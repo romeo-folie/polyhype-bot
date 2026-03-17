@@ -4,10 +4,12 @@
  * Wraps the `polymarket-ai-divergence` Simmer skill with typed input/output.
  * Uses native fetch (no heavy wrappers); assumes Node 20+ fetch is available.
  *
- * The Simmer skill URL and API key are loaded from environment variables:
- *   SIMMER_SKILL_URL  — base URL of the skill endpoint
- *   SIMMER_API_KEY    — bearer token for authentication
+ * The Simmer skill URL and API key are loaded from environment configuration
+ * via `loadConfig()`.
  */
+
+import { z } from 'zod';
+import { loadConfig } from './config.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -21,17 +23,16 @@ export interface SimmerTradeInput {
   amount_usdc: number;
 }
 
+/** Zod schema for validating Simmer skill responses. */
+const SimmerTradeResultSchema = z.object({
+  success: z.boolean(),
+  tx_hash: z.string().optional(),
+  error: z.string().optional(),
+  raw: z.unknown().optional(),
+});
+
 /** Result from the polymarket-ai-divergence skill. */
-export interface SimmerTradeResult {
-  /** Whether the trade was submitted successfully. */
-  success: boolean;
-  /** On-chain transaction hash (present when success=true). */
-  tx_hash?: string;
-  /** Human-readable error message (present when success=false). */
-  error?: string;
-  /** Raw response data from the skill (for debugging). */
-  raw?: unknown;
-}
+export type SimmerTradeResult = z.infer<typeof SimmerTradeResultSchema>;
 
 /** Simmer skill error with HTTP context. */
 export class SimmerError extends Error {
@@ -53,11 +54,7 @@ export class SimmerError extends Error {
  * @throws {SimmerError} on HTTP 4xx/5xx or network failure
  */
 export async function submitTrade(input: SimmerTradeInput): Promise<SimmerTradeResult> {
-  const skillUrl = process.env['SIMMER_SKILL_URL'];
-  const apiKey = process.env['SIMMER_API_KEY'];
-
-  if (!skillUrl) throw new Error('SIMMER_SKILL_URL is not set');
-  if (!apiKey) throw new Error('SIMMER_API_KEY is not set');
+  const { SIMMER_SKILL_URL: skillUrl, SIMMER_API_KEY: apiKey } = loadConfig();
 
   const resp = await fetch(skillUrl, {
     method: 'POST',
@@ -84,7 +81,15 @@ export async function submitTrade(input: SimmerTradeInput): Promise<SimmerTradeR
     );
   }
 
-  return body as SimmerTradeResult;
+  const parsed = SimmerTradeResultSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new SimmerError(
+      `Simmer skill response failed validation: ${parsed.error.message}`,
+      resp.status,
+      body,
+    );
+  }
+  return parsed.data;
 }
 
 /**
@@ -95,11 +100,15 @@ export async function submitTrade(input: SimmerTradeInput): Promise<SimmerTradeR
  * invalid market ID so the skill should reject it cleanly.
  */
 export async function probeSimmerSkill(): Promise<{ reachable: boolean; body: unknown; statusCode: number }> {
-  const skillUrl = process.env['SIMMER_SKILL_URL'];
-  const apiKey = process.env['SIMMER_API_KEY'];
-
-  if (!skillUrl) {
-    return { reachable: false, body: 'SIMMER_SKILL_URL is not set', statusCode: 0 };
+  let skillUrl: string;
+  let apiKey: string;
+  try {
+    const cfg = loadConfig();
+    skillUrl = cfg.SIMMER_SKILL_URL;
+    apiKey = cfg.SIMMER_API_KEY;
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { reachable: false, body: message, statusCode: 0 };
   }
 
   try {
@@ -107,7 +116,7 @@ export async function probeSimmerSkill(): Promise<{ reachable: boolean; body: un
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
         market_id: '__probe__',
