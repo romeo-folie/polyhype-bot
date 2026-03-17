@@ -1,0 +1,40 @@
+{
+  "name": "polymarket-geopolitical-agent",
+  "version": "0.1.0",
+  "description": "Autonomous geopolitical trading agent for Polymarket",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "build:emit": "tsc",
+    "start": "node dist/index.js",
+    "cron:ingest": "npx tsx src/ingestion/index.ts",
+    "cron:monitor": "npx tsx src/monitor/index.ts",
+    "probe:simmer": "npx tsx scripts/probe-simmer.ts",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest --passWithNoTests",
+    "test:unit": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=src/",
+    "lint": "eslint 'src/**/*.ts' 'scripts/**/*.ts'",
+    "format": "prettier --write 'src/**/*.ts' 'scripts/**/*.ts'"
+  },
+  "dependencies": {
+    "ioredis": "^5.3.2",
+    "rss-parser": "^3.13.0",
+    "cheerio": "^1.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.57.0",
+    "jest": "^29.7.0",
+    "@jest/globals": "^29.7.0",
+    "ts-jest": "^29.1.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
+    "prettier": "^3.2.5"
+  }
+}
