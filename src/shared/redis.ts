@@ -55,8 +55,8 @@ export async function dedup(key: string, ttlSeconds = 86400): Promise<boolean> {
 
 // Graceful shutdown — close Redis on process termination signals
 process.on('SIGTERM', () => {
-  closeRedis().catch(() => {});
+  void closeRedis().finally(() => { process.exit(0); });
 });
 process.on('SIGINT', () => {
-  closeRedis().catch(() => {});
+  void closeRedis().finally(() => { process.exit(0); });
 });
