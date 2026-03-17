@@ -1,65 +1,77 @@
+#!/usr/bin/env npx tsx
 /**
- * Simmer SDK connectivity probe.
+ * Simmer SDK Probe Script
  *
- * Validates that the `polymarket-ai-divergence` Simmer skill is reachable
- * from this project.  Runs standalone — no Redis, no LLM keys needed.
+ * Validates that the polymarket-ai-divergence Simmer skill is reachable
+ * and responds to a health/capabilities check.
  *
  * Usage:
+ *   SIMMER_SKILL_URL=http://... SIMMER_API_KEY=... npx tsx scripts/probe-simmer.ts
+ *   -- OR --
+ *   cp .env.example .env  # fill in values
  *   npm run probe:simmer
- *   # or: npx tsx scripts/probe-simmer.ts
- *
- * Expected outcomes:
- *   ✅  HTTP 400/422 — skill reachable, rejected the probe payload (expected)
- *   ✅  HTTP 200     — skill reachable, accepted the probe payload
- *   ❌  Connection refused / timeout — SIMMER_SKILL_URL is wrong or skill is down
- *   ❌  HTTP 401/403               — SIMMER_API_KEY is missing or invalid
- *
- * The script exits 0 if the skill responded (any HTTP code), 1 if unreachable.
  */
 
-import { probeSimmerSkill } from '../src/shared/simmer.js';
+// Minimal env load — dotenv not in deps, use process.env directly
+const SIMMER_SKILL_URL = process.env['SIMMER_SKILL_URL'];
+const SIMMER_API_KEY = process.env['SIMMER_API_KEY'];
 
-// Load .env if running locally (dotenv is not installed; read manually).
-import { readFileSync, existsSync } from 'fs';
-import { resolve } from 'path';
+async function probe(): Promise<void> {
+  console.log('=== Simmer SDK Probe ===');
 
-const envPath = resolve(process.cwd(), '.env');
-if (existsSync(envPath)) {
-  const lines = readFileSync(envPath, 'utf-8').split('\n');
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eqIdx = trimmed.indexOf('=');
-    if (eqIdx === -1) continue;
-    const key = trimmed.slice(0, eqIdx).trim();
-    const val = trimmed.slice(eqIdx + 1).trim();
-    if (key && val && !process.env[key]) {
-      process.env[key] = val;
-    }
+  if (!SIMMER_SKILL_URL) {
+    console.error('❌ SIMMER_SKILL_URL is not set. Copy .env.example to .env and fill in values.');
+    process.exit(1);
   }
-  console.log('[probe] loaded .env');
+  if (!SIMMER_API_KEY) {
+    console.error('❌ SIMMER_API_KEY is not set. Copy .env.example to .env and fill in values.');
+    process.exit(1);
+  }
+
+  console.log(`Skill URL : ${SIMMER_SKILL_URL}`);
+  console.log('API Key   : [set]');
+  console.log('');
+
+  // Attempt 1: GET /health (common Simmer convention)
+  const healthUrl = `${SIMMER_SKILL_URL.replace(/\/+$/, '')}/health`;
+  console.log(`Probing   : GET ${healthUrl}`);
+
+  try {
+    const res = await fetch(healthUrl, {
+      headers: {
+        Authorization: `Bearer ${SIMMER_API_KEY}`,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    console.log(`Status    : ${res.status} ${res.statusText}`);
+
+    if (res.ok) {
+      const body: unknown = await res.json().catch(() => null);
+      console.log('Response  :', JSON.stringify(body, null, 2));
+      console.log('');
+      console.log('✅ Simmer skill is reachable and healthy.');
+      return;
+    }
+
+    console.log('');
+    console.log(`⚠️  Skill returned ${res.status}. It may be reachable but not healthy.`);
+    console.log('   Check SIMMER_SKILL_URL and ensure the skill is running.');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log('');
+    console.log(`❌ Could not reach skill: ${msg}`);
+    console.log('');
+    console.log('   Possible causes:');
+    console.log('   1. Skill is not running — start it via the Simmer dashboard');
+    console.log('   2. SIMMER_SKILL_URL is incorrect — check your .env');
+    console.log('   3. Network connectivity issue');
+    process.exit(1);
+  }
 }
 
-console.log('[probe] SIMMER_SKILL_URL =', process.env['SIMMER_SKILL_URL'] ?? '(not set)');
-console.log('[probe] SIMMER_API_KEY   =', process.env['SIMMER_API_KEY'] ? '***set***' : '(not set)');
-console.log('[probe] sending probe payload...\n');
-
-const result = await probeSimmerSkill();
-
-console.log('[probe] result:', JSON.stringify(result, null, 2));
-
-if (!result.reachable) {
-  console.error('\n❌ Simmer skill is NOT reachable.');
-  console.error('   Check SIMMER_SKILL_URL and ensure the skill server is running.');
+probe().catch((err: unknown) => {
+  console.error('Probe script crashed:', err);
   process.exit(1);
-}
-
-if (result.statusCode === 401 || result.statusCode === 403) {
-  console.error(`\n❌ Auth failure (HTTP ${result.statusCode}).`);
-  console.error('   Check SIMMER_API_KEY.');
-  process.exit(1);
-}
-
-console.log(`\n✅ Simmer skill responded (HTTP ${result.statusCode}).`);
-console.log('   Environment is ready for Phase 1 ingestion work.');
-process.exit(0);
+});
