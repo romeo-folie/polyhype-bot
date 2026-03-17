@@ -2,76 +2,42 @@
 /**
  * Simmer SDK Probe Script
  *
- * Validates that the polymarket-ai-divergence Simmer skill is reachable
- * and responds to a health/capabilities check.
+ * Validates that the polymarket-ai-divergence Simmer skill is reachable.
+ * Delegates to the shared probeSimmerSkill() function for consistent probe logic.
  *
  * Usage:
- *   SIMMER_SKILL_URL=http://... SIMMER_API_KEY=... npx tsx scripts/probe-simmer.ts
- *   -- OR --
- *   cp .env.example .env  # fill in values
+ *   cp .env.example .env  # fill in values, then:
  *   npm run probe:simmer
+ *   -- OR (with dotenv-cli) --
+ *   dotenv -- npx tsx scripts/probe-simmer.ts
  */
 
-// Minimal env load — dotenv not in deps, use process.env directly
-const SIMMER_SKILL_URL = process.env['SIMMER_SKILL_URL'];
-const SIMMER_API_KEY = process.env['SIMMER_API_KEY'];
+import 'dotenv/config';
+import { probeSimmerSkill } from '../src/shared/simmer.js';
 
-async function probe(): Promise<void> {
+async function main(): Promise<void> {
   console.log('=== Simmer SDK Probe ===');
 
-  if (!SIMMER_SKILL_URL) {
-    console.error('❌ SIMMER_SKILL_URL is not set. Copy .env.example to .env and fill in values.');
+  const result = await probeSimmerSkill();
+
+  console.log(`Reachable : ${result.reachable}`);
+  console.log(`Status    : ${result.statusCode}`);
+  console.log('Response  :', JSON.stringify(result.body, null, 2));
+
+  if (!result.reachable) {
+    console.error('\n❌ Simmer skill is not reachable.');
     process.exit(1);
   }
-  if (!SIMMER_API_KEY) {
-    console.error('❌ SIMMER_API_KEY is not set. Copy .env.example to .env and fill in values.');
+
+  if (result.statusCode === 401 || result.statusCode === 403) {
+    console.error('\n❌ Authentication failed. Check SIMMER_API_KEY.');
     process.exit(1);
   }
 
-  console.log(`Skill URL : ${SIMMER_SKILL_URL}`);
-  console.log('API Key   : [set]');
-  console.log('');
-
-  // Attempt 1: GET /health (common Simmer convention)
-  const healthUrl = `${SIMMER_SKILL_URL.replace(/\/+$/, '')}/health`;
-  console.log(`Probing   : GET ${healthUrl}`);
-
-  try {
-    const res = await fetch(healthUrl, {
-      headers: {
-        Authorization: `Bearer ${SIMMER_API_KEY}`,
-        Accept: 'application/json',
-      },
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    console.log(`Status    : ${res.status} ${res.statusText}`);
-
-    if (res.ok) {
-      const body: unknown = await res.json().catch(() => null);
-      console.log('Response  :', JSON.stringify(body, null, 2));
-      console.log('');
-      console.log('✅ Simmer skill is reachable and healthy.');
-      return;
-    }
-
-    console.log('');
-    console.log(`⚠️  Skill returned ${res.status}. It may be reachable but not healthy.`);
-    console.log('   Check SIMMER_SKILL_URL and ensure the skill is running.');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.log('');
-    console.log(`❌ Could not reach skill: ${msg}`);
-    console.log('');
-    console.log('   Possible causes:');
-    console.log('   1. Skill is not running — start it via the Simmer dashboard');
-    console.log('   2. SIMMER_SKILL_URL is incorrect — check your .env');
-    console.log('   3. Network connectivity issue');
-    process.exit(1);
-  }
+  console.log('\n✅ Simmer skill is reachable.');
 }
 
-probe().catch((err: unknown) => {
+main().catch((err: unknown) => {
   console.error('Probe script crashed:', err);
   process.exit(1);
 });

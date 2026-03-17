@@ -2,10 +2,11 @@
  * Shared Redis client utility.
  *
  * Single shared instance. Callers should NOT create their own Redis instances.
- * Exported as a lazy singleton so the connection is only established when first used.
+ * Exported as a lazy singleton — connection only established when first used.
  */
 
 import { Redis } from 'ioredis';
+import { logger } from './logger.js';
 
 let _client: Redis | null = null;
 
@@ -20,11 +21,11 @@ export function getRedis(): Redis {
   _client = new Redis(url, {
     maxRetriesPerRequest: 3,
     enableReadyCheck: true,
-    lazyConnect: false,
+    lazyConnect: true,
   });
 
   _client.on('error', (err: Error) => {
-    console.error('[redis] connection error:', err.message);
+    logger.error('[redis] connection error', { message: err.message });
   });
 
   return _client;
@@ -51,3 +52,11 @@ export async function dedup(key: string, ttlSeconds = 86400): Promise<boolean> {
   const result = await redis.set(`dedup:${key}`, '1', 'EX', ttlSeconds, 'NX');
   return result === 'OK'; // OK = first time seen, null = already seen
 }
+
+// Graceful shutdown — close Redis on process termination signals
+process.on('SIGTERM', () => {
+  closeRedis().catch(() => {});
+});
+process.on('SIGINT', () => {
+  closeRedis().catch(() => {});
+});

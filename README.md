@@ -36,6 +36,9 @@ cp .env.example .env
 npm run build
 
 # 4. Probe the Simmer SDK connection
+# Requires a populated .env file (copy from .env.example):
+#   cp .env.example .env
+#   # fill in SIMMER_SKILL_URL and SIMMER_API_KEY
 npm run probe:simmer
 ```
 
