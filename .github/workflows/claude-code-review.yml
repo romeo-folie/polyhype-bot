@@ -1,14 +1,7 @@
 name: Claude Code Review
 
 on:
-  pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+  workflow_dispatch:  # Disabled: use local code-reviewer skill + Opus gate instead
 
 jobs:
   claude-review:
@@ -18,7 +11,9 @@ jobs:
     #   github.event.pull_request.user.login == 'new-developer' ||
     #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
 
-    runs-on: ubuntu-latest
+    runs-on:
+  workflow_dispatch:  # disabled — use local code-reviewer instead
+_disabled: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
