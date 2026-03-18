@@ -7,8 +7,7 @@
  */
 
 import { logger } from '../shared/logger.js';
-import { searchEvents } from './gamma.js';
-import type { GammaMarket } from './gamma.js';
+import { searchEvents, parseOutcomePrices } from './gamma.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 
 const TIMEOUT_MS = 20_000;
@@ -140,11 +139,11 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
           const liquidity = parseFloat(market.liquidity ?? '0');
           if (!isFinite(liquidity) || liquidity < MIN_LIQUIDITY) continue;
 
-          // Parse YES price
+          // Parse YES price — normalise from JSON-encoded string or pre-parsed array
           let currentYesPrice: number;
           try {
-            const prices = market.outcomePrices;
-            if (!Array.isArray(prices) || prices.length === 0) continue;
+            const prices = parseOutcomePrices(market.outcomePrices);
+            if (prices.length === 0) continue;
             currentYesPrice = parseFloat(prices[0] ?? '0');
             if (!isFinite(currentYesPrice)) continue;
           } catch {
