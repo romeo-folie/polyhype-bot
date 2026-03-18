@@ -22,15 +22,14 @@ function itemKey(item: RssItem): string {
 export async function filterSeen(items: RssItem[], redis: Redis): Promise<RssItem[]> {
   if (items.length === 0) return [];
 
-  const newItems: RssItem[] = [];
+  const results = await Promise.allSettled(
+    items.map((item) => {
+      const key = `dedup:${itemKey(item)}`;
+      return redis.set(key, '1', 'EX', DEDUP_TTL, 'NX');
+    }),
+  );
 
-  for (const item of items) {
-    const key = `dedup:${itemKey(item)}`;
-    const result = await redis.set(key, '1', 'EX', DEDUP_TTL, 'NX');
-    if (result === 'OK') {
-      newItems.push(item);
-    }
-  }
-
-  return newItems;
+  return items.filter(
+    (_, i) => results[i]!.status === 'fulfilled' && results[i]!.value === 'OK',
+  );
 }
