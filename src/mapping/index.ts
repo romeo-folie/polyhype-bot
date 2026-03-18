@@ -49,7 +49,10 @@ export async function runMapping(
   const divergenceThreshold = cfg.DIVERGENCE_THRESHOLD;
   const maxBetFraction = cfg.MAX_BET_FRACTION;
 
-  const signals: TradeSignal[] = [];
+  // Per-market deduplication: tracks the highest-edge signal seen for each market.
+  // Multiple headlines in one cycle can match the same market; emitting duplicate
+  // signals would create over-exposure. We keep only the strongest edge per market.
+  const bestByMarket = new Map<string, TradeSignal>();
 
   for (const item of items) {
     logger.info('[mapping] processing item', { title: item.title, urgency: item.urgencyScore });
@@ -115,7 +118,7 @@ export async function runMapping(
       });
 
       if (hasTrade && decision) {
-        signals.push({
+        const candidate_signal: TradeSignal = {
           marketId: candidate.marketId,
           conditionId: candidate.conditionId,
           clobTokenIds: candidate.clobTokenIds,
@@ -128,10 +131,16 @@ export async function runMapping(
           halfKellyFraction: decision.halfKellyFraction,
           sourcedFrom: item.title,
           reasoning: consensus.reasoning,
-        });
+        };
+        const existing = bestByMarket.get(candidate.marketId);
+        if (!existing || decision.edgeMagnitude > existing.edgeMagnitude) {
+          bestByMarket.set(candidate.marketId, candidate_signal);
+        }
       }
     }
   }
+
+  const signals = Array.from(bestByMarket.values());
 
   logger.info('[mapping] pipeline complete', {
     itemsProcessed: items.length,
