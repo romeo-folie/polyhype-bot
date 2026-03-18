@@ -72,3 +72,4 @@ See `.env.example` for full documentation of all required and optional variables
 - Phase 2: market mapping & execution logic.
 - Phase 3: execution orchestration & Telegram notifications.
 - Phase 4: position monitor & take-profit.
+# Test
