@@ -145,7 +145,7 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
             const prices = parseOutcomePrices(market.outcomePrices);
             if (prices.length === 0) continue;
             currentYesPrice = parseFloat(prices[0] ?? '0');
-            if (!isFinite(currentYesPrice)) continue;
+            if (!isFinite(currentYesPrice) || currentYesPrice < 0 || currentYesPrice > 1) continue;
           } catch {
             continue;
           }
