@@ -89,14 +89,24 @@ export async function runPipeline(bankrollUsd: number): Promise<void> {
   const results = await executeSignals(signals);
 
   // Stage 4: Persist positions + notify
+  let succeeded = 0;
   for (const result of results) {
-    if (result.success && result.txHash) {
-      try {
-        await persistPosition(result.signal, result.txHash);
-      } catch (err) {
-        logger.error('[pipeline] failed to persist position', {
+    if (result.success) {
+      succeeded++;
+      if (result.txHash) {
+        try {
+          await persistPosition(result.signal, result.txHash);
+        } catch (err) {
+          logger.error('[pipeline] failed to persist position', {
+            marketId: result.signal.marketId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      } else {
+        // Simmer returned success=true without a tx_hash — trade may have been
+        // submitted but we cannot track it. Log prominently; still notify.
+        logger.warn('[pipeline] trade succeeded but no txHash returned — position not persisted', {
           marketId: result.signal.marketId,
-          error: err instanceof Error ? err.message : String(err),
         });
       }
       notifyTradeExecuted(result);
@@ -104,8 +114,6 @@ export async function runPipeline(bankrollUsd: number): Promise<void> {
       notifyExecutionError(result);
     }
   }
-
-  const succeeded = results.filter((r) => r.success).length;
   logger.info('[pipeline] cycle complete', {
     signalsExecuted: results.length,
     succeeded,

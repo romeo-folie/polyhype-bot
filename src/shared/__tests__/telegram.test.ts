@@ -10,7 +10,7 @@ global.fetch = mockFetch as typeof fetch;
 const { notifyTradeExecuted, notifyExecutionError, _sendMessage } =
   await import('../telegram.js');
 
-function makeSignal(): TradeSignal {
+function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
   return {
     marketId: 'mkt-1',
     conditionId: 'cond-1',
@@ -24,6 +24,7 @@ function makeSignal(): TradeSignal {
     halfKellyFraction: 0.1,
     sourcedFrom: 'Reuters: Conflict escalates',
     reasoning: 'High tension',
+    ...overrides,
   };
 }
 
@@ -114,5 +115,50 @@ describe('Telegram notifications', () => {
     notifyTradeExecuted(result);
     await new Promise((r) => setTimeout(r, 10));
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('escapes HTML special characters in question and sourcedFrom', async () => {
+    mockFetch.mockResolvedValue({ ok: true } as Response);
+
+    const result: ExecutionResult = {
+      success: true,
+      txHash: '0xabc',
+      signal: makeSignal({
+        question: 'Will Iran & Iraq sign <treaty>?',
+        sourcedFrom: 'Headline: <b>Breaking</b> & more',
+      }),
+    };
+
+    notifyTradeExecuted(result);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(opts.body as string) as { text: string };
+    // Raw angle brackets and unescaped & must not appear in external text positions
+    expect(body.text).toContain('&amp;');
+    expect(body.text).toContain('&lt;');
+    expect(body.text).toContain('&gt;');
+    expect(body.text).not.toMatch(/Iran & Iraq/);
+    expect(body.text).not.toMatch(/<treaty>/);
+  });
+
+  it('notifyExecutionError escapes error message text', async () => {
+    mockFetch.mockResolvedValue({ ok: true } as Response);
+
+    const result: ExecutionResult = {
+      success: false,
+      error: 'Rejected: <invalid> market & bad input',
+      signal: makeSignal(),
+    };
+
+    notifyExecutionError(result);
+    await new Promise((r) => setTimeout(r, 10));
+
+    const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(opts.body as string) as { text: string };
+    expect(body.text).not.toMatch(/<invalid>/);
+    expect(body.text).toContain('&lt;invalid&gt;');
+    expect(body.text).toContain('&amp;');
   });
 });

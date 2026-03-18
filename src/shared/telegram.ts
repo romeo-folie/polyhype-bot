@@ -12,6 +12,20 @@ import { logger } from './logger.js';
 import type { TradeSignal } from '../mapping/index.js';
 import type { ExecutionResult } from '../execution/executor.js';
 
+/**
+ * Escape text for Telegram HTML parse mode.
+ * Telegram HTML supports only <b>, <i>, <code>, <pre>, <a> — all other
+ * angle brackets and ampersands must be escaped to avoid parse failures
+ * and silently-dropped messages when external text (headlines, errors, etc.)
+ * contains HTML special characters.
+ */
+function esc(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 const TELEGRAM_API = 'https://api.telegram.org';
 const SEND_TIMEOUT_MS = 10_000;
 
@@ -71,13 +85,13 @@ export function notifyTradeExecuted(result: ExecutionResult): void {
   const s = result.signal;
   const text =
     `⚡ <b>Trade Executed</b>\n` +
-    `${directionEmoji(s.direction)} <b>${s.direction}</b> on <i>${s.question.slice(0, 80)}</i>\n\n` +
+    `${directionEmoji(s.direction)} <b>${s.direction}</b> on <i>${esc(s.question.slice(0, 80))}</i>\n\n` +
     `💰 Stake: <b>$${s.stakeUsd.toFixed(2)}</b>\n` +
     `📊 Market price: ${pct(s.outcomePrice)} | Consensus: ${pct(s.consensusProbability)}\n` +
     `📈 Edge: ${pct(s.edgeMagnitude)} | Half-Kelly: ${pct(s.halfKellyFraction)}\n` +
-    `🔗 Market ID: <code>${s.marketId}</code>\n` +
-    `${result.txHash ? `✅ TX: <code>${result.txHash}</code>\n` : ''}` +
-    `📰 Source: ${s.sourcedFrom.slice(0, 120)}`;
+    `🔗 Market ID: <code>${esc(s.marketId)}</code>\n` +
+    `${result.txHash ? `✅ TX: <code>${esc(result.txHash)}</code>\n` : ''}` +
+    `📰 Source: ${esc(s.sourcedFrom.slice(0, 120))}`;
 
   void sendMessage(text);
 }
@@ -88,9 +102,9 @@ export function notifyTradeExecuted(result: ExecutionResult): void {
 export function notifySignalSkipped(signal: TradeSignal, reason: string): void {
   const text =
     `⏭ <b>Signal Skipped</b>\n` +
-    `${directionEmoji(signal.direction)} ${signal.direction} on <i>${signal.question.slice(0, 80)}</i>\n` +
-    `Reason: ${reason}\n` +
-    `Market ID: <code>${signal.marketId}</code>`;
+    `${directionEmoji(signal.direction)} ${signal.direction} on <i>${esc(signal.question.slice(0, 80))}</i>\n` +
+    `Reason: ${esc(reason)}\n` +
+    `Market ID: <code>${esc(signal.marketId)}</code>`;
 
   void sendMessage(text);
 }
@@ -103,10 +117,10 @@ export function notifyExecutionError(result: ExecutionResult): void {
   const s = result.signal;
   const text =
     `❌ <b>Execution Failed</b>\n` +
-    `${directionEmoji(s.direction)} ${s.direction} on <i>${s.question.slice(0, 80)}</i>\n` +
+    `${directionEmoji(s.direction)} ${s.direction} on <i>${esc(s.question.slice(0, 80))}</i>\n` +
     `Stake: $${s.stakeUsd.toFixed(2)}\n` +
-    `Error: ${result.error ?? 'unknown'}\n` +
-    `Market ID: <code>${s.marketId}</code>`;
+    `Error: ${esc(result.error ?? 'unknown')}\n` +
+    `Market ID: <code>${esc(s.marketId)}</code>`;
 
   void sendMessage(text);
 }
@@ -123,10 +137,10 @@ export function notifyTakeProfit(
   const sign = pnlPct >= 0 ? '+' : '';
   const text =
     `💸 <b>Take-Profit Triggered</b>\n` +
-    `<i>${question.slice(0, 80)}</i>\n\n` +
-    `P&L: <b>${sign}${(pnlPct * 100).toFixed(1)}%</b>\n` +
+    `<i>${esc(question.slice(0, 80))}</i>\n\n` +
+    `P&amp;L: <b>${sign}${(pnlPct * 100).toFixed(1)}%</b>\n` +
     `Stake: $${stakeUsd.toFixed(2)}\n` +
-    `Market ID: <code>${marketId}</code>`;
+    `Market ID: <code>${esc(marketId)}</code>`;
 
   void sendMessage(text);
 }
