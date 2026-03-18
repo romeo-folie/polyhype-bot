@@ -12,6 +12,19 @@ jest.unstable_mockModule('@google/generative-ai', () => ({
   })),
 }));
 
+// Mock the OpenAI module
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockChatCreate = jest.fn<(...args: any[]) => any>();
+jest.unstable_mockModule('openai', () => ({
+  default: jest.fn().mockImplementation(() => ({
+    chat: {
+      completions: {
+        create: mockChatCreate,
+      },
+    },
+  })),
+}));
+
 const { scoreItems } = await import('../scorer.js');
 
 function makeItem(title: string): RssItem {
@@ -26,11 +39,14 @@ function makeItem(title: string): RssItem {
 describe('scoreItems', () => {
   beforeEach(() => {
     mockGenerateContent.mockReset();
-    process.env['GEMINI_API_KEY'] = 'test-key';
+    mockChatCreate.mockReset();
+    process.env['GEMINI_API_KEY'] = 'test-gemini-key';
+    process.env['OPENAI_API_KEY'] = 'test-openai-key';
   });
 
   afterEach(() => {
     delete process.env['GEMINI_API_KEY'];
+    delete process.env['OPENAI_API_KEY'];
   });
 
   it('returns items with urgencyScore and keywords from LLM', async () => {
@@ -61,11 +77,11 @@ describe('scoreItems', () => {
     const result = await scoreItems([]);
     expect(result).toEqual([]);
     expect(mockGenerateContent).not.toHaveBeenCalled();
+    expect(mockChatCreate).not.toHaveBeenCalled();
   });
 
   it('assigns default score 1 when LLM call fails', async () => {
     mockGenerateContent.mockRejectedValue(new Error('API error'));
-    // Remove OpenAI key so no fallback
     delete process.env['OPENAI_API_KEY'];
 
     const items = [makeItem('Some headline')];
@@ -74,5 +90,35 @@ describe('scoreItems', () => {
     expect(result).toHaveLength(1);
     expect(result[0]!.urgencyScore).toBe(1);
     expect(result[0]!.keywords).toEqual([]);
+  });
+
+  it('falls back to OpenAI when Gemini fails', async () => {
+    // Gemini rejects (e.g. quota exceeded or network error)
+    mockGenerateContent.mockRejectedValue(new Error('Gemini quota exceeded'));
+
+    // OpenAI succeeds
+    mockChatCreate.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              results: [{ score: 8, keywords: ['sanctions', 'russia'] }],
+            }),
+          },
+        },
+      ],
+    });
+
+    const items = [makeItem('New sanctions imposed on Russia')];
+    const result = await scoreItems(items);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.urgencyScore).toBe(8);
+    expect(result[0]!.keywords).toEqual(['sanctions', 'russia']);
+
+    // Gemini was attempted first
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    // OpenAI was used as fallback
+    expect(mockChatCreate).toHaveBeenCalledTimes(1);
   });
 });
