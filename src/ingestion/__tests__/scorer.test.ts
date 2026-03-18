@@ -1,4 +1,4 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import type { RssItem } from '../rss.js';
 
 // Mock the Google Generative AI module
@@ -29,14 +29,20 @@ describe('scoreItems', () => {
     process.env['GEMINI_API_KEY'] = 'test-key';
   });
 
+  afterEach(() => {
+    delete process.env['GEMINI_API_KEY'];
+  });
+
   it('returns items with urgencyScore and keywords from LLM', async () => {
     mockGenerateContent.mockResolvedValue({
       response: {
         text: () =>
-          JSON.stringify([
-            { score: 9, keywords: ['military', 'conflict'] },
-            { score: 3, keywords: ['trade'] },
-          ]),
+          JSON.stringify({
+            results: [
+              { score: 9, keywords: ['military', 'conflict'] },
+              { score: 3, keywords: ['trade'] },
+            ],
+          }),
       },
     });
 

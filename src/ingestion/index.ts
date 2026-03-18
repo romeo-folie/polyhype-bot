@@ -17,8 +17,7 @@ const URGENCY_THRESHOLD = Number(process.env['URGENCY_THRESHOLD'] ?? 8);
 
 export async function runIngestion(): Promise<ScoredItem[]> {
   const redis = getRedis();
-  const rssItems = await fetchRssFeeds();
-  const scraped = await scrapeHeadlines();
+  const [rssItems, scraped] = await Promise.all([fetchRssFeeds(), scrapeHeadlines()]);
   const all = [...rssItems, ...scraped];
   const newItems = await filterSeen(all, redis);
   const scored = await scoreItems(newItems);
@@ -30,7 +29,8 @@ export async function runIngestion(): Promise<ScoredItem[]> {
 }
 
 // Entrypoint when run directly (npx tsx src/ingestion/index.ts)
-const isMain = process.argv[1]?.endsWith('ingestion/index.ts') ?? false;
+import { fileURLToPath } from 'node:url';
+const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 if (isMain) {
   runIngestion()
     .then((items) => {

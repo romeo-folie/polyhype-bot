@@ -1,11 +1,7 @@
 import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 import type { RssItem } from '../rss.js';
 
-// Mock ioredis before importing the module under test
 const mockSet = jest.fn<(...args: unknown[]) => Promise<string | null>>();
-jest.unstable_mockModule('ioredis', () => ({
-  Redis: jest.fn(),
-}));
 
 const { filterSeen } = await import('../dedup.js');
 

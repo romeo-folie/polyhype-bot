@@ -25,17 +25,24 @@ const SYSTEM_PROMPT =
   'You are a geopolitical analyst. You will receive a list of news headlines. ' +
   'Rate the geopolitical urgency of each headline on a scale of 1-10, ' +
   'where 10 = immediate geopolitical crisis/military action, 1 = routine news. ' +
-  'Return ONLY a JSON array: [{score: number, keywords: string[]}] in the same order as the input headlines. ' +
-  'No markdown, no explanation — just the JSON array.';
+  'Return ONLY a JSON object: {"results": [{score: number, keywords: string[]}]} in the same order as the input headlines. ' +
+  'No markdown, no explanation — just the JSON object.';
 
 function buildUserPrompt(items: RssItem[]): string {
   return items.map((item, i) => `${i + 1}. ${item.title}`).join('\n');
 }
 
-function parseScores(raw: string): ScoreResult[] {
+function parseScores(raw: string, batchLength: number): ScoreResult[] {
   // Strip markdown fences if present
   const cleaned = raw.replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
-  return JSON.parse(cleaned) as ScoreResult[];
+  const parsed = JSON.parse(cleaned) as { results: ScoreResult[] };
+  const results = parsed.results ?? [];
+  if (results.length !== batchLength) {
+    logger.warn(
+      `[scorer] LLM returned ${results.length} scores for ${batchLength} items — filling missing with score 1`,
+    );
+  }
+  return results;
 }
 
 async function scoreBatchGemini(items: RssItem[]): Promise<ScoreResult[]> {
@@ -43,14 +50,19 @@ async function scoreBatchGemini(items: RssItem[]): Promise<ScoreResult[]> {
   const genAI = new GoogleGenerativeAI(process.env['GEMINI_API_KEY']!);
   const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
-  const result = await model.generateContent({
-    contents: [{ role: 'user', parts: [{ text: buildUserPrompt(items) }] }],
-    systemInstruction: { role: 'system', parts: [{ text: SYSTEM_PROMPT }] },
-    generationConfig: { responseMimeType: 'application/json' },
-  });
+  const result = await Promise.race([
+    model.generateContent({
+      contents: [{ role: 'user', parts: [{ text: buildUserPrompt(items) }] }],
+      systemInstruction: { role: 'system', parts: [{ text: SYSTEM_PROMPT }] },
+      generationConfig: { responseMimeType: 'application/json' },
+    }),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Gemini timeout')), TIMEOUT_MS),
+    ),
+  ]);
 
   const text = result.response.text();
-  return parseScores(text);
+  return parseScores(text, items.length);
 }
 
 async function scoreBatchOpenAI(items: RssItem[]): Promise<ScoreResult[]> {
@@ -74,9 +86,8 @@ async function scoreBatchOpenAI(items: RssItem[]): Promise<ScoreResult[]> {
       { signal: controller.signal },
     );
 
-    const text = response.choices[0]?.message?.content ?? '[]';
-    const parsed = JSON.parse(text) as ScoreResult[] | { results: ScoreResult[] };
-    return Array.isArray(parsed) ? parsed : (parsed.results ?? []);
+    const text = response.choices[0]?.message?.content ?? '{"results":[]}';
+    return parseScores(text, items.length);
   } finally {
     clearTimeout(timer);
   }
