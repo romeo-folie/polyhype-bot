@@ -29,7 +29,8 @@ export async function filterSeen(items: RssItem[], redis: Redis): Promise<RssIte
     }),
   );
 
-  return items.filter(
-    (_, i) => results[i]!.status === 'fulfilled' && results[i]!.value === 'OK',
-  );
+  return items.filter((_, i) => {
+    const r = results[i]!;
+    return r.status === 'fulfilled' && r.value === 'OK';
+  });
 }
