@@ -9,6 +9,7 @@
  *   5. Send Telegram notifications
  */
 
+import 'dotenv/config';
 import { getRedis, closeRedis } from '../shared/redis.js';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
