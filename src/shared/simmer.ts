@@ -167,24 +167,23 @@ export async function submitSell(input: SimmerSellInput): Promise<SimmerTradeRes
 }
 
 /**
- * Resolve a Gamma/Polymarket numeric market ID to a Simmer UUID.
+ * Resolve a Gamma/Polymarket market question to a Simmer UUID.
  *
- * Simmer uses its own internal UUIDs — passing a Gamma numeric ID directly
- * to the trade endpoint returns "Market not found". This function searches
- * Simmer's market catalogue by question text and returns the matching UUID.
- *
- * Returns null if:
- * - No match found in Simmer (market not in Simmer's catalogue)
- * - Network/API failure
- *
- * @param question  The market question text from Gamma (used as search query)
+ * Safety requirement: mapping must be deterministic and high-confidence.
+ * We only accept normalized full-question equality (no fuzzy fallback).
  */
 export async function resolveSimmerMarketId(question: string): Promise<string | null> {
   const { SIMMER_API_KEY: apiKey } = loadConfig();
 
-  // Use the first 6+ meaningful words as the search query (better recall than full question)
-  const searchQuery = question.split(' ').slice(0, 8).join(' ');
-  const url = `${MARKETS_ENDPOINT}?q=${encodeURIComponent(searchQuery)}&limit=5`;
+  // Query using full question text for maximum precision.
+  const url = `${MARKETS_ENDPOINT}?q=${encodeURIComponent(question)}&limit=20`;
+
+  const normalizeQuestion = (value: string): string =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
 
   try {
     const resp = await fetch(url, {
@@ -194,15 +193,11 @@ export async function resolveSimmerMarketId(question: string): Promise<string | 
 
     if (!resp.ok) return null;
 
-    const data = (await resp.json()) as { markets?: Array<{ id: string; question: string }> };
+    const data = (await resp.json()) as { markets?: { id: string; question: string }[] };
     const markets = data.markets ?? [];
 
-    // Require a strong match — exact case-insensitive question match only.
-    // Loose substring matching or markets[0] fallback risks mapping to the
-    // wrong market and triggering incorrect live trades.
-    const exactMatch = markets.find(
-      (m) => m.question.toLowerCase().trim() === question.toLowerCase().trim(),
-    );
+    const target = normalizeQuestion(question);
+    const exactMatch = markets.find((m) => normalizeQuestion(m.question) === target);
 
     return exactMatch?.id ?? null;
   } catch {
