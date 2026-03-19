@@ -43,7 +43,7 @@ function clobTokenForSignal(signal: TradeSignal): string | null {
   return signal.clobTokenIds[1] ?? null;
 }
 
-function isMarketNotFoundMessage(msg: string | undefined): boolean {
+function isMarketNotFoundMessage(msg: string | null | undefined): boolean {
   if (!msg) return false;
   return /market\s+not\s+found/i.test(msg);
 }

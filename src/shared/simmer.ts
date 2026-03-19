@@ -62,7 +62,8 @@ const SimmerTradeResultSchema = z.object({
   cost: z.number().optional(),
   price: z.number().optional(),
   warnings: z.array(z.string()).optional(),
-  error: z.string().optional(),
+  // Simmer sometimes returns `error: null` on HTTP 200 responses.
+  error: z.string().nullish(),
   raw: z.unknown().optional(),
 });
 
