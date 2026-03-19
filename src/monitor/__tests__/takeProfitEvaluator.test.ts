@@ -47,7 +47,7 @@ describe('evaluateTakeProfit', () => {
       expect(result.returnPct).toBeCloseTo(50, 1);
     });
 
-    it('holds when return < threshold', () => {
+    it('holds when return < threshold and no divergence closed', () => {
       // entryPrice=0.4, currentOutcomePrice=0.44 → return=10%
       // currentYesPrice=0.44 < consensusProbability=0.7 → no divergence_closed
       const result = evaluateTakeProfit(
@@ -61,8 +61,8 @@ describe('evaluateTakeProfit', () => {
 
   describe('divergence closed — YES position', () => {
     it('exits with divergence_closed when currentYesPrice >= consensus and return < threshold', () => {
-      // entry=0.4, current=0.45 → return=12.5% < 25% threshold → NOT take_profit
-      // consensus=0.45, currentYesPrice=0.46 >= 0.45 → divergence_closed fires
+      // entry=0.4, current=0.46 → return=15% < 25% → not take_profit
+      // consensus=0.45, currentYesPrice=0.46 >= 0.45 → divergence_closed
       const result = evaluateTakeProfit(
         makePosition({ entryPrice: 0.4, consensusProbability: 0.45 }),
         makeCurrentPrice({ currentOutcomePrice: 0.46, currentYesPrice: 0.46 }),
@@ -73,7 +73,7 @@ describe('evaluateTakeProfit', () => {
     });
 
     it('holds when currentYesPrice < consensusProbability and return < threshold', () => {
-      // return=10%, currentYesPrice=0.44 < consensus=0.7 → neither condition
+      // return=10%, currentYesPrice=0.44 < consensus=0.7 → neither condition met
       const result = evaluateTakeProfit(
         makePosition({ entryPrice: 0.4, consensusProbability: 0.7 }),
         makeCurrentPrice({ currentOutcomePrice: 0.44, currentYesPrice: 0.44 }),
@@ -84,55 +84,61 @@ describe('evaluateTakeProfit', () => {
   });
 
   describe('divergence closed — NO position', () => {
-    it('exits with divergence_closed when YES price drops below (1-consensus) and return < threshold', () => {
-      // NO position: entry YES was 0.65, so entry NO = 0.35, consensus P(YES)=0.3
-      // divergence_closed: currentYesPrice <= 1 - 0.3 = 0.70? No —
-      // For NO: we think YES is overpriced. consensus=0.3 means we expect YES to fall.
-      // divergence_closed when currentYesPrice <= (1 - consensusProbability) = 1 - 0.3 = 0.70
-      // Wait: the formula is currentYesPrice <= (1 - consensusProbability) where
-      // consensusProbability is P(YES). If P(YES)=0.3, we bought NO. Divergence closes
-      // when market drops to our level: currentYesPrice <= 1 - consensusProbability is wrong.
-      // Correct: consensusProbability=0.3 means our true P(YES)=0.3.
-      // We bought NO because market YES price (e.g. 0.55) > our P(YES)=0.3.
-      // Divergence closes when currentYesPrice <= consensusProbability=0.3.
-      // The code uses: currentYesPrice <= 1 - consensusProbability
-      // With consensusProbability=0.3: threshold = 1-0.3=0.7
-      // currentYesPrice=0.25: 0.25 <= 0.70 → true
-      // Return for NO: entryPrice=0.45 (1-0.55), currentOutcomePrice=1-0.25=0.75
-      // return=(0.75-0.45)/0.45=66.7% >> 25% → would trigger take_profit first
-      // So use a case where return < threshold but divergence closes:
-      // entryNO=0.45, currentNO=0.50 → return=11% < 25%
-      // currentYesPrice = 1 - 0.50 = 0.50; 1-consensusProbability = 1-0.3 = 0.70
-      // 0.50 <= 0.70 → divergence_closed
+    it('exits with divergence_closed when currentYesPrice <= consensus and return < threshold', () => {
+      // NO position: bought NO because market YES=0.55 > our P(YES)=0.30
+      // Entry NO price = 0.68 (high entry to keep return below threshold)
+      // Current NO = 0.72 → return = (0.72-0.68)/0.68 ≈ 5.9% < 25%
+      // currentYesPrice = 1 - 0.72 = 0.28 <= consensusProbability=0.30 → divergence_closed
       const position = makePosition({
         direction: 'NO',
-        entryPrice: 0.45,
-        consensusProbability: 0.3,
+        entryPrice: 0.68,
+        consensusProbability: 0.30,
       });
       const result = evaluateTakeProfit(
         position,
         makeCurrentPrice({
           direction: 'NO',
-          currentOutcomePrice: 0.50,
-          currentYesPrice: 0.50,
+          currentOutcomePrice: 0.72,
+          currentYesPrice: 0.28,
         }),
         THRESHOLD,
       );
       expect(result.shouldExit).toBe(true);
       expect(result.reason).toBe('divergence_closed');
     });
+
+    it('holds for NO when currentYesPrice is still above consensus', () => {
+      // consensusProbability=0.30, currentYesPrice=0.45 > 0.30 → not closed yet
+      // return=5% < threshold
+      const position = makePosition({
+        direction: 'NO',
+        entryPrice: 0.55,
+        consensusProbability: 0.30,
+      });
+      const result = evaluateTakeProfit(
+        position,
+        makeCurrentPrice({
+          direction: 'NO',
+          currentOutcomePrice: 0.578,
+          currentYesPrice: 0.45,
+        }),
+        THRESHOLD,
+      );
+      expect(result.shouldExit).toBe(false);
+    });
   });
 
   describe('return calculation', () => {
     it('calculates negative return correctly (loss)', () => {
       // entryPrice=0.5, currentOutcomePrice=0.4 → return = -20%
+      // consensus=0.7, currentYesPrice=0.4 < 0.7 → no divergence_closed
       const result = evaluateTakeProfit(
-        makePosition({ entryPrice: 0.5 }),
+        makePosition({ entryPrice: 0.5, consensusProbability: 0.7 }),
         makeCurrentPrice({ currentOutcomePrice: 0.4, currentYesPrice: 0.4 }),
         THRESHOLD,
       );
       expect(result.returnPct).toBeCloseTo(-20, 1);
-      expect(result.shouldExit).toBe(false); // losses don't trigger take-profit
+      expect(result.shouldExit).toBe(false);
     });
 
     it('returns 0% when entryPrice is 0', () => {

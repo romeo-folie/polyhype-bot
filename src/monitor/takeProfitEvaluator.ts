@@ -48,11 +48,13 @@ export function evaluateTakeProfit(
     return { shouldExit: true, reason: 'take_profit_threshold', returnDecimal, returnPct };
   }
 
-  // Condition 2: divergence has closed (market price crossed our consensus)
+  // Condition 2: divergence has closed (market price reached our consensus estimate)
+  // YES position: we expected YES to rise → exit when YES price >= our P(YES) estimate
+  // NO position:  we expected YES to fall → exit when YES price <= our P(YES) estimate
   const divergenceClosed =
     direction === 'YES'
       ? currentYesPrice >= consensusProbability
-      : currentYesPrice <= 1 - consensusProbability;
+      : currentYesPrice <= consensusProbability;
 
   if (divergenceClosed) {
     return { shouldExit: true, reason: 'divergence_closed', returnDecimal, returnPct };
