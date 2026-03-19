@@ -29,6 +29,8 @@ import type { RssItem } from './rss.js';
 
 const GDELT_TIMEOUT_MS = 15_000;
 const GDELT_BASE = 'https://api.gdeltproject.org/api/v2/doc/doc';
+const GDELT_MAX_RETRIES = 1;
+const GDELT_RETRY_DELAY_MS = 6_000;
 
 /** Timespan in hours to look back. Matches the 5-minute cron cycle with generous overlap. */
 const GDELT_TIMESPAN_HOURS = 1;
@@ -68,6 +70,16 @@ function parseGdeltDate(seendate: string | undefined): Date {
   return new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}Z`);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRateLimitError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const maybeResponse = (err as { response?: { status?: number } }).response;
+  return maybeResponse?.status === 429;
+}
+
 async function fetchGdeltTheme(theme: string, label: string): Promise<RssItem[]> {
   const params = new URLSearchParams({
     query: `theme:${theme}`,
@@ -78,10 +90,28 @@ async function fetchGdeltTheme(theme: string, label: string): Promise<RssItem[]>
   });
 
   const url = `${GDELT_BASE}?${params.toString()}`;
-  const { data } = await axios.get<GdeltResponse>(url, {
-    timeout: GDELT_TIMEOUT_MS,
-    headers: { 'User-Agent': 'PGA-Bot/1.0 (geopolitical-agent)' },
-  });
+  let data: GdeltResponse;
+
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await axios.get<GdeltResponse>(url, {
+        timeout: GDELT_TIMEOUT_MS,
+        headers: { 'User-Agent': 'PGA-Bot/1.0 (geopolitical-agent)' },
+      });
+      data = response.data;
+      break;
+    } catch (err) {
+      const isRetryable = isRateLimitError(err) && attempt < GDELT_MAX_RETRIES;
+      if (!isRetryable) throw err;
+
+      logger.warn('[scraper] GDELT rate-limited; retrying theme fetch', {
+        theme,
+        attempt: attempt + 1,
+        waitMs: GDELT_RETRY_DELAY_MS,
+      });
+      await sleep(GDELT_RETRY_DELAY_MS);
+    }
+  }
 
   const articles = data?.articles ?? [];
   const items: RssItem[] = [];
