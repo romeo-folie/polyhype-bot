@@ -28,6 +28,7 @@ const envSchema = z.object({
   DIVERGENCE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.1),
   MAX_BET_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.1),
   TAKE_PROFIT_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.25),
+  BANKROLL_USD: z.coerce.number().positive().optional().default(100),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
