@@ -9,7 +9,6 @@
 
 import { logger } from '../shared/logger.js';
 import type { TradeSignal } from '../mapping/index.js';
-import type { ExecutionResult } from './executor.js';
 import type { Position } from './positionLedger.js';
 
 const TELEGRAM_API_BASE = 'https://api.telegram.org';
