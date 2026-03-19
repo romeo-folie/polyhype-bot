@@ -6,6 +6,7 @@
  */
 
 import { logger } from '../shared/logger.js';
+import { loadConfig } from '../shared/config.js';
 import type { RssItem } from './rss.js';
 
 export interface ScoredItem extends RssItem {
@@ -48,7 +49,7 @@ function parseScores(raw: string, batchLength: number): ScoreResult[] {
 async function scoreBatchGemini(items: RssItem[]): Promise<ScoreResult[]> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const genAI = new GoogleGenerativeAI(process.env['GEMINI_API_KEY']!);
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+  const model = genAI.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
 
   const result = await Promise.race([
     model.generateContent({
@@ -75,7 +76,7 @@ async function scoreBatchOpenAI(items: RssItem[]): Promise<ScoreResult[]> {
   try {
     const response = await client.chat.completions.create(
       {
-        model: 'gpt-4o-mini',
+        model: loadConfig().OPENAI_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: buildUserPrompt(items) },

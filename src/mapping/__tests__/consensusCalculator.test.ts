@@ -1,5 +1,14 @@
 import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 
+// Mock loadConfig so tests don't need REDIS_URL / SIMMER_* env vars
+jest.unstable_mockModule('../../shared/config.js', () => ({
+  loadConfig: jest.fn(() => ({
+    OPENAI_MODEL: 'gpt-4o-mini',
+    GEMINI_MODEL: 'gemini-2.5-flash',
+    LLM_PROVIDER: 'openai',
+  })),
+}));
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mockGenerateContent = jest.fn<(...args: any[]) => any>();
 jest.unstable_mockModule('@google/generative-ai', () => ({

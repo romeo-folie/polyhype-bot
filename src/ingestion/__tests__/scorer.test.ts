@@ -1,6 +1,16 @@
 import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import type { RssItem } from '../rss.js';
 
+// Mock loadConfig so scorer tests don't need REDIS_URL / SIMMER_* env vars
+jest.unstable_mockModule('../../shared/config.js', () => ({
+  loadConfig: jest.fn(() => ({
+    OPENAI_MODEL: 'gpt-4o-mini',
+    GEMINI_MODEL: 'gemini-2.5-flash',
+    LLM_PROVIDER: 'openai',
+    URGENCY_THRESHOLD: 8,
+  })),
+}));
+
 // Mock the Google Generative AI module
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mockGenerateContent = jest.fn<(...args: any[]) => any>();

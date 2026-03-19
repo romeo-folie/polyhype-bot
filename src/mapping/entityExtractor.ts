@@ -7,6 +7,7 @@
  */
 
 import { logger } from '../shared/logger.js';
+import { loadConfig } from '../shared/config.js';
 import { searchEvents, parseOutcomePrices } from './gamma.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 
@@ -25,7 +26,7 @@ async function extractEntitiesOpenAI(headline: string): Promise<string[]> {
   const client = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
   const completion = await client.chat.completions.create(
     {
-      model: 'gpt-4o-mini',
+      model: loadConfig().OPENAI_MODEL,
       messages: [
         { role: 'system', content: EXTRACT_SYSTEM_PROMPT },
         { role: 'user', content: headline },
@@ -45,7 +46,7 @@ async function extractEntitiesOpenAI(headline: string): Promise<string[]> {
 async function extractEntitiesGemini(headline: string): Promise<string[]> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const genai = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
-  const model = genai.getGenerativeModel({ model: 'gemini-2.5-flash' });
+  const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
 
   const result = await Promise.race([
     model.generateContent(`${EXTRACT_SYSTEM_PROMPT}\n\n${headline}`),

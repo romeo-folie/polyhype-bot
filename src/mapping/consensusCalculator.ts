@@ -8,6 +8,7 @@
  */
 
 import { logger } from '../shared/logger.js';
+import { loadConfig } from '../shared/config.js';
 
 const TIMEOUT_MS = 25_000;
 
@@ -49,7 +50,7 @@ async function callOpenAI(
 
   const completion = await client.chat.completions.create(
     {
-      model: 'gpt-4o-mini',
+      model: loadConfig().OPENAI_MODEL,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         {
@@ -76,7 +77,7 @@ async function callGemini(
 ): Promise<ConsensusResult> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const genai = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
-  const model = genai.getGenerativeModel({ model: 'gemini-2.5-flash' });
+  const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
 
   const prompt =
     `${SYSTEM_PROMPT}\n\n` +
