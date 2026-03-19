@@ -1,0 +1,91 @@
+/**
+ * Polymarket current price fetcher.
+ *
+ * Fetches the current best-bid/ask prices for open positions directly from
+ * the Gamma API. Used by the monitor to compute P&L and decide exits.
+ *
+ * For a YES position: current price = current YES bid
+ * For a NO position:  current price = current NO bid = 1 - YES ask
+ *
+ * We use the simpler midpoint approximation: currentYesPrice from outcomePrices[0].
+ * This is the same field ingested at entry time — consistent comparison.
+ */
+
+import { getMarket, parseOutcomePrices } from '../mapping/gamma.js';
+import { logger } from '../shared/logger.js';
+import type { Position } from '../execution/positionLedger.js';
+
+export interface CurrentPrice {
+  marketId: string;
+  direction: 'YES' | 'NO';
+  /** Current price of the outcome we hold (0–1) */
+  currentOutcomePrice: number;
+  /** Raw YES price from Gamma */
+  currentYesPrice: number;
+}
+
+/**
+ * Fetch the current price for a single open position.
+ *
+ * Returns null if the market is closed, not found, or the fetch fails.
+ */
+export async function fetchCurrentPrice(position: Position): Promise<CurrentPrice | null> {
+  try {
+    const market = await getMarket(position.marketId);
+
+    if (!market.active || market.closed) {
+      logger.info('[price-fetcher] market is closed', { marketId: position.marketId });
+      return null;
+    }
+
+    const prices = parseOutcomePrices(market.outcomePrices);
+    if (prices.length === 0) {
+      logger.warn('[price-fetcher] empty outcomePrices', { marketId: position.marketId });
+      return null;
+    }
+
+    const currentYesPrice = parseFloat(prices[0] ?? '0');
+    if (!isFinite(currentYesPrice)) {
+      logger.warn('[price-fetcher] non-finite YES price', { marketId: position.marketId });
+      return null;
+    }
+
+    // For YES positions: the price we care about is the YES price
+    // For NO positions: we bought NO at (1 - yesPrice), current value = (1 - currentYesPrice)
+    const currentOutcomePrice =
+      position.direction === 'YES' ? currentYesPrice : 1 - currentYesPrice;
+
+    return {
+      marketId: position.marketId,
+      direction: position.direction,
+      currentOutcomePrice,
+      currentYesPrice,
+    };
+  } catch (err) {
+    logger.warn('[price-fetcher] failed to fetch market price', {
+      marketId: position.marketId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Fetch current prices for all open positions.
+ *
+ * Returns a map from marketId to CurrentPrice (only for successfully fetched markets).
+ */
+export async function fetchAllCurrentPrices(
+  positions: Position[],
+): Promise<Map<string, CurrentPrice>> {
+  const results = new Map<string, CurrentPrice>();
+
+  for (const position of positions) {
+    const price = await fetchCurrentPrice(position);
+    if (price) {
+      results.set(position.marketId, price);
+    }
+  }
+
+  return results;
+}
