@@ -106,15 +106,32 @@ describe('fetchCurrentPrice', () => {
 });
 
 describe('fetchAllCurrentPrices', () => {
-  it('returns a map with prices for all fetchable positions', async () => {
+  it('returns a map keyed by marketId:direction with prices for all fetchable positions', async () => {
     mockGetMarket.mockResolvedValue(makeMarket('0.65'));
     mockParseOutcomePrices.mockReturnValue(['0.65', '0.35']);
 
-    const positions = [makePosition({ marketId: 'mkt-1' })];
+    const positions = [makePosition({ marketId: 'mkt-1', direction: 'YES' })];
     const result = await fetchAllCurrentPrices(positions);
 
     expect(result.size).toBe(1);
-    expect(result.get('mkt-1')!.currentYesPrice).toBeCloseTo(0.65);
+    expect(result.get('mkt-1:YES')!.currentYesPrice).toBeCloseTo(0.65);
+  });
+
+  it('does not overwrite when same market has both YES and NO positions', async () => {
+    mockGetMarket.mockResolvedValue(makeMarket('0.65'));
+    mockParseOutcomePrices.mockReturnValue(['0.65', '0.35']);
+
+    const positions = [
+      makePosition({ marketId: 'mkt-1', direction: 'YES' }),
+      makePosition({ marketId: 'mkt-1', direction: 'NO' }),
+    ];
+    const result = await fetchAllCurrentPrices(positions);
+
+    expect(result.size).toBe(2);
+    // YES position: outcome price = currentYesPrice = 0.65
+    expect(result.get('mkt-1:YES')!.currentOutcomePrice).toBeCloseTo(0.65);
+    // NO position: outcome price = 1 - currentYesPrice = 0.35
+    expect(result.get('mkt-1:NO')!.currentOutcomePrice).toBeCloseTo(0.35);
   });
 
   it('omits positions where fetch failed', async () => {

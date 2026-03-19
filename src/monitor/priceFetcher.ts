@@ -73,7 +73,10 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
 /**
  * Fetch current prices for all open positions.
  *
- * Returns a map from marketId to CurrentPrice (only for successfully fetched markets).
+ * Returns a map keyed by `${marketId}:${direction}` → CurrentPrice.
+ * Keying by both marketId and direction prevents a YES and NO position on the
+ * same market from overwriting each other's price (second write would silently
+ * replace the first with the wrong outcome price).
  */
 export async function fetchAllCurrentPrices(
   positions: Position[],
@@ -83,7 +86,7 @@ export async function fetchAllCurrentPrices(
   for (const position of positions) {
     const price = await fetchCurrentPrice(position);
     if (price) {
-      results.set(position.marketId, price);
+      results.set(`${position.marketId}:${position.direction}`, price);
     }
   }
 
