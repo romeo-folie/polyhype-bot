@@ -201,4 +201,33 @@ describe('executeTakeProfit', () => {
     expect(mockClose).not.toHaveBeenCalled();
     expect(mockNotify).not.toHaveBeenCalled();
   });
+
+  it('aborts without calling submitSell when entryPrice=0 and sharesHeld is absent', async () => {
+    const result = await executeTakeProfit({
+      position: makePosition({ entryPrice: 0, sharesHeld: undefined }),
+      currentPrice: 0.65,
+      returnPct: 25,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/invalid sharesToSell/);
+    expect(mockSell).not.toHaveBeenCalled();
+    expect(mockClose).not.toHaveBeenCalled();
+  });
+
+  it('aborts without calling submitSell when sharesHeld is 0', async () => {
+    const result = await executeTakeProfit({
+      position: makePosition({ sharesHeld: 0 }),
+      currentPrice: 0.65,
+      returnPct: 25,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/invalid sharesToSell/);
+    expect(mockSell).not.toHaveBeenCalled();
+  });
 });
