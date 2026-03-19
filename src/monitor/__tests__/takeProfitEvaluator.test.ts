@@ -33,6 +33,47 @@ function makeCurrentPrice(overrides: Partial<CurrentPrice> = {}): CurrentPrice {
 const THRESHOLD = 0.25; // 25%
 
 describe('evaluateTakeProfit', () => {
+  describe('stop-loss', () => {
+    it('exits with stop_loss when loss exceeds threshold', () => {
+      // entryPrice=0.5, currentOutcomePrice=0.3 → return = -40% < -30%
+      const result = evaluateTakeProfit(
+        makePosition({ entryPrice: 0.5, consensusProbability: 0.7 }),
+        makeCurrentPrice({ currentOutcomePrice: 0.3, currentYesPrice: 0.3 }),
+        THRESHOLD,
+        0.30,
+      );
+      expect(result.shouldExit).toBe(true);
+      expect(result.reason).toBe('stop_loss');
+      expect(result.returnPct).toBeCloseTo(-40, 1);
+    });
+
+    it('holds when loss is below stop-loss threshold', () => {
+      // entryPrice=0.5, currentOutcomePrice=0.4 → return = -20% > -30%
+      const result = evaluateTakeProfit(
+        makePosition({ entryPrice: 0.5, consensusProbability: 0.7 }),
+        makeCurrentPrice({ currentOutcomePrice: 0.4, currentYesPrice: 0.4 }),
+        THRESHOLD,
+        0.30,
+      );
+      expect(result.shouldExit).toBe(false);
+    });
+
+    it('stop-loss takes priority over divergence_closed', () => {
+      // Both conditions met: loss = -50% AND divergence closed
+      // entryPrice=0.5, currentOutcomePrice=0.25 → return = -50%
+      // consensus=0.2, currentYesPrice=0.25 >= 0.2 → divergence_closed too
+      // But stop-loss should fire first (checked first)
+      const result = evaluateTakeProfit(
+        makePosition({ entryPrice: 0.5, consensusProbability: 0.2 }),
+        makeCurrentPrice({ currentOutcomePrice: 0.25, currentYesPrice: 0.25 }),
+        THRESHOLD,
+        0.30,
+      );
+      expect(result.shouldExit).toBe(true);
+      expect(result.reason).toBe('stop_loss');
+    });
+  });
+
   describe('take-profit threshold', () => {
     it('exits when return clearly exceeds threshold', () => {
       // entryPrice=0.4, currentOutcomePrice=0.6 → return=50% >> 25%

@@ -18,6 +18,7 @@ import { runMapping } from '../mapping/index.js';
 import { executeSignals } from './executor.js';
 import { recordPosition } from './positionLedger.js';
 import { notifyTradeExecuted, notifyTradeError } from './telegram.js';
+import { reEvaluatePositions } from '../monitor/signalReeval.js';
 
 /**
  * Run the full ingestion → mapping → execution pipeline.
@@ -39,6 +40,24 @@ export async function runExecution(): Promise<void> {
       error: err instanceof Error ? err.message : String(err),
     });
     return;
+  }
+
+  // Re-evaluate existing positions against fresh OSINT before executing new signals
+  if (highUrgencyItems.length > 0) {
+    try {
+      const reevalResult = await reEvaluatePositions(highUrgencyItems, redis);
+      if (reevalResult.exited > 0) {
+        logger.info('[execution] signal re-evaluation triggered exits', {
+          exited: reevalResult.exited,
+          held: reevalResult.held,
+          errors: reevalResult.errors,
+        });
+      }
+    } catch (err) {
+      logger.warn('[execution] signal re-evaluation failed — continuing', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   if (highUrgencyItems.length === 0) {
