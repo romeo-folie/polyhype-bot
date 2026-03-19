@@ -28,7 +28,7 @@ import { logger } from '../shared/logger.js';
 import type { RssItem } from './rss.js';
 
 const GDELT_TIMEOUT_MS = 15_000;
-const GDELT_BASE = 'https://api.gdeltproject.org/api/v2/artlist/artlist';
+const GDELT_BASE = 'https://api.gdeltproject.org/api/v2/doc/doc';
 
 /** Timespan in hours to look back. Matches the 5-minute cron cycle with generous overlap. */
 const GDELT_TIMESPAN_HOURS = 1;
@@ -106,20 +106,37 @@ async function fetchGdeltTheme(theme: string, label: string): Promise<RssItem[]>
 }
 
 /**
- * Fetch geopolitical headlines from GDELT v2 ArtList across multiple crisis themes.
+ * Fetch geopolitical headlines from GDELT v2 across multiple crisis themes.
+ *
+ * GDELT enforces a 5-second rate limit between requests. Themes are queried
+ * sequentially with a 6-second gap to stay within the limit.
  *
  * Results are deduplicated by URL before returning. Failures per-theme are logged
  * and skipped — at least one theme succeeding is sufficient for pipeline operation.
  */
-export async function scrapeHeadlines(): Promise<RssItem[]> {
-  const settled = await Promise.allSettled(
-    GDELT_QUERIES.map(({ theme, label }) => fetchGdeltTheme(theme, label)),
-  );
+/** Delay between GDELT requests to respect the 5-second rate limit. Overridable in tests. */
+export const GDELT_REQUEST_DELAY_MS = 6_000;
 
+export async function scrapeHeadlines(
+  _delayMs = GDELT_REQUEST_DELAY_MS,
+): Promise<RssItem[]> {
+  const delayMs = process.env['NODE_ENV'] === 'test' ? 0 : _delayMs;
+  const results: Array<PromiseSettledResult<RssItem[]>> = [];
+  for (let i = 0; i < GDELT_QUERIES.length; i++) {
+    if (i > 0 && delayMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
+    const { theme, label } = GDELT_QUERIES[i]!;
+    const result = await fetchGdeltTheme(theme, label).then(
+      (value) => ({ status: 'fulfilled' as const, value }),
+      (reason: unknown) => ({ status: 'rejected' as const, reason }),
+    );
+    results.push(result);
+  }
   const seenUrls = new Set<string>();
-  const results: RssItem[] = [];
+  const deduped: RssItem[] = [];
 
-  for (const result of settled) {
+  for (const result of results) {
     if (result.status === 'rejected') {
       logger.warn('[scraper] GDELT theme fetch failed', { error: String(result.reason) });
       continue;
@@ -127,10 +144,10 @@ export async function scrapeHeadlines(): Promise<RssItem[]> {
     for (const item of result.value) {
       if (seenUrls.has(item.url)) continue;
       seenUrls.add(item.url);
-      results.push(item);
+      deduped.push(item);
     }
   }
 
-  logger.info('[scraper] GDELT fetch complete', { count: results.length });
-  return results;
+  logger.info('[scraper] GDELT fetch complete', { count: deduped.length });
+  return deduped;
 }
