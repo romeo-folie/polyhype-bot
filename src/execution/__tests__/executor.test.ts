@@ -20,17 +20,23 @@ jest.unstable_mockModule('../../shared/clob.js', () => ({
   submitClobBuy: jest.fn(),
 }));
 
+jest.unstable_mockModule('../positionLedger.js', () => ({
+  hasOpenPosition: jest.fn(),
+}));
+
 jest.unstable_mockModule('../../shared/logger.js', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
 const { submitTrade, resolveSimmerMarketId } = await import('../../shared/simmer.js');
 const { submitClobBuy } = await import('../../shared/clob.js');
+const { hasOpenPosition } = await import('../positionLedger.js');
 const { executeSignal, executeSignals } = await import('../executor.js');
 
 const mockSubmit = submitTrade as jest.MockedFunction<typeof submitTrade>;
 const mockResolve = resolveSimmerMarketId as jest.MockedFunction<typeof resolveSimmerMarketId>;
 const mockSubmitClob = submitClobBuy as jest.MockedFunction<typeof submitClobBuy>;
+const mockHasPosition = hasOpenPosition as jest.MockedFunction<typeof hasOpenPosition>;
 
 function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
   return {
@@ -62,11 +68,26 @@ describe('executeSignal', () => {
     mockSubmit.mockReset();
     mockResolve.mockReset();
     mockSubmitClob.mockReset();
+    mockHasPosition.mockReset();
 
-    // Default: available in Simmer and Simmer succeeds
+    // Default: available in Simmer, Simmer succeeds, no open position
     mockResolve.mockResolvedValue('simmer-uuid-123');
     mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
     mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
+    mockHasPosition.mockResolvedValue(false);
+  });
+
+  it('skips when already holding position in same market+direction', async () => {
+    mockHasPosition.mockResolvedValue(true);
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('position_already_open');
+    expect(mockSubmit).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
   });
 
   it('skips when stake is below floor', async () => {
@@ -185,10 +206,12 @@ describe('executeSignals', () => {
     mockSubmit.mockReset();
     mockResolve.mockReset();
     mockSubmitClob.mockReset();
+    mockHasPosition.mockReset();
 
     mockResolve.mockResolvedValue('simmer-uuid-123');
     mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
     mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
+    mockHasPosition.mockResolvedValue(false);
   });
 
   it('processes all signals and returns results', async () => {

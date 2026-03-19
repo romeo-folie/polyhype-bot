@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { submitTrade, resolveSimmerMarketId, SimmerError } from '../shared/simmer.js';
 import { submitClobBuy } from '../shared/clob.js';
+import { hasOpenPosition } from './positionLedger.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
@@ -95,7 +96,17 @@ export async function executeSignal(
     return { signal, skipped: true, skipReason: 'stake_below_floor' };
   }
 
-  // 2) Idempotency check
+  // 2) Open position check — don't stack into a market we already hold
+  const alreadyHolding = await hasOpenPosition(redis, signal.marketId, signal.direction);
+  if (alreadyHolding) {
+    logger.info('[executor] skipping — already holding position in this market', {
+      marketId: signal.marketId,
+      direction: signal.direction,
+    });
+    return { signal, skipped: true, skipReason: 'position_already_open' };
+  }
+
+  // 3) Idempotency check
   const key = idempotencyKey(signal);
   const alreadyFired = await redis.get(key);
   if (alreadyFired) {
