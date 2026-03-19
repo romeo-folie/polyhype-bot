@@ -12,7 +12,7 @@
 
 import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
-import { submitTrade, SimmerError } from '../shared/simmer.js';
+import { submitTrade, resolveSimmerMarketId, SimmerError } from '../shared/simmer.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
@@ -57,7 +57,18 @@ export async function executeSignal(
     return { signal, skipped: true, skipReason: 'stake_below_floor' };
   }
 
-  // 2. Idempotency check
+  // 2. Resolve Gamma numeric market ID → Simmer UUID
+  // Simmer uses its own internal UUIDs; Gamma IDs return "Market not found".
+  const simmerId = await resolveSimmerMarketId(signal.question);
+  if (!simmerId) {
+    logger.info('[executor] skipping — market not in Simmer catalogue', {
+      marketId: signal.marketId,
+      question: signal.question,
+    });
+    return { signal, skipped: true, skipReason: 'market_not_in_simmer' };
+  }
+
+  // 3. Idempotency check
   const key = idempotencyKey(signal);
   const alreadyFired = await redis.get(key);
   if (alreadyFired) {
@@ -77,9 +88,19 @@ export async function executeSignal(
     consensusP: signal.consensusProbability,
   });
 
+  // 5. Submit trade using resolved Simmer UUID
+  logger.info('[executor] submitting trade', {
+    marketId: signal.marketId,
+    simmerId,
+    direction: signal.direction,
+    stakeUsd: signal.stakeUsd,
+    edgeMagnitude: signal.edgeMagnitude,
+    consensusP: signal.consensusProbability,
+  });
+
   try {
     const tradeResult = await submitTrade({
-      market_id: signal.marketId,
+      market_id: simmerId,
       // Simmer API uses lowercase 'yes'/'no'; our internal signal uses 'YES'/'NO'
       side: signal.direction.toLowerCase() as 'yes' | 'no',
       amount: signal.stakeUsd,

@@ -18,6 +18,7 @@ import { loadConfig } from './config.js';
 
 const SIMMER_BASE_URL = 'https://api.simmer.markets';
 const TRADE_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/trade`;
+const MARKETS_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/markets`;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 // ── Request / response types ──────────────────────────────────────────────────
@@ -163,6 +164,50 @@ export async function submitSell(input: SimmerSellInput): Promise<SimmerTradeRes
     source: input.source ?? 'sdk:polymarket-geopolitical-agent',
     venue: input.venue ?? 'polymarket',
   });
+}
+
+/**
+ * Resolve a Gamma/Polymarket numeric market ID to a Simmer UUID.
+ *
+ * Simmer uses its own internal UUIDs — passing a Gamma numeric ID directly
+ * to the trade endpoint returns "Market not found". This function searches
+ * Simmer's market catalogue by question text and returns the matching UUID.
+ *
+ * Returns null if:
+ * - No match found in Simmer (market not in Simmer's catalogue)
+ * - Network/API failure
+ *
+ * @param question  The market question text from Gamma (used as search query)
+ */
+export async function resolveSimmerMarketId(question: string): Promise<string | null> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
+
+  // Use the first 6+ meaningful words as the search query (better recall than full question)
+  const searchQuery = question.split(' ').slice(0, 8).join(' ');
+  const url = `${MARKETS_ENDPOINT}?q=${encodeURIComponent(searchQuery)}&limit=5`;
+
+  try {
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!resp.ok) return null;
+
+    const data = (await resp.json()) as { markets?: Array<{ id: string; question: string }> };
+    const markets = data.markets ?? [];
+
+    // Find the best match — exact substring match preferred, otherwise first result
+    const exact = markets.find(
+      (m) =>
+        m.question.toLowerCase().includes(question.toLowerCase().slice(0, 40)) ||
+        question.toLowerCase().includes(m.question.toLowerCase().slice(0, 40)),
+    );
+
+    return exact?.id ?? markets[0]?.id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
