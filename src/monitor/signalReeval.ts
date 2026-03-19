@@ -18,12 +18,37 @@ import { getOpenPositions } from '../execution/positionLedger.js';
 import type { Redis } from 'ioredis';
 import type { ScoredItem } from '../ingestion/scorer.js';
 
+// Stop-words filtered from market question before keyword matching.
+// Without this filter, common English words ("will", "from", "before", etc.)
+// cause nearly every headline to match every position, burning LLM tokens
+// on irrelevant re-evaluations.
+const STOP_WORDS = new Set([
+  'will', 'does', 'have', 'been', 'this', 'that', 'what', 'when', 'where',
+  'which', 'with', 'from', 'into', 'more', 'than', 'them', 'they', 'their',
+  'there', 'then', 'each', 'also', 'most', 'some', 'over', 'only', 'very',
+  'just', 'about', 'after', 'again', 'before', 'being', 'below', 'between',
+  'both', 'could', 'during', 'further', 'here', 'other', 'same', 'should',
+  'such', 'under', 'until', 'while', 'would', 'your',
+]);
+
+/** Extract meaningful keywords from a market question, filtering stop-words. */
+export function extractKeywords(question: string): string[] {
+  return question
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter((w) => w.length >= 4 && !STOP_WORDS.has(w));
+}
+
+/** Visible for testing */
+export { STOP_WORDS };
+
 /**
  * Re-evaluate open positions against fresh OSINT items.
  *
- * For each position, if any high-urgency item is topically relevant (simple
- * keyword overlap), re-estimate consensus probability. If the edge has
- * evaporated below REEVAL_EDGE_FLOOR or direction has flipped, exit.
+ * For each position, if any high-urgency item is topically relevant (keyword
+ * overlap after stop-word filtering), re-estimate consensus probability.
+ * If the edge has evaporated below REEVAL_EDGE_FLOOR or direction has flipped, exit.
  */
 export async function reEvaluatePositions(
   highUrgencyItems: ScoredItem[],
@@ -48,12 +73,8 @@ export async function reEvaluatePositions(
 
   for (const position of positions) {
     // Check if any high-urgency item is relevant to this position's market.
-    // Simple heuristic: check if any keyword from the market question appears
-    // in the headline (case-insensitive, 4+ char words only).
-    const questionWords = position.question
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length >= 4);
+    // Uses extractKeywords to filter stop-words and short tokens.
+    const questionWords = extractKeywords(position.question);
 
     const hasRelevantNews = highUrgencyItems.some((item) => {
       const headline = item.title.toLowerCase();
@@ -80,6 +101,12 @@ export async function reEvaluatePositions(
         return questionWords.some((word) => headline.includes(word));
       });
 
+      // description is null because the position ledger does not store the original
+      // Gamma market description (it was available during Phase 2 mapping but not
+      // persisted). Trade-off: re-eval consensus may be slightly less informed than
+      // the original estimate, but the question text + headline + current price
+      // provide sufficient context for the LLM to produce a useful probability.
+      // To improve: persist description in the position ledger in a future iteration.
       freshConsensus = await estimateConsensusProbability({
         question: position.question,
         description: null,
@@ -116,6 +143,10 @@ export async function reEvaluatePositions(
     const shouldExit = freshEdge < edgeFloor;
 
     if (shouldExit) {
+      // Note on exit + re-entry race: the ingestion pipeline's idempotency guard
+      // (SHA-256 dedup key with 1h TTL in Redis) prevents the same headline from
+      // opening a new position in the same cycle where we just exited one. A re-entry
+      // can only happen on a genuinely new signal in a subsequent cycle.
       const returnPct =
         position.entryPrice > 0
           ? ((currentPrice.currentOutcomePrice - position.entryPrice) / position.entryPrice) * 100
