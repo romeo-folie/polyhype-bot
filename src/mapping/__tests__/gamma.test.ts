@@ -1,5 +1,5 @@
 import { jest, describe, it, expect, afterEach } from '@jest/globals';
-import { parseYesPrice, parseOutcomePrices } from '../gamma.js';
+import { parseYesPrice, parseOutcomePrices, parseClobTokenIds } from '../gamma.js';
 
 // ─── parseOutcomePrices unit tests ────────────────────────────────────────────
 
@@ -18,6 +18,30 @@ describe('parseOutcomePrices', () => {
 
   it('throws for JSON that is not an array', () => {
     expect(() => parseOutcomePrices('{"price":0.5}')).toThrow('Cannot parse outcomePrices');
+  });
+});
+
+// ─── parseClobTokenIds unit tests ───────────────────────────────────────────
+
+describe('parseClobTokenIds', () => {
+  it('passes through pre-parsed token id array unchanged', () => {
+    expect(parseClobTokenIds(['tok-yes', 'tok-no'])).toEqual(['tok-yes', 'tok-no']);
+  });
+
+  it('parses JSON-encoded token id array from Gamma wire format', () => {
+    const raw = '["36135303630970774358991758965953725374791089628290212294816140371870983436829","100818499003359884559774352671825765184103958625070066814408985574716007147193"]';
+    const parsed = parseClobTokenIds(raw);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]).toMatch(/^\d+$/);
+    expect(parsed[1]).toMatch(/^\d+$/);
+  });
+
+  it('throws for invalid JSON string', () => {
+    expect(() => parseClobTokenIds('not-json')).toThrow('Cannot parse clobTokenIds');
+  });
+
+  it('throws for JSON that is not an array', () => {
+    expect(() => parseClobTokenIds('{"token":"x"}')).toThrow('Cannot parse clobTokenIds');
   });
 });
 
