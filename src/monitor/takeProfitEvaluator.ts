@@ -11,7 +11,7 @@
  * 2. DIVERGENCE_CLOSED: the original edge has reversed — market has moved past
  *    our consensus probability, meaning the opportunity is gone.
  *    Condition: for YES positions, currentYesPrice >= consensusProbability
- *               for NO positions,  currentYesPrice <= (1 - consensusProbability)
+ *               for NO positions,  currentYesPrice <= consensusProbability
  */
 
 import type { Position } from '../execution/positionLedger.js';

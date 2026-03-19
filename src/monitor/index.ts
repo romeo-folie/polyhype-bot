@@ -43,7 +43,7 @@ export async function runMonitor(): Promise<void> {
   let priceError = 0;
 
   for (const position of positions) {
-    const currentPrice = priceMap.get(position.marketId);
+    const currentPrice = priceMap.get(`${position.marketId}:${position.direction}`);
 
     if (!currentPrice) {
       // Price unavailable — skip, monitor will retry next cycle
