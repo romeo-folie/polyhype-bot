@@ -17,7 +17,7 @@
 import type { Position } from '../execution/positionLedger.js';
 import type { CurrentPrice } from './priceFetcher.js';
 
-export type ExitReason = 'take_profit_threshold' | 'divergence_closed';
+export type ExitReason = 'take_profit_threshold' | 'divergence_closed' | 'stop_loss' | 'signal_reeval';
 
 export interface ExitDecision {
   shouldExit: boolean;
@@ -35,6 +35,7 @@ export function evaluateTakeProfit(
   position: Position,
   currentPrice: CurrentPrice,
   takeProfitThreshold: number,
+  stopLossThreshold = 0.30,
 ): ExitDecision {
   const { entryPrice, consensusProbability, direction } = position;
   const { currentOutcomePrice, currentYesPrice } = currentPrice;
@@ -43,7 +44,12 @@ export function evaluateTakeProfit(
   const returnDecimal = entryPrice > 0 ? (currentOutcomePrice - entryPrice) / entryPrice : 0;
   const returnPct = returnDecimal * 100;
 
-  // Condition 1: take-profit threshold reached
+  // Condition 1: stop-loss — exit immediately if loss exceeds threshold
+  if (returnDecimal <= -stopLossThreshold) {
+    return { shouldExit: true, reason: 'stop_loss', returnDecimal, returnPct };
+  }
+
+  // Condition 2: take-profit threshold reached
   if (returnDecimal >= takeProfitThreshold) {
     return { shouldExit: true, reason: 'take_profit_threshold', returnDecimal, returnPct };
   }

@@ -104,11 +104,16 @@ export async function notifyTakeProfitExecuted(opts: {
   position: Position;
   currentPrice: number;
   returnPct: number;
-  reason: 'take_profit_threshold' | 'divergence_closed';
+  reason: 'take_profit_threshold' | 'divergence_closed' | 'stop_loss' | 'signal_reeval';
 }): Promise<void> {
   const { position, currentPrice, returnPct, reason } = opts;
-  const reasonLabel =
-    reason === 'take_profit_threshold' ? '🎯 Take-profit threshold reached' : '📉 Divergence closed';
+  const reasonLabels: Record<string, string> = {
+    take_profit_threshold: '🎯 Take-profit threshold reached',
+    divergence_closed: '📉 Divergence closed',
+    stop_loss: '🛑 Stop-loss triggered',
+    signal_reeval: '🔄 Signal re-evaluation — edge evaporated',
+  };
+  const reasonLabel = reasonLabels[reason] ?? reason;
 
   const text =
     `💰 <b>Position Closed</b>\n\n` +

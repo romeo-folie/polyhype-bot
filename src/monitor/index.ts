@@ -22,8 +22,9 @@ export async function runMonitor(): Promise<void> {
   const redis = getRedis();
   const cfg = loadConfig();
   const takeProfitThreshold = cfg.TAKE_PROFIT_THRESHOLD;
+  const stopLossThreshold = cfg.STOP_LOSS_THRESHOLD;
 
-  logger.info('[monitor] starting position check', { takeProfitThreshold });
+  logger.info('[monitor] starting position check', { takeProfitThreshold, stopLossThreshold });
 
   // 1. Load all open positions
   const positions = await getOpenPositions(redis);
@@ -55,7 +56,7 @@ export async function runMonitor(): Promise<void> {
       continue;
     }
 
-    const decision = evaluateTakeProfit(position, currentPrice, takeProfitThreshold);
+    const decision = evaluateTakeProfit(position, currentPrice, takeProfitThreshold, stopLossThreshold);
 
     logger.info('[monitor] position evaluated', {
       marketId: position.marketId,
