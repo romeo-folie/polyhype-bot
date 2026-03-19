@@ -47,6 +47,18 @@ export async function executeTakeProfit(opts: {
   // Use tracked shares if available; fall back to estimating from stake/entry price
   const sharesToSell = position.sharesHeld ?? position.stakeUsd / position.entryPrice;
 
+  // Guard against legacy Redis positions with entryPrice=0 or NaN sharesHeld
+  if (!isFinite(sharesToSell) || sharesToSell <= 0) {
+    const error = `invalid sharesToSell (${String(sharesToSell)}) — entryPrice=${String(position.entryPrice)}, sharesHeld=${String(position.sharesHeld)}. Skipping sell to prevent bad order.`;
+    logger.error('[take-profit-executor] aborting sell — invalid share count', {
+      marketId: position.marketId,
+      sharesToSell,
+      entryPrice: position.entryPrice,
+      sharesHeld: position.sharesHeld,
+    });
+    return { marketId: position.marketId, success: false, error, returnPct, reason };
+  }
+
   logger.info('[take-profit-executor] exiting position', {
     marketId: position.marketId,
     direction: position.direction,
