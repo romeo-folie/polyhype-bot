@@ -1,18 +1,20 @@
 /**
  * Trade executor.
  *
- * Wraps the Simmer SDK `submitTrade` with:
- * - Pre-execution validation (stake floor, price sanity)
- * - Idempotency guard via Redis (prevent double-firing the same signal)
- * - Structured result logging
+ * Execution flow:
+ * 1) Try Simmer first (primary venue)
+ * 2) If market is unavailable in Simmer, fall back to direct Polymarket CLOB
  *
- * Idempotency key: SHA-256 of `${marketId}:${direction}:${roundedStakeUsd}`
- * TTL: 1 hour — signals older than 1 hour are considered expired.
+ * Shared controls:
+ * - Stake floor check
+ * - Idempotency guard via Redis (prevent double-firing same signal)
+ * - Structured result logging
  */
 
 import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { submitTrade, resolveSimmerMarketId, SimmerError } from '../shared/simmer.js';
+import { submitClobBuy } from '../shared/clob.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
@@ -27,28 +29,64 @@ export interface ExecutionResult {
   skipReason?: string;
   tradeResult?: SimmerTradeResult;
   error?: string;
+  executionVenue?: 'simmer' | 'clob';
 }
 
-/**
- * Compute an idempotency key for a trade signal.
- * Rounds stake to 2 dp to tolerate minor floating-point variance.
- */
 function idempotencyKey(signal: TradeSignal): string {
   const canonical = `${signal.marketId}:${signal.direction}:${signal.stakeUsd.toFixed(2)}`;
   const hash = createHash('sha256').update(canonical).digest('hex').slice(0, 16);
   return `${IDEMPOTENCY_KEY_PREFIX}${hash}`;
 }
 
-/**
- * Execute a single trade signal via the Simmer SDK.
- *
- * Returns an ExecutionResult — never throws. All errors are captured in result.error.
- */
+function clobTokenForSignal(signal: TradeSignal): string | null {
+  if (signal.direction === 'YES') return signal.clobTokenIds[0] ?? null;
+  return signal.clobTokenIds[1] ?? null;
+}
+
+function isMarketNotFoundMessage(msg: string | undefined): boolean {
+  if (!msg) return false;
+  return /market\s+not\s+found/i.test(msg);
+}
+
+async function tryExecuteViaClob(signal: TradeSignal): Promise<{
+  ok: boolean;
+  tradeResult?: SimmerTradeResult;
+  error?: string;
+}> {
+  const tokenId = clobTokenForSignal(signal);
+  if (!tokenId) {
+    return { ok: false, error: 'CLOB fallback unavailable: missing clobTokenIds' };
+  }
+
+  logger.info('[executor] attempting CLOB fallback', {
+    marketId: signal.marketId,
+    tokenId,
+    direction: signal.direction,
+    stakeUsd: signal.stakeUsd,
+  });
+
+  const clobResult = await submitClobBuy({
+    tokenId,
+    amountUsd: signal.stakeUsd,
+  });
+
+  const tradeResult: SimmerTradeResult = {
+    success: clobResult.success,
+    tx_hash: clobResult.tx_hash,
+    shares_bought: clobResult.shares_bought,
+    error: clobResult.error,
+    raw: clobResult.raw,
+  };
+
+  if (clobResult.success) return { ok: true, tradeResult };
+  return { ok: false, tradeResult, error: clobResult.error ?? 'CLOB trade failed' };
+}
+
 export async function executeSignal(
   signal: TradeSignal,
   redis: Redis,
 ): Promise<ExecutionResult> {
-  // 1. Stake floor check
+  // 1) Stake floor check
   if (signal.stakeUsd < MIN_STAKE_USD) {
     logger.info('[executor] skipping — stake below floor', {
       marketId: signal.marketId,
@@ -57,18 +95,7 @@ export async function executeSignal(
     return { signal, skipped: true, skipReason: 'stake_below_floor' };
   }
 
-  // 2. Resolve Gamma numeric market ID → Simmer UUID
-  // Simmer uses its own internal UUIDs; Gamma IDs return "Market not found".
-  const simmerId = await resolveSimmerMarketId(signal.question);
-  if (!simmerId) {
-    logger.info('[executor] skipping — market not in Simmer catalogue', {
-      marketId: signal.marketId,
-      question: signal.question,
-    });
-    return { signal, skipped: true, skipReason: 'market_not_in_simmer' };
-  }
-
-  // 3. Idempotency check
+  // 2) Idempotency check
   const key = idempotencyKey(signal);
   const alreadyFired = await redis.get(key);
   if (alreadyFired) {
@@ -79,67 +106,109 @@ export async function executeSignal(
     return { signal, skipped: true, skipReason: 'already_executed' };
   }
 
-  // 3. Submit trade
-  logger.info('[executor] submitting trade', {
-    marketId: signal.marketId,
-    direction: signal.direction,
-    stakeUsd: signal.stakeUsd,
-    edgeMagnitude: signal.edgeMagnitude,
-    consensusP: signal.consensusProbability,
-  });
+  // 3) Try Simmer first
+  const simmerId = await resolveSimmerMarketId(signal.question);
 
-  // 5. Submit trade using resolved Simmer UUID
-  logger.info('[executor] submitting trade', {
-    marketId: signal.marketId,
-    simmerId,
-    direction: signal.direction,
-    stakeUsd: signal.stakeUsd,
-    edgeMagnitude: signal.edgeMagnitude,
-    consensusP: signal.consensusProbability,
-  });
-
-  try {
-    const tradeResult = await submitTrade({
-      market_id: simmerId,
-      // Simmer API uses lowercase 'yes'/'no'; our internal signal uses 'YES'/'NO'
-      side: signal.direction.toLowerCase() as 'yes' | 'no',
-      amount: signal.stakeUsd,
-      reasoning: `OSINT signal: "${signal.sourcedFrom}" — consensus P=${signal.consensusProbability.toFixed(2)}, market P=${signal.outcomePrice.toFixed(2)}, edge=${signal.edgeMagnitude.toFixed(2)}. ${signal.reasoning}`,
+  if (simmerId) {
+    logger.info('[executor] submitting trade via Simmer', {
+      marketId: signal.marketId,
+      simmerId,
+      direction: signal.direction,
+      stakeUsd: signal.stakeUsd,
+      edgeMagnitude: signal.edgeMagnitude,
+      consensusP: signal.consensusProbability,
     });
 
-    if (tradeResult.success) {
-      // Mark idempotency key so we don't re-fire this signal
-      await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
-      logger.info('[executor] trade submitted successfully', {
-        marketId: signal.marketId,
-        txHash: tradeResult.tx_hash,
+    try {
+      const tradeResult = await submitTrade({
+        market_id: simmerId,
+        side: signal.direction.toLowerCase() as 'yes' | 'no',
+        amount: signal.stakeUsd,
+        reasoning: `OSINT signal: "${signal.sourcedFrom}" — consensus P=${signal.consensusProbability.toFixed(2)}, market P=${signal.outcomePrice.toFixed(2)}, edge=${signal.edgeMagnitude.toFixed(2)}. ${signal.reasoning}`,
       });
-    } else {
-      logger.warn('[executor] trade returned success=false', {
+
+      if (tradeResult.success) {
+        await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
+        logger.info('[executor] trade submitted successfully via Simmer', {
+          marketId: signal.marketId,
+          txHash: tradeResult.tx_hash,
+        });
+        return { signal, skipped: false, tradeResult, executionVenue: 'simmer' };
+      }
+
+      // Simmer returned success=false — only fall back for market-unavailable cases
+      if (!isMarketNotFoundMessage(tradeResult.error)) {
+        logger.warn('[executor] Simmer trade returned success=false', {
+          marketId: signal.marketId,
+          error: tradeResult.error,
+        });
+        return { signal, skipped: false, tradeResult, executionVenue: 'simmer' };
+      }
+
+      logger.warn('[executor] Simmer market unavailable; attempting CLOB fallback', {
         marketId: signal.marketId,
         error: tradeResult.error,
       });
+    } catch (err) {
+      const message = err instanceof SimmerError
+        ? `HTTP ${err.statusCode.toString()}: ${err.message}`
+        : err instanceof Error
+          ? err.message
+          : String(err);
+
+      // Only fall back on market-not-found style failures
+      if (!isMarketNotFoundMessage(message)) {
+        logger.error('[executor] Simmer submission failed', {
+          marketId: signal.marketId,
+          error: message,
+        });
+        return { signal, skipped: false, error: message, executionVenue: 'simmer' };
+      }
+
+      logger.warn('[executor] Simmer market unavailable (exception); attempting CLOB fallback', {
+        marketId: signal.marketId,
+        error: message,
+      });
     }
-
-    return { signal, skipped: false, tradeResult };
-  } catch (err) {
-    const message = err instanceof SimmerError
-      ? `HTTP ${err.statusCode.toString()}: ${err.message}`
-      : err instanceof Error ? err.message : String(err);
-
-    logger.error('[executor] trade submission failed', {
+  } else {
+    logger.info('[executor] market not in Simmer catalogue; attempting CLOB fallback', {
       marketId: signal.marketId,
-      error: message,
+      question: signal.question,
     });
-    return { signal, skipped: false, error: message };
   }
+
+  // 4) CLOB fallback
+  const clob = await tryExecuteViaClob(signal);
+  if (clob.ok && clob.tradeResult?.success) {
+    const tradeResult = clob.tradeResult;
+    await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
+    logger.info('[executor] trade submitted successfully via CLOB fallback', {
+      marketId: signal.marketId,
+      txHash: tradeResult.tx_hash,
+    });
+    return {
+      signal,
+      skipped: false,
+      tradeResult,
+      executionVenue: 'clob',
+    };
+  }
+
+  const fallbackError = clob.error ?? 'CLOB fallback failed';
+  logger.error('[executor] CLOB fallback failed', {
+    marketId: signal.marketId,
+    error: fallbackError,
+  });
+
+  return {
+    signal,
+    skipped: false,
+    ...(clob.tradeResult ? { tradeResult: clob.tradeResult } : {}),
+    error: fallbackError,
+    executionVenue: 'clob',
+  };
 }
 
-/**
- * Execute a batch of trade signals, respecting idempotency.
- *
- * Signals are processed sequentially to avoid hammering the Simmer skill.
- */
 export async function executeSignals(
   signals: TradeSignal[],
   redis: Redis,
