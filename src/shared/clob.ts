@@ -35,7 +35,7 @@ function normaliseError(err: unknown): string {
 async function getClobClient(): Promise<ClobClient> {
   if (cachedClient) return cachedClient;
 
-  cachedClient = (async () => {
+  const initPromise = (async () => {
     const cfg = loadConfig();
 
     if (!cfg.POLYGON_WALLET_PRIVATE_KEY) {
@@ -56,6 +56,16 @@ async function getClobClient(): Promise<ClobClient> {
       funderAddress,
     );
   })();
+
+  cachedClient = initPromise;
+
+  // Clear the cached promise on rejection so the next call retries fresh
+  // instead of returning the same rejected promise forever.
+  initPromise.catch(() => {
+    if (cachedClient === initPromise) {
+      cachedClient = null;
+    }
+  });
 
   return cachedClient;
 }
