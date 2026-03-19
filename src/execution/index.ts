@@ -42,7 +42,12 @@ export async function runExecution(): Promise<void> {
     return;
   }
 
-  // Re-evaluate existing positions against fresh OSINT before executing new signals
+  // Re-evaluate existing positions against fresh OSINT before executing new signals.
+  // NOTE: re-eval runs BEFORE new signal execution intentionally. If re-eval exits
+  // a position and the same cycle's mapping produces a new entry signal for that
+  // market, the idempotency key (1h TTL in Redis) prevents re-entry within the
+  // same window. This is the desired behavior — an exited position should not be
+  // immediately re-entered on the same cycle's OSINT.
   if (highUrgencyItems.length > 0) {
     try {
       const reevalResult = await reEvaluatePositions(highUrgencyItems, redis);
