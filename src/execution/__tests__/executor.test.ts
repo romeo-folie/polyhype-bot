@@ -1,7 +1,6 @@
 import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 import type { TradeSignal } from '../../mapping/index.js';
 
-// Mock the simmer module
 jest.unstable_mockModule('../../shared/simmer.js', () => ({
   submitTrade: jest.fn(),
   resolveSimmerMarketId: jest.fn(),
@@ -17,16 +16,21 @@ jest.unstable_mockModule('../../shared/simmer.js', () => ({
   },
 }));
 
-// Mock logger
+jest.unstable_mockModule('../../shared/clob.js', () => ({
+  submitClobBuy: jest.fn(),
+}));
+
 jest.unstable_mockModule('../../shared/logger.js', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
 const { submitTrade, resolveSimmerMarketId } = await import('../../shared/simmer.js');
+const { submitClobBuy } = await import('../../shared/clob.js');
 const { executeSignal, executeSignals } = await import('../executor.js');
 
 const mockSubmit = submitTrade as jest.MockedFunction<typeof submitTrade>;
 const mockResolve = resolveSimmerMarketId as jest.MockedFunction<typeof resolveSimmerMarketId>;
+const mockSubmitClob = submitClobBuy as jest.MockedFunction<typeof submitClobBuy>;
 
 function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
   return {
@@ -35,7 +39,7 @@ function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
     clobTokenIds: ['tok-yes', 'tok-no'],
     question: 'Will X happen?',
     direction: 'YES',
-    stakeUsd: 5.00,
+    stakeUsd: 5.0,
     edgeMagnitude: 0.2,
     consensusProbability: 0.7,
     outcomePrice: 0.5,
@@ -57,20 +61,12 @@ describe('executeSignal', () => {
   beforeEach(() => {
     mockSubmit.mockReset();
     mockResolve.mockReset();
-    // Default: market found in Simmer
+    mockSubmitClob.mockReset();
+
+    // Default: available in Simmer and Simmer succeeds
     mockResolve.mockResolvedValue('simmer-uuid-123');
-  });
-
-  it('skips when market is not found in Simmer catalogue', async () => {
-    mockResolve.mockResolvedValue(null);
-    const redis = makeRedis();
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await executeSignal(makeSignal(), redis as any);
-
-    expect(result.skipped).toBe(true);
-    expect(result.skipReason).toBe('market_not_in_simmer');
-    expect(mockSubmit).not.toHaveBeenCalled();
+    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
   });
 
   it('skips when stake is below floor', async () => {
@@ -83,11 +79,12 @@ describe('executeSignal', () => {
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('stake_below_floor');
     expect(mockSubmit).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
   });
 
   it('skips when idempotency key already exists', async () => {
     const redis = makeRedis();
-    redis.get.mockResolvedValue('1'); // already executed
+    redis.get.mockResolvedValue('1');
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeSignal(makeSignal(), redis as any);
@@ -95,62 +92,90 @@ describe('executeSignal', () => {
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('already_executed');
     expect(mockSubmit).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
   });
 
-  it('submits trade and sets idempotency key on success', async () => {
+  it('executes via Simmer when market is available there', async () => {
     const redis = makeRedis();
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeSignal(makeSignal(), redis as any);
 
     expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('simmer');
     expect(result.tradeResult?.success).toBe(true);
-    expect(result.tradeResult?.tx_hash).toBe('0xabc');
-    expect(redis.set).toHaveBeenCalledTimes(1);
-    // market_id should be the resolved Simmer UUID, not the Gamma numeric ID
     expect(mockSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        market_id: 'simmer-uuid-123',
-        side: 'yes',
-        amount: 5.00,
-      }),
+      expect.objectContaining({ market_id: 'simmer-uuid-123', side: 'yes', amount: 5.0 }),
     );
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+    expect(redis.set).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT set idempotency key when trade returns success=false', async () => {
+  it('falls back to CLOB when market is not in Simmer catalogue', async () => {
     const redis = makeRedis();
-    mockSubmit.mockResolvedValue({ success: false, error: 'insufficient funds' });
+    mockResolve.mockResolvedValue(null);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeSignal(makeSignal(), redis as any);
 
     expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('clob');
+    expect(result.tradeResult?.success).toBe(true);
+    expect(mockSubmit).not.toHaveBeenCalled();
+    expect(mockSubmitClob).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-yes', amountUsd: 5.0 }),
+    );
+    expect(redis.set).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to CLOB when Simmer says market not found', async () => {
+    const redis = makeRedis();
+    mockSubmit.mockResolvedValue({ success: false, error: 'Market not found' });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.executionVenue).toBe('clob');
+    expect(result.tradeResult?.success).toBe(true);
+    expect(mockSubmit).toHaveBeenCalledTimes(1);
+    expect(mockSubmitClob).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns an error when CLOB fallback fails', async () => {
+    const redis = makeRedis();
+    mockResolve.mockResolvedValue(null);
+    mockSubmitClob.mockResolvedValue({ success: false, error: 'insufficient balance' });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.executionVenue).toBe('clob');
+    expect(result.error).toContain('insufficient balance');
     expect(result.tradeResult?.success).toBe(false);
     expect(redis.set).not.toHaveBeenCalled();
   });
 
-  it('captures error when submitTrade throws', async () => {
+  it('does not fallback to CLOB on non-market Simmer errors', async () => {
     const redis = makeRedis();
     mockSubmit.mockRejectedValue(new Error('network timeout'));
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeSignal(makeSignal(), redis as any);
 
-    expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('simmer');
     expect(result.error).toContain('network timeout');
-    expect(result.tradeResult).toBeUndefined();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
   });
 
-  it('passes correct direction for NO trades', async () => {
+  it('uses NO token id when direction is NO during CLOB fallback', async () => {
     const redis = makeRedis();
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xdef' });
+    mockResolve.mockResolvedValue(null);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await executeSignal(makeSignal({ direction: 'NO' }), redis as any);
 
-    expect(mockSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({ side: 'no' }),
+    expect(mockSubmitClob).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-no' }),
     );
   });
 });
@@ -159,12 +184,15 @@ describe('executeSignals', () => {
   beforeEach(() => {
     mockSubmit.mockReset();
     mockResolve.mockReset();
+    mockSubmitClob.mockReset();
+
     mockResolve.mockResolvedValue('simmer-uuid-123');
+    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
   });
 
   it('processes all signals and returns results', async () => {
     const redis = makeRedis();
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
 
     const signals = [makeSignal({ marketId: 'a' }), makeSignal({ marketId: 'b' })];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
