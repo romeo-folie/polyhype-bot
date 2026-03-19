@@ -45,7 +45,7 @@ async function extractEntitiesOpenAI(headline: string): Promise<string[]> {
 async function extractEntitiesGemini(headline: string): Promise<string[]> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const genai = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
-  const model = genai.getGenerativeModel({ model: 'gemini-2.0-flash' });
+  const model = genai.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
   const result = await Promise.race([
     model.generateContent(`${EXTRACT_SYSTEM_PROMPT}\n\n${headline}`),
