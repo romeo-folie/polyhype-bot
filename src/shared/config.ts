@@ -8,7 +8,6 @@ import { z } from 'zod';
 
 const envSchema = z.object({
   REDIS_URL: z.string().url('REDIS_URL must be a valid URL'),
-  SIMMER_SKILL_URL: z.string().url('SIMMER_SKILL_URL must be a valid URL'),
   SIMMER_API_KEY: z.string().min(1, 'SIMMER_API_KEY is required'),
 
   // LLM — at least one must be set (validated below)

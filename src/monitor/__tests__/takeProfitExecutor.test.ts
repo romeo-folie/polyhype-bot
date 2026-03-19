@@ -6,7 +6,7 @@ jest.unstable_mockModule('../../shared/logger.js', () => ({
 }));
 
 jest.unstable_mockModule('../../shared/simmer.js', () => ({
-  submitTrade: jest.fn(),
+  submitSell: jest.fn(),
   SimmerError: class SimmerError extends Error {
     statusCode: number;
     body: unknown;
@@ -32,12 +32,12 @@ jest.unstable_mockModule('../../execution/telegram.js', () => ({
   notifyTradeError: jest.fn(),
 }));
 
-const { submitTrade } = await import('../../shared/simmer.js');
+const { submitSell } = await import('../../shared/simmer.js');
 const { closePosition } = await import('../../execution/positionLedger.js');
 const { notifyTakeProfitExecuted } = await import('../../execution/telegram.js');
 const { executeTakeProfit } = await import('../takeProfitExecutor.js');
 
-const mockSubmit = submitTrade as jest.MockedFunction<typeof submitTrade>;
+const mockSell = submitSell as jest.MockedFunction<typeof submitSell>;
 const mockClose = closePosition as jest.MockedFunction<typeof closePosition>;
 const mockNotify = notifyTakeProfitExecuted as jest.MockedFunction<typeof notifyTakeProfitExecuted>;
 
@@ -50,6 +50,7 @@ function makePosition(overrides: Partial<Position> = {}): Position {
     direction: 'YES',
     entryPrice: 0.4,
     stakeUsd: 5.0,
+    sharesHeld: 12.5,
     consensusProbability: 0.7,
     edgeMagnitude: 0.3,
     sourcedFrom: 'headline',
@@ -64,15 +65,15 @@ function makeRedis() {
 
 describe('executeTakeProfit', () => {
   beforeEach(() => {
-    mockSubmit.mockReset();
+    mockSell.mockReset();
     mockClose.mockReset();
     mockNotify.mockReset();
     mockClose.mockResolvedValue(undefined);
     mockNotify.mockResolvedValue(undefined);
   });
 
-  it('executes sell with inverted direction for YES position', async () => {
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xexit' });
+  it('executes sell on the same side as entry for YES position', async () => {
+    mockSell.mockResolvedValue({ success: true, tx_hash: '0xexit' });
 
     await executeTakeProfit({
       position: makePosition({ direction: 'YES' }),
@@ -82,13 +83,13 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
-    expect(mockSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({ direction: 'NO', market_id: 'mkt-1' }),
+    expect(mockSell).toHaveBeenCalledWith(
+      expect.objectContaining({ side: 'yes', market_id: 'mkt-1', action: 'sell' }),
     );
   });
 
-  it('executes sell with inverted direction for NO position', async () => {
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xexit2' });
+  it('executes sell on the same side as entry for NO position', async () => {
+    mockSell.mockResolvedValue({ success: true, tx_hash: '0xexit2' });
 
     await executeTakeProfit({
       position: makePosition({ direction: 'NO' }),
@@ -98,13 +99,47 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
-    expect(mockSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({ direction: 'YES' }),
+    expect(mockSell).toHaveBeenCalledWith(
+      expect.objectContaining({ side: 'no', action: 'sell' }),
+    );
+  });
+
+  it('uses sharesHeld when available', async () => {
+    mockSell.mockResolvedValue({ success: true, tx_hash: '0xexit' });
+
+    await executeTakeProfit({
+      position: makePosition({ sharesHeld: 12.5 }),
+      currentPrice: 0.65,
+      returnPct: 25,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    expect(mockSell).toHaveBeenCalledWith(
+      expect.objectContaining({ shares: 12.5 }),
+    );
+  });
+
+  it('falls back to stake/price estimate when sharesHeld is absent', async () => {
+    mockSell.mockResolvedValue({ success: true, tx_hash: '0xexit' });
+    const pos = makePosition({ sharesHeld: undefined, stakeUsd: 5.0, entryPrice: 0.4 });
+
+    await executeTakeProfit({
+      position: pos,
+      currentPrice: 0.65,
+      returnPct: 25,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    // fallback: 5.0 / 0.4 = 12.5
+    expect(mockSell).toHaveBeenCalledWith(
+      expect.objectContaining({ shares: 12.5 }),
     );
   });
 
   it('closes position in ledger on success', async () => {
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xexit' });
+    mockSell.mockResolvedValue({ success: true, tx_hash: '0xexit' });
 
     await executeTakeProfit({
       position: makePosition(),
@@ -119,7 +154,7 @@ describe('executeTakeProfit', () => {
   });
 
   it('returns success=true with txHash on success', async () => {
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xexit' });
+    mockSell.mockResolvedValue({ success: true, tx_hash: '0xexit' });
 
     const result = await executeTakeProfit({
       position: makePosition(),
@@ -135,7 +170,7 @@ describe('executeTakeProfit', () => {
   });
 
   it('returns success=false when trade returns success=false', async () => {
-    mockSubmit.mockResolvedValue({ success: false, error: 'slippage' });
+    mockSell.mockResolvedValue({ success: false, error: 'slippage' });
 
     const result = await executeTakeProfit({
       position: makePosition(),
@@ -150,8 +185,8 @@ describe('executeTakeProfit', () => {
     expect(mockClose).not.toHaveBeenCalled();
   });
 
-  it('returns success=false and does not close ledger when submitTrade throws', async () => {
-    mockSubmit.mockRejectedValue(new Error('timeout'));
+  it('returns success=false and does not close ledger when submitSell throws', async () => {
+    mockSell.mockRejectedValue(new Error('timeout'));
 
     const result = await executeTakeProfit({
       position: makePosition(),

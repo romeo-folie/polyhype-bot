@@ -80,8 +80,10 @@ export async function executeSignal(
   try {
     const tradeResult = await submitTrade({
       market_id: signal.marketId,
-      direction: signal.direction,
-      amount_usdc: signal.stakeUsd,
+      // Simmer API uses lowercase 'yes'/'no'; our internal signal uses 'YES'/'NO'
+      side: signal.direction.toLowerCase() as 'yes' | 'no',
+      amount: signal.stakeUsd,
+      reasoning: `OSINT signal: "${signal.sourcedFrom}" — consensus P=${signal.consensusProbability.toFixed(2)}, market P=${signal.outcomePrice.toFixed(2)}, edge=${signal.edgeMagnitude.toFixed(2)}. ${signal.reasoning}`,
     });
 
     if (tradeResult.success) {

@@ -96,6 +96,7 @@ export async function runExecution(): Promise<void> {
         sourcedFrom: result.signal.sourcedFrom,
         openedAt: new Date().toISOString(),
         txHash: result.tradeResult.tx_hash,
+        sharesHeld: result.tradeResult.shares_bought,
       });
 
       await notifyTradeExecuted(result.signal, result.tradeResult.tx_hash);

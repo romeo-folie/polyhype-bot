@@ -1,40 +1,73 @@
 /**
- * Simmer SDK wrapper.
+ * Simmer API client.
  *
- * Wraps the `polymarket-ai-divergence` Simmer skill with typed input/output.
- * Uses native fetch (no heavy wrappers); assumes Node 20+ fetch is available.
+ * Calls the Simmer hosted API (https://api.simmer.markets) directly.
+ * No local skill server required — runs standalone on any machine (including Raspberry Pi).
  *
- * The Simmer skill URL and API key are loaded from environment configuration
- * via `loadConfig()`.
+ * API reference: https://docs.simmer.markets
+ *
+ * Auth: Bearer token via SIMMER_API_KEY env var.
+ * Venue: "polymarket" for real USDC trades (requires claimed agent + wallet allowances).
+ *
+ * Trade endpoint: POST /api/sdk/trade
+ * Sell endpoint:  POST /api/sdk/trade (action: "sell", shares instead of amount)
  */
 
 import { z } from 'zod';
 import { loadConfig } from './config.js';
 
-// ── Types ──────────────────────────────────────────────────────────────────
+const SIMMER_BASE_URL = 'https://api.simmer.markets';
+const TRADE_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/trade`;
+const REQUEST_TIMEOUT_MS = 30_000;
 
-/** Input to the polymarket-ai-divergence skill. */
+// ── Request / response types ──────────────────────────────────────────────────
+
+/** Input to POST /api/sdk/trade (buy). */
 export interface SimmerTradeInput {
-  /** Polymarket market ID (CLOB market address). */
+  /** Polymarket market ID. */
   market_id: string;
-  /** Trade direction. */
-  direction: 'YES' | 'NO';
-  /** USDC amount to spend (before gas). */
-  amount_usdc: number;
+  /** Trade direction — 'yes' or 'no' (lowercase per Simmer API). */
+  side: 'yes' | 'no';
+  /** USDC amount to spend. */
+  amount: number;
+  /** Human-readable reasoning (displayed publicly on market page). */
+  reasoning: string;
+  /** Source tag for P&L tracking and rebuy protection. */
+  source?: string;
+  /** Venue — 'polymarket' for real USDC, 'sim' for virtual $SIM. */
+  venue?: 'polymarket' | 'sim';
+  /** If true, validate and calculate without executing. */
+  dry_run?: boolean;
 }
 
-/** Zod schema for validating Simmer skill responses. */
+/** Input to POST /api/sdk/trade (sell). */
+export interface SimmerSellInput {
+  market_id: string;
+  side: 'yes' | 'no';
+  action: 'sell';
+  /** Number of shares to sell (not USDC amount). */
+  shares: number;
+  reasoning: string;
+  source?: string;
+  venue?: 'polymarket' | 'sim';
+}
+
+/** Zod schema for Simmer trade response. */
 const SimmerTradeResultSchema = z.object({
   success: z.boolean(),
   tx_hash: z.string().optional(),
+  shares_bought: z.number().optional(),
+  shares_sold: z.number().optional(),
+  cost: z.number().optional(),
+  price: z.number().optional(),
+  warnings: z.array(z.string()).optional(),
   error: z.string().optional(),
   raw: z.unknown().optional(),
 });
 
-/** Result from the polymarket-ai-divergence skill. */
 export type SimmerTradeResult = z.infer<typeof SimmerTradeResultSchema>;
 
-/** Simmer skill error with HTTP context. */
+/** Simmer API error with HTTP context. */
 export class SimmerError extends Error {
   constructor(
     message: string,
@@ -46,73 +79,107 @@ export class SimmerError extends Error {
   }
 }
 
-// ── Client ─────────────────────────────────────────────────────────────────
+// ── HTTP helper ───────────────────────────────────────────────────────────────
 
-/**
- * Calls the Simmer `polymarket-ai-divergence` skill with the given trade input.
- *
- * @throws {SimmerError} on HTTP 4xx/5xx or network failure
- */
-export async function submitTrade(input: SimmerTradeInput): Promise<SimmerTradeResult> {
-  const { SIMMER_SKILL_URL: skillUrl, SIMMER_API_KEY: apiKey } = loadConfig();
+async function postToSimmer(
+  endpoint: string,
+  body: Record<string, unknown>,
+): Promise<SimmerTradeResult> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
 
-  const resp = await fetch(skillUrl, {
+  const resp = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify(input),
-    signal: AbortSignal.timeout(30_000), // 30 s hard timeout
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
-  let body: unknown;
+  let responseBody: unknown;
   try {
-    body = await resp.json();
+    responseBody = await resp.json();
   } catch {
-    body = await resp.text().catch(() => '(unreadable body)');
+    responseBody = await resp.text().catch(() => '(unreadable body)');
   }
 
   if (!resp.ok) {
     throw new SimmerError(
-      `Simmer skill returned HTTP ${resp.status.toString()}`,
+      `Simmer API returned HTTP ${resp.status.toString()}`,
       resp.status,
-      body,
+      responseBody,
     );
   }
 
-  const parsed = SimmerTradeResultSchema.safeParse(body);
+  const parsed = SimmerTradeResultSchema.safeParse(responseBody);
   if (!parsed.success) {
     throw new SimmerError(
-      `Simmer skill response failed validation: ${parsed.error.message}`,
+      `Simmer API response failed validation: ${parsed.error.message}`,
       resp.status,
-      body,
+      responseBody,
     );
   }
+
   return parsed.data;
 }
 
+// ── Public API ────────────────────────────────────────────────────────────────
+
 /**
- * Lightweight connectivity check — sends a dry-run probe to the skill.
- * Returns the raw response body for schema inspection.
+ * Submit a buy trade to Simmer.
  *
- * This does NOT submit a real trade; the probe payload uses an obviously
- * invalid market ID so the skill should reject it cleanly.
+ * Uses venue="polymarket" by default for real USDC trades.
+ * Requires a claimed Simmer agent with wallet allowances set up.
+ *
+ * @throws {SimmerError} on HTTP 4xx/5xx or network failure
  */
-export async function probeSimmerSkill(): Promise<{ reachable: boolean; body: unknown; statusCode: number }> {
-  let skillUrl: string;
-  let apiKey: string;
-  try {
-    const cfg = loadConfig();
-    skillUrl = cfg.SIMMER_SKILL_URL;
-    apiKey = cfg.SIMMER_API_KEY;
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { reachable: false, body: message, statusCode: 0 };
-  }
+export async function submitTrade(input: SimmerTradeInput): Promise<SimmerTradeResult> {
+  return postToSimmer(TRADE_ENDPOINT, {
+    market_id: input.market_id,
+    side: input.side,
+    amount: input.amount,
+    reasoning: input.reasoning,
+    source: input.source ?? 'sdk:polymarket-geopolitical-agent',
+    venue: input.venue ?? 'polymarket',
+    ...(input.dry_run !== undefined && { dry_run: input.dry_run }),
+  });
+}
+
+/**
+ * Submit a sell order to Simmer.
+ *
+ * Pass shares (not USDC amount). Venue defaults to "polymarket".
+ *
+ * @throws {SimmerError} on HTTP 4xx/5xx or network failure
+ */
+export async function submitSell(input: SimmerSellInput): Promise<SimmerTradeResult> {
+  return postToSimmer(TRADE_ENDPOINT, {
+    market_id: input.market_id,
+    side: input.side,
+    action: 'sell',
+    shares: input.shares,
+    reasoning: input.reasoning,
+    source: input.source ?? 'sdk:polymarket-geopolitical-agent',
+    venue: input.venue ?? 'polymarket',
+  });
+}
+
+/**
+ * Lightweight connectivity probe — sends a dry_run trade with an obviously
+ * invalid market ID so Simmer rejects it cleanly without executing anything.
+ *
+ * Returns reachable=true even on 4xx (auth issues surface here).
+ */
+export async function probeSimmerSkill(): Promise<{
+  reachable: boolean;
+  body: unknown;
+  statusCode: number;
+}> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
 
   try {
-    const resp = await fetch(skillUrl, {
+    const resp = await fetch(TRADE_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -120,9 +187,12 @@ export async function probeSimmerSkill(): Promise<{ reachable: boolean; body: un
       },
       body: JSON.stringify({
         market_id: '__probe__',
-        direction: 'YES',
-        amount_usdc: 0,
-      } satisfies SimmerTradeInput),
+        side: 'yes',
+        amount: 0,
+        reasoning: 'connectivity probe',
+        venue: 'sim',
+        dry_run: true,
+      }),
       signal: AbortSignal.timeout(10_000),
     });
 
@@ -135,7 +205,10 @@ export async function probeSimmerSkill(): Promise<{ reachable: boolean; body: un
 
     return { reachable: true, body, statusCode: resp.status };
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { reachable: false, body: message, statusCode: 0 };
+    return {
+      reachable: false,
+      body: err instanceof Error ? err.message : String(err),
+      statusCode: 0,
+    };
   }
 }
