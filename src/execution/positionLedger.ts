@@ -37,6 +37,8 @@ export interface Position {
   openedAt: string;
   /** tx_hash from Simmer, if available */
   txHash?: string | undefined;
+  /** Shares purchased — used when closing the position via sell order */
+  sharesHeld?: number | undefined;
 }
 
 function positionKey(marketId: string, direction: string): string {
@@ -67,6 +69,7 @@ export async function recordPosition(
     sourcedFrom: position.sourcedFrom,
     openedAt: position.openedAt,
     txHash: position.txHash ?? '',
+    sharesHeld: position.sharesHeld !== undefined ? String(position.sharesHeld) : '',
   });
   await redis.expire(key, POSITION_TTL_SECONDS);
 
@@ -144,5 +147,6 @@ function deserialisePosition(raw: Record<string, string>): Position {
     openedAt: raw['openedAt'] ?? new Date().toISOString(),
   };
   if (raw['txHash']) pos.txHash = raw['txHash'];
+  if (raw['sharesHeld']) pos.sharesHeld = parseFloat(raw['sharesHeld']);
   return pos;
 }

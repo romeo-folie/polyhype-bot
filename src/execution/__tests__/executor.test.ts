@@ -91,11 +91,13 @@ describe('executeSignal', () => {
     expect(result.tradeResult?.success).toBe(true);
     expect(result.tradeResult?.tx_hash).toBe('0xabc');
     expect(redis.set).toHaveBeenCalledTimes(1);
-    expect(mockSubmit).toHaveBeenCalledWith({
-      market_id: 'mkt-test',
-      direction: 'YES',
-      amount_usdc: 5.00,
-    });
+    expect(mockSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        market_id: 'mkt-test',
+        side: 'yes',
+        amount: 5.00,
+      }),
+    );
   });
 
   it('does NOT set idempotency key when trade returns success=false', async () => {
@@ -130,7 +132,7 @@ describe('executeSignal', () => {
     await executeSignal(makeSignal({ direction: 'NO' }), redis as any);
 
     expect(mockSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({ direction: 'NO' }),
+      expect.objectContaining({ side: 'no' }),
     );
   });
 });

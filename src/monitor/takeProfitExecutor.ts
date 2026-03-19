@@ -12,7 +12,7 @@
  */
 
 import { logger } from '../shared/logger.js';
-import { submitTrade, SimmerError } from '../shared/simmer.js';
+import { submitSell, SimmerError } from '../shared/simmer.js';
 import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import type { Redis } from 'ioredis';
@@ -41,21 +41,28 @@ export async function executeTakeProfit(opts: {
   redis: Redis;
 }): Promise<TakeProfitResult> {
   const { position, currentPrice, returnPct, reason, redis } = opts;
-  const sellDirection = position.direction === 'YES' ? 'NO' : 'YES';
+  // Sell the same side we bought (sell YES shares to exit a YES position)
+  const sellSide = position.direction.toLowerCase() as 'yes' | 'no';
+
+  // Use tracked shares if available; fall back to estimating from stake/entry price
+  const sharesToSell = position.sharesHeld ?? position.stakeUsd / position.entryPrice;
 
   logger.info('[take-profit-executor] exiting position', {
     marketId: position.marketId,
     direction: position.direction,
-    sellDirection,
+    sellSide,
+    sharesToSell: sharesToSell.toFixed(4),
     returnPct: returnPct.toFixed(2),
     reason,
   });
 
   try {
-    const tradeResult = await submitTrade({
+    const tradeResult = await submitSell({
       market_id: position.marketId,
-      direction: sellDirection,
-      amount_usdc: position.stakeUsd,
+      side: sellSide,
+      action: 'sell',
+      shares: sharesToSell,
+      reasoning: `Take-profit exit: ${reason} — return ${returnPct.toFixed(1)}% at price ${currentPrice.toFixed(3)}`,
     });
 
     if (tradeResult.success) {

@@ -1,22 +1,21 @@
 #!/usr/bin/env npx tsx
 /**
- * Simmer SDK Probe Script
+ * Simmer API Probe Script
  *
- * Validates that the polymarket-ai-divergence Simmer skill is reachable.
- * Delegates to the shared probeSimmerSkill() function for consistent probe logic.
+ * Validates that the Simmer API is reachable and the API key is valid.
+ * Sends a dry-run trade with a probe market ID — no real trade executed.
  *
  * Usage:
- *   cp .env.example .env  # fill in values, then:
+ *   cp .env.example .env  # fill in SIMMER_API_KEY, then:
  *   npm run probe:simmer
- *   -- OR (with dotenv-cli) --
- *   dotenv -- npx tsx scripts/probe-simmer.ts
  */
 
 import 'dotenv/config';
 import { probeSimmerSkill } from '../src/shared/simmer.js';
 
 async function main(): Promise<void> {
-  console.log('=== Simmer SDK Probe ===');
+  console.log('=== Simmer API Probe ===');
+  console.log('Target: https://api.simmer.markets/api/sdk/trade');
 
   const result = await probeSimmerSkill();
 
@@ -25,7 +24,7 @@ async function main(): Promise<void> {
   console.log('Response  :', JSON.stringify(result.body, null, 2));
 
   if (!result.reachable) {
-    console.error('\n❌ Simmer skill is not reachable.');
+    console.error('\n❌ Simmer API is not reachable. Check network connectivity.');
     process.exit(1);
   }
 
@@ -34,7 +33,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log('\n✅ Simmer skill is reachable.');
+  console.log('\n✅ Simmer API is reachable and key is accepted.');
+  console.log('   Register/claim your agent at https://simmer.markets to enable real trading.');
 }
 
 main().catch((err: unknown) => {
