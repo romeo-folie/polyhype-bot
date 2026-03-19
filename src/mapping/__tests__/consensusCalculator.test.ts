@@ -5,7 +5,7 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
   loadConfig: jest.fn(() => ({
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
-    LLM_PROVIDER: 'openai',
+    LLM_PROVIDER: 'gemini', // default: try Gemini first, fall back to OpenAI
   })),
 }));
 

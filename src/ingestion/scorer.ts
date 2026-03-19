@@ -96,7 +96,9 @@ async function scoreBatchOpenAI(items: RssItem[]): Promise<ScoreResult[]> {
 
 async function scoreBatch(items: RssItem[]): Promise<ScoreResult[]> {
   // Prefer Gemini if key available, fall back to OpenAI
-  if (process.env['GEMINI_API_KEY']) {
+  const provider = loadConfig().LLM_PROVIDER;
+
+  if (provider === 'gemini' && process.env['GEMINI_API_KEY']) {
     try {
       return await scoreBatchGemini(items);
     } catch (err) {

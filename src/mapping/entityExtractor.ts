@@ -66,7 +66,8 @@ async function extractEntitiesGemini(headline: string): Promise<string[]> {
  * Tries Gemini first (cheaper), falls back to OpenAI on error.
  */
 export async function extractEntities(headline: string): Promise<string[]> {
-  const useGemini = Boolean(process.env['GEMINI_API_KEY']);
+  const provider = loadConfig().LLM_PROVIDER;
+  const useGemini = provider === 'gemini' && Boolean(process.env['GEMINI_API_KEY']);
   const useOpenAI = Boolean(process.env['OPENAI_API_KEY']);
 
   if (useGemini) {
