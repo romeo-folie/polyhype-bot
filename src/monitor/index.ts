@@ -9,6 +9,7 @@
  *   3. If exit triggered: execute sell via Simmer, remove from ledger, notify Telegram
  */
 
+import 'dotenv/config';
 import { getRedis, closeRedis } from '../shared/redis.js';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
