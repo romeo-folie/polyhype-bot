@@ -19,7 +19,7 @@ const DEFAULT_FEEDS = [
   'https://rss.nytimes.com/services/xml/rss/nyt/World.xml',
   'https://www.aljazeera.com/xml/rss/all.xml',
   'https://feeds.skynews.com/feeds/rss/world.xml',
-  'https://www.reutersagency.com/feed/?best-topics=political-general&post_type=best',
+  'https://reutersbest.com/feed/',
 ];
 
 const FEED_TIMEOUT_MS = 10_000;
