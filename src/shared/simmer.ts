@@ -197,14 +197,14 @@ export async function resolveSimmerMarketId(question: string): Promise<string | 
     const data = (await resp.json()) as { markets?: Array<{ id: string; question: string }> };
     const markets = data.markets ?? [];
 
-    // Find the best match — exact substring match preferred, otherwise first result
-    const exact = markets.find(
-      (m) =>
-        m.question.toLowerCase().includes(question.toLowerCase().slice(0, 40)) ||
-        question.toLowerCase().includes(m.question.toLowerCase().slice(0, 40)),
+    // Require a strong match — exact case-insensitive question match only.
+    // Loose substring matching or markets[0] fallback risks mapping to the
+    // wrong market and triggering incorrect live trades.
+    const exactMatch = markets.find(
+      (m) => m.question.toLowerCase().trim() === question.toLowerCase().trim(),
     );
 
-    return exact?.id ?? markets[0]?.id ?? null;
+    return exactMatch?.id ?? null;
   } catch {
     return null;
   }
