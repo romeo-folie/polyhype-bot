@@ -4,6 +4,7 @@ import type { TradeSignal } from '../../mapping/index.js';
 // Mock the simmer module
 jest.unstable_mockModule('../../shared/simmer.js', () => ({
   submitTrade: jest.fn(),
+  resolveSimmerMarketId: jest.fn(),
   SimmerError: class SimmerError extends Error {
     statusCode: number;
     body: unknown;
@@ -21,10 +22,11 @@ jest.unstable_mockModule('../../shared/logger.js', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
-const { submitTrade } = await import('../../shared/simmer.js');
+const { submitTrade, resolveSimmerMarketId } = await import('../../shared/simmer.js');
 const { executeSignal, executeSignals } = await import('../executor.js');
 
 const mockSubmit = submitTrade as jest.MockedFunction<typeof submitTrade>;
+const mockResolve = resolveSimmerMarketId as jest.MockedFunction<typeof resolveSimmerMarketId>;
 
 function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
   return {
@@ -54,6 +56,21 @@ function makeRedis() {
 describe('executeSignal', () => {
   beforeEach(() => {
     mockSubmit.mockReset();
+    mockResolve.mockReset();
+    // Default: market found in Simmer
+    mockResolve.mockResolvedValue('simmer-uuid-123');
+  });
+
+  it('skips when market is not found in Simmer catalogue', async () => {
+    mockResolve.mockResolvedValue(null);
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('market_not_in_simmer');
+    expect(mockSubmit).not.toHaveBeenCalled();
   });
 
   it('skips when stake is below floor', async () => {
@@ -91,9 +108,10 @@ describe('executeSignal', () => {
     expect(result.tradeResult?.success).toBe(true);
     expect(result.tradeResult?.tx_hash).toBe('0xabc');
     expect(redis.set).toHaveBeenCalledTimes(1);
+    // market_id should be the resolved Simmer UUID, not the Gamma numeric ID
     expect(mockSubmit).toHaveBeenCalledWith(
       expect.objectContaining({
-        market_id: 'mkt-test',
+        market_id: 'simmer-uuid-123',
         side: 'yes',
         amount: 5.00,
       }),
@@ -140,6 +158,8 @@ describe('executeSignal', () => {
 describe('executeSignals', () => {
   beforeEach(() => {
     mockSubmit.mockReset();
+    mockResolve.mockReset();
+    mockResolve.mockResolvedValue('simmer-uuid-123');
   });
 
   it('processes all signals and returns results', async () => {
