@@ -54,6 +54,16 @@ npm run probe:simmer
 | `npm run format` | Prettier |
 | `npm test` | Jest tests |
 
+## Module Documentation
+
+| Module | README | Description |
+|--------|--------|-------------|
+| `src/shared/` | [README](src/shared/README.md) | Config, Redis client, Simmer SDK wrapper, logger |
+| `src/ingestion/` | [README](src/ingestion/README.md) | RSS + Cheerio scraping, Redis dedup, LLM urgency scoring |
+| `src/mapping/` | [README](src/mapping/README.md) | Gamma API client, entity extraction, consensus probability, Half-Kelly sizing |
+| `src/execution/` | [README](src/execution/README.md) | Simmer trade execution, Redis position ledger, Telegram notifications |
+| `src/monitor/` | [README](src/monitor/README.md) | Position monitor, take-profit evaluator + executor |
+
 ## Phases
 
 See [docs/PHASES.md](docs/PHASES.md) for the full phase breakdown.

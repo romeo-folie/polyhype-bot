@@ -1,0 +1,54 @@
+# ingestion — Phase 1: Data Ingestion & Filtering
+
+Scrapes and filters geopolitical OSINT from free RSS feeds and news dashboards. Produces a list of high-urgency scored items for the mapping pipeline.
+
+## Pipeline
+
+```
+RSS feeds          ──┐
+Cheerio scraper    ──┼──► dedup (Redis) ──► LLM scorer ──► filter by urgency ──► ScoredItem[]
+(worldmonitor.app)   │
+(pizzint.watch)    ──┘
+```
+
+## Modules
+
+### `rss.ts`
+Fetches headlines from configured RSS feeds using [rss-parser](https://github.com/rbren/rss-parser).
+
+Returns `RssItem[]` — normalised to `{ title, url, publishedAt, source }`.
+
+### `scraper.ts`
+Cheerio-based HTML scraper for JS-light pages (`worldmonitor.app`, `pizzint.watch`).
+
+Falls back to empty array on fetch/parse failure — never aborts the pipeline.
+
+### `dedup.ts`
+Redis-backed deduplication layer. Keys are SHA-256 hashes of the item URL.
+
+- `filterSeen(items, redis)` — returns only items not yet seen; marks all as seen (TTL: 48 h)
+
+Prevents the same headline from being scored and traded multiple times within 48 hours.
+
+### `scorer.ts`
+Batches headlines (up to 10 per call) and sends them to an LLM for geopolitical urgency scoring.
+
+- Provider priority: **Gemini Flash** → **OpenAI GPT-4o-mini** (fallback)
+- Returns `ScoredItem[]` — extends `RssItem` with `urgencyScore: number` (1–10) and `keywords: string[]`
+- On total LLM failure: assigns score `1` and empty keywords (pipeline continues)
+
+### `index.ts`
+Cron entrypoint. Orchestrates RSS + scrape → dedup → score → filter by `URGENCY_THRESHOLD`.
+
+```ts
+const items: ScoredItem[] = await runIngestion();
+// items.urgencyScore >= URGENCY_THRESHOLD (default 8)
+```
+
+## Entry point
+
+```bash
+npx tsx src/ingestion/index.ts
+# or via package.json:
+npm run cron:ingest
+```
