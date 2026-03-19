@@ -41,13 +41,13 @@ const MOCK_RESPONSE = {
         language: 'French', // non-English — filtered out
       },
       {
-        url: '',           // no URL — skipped
+        url: '',
         title: 'Empty URL article',
         language: 'English',
       },
       {
         url: 'https://example.com/no-title',
-        title: '',         // no title — skipped
+        title: '',
         language: 'English',
       },
     ],
@@ -63,15 +63,21 @@ describe('scrapeHeadlines (GDELT)', () => {
     jest.restoreAllMocks();
   });
 
-  it('returns deduplicated English articles from multiple GDELT themes', async () => {
+  it('returns deduplicated English articles from combined GDELT query', async () => {
     mockGet.mockResolvedValue(MOCK_RESPONSE);
 
     const items = await scrapeHeadlines();
 
-    // Only 2 unique English articles with non-empty url+title
     expect(items).toHaveLength(2);
     expect(items[0]?.title).toBe('Iran launches ballistic missiles at Israeli targets');
     expect(items[1]?.title).toBe('Conflict escalates in Gaza Strip');
+    expect(mockGet).toHaveBeenCalledTimes(1);
+
+    const url = String(mockGet.mock.calls[0]?.[0] ?? '');
+    expect(url).toContain('theme%3ACRISISLEX_CRISISLEXREC');
+    expect(url).toContain('theme%3AWB_2243_CONFLICT_AND_VIOLENCE');
+    expect(url).toContain('theme%3ATERROR');
+    expect(url).toContain('theme%3APROTEST');
   });
 
   it('parses GDELT date format correctly', async () => {
@@ -91,7 +97,7 @@ describe('scrapeHeadlines (GDELT)', () => {
     const items = await scrapeHeadlines();
     expect(items).toHaveLength(1);
     expect(items[0]?.publishedAt).toEqual(new Date('2026-03-19T08:30:45Z'));
-    expect(items[0]?.source).toMatch(/^GDELT/);
+    expect(items[0]?.source).toBe('GDELT Combined');
   });
 
   it('falls back to current time when seendate is absent', async () => {
@@ -115,16 +121,17 @@ describe('scrapeHeadlines (GDELT)', () => {
     expect(items[0]?.publishedAt.getTime()).toBeLessThanOrEqual(after.getTime());
   });
 
-  it('continues when one GDELT theme fails, returns results from others', async () => {
-    // First call fails, remaining 3 succeed with 1 article each (same URL → deduped to 1)
+  it('retries once on 429 and succeeds', async () => {
+    const rateLimitError = { response: { status: 429 } };
+
     mockGet
-      .mockRejectedValueOnce(new Error('GDELT timeout'))
-      .mockResolvedValue({
+      .mockRejectedValueOnce(rateLimitError)
+      .mockResolvedValueOnce({
         data: {
           articles: [
             {
-              url: 'https://example.com/theme-article',
-              title: 'Conflict event',
+              url: 'https://example.com/retry-ok',
+              title: 'Retry success article',
               seendate: '20260319T080000Z',
               language: 'English',
             },
@@ -134,9 +141,10 @@ describe('scrapeHeadlines (GDELT)', () => {
 
     const items = await scrapeHeadlines();
     expect(items).toHaveLength(1);
+    expect(mockGet).toHaveBeenCalledTimes(2);
   });
 
-  it('returns empty array when all GDELT themes fail', async () => {
+  it('returns empty array when combined query fails', async () => {
     mockGet.mockRejectedValue(new Error('network error'));
 
     const items = await scrapeHeadlines();
