@@ -8,7 +8,7 @@
 
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
-import { searchEvents, parseOutcomePrices } from './gamma.js';
+import { searchEvents, parseOutcomePrices, parseClobTokenIds } from './gamma.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 
 const TIMEOUT_MS = 20_000;
@@ -152,11 +152,19 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
             continue;
           }
 
+          let clobTokenIds: string[];
+          try {
+            clobTokenIds = parseClobTokenIds(market.clobTokenIds ?? []);
+            if (clobTokenIds.length < 2) continue;
+          } catch {
+            continue;
+          }
+
           seen.set(market.id, {
             marketId: market.id,
             question: market.question,
             conditionId: market.conditionId,
-            clobTokenIds: market.clobTokenIds ?? [],
+            clobTokenIds,
             currentYesPrice,
             volume: parseFloat(market.volume ?? '0'),
             liquidity,

@@ -23,8 +23,13 @@ export interface GammaMarket {
   id: string;
   question: string;
   conditionId: string;
-  /** CLOB token IDs — [YES token, NO token] */
-  clobTokenIds: string[];
+  /**
+   * CLOB token IDs — [YES token, NO token].
+   *
+   * Gamma currently returns this as a JSON-encoded string in many responses,
+   * e.g. '["123", "456"]'. Some environments return it pre-parsed as string[].
+   */
+  clobTokenIds: string | string[];
   /**
    * Current best-bid prices per outcome.
    *
@@ -113,6 +118,22 @@ export function parseOutcomePrices(outcomePrices: string | string[]): string[] {
     throw new Error('Parsed outcomePrices is not an array');
   } catch (e) {
     throw new Error(`Cannot parse outcomePrices: "${outcomePrices}" — ${String(e)}`);
+  }
+}
+
+/**
+ * Normalise `clobTokenIds` from either form returned by Gamma.
+ *
+ * Gamma often returns a JSON-encoded string instead of string[].
+ */
+export function parseClobTokenIds(clobTokenIds: string | string[]): string[] {
+  if (Array.isArray(clobTokenIds)) return clobTokenIds;
+  try {
+    const parsed = JSON.parse(clobTokenIds) as unknown;
+    if (Array.isArray(parsed)) return parsed as string[];
+    throw new Error('Parsed clobTokenIds is not an array');
+  } catch (e) {
+    throw new Error(`Cannot parse clobTokenIds: "${clobTokenIds}" — ${String(e)}`);
   }
 }
 
