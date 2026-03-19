@@ -12,13 +12,19 @@ import { loadConfig } from '../shared/config.js';
 
 const TIMEOUT_MS = 25_000;
 
-const SYSTEM_PROMPT =
-  'You are a probabilistic analyst specialising in prediction markets. ' +
-  'Given a market question, its description, and a relevant breaking news headline, ' +
-  'estimate the true probability (0.00–1.00) that the market resolves YES. ' +
-  'Account for the current market price only as a weak prior — focus on the news. ' +
-  'Return ONLY a JSON object: {"probability": 0.72, "reasoning": "one sentence"} ' +
-  'No markdown, no extra keys.';
+function buildSystemPrompt(): string {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  return (
+    'You are a probabilistic analyst specialising in prediction markets. ' +
+    `Today's date is ${today}. ` +
+    'Given a market question, its description, and a relevant breaking news headline, ' +
+    'estimate the true probability (0.00–1.00) that the market resolves YES. ' +
+    'Pay close attention to any deadlines in the market question relative to today\'s date. ' +
+    'Account for the current market price only as a weak prior — focus on the news. ' +
+    'Return ONLY a JSON object: {"probability": 0.72, "reasoning": "one sentence"} ' +
+    'No markdown, no extra keys.'
+  );
+}
 
 function buildUserPrompt(opts: {
   question: string;
@@ -52,7 +58,7 @@ async function callOpenAI(
     {
       model: loadConfig().OPENAI_MODEL,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: buildSystemPrompt() },
         {
           role: 'user',
           content: buildUserPrompt({ question, description, headline, currentYesPrice }),
@@ -80,7 +86,7 @@ async function callGemini(
   const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
 
   const prompt =
-    `${SYSTEM_PROMPT}\n\n` +
+    `${buildSystemPrompt()}\n\n` +
     buildUserPrompt({ question, description, headline, currentYesPrice });
 
   const result = await Promise.race([

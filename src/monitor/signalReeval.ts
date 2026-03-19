@@ -65,10 +65,16 @@ export async function reEvaluatePositions(
       continue;
     }
 
-    // Re-estimate consensus probability
+    // Fetch current price first — needed for both LLM prompt and edge calculation
+    const currentPrice = await fetchCurrentPrice(position);
+    if (!currentPrice) {
+      errors++;
+      continue;
+    }
+
+    // Re-estimate consensus probability using live market price
     let freshConsensus: { probability: number; reasoning: string };
     try {
-      // Pick the most relevant headline for context
       const relevantHeadline = highUrgencyItems.find((item) => {
         const headline = item.title.toLowerCase();
         return questionWords.some((word) => headline.includes(word));
@@ -78,20 +84,13 @@ export async function reEvaluatePositions(
         question: position.question,
         description: null,
         headline: relevantHeadline?.title ?? highUrgencyItems[0]?.title ?? '',
-        currentYesPrice: position.entryPrice,
+        currentYesPrice: currentPrice.currentYesPrice,
       });
     } catch (err) {
       logger.warn('[reeval] consensus re-estimation failed', {
         marketId: position.marketId,
         error: err instanceof Error ? err.message : String(err),
       });
-      errors++;
-      continue;
-    }
-
-    // Fetch current price
-    const currentPrice = await fetchCurrentPrice(position);
-    if (!currentPrice) {
       errors++;
       continue;
     }
