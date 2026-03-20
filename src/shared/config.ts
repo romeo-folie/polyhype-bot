@@ -39,6 +39,15 @@ const envSchema = z.object({
   REEVAL_ENABLED: z.coerce.boolean().optional().default(true),
   REEVAL_EDGE_FLOOR: z.coerce.number().min(0).max(1).optional().default(0.03),
   BANKROLL_USD: z.coerce.number().positive().optional().default(100),
+
+  // Spot price monitor (Phase 5)
+  SPOT_MONITOR_ENABLED: z.coerce.boolean().optional().default(false),
+  SPOT_MOVE_THRESHOLD: z.coerce.number().min(0).optional().default(3),
+  SPOT_LOOKBACK_MINUTES: z.coerce.number().int().min(1).optional().default(5),
+  SPOT_COOLDOWN_MINUTES: z.coerce.number().int().min(1).optional().default(30),
+  SPOT_DIVERGENCE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.12),
+  SPOT_CRYPTO_ASSETS: z.string().optional().default('bitcoin,ethereum'),
+  SPOT_COMMODITY_ASSETS: z.string().optional().default('CL=F,GC=F'),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
