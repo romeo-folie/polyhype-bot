@@ -43,7 +43,6 @@ const MIN_LIQUIDITY = 5_000;
 async function inferCorrelationDirection(
   assetId: string,
   question: string,
-  changePercent: number,
 ): Promise<'positive' | 'negative'> {
   const redis = getRedis();
   const cacheKey = `spot:correlation:${assetId}:${question}`;
@@ -51,7 +50,7 @@ async function inferCorrelationDirection(
   const cached = await redis.get(cacheKey);
   if (cached === 'positive' || cached === 'negative') return cached;
 
-  const direction = await callLlmForCorrelation(assetId, question, changePercent);
+  const direction = await callLlmForCorrelation(assetId, question);
 
   await redis.set(cacheKey, direction, 'EX', CORRELATION_CACHE_TTL);
   return direction;
@@ -60,18 +59,15 @@ async function inferCorrelationDirection(
 async function callLlmForCorrelation(
   assetId: string,
   question: string,
-  changePercent: number,
 ): Promise<'positive' | 'negative'> {
   const cfg = loadConfig();
-  const moveDesc =
-    changePercent > 0
-      ? `rising ${Math.abs(changePercent).toFixed(1)}%`
-      : `falling ${Math.abs(changePercent).toFixed(1)}%`;
 
+  // Always ask about the asset *rising* — this makes the cached answer
+  // direction-independent. The caller accounts for actual move direction.
   const prompt =
-    `Asset: ${assetId} is ${moveDesc} in the last few minutes.\n` +
+    `Asset: ${assetId}\n` +
     `Market question: "${question}"\n\n` +
-    'Does this asset price movement make the market MORE likely or LESS likely to resolve YES?\n' +
+    `If ${assetId} rises significantly in price, does that make this market MORE likely or LESS likely to resolve YES?\n` +
     'Answer with ONLY one word: "positive" (more likely YES) or "negative" (less likely YES).';
 
   const useGemini = cfg.LLM_PROVIDER === 'gemini' && Boolean(process.env['GEMINI_API_KEY']);
@@ -132,7 +128,7 @@ async function callOpenAICorrelation(prompt: string): Promise<'positive' | 'nega
 function meetsLiquidityFilter(market: GammaMarket): boolean {
   const volume = parseFloat(market.volume || '0');
   const liquidity = parseFloat(market.liquidity || '0');
-  return volume >= MIN_VOLUME || liquidity >= MIN_LIQUIDITY;
+  return volume >= MIN_VOLUME && liquidity >= MIN_LIQUIDITY;
 }
 
 /**
@@ -184,7 +180,6 @@ export async function findCorrelatedMarkets(move: SpotMove): Promise<CorrelatedM
           correlationDirection = await inferCorrelationDirection(
             move.assetId,
             market.question,
-            move.changePercent,
           );
         } catch (err) {
           logger.warn('[spot-correlator] correlation inference failed', {

@@ -198,6 +198,18 @@ export async function estimateFastConsensus(
     const now = Date.now();
     const timeToExpiryYears = Math.max(0, (priceTarget.deadlineMs - now) / (365.25 * 24 * 3600 * 1000));
 
+    // Skip expired markets — returning current market price means no divergence
+    if (timeToExpiryYears <= 0) {
+      logger.info('[spot-fast-consensus] market expired, skipping', {
+        marketId: market.marketId,
+      });
+      return {
+        probability: market.currentYesPrice,
+        reasoning: 'Market expired — no formula estimate available',
+        method: 'formula',
+      };
+    }
+
     const probability = formulaProbability(
       move.currentPrice,
       priceTarget.targetPrice,
