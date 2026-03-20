@@ -32,6 +32,14 @@ export async function runSpotMonitor(): Promise<void> {
     return;
   }
 
+  // Prevent overlapping runs — LLM calls can exceed the 1-min cron interval
+  const redis = getRedis();
+  const lockAcquired = await redis.set('spot:lock', '1', 'EX', 120, 'NX');
+  if (!lockAcquired) {
+    logger.info('[spot] previous cycle still running, skipping');
+    return;
+  }
+
   logger.info('[spot] starting spot monitor cycle');
 
   // 1. Poll spot prices
@@ -83,12 +91,18 @@ export async function runSpotMonitor(): Promise<void> {
         continue;
       }
 
-      // Adjust probability based on correlation direction
-      // If negative correlation and price went up → lower probability
-      const adjustedProbability =
-        market.correlationDirection === 'negative'
-          ? 1 - consensus.probability
-          : consensus.probability;
+      // Adjust probability based on correlation direction AND actual move direction.
+      // correlationDirection answers: "does asset RISING make YES more likely?"
+      //   positive + price up   → consensus as-is
+      //   positive + price down → invert (asset falling makes YES less likely)
+      //   negative + price up   → invert (asset rising makes YES less likely)
+      //   negative + price down → as-is  (asset falling makes YES more likely)
+      const shouldInvert =
+        (market.correlationDirection === 'positive' && move.changePercent < 0) ||
+        (market.correlationDirection === 'negative' && move.changePercent > 0);
+      const adjustedProbability = shouldInvert
+        ? 1 - consensus.probability
+        : consensus.probability;
 
       // 5. Compute divergence
       const { hasTrade, decision } = computeDivergence({
@@ -130,7 +144,6 @@ export async function runSpotMonitor(): Promise<void> {
   logger.info('[spot] executing trade signals', { count: signals.length });
 
   // 6. Execute signals via shared executor
-  const redis = getRedis();
   const results = await executeSignals(signals, redis);
 
   for (const result of results) {
