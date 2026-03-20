@@ -14,6 +14,7 @@
     "cron:trade": "npx tsx src/execution/index.ts",
     "cron:monitor": "npx tsx src/monitor/index.ts",
     "cron:ingest": "npx tsx src/ingestion/index.ts",
+    "cron:spot": "npx tsx src/spot/index.ts",
     "probe:simmer": "npx tsx scripts/probe-simmer.ts",
     "test": "node --experimental-vm-modules node_modules/.bin/jest --passWithNoTests",
     "test:unit": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=src/",
