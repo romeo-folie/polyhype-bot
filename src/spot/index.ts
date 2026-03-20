@@ -17,7 +17,7 @@ import { findCorrelatedMarkets } from './marketCorrelator.js';
 import { estimateFastConsensus } from './fastPathConsensus.js';
 import { computeDivergence } from '../mapping/divergenceCalculator.js';
 import { executeSignals } from '../execution/executor.js';
-import { recordPosition } from '../execution/positionLedger.js';
+import { recordPosition, hasOpenPosition } from '../execution/positionLedger.js';
 import { notifyTradeExecuted, notifyTradeError } from '../execution/telegram.js';
 import type { TradeSignal } from '../mapping/index.js';
 
@@ -40,6 +40,18 @@ export async function runSpotMonitor(): Promise<void> {
     return;
   }
 
+  try {
+    await runSpotMonitorInner(cfg, redis);
+  } finally {
+    // Release lock explicitly so the next cron run isn't blocked for the full 120s TTL
+    await redis.del('spot:lock').catch(() => { /* best effort */ });
+  }
+}
+
+async function runSpotMonitorInner(
+  cfg: ReturnType<typeof loadConfig>,
+  redis: ReturnType<typeof getRedis>,
+): Promise<void> {
   logger.info('[spot] starting spot monitor cycle');
 
   // 1. Poll spot prices
@@ -141,10 +153,47 @@ export async function runSpotMonitor(): Promise<void> {
     return;
   }
 
-  logger.info('[spot] executing trade signals', { count: signals.length });
+  // 6a. Deduplicate signals by marketId:direction — multiple spot moves in one
+  // cycle can correlate to the same market. Keep the highest-edge signal only
+  // to prevent duplicate execution before position is recorded.
+  const bestByKey = new Map<string, TradeSignal>();
+  for (const signal of signals) {
+    const key = `${signal.marketId}:${signal.direction}`;
+    const existing = bestByKey.get(key);
+    if (!existing || signal.edgeMagnitude > existing.edgeMagnitude) {
+      bestByKey.set(key, signal);
+    }
+  }
+  const dedupedSignals = Array.from(bestByKey.values());
 
-  // 6. Execute signals via shared executor
-  const results = await executeSignals(signals, redis);
+  // 6b. Pre-check: skip signals where a position is already open (guards against
+  // the race between executeSignals and recordPosition in the same cycle).
+  const filteredSignals: TradeSignal[] = [];
+  for (const signal of dedupedSignals) {
+    const alreadyOpen = await hasOpenPosition(redis, signal.marketId, signal.direction);
+    if (alreadyOpen) {
+      logger.info('[spot] skipping signal — position already open', {
+        marketId: signal.marketId,
+        direction: signal.direction,
+      });
+      continue;
+    }
+    filteredSignals.push(signal);
+  }
+
+  if (filteredSignals.length === 0) {
+    logger.info('[spot] all signals filtered (dedup or existing positions)');
+    return;
+  }
+
+  logger.info('[spot] executing trade signals', {
+    raw: signals.length,
+    afterDedup: dedupedSignals.length,
+    afterPositionCheck: filteredSignals.length,
+  });
+
+  // 6c. Execute signals via shared executor
+  const results = await executeSignals(filteredSignals, redis);
 
   for (const result of results) {
     if (result.skipped) {
