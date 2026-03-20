@@ -94,6 +94,7 @@ flowchart TB
 |-------|-----------|--------------|
 | **Trade** (`cron:trade`) | `src/execution/index.ts` | Ingest OSINT → score urgency → map to markets → re-evaluate open positions → execute new trades |
 | **Monitor** (`cron:monitor`) | `src/monitor/index.ts` | Fetch prices for open positions → evaluate stop-loss / take-profit / divergence → exit if triggered |
+| **Spot** (`cron:spot`) | `src/spot/index.ts` | Poll spot prices → detect significant moves → find correlated markets → estimate probability → execute trades |
 
 ### Exit Priority
 
@@ -140,6 +141,7 @@ PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 
 */5 * * * * cd /path/to/polymarket-geopolitical-agent && npx tsx src/execution/index.ts >> /tmp/pga-trade.log 2>&1
 */5 * * * * cd /path/to/polymarket-geopolitical-agent && npx tsx src/monitor/index.ts >> /tmp/pga-monitor.log 2>&1
+* * * * * cd /path/to/polymarket-geopolitical-agent && npx tsx src/spot/index.ts >> /tmp/pga-spot.log 2>&1
 ```
 
 ## Scripts
@@ -150,6 +152,7 @@ PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 | `npm run probe:simmer` | Verify Simmer SDK connectivity |
 | `npm run cron:trade` | Run the full trade pipeline (ingest → map → re-eval → execute) |
 | `npm run cron:monitor` | Run the position monitor (stop-loss / take-profit / divergence) |
+| `npm run cron:spot` | Run the spot price monitor (price moves → correlated market trades) |
 | `npm run lint` | ESLint |
 | `npm run format` | Prettier |
 | `npm test` | Jest tests |
@@ -163,6 +166,7 @@ PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 | `src/mapping/` | [README](src/mapping/README.md) | Gamma API client, entity extraction, consensus probability, Half-Kelly sizing |
 | `src/execution/` | [README](src/execution/README.md) | Simmer trade execution, Redis position ledger, Telegram notifications |
 | `src/monitor/` | [README](src/monitor/README.md) | Position monitor, take-profit evaluator + executor |
+| `src/spot/` | — | Spot price monitor: polls CoinGecko/Yahoo Finance, detects moves, correlates to Polymarket, executes trades |
 
 ## Phases
 
@@ -182,4 +186,5 @@ See `.env.example` for full documentation of all required and optional variables
 - Phase 2: market mapping & execution logic.
 - Phase 3: execution orchestration & Telegram notifications.
 - Phase 4: position monitor & take-profit.
+- Phase 5: spot price monitor — parallel signal source from live asset prices.
 # Test

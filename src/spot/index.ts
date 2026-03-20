@@ -1,0 +1,205 @@
+/**
+ * Phase 5: Spot Price Monitor — Pipeline Orchestration.
+ *
+ * poll() → detect() → correlate() → estimate() → diverge() → execute()
+ *
+ * Runs as `cron:spot` (1-min interval). Independent from the news pipeline.
+ * Emits standard TradeSignal[] and shares the same executor, position ledger,
+ * idempotency layer, and Telegram notifications.
+ */
+
+import { logger } from '../shared/logger.js';
+import { loadConfig } from '../shared/config.js';
+import { getRedis, closeRedis } from '../shared/redis.js';
+import { pollSpotPrices } from './poller.js';
+import { detectMoves } from './thresholdDetector.js';
+import { findCorrelatedMarkets } from './marketCorrelator.js';
+import { estimateFastConsensus } from './fastPathConsensus.js';
+import { computeDivergence } from '../mapping/divergenceCalculator.js';
+import { executeSignals } from '../execution/executor.js';
+import { recordPosition } from '../execution/positionLedger.js';
+import { notifyTradeExecuted, notifyTradeError } from '../execution/telegram.js';
+import type { TradeSignal } from '../mapping/index.js';
+
+/**
+ * Run a single spot monitor cycle.
+ */
+export async function runSpotMonitor(): Promise<void> {
+  const cfg = loadConfig();
+
+  if (!cfg.SPOT_MONITOR_ENABLED) {
+    logger.info('[spot] spot monitor disabled, skipping');
+    return;
+  }
+
+  logger.info('[spot] starting spot monitor cycle');
+
+  // 1. Poll spot prices
+  const prices = await pollSpotPrices();
+  if (prices.length === 0) {
+    logger.info('[spot] no prices fetched, skipping cycle');
+    return;
+  }
+
+  // 2. Detect significant moves
+  const moves = await detectMoves(prices);
+  if (moves.length === 0) {
+    logger.info('[spot] no significant moves detected');
+    return;
+  }
+
+  logger.info('[spot] detected moves', { count: moves.length });
+
+  // 3. For each move, find correlated markets and generate signals
+  const signals: TradeSignal[] = [];
+
+  for (const move of moves) {
+    let markets;
+    try {
+      markets = await findCorrelatedMarkets(move);
+    } catch (err) {
+      logger.error('[spot] failed to find correlated markets', {
+        assetId: move.assetId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+
+    if (markets.length === 0) {
+      logger.info('[spot] no correlated markets for move', { assetId: move.assetId });
+      continue;
+    }
+
+    for (const market of markets) {
+      // 4. Estimate consensus probability
+      let consensus;
+      try {
+        consensus = await estimateFastConsensus(move, market);
+      } catch (err) {
+        logger.warn('[spot] consensus estimation failed', {
+          marketId: market.marketId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+
+      // Adjust probability based on correlation direction
+      // If negative correlation and price went up → lower probability
+      const adjustedProbability =
+        market.correlationDirection === 'negative'
+          ? 1 - consensus.probability
+          : consensus.probability;
+
+      // 5. Compute divergence
+      const { hasTrade, decision } = computeDivergence({
+        consensusProbability: adjustedProbability,
+        currentYesPrice: market.currentYesPrice,
+        bankrollUsd: cfg.BANKROLL_USD,
+        divergenceThreshold: cfg.SPOT_DIVERGENCE_THRESHOLD,
+        maxBetFraction: cfg.MAX_BET_FRACTION,
+      });
+
+      if (!hasTrade || !decision) continue;
+
+      const sourcedFrom =
+        `Spot: ${move.assetId} ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(1)}% ` +
+        `in ${move.windowMinutes}min`;
+
+      signals.push({
+        marketId: market.marketId,
+        conditionId: market.conditionId,
+        clobTokenIds: market.clobTokenIds,
+        question: market.question,
+        direction: decision.direction,
+        stakeUsd: decision.stakeUsd,
+        edgeMagnitude: decision.edgeMagnitude,
+        consensusProbability: decision.consensusProbability,
+        outcomePrice: decision.outcomePrice,
+        halfKellyFraction: decision.halfKellyFraction,
+        sourcedFrom,
+        reasoning: consensus.reasoning,
+      });
+    }
+  }
+
+  if (signals.length === 0) {
+    logger.info('[spot] no trade signals after divergence check');
+    return;
+  }
+
+  logger.info('[spot] executing trade signals', { count: signals.length });
+
+  // 6. Execute signals via shared executor
+  const redis = getRedis();
+  const results = await executeSignals(signals, redis);
+
+  for (const result of results) {
+    if (result.skipped) {
+      logger.info('[spot] signal skipped', {
+        marketId: result.signal.marketId,
+        reason: result.skipReason,
+      });
+      continue;
+    }
+
+    if (result.error) {
+      logger.error('[spot] trade execution failed', {
+        marketId: result.signal.marketId,
+        error: result.error,
+      });
+      await notifyTradeError(result.signal, result.error);
+      continue;
+    }
+
+    // Record position
+    await recordPosition(redis, {
+      marketId: result.signal.marketId,
+      conditionId: result.signal.conditionId,
+      clobTokenIds: result.signal.clobTokenIds,
+      question: result.signal.question,
+      direction: result.signal.direction,
+      entryPrice: result.signal.outcomePrice,
+      stakeUsd: result.signal.stakeUsd,
+      openedAt: new Date().toISOString(),
+      sourcedFrom: result.signal.sourcedFrom,
+      consensusProbability: result.signal.consensusProbability,
+      edgeMagnitude: result.signal.edgeMagnitude,
+    });
+
+    await notifyTradeExecuted(result.signal, result.tradeResult?.tx_hash);
+
+    logger.info('[spot] trade executed', {
+      marketId: result.signal.marketId,
+      direction: result.signal.direction,
+      stakeUsd: result.signal.stakeUsd,
+      venue: result.executionVenue,
+    });
+  }
+
+  logger.info('[spot] spot monitor cycle complete', {
+    signalsGenerated: signals.length,
+    executed: results.filter((r) => !r.skipped && !r.error).length,
+    skipped: results.filter((r) => r.skipped).length,
+    errors: results.filter((r) => r.error).length,
+  });
+}
+
+// CLI entrypoint — only runs when executed directly, not when imported
+async function main() {
+  try {
+    await runSpotMonitor();
+  } catch (err) {
+    logger.error('[spot] fatal error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    process.exitCode = 1;
+  } finally {
+    await closeRedis();
+  }
+}
+
+// Entrypoint when run directly (npx tsx src/spot/index.ts)
+const isMain = process.argv[1]?.endsWith('spot/index.ts') ?? false;
+if (isMain) {
+  main();
+}
