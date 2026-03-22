@@ -128,6 +128,27 @@ export async function notifyTakeProfitExecuted(opts: {
   await notify(text);
 }
 
+/**
+ * CRITICAL: Notify that an arb YES leg filled but NO leg failed, leaving an
+ * unhedged long YES position that requires immediate manual intervention.
+ */
+export async function notifyUnhedgedArbPosition(opts: {
+  marketId: string;
+  question: string;
+  stakeUsd: number;
+  noError?: string | undefined;
+}): Promise<void> {
+  const text =
+    `🚨 <b>CRITICAL: Unhedged Arb Position</b>\n\n` +
+    `<b>Market:</b> ${escapeHtml(opts.question)}\n` +
+    `<b>Market ID:</b> <code>${escapeHtml(opts.marketId)}</code>\n` +
+    `<b>YES stake:</b> $${opts.stakeUsd.toFixed(2)} USDC — <b>NO leg FAILED</b>\n` +
+    `${opts.noError ? `<b>NO error:</b> ${escapeHtml(opts.noError)}\n` : ''}` +
+    `\n⚠️ <b>Action required: manually close or hedge the YES position.</b>`;
+
+  await notify(text);
+}
+
 // ── Utility ─────────────────────────────────────────────────────────────────
 
 function escapeHtml(str: string): string {
