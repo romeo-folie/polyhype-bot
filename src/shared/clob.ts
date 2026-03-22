@@ -15,6 +15,8 @@ const POLYGON_CHAIN_ID = 137;
 export interface ClobBuyInput {
   tokenId: string;
   amountUsd: number;
+  /** Override order type. Defaults to CLOB_ORDER_TYPE config. Use FOK for arb legs. */
+  orderType?: 'FOK' | 'FAK';
 }
 
 export interface ClobTradeResult {
@@ -108,7 +110,9 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
     const tickSize = await client.getTickSize(input.tokenId);
     const negRisk = await client.getNegRisk(input.tokenId);
 
-    const orderType = cfg.CLOB_ORDER_TYPE === 'FOK' ? OrderType.FOK : OrderType.FAK;
+    const resolvedOrderType = input.orderType
+      ? (input.orderType === 'FOK' ? OrderType.FOK : OrderType.FAK)
+      : (cfg.CLOB_ORDER_TYPE === 'FOK' ? OrderType.FOK : OrderType.FAK);
 
     const raw = await client.createAndPostMarketOrder(
       {
@@ -117,7 +121,7 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
         side: Side.BUY,
       },
       { tickSize, negRisk },
-      orderType,
+      resolvedOrderType,
     );
 
     if (raw && typeof raw === 'object' && 'error' in (raw as Record<string, unknown>)) {
