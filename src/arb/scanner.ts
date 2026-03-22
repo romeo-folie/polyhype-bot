@@ -330,7 +330,8 @@ export async function executeArb(
     totalCostUsd: totalCost.toFixed(4),
     shares: shares.toFixed(4),
     edge: opp.edge.toFixed(4),
-    expectedProfit: (opp.edge * shares - (yesUsd + noUsd) * cfg.ARB_FEE_RATE).toFixed(4),
+    // opp.edge is already net of fees — no further fee subtraction needed here.
+    expectedProfit: (opp.edge * shares).toFixed(4),
   });
 
   return {

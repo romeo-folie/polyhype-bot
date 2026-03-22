@@ -113,13 +113,17 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
 
     // Wrap the entire order submission in a timeout to prevent hung connections
     // from keeping the cron process alive indefinitely (SDK has no built-in timeout).
-    const orderWithTimeout = <T>(promise: Promise<T>): Promise<T> =>
-      Promise.race([
-        promise,
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`CLOB order timed out after ${CLOB_ORDER_TIMEOUT_MS}ms`)), CLOB_ORDER_TIMEOUT_MS),
-        ),
-      ]);
+    // The timer is cleared in .finally() so it never leaks regardless of outcome.
+    const orderWithTimeout = <T>(promise: Promise<T>): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout>;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`CLOB order timed out after ${CLOB_ORDER_TIMEOUT_MS}ms`)),
+          CLOB_ORDER_TIMEOUT_MS,
+        );
+      });
+      return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+    };
 
     const tickSize = await orderWithTimeout(client.getTickSize(input.tokenId));
     const negRisk = await orderWithTimeout(client.getNegRisk(input.tokenId));
