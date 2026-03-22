@@ -27,6 +27,8 @@ export interface TradeSignal {
   stakeUsd: number;
   edgeMagnitude: number;
   consensusProbability: number;
+  /** Standard deviation of consensus probability across N LLM samples */
+  consensusStddev: number;
   outcomePrice: number;
   halfKellyFraction: number;
   /** The OSINT headline that triggered this signal */
@@ -99,8 +101,9 @@ export async function runMapping(
         continue;
       }
 
-      const { hasTrade, decision } = computeDivergence({
+      const { hasTrade, decision, skipReason } = computeDivergence({
         consensusProbability: consensus.probability,
+        consensusStddev: consensus.stddev,
         currentYesPrice: candidate.currentYesPrice,
         bankrollUsd,
         divergenceThreshold,
@@ -111,8 +114,10 @@ export async function runMapping(
         marketId: candidate.marketId,
         question: candidate.question.substring(0, 80),
         consensusP: consensus.probability.toFixed(3),
+        consensusStddev: consensus.stddev.toFixed(3),
         marketP: candidate.currentYesPrice.toFixed(3),
         hasTrade,
+        skipReason,
         direction: decision?.direction,
         stakeUsd: decision?.stakeUsd?.toFixed(2),
       });
@@ -127,6 +132,7 @@ export async function runMapping(
           stakeUsd: decision.stakeUsd,
           edgeMagnitude: decision.edgeMagnitude,
           consensusProbability: decision.consensusProbability,
+          consensusStddev: consensus.stddev,
           outcomePrice: decision.outcomePrice,
           halfKellyFraction: decision.halfKellyFraction,
           sourcedFrom: item.title,

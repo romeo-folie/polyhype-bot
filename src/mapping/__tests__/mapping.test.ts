@@ -66,7 +66,7 @@ describe('runMapping', () => {
 
   it('returns a trade signal when edge ≥ threshold', async () => {
     mockFindCandidates.mockResolvedValue([CANDIDATE]);
-    mockEstimate.mockResolvedValue({ probability: 0.72, reasoning: 'High tension' });
+    mockEstimate.mockResolvedValue({ probability: 0.72, reasoning: 'High tension', stddev: 0.01, sampleCount: 3 });
 
     const signals = await runMapping([makeScoredItem()], 100);
 
@@ -81,7 +81,7 @@ describe('runMapping', () => {
   it('returns no signals when edge < threshold', async () => {
     mockFindCandidates.mockResolvedValue([CANDIDATE]);
     // consensus very close to market price → edge = 0.05 < 0.10
-    mockEstimate.mockResolvedValue({ probability: 0.45, reasoning: 'Low divergence' });
+    mockEstimate.mockResolvedValue({ probability: 0.45, reasoning: 'Low divergence', stddev: 0.01, sampleCount: 3 });
 
     const signals = await runMapping([makeScoredItem()], 100);
     expect(signals).toHaveLength(0);
@@ -122,7 +122,7 @@ describe('runMapping', () => {
       marketId: `mkt-${i}`,
     }));
     mockFindCandidates.mockResolvedValue(manyCandidates);
-    mockEstimate.mockResolvedValue({ probability: 0.45, reasoning: 'Below threshold' });
+    mockEstimate.mockResolvedValue({ probability: 0.45, reasoning: 'Below threshold', stddev: 0.01, sampleCount: 3 });
 
     await runMapping([makeScoredItem()], 100);
 
@@ -131,7 +131,7 @@ describe('runMapping', () => {
 
   it('produces NO direction signal when consensus < market price', async () => {
     mockFindCandidates.mockResolvedValue([{ ...CANDIDATE, currentYesPrice: 0.8 }]);
-    mockEstimate.mockResolvedValue({ probability: 0.55, reasoning: 'Market overpriced' });
+    mockEstimate.mockResolvedValue({ probability: 0.55, reasoning: 'Market overpriced', stddev: 0.01, sampleCount: 3 });
 
     const signals = await runMapping([makeScoredItem()], 100);
 
@@ -145,8 +145,8 @@ describe('runMapping', () => {
     // Item B: consensus 0.85 → edge 0.45 (higher — this one should win)
     mockFindCandidates.mockResolvedValue([CANDIDATE]);
     mockEstimate
-      .mockResolvedValueOnce({ probability: 0.72, reasoning: 'Moderate signal' })  // Item A
-      .mockResolvedValueOnce({ probability: 0.85, reasoning: 'Strong signal' });   // Item B
+      .mockResolvedValueOnce({ probability: 0.72, reasoning: 'Moderate signal', stddev: 0.01, sampleCount: 3 })  // Item A
+      .mockResolvedValueOnce({ probability: 0.85, reasoning: 'Strong signal', stddev: 0.01, sampleCount: 3 });   // Item B
 
     const items = [makeScoredItem({ title: 'Item A' }), makeScoredItem({ title: 'Item B' })];
     const signals = await runMapping(items, 100);
@@ -173,7 +173,7 @@ describe('runMapping', () => {
     // (The actual parse-time guard is unit-tested in gamma.test.ts / entity extractor.)
     // Here we just confirm the pipeline doesn't throw with out-of-range prices.
     mockFindCandidates.mockResolvedValue([{ ...CANDIDATE, currentYesPrice: 1.5 }]);
-    mockEstimate.mockResolvedValue({ probability: 0.72, reasoning: 'Signal' });
+    mockEstimate.mockResolvedValue({ probability: 0.72, reasoning: 'Signal', stddev: 0.01, sampleCount: 3 });
 
     // Should not throw — divergenceCalculator handles edge cases gracefully
     await expect(runMapping([makeScoredItem()], 100)).resolves.toBeDefined();

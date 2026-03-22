@@ -30,6 +30,7 @@ export interface TradeDecision {
 
 export interface DivergenceInput {
   consensusProbability: number;
+  consensusStddev: number;
   currentYesPrice: number;
   /** Total portfolio value in USD */
   bankrollUsd: number;
@@ -42,21 +43,43 @@ export interface DivergenceInput {
 export interface DivergenceResult {
   hasTrade: boolean;
   decision: TradeDecision | null;
+  skipReason?: string;
 }
+
+/** Skip if consensus stddev exceeds this threshold (noisy signal). */
+export const NOISE_STDDEV_THRESHOLD = 0.08;
 
 /**
  * Compute edge and position size.
  *
- * Returns `hasTrade: false` when edge is below the divergence threshold.
+ * Returns `hasTrade: false` when edge is below the divergence threshold,
+ * the signal is too noisy, or EV at the lower confidence bound is negative.
  */
 export function computeDivergence(input: DivergenceInput): DivergenceResult {
   const {
     consensusProbability: p,
+    consensusStddev,
     currentYesPrice,
     bankrollUsd,
     divergenceThreshold,
     maxBetFraction,
   } = input;
+
+  // Gate 1: Noisy signal — stddev too high
+  if (consensusStddev > NOISE_STDDEV_THRESHOLD) {
+    return { hasTrade: false, decision: null, skipReason: `noisy_signal:stddev=${consensusStddev.toFixed(3)}` };
+  }
+
+  // Gate 2: EV gate — use lower confidence bound, not point estimate
+  const p_lower = Math.max(0, p - consensusStddev);
+  const direction_for_ev: 'YES' | 'NO' = (p - currentYesPrice) > 0 ? 'YES' : 'NO';
+  const outcomePrice_for_ev = direction_for_ev === 'YES' ? currentYesPrice : 1 - currentYesPrice;
+  const p_for_ev = direction_for_ev === 'YES' ? p_lower : 1 - p_lower;
+  const payout_for_ev = outcomePrice_for_ev > 0 ? 1 / outcomePrice_for_ev : 0;
+  const ev = payout_for_ev > 0 ? p_for_ev * payout_for_ev - 1 : -1;
+  if (ev <= 0) {
+    return { hasTrade: false, decision: null, skipReason: `negative_ev:ev=${ev.toFixed(4)},p_lower=${p_lower.toFixed(3)}` };
+  }
 
   const edge = p - currentYesPrice;
   const edgeMagnitude = Math.abs(edge);

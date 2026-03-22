@@ -152,6 +152,8 @@ describe('estimateFastConsensus', () => {
     mockEstimate.mockResolvedValue({
       probability: 0.65,
       reasoning: 'BTC rally makes SEC approval more likely',
+      stddev: 0.01,
+      sampleCount: 3,
     });
 
     const result = await estimateFastConsensus(
@@ -173,6 +175,8 @@ describe('estimateFastConsensus', () => {
     mockEstimate.mockResolvedValue({
       probability: 0.7,
       reasoning: 'test',
+      stddev: 0.01,
+      sampleCount: 3,
     });
 
     await estimateFastConsensus(

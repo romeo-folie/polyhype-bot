@@ -113,21 +113,19 @@ function parseResult(raw: string): ConsensusResult {
 }
 
 export interface ConsensusEstimate {
-  probability: number;
-  reasoning: string;
+  probability: number;       // mean across N runs
+  reasoning: string;         // reasoning from first call
+  stddev: number;            // standard deviation across N runs
+  sampleCount: number;       // how many calls succeeded
 }
 
-/**
- * Estimate the true YES probability for a market given a triggering headline.
- *
- * Tries Gemini first (cheaper), falls back to OpenAI.
- */
-export async function estimateConsensusProbability(opts: {
+/** Single-call estimate — tries Gemini first, falls back to OpenAI. */
+async function estimateSingle(opts: {
   question: string;
   description: string | null;
   headline: string;
   currentYesPrice: number;
-}): Promise<ConsensusEstimate> {
+}): Promise<ConsensusResult> {
   const provider = loadConfig().LLM_PROVIDER;
   const useGemini = provider === 'gemini' && Boolean(process.env['GEMINI_API_KEY']);
   const useOpenAI = Boolean(process.env['OPENAI_API_KEY']);
@@ -147,4 +145,39 @@ export async function estimateConsensusProbability(opts: {
   }
 
   throw new Error('No LLM provider configured (OPENAI_API_KEY or GEMINI_API_KEY required)');
+}
+
+const N_SAMPLES = 3;
+
+/**
+ * Estimate the true YES probability for a market given a triggering headline.
+ *
+ * Runs N_SAMPLES calls and returns mean + stddev for confidence gating.
+ */
+export async function estimateConsensusProbability(opts: {
+  question: string;
+  description: string | null;
+  headline: string;
+  currentYesPrice: number;
+}): Promise<ConsensusEstimate> {
+  const results: number[] = [];
+  let reasoning = '';
+
+  for (let i = 0; i < N_SAMPLES; i++) {
+    try {
+      const r = await estimateSingle(opts);
+      results.push(r.probability);
+      if (i === 0) reasoning = r.reasoning;
+    } catch (err) {
+      logger.warn('[consensus-calc] sample failed', { i, error: String(err) });
+    }
+  }
+
+  if (results.length === 0) throw new Error('All consensus samples failed');
+
+  const mean = results.reduce((a, b) => a + b, 0) / results.length;
+  const variance = results.reduce((s, x) => s + (x - mean) ** 2, 0) / results.length;
+  const stddev = Math.sqrt(variance);
+
+  return { probability: mean, reasoning, stddev, sampleCount: results.length };
 }

@@ -11,6 +11,7 @@
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis, closeRedis } from '../shared/redis.js';
+import { getBankroll, deductStake } from '../shared/bankroll.js';
 import { pollSpotPrices } from './poller.js';
 import { detectMoves } from './thresholdDetector.js';
 import { findCorrelatedMarkets } from './marketCorrelator.js';
@@ -53,6 +54,8 @@ async function runSpotMonitorInner(
   redis: ReturnType<typeof getRedis>,
 ): Promise<void> {
   logger.info('[spot] starting spot monitor cycle');
+
+  const bankrollUsd = await getBankroll(redis);
 
   // 1. Poll spot prices
   const prices = await pollSpotPrices();
@@ -117,10 +120,15 @@ async function runSpotMonitorInner(
         : consensus.probability;
 
       // 5. Compute divergence
+      // Spot fast-path: formula-based estimates have no stddev (single deterministic call),
+      // LLM fallback goes through estimateConsensusProbability which now returns stddev.
+      // For formula path, stddev=0 means EV gate relies solely on point estimate.
+      const consensusStddev = 0; // fast-path consensus is single-call, no multi-sample
       const { hasTrade, decision } = computeDivergence({
         consensusProbability: adjustedProbability,
+        consensusStddev,
         currentYesPrice: market.currentYesPrice,
-        bankrollUsd: cfg.BANKROLL_USD,
+        bankrollUsd,
         divergenceThreshold: cfg.SPOT_DIVERGENCE_THRESHOLD,
         maxBetFraction: cfg.MAX_BET_FRACTION,
       });
@@ -140,6 +148,7 @@ async function runSpotMonitorInner(
         stakeUsd: decision.stakeUsd,
         edgeMagnitude: decision.edgeMagnitude,
         consensusProbability: decision.consensusProbability,
+        consensusStddev,
         outcomePrice: decision.outcomePrice,
         halfKellyFraction: decision.halfKellyFraction,
         sourcedFrom,
@@ -213,6 +222,11 @@ async function runSpotMonitorInner(
       continue;
     }
 
+    if (!result.tradeResult?.success) {
+      await notifyTradeError(result.signal, result.tradeResult?.error ?? 'unknown error');
+      continue;
+    }
+
     // Record position
     await recordPosition(redis, {
       marketId: result.signal.marketId,
@@ -225,10 +239,12 @@ async function runSpotMonitorInner(
       openedAt: new Date().toISOString(),
       sourcedFrom: result.signal.sourcedFrom,
       consensusProbability: result.signal.consensusProbability,
+      consensusStddev: result.signal.consensusStddev,
       edgeMagnitude: result.signal.edgeMagnitude,
     });
 
-    await notifyTradeExecuted(result.signal, result.tradeResult?.tx_hash);
+    await deductStake(redis, result.signal.stakeUsd);
+    await notifyTradeExecuted(result.signal, result.tradeResult.tx_hash);
 
     logger.info('[spot] trade executed', {
       marketId: result.signal.marketId,
