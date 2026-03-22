@@ -11,7 +11,6 @@
 
 import 'dotenv/config';
 import { getRedis, closeRedis } from '../shared/redis.js';
-import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping } from '../mapping/index.js';
@@ -19,6 +18,7 @@ import { executeSignals } from './executor.js';
 import { recordPosition } from './positionLedger.js';
 import { notifyTradeExecuted, notifyTradeError } from './telegram.js';
 import { reEvaluatePositions } from '../monitor/signalReeval.js';
+import { getBankroll, deductStake } from '../shared/bankroll.js';
 
 /**
  * Run the full ingestion → mapping → execution pipeline.
@@ -27,7 +27,7 @@ import { reEvaluatePositions } from '../monitor/signalReeval.js';
  */
 export async function runExecution(): Promise<void> {
   const redis = getRedis();
-  const bankrollUsd = loadConfig().BANKROLL_USD;
+  const bankrollUsd = await getBankroll(redis);
 
   logger.info('[execution] pipeline starting', { bankrollUsd });
 
@@ -117,6 +117,7 @@ export async function runExecution(): Promise<void> {
         entryPrice: result.signal.outcomePrice,
         stakeUsd: result.signal.stakeUsd,
         consensusProbability: result.signal.consensusProbability,
+        consensusStddev: result.signal.consensusStddev,
         edgeMagnitude: result.signal.edgeMagnitude,
         sourcedFrom: result.signal.sourcedFrom,
         openedAt: new Date().toISOString(),
@@ -124,6 +125,7 @@ export async function runExecution(): Promise<void> {
         sharesHeld: result.tradeResult.shares_bought,
       });
 
+      await deductStake(redis, result.signal.stakeUsd);
       await notifyTradeExecuted(result.signal, result.tradeResult.tx_hash);
     } else if (result.tradeResult && !result.tradeResult.success) {
       await notifyTradeError(result.signal, result.tradeResult.error ?? 'unknown error');

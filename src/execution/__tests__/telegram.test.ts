@@ -23,6 +23,7 @@ function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
     stakeUsd: 5.0,
     edgeMagnitude: 0.2,
     consensusProbability: 0.7,
+    consensusStddev: 0.01,
     outcomePrice: 0.5,
     halfKellyFraction: 0.1,
     sourcedFrom: 'Breaking news',

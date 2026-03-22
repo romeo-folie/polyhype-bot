@@ -29,6 +29,8 @@ export interface Position {
   stakeUsd: number;
   /** Consensus probability at time of entry */
   consensusProbability: number;
+  /** Consensus stddev at time of entry (for post-trade analysis) */
+  consensusStddev?: number | undefined;
   /** Original edge magnitude */
   edgeMagnitude: number;
   /** OSINT headline that triggered this trade */
@@ -68,6 +70,7 @@ export async function recordPosition(
     edgeMagnitude: String(position.edgeMagnitude),
     sourcedFrom: position.sourcedFrom,
     openedAt: position.openedAt,
+    consensusStddev: position.consensusStddev !== undefined ? String(position.consensusStddev) : '',
     txHash: position.txHash ?? '',
     sharesHeld: position.sharesHeld !== undefined ? String(position.sharesHeld) : '',
   });
@@ -146,6 +149,7 @@ function deserialisePosition(raw: Record<string, string>): Position {
     sourcedFrom: raw['sourcedFrom'] ?? '',
     openedAt: raw['openedAt'] ?? new Date().toISOString(),
   };
+  if (raw['consensusStddev']) pos.consensusStddev = parseFloat(raw['consensusStddev']);
   if (raw['txHash']) pos.txHash = raw['txHash'];
   if (raw['sharesHeld']) pos.sharesHeld = parseFloat(raw['sharesHeld']);
   return pos;

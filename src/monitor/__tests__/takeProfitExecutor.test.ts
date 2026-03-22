@@ -32,6 +32,10 @@ jest.unstable_mockModule('../../execution/telegram.js', () => ({
   notifyTradeError: jest.fn(),
 }));
 
+jest.unstable_mockModule('../../shared/bankroll.js', () => ({
+  creditProceeds: jest.fn<() => Promise<number>>().mockResolvedValue(100),
+}));
+
 const { submitSell } = await import('../../shared/simmer.js');
 const { closePosition } = await import('../../execution/positionLedger.js');
 const { notifyTakeProfitExecuted } = await import('../../execution/telegram.js');

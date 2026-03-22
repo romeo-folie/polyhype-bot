@@ -15,6 +15,7 @@ import { logger } from '../shared/logger.js';
 import { submitSell, SimmerError } from '../shared/simmer.js';
 import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
+import { creditProceeds } from '../shared/bankroll.js';
 import type { Redis } from 'ioredis';
 import type { Position } from '../execution/positionLedger.js';
 import type { ExitReason } from './takeProfitEvaluator.js';
@@ -80,6 +81,10 @@ export async function executeTakeProfit(opts: {
     if (tradeResult.success) {
       // Remove from ledger — position is closed
       await closePosition(redis, position.marketId, position.direction);
+
+      // Credit proceeds back to bankroll (shares × current price)
+      const proceedsUsd = sharesToSell * currentPrice;
+      await creditProceeds(redis, proceedsUsd);
 
       // Notify
       await notifyTakeProfitExecuted({

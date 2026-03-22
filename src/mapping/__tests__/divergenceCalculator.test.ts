@@ -1,10 +1,11 @@
 import { describe, it, expect } from '@jest/globals';
-import { computeDivergence, computeHalfKelly } from '../divergenceCalculator.js';
+import { computeDivergence, computeHalfKelly, NOISE_STDDEV_THRESHOLD } from '../divergenceCalculator.js';
 
 const DEFAULT_INPUT = {
   bankrollUsd: 100,
   divergenceThreshold: 0.1,
   maxBetFraction: 0.1,
+  consensusStddev: 0.01, // low stddev — passes noise gate
 };
 
 describe('computeHalfKelly', () => {
@@ -95,6 +96,63 @@ describe('computeDivergence', () => {
       ...DEFAULT_INPUT,
       consensusProbability: 0.7,
       currentYesPrice: 0.5, // edge = 0.20
+    });
+    expect(result.hasTrade).toBe(true);
+  });
+});
+
+describe('EV gate & noise gate', () => {
+  it('exports NOISE_STDDEV_THRESHOLD constant', () => {
+    expect(NOISE_STDDEV_THRESHOLD).toBe(0.08);
+  });
+
+  it('rejects noisy signal when stddev > threshold', () => {
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.7,
+      consensusStddev: 0.09, // above 0.08 threshold
+      currentYesPrice: 0.5,
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('noisy_signal');
+  });
+
+  it('rejects negative EV at lower bound', () => {
+    // p=0.52, stddev=0.05 → p_lower=0.47, market=0.50
+    // Direction YES (0.52 > 0.50), outcomePrice=0.50, payout=2.0
+    // p_for_ev = p_lower = 0.47, EV = 0.47*2 - 1 = -0.06 → negative
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.52,
+      consensusStddev: 0.05,
+      currentYesPrice: 0.50,
+      divergenceThreshold: 0.01, // low threshold so edge gate doesn't reject first
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('negative_ev');
+  });
+
+  it('allows trade when EV positive at lower bound', () => {
+    // p=0.70, stddev=0.02 → p_lower=0.68, market=0.50
+    // Direction YES, outcomePrice=0.50, payout=2.0
+    // EV = 0.68*2 - 1 = 0.36 → positive
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.7,
+      consensusStddev: 0.02,
+      currentYesPrice: 0.5,
+    });
+    expect(result.hasTrade).toBe(true);
+    expect(result.decision).not.toBeNull();
+    expect(result.skipReason).toBeUndefined();
+  });
+
+  it('stddev=0 passes noise gate (formula-based estimates)', () => {
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.7,
+      consensusStddev: 0,
+      currentYesPrice: 0.5,
     });
     expect(result.hasTrade).toBe(true);
   });
