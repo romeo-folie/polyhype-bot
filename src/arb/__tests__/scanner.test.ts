@@ -221,8 +221,8 @@ describe('executeArb', () => {
     expect(result.error).toBe('no_leg_failed_unhedged');
     expect(result.yesResult?.success).toBe(true);
     expect(result.noResult?.success).toBe(false);
-    // YES leg cost + fees should be deducted
-    expect(mockDeductStake).toHaveBeenCalledWith(expect.anything(), expect.closeTo(yesUsd * (1 + FEE_RATE), 4));
+    // YES leg USDC deployed should be deducted (fees are factored into net edge, not re-applied here)
+    expect(mockDeductStake).toHaveBeenCalledWith(expect.anything(), expect.closeTo(yesUsd, 4));
   });
 
   it('deducts yesUsd + noUsd (equal-share total cost) when both legs fill', async () => {
@@ -231,10 +231,10 @@ describe('executeArb', () => {
     const result = await executeArb(opp, redis as any);
     expect(result.success).toBe(true);
     expect(mockSubmitClobBuy).toHaveBeenCalledTimes(2);
-    // Total cost = (yesUsd + noUsd) * (1 + FEE_RATE), includes Polymarket taker fees
+    // Total USDC deployed = yesUsd + noUsd (fees factored into net edge, not re-applied here)
     expect(mockDeductStake).toHaveBeenCalledWith(
       expect.anything(),
-      expect.closeTo((yesUsd + noUsd) * (1 + FEE_RATE), 4),
+      expect.closeTo(yesUsd + noUsd, 4),
     );
   });
 
