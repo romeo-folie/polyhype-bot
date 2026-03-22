@@ -51,6 +51,11 @@ const envSchema = z.object({
   SPOT_DIVERGENCE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.12),
   SPOT_CRYPTO_ASSETS: z.string().optional().default('bitcoin,ethereum'),
   SPOT_COMMODITY_ASSETS: z.string().optional().default('CL=F,GC=F'),
+
+  // Arbitrage scanner (Phase: arb)
+  ARB_ENABLED: z.coerce.boolean().optional().default(true),
+  ARB_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.04),
+  ARB_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.05),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
