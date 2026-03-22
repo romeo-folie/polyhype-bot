@@ -69,6 +69,11 @@ function makeRedis() {
       store.set(key, value);
       return 'OK';
     }),
+    del: jest.fn(async (key: string) => {
+      const had = store.has(key) ? 1 : 0;
+      store.delete(key);
+      return had;
+    }),
     _store: store,
   };
 }
