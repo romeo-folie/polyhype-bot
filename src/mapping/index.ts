@@ -14,8 +14,11 @@ import { loadConfig } from '../shared/config.js';
 import { findCandidateMarkets } from './entityExtractor.js';
 import { estimateConsensusProbability } from './consensusCalculator.js';
 import { computeDivergence } from './divergenceCalculator.js';
+import { resolveYesPrice } from '../shared/priceCache.js';
 import type { TradeDecision } from './divergenceCalculator.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
+import type { Redis } from 'ioredis';
+import type { ClobPriceFeed } from '../shared/clobWebSocket.js';
 
 export interface TradeSignal {
   /** Gamma market ID */
@@ -42,10 +45,12 @@ export interface TradeSignal {
  *
  * @param items      High-urgency scored items from Phase 1.
  * @param bankrollUsd Current portfolio value in USD (passed in from caller for testability).
+ * @param opts       Optional WebSocket feed + Redis for real-time price resolution.
  */
 export async function runMapping(
   items: ScoredItem[],
   bankrollUsd: number,
+  opts?: { redis?: Redis; feed?: ClobPriceFeed },
 ): Promise<TradeSignal[]> {
   const cfg = loadConfig();
   const divergenceThreshold = cfg.DIVERGENCE_THRESHOLD;
@@ -85,13 +90,25 @@ export async function runMapping(
     const toEvaluate = candidates.slice(0, 10);
 
     for (const candidate of toEvaluate) {
+      // Subscribe to WS updates for high-urgency items
+      if (opts?.feed && item.urgencyScore >= cfg.URGENCY_THRESHOLD) {
+        await opts.feed.watch(candidate.marketId, candidate.clobTokenIds);
+      }
+
+      // Resolve price: WS cache first, then fall back to Gamma snapshot
+      let currentYesPrice = candidate.currentYesPrice;
+      if (opts?.redis && opts?.feed) {
+        const wsPrice = await resolveYesPrice(candidate.marketId, opts.redis, opts.feed);
+        if (wsPrice !== null) currentYesPrice = wsPrice;
+      }
+
       let consensus;
       try {
         consensus = await estimateConsensusProbability({
           question: candidate.question,
           description: candidate.description,
           headline: item.title,
-          currentYesPrice: candidate.currentYesPrice,
+          currentYesPrice,
         });
       } catch (err) {
         logger.warn('[mapping] consensus estimation failed', {
@@ -104,7 +121,7 @@ export async function runMapping(
       const { hasTrade, decision, skipReason } = computeDivergence({
         consensusProbability: consensus.probability,
         consensusStddev: consensus.stddev,
-        currentYesPrice: candidate.currentYesPrice,
+        currentYesPrice,
         bankrollUsd,
         divergenceThreshold,
         maxBetFraction,
@@ -115,7 +132,7 @@ export async function runMapping(
         question: candidate.question.substring(0, 80),
         consensusP: consensus.probability.toFixed(3),
         consensusStddev: consensus.stddev.toFixed(3),
-        marketP: candidate.currentYesPrice.toFixed(3),
+        marketP: currentYesPrice.toFixed(3),
         hasTrade,
         skipReason,
         direction: decision?.direction,

@@ -13,6 +13,8 @@
 
 import { getMarket, parseOutcomePrices } from '../mapping/gamma.js';
 import { logger } from '../shared/logger.js';
+import { getRedis } from '../shared/redis.js';
+import { getPriceFeed } from '../shared/feedSingleton.js';
 import type { Position } from '../execution/positionLedger.js';
 
 export interface CurrentPrice {
@@ -31,6 +33,26 @@ export interface CurrentPrice {
  */
 export async function fetchCurrentPrice(position: Position): Promise<CurrentPrice | null> {
   try {
+    // Ensure the position's market is watched for WS updates
+    const redis = getRedis();
+    const feed = getPriceFeed(redis);
+    await feed.watch(position.marketId, position.clobTokenIds);
+
+    // Try WS cache first for sub-second freshness
+    const cachedPrice = await feed.getCachedPrice(position.marketId);
+    if (cachedPrice !== null) {
+      logger.debug('[price-fetcher] WS cache hit', { marketId: position.marketId, price: cachedPrice });
+      const currentOutcomePrice =
+        position.direction === 'YES' ? cachedPrice : 1 - cachedPrice;
+      return {
+        marketId: position.marketId,
+        direction: position.direction,
+        currentOutcomePrice,
+        currentYesPrice: cachedPrice,
+      };
+    }
+
+    // Fall back to Gamma REST
     const market = await getMarket(position.marketId);
 
     if (!market.active || market.closed) {

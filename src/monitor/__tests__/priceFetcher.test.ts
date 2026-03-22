@@ -2,7 +2,7 @@ import { jest, describe, it, expect, afterEach } from '@jest/globals';
 import type { Position } from '../../execution/positionLedger.js';
 
 jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
 // Mock the gamma module
@@ -11,6 +11,25 @@ jest.unstable_mockModule('../../mapping/gamma.js', () => ({
   parseOutcomePrices: jest.fn(),
   searchEvents: jest.fn(),
   parseYesPrice: jest.fn(),
+}));
+
+// Mock redis + price feed so fetchCurrentPrice doesn't need a real connection
+const mockFeed = {
+  watch: jest.fn(async () => {}),
+  getCachedPrice: jest.fn(async () => null as number | null),
+  unwatch: jest.fn(),
+  destroy: jest.fn(),
+};
+
+jest.unstable_mockModule('../../shared/redis.js', () => ({
+  getRedis: jest.fn(() => ({})),
+  closeRedis: jest.fn(async () => {}),
+  dedup: jest.fn(async () => true),
+}));
+
+jest.unstable_mockModule('../../shared/feedSingleton.js', () => ({
+  getPriceFeed: jest.fn(() => mockFeed),
+  destroyPriceFeed: jest.fn(),
 }));
 
 const { getMarket, parseOutcomePrices } = await import('../../mapping/gamma.js');
@@ -56,6 +75,9 @@ function makeMarket(yesPrice = '0.65', active = true, closed = false) {
 afterEach(() => {
   mockGetMarket.mockReset();
   mockParseOutcomePrices.mockReset();
+  mockFeed.getCachedPrice.mockReset();
+  mockFeed.getCachedPrice.mockResolvedValue(null);
+  mockFeed.watch.mockReset();
 });
 
 describe('fetchCurrentPrice', () => {
