@@ -23,7 +23,6 @@ function makeRedis() {
   return {
     get: jest.fn(async (key: string) => store.get(key) ?? null),
     set: jest.fn(async (key: string, value: string, ...args: unknown[]) => {
-      // Support NX flag — return null if key exists and NX is passed
       if (args.includes('NX') && store.has(key)) return null;
       store.set(key, value);
       return 'OK';
@@ -31,6 +30,17 @@ function makeRedis() {
     incrbyfloat: jest.fn(async (key: string, increment: number) => {
       const current = parseFloat(store.get(key) ?? '0');
       const updated = current + increment;
+      store.set(key, updated.toFixed(6));
+      return updated.toFixed(6);
+    }),
+    // Mock for Lua eval (deductStake uses this)
+    eval: jest.fn(async (_script: string, _numkeys: number, key: string, incrArg: string) => {
+      const current = parseFloat(store.get(key) ?? '0');
+      const updated = current + parseFloat(incrArg);
+      if (updated < 0) {
+        store.set(key, '0.000000');
+        return '0.000000';
+      }
       store.set(key, updated.toFixed(6));
       return updated.toFixed(6);
     }),
@@ -65,12 +75,12 @@ describe('bankroll', () => {
     expect(redis._store.get('bankroll:current')).toBe('42.123000');
   });
 
-  it('deductStake reduces correctly via INCRBYFLOAT', async () => {
+  it('deductStake reduces correctly via atomic Lua script', async () => {
     redis._store.set('bankroll:current', '100.000000');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const updated = await deductStake(redis as any, 25);
     expect(updated).toBeCloseTo(75);
-    expect(redis.incrbyfloat).toHaveBeenCalledWith('bankroll:current', -25);
+    expect(redis.eval).toHaveBeenCalled();
   });
 
   it('deductStake clamps at 0 when overdrawing', async () => {
@@ -78,7 +88,6 @@ describe('bankroll', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const updated = await deductStake(redis as any, 50);
     expect(updated).toBe(0);
-    // After clamping, key should be '0.000000'
     expect(redis._store.get('bankroll:current')).toBe('0.000000');
   });
 
@@ -103,11 +112,9 @@ describe('bankroll', () => {
   });
 
   it('cold-start NX does not overwrite concurrent seed', async () => {
-    // Simulate another process already seeding
     redis._store.set('bankroll:current', '200.000000');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await getBankroll(redis as any);
-    // Should return the existing 200, not overwrite with config's 100
     expect(result).toBe(200);
   });
 });

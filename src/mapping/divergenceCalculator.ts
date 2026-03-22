@@ -70,11 +70,14 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
     return { hasTrade: false, decision: null, skipReason: `noisy_signal:stddev=${consensusStddev.toFixed(3)}` };
   }
 
-  // Gate 2: EV gate — use lower confidence bound, not point estimate
+  // Gate 2: EV gate — use pessimistic confidence bound, not point estimate
+  // YES trade: pessimistic p(YES) = p - stddev (event less likely than estimated)
+  // NO trade:  pessimistic p(NO)  = 1 - (p + stddev) (event more likely than estimated)
   const p_lower = Math.max(0, p - consensusStddev);
+  const p_upper = Math.min(1, p + consensusStddev);
   const direction_for_ev: 'YES' | 'NO' = (p - currentYesPrice) > 0 ? 'YES' : 'NO';
   const outcomePrice_for_ev = direction_for_ev === 'YES' ? currentYesPrice : 1 - currentYesPrice;
-  const p_for_ev = direction_for_ev === 'YES' ? p_lower : 1 - p_lower;
+  const p_for_ev = direction_for_ev === 'YES' ? p_lower : 1 - p_upper;
   const payout_for_ev = outcomePrice_for_ev > 0 ? 1 / outcomePrice_for_ev : 0;
   const ev = payout_for_ev > 0 ? p_for_ev * payout_for_ev - 1 : -1;
   if (ev <= 0) {
