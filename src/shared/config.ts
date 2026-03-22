@@ -58,6 +58,8 @@ const envSchema = z.object({
   // Raised from 0.04 to 0.05 to ensure profit after fees.
   ARB_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.05),
   ARB_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.05),
+  // Polymarket taker fee rate per trade (~2% default). Configurable for fee tier changes.
+  ARB_FEE_RATE: z.coerce.number().min(0).max(1).optional().default(0.02),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

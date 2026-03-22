@@ -18,8 +18,9 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
   loadConfig: jest.fn(() => ({
     CLOB_FALLBACK_ENABLED: true,
     ARB_ENABLED: true,
-    ARB_MIN_EDGE: 0.05,        // default raised to 0.05 (net edge threshold)
+    ARB_MIN_EDGE: 0.05,
     ARB_MAX_STAKE_FRACTION: 0.05,
+    ARB_FEE_RATE: 0.02,        // env-configurable fee rate
   })),
 }));
 
@@ -119,6 +120,36 @@ describe('scanForArb', () => {
     // yesAsk=0.48, noAsk=0.49 → gross=0.03, net=0.03-0.97*0.04=-0.009 ✗
     mockGetActiveMarkets.mockResolvedValue([
       makeMarket({ outcomePrices: '["0.48","0.49"]' }),
+    ]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const opps = await scanForArb(redis as any);
+    expect(opps).toHaveLength(0);
+  });
+
+  it('skips market with degenerate zero prices (combined < 0.02)', async () => {
+    mockGetActiveMarkets.mockResolvedValue([
+      makeMarket({ outcomePrices: '["0.00","0.00"]' }),
+    ]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const opps = await scanForArb(redis as any);
+    expect(opps).toHaveLength(0);
+  });
+
+  it('skips market with near-zero combined price', async () => {
+    mockGetActiveMarkets.mockResolvedValue([
+      makeMarket({ outcomePrices: '["0.005","0.005"]' }),
+    ]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const opps = await scanForArb(redis as any);
+    expect(opps).toHaveLength(0);
+  });
+
+  it('skips non-binary market with 3 outcomes', async () => {
+    mockGetActiveMarkets.mockResolvedValue([
+      makeMarket({
+        outcomePrices: '["0.30","0.30","0.30"]',
+        clobTokenIds: '["t1","t2","t3"]',
+      }),
     ]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const opps = await scanForArb(redis as any);
@@ -251,6 +282,21 @@ describe('executeArb', () => {
     const result = await executeArb(opp, redis as any);
     expect(result.success).toBe(false);
     expect(result.error).toBe('dedup_concurrent');
+    expect(mockSubmitClobBuy).not.toHaveBeenCalled();
+  });
+
+  it('returns degenerate_price error when combined is near-zero', async () => {
+    const degenerateOpp = {
+      ...opp,
+      yesAsk: 0.005,
+      noAsk: 0.005,
+      edge: 0.98,
+      grossEdge: 0.99,
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeArb(degenerateOpp, redis as any);
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('invalid_combined_price');
     expect(mockSubmitClobBuy).not.toHaveBeenCalled();
   });
 
