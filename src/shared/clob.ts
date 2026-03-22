@@ -11,6 +11,9 @@ import { loadConfig } from './config.js';
 
 const CLOB_HOST = 'https://clob.polymarket.com';
 const POLYGON_CHAIN_ID = 137;
+// Hard timeout for CLOB order submission. The SDK has no built-in timeout;
+// without this a hung connection would keep the cron process alive indefinitely.
+const CLOB_ORDER_TIMEOUT_MS = 30_000;
 
 export interface ClobBuyInput {
   tokenId: string;
@@ -107,14 +110,25 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
 
   try {
     const client = await getClobClient();
-    const tickSize = await client.getTickSize(input.tokenId);
-    const negRisk = await client.getNegRisk(input.tokenId);
+
+    // Wrap the entire order submission in a timeout to prevent hung connections
+    // from keeping the cron process alive indefinitely (SDK has no built-in timeout).
+    const orderWithTimeout = <T>(promise: Promise<T>): Promise<T> =>
+      Promise.race([
+        promise,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`CLOB order timed out after ${CLOB_ORDER_TIMEOUT_MS}ms`)), CLOB_ORDER_TIMEOUT_MS),
+        ),
+      ]);
+
+    const tickSize = await orderWithTimeout(client.getTickSize(input.tokenId));
+    const negRisk = await orderWithTimeout(client.getNegRisk(input.tokenId));
 
     const resolvedOrderType = input.orderType
       ? (input.orderType === 'FOK' ? OrderType.FOK : OrderType.FAK)
       : (cfg.CLOB_ORDER_TYPE === 'FOK' ? OrderType.FOK : OrderType.FAK);
 
-    const raw = await client.createAndPostMarketOrder(
+    const raw = await orderWithTimeout(client.createAndPostMarketOrder(
       {
         tokenID: input.tokenId,
         amount: input.amountUsd,
@@ -122,7 +136,7 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
       },
       { tickSize, negRisk },
       resolvedOrderType,
-    );
+    ));
 
     if (raw && typeof raw === 'object' && 'error' in (raw as Record<string, unknown>)) {
       const error = (raw as Record<string, unknown>)['error'];
