@@ -86,7 +86,8 @@ describe('estimateConsensusProbability', () => {
     //        = sqrt((0 + 0.0004 + 0.0004) / 3) = sqrt(0.000267) ≈ 0.01633
     expect(result.stddev).toBeCloseTo(0.01633, 3);
     expect(result.sampleCount).toBe(3);
-    expect(result.reasoning).toBe('Call 1'); // reasoning from first call
+    // Parallel calls — reasoning comes from whichever resolves first; any call label is valid
+    expect(['Call 1', 'Call 2', 'Call 3']).toContain(result.reasoning);
     expect(mockGenerateContent).toHaveBeenCalledTimes(3);
   });
 

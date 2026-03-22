@@ -19,6 +19,10 @@ export interface FastConsensusResult {
   probability: number;
   reasoning: string;
   method: 'formula' | 'llm';
+  /** Standard deviation across consensus samples.
+   *  0 for formula-based estimates (deterministic).
+   *  Real stddev for LLM-based estimates (multi-sample). */
+  stddev: number;
 }
 
 /** Default annualised volatility estimates by asset class. */
@@ -207,6 +211,7 @@ export async function estimateFastConsensus(
         probability: market.currentYesPrice,
         reasoning: 'Market expired — no formula estimate available',
         method: 'formula',
+        stddev: 0,
       };
     }
 
@@ -228,7 +233,7 @@ export async function estimateFastConsensus(
       method: 'formula',
     });
 
-    return { probability, reasoning, method: 'formula' };
+    return { probability, reasoning, method: 'formula', stddev: 0 };
   }
 
   // Non-price-target market: fall back to LLM with spot move as context
@@ -253,5 +258,6 @@ export async function estimateFastConsensus(
     probability: estimate.probability,
     reasoning: estimate.reasoning,
     method: 'llm',
+    stddev: estimate.stddev,
   };
 }

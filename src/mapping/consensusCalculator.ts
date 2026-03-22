@@ -160,16 +160,22 @@ export async function estimateConsensusProbability(opts: {
   headline: string;
   currentYesPrice: number;
 }): Promise<ConsensusEstimate> {
+  // Fire all N samples in parallel — reduces latency from N×LLM to ~1×LLM
+  const settled = await Promise.allSettled(
+    Array.from({ length: N_SAMPLES }, () => estimateSingle(opts)),
+  );
+
   const results: number[] = [];
   let reasoning = '';
 
-  for (let i = 0; i < N_SAMPLES; i++) {
-    try {
-      const r = await estimateSingle(opts);
-      results.push(r.probability);
-      if (i === 0) reasoning = r.reasoning;
-    } catch (err) {
-      logger.warn('[consensus-calc] sample failed', { i, error: String(err) });
+  for (const outcome of settled) {
+    if (outcome.status === 'fulfilled') {
+      results.push(outcome.value.probability);
+      if (reasoning === '') reasoning = outcome.value.reasoning;
+    } else {
+      logger.warn('[consensus-calc] sample failed', {
+        error: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason),
+      });
     }
   }
 
