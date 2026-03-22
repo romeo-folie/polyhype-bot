@@ -233,7 +233,11 @@ export async function executeArb(
     noUsd: noUsd.toFixed(2),
   });
 
-  // 15s timeout guard — submitClobBuy has no internal timeout and could hang.
+  // 15s timeout for arb legs — intentionally shorter than the 30s timeout inside
+  // submitClobBuy itself. For arb, faster abort is better: a slow YES fill that
+  // takes >15s likely means execution price has moved. The inner 30s timeout
+  // protects non-arb CLOB callers; this guard fires first for the arb path.
+  // Both timers are .finally-cleared, so there is no timer leak.
   function withTimeout<T>(promise: Promise<T>): Promise<T> {
     let timer: ReturnType<typeof setTimeout>;
     const timeout = new Promise<never>((_, reject) => {
@@ -252,6 +256,10 @@ export async function executeArb(
       marketId: opp.marketId,
       error: yesResult.error,
     });
+    // No capital was deployed — delete the dedup key so the opportunity can be
+    // retried in the next cron cycle. Leaving the key would lock out retries
+    // for 30 minutes despite zero risk.
+    await redis.del(arbDedupKey(opp.marketId)).catch(() => undefined);
     return {
       marketId: opp.marketId,
       success: false,
