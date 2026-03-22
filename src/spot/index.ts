@@ -120,10 +120,10 @@ async function runSpotMonitorInner(
         : consensus.probability;
 
       // 5. Compute divergence
-      // Spot fast-path: formula-based estimates have no stddev (single deterministic call),
-      // LLM fallback goes through estimateConsensusProbability which now returns stddev.
-      // For formula path, stddev=0 means EV gate relies solely on point estimate.
-      const consensusStddev = 0; // fast-path consensus is single-call, no multi-sample
+      // Spot fast-path: formula-based estimates are deterministic (stddev=0).
+      // LLM fallback goes through estimateConsensusProbability which returns real stddev.
+      // Both cases now propagate correctly — EV gate is properly conservative for LLM calls.
+      const consensusStddev = consensus.stddev;
       const { hasTrade, decision } = computeDivergence({
         consensusProbability: adjustedProbability,
         consensusStddev,
