@@ -72,7 +72,8 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
     let prices: string[];
     try {
       prices = parseOutcomePrices(market.outcomePrices);
-    } catch {
+    } catch (err) {
+      logger.debug('[arb] skipping market — price parse error', { marketId: market.id, err: String(err) });
       continue;
     }
     // Binary markets have exactly 2 outcomes — skip multi-outcome markets
@@ -99,7 +100,8 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
     let tokenIds: string[];
     try {
       tokenIds = parseClobTokenIds(market.clobTokenIds);
-    } catch {
+    } catch (err) {
+      logger.debug('[arb] skipping market — tokenId parse error', { marketId: market.id, err: String(err) });
       continue;
     }
     if (tokenIds.length !== 2) continue;
@@ -232,11 +234,12 @@ export async function executeArb(
   });
 
   // Leg 1: YES — FOK (equal shares)
-  const yesResult = await submitClobBuy({
-    tokenId: opp.yesTokenId,
-    amountUsd: yesUsd,
-    orderType: 'FOK',
-  });
+  const clobTimeout = <T>(): Promise<T> =>
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('submitClobBuy timeout')), 15_000));
+  const yesResult = await Promise.race([
+    submitClobBuy({ tokenId: opp.yesTokenId, amountUsd: yesUsd, orderType: 'FOK' }),
+    clobTimeout<Awaited<ReturnType<typeof submitClobBuy>>>(),
+  ]).catch(err => ({ success: false as const, error: String(err) }));
 
   if (!yesResult.success) {
     logger.warn('[arb] YES leg failed — aborting, NO leg not submitted', {
@@ -256,11 +259,10 @@ export async function executeArb(
   }
 
   // Leg 2: NO — FOK (equal shares)
-  const noResult = await submitClobBuy({
-    tokenId: opp.noTokenId,
-    amountUsd: noUsd,
-    orderType: 'FOK',
-  });
+  const noResult = await Promise.race([
+    submitClobBuy({ tokenId: opp.noTokenId, amountUsd: noUsd, orderType: 'FOK' }),
+    clobTimeout<Awaited<ReturnType<typeof submitClobBuy>>>(),
+  ]).catch(err => ({ success: false as const, error: String(err) }));
 
   if (!noResult.success) {
     // YES filled, NO failed — we are now LONG YES with no hedge.
@@ -292,8 +294,10 @@ export async function executeArb(
       noError: noResult.error,
       ts: Date.now(),
     }));
-    // YES leg filled = real USDC spent — deduct 1 leg so bankroll stays accurate
-    await deductStake(redis, yesUsd);
+    // YES leg filled = real USDC spent — deduct 1 leg + Polymarket taker fees.
+    // Fees are auto-deducted from on-chain USDC on top of the order amount;
+    // bankroll must reflect total USDC that actually left the wallet.
+    await deductStake(redis, yesUsd * (1 + cfg.ARB_FEE_RATE));
     return {
       marketId: opp.marketId,
       success: false,
@@ -307,18 +311,20 @@ export async function executeArb(
     };
   }
 
-  // Both legs filled — deduct actual cost from bankroll.
-  // At resolution, `shares × $1` arrives from whichever outcome wins.
-  // Net profit ≈ shares × edge.
-  await deductStake(redis, yesUsd + noUsd);
+  // Both legs filled — deduct base cost + Polymarket taker fees from bankroll.
+  // Fees are auto-deducted from on-chain USDC on top of the order amount;
+  // bankroll must reflect total USDC that actually left the wallet.
+  const totalCost = (yesUsd + noUsd) * (1 + cfg.ARB_FEE_RATE);
+  await deductStake(redis, totalCost);
 
   logger.info('[arb] both legs filled', {
     marketId: opp.marketId,
     yesUsd: yesUsd.toFixed(2),
     noUsd: noUsd.toFixed(2),
+    totalCostUsd: totalCost.toFixed(4),
     shares: shares.toFixed(4),
     edge: opp.edge.toFixed(4),
-    expectedProfit: (opp.edge * shares).toFixed(4),
+    expectedProfit: (opp.edge * shares - (yesUsd + noUsd) * cfg.ARB_FEE_RATE).toFixed(4),
   });
 
   return {

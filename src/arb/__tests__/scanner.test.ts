@@ -81,7 +81,7 @@ function makeMarket(overrides: Record<string, unknown> = {}) {
     question: 'Will X happen?',
     conditionId: 'cond-1',
     clobTokenIds: '["yes-token","no-token"]',
-    outcomePrices: '["0.40","0.50"]', // gross edge = 0.10; net = 0.10 - 0.90*0.04 = 0.064
+    outcomePrices: '["0.40","0.50"]', // gross edge = 0.10; net = 0.10 - 0.90*0.02 = 0.082
     outcomes: ['Yes', 'No'],
     active: true,
     closed: false,
@@ -104,7 +104,7 @@ describe('scanForArb', () => {
   });
 
   it('returns market with net edge > ARB_MIN_EDGE (0.05)', async () => {
-    // gross=0.10, net = 0.10 - 0.90*0.04 = 0.064 > 0.05 ✅
+    // gross=0.10, net = 0.10 - 0.90*0.02 = 0.082 > 0.05 ✅
     mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const opps = await scanForArb(redis as any);
@@ -117,7 +117,7 @@ describe('scanForArb', () => {
   });
 
   it('excludes market with net edge <= ARB_MIN_EDGE (0.05)', async () => {
-    // yesAsk=0.48, noAsk=0.49 → gross=0.03, net=0.03-0.97*0.04=-0.009 ✗
+    // yesAsk=0.48, noAsk=0.49 → gross=0.03, net=0.03-0.97*0.02=0.0106 < 0.05 ✗
     mockGetActiveMarkets.mockResolvedValue([
       makeMarket({ outcomePrices: '["0.48","0.49"]' }),
     ]);
@@ -169,7 +169,7 @@ describe('executeArb', () => {
   let redis: ReturnType<typeof makeRedis>;
 
   // yesAsk=0.40, noAsk=0.50, combined=0.90
-  // gross edge = 0.10; net edge after fees = 0.10 - 0.90*0.04 ≈ 0.064
+  // gross edge = 0.10; net edge after fees = 0.10 - 0.90*0.02 = 0.082
   const yesAsk = 0.40;
   const noAsk = 0.50;
   const combined = yesAsk + noAsk;
@@ -221,8 +221,8 @@ describe('executeArb', () => {
     expect(result.error).toBe('no_leg_failed_unhedged');
     expect(result.yesResult?.success).toBe(true);
     expect(result.noResult?.success).toBe(false);
-    // YES leg cost (yesUsd) should be deducted
-    expect(mockDeductStake).toHaveBeenCalledWith(expect.anything(), expect.closeTo(yesUsd, 4));
+    // YES leg cost + fees should be deducted
+    expect(mockDeductStake).toHaveBeenCalledWith(expect.anything(), expect.closeTo(yesUsd * (1 + FEE_RATE), 4));
   });
 
   it('deducts yesUsd + noUsd (equal-share total cost) when both legs fill', async () => {
@@ -231,10 +231,10 @@ describe('executeArb', () => {
     const result = await executeArb(opp, redis as any);
     expect(result.success).toBe(true);
     expect(mockSubmitClobBuy).toHaveBeenCalledTimes(2);
-    // Total cost = yesUsd + noUsd = totalBudget (within float precision)
+    // Total cost = (yesUsd + noUsd) * (1 + FEE_RATE), includes Polymarket taker fees
     expect(mockDeductStake).toHaveBeenCalledWith(
       expect.anything(),
-      expect.closeTo(yesUsd + noUsd, 4),
+      expect.closeTo((yesUsd + noUsd) * (1 + FEE_RATE), 4),
     );
   });
 
