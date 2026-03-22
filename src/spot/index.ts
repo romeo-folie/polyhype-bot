@@ -12,6 +12,8 @@ import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis, closeRedis } from '../shared/redis.js';
 import { getBankroll, deductStake } from '../shared/bankroll.js';
+import { getPriceFeed } from '../shared/feedSingleton.js';
+import { resolveYesPrice } from '../shared/priceCache.js';
 import { pollSpotPrices } from './poller.js';
 import { detectMoves } from './thresholdDetector.js';
 import { findCorrelatedMarkets } from './marketCorrelator.js';
@@ -93,7 +95,17 @@ async function runSpotMonitorInner(
       continue;
     }
 
+    const feed = getPriceFeed(redis);
+
     for (const market of markets) {
+      // Subscribe to WS price updates for this correlated market
+      await feed.watch(market.marketId, market.clobTokenIds);
+
+      // Resolve price: WS cache first, Gamma snapshot fallback
+      let currentYesPrice = market.currentYesPrice;
+      const wsPrice = await resolveYesPrice(market.marketId, redis, feed);
+      if (wsPrice !== null) currentYesPrice = wsPrice;
+
       // 4. Estimate consensus probability
       let consensus;
       try {
@@ -127,7 +139,7 @@ async function runSpotMonitorInner(
       const { hasTrade, decision } = computeDivergence({
         consensusProbability: adjustedProbability,
         consensusStddev,
-        currentYesPrice: market.currentYesPrice,
+        currentYesPrice,
         bankrollUsd,
         divergenceThreshold: cfg.SPOT_DIVERGENCE_THRESHOLD,
         maxBetFraction: cfg.MAX_BET_FRACTION,
