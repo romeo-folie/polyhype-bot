@@ -109,7 +109,7 @@ describe('scanForArb', () => {
     const opps = await scanForArb(redis as any);
     expect(opps).toHaveLength(1);
     // edge reported is net edge
-    const expectedNet = 0.10 - (0.40 + 0.50) * 2 * FEE_RATE;
+    const expectedNet = 0.10 - (0.40 + 0.50) * FEE_RATE;
     expect(opps[0]!.edge).toBeCloseTo(expectedNet, 4);
     expect(opps[0]!.grossEdge).toBeCloseTo(0.10, 4);
     expect(opps[0]!.marketId).toBe('market-1');
@@ -143,7 +143,7 @@ describe('executeArb', () => {
   const noAsk = 0.50;
   const combined = yesAsk + noAsk;
   const grossEdge = 1 - combined;
-  const netEdge = grossEdge - combined * 2 * FEE_RATE;
+  const netEdge = grossEdge - combined * FEE_RATE;
 
   const opp = {
     marketId: 'market-1',
