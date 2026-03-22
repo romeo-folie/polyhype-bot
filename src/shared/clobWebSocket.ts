@@ -49,11 +49,16 @@ export class ClobPriceFeed {
     for (const tokenId of clobTokenIds) {
       this.tokenToMarket.set(tokenId, marketId);
     }
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    if (!this.ws) {
+      // No connection yet — start one. The 'open' handler will subscribe all watched markets.
       this.connect();
-    } else {
+    } else if (this.ws.readyState === WebSocket.OPEN) {
+      // Already connected — subscribe immediately.
       this.subscribe(clobTokenIds);
     }
+    // If readyState is CONNECTING, do nothing: the 'open' handler will subscribe all
+    // watched markets (including this one just added above) when the handshake completes.
+    // Calling connect() again here would spawn a duplicate connection.
   }
 
   /** Remove a market from the watch list. */

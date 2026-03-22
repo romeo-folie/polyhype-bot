@@ -15,6 +15,7 @@ import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { getOpenPositions } from '../execution/positionLedger.js';
 import { fetchAllCurrentPrices } from './priceFetcher.js';
+import { getPriceFeed } from '../shared/feedSingleton.js';
 import { evaluateTakeProfit } from './takeProfitEvaluator.js';
 import { executeTakeProfit } from './takeProfitExecutor.js';
 
@@ -36,7 +37,14 @@ export async function runMonitor(): Promise<void> {
 
   logger.info('[monitor] checking positions', { count: positions.length });
 
-  // 2. Fetch current prices for all positions
+  // 2a. Register watches for all positions before reading prices.
+  // feed.watch() is idempotent and CONNECTING-safe — safe to call in bulk here.
+  const feed = getPriceFeed(redis);
+  await Promise.all(
+    positions.map((p) => feed.watch(p.marketId, p.clobTokenIds).catch(() => undefined)),
+  );
+
+  // 2b. Fetch current prices for all positions
   const priceMap = await fetchAllCurrentPrices(positions);
 
   // 3. Evaluate and act on each position
