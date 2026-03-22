@@ -55,7 +55,7 @@ interface SearchEventsOptions {
   activeOnly?: boolean;
 }
 
-function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+export function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
@@ -145,6 +145,26 @@ export function parseClobTokenIds(clobTokenIds: string | string[]): string[] {
  *
  * Accepts both pre-parsed `string[]` and raw JSON string.
  */
+/**
+ * Fetch active binary markets from Gamma API.
+ * Returns markets where active=true, closed=false, enableOrderBook=true.
+ * Paginated — fetches up to `limit` markets.
+ */
+export async function getActiveMarkets(limit = 100): Promise<GammaMarket[]> {
+  const params = new URLSearchParams({
+    active: 'true',
+    closed: 'false',
+    enable_order_book: 'true',
+    limit: String(limit),
+  });
+  const url = `${BASE_URL}/markets?${params.toString()}`;
+  const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+  if (!res.ok) throw new Error(`Gamma markets error: ${res.status}`);
+  const data = (await res.json()) as unknown;
+  if (!Array.isArray(data)) return [];
+  return data as GammaMarket[];
+}
+
 export function parseYesPrice(outcomePrices: string | string[]): number {
   const prices = parseOutcomePrices(outcomePrices);
   if (prices.length === 0) {
