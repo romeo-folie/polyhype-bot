@@ -20,7 +20,10 @@ import type { Redis } from 'ioredis';
 const MAX_ARB_PER_RUN = 2;
 // Dedup TTL: don't re-enter same market within 30 minutes
 const ARB_DEDUP_TTL_S = 30 * 60;
-// Polymarket taker fee rate per leg (~2%). Used for net edge calculation.
+// Polymarket taker fee rate (~2% per leg).
+// Fee formula: total_fees = combined × FEE_RATE
+//   (yesUsd + noUsd = shares × combined; fees on the total cost, not per-leg separately)
+// Net edge = grossEdge - combined × FEE_RATE
 const POLYMARKET_FEE_RATE = 0.02;
 // NOTE (LOW): getActiveMarkets currently fetches a fixed 200-market page.
 // Polymarket has 1000s of active markets. Pagination is deferred — at the
@@ -36,7 +39,7 @@ export interface ArbOpportunity {
   noTokenId: string;
   yesAsk: number;
   noAsk: number;
-  /** Net edge after estimated Polymarket taker fees (gross - combined × 2 × FEE_RATE) */
+  /** Net edge after estimated Polymarket taker fees (gross - combined × FEE_RATE) */
   edge: number;
   grossEdge: number;
 }
@@ -82,9 +85,9 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
 
     const combined = yesAsk + noAsk;
     const grossEdge = 1.0 - combined;
-    // Compute net edge: gross edge minus estimated Polymarket taker fees (~2%/leg).
-    // Net edge = grossEdge - combined × 2 × FEE_RATE
-    const estFees = combined * 2 * POLYMARKET_FEE_RATE;
+    // Net edge = grossEdge - total_fees
+    // total_fees = combined × FEE_RATE  (fee applies to total capital deployed = shares × combined)
+    const estFees = combined * POLYMARKET_FEE_RATE;
     const edge = grossEdge - estFees; // net edge
 
     if (edge <= minEdge) continue;
@@ -125,7 +128,7 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
  * regardless of which leg is more expensive. Equal-dollar sizing creates unequal
  * share counts and leaves directional exposure.
  *
- * Net edge (after fees) = gross edge - (yesAsk + noAsk) × 2 × FEE_RATE
+ * Net edge (after fees) = gross edge - (yesAsk + noAsk) × FEE_RATE
  *
  * If YES leg fails, NO is NOT submitted (abort, no unhedged exposure).
  */
@@ -230,12 +233,19 @@ export async function executeArb(
       yesStake: yesUsd,
       noError: noResult.error,
     });
-    // Fire-and-forget notification — alert Romeo regardless of WS/network state
-    void notifyUnhedgedArbPosition({
+    // Fire-and-forget notification — alert Romeo regardless of WS/network state.
+    // .catch() is required: a bare void would silently swallow an unhandled rejection
+    // and could crash the process during this critical financial-risk path.
+    notifyUnhedgedArbPosition({
       marketId: opp.marketId,
       question: opp.question,
       stakeUsd: yesUsd,
       noError: noResult.error,
+    }).catch((err: unknown) => {
+      logger.error('[arb] failed to send unhedged position alert', {
+        marketId: opp.marketId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
     // Persist alert in Redis so the monitoring layer can detect unhedged positions
     await redis.setex(`alert:unhedged:${opp.marketId}`, 3600, JSON.stringify({
