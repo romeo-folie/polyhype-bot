@@ -20,6 +20,12 @@ import type { Redis } from 'ioredis';
 const MAX_ARB_PER_RUN = 2;
 // Dedup TTL: don't re-enter same market within 30 minutes
 const ARB_DEDUP_TTL_S = 30 * 60;
+// Polymarket taker fee rate per leg (~2%). Used for net edge calculation.
+const POLYMARKET_FEE_RATE = 0.02;
+// NOTE (LOW): getActiveMarkets currently fetches a fixed 200-market page.
+// Polymarket has 1000s of active markets. Pagination is deferred — at the
+// default ARB_MIN_EDGE threshold (0.05 net), true arb opportunities are rare;
+// the first 200 markets by liquidity are the most likely candidates.
 
 const arbDedupKey = (marketId: string) => `arb:attempted:${marketId}`;
 
@@ -30,7 +36,9 @@ export interface ArbOpportunity {
   noTokenId: string;
   yesAsk: number;
   noAsk: number;
-  edge: number; // 1.00 - yesAsk - noAsk
+  /** Net edge after estimated Polymarket taker fees (gross - combined × 2 × FEE_RATE) */
+  edge: number;
+  grossEdge: number;
 }
 
 export interface ArbResult {
@@ -38,7 +46,9 @@ export interface ArbResult {
   success: boolean;
   yesResult?: { success: boolean; error?: string };
   noResult?: { success: boolean; error?: string };
-  stakePerLeg: number;
+  numShares: number;
+  yesCostUsd: number;
+  noCostUsd: number;
   edge: number;
   error?: string;
 }
@@ -71,13 +81,11 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
     if (!isFinite(yesAsk) || !isFinite(noAsk)) continue;
 
     const combined = yesAsk + noAsk;
-    // Raw edge before fees. Polymarket charges ~2% per trade (taker fee).
-    // Two legs = ~4% total fees. The default ARB_MIN_EDGE (≥0.04) acts as an
-    // implicit fee floor: only edges where profit > fees are pursued.
-    // This does NOT explicitly subtract the fee — edge is the gross gap.
-    // A more precise calculation would be: edge - (yesAsk + noAsk) * FEE_RATE * 2
-    // but the threshold gate provides sufficient protection for the MVP.
-    const edge = 1.0 - combined;
+    const grossEdge = 1.0 - combined;
+    // Compute net edge: gross edge minus estimated Polymarket taker fees (~2%/leg).
+    // Net edge = grossEdge - combined × 2 × FEE_RATE
+    const estFees = combined * 2 * POLYMARKET_FEE_RATE;
+    const edge = grossEdge - estFees; // net edge
 
     if (edge <= minEdge) continue;
 
@@ -96,7 +104,8 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
       noTokenId: tokenIds[1]!,
       yesAsk,
       noAsk,
-      edge,
+      edge,         // net edge (after fees)
+      grossEdge,
     });
   }
 
@@ -105,35 +114,70 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
 }
 
 /**
- * Execute an arbitrage trade: buy YES + buy NO as FOK.
- * If YES leg fails, NO is NOT submitted (abort on first failure).
- * Marks market as attempted in Redis regardless of outcome.
+ * Execute an arbitrage trade: buy equal SHARES of YES + NO as FOK.
+ *
+ * Equal-share sizing (not equal-dollar) is required for a risk-free payoff:
+ *   shares = totalBudget / (yesAsk + noAsk)
+ *   yesUsd = shares × yesAsk
+ *   noUsd  = shares × noAsk
+ *
+ * At resolution, exactly `shares` dollars arrive from whichever outcome wins,
+ * regardless of which leg is more expensive. Equal-dollar sizing creates unequal
+ * share counts and leaves directional exposure.
+ *
+ * Net edge (after fees) = gross edge - (yesAsk + noAsk) × 2 × FEE_RATE
+ *
+ * If YES leg fails, NO is NOT submitted (abort, no unhedged exposure).
  */
 export async function executeArb(
   opp: ArbOpportunity,
   redis: Redis,
 ): Promise<ArbResult> {
   const cfg = loadConfig();
+  const combined = opp.yesAsk + opp.noAsk;
 
   // Check bankroll BEFORE marking as attempted.
-  // Marking dedup before this check would lock the market out for 30 min
-  // even when no trade was attempted due to insufficient bankroll.
   const bankroll = await getBankroll(redis);
-  const stakePerLeg = bankroll * cfg.ARB_MAX_STAKE_FRACTION;
+  const totalBudget = bankroll * cfg.ARB_MAX_STAKE_FRACTION;
 
-  if (stakePerLeg < 1.0) {
+  if (totalBudget < 2.0) {
     return {
       marketId: opp.marketId,
       success: false,
-      stakePerLeg,
+      numShares: 0,
+      yesCostUsd: 0,
+      noCostUsd: 0,
       edge: opp.edge,
       error: 'stake_too_small',
     };
   }
 
-  // Mark as attempted only after confirming bankroll is sufficient,
-  // and before submitting orders to prevent concurrent duplicate execution.
-  await redis.setex(arbDedupKey(opp.marketId), ARB_DEDUP_TTL_S, '1');
+  // Equal-share sizing: same number of outcome tokens per leg.
+  // Revenue at resolution = shares × $1 regardless of which outcome wins.
+  const shares = totalBudget / combined;
+  const yesUsd = shares * opp.yesAsk;
+  const noUsd  = shares * opp.noAsk;
+
+  // opp.edge is already net of estimated fees (computed in scanForArb).
+
+  // Atomically claim the dedup slot. SET NX prevents two overlapping cron runs
+  // from both passing the get-based dedup in scanForArb and then double-trading.
+  // This is the authoritative guard — scanForArb's redis.get is a pre-filter only.
+  const claimed = await redis.set(arbDedupKey(opp.marketId), '1', 'EX', ARB_DEDUP_TTL_S, 'NX');
+  if (!claimed) {
+    logger.info('[arb] dedup NX: market already claimed by concurrent run', {
+      marketId: opp.marketId,
+    });
+    return {
+      marketId: opp.marketId,
+      success: false,
+      numShares: 0,
+      yesCostUsd: 0,
+      noCostUsd: 0,
+      edge: opp.edge,
+      error: 'dedup_concurrent',
+    };
+  }
 
   logger.info('[arb] executing opportunity', {
     marketId: opp.marketId,
@@ -141,13 +185,15 @@ export async function executeArb(
     yesAsk: opp.yesAsk,
     noAsk: opp.noAsk,
     edge: opp.edge.toFixed(4),
-    stakePerLeg,
+    shares: shares.toFixed(4),
+    yesUsd: yesUsd.toFixed(2),
+    noUsd: noUsd.toFixed(2),
   });
 
-  // Leg 1: YES — FOK
+  // Leg 1: YES — FOK (equal shares)
   const yesResult = await submitClobBuy({
     tokenId: opp.yesTokenId,
-    amountUsd: stakePerLeg,
+    amountUsd: yesUsd,
     orderType: 'FOK',
   });
 
@@ -160,16 +206,18 @@ export async function executeArb(
       marketId: opp.marketId,
       success: false,
       yesResult: { success: false, ...(yesResult.error ? { error: yesResult.error } : {}) },
-      stakePerLeg,
+      numShares: shares,
+      yesCostUsd: yesUsd,
+      noCostUsd: 0,
       edge: opp.edge,
       error: 'yes_leg_failed',
     };
   }
 
-  // Leg 2: NO — FOK
+  // Leg 2: NO — FOK (equal shares)
   const noResult = await submitClobBuy({
     tokenId: opp.noTokenId,
-    amountUsd: stakePerLeg,
+    amountUsd: noUsd,
     orderType: 'FOK',
   });
 
@@ -179,44 +227,50 @@ export async function executeArb(
     // immediate Telegram alert requiring manual intervention.
     logger.error('[arb] CRITICAL: YES leg filled but NO leg failed — unhedged YES position', {
       marketId: opp.marketId,
-      yesStake: stakePerLeg,
+      yesStake: yesUsd,
       noError: noResult.error,
     });
     // Fire-and-forget notification — alert Romeo regardless of WS/network state
     void notifyUnhedgedArbPosition({
       marketId: opp.marketId,
       question: opp.question,
-      stakeUsd: stakePerLeg,
+      stakeUsd: yesUsd,
       noError: noResult.error,
     });
     // Persist alert in Redis so the monitoring layer can detect unhedged positions
     await redis.setex(`alert:unhedged:${opp.marketId}`, 3600, JSON.stringify({
       marketId: opp.marketId,
-      yesStake: stakePerLeg,
+      yesStake: yesUsd,
       noError: noResult.error,
       ts: Date.now(),
     }));
     // YES leg filled = real USDC spent — deduct 1 leg so bankroll stays accurate
-    await deductStake(redis, stakePerLeg);
+    await deductStake(redis, yesUsd);
     return {
       marketId: opp.marketId,
       success: false,
       yesResult: { success: true },
       noResult: { success: false, ...(noResult.error ? { error: noResult.error } : {}) },
-      stakePerLeg,
+      numShares: shares,
+      yesCostUsd: yesUsd,
+      noCostUsd: 0,
       edge: opp.edge,
       error: 'no_leg_failed_unhedged',
     };
   }
 
-  // Both legs filled — deduct from bankroll (cost = stakePerLeg * 2, profit locked in at resolution)
-  await deductStake(redis, stakePerLeg * 2);
+  // Both legs filled — deduct actual cost from bankroll.
+  // At resolution, `shares × $1` arrives from whichever outcome wins.
+  // Net profit ≈ shares × edge.
+  await deductStake(redis, yesUsd + noUsd);
 
   logger.info('[arb] both legs filled', {
     marketId: opp.marketId,
-    stakePerLeg,
+    yesUsd: yesUsd.toFixed(2),
+    noUsd: noUsd.toFixed(2),
+    shares: shares.toFixed(4),
     edge: opp.edge.toFixed(4),
-    expectedProfit: (opp.edge * stakePerLeg).toFixed(4),
+    expectedProfit: (opp.edge * shares).toFixed(4),
   });
 
   return {
@@ -224,7 +278,9 @@ export async function executeArb(
     success: true,
     yesResult: { success: true },
     noResult: { success: true },
-    stakePerLeg,
+    numShares: shares,
+    yesCostUsd: yesUsd,
+    noCostUsd: noUsd,
     edge: opp.edge,
   };
 }

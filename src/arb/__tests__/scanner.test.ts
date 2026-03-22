@@ -18,7 +18,7 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
   loadConfig: jest.fn(() => ({
     CLOB_FALLBACK_ENABLED: true,
     ARB_ENABLED: true,
-    ARB_MIN_EDGE: 0.04,
+    ARB_MIN_EDGE: 0.05,        // default raised to 0.05 (net edge threshold)
     ARB_MAX_STAKE_FRACTION: 0.05,
   })),
 }));
@@ -32,9 +32,13 @@ jest.unstable_mockModule('../../shared/logger.js', () => ({
   },
 }));
 
-const mockGetActiveMarkets = jest.fn<() => Promise<unknown[]>>();
+// Mock Telegram so unhedged alert doesn't make real HTTP calls
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+jest.unstable_mockModule('../../execution/telegram.js', () => ({
+  notifyUnhedgedArbPosition: jest.fn<() => Promise<void>>().mockResolvedValue(),
+}));
 
-// Import real parse helpers before mocking the module
+const mockGetActiveMarkets = jest.fn<() => Promise<unknown[]>>();
 const { parseOutcomePrices: realParseOutcomePrices, parseClobTokenIds: realParseClobTokenIds } =
   await import('../../mapping/gamma.js');
 
@@ -45,6 +49,9 @@ jest.unstable_mockModule('../../mapping/gamma.js', () => ({
 }));
 
 const { scanForArb, executeArb } = await import('../scanner.js');
+
+// Polymarket fee rate (matches POLYMARKET_FEE_RATE in scanner.ts)
+const FEE_RATE = 0.02;
 
 // --- Redis mock ---
 
@@ -73,7 +80,7 @@ function makeMarket(overrides: Record<string, unknown> = {}) {
     question: 'Will X happen?',
     conditionId: 'cond-1',
     clobTokenIds: '["yes-token","no-token"]',
-    outcomePrices: '["0.40","0.50"]', // edge = 0.10
+    outcomePrices: '["0.40","0.50"]', // gross edge = 0.10; net = 0.10 - 0.90*0.04 = 0.064
     outcomes: ['Yes', 'No'],
     active: true,
     closed: false,
@@ -95,18 +102,23 @@ describe('scanForArb', () => {
     jest.clearAllMocks();
   });
 
-  it('returns market with edge > 0.04', async () => {
+  it('returns market with net edge > ARB_MIN_EDGE (0.05)', async () => {
+    // gross=0.10, net = 0.10 - 0.90*0.04 = 0.064 > 0.05 ✅
     mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const opps = await scanForArb(redis as any);
     expect(opps).toHaveLength(1);
-    expect(opps[0]!.edge).toBeCloseTo(0.10);
+    // edge reported is net edge
+    const expectedNet = 0.10 - (0.40 + 0.50) * 2 * FEE_RATE;
+    expect(opps[0]!.edge).toBeCloseTo(expectedNet, 4);
+    expect(opps[0]!.grossEdge).toBeCloseTo(0.10, 4);
     expect(opps[0]!.marketId).toBe('market-1');
   });
 
-  it('excludes market with edge <= 0.04', async () => {
+  it('excludes market with net edge <= ARB_MIN_EDGE (0.05)', async () => {
+    // yesAsk=0.48, noAsk=0.49 → gross=0.03, net=0.03-0.97*0.04=-0.009 ✗
     mockGetActiveMarkets.mockResolvedValue([
-      makeMarket({ outcomePrices: '["0.48","0.49"]' }), // edge = 0.03
+      makeMarket({ outcomePrices: '["0.48","0.49"]' }),
     ]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const opps = await scanForArb(redis as any);
@@ -125,15 +137,31 @@ describe('scanForArb', () => {
 describe('executeArb', () => {
   let redis: ReturnType<typeof makeRedis>;
 
+  // yesAsk=0.40, noAsk=0.50, combined=0.90
+  // gross edge = 0.10; net edge after fees = 0.10 - 0.90*0.04 ≈ 0.064
+  const yesAsk = 0.40;
+  const noAsk = 0.50;
+  const combined = yesAsk + noAsk;
+  const grossEdge = 1 - combined;
+  const netEdge = grossEdge - combined * 2 * FEE_RATE;
+
   const opp = {
     marketId: 'market-1',
     question: 'Will X happen?',
     yesTokenId: 'yes-token',
     noTokenId: 'no-token',
-    yesAsk: 0.40,
-    noAsk: 0.50,
-    edge: 0.10,
+    yesAsk,
+    noAsk,
+    grossEdge,
+    edge: netEdge,
   };
+
+  // bankroll=100, ARB_MAX_STAKE_FRACTION=0.05 → totalBudget=5
+  // shares = 5 / 0.90 ≈ 5.556; yesUsd = 5.556 * 0.40 ≈ 2.222; noUsd = 5.556 * 0.50 ≈ 2.778
+  const totalBudget = 100 * 0.05;
+  const shares = totalBudget / combined;
+  const yesUsd = shares * yesAsk;
+  const noUsd = shares * noAsk;
 
   beforeEach(() => {
     redis = makeRedis();
@@ -148,7 +176,6 @@ describe('executeArb', () => {
     const result = await executeArb(opp, redis as any);
     expect(result.success).toBe(false);
     expect(result.error).toBe('yes_leg_failed');
-    // submitClobBuy called only once (YES leg)
     expect(mockSubmitClobBuy).toHaveBeenCalledTimes(1);
     expect(mockDeductStake).not.toHaveBeenCalled();
   });
@@ -163,22 +190,40 @@ describe('executeArb', () => {
     expect(result.error).toBe('no_leg_failed_unhedged');
     expect(result.yesResult?.success).toBe(true);
     expect(result.noResult?.success).toBe(false);
-    // YES leg filled = real USDC spent — bankroll must be decremented by 1 leg
-    expect(mockDeductStake).toHaveBeenCalledWith(expect.anything(), 5);
+    // YES leg cost (yesUsd) should be deducted
+    expect(mockDeductStake).toHaveBeenCalledWith(expect.anything(), expect.closeTo(yesUsd, 4));
   });
 
-  it('deducts stakePerLeg * 2 when both legs fill', async () => {
+  it('deducts yesUsd + noUsd (equal-share total cost) when both legs fill', async () => {
     mockSubmitClobBuy.mockResolvedValue({ success: true });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeArb(opp, redis as any);
     expect(result.success).toBe(true);
     expect(mockSubmitClobBuy).toHaveBeenCalledTimes(2);
-    // stakePerLeg = 100 * 0.05 = 5, so deduct 10
-    expect(mockDeductStake).toHaveBeenCalledWith(expect.anything(), 10);
+    // Total cost = yesUsd + noUsd = totalBudget (within float precision)
+    expect(mockDeductStake).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.closeTo(yesUsd + noUsd, 4),
+    );
+  });
+
+  it('submits equal-share USD amounts — not equal dollar', async () => {
+    mockSubmitClobBuy.mockResolvedValue({ success: true });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await executeArb(opp, redis as any);
+    // YES leg gets yesUsd (< noUsd because yesAsk < noAsk)
+    expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'yes-token', amountUsd: expect.closeTo(yesUsd, 4) }),
+    );
+    expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'no-token', amountUsd: expect.closeTo(noUsd, 4) }),
+    );
+    // The two amounts must differ (equal-share, not equal-dollar)
+    expect(yesUsd).not.toBeCloseTo(noUsd, 2);
   });
 
   it('returns stake_too_small when bankroll too low', async () => {
-    mockGetBankroll.mockResolvedValue(10); // 10 * 0.05 = 0.50 < 1.0
+    mockGetBankroll.mockResolvedValue(10); // 10 * 0.05 = 0.50 < 2.0
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeArb(opp, redis as any);
     expect(result.success).toBe(false);
@@ -186,11 +231,27 @@ describe('executeArb', () => {
     expect(mockSubmitClobBuy).not.toHaveBeenCalled();
   });
 
-  it('sets dedup key on execution', async () => {
+  it('uses SET NX for atomic dedup (not setex)', async () => {
     mockSubmitClobBuy.mockResolvedValue({ success: true });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await executeArb(opp, redis as any);
-    expect(redis.setex).toHaveBeenCalledWith('arb:attempted:market-1', 1800, '1');
+    // redis.set called with NX flag for atomic claim
+    expect(redis.set).toHaveBeenCalledWith(
+      'arb:attempted:market-1', '1', 'EX', 1800, 'NX',
+    );
+    // setex should NOT be used for the dedup key
+    expect(redis.setex).not.toHaveBeenCalledWith('arb:attempted:market-1', expect.anything(), expect.anything());
+  });
+
+  it('returns dedup_concurrent when NX claim fails (concurrent run)', async () => {
+    // Pre-populate the key so NX returns null
+    redis._store.set('arb:attempted:market-1', '1');
+    mockSubmitClobBuy.mockResolvedValue({ success: true });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeArb(opp, redis as any);
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('dedup_concurrent');
+    expect(mockSubmitClobBuy).not.toHaveBeenCalled();
   });
 
   it('passes FOK order type to both legs', async () => {
