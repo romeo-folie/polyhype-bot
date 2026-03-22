@@ -233,13 +233,19 @@ export async function executeArb(
     noUsd: noUsd.toFixed(2),
   });
 
+  // 15s timeout guard — submitClobBuy has no internal timeout and could hang.
+  function withTimeout<T>(promise: Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('submitClobBuy timeout')), 15_000);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+
   // Leg 1: YES — FOK (equal shares)
-  const clobTimeout = <T>(): Promise<T> =>
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('submitClobBuy timeout')), 15_000));
-  const yesResult = await Promise.race([
+  const yesResult = await withTimeout(
     submitClobBuy({ tokenId: opp.yesTokenId, amountUsd: yesUsd, orderType: 'FOK' }),
-    clobTimeout<Awaited<ReturnType<typeof submitClobBuy>>>(),
-  ]).catch(err => ({ success: false as const, error: String(err) }));
+  ).catch(err => ({ success: false as const, error: String(err) }));
 
   if (!yesResult.success) {
     logger.warn('[arb] YES leg failed — aborting, NO leg not submitted', {
@@ -259,10 +265,9 @@ export async function executeArb(
   }
 
   // Leg 2: NO — FOK (equal shares)
-  const noResult = await Promise.race([
+  const noResult = await withTimeout(
     submitClobBuy({ tokenId: opp.noTokenId, amountUsd: noUsd, orderType: 'FOK' }),
-    clobTimeout<Awaited<ReturnType<typeof submitClobBuy>>>(),
-  ]).catch(err => ({ success: false as const, error: String(err) }));
+  ).catch(err => ({ success: false as const, error: String(err) }));
 
   if (!noResult.success) {
     // YES filled, NO failed — we are now LONG YES with no hedge.
@@ -294,10 +299,8 @@ export async function executeArb(
       noError: noResult.error,
       ts: Date.now(),
     }));
-    // YES leg filled = real USDC spent — deduct 1 leg + Polymarket taker fees.
-    // Fees are auto-deducted from on-chain USDC on top of the order amount;
-    // bankroll must reflect total USDC that actually left the wallet.
-    await deductStake(redis, yesUsd * (1 + cfg.ARB_FEE_RATE));
+    // YES leg USDC deployed. Fees are factored into net edge already (estFees = combined × FEE_RATE).
+    await deductStake(redis, yesUsd);
     return {
       marketId: opp.marketId,
       success: false,
@@ -311,17 +314,13 @@ export async function executeArb(
     };
   }
 
-  // Both legs filled — deduct base cost + Polymarket taker fees from bankroll.
-  // Fees are auto-deducted from on-chain USDC on top of the order amount;
-  // bankroll must reflect total USDC that actually left the wallet.
-  const totalCost = (yesUsd + noUsd) * (1 + cfg.ARB_FEE_RATE);
-  await deductStake(redis, totalCost);
+  // Both legs filled — deduct actual USDC deployed. Fees are in net edge, not re-applied here.
+  await deductStake(redis, yesUsd + noUsd);
 
   logger.info('[arb] both legs filled', {
     marketId: opp.marketId,
     yesUsd: yesUsd.toFixed(2),
     noUsd: noUsd.toFixed(2),
-    totalCostUsd: totalCost.toFixed(4),
     shares: shares.toFixed(4),
     edge: opp.edge.toFixed(4),
     expectedProfit: (opp.edge * shares - (yesUsd + noUsd) * cfg.ARB_FEE_RATE).toFixed(4),
