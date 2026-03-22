@@ -20,11 +20,9 @@ import type { Redis } from 'ioredis';
 const MAX_ARB_PER_RUN = 2;
 // Dedup TTL: don't re-enter same market within 30 minutes
 const ARB_DEDUP_TTL_S = 30 * 60;
-// Polymarket taker fee rate (~2% per leg).
-// Fee formula: total_fees = combined × FEE_RATE
-//   (yesUsd + noUsd = shares × combined; fees on the total cost, not per-leg separately)
-// Net edge = grossEdge - combined × FEE_RATE
-const POLYMARKET_FEE_RATE = 0.02;
+// Minimum combined price guard: combined < MIN_COMBINED means prices are near-zero
+// (data error or extreme illiquidity), which would produce Infinity/NaN share counts.
+const MIN_COMBINED = 0.02;
 // NOTE (LOW): getActiveMarkets currently fetches a fixed 200-market page.
 // Polymarket has 1000s of active markets. Pagination is deferred — at the
 // default ARB_MIN_EDGE threshold (0.05 net), true arb opportunities are rare;
@@ -77,17 +75,23 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
     } catch {
       continue;
     }
-    if (prices.length < 2) continue;
+    // Binary markets have exactly 2 outcomes — skip multi-outcome markets
+    if (prices.length !== 2) continue;
 
     const yesAsk = parseFloat(prices[0] ?? '0');
     const noAsk = parseFloat(prices[1] ?? '0');
     if (!isFinite(yesAsk) || !isFinite(noAsk)) continue;
+    if (yesAsk <= 0 || noAsk <= 0) continue;
 
     const combined = yesAsk + noAsk;
+    // Guard against near-zero combined: would produce Infinity/NaN share counts.
+    if (combined < MIN_COMBINED) continue;
+
     const grossEdge = 1.0 - combined;
     // Net edge = grossEdge - total_fees
-    // total_fees = combined × FEE_RATE  (fee applies to total capital deployed = shares × combined)
-    const estFees = combined * POLYMARKET_FEE_RATE;
+    // total_fees = combined × feeRate  (fee applies to total capital = shares × combined)
+    const feeRate = cfg.ARB_FEE_RATE;
+    const estFees = combined * feeRate;
     const edge = grossEdge - estFees; // net edge
 
     if (edge <= minEdge) continue;
@@ -98,7 +102,7 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
     } catch {
       continue;
     }
-    if (tokenIds.length < 2) continue;
+    if (tokenIds.length !== 2) continue;
 
     opportunities.push({
       marketId: market.id,
@@ -155,11 +159,45 @@ export async function executeArb(
     };
   }
 
+  // Guard against combined near-zero (data anomaly) before division.
+  // scanForArb already filters this out; this is a belt-and-suspenders check.
+  if (combined < MIN_COMBINED || !isFinite(combined)) {
+    return {
+      marketId: opp.marketId,
+      success: false,
+      numShares: 0,
+      yesCostUsd: 0,
+      noCostUsd: 0,
+      edge: opp.edge,
+      error: 'invalid_combined_price',
+    };
+  }
+
   // Equal-share sizing: same number of outcome tokens per leg.
   // Revenue at resolution = shares × $1 regardless of which outcome wins.
   const shares = totalBudget / combined;
   const yesUsd = shares * opp.yesAsk;
   const noUsd  = shares * opp.noAsk;
+
+  // Final sanity check: computed amounts must be finite positive numbers.
+  if (!isFinite(shares) || !isFinite(yesUsd) || !isFinite(noUsd) || shares <= 0) {
+    logger.error('[arb] invalid share computation — aborting', {
+      marketId: opp.marketId,
+      combined,
+      shares,
+      yesUsd,
+      noUsd,
+    });
+    return {
+      marketId: opp.marketId,
+      success: false,
+      numShares: 0,
+      yesCostUsd: 0,
+      noCostUsd: 0,
+      edge: opp.edge,
+      error: 'invalid_share_computation',
+    };
+  }
 
   // opp.edge is already net of estimated fees (computed in scanForArb).
 
