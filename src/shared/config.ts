@@ -54,7 +54,7 @@ const envSchema = z.object({
 
   // Arbitrage scanner (Phase: arb)
   ARB_ENABLED: z.coerce.boolean().optional().default(true),
-  ARB_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.04),
+  ARB_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.04), // Must exceed 2× Polymarket fee (~2% total)
   ARB_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.05),
 });
 

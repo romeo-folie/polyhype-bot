@@ -163,7 +163,8 @@ describe('executeArb', () => {
     expect(result.error).toBe('no_leg_failed_unhedged');
     expect(result.yesResult?.success).toBe(true);
     expect(result.noResult?.success).toBe(false);
-    expect(mockDeductStake).not.toHaveBeenCalled();
+    // YES leg filled = real USDC spent — bankroll must be decremented by 1 leg
+    expect(mockDeductStake).toHaveBeenCalledWith(expect.anything(), 5);
   });
 
   it('deducts stakePerLeg * 2 when both legs fill', async () => {
