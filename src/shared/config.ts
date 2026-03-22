@@ -54,7 +54,9 @@ const envSchema = z.object({
 
   // Arbitrage scanner (Phase: arb)
   ARB_ENABLED: z.coerce.boolean().optional().default(true),
-  ARB_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.04), // Must exceed 2× Polymarket fee (~2% total)
+  // Minimum NET edge (after ~2% per-leg Polymarket fees) to enter an arb trade.
+  // Raised from 0.04 to 0.05 to ensure profit after fees.
+  ARB_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.05),
   ARB_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.05),
 });
 
