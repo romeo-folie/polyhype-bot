@@ -299,8 +299,10 @@ export async function executeArb(
       noError: noResult.error,
       ts: Date.now(),
     }));
-    // YES leg USDC deployed. Fees are factored into net edge already (estFees = combined × FEE_RATE).
-    await deductStake(redis, yesUsd);
+    // YES leg filled = real USDC spent. Polymarket taker fees (~2%) are auto-deducted
+    // from on-chain USDC *on top of* the order amount. Bankroll must include fees to
+    // prevent drift above actual wallet balance.
+    await deductStake(redis, yesUsd * (1 + cfg.ARB_FEE_RATE));
     return {
       marketId: opp.marketId,
       success: false,
@@ -314,13 +316,18 @@ export async function executeArb(
     };
   }
 
-  // Both legs filled — deduct actual USDC deployed. Fees are in net edge, not re-applied here.
-  await deductStake(redis, yesUsd + noUsd);
+  // Both legs filled — deduct base cost + Polymarket taker fees (~2%) from bankroll.
+  // Fees are auto-deducted from on-chain USDC *on top of* the order amount.
+  // Net edge already accounts for fees in profit estimation, but bankroll must
+  // reflect total USDC that actually left the wallet to prevent tracker drift.
+  const totalCost = (yesUsd + noUsd) * (1 + cfg.ARB_FEE_RATE);
+  await deductStake(redis, totalCost);
 
   logger.info('[arb] both legs filled', {
     marketId: opp.marketId,
     yesUsd: yesUsd.toFixed(2),
     noUsd: noUsd.toFixed(2),
+    totalCostUsd: totalCost.toFixed(4),
     shares: shares.toFixed(4),
     edge: opp.edge.toFixed(4),
     expectedProfit: (opp.edge * shares - (yesUsd + noUsd) * cfg.ARB_FEE_RATE).toFixed(4),
