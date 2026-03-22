@@ -13,6 +13,7 @@ import { submitClobBuy } from '../shared/clob.js';
 import { getBankroll, deductStake } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
+import { notifyUnhedgedArbPosition } from '../execution/telegram.js';
 import type { Redis } from 'ioredis';
 
 // Max arb trades per scan run (2 trades = 4 orders, well within 60 orders/min limit)
@@ -70,6 +71,12 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
     if (!isFinite(yesAsk) || !isFinite(noAsk)) continue;
 
     const combined = yesAsk + noAsk;
+    // Raw edge before fees. Polymarket charges ~2% per trade (taker fee).
+    // Two legs = ~4% total fees. The default ARB_MIN_EDGE (≥0.04) acts as an
+    // implicit fee floor: only edges where profit > fees are pursued.
+    // This does NOT explicitly subtract the fee — edge is the gross gap.
+    // A more precise calculation would be: edge - (yesAsk + noAsk) * FEE_RATE * 2
+    // but the threshold gate provides sufficient protection for the MVP.
     const edge = 1.0 - combined;
 
     if (edge <= minEdge) continue;
@@ -108,9 +115,9 @@ export async function executeArb(
 ): Promise<ArbResult> {
   const cfg = loadConfig();
 
-  // Mark as attempted immediately to prevent concurrent duplicate execution
-  await redis.setex(arbDedupKey(opp.marketId), ARB_DEDUP_TTL_S, '1');
-
+  // Check bankroll BEFORE marking as attempted.
+  // Marking dedup before this check would lock the market out for 30 min
+  // even when no trade was attempted due to insufficient bankroll.
   const bankroll = await getBankroll(redis);
   const stakePerLeg = bankroll * cfg.ARB_MAX_STAKE_FRACTION;
 
@@ -123,6 +130,10 @@ export async function executeArb(
       error: 'stake_too_small',
     };
   }
+
+  // Mark as attempted only after confirming bankroll is sufficient,
+  // and before submitting orders to prevent concurrent duplicate execution.
+  await redis.setex(arbDedupKey(opp.marketId), ARB_DEDUP_TTL_S, '1');
 
   logger.info('[arb] executing opportunity', {
     marketId: opp.marketId,
@@ -164,12 +175,27 @@ export async function executeArb(
 
   if (!noResult.success) {
     // YES filled, NO failed — we are now LONG YES with no hedge.
-    // Log as critical — requires manual intervention.
+    // This is a real financial risk event: log as critical AND send an
+    // immediate Telegram alert requiring manual intervention.
     logger.error('[arb] CRITICAL: YES leg filled but NO leg failed — unhedged YES position', {
       marketId: opp.marketId,
       yesStake: stakePerLeg,
       noError: noResult.error,
     });
+    // Fire-and-forget notification — alert Romeo regardless of WS/network state
+    void notifyUnhedgedArbPosition({
+      marketId: opp.marketId,
+      question: opp.question,
+      stakeUsd: stakePerLeg,
+      noError: noResult.error,
+    });
+    // Persist alert in Redis so the monitoring layer can detect unhedged positions
+    await redis.setex(`alert:unhedged:${opp.marketId}`, 3600, JSON.stringify({
+      marketId: opp.marketId,
+      yesStake: stakePerLeg,
+      noError: noResult.error,
+      ts: Date.now(),
+    }));
     return {
       marketId: opp.marketId,
       success: false,

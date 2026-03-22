@@ -19,6 +19,10 @@ const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/';
 const PRICE_CACHE_TTL_S = 30;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
+// Cap reconnect attempts to prevent keeping cron processes alive indefinitely
+// on a persistent WS failure. After RECONNECT_MAX_ATTEMPTS the feed gives up
+// and falls back to Gamma REST on all subsequent price requests.
+const RECONNECT_MAX_ATTEMPTS = 10;
 
 export const WS_PRICE_KEY = (marketId: string): string => `ws:price:${marketId}`;
 
@@ -164,6 +168,15 @@ export class ClobPriceFeed {
   }
 
   private scheduleReconnect(): void {
+    if (this.reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) {
+      // Persistent failure — give up and destroy the feed so the process can exit cleanly.
+      // Price reads will fall back to Gamma REST via resolveYesPrice().
+      logger.error('[clob-ws] max reconnect attempts reached — giving up', {
+        attempts: this.reconnectAttempt,
+      });
+      this.destroy();
+      return;
+    }
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** this.reconnectAttempt, RECONNECT_MAX_MS);
     this.reconnectAttempt++;
     logger.info('[clob-ws] reconnecting', { attempt: this.reconnectAttempt, delayMs: delay });
