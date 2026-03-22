@@ -196,6 +196,8 @@ export async function executeArb(
       noError: noResult.error,
       ts: Date.now(),
     }));
+    // YES leg filled = real USDC spent — deduct 1 leg so bankroll stays accurate
+    await deductStake(redis, stakePerLeg);
     return {
       marketId: opp.marketId,
       success: false,
