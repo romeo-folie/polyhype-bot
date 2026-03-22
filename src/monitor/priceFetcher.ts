@@ -33,10 +33,13 @@ export interface CurrentPrice {
  */
 export async function fetchCurrentPrice(position: Position): Promise<CurrentPrice | null> {
   try {
-    // Ensure the position's market is watched for WS updates
+    // NOTE: feed.watch() is intentionally NOT called here. The read path must
+    // remain side-effect-free — watch registration belongs in the monitor setup
+    // (fetchAllCurrentPrices callers should call feed.watch() before the read loop).
+    // Calling watch() on every fetch invocation caused repeated subscription attempts
+    // and obscured WS connection logic.
     const redis = getRedis();
     const feed = getPriceFeed(redis);
-    await feed.watch(position.marketId, position.clobTokenIds);
 
     // Try WS cache first for sub-second freshness
     const cachedPrice = await feed.getCachedPrice(position.marketId);

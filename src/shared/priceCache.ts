@@ -25,8 +25,14 @@ export async function resolveYesPrice(
   try {
     const market = await getMarket(marketId);
     const prices = parseOutcomePrices(market.outcomePrices);
+    if (prices.length === 0) {
+      // Empty outcomes array — cannot determine a valid price.
+      // Returning null (not 0) to avoid triggering false divergence signals.
+      logger.warn('[price-cache] empty outcomePrices from Gamma REST', { marketId });
+      return null;
+    }
     const price = parseFloat(prices[0] ?? '0');
-    if (!isFinite(price)) return null;
+    if (!isFinite(price) || price < 0 || price > 1) return null;
     logger.debug('[price-cache] REST fallback', { marketId, price });
     return price;
   } catch (err) {
