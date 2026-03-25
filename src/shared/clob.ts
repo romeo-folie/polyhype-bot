@@ -5,7 +5,7 @@
  * Trades are signed locally with POLYGON_WALLET_PRIVATE_KEY.
  */
 
-import { ClobClient, OrderType, Side } from '@polymarket/clob-client';
+import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client';
 import { Wallet } from '@ethersproject/wallet';
 import { loadConfig } from './config.js';
 
@@ -177,9 +177,10 @@ export async function getClobBalance(): Promise<number | null> {
   try {
     const client = await getClobClient();
     // getBalanceAllowance returns { balance, allowance } as string decimals
+    // COLLATERAL = USDC wallet balance + allowance for the exchange contract
     const result = await (client as unknown as {
-      getBalanceAllowance(): Promise<{ balance?: string; allowance?: string }>;
-    }).getBalanceAllowance();
+      getBalanceAllowance(params: { asset_type: string }): Promise<{ balance?: string; allowance?: string }>;
+    }).getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
     const balance = parseFloat(result.balance ?? '0');
     const allowance = parseFloat(result.allowance ?? '0');
     if (!isFinite(balance) || !isFinite(allowance)) return null;
