@@ -10,7 +10,7 @@
  */
 
 import 'dotenv/config';
-import { getRedis, closeRedis } from '../shared/redis.js';
+import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { getOpenPositions } from '../execution/positionLedger.js';
@@ -25,8 +25,10 @@ export async function runMonitor(): Promise<void> {
 
   // Prevent overlapping runs — a slow cycle (many positions, Simmer API latency)
   // can exceed the 5-min cron interval and stack processes on low-memory hosts.
-  const lockAcquired = await redis.set('monitor:lock', '1', 'EX', 270, 'NX');
-  if (!lockAcquired) {
+  // Token-based: only the acquiring run can release the lock (safe if TTL expires
+  // and a newer run reacquires before the older run finishes).
+  const lockToken = await acquireLock('monitor:lock', 270);
+  if (!lockToken) {
     logger.info('[monitor] previous cycle still running, skipping');
     return;
   }
@@ -34,7 +36,7 @@ export async function runMonitor(): Promise<void> {
   try {
     await runMonitorInner(redis);
   } finally {
-    await redis.del('monitor:lock').catch(() => { /* best effort */ });
+    await releaseLock('monitor:lock', lockToken).catch(() => { /* best effort */ });
     destroyPriceFeed();
   }
 }

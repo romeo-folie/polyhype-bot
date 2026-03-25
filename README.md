@@ -211,15 +211,17 @@ PATH=/usr/local/bin:/usr/bin:/bin
 */15 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/arb/index.ts >> /tmp/pga-arb.log 2>&1
 ```
 
-#### Overlap protection — three layers
+#### Overlap protection
 
-| Layer | Mechanism | Protects against |
-|---|---|---|
-| `flock` in `run.sh` | OS-level file lock per script | Second cron tick firing while prior OS process is still alive |
-| Redis lock in entrypoint | `SET ... EX 270 NX` | Slow cycle (LLM latency, Simmer API) that releases the flock before finishing |
-| WebSocket feed cleanup | `destroyPriceFeed()` in `finally` | Open WS connection holding the Node event loop open after work is done |
+| Layer | Applies to | Mechanism | Protects against |
+|---|---|---|---|
+| `flock` in `run.sh` | All pipelines | OS-level file lock per script (`/tmp/pga-<script>.lock`) | Second cron tick firing while prior OS process is still alive |
+| Redis overlap lock | `execution`, `monitor`, `spot` | Token-based `SET ... EX NX` + Lua compare-and-delete release | Slow cycle (LLM latency, Simmer API) running longer than the lock TTL; prevents a long-running process from releasing a lock it no longer owns |
+| WebSocket feed cleanup | `monitor`, `spot` | `destroyPriceFeed()` in `finally` | Open WS connection holding the Node event loop open after work is done |
 
-All three layers are required for clean, bounded cron behaviour on a Raspberry Pi.
+The Redis lock uses token-based ownership: each run stores a unique token on acquire and releases with a Lua script that only deletes if the stored value still matches. This prevents an expired long-running process from evicting a newer run's lock.
+
+`arb` only uses `flock` (its cycles are short and have no WS feed); the Redis lock applies to the three pipelines that make LLM calls.
 
 ## Scripts
 

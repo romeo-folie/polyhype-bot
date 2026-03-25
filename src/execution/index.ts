@@ -10,7 +10,7 @@
  */
 
 import 'dotenv/config';
-import { getRedis, closeRedis } from '../shared/redis.js';
+import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping } from '../mapping/index.js';
@@ -31,8 +31,10 @@ export async function runExecution(): Promise<void> {
   // Prevent overlapping runs — ingestion + LLM mapping can exceed the 5-min cron
   // interval on slow networks / cold LLM responses. Without a lock, a second cron
   // tick spawns a second process that races for the same signals and double-executes.
-  const lockAcquired = await redis.set('execution:lock', '1', 'EX', 270, 'NX');
-  if (!lockAcquired) {
+  // Token-based: only the acquiring run can release the lock (safe if TTL expires
+  // and a newer run reacquires before the older run finishes).
+  const lockToken = await acquireLock('execution:lock', 270);
+  if (!lockToken) {
     logger.info('[execution] previous cycle still running, skipping');
     return;
   }
@@ -40,7 +42,7 @@ export async function runExecution(): Promise<void> {
   try {
     await runExecutionInner(redis);
   } finally {
-    await redis.del('execution:lock').catch(() => { /* best effort */ });
+    await releaseLock('execution:lock', lockToken).catch(() => { /* best effort */ });
   }
 }
 
