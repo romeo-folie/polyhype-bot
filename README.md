@@ -36,13 +36,25 @@ flowchart TB
         REEVAL_CHECK --> REEVAL_LLM --> REEVAL_EXIT
     end
 
+    subgraph PRICES_WS["📡 Price Feed (shared singleton)"]
+        WS_FEED["CLOB WebSocket<br/><i>wss://ws-subscriptions-clob</i>"]
+        WS_CACHE["Redis Price Cache<br/><i>30s TTL per market</i>"]
+        GAMMA_REST["Gamma REST<br/><i>fallback on cache miss</i>"]
+
+        WS_FEED --> WS_CACHE
+        WS_CACHE -->|"miss"| GAMMA_REST
+    end
+
     subgraph EXECUTION["💰 Trade Execution"]
+        CTX_CHECK["Simmer Context Check<br/><i>GET /sdk/context/{id}<br/>skip: resolved / existing position<br/>/ flip-flop / fee drag</i>"]
         ROUTER["Execution Router"]
         SIMMER["Simmer API<br/><i>primary venue</i>"]
         CLOB["Polymarket CLOB<br/><i>fallback — direct orderbook</i>"]
         LEDGER["Redis Position Ledger"]
         TELEGRAM["Telegram Notifications"]
 
+        CTX_CHECK -->|"safe to trade"| ROUTER
+        CTX_CHECK -->|"skip"| TELEGRAM
         ROUTER -->|"market in Simmer"| SIMMER
         ROUTER -->|"market not in Simmer"| CLOB
         SIMMER --> LEDGER
@@ -51,18 +63,21 @@ flowchart TB
     end
 
     subgraph MONITOR["👁️ Position Monitor (cron:monitor, every 5 min)"]
-        PRICES["Gamma Price Fetcher"]
+        MON_PRICES["resolveYesPrice()<br/><i>WS cache → Gamma REST</i>"]
         STOPLOSS["Stop-Loss<br/><i>exit if loss ≥ 30%</i>"]
         TAKEPROFIT["Take-Profit<br/><i>exit if gain ≥ 25%</i>"]
         DIVCLOSE["Divergence Closed<br/><i>market reached consensus</i>"]
+        REDEEMER["Resolution Redeemer<br/><i>auto-redeem winning positions<br/>via Simmer API</i>"]
         SELL["Sell Executor<br/><i>Simmer / CLOB</i>"]
 
-        PRICES --> STOPLOSS
+        MON_PRICES --> STOPLOSS
         STOPLOSS -->|"loss exceeded"| SELL
-        PRICES --> TAKEPROFIT
+        MON_PRICES --> TAKEPROFIT
         TAKEPROFIT -->|"profit target hit"| SELL
-        PRICES --> DIVCLOSE
+        MON_PRICES --> DIVCLOSE
         DIVCLOSE -->|"edge gone"| SELL
+        MON_PRICES --> REDEEMER
+        REDEEMER -->|"resolved + won"| TELEGRAM
     end
 
     SCORER -->|"high-urgency items"| MAPPING
@@ -71,6 +86,9 @@ flowchart TB
     REEVAL_EXIT -->|"exit signal"| SELL
     LEDGER -.->|"open positions"| MONITOR
     LEDGER -.->|"open positions"| REEVAL
+    WS_CACHE -.->|"fresh prices"| MON_PRICES
+    WS_FEED -.->|"watch market"| MAPPING
+    WS_FEED -.->|"watch open positions"| MONITOR
 
     subgraph GUARDS["🛡️ Execution Guards"]
         G1["Stake floor check"]
@@ -78,7 +96,7 @@ flowchart TB
         G3["Idempotency key<br/><i>Redis, 1h TTL</i>"]
     end
 
-    DIVERGENCE --> GUARDS --> ROUTER
+    DIVERGENCE --> GUARDS --> CTX_CHECK
 
     style INGESTION fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
     style MAPPING fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
@@ -92,9 +110,9 @@ flowchart TB
 
 | Cycle | Entrypoint | What happens |
 |-------|-----------|--------------|
-| **Trade** (`cron:trade`) | `src/execution/index.ts` | Ingest OSINT → score urgency → map to markets → re-evaluate open positions → execute new trades |
-| **Monitor** (`cron:monitor`) | `src/monitor/index.ts` | Fetch prices for open positions → evaluate stop-loss / take-profit / divergence → exit if triggered |
-| **Spot** (`cron:spot`) | `src/spot/index.ts` | Poll spot prices → detect significant moves → find correlated markets → estimate probability → execute trades |
+| **Trade** (`cron:trade`) | `src/execution/index.ts` | Ingest OSINT → apply timing window multiplier → score urgency → watch high-urgency markets on WS feed → map to markets → context check (Simmer) → re-evaluate open positions → execute new trades |
+| **Monitor** (`cron:monitor`) | `src/monitor/index.ts` | Resolve prices via WS cache (Gamma REST fallback) → evaluate stop-loss / take-profit / divergence → exit if triggered → auto-redeem resolved winning positions |
+| **Spot** (`cron:spot`) | `src/spot/index.ts` | Poll spot prices → detect significant moves → cross-check Simmer oracle opportunities → find correlated markets → watch on WS feed → estimate probability → execute trades |
 
 ### Exit Priority
 
@@ -111,6 +129,41 @@ flowchart TB
 |-------|-----------|------|
 | **Simmer** (primary) | Market exists in Simmer catalogue | `SIMMER_API_KEY` |
 | **Polymarket CLOB** (fallback) | Market not in Simmer | `POLYGON_WALLET_PRIVATE_KEY` (local signing) |
+
+### Price Resolution
+
+All price lookups go through `resolveYesPrice()`, which checks the CLOB WebSocket cache (Redis, 30s TTL) before falling back to Gamma REST. A single `ClobPriceFeed` singleton subscribes to market order-book updates for all watched markets:
+
+- High-urgency OSINT markets are subscribed when they enter the divergence calculator
+- Spot-triggered correlated markets are subscribed at trade time
+- Open position markets are subscribed at monitor startup
+
+Set `WS_ENABLED=false` to disable WebSocket subscriptions (REST-only mode; useful in test environments).
+
+### Pre-Trade Context Check (Simmer)
+
+Before every Simmer trade, `executor.ts` calls `GET /api/sdk/context/{market_id}` and skips the trade if:
+
+- Market is resolved or closed
+- Simmer already sees an open position on the same side (prevents doubling up)
+- Simmer flags a severe flip-flop warning (signal instability)
+- Market has fees (fee drag erodes geopolitical edge at typical stake sizes)
+
+### Auto-Redemption
+
+The monitor cycle automatically redeems winning positions on resolved markets via the Simmer API (`resolutionRedeemer.ts`). Redemptions are Telegram-notified with the profit amount.
+
+### Timing Window Multiplier
+
+OSINT urgency scores are boosted by a regional timing window after LLM scoring:
+
+| Window (UTC) | Region | Multiplier | Rationale |
+|---|---|---|---|
+| 00:00 – 08:00 | Asia/Pacific | ×1.20 | US asleep — geopolitical repricing lag is widest |
+| 06:00 – 14:00 | Europe/Middle East | ×1.15 | US waking — partial repricing lag |
+| Outside windows | — | ×1.00 | No adjustment |
+
+Scores are capped at 10. Configure via `TIMING_WINDOW_ENABLED` (default `true`).
 
 ## Setup
 
@@ -187,12 +240,12 @@ PATH=/usr/local/bin:/usr/bin:/bin
 
 | Module | README | Description |
 |--------|--------|-------------|
-| `src/shared/` | [README](src/shared/README.md) | Config, Redis client, Simmer SDK wrapper, logger |
-| `src/ingestion/` | [README](src/ingestion/README.md) | RSS + Cheerio scraping, Redis dedup, LLM urgency scoring |
+| `src/shared/` | [README](src/shared/README.md) | Config, Redis client, Simmer SDK wrapper (`context` + `opportunities` endpoints), CLOB WebSocket feed, price cache, logger |
+| `src/ingestion/` | [README](src/ingestion/README.md) | RSS + Cheerio scraping, Redis dedup, LLM urgency scoring, timing window multiplier |
 | `src/mapping/` | [README](src/mapping/README.md) | Gamma API client, entity extraction, consensus probability, Half-Kelly sizing |
-| `src/execution/` | [README](src/execution/README.md) | Simmer trade execution, Redis position ledger, Telegram notifications |
-| `src/monitor/` | [README](src/monitor/README.md) | Position monitor, take-profit evaluator + executor |
-| `src/spot/` | — | Spot price monitor: polls CoinGecko/Yahoo Finance, detects moves, correlates to Polymarket, executes trades |
+| `src/execution/` | [README](src/execution/README.md) | Simmer pre-trade context check, execution router, Redis position ledger, Telegram notifications |
+| `src/monitor/` | [README](src/monitor/README.md) | WS-backed price resolution, stop-loss / take-profit / divergence evaluator, auto-redemption of resolved positions |
+| `src/spot/` | — | Spot price monitor: polls CoinGecko/Yahoo Finance, Simmer oracle cross-check, correlates to Polymarket, executes trades |
 
 ## Phases
 
