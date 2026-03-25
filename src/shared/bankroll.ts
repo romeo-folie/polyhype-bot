@@ -54,13 +54,11 @@ export async function setBankroll(_redis: Redis, _amount: number): Promise<void>
 }
 
 /** No-op — Simmer deducts from wallet on trade execution. */
-export async function deductStake(_redis: Redis, stakeUsd: number): Promise<number> {
+export async function deductStake(_redis: Redis, stakeUsd: number): Promise<void> {
   logger.info('[bankroll] stake deducted (tracked by Simmer)', { stakeUsd });
-  return 0;
 }
 
 /** No-op — Simmer credits wallet on redemption/exit. */
-export async function creditProceeds(_redis: Redis, proceedsUsd: number): Promise<number> {
+export async function creditProceeds(_redis: Redis, proceedsUsd: number): Promise<void> {
   logger.info('[bankroll] proceeds credited (tracked by Simmer)', { proceedsUsd });
-  return 0;
 }

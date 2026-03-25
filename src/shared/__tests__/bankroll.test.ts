@@ -79,34 +79,36 @@ describe('bankroll', () => {
     );
   });
 
-  it('throws when Simmer fails and no last known balance exists', async () => {
-    // This test relies on module-level state. Since we already called getBankroll
-    // successfully above (in prior tests within this describe block), the
-    // lastKnownBalance may be populated. We test the throw path by importing
-    // fresh — but since jest module cache is shared, we verify the fallback path.
-    // The throw path is tested implicitly: on a cold start with no prior success,
-    // the error propagates.
-    mockGetPortfolio.mockRejectedValue(new Error('Simmer API returned HTTP 500'));
-    // After prior tests, lastKnownBalance is already set, so it falls back.
-    // This verifies that the fallback mechanism works across calls.
-    const result = await getBankroll();
-    expect(typeof result).toBe('number');
-  });
-
   it('setBankroll is a no-op', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await expect(setBankroll({} as any, 42)).resolves.toBeUndefined();
   });
 
-  it('deductStake is a no-op returning 0', async () => {
+  it('deductStake is a no-op returning void', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await deductStake({} as any, 25);
-    expect(result).toBe(0);
+    await expect(deductStake({} as any, 25)).resolves.toBeUndefined();
   });
 
-  it('creditProceeds is a no-op returning 0', async () => {
+  it('creditProceeds is a no-op returning void', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await creditProceeds({} as any, 30);
-    expect(result).toBe(0);
+    await expect(creditProceeds({} as any, 30)).resolves.toBeUndefined();
+  });
+});
+
+// Note: the cold-start throw path (lastKnownBalance === null + API failure → throws)
+// is tested in bankroll.coldstart.test.ts, which gets a fresh module instance.
+describe('bankroll — error fallback with cached balance', () => {
+  it('falls back to prior cached balance when Simmer fails mid-run', async () => {
+    mockGetPortfolio.mockReset();
+    mockGetPortfolio.mockRejectedValue(new Error('Simmer API returned HTTP 503'));
+
+    // lastKnownBalance was populated by earlier tests in this file —
+    // verify that the fallback path returns the cached value.
+    const result = await getBankroll();
+    expect(typeof result).toBe('number');
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      '[bankroll] Simmer API failed — using last known balance',
+      expect.any(Object),
+    );
   });
 });
