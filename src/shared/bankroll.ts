@@ -1,67 +1,66 @@
 /**
- * Live bankroll tracker — Redis-backed.
+ * Live bankroll tracker — Simmer portfolio as source of truth.
  *
- * bankroll:current = cash available (USDC)
- * Updated on every trade entry (subtract stake) and exit (add proceeds).
- * Cold-start: falls back to BANKROLL_USD env config.
+ * getBankroll() fetches the real USDC balance from Simmer's portfolio API.
+ * deductStake() and creditProceeds() are no-ops — Simmer tracks the wallet.
  *
- * All mutations use INCRBYFLOAT for atomicity — safe under concurrent
- * pipeline access (news cron + spot cron + monitor cron).
+ * The Redis parameter is kept in signatures for backward compatibility with
+ * existing callers but is not used.
  */
 import type { Redis } from 'ioredis';
-import { loadConfig } from './config.js';
+import { getPortfolio } from './simmer.js';
 import { logger } from './logger.js';
 
-const BANKROLL_KEY = 'bankroll:current';
+/** Warn when live balance drops below this threshold. */
+const LOW_BALANCE_WARN_USD = 1.0;
 
-/** Get current bankroll. Falls back to config on cold start (NX-guarded). */
-export async function getBankroll(redis: Redis): Promise<number> {
-  const raw = await redis.get(BANKROLL_KEY);
-  if (raw !== null) return parseFloat(raw);
-  // Cold start — seed from config. NX prevents overwriting a concurrent write.
-  const initial = loadConfig().BANKROLL_USD;
-  const wasSet = await redis.set(BANKROLL_KEY, initial.toFixed(6), 'NX');
-  if (wasSet) {
-    logger.info('[bankroll] cold-start seed', { initial });
+/** In-memory fallback: last successfully fetched balance. */
+let lastKnownBalance: number | null = null;
+
+/** Get current bankroll from Simmer's live portfolio balance. */
+export async function getBankroll(_redis?: Redis): Promise<number> {
+  try {
+    const portfolio = await getPortfolio();
+    lastKnownBalance = portfolio.balance_usdc;
+
+    if (portfolio.balance_usdc <= 0) {
+      logger.error('[bankroll] live balance is zero or negative — all trades will be skipped', {
+        balanceUsdc: portfolio.balance_usdc,
+      });
+    } else if (portfolio.balance_usdc < LOW_BALANCE_WARN_USD) {
+      logger.warn('[bankroll] live balance is suspiciously low', {
+        balanceUsdc: portfolio.balance_usdc,
+      });
+    } else {
+      logger.info('[bankroll] live balance from Simmer', { balanceUsdc: portfolio.balance_usdc });
+    }
+
+    return portfolio.balance_usdc;
+  } catch (err) {
+    if (lastKnownBalance !== null) {
+      logger.warn('[bankroll] Simmer API failed — using last known balance', {
+        lastKnownBalance,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return lastKnownBalance;
+    }
+    throw err;
   }
-  // Re-read in case another process seeded first
-  const current = await redis.get(BANKROLL_KEY);
-  return parseFloat(current!);
 }
 
-/** Set bankroll to an absolute value. */
-export async function setBankroll(redis: Redis, amount: number): Promise<void> {
-  await redis.set(BANKROLL_KEY, amount.toFixed(6));
+/** @deprecated No-op — Simmer tracks the wallet balance directly. */
+export async function setBankroll(_redis: Redis, _amount: number): Promise<void> {
+  logger.info('[bankroll] setBankroll is deprecated — Simmer tracks the wallet balance');
 }
 
-/** Lua script: atomic decrement-and-clamp-at-zero. */
-const DEDUCT_LUA = `
-local v = redis.call('INCRBYFLOAT', KEYS[1], ARGV[1])
-if tonumber(v) < 0 then
-  redis.call('SET', KEYS[1], '0.000000')
-  return '0.000000'
-end
-return v
-`;
-
-/**
- * Deduct stake on trade entry. Uses a Lua script for atomic
- * decrement-and-clamp-at-zero — safe under concurrent access.
- */
-export async function deductStake(redis: Redis, stakeUsd: number): Promise<number> {
-  // Ensure key exists before Lua script
-  await getBankroll(redis);
-  const result = await redis.eval(DEDUCT_LUA, 1, BANKROLL_KEY, (-stakeUsd).toFixed(6)) as string;
-  const updated = parseFloat(result);
-  logger.info('[bankroll] stake deducted', { stakeUsd, after: updated });
-  return updated;
+/** No-op — Simmer deducts from wallet on trade execution. */
+export async function deductStake(_redis: Redis, stakeUsd: number): Promise<number> {
+  logger.info('[bankroll] stake deducted (tracked by Simmer)', { stakeUsd });
+  return 0;
 }
 
-/** Credit proceeds on trade exit. Uses INCRBYFLOAT for atomicity. */
-export async function creditProceeds(redis: Redis, proceedsUsd: number): Promise<number> {
-  // Ensure key exists before INCRBYFLOAT
-  await getBankroll(redis);
-  const updated = parseFloat(await redis.incrbyfloat(BANKROLL_KEY, proceedsUsd));
-  logger.info('[bankroll] proceeds credited', { proceedsUsd, after: updated });
-  return updated;
+/** No-op — Simmer credits wallet on redemption/exit. */
+export async function creditProceeds(_redis: Redis, proceedsUsd: number): Promise<number> {
+  logger.info('[bankroll] proceeds credited (tracked by Simmer)', { proceedsUsd });
+  return 0;
 }
