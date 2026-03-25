@@ -115,33 +115,59 @@ flowchart TB
 ## Setup
 
 ```bash
-# 1. Install dependencies
+# 1. Start Redis
+docker run -d --name pga-redis --restart unless-stopped -p 6379:6379 redis:alpine
+# REDIS_URL=redis://localhost:6379
+#
+# Or use a custom port (e.g. if 6379 is taken):
+# docker run -d --name pga-redis --restart unless-stopped -p 6385:6379 redis:alpine
+# REDIS_URL=redis://localhost:6385
+
+# 2. Install dependencies
 npm install
 
-# 2. Configure environment
+# 3. Configure environment
 cp .env.example .env
 # Required: REDIS_URL, SIMMER_API_KEY, OPENAI_API_KEY (or GEMINI_API_KEY),
 #           TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, POLYGON_WALLET_PRIVATE_KEY
 # See .env.example for all optional tuning knobs.
 
-# 3. Verify build
+# 4. Verify build
 npm run build
 
-# 4. Probe Simmer connectivity
+# 5. Probe Simmer connectivity
 npm run probe:simmer
 
-# 5. Run trade + monitor cycles via cron (every 5 min)
+# 6. Run trade + monitor cycles via cron (every 5 min)
 # See crontab example below.
 ```
 
 ### Crontab
 
-```cron
-PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+Cron runs in a stripped environment and won't load your `.env` automatically. Use a wrapper script:
 
-*/5 * * * * cd /path/to/polymarket-geopolitical-agent && npx tsx src/execution/index.ts >> /tmp/pga-trade.log 2>&1
-*/5 * * * * cd /path/to/polymarket-geopolitical-agent && npx tsx src/monitor/index.ts >> /tmp/pga-monitor.log 2>&1
-* * * * * cd /path/to/polymarket-geopolitical-agent && npx tsx src/spot/index.ts >> /tmp/pga-spot.log 2>&1
+```bash
+# create run.sh in the project root
+cat > /path/to/polymarket-geopolitical-agent/run.sh << 'EOF'
+#!/bin/bash
+set -a
+source /path/to/polymarket-geopolitical-agent/.env
+set +a
+exec "$@"
+EOF
+chmod +x /path/to/polymarket-geopolitical-agent/run.sh
+```
+
+Then add to crontab (`crontab -e`):
+
+```cron
+PATH=/usr/local/bin:/usr/bin:/bin
+# On macOS with Homebrew: PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+# On Linux with nvm: PATH=/home/<user>/.nvm/versions/node/<version>/bin:/usr/local/bin:/usr/bin:/bin
+
+*/5 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/execution/index.ts >> /tmp/pga-trade.log 2>&1
+*/5 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/monitor/index.ts >> /tmp/pga-monitor.log 2>&1
+* * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/spot/index.ts >> /tmp/pga-spot.log 2>&1
 ```
 
 ## Scripts
