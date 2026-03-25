@@ -1,9 +1,15 @@
 import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 
 const mockGetPortfolio = jest.fn<() => Promise<{ balance_usdc: number }>>();
+const mockGetClobBalance = jest.fn<() => Promise<number | null>>();
 
 jest.unstable_mockModule('../simmer.js', () => ({
   getPortfolio: mockGetPortfolio,
+}));
+
+jest.unstable_mockModule('../clob.js', () => ({
+  getClobBalance: mockGetClobBalance,
+  submitClobBuy: jest.fn(),
 }));
 
 const mockLogger = {
@@ -23,104 +29,94 @@ const { getBankroll, setBankroll, deductStake, creditProceeds, _resetCacheForTes
 describe('bankroll', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    // Reset module-level cache state between tests so each test starts fresh.
     _resetCacheForTests();
+    // Default: Simmer 100, CLOB 50 → combined 150
     mockGetPortfolio.mockResolvedValue({ balance_usdc: 100 });
+    mockGetClobBalance.mockResolvedValue(50);
   });
 
-  it('returns live Simmer balance', async () => {
+  it('returns combined Simmer + CLOB balance', async () => {
     const result = await getBankroll();
-    expect(result).toBe(100);
+    expect(result).toBe(150);
     expect(mockGetPortfolio).toHaveBeenCalledTimes(1);
+    expect(mockGetClobBalance).toHaveBeenCalledTimes(1);
   });
 
-  it('returns updated balance when Simmer balance changes', async () => {
-    mockGetPortfolio.mockResolvedValue({ balance_usdc: 85.5 });
+  it('logs combined balance breakdown', async () => {
+    await getBankroll();
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      '[bankroll] combined live balance',
+      expect.objectContaining({ simmerUsdc: 100, clobUsdc: 50, totalUsdc: 150 }),
+    );
+  });
+
+  it('treats null CLOB balance as 0 (CLOB unavailable / key not configured)', async () => {
+    mockGetClobBalance.mockResolvedValue(null);
     const result = await getBankroll();
-    expect(result).toBeCloseTo(85.5);
+    expect(result).toBe(100); // Simmer only
   });
 
   it('accepts optional redis parameter for backward compat', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await getBankroll({} as any);
-    expect(result).toBe(100);
+    expect(result).toBe(150);
   });
 
-  it('logs error when balance is zero', async () => {
+  it('logs error when combined total is zero', async () => {
     mockGetPortfolio.mockResolvedValue({ balance_usdc: 0 });
+    mockGetClobBalance.mockResolvedValue(0);
     const result = await getBankroll();
     expect(result).toBe(0);
     expect(mockLogger.error).toHaveBeenCalledWith(
-      '[bankroll] live balance is zero or negative — all trades will be skipped',
-      expect.objectContaining({ balanceUsdc: 0 }),
+      '[bankroll] total balance is zero or negative — all trades will be skipped',
+      expect.objectContaining({ totalUsdc: 0 }),
     );
   });
 
-  it('logs warning when balance is suspiciously low', async () => {
-    mockGetPortfolio.mockResolvedValue({ balance_usdc: 0.5 });
+  it('logs warning when combined total is suspiciously low', async () => {
+    mockGetPortfolio.mockResolvedValue({ balance_usdc: 0.3 });
+    mockGetClobBalance.mockResolvedValue(0.2);
     const result = await getBankroll();
-    expect(result).toBe(0.5);
+    expect(result).toBeCloseTo(0.5);
     expect(mockLogger.warn).toHaveBeenCalledWith(
-      '[bankroll] live balance is suspiciously low',
-      expect.objectContaining({ balanceUsdc: 0.5 }),
+      '[bankroll] total balance is suspiciously low',
+      expect.objectContaining({ totalUsdc: expect.closeTo(0.5, 5) }),
     );
   });
 
-  it('caches balance within TTL — does not call Simmer on rapid successive calls', async () => {
-    await getBankroll(); // populates cache
-    await getBankroll(); // cache hit
-    await getBankroll(); // cache hit
+  it('caches combined balance within TTL', async () => {
+    await getBankroll();
+    await getBankroll();
+    await getBankroll();
     expect(mockGetPortfolio).toHaveBeenCalledTimes(1);
+    expect(mockGetClobBalance).toHaveBeenCalledTimes(1);
   });
 
   it('refreshes balance after TTL expires', async () => {
-    // Populate cache with 100
     await getBankroll();
-    expect(mockGetPortfolio).toHaveBeenCalledTimes(1);
-
-    // Expire the cache by resetting lastFetchTime to 0
     _resetCacheForTests();
-    // But keep lastKnownBalance non-null by doing a successful fetch first
-    mockGetPortfolio.mockResolvedValue({ balance_usdc: 100 });
-    await getBankroll();
-    _resetCacheForTests(); // expire again
 
-    // Now next call with different balance value should fetch fresh
-    mockGetPortfolio.mockResolvedValue({ balance_usdc: 120 });
+    mockGetPortfolio.mockResolvedValue({ balance_usdc: 200 });
+    mockGetClobBalance.mockResolvedValue(75);
     const result = await getBankroll();
-    expect(result).toBe(120);
+    expect(result).toBe(275);
   });
 
-  it('falls back to last known balance on Simmer API failure', async () => {
-    // First call succeeds — caches balance
-    mockGetPortfolio.mockResolvedValue({ balance_usdc: 200 });
+  it('falls back to last known combined balance on fetch failure', async () => {
+    // First call: succeeds, caches 150
     await getBankroll();
 
-    // Expire cache so next call attempts Simmer
-    _resetCacheForTests();
-    // Preserve lastKnownBalance by re-populating via a successful call, then expiring
-    // Actually _resetCacheForTests clears lastKnownBalance too — we need to re-seed it:
-    mockGetPortfolio.mockResolvedValue({ balance_usdc: 200 });
-    await getBankroll(); // repopulates lastKnownBalance = 200
-
-    // Now expire only the time (simulate by using the real module: set lastFetchTime to 0)
-    // Since _resetCacheForTests clears both, we instead just force a fresh expired state
-    // by mocking Date.now to return far future on the next call. Simplest: just call
-    // _resetCacheForTests and immediately make the next getBankroll call fail — but that
-    // also clears lastKnownBalance. So we need a two-step: fetch (cache), then fail.
-    // The trick: after a successful fetch, lastKnownBalance IS set. _resetCacheForTests
-    // clears it. So use a workaround: don't reset, just let the cache expire naturally
-    // by mocking Date.now for just this test.
+    // Expire cache via Date.now mock
     const realDateNow = Date.now;
-    Date.now = () => realDateNow() + 20_000; // pretend 20s have passed
+    Date.now = () => realDateNow() + 20_000;
 
     try {
       mockGetPortfolio.mockRejectedValue(new Error('Simmer API returned HTTP 503'));
       const result = await getBankroll();
-      expect(result).toBe(200);
+      expect(result).toBe(150);
       expect(mockLogger.warn).toHaveBeenCalledWith(
-        '[bankroll] Simmer API failed — using last known balance',
-        expect.objectContaining({ lastKnownBalance: 200 }),
+        '[bankroll] balance fetch failed — using last known balance',
+        expect.objectContaining({ lastKnownBalance: 150 }),
       );
     } finally {
       Date.now = realDateNow;
@@ -132,36 +128,30 @@ describe('bankroll', () => {
     await expect(setBankroll({} as any, 42)).resolves.toBeUndefined();
   });
 
-  it('deductStake updates the in-memory cache so subsequent getBankroll calls reflect the deduction', async () => {
-    // Populate cache with 100
-    mockGetPortfolio.mockResolvedValue({ balance_usdc: 100 });
-    const initialBalance = await getBankroll();
-    expect(initialBalance).toBe(100);
+  it('deductStake subtracts from cached combined balance', async () => {
+    await getBankroll(); // cache = 150
 
-    // Deduct — Simmer won't be called again within TTL, so cache must be updated
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await deductStake({} as any, 25);
+    await deductStake({} as any, 30);
 
-    // Next getBankroll call should hit cache and return 75 (not 100)
-    const afterDeduct = await getBankroll();
-    expect(afterDeduct).toBe(75);
-    // Simmer was only called once (the initial fetch)
-    expect(mockGetPortfolio).toHaveBeenCalledTimes(1);
+    const after = await getBankroll();
+    expect(after).toBe(120);
+    expect(mockGetPortfolio).toHaveBeenCalledTimes(1); // still cached
   });
 
   it('deductStake does not go below zero', async () => {
     mockGetPortfolio.mockResolvedValue({ balance_usdc: 10 });
-    await getBankroll();
+    mockGetClobBalance.mockResolvedValue(5);
+    await getBankroll(); // cache = 15
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await deductStake({} as any, 50); // more than balance
+    await deductStake({} as any, 100);
 
     const result = await getBankroll();
     expect(result).toBe(0);
   });
 
-  it('deductStake is safe when cache is empty (before first getBankroll)', async () => {
-    // Cache is empty (_resetCacheForTests called in beforeEach)
+  it('deductStake is safe when cache is empty', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await expect(deductStake({} as any, 25)).resolves.toBeUndefined();
   });

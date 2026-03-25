@@ -9,6 +9,7 @@
  */
 import type { Redis } from 'ioredis';
 import { getPortfolio } from './simmer.js';
+import { getClobBalance } from './clob.js';
 import { logger } from './logger.js';
 
 /** Warn when live balance drops below this threshold. */
@@ -27,11 +28,19 @@ export function _resetCacheForTests(): void {
   lastFetchTime = 0;
 }
 
-/** Get current bankroll from Simmer's live portfolio balance.
+/**
+ * Get the combined bankroll across all execution venues.
+ *
+ * - Simmer balance: USDC managed by Simmer's portfolio (primary execution path).
+ * - CLOB balance:   On-chain USDC allowance/balance for direct Polymarket CLOB
+ *   trades (fallback when Simmer doesn't know the market).
+ *
+ * Combined total is used for position sizing so Half-Kelly calculations reflect
+ * the full capital available, regardless of which venue a trade routes through.
  *
  * Caches the result for CACHE_TTL_MS (15s) so rapid calls within a single
  * pipeline cycle (e.g. 30 market candidates all calling getBankroll()) reuse
- * the same value instead of issuing 30 sequential HTTP requests to Simmer.
+ * the same value instead of issuing sequential API requests.
  */
 export async function getBankroll(_redis?: Redis): Promise<number> {
   const now = Date.now();
@@ -40,26 +49,37 @@ export async function getBankroll(_redis?: Redis): Promise<number> {
   }
 
   try {
-    const portfolio = await getPortfolio();
-    lastKnownBalance = portfolio.balance_usdc;
+    // Fetch Simmer and CLOB balances in parallel — neither blocks the other.
+    const [portfolio, clobBalance] = await Promise.all([
+      getPortfolio(),
+      getClobBalance(),
+    ]);
+
+    const simmerBalance = portfolio.balance_usdc;
+    const clob = clobBalance ?? 0;
+    const total = simmerBalance + clob;
+
+    lastKnownBalance = total;
     lastFetchTime = now;
 
-    if (portfolio.balance_usdc <= 0) {
-      logger.error('[bankroll] live balance is zero or negative — all trades will be skipped', {
-        balanceUsdc: portfolio.balance_usdc,
+    logger.info('[bankroll] combined live balance', {
+      simmerUsdc: simmerBalance,
+      clobUsdc: clob,
+      totalUsdc: total,
+    });
+
+    if (total <= 0) {
+      logger.error('[bankroll] total balance is zero or negative — all trades will be skipped', {
+        totalUsdc: total,
       });
-    } else if (portfolio.balance_usdc < LOW_BALANCE_WARN_USD) {
-      logger.warn('[bankroll] live balance is suspiciously low', {
-        balanceUsdc: portfolio.balance_usdc,
-      });
-    } else {
-      logger.info('[bankroll] live balance from Simmer', { balanceUsdc: portfolio.balance_usdc });
+    } else if (total < LOW_BALANCE_WARN_USD) {
+      logger.warn('[bankroll] total balance is suspiciously low', { totalUsdc: total });
     }
 
-    return portfolio.balance_usdc;
+    return total;
   } catch (err) {
     if (lastKnownBalance !== null) {
-      logger.warn('[bankroll] Simmer API failed — using last known balance', {
+      logger.warn('[bankroll] balance fetch failed — using last known balance', {
         lastKnownBalance,
         error: err instanceof Error ? err.message : String(err),
       });

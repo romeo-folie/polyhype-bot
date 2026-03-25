@@ -162,3 +162,30 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
     return { success: false, error: normaliseError(err) };
   }
 }
+
+/**
+ * Fetch the USDC balance available for CLOB trading.
+ *
+ * Uses ClobClient.getBalanceAllowance() which returns the on-chain USDC
+ * balance and ERC20 allowance for the signer wallet. The effective tradeable
+ * amount is min(balance, allowance).
+ *
+ * Returns null on failure (missing private key, network error) so callers
+ * can degrade gracefully rather than blocking the full bankroll read.
+ */
+export async function getClobBalance(): Promise<number | null> {
+  try {
+    const client = await getClobClient();
+    // getBalanceAllowance returns { balance, allowance } as string decimals
+    const result = await (client as unknown as {
+      getBalanceAllowance(): Promise<{ balance?: string; allowance?: string }>;
+    }).getBalanceAllowance();
+    const balance = parseFloat(result.balance ?? '0');
+    const allowance = parseFloat(result.allowance ?? '0');
+    if (!isFinite(balance) || !isFinite(allowance)) return null;
+    // Tradeable = amount the contract is permitted to spend, capped by wallet balance
+    return Math.min(balance, allowance);
+  } catch {
+    return null;
+  }
+}
