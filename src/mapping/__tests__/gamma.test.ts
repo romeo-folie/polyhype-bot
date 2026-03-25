@@ -1,4 +1,4 @@
-import { jest, describe, it, expect, afterEach } from '@jest/globals';
+import { jest, describe, it, expect, afterEach, beforeEach } from '@jest/globals';
 import { parseYesPrice, parseOutcomePrices, parseClobTokenIds } from '../gamma.js';
 
 // ─── parseOutcomePrices unit tests ────────────────────────────────────────────
@@ -183,5 +183,119 @@ describe('getMarket', () => {
     } as Response);
 
     await expect(getMarket('bad-id')).rejects.toThrow('Gamma API error: 404');
+  });
+});
+
+// ─── getActiveMarkets pagination tests ───────────────────────────────────────
+
+const { getActiveMarkets } = await import('../gamma.js');
+
+function makeMarket(id: string) {
+  return {
+    id,
+    question: `Market ${id}`,
+    conditionId: `cond-${id}`,
+    clobTokenIds: ['tok-yes', 'tok-no'],
+    outcomePrices: ['0.55', '0.45'],
+    outcomes: ['Yes', 'No'],
+    active: true,
+    closed: false,
+    volume: '1000',
+    liquidity: '500',
+    endDate: null,
+    description: null,
+  };
+}
+
+describe('getActiveMarkets', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it('returns all markets from a single page when count < pageSize', async () => {
+    const page = [makeMarket('1'), makeMarket('2'), makeMarket('3')];
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => page,
+    } as Response);
+
+    const result = await getActiveMarkets(500, 500);
+    expect(result).toHaveLength(3);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('fetches multiple pages when first page is full', async () => {
+    const page1 = Array.from({ length: 500 }, (_, i) => makeMarket(`p1-${i}`));
+    const page2 = Array.from({ length: 300 }, (_, i) => makeMarket(`p2-${i}`));
+
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => page1 } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => page2 } as Response);
+
+    const result = await getActiveMarkets(1000, 500);
+    expect(result).toHaveLength(800);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops at maxTotal even if more pages are available', async () => {
+    const page1 = Array.from({ length: 500 }, (_, i) => makeMarket(`p1-${i}`));
+    const page2 = Array.from({ length: 500 }, (_, i) => makeMarket(`p2-${i}`));
+
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => page1 } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => page2 } as Response);
+
+    const result = await getActiveMarkets(700, 500);
+    // First page: 500, second page: capped at 200 (700 - 500)
+    // But mock returns 500 for page2 — result should be capped at 700
+    expect(result.length).toBeLessThanOrEqual(700);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('includes order=liquidityNum and ascending=false in query params', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [makeMarket('1')],
+    } as Response);
+
+    await getActiveMarkets(10, 10);
+    const calledUrl = mockFetch.mock.calls[0]?.[0] as string;
+    expect(calledUrl).toContain('order=liquidityNum');
+    expect(calledUrl).toContain('ascending=false');
+  });
+
+  it('includes offset in subsequent page requests', async () => {
+    const page1 = Array.from({ length: 500 }, (_, i) => makeMarket(`p1-${i}`));
+    const page2 = [makeMarket('last')];
+
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => page1 } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => page2 } as Response);
+
+    await getActiveMarkets(1000, 500);
+
+    const secondCallUrl = mockFetch.mock.calls[1]?.[0] as string;
+    expect(secondCallUrl).toContain('offset=500');
+  });
+
+  it('throws on non-200 response', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+    } as Response);
+
+    await expect(getActiveMarkets()).rejects.toThrow('Gamma markets error: 503');
+  });
+
+  it('returns empty array when API returns empty array on first page', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [],
+    } as Response);
+
+    const result = await getActiveMarkets();
+    expect(result).toEqual([]);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });
