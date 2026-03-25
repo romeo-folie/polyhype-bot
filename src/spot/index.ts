@@ -12,7 +12,7 @@ import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis, closeRedis } from '../shared/redis.js';
 import { getBankroll, deductStake } from '../shared/bankroll.js';
-import { getPriceFeed } from '../shared/feedSingleton.js';
+import { getPriceFeed, destroyPriceFeed } from '../shared/feedSingleton.js';
 import { resolveYesPrice } from '../shared/priceCache.js';
 import { pollSpotPrices } from './poller.js';
 import { detectMoves } from './thresholdDetector.js';
@@ -321,6 +321,7 @@ async function main() {
     });
     process.exitCode = 1;
   } finally {
+    destroyPriceFeed();
     await closeRedis();
   }
 }

@@ -197,31 +197,29 @@ npm run probe:simmer
 
 ### Crontab
 
-Cron runs in a stripped environment and won't load your `.env` automatically. Use a wrapper script:
+Cron runs in a stripped environment and won't load your `.env` automatically. A `run.sh` wrapper script is included in the project root. It handles `.env` loading and uses `flock(1)` to prevent overlapping cron runs (important on low-memory hosts like Raspberry Pi).
 
-```bash
-# create run.sh in the project root
-cat > /path/to/polymarket-geopolitical-agent/run.sh << 'EOF'
-#!/bin/bash
-set -a
-source /path/to/polymarket-geopolitical-agent/.env
-set +a
-exec "$@"
-EOF
-chmod +x /path/to/polymarket-geopolitical-agent/run.sh
-```
-
-Then add to crontab (`crontab -e`):
+The script already exists — just reference it in your crontab:
 
 ```cron
 PATH=/usr/local/bin:/usr/bin:/bin
-# On macOS with Homebrew: PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
-# On Linux with nvm: PATH=/home/<user>/.nvm/versions/node/<version>/bin:/usr/local/bin:/usr/bin:/bin
+# On Raspberry Pi / Linux with nvm: PATH=/home/<user>/.nvm/versions/node/<version>/bin:/usr/local/bin:/usr/bin:/bin
 
 */5 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/execution/index.ts >> /tmp/pga-trade.log 2>&1
 */5 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/monitor/index.ts >> /tmp/pga-monitor.log 2>&1
-* * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/spot/index.ts >> /tmp/pga-spot.log 2>&1
+* * * * *   /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/spot/index.ts >> /tmp/pga-spot.log 2>&1
+*/15 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/arb/index.ts >> /tmp/pga-arb.log 2>&1
 ```
+
+#### Overlap protection — three layers
+
+| Layer | Mechanism | Protects against |
+|---|---|---|
+| `flock` in `run.sh` | OS-level file lock per script | Second cron tick firing while prior OS process is still alive |
+| Redis lock in entrypoint | `SET ... EX 270 NX` | Slow cycle (LLM latency, Simmer API) that releases the flock before finishing |
+| WebSocket feed cleanup | `destroyPriceFeed()` in `finally` | Open WS connection holding the Node event loop open after work is done |
+
+All three layers are required for clean, bounded cron behaviour on a Raspberry Pi.
 
 ## Scripts
 

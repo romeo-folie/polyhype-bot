@@ -27,6 +27,24 @@ import { getBankroll, deductStake } from '../shared/bankroll.js';
  */
 export async function runExecution(): Promise<void> {
   const redis = getRedis();
+
+  // Prevent overlapping runs — ingestion + LLM mapping can exceed the 5-min cron
+  // interval on slow networks / cold LLM responses. Without a lock, a second cron
+  // tick spawns a second process that races for the same signals and double-executes.
+  const lockAcquired = await redis.set('execution:lock', '1', 'EX', 270, 'NX');
+  if (!lockAcquired) {
+    logger.info('[execution] previous cycle still running, skipping');
+    return;
+  }
+
+  try {
+    await runExecutionInner(redis);
+  } finally {
+    await redis.del('execution:lock').catch(() => { /* best effort */ });
+  }
+}
+
+async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<void> {
   const bankrollUsd = await getBankroll(redis);
 
   logger.info('[execution] pipeline starting', { bankrollUsd });
@@ -160,7 +178,7 @@ if (isMain) {
       logger.error('[execution] fatal error', {
         error: err instanceof Error ? err.message : String(err),
       });
-      process.exit(1);
+      process.exitCode = 1;
     })
     .finally(() => {
       closeRedis().catch(() => undefined);

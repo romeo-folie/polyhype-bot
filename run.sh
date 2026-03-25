@@ -1,15 +1,22 @@
 #!/bin/bash
-# run.sh — wrapper for cron jobs that loads .env before executing a command.
+# run.sh — cron wrapper: loads .env, acquires per-script flock, then exec's the command.
+#
+# flock(1) prevents a second cron tick from starting while the previous run is still
+# alive. The lock file is keyed by the script name so each pipeline has its own gate.
+# Redis-level locks inside each entrypoint provide a second layer for any case where
+# two hosts share the same Redis instance.
 #
 # Usage:
 #   ./run.sh npx tsx src/execution/index.ts
 #   ./run.sh npx tsx src/monitor/index.ts
 #   ./run.sh npx tsx src/spot/index.ts
+#   ./run.sh npx tsx src/arb/index.ts
 #
-# Crontab example:
+# Crontab example (use absolute paths; redirect logs):
 #   */5 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/execution/index.ts >> /tmp/pga-trade.log 2>&1
 #   */5 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/monitor/index.ts >> /tmp/pga-monitor.log 2>&1
 #   * * * * *   /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/spot/index.ts >> /tmp/pga-spot.log 2>&1
+#   */15 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/arb/index.ts >> /tmp/pga-arb.log 2>&1
 
 set -euo pipefail
 
@@ -24,4 +31,16 @@ set -a
 source "$ENV_FILE"
 set +a
 
-exec "$@"
+# Derive a lock-file name from the last path component of the script being run.
+# e.g. "npx tsx src/monitor/index.ts" -> lock file "/tmp/pga-monitor.lock"
+SCRIPT_NAME=""
+for arg in "$@"; do
+  if [[ "$arg" == *.ts ]]; then
+    SCRIPT_NAME="$(basename "$(dirname "$arg")")"
+    break
+  fi
+done
+LOCK_FILE="/tmp/pga-${SCRIPT_NAME:-default}.lock"
+
+# flock -n: non-blocking — exits immediately if lock is held (previous run still alive).
+exec flock -n "$LOCK_FILE" "$@"

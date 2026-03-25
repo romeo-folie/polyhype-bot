@@ -15,13 +15,31 @@ import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { getOpenPositions } from '../execution/positionLedger.js';
 import { fetchAllCurrentPrices } from './priceFetcher.js';
-import { getPriceFeed } from '../shared/feedSingleton.js';
+import { getPriceFeed, destroyPriceFeed } from '../shared/feedSingleton.js';
 import { evaluateTakeProfit } from './takeProfitEvaluator.js';
 import { executeTakeProfit } from './takeProfitExecutor.js';
 import { redeemResolvedPositions } from './resolutionRedeemer.js';
 
 export async function runMonitor(): Promise<void> {
   const redis = getRedis();
+
+  // Prevent overlapping runs — a slow cycle (many positions, Simmer API latency)
+  // can exceed the 5-min cron interval and stack processes on low-memory hosts.
+  const lockAcquired = await redis.set('monitor:lock', '1', 'EX', 270, 'NX');
+  if (!lockAcquired) {
+    logger.info('[monitor] previous cycle still running, skipping');
+    return;
+  }
+
+  try {
+    await runMonitorInner(redis);
+  } finally {
+    await redis.del('monitor:lock').catch(() => { /* best effort */ });
+    destroyPriceFeed();
+  }
+}
+
+async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void> {
   const cfg = loadConfig();
   const takeProfitThreshold = cfg.TAKE_PROFIT_THRESHOLD;
   const stopLossThreshold = cfg.STOP_LOSS_THRESHOLD;
@@ -119,9 +137,10 @@ if (isMain) {
       logger.error('[monitor] fatal error', {
         error: err instanceof Error ? err.message : String(err),
       });
-      process.exit(1);
+      process.exitCode = 1;
     })
     .finally(() => {
+      destroyPriceFeed();
       closeRedis().catch(() => undefined);
     });
 }
