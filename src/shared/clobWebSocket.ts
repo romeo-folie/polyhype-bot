@@ -15,7 +15,7 @@ import WebSocket from 'ws';
 import type { Redis } from 'ioredis';
 import { logger } from './logger.js';
 
-const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/';
+const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 const PRICE_CACHE_TTL_S = 30;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
