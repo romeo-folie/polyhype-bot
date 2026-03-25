@@ -146,23 +146,54 @@ export function parseClobTokenIds(clobTokenIds: string | string[]): string[] {
  * Accepts both pre-parsed `string[]` and raw JSON string.
  */
 /**
- * Fetch active binary markets from Gamma API.
- * Returns markets where active=true, closed=false, enableOrderBook=true.
- * Paginated — fetches up to `limit` markets.
+ * Fetch active binary markets from Gamma API, sorted by liquidity descending.
+ *
+ * Fetches up to `maxTotal` markets across multiple paginated requests, each
+ * page capped at `pageSize` (Gamma API hard limit: 500 per request).
+ *
+ * Sorting by `liquidityNum` descending ensures the most liquid (and therefore
+ * most executable) markets are scanned first. This matters for arb: thin-book
+ * markets appear as arb opportunities on paper but FOK orders reliably fail
+ * due to insufficient depth.
+ *
+ * Pagination stops early if a page returns fewer results than requested
+ * (signals end of available markets).
  */
-export async function getActiveMarkets(limit = 100): Promise<GammaMarket[]> {
-  const params = new URLSearchParams({
-    active: 'true',
-    closed: 'false',
-    enable_order_book: 'true',
-    limit: String(limit),
-  });
-  const url = `${BASE_URL}/markets?${params.toString()}`;
-  const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
-  if (!res.ok) throw new Error(`Gamma markets error: ${res.status}`);
-  const data = (await res.json()) as unknown;
-  if (!Array.isArray(data)) return [];
-  return data as GammaMarket[];
+export async function getActiveMarkets(
+  maxTotal = 1000,
+  pageSize = 500,
+): Promise<GammaMarket[]> {
+  const results: GammaMarket[] = [];
+  let offset = 0;
+
+  while (results.length < maxTotal) {
+    const batchSize = Math.min(pageSize, maxTotal - results.length);
+    const params = new URLSearchParams({
+      active: 'true',
+      closed: 'false',
+      enable_order_book: 'true',
+      limit: String(batchSize),
+      offset: String(offset),
+      order: 'liquidityNum',
+      ascending: 'false',
+    });
+
+    const url = `${BASE_URL}/markets?${params.toString()}`;
+    const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+    if (!res.ok) throw new Error(`Gamma markets error: ${res.status}`);
+
+    const data = (await res.json()) as unknown;
+    if (!Array.isArray(data) || data.length === 0) break;
+
+    const batch = (data as GammaMarket[]).slice(0, maxTotal - results.length);
+    results.push(...batch);
+    offset += data.length;
+
+    // Partial page means we've hit the end of available markets
+    if (data.length < batchSize) break;
+  }
+
+  return results;
 }
 
 export function parseYesPrice(outcomePrices: string | string[]): number {

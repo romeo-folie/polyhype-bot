@@ -23,10 +23,12 @@ const ARB_DEDUP_TTL_S = 30 * 60;
 // Minimum combined price guard: combined < MIN_COMBINED means prices are near-zero
 // (data error or extreme illiquidity), which would produce Infinity/NaN share counts.
 const MIN_COMBINED = 0.02;
-// NOTE (LOW): getActiveMarkets currently fetches a fixed 200-market page.
-// Polymarket has 1000s of active markets. Pagination is deferred — at the
-// default ARB_MIN_EDGE threshold (0.05 net), true arb opportunities are rare;
-// the first 200 markets by liquidity are the most likely candidates.
+// Number of markets to scan per arb run.
+// Fetched in pages of 500, sorted by liquidityNum descending so the most
+// executable markets (deep books, low slippage) are evaluated first.
+// 1000 covers the majority of meaningfully liquid markets without scanning
+// deep into the long tail where FOK orders reliably fail due to thin books.
+const ARB_SCAN_MARKET_COUNT = 1000;
 
 const arbDedupKey = (marketId: string) => `arb:attempted:${marketId}`;
 
@@ -61,7 +63,7 @@ export interface ArbResult {
 export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
   const cfg = loadConfig();
   const minEdge = cfg.ARB_MIN_EDGE;
-  const markets = await getActiveMarkets(200);
+  const markets = await getActiveMarkets(ARB_SCAN_MARKET_COUNT);
   const opportunities: ArbOpportunity[] = [];
 
   for (const market of markets) {
