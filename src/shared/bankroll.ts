@@ -14,14 +14,35 @@ import { logger } from './logger.js';
 /** Warn when live balance drops below this threshold. */
 const LOW_BALANCE_WARN_USD = 1.0;
 
+/** TTL for the in-process balance cache — avoids hammering Simmer on every position-sizing call. */
+const CACHE_TTL_MS = 15_000;
+
 /** In-memory fallback: last successfully fetched balance. */
 let lastKnownBalance: number | null = null;
+let lastFetchTime = 0;
 
-/** Get current bankroll from Simmer's live portfolio balance. */
+/** Reset cache state. Exported for test use only — do not call in production code. */
+export function _resetCacheForTests(): void {
+  lastKnownBalance = null;
+  lastFetchTime = 0;
+}
+
+/** Get current bankroll from Simmer's live portfolio balance.
+ *
+ * Caches the result for CACHE_TTL_MS (15s) so rapid calls within a single
+ * pipeline cycle (e.g. 30 market candidates all calling getBankroll()) reuse
+ * the same value instead of issuing 30 sequential HTTP requests to Simmer.
+ */
 export async function getBankroll(_redis?: Redis): Promise<number> {
+  const now = Date.now();
+  if (lastKnownBalance !== null && now - lastFetchTime < CACHE_TTL_MS) {
+    return lastKnownBalance;
+  }
+
   try {
     const portfolio = await getPortfolio();
     lastKnownBalance = portfolio.balance_usdc;
+    lastFetchTime = now;
 
     if (portfolio.balance_usdc <= 0) {
       logger.error('[bankroll] live balance is zero or negative — all trades will be skipped', {

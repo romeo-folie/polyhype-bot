@@ -17,12 +17,14 @@ jest.unstable_mockModule('../logger.js', () => ({
   logger: mockLogger,
 }));
 
-// Each test file gets a fresh module — lastKnownBalance starts as null.
-const { getBankroll, setBankroll, deductStake, creditProceeds } = await import('../bankroll.js');
+const { getBankroll, setBankroll, deductStake, creditProceeds, _resetCacheForTests } =
+  await import('../bankroll.js');
 
 describe('bankroll', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // Reset module-level cache state between tests so each test starts fresh.
+    _resetCacheForTests();
     mockGetPortfolio.mockResolvedValue({ balance_usdc: 100 });
   });
 
@@ -64,19 +66,65 @@ describe('bankroll', () => {
     );
   });
 
+  it('caches balance within TTL — does not call Simmer on rapid successive calls', async () => {
+    await getBankroll(); // populates cache
+    await getBankroll(); // cache hit
+    await getBankroll(); // cache hit
+    expect(mockGetPortfolio).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes balance after TTL expires', async () => {
+    // Populate cache with 100
+    await getBankroll();
+    expect(mockGetPortfolio).toHaveBeenCalledTimes(1);
+
+    // Expire the cache by resetting lastFetchTime to 0
+    _resetCacheForTests();
+    // But keep lastKnownBalance non-null by doing a successful fetch first
+    mockGetPortfolio.mockResolvedValue({ balance_usdc: 100 });
+    await getBankroll();
+    _resetCacheForTests(); // expire again
+
+    // Now next call with different balance value should fetch fresh
+    mockGetPortfolio.mockResolvedValue({ balance_usdc: 120 });
+    const result = await getBankroll();
+    expect(result).toBe(120);
+  });
+
   it('falls back to last known balance on Simmer API failure', async () => {
     // First call succeeds — caches balance
     mockGetPortfolio.mockResolvedValue({ balance_usdc: 200 });
     await getBankroll();
 
-    // Second call fails — should return cached value
-    mockGetPortfolio.mockRejectedValue(new Error('Simmer API returned HTTP 503'));
-    const result = await getBankroll();
-    expect(result).toBe(200);
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      '[bankroll] Simmer API failed — using last known balance',
-      expect.objectContaining({ lastKnownBalance: 200 }),
-    );
+    // Expire cache so next call attempts Simmer
+    _resetCacheForTests();
+    // Preserve lastKnownBalance by re-populating via a successful call, then expiring
+    // Actually _resetCacheForTests clears lastKnownBalance too — we need to re-seed it:
+    mockGetPortfolio.mockResolvedValue({ balance_usdc: 200 });
+    await getBankroll(); // repopulates lastKnownBalance = 200
+
+    // Now expire only the time (simulate by using the real module: set lastFetchTime to 0)
+    // Since _resetCacheForTests clears both, we instead just force a fresh expired state
+    // by mocking Date.now to return far future on the next call. Simplest: just call
+    // _resetCacheForTests and immediately make the next getBankroll call fail — but that
+    // also clears lastKnownBalance. So we need a two-step: fetch (cache), then fail.
+    // The trick: after a successful fetch, lastKnownBalance IS set. _resetCacheForTests
+    // clears it. So use a workaround: don't reset, just let the cache expire naturally
+    // by mocking Date.now for just this test.
+    const realDateNow = Date.now;
+    Date.now = () => realDateNow() + 20_000; // pretend 20s have passed
+
+    try {
+      mockGetPortfolio.mockRejectedValue(new Error('Simmer API returned HTTP 503'));
+      const result = await getBankroll();
+      expect(result).toBe(200);
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        '[bankroll] Simmer API failed — using last known balance',
+        expect.objectContaining({ lastKnownBalance: 200 }),
+      );
+    } finally {
+      Date.now = realDateNow;
+    }
   });
 
   it('setBankroll is a no-op', async () => {
@@ -95,20 +143,4 @@ describe('bankroll', () => {
   });
 });
 
-// Note: the cold-start throw path (lastKnownBalance === null + API failure → throws)
-// is tested in bankroll.coldstart.test.ts, which gets a fresh module instance.
-describe('bankroll — error fallback with cached balance', () => {
-  it('falls back to prior cached balance when Simmer fails mid-run', async () => {
-    mockGetPortfolio.mockReset();
-    mockGetPortfolio.mockRejectedValue(new Error('Simmer API returned HTTP 503'));
-
-    // lastKnownBalance was populated by earlier tests in this file —
-    // verify that the fallback path returns the cached value.
-    const result = await getBankroll();
-    expect(typeof result).toBe('number');
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      '[bankroll] Simmer API failed — using last known balance',
-      expect.any(Object),
-    );
-  });
-});
+// Note: cold-start throw path tested in bankroll.coldstart.test.ts
