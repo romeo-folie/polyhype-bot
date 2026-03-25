@@ -18,6 +18,7 @@ import { fetchAllCurrentPrices } from './priceFetcher.js';
 import { getPriceFeed } from '../shared/feedSingleton.js';
 import { evaluateTakeProfit } from './takeProfitEvaluator.js';
 import { executeTakeProfit } from './takeProfitExecutor.js';
+import { redeemResolvedPositions } from './resolutionRedeemer.js';
 
 export async function runMonitor(): Promise<void> {
   const redis = getRedis();
@@ -26,6 +27,14 @@ export async function runMonitor(): Promise<void> {
   const stopLossThreshold = cfg.STOP_LOSS_THRESHOLD;
 
   logger.info('[monitor] starting position check', { takeProfitThreshold, stopLossThreshold });
+
+  // 0. Redeem any resolved winning positions first
+  const redemptions = await redeemResolvedPositions(redis);
+  if (redemptions.length > 0) {
+    const succeeded = redemptions.filter((r) => r.success).length;
+    const failed = redemptions.length - succeeded;
+    logger.info('[monitor] redemption cycle complete', { succeeded, failed });
+  }
 
   // 1. Load all open positions
   const positions = await getOpenPositions(redis);

@@ -149,6 +149,27 @@ export async function notifyUnhedgedArbPosition(opts: {
   await notify(text);
 }
 
+/**
+ * Notify on a resolved position redemption.
+ */
+export async function notifyRedemptionExecuted(opts: {
+  marketId: string;
+  question: string;
+  side: 'yes' | 'no';
+  txHash?: string;
+  valueUsdc: number;
+}): Promise<void> {
+  const { question, side, txHash, valueUsdc } = opts;
+
+  const text =
+    `🏆 <b>Position Redeemed</b>\n\n` +
+    `<b>Market:</b> ${escapeHtml(question)}\n` +
+    `<b>Side:</b> ${side.toUpperCase()}\n` +
+    `<b>Proceeds:</b> $${valueUsdc.toFixed(2)} USDC${txHash ? `\n<b>Tx:</b> <code>${escapeHtml(txHash)}</code>` : ''}`;
+
+  await notify(text);
+}
+
 // ── Utility ─────────────────────────────────────────────────────────────────
 
 function escapeHtml(str: string): string {

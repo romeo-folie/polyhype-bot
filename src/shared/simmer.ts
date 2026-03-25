@@ -19,6 +19,8 @@ import { loadConfig } from './config.js';
 const SIMMER_BASE_URL = 'https://api.simmer.markets';
 const TRADE_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/trade`;
 const MARKETS_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/markets`;
+const POSITIONS_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/positions`;
+const REDEEM_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/redeem`;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 // ── Request / response types ──────────────────────────────────────────────────
@@ -68,6 +70,27 @@ const SimmerTradeResultSchema = z.object({
 });
 
 export type SimmerTradeResult = z.infer<typeof SimmerTradeResultSchema>;
+
+/** A single position returned by GET /api/sdk/positions. */
+export interface SimmerPosition {
+  market_id: string;
+  side: 'yes' | 'no';
+  redeemable: boolean;
+  question?: string;
+  shares?: number;
+  value_usdc?: number;
+  [key: string]: unknown;
+}
+
+/** Response from POST /api/sdk/redeem. */
+const SimmerRedeemResultSchema = z.object({
+  success: z.boolean(),
+  tx_hash: z.string().optional().nullable(),
+  unsigned_tx: z.unknown().optional().nullable(),
+  error: z.string().optional().nullable(),
+});
+
+export type SimmerRedeemResult = z.infer<typeof SimmerRedeemResultSchema>;
 
 /** Simmer API error with HTTP context. */
 export class SimmerError extends Error {
@@ -204,6 +227,91 @@ export async function resolveSimmerMarketId(question: string): Promise<string | 
   } catch {
     return null;
   }
+}
+
+/**
+ * Fetch positions from Simmer filtered by status and venue.
+ *
+ * Use status="resolved" to find positions ready for redemption.
+ * Filters to venue="polymarket" by default — PGA only trades there.
+ *
+ * @throws {SimmerError} on HTTP 4xx/5xx or network failure
+ */
+export async function getSimmerPositions(opts: {
+  status?: 'active' | 'resolved' | 'closed' | 'all';
+  venue?: 'polymarket' | 'sim' | 'kalshi';
+  source?: string;
+} = {}): Promise<SimmerPosition[]> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
+  const { status = 'active', venue = 'polymarket', source } = opts;
+
+  const params = new URLSearchParams({ status, venue });
+  if (source) params.set('source', source);
+
+  const resp = await fetch(`${POSITIONS_ENDPOINT}?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => resp.text());
+    throw new SimmerError(`Simmer positions API returned HTTP ${resp.status.toString()}`, resp.status, body);
+  }
+
+  const data = (await resp.json()) as { positions?: SimmerPosition[] } | SimmerPosition[];
+  // API may return { positions: [...] } or a bare array
+  return Array.isArray(data) ? data : (data.positions ?? []);
+}
+
+/**
+ * Redeem a winning Polymarket position for USDC.e on Polygon.
+ *
+ * For managed wallets: Simmer signs and submits server-side, returns tx_hash.
+ * For external wallets: returns unsigned_tx (not handled here — PGA uses managed wallets).
+ *
+ * @throws {SimmerError} on HTTP 4xx/5xx or network failure
+ */
+export async function submitRedeem(input: {
+  market_id: string;
+  side: 'yes' | 'no';
+}): Promise<SimmerRedeemResult> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
+
+  const resp = await fetch(REDEEM_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ market_id: input.market_id, side: input.side }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+
+  let responseBody: unknown;
+  try {
+    responseBody = await resp.json();
+  } catch {
+    responseBody = await resp.text().catch(() => '(unreadable body)');
+  }
+
+  if (!resp.ok) {
+    throw new SimmerError(
+      `Simmer redeem API returned HTTP ${resp.status.toString()}`,
+      resp.status,
+      responseBody,
+    );
+  }
+
+  const parsed = SimmerRedeemResultSchema.safeParse(responseBody);
+  if (!parsed.success) {
+    throw new SimmerError(
+      `Simmer redeem response failed validation: ${parsed.error.message}`,
+      resp.status,
+      responseBody,
+    );
+  }
+
+  return parsed.data;
 }
 
 /**
