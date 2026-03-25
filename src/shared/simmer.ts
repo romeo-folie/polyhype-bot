@@ -21,6 +21,8 @@ const TRADE_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/trade`;
 const MARKETS_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/markets`;
 const POSITIONS_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/positions`;
 const REDEEM_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/redeem`;
+const CONTEXT_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/context`;
+const OPPORTUNITIES_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/markets/opportunities`;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 // ── Request / response types ──────────────────────────────────────────────────
@@ -312,6 +314,116 @@ export async function submitRedeem(input: {
   }
 
   return parsed.data;
+}
+
+/** Trading discipline returned by GET /api/sdk/context/{market_id}. */
+export interface SimmerContextDiscipline {
+  last_action?: string | null;
+  last_action_at?: string | null;
+  direction_changes_24h: number;
+  flip_flop_warning?: string | null;
+  /** 'none' | 'caution' | 'severe' */
+  warning_level: string;
+}
+
+/** Concise context response — only fields PGA cares about. */
+export interface SimmerMarketContext {
+  market: {
+    id: string;
+    question: string;
+    current_price: number;
+    status: string;
+    resolution_criteria?: string | null;
+    fee_rate_bps: number;
+    spread?: number | null;
+    resolves_at?: string | null;
+    ai_consensus?: number | null;
+    divergence?: number | null;
+  };
+  position: {
+    has_position: boolean;
+    side?: string | null;
+  };
+  discipline: SimmerContextDiscipline;
+  warnings: string[];
+}
+
+/**
+ * Fetch context for a single market — safeguards, resolution criteria, discipline.
+ *
+ * Pass myProbability to get a TRADE/HOLD recommendation from Simmer's edge engine.
+ * Rate limited: 300/min. Returns null on any error (never throws).
+ */
+export async function getMarketContext(
+  marketId: string,
+  myProbability?: number,
+): Promise<SimmerMarketContext | null> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
+
+  const url = new URL(`${CONTEXT_ENDPOINT}/${marketId}`);
+  if (myProbability !== undefined) {
+    url.searchParams.set('my_probability', myProbability.toString());
+  }
+
+  try {
+    const resp = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!resp.ok) return null;
+    return (await resp.json()) as SimmerMarketContext;
+  } catch {
+    return null;
+  }
+}
+
+/** A single opportunity from GET /api/sdk/markets/opportunities. */
+export interface SimmerOpportunity {
+  id: string;
+  question: string;
+  current_price: number;
+  ai_consensus?: number | null;
+  external_price?: number | null;
+  divergence: number;
+  recommended_side: 'yes' | 'no';
+  signal_source?: 'oracle' | 'crowd' | null;
+  fee_rate_bps?: number;
+  [key: string]: unknown;
+}
+
+/**
+ * Fetch Simmer's ranked opportunity list — markets where AI diverges from market price.
+ *
+ * signal_source "oracle" = AI multi-model forecast; "crowd" = sim agent activity.
+ * Returns empty array on any error (never throws).
+ */
+export async function getOpportunities(opts: {
+  venue?: 'polymarket' | 'kalshi' | 'sim';
+  limit?: number;
+  minDivergence?: number;
+} = {}): Promise<SimmerOpportunity[]> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
+  const { venue = 'polymarket', limit = 50, minDivergence = 0.03 } = opts;
+
+  const params = new URLSearchParams({
+    venue,
+    limit: limit.toString(),
+    min_divergence: minDivergence.toString(),
+  });
+
+  try {
+    const resp = await fetch(`${OPPORTUNITIES_ENDPOINT}?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (!resp.ok) return [];
+    const data = (await resp.json()) as { opportunities?: SimmerOpportunity[] } | SimmerOpportunity[];
+    return Array.isArray(data) ? data : (data.opportunities ?? []);
+  } catch {
+    return [];
+  }
 }
 
 /**
