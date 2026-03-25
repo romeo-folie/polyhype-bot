@@ -10,9 +10,9 @@
 
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
-import { getRedis, closeRedis } from '../shared/redis.js';
+import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { getBankroll, deductStake } from '../shared/bankroll.js';
-import { getPriceFeed } from '../shared/feedSingleton.js';
+import { getPriceFeed, destroyPriceFeed } from '../shared/feedSingleton.js';
 import { resolveYesPrice } from '../shared/priceCache.js';
 import { pollSpotPrices } from './poller.js';
 import { detectMoves } from './thresholdDetector.js';
@@ -36,10 +36,12 @@ export async function runSpotMonitor(): Promise<void> {
     return;
   }
 
-  // Prevent overlapping runs — LLM calls can exceed the 1-min cron interval
+  // Prevent overlapping runs — LLM calls can exceed the 1-min cron interval.
+  // Token-based: only the acquiring run can release the lock (safe if TTL expires
+  // and a newer run reacquires before the older run finishes).
   const redis = getRedis();
-  const lockAcquired = await redis.set('spot:lock', '1', 'EX', 120, 'NX');
-  if (!lockAcquired) {
+  const lockToken = await acquireLock('spot:lock', 120);
+  if (!lockToken) {
     logger.info('[spot] previous cycle still running, skipping');
     return;
   }
@@ -48,7 +50,7 @@ export async function runSpotMonitor(): Promise<void> {
     await runSpotMonitorInner(cfg, redis);
   } finally {
     // Release lock explicitly so the next cron run isn't blocked for the full 120s TTL
-    await redis.del('spot:lock').catch(() => { /* best effort */ });
+    await releaseLock('spot:lock', lockToken).catch(() => { /* best effort */ });
   }
 }
 
@@ -321,6 +323,7 @@ async function main() {
     });
     process.exitCode = 1;
   } finally {
+    destroyPriceFeed();
     await closeRedis();
   }
 }

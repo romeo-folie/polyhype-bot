@@ -10,7 +10,7 @@
  */
 
 import 'dotenv/config';
-import { getRedis, closeRedis } from '../shared/redis.js';
+import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping } from '../mapping/index.js';
@@ -27,6 +27,26 @@ import { getBankroll, deductStake } from '../shared/bankroll.js';
  */
 export async function runExecution(): Promise<void> {
   const redis = getRedis();
+
+  // Prevent overlapping runs — ingestion + LLM mapping can exceed the 5-min cron
+  // interval on slow networks / cold LLM responses. Without a lock, a second cron
+  // tick spawns a second process that races for the same signals and double-executes.
+  // Token-based: only the acquiring run can release the lock (safe if TTL expires
+  // and a newer run reacquires before the older run finishes).
+  const lockToken = await acquireLock('execution:lock', 270);
+  if (!lockToken) {
+    logger.info('[execution] previous cycle still running, skipping');
+    return;
+  }
+
+  try {
+    await runExecutionInner(redis);
+  } finally {
+    await releaseLock('execution:lock', lockToken).catch(() => { /* best effort */ });
+  }
+}
+
+async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<void> {
   const bankrollUsd = await getBankroll(redis);
 
   logger.info('[execution] pipeline starting', { bankrollUsd });
@@ -160,7 +180,7 @@ if (isMain) {
       logger.error('[execution] fatal error', {
         error: err instanceof Error ? err.message : String(err),
       });
-      process.exit(1);
+      process.exitCode = 1;
     })
     .finally(() => {
       closeRedis().catch(() => undefined);

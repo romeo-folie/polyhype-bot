@@ -23,7 +23,7 @@ if (isMain) {
       logger.error('[arb] fatal error', {
         error: err instanceof Error ? err.message : String(err),
       });
-      process.exit(1);
+      process.exitCode = 1;
     })
     .finally(() => {
       closeRedis().catch(() => undefined);
