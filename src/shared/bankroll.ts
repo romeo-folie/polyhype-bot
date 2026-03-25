@@ -74,9 +74,19 @@ export async function setBankroll(_redis: Redis, _amount: number): Promise<void>
   logger.info('[bankroll] setBankroll is deprecated — Simmer tracks the wallet balance');
 }
 
-/** No-op — Simmer deducts from wallet on trade execution. */
+/**
+ * Deduct a stake from the in-memory bankroll cache.
+ *
+ * Simmer deducts from the actual wallet on execution, but the in-process
+ * cache needs updating immediately — otherwise the next signal in the same
+ * cycle sizes against the full pre-trade balance and Simmer rejects it for
+ * insufficient funds.
+ */
 export async function deductStake(_redis: Redis, stakeUsd: number): Promise<void> {
-  logger.info('[bankroll] stake deducted (tracked by Simmer)', { stakeUsd });
+  if (lastKnownBalance !== null) {
+    lastKnownBalance = Math.max(0, lastKnownBalance - stakeUsd);
+  }
+  logger.info('[bankroll] stake deducted from cache', { stakeUsd, remainingCached: lastKnownBalance });
 }
 
 /** No-op — Simmer credits wallet on redemption/exit. */

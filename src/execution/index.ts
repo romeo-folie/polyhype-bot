@@ -14,7 +14,7 @@ import { getRedis, closeRedis } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping } from '../mapping/index.js';
-import { executeSignals } from './executor.js';
+import { executeSignal } from './executor.js';
 import { recordPosition } from './positionLedger.js';
 import { notifyTradeExecuted, notifyTradeError } from './telegram.js';
 import { reEvaluatePositions } from '../monitor/signalReeval.js';
@@ -88,12 +88,22 @@ export async function runExecution(): Promise<void> {
 
   logger.info('[execution] signals to execute', { count: signals.length });
 
-  // Phase 3 — execute signals
-  const results = await executeSignals(signals, redis);
+  // Phase 3 — execute signals one at a time, deducting the bankroll cache
+  // immediately after each successful trade so that subsequent signals in the
+  // same cycle are sized against the remaining balance rather than the full
+  // opening snapshot. Without this, Simmer rejects signals 2+ for insufficient
+  // funds because the in-process cache still shows the pre-trade balance.
+  const results = [];
+  let executed = 0;
+  let failed = 0;
+  let skipped = 0;
 
-  // Phase 3 — record positions & notify
-  for (const result of results) {
+  for (const signal of signals) {
+    const result = await executeSignal(signal, redis);
+    results.push(result);
+
     if (result.skipped) {
+      skipped++;
       logger.info('[execution] signal skipped', {
         marketId: result.signal.marketId,
         reason: result.skipReason,
@@ -102,11 +112,18 @@ export async function runExecution(): Promise<void> {
     }
 
     if (result.error) {
+      failed++;
       await notifyTradeError(result.signal, result.error);
       continue;
     }
 
     if (result.tradeResult?.success) {
+      executed++;
+
+      // Deduct immediately — keeps the bankroll cache accurate for the next
+      // signal in this cycle (prevents over-allocation and Simmer rejections).
+      await deductStake(redis, result.signal.stakeUsd);
+
       // Record in ledger
       await recordPosition(redis, {
         marketId: result.signal.marketId,
@@ -125,16 +142,12 @@ export async function runExecution(): Promise<void> {
         sharesHeld: result.tradeResult.shares_bought,
       });
 
-      await deductStake(redis, result.signal.stakeUsd);
       await notifyTradeExecuted(result.signal, result.tradeResult.tx_hash);
     } else if (result.tradeResult && !result.tradeResult.success) {
+      failed++;
       await notifyTradeError(result.signal, result.tradeResult.error ?? 'unknown error');
     }
   }
-
-  const executed = results.filter((r) => !r.skipped && !r.error && r.tradeResult?.success).length;
-  const failed = results.filter((r) => r.error || (r.tradeResult && !r.tradeResult.success)).length;
-  const skipped = results.filter((r) => r.skipped).length;
 
   logger.info('[execution] pipeline complete', { executed, failed, skipped });
 }

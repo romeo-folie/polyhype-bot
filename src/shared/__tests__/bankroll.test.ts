@@ -132,7 +132,36 @@ describe('bankroll', () => {
     await expect(setBankroll({} as any, 42)).resolves.toBeUndefined();
   });
 
-  it('deductStake is a no-op returning void', async () => {
+  it('deductStake updates the in-memory cache so subsequent getBankroll calls reflect the deduction', async () => {
+    // Populate cache with 100
+    mockGetPortfolio.mockResolvedValue({ balance_usdc: 100 });
+    const initialBalance = await getBankroll();
+    expect(initialBalance).toBe(100);
+
+    // Deduct — Simmer won't be called again within TTL, so cache must be updated
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await deductStake({} as any, 25);
+
+    // Next getBankroll call should hit cache and return 75 (not 100)
+    const afterDeduct = await getBankroll();
+    expect(afterDeduct).toBe(75);
+    // Simmer was only called once (the initial fetch)
+    expect(mockGetPortfolio).toHaveBeenCalledTimes(1);
+  });
+
+  it('deductStake does not go below zero', async () => {
+    mockGetPortfolio.mockResolvedValue({ balance_usdc: 10 });
+    await getBankroll();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await deductStake({} as any, 50); // more than balance
+
+    const result = await getBankroll();
+    expect(result).toBe(0);
+  });
+
+  it('deductStake is safe when cache is empty (before first getBankroll)', async () => {
+    // Cache is empty (_resetCacheForTests called in beforeEach)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await expect(deductStake({} as any, 25)).resolves.toBeUndefined();
   });
