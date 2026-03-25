@@ -4,6 +4,7 @@ import type { TradeSignal } from '../../mapping/index.js';
 jest.unstable_mockModule('../../shared/simmer.js', () => ({
   submitTrade: jest.fn(),
   resolveSimmerMarketId: jest.fn(),
+  getMarketContext: jest.fn<() => Promise<null>>().mockResolvedValue(null),
   SimmerError: class SimmerError extends Error {
     statusCode: number;
     body: unknown;

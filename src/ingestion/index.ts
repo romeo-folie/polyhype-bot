@@ -11,6 +11,7 @@ import { fetchRssFeeds } from './rss.js';
 import { scrapeHeadlines } from './scraper.js';
 import { filterSeen } from './dedup.js';
 import { scoreItems } from './scorer.js';
+import { applyTimingBoost } from './timingWindow.js';
 import type { ScoredItem } from './scorer.js';
 
 const URGENCY_THRESHOLD = Number(process.env['URGENCY_THRESHOLD'] ?? 8);
@@ -21,7 +22,10 @@ export async function runIngestion(): Promise<ScoredItem[]> {
   const all = [...rssItems, ...scraped];
   const newItems = await filterSeen(all, redis);
   const scored = await scoreItems(newItems);
-  const highUrgency = scored.filter((i) => i.urgencyScore >= URGENCY_THRESHOLD);
+  // Apply timing window boost — items breaking during Asia/Europe hours (US asleep)
+  // get a score multiplier to reflect the repricing lag edge.
+  const boosted = applyTimingBoost(scored);
+  const highUrgency = boosted.filter((i) => i.urgencyScore >= URGENCY_THRESHOLD);
   logger.info(
     `[ingestion] ${all.length} total → ${newItems.length} new → ${highUrgency.length} high-urgency`,
   );

@@ -13,7 +13,7 @@
 
 import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
-import { submitTrade, resolveSimmerMarketId, SimmerError } from '../shared/simmer.js';
+import { submitTrade, resolveSimmerMarketId, getMarketContext, SimmerError } from '../shared/simmer.js';
 import { submitClobBuy } from '../shared/clob.js';
 import { hasOpenPosition } from './positionLedger.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
@@ -121,6 +121,59 @@ export async function executeSignal(
   const simmerId = await resolveSimmerMarketId(signal.question);
 
   if (simmerId) {
+    // Context safeguard check — flip-flop detection, resolution criteria, market status
+    const ctx = await getMarketContext(simmerId, signal.consensusProbability);
+    if (ctx) {
+      // Gate 1: market already resolved or closed
+      if (ctx.market.status === 'resolved' || ctx.market.status === 'closed') {
+        logger.info('[executor] skipping — market already resolved/closed', {
+          marketId: signal.marketId,
+          status: ctx.market.status,
+        });
+        return { signal, skipped: true, skipReason: `market_${ctx.market.status}` };
+      }
+
+      // Gate 2: Simmer already knows we have a position on this side
+      if (ctx.position.has_position && ctx.position.side === signal.direction.toLowerCase()) {
+        logger.info('[executor] skipping — Simmer reports existing position', {
+          marketId: signal.marketId,
+          side: ctx.position.side,
+        });
+        return { signal, skipped: true, skipReason: 'simmer_position_exists' };
+      }
+
+      // Gate 3: severe flip-flop warning — we've been reversing too much on this market
+      if (ctx.discipline.warning_level === 'severe') {
+        logger.warn('[executor] skipping — severe flip-flop warning from Simmer', {
+          marketId: signal.marketId,
+          flipFlopWarning: ctx.discipline.flip_flop_warning,
+          directionChanges24h: ctx.discipline.direction_changes_24h,
+        });
+        return { signal, skipped: true, skipReason: 'flip_flop_severe' };
+      }
+
+      // Gate 4: market has fees — fee drag erodes edge on geopolitical markets
+      if (ctx.market.fee_rate_bps > 0) {
+        logger.info('[executor] skipping — market has fees', {
+          marketId: signal.marketId,
+          feeRateBps: ctx.market.fee_rate_bps,
+        });
+        return { signal, skipped: true, skipReason: `fee_market:${ctx.market.fee_rate_bps.toString()}bps` };
+      }
+
+      logger.info('[executor] context check passed', {
+        marketId: signal.marketId,
+        warnings: ctx.warnings,
+        flipFlopLevel: ctx.discipline.warning_level,
+        resolutionCriteria: ctx.market.resolution_criteria?.slice(0, 80),
+      });
+    } else {
+      logger.warn('[executor] context check unavailable — proceeding without safeguards', {
+        marketId: signal.marketId,
+        simmerId,
+      });
+    }
+
     logger.info('[executor] submitting trade via Simmer', {
       marketId: signal.marketId,
       simmerId,

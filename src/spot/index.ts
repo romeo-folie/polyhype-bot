@@ -22,6 +22,7 @@ import { computeDivergence } from '../mapping/divergenceCalculator.js';
 import { executeSignals } from '../execution/executor.js';
 import { recordPosition, hasOpenPosition } from '../execution/positionLedger.js';
 import { notifyTradeExecuted, notifyTradeError } from '../execution/telegram.js';
+import { getOpportunities } from '../shared/simmer.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 /**
@@ -174,11 +175,47 @@ async function runSpotMonitorInner(
     return;
   }
 
+  // 5b. Cross-check with Simmer opportunities — boost confidence when Simmer agrees
+  // Fetch opportunities once per cycle (not per signal) to avoid rate limit pressure.
+  // If Simmer's AI oracle disagrees with our direction, log it and reduce stake by 50%.
+  const simmerOpps = await getOpportunities({ venue: 'polymarket', limit: 50, minDivergence: 0.03 });
+  const simmerOppByQuestion = new Map(
+    simmerOpps.map((o) => [o.question.toLowerCase().trim(), o]),
+  );
+
+  const crossCheckedSignals = signals.map((signal) => {
+    const oppKey = signal.question.toLowerCase().trim();
+    const opp = simmerOppByQuestion.get(oppKey);
+    if (!opp) return signal; // no Simmer view — proceed as-is
+
+    const simmerAgreesDirection = opp.recommended_side === signal.direction.toLowerCase();
+    if (!simmerAgreesDirection && opp.signal_source === 'oracle') {
+      // Oracle-grade disagreement — reduce stake (don't skip, LLM reasoning may still be valid)
+      logger.warn('[spot] Simmer oracle disagrees with signal direction — halving stake', {
+        marketId: signal.marketId,
+        ourDirection: signal.direction,
+        simmerSide: opp.recommended_side,
+        simmerDivergence: opp.divergence,
+      });
+      return { ...signal, stakeUsd: signal.stakeUsd * 0.5 };
+    }
+
+    if (simmerAgreesDirection && opp.signal_source === 'oracle') {
+      logger.info('[spot] Simmer oracle confirms signal direction', {
+        marketId: signal.marketId,
+        direction: signal.direction,
+        simmerDivergence: opp.divergence,
+      });
+    }
+
+    return signal;
+  });
+
   // 6a. Deduplicate signals by marketId:direction — multiple spot moves in one
   // cycle can correlate to the same market. Keep the highest-edge signal only
   // to prevent duplicate execution before position is recorded.
   const bestByKey = new Map<string, TradeSignal>();
-  for (const signal of signals) {
+  for (const signal of crossCheckedSignals) {
     const key = `${signal.marketId}:${signal.direction}`;
     const existing = bestByKey.get(key);
     if (!existing || signal.edgeMagnitude > existing.edgeMagnitude) {

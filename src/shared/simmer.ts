@@ -15,10 +15,15 @@
 
 import { z } from 'zod';
 import { loadConfig } from './config.js';
+import { logger } from './logger.js';
 
 const SIMMER_BASE_URL = 'https://api.simmer.markets';
 const TRADE_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/trade`;
 const MARKETS_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/markets`;
+const POSITIONS_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/positions`;
+const REDEEM_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/redeem`;
+const CONTEXT_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/context`;
+const OPPORTUNITIES_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/markets/opportunities`;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 // ── Request / response types ──────────────────────────────────────────────────
@@ -68,6 +73,28 @@ const SimmerTradeResultSchema = z.object({
 });
 
 export type SimmerTradeResult = z.infer<typeof SimmerTradeResultSchema>;
+
+/** Zod schema for Simmer position response. */
+const SimmerPositionSchema = z.object({
+  market_id: z.string(),
+  side: z.enum(['yes', 'no']),
+  redeemable: z.boolean(),
+  question: z.string().optional(),
+  shares: z.number().optional(),
+  value_usdc: z.number().optional(),
+});
+
+export type SimmerPosition = z.infer<typeof SimmerPositionSchema>;
+
+/** Response from POST /api/sdk/redeem. */
+const SimmerRedeemResultSchema = z.object({
+  success: z.boolean(),
+  tx_hash: z.string().optional().nullable(),
+  unsigned_tx: z.unknown().optional().nullable(),
+  error: z.string().optional().nullable(),
+});
+
+export type SimmerRedeemResult = z.infer<typeof SimmerRedeemResultSchema>;
 
 /** Simmer API error with HTTP context. */
 export class SimmerError extends Error {
@@ -203,6 +230,214 @@ export async function resolveSimmerMarketId(question: string): Promise<string | 
     return exactMatch?.id ?? null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Fetch positions from Simmer filtered by status and venue.
+ *
+ * Use status="resolved" to find positions ready for redemption.
+ * Filters to venue="polymarket" by default — PGA only trades there.
+ *
+ * @throws {SimmerError} on HTTP 4xx/5xx or network failure
+ */
+export async function getSimmerPositions(opts: {
+  status?: 'active' | 'resolved' | 'closed' | 'all';
+  venue?: 'polymarket' | 'sim' | 'kalshi';
+  source?: string;
+} = {}): Promise<SimmerPosition[]> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
+  const { status = 'active', venue = 'polymarket', source } = opts;
+
+  const params = new URLSearchParams({ status, venue });
+  if (source) params.set('source', source);
+
+  const resp = await fetch(`${POSITIONS_ENDPOINT}?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => resp.text());
+    throw new SimmerError(`Simmer positions API returned HTTP ${resp.status.toString()}`, resp.status, body);
+  }
+
+  const raw = (await resp.json()) as unknown;
+  // API may return { positions: [...] } or a bare array
+  const arr = Array.isArray(raw) ? raw : ((raw as Record<string, unknown>).positions ?? []);
+  const positions: SimmerPosition[] = [];
+  for (const item of arr as unknown[]) {
+    const parsed = SimmerPositionSchema.safeParse(item);
+    if (parsed.success) {
+      positions.push(parsed.data);
+    } else {
+      logger.warn('[simmer] skipping malformed position entry', {
+        error: parsed.error.message,
+        raw: JSON.stringify(item).slice(0, 200),
+      });
+    }
+  }
+  return positions;
+}
+
+/**
+ * Redeem a winning Polymarket position for USDC.e on Polygon.
+ *
+ * For managed wallets: Simmer signs and submits server-side, returns tx_hash.
+ * For external wallets: returns unsigned_tx (not handled here — PGA uses managed wallets).
+ *
+ * @throws {SimmerError} on HTTP 4xx/5xx or network failure
+ */
+export async function submitRedeem(input: {
+  market_id: string;
+  side: 'yes' | 'no';
+}): Promise<SimmerRedeemResult> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
+
+  const resp = await fetch(REDEEM_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ market_id: input.market_id, side: input.side }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+
+  let responseBody: unknown;
+  try {
+    responseBody = await resp.json();
+  } catch {
+    responseBody = await resp.text().catch(() => '(unreadable body)');
+  }
+
+  if (!resp.ok) {
+    throw new SimmerError(
+      `Simmer redeem API returned HTTP ${resp.status.toString()}`,
+      resp.status,
+      responseBody,
+    );
+  }
+
+  const parsed = SimmerRedeemResultSchema.safeParse(responseBody);
+  if (!parsed.success) {
+    throw new SimmerError(
+      `Simmer redeem response failed validation: ${parsed.error.message}`,
+      resp.status,
+      responseBody,
+    );
+  }
+
+  return parsed.data;
+}
+
+/** Trading discipline returned by GET /api/sdk/context/{market_id}. */
+export interface SimmerContextDiscipline {
+  last_action?: string | null;
+  last_action_at?: string | null;
+  direction_changes_24h: number;
+  flip_flop_warning?: string | null;
+  /** 'none' | 'caution' | 'severe' */
+  warning_level: string;
+}
+
+/** Concise context response — only fields PGA cares about. */
+export interface SimmerMarketContext {
+  market: {
+    id: string;
+    question: string;
+    current_price: number;
+    status: string;
+    resolution_criteria?: string | null;
+    fee_rate_bps: number;
+    spread?: number | null;
+    resolves_at?: string | null;
+    ai_consensus?: number | null;
+    divergence?: number | null;
+  };
+  position: {
+    has_position: boolean;
+    side?: string | null;
+  };
+  discipline: SimmerContextDiscipline;
+  warnings: string[];
+}
+
+/**
+ * Fetch context for a single market — safeguards, resolution criteria, discipline.
+ *
+ * Pass myProbability to get a TRADE/HOLD recommendation from Simmer's edge engine.
+ * Rate limited: 300/min. Returns null on any error (never throws).
+ */
+export async function getMarketContext(
+  marketId: string,
+  myProbability?: number,
+): Promise<SimmerMarketContext | null> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
+
+  const url = new URL(`${CONTEXT_ENDPOINT}/${marketId}`);
+  if (myProbability !== undefined) {
+    url.searchParams.set('my_probability', myProbability.toString());
+  }
+
+  try {
+    const resp = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!resp.ok) return null;
+    return (await resp.json()) as SimmerMarketContext;
+  } catch {
+    return null;
+  }
+}
+
+/** A single opportunity from GET /api/sdk/markets/opportunities. */
+export interface SimmerOpportunity {
+  id: string;
+  question: string;
+  current_price: number;
+  ai_consensus?: number | null;
+  external_price?: number | null;
+  divergence: number;
+  recommended_side: 'yes' | 'no';
+  signal_source?: 'oracle' | 'crowd' | null;
+  fee_rate_bps?: number;
+  [key: string]: unknown;
+}
+
+/**
+ * Fetch Simmer's ranked opportunity list — markets where AI diverges from market price.
+ *
+ * signal_source "oracle" = AI multi-model forecast; "crowd" = sim agent activity.
+ * Returns empty array on any error (never throws).
+ */
+export async function getOpportunities(opts: {
+  venue?: 'polymarket' | 'kalshi' | 'sim';
+  limit?: number;
+  minDivergence?: number;
+} = {}): Promise<SimmerOpportunity[]> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
+  const { venue = 'polymarket', limit = 50, minDivergence = 0.03 } = opts;
+
+  const params = new URLSearchParams({
+    venue,
+    limit: limit.toString(),
+    min_divergence: minDivergence.toString(),
+  });
+
+  try {
+    const resp = await fetch(`${OPPORTUNITIES_ENDPOINT}?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (!resp.ok) return [];
+    const data = (await resp.json()) as { opportunities?: SimmerOpportunity[] } | SimmerOpportunity[];
+    return Array.isArray(data) ? data : (data.opportunities ?? []);
+  } catch {
+    return [];
   }
 }
 
