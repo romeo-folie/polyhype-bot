@@ -11,9 +11,17 @@
 #   */5 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/monitor/index.ts >> /tmp/pga-monitor.log 2>&1
 #   * * * * *   /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/spot/index.ts >> /tmp/pga-spot.log 2>&1
 
+set -euo pipefail
+
+ENV_FILE="$(dirname "$0")/.env"
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "ERROR: $ENV_FILE not found. Aborting." >&2
+  exit 1
+fi
+
 set -a
 # shellcheck source=.env
-source "$(dirname "$0")/.env"
+source "$ENV_FILE"
 set +a
 
 exec "$@"
