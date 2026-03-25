@@ -30,6 +30,12 @@ export interface RedemptionResult {
   error?: string;
 }
 
+const REDEEM_DELAY_MS = 6_500; // ~9/min, safely under Simmer's 10/min limit
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Find and redeem all resolved winning positions on Simmer.
  *
@@ -63,6 +69,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
   logger.info('[redeemer] found redeemable positions', { count: redeemable.length });
 
   for (const pos of redeemable) {
+    if (results.length > 0) await sleep(REDEEM_DELAY_MS);
     const side = pos.side as 'yes' | 'no';
     try {
       const redeemResult = await submitRedeem({ market_id: pos.market_id, side });

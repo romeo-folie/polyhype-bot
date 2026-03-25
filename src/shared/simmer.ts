@@ -15,6 +15,7 @@
 
 import { z } from 'zod';
 import { loadConfig } from './config.js';
+import { logger } from './logger.js';
 
 const SIMMER_BASE_URL = 'https://api.simmer.markets';
 const TRADE_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/trade`;
@@ -73,16 +74,17 @@ const SimmerTradeResultSchema = z.object({
 
 export type SimmerTradeResult = z.infer<typeof SimmerTradeResultSchema>;
 
-/** A single position returned by GET /api/sdk/positions. */
-export interface SimmerPosition {
-  market_id: string;
-  side: 'yes' | 'no';
-  redeemable: boolean;
-  question?: string;
-  shares?: number;
-  value_usdc?: number;
-  [key: string]: unknown;
-}
+/** Zod schema for Simmer position response. */
+const SimmerPositionSchema = z.object({
+  market_id: z.string(),
+  side: z.enum(['yes', 'no']),
+  redeemable: z.boolean(),
+  question: z.string().optional(),
+  shares: z.number().optional(),
+  value_usdc: z.number().optional(),
+});
+
+export type SimmerPosition = z.infer<typeof SimmerPositionSchema>;
 
 /** Response from POST /api/sdk/redeem. */
 const SimmerRedeemResultSchema = z.object({
@@ -260,9 +262,22 @@ export async function getSimmerPositions(opts: {
     throw new SimmerError(`Simmer positions API returned HTTP ${resp.status.toString()}`, resp.status, body);
   }
 
-  const data = (await resp.json()) as { positions?: SimmerPosition[] } | SimmerPosition[];
+  const raw = (await resp.json()) as unknown;
   // API may return { positions: [...] } or a bare array
-  return Array.isArray(data) ? data : (data.positions ?? []);
+  const arr = Array.isArray(raw) ? raw : ((raw as Record<string, unknown>).positions ?? []);
+  const positions: SimmerPosition[] = [];
+  for (const item of arr as unknown[]) {
+    const parsed = SimmerPositionSchema.safeParse(item);
+    if (parsed.success) {
+      positions.push(parsed.data);
+    } else {
+      logger.warn('[simmer] skipping malformed position entry', {
+        error: parsed.error.message,
+        raw: JSON.stringify(item).slice(0, 200),
+      });
+    }
+  }
+  return positions;
 }
 
 /**

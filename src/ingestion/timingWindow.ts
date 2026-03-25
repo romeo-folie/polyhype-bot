@@ -18,6 +18,7 @@
  * (Outside windows)                  1.00x       US prime time — priced quickly
  */
 
+import { logger } from '../shared/logger.js';
 import type { ScoredItem } from './scorer.js';
 
 interface TimingWindow {
@@ -67,13 +68,13 @@ export function applyTimingBoost(
 
   return items.map((item) => {
     const boosted = Math.min(MAX_URGENCY_SCORE, item.urgencyScore * multiplier);
-    return {
-      ...item,
-      urgencyScore: boosted,
-      // Preserve keyword list; timing window info is purely a score modifier
-      keywords: item.keywords,
-      _timingWindow: windowName,      // debug field
-      _timingMultiplier: multiplier,  // debug field
-    } as ScoredItem & { _timingWindow: string | null; _timingMultiplier: number };
+    logger.debug('[timing] boosted urgency score', {
+      title: item.title?.slice(0, 80),
+      original: item.urgencyScore,
+      boosted,
+      window: windowName,
+      multiplier,
+    });
+    return { ...item, urgencyScore: boosted };
   });
 }

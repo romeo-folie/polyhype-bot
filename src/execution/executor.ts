@@ -167,6 +167,11 @@ export async function executeSignal(
         flipFlopLevel: ctx.discipline.warning_level,
         resolutionCriteria: ctx.market.resolution_criteria?.slice(0, 80),
       });
+    } else {
+      logger.warn('[executor] context check unavailable — proceeding without safeguards', {
+        marketId: signal.marketId,
+        simmerId,
+      });
     }
 
     logger.info('[executor] submitting trade via Simmer', {
