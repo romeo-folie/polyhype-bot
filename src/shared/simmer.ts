@@ -24,6 +24,7 @@ const POSITIONS_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/positions`;
 const REDEEM_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/redeem`;
 const CONTEXT_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/context`;
 const OPPORTUNITIES_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/markets/opportunities`;
+const PORTFOLIO_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/portfolio`;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 // ── Request / response types ──────────────────────────────────────────────────
@@ -95,6 +96,17 @@ const SimmerRedeemResultSchema = z.object({
 });
 
 export type SimmerRedeemResult = z.infer<typeof SimmerRedeemResultSchema>;
+
+/** Zod schema for Simmer portfolio response. */
+const SimmerPortfolioSchema = z.object({
+  balance_usdc: z.number(),
+  sim_balance: z.number().optional(),
+  total_exposure: z.number().optional(),
+  positions_count: z.number().optional(),
+  pnl_total: z.number().optional(),
+});
+
+export type SimmerPortfolio = z.infer<typeof SimmerPortfolioSchema>;
 
 /** Simmer API error with HTTP context. */
 export class SimmerError extends Error {
@@ -487,4 +499,47 @@ export async function probeSimmerSkill(): Promise<{
       statusCode: 0,
     };
   }
+}
+
+/**
+ * Fetch the Simmer wallet portfolio — live USDC balance and summary stats.
+ *
+ * Used by bankroll module to replace the Redis-seeded counter with the
+ * actual wallet balance tracked by Simmer.
+ *
+ * @throws {SimmerError} on HTTP 4xx/5xx or network failure
+ */
+export async function getPortfolio(): Promise<SimmerPortfolio> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
+
+  const resp = await fetch(PORTFOLIO_ENDPOINT, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+
+  let responseBody: unknown;
+  try {
+    responseBody = await resp.json();
+  } catch {
+    responseBody = await resp.text().catch(() => '(unreadable body)');
+  }
+
+  if (!resp.ok) {
+    throw new SimmerError(
+      `Simmer portfolio API returned HTTP ${resp.status.toString()}`,
+      resp.status,
+      responseBody,
+    );
+  }
+
+  const parsed = SimmerPortfolioSchema.safeParse(responseBody);
+  if (!parsed.success) {
+    throw new SimmerError(
+      `Simmer portfolio response failed validation: ${parsed.error.message}`,
+      resp.status,
+      responseBody,
+    );
+  }
+
+  return parsed.data;
 }
