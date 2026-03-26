@@ -17,6 +17,7 @@
     "cron:spot": "npx tsx src/spot/index.ts",
     "cron:arb": "npx tsx src/arb/index.ts",
     "probe:simmer": "npx tsx scripts/probe-simmer.ts",
+    "probe:clob-allowance": "npx tsx scripts/probe-clob-allowance.ts",
     "test": "node --experimental-vm-modules node_modules/.bin/jest --passWithNoTests",
     "test:unit": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=src/",
     "lint": "eslint 'src/**/*.ts' 'scripts/**/*.ts'",
