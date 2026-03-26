@@ -95,7 +95,7 @@ async function persistCreds(creds: ApiKeyCreds): Promise<void> {
   }
 }
 
-async function getClobClient(): Promise<ClobClient> {
+export async function getClobClient(): Promise<ClobClient> {
   if (cachedClient) return cachedClient;
 
   const initPromise = (async () => {
