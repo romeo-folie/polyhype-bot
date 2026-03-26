@@ -2,17 +2,18 @@
  * Take-profit executor.
  *
  * When the evaluator decides to exit a position, this module:
- * 1. Calls the Simmer SDK to sell the position (inverted direction at current price)
+ * 1. Routes to the correct venue (Simmer or CLOB) based on position.executionVenue
  * 2. Removes the position from the Redis ledger
  * 3. Sends a Telegram take-profit notification
  *
- * Sell direction is always the inverse of the entry direction:
- *   Entry YES → Sell NO (exit long YES position)
- *   Entry NO  → Sell YES (exit long NO position)
+ * Sell direction is always the same side as the entry direction:
+ *   Entry YES → Sell YES shares
+ *   Entry NO  → Sell NO shares
  */
 
 import { logger } from '../shared/logger.js';
 import { submitSell, SimmerError } from '../shared/simmer.js';
+import { submitClobSell } from '../shared/clob.js';
 import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
@@ -32,6 +33,7 @@ export interface TakeProfitResult {
 /**
  * Execute a take-profit exit for a single position.
  *
+ * Routes to Simmer or CLOB based on position.executionVenue.
  * Never throws — all errors are captured in result.error.
  */
 export async function executeTakeProfit(opts: {
@@ -67,7 +69,27 @@ export async function executeTakeProfit(opts: {
     sharesToSell: sharesToSell.toFixed(4),
     returnPct: returnPct.toFixed(2),
     reason,
+    venue: position.executionVenue ?? 'simmer',
   });
+
+  // Route to the correct venue
+  const venue = position.executionVenue ?? 'simmer';
+  if (venue === 'clob') {
+    return executeClobExit({ position, currentPrice, returnPct, reason, redis, sharesToSell });
+  }
+  return executeSimmerExit({ position, currentPrice, returnPct, reason, redis, sellSide, sharesToSell });
+}
+
+async function executeSimmerExit(opts: {
+  position: Position;
+  currentPrice: number;
+  returnPct: number;
+  reason: ExitReason;
+  redis: Redis;
+  sellSide: 'yes' | 'no';
+  sharesToSell: number;
+}): Promise<TakeProfitResult> {
+  const { position, currentPrice, returnPct, reason, redis, sellSide, sharesToSell } = opts;
 
   try {
     const tradeResult = await submitSell({
@@ -79,22 +101,12 @@ export async function executeTakeProfit(opts: {
     });
 
     if (tradeResult.success) {
-      // Remove from ledger — position is closed
       await closePosition(redis, position.marketId, position.direction);
-
-      // Credit proceeds back to bankroll (shares × current price)
       const proceedsUsd = sharesToSell * currentPrice;
       await creditProceeds(redis, proceedsUsd);
+      await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
 
-      // Notify
-      await notifyTakeProfitExecuted({
-        position,
-        currentPrice,
-        returnPct,
-        reason,
-      });
-
-      logger.info('[take-profit-executor] exit successful', {
+      logger.info('[take-profit-executor] exit successful (simmer)', {
         marketId: position.marketId,
         txHash: tradeResult.tx_hash,
         returnPct: returnPct.toFixed(2),
@@ -125,6 +137,72 @@ export async function executeTakeProfit(opts: {
           : String(err);
 
     logger.error('[take-profit-executor] exit trade failed', {
+      marketId: position.marketId,
+      error: message,
+    });
+    return { marketId: position.marketId, success: false, error: message, returnPct, reason };
+  }
+}
+
+async function executeClobExit(opts: {
+  position: Position;
+  currentPrice: number;
+  returnPct: number;
+  reason: ExitReason;
+  redis: Redis;
+  sharesToSell: number;
+}): Promise<TakeProfitResult> {
+  const { position, currentPrice, returnPct, reason, redis, sharesToSell } = opts;
+
+  // Get the correct token ID: index 0 for YES, index 1 for NO
+  const tokenId = position.direction === 'YES'
+    ? position.clobTokenIds[0]
+    : position.clobTokenIds[1];
+
+  if (!tokenId) {
+    const error = 'CLOB exit failed: missing token ID for direction ' + position.direction;
+    logger.error('[take-profit-executor] ' + error, { marketId: position.marketId });
+    return { marketId: position.marketId, success: false, error, returnPct, reason };
+  }
+
+  try {
+    const clobResult = await submitClobSell({
+      tokenId,
+      shares: sharesToSell,
+      orderType: 'FAK',
+    });
+
+    if (clobResult.success) {
+      await closePosition(redis, position.marketId, position.direction);
+      const proceedsUsd = sharesToSell * currentPrice;
+      await creditProceeds(redis, proceedsUsd);
+      await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
+
+      logger.info('[take-profit-executor] exit successful (clob)', {
+        marketId: position.marketId,
+        txHash: clobResult.tx_hash,
+        returnPct: returnPct.toFixed(2),
+      });
+
+      const successResult: TakeProfitResult = {
+        marketId: position.marketId,
+        success: true,
+        returnPct,
+        reason,
+      };
+      if (clobResult.tx_hash) successResult.txHash = clobResult.tx_hash;
+      return successResult;
+    } else {
+      const error = clobResult.error ?? 'CLOB sell failed';
+      logger.warn('[take-profit-executor] CLOB sell returned success=false', {
+        marketId: position.marketId,
+        error,
+      });
+      return { marketId: position.marketId, success: false, error, returnPct, reason };
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('[take-profit-executor] CLOB exit trade failed', {
       marketId: position.marketId,
       error: message,
     });

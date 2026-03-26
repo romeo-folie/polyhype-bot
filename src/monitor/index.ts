@@ -19,6 +19,7 @@ import { getPriceFeed, destroyPriceFeed } from '../shared/feedSingleton.js';
 import { evaluateTakeProfit } from './takeProfitEvaluator.js';
 import { executeTakeProfit } from './takeProfitExecutor.js';
 import { redeemResolvedPositions } from './resolutionRedeemer.js';
+import { runClobProbe } from '../shared/clobProbe.js';
 
 export async function runMonitor(): Promise<void> {
   const redis = getRedis();
@@ -32,6 +33,13 @@ export async function runMonitor(): Promise<void> {
     logger.info('[monitor] previous cycle still running, skipping');
     return;
   }
+
+  // Fire-and-forget CLOB probe — log errors but never crash the monitor
+  await runClobProbe().catch((err) => {
+    logger.warn('[monitor] CLOB probe failed — continuing', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
 
   try {
     await runMonitorInner(redis);

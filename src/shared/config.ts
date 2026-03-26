@@ -21,7 +21,7 @@ const envSchema = z.object({
   // Wallet / direct CLOB execution
   POLYGON_WALLET_PRIVATE_KEY: z.string().optional(),
   POLYMARKET_FUNDER_ADDRESS: z.string().optional(),
-  POLYMARKET_SIGNATURE_TYPE: z.coerce.number().int().min(0).max(1).optional().default(0),
+  POLYMARKET_SIGNATURE_TYPE: z.coerce.number().int().min(0).max(2).optional().default(0),
   CLOB_FALLBACK_ENABLED: z.coerce.boolean().optional().default(true),
   CLOB_ORDER_TYPE: z.enum(['FOK', 'FAK']).optional().default('FAK'),
 
@@ -82,5 +82,21 @@ export function loadConfig(): AppConfig {
   }
 
   _config = cfg;
+
+  // Cross-validate CLOB-related config
+  if (cfg.CLOB_FALLBACK_ENABLED) {
+    if (!cfg.POLYGON_WALLET_PRIVATE_KEY) {
+      throw new Error('POLYGON_WALLET_PRIVATE_KEY is required when CLOB_FALLBACK_ENABLED=true');
+    }
+    if (
+      (cfg.POLYMARKET_SIGNATURE_TYPE === 1 || cfg.POLYMARKET_SIGNATURE_TYPE === 2) &&
+      !cfg.POLYMARKET_FUNDER_ADDRESS
+    ) {
+      throw new Error(
+        'POLYMARKET_FUNDER_ADDRESS is required when POLYMARKET_SIGNATURE_TYPE is 1 (proxy) or 2 (gnosis safe)',
+      );
+    }
+  }
+
   return _config;
 }

@@ -24,6 +24,7 @@ function makePosition(overrides: Partial<Position> = {}): Position {
     sourcedFrom: 'Test headline',
     openedAt: new Date('2026-03-18T12:00:00Z').toISOString(),
     txHash: '0xabc',
+    executionVenue: 'simmer',
     ...overrides,
   };
 }
@@ -142,5 +143,40 @@ describe('closePosition', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const positions = await getOpenPositions(redis as any);
     expect(positions).toHaveLength(0);
+  });
+});
+
+describe('executionVenue', () => {
+  it('persists and deserialises executionVenue round-trip (simmer)', async () => {
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await recordPosition(redis as any, makePosition({ executionVenue: 'simmer' }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const positions = await getOpenPositions(redis as any);
+    expect(positions[0]!.executionVenue).toBe('simmer');
+  });
+
+  it('persists and deserialises executionVenue round-trip (clob)', async () => {
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await recordPosition(redis as any, makePosition({ executionVenue: 'clob' }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const positions = await getOpenPositions(redis as any);
+    expect(positions[0]!.executionVenue).toBe('clob');
+  });
+
+  it('defaults to simmer for legacy positions without executionVenue', async () => {
+    const redis = makeRedis();
+    // Simulate a legacy position that was stored without executionVenue
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await recordPosition(redis as any, makePosition({ executionVenue: 'simmer' }));
+
+    // Manually remove the executionVenue field from the stored hash
+    const key = Object.keys(redis._store)[0]!;
+    delete redis._store[key]!['executionVenue'];
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const positions = await getOpenPositions(redis as any);
+    expect(positions[0]!.executionVenue).toBe('simmer');
   });
 });

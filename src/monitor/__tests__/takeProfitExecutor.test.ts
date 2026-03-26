@@ -19,6 +19,12 @@ jest.unstable_mockModule('../../shared/simmer.js', () => ({
   },
 }));
 
+jest.unstable_mockModule('../../shared/clob.js', () => ({
+  submitClobSell: jest.fn(),
+  submitClobBuy: jest.fn(),
+  getClobBalance: jest.fn(),
+}));
+
 jest.unstable_mockModule('../../execution/positionLedger.js', () => ({
   closePosition: jest.fn(),
   getOpenPositions: jest.fn(),
@@ -37,11 +43,13 @@ jest.unstable_mockModule('../../shared/bankroll.js', () => ({
 }));
 
 const { submitSell } = await import('../../shared/simmer.js');
+const { submitClobSell } = await import('../../shared/clob.js');
 const { closePosition } = await import('../../execution/positionLedger.js');
 const { notifyTakeProfitExecuted } = await import('../../execution/telegram.js');
 const { executeTakeProfit } = await import('../takeProfitExecutor.js');
 
 const mockSell = submitSell as jest.MockedFunction<typeof submitSell>;
+const mockClobSell = submitClobSell as jest.MockedFunction<typeof submitClobSell>;
 const mockClose = closePosition as jest.MockedFunction<typeof closePosition>;
 const mockNotify = notifyTakeProfitExecuted as jest.MockedFunction<typeof notifyTakeProfitExecuted>;
 
@@ -59,6 +67,7 @@ function makePosition(overrides: Partial<Position> = {}): Position {
     edgeMagnitude: 0.3,
     sourcedFrom: 'headline',
     openedAt: new Date().toISOString(),
+    executionVenue: 'simmer',
     ...overrides,
   };
 }
@@ -70,6 +79,7 @@ function makeRedis() {
 describe('executeTakeProfit', () => {
   beforeEach(() => {
     mockSell.mockReset();
+    mockClobSell.mockReset();
     mockClose.mockReset();
     mockNotify.mockReset();
     mockClose.mockResolvedValue(undefined);
@@ -233,5 +243,73 @@ describe('executeTakeProfit', () => {
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/invalid sharesToSell/);
     expect(mockSell).not.toHaveBeenCalled();
+  });
+
+  // ── CLOB venue routing ────────────────────────────────────────────────────
+
+  it('routes CLOB-venue position to submitClobSell instead of submitSell', async () => {
+    mockClobSell.mockResolvedValue({ success: true, tx_hash: '0xclobexit' });
+
+    const result = await executeTakeProfit({
+      position: makePosition({ executionVenue: 'clob', direction: 'YES' }),
+      currentPrice: 0.65,
+      returnPct: 25,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.txHash).toBe('0xclobexit');
+    expect(mockClobSell).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-yes', shares: 12.5, orderType: 'FAK' }),
+    );
+    expect(mockSell).not.toHaveBeenCalled();
+    expect(mockClose).toHaveBeenCalledWith(makeRedis(), 'mkt-1', 'YES');
+  });
+
+  it('routes CLOB-venue NO position to correct token ID', async () => {
+    mockClobSell.mockResolvedValue({ success: true, tx_hash: '0xclobexit2' });
+
+    await executeTakeProfit({
+      position: makePosition({ executionVenue: 'clob', direction: 'NO' }),
+      currentPrice: 0.65,
+      returnPct: 25,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    expect(mockClobSell).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-no' }),
+    );
+  });
+
+  it('returns error when CLOB-venue position has no token ID', async () => {
+    const result = await executeTakeProfit({
+      position: makePosition({ executionVenue: 'clob', clobTokenIds: [] }),
+      currentPrice: 0.65,
+      returnPct: 25,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('missing token ID');
+    expect(mockClobSell).not.toHaveBeenCalled();
+  });
+
+  it('returns success=false when CLOB sell fails', async () => {
+    mockClobSell.mockResolvedValue({ success: false, error: 'CLOB order rejected' });
+
+    const result = await executeTakeProfit({
+      position: makePosition({ executionVenue: 'clob' }),
+      currentPrice: 0.65,
+      returnPct: 25,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('CLOB order rejected');
+    expect(mockClose).not.toHaveBeenCalled();
   });
 });

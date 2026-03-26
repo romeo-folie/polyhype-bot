@@ -8,6 +8,7 @@
 import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client';
 import { Wallet } from '@ethersproject/wallet';
 import { loadConfig } from './config.js';
+import { logger } from './logger.js';
 
 const CLOB_HOST = 'https://clob.polymarket.com';
 const POLYGON_CHAIN_ID = 137;
@@ -22,12 +23,30 @@ export interface ClobBuyInput {
   orderType?: 'FOK' | 'FAK';
 }
 
+export interface ClobSellInput {
+  tokenId: string;
+  /** Number of conditional tokens to sell */
+  shares: number;
+  orderType?: 'FOK' | 'FAK';
+}
+
 export interface ClobTradeResult {
   success: boolean;
   tx_hash?: string;
   shares_bought?: number;
   error?: string;
   raw?: unknown;
+}
+
+/** SDK OrderResponse shape from createAndPostMarketOrder */
+interface OrderResponse {
+  success: boolean;
+  errorMsg: string;
+  orderID: string;
+  transactionsHashes: string[];
+  status: string;
+  takingAmount: string;
+  makingAmount: string;
 }
 
 let cachedClient: Promise<ClobClient> | null = null;
@@ -75,28 +94,37 @@ async function getClobClient(): Promise<ClobClient> {
   return cachedClient;
 }
 
-function extractTxHash(raw: unknown): string | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const obj = raw as Record<string, unknown>;
-  const candidates = [obj['tx_hash'], obj['txHash'], obj['orderID'], obj['orderId'], obj['id']];
-  for (const value of candidates) {
-    if (typeof value === 'string' && value.length > 0) return value;
-  }
-  return undefined;
+function orderWithTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`CLOB order timed out after ${CLOB_ORDER_TIMEOUT_MS}ms`)),
+      CLOB_ORDER_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function extractShares(raw: unknown): number | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const obj = raw as Record<string, unknown>;
-  const candidates = [obj['size_matched'], obj['sizeMatched'], obj['filled_size'], obj['size']];
-  for (const value of candidates) {
-    if (typeof value === 'number' && isFinite(value)) return value;
-    if (typeof value === 'string') {
-      const parsed = parseFloat(value);
-      if (isFinite(parsed)) return parsed;
-    }
+function parseOrderResponse(raw: unknown): ClobTradeResult {
+  const resp = raw as OrderResponse;
+
+  if (resp.success === false) {
+    return {
+      success: false,
+      error: resp.errorMsg || 'CLOB order rejected',
+      raw,
+    };
   }
-  return undefined;
+
+  const txHash = resp.transactionsHashes?.[0];
+  const takingAmount = parseFloat(resp.takingAmount);
+
+  return {
+    success: true,
+    ...(txHash ? { tx_hash: txHash } : {}),
+    ...(isFinite(takingAmount) && takingAmount > 0 ? { shares_bought: takingAmount } : {}),
+    raw,
+  };
 }
 
 /**
@@ -111,19 +139,14 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
   try {
     const client = await getClobClient();
 
-    // Wrap the entire order submission in a timeout to prevent hung connections
-    // from keeping the cron process alive indefinitely (SDK has no built-in timeout).
-    // The timer is cleared in .finally() so it never leaks regardless of outcome.
-    const orderWithTimeout = <T>(promise: Promise<T>): Promise<T> => {
-      let timer: ReturnType<typeof setTimeout>;
-      const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`CLOB order timed out after ${CLOB_ORDER_TIMEOUT_MS}ms`)),
-          CLOB_ORDER_TIMEOUT_MS,
-        );
-      });
-      return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-    };
+    // Allowance preflight
+    const bal = await getClobBalance();
+    if (bal !== null && bal.allowance < input.amountUsd) {
+      return {
+        success: false,
+        error: `Insufficient CLOB allowance: ${String(bal.allowance)} USDC available, ${String(input.amountUsd)} required`,
+      };
+    }
 
     const tickSize = await orderWithTimeout(client.getTickSize(input.tokenId));
     const negRisk = await orderWithTimeout(client.getNegRisk(input.tokenId));
@@ -142,50 +165,73 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
       resolvedOrderType,
     ));
 
-    if (raw && typeof raw === 'object' && 'error' in (raw as Record<string, unknown>)) {
-      const error = (raw as Record<string, unknown>)['error'];
-      if (typeof error === 'string' && error.length > 0) {
-        return { success: false, error, raw };
-      }
-    }
-
-    const txHash = extractTxHash(raw);
-    const sharesBought = extractShares(raw);
-
-    return {
-      success: true,
-      ...(txHash ? { tx_hash: txHash } : {}),
-      ...(sharesBought !== undefined ? { shares_bought: sharesBought } : {}),
-      raw,
-    };
+    return parseOrderResponse(raw);
   } catch (err) {
     return { success: false, error: normaliseError(err) };
   }
 }
 
 /**
- * Fetch the USDC balance available for CLOB trading.
+ * Execute a market SELL on Polymarket CLOB.
  *
- * Uses ClobClient.getBalanceAllowance() which returns the on-chain USDC
- * balance and ERC20 allowance for the signer wallet. The effective tradeable
- * amount is min(balance, allowance).
- *
- * Returns null on failure (missing private key, network error) so callers
- * can degrade gracefully rather than blocking the full bankroll read.
+ * For SELL orders, `amount` is the number of conditional tokens (shares), not USD.
  */
-export async function getClobBalance(): Promise<number | null> {
+export async function submitClobSell(input: ClobSellInput): Promise<ClobTradeResult> {
+  const cfg = loadConfig();
+  if (!cfg.CLOB_FALLBACK_ENABLED) {
+    return { success: false, error: 'CLOB fallback disabled (CLOB_FALLBACK_ENABLED=false)' };
+  }
+
   try {
     const client = await getClobClient();
-    // getBalanceAllowance returns { balance, allowance } as string decimals
-    // COLLATERAL = USDC wallet balance + allowance for the exchange contract
+
+    const tickSize = await orderWithTimeout(client.getTickSize(input.tokenId));
+    const negRisk = await orderWithTimeout(client.getNegRisk(input.tokenId));
+
+    const resolvedOrderType = input.orderType
+      ? (input.orderType === 'FOK' ? OrderType.FOK : OrderType.FAK)
+      : (cfg.CLOB_ORDER_TYPE === 'FOK' ? OrderType.FOK : OrderType.FAK);
+
+    logger.info('[clob] submitting SELL order', {
+      tokenId: input.tokenId,
+      shares: input.shares,
+      orderType: resolvedOrderType,
+    });
+
+    const raw = await orderWithTimeout(client.createAndPostMarketOrder(
+      {
+        tokenID: input.tokenId,
+        amount: input.shares,
+        side: Side.SELL,
+      },
+      { tickSize, negRisk },
+      resolvedOrderType,
+    ));
+
+    return parseOrderResponse(raw);
+  } catch (err) {
+    return { success: false, error: normaliseError(err) };
+  }
+}
+
+/**
+ * Fetch the raw USDC balance and allowance for the CLOB wallet.
+ *
+ * Returns both values separately for probe and preflight use.
+ * Not included in global bankroll — CLOB capital is validated at order time.
+ *
+ * Returns null on failure so callers can degrade gracefully.
+ */
+export async function getClobBalance(): Promise<{ balance: number; allowance: number } | null> {
+  try {
+    const client = await getClobClient();
     const result = await (client as unknown as {
       getBalanceAllowance(params: { asset_type: string }): Promise<{ balance?: string; allowance?: string }>;
     }).getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
     const balance = parseFloat(result.balance ?? '0');
     const allowance = parseFloat(result.allowance ?? '0');
     if (!isFinite(balance) || !isFinite(allowance)) return null;
-    // Tradeable = amount the contract is permitted to spend, capped by wallet balance
-    return Math.min(balance, allowance);
+    return { balance, allowance };
   } catch {
     return null;
   }
