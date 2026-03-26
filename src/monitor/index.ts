@@ -34,8 +34,12 @@ export async function runMonitor(): Promise<void> {
     return;
   }
 
-  // Fire-and-forget CLOB probe — log errors but never crash the monitor
-  await runClobProbe().catch((err) => {
+  // Truly fire-and-forget CLOB probe — must not block or delay the monitor.
+  // Wrapped in a 10s timeout so upstream latency can never stall startup.
+  void Promise.race([
+    runClobProbe(),
+    new Promise<void>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 10_000)),
+  ]).catch((err) => {
     logger.warn('[monitor] CLOB probe failed — continuing', {
       error: err instanceof Error ? err.message : String(err),
     });
