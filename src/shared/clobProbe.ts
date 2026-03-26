@@ -4,16 +4,18 @@
  * Logs key CLOB wallet/account state at process startup so operators can
  * verify configuration before the first trade cycle fires.
  *
+ * Uses the shared getClobClient() which loads API credentials from Redis,
+ * avoiding a cold createOrDeriveApiKey() call (and the noisy 400 it produces).
+ *
  * Never throws — errors are caught and logged.
  */
 
 import { Wallet } from '@ethersproject/wallet';
-import { ClobClient, AssetType } from '@polymarket/clob-client';
+import { AssetType } from '@polymarket/clob-client';
 import { loadConfig } from './config.js';
 import { logger } from './logger.js';
+import { getClobClient } from './clob.js';
 
-const CLOB_HOST = 'https://clob.polymarket.com';
-const POLYGON_CHAIN_ID = 137;
 // USDC uses 6 decimal places; raw API values are in base units.
 const USDC_BASE = 1_000_000;
 
@@ -47,14 +49,10 @@ export async function runClobProbe(): Promise<void> {
     label: SIG_TYPE_LABELS[sigType] ?? 'UNKNOWN',
   });
 
-  // Bootstrap credential acquisition.
-  // createOrDeriveApiKey() first tries to CREATE a key (returns 400 if one
-  // already exists), then falls back to derivation. A 400 on create is
-  // expected for existing accounts — we log it at debug, not as an error.
-  const bootstrap = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID, signer);
-  let creds: Awaited<ReturnType<typeof bootstrap.createOrDeriveApiKey>>;
+  // Use the shared cached client — reads creds from Redis, skips createOrDeriveApiKey().
+  let client: Awaited<ReturnType<typeof getClobClient>>;
   try {
-    creds = await bootstrap.createOrDeriveApiKey();
+    client = await getClobClient();
     logger.info('[clob-probe] API credentials acquired');
   } catch (err) {
     logger.error('[clob-probe] failed to acquire API credentials — cannot continue probe', {
@@ -63,22 +61,12 @@ export async function runClobProbe(): Promise<void> {
     return;
   }
 
-  const client = new ClobClient(
-    CLOB_HOST,
-    POLYGON_CHAIN_ID,
-    signer,
-    creds,
-    sigType,
-    funderAddress,
-  );
-
   const typedClient = client as unknown as {
     updateBalanceAllowance(params?: { asset_type?: string }): Promise<void>;
     getBalanceAllowance(params: { asset_type: string }): Promise<{ balance?: string; allowance?: string }>;
   };
 
-  // Refresh on-chain allowance state before reading (#90).
-  // A stale on-chain state often shows allowance=0 even when approved.
+  // Refresh on-chain allowance state before reading.
   try {
     await typedClient.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
     logger.info('[clob-probe] allowance refreshed');
@@ -88,7 +76,7 @@ export async function runClobProbe(): Promise<void> {
     });
   }
 
-  // Balance + allowance (normalised from base units to whole USDC) (#89).
+  // Balance + allowance (normalised from base units to whole USDC).
   const balResult = await typedClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
 
   const balanceUsdc = parseFloat(balResult.balance ?? '0') / USDC_BASE;
