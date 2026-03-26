@@ -42,7 +42,7 @@ async function loadCredsFromRedis(redis: Redis): Promise<ApiKeyCreds | null> {
     if (
       parsed &&
       typeof parsed === 'object' &&
-      'apiKey' in parsed &&
+      'key' in parsed &&
       'secret' in parsed &&
       'passphrase' in parsed
     ) {
@@ -83,7 +83,7 @@ async function main(): Promise<void> {
     console.log('\n[1/3] loading API credentials from Redis cache...');
     creds = await loadCredsFromRedis(redis);
     if (creds) {
-      console.log('apiKey prefix  :', `${creds.apiKey.slice(0, 8)}... (loaded from Redis)`);
+      console.log('apiKey prefix  :', `${creds.key.slice(0, 8)}... (loaded from Redis)`);
     } else {
       console.log('No cached creds found in Redis.');
     }
@@ -93,13 +93,13 @@ async function main(): Promise<void> {
     console.log('\n[1/3] deriving API credentials from Polymarket (createOrDeriveApiKey)...');
     const bootstrap = new ClobClient(HOST, CHAIN_ID, signer, undefined, signatureType, funderAddress);
     const derived = await bootstrap.createOrDeriveApiKey();
-    if (!derived || !derived.apiKey) {
+    if (!derived || !derived.key) {
       throw new Error('createOrDeriveApiKey returned empty/undefined — check sig type and funder address');
     }
     creds = derived;
     // Persist for future runs
     await redis.set(CLOB_CREDS_REDIS_KEY, JSON.stringify(creds), 'EX', 23 * 3600);
-    console.log('apiKey prefix  :', `${creds.apiKey.slice(0, 8)}... (derived fresh, cached to Redis)`);
+    console.log('apiKey prefix  :', `${creds.key.slice(0, 8)}... (derived fresh, cached to Redis)`);
   }
 
   const client = new ClobClient(HOST, CHAIN_ID, signer, creds, signatureType, funderAddress);
