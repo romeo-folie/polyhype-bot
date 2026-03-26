@@ -14,11 +14,13 @@ import { logger } from './logger.js';
 
 const CLOB_HOST = 'https://clob.polymarket.com';
 const POLYGON_CHAIN_ID = 137;
+// USDC uses 6 decimal places; raw API values are in base units.
+const USDC_BASE = 1_000_000;
 
 const SIG_TYPE_LABELS: Record<number, string> = {
-  0: 'EOA',
-  1: 'POLY_PROXY',
-  2: 'POLY_GNOSIS_SAFE',
+  0: 'EOA — direct MetaMask/hardware wallet private key',
+  1: 'POLY_PROXY — Magic/Google OAuth proxy account',
+  2: 'POLY_GNOSIS_SAFE — Gnosis Safe multisig',
 };
 
 export async function runClobProbe(): Promise<void> {
@@ -45,8 +47,21 @@ export async function runClobProbe(): Promise<void> {
     label: SIG_TYPE_LABELS[sigType] ?? 'UNKNOWN',
   });
 
+  // Bootstrap credential acquisition.
+  // createOrDeriveApiKey() first tries to CREATE a key (returns 400 if one
+  // already exists), then falls back to derivation. A 400 on create is
+  // expected for existing accounts — we log it at debug, not as an error.
   const bootstrap = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID, signer);
-  const creds = await bootstrap.createOrDeriveApiKey();
+  let creds: Awaited<ReturnType<typeof bootstrap.createOrDeriveApiKey>>;
+  try {
+    creds = await bootstrap.createOrDeriveApiKey();
+    logger.info('[clob-probe] API credentials acquired');
+  } catch (err) {
+    logger.error('[clob-probe] failed to acquire API credentials — cannot continue probe', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
 
   const client = new ClobClient(
     CLOB_HOST,
@@ -57,19 +72,36 @@ export async function runClobProbe(): Promise<void> {
     funderAddress,
   );
 
-  // Balance + allowance
-  const balResult = await (client as unknown as {
+  const typedClient = client as unknown as {
+    updateBalanceAllowance(params?: { asset_type?: string }): Promise<void>;
     getBalanceAllowance(params: { asset_type: string }): Promise<{ balance?: string; allowance?: string }>;
-  }).getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+  };
 
-  const balance = parseFloat(balResult.balance ?? '0');
-  const allowance = parseFloat(balResult.allowance ?? '0');
+  // Refresh on-chain allowance state before reading (#90).
+  // A stale on-chain state often shows allowance=0 even when approved.
+  try {
+    await typedClient.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+    logger.info('[clob-probe] allowance refreshed');
+  } catch (err) {
+    logger.warn('[clob-probe] allowance refresh failed — reading cached state', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
-  logger.info('[clob-probe] USDC collateral balance', { balance });
-  logger.info('[clob-probe] USDC allowance', { allowance });
+  // Balance + allowance (normalised from base units to whole USDC) (#89).
+  const balResult = await typedClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
 
-  if (balance === 0 && allowance === 0) {
-    logger.warn('[clob-probe] both balance and allowance are zero — CLOB trades will fail');
+  const balanceUsdc = parseFloat(balResult.balance ?? '0') / USDC_BASE;
+  const allowanceUsdc = parseFloat(balResult.allowance ?? '0') / USDC_BASE;
+
+  logger.info('[clob-probe] USDC collateral balance', { balanceUsdc });
+  logger.info('[clob-probe] USDC allowance', { allowanceUsdc });
+
+  if (balanceUsdc === 0) {
+    logger.warn('[clob-probe] USDC balance is zero — deposit required before CLOB trades');
+  }
+  if (allowanceUsdc === 0) {
+    logger.warn('[clob-probe] USDC allowance is zero — approve the CLOB contract before trading');
   }
 
   // Open orders

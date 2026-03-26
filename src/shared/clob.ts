@@ -299,21 +299,34 @@ export async function submitClobSell(input: ClobSellInput): Promise<ClobTradeRes
 }
 
 /**
- * Fetch the raw USDC balance and allowance for the CLOB wallet.
+ * Fetch the USDC balance and allowance for the CLOB wallet.
  *
- * Returns both values separately for probe and preflight use.
- * Not included in global bankroll — CLOB capital is validated at order time.
+ * Values are normalised from base units (6 decimals) to whole USDC.
+ * Refreshes on-chain allowance state before reading to avoid stale zero.
  *
  * Returns null on failure so callers can degrade gracefully.
  */
 export async function getClobBalance(): Promise<{ balance: number; allowance: number } | null> {
   try {
     const client = await getClobClient();
-    const result = await (client as unknown as {
+    const typedClient = client as unknown as {
+      updateBalanceAllowance(params?: { asset_type?: string }): Promise<void>;
       getBalanceAllowance(params: { asset_type: string }): Promise<{ balance?: string; allowance?: string }>;
-    }).getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
-    const balance = parseFloat(result.balance ?? '0');
-    const allowance = parseFloat(result.allowance ?? '0');
+    };
+
+    // Refresh on-chain allowance before reading — avoids stale allowance=0.
+    await typedClient.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL }).catch((err: unknown) => {
+      logger.warn('[clob] allowance refresh failed — reading cached value', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+    const result = await typedClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+
+    // Values are in USDC base units (6 decimals). Convert to whole USDC.
+    const USDC_BASE = 1_000_000;
+    const balance = parseFloat(result.balance ?? '0') / USDC_BASE;
+    const allowance = parseFloat(result.allowance ?? '0') / USDC_BASE;
     if (!isFinite(balance) || !isFinite(allowance)) return null;
     return { balance, allowance };
   } catch {
