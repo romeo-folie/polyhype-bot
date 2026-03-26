@@ -42,7 +42,7 @@ async function loadCredsFromRedis(redis: Redis): Promise<ApiKeyCreds | null> {
     if (
       parsed &&
       typeof parsed === 'object' &&
-      'apiKey' in parsed &&
+      'key' in parsed &&
       'secret' in parsed &&
       'passphrase' in parsed
     ) {
