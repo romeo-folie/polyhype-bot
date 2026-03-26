@@ -43,6 +43,18 @@ jest.unstable_mockModule('../logger.js', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
+const mockRedisGet = jest.fn<() => Promise<string | null>>().mockResolvedValue(null);
+const mockRedisSet = jest.fn<() => Promise<string>>().mockResolvedValue('OK');
+const mockRedisDel = jest.fn<() => Promise<number>>().mockResolvedValue(1);
+
+jest.unstable_mockModule('../redis.js', () => ({
+  getRedis: jest.fn(() => ({
+    get: mockRedisGet,
+    set: mockRedisSet,
+    del: mockRedisDel,
+  })),
+}));
+
 const { submitClobBuy, submitClobSell, getClobBalance } = await import('../clob.js');
 
 describe('submitClobBuy', () => {
