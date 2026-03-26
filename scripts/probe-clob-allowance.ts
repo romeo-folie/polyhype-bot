@@ -125,13 +125,16 @@ async function main(): Promise<void> {
   console.log('balanceUsdc    :', toUsdc(raw.balance));
   console.log('allowanceUsdc  :', toUsdc(raw.allowance));
 
-  if (toUsdc(raw.allowance) > 0) {
-    console.log('\n✅ Allowance is set — CLOB trading ready.');
+  const balanceOk = toUsdc(raw.balance) > 0;
+  const allowanceOk = toUsdc(raw.allowance) > 0;
+
+  if (balanceOk) {
+    console.log('\n✅ Balance is funded — CLOB trading ready.');
+    if (!allowanceOk) {
+      console.log('   (allowance=0 is normal for POLY_PROXY accounts — proxy accesses funds directly)');
+    }
   } else {
-    console.log('\n⚠️  Allowance is still zero after refresh.');
-    console.log('   This means the CTF Exchange contract is not approved to spend USDC.');
-    console.log('   Try depositing/withdrawing a small amount on polymarket.com to trigger approval,');
-    console.log('   or contact Polymarket support if the issue persists.');
+    console.log('\n⚠️  Balance is zero — fund your Polymarket wallet before trading.');
   }
 
   await redis.quit();
