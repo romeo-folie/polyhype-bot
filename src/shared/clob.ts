@@ -223,12 +223,15 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
   try {
     const client = await getClobClient();
 
-    // Allowance preflight
+    // Note: POLY_PROXY accounts (sig type 1) do not use the standard ERC20 allowance
+    // mechanism — the proxy contract accesses funds directly, bypassing approve().
+    // getBalanceAllowance().allowance returns 0 for these accounts even when trading
+    // is fully operational. Balance check only: gate on actual USDC balance.
     const bal = await getClobBalance();
-    if (bal !== null && bal.allowance < input.amountUsd) {
+    if (bal !== null && bal.balance < input.amountUsd) {
       return {
         success: false,
-        error: `Insufficient CLOB allowance: ${String(bal.allowance)} USDC available, ${String(input.amountUsd)} required`,
+        error: `Insufficient CLOB balance: ${String(bal.balance)} USDC available, ${String(input.amountUsd)} required`,
       };
     }
 

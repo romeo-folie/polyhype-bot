@@ -101,7 +101,9 @@ export async function runClobProbe(): Promise<void> {
     logger.warn('[clob-probe] USDC balance is zero — deposit required before CLOB trades');
   }
   if (allowanceUsdc === 0) {
-    logger.warn('[clob-probe] USDC allowance is zero — approve the CLOB contract before trading');
+    // POLY_PROXY accounts (sig type 1) return allowance=0 by design — the proxy
+    // accesses funds directly without a standard ERC20 approve(). Not a blocker.
+    logger.info('[clob-probe] USDC allowance is zero — normal for POLY_PROXY accounts (sig type 1)');
   }
 
   // Open orders
