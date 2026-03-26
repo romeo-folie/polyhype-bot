@@ -17,6 +17,7 @@ import { submitClobSell } from '../shared/clob.js';
 import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
+import { loadConfig } from '../shared/config.js';
 import type { Redis } from 'ioredis';
 import type { Position } from '../execution/positionLedger.js';
 import type { ExitReason } from './takeProfitEvaluator.js';
@@ -169,7 +170,7 @@ async function executeClobExit(opts: {
     const clobResult = await submitClobSell({
       tokenId,
       shares: sharesToSell,
-      orderType: 'FAK',
+      orderType: loadConfig().CLOB_ORDER_TYPE,
     });
 
     if (clobResult.success) {

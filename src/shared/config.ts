@@ -87,8 +87,13 @@ export function loadConfig(): AppConfig {
 
   _config = cfg;
 
-  // Cross-validate CLOB-related config
-  if (cfg.CLOB_FALLBACK_ENABLED) {
+  // Cross-validate CLOB-related config.
+  // Only enforce wallet-key requirement when CLOB_FALLBACK_ENABLED is explicitly
+  // set to true in the environment — the default=true must not block users who
+  // have not configured CLOB at all.
+  const clobExplicitlyEnabled =
+    cfg.CLOB_FALLBACK_ENABLED && process.env['CLOB_FALLBACK_ENABLED'] !== undefined;
+  if (clobExplicitlyEnabled) {
     if (!cfg.POLYGON_WALLET_PRIVATE_KEY) {
       throw new Error('POLYGON_WALLET_PRIVATE_KEY is required when CLOB_FALLBACK_ENABLED=true');
     }
