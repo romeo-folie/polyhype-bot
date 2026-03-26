@@ -107,6 +107,7 @@ async function getClobClient(): Promise<ClobClient> {
 
     const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY);
     const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
+    const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;
 
     // Try to load previously persisted creds first — avoids a round-trip to
     // /auth/api-key on every cold start, which Polymarket rate-limits at ~400/day.
@@ -115,7 +116,19 @@ async function getClobClient(): Promise<ClobClient> {
       logger.info('[clob] loaded API creds from Redis cache');
     } else {
       logger.info('[clob] deriving new API creds from Polymarket');
-      const bootstrap = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID, signer);
+      // IMPORTANT: the bootstrap client used for key derivation must be initialised
+      // with the same signatureType and funderAddress as the final client. Polymarket
+      // ties API keys to the account identity (EOA / proxy / gnosis safe). Deriving
+      // with a bare EOA client (sig type 0) when the account is a proxy (sig type 1)
+      // produces a key bound to the wrong address — causing 400 on all subsequent calls.
+      const bootstrap = new ClobClient(
+        CLOB_HOST,
+        POLYGON_CHAIN_ID,
+        signer,
+        undefined,     // no creds yet
+        sigType,
+        funderAddress,
+      );
       creds = await bootstrap.createOrDeriveApiKey();
       await persistCreds(creds);
     }
@@ -125,7 +138,7 @@ async function getClobClient(): Promise<ClobClient> {
       POLYGON_CHAIN_ID,
       signer,
       creds,
-      cfg.POLYMARKET_SIGNATURE_TYPE,
+      sigType,
       funderAddress,
     );
   })();
