@@ -22,7 +22,11 @@ const envSchema = z.object({
   POLYGON_WALLET_PRIVATE_KEY: z.string().optional(),
   POLYMARKET_FUNDER_ADDRESS: z.string().optional(),
   POLYMARKET_SIGNATURE_TYPE: z.coerce.number().int().min(0).max(2).optional().default(0),
-  CLOB_FALLBACK_ENABLED: z.string().optional().default('true').transform(v => !['false', '0'].includes(v.trim().toLowerCase())),
+  CLOB_FALLBACK_ENABLED: z.string().optional().default('true')
+    .refine(v => ['true', 'false', '1', '0'].includes(v.trim().toLowerCase()), {
+      message: "CLOB_FALLBACK_ENABLED must be 'true', 'false', '1', or '0'",
+    })
+    .transform(v => !['false', '0'].includes(v.trim().toLowerCase())),
   CLOB_ORDER_TYPE: z.enum(['FOK', 'FAK']).optional().default('FAK'),
 
   // Model selection (optional — defaults to recommended fast/cheap models)
