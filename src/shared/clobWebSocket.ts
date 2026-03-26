@@ -99,7 +99,10 @@ export class ClobPriceFeed {
 
     this.ws = new WebSocket(WS_URL);
 
+    let established = false;
+
     this.ws.on('open', () => {
+      established = true;
       this.reconnectAttempt = 0;
       logger.info('[clob-ws] connected');
       const allTokens = [...this.tokenToMarket.keys()];
@@ -114,9 +117,16 @@ export class ClobPriceFeed {
       });
     });
 
-    this.ws.on('close', () => {
+    this.ws.on('close', (code: number, reason: Buffer) => {
       if (!this.destroyed) {
-        logger.warn('[clob-ws] disconnected — scheduling reconnect');
+        const phase = established ? 'post-open' : 'pre-open';
+        const reasonStr = reason.length > 0 ? reason.toString() : '(no reason)';
+        logger.warn('[clob-ws] connection closed — scheduling reconnect', {
+          phase,
+          code,
+          reason: reasonStr,
+          attempt: this.reconnectAttempt + 1,
+        });
         this.scheduleReconnect();
       }
     });
