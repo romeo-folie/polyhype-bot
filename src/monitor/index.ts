@@ -19,6 +19,7 @@ import { getPriceFeed, destroyPriceFeed } from '../shared/feedSingleton.js';
 import { evaluateTakeProfit } from './takeProfitEvaluator.js';
 import { executeTakeProfit } from './takeProfitExecutor.js';
 import { redeemResolvedPositions } from './resolutionRedeemer.js';
+import { runClobProbe } from '../shared/clobProbe.js';
 
 export async function runMonitor(): Promise<void> {
   const redis = getRedis();
@@ -32,6 +33,17 @@ export async function runMonitor(): Promise<void> {
     logger.info('[monitor] previous cycle still running, skipping');
     return;
   }
+
+  // Truly fire-and-forget CLOB probe — must not block or delay the monitor.
+  // Wrapped in a 10s timeout so upstream latency can never stall startup.
+  void Promise.race([
+    runClobProbe(),
+    new Promise<void>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 10_000)),
+  ]).catch((err) => {
+    logger.warn('[monitor] CLOB probe failed — continuing', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
 
   try {
     await runMonitorInner(redis);

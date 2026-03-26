@@ -2,14 +2,19 @@
  * Live bankroll tracker — Simmer portfolio as source of truth.
  *
  * getBankroll() fetches the real USDC balance from Simmer's portfolio API.
- * deductStake() and creditProceeds() are no-ops — Simmer tracks the wallet.
+ * CLOB balance is NOT included — CLOB capital is validated at order time
+ * via the allowance preflight in submitClobBuy().
+ *
+ * deductStake() immediately adjusts the in-memory cache so consecutive
+ * signals in the same cycle size against the post-trade balance.
+ * creditProceeds() adds back to the cache for CLOB exits (Simmer tracks
+ * its own wallet; CLOB proceeds are on-chain and not visible to Simmer).
  *
  * The Redis parameter is kept in signatures for backward compatibility with
  * existing callers but is not used.
  */
 import type { Redis } from 'ioredis';
 import { getPortfolio } from './simmer.js';
-import { getClobBalance } from './clob.js';
 import { logger } from './logger.js';
 
 /** Warn when live balance drops below this threshold. */
@@ -29,18 +34,10 @@ export function _resetCacheForTests(): void {
 }
 
 /**
- * Get the combined bankroll across all execution venues.
- *
- * - Simmer balance: USDC managed by Simmer's portfolio (primary execution path).
- * - CLOB balance:   On-chain USDC allowance/balance for direct Polymarket CLOB
- *   trades (fallback when Simmer doesn't know the market).
- *
- * Combined total is used for position sizing so Half-Kelly calculations reflect
- * the full capital available, regardless of which venue a trade routes through.
+ * Get the current bankroll (Simmer portfolio balance only).
  *
  * Caches the result for CACHE_TTL_MS (15s) so rapid calls within a single
- * pipeline cycle (e.g. 30 market candidates all calling getBankroll()) reuse
- * the same value instead of issuing sequential API requests.
+ * pipeline cycle reuse the same value instead of issuing sequential API requests.
  */
 export async function getBankroll(_redis?: Redis): Promise<number> {
   const now = Date.now();
@@ -49,34 +46,25 @@ export async function getBankroll(_redis?: Redis): Promise<number> {
   }
 
   try {
-    // Fetch Simmer and CLOB balances in parallel — neither blocks the other.
-    const [portfolio, clobBalance] = await Promise.all([
-      getPortfolio(),
-      getClobBalance(),
-    ]);
-
+    const portfolio = await getPortfolio();
     const simmerBalance = portfolio.balance_usdc;
-    const clob = clobBalance ?? 0;
-    const total = simmerBalance + clob;
 
-    lastKnownBalance = total;
+    lastKnownBalance = simmerBalance;
     lastFetchTime = now;
 
-    logger.info('[bankroll] combined live balance', {
+    logger.info('[bankroll] simmer live balance', {
       simmerUsdc: simmerBalance,
-      clobUsdc: clob,
-      totalUsdc: total,
     });
 
-    if (total <= 0) {
+    if (simmerBalance <= 0) {
       logger.error('[bankroll] total balance is zero or negative — all trades will be skipped', {
-        totalUsdc: total,
+        totalUsdc: simmerBalance,
       });
-    } else if (total < LOW_BALANCE_WARN_USD) {
-      logger.warn('[bankroll] total balance is suspiciously low', { totalUsdc: total });
+    } else if (simmerBalance < LOW_BALANCE_WARN_USD) {
+      logger.warn('[bankroll] total balance is suspiciously low', { totalUsdc: simmerBalance });
     }
 
-    return total;
+    return simmerBalance;
   } catch (err) {
     if (lastKnownBalance !== null) {
       logger.warn('[bankroll] balance fetch failed — using last known balance', {
@@ -109,7 +97,16 @@ export async function deductStake(_redis: Redis, stakeUsd: number): Promise<void
   logger.info('[bankroll] stake deducted from cache', { stakeUsd, remainingCached: lastKnownBalance });
 }
 
-/** No-op — Simmer credits wallet on redemption/exit. */
+/**
+ * Credit proceeds back to the in-memory bankroll cache.
+ *
+ * For Simmer positions, Simmer tracks the wallet directly. For CLOB positions,
+ * proceeds are on-chain — updating the cache here keeps position sizing accurate
+ * until the next Simmer portfolio refresh.
+ */
 export async function creditProceeds(_redis: Redis, proceedsUsd: number): Promise<void> {
-  logger.info('[bankroll] proceeds credited (tracked by Simmer)', { proceedsUsd });
+  if (lastKnownBalance !== null) {
+    lastKnownBalance += proceedsUsd;
+  }
+  logger.info('[bankroll] proceeds credited', { proceedsUsd, cachedBalance: lastKnownBalance });
 }

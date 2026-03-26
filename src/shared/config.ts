@@ -21,8 +21,12 @@ const envSchema = z.object({
   // Wallet / direct CLOB execution
   POLYGON_WALLET_PRIVATE_KEY: z.string().optional(),
   POLYMARKET_FUNDER_ADDRESS: z.string().optional(),
-  POLYMARKET_SIGNATURE_TYPE: z.coerce.number().int().min(0).max(1).optional().default(0),
-  CLOB_FALLBACK_ENABLED: z.coerce.boolean().optional().default(true),
+  POLYMARKET_SIGNATURE_TYPE: z.coerce.number().int().min(0).max(2).optional().default(0),
+  CLOB_FALLBACK_ENABLED: z.string().optional().default('true')
+    .refine(v => ['true', 'false', '1', '0'].includes(v.trim().toLowerCase()), {
+      message: "CLOB_FALLBACK_ENABLED must be 'true', 'false', '1', or '0'",
+    })
+    .transform(v => !['false', '0'].includes(v.trim().toLowerCase())),
   CLOB_ORDER_TYPE: z.enum(['FOK', 'FAK']).optional().default('FAK'),
 
   // Model selection (optional — defaults to recommended fast/cheap models)
@@ -82,5 +86,26 @@ export function loadConfig(): AppConfig {
   }
 
   _config = cfg;
+
+  // Cross-validate CLOB-related config.
+  // Only enforce wallet-key requirement when CLOB_FALLBACK_ENABLED is explicitly
+  // set to true in the environment — the default=true must not block users who
+  // have not configured CLOB at all.
+  const clobExplicitlyEnabled =
+    cfg.CLOB_FALLBACK_ENABLED && process.env['CLOB_FALLBACK_ENABLED'] !== undefined;
+  if (clobExplicitlyEnabled) {
+    if (!cfg.POLYGON_WALLET_PRIVATE_KEY) {
+      throw new Error('POLYGON_WALLET_PRIVATE_KEY is required when CLOB_FALLBACK_ENABLED=true');
+    }
+    if (
+      (cfg.POLYMARKET_SIGNATURE_TYPE === 1 || cfg.POLYMARKET_SIGNATURE_TYPE === 2) &&
+      !cfg.POLYMARKET_FUNDER_ADDRESS
+    ) {
+      throw new Error(
+        'POLYMARKET_FUNDER_ADDRESS is required when POLYMARKET_SIGNATURE_TYPE is 1 (proxy) or 2 (gnosis safe)',
+      );
+    }
+  }
+
   return _config;
 }

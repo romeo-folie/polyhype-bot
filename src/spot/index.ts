@@ -292,6 +292,7 @@ async function runSpotMonitorInner(
       consensusProbability: result.signal.consensusProbability,
       consensusStddev: result.signal.consensusStddev,
       edgeMagnitude: result.signal.edgeMagnitude,
+      executionVenue: result.executionVenue ?? 'simmer',
     });
 
     await deductStake(redis, result.signal.stakeUsd);

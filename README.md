@@ -123,12 +123,34 @@ flowchart TB
 | 3 | **Signal re-eval** — edge evaporated | LLM call | Trade cycle |
 | 4 | **Divergence closed** — market reached consensus | Free (price check) | Monitor cycle |
 
-### Execution Venues
+### Execution Venues (Model B — venue-aware lifecycle)
 
 | Venue | When used | Auth |
 |-------|-----------|------|
 | **Simmer** (primary) | Market exists in Simmer catalogue | `SIMMER_API_KEY` |
 | **Polymarket CLOB** (fallback) | Market not in Simmer | `POLYGON_WALLET_PRIVATE_KEY` (local signing) |
+
+Each position records its `executionVenue` (`simmer` or `clob`). The full lifecycle — entry, take-profit exit, and redemption — routes through the venue that opened the position. CLOB positions are exited via `submitClobSell` and redeemed by checking the Gamma API for market resolution status.
+
+### CLOB Account Modes
+
+| Signature Type | Value | Description | Requires `POLYMARKET_FUNDER_ADDRESS` |
+|----------------|-------|-------------|--------------------------------------|
+| EOA | `0` | Direct browser/EOA wallet (default) | No |
+| POLY_PROXY | `1` | Polymarket proxy (magic/email wallet) | Yes |
+| POLY_GNOSIS_SAFE | `2` | Gnosis Safe multisig | Yes |
+
+Set `POLYMARKET_SIGNATURE_TYPE` in `.env`. Types 1 and 2 require `POLYMARKET_FUNDER_ADDRESS` — startup will fail if it's missing.
+
+### CLOB Startup Probe
+
+The monitor entrypoint runs `runClobProbe()` at startup. It logs:
+- Signer and funder addresses
+- Signature type
+- USDC collateral balance and allowance
+- Open CLOB order count
+
+This is fire-and-forget — probe failures are logged but never crash the process.
 
 ### Price Resolution
 

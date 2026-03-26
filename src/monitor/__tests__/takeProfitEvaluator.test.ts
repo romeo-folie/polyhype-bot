@@ -16,6 +16,7 @@ function makePosition(overrides: Partial<Position> = {}): Position {
     edgeMagnitude: 0.3,
     sourcedFrom: 'headline',
     openedAt: new Date().toISOString(),
+    executionVenue: 'simmer',
     ...overrides,
   };
 }

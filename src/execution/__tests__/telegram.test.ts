@@ -45,6 +45,7 @@ function makePosition(overrides: Partial<Position> = {}): Position {
     edgeMagnitude: 0.2,
     sourcedFrom: 'Breaking news',
     openedAt: new Date('2026-03-18T12:00:00Z').toISOString(),
+    executionVenue: 'simmer',
     ...overrides,
   };
 }

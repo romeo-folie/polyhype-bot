@@ -2,21 +2,22 @@
  * Resolution redeemer.
  *
  * Checks Simmer for any resolved (won) positions and redeems them for USDC.e.
- * Called at the start of each monitor cycle, before price checks.
+ * Also checks CLOB positions tracked in Redis that are not visible to Simmer.
  *
  * Flow:
- *   1. GET /api/sdk/positions?status=resolved&venue=polymarket
+ *   1. GET /api/sdk/positions?status=resolved&venue=polymarket (Simmer)
  *   2. Filter to redeemable=true
  *   3. POST /api/sdk/redeem for each — Simmer signs + broadcasts for managed wallets
  *   4. Remove redeemed positions from Redis ledger
  *   5. Credit proceeds to bankroll and notify Telegram
+ *   6. Check Redis for CLOB-venue positions and resolve independently
  *
  * Rate limit: Simmer redeem is 10/minute. We process sequentially to stay within limits.
  */
 
 import { logger } from '../shared/logger.js';
 import { getSimmerPositions, submitRedeem, SimmerError } from '../shared/simmer.js';
-import { closePosition } from '../execution/positionLedger.js';
+import { closePosition, getOpenPositions } from '../execution/positionLedger.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
 import type { Redis } from 'ioredis';
@@ -37,7 +38,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Find and redeem all resolved winning positions on Simmer.
+ * Find and redeem all resolved winning positions on Simmer,
+ * then check CLOB positions for resolution.
  *
  * Never throws — errors are logged and captured per-position.
  * Returns an array of results (one per redeemable position attempted).
@@ -45,6 +47,7 @@ function sleep(ms: number): Promise<void> {
 export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionResult[]> {
   const results: RedemptionResult[] = [];
 
+  // ── Simmer redemptions (unchanged) ────────────────────────────────────────
   let resolvedPositions;
   try {
     resolvedPositions = await getSimmerPositions({
@@ -63,73 +66,207 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
 
   if (redeemable.length === 0) {
     logger.debug('[redeemer] no redeemable positions found');
-    return results;
-  }
+  } else {
+    logger.info('[redeemer] found redeemable positions', { count: redeemable.length });
 
-  logger.info('[redeemer] found redeemable positions', { count: redeemable.length });
+    for (const pos of redeemable) {
+      if (results.length > 0) await sleep(REDEEM_DELAY_MS);
+      const side = pos.side as 'yes' | 'no';
+      try {
+        const redeemResult = await submitRedeem({ market_id: pos.market_id, side });
 
-  for (const pos of redeemable) {
-    if (results.length > 0) await sleep(REDEEM_DELAY_MS);
-    const side = pos.side as 'yes' | 'no';
-    try {
-      const redeemResult = await submitRedeem({ market_id: pos.market_id, side });
+        if (redeemResult.success) {
+          // Remove from Redis ledger — treat direction as uppercase to match ledger keys
+          const direction = side.toUpperCase() as 'YES' | 'NO';
+          await closePosition(redis, pos.market_id, direction);
 
-      if (redeemResult.success) {
-        // Remove from Redis ledger — treat direction as uppercase to match ledger keys
-        const direction = side.toUpperCase() as 'YES' | 'NO';
-        await closePosition(redis, pos.market_id, direction);
+          // Credit face value (resolved = $1/share) to bankroll
+          const proceedsUsdc = pos.value_usdc ?? pos.shares ?? 0;
+          if (proceedsUsdc > 0) {
+            await creditProceeds(redis, proceedsUsdc);
+          }
 
-        // Credit face value (resolved = $1/share) to bankroll
-        const proceedsUsdc = pos.value_usdc ?? pos.shares ?? 0;
-        if (proceedsUsdc > 0) {
-          await creditProceeds(redis, proceedsUsdc);
+          // Notify
+          const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
+            marketId: pos.market_id,
+            question: pos.question ?? pos.market_id,
+            side,
+            valueUsdc: proceedsUsdc,
+          };
+          if (redeemResult.tx_hash) notifyOpts.txHash = redeemResult.tx_hash;
+          await notifyRedemptionExecuted(notifyOpts);
+
+          logger.info('[redeemer] redemption successful', {
+            marketId: pos.market_id,
+            side,
+            txHash: redeemResult.tx_hash,
+            valueUsdc: proceedsUsdc,
+          });
+
+          const r: RedemptionResult = {
+            marketId: pos.market_id,
+            side,
+            success: true,
+            valueUsdc: proceedsUsdc,
+          };
+          if (redeemResult.tx_hash) r.txHash = redeemResult.tx_hash;
+          results.push(r);
+        } else {
+          const error = redeemResult.error ?? 'unknown error from Simmer';
+          logger.warn('[redeemer] redemption returned success=false', {
+            marketId: pos.market_id,
+            error,
+          });
+          results.push({ marketId: pos.market_id, side, success: false, error });
         }
+      } catch (err) {
+        const message =
+          err instanceof SimmerError
+            ? `HTTP ${err.statusCode.toString()}: ${err.message}`
+            : err instanceof Error
+              ? err.message
+              : String(err);
 
-        // Notify
-        const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
-          marketId: pos.market_id,
-          question: pos.question ?? pos.market_id,
-          side,
-          valueUsdc: proceedsUsdc,
-        };
-        if (redeemResult.tx_hash) notifyOpts.txHash = redeemResult.tx_hash;
-        await notifyRedemptionExecuted(notifyOpts);
-
-        logger.info('[redeemer] redemption successful', {
-          marketId: pos.market_id,
-          side,
-          txHash: redeemResult.tx_hash,
-          valueUsdc: proceedsUsdc,
-        });
-
-        const r: RedemptionResult = {
-          marketId: pos.market_id,
-          side,
-          success: true,
-          valueUsdc: proceedsUsdc,
-        };
-        if (redeemResult.tx_hash) r.txHash = redeemResult.tx_hash;
-        results.push(r);
-      } else {
-        const error = redeemResult.error ?? 'unknown error from Simmer';
-        logger.warn('[redeemer] redemption returned success=false', {
-          marketId: pos.market_id,
-          error,
-        });
-        results.push({ marketId: pos.market_id, side, success: false, error });
+        logger.error('[redeemer] redemption failed', { marketId: pos.market_id, side, error: message });
+        results.push({ marketId: pos.market_id, side, success: false, error: message });
       }
-    } catch (err) {
-      const message =
-        err instanceof SimmerError
-          ? `HTTP ${err.statusCode.toString()}: ${err.message}`
-          : err instanceof Error
-            ? err.message
-            : String(err);
-
-      logger.error('[redeemer] redemption failed', { marketId: pos.market_id, side, error: message });
-      results.push({ marketId: pos.market_id, side, success: false, error: message });
     }
   }
 
+  // ── CLOB position redemptions ─────────────────────────────────────────────
+  try {
+    await redeemClobPositions(redis, results);
+  } catch (err) {
+    logger.warn('[redeemer] CLOB position redemption scan failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   return results;
+}
+
+/**
+ * Check Redis for CLOB-venue positions that may have resolved.
+ *
+ * CLOB positions are not visible to Simmer. We check each one against the
+ * Gamma API for resolution status and close accordingly.
+ */
+async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): Promise<void> {
+  const allPositions = await getOpenPositions(redis);
+  const clobPositions = allPositions.filter((p) => p.executionVenue === 'clob');
+
+  if (clobPositions.length === 0) return;
+
+  logger.info('[redeemer] checking CLOB positions for resolution', { count: clobPositions.length });
+
+  for (const pos of clobPositions) {
+    const side = pos.direction.toLowerCase() as 'yes' | 'no';
+
+    try {
+      // Check resolution via Gamma API
+      const resolved = await checkMarketResolved(pos.conditionId);
+
+      if (!resolved) continue;
+
+      logger.info('[redeemer] CLOB market resolved', {
+        marketId: pos.marketId,
+        conditionId: pos.conditionId,
+        outcome: resolved.outcome,
+        direction: pos.direction,
+      });
+
+      // Close the position in Redis.
+      // NOTE: This is a ledger-only close. On-chain conditional token redemption
+      // must be handled separately (e.g. via a manual script or future automation).
+      // For won positions, we credit face value to the bankroll cache to keep
+      // position sizing accurate until the next Simmer portfolio refresh.
+      await closePosition(redis, pos.marketId, pos.direction);
+
+      // If won: credit shares as USDC (each winning share = $1)
+      const won = (resolved.outcome === 'YES' && pos.direction === 'YES') ||
+                  (resolved.outcome === 'NO' && pos.direction === 'NO');
+      const proceedsUsdc = won ? (pos.sharesHeld ?? pos.stakeUsd / pos.entryPrice) : 0;
+
+      if (proceedsUsdc > 0) {
+        await creditProceeds(redis, proceedsUsdc);
+      }
+
+      // Notify
+      await notifyRedemptionExecuted({
+        marketId: pos.marketId,
+        question: pos.question,
+        side,
+        valueUsdc: proceedsUsdc,
+      });
+
+      logger.info('[redeemer] CLOB position redeemed', {
+        marketId: pos.marketId,
+        side,
+        won,
+        valueUsdc: proceedsUsdc,
+      });
+
+      results.push({
+        marketId: pos.marketId,
+        side,
+        success: true,
+        valueUsdc: proceedsUsdc,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn('[redeemer] CLOB position resolution check failed', {
+        marketId: pos.marketId,
+        error: message,
+      });
+      results.push({ marketId: pos.marketId, side, success: false, error: message });
+    }
+  }
+}
+
+/**
+ * Check whether a market has resolved via the Gamma API.
+ *
+ * Returns null if the market is still active, or the outcome if resolved.
+ */
+async function checkMarketResolved(
+  conditionId: string,
+): Promise<{ outcome: 'YES' | 'NO' } | null> {
+  try {
+    const url = `https://gamma-api.polymarket.com/markets?condition_id=${encodeURIComponent(conditionId)}`;
+    const resp = await fetch(url, {
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!resp.ok) {
+      logger.warn('[redeemer] Gamma API returned non-OK', { status: resp.status, conditionId });
+      return null;
+    }
+
+    const data = (await resp.json()) as Array<{
+      closed?: boolean;
+      resolved?: boolean;
+      outcome?: string;
+    }>;
+
+    const market = data[0];
+    if (!market) return null;
+
+    if (!market.resolved && !market.closed) return null;
+
+    // Gamma outcome field is typically "Yes" or "No"
+    const outcomeStr = (market.outcome ?? '').toUpperCase();
+    if (outcomeStr === 'YES' || outcomeStr === 'NO') {
+      return { outcome: outcomeStr };
+    }
+
+    // If resolved but outcome is unclear, treat as unresolved and retry next cycle
+    logger.warn('[redeemer] market resolved with unclear outcome — skipping until parseable', { conditionId, outcome: market.outcome });
+    return null;
+  } catch (err) {
+    logger.warn('[redeemer] Gamma market check failed', {
+      conditionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }

@@ -160,6 +160,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         openedAt: new Date().toISOString(),
         txHash: result.tradeResult.tx_hash,
         sharesHeld: result.tradeResult.shares_bought,
+        executionVenue: result.executionVenue ?? 'simmer',
       });
 
       await notifyTradeExecuted(result.signal, result.tradeResult.tx_hash);

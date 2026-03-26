@@ -41,6 +41,8 @@ export interface Position {
   txHash?: string | undefined;
   /** Shares purchased — used when closing the position via sell order */
   sharesHeld?: number | undefined;
+  /** Venue via which this position was entered */
+  executionVenue: 'simmer' | 'clob';
 }
 
 function positionKey(marketId: string, direction: string): string {
@@ -73,6 +75,7 @@ export async function recordPosition(
     consensusStddev: position.consensusStddev !== undefined ? String(position.consensusStddev) : '',
     txHash: position.txHash ?? '',
     sharesHeld: position.sharesHeld !== undefined ? String(position.sharesHeld) : '',
+    executionVenue: position.executionVenue,
   });
   await redis.expire(key, POSITION_TTL_SECONDS);
 
@@ -148,6 +151,7 @@ function deserialisePosition(raw: Record<string, string>): Position {
     edgeMagnitude: parseFloat(raw['edgeMagnitude'] ?? '0'),
     sourcedFrom: raw['sourcedFrom'] ?? '',
     openedAt: raw['openedAt'] ?? new Date().toISOString(),
+    executionVenue: (raw['executionVenue'] === 'clob' ? 'clob' : 'simmer'),
   };
   if (raw['consensusStddev']) pos.consensusStddev = parseFloat(raw['consensusStddev']);
   if (raw['txHash']) pos.txHash = raw['txHash'];
