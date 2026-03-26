@@ -9,6 +9,8 @@ import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client'
 import { Wallet } from '@ethersproject/wallet';
 import { loadConfig } from './config.js';
 import { logger } from './logger.js';
+import { getRedis } from './redis.js';
+import type { ApiKeyCreds } from '@polymarket/clob-client';
 
 const CLOB_HOST = 'https://clob.polymarket.com';
 const POLYGON_CHAIN_ID = 137;
@@ -51,9 +53,46 @@ interface OrderResponse {
 
 let cachedClient: Promise<ClobClient> | null = null;
 
+// Redis key where derived API creds are persisted across process restarts.
+// TTL is 23 hours — Polymarket API keys do not expire, but we refresh daily
+// as a precaution so stale keys (e.g. after account changes) don't persist forever.
+const CLOB_CREDS_REDIS_KEY = 'clob:api_creds';
+const CLOB_CREDS_TTL_SECONDS = 23 * 3600;
+
 function normaliseError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+async function loadPersistedCreds(): Promise<ApiKeyCreds | null> {
+  try {
+    const redis = getRedis();
+    const raw = await redis.get(CLOB_CREDS_REDIS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      'key' in parsed &&
+      'secret' in parsed &&
+      'passphrase' in parsed
+    ) {
+      return parsed as ApiKeyCreds;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function persistCreds(creds: ApiKeyCreds): Promise<void> {
+  try {
+    const redis = getRedis();
+    await redis.set(CLOB_CREDS_REDIS_KEY, JSON.stringify(creds), 'EX', CLOB_CREDS_TTL_SECONDS);
+  } catch (err) {
+    // Non-fatal: if persist fails, creds are still used in-process; next cold start will re-derive.
+    logger.warn('[clob] failed to persist API creds to Redis', { error: normaliseError(err) });
+  }
 }
 
 async function getClobClient(): Promise<ClobClient> {
@@ -67,10 +106,20 @@ async function getClobClient(): Promise<ClobClient> {
     }
 
     const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY);
-    const bootstrap = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID, signer);
-    const creds = await bootstrap.createOrDeriveApiKey();
-
     const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
+
+    // Try to load previously persisted creds first — avoids a round-trip to
+    // /auth/api-key on every cold start, which Polymarket rate-limits at ~400/day.
+    let creds = await loadPersistedCreds();
+    if (creds) {
+      logger.info('[clob] loaded API creds from Redis cache');
+    } else {
+      logger.info('[clob] deriving new API creds from Polymarket');
+      const bootstrap = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID, signer);
+      creds = await bootstrap.createOrDeriveApiKey();
+      await persistCreds(creds);
+    }
+
     return new ClobClient(
       CLOB_HOST,
       POLYGON_CHAIN_ID,
@@ -85,13 +134,35 @@ async function getClobClient(): Promise<ClobClient> {
 
   // Clear the cached promise on rejection so the next call retries fresh
   // instead of returning the same rejected promise forever.
-  initPromise.catch(() => {
+  // Also clear persisted creds on auth failure so the next attempt re-derives.
+  initPromise.catch((err: unknown) => {
     if (cachedClient === initPromise) {
       cachedClient = null;
+    }
+    // If the failure looks like an auth error, evict the cached creds so the
+    // next cold start doesn't replay a stale/invalid key set.
+    const msg = normaliseError(err).toLowerCase();
+    if (msg.includes('api key') || msg.includes('auth') || msg.includes('401') || msg.includes('403')) {
+      logger.warn('[clob] auth failure — evicting cached API creds from Redis');
+      void getRedis().del(CLOB_CREDS_REDIS_KEY).catch(() => undefined);
     }
   });
 
   return cachedClient;
+}
+
+/**
+ * Force re-derivation of CLOB API credentials on next client initialisation.
+ * Call this if you suspect stale or revoked credentials.
+ */
+export async function evictClobCreds(): Promise<void> {
+  cachedClient = null;
+  try {
+    await getRedis().del(CLOB_CREDS_REDIS_KEY);
+    logger.info('[clob] API creds evicted from Redis cache');
+  } catch {
+    // best-effort
+  }
 }
 
 function orderWithTimeout<T>(promise: Promise<T>): Promise<T> {
