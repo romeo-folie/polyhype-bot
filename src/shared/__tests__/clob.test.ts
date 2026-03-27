@@ -8,12 +8,15 @@ const mockGetTickSize = jest.fn<(...args: any[]) => Promise<string>>();
 const mockGetNegRisk = jest.fn<(...args: any[]) => Promise<boolean>>();
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mockGetBalanceAllowance = jest.fn<(...args: any[]) => Promise<any>>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockUpdateBalanceAllowance = jest.fn<(...args: any[]) => Promise<any>>();
 
 const mockClobClient = {
   createAndPostMarketOrder: mockCreateAndPostMarketOrder,
   getTickSize: mockGetTickSize,
   getNegRisk: mockGetNegRisk,
   getBalanceAllowance: mockGetBalanceAllowance,
+  updateBalanceAllowance: mockUpdateBalanceAllowance,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   createOrDeriveApiKey: jest.fn<() => Promise<any>>().mockResolvedValue({ apiKey: 'test', secret: 'test', passphrase: 'test' }),
 };
@@ -62,7 +65,8 @@ describe('submitClobBuy', () => {
     jest.clearAllMocks();
     mockGetTickSize.mockResolvedValue('0.01');
     mockGetNegRisk.mockResolvedValue(false);
-    mockGetBalanceAllowance.mockResolvedValue({ balance: '1000', allowance: '1000' });
+    mockGetBalanceAllowance.mockResolvedValue({ balance: '1000000000', allowance: '1000000000' });
+    mockUpdateBalanceAllowance.mockResolvedValue(undefined);
   });
 
   it('returns success on a successful order', async () => {
@@ -111,13 +115,13 @@ describe('submitClobBuy', () => {
     expect(result.error).toContain('timed out');
   }, 35_000);
 
-  it('rejects when allowance is insufficient', async () => {
-    mockGetBalanceAllowance.mockResolvedValue({ balance: '100', allowance: '2' });
+  it('rejects when balance is insufficient', async () => {
+    mockGetBalanceAllowance.mockResolvedValue({ balance: '2000000', allowance: '0' });
 
     const result = await submitClobBuy({ tokenId: 'tok-yes', amountUsd: 5 });
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('Insufficient CLOB allowance');
+    expect(result.error).toContain('Insufficient CLOB balance');
     expect(mockCreateAndPostMarketOrder).not.toHaveBeenCalled();
   });
 });
@@ -179,10 +183,11 @@ describe('submitClobSell', () => {
 describe('getClobBalance', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockUpdateBalanceAllowance.mockResolvedValue(undefined);
   });
 
   it('returns balance and allowance separately', async () => {
-    mockGetBalanceAllowance.mockResolvedValue({ balance: '100.5', allowance: '50.25' });
+    mockGetBalanceAllowance.mockResolvedValue({ balance: '100500000', allowance: '50250000' });
 
     const result = await getClobBalance();
 

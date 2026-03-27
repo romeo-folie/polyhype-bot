@@ -1,116 +1,78 @@
 # Polymarket Geopolitical Trading Agent
 
-Autonomous agent that monitors geopolitical OSINT feeds, maps high-urgency events to Polymarket prediction contracts, and executes trades with automatic position management.
+Autonomous agent that monitors multi-category OSINT feeds, maps high-urgency events to Polymarket prediction contracts, and executes trades with automatic position management.
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    subgraph INGESTION["⚡ Ingestion (cron:trade, every 5 min)"]
-        GDELT["GDELT v2 API<br/><i>combined theme query</i>"]
-        RSS["RSS Feeds<br/><i>BBC, NYT, Al Jazeera,<br/>Sky News, Reuters</i>"]
-        DEDUP["Redis Dedup"]
-        SCORER["LLM Urgency Scorer<br/><i>OpenAI / Gemini</i>"]
-
-        GDELT --> DEDUP
-        RSS --> DEDUP
-        DEDUP --> SCORER
-    end
-
-    subgraph MAPPING["🗺️ Market Mapping"]
-        ENTITY["Entity Extractor<br/><i>LLM → keywords</i>"]
-        GAMMA["Polymarket Gamma API<br/><i>market search</i>"]
-        CONSENSUS["Consensus Calculator<br/><i>LLM probability estimate</i>"]
-        DIVERGENCE["Divergence Calculator<br/><i>edge detection + Half-Kelly sizing</i>"]
-
-        ENTITY --> GAMMA
-        GAMMA --> CONSENSUS
-        CONSENSUS --> DIVERGENCE
-    end
-
-    subgraph REEVAL["🔄 Signal Re-evaluation"]
-        REEVAL_CHECK["Check open positions<br/>against fresh OSINT"]
-        REEVAL_LLM["Re-estimate consensus<br/><i>LLM</i>"]
-        REEVAL_EXIT["Exit if edge < 3%<br/>or direction flipped"]
-
-        REEVAL_CHECK --> REEVAL_LLM --> REEVAL_EXIT
-    end
-
-    subgraph PRICES_WS["📡 Price Feed (shared singleton)"]
-        WS_FEED["CLOB WebSocket<br/><i>wss://ws-subscriptions-clob</i>"]
-        WS_CACHE["Redis Price Cache<br/><i>30s TTL per market</i>"]
-        GAMMA_REST["Gamma REST<br/><i>fallback on cache miss</i>"]
-
-        WS_FEED --> WS_CACHE
-        WS_CACHE -->|"miss"| GAMMA_REST
-    end
-
-    subgraph EXECUTION["💰 Trade Execution"]
-        CTX_CHECK["Simmer Context Check<br/><i>GET /sdk/context/{id}<br/>skip: resolved / existing position<br/>/ flip-flop / fee drag</i>"]
-        ROUTER["Execution Router"]
-        SIMMER["Simmer API<br/><i>primary venue</i>"]
-        CLOB["Polymarket CLOB<br/><i>fallback — direct orderbook</i>"]
-        LEDGER["Redis Position Ledger"]
-        TELEGRAM["Telegram Notifications"]
-
-        CTX_CHECK -->|"safe to trade"| ROUTER
-        CTX_CHECK -->|"skip"| TELEGRAM
-        ROUTER -->|"market in Simmer"| SIMMER
-        ROUTER -->|"market not in Simmer"| CLOB
-        SIMMER --> LEDGER
-        CLOB --> LEDGER
-        LEDGER --> TELEGRAM
-    end
-
-    subgraph MONITOR["👁️ Position Monitor (cron:monitor, every 5 min)"]
-        MON_PRICES["resolveYesPrice()<br/><i>WS cache → Gamma REST</i>"]
-        STOPLOSS["Stop-Loss<br/><i>exit if loss ≥ 30%</i>"]
-        TAKEPROFIT["Take-Profit<br/><i>exit if gain ≥ 25%</i>"]
-        DIVCLOSE["Divergence Closed<br/><i>market reached consensus</i>"]
-        REDEEMER["Resolution Redeemer<br/><i>auto-redeem winning positions<br/>via Simmer API</i>"]
-        SELL["Sell Executor<br/><i>Simmer / CLOB</i>"]
-
-        MON_PRICES --> STOPLOSS
-        STOPLOSS -->|"loss exceeded"| SELL
-        MON_PRICES --> TAKEPROFIT
-        TAKEPROFIT -->|"profit target hit"| SELL
-        MON_PRICES --> DIVCLOSE
-        DIVCLOSE -->|"edge gone"| SELL
-        MON_PRICES --> REDEEMER
-        REDEEMER -->|"resolved + won"| TELEGRAM
-    end
-
-    SCORER -->|"high-urgency items"| MAPPING
-    SCORER -->|"high-urgency items"| REEVAL
-    DIVERGENCE -->|"TradeSignal[]"| EXECUTION
-    REEVAL_EXIT -->|"exit signal"| SELL
-    LEDGER -.->|"open positions"| MONITOR
-    LEDGER -.->|"open positions"| REEVAL
-    WS_CACHE -.->|"fresh prices"| MON_PRICES
-    WS_FEED -.->|"watch market"| MAPPING
-    WS_FEED -.->|"watch open positions"| MONITOR
-
-    subgraph GUARDS["🛡️ Execution Guards"]
-        G1["Stake floor check"]
-        G2["Open position check<br/><i>no duplicate entry</i>"]
-        G3["Idempotency key<br/><i>Redis, 1h TTL</i>"]
-    end
-
-    DIVERGENCE --> GUARDS --> CTX_CHECK
-
-    style INGESTION fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
-    style MAPPING fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
-    style REEVAL fill:#1a1a2e,stroke:#0f3460,color:#e0e0e0
-    style EXECUTION fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
-    style MONITOR fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
-    style GUARDS fill:#1a1a2e,stroke:#533483,color:#e0e0e0
 ```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ INGESTION (cron:trade, every 5 min)                                          │
+│  RSS feeds: Geo / Macro / Crypto-Reg / AI-Tech / US Politics                 │
+│  Geo scraper: GDELT v2 (combined query)                                      │
+│      └─> Redis dedup ─> LLM urgency scorer (per-category) ─> high-urgency     │
+└──────────────────────────────────────────────────────────────────────────────┘
+                               │
+                               ├───────────────────────────────┐
+                               │                               │
+                               ▼                               ▼
+┌──────────────────────────────┐                ┌──────────────────────────────┐
+│ MAPPING                      │                │ SIGNAL RE-EVAL               │
+│  Entity extractor            │                │  Re-estimate consensus (LLM) │
+│  Gamma search                │                │  Exit if edge < 3% / flips    │
+│  Consensus estimator (LLM)   │                └──────────────────────────────┘
+│  Divergence + Half-Kelly     │
+└───────────────┬──────────────┘
+                │ TradeSignal[]
+                ▼
+┌──────────────────────────────┐
+│ EXECUTION + GUARDS           │
+│  Stake floor / idempotency   │
+│  Simmer context check        │
+│  Router → Simmer (primary)   │
+│           → CLOB (fallback)  │
+│  Ledger + Telegram           │
+└──────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ PRICE FEED (shared singleton)                                                │
+│  CLOB WS → Redis cache (30s TTL) → Gamma REST (cache miss)                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ MONITOR (cron:monitor, every 5 min)                                          │
+│  resolveYesPrice() → stop-loss / take-profit / divergence closed             │
+│  Sell executor (Simmer / CLOB) + auto-redeem                                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Ingestion Categories (Phase 5)
+
+All ingestion categories use a shared `CategoryConfig` interface:
+
+```ts
+interface CategoryConfig {
+  id: string;
+  label: string;
+  feeds: { url: string; headers?: Record<string, string> }[];
+  scorerPrompt: string;
+  scoreThreshold: number;
+  entityContext: string;
+}
+```
+
+| Category | ID | Threshold |
+|---|---|---|
+| Geopolitical | `geopolitical` | 8 |
+| Macro / Central Bank | `macro` | 8 |
+| Crypto / Regulatory | `crypto-regulatory` | 8 |
+| AI / Tech Company Events | `ai-tech` | 7 |
+| US Politics (Non-Election) | `us-politics` | 7 |
 
 ### Data Flow Summary
 
 | Cycle | Entrypoint | What happens |
 |-------|-----------|--------------|
-| **Trade** (`cron:trade`) | `src/execution/index.ts` | Ingest OSINT → apply timing window multiplier → score urgency → watch high-urgency markets on WS feed → map to markets → context check (Simmer) → re-evaluate open positions → execute new trades |
+| **Trade** (`cron:trade`) | `src/execution/index.ts` | Ingest multi-category OSINT → apply timing window multiplier → score per category → watch high-urgency markets on WS feed → map to markets → context check (Simmer) → re-evaluate open positions → execute new trades |
 | **Monitor** (`cron:monitor`) | `src/monitor/index.ts` | Resolve prices via WS cache (Gamma REST fallback) → evaluate stop-loss / take-profit / divergence → exit if triggered → auto-redeem resolved winning positions |
 | **Spot** (`cron:spot`) | `src/spot/index.ts` | Poll spot prices → detect significant moves → cross-check Simmer oracle opportunities → find correlated markets → watch on WS feed → estimate probability → execute trades |
 
@@ -263,7 +225,8 @@ The Redis lock uses token-based ownership: each run stores a unique token on acq
 | Module | README | Description |
 |--------|--------|-------------|
 | `src/shared/` | [README](src/shared/README.md) | Config, Redis client, Simmer SDK wrapper (`context` + `opportunities` endpoints), CLOB WebSocket feed, price cache, logger |
-| `src/ingestion/` | [README](src/ingestion/README.md) | RSS + Cheerio scraping, Redis dedup, LLM urgency scoring, timing window multiplier |
+| `src/ingestion/` | [README](src/ingestion/README.md) | RSS + GDELT ingestion, Redis dedup, LLM urgency scoring, timing window multiplier |
+| `src/ingestion/categories/` | [README](src/ingestion/categories/README.md) | CategoryConfig registry for multi-category ingestion (feeds, scorer prompts, thresholds, entity context) |
 | `src/mapping/` | [README](src/mapping/README.md) | Gamma API client, entity extraction, consensus probability, Half-Kelly sizing |
 | `src/execution/` | [README](src/execution/README.md) | Simmer pre-trade context check, execution router, Redis position ledger, Telegram notifications |
 | `src/monitor/` | [README](src/monitor/README.md) | WS-backed price resolution, stop-loss / take-profit / divergence evaluator, auto-redemption of resolved positions |
@@ -287,5 +250,5 @@ See `.env.example` for full documentation of all required and optional variables
 - Phase 2: market mapping & execution logic.
 - Phase 3: execution orchestration & Telegram notifications.
 - Phase 4: position monitor & take-profit.
-- Phase 5: spot price monitor — parallel signal source from live asset prices.
-# Test
+- Phase 5: multi-category market expansion.
+- Phase 6: spot price monitor — parallel signal source from live asset prices.

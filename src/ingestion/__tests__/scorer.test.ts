@@ -47,6 +47,13 @@ function makeItem(title: string): RssItem {
 }
 
 describe('scoreItems', () => {
+  const meta = {
+    systemPrompt: 'Custom system prompt for testing',
+    categoryId: 'test',
+    categoryLabel: 'Test Category',
+    entityContext: 'test entities',
+  };
+
   beforeEach(() => {
     mockGenerateContent.mockReset();
     mockChatCreate.mockReset();
@@ -74,17 +81,20 @@ describe('scoreItems', () => {
 
     const items = [makeItem('Major military conflict erupts'), makeItem('Trade talks continue')];
 
-    const result = await scoreItems(items);
+    const result = await scoreItems(items, meta);
 
     expect(result).toHaveLength(2);
     expect(result[0]!.urgencyScore).toBe(9);
     expect(result[0]!.keywords).toEqual(['military', 'conflict']);
+    expect(result[0]!.categoryId).toBe('test');
+    expect(result[0]!.categoryLabel).toBe('Test Category');
+    expect(result[0]!.entityContext).toBe('test entities');
     expect(result[1]!.urgencyScore).toBe(3);
     expect(result[1]!.keywords).toEqual(['trade']);
   });
 
   it('returns empty array for empty input', async () => {
-    const result = await scoreItems([]);
+    const result = await scoreItems([], meta);
     expect(result).toEqual([]);
     expect(mockGenerateContent).not.toHaveBeenCalled();
     expect(mockChatCreate).not.toHaveBeenCalled();
@@ -95,7 +105,7 @@ describe('scoreItems', () => {
     delete process.env['OPENAI_API_KEY'];
 
     const items = [makeItem('Some headline')];
-    const result = await scoreItems(items);
+    const result = await scoreItems(items, meta);
 
     expect(result).toHaveLength(1);
     expect(result[0]!.urgencyScore).toBe(1);
@@ -120,7 +130,7 @@ describe('scoreItems', () => {
     });
 
     const items = [makeItem('New sanctions imposed on Russia')];
-    const result = await scoreItems(items);
+    const result = await scoreItems(items, meta);
 
     expect(result).toHaveLength(1);
     expect(result[0]!.urgencyScore).toBe(8);
@@ -130,5 +140,22 @@ describe('scoreItems', () => {
     expect(mockGenerateContent).toHaveBeenCalledTimes(1);
     // OpenAI was used as fallback
     expect(mockChatCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the provided system prompt', async () => {
+    mockGenerateContent.mockResolvedValue({
+      response: {
+        text: () =>
+          JSON.stringify({
+            results: [{ score: 5, keywords: ['test'] }],
+          }),
+      },
+    });
+
+    const items = [makeItem('Test headline')];
+    await scoreItems(items, meta);
+
+    const call = mockGenerateContent.mock.calls[0]?.[0];
+    expect(call?.systemInstruction?.parts?.[0]?.text).toBe(meta.systemPrompt);
   });
 });

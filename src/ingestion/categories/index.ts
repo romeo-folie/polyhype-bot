@@ -1,0 +1,9 @@
+import { geopolitical } from './geopolitical.js';
+import { macro } from './macro.js';
+import { cryptoRegulatory } from './cryptoRegulatory.js';
+import { aiTech } from './aiTech.js';
+import { usPolitics } from './usPolitics.js';
+
+export const CATEGORIES = [geopolitical, macro, cryptoRegulatory, aiTech, usPolitics] as const;
+
+export { geopolitical, macro, cryptoRegulatory, aiTech, usPolitics };

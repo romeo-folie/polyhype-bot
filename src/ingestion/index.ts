@@ -13,24 +13,61 @@ import { filterSeen } from './dedup.js';
 import { scoreItems } from './scorer.js';
 import { applyTimingBoost } from './timingWindow.js';
 import type { ScoredItem } from './scorer.js';
+import type { Redis } from 'ioredis';
+import type { CategoryConfig } from './categories/types.js';
+import { CATEGORIES } from './categories/index.js';
 
-const URGENCY_THRESHOLD = Number(process.env['URGENCY_THRESHOLD'] ?? 8);
+async function runCategoryPipeline(
+  category: CategoryConfig,
+  redis: Redis,
+): Promise<ScoredItem[]> {
+  const [rssItems, scraped] = await Promise.all([
+    fetchRssFeeds(category.feeds),
+    category.id === 'geopolitical' ? scrapeHeadlines() : Promise.resolve([]),
+  ]);
 
-export async function runIngestion(): Promise<ScoredItem[]> {
-  const redis = getRedis();
-  const [rssItems, scraped] = await Promise.all([fetchRssFeeds(), scrapeHeadlines()]);
   const all = [...rssItems, ...scraped];
   const newItems = await filterSeen(all, redis);
-  const scored = await scoreItems(newItems);
-  // Apply timing window boost — items breaking during Asia/Europe hours (US asleep)
-  // get a score multiplier to reflect the repricing lag edge.
+  const scored = await scoreItems(newItems, {
+    systemPrompt: category.scorerPrompt,
+    categoryId: category.id,
+    categoryLabel: category.label,
+    entityContext: category.entityContext,
+  });
+
   const boosted = applyTimingBoost(scored);
-  const highUrgency = boosted.filter((i) => i.urgencyScore >= URGENCY_THRESHOLD);
+  const highUrgency = boosted.filter((i) => i.urgencyScore >= category.scoreThreshold);
   logger.info(
-    `[ingestion] ${all.length} total → ${newItems.length} new → ${highUrgency.length} high-urgency`,
+    `[ingestion] ${category.id}: ${all.length} total → ${newItems.length} new → ${highUrgency.length} high-urgency`,
   );
   return highUrgency;
 }
+
+export async function runIngestion(): Promise<ScoredItem[]> {
+  const redis = getRedis();
+  const settled = await Promise.allSettled(
+    CATEGORIES.map((category) => runCategoryPipeline(category, redis)),
+  );
+
+  const highUrgency: ScoredItem[] = [];
+  for (let i = 0; i < settled.length; i++) {
+    const result = settled[i]!;
+    const category = CATEGORIES[i]!;
+    if (result.status === 'fulfilled') {
+      highUrgency.push(...result.value);
+    } else {
+      logger.warn('[ingestion] category pipeline failed', {
+        category: category.id,
+        error: String(result.reason),
+      });
+    }
+  }
+
+  logger.info('[ingestion] pipeline complete', { highUrgencyCount: highUrgency.length });
+  return highUrgency;
+}
+
+export { runCategoryPipeline };
 
 // Entrypoint when run directly (npx tsx src/ingestion/index.ts)
 import { fileURLToPath } from 'node:url';

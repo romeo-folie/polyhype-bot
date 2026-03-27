@@ -1,8 +1,8 @@
 /**
  * Entity extractor.
  *
- * Given a scored news item, uses an LLM to extract geopolitical entities
- * (countries, leaders, organisations) as terse search keywords, then queries
+ * Given a scored news item, uses an LLM to extract domain-specific entities
+ * as terse search keywords, then queries
  * the Polymarket Gamma API to find relevant active markets.
  */
 
@@ -15,20 +15,25 @@ const TIMEOUT_MS = 20_000;
 
 // ─── LLM helpers (shared with scorer pattern) ────────────────────────────────
 
-const EXTRACT_SYSTEM_PROMPT =
-  'You are a geopolitical analyst. Extract the most important named entities from a ' +
-  'news headline for a Polymarket keyword search. Return ONLY a JSON object: ' +
-  '{"entities": ["entity1", "entity2"]} — max 5 short keywords, no phrases. ' +
-  'No markdown, no explanation.';
+function buildEntitySystemPrompt(entityContext: string): string {
+  return (
+    'You are an analyst. Extract the most important named entities from a ' +
+    'news headline for a Polymarket keyword search. Focus on: ' +
+    `${entityContext}. ` +
+    'Return ONLY a JSON object: {"entities": ["entity1", "entity2"]} — max 5 short keywords, no phrases. ' +
+    'No markdown, no explanation.'
+  );
+}
 
-async function extractEntitiesOpenAI(headline: string): Promise<string[]> {
+async function extractEntitiesOpenAI(headline: string, entityContext: string): Promise<string[]> {
   const { OpenAI } = await import('openai');
   const client = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
+  const systemPrompt = buildEntitySystemPrompt(entityContext);
   const completion = await client.chat.completions.create(
     {
       model: loadConfig().OPENAI_MODEL,
       messages: [
-        { role: 'system', content: EXTRACT_SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: headline },
       ],
       response_format: { type: 'json_object' },
@@ -43,13 +48,14 @@ async function extractEntitiesOpenAI(headline: string): Promise<string[]> {
   return Array.isArray(parsed.entities) ? parsed.entities.slice(0, 5) : [];
 }
 
-async function extractEntitiesGemini(headline: string): Promise<string[]> {
+async function extractEntitiesGemini(headline: string, entityContext: string): Promise<string[]> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const genai = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
   const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
+  const systemPrompt = buildEntitySystemPrompt(entityContext);
 
   const result = await Promise.race([
-    model.generateContent(`${EXTRACT_SYSTEM_PROMPT}\n\n${headline}`),
+    model.generateContent(`${systemPrompt}\n\n${headline}`),
     new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('Gemini timeout')), TIMEOUT_MS),
     ),
@@ -61,18 +67,18 @@ async function extractEntitiesGemini(headline: string): Promise<string[]> {
 }
 
 /**
- * Extract geopolitical entities from a headline.
+ * Extract entities from a headline using the category context.
  *
  * Tries Gemini first (cheaper), falls back to OpenAI on error.
  */
-export async function extractEntities(headline: string): Promise<string[]> {
+export async function extractEntities(headline: string, entityContext: string): Promise<string[]> {
   const provider = loadConfig().LLM_PROVIDER;
   const useGemini = provider === 'gemini' && Boolean(process.env['GEMINI_API_KEY']);
   const useOpenAI = Boolean(process.env['OPENAI_API_KEY']);
 
   if (useGemini) {
     try {
-      return await extractEntitiesGemini(headline);
+      return await extractEntitiesGemini(headline, entityContext);
     } catch (err) {
       logger.warn('[entity-extractor] Gemini failed, trying OpenAI', {
         error: err instanceof Error ? err.message : String(err),
@@ -81,7 +87,7 @@ export async function extractEntities(headline: string): Promise<string[]> {
   }
 
   if (useOpenAI) {
-    return await extractEntitiesOpenAI(headline);
+    return await extractEntitiesOpenAI(headline, entityContext);
   }
 
   throw new Error('No LLM provider configured (OPENAI_API_KEY or GEMINI_API_KEY required)');
@@ -117,7 +123,7 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
   // Combine scorer keywords with LLM-extracted entities for richer queries
   let entities: string[] = [];
   try {
-    entities = await extractEntities(item.title);
+    entities = await extractEntities(item.title, item.entityContext);
   } catch (err) {
     logger.warn('[entity-extractor] entity extraction failed, falling back to keywords', {
       error: err instanceof Error ? err.message : String(err),

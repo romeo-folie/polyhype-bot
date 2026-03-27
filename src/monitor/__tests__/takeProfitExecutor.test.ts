@@ -5,6 +5,12 @@ jest.unstable_mockModule('../../shared/logger.js', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
+jest.unstable_mockModule('../../shared/config.js', () => ({
+  loadConfig: jest.fn(() => ({
+    CLOB_ORDER_TYPE: 'FAK',
+  })),
+}));
+
 jest.unstable_mockModule('../../shared/simmer.js', () => ({
   submitSell: jest.fn(),
   resolveSimmerMarketId: jest.fn(),
