@@ -23,9 +23,9 @@ jobs:
         run: npm ci
       - name: Run tests (core)
         env:
-          NODE_OPTIONS: --max-old-space-size=6144
+          NODE_OPTIONS: --max-old-space-size=4096
         run: |
-          npm test -- --runInBand --runTestsByPath \
+          npx vitest run --reporter=verbose \
             src/mapping/__tests__/mapping.test.ts \
             src/mapping/__tests__/gamma.test.ts \
             src/mapping/__tests__/consensusCalculator.test.ts \
@@ -38,9 +38,9 @@ jobs:
             src/ingestion/__tests__/timingWindow.test.ts
       - name: Run tests (monitor + shared + execution)
         env:
-          NODE_OPTIONS: --max-old-space-size=6144
+          NODE_OPTIONS: --max-old-space-size=4096
         run: |
-          npm test -- --runInBand --runTestsByPath \
+          npx vitest run --reporter=verbose \
             src/monitor/__tests__/priceFetcher.test.ts \
             src/monitor/__tests__/takeProfitEvaluator.test.ts \
             src/monitor/__tests__/signalReeval.test.ts \
@@ -54,24 +54,24 @@ jobs:
             src/execution/__tests__/telegram.test.ts
       - name: Run tests (arb)
         env:
-          NODE_OPTIONS: --max-old-space-size=6144
+          NODE_OPTIONS: --max-old-space-size=4096
         run: |
-          npm test -- --runInBand --runTestsByPath \
+          npx vitest run --reporter=verbose \
             src/arb/__tests__/runArbScan.test.ts \
             src/arb/__tests__/scanner.test.ts
       - name: Run tests (spot)
         env:
-          NODE_OPTIONS: --max-old-space-size=6144
+          NODE_OPTIONS: --max-old-space-size=4096
         run: |
-          npm test -- --runInBand --runTestsByPath \
+          npx vitest run --reporter=verbose \
             src/spot/__tests__/marketCorrelator.test.ts \
             src/spot/__tests__/thresholdDetector.test.ts \
             src/spot/__tests__/poller.test.ts \
             src/spot/__tests__/fastPathConsensus.test.ts
       - name: Run tests (copytrade)
         env:
-          NODE_OPTIONS: --max-old-space-size=6144
+          NODE_OPTIONS: --max-old-space-size=4096
         run: |
-          npm test -- --runInBand --runTestsByPath \
+          npx vitest run --reporter=verbose \
             src/copytrade/__tests__/copytrade.test.ts \
             src/copytrade/__tests__/shortlist.test.ts

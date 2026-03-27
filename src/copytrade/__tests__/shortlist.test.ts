@@ -36,7 +36,7 @@ beforeEach(() => {
 describe('copytrade shortlist', () => {
   it('fetches leaderboard and parses entries', async () => {
     const payload = [
-      { rank: '1', proxyWallet: '0xabc', userName: 'foo', vol: 200000, pnl: 50000 },
+      { rank: '1', proxyWallet: '0x0000000000000000000000000000000000000abc', userName: 'foo', vol: 200000, pnl: 50000 },
     ];
     mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => payload } as Response);
 
@@ -48,31 +48,40 @@ describe('copytrade shortlist', () => {
 
   it('selects by threshold and backfills to top N', async () => {
     const entries = [
-      { rank: '1', proxyWallet: '0x1', userName: 'a', vol: 150000, pnl: 20000 },
-      { rank: '2', proxyWallet: '0x2', userName: 'b', vol: 90000, pnl: 5000 },
-      { rank: '3', proxyWallet: '0x3', userName: 'c', vol: 200000, pnl: 15000 },
+      { rank: '1', proxyWallet: '0x0000000000000000000000000000000000000001', userName: 'a', vol: 150000, pnl: 20000 },
+      { rank: '2', proxyWallet: '0x0000000000000000000000000000000000000002', userName: 'b', vol: 90000, pnl: 5000 },
+      { rank: '3', proxyWallet: '0x0000000000000000000000000000000000000003', userName: 'c', vol: 200000, pnl: 15000 },
     ];
 
     const { selectWallets } = await import('../shortlist.js');
     const { selected, backfilled } = selectWallets(entries, 10000, 100000, 2);
 
-    expect(selected.map(e => e.proxyWallet)).toEqual(['0x1', '0x3']);
+    expect(selected.map(e => e.proxyWallet)).toEqual([
+      '0x0000000000000000000000000000000000000001',
+      '0x0000000000000000000000000000000000000003',
+    ]);
     expect(backfilled).toHaveLength(0);
 
     const { selected: selected2, backfilled: backfilled2 } = selectWallets(entries, 10000, 250000, 2);
     expect(selected2).toHaveLength(0);
-    expect(backfilled2.map(e => e.proxyWallet)).toEqual(['0x1', '0x2']);
+    expect(backfilled2.map(e => e.proxyWallet)).toEqual([
+      '0x0000000000000000000000000000000000000001',
+      '0x0000000000000000000000000000000000000002',
+    ]);
   });
 
   it('updates .env with atomic write and replacement', async () => {
     mockReadFile.mockResolvedValue('FOO=bar\nCOPYTRADE_WALLETS=old\n');
 
     const { updateEnvWallets } = await import('../shortlist.js');
-    await updateEnvWallets(['0xabc', '0xdef']);
+    await updateEnvWallets([
+      '0x0000000000000000000000000000000000000abc',
+      '0x0000000000000000000000000000000000000def',
+    ]);
 
     expect(mockWriteFile).toHaveBeenCalledWith(
       expect.stringContaining('.env.tmp'),
-      expect.stringContaining('COPYTRADE_WALLETS=0xabc,0xdef'),
+      expect.stringContaining('COPYTRADE_WALLETS=0x0000000000000000000000000000000000000abc,0x0000000000000000000000000000000000000def'),
       'utf8',
     );
     expect(mockRename).toHaveBeenCalledWith(
@@ -85,10 +94,10 @@ describe('copytrade shortlist', () => {
     mockReadFile.mockResolvedValue('FOO=bar\n');
 
     const { updateEnvWallets } = await import('../shortlist.js');
-    await updateEnvWallets(['0xabc']);
+    await updateEnvWallets(['0x0000000000000000000000000000000000000abc']);
 
     const writeArgs = mockWriteFile.mock.calls[0] ?? [];
-    expect(writeArgs[1]).toContain('COPYTRADE_WALLETS=0xabc');
+    expect(writeArgs[1]).toContain('COPYTRADE_WALLETS=0x0000000000000000000000000000000000000abc');
   });
 
   it('skips env mutation when auto-apply is false', async () => {
