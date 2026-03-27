@@ -17,7 +17,7 @@ export const aiTech: CategoryConfig = {
     { url: 'https://deepmind.google/blog/rss.xml' },
     { url: 'https://huggingface.co/blog/feed.xml' },
     { url: 'https://openai.com/blog/rss.xml' },
-    { url: 'https://ai.meta.com/blog/rss.xml/' },
+    { url: 'https://about.fb.com/feed/' },
   ],
   scorerPrompt: AI_TECH_PROMPT,
   scoreThreshold: 7,
