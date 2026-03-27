@@ -233,7 +233,8 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
             await markDedup();
             continue;
           }
-          const positionsToExit = positionIndex.get(positionKey(market.id, direction)) ?? [];
+          const walletKey = trade.proxyWallet.toLowerCase();
+          const positionsToExit = positionIndex.get(`${positionKey(market.id, direction)}:${walletKey}`) ?? [];
           if (positionsToExit.length === 0) {
             await markDedup();
             continue;
