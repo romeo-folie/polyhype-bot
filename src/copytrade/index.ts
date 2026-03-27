@@ -141,128 +141,139 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       if (trade.timestamp < lastTimestamp) continue;
       if (!trade.transactionHash) continue;
 
-      const deduped = await dedup(`copytrade:tx:${trade.transactionHash}`, COPYTRADE_DEDUP_TTL_SECONDS);
+      const dedupKey = `copytrade:tx:${trade.transactionHash}:${trade.asset}:${trade.outcomeIndex}`;
+      const deduped = await dedup(dedupKey, COPYTRADE_DEDUP_TTL_SECONDS);
       if (!deduped) continue;
 
       if (trade.timestamp > latestTimestamp) {
         latestTimestamp = trade.timestamp;
       }
 
-      if (cfg.COPYTRADE_MARKET_SCOPE === 'weather' && !isWeatherMarket(trade.title)) {
-        logger.info('[copytrade] skipped non-weather market', { title: trade.title });
-        continue;
-      }
+      try {
+        if (cfg.COPYTRADE_MARKET_SCOPE === 'weather' && !isWeatherMarket(trade.title)) {
+          logger.info('[copytrade] skipped non-weather market', { title: trade.title });
+          continue;
+        }
 
-      const market = await getMarketBySlug(trade.slug);
-      if (!market) {
-        logger.warn('[copytrade] market lookup failed', { slug: trade.slug });
-        continue;
-      }
+        const market = await getMarketBySlug(trade.slug);
+        if (!market) {
+          logger.warn('[copytrade] market lookup failed', { slug: trade.slug });
+          continue;
+        }
 
-      if (!market.active || market.closed) {
-        logger.info('[copytrade] skipped inactive market', { marketId: market.id, slug: trade.slug });
-        continue;
-      }
+        if (!market.active || market.closed) {
+          logger.info('[copytrade] skipped inactive market', { marketId: market.id, slug: trade.slug });
+          continue;
+        }
 
-      if (market.endDate) {
-        const hoursToResolve = (new Date(market.endDate).getTime() - Date.now()) / 3_600_000;
-        if (hoursToResolve < cfg.COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS) {
-          logger.info('[copytrade] skipped near-resolution market', {
+        if (market.endDate) {
+          const hoursToResolve = (new Date(market.endDate).getTime() - Date.now()) / 3_600_000;
+          if (hoursToResolve < cfg.COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS) {
+            logger.info('[copytrade] skipped near-resolution market', {
+              marketId: market.id,
+              hoursToResolve: hoursToResolve.toFixed(2),
+            });
+            continue;
+          }
+        }
+
+        const liquidity = Number.parseFloat(market.liquidity ?? '0');
+        if (!Number.isFinite(liquidity) || liquidity < cfg.COPYTRADE_MIN_LIQUIDITY) {
+          logger.info('[copytrade] skipped low-liquidity market', {
             marketId: market.id,
-            hoursToResolve: hoursToResolve.toFixed(2),
+            liquidity,
           });
           continue;
         }
-      }
 
-      const liquidity = Number.parseFloat(market.liquidity ?? '0');
-      if (!Number.isFinite(liquidity) || liquidity < cfg.COPYTRADE_MIN_LIQUIDITY) {
-        logger.info('[copytrade] skipped low-liquidity market', {
-          marketId: market.id,
-          liquidity,
-        });
-        continue;
-      }
-
-      const clobTokenIds = parseClobTokenIds(market.clobTokenIds);
-      const prices = parseOutcomePrices(market.outcomePrices);
-      const currentYesPrice = Number.parseFloat(prices[0] ?? '0');
-      if (!Number.isFinite(currentYesPrice)) {
-        logger.warn('[copytrade] invalid price from Gamma', { marketId: market.id });
-        continue;
-      }
-
-      const direction = tradeDirection(trade);
-      const currentOutcomePrice = direction === 'YES' ? currentYesPrice : 1 - currentYesPrice;
-      const slippage = slippageBps(trade.price, currentOutcomePrice);
-      if (slippage > cfg.COPYTRADE_MAX_SLIPPAGE_BPS) {
-        logger.info('[copytrade] skipped high slippage', {
-          marketId: market.id,
-          slippageBps: slippage.toFixed(1),
-        });
-        continue;
-      }
-
-      if (trade.side === 'SELL') {
-        if (cfg.COPYTRADE_EXIT_MODE !== 'mirror') continue;
-        const pos = positionIndex.get(positionKey(market.id, direction));
-        if (!pos) continue;
-
-        const currentPrice = await fetchCurrentPrice(pos);
-        if (!currentPrice) continue;
-
-        const returnPct =
-          pos.entryPrice > 0
-            ? ((currentPrice.currentOutcomePrice - pos.entryPrice) / pos.entryPrice) * 100
-            : 0;
-
-        const reason: ExitReason = 'copytrade_mirror';
-        const result = await executeTakeProfit({
-          position: pos,
-          currentPrice: currentPrice.currentOutcomePrice,
-          returnPct,
-          reason,
-          redis,
-        });
-
-        if (result.success) {
-          exits++;
+        const clobTokenIds = parseClobTokenIds(market.clobTokenIds);
+        const prices = parseOutcomePrices(market.outcomePrices);
+        const currentYesPrice = Number.parseFloat(prices[0] ?? '0');
+        if (!Number.isFinite(currentYesPrice)) {
+          logger.warn('[copytrade] invalid price from Gamma', { marketId: market.id });
+          continue;
         }
-        continue;
-      }
 
-      const scaledStake = trade.usdcSize * cfg.COPYTRADE_SIZE_SCALE;
-      const maxStake = Math.min(cfg.COPYTRADE_MAX_STAKE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
-      const stakeUsd = Math.max(0, Math.min(scaledStake, maxStake));
-      if (stakeUsd <= 0) {
-        logger.info('[copytrade] skipped zero stake after scaling', {
+        const direction = tradeDirection(trade);
+        const currentOutcomePrice = direction === 'YES' ? currentYesPrice : 1 - currentYesPrice;
+        const slippage = slippageBps(trade.price, currentOutcomePrice);
+        if (slippage > cfg.COPYTRADE_MAX_SLIPPAGE_BPS) {
+          logger.info('[copytrade] skipped high slippage', {
+            marketId: market.id,
+            slippageBps: slippage.toFixed(1),
+          });
+          continue;
+        }
+
+        if (trade.side === 'SELL') {
+          if (cfg.COPYTRADE_EXIT_MODE !== 'mirror') continue;
+          const pos = positionIndex.get(positionKey(market.id, direction));
+          if (!pos) continue;
+
+          const currentPrice = await fetchCurrentPrice(pos);
+          if (!currentPrice) continue;
+
+          const returnPct =
+            pos.entryPrice > 0
+              ? ((currentPrice.currentOutcomePrice - pos.entryPrice) / pos.entryPrice) * 100
+              : 0;
+
+          const reason: ExitReason = 'copytrade_mirror';
+          const result = await executeTakeProfit({
+            position: pos,
+            currentPrice: currentPrice.currentOutcomePrice,
+            returnPct,
+            reason,
+            redis,
+          });
+
+          if (result.success) {
+            exits++;
+          }
+          continue;
+        }
+
+        const scaledStake = trade.usdcSize * cfg.COPYTRADE_SIZE_SCALE;
+        const maxStake = Math.min(cfg.COPYTRADE_MAX_STAKE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
+        const stakeUsd = Math.max(0, Math.min(scaledStake, maxStake));
+        if (stakeUsd <= 0) {
+          logger.info('[copytrade] skipped zero stake after scaling', {
+            marketId: market.id,
+            scaledStake,
+            maxStake,
+          });
+          continue;
+        }
+
+        const consensusProbability = direction === 'YES' ? trade.price : 1 - trade.price;
+        const edgeMagnitude = Math.abs(consensusProbability - currentYesPrice);
+
+        const signal: TradeSignal = {
           marketId: market.id,
-          scaledStake,
-          maxStake,
+          conditionId: market.conditionId,
+          clobTokenIds,
+          question: market.question,
+          direction,
+          stakeUsd,
+          edgeMagnitude,
+          consensusProbability,
+          consensusStddev: 0,
+          outcomePrice: currentOutcomePrice,
+          halfKellyFraction: 0,
+          sourcedFrom: `copytrade:${wallet}`,
+          reasoning: `Copytrade mirror of ${wallet} ${trade.side} @ ${trade.price.toFixed(4)} (tx ${trade.transactionHash.slice(0, 10)}...)`,
+        };
+
+        signals.push(signal);
+      } catch (err) {
+        logger.warn('[copytrade] trade processing failed', {
+          wallet,
+          txHash: trade.transactionHash,
+          slug: trade.slug,
+          error: err instanceof Error ? err.message : String(err),
         });
         continue;
       }
-
-      const consensusProbability = direction === 'YES' ? trade.price : 1 - trade.price;
-      const edgeMagnitude = Math.abs(consensusProbability - currentYesPrice);
-
-      const signal: TradeSignal = {
-        marketId: market.id,
-        conditionId: market.conditionId,
-        clobTokenIds,
-        question: market.question,
-        direction,
-        stakeUsd,
-        edgeMagnitude,
-        consensusProbability,
-        consensusStddev: 0,
-        outcomePrice: currentOutcomePrice,
-        halfKellyFraction: 0,
-        sourcedFrom: `copytrade:${wallet}`,
-        reasoning: `Copytrade mirror of ${wallet} ${trade.side} @ ${trade.price.toFixed(4)} (tx ${trade.transactionHash.slice(0, 10)}...)`,
-      };
-
-      signals.push(signal);
     }
 
     if (latestTimestamp > lastTimestamp) {
