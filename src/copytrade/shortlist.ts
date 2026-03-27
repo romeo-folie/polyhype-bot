@@ -8,7 +8,7 @@ const DATA_API_BASE = 'https://data-api.polymarket.com';
 const REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_CANDIDATES = 50;
 
-interface LeaderboardEntry {
+export interface LeaderboardEntry {
   rank: string;
   proxyWallet: string;
   userName: string;
@@ -16,11 +16,11 @@ interface LeaderboardEntry {
   pnl: number;
 }
 
-function resolveCategory(scope: 'weather' | 'all'): string {
+export function resolveCategory(scope: 'weather' | 'all'): string {
   return scope === 'weather' ? 'WEATHER' : 'OVERALL';
 }
 
-async function fetchLeaderboard(category: string, timePeriod: string, limit: number): Promise<LeaderboardEntry[]> {
+export async function fetchLeaderboard(category: string, timePeriod: string, limit: number): Promise<LeaderboardEntry[]> {
   const params = new URLSearchParams({
     category,
     timePeriod,
@@ -37,26 +37,27 @@ async function fetchLeaderboard(category: string, timePeriod: string, limit: num
   return Array.isArray(data) ? data : [];
 }
 
-function formatWallets(wallets: string[]): string {
+export function formatWallets(wallets: string[]): string {
   return wallets.map((w) => w.toLowerCase()).join(',');
 }
 
-async function updateEnvWallets(wallets: string[]): Promise<void> {
+export async function updateEnvWallets(wallets: string[]): Promise<void> {
   const envPath = path.resolve(process.cwd(), '.env');
+  const envDir = path.dirname(envPath);
+  const tempPath = path.join(envDir, '.env.tmp');
   const content = await fs.readFile(envPath, 'utf8');
   const walletsValue = formatWallets(wallets);
 
   const lineRegex = /^COPYTRADE_WALLETS=.*$/m;
-  if (lineRegex.test(content)) {
-    const next = content.replace(lineRegex, `COPYTRADE_WALLETS=${walletsValue}`);
-    await fs.writeFile(envPath, next, 'utf8');
-  } else {
-    const next = `${content.trimEnd()}\nCOPYTRADE_WALLETS=${walletsValue}\n`;
-    await fs.writeFile(envPath, next, 'utf8');
-  }
+  const next = lineRegex.test(content)
+    ? content.replace(lineRegex, `COPYTRADE_WALLETS=${walletsValue}`)
+    : `${content.trimEnd()}\nCOPYTRADE_WALLETS=${walletsValue}\n`;
+
+  await fs.writeFile(tempPath, next, 'utf8');
+  await fs.rename(tempPath, envPath);
 }
 
-function selectWallets(entries: LeaderboardEntry[], minPnl: number, minVol: number, topN: number) {
+export function selectWallets(entries: LeaderboardEntry[], minPnl: number, minVol: number, topN: number) {
   const filtered = entries.filter((entry) => entry.pnl >= minPnl && entry.vol >= minVol);
   const selected: LeaderboardEntry[] = [];
   const seen = new Set<string>();
@@ -81,7 +82,7 @@ function selectWallets(entries: LeaderboardEntry[], minPnl: number, minVol: numb
   return { selected, backfilled };
 }
 
-async function run(): Promise<void> {
+export async function run(): Promise<void> {
   const cfg = loadConfig();
   if (!cfg.COPYTRADE_ENABLED) {
     logger.info('[copytrade-shortlist] COPYTRADE_ENABLED=false; skipping shortlist update');
@@ -122,9 +123,11 @@ async function run(): Promise<void> {
   logger.info('[copytrade-shortlist] COPYTRADE_WALLETS updated', { count: wallets.length });
 }
 
-run().catch((err) => {
-  logger.error('[copytrade-shortlist] failed', {
-    error: err instanceof Error ? err.message : String(err),
+if (process.env['NODE_ENV'] !== 'test') {
+  run().catch((err) => {
+    logger.error('[copytrade-shortlist] failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    process.exitCode = 1;
   });
-  process.exitCode = 1;
-});
+}
