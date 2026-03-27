@@ -16,7 +16,6 @@
     "cron:ingest": "npx tsx src/ingestion/index.ts",
     "cron:spot": "npx tsx src/spot/index.ts",
     "cron:arb": "npx tsx src/arb/index.ts",
-    "cron:copytrade-shortlist": "npx tsx src/copytrade/shortlist.ts",
     "probe:simmer": "npx tsx scripts/probe-simmer.ts",
     "probe:clob-allowance": "npx tsx scripts/probe-clob-allowance.ts",
     "test": "node --experimental-vm-modules node_modules/.bin/jest --passWithNoTests",
