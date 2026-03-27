@@ -155,16 +155,20 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       if (localDedup.has(dedupKey)) continue;
       // If we've already persisted a dedup key from a prior run, skip immediately.
       const priorDedup = await redis.get(dedupKey);
-      if (priorDedup) continue;
-
-      if (trade.timestamp > latestTimestamp) {
-        latestTimestamp = trade.timestamp;
+      if (priorDedup) {
+        if (trade.timestamp > latestTimestamp) {
+          latestTimestamp = trade.timestamp;
+        }
+        continue;
       }
 
       const markDedup = async () => {
         if (localDedup.has(dedupKey)) return;
         localDedup.add(dedupKey);
         await dedup(dedupKey, COPYTRADE_DEDUP_TTL_SECONDS);
+        if (trade.timestamp > latestTimestamp) {
+          latestTimestamp = trade.timestamp;
+        }
       };
 
       try {
