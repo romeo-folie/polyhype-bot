@@ -9,7 +9,6 @@ export default {
   transform: {
     '^.+\\.ts$': ['ts-jest', {
       useESM: true,
-      isolatedModules: true,
       diagnostics: { ignoreCodes: [151002] },
     }],
   },
