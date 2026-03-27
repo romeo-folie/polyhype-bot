@@ -114,7 +114,8 @@ function normalisePosition(raw: Record<string, unknown>): Record<string, unknown
   if (!('shares' in next)) {
     const yes = Number(next['shares_yes'] ?? 0);
     const no = Number(next['shares_no'] ?? 0);
-    const side = typeof next.side === 'string' ? next.side : null;
+    const sideRaw = typeof next.side === 'string' ? next.side.toLowerCase() : null;
+    const side = sideRaw === 'yes' || sideRaw === 'no' ? sideRaw : null;
 
     if (side === 'yes' && Number.isFinite(yes) && yes > 0) {
       next.shares = yes;
