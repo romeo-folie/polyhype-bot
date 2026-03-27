@@ -114,8 +114,25 @@ function normalisePosition(raw: Record<string, unknown>): Record<string, unknown
   if (!('shares' in next)) {
     const yes = Number(next['shares_yes'] ?? 0);
     const no = Number(next['shares_no'] ?? 0);
-    if (Number.isFinite(yes) && yes > 0) next.shares = yes;
-    if (Number.isFinite(no) && no > 0) next.shares = no;
+    const side = typeof next.side === 'string' ? next.side : null;
+
+    if (side === 'yes' && Number.isFinite(yes) && yes > 0) {
+      next.shares = yes;
+    } else if (side === 'no' && Number.isFinite(no) && no > 0) {
+      next.shares = no;
+    } else if (!side) {
+      if (Number.isFinite(yes) && yes > 0 && (!Number.isFinite(no) || no <= 0)) {
+        next.shares = yes;
+      } else if (Number.isFinite(no) && no > 0 && (!Number.isFinite(yes) || yes <= 0)) {
+        next.shares = no;
+      } else if (Number.isFinite(yes) && yes > 0 && Number.isFinite(no) && no > 0) {
+        logger.warn('[simmer] ambiguous shares (both yes/no set) — skipping derived shares', {
+          market_id: next.market_id,
+          shares_yes: yes,
+          shares_no: no,
+        });
+      }
+    }
   }
 
   if (!('value_usdc' in next)) {
