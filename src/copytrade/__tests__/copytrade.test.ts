@@ -17,11 +17,11 @@ let configOverride = {
 
 jest.unstable_mockModule('../../shared/logger.js', () => ({ logger: mockLogger }));
 
-const mockDedup = jest.fn<Promise<boolean>, [string, number?]>();
+const mockDedup = jest.fn() as any;
 jest.unstable_mockModule('../../shared/redis.js', () => ({ dedup: mockDedup }));
 
-const mockFetchWithTimeout = jest.fn<Promise<Response>, [string, number]>();
-const mockGetMarketBySlug = jest.fn<Promise<any>, [string]>();
+const mockFetchWithTimeout = jest.fn() as any;
+const mockGetMarketBySlug = jest.fn() as any;
 jest.unstable_mockModule('../../mapping/gamma.js', async () => {
   const actual = await import('../../mapping/gamma.js');
   return {
@@ -31,17 +31,17 @@ jest.unstable_mockModule('../../mapping/gamma.js', async () => {
   };
 });
 
-const mockGetOpenPositions = jest.fn<Promise<any[]>, []>();
+const mockGetOpenPositions = jest.fn() as any;
 jest.unstable_mockModule('../../execution/positionLedger.js', () => ({
   getOpenPositions: mockGetOpenPositions,
 }));
 
-const mockFetchCurrentPrice = jest.fn<Promise<any>, [any]>();
+const mockFetchCurrentPrice = jest.fn() as any;
 jest.unstable_mockModule('../../monitor/priceFetcher.js', () => ({
   fetchCurrentPrice: mockFetchCurrentPrice,
 }));
 
-const mockExecuteTakeProfit = jest.fn<Promise<any>, [any]>();
+const mockExecuteTakeProfit = jest.fn() as any;
 jest.unstable_mockModule('../../monitor/takeProfitExecutor.js', () => ({
   executeTakeProfit: mockExecuteTakeProfit,
 }));
@@ -131,7 +131,9 @@ describe('runCopytrade', () => {
     mockGetMarketBySlug.mockResolvedValue(makeMarket({ outcomePrices: '["0.9","0.1"]' }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn().mockResolvedValue(null), set: jest.fn().mockResolvedValue('OK') };
+    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
 
     expect(result.signals).toHaveLength(0);
@@ -146,7 +148,9 @@ describe('runCopytrade', () => {
     }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn().mockResolvedValue(null), set: jest.fn().mockResolvedValue('OK') };
+    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
 
     expect(result.signals).toHaveLength(0);
@@ -158,7 +162,9 @@ describe('runCopytrade', () => {
     mockGetMarketBySlug.mockResolvedValue(makeMarket({ outcomePrices: '["0.6","0.4"]' }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn().mockResolvedValue(null), set: jest.fn().mockResolvedValue('OK') };
+    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
 
     expect(result.signals).toHaveLength(1);
@@ -196,7 +202,9 @@ describe('runCopytrade', () => {
     mockExecuteTakeProfit.mockResolvedValue({ success: true });
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn().mockResolvedValue(null), set: jest.fn().mockResolvedValue('OK') };
+    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
 
     expect(result.exits).toBe(1);
@@ -209,7 +217,9 @@ describe('runCopytrade', () => {
     mockGetMarketBySlug.mockResolvedValue(makeMarket({ outcomePrices: '["0.6","0.4"]' }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn().mockResolvedValue(null), set: jest.fn().mockResolvedValue('OK') };
+    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
     await runCopytrade(redis as any, 1000);
 
     expect(mockDedup).toHaveBeenCalledWith('copytrade:tx:0xabc:asset-9:1', expect.any(Number));
@@ -224,7 +234,9 @@ describe('runCopytrade', () => {
       .mockResolvedValueOnce(makeMarket({ outcomePrices: '["0.6","0.4"]' }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn().mockResolvedValue(null), set: jest.fn().mockResolvedValue('OK') };
+    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
 
     expect(result.signals).toHaveLength(1);

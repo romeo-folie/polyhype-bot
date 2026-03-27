@@ -112,11 +112,14 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
     : [];
   const positionIndex = new Map<string, Position>();
   for (const position of positions) {
+    // Only mirror-close positions that were opened by copytrade.
+    if (!position.sourcedFrom.startsWith('copytrade:')) continue;
     positionIndex.set(positionKey(position.marketId, position.direction), position);
   }
 
   const signals: TradeSignal[] = [];
   let exits = 0;
+  const localDedup = new Set<string>();
 
   for (const wallet of wallets) {
     const lastKey = `copytrade:last_ts:${wallet}`;
@@ -142,16 +145,25 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       if (!trade.transactionHash) continue;
 
       const dedupKey = `copytrade:tx:${trade.transactionHash}:${trade.asset}:${trade.outcomeIndex}`;
-      const deduped = await dedup(dedupKey, COPYTRADE_DEDUP_TTL_SECONDS);
-      if (!deduped) continue;
+      if (localDedup.has(dedupKey)) continue;
+      // If we've already persisted a dedup key from a prior run, skip immediately.
+      const priorDedup = await redis.get(dedupKey);
+      if (priorDedup) continue;
 
       if (trade.timestamp > latestTimestamp) {
         latestTimestamp = trade.timestamp;
       }
 
+      const markDedup = async () => {
+        if (localDedup.has(dedupKey)) return;
+        localDedup.add(dedupKey);
+        await dedup(dedupKey, COPYTRADE_DEDUP_TTL_SECONDS);
+      };
+
       try {
         if (cfg.COPYTRADE_MARKET_SCOPE === 'weather' && !isWeatherMarket(trade.title)) {
           logger.info('[copytrade] skipped non-weather market', { title: trade.title });
+          await markDedup();
           continue;
         }
 
@@ -163,6 +175,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
 
         if (!market.active || market.closed) {
           logger.info('[copytrade] skipped inactive market', { marketId: market.id, slug: trade.slug });
+          await markDedup();
           continue;
         }
 
@@ -173,6 +186,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
               marketId: market.id,
               hoursToResolve: hoursToResolve.toFixed(2),
             });
+            await markDedup();
             continue;
           }
         }
@@ -183,6 +197,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
             marketId: market.id,
             liquidity,
           });
+          await markDedup();
           continue;
         }
 
@@ -202,13 +217,20 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
             marketId: market.id,
             slippageBps: slippage.toFixed(1),
           });
+          await markDedup();
           continue;
         }
 
         if (trade.side === 'SELL') {
-          if (cfg.COPYTRADE_EXIT_MODE !== 'mirror') continue;
+          if (cfg.COPYTRADE_EXIT_MODE !== 'mirror') {
+            await markDedup();
+            continue;
+          }
           const pos = positionIndex.get(positionKey(market.id, direction));
-          if (!pos) continue;
+          if (!pos) {
+            await markDedup();
+            continue;
+          }
 
           const currentPrice = await fetchCurrentPrice(pos);
           if (!currentPrice) continue;
@@ -229,6 +251,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
 
           if (result.success) {
             exits++;
+            await markDedup();
           }
           continue;
         }
@@ -242,6 +265,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
             scaledStake,
             maxStake,
           });
+          await markDedup();
           continue;
         }
 
@@ -265,6 +289,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         };
 
         signals.push(signal);
+        await markDedup();
       } catch (err) {
         logger.warn('[copytrade] trade processing failed', {
           wallet,
