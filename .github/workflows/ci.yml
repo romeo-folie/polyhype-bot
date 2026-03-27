@@ -23,5 +23,5 @@ jobs:
         run: npm ci
       - name: Run tests
         env:
-          NODE_OPTIONS: --max-old-space-size=4096
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npm test -- --runInBand
