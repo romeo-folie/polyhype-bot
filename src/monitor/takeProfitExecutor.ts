@@ -12,7 +12,7 @@
  */
 
 import { logger } from '../shared/logger.js';
-import { submitSell, SimmerError } from '../shared/simmer.js';
+import { submitSell, resolveSimmerMarketId, SimmerError } from '../shared/simmer.js';
 import { submitClobSell } from '../shared/clob.js';
 import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
@@ -92,9 +92,28 @@ async function executeSimmerExit(opts: {
 }): Promise<TakeProfitResult> {
   const { position, currentPrice, returnPct, reason, redis, sellSide, sharesToSell } = opts;
 
+  // Resolve the Simmer-internal UUID for this market.
+  // Simmer does NOT accept Polymarket numeric IDs — it requires its own UUID.
+  // The buy path does this via resolveSimmerMarketId(signal.question); we must
+  // do the same here or the sell will always fail with "Market not found".
+  const simmerId = await resolveSimmerMarketId(position.question);
+  if (!simmerId) {
+    const error = `Simmer market ID not found for question: "${position.question.slice(0, 80)}"`;
+    logger.warn('[take-profit-executor] cannot resolve Simmer UUID — sell aborted', {
+      marketId: position.marketId,
+      question: position.question.slice(0, 80),
+    });
+    return { marketId: position.marketId, success: false, error, returnPct, reason };
+  }
+
+  logger.info('[take-profit-executor] resolved Simmer UUID', {
+    marketId: position.marketId,
+    simmerId,
+  });
+
   try {
     const tradeResult = await submitSell({
-      market_id: position.marketId,
+      market_id: simmerId,
       side: sellSide,
       action: 'sell',
       shares: sharesToSell,
