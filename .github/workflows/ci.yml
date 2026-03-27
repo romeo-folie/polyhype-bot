@@ -21,7 +21,47 @@ jobs:
           cache: npm
       - name: Install deps
         run: npm ci
-      - name: Run tests
+      - name: Run tests (core)
         env:
           NODE_OPTIONS: --max-old-space-size=6144
-        run: npm test -- --runInBand
+        run: |
+          npm test -- --runInBand --runTestsByPath \
+            src/mapping/__tests__/mapping.test.ts \
+            src/mapping/__tests__/gamma.test.ts \
+            src/mapping/__tests__/consensusCalculator.test.ts \
+            src/mapping/__tests__/divergenceCalculator.test.ts \
+            src/mapping/__tests__/entityExtractor.categories.test.ts \
+            src/ingestion/__tests__/categoriesScorer.test.ts \
+            src/ingestion/__tests__/dedup.test.ts \
+            src/ingestion/__tests__/scraper.test.ts \
+            src/ingestion/__tests__/scorer.test.ts \
+            src/ingestion/__tests__/timingWindow.test.ts
+      - name: Run tests (monitor + shared + execution)
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          npm test -- --runInBand --runTestsByPath \
+            src/monitor/__tests__/priceFetcher.test.ts \
+            src/monitor/__tests__/takeProfitEvaluator.test.ts \
+            src/monitor/__tests__/signalReeval.test.ts \
+            src/monitor/__tests__/takeProfitExecutor.test.ts \
+            src/shared/__tests__/bankroll.test.ts \
+            src/shared/__tests__/bankroll.coldstart.test.ts \
+            src/shared/__tests__/clob.test.ts \
+            src/shared/__tests__/clobWebSocket.test.ts \
+            src/execution/__tests__/executor.test.ts \
+            src/execution/__tests__/positionLedger.test.ts \
+            src/execution/__tests__/telegram.test.ts
+      - name: Run tests (arb + spot + copytrade)
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          npm test -- --runInBand --runTestsByPath \
+            src/arb/__tests__/runArbScan.test.ts \
+            src/arb/__tests__/scanner.test.ts \
+            src/spot/__tests__/marketCorrelator.test.ts \
+            src/spot/__tests__/thresholdDetector.test.ts \
+            src/spot/__tests__/poller.test.ts \
+            src/spot/__tests__/fastPathConsensus.test.ts \
+            src/copytrade/__tests__/copytrade.test.ts \
+            src/copytrade/__tests__/shortlist.test.ts
