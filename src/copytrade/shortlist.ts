@@ -37,8 +37,16 @@ export async function fetchLeaderboard(category: string, timePeriod: string, lim
   return Array.isArray(data) ? data : [];
 }
 
+function normaliseWallet(raw: string): string | null {
+  const w = raw.trim().toLowerCase();
+  return /^0x[0-9a-f]{40}$/.test(w) ? w : null;
+}
+
 export function formatWallets(wallets: string[]): string {
-  return wallets.map((w) => w.toLowerCase()).join(',');
+  return wallets
+    .map((w) => normaliseWallet(w))
+    .filter((w): w is string => Boolean(w))
+    .join(',');
 }
 
 export async function updateEnvWallets(wallets: string[]): Promise<void> {

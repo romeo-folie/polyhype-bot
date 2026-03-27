@@ -114,7 +114,8 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
   for (const position of positions) {
     // Only mirror-close positions that were opened by copytrade.
     if (!position.sourcedFrom.startsWith('copytrade:')) continue;
-    const key = positionKey(position.marketId, position.direction);
+    const wallet = position.sourcedFrom.replace('copytrade:', '').toLowerCase();
+    const key = `${positionKey(position.marketId, position.direction)}:${wallet}`;
     const bucket = positionIndex.get(key);
     if (bucket) {
       bucket.push(position);
