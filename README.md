@@ -110,6 +110,23 @@ Env knobs:
 - `COPYTRADE_MIN_LIQUIDITY` — skip thin markets
 - `COPYTRADE_EXIT_MODE` — `mirror` to follow wallet sells, `rules` to use PGA exits
 
+Copytrade shortlist automation (weekly refresh of `COPYTRADE_WALLETS`):
+
+- `COPYTRADE_SHORTLIST_TIME_WINDOW` — `DAY` | `WEEK` | `MONTH` | `ALL`
+- `COPYTRADE_SHORTLIST_TOP_N` — number of wallets to apply
+- `COPYTRADE_SHORTLIST_MIN_PNL_USD` — minimum PnL filter (USD)
+- `COPYTRADE_SHORTLIST_MIN_VOL_USD` — minimum volume filter (USD)
+- `COPYTRADE_SHORTLIST_AUTO_APPLY` — update `.env` automatically (`true`/`false`)
+
+Run (cron example):
+
+```bash
+# Weekly shortlist refresh (Mon 06:00 GMT)
+0 6 * * MON /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh \
+  npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/copytrade/shortlist.ts \
+  >> /tmp/pga-copytrade-shortlist.log 2>&1
+```
+
 ### CLOB Account Modes
 
 | Signature Type | Value | Description | Requires `POLYMARKET_FUNDER_ADDRESS` |

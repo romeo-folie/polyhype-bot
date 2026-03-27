@@ -74,6 +74,13 @@ const envSchema = z.object({
   COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS: z.coerce.number().min(0).optional().default(6),
   COPYTRADE_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(1000),
   COPYTRADE_EXIT_MODE: z.enum(['mirror', 'rules']).optional().default('rules'),
+
+  // Copytrade shortlist automation
+  COPYTRADE_SHORTLIST_TIME_WINDOW: z.enum(['DAY', 'WEEK', 'MONTH', 'ALL']).optional().default('WEEK'),
+  COPYTRADE_SHORTLIST_TOP_N: z.coerce.number().int().min(1).max(50).optional().default(5),
+  COPYTRADE_SHORTLIST_MIN_PNL_USD: z.coerce.number().min(0).optional().default(10000),
+  COPYTRADE_SHORTLIST_MIN_VOL_USD: z.coerce.number().min(0).optional().default(100000),
+  COPYTRADE_SHORTLIST_AUTO_APPLY: z.coerce.boolean().optional().default(true),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
