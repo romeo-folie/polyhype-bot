@@ -102,6 +102,23 @@ export async function getMarket(marketId: string): Promise<GammaMarket> {
 }
 
 /**
+ * Fetch a market by slug (returns the first match or null).
+ */
+export async function getMarketBySlug(slug: string): Promise<GammaMarket | null> {
+  const params = new URLSearchParams({ slug });
+  const url = `${BASE_URL}/markets?${params.toString()}`;
+  const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+
+  if (!res.ok) {
+    throw new Error(`Gamma API error: ${res.status} ${res.statusText} for slug=${slug}`);
+  }
+
+  const data = (await res.json()) as GammaMarket[];
+  if (!Array.isArray(data) || data.length === 0) return null;
+  return data[0] ?? null;
+}
+
+/**
  * Normalise `outcomePrices` from either form returned by the Gamma API.
  *
  * Gamma v2 returns a JSON-encoded string: `'["0.72","0.28"]'`

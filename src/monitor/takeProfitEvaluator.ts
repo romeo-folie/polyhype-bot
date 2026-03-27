@@ -17,7 +17,7 @@
 import type { Position } from '../execution/positionLedger.js';
 import type { CurrentPrice } from './priceFetcher.js';
 
-export type ExitReason = 'take_profit_threshold' | 'divergence_closed' | 'stop_loss' | 'signal_reeval';
+export type ExitReason = 'take_profit_threshold' | 'divergence_closed' | 'stop_loss' | 'signal_reeval' | 'copytrade_mirror';
 
 export interface ExitDecision {
   shouldExit: boolean;

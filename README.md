@@ -72,7 +72,7 @@ interface CategoryConfig {
 
 | Cycle | Entrypoint | What happens |
 |-------|-----------|--------------|
-| **Trade** (`cron:trade`) | `src/execution/index.ts` | Ingest multi-category OSINT → apply timing window multiplier → score per category → watch high-urgency markets on WS feed → map to markets → context check (Simmer) → re-evaluate open positions → execute new trades |
+| **Trade** (`cron:trade`) | `src/execution/index.ts` | Ingest multi-category OSINT → apply timing window multiplier → score per category → watch high-urgency markets on WS feed → map to markets → context check (Simmer) → **copytrade wallet fills** → re-evaluate open positions → execute new trades |
 | **Monitor** (`cron:monitor`) | `src/monitor/index.ts` | Resolve prices via WS cache (Gamma REST fallback) → evaluate stop-loss / take-profit / divergence → exit if triggered → auto-redeem resolved winning positions |
 | **Spot** (`cron:spot`) | `src/spot/index.ts` | Poll spot prices → detect significant moves → cross-check Simmer oracle opportunities → find correlated markets → watch on WS feed → estimate probability → execute trades |
 
@@ -93,6 +93,22 @@ interface CategoryConfig {
 | **Polymarket CLOB** (fallback) | Market not in Simmer | `POLYGON_WALLET_PRIVATE_KEY` (local signing) |
 
 Each position records its `executionVenue` (`simmer` or `clob`). The full lifecycle — entry, take-profit exit, and redemption — routes through the venue that opened the position. CLOB positions are exited via `submitClobSell` and redeemed by checking the Gamma API for market resolution status.
+
+### Copytrade Signals (Phase 6)
+
+Copytrade ingests wallet fills from the Polymarket Data API and mirrors them into PGA as `TradeSignal`s.
+
+Env knobs:
+
+- `COPYTRADE_ENABLED` — master switch
+- `COPYTRADE_WALLETS` — comma-separated profile addresses
+- `COPYTRADE_MARKET_SCOPE` — `weather` or `all`
+- `COPYTRADE_SIZE_SCALE` — scale factor vs observed USDC size
+- `COPYTRADE_MAX_STAKE_USD` — cap per trade
+- `COPYTRADE_MAX_SLIPPAGE_BPS` — skip if price moved too far since wallet fill
+- `COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS` — skip near-resolution markets
+- `COPYTRADE_MIN_LIQUIDITY` — skip thin markets
+- `COPYTRADE_EXIT_MODE` — `mirror` to follow wallet sells, `rules` to use PGA exits
 
 ### CLOB Account Modes
 
