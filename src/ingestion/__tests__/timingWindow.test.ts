@@ -10,6 +10,9 @@ function makeItem(score: number): ScoredItem {
     publishedAt: new Date(),
     urgencyScore: score,
     keywords: ['war'],
+    categoryId: 'geopolitical',
+    categoryLabel: 'Geopolitical',
+    entityContext: 'country, leader',
   };
 }
 

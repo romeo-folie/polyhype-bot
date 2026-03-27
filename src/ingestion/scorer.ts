@@ -1,8 +1,8 @@
 /**
- * LLM urgency scorer for geopolitical news headlines.
+ * LLM urgency scorer for news headlines.
  *
- * Scores items 1–10 for geopolitical urgency using Gemini Flash (preferred)
- * or OpenAI GPT-4o-mini as fallback. Batches up to 10 items per API call.
+ * Scores items 1–10 using Gemini Flash (preferred) or OpenAI GPT-4o-mini
+ * as fallback. Batches up to 10 items per API call.
  */
 
 import { logger } from '../shared/logger.js';
@@ -12,6 +12,9 @@ import type { RssItem } from './rss.js';
 export interface ScoredItem extends RssItem {
   urgencyScore: number;
   keywords: string[];
+  categoryId: string;
+  categoryLabel: string;
+  entityContext: string;
 }
 
 interface ScoreResult {
@@ -22,7 +25,7 @@ interface ScoreResult {
 const BATCH_SIZE = 10;
 const TIMEOUT_MS = 30_000;
 
-const SYSTEM_PROMPT =
+const DEFAULT_SYSTEM_PROMPT =
   'You are a geopolitical analyst. You will receive a list of news headlines. ' +
   'Rate the geopolitical urgency of each headline on a scale of 1-10, ' +
   'where 10 = immediate geopolitical crisis/military action, 1 = routine news. ' +
@@ -46,7 +49,7 @@ function parseScores(raw: string, batchLength: number): ScoreResult[] {
   return results;
 }
 
-async function scoreBatchGemini(items: RssItem[]): Promise<ScoreResult[]> {
+async function scoreBatchGemini(items: RssItem[], systemPrompt: string): Promise<ScoreResult[]> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const genAI = new GoogleGenerativeAI(process.env['GEMINI_API_KEY']!);
   const model = genAI.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
@@ -54,7 +57,7 @@ async function scoreBatchGemini(items: RssItem[]): Promise<ScoreResult[]> {
   const result = await Promise.race([
     model.generateContent({
       contents: [{ role: 'user', parts: [{ text: buildUserPrompt(items) }] }],
-      systemInstruction: { role: 'system', parts: [{ text: SYSTEM_PROMPT }] },
+      systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
       generationConfig: { responseMimeType: 'application/json' },
     }),
     new Promise<never>((_, reject) =>
@@ -66,7 +69,7 @@ async function scoreBatchGemini(items: RssItem[]): Promise<ScoreResult[]> {
   return parseScores(text, items.length);
 }
 
-async function scoreBatchOpenAI(items: RssItem[]): Promise<ScoreResult[]> {
+async function scoreBatchOpenAI(items: RssItem[], systemPrompt: string): Promise<ScoreResult[]> {
   const { default: OpenAI } = await import('openai');
   const client = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
 
@@ -78,7 +81,7 @@ async function scoreBatchOpenAI(items: RssItem[]): Promise<ScoreResult[]> {
       {
         model: loadConfig().OPENAI_MODEL,
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: systemPrompt },
           { role: 'user', content: buildUserPrompt(items) },
         ],
         response_format: { type: 'json_object' },
@@ -94,13 +97,13 @@ async function scoreBatchOpenAI(items: RssItem[]): Promise<ScoreResult[]> {
   }
 }
 
-async function scoreBatch(items: RssItem[]): Promise<ScoreResult[]> {
+async function scoreBatch(items: RssItem[], systemPrompt: string): Promise<ScoreResult[]> {
   // Prefer Gemini if key available, fall back to OpenAI
   const provider = loadConfig().LLM_PROVIDER;
 
   if (provider === 'gemini' && process.env['GEMINI_API_KEY']) {
     try {
-      return await scoreBatchGemini(items);
+      return await scoreBatchGemini(items, systemPrompt);
     } catch (err) {
       logger.warn('[scorer] Gemini scoring failed, trying OpenAI fallback', {
         error: String(err),
@@ -109,23 +112,32 @@ async function scoreBatch(items: RssItem[]): Promise<ScoreResult[]> {
   }
 
   if (process.env['OPENAI_API_KEY']) {
-    return scoreBatchOpenAI(items);
+    return scoreBatchOpenAI(items, systemPrompt);
   }
 
   logger.error('[scorer] No LLM API key configured — cannot score items');
   return [];
 }
 
-export async function scoreItems(items: RssItem[]): Promise<ScoredItem[]> {
+export async function scoreItems(
+  items: RssItem[],
+  opts: {
+    systemPrompt: string;
+    categoryId: string;
+    categoryLabel: string;
+    entityContext: string;
+  },
+): Promise<ScoredItem[]> {
   if (items.length === 0) return [];
 
   const scored: ScoredItem[] = [];
+  const systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
 
   // Process in batches of BATCH_SIZE
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     const batch = items.slice(i, i + BATCH_SIZE);
     try {
-      const results = await scoreBatch(batch);
+      const results = await scoreBatch(batch, systemPrompt);
 
       for (let j = 0; j < batch.length; j++) {
         const item = batch[j]!;
@@ -134,6 +146,9 @@ export async function scoreItems(items: RssItem[]): Promise<ScoredItem[]> {
           ...item,
           urgencyScore: result?.score ?? 1,
           keywords: result?.keywords ?? [],
+          categoryId: opts.categoryId,
+          categoryLabel: opts.categoryLabel,
+          entityContext: opts.entityContext,
         });
       }
     } catch (err) {
@@ -143,7 +158,14 @@ export async function scoreItems(items: RssItem[]): Promise<ScoredItem[]> {
         batchSize: batch.length,
       });
       for (const item of batch) {
-        scored.push({ ...item, urgencyScore: 1, keywords: [] });
+        scored.push({
+          ...item,
+          urgencyScore: 1,
+          keywords: [],
+          categoryId: opts.categoryId,
+          categoryLabel: opts.categoryLabel,
+          entityContext: opts.entityContext,
+        });
       }
     }
   }

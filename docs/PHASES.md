@@ -32,3 +32,9 @@
 - **Deliverables:** A separate script intended to run every 5 minutes that fetches open positions via Simmer SDK, checks Polymarket bid/ask, and triggers a sell if up +25% or divergence closes.
 - **Acceptance Criteria:** Script successfully evaluates open positions and executes sells under the defined conditions.
 - **Complexity:** Moderate
+
+## Phase 5: Multi-Category Market Expansion
+- **Goals:** Extend ingestion beyond geopolitical to macro, crypto-regulatory, AI/tech, and US politics signals.
+- **Deliverables:** Category registry, per-category prompts/feeds/thresholds, parallel orchestrator, updated tests + docs.
+- **Acceptance Criteria:** All categories run per tick with shared pipeline and tests cover scoring + entity extraction per category.
+- **Complexity:** Moderate

@@ -37,6 +37,9 @@ function makeScoredItem(overrides: Partial<ScoredItem> = {}): ScoredItem {
     source: 'RSS Test',
     urgencyScore: 9,
     keywords: ['russia', 'troops', 'border'],
+    categoryId: 'geopolitical',
+    categoryLabel: 'Geopolitical',
+    entityContext: 'country, leader',
     ...overrides,
   };
 }
