@@ -49,6 +49,7 @@ jobs:
             src/shared/__tests__/bankroll.coldstart.test.ts \
             src/shared/__tests__/clob.test.ts \
             src/shared/__tests__/clobWebSocket.test.ts \
+            src/shared/__tests__/simmer.test.ts \
             src/execution/__tests__/executor.test.ts \
             src/execution/__tests__/positionLedger.test.ts \
             src/execution/__tests__/telegram.test.ts

@@ -85,6 +85,50 @@ const SimmerPositionSchema = z.object({
   value_usdc: z.number().optional(),
 });
 
+function deriveSide(raw: Record<string, unknown>): 'yes' | 'no' | null {
+  const yes = Number(raw['shares_yes'] ?? 0);
+  const no = Number(raw['shares_no'] ?? 0);
+  if (Number.isFinite(yes) && yes > 0 && (!Number.isFinite(no) || no <= 0)) return 'yes';
+  if (Number.isFinite(no) && no > 0 && (!Number.isFinite(yes) || yes <= 0)) return 'no';
+  return null;
+}
+
+function normalisePosition(raw: Record<string, unknown>): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...raw };
+
+  if (!('side' in next)) {
+    const inferred = deriveSide(next);
+    if (inferred) {
+      next.side = inferred;
+      logger.info('[simmer] inferred missing side from shares', {
+        market_id: next.market_id,
+        side: inferred,
+      });
+    }
+  }
+
+  if (!('redeemable' in next)) {
+    next.redeemable = false;
+  }
+
+  if (!('shares' in next)) {
+    const yes = Number(next['shares_yes'] ?? 0);
+    const no = Number(next['shares_no'] ?? 0);
+    if (Number.isFinite(yes) && yes > 0) next.shares = yes;
+    if (Number.isFinite(no) && no > 0) next.shares = no;
+  }
+
+  if (!('value_usdc' in next)) {
+    const price = Number(next['current_price'] ?? NaN);
+    const shares = Number(next['shares'] ?? NaN);
+    if (Number.isFinite(price) && Number.isFinite(shares)) {
+      next.value_usdc = price * shares;
+    }
+  }
+
+  return next;
+}
+
 export type SimmerPosition = z.infer<typeof SimmerPositionSchema>;
 
 /** Response from POST /api/sdk/redeem. */
@@ -279,7 +323,10 @@ export async function getSimmerPositions(opts: {
   const arr = Array.isArray(raw) ? raw : ((raw as Record<string, unknown>).positions ?? []);
   const positions: SimmerPosition[] = [];
   for (const item of arr as unknown[]) {
-    const parsed = SimmerPositionSchema.safeParse(item);
+    const candidate = typeof item === 'object' && item !== null
+      ? normalisePosition(item as Record<string, unknown>)
+      : item;
+    const parsed = SimmerPositionSchema.safeParse(candidate);
     if (parsed.success) {
       positions.push(parsed.data);
     } else {
