@@ -110,11 +110,17 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
   const positions = cfg.COPYTRADE_EXIT_MODE === 'mirror'
     ? await getOpenPositions(redis)
     : [];
-  const positionIndex = new Map<string, Position>();
+  const positionIndex = new Map<string, Position[]>();
   for (const position of positions) {
     // Only mirror-close positions that were opened by copytrade.
     if (!position.sourcedFrom.startsWith('copytrade:')) continue;
-    positionIndex.set(positionKey(position.marketId, position.direction), position);
+    const key = positionKey(position.marketId, position.direction);
+    const bucket = positionIndex.get(key);
+    if (bucket) {
+      bucket.push(position);
+    } else {
+      positionIndex.set(key, [position]);
+    }
   }
 
   const signals: TradeSignal[] = [];
@@ -226,31 +232,53 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
             await markDedup();
             continue;
           }
-          const pos = positionIndex.get(positionKey(market.id, direction));
-          if (!pos) {
+          const positionsToExit = positionIndex.get(positionKey(market.id, direction)) ?? [];
+          if (positionsToExit.length === 0) {
             await markDedup();
             continue;
           }
 
-          const currentPrice = await fetchCurrentPrice(pos);
-          if (!currentPrice) continue;
+          let hadError = false;
+          for (const pos of positionsToExit) {
+            try {
+              const currentPrice = await fetchCurrentPrice(pos);
+              if (!currentPrice) {
+                hadError = true;
+                continue;
+              }
 
-          const returnPct =
-            pos.entryPrice > 0
-              ? ((currentPrice.currentOutcomePrice - pos.entryPrice) / pos.entryPrice) * 100
-              : 0;
+              const returnPct =
+                pos.entryPrice > 0
+                  ? ((currentPrice.currentOutcomePrice - pos.entryPrice) / pos.entryPrice) * 100
+                  : 0;
 
-          const reason: ExitReason = 'copytrade_mirror';
-          const result = await executeTakeProfit({
-            position: pos,
-            currentPrice: currentPrice.currentOutcomePrice,
-            returnPct,
-            reason,
-            redis,
-          });
+              const reason: ExitReason = 'copytrade_mirror';
+              const result = await executeTakeProfit({
+                position: pos,
+                currentPrice: currentPrice.currentOutcomePrice,
+                returnPct,
+                reason,
+                redis,
+              });
 
-          if (result.success) {
-            exits++;
+              if (result.success) {
+                exits++;
+              } else {
+                hadError = true;
+              }
+            } catch (err) {
+              hadError = true;
+              logger.warn('[copytrade] mirror exit failed', {
+                wallet,
+                txHash: trade.transactionHash,
+                slug: trade.slug,
+                marketId: market.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+
+          if (!hadError) {
             await markDedup();
           }
           continue;

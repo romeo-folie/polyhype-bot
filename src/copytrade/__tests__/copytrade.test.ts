@@ -188,7 +188,7 @@ describe('runCopytrade', () => {
         stakeUsd: 10,
         consensusProbability: 0.5,
         edgeMagnitude: 0.1,
-        sourcedFrom: 'copytrade',
+        sourcedFrom: 'copytrade:0xabc',
         openedAt: new Date().toISOString(),
         executionVenue: 'simmer',
       },
