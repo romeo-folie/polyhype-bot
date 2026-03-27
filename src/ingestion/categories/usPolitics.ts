@@ -13,7 +13,7 @@ export const usPolitics: CategoryConfig = {
   label: 'US Politics (Non-Election)',
   feeds: [
     { url: 'https://rss.politico.com/politics-news.xml' },
-    { url: 'https://www.govtrack.us/events/key-votes/rss' },
+    { url: 'https://www.govtrack.us/posts.rss' },
     { url: 'https://feeds.npr.org/1014/rss.xml' },
   ],
   scorerPrompt: US_POLITICS_PROMPT,
