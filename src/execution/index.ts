@@ -14,11 +14,14 @@ import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.
 import { logger } from '../shared/logger.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping } from '../mapping/index.js';
+import { runCopytrade } from '../copytrade/index.js';
 import { executeSignal } from './executor.js';
 import { recordPosition } from './positionLedger.js';
 import { notifyTradeExecuted, notifyTradeError } from './telegram.js';
 import { reEvaluatePositions } from '../monitor/signalReeval.js';
 import { getBankroll, deductStake } from '../shared/bankroll.js';
+import type { ScoredItem } from '../ingestion/scorer.js';
+import type { TradeSignal } from '../mapping/index.js';
 
 /**
  * Run the full ingestion → mapping → execution pipeline.
@@ -51,15 +54,31 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
 
   logger.info('[execution] pipeline starting', { bankrollUsd });
 
+  // Copytrade signals (wallet mirroring)
+  let copytradeSignals: TradeSignal[] = [];
+  try {
+    const copytradeResult = await runCopytrade(redis, bankrollUsd);
+    copytradeSignals = copytradeResult.signals;
+    if (copytradeResult.exits > 0) {
+      logger.info('[execution] copytrade mirror exits executed', {
+        exits: copytradeResult.exits,
+      });
+    }
+  } catch (err) {
+    logger.warn('[execution] copytrade failed — continuing', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   // Phase 1 — ingest OSINT
-  let highUrgencyItems;
+  let highUrgencyItems: ScoredItem[] = [];
   try {
     highUrgencyItems = await runIngestion();
   } catch (err) {
-    logger.error('[execution] ingestion failed — aborting', {
+    logger.error('[execution] ingestion failed — continuing with copytrade only', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return;
+    highUrgencyItems = [] as never;
   }
 
   // Re-evaluate existing positions against fresh OSINT before executing new signals.
@@ -85,21 +104,21 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
     }
   }
 
-  if (highUrgencyItems.length === 0) {
-    logger.info('[execution] no high-urgency items — nothing to do');
-    return;
+  let signals: TradeSignal[] = [];
+
+  if (highUrgencyItems.length > 0) {
+    // Phase 2 — map to trade signals
+    try {
+      signals = await runMapping(highUrgencyItems, bankrollUsd);
+    } catch (err) {
+      logger.error('[execution] mapping failed — continuing with copytrade only', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      signals = [];
+    }
   }
 
-  // Phase 2 — map to trade signals
-  let signals;
-  try {
-    signals = await runMapping(highUrgencyItems, bankrollUsd);
-  } catch (err) {
-    logger.error('[execution] mapping failed — aborting', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return;
-  }
+  signals = [...signals, ...copytradeSignals];
 
   if (signals.length === 0) {
     logger.info('[execution] no trade signals generated');

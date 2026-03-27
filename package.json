@@ -16,10 +16,11 @@
     "cron:ingest": "npx tsx src/ingestion/index.ts",
     "cron:spot": "npx tsx src/spot/index.ts",
     "cron:arb": "npx tsx src/arb/index.ts",
+    "cron:copytrade-shortlist": "npx tsx src/copytrade/shortlist.ts",
     "probe:simmer": "npx tsx scripts/probe-simmer.ts",
     "probe:clob-allowance": "npx tsx scripts/probe-clob-allowance.ts",
-    "test": "node --experimental-vm-modules node_modules/.bin/jest --passWithNoTests",
-    "test:unit": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=src/",
+    "test": "vitest run --reporter=verbose",
+    "test:unit": "vitest run --reporter=verbose",
     "lint": "eslint 'src/**/*.ts' 'scripts/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts' 'scripts/**/*.ts'"
   },
@@ -37,7 +38,6 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@jest/globals": "^29.7.0",
     "@types/cheerio": "^0.22.35",
     "@types/node": "^20.11.0",
     "@types/ws": "^8.18.1",
@@ -45,10 +45,9 @@
     "@typescript-eslint/parser": "^7.0.0",
     "dotenv": "^17.3.1",
     "eslint": "^8.57.0",
-    "jest": "^29.7.0",
     "prettier": "^3.2.5",
-    "ts-jest": "^29.1.0",
     "tsx": "^4.7.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^1.6.1"
   }
 }

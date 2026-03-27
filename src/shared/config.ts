@@ -63,6 +63,24 @@ const envSchema = z.object({
   ARB_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.05),
   // Polymarket taker fee rate per trade (~2% default). Configurable for fee tier changes.
   ARB_FEE_RATE: z.coerce.number().min(0).max(1).optional().default(0.02),
+
+  // Copytrade signals
+  COPYTRADE_ENABLED: z.coerce.boolean().optional().default(false),
+  COPYTRADE_WALLETS: z.string().optional().default(''),
+  COPYTRADE_MARKET_SCOPE: z.enum(['weather', 'all']).optional().default('weather'),
+  COPYTRADE_SIZE_SCALE: z.coerce.number().min(0).optional().default(0.1),
+  COPYTRADE_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(25),
+  COPYTRADE_MAX_SLIPPAGE_BPS: z.coerce.number().min(0).optional().default(200),
+  COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS: z.coerce.number().min(0).optional().default(6),
+  COPYTRADE_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(1000),
+  COPYTRADE_EXIT_MODE: z.enum(['mirror', 'rules']).optional().default('rules'),
+
+  // Copytrade shortlist automation
+  COPYTRADE_SHORTLIST_TIME_WINDOW: z.enum(['DAY', 'WEEK', 'MONTH', 'ALL']).optional().default('WEEK'),
+  COPYTRADE_SHORTLIST_TOP_N: z.coerce.number().int().min(1).max(50).optional().default(5),
+  COPYTRADE_SHORTLIST_MIN_PNL_USD: z.coerce.number().min(0).optional().default(10000),
+  COPYTRADE_SHORTLIST_MIN_VOL_USD: z.coerce.number().min(0).optional().default(100000),
+  COPYTRADE_SHORTLIST_AUTO_APPLY: z.coerce.boolean().optional().default(true),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

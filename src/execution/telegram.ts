@@ -104,7 +104,7 @@ export async function notifyTakeProfitExecuted(opts: {
   position: Position;
   currentPrice: number;
   returnPct: number;
-  reason: 'take_profit_threshold' | 'divergence_closed' | 'stop_loss' | 'signal_reeval';
+  reason: 'take_profit_threshold' | 'divergence_closed' | 'stop_loss' | 'signal_reeval' | 'copytrade_mirror';
 }): Promise<void> {
   const { position, currentPrice, returnPct, reason } = opts;
   const reasonLabels: Record<string, string> = {
@@ -112,6 +112,7 @@ export async function notifyTakeProfitExecuted(opts: {
     divergence_closed: '📉 Divergence closed',
     stop_loss: '🛑 Stop-loss triggered',
     signal_reeval: '🔄 Signal re-evaluation — edge evaporated',
+    copytrade_mirror: '🧲 Copytrade mirror exit',
   };
   const reasonLabel = reasonLabels[reason] ?? reason;
 
