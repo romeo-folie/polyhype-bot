@@ -7,6 +7,7 @@ jest.unstable_mockModule('../../shared/logger.js', () => ({
 
 jest.unstable_mockModule('../../shared/simmer.js', () => ({
   submitSell: jest.fn(),
+  resolveSimmerMarketId: jest.fn(),
   SimmerError: class SimmerError extends Error {
     statusCode: number;
     body: unknown;
@@ -42,13 +43,14 @@ jest.unstable_mockModule('../../shared/bankroll.js', () => ({
   creditProceeds: jest.fn<() => Promise<number>>().mockResolvedValue(100),
 }));
 
-const { submitSell } = await import('../../shared/simmer.js');
+const { submitSell, resolveSimmerMarketId } = await import('../../shared/simmer.js');
 const { submitClobSell } = await import('../../shared/clob.js');
 const { closePosition } = await import('../../execution/positionLedger.js');
 const { notifyTakeProfitExecuted } = await import('../../execution/telegram.js');
 const { executeTakeProfit } = await import('../takeProfitExecutor.js');
 
 const mockSell = submitSell as jest.MockedFunction<typeof submitSell>;
+const mockResolveSimmerMarketId = resolveSimmerMarketId as jest.MockedFunction<typeof resolveSimmerMarketId>;
 const mockClobSell = submitClobSell as jest.MockedFunction<typeof submitClobSell>;
 const mockClose = closePosition as jest.MockedFunction<typeof closePosition>;
 const mockNotify = notifyTakeProfitExecuted as jest.MockedFunction<typeof notifyTakeProfitExecuted>;
@@ -79,9 +81,12 @@ function makeRedis() {
 describe('executeTakeProfit', () => {
   beforeEach(() => {
     mockSell.mockReset();
+    mockResolveSimmerMarketId.mockReset();
     mockClobSell.mockReset();
     mockClose.mockReset();
     mockNotify.mockReset();
+    // Default: Simmer resolves to a stable UUID for all tests
+    mockResolveSimmerMarketId.mockResolvedValue('simmer-uuid-abc123');
     mockClose.mockResolvedValue(undefined);
     mockNotify.mockResolvedValue(undefined);
   });
@@ -97,9 +102,27 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
+    // market_id must be the Simmer UUID (resolved from question), NOT the Polymarket numeric ID
     expect(mockSell).toHaveBeenCalledWith(
-      expect.objectContaining({ side: 'yes', market_id: 'mkt-1', action: 'sell' }),
+      expect.objectContaining({ side: 'yes', market_id: 'simmer-uuid-abc123', action: 'sell' }),
     );
+  });
+
+  it('returns success=false when Simmer UUID cannot be resolved', async () => {
+    mockResolveSimmerMarketId.mockResolvedValue(null);
+
+    const result = await executeTakeProfit({
+      position: makePosition(),
+      currentPrice: 0.65,
+      returnPct: 25,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Simmer market ID not found');
+    expect(mockSell).not.toHaveBeenCalled();
+    expect(mockClose).not.toHaveBeenCalled();
   });
 
   it('executes sell on the same side as entry for NO position', async () => {
