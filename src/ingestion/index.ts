@@ -5,6 +5,7 @@
  * Fetches RSS + scraped headlines → deduplicates → scores urgency → returns high-urgency items.
  */
 
+import 'dotenv/config';
 import { getRedis } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
 import { fetchRssFeeds } from './rss.js';

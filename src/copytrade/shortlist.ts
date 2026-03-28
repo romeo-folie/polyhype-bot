@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import fs from 'fs/promises';
 import path from 'path';
 import { loadConfig } from '../shared/config.js';
@@ -16,8 +17,11 @@ export interface LeaderboardEntry {
   pnl: number;
 }
 
-export function resolveCategory(scope: 'weather' | 'all'): string {
-  return scope === 'weather' ? 'WEATHER' : 'OVERALL';
+export function resolveCategory(scope: string[]): string {
+  if (scope.includes('weather') && scope.length === 1) {
+    return 'WEATHER';
+  }
+  return 'OVERALL';
 }
 
 export async function fetchLeaderboard(category: string, timePeriod: string, limit: number): Promise<LeaderboardEntry[]> {
