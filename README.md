@@ -100,13 +100,14 @@ Env knobs:
 
 - `COPYTRADE_ENABLED` — master switch
 - `COPYTRADE_WALLETS` — comma-separated profile addresses
-- `COPYTRADE_MARKET_SCOPE` — `weather` or `all`
-- `COPYTRADE_SIZE_SCALE` — scale factor vs observed USDC size
+- `COPYTRADE_MARKET_SCOPE` — `all` (default) or comma-separated categories (`weather`, `geopolitics`, `sports`, `crypto`)
+- `COPYTRADE_SIZE_SCALE` — scale factor vs observed USDC size (e.g. 0.1 mirrors 10% of whale size)
 - `COPYTRADE_MAX_STAKE_USD` — cap per trade
-- `COPYTRADE_MAX_SLIPPAGE_BPS` — skip if price moved too far since wallet fill
+- `COPYTRADE_MAX_SLIPPAGE_BPS` — skip if price moved too far (200 bps = 2%)
 - `COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS` — skip near-resolution markets
 - `COPYTRADE_MIN_LIQUIDITY` — skip thin markets
-- `COPYTRADE_EXIT_MODE` — `mirror` to follow wallet sells, `rules` to use PGA exits
+- `COPYTRADE_EXIT_MODE` — `mirror` (follow whale sells) or `rules` (standard PGA exits)
+- `COPYTRADE_POLL_INTERVAL_MS` — worker loop speed (default 2s)
 
 Copytrade shortlist automation (weekly refresh of `COPYTRADE_WALLETS`):
 
@@ -246,6 +247,17 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # Arbitrage Scanner (Every 15 min)
 */15 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/arb/index.ts >> /tmp/pga-arb.log 2>&1
 ```
+
+### Monitoring & Logs
+
+The agent follows a standard logging pattern. You can monitor the system in real-time by tailing the relevant log files (as defined in your crontab/PM2 config):
+
+| Component | Fast Tailing Command |
+| :--- | :--- |
+| **OSINT Pipeline** | `tail -f /tmp/pga-trade.log` |
+| **Copytrade Worker** | `pm2 logs pga-worker` OR `tail -f /tmp/pga-copytrade.log` |
+| **Position Monitor** | `tail -f /tmp/pga-monitor.log` |
+| **Spot Price Feed** | `tail -f /tmp/pga-spot.log` |
 
 #### Overlap protection
 
