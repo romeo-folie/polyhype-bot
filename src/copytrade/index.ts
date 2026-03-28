@@ -52,7 +52,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   weather: ['rain', 'snow', 'storm', 'hurricane', 'temperature', 'precipitation', 'tornado', 'wind', 'heat', 'cold'],
   geopolitics: ['war', 'conflict', 'un', 'sanctions', 'treaty', 'military', 'invasion', 'ceasefire', 'nuclear'],
   sports: ['olympics', 'nfl', 'nba', 'soccer', 'fifa', 'super bowl', 'championship', 'world cup'],
-  crypto: ['bitcoin', 'ethereum', 'doge', 'dogecoin', 'sec', 'etf', 'regulation', 'coinbase', 'binance', 'halving', 'solana', 'xrp', 'ripple', 'shiba', 'shib', 'pepe', 'crypto', 'cryptocurrency', 'coin', 'token', 'blockchain'],
+  crypto: ['bitcoin', 'ethereum', 'doge', 'dogecoin', 'sec', 'etf', 'bnb', 'tao', 'regulation', 'coinbase', 'binance', 'halving', 'solana', 'xrp', 'ripple', 'shiba', 'shib', 'pepe', 'crypto', 'cryptocurrency', 'coin', 'token', 'blockchain'],
   macro: ['fed', 'inflation', 'cpi', 'gdp', 'recession', 'interest rate', 'rate cut', 'rate hike', 'central bank'],
   'ai-tech': ['openai', 'nvidia', 'gemini', 'anthropic', 'gpu', 'llm', 'silicon'],
   'us-politics': ['election', 'biden', 'trump', 'senate', 'house', 'congress', 'white house', 'democrat', 'republican'],
@@ -205,9 +205,14 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         continue;
       }
 
-      // Category Filter
-      if (!matchesCategory(market.question, market.description, cfg.COPYTRADE_MARKET_SCOPE)) {
-        logger.info('[copytrade] skipped market outside scope', { title: trade.title, scope: cfg.COPYTRADE_MARKET_SCOPE });
+      // Category Filter (check both the activity Title and the official Market Question)
+      const scanText = `${trade.title} ${market.question}`;
+      if (!matchesCategory(scanText, market.description, cfg.COPYTRADE_MARKET_SCOPE)) {
+        logger.info('[copytrade] skipped market outside scope', {
+          title: trade.title,
+          question: market.question,
+          scope: cfg.COPYTRADE_MARKET_SCOPE,
+        });
         await markDedup();
         continue;
       }
