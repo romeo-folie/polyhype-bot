@@ -17,11 +17,24 @@ export interface LeaderboardEntry {
   pnl: number;
 }
 
-export function resolveCategory(scope: string[]): string {
-  if (scope.includes('weather') && scope.length === 1) {
-    return 'WEATHER';
+const CATEGORY_MAP: Record<string, string> = {
+  geopolitics: 'POLITICS',
+  'us-politics': 'POLITICS',
+  weather: 'WEATHER',
+  sports: 'SPORTS',
+  crypto: 'CRYPTO',
+};
+
+export function resolveCategories(scope: string[]): string[] {
+  const cats = new Set<string>();
+  for (const s of scope) {
+    if (CATEGORY_MAP[s]) {
+      cats.add(CATEGORY_MAP[s]!);
+    } else {
+      cats.add('OVERALL');
+    }
   }
-  return 'OVERALL';
+  return cats.size === 0 ? ['OVERALL'] : Array.from(cats);
 }
 
 export async function fetchLeaderboard(category: string, timePeriod: string, limit: number): Promise<LeaderboardEntry[]> {
@@ -101,29 +114,52 @@ export async function run(): Promise<void> {
     return;
   }
 
-  const category = resolveCategory(cfg.COPYTRADE_MARKET_SCOPE);
+  const apiCategories = resolveCategories(cfg.COPYTRADE_MARKET_SCOPE);
   const timeWindow = cfg.COPYTRADE_SHORTLIST_TIME_WINDOW;
   const topN = cfg.COPYTRADE_SHORTLIST_TOP_N;
   const minPnl = cfg.COPYTRADE_SHORTLIST_MIN_PNL_USD;
   const minVol = cfg.COPYTRADE_SHORTLIST_MIN_VOL_USD;
 
-  const leaderboard = await fetchLeaderboard(category, timeWindow, DEFAULT_MAX_CANDIDATES);
-  if (leaderboard.length === 0) {
-    logger.warn('[copytrade-shortlist] empty leaderboard response', { category, timeWindow });
+  const combinedWallets = new Set<string>();
+  const stats: Record<string, number> = {};
+
+  for (const category of apiCategories) {
+    try {
+      const leaderboard = await fetchLeaderboard(category, timeWindow, Math.max(DEFAULT_MAX_CANDIDATES, topN * 2));
+      if (leaderboard.length === 0) {
+        logger.warn('[copytrade-shortlist] empty leaderboard response', { category, timeWindow });
+        continue;
+      }
+
+      const { selected, backfilled } = selectWallets(leaderboard, minPnl, minVol, topN);
+      const results = [...selected, ...backfilled];
+      
+      results.forEach((entry) => combinedWallets.add(entry.proxyWallet));
+      stats[category] = results.length;
+
+      logger.info('[copytrade-shortlist] category processed', { 
+        category, 
+        selectedCount: selected.length, 
+        backfillCount: backfilled.length 
+      });
+    } catch (err) {
+      logger.error('[copytrade-shortlist] category fetch failed', { 
+        category, 
+        error: err instanceof Error ? err.message : String(err) 
+      });
+    }
+  }
+
+  const wallets = Array.from(combinedWallets);
+  if (wallets.length === 0) {
+    logger.warn('[copytrade-shortlist] no wallets found across all categories');
     return;
   }
 
-  const { selected, backfilled } = selectWallets(leaderboard, minPnl, minVol, topN);
-  const wallets = [...selected, ...backfilled].map((entry) => entry.proxyWallet);
-
-  logger.info('[copytrade-shortlist] shortlist computed', {
-    category,
-    timeWindow,
-    minPnl,
-    minVol,
-    topN,
-    selected: selected.map((entry) => entry.proxyWallet),
-    backfilled: backfilled.map((entry) => entry.proxyWallet),
+  logger.info('[copytrade-shortlist] final shortlist computed', {
+    apiCategories,
+    stats,
+    totalUniqueWallets: wallets.length,
   });
 
   if (!cfg.COPYTRADE_SHORTLIST_AUTO_APPLY) {

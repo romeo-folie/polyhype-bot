@@ -103,7 +103,7 @@ describe('copytrade shortlist', () => {
   it('skips env mutation when auto-apply is false', async () => {
     mockLoadConfig.mockReturnValue({
       COPYTRADE_ENABLED: true,
-      COPYTRADE_MARKET_SCOPE: 'weather',
+      COPYTRADE_MARKET_SCOPE: ['weather'],
       COPYTRADE_SHORTLIST_TIME_WINDOW: 'WEEK',
       COPYTRADE_SHORTLIST_TOP_N: 5,
       COPYTRADE_SHORTLIST_MIN_PNL_USD: 10000,
@@ -116,5 +116,40 @@ describe('copytrade shortlist', () => {
     await run();
 
     expect(mockWriteFile).not.toHaveBeenCalled();
+  });
+
+  it('fetches multiple categories and merges results', async () => {
+    mockLoadConfig.mockReturnValue({
+      COPYTRADE_ENABLED: true,
+      COPYTRADE_MARKET_SCOPE: ['weather', 'geopolitics'],
+      COPYTRADE_SHORTLIST_TIME_WINDOW: 'WEEK',
+      COPYTRADE_SHORTLIST_TOP_N: 1,
+      COPYTRADE_SHORTLIST_MIN_PNL_USD: 1000,
+      COPYTRADE_SHORTLIST_MIN_VOL_USD: 1000,
+      COPYTRADE_SHORTLIST_AUTO_APPLY: true,
+    });
+    
+    // Result for WEATHER
+    mockFetchWithTimeout.mockResolvedValueOnce({ 
+      ok: true, 
+      json: async () => [{ proxyWallet: '0x1111111111111111111111111111111111111111', vol: 5000, pnl: 2000 }] 
+    } as Response);
+    // Result for POLITICS
+    mockFetchWithTimeout.mockResolvedValueOnce({ 
+      ok: true, 
+      json: async () => [{ proxyWallet: '0x2222222222222222222222222222222222222222', vol: 5000, pnl: 2000 }] 
+    } as Response);
+
+    mockReadFile.mockResolvedValue('COPYTRADE_WALLETS=old\n');
+
+    const { run } = await import('../shortlist.js');
+    await run();
+
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(2);
+    expect(mockWriteFile).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('COPYTRADE_WALLETS=0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222'),
+      'utf8'
+    );
   });
 });
