@@ -53,6 +53,9 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   geopolitics: ['war', 'conflict', 'un', 'sanctions', 'treaty', 'military', 'invasion', 'ceasefire', 'nuclear'],
   sports: ['olympics', 'nfl', 'nba', 'soccer', 'fifa', 'super bowl', 'championship', 'world cup'],
   crypto: ['bitcoin', 'ethereum', 'sec', 'etf', 'regulation', 'coinbase', 'binance', 'halving', 'solana'],
+  macro: ['fed', 'inflation', 'cpi', 'gdp', 'recession', 'interest rate', 'rate cut', 'rate hike', 'central bank'],
+  'ai-tech': ['openai', 'nvidia', 'gemini', 'anthropic', 'gpu', 'llm', 'silicon'],
+  'us-politics': ['election', 'biden', 'trump', 'senate', 'house', 'congress', 'white house', 'democrat', 'republican'],
 };
 
 /**

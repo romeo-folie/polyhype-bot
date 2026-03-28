@@ -100,7 +100,7 @@ Env knobs:
 
 - `COPYTRADE_ENABLED` — master switch
 - `COPYTRADE_WALLETS` — comma-separated profile addresses
-- `COPYTRADE_MARKET_SCOPE` — `all` (default) or comma-separated categories (`weather`, `geopolitics`, `sports`, `crypto`)
+- `COPYTRADE_MARKET_SCOPE` —    *   **Scope Filtering**: Limit copying to specific domains by keyword (`geopolitics`, `weather`, `sports`, `crypto`, `macro`, `ai-tech`, `us-politics`).
 - `COPYTRADE_SIZE_SCALE` — scale factor vs observed USDC size (e.g. 0.1 mirrors 10% of whale size)
 - `COPYTRADE_MAX_STAKE_USD` — cap per trade
 - `COPYTRADE_MAX_SLIPPAGE_BPS` — skip if price moved too far (200 bps = 2%)
