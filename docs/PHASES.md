@@ -5,7 +5,7 @@
 
 ## Phase 0: Project Scaffolding & Setup
 - **Goals:** Set up the repository and ensure the Simmer SDK (`polymarket-ai-divergence` skill) is accessible.
-- **Deliverables:** Empty orchestration scripts and cron job definitions.
+- **Deliverables:** Empty orchestration scripts and initial worker/cron definitions.
 - **Acceptance Criteria:** Environment is ready for the ingestion script.
 - **Complexity:** Simple
 
@@ -29,7 +29,7 @@
 
 ## Phase 4: Position Monitor & Take-Profit (`polymarket-position-monitor`)
 - **Goals:** Actively manage open positions to secure profits.
-- **Deliverables:** A separate script intended to run every 5 minutes that fetches open positions via Simmer SDK, checks Polymarket bid/ask, and triggers a sell if up +25% or divergence closes.
+- **Deliverables:** A monitoring script/job running every 5 minutes that fetches open positions via Simmer SDK, checks Polymarket bid/ask, and triggers a sell if up +25% or divergence closes.
 - **Acceptance Criteria:** Script successfully evaluates open positions and executes sells under the defined conditions.
 - **Complexity:** Moderate
 
@@ -39,8 +39,7 @@
 - **Acceptance Criteria:** All categories run per tick with shared pipeline and tests cover scoring + entity extraction per category.
 - **Complexity:** Moderate
 
-## Phase 6: Copytrade Wallet Signals
-- **Goals:** Mirror trades from configurable wallet(s) into PGA with guardrails.
-- **Deliverables:** Wallet activity fetcher, signal generator, slippage/liquidity/time guards, optional mirror-exit mode, config docs.
-- **Acceptance Criteria:** Copytrade signals execute when enabled and obey guardrails; exits mirror wallet sells if configured.
+- **Goals:** Mirror trades from configurable wallet(s) into PGA with guardrails via a low-latency persistent worker.
+- **Deliverables:** Persistent wallet activity worker, signal generator, slippage/liquidity/time guards, multi-LLM consensus ensemble, optional mirror-exit mode.
+- **Acceptance Criteria:** Copytrade signals execute with sub-5s latency and obey guardrails; tests verify ensemble and liquidity gates.
 - **Complexity:** Moderate

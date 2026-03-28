@@ -10,11 +10,11 @@
  */
 
 import 'dotenv/config';
+import process from 'node:process';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping } from '../mapping/index.js';
-import { runCopytrade } from '../copytrade/index.js';
 import { executeSignal } from './executor.js';
 import { recordPosition } from './positionLedger.js';
 import { notifyTradeExecuted, notifyTradeError } from './telegram.js';
@@ -54,34 +54,18 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
 
   logger.info('[execution] pipeline starting', { bankrollUsd });
 
-  // Copytrade signals (wallet mirroring)
-  let copytradeSignals: TradeSignal[] = [];
-  try {
-    const copytradeResult = await runCopytrade(redis, bankrollUsd);
-    copytradeSignals = copytradeResult.signals;
-    if (copytradeResult.exits > 0) {
-      logger.info('[execution] copytrade mirror exits executed', {
-        exits: copytradeResult.exits,
-      });
-    }
-  } catch (err) {
-    logger.warn('[execution] copytrade failed — continuing', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-
-  // Phase 1 — ingest OSINT
+  // 1. Phase 1 — ingest OSINT (Long-tail latency)
   let highUrgencyItems: ScoredItem[] = [];
   try {
     highUrgencyItems = await runIngestion();
   } catch (err) {
-    logger.error('[execution] ingestion failed — continuing with copytrade only', {
+    logger.error('[execution] ingestion failed — continuing', {
       error: err instanceof Error ? err.message : String(err),
     });
     highUrgencyItems = [] as never;
   }
 
-  // Re-evaluate existing positions against fresh OSINT before executing new signals.
+  // 2. Re-evaluate existing positions against fresh OSINT before executing new signals.
   // NOTE: re-eval runs BEFORE new signal execution intentionally. If re-eval exits
   // a position and the same cycle's mapping produces a new entry signal for that
   // market, the idempotency key (1h TTL in Redis) prevents re-entry within the
@@ -107,31 +91,18 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
   let signals: TradeSignal[] = [];
 
   if (highUrgencyItems.length > 0) {
-    // Phase 2 — map to trade signals
+    // 3. Phase 2 — map to trade signals
     try {
       signals = await runMapping(highUrgencyItems, bankrollUsd);
     } catch (err) {
-      logger.error('[execution] mapping failed — continuing with copytrade only', {
+      logger.error('[execution] mapping failed — continuing', {
         error: err instanceof Error ? err.message : String(err),
       });
       signals = [];
     }
   }
 
-  signals = [...signals, ...copytradeSignals];
-
-  if (signals.length === 0) {
-    logger.info('[execution] no trade signals generated');
-    return;
-  }
-
-  logger.info('[execution] signals to execute', { count: signals.length });
-
-  // Phase 3 — execute signals one at a time, deducting the bankroll cache
-  // immediately after each successful trade so that subsequent signals in the
-  // same cycle are sized against the remaining balance rather than the full
-  // opening snapshot. Without this, Simmer rejects signals 2+ for insufficient
-  // funds because the in-process cache still shows the pre-trade balance.
+  // 4. Phase 3 — execute mapping signals one at a time
   const results = [];
   let executed = 0;
   let failed = 0;

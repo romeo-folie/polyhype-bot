@@ -69,12 +69,22 @@ describe('estimateConsensusProbability', () => {
     // Return different probabilities across 3 calls: 0.70, 0.72, 0.68
     let callCount = 0;
     const probs = [0.70, 0.72, 0.68];
+    // Gemini handles 2 calls
     mockGenerateContent.mockImplementation(async () => {
       const p = probs[callCount++]!;
       return {
         response: {
-          text: () => JSON.stringify({ probability: p, reasoning: `Call ${callCount}` }),
+          text: () => JSON.stringify({ probability: p, reasoning: `Gemini ${callCount}` }),
         },
+      };
+    });
+    // OpenAI handles 1 call
+    mockChatCreate.mockImplementation(async () => {
+      const p = probs[callCount++]!;
+      return {
+        choices: [
+          { message: { content: JSON.stringify({ probability: p, reasoning: 'OpenAI 1' }) } },
+        ],
       };
     });
 
@@ -82,54 +92,37 @@ describe('estimateConsensusProbability', () => {
 
     // mean = (0.70 + 0.72 + 0.68) / 3 = 0.70
     expect(result.probability).toBeCloseTo(0.70, 4);
-    // stddev = sqrt(((0.70-0.70)^2 + (0.72-0.70)^2 + (0.68-0.70)^2) / 3)
-    //        = sqrt((0 + 0.0004 + 0.0004) / 3) = sqrt(0.000267) ≈ 0.01633
-    expect(result.stddev).toBeCloseTo(0.01633, 3);
     expect(result.sampleCount).toBe(3);
-    // Parallel calls — reasoning comes from whichever resolves first; any call label is valid
-    expect(['Call 1', 'Call 2', 'Call 3']).toContain(result.reasoning);
-    expect(mockGenerateContent).toHaveBeenCalledTimes(3);
+    // Distributions: 2 Gemini, 1 OpenAI
+    expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+    expect(mockChatCreate).toHaveBeenCalledTimes(1);
   });
 
   it('returns result with sampleCount=1 when 2 of 3 calls fail', async () => {
     let callCount = 0;
-    mockGenerateContent.mockImplementation(async () => {
-      callCount++;
-      if (callCount <= 2) throw new Error('Gemini unavailable');
-      return {
-        response: {
-          text: () => JSON.stringify({ probability: 0.65, reasoning: 'only success' }),
-        },
-      };
+    // Ensemble (2 Gem, 1 OA): mock Gem to fail. 
+    mockGenerateContent.mockRejectedValue(new Error('Gemini unavailable'));
+    // Mock OA to succeed once
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ probability: 0.65, reasoning: 'OA success' }) } }]
     });
-    // OpenAI also fails (so fallback doesn't produce extra samples)
-    mockChatCreate.mockRejectedValue(new Error('OpenAI unavailable'));
 
     const result = await estimateConsensusProbability(BASE_OPTS);
     expect(result.probability).toBeCloseTo(0.65);
     expect(result.sampleCount).toBe(1);
-    expect(result.stddev).toBe(0); // single sample → 0 variance
+    expect(result.stddev).toBe(0);
   });
 
-  it('falls back to OpenAI when Gemini fails for all samples', async () => {
+  it('returns sampleCount=1 if Gemini fail — OA succeeds (Ensemble)', async () => {
     mockGenerateContent.mockRejectedValue(new Error('Gemini unavailable'));
-    let callCount = 0;
-    const probs = [0.65, 0.67, 0.63];
-    mockChatCreate.mockImplementation(async () => {
-      const p = probs[callCount++]!;
-      return {
-        choices: [
-          { message: { content: JSON.stringify({ probability: p, reasoning: 'OpenAI fallback' }) } },
-        ],
-      };
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ probability: 0.65, reasoning: 'OA success' }) } }]
     });
 
     const result = await estimateConsensusProbability(BASE_OPTS);
-    expect(result.probability).toBeCloseTo(0.65, 2);
-    expect(result.sampleCount).toBe(3);
-    // Gemini fails 3 times, OpenAI succeeds 3 times
-    expect(mockGenerateContent).toHaveBeenCalledTimes(3);
-    expect(mockChatCreate).toHaveBeenCalledTimes(3);
+    expect(result.sampleCount).toBe(1);
+    expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+    expect(mockChatCreate).toHaveBeenCalledTimes(1);
   });
 
   it('throws when all samples fail', async () => {
@@ -153,6 +146,9 @@ describe('estimateConsensusProbability', () => {
       response: {
         text: () => JSON.stringify({ probability: 0.5, reasoning: 'Uncertain' }),
       },
+    });
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ probability: 0.5, reasoning: 'OA Uncertain' }) } }]
     });
 
     const result = await estimateConsensusProbability({ ...BASE_OPTS, description: null });

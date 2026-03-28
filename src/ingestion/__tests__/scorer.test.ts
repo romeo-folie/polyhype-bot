@@ -72,8 +72,8 @@ describe('scoreItems', () => {
         text: () =>
           JSON.stringify({
             results: [
-              { score: 9, keywords: ['military', 'conflict'] },
-              { score: 3, keywords: ['trade'] },
+              { score: 9, keywords: ['military', 'conflict'], sentiment: 'YES' },
+              { score: 3, keywords: ['trade'], sentiment: 'NEUTRAL' },
             ],
           }),
       },
@@ -86,11 +86,13 @@ describe('scoreItems', () => {
     expect(result).toHaveLength(2);
     expect(result[0]!.urgencyScore).toBe(9);
     expect(result[0]!.keywords).toEqual(['military', 'conflict']);
+    expect(result[0]!.sentiment).toBe('YES');
     expect(result[0]!.categoryId).toBe('test');
     expect(result[0]!.categoryLabel).toBe('Test Category');
     expect(result[0]!.entityContext).toBe('test entities');
     expect(result[1]!.urgencyScore).toBe(3);
     expect(result[1]!.keywords).toEqual(['trade']);
+    expect(result[1]!.sentiment).toBe('NEUTRAL');
   });
 
   it('returns empty array for empty input', async () => {
@@ -110,6 +112,7 @@ describe('scoreItems', () => {
     expect(result).toHaveLength(1);
     expect(result[0]!.urgencyScore).toBe(1);
     expect(result[0]!.keywords).toEqual([]);
+    expect(result[0]!.sentiment).toBe('NEUTRAL');
   });
 
   it('falls back to OpenAI when Gemini fails', async () => {

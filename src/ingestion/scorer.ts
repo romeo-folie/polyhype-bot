@@ -5,6 +5,7 @@
  * as fallback. Batches up to 10 items per API call.
  */
 
+import process from 'node:process';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import type { RssItem } from './rss.js';
@@ -15,11 +16,13 @@ export interface ScoredItem extends RssItem {
   categoryId: string;
   categoryLabel: string;
   entityContext: string;
+  sentiment: 'YES' | 'NO' | 'NEUTRAL';
 }
 
 interface ScoreResult {
   score: number;
   keywords: string[];
+  sentiment: 'YES' | 'NO' | 'NEUTRAL';
 }
 
 const BATCH_SIZE = 10;
@@ -29,7 +32,9 @@ const DEFAULT_SYSTEM_PROMPT =
   'You are a geopolitical analyst. You will receive a list of news headlines. ' +
   'Rate the geopolitical urgency of each headline on a scale of 1-10, ' +
   'where 10 = immediate geopolitical crisis/military action, 1 = routine news. ' +
-  'Return ONLY a JSON object: {"results": [{"score": 7, "keywords": ["war", "conflict"]}]} in the same order as the input headlines. ' +
+  'Also identify the directional sentiment: "YES" if the news makes the event more likely, ' +
+  '"NO" if less likely, or "NEUTRAL" if unclear. ' +
+  'Return ONLY a JSON object: {"results": [{"score": 7, "keywords": ["war", "conflict"], "sentiment": "YES"}]} in the same order as the input headlines. ' +
   'No markdown, no explanation — just the JSON object.';
 
 function buildUserPrompt(items: RssItem[]): string {
@@ -149,6 +154,7 @@ export async function scoreItems(
           categoryId: opts.categoryId,
           categoryLabel: opts.categoryLabel,
           entityContext: opts.entityContext,
+          sentiment: result?.sentiment ?? 'NEUTRAL',
         });
       }
     } catch (err) {
@@ -165,6 +171,7 @@ export async function scoreItems(
           categoryId: opts.categoryId,
           categoryLabel: opts.categoryLabel,
           entityContext: opts.entityContext,
+          sentiment: 'NEUTRAL',
         });
       }
     }

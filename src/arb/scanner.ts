@@ -8,6 +8,7 @@
  * (4 orders) to stay well within limits.
  */
 
+import process from 'node:process';
 import { getActiveMarkets, parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import { submitClobBuy } from '../shared/clob.js';
 import { getBankroll, deductStake } from '../shared/bankroll.js';
@@ -24,10 +25,6 @@ const ARB_DEDUP_TTL_S = 30 * 60;
 // (data error or extreme illiquidity), which would produce Infinity/NaN share counts.
 const MIN_COMBINED = 0.02;
 // Number of markets to scan per arb run.
-// Fetched in pages of 500, sorted by liquidityNum descending so the most
-// executable markets (deep books, low slippage) are evaluated first.
-// 1000 covers the majority of meaningfully liquid markets without scanning
-// deep into the long tail where FOK orders reliably fail due to thin books.
 const ARB_SCAN_MARKET_COUNT = 1000;
 
 const arbDedupKey = (marketId: string) => `arb:attempted:${marketId}`;
@@ -91,8 +88,6 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
     if (combined < MIN_COMBINED) continue;
 
     const grossEdge = 1.0 - combined;
-    // Net edge = grossEdge - total_fees
-    // total_fees = combined × feeRate  (fee applies to total capital = shares × combined)
     const feeRate = cfg.ARB_FEE_RATE;
     const estFees = combined * feeRate;
     const edge = grossEdge - estFees; // net edge
@@ -126,19 +121,8 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
 
 /**
  * Execute an arbitrage trade: buy equal SHARES of YES + NO as FOK.
- *
- * Equal-share sizing (not equal-dollar) is required for a risk-free payoff:
- *   shares = totalBudget / (yesAsk + noAsk)
- *   yesUsd = shares × yesAsk
- *   noUsd  = shares × noAsk
- *
- * At resolution, exactly `shares` dollars arrive from whichever outcome wins,
- * regardless of which leg is more expensive. Equal-dollar sizing creates unequal
- * share counts and leaves directional exposure.
- *
- * Net edge (after fees) = gross edge - (yesAsk + noAsk) × FEE_RATE
- *
- * If YES leg fails, NO is NOT submitted (abort, no unhedged exposure).
+ * 
+ * Parallel Execution: Submit both legs simultaneously to minimize the unhedged window.
  */
 export async function executeArb(
   opp: ArbOpportunity,
@@ -147,7 +131,6 @@ export async function executeArb(
   const cfg = loadConfig();
   const combined = opp.yesAsk + opp.noAsk;
 
-  // Check bankroll BEFORE marking as attempted.
   const bankroll = await getBankroll(redis);
   const totalBudget = bankroll * cfg.ARB_MAX_STAKE_FRACTION;
 
@@ -163,8 +146,6 @@ export async function executeArb(
     };
   }
 
-  // Guard against combined near-zero (data anomaly) before division.
-  // scanForArb already filters this out; this is a belt-and-suspenders check.
   if (combined < MIN_COMBINED || !isFinite(combined)) {
     return {
       marketId: opp.marketId,
@@ -177,20 +158,15 @@ export async function executeArb(
     };
   }
 
-  // Equal-share sizing: same number of outcome tokens per leg.
-  // Revenue at resolution = shares × $1 regardless of which outcome wins.
   const shares = totalBudget / combined;
   const yesUsd = shares * opp.yesAsk;
   const noUsd  = shares * opp.noAsk;
 
-  // Final sanity check: computed amounts must be finite positive numbers.
   if (!isFinite(shares) || !isFinite(yesUsd) || !isFinite(noUsd) || shares <= 0) {
     logger.error('[arb] invalid share computation — aborting', {
       marketId: opp.marketId,
       combined,
       shares,
-      yesUsd,
-      noUsd,
     });
     return {
       marketId: opp.marketId,
@@ -203,16 +179,8 @@ export async function executeArb(
     };
   }
 
-  // opp.edge is already net of estimated fees (computed in scanForArb).
-
-  // Atomically claim the dedup slot. SET NX prevents two overlapping cron runs
-  // from both passing the get-based dedup in scanForArb and then double-trading.
-  // This is the authoritative guard — scanForArb's redis.get is a pre-filter only.
   const claimed = await redis.set(arbDedupKey(opp.marketId), '1', 'EX', ARB_DEDUP_TTL_S, 'NX');
   if (!claimed) {
-    logger.info('[arb] dedup NX: market already claimed by concurrent run', {
-      marketId: opp.marketId,
-    });
     return {
       marketId: opp.marketId,
       success: false,
@@ -224,22 +192,14 @@ export async function executeArb(
     };
   }
 
-  logger.info('[arb] executing opportunity', {
+  logger.info('[arb] executing opportunity (Atomic)', {
     marketId: opp.marketId,
-    question: opp.question.slice(0, 80),
     yesAsk: opp.yesAsk,
     noAsk: opp.noAsk,
     edge: opp.edge.toFixed(4),
     shares: shares.toFixed(4),
-    yesUsd: yesUsd.toFixed(2),
-    noUsd: noUsd.toFixed(2),
   });
 
-  // 15s timeout for arb legs — intentionally shorter than the 30s timeout inside
-  // submitClobBuy itself. For arb, faster abort is better: a slow YES fill that
-  // takes >15s likely means execution price has moved. The inner 30s timeout
-  // protects non-arb CLOB callers; this guard fires first for the arb path.
-  // Both timers are .finally-cleared, so there is no timer leak.
   function withTimeout<T>(promise: Promise<T>): Promise<T> {
     let timer: ReturnType<typeof setTimeout>;
     const timeout = new Promise<never>((_, reject) => {
@@ -248,70 +208,34 @@ export async function executeArb(
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
 
-  // Leg 1: YES — FOK (equal shares)
-  const yesResult = await withTimeout(
-    submitClobBuy({ tokenId: opp.yesTokenId, amountUsd: yesUsd, orderType: 'FOK' }),
-  ).catch(err => ({ success: false as const, error: String(err) }));
+  // Submit both legs simultaneously
+  const [yesResult, noResult] = await Promise.all([
+    withTimeout(submitClobBuy({ tokenId: opp.yesTokenId, amountUsd: yesUsd, orderType: 'FOK' }))
+      .catch(err => ({ success: false as const, error: String(err) })),
+    withTimeout(submitClobBuy({ tokenId: opp.noTokenId, amountUsd: noUsd, orderType: 'FOK' }))
+      .catch(err => ({ success: false as const, error: String(err) })),
+  ]);
 
-  if (!yesResult.success) {
-    logger.warn('[arb] YES leg failed — aborting, NO leg not submitted', {
-      marketId: opp.marketId,
-      error: yesResult.error,
-    });
-    // No capital was deployed — delete the dedup key so the opportunity can be
-    // retried in the next cron cycle. Leaving the key would lock out retries
-    // for 30 minutes despite zero risk.
+  if (!yesResult.success && !noResult.success) {
+    logger.info('[arb] both legs failed (FOK/Price move)', { marketId: opp.marketId });
     await redis.del(arbDedupKey(opp.marketId)).catch(() => undefined);
     return {
       marketId: opp.marketId,
       success: false,
       yesResult: { success: false, ...(yesResult.error ? { error: yesResult.error } : {}) },
+      noResult: { success: false, ...(noResult.error ? { error: noResult.error } : {}) },
       numShares: 0,
       yesCostUsd: 0,
       noCostUsd: 0,
       edge: opp.edge,
-      error: 'yes_leg_failed',
+      error: 'both_legs_failed',
     };
   }
 
-  // Leg 2: NO — FOK (equal shares)
-  const noResult = await withTimeout(
-    submitClobBuy({ tokenId: opp.noTokenId, amountUsd: noUsd, orderType: 'FOK' }),
-  ).catch(err => ({ success: false as const, error: String(err) }));
-
-  if (!noResult.success) {
-    // YES filled, NO failed — we are now LONG YES with no hedge.
-    // This is a real financial risk event: log as critical AND send an
-    // immediate Telegram alert requiring manual intervention.
-    logger.error('[arb] CRITICAL: YES leg filled but NO leg failed — unhedged YES position', {
-      marketId: opp.marketId,
-      yesStake: yesUsd,
-      noError: noResult.error,
-    });
-    // Fire-and-forget notification — alert Romeo regardless of WS/network state.
-    // .catch() is required: a bare void would silently swallow an unhandled rejection
-    // and could crash the process during this critical financial-risk path.
-    notifyUnhedgedArbPosition({
-      marketId: opp.marketId,
-      question: opp.question,
-      stakeUsd: yesUsd,
-      noError: noResult.error,
-    }).catch((err: unknown) => {
-      logger.error('[arb] failed to send unhedged position alert', {
-        marketId: opp.marketId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-    // Persist alert in Redis so the monitoring layer can detect unhedged positions
-    await redis.setex(`alert:unhedged:${opp.marketId}`, 3600, JSON.stringify({
-      marketId: opp.marketId,
-      yesStake: yesUsd,
-      noError: noResult.error,
-      ts: Date.now(),
-    }));
-    // YES leg filled = real USDC spent. Polymarket taker fees (~2%) are auto-deducted
-    // from on-chain USDC *on top of* the order amount. Bankroll must include fees to
-    // prevent drift above actual wallet balance.
+  if (yesResult.success && !noResult.success) {
+    logger.error('[arb] CRITICAL: YES filled, NO failed — unhedged YES', { marketId: opp.marketId });
+    notifyUnhedgedArbPosition({ marketId: opp.marketId, question: opp.question, stakeUsd: yesUsd, noError: noResult.error })
+      .catch(err => logger.error('[arb] alert failed', { err }));
     await deductStake(redis, yesUsd * (1 + cfg.ARB_FEE_RATE));
     return {
       marketId: opp.marketId,
@@ -326,22 +250,33 @@ export async function executeArb(
     };
   }
 
-  // Both legs filled — deduct base cost + Polymarket taker fees (~2%) from bankroll.
-  // Fees are auto-deducted from on-chain USDC *on top of* the order amount.
-  // Net edge already accounts for fees in profit estimation, but bankroll must
-  // reflect total USDC that actually left the wallet to prevent tracker drift.
+  if (!yesResult.success && noResult.success) {
+    logger.error('[arb] CRITICAL: NO filled, YES failed — unhedged NO', { marketId: opp.marketId });
+    notifyUnhedgedArbPosition({ marketId: opp.marketId, question: opp.question, stakeUsd: noUsd, noError: yesResult.error })
+      .catch(err => logger.error('[arb] alert failed', { err }));
+    await deductStake(redis, noUsd * (1 + cfg.ARB_FEE_RATE));
+    return {
+      marketId: opp.marketId,
+      success: false,
+      yesResult: { success: false, ...(yesResult.error ? { error: yesResult.error } : {}) },
+      noResult: { success: true },
+      numShares: shares,
+      yesCostUsd: 0,
+      noCostUsd: noUsd,
+      edge: opp.edge,
+      error: 'yes_leg_failed_unhedged',
+    };
+  }
+
+  // Both success
   const totalCost = (yesUsd + noUsd) * (1 + cfg.ARB_FEE_RATE);
   await deductStake(redis, totalCost);
 
-  logger.info('[arb] both legs filled', {
+  logger.info('[arb] both legs filled (Atomic success)', {
     marketId: opp.marketId,
-    yesUsd: yesUsd.toFixed(2),
-    noUsd: noUsd.toFixed(2),
     totalCostUsd: totalCost.toFixed(4),
     shares: shares.toFixed(4),
     edge: opp.edge.toFixed(4),
-    // opp.edge is already net of fees — no further fee subtraction needed here.
-    expectedProfit: (opp.edge * shares).toFixed(4),
   });
 
   return {
@@ -356,35 +291,12 @@ export async function executeArb(
   };
 }
 
-/**
- * Run one full arb scan cycle: scan → execute top opportunities.
- * Called from cron or on-demand.
- */
 export async function runArbScan(redis: Redis): Promise<void> {
   const cfg = loadConfig();
-  if (!cfg.ARB_ENABLED) {
-    logger.info('[arb] skipping scan — ARB_ENABLED=false');
-    return;
-  }
-  if (!cfg.CLOB_FALLBACK_ENABLED) {
-    logger.info('[arb] skipping scan — CLOB disabled');
-    return;
-  }
+  if (!cfg.ARB_ENABLED || !cfg.CLOB_FALLBACK_ENABLED) return;
 
-  let opportunities: ArbOpportunity[];
-  try {
-    opportunities = await scanForArb(redis);
-  } catch (err) {
-    logger.error('[arb] scan failed', { error: String(err) });
-    return;
-  }
-
-  if (opportunities.length === 0) {
-    logger.info('[arb] no opportunities found');
-    return;
-  }
-
-  logger.info('[arb] opportunities found', { count: opportunities.length, top: opportunities[0] });
+  const opportunities = await scanForArb(redis);
+  if (opportunities.length === 0) return;
 
   const toExecute = opportunities.slice(0, MAX_ARB_PER_RUN);
   for (const opp of toExecute) {

@@ -99,6 +99,24 @@ describe('computeDivergence', () => {
     });
     expect(result.hasTrade).toBe(true);
   });
+
+  it('caps stake at 20% of bookDepthUsd (Liquidity Gate)', () => {
+    // Bankroll $1000, 10% max bet = $100
+    // Book depth $100, 20% cap = $20
+    const result = computeDivergence({
+      bankrollUsd: 1000,
+      divergenceThreshold: 0.01,
+      maxBetFraction: 0.1,
+      consensusStddev: 0.01,
+      consensusProbability: 0.8,
+      currentYesPrice: 0.5, // Kelly (~0.3) > 10% maxBetFraction ($100)
+      bookDepthUsd: 100,
+    });
+    
+    expect(result.hasTrade).toBe(true);
+    // Should be capped by book depth: 100 * 0.2 = 20
+    expect(result.decision!.stakeUsd).toBeCloseTo(20, 2);
+  });
 });
 
 describe('EV gate & noise gate', () => {

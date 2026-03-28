@@ -206,13 +206,13 @@ describe('executeArb', () => {
     mockDeductStake.mockResolvedValue(90);
   });
 
-  it('returns yes_leg_failed when YES leg fails — NO not submitted', async () => {
+  it('returns both_legs_failed when both YES and NO fail', async () => {
     mockSubmitClobBuy.mockResolvedValue({ success: false, error: 'no_fill' });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeArb(opp, redis as any);
     expect(result.success).toBe(false);
-    expect(result.error).toBe('yes_leg_failed');
-    expect(mockSubmitClobBuy).toHaveBeenCalledTimes(1);
+    expect(result.error).toBe('both_legs_failed');
+    expect(mockSubmitClobBuy).toHaveBeenCalledTimes(2);
     expect(mockDeductStake).not.toHaveBeenCalled();
   });
 
@@ -228,6 +228,20 @@ describe('executeArb', () => {
     expect(result.noResult?.success).toBe(false);
     // YES leg cost + Polymarket taker fees should be deducted from bankroll
     expect(mockDeductStake).toHaveBeenCalledWith(expect.anything(), expect.closeTo(yesUsd * (1 + FEE_RATE), 4));
+  });
+
+  it('returns yes_leg_failed_unhedged when NO fills but YES fails', async () => {
+    mockSubmitClobBuy
+      .mockResolvedValueOnce({ success: false, error: 'no_fill' })
+      .mockResolvedValueOnce({ success: true });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeArb(opp, redis as any);
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('yes_leg_failed_unhedged');
+    expect(result.yesResult?.success).toBe(false);
+    expect(result.noResult?.success).toBe(true);
+    // NO leg cost + Polymarket taker fees should be deducted from bankroll
+    expect(mockDeductStake).toHaveBeenCalledWith(expect.anything(), expect.closeTo(noUsd * (1 + FEE_RATE), 4));
   });
 
   it('deducts yesUsd + noUsd (equal-share total cost) when both legs fill', async () => {

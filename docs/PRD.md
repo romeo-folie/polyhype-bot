@@ -11,7 +11,7 @@ The goal is to build an autonomous geopolitical trading agent on Polymarket. It 
 - **User:** Romeo (operator).
 - **Success Criteria:** 
   - The agent successfully ingests OSINT data, scores it, finds relevant Polymarket contracts, executes trades when divergence >10% is found, and manages exits automatically.
-  - The system operates autonomously via local cron jobs.
+  - The system operates autonomously via persistent workers (for high-frequency signals) and local cron jobs (for periodic maintenance).
 
 ## 3. Financial & Risk Parameters
 - **Initial Bankroll:** $100 (Funded via Polygon as `$USDE.e` + `$POL` for gas).
@@ -29,7 +29,7 @@ The goal is to build an autonomous geopolitical trading agent on Polymarket. It 
 
 ### P0 - Execution & Position Management
 - **Execution Orchestration:** Pass `market_id`, `direction` (YES/NO), and `amount` to the existing `polymarket-ai-divergence` Simmer SDK skill to fire the trade.
-- **Take-Profit Monitor:** A dedicated cron job (`polymarket-position-monitor`) running every 5 minutes. It asks the Simmer SDK for open positions, checks current bid/ask on Polymarket, and executes a Sell order if the position is up +25% or if the original probability divergence has closed.
+- **Take-Profit Monitor:** A dedicated cron job (`npm run cron:monitor`) running every 5 minutes. It asks the Simmer SDK for open positions, checks current bid/ask on Polymarket, and executes a Sell order if the position is up +25% or if the original probability divergence has closed.
 
 ### P1 - Notifications
 - **Telegram Updates:** Push structured updates detailing the trade, divergence identified, and the OSINT source upon execution or taking profit.

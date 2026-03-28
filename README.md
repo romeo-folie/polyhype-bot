@@ -2,48 +2,45 @@
 
 Autonomous agent that monitors multi-category OSINT feeds, maps high-urgency events to Polymarket prediction contracts, and executes trades with automatic position management.
 
-## Architecture
+## Hybrid Architecture
 
+The system operates using two decoupled execution paths to balance speed and resource efficiency:
+
+1.  **Low-Latency Worker (Persistent)**: Polls high-frequency sources (copytrade wallets) every 2 seconds for immediate execution.
+2.  **OSINT Pipeline (Scheduled)**: Ingests news feeds and GDELT every 5 minutes, performing multi-stage LLM analysis (scoring → mapping → execution).
+
+```mermaid
+graph TD
+    subgraph "Persistent Worker (2s Loop)"
+        W1[Whale Wallet Poll] --> W2[Category Filter]
+        W2 --> W3[Mirror Signal]
+        W3 --> EXEC[Execution Router]
+    end
+
+    subgraph "OSINT Pipeline (5m Cron)"
+        O1[News/GDELT Ingest] --> O2[LLM Urgency Scorer]
+        O2 --> O3[Gamma Market Mapping]
+        O3 --> O4[Signal Re-eval]
+        O4 --> EXEC
+    end
+
+    EXEC --> S[Simmer SDK]
+    EXEC --> C[Polymarket CLOB]
+    
+    subgraph "Position Monitor (5m Cron)"
+        M1[Price Feed WS/REST] --> M2[Stop-Loss/Take-Profit]
+        M2 --> M3[Auto-Redeem]
+    end
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ INGESTION (cron:trade, every 5 min)                                          │
-│  RSS feeds: Geo / Macro / Crypto-Reg / AI-Tech / US Politics                 │
-│  Geo scraper: GDELT v2 (combined query)                                      │
-│      └─> Redis dedup ─> LLM urgency scorer (per-category) ─> high-urgency     │
-└──────────────────────────────────────────────────────────────────────────────┘
-                               │
-                               ├───────────────────────────────┐
-                               │                               │
-                               ▼                               ▼
-┌──────────────────────────────┐                ┌──────────────────────────────┐
-│ MAPPING                      │                │ SIGNAL RE-EVAL               │
-│  Entity extractor            │                │  Re-estimate consensus (LLM) │
-│  Gamma search                │                │  Exit if edge < 3% / flips    │
-│  Consensus estimator (LLM)   │                └──────────────────────────────┘
-│  Divergence + Half-Kelly     │
-└───────────────┬──────────────┘
-                │ TradeSignal[]
-                ▼
-┌──────────────────────────────┐
-│ EXECUTION + GUARDS           │
-│  Stake floor / idempotency   │
-│  Simmer context check        │
-│  Router → Simmer (primary)   │
-│           → CLOB (fallback)  │
-│  Ledger + Telegram           │
-└──────────────────────────────┘
 
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ PRICE FEED (shared singleton)                                                │
-│  CLOB WS → Redis cache (30s TTL) → Gamma REST (cache miss)                    │
-└──────────────────────────────────────────────────────────────────────────────┘
+### Execution Flow Details
 
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ MONITOR (cron:monitor, every 5 min)                                          │
-│  resolveYesPrice() → stop-loss / take-profit / divergence closed             │
-│  Sell executor (Simmer / CLOB) + auto-redeem                                 │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+| Flow | Logic | Interval | Priority |
+| :--- | :--- | :--- | :--- |
+| **Copytrade** | Latency-critical. Mirrors expert wallets immediately. | 2 seconds | High |
+| **OSINT** | Context-heavy. Monitors global events and maps to markets. | 5 minutes | Medium |
+| **Monitor** | Maintenance. Manages exits and redemptions. | 5 minutes | N/A |
+
 
 ### Ingestion Categories (Phase 5)
 
@@ -72,9 +69,10 @@ interface CategoryConfig {
 
 | Cycle | Entrypoint | What happens |
 |-------|-----------|--------------|
-| **Trade** (`cron:trade`) | `src/execution/index.ts` | Ingest multi-category OSINT → apply timing window multiplier → score per category → watch high-urgency markets on WS feed → map to markets → context check (Simmer) → **copytrade wallet fills** → re-evaluate open positions → execute new trades |
-| **Monitor** (`cron:monitor`) | `src/monitor/index.ts` | Resolve prices via WS cache (Gamma REST fallback) → evaluate stop-loss / take-profit / divergence → exit if triggered → auto-redeem resolved winning positions |
-| **Spot** (`cron:spot`) | `src/spot/index.ts` | Poll spot prices → detect significant moves → cross-check Simmer oracle opportunities → find correlated markets → watch on WS feed → estimate probability → execute trades |
+| **Copytrade** (`worker:copytrade`) | `src/copytrade/worker.ts` | **Persistent Worker**: Parallel wallet polling → fetch high-frequency trades → filter by category keywords → apply liquidity-aware sizing → execute via Simmer/CLOB |
+| **Trade** (`cron:trade`) | `src/execution/index.ts` | **OSINT Pipeline**: Ingest multi-category news → score per category → map to markets → context check → execute new trades |
+| **Monitor** (`cron:monitor`) | `src/monitor/index.ts` | Resolve prices via WS cache → evaluate stop-loss / take-profit / divergence → exit if triggered → auto-redeem resolved winning positions |
+| **Spot** (`cron:spot`) | `src/spot/index.ts` | Poll spot prices → detect significant moves → cross-check Simmer oracle opportunities → execute correlated trades |
 
 ### Exit Priority
 
@@ -123,7 +121,7 @@ Run (cron example):
 ```bash
 # Weekly shortlist refresh (Mon 06:00 GMT)
 0 6 * * MON /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh \
-  npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/copytrade/shortlist.ts \
+  npm run cron:shortlist \
   >> /tmp/pga-copytrade-shortlist.log 2>&1
 ```
 
@@ -208,23 +206,44 @@ npm run build
 # 5. Probe Simmer connectivity
 npm run probe:simmer
 
-# 6. Run trade + monitor cycles via cron (every 5 min)
+# 6. Start the Low-Latency Worker
+# It is recommended to run this using a process manager like PM2
+npm run worker:copytrade
+
+# 7. Run scheduled monitor cycles via cron (every 5 min)
 # See crontab example below.
 ```
 
-### Crontab
+### Running the Agent
 
-Cron runs in a stripped environment and won't load your `.env` automatically. A `run.sh` wrapper script is included in the project root. It handles `.env` loading and uses `flock(1)` to prevent overlapping cron runs (important on low-memory hosts like Raspberry Pi).
+The agent uses a hybrid architecture: a **persistent worker** for high-frequency signals (Copytrade) and **cron jobs** for periodic maintenance/OSINT tasks.
 
-The script already exists — just reference it in your crontab:
+#### Persistent Worker (Copytrade)
+Run the worker directly or using `pm2` for reliability:
+```bash
+# Direct
+npm run worker:copytrade
+
+# With PM2 (Recommended)
+pm2 start "npm run worker:copytrade" --name pga-worker
+```
+
+#### Scheduled Jobs (Cron)
+Cron jobs handle the broader OSINT pipeline and position monitoring. A `run.sh` wrapper script is included to manage `.env` loading and use `flock(1)` to prevent overlapping runs.
 
 ```cron
 PATH=/usr/local/bin:/usr/bin:/bin
-# On Raspberry Pi / Linux with nvm: PATH=/home/<user>/.nvm/versions/node/<version>/bin:/usr/local/bin:/usr/bin:/bin
 
+# OSINT News Pipeline (Every 5 min)
 */5 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/execution/index.ts >> /tmp/pga-trade.log 2>&1
+
+# Position Monitor (Every 5 min)
 */5 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/monitor/index.ts >> /tmp/pga-monitor.log 2>&1
+
+# Spot Price Monitor (Every 1 min)
 * * * * *   /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/spot/index.ts >> /tmp/pga-spot.log 2>&1
+
+# Arbitrage Scanner (Every 15 min)
 */15 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/arb/index.ts >> /tmp/pga-arb.log 2>&1
 ```
 

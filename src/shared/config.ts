@@ -4,6 +4,7 @@
  * Throws at startup if required variables are missing.
  */
 
+import process from 'node:process';
 import { z } from 'zod';
 
 const envSchema = z.object({
@@ -23,10 +24,10 @@ const envSchema = z.object({
   POLYMARKET_FUNDER_ADDRESS: z.string().optional(),
   POLYMARKET_SIGNATURE_TYPE: z.coerce.number().int().min(0).max(2).optional().default(0),
   CLOB_FALLBACK_ENABLED: z.string().optional().default('true')
-    .refine(v => ['true', 'false', '1', '0'].includes(v.trim().toLowerCase()), {
+    .refine((v: string) => ['true', 'false', '1', '0'].includes(v.trim().toLowerCase()), {
       message: "CLOB_FALLBACK_ENABLED must be 'true', 'false', '1', or '0'",
     })
-    .transform(v => !['false', '0'].includes(v.trim().toLowerCase())),
+    .transform((v: string) => !['false', '0'].includes(v.trim().toLowerCase())),
   CLOB_ORDER_TYPE: z.enum(['FOK', 'FAK']).optional().default('FAK'),
 
   // Model selection (optional — defaults to recommended fast/cheap models)
@@ -67,13 +68,15 @@ const envSchema = z.object({
   // Copytrade signals
   COPYTRADE_ENABLED: z.coerce.boolean().optional().default(false),
   COPYTRADE_WALLETS: z.string().optional().default(''),
-  COPYTRADE_MARKET_SCOPE: z.enum(['weather', 'all']).optional().default('weather'),
+  COPYTRADE_MARKET_SCOPE: z.string().optional().default('all')
+    .transform((s: string) => s.split(',').map((v: string) => v.trim().toLowerCase())),
   COPYTRADE_SIZE_SCALE: z.coerce.number().min(0).optional().default(0.1),
   COPYTRADE_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(25),
   COPYTRADE_MAX_SLIPPAGE_BPS: z.coerce.number().min(0).optional().default(200),
   COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS: z.coerce.number().min(0).optional().default(6),
   COPYTRADE_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(1000),
   COPYTRADE_EXIT_MODE: z.enum(['mirror', 'rules']).optional().default('rules'),
+  COPYTRADE_POLL_INTERVAL_MS: z.coerce.number().int().min(500).optional().default(2000),
 
   // Copytrade shortlist automation
   COPYTRADE_SHORTLIST_TIME_WINDOW: z.enum(['DAY', 'WEEK', 'MONTH', 'ALL']).optional().default('WEEK'),
@@ -92,7 +95,7 @@ export function loadConfig(): AppConfig {
 
   const parsed = envSchema.safeParse(process.env);
   if (!parsed.success) {
-    const errors = parsed.error.errors.map((e) => `  ${e.path.join('.')}: ${e.message}`).join('\n');
+    const errors = parsed.error.errors.map((e: z.ZodIssue) => `  ${e.path.join('.')}: ${e.message}`).join('\n');
     throw new Error(`Configuration validation failed:\n${errors}`);
   }
 

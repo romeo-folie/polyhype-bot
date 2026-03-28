@@ -125,6 +125,7 @@ export async function runMapping(
         bankrollUsd,
         divergenceThreshold,
         maxBetFraction,
+        bookDepthUsd: candidate.liquidity,
       });
 
       logger.info('[mapping] divergence result', {

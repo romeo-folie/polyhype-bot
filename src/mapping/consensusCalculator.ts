@@ -7,6 +7,7 @@
  * Returns a number in [0, 1].
  */
 
+import process from 'node:process';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 
@@ -153,6 +154,7 @@ const N_SAMPLES = 3;
  * Estimate the true YES probability for a market given a triggering headline.
  *
  * Runs N_SAMPLES calls and returns mean + stddev for confidence gating.
+ * Distributes samples across both OpenAI and Gemini if both are available (Multi-LLM Ensemble).
  */
 export async function estimateConsensusProbability(opts: {
   question: string;
@@ -160,10 +162,24 @@ export async function estimateConsensusProbability(opts: {
   headline: string;
   currentYesPrice: number;
 }): Promise<ConsensusEstimate> {
-  // Fire all N samples in parallel — reduces latency from N×LLM to ~1×LLM
-  const settled = await Promise.allSettled(
-    Array.from({ length: N_SAMPLES }, () => estimateSingle(opts)),
-  );
+  const useGemini = Boolean(process.env['GEMINI_API_KEY']);
+  const useOpenAI = Boolean(process.env['OPENAI_API_KEY']);
+
+  // Determine sample distribution
+  const calls: Promise<ConsensusResult>[] = [];
+  if (useGemini && useOpenAI) {
+    // 2 Gemini, 1 OpenAI (or 1:1 if N_SAMPLES=2)
+    calls.push(callGemini(opts.question, opts.description, opts.headline, opts.currentYesPrice));
+    calls.push(callGemini(opts.question, opts.description, opts.headline, opts.currentYesPrice));
+    calls.push(callOpenAI(opts.question, opts.description, opts.headline, opts.currentYesPrice));
+  } else {
+    // Fallback to single-provider parallel sampling
+    for (let i = 0; i < N_SAMPLES; i++) {
+      calls.push(estimateSingle(opts));
+    }
+  }
+
+  const settled = await Promise.allSettled(calls);
 
   const results: number[] = [];
   let reasoning = '';

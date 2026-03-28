@@ -5,7 +5,7 @@ const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: 
 let configOverride = {
   COPYTRADE_ENABLED: true,
   COPYTRADE_WALLETS: '0xabc',
-  COPYTRADE_MARKET_SCOPE: 'weather',
+  COPYTRADE_MARKET_SCOPE: ['weather', 'geopolitics'],
   COPYTRADE_SIZE_SCALE: 0.1,
   COPYTRADE_MAX_STAKE_USD: 25,
   COPYTRADE_MAX_SLIPPAGE_BPS: 200,
@@ -81,7 +81,7 @@ const makeMarket = (overrides?: Partial<Record<string, unknown>>) => ({
   volume: '10000',
   liquidity: '5000',
   endDate: new Date(Date.now() + 12 * 3600_000).toISOString(),
-  description: null,
+  description: 'Expect cold rain and wind.',
   ...overrides,
 });
 
@@ -97,7 +97,7 @@ beforeEach(() => {
   configOverride = {
     COPYTRADE_ENABLED: true,
     COPYTRADE_WALLETS: '0xabc',
-    COPYTRADE_MARKET_SCOPE: 'weather',
+    COPYTRADE_MARKET_SCOPE: ['weather', 'geopolitics'],
     COPYTRADE_SIZE_SCALE: 0.1,
     COPYTRADE_MAX_STAKE_USD: 25,
     COPYTRADE_MAX_SLIPPAGE_BPS: 200,
@@ -116,11 +116,13 @@ describe('copytrade helpers', () => {
     expect(parseWalletList(' 0xabc , 0xdef ')).toEqual(['0xabc', '0xdef']);
   });
 
-  it('detects weather markets by title', async () => {
-    const { isWeatherMarket } = await import('../index.js');
-    expect(isWeatherMarket('Will the highest temperature in Shenzhen be 28°C on March 25?')).toBe(true);
-    expect(isWeatherMarket('Precipitation in NYC in April?')).toBe(true);
-    expect(isWeatherMarket('Will the price of Bitcoin be above $70k?')).toBe(false);
+  it('detects markets by category keywords in title or description', async () => {
+    const { matchesCategory } = await import('../index.js');
+    expect(matchesCategory('Will it rain in NYC?', null, ['weather'])).toBe(true);
+    expect(matchesCategory('Market Title', 'Military action in Middle East', ['geopolitics'])).toBe(true);
+    expect(matchesCategory('Bitcoin price above $100k?', null, ['crypto'])).toBe(true);
+    expect(matchesCategory('Anything here', null, ['all'])).toBe(true);
+    expect(matchesCategory('Bitcoin price above $100k?', null, ['weather'])).toBe(false);
   });
 });
 
@@ -240,5 +242,21 @@ describe('runCopytrade', () => {
     const result = await runCopytrade(redis as any, 1000);
 
     expect(result.signals).toHaveLength(1);
+  });
+
+  it('polls multiple wallets in parallel', async () => {
+    configOverride = { ...configOverride, COPYTRADE_WALLETS: '0x1,0x2,0x3' };
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [] } as Response);
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    await runCopytrade(redis as any, 1000);
+
+    // Should call fetchWithTimeout for each wallet
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(3);
+    const urls = mockFetchWithTimeout.mock.calls.map((c: any) => c[0] as string);
+    expect(urls.some((u: any) => u.includes('user=0x1'))).toBe(true);
+    expect(urls.some((u: any) => u.includes('user=0x2'))).toBe(true);
+    expect(urls.some((u: any) => u.includes('user=0x3'))).toBe(true);
   });
 });
