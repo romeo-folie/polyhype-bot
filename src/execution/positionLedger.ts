@@ -158,3 +158,47 @@ function deserialisePosition(raw: Record<string, string>): Position {
   if (raw['sharesHeld']) pos.sharesHeld = parseFloat(raw['sharesHeld']);
   return pos;
 }
+// ── CLI Entrypoint ─────────────────────────────────────────────────────────
+import 'dotenv/config';
+import { getRedis, closeRedis } from '../shared/redis.js';
+
+async function main() {
+  const redis = getRedis();
+  const args = process.argv.slice(2);
+
+  if (args[0] === '--list') {
+    const positions = await getOpenPositions(redis);
+    if (positions.length === 0) {
+      console.log('No open positions.');
+    } else {
+      console.table(positions.map(p => ({
+        marketId: p.marketId,
+        direction: p.direction,
+        stake: `$${p.stakeUsd.toFixed(2)}`,
+        entry: (p.entryPrice * 100).toFixed(1) + '%',
+        shares: p.sharesHeld?.toFixed(4) ?? 'N/A',
+        venue: p.executionVenue,
+        question: p.question.slice(0, 50) + '...'
+      })));
+    }
+  } else if (args[0] === '--remove' && args[1] && args[2]) {
+    const marketId = args[1];
+    const direction = args[2].toUpperCase() as 'YES' | 'NO';
+    await closePosition(redis, marketId, direction);
+    console.log(`Successfully removed ${marketId}:${direction} from ledger.`);
+  } else {
+    console.log('Usage:');
+    console.log('  npx tsx src/execution/positionLedger.ts --list');
+    console.log('  npx tsx src/execution/positionLedger.ts --remove <marketId> <YES|NO>');
+  }
+
+  await closeRedis();
+}
+
+const isMain = process.argv[1]?.endsWith('positionLedger.ts') || process.argv[1]?.endsWith('positionLedger.js');
+if (isMain) {
+  main().catch(err => {
+    console.error('CLI Error:', err);
+    process.exit(1);
+  });
+}
