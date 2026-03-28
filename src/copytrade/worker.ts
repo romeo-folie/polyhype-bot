@@ -31,14 +31,14 @@ export async function runWorker(maxCycles?: number): Promise<void> {
   while (true) {
     if (maxCycles !== undefined && iterations >= maxCycles) break;
 
-    // Refresh config from .env every 100 cycles to pick up shortlist updates
-    if (iterations > 0 && iterations % 100 === 0) {
-      dotenv.config({ override: true });
-      loadConfig(true); // flush cache
-      logger.info('[copytrade-worker] configuration refreshed from .env');
-    }
-
     try {
+      // Refresh config from .env every 100 cycles to pick up shortlist updates (hot-reloading)
+      if (iterations > 0 && iterations % 100 === 0) {
+        dotenv.config({ override: true });
+        loadConfig(true); // flush cache
+        logger.info('[copytrade-worker] configuration refreshed from .env');
+      }
+
       const bankrollUsd = await getBankroll(redis);
       const { signals, exits } = await runCopytrade(redis, bankrollUsd);
 
