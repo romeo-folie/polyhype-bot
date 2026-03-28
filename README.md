@@ -207,11 +207,15 @@ npm run build
 # 5. Probe Simmer connectivity
 npm run probe:simmer
 
-# 6. Start the Low-Latency Worker
+# 6. Initialize Copytrade Shortlist (Highly Recommended)
+# Fetches the top-performing whale wallets for Copytrade.
+npm run cron:shortlist
+
+# 7. Start the Low-Latency Worker
 # It is recommended to run this using a process manager like PM2
 npm run worker:copytrade
 
-# 7. Run scheduled monitor cycles via cron (every 5 min)
+# 8. Run scheduled monitor cycles via cron (every 5 min)
 # See crontab example below.
 ```
 
@@ -246,6 +250,9 @@ PATH=/usr/local/bin:/usr/bin:/bin
 
 # Arbitrage Scanner (Every 15 min)
 */15 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/arb/index.ts >> /tmp/pga-arb.log 2>&1
+
+# Copytrade Shortlist Refresh (Every Monday at 6 AM)
+0 6 * * MON /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/copytrade/shortlist.ts >> /tmp/pga-copytrade-shortlist.log 2>&1
 ```
 
 ### Monitoring & Logs
