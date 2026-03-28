@@ -208,34 +208,46 @@ export async function executeArb(
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
 
-  // Submit both legs simultaneously
-  const [yesResult, noResult] = await Promise.all([
-    withTimeout(submitClobBuy({ tokenId: opp.yesTokenId, amountUsd: yesUsd, orderType: 'FOK' }))
-      .catch(err => ({ success: false as const, error: String(err) })),
-    withTimeout(submitClobBuy({ tokenId: opp.noTokenId, amountUsd: noUsd, orderType: 'FOK' }))
-      .catch(err => ({ success: false as const, error: String(err) })),
-  ]);
+  // Sequential execution to minimize unhedged exposure.
+  // We execute Leg A first; if it fails, we never attempt Leg B.
+  const yesResult = await withTimeout(submitClobBuy({ tokenId: opp.yesTokenId, amountUsd: yesUsd, orderType: 'FOK' }))
+    .catch(err => ({ success: false as const, error: String(err) }));
 
-  if (!yesResult.success && !noResult.success) {
-    logger.info('[arb] both legs failed (FOK/Price move)', { marketId: opp.marketId });
+  if (!yesResult.success) {
+    logger.info('[arb] YES leg failed (FOK/Price move) — aborting NO leg', { 
+      marketId: opp.marketId, 
+      error: yesResult.error 
+    });
     await redis.del(arbDedupKey(opp.marketId)).catch(() => undefined);
     return {
       marketId: opp.marketId,
       success: false,
       yesResult: { success: false, ...(yesResult.error ? { error: yesResult.error } : {}) },
-      noResult: { success: false, ...(noResult.error ? { error: noResult.error } : {}) },
+      noResult: { success: false }, // Never attempted
       numShares: 0,
       yesCostUsd: 0,
       noCostUsd: 0,
       edge: opp.edge,
-      error: 'both_legs_failed',
+      error: 'yes_leg_failed',
     };
   }
 
-  if (yesResult.success && !noResult.success) {
-    logger.error('[arb] CRITICAL: YES filled, NO failed — unhedged YES', { marketId: opp.marketId });
-    notifyUnhedgedArbPosition({ marketId: opp.marketId, question: opp.question, stakeUsd: yesUsd, noError: noResult.error })
-      .catch(err => logger.error('[arb] alert failed', { err }));
+  // YES succeeded, now attempt NO
+  const noResult = await withTimeout(submitClobBuy({ tokenId: opp.noTokenId, amountUsd: noUsd, orderType: 'FOK' }))
+    .catch(err => ({ success: false as const, error: String(err) }));
+
+  if (!noResult.success) {
+    logger.error('[arb] CRITICAL: YES filled, NO failed — unhedged YES', { 
+      marketId: opp.marketId,
+      noError: noResult.error 
+    });
+    notifyUnhedgedArbPosition({ 
+      marketId: opp.marketId, 
+      question: opp.question, 
+      stakeUsd: yesUsd, 
+      noError: noResult.error 
+    }).catch(err => logger.error('[arb] alert failed', { err }));
+    
     await deductStake(redis, yesUsd * (1 + cfg.ARB_FEE_RATE));
     return {
       marketId: opp.marketId,
@@ -247,24 +259,6 @@ export async function executeArb(
       noCostUsd: 0,
       edge: opp.edge,
       error: 'no_leg_failed_unhedged',
-    };
-  }
-
-  if (!yesResult.success && noResult.success) {
-    logger.error('[arb] CRITICAL: NO filled, YES failed — unhedged NO', { marketId: opp.marketId });
-    notifyUnhedgedArbPosition({ marketId: opp.marketId, question: opp.question, stakeUsd: noUsd, noError: yesResult.error })
-      .catch(err => logger.error('[arb] alert failed', { err }));
-    await deductStake(redis, noUsd * (1 + cfg.ARB_FEE_RATE));
-    return {
-      marketId: opp.marketId,
-      success: false,
-      yesResult: { success: false, ...(yesResult.error ? { error: yesResult.error } : {}) },
-      noResult: { success: true },
-      numShares: shares,
-      yesCostUsd: 0,
-      noCostUsd: noUsd,
-      edge: opp.edge,
-      error: 'yes_leg_failed_unhedged',
     };
   }
 
