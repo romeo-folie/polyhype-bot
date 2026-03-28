@@ -52,7 +52,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   weather: ['rain', 'snow', 'storm', 'hurricane', 'temperature', 'precipitation', 'tornado', 'wind', 'heat', 'cold'],
   geopolitics: ['war', 'conflict', 'un', 'sanctions', 'treaty', 'military', 'invasion', 'ceasefire', 'nuclear'],
   sports: ['olympics', 'nfl', 'nba', 'soccer', 'fifa', 'super bowl', 'championship', 'world cup'],
-  crypto: ['bitcoin', 'ethereum', 'doge', 'dogecoin', 'sec', 'etf', 'regulation', 'coinbase', 'binance', 'halving', 'solana', 'xrp', 'ripple', 'shiba', 'shib', 'pepe'],
+  crypto: ['bitcoin', 'ethereum', 'doge', 'dogecoin', 'sec', 'etf', 'regulation', 'coinbase', 'binance', 'halving', 'solana', 'xrp', 'ripple', 'shiba', 'shib', 'pepe', 'crypto', 'cryptocurrency', 'coin', 'token', 'blockchain'],
   macro: ['fed', 'inflation', 'cpi', 'gdp', 'recession', 'interest rate', 'rate cut', 'rate hike', 'central bank'],
   'ai-tech': ['openai', 'nvidia', 'gemini', 'anthropic', 'gpu', 'llm', 'silicon'],
   'us-politics': ['election', 'biden', 'trump', 'senate', 'house', 'congress', 'white house', 'democrat', 'republican'],
