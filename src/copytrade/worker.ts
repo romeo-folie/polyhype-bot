@@ -1,3 +1,5 @@
+import 'dotenv/config';
+import dotenv from 'dotenv';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { getRedis } from '../shared/redis.js';
@@ -28,6 +30,13 @@ export async function runWorker(maxCycles?: number): Promise<void> {
 
   while (true) {
     if (maxCycles !== undefined && iterations >= maxCycles) break;
+
+    // Refresh config from .env every 100 cycles to pick up shortlist updates
+    if (iterations > 0 && iterations % 100 === 0) {
+      dotenv.config({ override: true });
+      loadConfig(true); // flush cache
+      logger.info('[copytrade-worker] configuration refreshed from .env');
+    }
 
     try {
       const bankrollUsd = await getBankroll(redis);

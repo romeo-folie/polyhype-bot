@@ -90,8 +90,8 @@ export type AppConfig = z.infer<typeof envSchema>;
 
 let _config: AppConfig | null = null;
 
-export function loadConfig(): AppConfig {
-  if (_config) return _config;
+export function loadConfig(forceReload = false): AppConfig {
+  if (_config && !forceReload) return _config;
 
   const parsed = envSchema.safeParse(process.env);
   if (!parsed.success) {
