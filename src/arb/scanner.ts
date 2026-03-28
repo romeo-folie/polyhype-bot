@@ -295,11 +295,17 @@ export async function runArbScan(redis: Redis): Promise<void> {
   const cfg = loadConfig();
   if (!cfg.ARB_ENABLED || !cfg.CLOB_FALLBACK_ENABLED) return;
 
-  const opportunities = await scanForArb(redis);
-  if (opportunities.length === 0) return;
+  try {
+    const opportunities = await scanForArb(redis);
+    if (opportunities.length === 0) return;
 
-  const toExecute = opportunities.slice(0, MAX_ARB_PER_RUN);
-  for (const opp of toExecute) {
-    await executeArb(opp, redis);
+    const toExecute = opportunities.slice(0, MAX_ARB_PER_RUN);
+    for (const opp of toExecute) {
+      await executeArb(opp, redis);
+    }
+  } catch (err) {
+    logger.error('[arb] scan failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
