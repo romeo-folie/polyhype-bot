@@ -18,6 +18,7 @@ import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
+import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { Redis } from 'ioredis';
 import type { Position } from '../execution/positionLedger.js';
@@ -125,6 +126,18 @@ async function executeSimmerExit(opts: {
       await closePosition(redis, position.marketId, position.direction);
       const proceedsUsd = sharesToSell * currentPrice;
       await creditProceeds(redis, proceedsUsd);
+      await recordOutcome(redis, {
+        source: 'osint',
+        category: inferCategory(position.question),
+        question: position.question.slice(0, 200),
+        direction: position.direction as 'YES' | 'NO',
+        consensusProbability: position.consensusProbability ?? 0.5,
+        divergence: position.edgeMagnitude ?? 0,
+        result: returnPct >= 0 ? 'won' : 'lost',
+        returnPct,
+        holdingHours: position.openedAt ? (Date.now() - new Date(position.openedAt).getTime()) / 3600000 : 0,
+        executionVenue: position.executionVenue ?? 'simmer',
+      });
       await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
 
       logger.info('[take-profit-executor] exit successful (simmer)', {
@@ -257,6 +270,18 @@ async function executeClobExit(opts: {
       await closePosition(redis, position.marketId, position.direction);
       const proceedsUsd = sharesToSell * currentPrice;
       await creditProceeds(redis, proceedsUsd);
+      await recordOutcome(redis, {
+        source: 'osint',
+        category: inferCategory(position.question),
+        question: position.question.slice(0, 200),
+        direction: position.direction as 'YES' | 'NO',
+        consensusProbability: position.consensusProbability ?? 0.5,
+        divergence: position.edgeMagnitude ?? 0,
+        result: returnPct >= 0 ? 'won' : 'lost',
+        returnPct,
+        holdingHours: position.openedAt ? (Date.now() - new Date(position.openedAt).getTime()) / 3600000 : 0,
+        executionVenue: position.executionVenue ?? 'clob',
+      });
       await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
 
       logger.info('[take-profit-executor] exit successful (clob)', {

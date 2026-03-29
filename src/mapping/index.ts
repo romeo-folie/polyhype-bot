@@ -114,6 +114,7 @@ export async function runMapping(
           description: candidate.description,
           headline: item.title,
           currentYesPrice,
+          ...(opts?.redis ? { redis: opts.redis } : {}),
         });
       } catch (err) {
         logger.warn('[mapping] consensus estimation failed', {

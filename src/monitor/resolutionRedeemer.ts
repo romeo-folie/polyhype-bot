@@ -21,6 +21,7 @@ import { closePosition, getOpenPositions } from '../execution/positionLedger.js'
 import { redeemClobOutcome } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
+import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
 import type { Redis } from 'ioredis';
 
 export interface RedemptionResult {
@@ -86,6 +87,21 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
           if (proceedsUsdc > 0) {
             await creditProceeds(redis, proceedsUsdc);
           }
+
+          // Record outcome (Phase 8)
+          const question = pos.question ?? pos.market_id;
+          await recordOutcome(redis, {
+            source: 'osint',
+            category: inferCategory(question),
+            question: question.slice(0, 200),
+            direction: direction,
+            consensusProbability: (pos as any).consensusProbability ?? 0.5,
+            divergence: (pos as any).edgeMagnitude ?? 0,
+            result: 'won',
+            returnPct: proceedsUsdc > 0 && (pos as any).stakeUsd ? ((proceedsUsdc - (pos as any).stakeUsd) / (pos as any).stakeUsd) * 100 : 0,
+            holdingHours: (pos as any).openedAt ? (Date.now() - new Date((pos as any).openedAt as string).getTime()) / 3600000 : 0,
+            executionVenue: (pos as any).executionVenue ?? 'simmer',
+          });
 
           // Notify
           const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
@@ -215,6 +231,20 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): P
       if (proceedsUsdc > 0) {
         await creditProceeds(redis, proceedsUsdc);
       }
+
+      // Record outcome (Phase 8)
+      await recordOutcome(redis, {
+        source: 'osint',
+        category: inferCategory(pos.question ?? pos.marketId),
+        question: (pos.question ?? pos.marketId).slice(0, 200),
+        direction: pos.direction as 'YES' | 'NO',
+        consensusProbability: pos.consensusProbability ?? 0.5,
+        divergence: pos.edgeMagnitude ?? 0,
+        result: won ? 'won' : 'lost',
+        returnPct: pos.stakeUsd ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
+        holdingHours: pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000 : 0,
+        executionVenue: pos.executionVenue ?? 'clob',
+      });
 
       // Notify
       const notifyOpts: any = {

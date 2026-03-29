@@ -79,6 +79,14 @@ const envSchema = z.object({
   CRYPTO_ARB_DEDUP_TTL_S: z.coerce.number().int().positive().optional().default(300),
   CRYPTO_ARB_MARKET_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
 
+  // Continuous improvement (Phase 8)
+  CALIBRATION_ENABLED: z.coerce.boolean().optional().default(true),
+  CALIBRATION_MIN_SAMPLES: z.coerce.number().int().positive().optional().default(20),
+  OUTCOME_HISTORY_DAYS: z.coerce.number().int().positive().optional().default(180),
+  OUTCOME_MAX_PER_CATEGORY: z.coerce.number().int().positive().optional().default(500),
+  CONTEXT_INJECTION_ENABLED: z.coerce.boolean().optional().default(true),
+  CONTEXT_INJECTION_LIMIT: z.coerce.number().int().min(1).max(10).optional().default(5),
+
   // Copytrade signals
   COPYTRADE_ENABLED: z.coerce.boolean().optional().default(false),
   COPYTRADE_WALLETS: z.string().optional().default(''),

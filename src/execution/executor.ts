@@ -18,6 +18,8 @@ import { submitClobBuy } from '../shared/clob.js';
 import { hasOpenPosition } from './positionLedger.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { loadConfig } from '../shared/config.js';
+import { getCalibrationStats, applyCalibrationCorrection } from '../shared/calibration.js';
+import { inferCategory } from '../shared/outcomeRecorder.js';
 import { notifyTradeError } from './telegram.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
 import type { Redis } from 'ioredis';
@@ -260,6 +262,28 @@ export async function executeSignal(
       key,
     });
     return { signal, skipped: true, skipReason: 'already_executed' };
+  }
+
+  // 1b) Calibration correction (Phase 8b) — adjust edge before sizing
+  const cfg = loadConfig();
+  if (cfg.CALIBRATION_ENABLED && !signal.isFutures) {
+    try {
+      const cal = await getCalibrationStats(redis, inferCategory(signal.question));
+      const correctedEdge = applyCalibrationCorrection(signal.edgeMagnitude ?? 0, cal, cfg.CALIBRATION_MIN_SAMPLES);
+      if (correctedEdge !== signal.edgeMagnitude) {
+        logger.info('[executor] calibration correction applied', {
+          category: inferCategory(signal.question),
+          originalEdge: signal.edgeMagnitude,
+          correctedEdge,
+          factor: cal?.edgeCorrectionFactor,
+        });
+        signal = { ...signal, edgeMagnitude: correctedEdge };
+      }
+    } catch (err) {
+      logger.warn('[executor] calibration lookup failed (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // 2) Route Futures signals to specialized handler

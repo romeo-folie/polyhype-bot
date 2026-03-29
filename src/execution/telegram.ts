@@ -188,6 +188,17 @@ export async function notifyRedemptionExecuted(opts: {
   await notify(text);
 }
 
+/**
+ * Notify weekly calibration summary (Phase 8b).
+ */
+export async function notifyCalibrationUpdate(lines: string[]): Promise<void> {
+  const text =
+    `📊 <b>Weekly Calibration Update</b>\n\n` +
+    lines.map((l) => escapeHtml(l)).join('\n');
+
+  await notify(text);
+}
+
 // ── Utility ─────────────────────────────────────────────────────────────────
 
 function escapeHtml(str: string): string {
