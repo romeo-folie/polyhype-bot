@@ -273,6 +273,8 @@ async function checkMarketResolved(
       closed?: boolean;
       resolved?: boolean;
       outcome?: string;
+      outcomePrices?: string;
+      outcomes?: string;
     }[];
 
     const market = data[0];
@@ -280,14 +282,38 @@ async function checkMarketResolved(
 
     if (!market.resolved && !market.closed) return null;
 
-    // Gamma outcome field is typically "Yes" or "No"
+    // Gamma does NOT return an `outcome` field on resolved markets.
+    // The winner is determined from `outcomePrices`: the winning outcome has price "1",
+    // the losing outcome has price "0". outcomes[0] = YES, outcomes[1] = NO.
+    // e.g. outcomePrices: ["0", "1"] means NO won.
+    if (market.outcomePrices) {
+      try {
+        const prices: string[] = JSON.parse(market.outcomePrices) as string[];
+        const yesPrice = parseFloat(prices[0] ?? '0');
+        const noPrice = parseFloat(prices[1] ?? '0');
+
+        if (yesPrice === 1) return { outcome: 'YES' };
+        if (noPrice === 1) return { outcome: 'NO' };
+
+        // Both non-1: market closed but not yet settled on-chain (e.g. pending resolution)
+        logger.warn('[redeemer] market closed but outcomePrices not yet settled', {
+          conditionId,
+          outcomePrices: market.outcomePrices,
+        });
+        return null;
+      } catch {
+        logger.warn('[redeemer] failed to parse outcomePrices', { conditionId, outcomePrices: market.outcomePrices });
+        return null;
+      }
+    }
+
+    // Legacy fallback: some older markets may still have an outcome field
     const outcomeStr = (market.outcome ?? '').toUpperCase();
     if (outcomeStr === 'YES' || outcomeStr === 'NO') {
       return { outcome: outcomeStr };
     }
 
-    // If resolved but outcome is unclear, treat as unresolved and retry next cycle
-    logger.warn('[redeemer] market resolved with unclear outcome — skipping until parseable', { conditionId, outcome: market.outcome });
+    logger.warn('[redeemer] market resolved but outcome not determinable', { conditionId });
     return null;
   } catch (err) {
     logger.warn('[redeemer] Gamma market check failed', {
