@@ -157,6 +157,17 @@ async function estimateSingle(opts: {
  * Runs CONSENSUS_SAMPLES calls and returns mean + stddev for confidence gating.
  * Distributes samples across both OpenAI and Gemini if both are available (Multi-LLM Ensemble).
  */
+/**
+ * Build a stable cache key for a consensus estimate.
+ * - Price is bucketed to 0.05 increments to tolerate minor market drift.
+ * - Headline is trimmed to remove whitespace variation before slicing.
+ */
+function buildConsensusCacheKey(question: string, headline: string, currentYesPrice: number): string {
+  const priceBucket = Math.round(currentYesPrice / 0.05) * 0.05;
+  const raw = `${question}|${headline.trim().slice(0, 200)}|${priceBucket.toFixed(2)}`;
+  return 'consensus:' + createHash('sha256').update(raw).digest('hex');
+}
+
 export async function estimateConsensusProbability(opts: {
   question: string;
   description: string | null;
@@ -171,9 +182,7 @@ export async function estimateConsensusProbability(opts: {
 
   // Check consensus cache
   if (cfg.CONSENSUS_CACHE_ENABLED && opts.redis) {
-    const priceBucket = Math.round(opts.currentYesPrice / 0.05) * 0.05;
-    const raw = `${opts.question}|${opts.headline.slice(0, 200)}|${priceBucket.toFixed(2)}`;
-    const cacheKey = 'consensus:' + createHash('sha256').update(raw).digest('hex');
+    const cacheKey = buildConsensusCacheKey(opts.question, opts.headline, opts.currentYesPrice);
     try {
       const cached = await opts.redis.get(cacheKey);
       if (cached) {
@@ -244,9 +253,7 @@ export async function estimateConsensusProbability(opts: {
 
   // Cache the result
   if (cfg.CONSENSUS_CACHE_ENABLED && opts.redis) {
-    const priceBucket = Math.round(opts.currentYesPrice / 0.05) * 0.05;
-    const raw = `${opts.question}|${opts.headline.slice(0, 200)}|${priceBucket.toFixed(2)}`;
-    const cacheKey = 'consensus:' + createHash('sha256').update(raw).digest('hex');
+    const cacheKey = buildConsensusCacheKey(opts.question, opts.headline, opts.currentYesPrice);
     try {
       await opts.redis.set(cacheKey, JSON.stringify(estimate), 'EX', cfg.CONSENSUS_CACHE_TTL_S);
     } catch {
