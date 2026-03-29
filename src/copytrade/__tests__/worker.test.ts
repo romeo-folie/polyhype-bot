@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
-const mockRedis = { get: jest.fn(), set: jest.fn(), setex: jest.fn(), del: jest.fn() };
+const mockRedis = { get: jest.fn(), set: jest.fn().mockResolvedValue('OK'), setex: jest.fn(), del: jest.fn(), eval: jest.fn().mockResolvedValue(1) };
 
 jest.unstable_mockModule('../../shared/logger.js', () => ({ logger: mockLogger }));
 jest.unstable_mockModule('../../shared/redis.js', () => ({ 
@@ -83,7 +83,7 @@ describe('copytrade worker', () => {
     }
 
     expect(mockRunCopytrade).toHaveBeenCalled();
-    expect(mockExecuteSignal).toHaveBeenCalledWith(signal, mockRedis);
+    expect(mockExecuteSignal).toHaveBeenCalledWith(signal, mockRedis, 0);
     expect(mockDeductStake).toHaveBeenCalledWith(mockRedis, 10);
     expect(mockRecordPosition).toHaveBeenCalled();
   });

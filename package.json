@@ -12,6 +12,7 @@
     "build:emit": "tsc",
     "start": "node dist/index.js",
     "worker:copytrade": "npx tsx src/copytrade/worker.ts",
+    "monitor:futures": "npx tsx src/monitor/futuresMonitor.ts",
     "cron:trade": "npx tsx src/execution/index.ts",
     "cron:monitor": "npx tsx src/monitor/index.ts",
     "cron:ingest": "npx tsx src/ingestion/index.ts",
