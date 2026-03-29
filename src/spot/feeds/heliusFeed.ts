@@ -1,89 +1,85 @@
-import { Connection, PublicKey, AccountInfo } from '@solana/web3.js';
-import { parsePriceData } from '@pythnetwork/client';
+import WebSocket from 'ws';
 import { logger } from '../../shared/logger.js';
 import { getRedis } from '../../shared/redis.js';
 
 /**
- * Pyth Network Price Account IDs on Solana Mainnet.
+ * Pyth Network Price Feed IDs (Mainnet).
+ * Verified correct for high-accuracy SOL, BTC, and ETH tracking via Hermes.
  */
-const PYTH_ACCOUNTS: Record<string, string> = {
-  BTC: 'GVXRSBjTuSvU9K79qSgbt7Wqrq97neB9Jhcic65tD8Sx',
-  ETH: 'JBu1pE2waHcbMNeGTKsGMBvuyY6MvbevR6p9u89nK9An',
-  SOL: 'H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG',
+const PYTH_FEED_IDS: Record<string, string> = {
+  SOL: 'ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d',
+  BTC: 'e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43',
+  ETH: 'ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace',
 };
 
 /**
- * Helius WebSocket Feed for Solana/Pyth data.
- * Monitors account changes for Pyth price accounts to get real-time price moves.
+ * HeliusFeed (now powered by Pyth Hermes for stability).
+ * Bypasses RPC account-change limitations by using Pyth's dedicated push service.
  */
 export class HeliusFeed {
-  private connection: Connection;
-  private subscriptionIds: number[] = [];
+  private ws: WebSocket | null = null;
   private tickerCount: Record<string, number> = {};
-  private watchdog: NodeJS.Timeout | null = null;
-  private apiKey: string;
+  private reconnectTimeout: NodeJS.Timeout | null = null;
 
-  constructor(apiKey: string, private symbols: string[] = ['SOL']) {
-    this.apiKey = apiKey;
-    const url = `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
-    const wsUrl = `wss://mainnet.helius-rpc.com/?api-key=${apiKey}`;
-    this.connection = new Connection(url, {
-      wsEndpoint: wsUrl,
-      commitment: 'processed',
-    });
+  constructor(_apiKey: string, private symbols: string[] = ['SOL']) {
+    // API key currently not needed for public Pyth Hermes
   }
 
   public async start(): Promise<void> {
-    logger.info('[helius] starting feeds', { symbols: this.symbols });
+    // Hermes public endpoint for high-speed price updates
+    const wsUrl = 'wss://hermes.pyth.network/ws';
+    logger.info('[pyth] connecting to Hermes WebSocket...', { symbols: this.symbols });
 
-    for (const symbol of this.symbols) {
-      const pubkey = PYTH_ACCOUNTS[symbol];
-      if (!pubkey) {
-        logger.warn('[helius] symbol not found in Pyth map', { symbol });
-        continue;
+    this.ws = new WebSocket(wsUrl);
+
+    this.ws.on('open', () => {
+      logger.info('[pyth] connected to Hermes');
+      const ids = this.symbols
+        .map(s => PYTH_FEED_IDS[s])
+        .filter(Boolean)
+        .map(id => `0x${id}`);
+
+      if (ids.length > 0) {
+        this.ws?.send(JSON.stringify({
+          type: 'subscribe',
+          ids
+        }));
+        logger.info('[pyth] subscribed to price feeds', { count: ids.length });
       }
+    });
 
-      logger.info(`[helius] subscribing to ${symbol} (Pyth: ${pubkey})...`);
-
+    this.ws.on('message', (data: string) => {
       try {
-        const id = this.connection.onAccountChange(
-          new PublicKey(pubkey),
-          (accountInfo) => {
-            this.resetWatchdog();
-            void this.handleUpdate(symbol, accountInfo);
-          },
-          'processed',
-        );
-        this.subscriptionIds.push(id);
-        logger.info(`[helius] subscription active for ${symbol}`);
+        const msg = JSON.parse(data.toString());
+        if (msg.type === 'price_update' && msg.price_feed) {
+          void this.handleUpdate(msg.price_feed);
+        }
       } catch (err) {
-        logger.error(`[helius] failed to subscribe to ${symbol}`, { error: String(err) });
+        // Ignore parsing errors for binary/system messages
       }
-    }
-    this.resetWatchdog();
+    });
+
+    this.ws.on('error', (err) => {
+      logger.error('[pyth] WebSocket error', { error: err.message });
+    });
+
+    this.ws.on('close', () => {
+      if (this.ws) {
+        logger.warn('[pyth] connection closed, reconnecting in 5s...');
+        this.reconnectTimeout = setTimeout(() => this.start(), 5000);
+      }
+    });
   }
 
-  private resetWatchdog(): void {
-    if (this.watchdog) clearTimeout(this.watchdog);
-    this.watchdog = setTimeout(() => {
-      logger.warn('[helius] stream silent for 60s, force-reconnecting...');
-      void this.reconnect();
-    }, 60000); // 60s watchdog to detect silent streams
-  }
-
-  private async reconnect(): Promise<void> {
-    this.stop();
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    await this.start();
-  }
-
-  private async handleUpdate(symbol: string, accountInfo: AccountInfo<Buffer>): Promise<void> {
+  private async handleUpdate(feed: any): Promise<void> {
     try {
-      const priceData = parsePriceData(accountInfo.data);
-      const price = priceData.aggregate.price;
+      // Pyth Hermes price is (price * 10^expo)
+      const price = Number(feed.price.price) * Math.pow(10, feed.price.expo);
+      const feedIdClean = feed.id.startsWith('0x') ? feed.id.slice(2) : feed.id;
+      const symbol = Object.keys(PYTH_FEED_IDS).find(k => PYTH_FEED_IDS[k] === feedIdClean) || 'unknown';
       const timestamp = Date.now();
 
-      if (!isFinite(price) || price <= 0) return;
+      if (!isFinite(price) || price <= 0 || symbol === 'unknown') return;
 
       const redis = getRedis();
       const pipeline = redis.pipeline();
@@ -97,22 +93,24 @@ export class HeliusFeed {
 
       await pipeline.exec();
 
-      // Pulse: log to info once every 5 updates per symbol to show "life"
+      // Pulse: log to info once every 10 updates per symbol
       this.tickerCount[symbol] = (this.tickerCount[symbol] || 0) + 1;
-      if (this.tickerCount[symbol] % 5 === 0) {
-        logger.info(`[helius] ${symbol.toUpperCase()} tick (on-chain): $${price.toLocaleString()}`);
+      if (this.tickerCount[symbol] % 10 === 0) {
+        logger.info(`[pyth] ${symbol.toUpperCase()} tick (hermes): $${price.toLocaleString()}`);
       }
     } catch (err) {
-      logger.error('[helius] parse error', { symbol, error: String(err) });
+      logger.error('[pyth] update handling error', { error: String(err) });
     }
   }
 
   public stop(): void {
-    logger.info('[helius] stopping feeds');
-    if (this.watchdog) clearTimeout(this.watchdog);
-    for (const id of this.subscriptionIds) {
-      void this.connection.removeAccountChangeListener(id).catch(() => {});
+    logger.info('[pyth] stopping feeds');
+    if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
+    if (this.ws) {
+      const socket = this.ws;
+      this.ws = null; // Prevent reconnect on close
+      socket.removeAllListeners();
+      socket.terminate();
     }
-    this.subscriptionIds = [];
   }
 }
