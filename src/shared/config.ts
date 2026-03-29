@@ -4,6 +4,7 @@
  * Throws at startup if required variables are missing.
  */
 
+import 'dotenv/config';
 import process from 'node:process';
 import { z } from 'zod';
 
