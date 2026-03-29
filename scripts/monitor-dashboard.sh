@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env zsh
 # PGA Monitor Dashboard
 # 6-pane tmux session covering all persistent workers and cron logs.
 # Uses tail -f on pm2 log files directly — avoids pm2 CLI version incompatibilities.
@@ -9,26 +9,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 PM2_LOGS="${HOME}/.pm2/logs"
 
-# Canonical PM2 process names → npm scripts
-declare -A WORKERS=(
-  ["pga-spot-feed"]="worker:spot-feed"
-  ["pga-arb"]="worker:arb"
-  ["pga-copytrade"]="worker:copytrade"
-  ["pga-futures"]="monitor:futures"
-)
-
 cd "$PROJECT_DIR" || exit 1
 
-# Ensure all persistent workers are running under correct names
-for name in "${!WORKERS[@]}"; do
+# Ensure all persistent workers are running — name:script pairs
+WORKER_NAMES=(pga-spot-feed pga-arb pga-copytrade pga-futures)
+WORKER_SCRIPTS=("worker:spot-feed" "worker:arb" "worker:copytrade" "monitor:futures")
+
+for i in {1..${#WORKER_NAMES[@]}}; do
+  name="${WORKER_NAMES[$i]}"
+  script="${WORKER_SCRIPTS[$i]}"
   if ! pm2 list | grep -q "$name"; then
-    echo "[monitor] Starting $name (npm run ${WORKERS[$name]})"
-    pm2 start "npm run ${WORKERS[$name]}" --name "$name"
+    echo "[monitor] Starting $name (npm run $script)"
+    pm2 start "npm run $script" --name "$name"
   fi
 done
 
 # Remove stale legacy process names if they exist
-for stale in "pga-feeds" "pga-worker"; do
+for stale in pga-feeds pga-worker; do
   if pm2 list | grep -q "$stale"; then
     echo "[monitor] Removing stale process: $stale"
     pm2 delete "$stale"
