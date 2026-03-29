@@ -22,6 +22,31 @@ import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeReco
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { Redis } from 'ioredis';
 import type { Position } from '../execution/positionLedger.js';
+
+/**
+ * Close a PM position from the ledger and, if a delta-hedge link exists,
+ * also close the linked HL position. Called from all take-profit exit paths
+ * so hedge positions are never orphaned.
+ */
+async function closePositionWithHedge(redis: Redis, marketId: string, direction: Position['direction']): Promise<void> {
+  await closePosition(redis, marketId, direction);
+  // Check for a linked HL hedge and close it if present.
+  const hlSymbol = await redis.get(`hedge:link:${marketId}`).catch(() => null);
+  if (hlSymbol) {
+    try {
+      const hl = getHyperliquid();
+      const result = await hl.closePosition(hlSymbol);
+      if (result.success) {
+        logger.info('[take-profit-executor] closed linked HL hedge', { marketId, hlSymbol });
+      } else {
+        logger.warn('[take-profit-executor] failed to close linked HL hedge', { marketId, hlSymbol, error: result.error });
+      }
+    } catch (err) {
+      logger.warn('[take-profit-executor] error closing linked HL hedge', { marketId, hlSymbol, error: String(err) });
+    }
+    await redis.del(`hedge:link:${marketId}`).catch(() => {});
+  }
+}
 import type { ExitReason } from './takeProfitEvaluator.js';
 
 export interface TakeProfitResult {
@@ -125,7 +150,7 @@ async function executeSimmerExit(opts: {
     });
 
     if (tradeResult.success) {
-      await closePosition(redis, position.marketId, position.direction);
+      await closePositionWithHedge(redis, position.marketId, position.direction);
       const proceedsUsd = sharesToSell * currentPrice;
       await creditProceeds(redis, proceedsUsd);
       await recordOutcome(redis, {
@@ -189,7 +214,7 @@ async function executeSimmerExit(opts: {
           });
 
           if (retryResult.success) {
-            await closePosition(redis, position.marketId, position.direction);
+            await closePositionWithHedge(redis, position.marketId, position.direction);
             await creditProceeds(redis, liveMatch.shares * currentPrice);
             const freshReturnPct = position.entryPrice > 0 ? ((currentPrice - position.entryPrice) / position.entryPrice) * 100 : 0;
             await notifyTakeProfitExecuted({ position, currentPrice, returnPct: freshReturnPct, reason });
@@ -269,7 +294,7 @@ async function executeClobExit(opts: {
     });
 
     if (clobResult.success) {
-      await closePosition(redis, position.marketId, position.direction);
+      await closePositionWithHedge(redis, position.marketId, position.direction);
       const proceedsUsd = sharesToSell * currentPrice;
       await creditProceeds(redis, proceedsUsd);
       await recordOutcome(redis, {
@@ -354,16 +379,18 @@ async function attemptSyntheticExit(opts: {
   });
 
   if (result.success) {
-    // Record the hedge link so the futures monitor can close the HL position independently.
-    // Without this, the synthetic exit leaves an orphaned HL position with no tracking reference.
+    // Record the hedge link. The hedge is intentionally left open here — it is the
+    // active HL position. If the PM side is later closed by any other path (SL/TP),
+    // closePositionWithHedge() will read this key and close the HL leg too.
     await redis.set(`hedge:link:${position.marketId}`, hlSymbol, 'EX', 7 * 24 * 3600);
     logger.info('[take-profit-executor] synthetic exit: hedge link persisted', {
       marketId: position.marketId,
       hlSymbol,
     });
 
-    // Close the PM side in the position ledger. The HL hedge position remains open
-    // and will be managed by the futures monitor via the hedge:link key above.
+    // Close only the PM side here. The HL hedge remains open and monitored by
+    // futuresMonitor for its own SL/TP. If this PM position is closed by any other
+    // path, closePositionWithHedge() will clean up the HL leg.
     await closePosition(redis, position.marketId, position.direction);
     await notifyTakeProfitExecuted({ 
        position, 

@@ -135,8 +135,21 @@ export async function getClobClient(): Promise<ClobClient> {
     // so the SDK's signer detector works correctly for both order placement and SELL signing.
     // Without this, the SDK falls through to the viem walletClient path and throws
     // "wallet client is missing account address".
+    //
+    // Robustness: verify the source method exists before patching. If a future ethers
+    // version removes `signTypedData`, fail loudly here rather than silently passing a
+    // broken signer that would produce invalid signatures at trade time.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (signer as any)._signTypedData = signer.signTypedData.bind(signer);
+    const signerAny = signer as any;
+    if (typeof signerAny._signTypedData !== 'function') {
+      if (typeof signer.signTypedData !== 'function') {
+        throw new Error(
+          'ethers Wallet has neither _signTypedData nor signTypedData — ' +
+          'incompatible ethers version; check @polymarket/clob-client peer deps',
+        );
+      }
+      signerAny._signTypedData = signer.signTypedData.bind(signer);
+    }
 
     const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
     const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;

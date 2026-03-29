@@ -118,13 +118,20 @@ async function executeHyperliquidSignal(
        return { signal, skipped: true, skipReason: 'insufficient_equity' };
     }
 
-    // Check if we're already at the global margin cap
+    // Check if we're already at the global margin cap.
+    // Use three-layer accounting to handle HL API propagation delay:
+    //   1. totalCurrentMargin  — live positions confirmed by HL
+    //   2. knownSessionExposureUsd — within-batch in-flight orders (passed by caller)
+    //   3. pendingMarginUsd (Redis TTL key) — cross-cycle in-flight orders not yet
+    //      reflected in HL state (TTL = 30s, covers HL settlement lag)
     const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
-    
-    // Safety: Account for HL API propagation delay by adding known session exposure
-    if (totalCurrentMargin + knownSessionExposureUsd + signal.stakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
-      logger.warn('[executor] skipping — global margin cap exceeded (including session exposure)', {
+    const pendingRaw = await redis.get('hl:pending_margin_usd').catch(() => null);
+    const pendingMarginUsd = pendingRaw ? parseFloat(pendingRaw) : 0;
+
+    if (totalCurrentMargin + knownSessionExposureUsd + pendingMarginUsd + signal.stakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
+      logger.warn('[executor] skipping — global margin cap exceeded (including pending/session exposure)', {
         current: totalCurrentMargin.toFixed(2),
+        pending: pendingMarginUsd.toFixed(2),
         session: knownSessionExposureUsd.toFixed(2),
         requested: signal.stakeUsd.toFixed(2),
         cap: cfg.FUTURES_GLOBAL_MAX_MARGIN_USD,
@@ -148,6 +155,11 @@ async function executeHyperliquidSignal(
     });
 
     if (tradeResult.success) {
+      // Record pending margin so back-to-back cron cycles see the cap correctly
+      // even before HL state reflects this new position (30s TTL covers settlement lag).
+      const prevPending = parseFloat((await redis.get('hl:pending_margin_usd').catch(() => null)) ?? '0');
+      const newPending = Math.max(0, prevPending + signal.stakeUsd);
+      await redis.set('hl:pending_margin_usd', String(newPending), 'EX', 30).catch(() => {});
       return {
         signal,
         skipped: false,
@@ -294,6 +306,19 @@ export async function executeSignal(
 
   // 2) Route Futures signals to specialized handler
   if (signal.isFutures) {
+    // Futures-specific idempotency: key on marketId+direction only (no stakeUsd).
+    // The general key hashes stakeUsd so duplicate headlines with slightly different
+    // stake would bypass it. Futures dedup window = 1 hour, same as general TTL.
+    const futuresDedup = `${IDEMPOTENCY_KEY_PREFIX}futures:${signal.marketId}:${signal.direction}`;
+    const alreadyFired = await redis.get(futuresDedup);
+    if (alreadyFired) {
+      logger.info('[executor] skipping futures — idempotency dedup', {
+        marketId: signal.marketId,
+        direction: signal.direction,
+      });
+      return { signal, skipped: true, skipReason: 'already_executed' };
+    }
+
     // Open position check for futures — prevent stacking from multiple signal sources.
     const alreadyHoldingFutures = await hasOpenPosition(redis, signal.marketId, signal.direction);
     if (alreadyHoldingFutures) {
@@ -305,7 +330,7 @@ export async function executeSignal(
     }
     const result = await executeHyperliquidSignal(signal, redis, knownSessionExposureUsd);
     if (result.tradeResult?.success) {
-      await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
+      await redis.set(futuresDedup, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
     }
     return result;
   }

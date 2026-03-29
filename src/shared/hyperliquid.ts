@@ -166,8 +166,12 @@ class HyperliquidClient {
       const { index, szDecimals } = await this.getAssetMeta(opts.symbol);
       if (index === -1) throw new Error(`Symbol ${opts.symbol} not found on Hyperliquid`);
 
-      // 2. Manage leverage (Account-level setting)
-      await this.updateLeverage(opts.symbol, opts.leverage);
+      // 2. Manage leverage (Account-level setting).
+      // Failure is hard-stop: proceeding with wrong leverage is a direct financial risk.
+      const leverageOk = await this.updateLeverage(opts.symbol, opts.leverage);
+      if (!leverageOk) {
+        return { success: false, error: `updateLeverage failed for ${opts.symbol} — order aborted to avoid wrong-leverage trade` };
+      }
 
       // 3. Size calculation
       const midPrice = await this.getMidPrice(opts.symbol);
@@ -224,7 +228,7 @@ class HyperliquidClient {
   /**
    * Set leverage for an asset. Must be called before placing an order if leverage differs from default.
    */
-  async updateLeverage(symbol: string, leverage: number): Promise<void> {
+  async updateLeverage(symbol: string, leverage: number): Promise<boolean> {
     try {
       const { index } = await this.getAssetMeta(symbol);
       const action = {
@@ -237,8 +241,10 @@ class HyperliquidClient {
       const nonce = Date.now();
       const signature = await this.signAction(action, nonce);
       await axios.post(`${this.baseUrl}/exchange`, { action, nonce, signature });
+      return true;
     } catch (err) {
-      logger.warn('[hyperliquid] updateLeverage failed', { symbol, leverage, error: String(err) });
+      logger.error('[hyperliquid] updateLeverage failed — caller must abort order', { symbol, leverage, error: String(err) });
+      return false;
     }
   }
 
