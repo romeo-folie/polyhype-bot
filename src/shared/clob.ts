@@ -137,7 +137,7 @@ export async function getClobClient(): Promise<ClobClient> {
       const bootstrap = new ClobClient(
         CLOB_HOST,
         POLYGON_CHAIN_ID,
-        signer as any,
+        signer as any, // TODO: Replace with proper SignerV6 interface when SDK is updated
         undefined,     // no creds yet
         sigType,
         funderAddress,
@@ -149,7 +149,7 @@ export async function getClobClient(): Promise<ClobClient> {
     return new ClobClient(
       CLOB_HOST,
       POLYGON_CHAIN_ID,
-      signer as any,
+      signer as any, // TODO: Replace with proper SignerV6 interface when SDK is updated
       creds,
       sigType,
       funderAddress,
@@ -402,9 +402,10 @@ export async function redeemClobOutcome(input: {
         nonce,
       );
 
-      // Gnosis Safe expects v + 4 for EOA signatures in some versions, or simple concat.
-      // Ethers v6 signer.signingKey.sign(safeTxHash) returns a Signature object.
-      // For Gnosis Safe, we usually want a direct EOA signature: r + s + (v + 4)
+      // Sign the transaction following Gnosis Safe specs.
+      // NOTE: This implementation assumes Gnosis Safe v1.1.1 or v1.3.0 with standard EOA signing.
+      // It uses the (v + 4) suffix which is a required Gnosis-specific trick for EOA signatures
+      // to distinguish them from other signature types in the Safe's internal signature validator.
       const sig = signer.signingKey.sign(safeTxHash);
       const r = sig.r;
       const s = sig.s;

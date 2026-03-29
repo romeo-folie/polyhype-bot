@@ -171,8 +171,9 @@ async function executeSimmerExit(opts: {
           if (retryResult.success) {
             await closePosition(redis, position.marketId, position.direction);
             await creditProceeds(redis, liveMatch.shares * currentPrice);
-            await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
-            return { marketId: position.marketId, success: true, returnPct, reason, txHash: retryResult.tx_hash };
+            const freshReturnPct = position.entryPrice > 0 ? ((currentPrice - position.entryPrice) / position.entryPrice) * 100 : 0;
+            await notifyTakeProfitExecuted({ position, currentPrice, returnPct: freshReturnPct, reason });
+            return { marketId: position.marketId, success: true, returnPct: freshReturnPct, reason, txHash: retryResult.tx_hash };
           }
         }
       }

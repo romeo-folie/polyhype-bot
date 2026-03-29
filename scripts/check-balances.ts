@@ -5,7 +5,6 @@ import { loadConfig } from '../src/shared/config.js';
 const USDC_TOKEN_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'; // USDC.e on Polygon
 
 const ERC20_ABI = [
-  'function balanceWith(address account) view returns (uint256)',
   'function balanceOf(address account) view returns (uint256)',
   'function symbol() view returns (string)',
   'function decimals() view returns (uint8)',

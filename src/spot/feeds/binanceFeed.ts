@@ -13,6 +13,7 @@ export class BinanceFeed {
   private tickerCount: Record<string, number> = {};
   private symbols: string[];
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private reconnectCount = 0;
 
   constructor(symbols: string[] = ['btcusdt', 'ethusdt', 'solusdt']) {
     this.symbols = symbols.map(s => s.toLowerCase());
@@ -28,6 +29,7 @@ export class BinanceFeed {
 
     this.ws.on('open', () => {
       logger.info('[binance] connected');
+      this.reconnectCount = 0; // Reset on success
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
@@ -58,43 +60,50 @@ export class BinanceFeed {
   }
 
   private async handleTicker(msg: any): Promise<void> {
-    const symbol = msg.s.toLowerCase();
-    const price = parseFloat(msg.c);
-    const timestamp = msg.E || Date.now();
+    try {
+      const symbol = msg.s.toLowerCase();
+      const price = parseFloat(msg.c);
+      const timestamp = msg.E || Date.now();
 
-    const redis = getRedis();
-    const lastKey = `spot:last:${symbol}`;
-    const pricesKey = `spot:prices:${symbol}`;
+      const redis = getRedis();
+      const lastKey = `spot:last:${symbol}`;
+      const pricesKey = `spot:prices:${symbol}`;
 
-    const pipeline = redis.pipeline();
-    // Update latest
-    pipeline.set(lastKey, JSON.stringify({ price, timestamp, source: 'binance' }));
-    // Add to history (score=timestamp)
-    pipeline.zadd(pricesKey, timestamp, `${timestamp}:${price}`);
-    // Prune history (keep 60m)
-    pipeline.zremrangebyscore(pricesKey, '-inf', timestamp - 60 * 60 * 1000);
-    // Expire
-    pipeline.expire(lastKey, 7200);
-    pipeline.expire(pricesKey, 7200);
-    
-    // Publish event for Arb Worker
-    pipeline.publish('spot:price_moved', JSON.stringify({ symbol, price, timestamp }));
+      const pipeline = redis.pipeline();
+      // Update latest
+      pipeline.set(lastKey, JSON.stringify({ price, timestamp, source: 'binance' }));
+      // Add to history (score=timestamp)
+      pipeline.zadd(pricesKey, timestamp, `${timestamp}:${price}`);
+      // Prune history (keep 60m)
+      pipeline.zremrangebyscore(pricesKey, '-inf', timestamp - 60 * 60 * 1000);
+      // Expire
+      pipeline.expire(lastKey, 7200);
+      pipeline.expire(pricesKey, 7200);
+      
+      // Publish event for Arb Worker
+      pipeline.publish('spot:price_moved', JSON.stringify({ symbol, price, timestamp }));
 
-    await pipeline.exec();
-    
-    // Pulse: log to info once every 20 updates per symbol to show "life"
-    this.tickerCount[symbol] = (this.tickerCount[symbol] || 0) + 1;
-    if (this.tickerCount[symbol] % 20 === 0) {
-      logger.info(`[binance] ${symbol.toUpperCase()} tick: $${price.toLocaleString()}`);
+      await pipeline.exec();
+      
+      // Pulse: log to info once every 20 updates per symbol to show "life"
+      this.tickerCount[symbol] = (this.tickerCount[symbol] || 0) + 1;
+      if (this.tickerCount[symbol] % 20 === 0) {
+        logger.info(`[binance] ${symbol.toUpperCase()} tick: $${price.toLocaleString()}`);
+      }
+    } catch (err) {
+      logger.error('[binance] handleTicker error', { error: String(err) });
     }
   }
 
   private reconnect(): void {
     if (this.reconnectTimer) return;
+    this.reconnectCount++;
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectCount), 30000);
+    logger.warn(`[binance] reconnecting in ${delay / 1000}s (attempt ${this.reconnectCount})...`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.start();
-    }, 5000);
+    }, delay);
   }
 
   public stop(): void {

@@ -1,4 +1,4 @@
-import WebSocket from 'ws';
+import { WebSocket } from 'ws';
 import { logger } from '../../shared/logger.js';
 import { getRedis } from '../../shared/redis.js';
 
@@ -20,6 +20,7 @@ export class HeliusFeed {
   private ws: WebSocket | null = null;
   private tickerCount: Record<string, number> = {};
   private reconnectTimeout: NodeJS.Timeout | null = null;
+  private reconnectCount = 0;
 
   constructor(_apiKey: string, private symbols: string[] = ['SOL']) {
     // API key currently not needed for public Pyth Hermes
@@ -34,6 +35,7 @@ export class HeliusFeed {
 
     this.ws.on('open', () => {
       logger.info('[pyth] connected to Hermes');
+      this.reconnectCount = 0; // Reset on success
       const ids = this.symbols
         .map(s => PYTH_FEED_IDS[s])
         .filter(Boolean)
@@ -65,8 +67,10 @@ export class HeliusFeed {
 
     this.ws.on('close', () => {
       if (this.ws) {
-        logger.warn('[pyth] connection closed, reconnecting in 5s...');
-        this.reconnectTimeout = setTimeout(() => this.start(), 5000);
+        this.reconnectCount++;
+        const delay = Math.min(1000 * Math.pow(2, this.reconnectCount), 30000);
+        logger.warn(`[pyth] connection closed, reconnecting in ${delay / 1000}s (attempt ${this.reconnectCount})...`);
+        this.reconnectTimeout = setTimeout(() => this.start(), delay);
       }
     });
   }
