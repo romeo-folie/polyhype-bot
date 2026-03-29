@@ -1,45 +1,43 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # PGA Monitor Dashboard
 # 6-pane tmux session — all persistent workers + cron logs.
-# Usage: bash scripts/monitor-dashboard.sh  (run from anywhere)
-
-set -e
+# Usage: ./scripts/monitor-dashboard.sh
+# Compatible with bash, zsh, dash (POSIX sh).
 
 SESSION="pga"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 PM2_LOGS="${HOME}/.pm2/logs"
-PROJECT_DIR="${0:a:h:h}"   # zsh: absolute path of this script's parent directory
 
 # ── Dependency checks ──────────────────────────────────────────────────────────
 for cmd in pm2 tmux; do
-  if ! command -v "$cmd" &>/dev/null; then
+  if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "ERROR: '$cmd' not found in PATH." >&2; exit 1
   fi
 done
 
+cd "$PROJECT_DIR" || exit 1
+
 # ── Start missing workers ──────────────────────────────────────────────────────
-cd "$PROJECT_DIR"
-
-typeset -A WORKERS
-WORKERS=(
-  pga-spot-feed  "worker:spot-feed"
-  pga-arb        "worker:arb"
-  pga-copytrade  "worker:copytrade"
-  pga-futures    "monitor:futures"
-)
-
-for name script in ${(kv)WORKERS}; do
-  if ! pm2 list | grep -qw "$name"; then
+start_if_missing() {
+  name="$1"; script="$2"
+  if ! pm2 list | grep -q "$name"; then
     echo "[monitor] starting $name"
     pm2 start "npm run $script" --name "$name"
   fi
-done
+}
+
+start_if_missing pga-spot-feed  "worker:spot-feed"
+start_if_missing pga-arb        "worker:arb"
+start_if_missing pga-copytrade  "worker:copytrade"
+start_if_missing pga-futures    "monitor:futures"
 
 # Remove stale legacy names
 for stale in pga-feeds pga-worker; do
-  pm2 list | grep -qw "$stale" && pm2 delete "$stale" || true
+  pm2 list | grep -q "$stale" && pm2 delete "$stale" || true
 done
 
-pm2 save --force &>/dev/null
+pm2 save --force >/dev/null 2>&1
 
 # ── Ensure log files exist ─────────────────────────────────────────────────────
 for name in pga-spot-feed pga-arb pga-copytrade pga-futures; do
@@ -54,12 +52,10 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
+echo "[monitor] creating tmux session: $SESSION"
+
 # ── Build dashboard ────────────────────────────────────────────────────────────
-# Pass commands directly to split-window — no send-keys, no timing race.
-# Layout (tiled, 2 columns x 3 rows):
-#  spot-feed  │  arb
-#  copytrade  │  futures
-#  cron:trade │  cron:monitor
+# Commands passed directly to split-window — no send-keys, no timing races.
 
 tmux new-session  -d -s "$SESSION" -n Dashboard \
   "tail -f '${PM2_LOGS}/pga-spot-feed-out.log'"
