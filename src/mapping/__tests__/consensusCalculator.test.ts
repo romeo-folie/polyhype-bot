@@ -5,8 +5,17 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
   loadConfig: jest.fn(() => ({
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
-    LLM_PROVIDER: 'gemini', // default: try Gemini first, fall back to OpenAI
+    LLM_PROVIDER: 'gemini',
+    CONTEXT_INJECTION_ENABLED: true,
+    CONTEXT_INJECTION_LIMIT: 5,
   })),
+}));
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockGetRecentOutcomes = jest.fn<(...args: any[]) => any>();
+jest.unstable_mockModule('../../shared/outcomeRecorder.js', () => ({
+  getRecentOutcomes: mockGetRecentOutcomes,
+  inferCategory: jest.fn(() => 'geopolitical'),
 }));
 
 // Suppress logger output in tests
@@ -56,6 +65,8 @@ describe('estimateConsensusProbability', () => {
   beforeEach(() => {
     mockGenerateContent.mockReset();
     mockChatCreate.mockReset();
+    mockGetRecentOutcomes.mockReset();
+    mockGetRecentOutcomes.mockResolvedValue([]);
     process.env['GEMINI_API_KEY'] = 'test-gemini-key';
     process.env['OPENAI_API_KEY'] = 'test-openai-key';
   });
@@ -154,6 +165,94 @@ describe('estimateConsensusProbability', () => {
     const result = await estimateConsensusProbability({ ...BASE_OPTS, description: null });
     expect(result.probability).toBeCloseTo(0.5);
     expect(result.sampleCount).toBe(3);
+  });
+
+  it('injects context block into prompt when 3+ outcomes available', async () => {
+    mockGetRecentOutcomes.mockResolvedValue([
+      { question: 'Q1', direction: 'YES', consensusProbability: 0.7, result: 'won', returnPct: 10, holdingHours: 5 },
+      { question: 'Q2', direction: 'NO', consensusProbability: 0.6, result: 'lost', returnPct: -5, holdingHours: 3 },
+      { question: 'Q3', direction: 'YES', consensusProbability: 0.8, result: 'won', returnPct: 15, holdingHours: 8 },
+    ]);
+
+    let callCount = 0;
+    const probs = [0.70, 0.72, 0.68];
+    mockGenerateContent.mockImplementation(async (_prompt: string) => {
+      const p = probs[callCount++]!;
+      return { response: { text: () => JSON.stringify({ probability: p, reasoning: `G${callCount}` }) } };
+    });
+    mockChatCreate.mockImplementation(async (_opts: any) => {
+      const p = probs[callCount++]!;
+      return { choices: [{ message: { content: JSON.stringify({ probability: p, reasoning: 'O1' }) } }] };
+    });
+
+    const mockRedis = { zrevrange: jest.fn(), hgetall: jest.fn() };
+    await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
+
+    // The Gemini call receives the full prompt as a single string — check it includes the context block
+    const geminiCall = mockGenerateContent.mock.calls[0]?.[0] as string;
+    expect(geminiCall).toContain('Recent track record on geopolitical');
+    expect(geminiCall).toContain('Q1');
+    expect(geminiCall).toContain('calibrate your estimate');
+  });
+
+  it('does not inject context with fewer than 3 outcomes', async () => {
+    mockGetRecentOutcomes.mockResolvedValue([
+      { question: 'Q1', direction: 'YES', consensusProbability: 0.7, result: 'won', returnPct: 10, holdingHours: 5 },
+    ]);
+
+    let callCount = 0;
+    mockGenerateContent.mockImplementation(async () => {
+      callCount++;
+      return { response: { text: () => JSON.stringify({ probability: 0.7, reasoning: 'test' }) } };
+    });
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ probability: 0.7, reasoning: 'test' }) } }],
+    });
+
+    const mockRedis = { zrevrange: jest.fn(), hgetall: jest.fn() };
+    await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
+
+    const geminiCall = mockGenerateContent.mock.calls[0]?.[0] as string;
+    expect(geminiCall).not.toContain('Recent track record');
+  });
+
+  it('skips context injection when CONTEXT_INJECTION_ENABLED=false', async () => {
+    const { loadConfig } = await import('../../shared/config.js');
+    (loadConfig as jest.Mock).mockReturnValue({
+      OPENAI_MODEL: 'gpt-4o-mini',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+      LLM_PROVIDER: 'gemini',
+      CONTEXT_INJECTION_ENABLED: false,
+      CONTEXT_INJECTION_LIMIT: 5,
+    });
+
+    mockGetRecentOutcomes.mockResolvedValue([
+      { question: 'Q1', direction: 'YES', consensusProbability: 0.7, result: 'won', returnPct: 10, holdingHours: 5 },
+      { question: 'Q2', direction: 'NO', consensusProbability: 0.6, result: 'lost', returnPct: -5, holdingHours: 3 },
+      { question: 'Q3', direction: 'YES', consensusProbability: 0.8, result: 'won', returnPct: 15, holdingHours: 8 },
+    ]);
+
+    mockGenerateContent.mockResolvedValue({
+      response: { text: () => JSON.stringify({ probability: 0.7, reasoning: 'test' }) },
+    });
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ probability: 0.7, reasoning: 'test' }) } }],
+    });
+
+    const mockRedis = { zrevrange: jest.fn(), hgetall: jest.fn() };
+    await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
+
+    // getRecentOutcomes should not have been called
+    expect(mockGetRecentOutcomes).not.toHaveBeenCalled();
+
+    // Restore config
+    (loadConfig as jest.Mock).mockReturnValue({
+      OPENAI_MODEL: 'gpt-4o-mini',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+      LLM_PROVIDER: 'gemini',
+      CONTEXT_INJECTION_ENABLED: true,
+      CONTEXT_INJECTION_LIMIT: 5,
+    });
   });
 
   it('throws on invalid probability value when all providers return bad data', async () => {

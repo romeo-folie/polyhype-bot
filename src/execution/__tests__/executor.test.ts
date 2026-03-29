@@ -36,7 +36,23 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
     DIVERGENCE_THRESHOLD: 0.1,
     OPENAI_API_KEY: 'test-openai',
     FUTURES_ENABLED: false,
+    CALIBRATION_ENABLED: true,
+    CALIBRATION_MIN_SAMPLES: 20,
   })),
+}));
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockGetCalibrationStats = jest.fn<(...args: any[]) => any>().mockResolvedValue(null);
+jest.unstable_mockModule('../../shared/calibration.js', () => ({
+  getCalibrationStats: mockGetCalibrationStats,
+  applyCalibrationCorrection: jest.fn((edge: number, stats: any, min: number) => {
+    if (!stats || stats.sampleSize < min) return edge;
+    return edge * stats.edgeCorrectionFactor;
+  }),
+}));
+
+jest.unstable_mockModule('../../shared/outcomeRecorder.js', () => ({
+  inferCategory: jest.fn(() => 'geopolitical'),
 }));
 
 const { submitTrade, resolveSimmerMarketId } = await import('../../shared/simmer.js');
@@ -81,6 +97,8 @@ describe('executeSignal', () => {
     mockResolve.mockReset();
     mockSubmitClob.mockReset();
     mockHasPosition.mockReset();
+    mockGetCalibrationStats.mockReset();
+    mockGetCalibrationStats.mockResolvedValue(null);
 
     // Default: available in Simmer, Simmer succeeds, no open position
     mockResolve.mockResolvedValue('simmer-uuid-123');
@@ -213,12 +231,60 @@ describe('executeSignal', () => {
   });
 });
 
+describe('calibration correction', () => {
+  beforeEach(() => {
+    mockSubmit.mockReset();
+    mockResolve.mockReset();
+    mockSubmitClob.mockReset();
+    mockHasPosition.mockReset();
+    mockGetCalibrationStats.mockReset();
+
+    mockResolve.mockResolvedValue('simmer-uuid-123');
+    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
+    mockHasPosition.mockResolvedValue(false);
+  });
+
+  it('applies calibration correction when stats are available', async () => {
+    mockGetCalibrationStats.mockResolvedValue({
+      category: 'geopolitical',
+      sampleSize: 30,
+      winRate: 0.5,
+      avgReturn: 0,
+      edgeCorrectionFactor: 0.8,
+      buckets: [],
+    });
+
+    const redis = makeRedis();
+    const signal = makeSignal({ edgeMagnitude: 0.2 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(signal, redis as any);
+
+    expect(result.skipped).toBe(false);
+    // The signal passed to Simmer should have corrected edge in reasoning
+    expect(mockSubmit).toHaveBeenCalled();
+  });
+
+  it('does not apply correction when stats is null', async () => {
+    mockGetCalibrationStats.mockResolvedValue(null);
+
+    const redis = makeRedis();
+    const signal = makeSignal({ edgeMagnitude: 0.2 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(signal, redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.tradeResult?.success).toBe(true);
+  });
+});
+
 describe('executeSignals', () => {
   beforeEach(() => {
     mockSubmit.mockReset();
     mockResolve.mockReset();
     mockSubmitClob.mockReset();
     mockHasPosition.mockReset();
+    mockGetCalibrationStats.mockReset();
+    mockGetCalibrationStats.mockResolvedValue(null);
 
     mockResolve.mockResolvedValue('simmer-uuid-123');
     mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });

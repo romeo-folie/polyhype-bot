@@ -21,6 +21,7 @@ import { closePosition, getOpenPositions } from '../execution/positionLedger.js'
 import { redeemClobOutcome } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
+import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
 import type { Redis } from 'ioredis';
 
 export interface RedemptionResult {
@@ -86,6 +87,34 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
           if (proceedsUsdc > 0) {
             await creditProceeds(redis, proceedsUsdc);
           }
+
+          // Record outcome (Phase 8).
+          // redeemable === true means Polymarket confirmed our direction won.
+          // Any position reaching this block has passed the redeemable filter,
+          // so we can safely derive result from redeemable. Be explicit rather than
+          // hardcoding 'won' in case a future code path passes non-redeemable positions.
+          const simmerWon = pos.redeemable === true;
+          const posAny = pos as Record<string, unknown>;
+          const stakeUsd = typeof posAny['stakeUsd'] === 'number' ? posAny['stakeUsd'] : null;
+          const openedAt = typeof posAny['openedAt'] === 'string' ? posAny['openedAt'] : null;
+          if (!stakeUsd) {
+            logger.warn('[redeemer] Simmer position missing stakeUsd for outcome calibration', {
+              market_id: pos.market_id,
+            });
+          }
+          const question = pos.question ?? pos.market_id;
+          await recordOutcome(redis, {
+            source: 'osint',
+            category: inferCategory(question),
+            question: question.slice(0, 200),
+            direction: direction,
+            consensusProbability: typeof posAny['consensusProbability'] === 'number' ? posAny['consensusProbability'] : 0.5,
+            divergence: typeof posAny['edgeMagnitude'] === 'number' ? posAny['edgeMagnitude'] : 0,
+            result: simmerWon ? 'won' : 'lost',
+            returnPct: proceedsUsdc > 0 && stakeUsd ? ((proceedsUsdc - stakeUsd) / stakeUsd) * 100 : 0,
+            holdingHours: openedAt ? (Date.now() - new Date(openedAt).getTime()) / 3600000 : 0,
+            executionVenue: typeof posAny['executionVenue'] === 'string' ? posAny['executionVenue'] : 'simmer',
+          });
 
           // Notify
           const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
@@ -215,6 +244,20 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): P
       if (proceedsUsdc > 0) {
         await creditProceeds(redis, proceedsUsdc);
       }
+
+      // Record outcome (Phase 8)
+      await recordOutcome(redis, {
+        source: 'osint',
+        category: inferCategory(pos.question ?? pos.marketId),
+        question: (pos.question ?? pos.marketId).slice(0, 200),
+        direction: pos.direction as 'YES' | 'NO',
+        consensusProbability: pos.consensusProbability ?? 0.5,
+        divergence: pos.edgeMagnitude ?? 0,
+        result: won ? 'won' : 'lost',
+        returnPct: pos.stakeUsd ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
+        holdingHours: pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000 : 0,
+        executionVenue: pos.executionVenue ?? 'clob',
+      });
 
       // Notify
       const notifyOpts: any = {

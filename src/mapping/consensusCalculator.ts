@@ -10,6 +10,8 @@
 import process from 'node:process';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
+import { getRecentOutcomes, inferCategory } from '../shared/outcomeRecorder.js';
+import type { Redis } from 'ioredis';
 
 const TIMEOUT_MS = 25_000;
 
@@ -161,21 +163,44 @@ export async function estimateConsensusProbability(opts: {
   description: string | null;
   headline: string;
   currentYesPrice: number;
+  redis?: Redis;
 }): Promise<ConsensusEstimate> {
+  const cfg = loadConfig();
   const useGemini = Boolean(process.env.GEMINI_API_KEY);
   const useOpenAI = Boolean(process.env.OPENAI_API_KEY);
 
-  // Determine sample distribution
+  // Phase 8a: Context injection — prepend recent outcomes to headline
+  let enrichedHeadline = opts.headline;
+  if (cfg.CONTEXT_INJECTION_ENABLED && opts.redis) {
+    try {
+      const category = inferCategory(opts.question);
+      const outcomes = await getRecentOutcomes(opts.redis, category, cfg.CONTEXT_INJECTION_LIMIT);
+      if (outcomes.length >= 3) {
+        const contextBlock =
+          `Recent track record on ${category} signals (last ${outcomes.length.toString()} closed positions):\n` +
+          outcomes.map(o =>
+            `• "${o.question.slice(0, 100)}" → ${o.direction} at ${(o.consensusProbability * 100).toFixed(0)}% confidence → ${o.result.toUpperCase()} (${o.returnPct >= 0 ? '+' : ''}${o.returnPct.toFixed(1)}% in ${o.holdingHours.toFixed(1)}h)`,
+          ).join('\n') +
+          '\n\nUse this track record to calibrate your estimate. Adjust probability up or down based on patterns you observe.\n\n';
+        enrichedHeadline = contextBlock + opts.headline;
+      }
+    } catch (err) {
+      logger.warn('[consensus-calc] context injection failed (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Determine sample distribution — use enriched headline for context injection
   const calls: Promise<ConsensusResult>[] = [];
   if (useGemini && useOpenAI) {
-    // 2 Gemini, 1 OpenAI (or 1:1 if N_SAMPLES=2)
-    calls.push(callGemini(opts.question, opts.description, opts.headline, opts.currentYesPrice));
-    calls.push(callGemini(opts.question, opts.description, opts.headline, opts.currentYesPrice));
-    calls.push(callOpenAI(opts.question, opts.description, opts.headline, opts.currentYesPrice));
+    calls.push(callGemini(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice));
+    calls.push(callGemini(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice));
+    calls.push(callOpenAI(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice));
   } else {
     // Fallback to single-provider parallel sampling
     for (let i = 0; i < N_SAMPLES; i++) {
-      calls.push(estimateSingle(opts));
+      calls.push(estimateSingle({ ...opts, headline: enrichedHeadline }));
     }
   }
 

@@ -1,12 +1,12 @@
 # Polymarket Geopolitical Trading Agent
 
-Autonomous multi-signal trading agent for Polymarket prediction markets. Combines OSINT pipelines, whale wallet mirroring, real-time spot price arbitrage, crypto latency arbitrage, and Hyperliquid futures hedging into a single risk-managed system.
+Autonomous multi-signal trading agent for Polymarket prediction markets. Combines OSINT pipelines, whale wallet mirroring, real-time spot price arbitrage, crypto latency arbitrage, Hyperliquid futures hedging, and continuous self-improvement (outcome tracking, context injection, calibration) into a single risk-managed system.
 
 ---
 
 ## Architecture Overview
 
-The system runs as **seven concurrent processes** — two persistent workers plus five periodic pipelines — each independently signalling trades through a shared execution layer.
+The system runs as **seven concurrent processes** — two persistent workers plus five periodic pipelines — each independently signalling trades through a shared execution layer, with a continuous improvement feedback loop that records outcomes, injects historical context into LLM prompts, and applies calibration corrections.
 
 ```mermaid
 graph TD
@@ -313,6 +313,9 @@ Redis position ledger → all open positions
 | `src/shared/clob.ts` | Polymarket CLOB client — order signing, balance, on-chain redemption |
 | `src/shared/simmer.ts` | Simmer SDK wrapper — opportunities, context, portfolio, redeem |
 | `src/shared/redis.ts` | Redis client, pub/sub, distributed lock (token-based) |
+| `src/shared/outcomeRecorder.ts` | Outcome recorder — records every closed position for context injection and calibration |
+| `src/shared/calibration.ts` | Calibration tracker — weekly win-rate analysis, edge correction factors per category |
+| `src/cron/calibrate.ts` | Weekly calibration cron entrypoint — recomputes stats, sends Telegram summary |
 | `src/shared/feedSingleton.ts` | Shared `ClobPriceFeed` singleton — WS order book subscriptions for watched markets |
 
 ---
@@ -374,6 +377,9 @@ PATH=/usr/local/bin:/usr/bin:/bin
 
 # Copytrade shortlist refresh (Monday 06:00 GMT)
 0 6 * * MON /path/to/pga/run.sh npx tsx src/copytrade/shortlist.ts >> /tmp/pga-shortlist.log 2>&1
+
+# Calibration stats refresh (Monday 03:00 GMT)
+0 3 * * MON /path/to/pga/run.sh npx tsx src/cron/calibrate.ts >> /tmp/pga-calibrate.log 2>&1
 ```
 
 > **Note:** `worker:arb`, `worker:copytrade`, `worker:spot-feed`, and `monitor:futures` are persistent — run them via PM2, not cron.
@@ -397,6 +403,7 @@ PATH=/usr/local/bin:/usr/bin:/bin
 | `npm run worker:spot-feed` | Start persistent Binance/Helius WebSocket feeds |
 | `npm run monitor:futures` | Start persistent Hyperliquid futures monitor |
 | `npm run cron:shortlist` | Refresh copytrade wallet shortlist from leaderboard |
+| `npm run cron:calibrate` | Recompute calibration stats per category (weekly) |
 | `npm run sync-env` | Append missing keys from `.env.example` to `.env` |
 
 ---
@@ -425,6 +432,12 @@ See `.env.example` for full documentation. Highlights:
 | `CRYPTO_ARB_MAX_STAKE_FRACTION` | — | Max fraction of bankroll per crypto arb trade (default 0.03 = 3%) |
 | `CRYPTO_ARB_DEDUP_TTL_S` | — | Dedup window per market/direction in seconds (default 300 = 5 min) |
 | `CRYPTO_ARB_MARKET_CACHE_TTL_S` | — | Cache TTL for Gamma market search results (default 3600 = 1h) |
+| `CALIBRATION_ENABLED` | — | Master switch for calibration correction (default true) |
+| `CALIBRATION_MIN_SAMPLES` | — | Minimum outcomes before correction applies (default 20) |
+| `OUTCOME_HISTORY_DAYS` | — | TTL for outcome records in days (default 180) |
+| `OUTCOME_MAX_PER_CATEGORY` | — | Max outcomes per category before pruning (default 500) |
+| `CONTEXT_INJECTION_ENABLED` | — | Inject historical outcomes into LLM prompts (default true) |
+| `CONTEXT_INJECTION_LIMIT` | — | Number of outcomes injected per prompt (default 5) |
 
 ---
 
