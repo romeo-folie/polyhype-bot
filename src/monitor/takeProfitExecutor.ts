@@ -12,7 +12,7 @@
  */
 
 import { logger } from '../shared/logger.js';
-import { submitSell, resolveSimmerMarketId, SimmerError } from '../shared/simmer.js';
+import { submitSell, resolveSimmerMarketId, getSimmerPositions, SimmerError } from '../shared/simmer.js';
 import { submitClobSell } from '../shared/clob.js';
 import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
@@ -142,6 +142,41 @@ async function executeSimmerExit(opts: {
       return successResult;
     } else {
       const error = tradeResult.error ?? 'unknown error from Simmer';
+      
+      // AUTO-RECOVERY: If shares mismatch, fetch actual balance and retry ONCE
+      if (error.toLowerCase().includes('insufficient shares')) {
+        logger.warn('[take-profit-executor] share mismatch detected — sync and retry', {
+          marketId: position.marketId,
+          expected: sharesToSell.toFixed(4),
+          error
+        });
+
+        const livePositions = await getSimmerPositions({ status: 'active' });
+        const liveMatch = livePositions.find(p => p.market_id === simmerId && p.side === sellSide);
+        
+        if (liveMatch && liveMatch.shares && liveMatch.shares > 0 && liveMatch.shares < sharesToSell) {
+          logger.info('[take-profit-executor] retrying with actual balance', {
+            marketId: position.marketId,
+            actualShares: liveMatch.shares.toFixed(4)
+          });
+          
+          const retryResult = await submitSell({
+            market_id: simmerId,
+            side: sellSide,
+            action: 'sell',
+            shares: liveMatch.shares,
+            reasoning: `Recovery exit: ${reason} (Sync from ${sharesToSell.toFixed(4)} to ${liveMatch.shares.toFixed(4)})`,
+          });
+
+          if (retryResult.success) {
+            await closePosition(redis, position.marketId, position.direction);
+            await creditProceeds(redis, liveMatch.shares * currentPrice);
+            await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
+            return { marketId: position.marketId, success: true, returnPct, reason, txHash: retryResult.tx_hash };
+          }
+        }
+      }
+
       logger.warn('[take-profit-executor] sell returned success=false', {
         marketId: position.marketId,
         error,
