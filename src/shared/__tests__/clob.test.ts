@@ -16,6 +16,9 @@ vi.mock('ethers', () => ({
   Wallet: vi.fn(() => ({
     address: '0xtest',
     sendTransaction: mockSendTransaction,
+    // ethers v6 renamed _signTypedData → signTypedData; clob.ts patches _signTypedData
+    // back onto the wallet. The mock must expose signTypedData so the patch doesn't throw.
+    signTypedData: vi.fn().mockResolvedValue('0xsig'),
     signingKey: {
       sign: () => ({
         r: '0x' + '0'.repeat(64),
