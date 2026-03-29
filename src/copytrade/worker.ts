@@ -26,6 +26,8 @@ export async function runWorker(maxCycles?: number): Promise<void> {
   });
 
   const POLL_INTERVAL_MS = cfg.COPYTRADE_POLL_INTERVAL_MS;
+  const MAX_CONSECUTIVE_FAILURES = 10;
+  let consecutiveFailures = 0;
   let iterations = 0;
 
   while (true) {
@@ -86,8 +88,19 @@ export async function runWorker(maxCycles?: number): Promise<void> {
       if (iterations % 100 === 0) {
         logger.info('[copytrade-worker] heartbeat', { iterations });
       }
+
+      consecutiveFailures = 0; // reset circuit breaker on success
     } catch (err) {
-      logger.error('[copytrade-worker] cycle failed', { error: (err as Error).message });
+      consecutiveFailures++;
+      logger.error('[copytrade-worker] cycle failed', {
+        error: (err as Error).message,
+        consecutiveFailures,
+      });
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        const backoffMs = Math.min(1000 * Math.pow(2, consecutiveFailures - MAX_CONSECUTIVE_FAILURES), 60_000);
+        logger.warn('[copytrade-worker] circuit breaker: backing off', { backoffMs, consecutiveFailures });
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+      }
     }
 
     iterations++;
