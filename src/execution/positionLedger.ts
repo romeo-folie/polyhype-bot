@@ -112,7 +112,7 @@ export async function getOpenPositions(redis: Redis): Promise<Position[]> {
   const positions: Position[] = [];
   for (const key of keys) {
     const raw = await redis.hgetall(key);
-    if (!raw || !raw['marketId']) {
+    if (!raw.marketId) {
       // Key expired — remove from index
       await redis.zrem(POSITIONS_INDEX_KEY, key);
       continue;
@@ -154,32 +154,34 @@ export async function hasOpenPosition(
 function deserialisePosition(raw: Record<string, string>): Position {
   const venue = raw['executionVenue'] as Position['executionVenue'];
   const pos: Position = {
-    marketId: raw['marketId'] ?? '',
-    conditionId: raw['conditionId'],
-    clobTokenIds: raw['clobTokenIds'] ? (JSON.parse(raw['clobTokenIds']) as string[]) : [],
-    question: raw['question'] ?? '',
-    direction: (raw['direction'] ?? 'YES') as Position['direction'],
-    entryPrice: parseFloat(raw['entryPrice'] ?? '0'),
-    stakeUsd: parseFloat(raw['stakeUsd'] ?? '0'),
-    edgeMagnitude: parseFloat(raw['edgeMagnitude'] ?? '0'),
-    sourcedFrom: raw['sourcedFrom'] ?? '',
-    openedAt: raw['openedAt'] ?? new Date().toISOString(),
-    executionVenue: venue || 'simmer',
+    marketId: raw.marketId ?? '',
+    conditionId: raw.conditionId,
+    clobTokenIds: raw.clobTokenIds ? (JSON.parse(raw.clobTokenIds) as string[]) : [],
+    question: raw.question ?? '',
+    direction: (raw.direction ?? 'YES') as Position['direction'],
+    entryPrice: parseFloat(raw.entryPrice ?? '0'),
+    stakeUsd: parseFloat(raw.stakeUsd ?? '0'),
+    edgeMagnitude: parseFloat(raw.edgeMagnitude ?? '0'),
+    sourcedFrom: raw.sourcedFrom ?? '',
+    openedAt: raw.openedAt ?? new Date().toISOString(),
+    executionVenue: (venue || 'simmer') as Position['executionVenue'],
   };
-  if (raw['consensusProbability']) pos.consensusProbability = parseFloat(raw['consensusProbability']);
-  if (raw['consensusStddev']) pos.consensusStddev = parseFloat(raw['consensusStddev']);
-  if (raw['txHash']) pos.txHash = raw['txHash'];
-  if (raw['sharesHeld']) pos.sharesHeld = parseFloat(raw['sharesHeld']);
+
+  if (raw.consensusProbability) pos.consensusProbability = parseFloat(raw.consensusProbability);
+  if (raw.consensusStddev) pos.consensusStddev = parseFloat(raw.consensusStddev);
+  if (raw.txHash) pos.txHash = raw.txHash;
+  if (raw.sharesHeld) pos.sharesHeld = parseFloat(raw.sharesHeld);
   
-  if (raw['isFutures'] === 'true') {
+  if (raw.isFutures === 'true') {
     pos.isFutures = true;
-    if (raw['leverage']) pos.leverage = parseFloat(raw['leverage']);
-    if (raw['symbol']) pos.symbol = raw['symbol'];
-    if (raw['side']) pos.side = raw['side'] as 'long' | 'short';
+    if (raw.leverage) pos.leverage = parseFloat(raw.leverage);
+    if (raw.symbol) pos.symbol = raw.symbol;
+    if (raw.side) pos.side = raw.side as 'long' | 'short';
   }
 
   return pos;
 }
+
 // ── CLI Entrypoint ─────────────────────────────────────────────────────────
 import 'dotenv/config';
 import { getRedis, closeRedis } from '../shared/redis.js';
@@ -224,3 +226,4 @@ if (isMain) {
     process.exit(1);
   });
 }
+

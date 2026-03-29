@@ -71,11 +71,11 @@ export async function executeTakeProfit(opts: {
     sharesToSell: sharesToSell.toFixed(4),
     returnPct: returnPct.toFixed(2),
     reason,
-    venue: position.executionVenue ?? 'simmer',
+    venue: position.executionVenue,
   });
 
   // Route to the correct venue
-  const venue = position.executionVenue ?? 'simmer';
+  const venue = position.executionVenue;
   if (venue === 'clob') {
     return executeClobExit({ position, currentPrice, returnPct, reason, redis, sharesToSell });
   }
@@ -159,7 +159,7 @@ async function executeSimmerExit(opts: {
         const livePositions = await getSimmerPositions({ status: 'active' });
         const liveMatch = livePositions.find(p => p.market_id === simmerId && p.side === sellSide);
         
-        if (liveMatch && liveMatch.shares && liveMatch.shares > 0 && liveMatch.shares < sharesToSell) {
+        if (liveMatch?.shares && liveMatch.shares > 0 && liveMatch.shares < sharesToSell) {
           logger.info('[take-profit-executor] retrying with actual balance', {
             marketId: position.marketId,
             actualShares: liveMatch.shares.toFixed(4)
@@ -176,8 +176,9 @@ async function executeSimmerExit(opts: {
           if (retryResult.success) {
             await closePosition(redis, position.marketId, position.direction);
             await creditProceeds(redis, liveMatch.shares * currentPrice);
-            await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
-            return { marketId: position.marketId, success: true, returnPct, reason, txHash: retryResult.tx_hash };
+            const freshReturnPct = position.entryPrice > 0 ? ((currentPrice - position.entryPrice) / position.entryPrice) * 100 : 0;
+            await notifyTakeProfitExecuted({ position, currentPrice, returnPct: freshReturnPct, reason });
+            return { marketId: position.marketId, success: true, returnPct: freshReturnPct, reason, txHash: retryResult.tx_hash };
           }
         }
       }
