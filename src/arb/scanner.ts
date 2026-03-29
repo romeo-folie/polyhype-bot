@@ -122,7 +122,8 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
 /**
  * Execute an arbitrage trade: buy equal SHARES of YES + NO as FOK.
  * 
- * Parallel Execution: Submit both legs simultaneously to minimize the unhedged window.
+ * Sequential Execution: YES leg first; NO leg only if YES fills. This is intentional —
+ * submitting both simultaneously would leave an unhedged YES position if the NO leg fails.
  */
 export async function executeArb(
   opp: ArbOpportunity,

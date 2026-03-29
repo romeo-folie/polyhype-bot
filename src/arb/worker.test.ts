@@ -17,12 +17,16 @@ vi.mock('./scanner.js', () => ({
 }));
 
 // Mock Redis with Pub/Sub listeners
+// Local capture of the Redis pub/sub message callback — avoids global namespace
+// pollution that could cause collisions if test files run concurrently.
+let onRedisMessage: ((channel: string, msg: string) => void) | null = null;
+
 const mockRedis = {
   subscribe: vi.fn().mockResolvedValue(1),
   unsubscribe: vi.fn().mockResolvedValue(1),
-  on: vi.fn((event, callback) => {
+  on: vi.fn((event: string, callback: (channel: string, msg: string) => void) => {
     if (event === 'message') {
-      (global as any)._onRedisMessageCallback = callback;
+      onRedisMessage = callback;
     }
   }),
   pipeline: vi.fn(() => ({
@@ -59,7 +63,7 @@ describe('ArbitrageWorker', () => {
     await worker.start();
 
     // Simulate message from Redis Pub/Sub
-    const callback = (global as any)._onRedisMessageCallback;
+    const callback = onRedisMessage!;
     await callback('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 65000 }));
 
     expect(runArbScan).toHaveBeenCalled();
@@ -72,7 +76,7 @@ describe('ArbitrageWorker', () => {
      const worker = new ArbitrageWorker({ baselineIntervalMs: 100, maxTradesPerMin: 1 });
      await worker.start();
 
-     const callback = (global as any)._onRedisMessageCallback;
+     const callback = onRedisMessage!;
      
      // 1st trigger
      await callback('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 65100 }));

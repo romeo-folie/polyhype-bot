@@ -1,3 +1,4 @@
+import { statSync } from 'fs';
 import dotenv from 'dotenv';
 dotenv.config();
 import { loadConfig } from '../shared/config.js';
@@ -69,7 +70,6 @@ export async function runWorker(maxCycles?: number): Promise<void> {
         // The shortlist writer uses atomic rename (temp → .env), so stat the file and
         // only reload if it was last modified more than 2s ago (rename has completed).
         try {
-          const { statSync } = await import('fs');
           const envStat = statSync('.env');
           const ageMs = Date.now() - envStat.mtimeMs;
           if (ageMs > 2_000) {
