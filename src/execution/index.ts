@@ -16,6 +16,7 @@ import { logger } from '../shared/logger.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping, mapNewsToFutures } from '../mapping/index.js';
 import { executeSignal } from './executor.js';
+import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import { recordPosition } from './positionLedger.js';
 import { notifyTradeExecuted, notifyTradeError } from './telegram.js';
 import { reEvaluatePositions } from '../monitor/signalReeval.js';
@@ -60,9 +61,11 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
       // 2. Continuous Monitoring — Re-evaluate open positions against fresh OSINT before opening new ones. 
       // This prevents "doubling down" on trades where our informational edge has already evaporated or flipped.
       const reevalResult = await reEvaluatePositions(highUrgencyItems, redis);
-      if (reevalResult.exited > 0) {
+      if (reevalResult.exited > 0 || reevalResult.errors > 0) {
         logger.info('[execution] signal re-evaluation triggered exits', {
           exited: reevalResult.exited,
+          held: reevalResult.held,
+          errors: reevalResult.errors,
         });
       }
     } catch (err) {
@@ -98,6 +101,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
   let executed = 0;
   let failed = 0;
   let skipped = 0;
+  let sessionExposureUsd = 0;
 
   for (const signal of signals) {
     // 4. Execution Loop — Cycle through signals and attempt execution on the primary or fallback venue.
@@ -106,7 +110,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
     // The executor handles Idempotency (Grip-it-and-rip-it): ensures the same signal hash isn't fired twice
     // within the 3600s Redis window, protecting against feed re-ingestion noise or redundant LLM calls
     // during extreme breaking news cycles.
-    const result = await executeSignal(signal, redis);
+    const result = await executeSignal(signal, redis, sessionExposureUsd);
 
     if (result.skipped) {
       skipped++;
@@ -150,6 +154,13 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         leverage: result.signal.leverage,
         symbol: result.signal.symbol || (result.signal.isFutures ? result.signal.marketId : undefined),
       });
+
+      // Track HL margin consumed for accurate margin cap checks in subsequent signals.
+      if (result.executionVenue === 'hyperliquid') {
+        sessionExposureUsd += signal.stakeUsd;
+      } else if (result.hedgePlaced) {
+        sessionExposureUsd += signal.stakeUsd;
+      }
 
       await notifyTradeExecuted(result.signal, result.tradeResult.tx_hash);
     } else if (result.tradeResult && !result.tradeResult.success) {
