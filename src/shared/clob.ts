@@ -74,9 +74,17 @@ let cachedClient: Promise<ClobClient> | null = null;
 const CLOB_CREDS_REDIS_KEY = 'clob:api_creds';
 const CLOB_CREDS_TTL_SECONDS = 23 * 3600;
 
+const USDC_RAW_RE = /balance:\s*(\d+),\s*order amount:\s*(\d+)/i;
+
 function normaliseError(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
+  const msg = err instanceof Error ? err.message : String(err);
+  // CLOB API returns raw 6-decimal USDC values in error messages (e.g. "balance: 4922880, order amount: 5000000").
+  // Translate them to human-readable USDC so logs are not misleading.
+  return msg.replace(USDC_RAW_RE, (_match, bal: string, amt: string) => {
+    const balUsdc = (parseInt(bal, 10) / 1_000_000).toFixed(2);
+    const amtUsdc = (parseInt(amt, 10) / 1_000_000).toFixed(2);
+    return `balance: $${balUsdc}, order amount: $${amtUsdc}`;
+  });
 }
 
 async function loadPersistedCreds(): Promise<ApiKeyCreds | null> {
