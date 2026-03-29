@@ -268,11 +268,12 @@ export async function executeSignal(
   const cfg = loadConfig();
   if (cfg.CALIBRATION_ENABLED && !signal.isFutures) {
     try {
-      const cal = await getCalibrationStats(redis, inferCategory(signal.question));
+      const category = inferCategory(signal.question);
+      const cal = await getCalibrationStats(redis, category);
       const correctedEdge = applyCalibrationCorrection(signal.edgeMagnitude ?? 0, cal, cfg.CALIBRATION_MIN_SAMPLES);
       if (correctedEdge !== signal.edgeMagnitude) {
         logger.info('[executor] calibration correction applied', {
-          category: inferCategory(signal.question),
+          category,
           originalEdge: signal.edgeMagnitude,
           correctedEdge,
           factor: cal?.edgeCorrectionFactor,

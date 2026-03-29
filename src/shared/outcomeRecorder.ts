@@ -80,11 +80,21 @@ export async function recordOutcome(
     await redis.zadd(`outcomes:${outcome.category}`, ts, id);
     await redis.zadd(`outcomes:source:${outcome.source}`, ts, id);
 
-    // Prune if category exceeds max
+    // Prune if category exceeds max.
+    // Remove pruned IDs from all index sets to avoid orphaned references.
     const count = await redis.zcard(`outcomes:${outcome.category}`);
     if (count > cfg.OUTCOME_MAX_PER_CATEGORY) {
       const excess = count - cfg.OUTCOME_MAX_PER_CATEGORY;
-      await redis.zpopmin(`outcomes:${outcome.category}`, excess);
+      // ioredis zpopmin returns a flat string[] alternating [member, score, member, score, ...]
+      const pruned: string[] = await redis.zpopmin(`outcomes:${outcome.category}`, excess);
+      const prunedIds = pruned.filter((_v, i) => i % 2 === 0);
+      if (prunedIds.length > 0) {
+        await redis.zrem('outcomes:all', ...prunedIds);
+        await redis.zrem(`outcomes:source:${outcome.source}`, ...prunedIds);
+        // Also delete the hash entries to free memory
+        const hashKeys = prunedIds.map(id => `outcome:${id}`);
+        await redis.del(...hashKeys);
+      }
     }
 
     logger.info('[outcome-recorder] recorded outcome', {

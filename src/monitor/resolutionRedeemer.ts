@@ -88,19 +88,32 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
             await creditProceeds(redis, proceedsUsdc);
           }
 
-          // Record outcome (Phase 8)
+          // Record outcome (Phase 8).
+          // redeemable === true means Polymarket confirmed our direction won.
+          // Any position reaching this block has passed the redeemable filter,
+          // so we can safely derive result from redeemable. Be explicit rather than
+          // hardcoding 'won' in case a future code path passes non-redeemable positions.
+          const simmerWon = pos.redeemable === true;
+          const posAny = pos as Record<string, unknown>;
+          const stakeUsd = typeof posAny['stakeUsd'] === 'number' ? posAny['stakeUsd'] : null;
+          const openedAt = typeof posAny['openedAt'] === 'string' ? posAny['openedAt'] : null;
+          if (!stakeUsd) {
+            logger.warn('[redeemer] Simmer position missing stakeUsd for outcome calibration', {
+              market_id: pos.market_id,
+            });
+          }
           const question = pos.question ?? pos.market_id;
           await recordOutcome(redis, {
             source: 'osint',
             category: inferCategory(question),
             question: question.slice(0, 200),
             direction: direction,
-            consensusProbability: (pos as any).consensusProbability ?? 0.5,
-            divergence: (pos as any).edgeMagnitude ?? 0,
-            result: 'won',
-            returnPct: proceedsUsdc > 0 && (pos as any).stakeUsd ? ((proceedsUsdc - (pos as any).stakeUsd) / (pos as any).stakeUsd) * 100 : 0,
-            holdingHours: (pos as any).openedAt ? (Date.now() - new Date((pos as any).openedAt as string).getTime()) / 3600000 : 0,
-            executionVenue: (pos as any).executionVenue ?? 'simmer',
+            consensusProbability: typeof posAny['consensusProbability'] === 'number' ? posAny['consensusProbability'] : 0.5,
+            divergence: typeof posAny['edgeMagnitude'] === 'number' ? posAny['edgeMagnitude'] : 0,
+            result: simmerWon ? 'won' : 'lost',
+            returnPct: proceedsUsdc > 0 && stakeUsd ? ((proceedsUsdc - stakeUsd) / stakeUsd) * 100 : 0,
+            holdingHours: openedAt ? (Date.now() - new Date(openedAt).getTime()) / 3600000 : 0,
+            executionVenue: typeof posAny['executionVenue'] === 'string' ? posAny['executionVenue'] : 'simmer',
           });
 
           // Notify

@@ -98,12 +98,14 @@ async function executeSimmerExit(opts: {
   // Simmer does NOT accept Polymarket numeric IDs — it requires its own UUID.
   // The buy path does this via resolveSimmerMarketId(signal.question); we must
   // do the same here or the sell will always fail with "Market not found".
-  const simmerId = await resolveSimmerMarketId(position.question);
+  const question = position.question ?? '';
+  const simmerId = await resolveSimmerMarketId(question);
   if (!simmerId) {
-    const error = `Simmer market ID not found for question: "${position.question.slice(0, 80)}"`;
+    const qPreview = question.slice(0, 80);
+    const error = `Simmer market ID not found for question: "${qPreview}"`;
     logger.warn('[take-profit-executor] cannot resolve Simmer UUID — sell aborted', {
       marketId: position.marketId,
-      question: position.question.slice(0, 80),
+      question: qPreview,
     });
     return { marketId: position.marketId, success: false, error, returnPct, reason };
   }
