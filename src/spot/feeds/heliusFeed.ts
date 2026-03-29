@@ -20,14 +20,16 @@ export class HeliusFeed {
   private connection: Connection;
   private subscriptionIds: number[] = [];
   private tickerCount: Record<string, number> = {};
+  private watchdog: NodeJS.Timeout | null = null;
+  private apiKey: string;
 
   constructor(apiKey: string, private symbols: string[] = ['SOL']) {
+    this.apiKey = apiKey;
     const url = `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
-    // Explicitly use the wss protocol for the connection
     const wsUrl = `wss://mainnet.helius-rpc.com/?api-key=${apiKey}`;
     this.connection = new Connection(url, {
       wsEndpoint: wsUrl,
-      commitment: 'confirmed',
+      commitment: 'processed',
     });
   }
 
@@ -47,9 +49,10 @@ export class HeliusFeed {
         const id = this.connection.onAccountChange(
           new PublicKey(pubkey),
           (accountInfo) => {
+            this.resetWatchdog();
             void this.handleUpdate(symbol, accountInfo);
           },
-          'confirmed',
+          'processed',
         );
         this.subscriptionIds.push(id);
         logger.info(`[helius] subscription active for ${symbol}`);
@@ -57,6 +60,21 @@ export class HeliusFeed {
         logger.error(`[helius] failed to subscribe to ${symbol}`, { error: String(err) });
       }
     }
+    this.resetWatchdog();
+  }
+
+  private resetWatchdog(): void {
+    if (this.watchdog) clearTimeout(this.watchdog);
+    this.watchdog = setTimeout(() => {
+      logger.warn('[helius] stream silent for 60s, force-reconnecting...');
+      void this.reconnect();
+    }, 60000); // 60s watchdog to detect silent streams
+  }
+
+  private async reconnect(): Promise<void> {
+    this.stop();
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    await this.start();
   }
 
   private async handleUpdate(symbol: string, accountInfo: AccountInfo<Buffer>): Promise<void> {
@@ -91,6 +109,7 @@ export class HeliusFeed {
 
   public stop(): void {
     logger.info('[helius] stopping feeds');
+    if (this.watchdog) clearTimeout(this.watchdog);
     for (const id of this.subscriptionIds) {
       void this.connection.removeAccountChangeListener(id).catch(() => {});
     }
