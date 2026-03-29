@@ -65,20 +65,14 @@ export class ArbitrageWorker {
         logger.debug('[arb-worker] price move detected (Fast-Path)', parsed);
         void this.triggerScan('fast-path');
 
-        // Trigger crypto latency arb path (independent of YES+NO arb scan)
+        // Trigger crypto latency arb path (independent of YES+NO arb scan).
+        // Moved to async method to allow awaiting previous-price lookup.
         if (parsed.symbol && parsed.price != null) {
-          const assetId = BINANCE_SYMBOL_TO_ASSET[parsed.symbol];
-          if (assetId) {
-            const move: SpotMove = {
-              assetId,
-              currentPrice: parsed.price,
-              referencePrice: parsed.price, // best available from ticker
-              changePercent: 0,
-              windowMinutes: 0,
-              detectedAt: new Date(parsed.timestamp ?? Date.now()).toISOString(),
-            };
-            void this.triggerCryptoArb(move);
-          }
+          void this.triggerCryptoArbFromTicker(
+            String(parsed.symbol),
+            parsed.price as number,
+            parsed.timestamp as number | undefined,
+          );
         }
       }
     });
@@ -133,6 +127,35 @@ export class ArbitrageWorker {
    * Trigger crypto latency arb path. Runs independently of the YES+NO arb scan.
    * All errors are caught — must never crash the worker.
    */
+  private async triggerCryptoArbFromTicker(symbol: string, currentPrice: number, tsMs?: number): Promise<void> {
+    const assetId = BINANCE_SYMBOL_TO_ASSET[symbol];
+    if (!assetId) return;
+
+    // Resolve previous price for meaningful referencePrice / changePercent.
+    const redis = getRedis();
+    const lastRaw = await redis.get(`spot:last:${symbol}`).catch(() => null);
+    let referencePrice = currentPrice;
+    if (lastRaw) {
+      try {
+        const last = JSON.parse(lastRaw) as { price?: unknown };
+        const prevPrice = typeof last.price === 'number' ? last.price : null;
+        if (prevPrice != null && prevPrice > 0) referencePrice = prevPrice;
+      } catch { /* keep currentPrice as fallback */ }
+    }
+    const changePercent = referencePrice > 0
+      ? ((currentPrice - referencePrice) / referencePrice) * 100
+      : 0;
+
+    return this.triggerCryptoArb({
+      assetId,
+      currentPrice,
+      referencePrice,
+      changePercent,
+      windowMinutes: 0,
+      detectedAt: new Date(tsMs ?? Date.now()).toISOString(),
+    });
+  }
+
   private async triggerCryptoArb(move: SpotMove): Promise<void> {
     try {
       const cfg = loadConfig();

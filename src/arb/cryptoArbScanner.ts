@@ -9,8 +9,9 @@
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getPriceFeed } from '../shared/feedSingleton.js';
-import { findCorrelatedMarkets } from '../spot/marketCorrelator.js';
+import { findCorrelatedMarkets, type CorrelatedMarket } from '../spot/marketCorrelator.js';
 import { estimateFastConsensus } from '../spot/fastPathConsensus.js';
+import { getBankroll } from '../shared/bankroll.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { Redis } from 'ioredis';
 
@@ -92,7 +93,20 @@ export async function scanCryptoArb(
   const cached = await redis.get(cacheKey);
   if (cached) {
     try {
-      markets = JSON.parse(cached);
+      const parsed = JSON.parse(cached) as unknown;
+      // Validate shape: must be an array of objects with at minimum marketId + conditionId.
+      if (
+        Array.isArray(parsed) &&
+        (parsed.length === 0 ||
+          (typeof (parsed[0] as Record<string, unknown>)['marketId'] === 'string' &&
+           typeof (parsed[0] as Record<string, unknown>)['conditionId'] === 'string'))
+      ) {
+        markets = parsed as CorrelatedMarket[];
+      } else {
+        logger.warn('[crypto-arb] cached market data has unexpected shape — discarding');
+        markets = null;
+        await redis.del(cacheKey);
+      }
     } catch {
       markets = null;
     }
@@ -142,8 +156,7 @@ export async function scanCryptoArb(
       const deduped = await redis.get(dedupKey);
       if (deduped) continue;
 
-      // 6. Half-Kelly sizing
-      const { getBankroll } = await import('../shared/bankroll.js');
+      // 6. Edge-scaled fixed-fraction sizing
       const bankroll = await getBankroll(redis);
       const kellyStake = bankroll * netEdge * cfg.CRYPTO_ARB_MAX_STAKE_FRACTION;
       const maxStake = cfg.MAX_BET_FRACTION * bankroll;
