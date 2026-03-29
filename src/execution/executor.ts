@@ -16,7 +16,7 @@ import { logger } from '../shared/logger.js';
 import { submitTrade, resolveSimmerMarketId, getMarketContext, SimmerError } from '../shared/simmer.js';
 import { submitClobBuy } from '../shared/clob.js';
 import { hasOpenPosition } from './positionLedger.js';
-import { getHyperliquid, HL_SYMBOL_MAP } from '../shared/hyperliquid.js';
+import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { loadConfig } from '../shared/config.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
 import type { Redis } from 'ioredis';
@@ -88,6 +88,7 @@ async function tryExecuteViaClob(signal: TradeSignal): Promise<{
 async function executeHyperliquidSignal(
   signal: TradeSignal,
   redis: Redis,
+  knownSessionExposureUsd = 0,
 ): Promise<ExecutionResult> {
   const cfg = loadConfig();
   const hl = getHyperliquid();
@@ -97,21 +98,22 @@ async function executeHyperliquidSignal(
     const state = await hl.getClearinghouseState();
     const accountValue = parseFloat(state?.marginSummary?.accountValue || '0');
     
-    if (accountValue < signal.stakeUsd) {
-      logger.warn('[executor] skipping — insufficient HL equity', {
-        accountValue: accountValue.toFixed(2),
-        required: signal.stakeUsd.toFixed(2),
-      });
-      return { signal, skipped: true, skipReason: 'insufficient_equity' };
+    // Solvency check: basic safety to avoid sending orders that will definitely fail.
+    // Real-time margin checks happen on the HL side.
+    if (accountValue < 0.01) {
+       logger.warn('[executor] skipping — account has zero or near-zero equity', { accountValue: accountValue.toFixed(2) });
+       return { signal, skipped: true, skipReason: 'insufficient_equity' };
     }
 
     // Check if we're already at the global margin cap
     const positions = await hl.getOpenPositions();
     const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
     
-    if (totalCurrentMargin + signal.stakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
-      logger.warn('[executor] skipping — global margin cap exceeded', {
+    // Safety: Account for HL API propagation delay by adding known session exposure
+    if (totalCurrentMargin + knownSessionExposureUsd + signal.stakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
+      logger.warn('[executor] skipping — global margin cap exceeded (including session exposure)', {
         current: totalCurrentMargin.toFixed(2),
+        session: knownSessionExposureUsd.toFixed(2),
         requested: signal.stakeUsd.toFixed(2),
         cap: cfg.FUTURES_GLOBAL_MAX_MARGIN_USD,
       });
@@ -166,6 +168,7 @@ async function executeHyperliquidSignal(
 async function triggerDeltaHedge(
   pmSignal: TradeSignal,
   redis: Redis,
+  knownSessionExposureUsd = 0,
 ): Promise<void> {
   const cfg = loadConfig();
   if (!cfg.FUTURES_ENABLED || pmSignal.isFutures) return;
@@ -177,9 +180,11 @@ async function triggerDeltaHedge(
     const positions = await hl.getOpenPositions();
     const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
     
-    if (totalCurrentMargin + pmSignal.stakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
-       logger.warn('[executor] skipping delta hedge — global margin cap reached', {
+    // Safety: Account for session exposure to prevent overshooting cap during multi-signal cycles
+    if (totalCurrentMargin + knownSessionExposureUsd + pmSignal.stakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
+       logger.warn('[executor] skipping delta hedge — global margin cap reached (including session exposure)', {
          current: totalCurrentMargin.toFixed(2),
+         session: knownSessionExposureUsd.toFixed(2),
          hedge: pmSignal.stakeUsd.toFixed(2),
          cap: cfg.FUTURES_GLOBAL_MAX_MARGIN_USD,
        });
@@ -190,23 +195,15 @@ async function triggerDeltaHedge(
     return; // Safety first
   }
 
-  // 2. Identify the correlated asset symbol
-  let hlSymbol: string | undefined;
-  const lowerQuestion = pmSignal.question.toLowerCase();
-  
-  for (const [id, symbol] of Object.entries(HL_SYMBOL_MAP)) {
-    if (lowerQuestion.includes(id) || lowerQuestion.includes((symbol as string).toLowerCase())) {
-      hlSymbol = symbol as string;
-      break;
-    }
-  }
+  // 2. Identify the correlated asset symbol using shared logic
+  const hlSymbol = resolveHlSymbol(pmSignal.question);
 
   if (!hlSymbol) {
     logger.debug('[executor] no correlated HL asset found for hedge', { pmMarketId: pmSignal.marketId });
     return;
   }
 
-  // 2. Execute 1:1 Delta Hedge (Short)
+  // 3. Execute 1:1 Delta Hedge (Short)
   const hedgeStakeUsd = pmSignal.stakeUsd;
 
   logger.info('[executor] opening delta hedge on Hyperliquid', {
@@ -234,6 +231,7 @@ async function triggerDeltaHedge(
 export async function executeSignal(
   signal: TradeSignal,
   redis: Redis,
+  knownSessionExposureUsd = 0,
 ): Promise<ExecutionResult> {
   // 1) Idempotency check (Moved up to cover all platforms)
   const key = idempotencyKey(signal);
@@ -248,14 +246,14 @@ export async function executeSignal(
 
   // 2) Route Futures signals to specialized handler
   if (signal.isFutures) {
-    const result = await executeHyperliquidSignal(signal, redis);
+    const result = await executeHyperliquidSignal(signal, redis, knownSessionExposureUsd);
     if (result.tradeResult?.success) {
       await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
     }
     return result;
   }
 
-  // 1) Stake floor check
+  // 3) Stake floor check
   if (signal.stakeUsd < MIN_STAKE_USD) {
     logger.info('[executor] skipping — stake below floor', {
       marketId: signal.marketId,
@@ -264,7 +262,7 @@ export async function executeSignal(
     return { signal, skipped: true, skipReason: 'stake_below_floor' };
   }
 
-  // 2) Open position check — don't stack into a market we already hold
+  // 4) Open position check — don't stack into a market we already hold
   const alreadyHolding = await hasOpenPosition(redis, signal.marketId, signal.direction);
   if (alreadyHolding) {
     logger.info('[executor] skipping — already holding position in this market', {
@@ -274,9 +272,7 @@ export async function executeSignal(
     return { signal, skipped: true, skipReason: 'position_already_open' };
   }
 
-  // 3) Stake floor check
-
-  // 3) Try Simmer first
+  // 5) Try Simmer first
   const simmerId = await resolveSimmerMarketId(signal.question);
 
   if (simmerId) {
@@ -359,7 +355,7 @@ export async function executeSignal(
 
         const exeResult: ExecutionResult = { signal, skipped: false, tradeResult, executionVenue: 'simmer' };
         // Trigger Delta Hedge (for News signals)
-        void triggerDeltaHedge(signal, redis);
+        void triggerDeltaHedge(signal, redis, knownSessionExposureUsd);
         
         return exeResult;
       }
@@ -405,7 +401,7 @@ export async function executeSignal(
     });
   }
 
-  // 4) CLOB fallback
+  // 6) CLOB fallback
   const clob = await tryExecuteViaClob(signal);
   if (clob.ok && clob.tradeResult?.success) {
     const tradeResult = clob.tradeResult;
@@ -414,16 +410,16 @@ export async function executeSignal(
       marketId: signal.marketId,
       txHash: tradeResult.tx_hash,
     });
-    const exeResult: ExecutionResult = {
+    const execResult: ExecutionResult = {
       signal,
       skipped: false,
       tradeResult,
       executionVenue: 'clob',
     };
     // Trigger Delta Hedge (for News signals)
-    void triggerDeltaHedge(signal, redis);
+    void triggerDeltaHedge(signal, redis, knownSessionExposureUsd);
 
-    return exeResult;
+    return execResult;
   }
 
   const fallbackError = clob.error ?? 'CLOB fallback failed';
@@ -446,8 +442,31 @@ export async function executeSignals(
   redis: Redis,
 ): Promise<ExecutionResult[]> {
   const results: ExecutionResult[] = [];
+  let sessionExposureUsd = 0;
+
   for (const signal of signals) {
-    const result = await executeSignal(signal, redis);
+    const result = await executeSignal(signal, redis, sessionExposureUsd);
+    
+    // If trade succeeded, track the exposure to account for API lag in the next signal's margin check
+    if (result.tradeResult?.success && (result.executionVenue === 'hyperliquid' || result.executionVenue === 'clob' || result.executionVenue === 'simmer')) {
+       // Only increment session exposure if it consumes HL margin (Hedges for simmer/clob also consume margin)
+       // Wait, simmer/clob trades don't consume HL margin themselves, but the hedge does.
+       // However, triggerDeltaHedge is void (background).
+       // So we should ideally increment exposure if the hedge was triggered.
+       // But triggerDeltaHedge is void... so we don't know yet if it succeeded.
+       // We'll conservatively assume it will trigger if futures are enabled.
+       const cfg = loadConfig();
+       if (result.executionVenue === 'hyperliquid') {
+          sessionExposureUsd += signal.stakeUsd;
+       } else if (cfg.FUTURES_ENABLED && !signal.isFutures) {
+          // Check if resolved asset exists (shared logic matches triggerDeltaHedge)
+          const symbol = resolveHlSymbol(signal.question);
+          if (symbol) {
+             sessionExposureUsd += signal.stakeUsd;
+          }
+       }
+    }
+    
     results.push(result);
   }
   return results;

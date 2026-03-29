@@ -203,3 +203,47 @@ export async function estimateConsensusProbability(opts: {
 
   return { probability: mean, reasoning, stddev, sampleCount: results.length };
 }
+
+/**
+ * Rapid sentiment check for futures trading. 
+ * Performs a single-call zero-shot classification: POSITIVE, NEGATIVE, or NEUTRAL.
+ */
+export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHORT' | 'NEUTRAL'> {
+  const provider = loadConfig().LLM_PROVIDER;
+  const useGemini = provider === 'gemini' && Boolean(process.env['GEMINI_API_KEY']);
+  const useOpenAI = Boolean(process.env['OPENAI_API_KEY']);
+
+  const system = 'You are a high-speed financial sentiment classifier. ' +
+    'Classify the given headline as POSITIVE or NEGATIVE for the relevant asset. ' +
+    'If the impact is ambiguous or insignificant, return NEUTRAL. ' +
+    'Return ONLY the word: POSITIVE, NEGATIVE, or NEUTRAL.';
+
+  let raw = '';
+  try {
+    if (useGemini) {
+      const { GoogleGenerativeAI } = await import('@google/generative-ai');
+      const genai = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
+      const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
+      const prompt = `${system}\n\nHeadline: ${headline}`;
+      const result = await model.generateContent(prompt);
+      raw = result.response.text().trim().toUpperCase();
+    } else if (useOpenAI) {
+      const { OpenAI } = await import('openai');
+      const client = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
+      const completion = await client.chat.completions.create({
+        model: loadConfig().OPENAI_MODEL,
+        messages: [{ role: 'system', content: system }, { role: 'user', content: headline }],
+        max_tokens: 10,
+        temperature: 0,
+      });
+      raw = (completion.choices[0]?.message?.content ?? '').trim().toUpperCase();
+    }
+  } catch (err) {
+    logger.warn('[sentiment-calc] LLM failed, falling back to NEUTRAL', { error: String(err) });
+    return 'NEUTRAL';
+  }
+
+  if (raw.includes('POSITIVE')) return 'LONG';
+  if (raw.includes('NEGATIVE')) return 'SHORT';
+  return 'NEUTRAL';
+}

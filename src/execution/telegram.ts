@@ -86,7 +86,7 @@ export async function notifyTradeExecuted(
  * Notify on a failed trade execution.
  */
 export async function notifyTradeError(
-  signal: TradeSignal,
+  signal: { question: string; direction: string; stakeUsd: number; marketId?: string },
   error: string,
 ): Promise<void> {
   const text =
@@ -117,8 +117,9 @@ export async function notifyTakeProfitExecuted(opts: {
   currentPrice: number;
   returnPct: number;
   reason: TakeProfitReason;
+  mechanismDetail?: string;
 }): Promise<void> {
-  const { position, currentPrice, returnPct, reason } = opts;
+  const { position, currentPrice, returnPct, reason, mechanismDetail } = opts;
   const reasonLabels: Record<string, string> = {
     take_profit_threshold: '🎯 Take-profit threshold reached',
     divergence_closed: '📉 Divergence closed',
@@ -129,7 +130,8 @@ export async function notifyTakeProfitExecuted(opts: {
     futures_sl: '🛑 Futures Stop-Loss triggered',
     futures_tp: '🎯 Futures Take-Profit triggered',
   };
-  const reasonLabel = reasonLabels[reason] ?? reason;
+  let reasonLabel = reasonLabels[reason] ?? reason;
+  if (mechanismDetail) reasonLabel = `${reasonLabel} [${mechanismDetail}]`;
 
   const text =
     `💰 <b>Position Closed</b>\n\n` +

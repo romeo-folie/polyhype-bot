@@ -19,17 +19,24 @@ vi.mock('../../shared/redis.js', () => ({
   closeRedis: vi.fn(),
 }));
 
-// Mock WebSocket
-vi.mock('ws', () => {
-  return {
-    default: vi.fn().mockImplementation(() => ({
-      on: vi.fn(),
-      send: vi.fn(),
-      terminate: vi.fn(),
-      removeAllListeners: vi.fn(),
-    })),
-  };
-});
+// vi.mock factories are hoisted before variable declarations, so use vi.hoisted
+// to define the constructor mock in a way that's safe to reference inside the factory.
+const mockWsCtor = vi.hoisted(() =>
+  vi.fn().mockImplementation(() => ({
+    on: vi.fn(),
+    send: vi.fn(),
+    terminate: vi.fn(),
+    removeAllListeners: vi.fn(),
+  }))
+);
+
+// Provide both default and named export to match:
+//   source: `import { WebSocket } from 'ws'`
+//   test:   `import WebSocket from 'ws'`
+vi.mock('ws', () => ({
+  default: mockWsCtor,
+  WebSocket: mockWsCtor,
+}));
 
 describe('HeliusFeed (Hermes)', () => {
   beforeEach(() => {

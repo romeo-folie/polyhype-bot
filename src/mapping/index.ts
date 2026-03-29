@@ -12,10 +12,10 @@
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { findCandidateMarkets } from './entityExtractor.js';
-import { estimateConsensusProbability } from './consensusCalculator.js';
+import { estimateConsensusProbability, estimateSentiment } from './consensusCalculator.js';
 import { computeDivergence } from './divergenceCalculator.js';
 import { resolveYesPrice } from '../shared/priceCache.js';
-import { HL_SYMBOL_MAP } from '../shared/hyperliquid.js';
+import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { TradeDecision } from './divergenceCalculator.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 import type { Redis } from 'ioredis';
@@ -194,34 +194,33 @@ export async function mapNewsToFutures(
   for (const item of items) {
     if (item.urgencyScore < cfg.URGENCY_THRESHOLD) continue;
 
-    // Fast check: look for major crypto keywords in title/content
-    const lowerTitle = item.title.toLowerCase();
-    for (const [assetId, symbol] of Object.entries(HL_SYMBOL_MAP)) {
-      if (lowerTitle.includes(assetId) || lowerTitle.includes(symbol.toLowerCase())) {
-        // Sentiment check
-        const negativePattern = /hacked|crash|ban|illegal|denied|plunge|rejection|liquidation|sues|suit|investigation|exploit|vulnerability|scam|fraud|arrest|bankrupt|insolvent|delist/i;
-        const isPositive = !negativePattern.test(lowerTitle);
-        const direction = isPositive ? 'LONG' : 'SHORT';
-        
-        const stakeUsd = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
-        
-        signals.push({
-          marketId: symbol,
-          question: `News Futures: ${symbol} ${direction}`,
-          direction,
-          stakeUsd,
-          edgeMagnitude: item.urgencyScore / 10,
-          outcomePrice: 0, // Market order
-          isFutures: true,
-          leverage: cfg.FUTURES_DEFAULT_LEVERAGE,
-          sourcedFrom: `News: ${item.title}`,
-          reasoning: `High-urgency news detected for ${symbol}. Urgency: ${item.urgencyScore}. Sentiment: ${isPositive ? 'positive' : 'negative'}. Executing single-signal HL Perp.`,
-        });
-        
-        // Only one futures signal per news item to prevent over-trading
-        break;
-      }
+    // 1. Identify asset using shared symbol resolution logic
+    const symbol = resolveHlSymbol(item.title);
+    if (!symbol) continue;
+
+    // 2. Perform zero-shot LLM sentiment analysis
+    const direction = await estimateSentiment(item.title);
+    if (direction === 'NEUTRAL') {
+      logger.info('[mapping] skipping HL signal — neutral sentiment', { symbol, title: item.title });
+      continue;
     }
+    
+    const stakeUsd = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
+    
+    signals.push({
+      marketId: symbol,
+      question: `News Futures: ${symbol} ${direction}`,
+      direction,
+      stakeUsd,
+      edgeMagnitude: item.urgencyScore / 10,
+      outcomePrice: 0, // Market order
+      isFutures: true,
+      leverage: cfg.FUTURES_DEFAULT_LEVERAGE,
+      sourcedFrom: `News: ${item.title}`,
+      reasoning: `High-urgency news detected for ${symbol} with ${direction} sentiment. Urgency: ${item.urgencyScore}. Executing single-signal HL Perp via rapid LLM classification.`,
+    });
+    
+    // Only one futures signal per news item to prevent over-trading
   }
 
   return signals;

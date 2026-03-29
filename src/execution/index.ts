@@ -100,9 +100,12 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
   let skipped = 0;
 
   for (const signal of signals) {
-    // 4. Phase 3 — execute mapping signals one at a time.
-    // The executor handles idempotency via Redis, ensuring the same signal won't fire twice
-    // even if a news item is repeatedly ingestion by the source feed within the lifecycle window.
+    // 4. Execution Loop — Cycle through signals and attempt execution on the primary or fallback venue.
+    // This loop is sequential to simplify bankroll management and prevent race conditions on shared account margin.
+    //
+    // The executor handles Idempotency (Grip-it-and-rip-it): ensures the same signal hash isn't fired twice
+    // within the 3600s Redis window, protecting against feed re-ingestion noise or redundant LLM calls
+    // during extreme breaking news cycles.
     const result = await executeSignal(signal, redis);
 
     if (result.skipped) {
@@ -135,7 +138,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         direction: result.signal.direction,
         entryPrice: result.signal.outcomePrice,
         stakeUsd: result.signal.stakeUsd,
-        consensusProbability: result.signal.consensusProbability,
+        consensusProbability: result.signal.consensusProbability ?? 0.5,
         consensusStddev: result.signal.consensusStddev,
         edgeMagnitude: result.signal.edgeMagnitude,
         sourcedFrom: result.signal.sourcedFrom,

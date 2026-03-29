@@ -36,12 +36,16 @@ jest.unstable_mockModule('../../shared/simmer.js', () => ({
 const mockPlaceMarketOrder = jest.fn();
 jest.unstable_mockModule('../../shared/hyperliquid.js', () => ({
   getHyperliquid: jest.fn().mockReturnValue({
+    getOpenPositions: jest.fn().mockResolvedValue([]),
     placeMarketOrder: mockPlaceMarketOrder,
   }),
-  HL_SYMBOL_MAP: {
-    bitcoin: 'BTC',
-    ethereum: 'ETH',
-  },
+  // resolveHlSymbol replaces the old HL_SYMBOL_MAP inline loop
+  resolveHlSymbol: jest.fn().mockImplementation((text: string) => {
+    const lower = text.toLowerCase();
+    if (lower.includes('bitcoin')) return 'BTC';
+    if (lower.includes('ethereum')) return 'ETH';
+    return undefined;
+  }),
 }));
 
 const { executeSignal } = await import('../executor.js');

@@ -215,15 +215,15 @@ async function executeClobExit(opts: {
 }): Promise<TakeProfitResult> {
   const { position, currentPrice, returnPct, reason, redis, sharesToSell } = opts;
 
-  // Get the correct token ID: index 0 for YES, index 1 for NO
+  // 1. Venue Guard: Ensure we don't attempt CLOB token extraction for HL positions
+  if (position.executionVenue === 'hyperliquid') {
+    return { success: false, marketId: position.marketId, error: 'Hyperliquid exit not yet implemented via CLOB route', returnPct, reason };
+  }
+
+  // 2. Extract token ID
   const tokenId = position.direction === 'YES'
     ? position.clobTokenIds?.[0]
     : position.clobTokenIds?.[1];
-
-  if (position.executionVenue === 'hyperliquid') {
-    // TODO: Implement Hyperliquid exit logic in Phase: futures
-    return { success: false, marketId: position.marketId, error: 'Hyperliquid exit not yet implemented', returnPct, reason };
-  }
 
   if (!tokenId) {
     const error = 'CLOB exit failed: missing token ID for direction ' + position.direction;
@@ -321,7 +321,13 @@ async function attemptSyntheticExit(opts: {
 
   if (result.success) {
     await closePosition(redis, position.marketId, position.direction);
-    await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason: `Synthetic: ${reason}` as ExitReason });
+    await notifyTakeProfitExecuted({ 
+       position, 
+       currentPrice, 
+       returnPct, 
+       reason: 'synthetic',
+       mechanismDetail: reason,
+    });
     
     return {
       marketId: position.marketId,

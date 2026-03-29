@@ -34,16 +34,25 @@ jest.unstable_mockModule('../../shared/redis.js', () => ({
 
 // Mock Hyperliquid Client
 const mockGetOpenPositions = jest.fn();
-const mockPlaceMarketOrder = jest.fn();
+const mockClosePosition = jest.fn();
 jest.unstable_mockModule('../../shared/hyperliquid.js', () => ({
   getHyperliquid: jest.fn().mockReturnValue({
     getOpenPositions: mockGetOpenPositions,
-    placeMarketOrder: mockPlaceMarketOrder,
+    closePosition: mockClosePosition,
   }),
+}));
+
+// Mock Position Ledger
+const mockGetLedgerPositions = jest.fn();
+const mockCloseLedgerPosition = jest.fn();
+jest.unstable_mockModule('../../execution/positionLedger.js', () => ({
+  getOpenPositions: mockGetLedgerPositions,
+  closePosition: mockCloseLedgerPosition,
 }));
 
 // Mock Telegram
 jest.unstable_mockModule('../../execution/telegram.js', () => ({
+  notifyTradeError: jest.fn(),
   notifyTakeProfitExecuted: jest.fn(),
 }));
 
@@ -52,16 +61,19 @@ const { runFuturesMonitorWorker } = await import('../futuresMonitor.js');
 describe('futuresMonitor', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    // Control the infinite loop and speed up tests by mocking setTimeout to throw
-    jest.spyOn(global, 'setTimeout').mockImplementation((fn: any) => {
-      if (typeof fn === 'function') fn();
+    // Break the while(true) loop after one tick.
+    // We throw WITHOUT calling fn() so the Promise constructor rejects (uncaught resolve
+    // would swallow the throw). The rejection propagates past the inner try/catch
+    // (which only wraps the work, not the bottom sleep) and bubbles up to runTick.
+    jest.spyOn(global, 'setTimeout').mockImplementation((_fn: any) => {
       throw new Error('TEST_COMPLETE');
     });
-    
+
     // Default mock behavior
     mockGetOpenPositions.mockResolvedValue([]);
-    mockPlaceMarketOrder.mockResolvedValue({ success: true });
-    mockRedis.get.mockResolvedValue(null);
+    mockGetLedgerPositions.mockResolvedValue([]);
+    mockClosePosition.mockResolvedValue({ success: true });
+    mockCloseLedgerPosition.mockResolvedValue(undefined);
   });
 
   async function runTick() {
@@ -74,88 +86,88 @@ describe('futuresMonitor', () => {
 
   it('triggers SL when price falls below -1.5%', async () => {
     mockGetOpenPositions.mockResolvedValue([
-      { 
-        symbol: 'BTC', 
-        position: { 
-          szi: '0.1', 
-          entryPx: '50000', 
+      {
+        symbol: 'BTC',
+        position: {
+          szi: '0.1',
+          entryPx: '50000',
           unrealizedPnl: '-100', // -2.0% (100 / 5000)
-          marginUsed: '1000' 
-        } 
+          marginUsed: '1000',
+        },
       },
     ]);
 
     await runTick();
 
-    expect(mockPlaceMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
-      symbol: 'BTC',
-      isBuy: false, // Closing LONG
-      reduceOnly: true,
-    }));
+    expect(mockClosePosition).toHaveBeenCalledWith('BTC');
   });
 
   it('triggers TP when price rises above +3.0%', async () => {
     mockGetOpenPositions.mockResolvedValue([
-      { 
-        symbol: 'ETH', 
-        position: { 
-          szi: '1.0', 
-          entryPx: '3000', 
+      {
+        symbol: 'ETH',
+        position: {
+          szi: '1.0',
+          entryPx: '3000',
           unrealizedPnl: '100', // +3.33%
-          marginUsed: '600' 
-        } 
+          marginUsed: '600',
+        },
       },
     ]);
 
     await runTick();
 
-    expect(mockPlaceMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
-      symbol: 'ETH',
-      isBuy: false,
-    }));
+    expect(mockClosePosition).toHaveBeenCalledWith('ETH');
   });
 
   it('does NOT trigger exit when price move is within neutral bounds', async () => {
     mockGetOpenPositions.mockResolvedValue([
-      { 
-        symbol: 'SOL', 
-        position: { 
-          szi: '10', 
-          entryPx: '140', 
+      {
+        symbol: 'SOL',
+        position: {
+          szi: '10',
+          entryPx: '140',
           unrealizedPnl: '7', // +0.5%
-          marginUsed: '280' 
-        } 
+          marginUsed: '280',
+        },
       },
     ]);
 
     await runTick();
 
-    expect(mockPlaceMarketOrder).not.toHaveBeenCalled();
+    expect(mockClosePosition).not.toHaveBeenCalled();
   });
 
   it('triggers exit when Max Hold Hours is exceeded', async () => {
     const symbol = 'BTC';
     mockGetOpenPositions.mockResolvedValue([
-      { 
-        symbol, 
-        position: { 
-          szi: '0.1', 
-          entryPx: '50000', 
-          unrealizedPnl: '0', 
-          marginUsed: '1000' 
-        } 
+      {
+        symbol,
+        position: {
+          szi: '0.1',
+          entryPx: '50000',
+          unrealizedPnl: '0',
+          marginUsed: '1000',
+        },
       },
     ]);
 
-    // Mock first seen time as 25 hours ago
-    const longAgo = Date.now() - (25 * 3600 * 1000);
-    mockRedis.get.mockResolvedValue(longAgo.toString());
+    // Provide ledger entry with openedAt 25 hours ago
+    const longAgo = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+    mockGetLedgerPositions.mockResolvedValue([
+      {
+        marketId: symbol,
+        openedAt: longAgo,
+        isFutures: true,
+        direction: 'LONG',
+        question: `News Futures: ${symbol} LONG`,
+        entryPrice: 50000,
+        stakeUsd: 10,
+      },
+    ]);
 
     await runTick();
 
-    expect(mockPlaceMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
-      symbol,
-      reduceOnly: true,
-    }));
+    expect(mockClosePosition).toHaveBeenCalledWith(symbol);
   });
 });

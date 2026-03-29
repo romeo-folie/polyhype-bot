@@ -28,14 +28,21 @@ export const HL_SYMBOL_MAP: Record<string, string> = {
   'ondo-finance': 'ONDO',
 };
 
-// EIP-712 Domain for Hyperliquid
-const DOMAIN = {
-  name: 'Exchange', // Must be 'Exchange' for L1 trading actions
-  version: '1',
-  chainId: 1337,
-  verifyingContract: '0x0000000000000000000000000000000000000000' as `0x${string}`,
-};
+/**
+ * Resolves a text string (headline or question) to a Hyperliquid asset symbol.
+ * Substring matching against both original asset IDs and symbols.
+ */
+export function resolveHlSymbol(text: string): string | undefined {
+  const lowerText = text.toLowerCase();
+  for (const [id, symbol] of Object.entries(HL_SYMBOL_MAP)) {
+    if (lowerText.includes(id) || lowerText.includes(symbol.toLowerCase())) {
+      return symbol;
+    }
+  }
+  return undefined;
+}
 
+// EIP-712 Types for Hyperliquid
 const TYPES = {
   'Agent': [
     { name: 'source', type: 'string' },
@@ -48,7 +55,7 @@ export interface HlPosition {
   position: {
     szi: string;
     entryPx: string;
-    leverage: { type: string; value: number };
+    leverage: { type: string; value: number } | number;
     unrealizedPnl: string;
     marginUsed: string;
     coin: string;
@@ -61,6 +68,7 @@ export interface HlPosition {
 class HyperliquidClient {
   private wallet: ethers.Wallet;
   private baseUrl: string;
+  private domain: any;
   private metaCache: any = null;
   private metaCacheTime = 0;
   private midCache: Record<string, string> = {};
@@ -73,10 +81,19 @@ class HyperliquidClient {
     }
     this.wallet = new ethers.Wallet(cfg.HYPERLIQUID_PRIVATE_KEY);
     this.baseUrl = cfg.HYPERLIQUID_TESTNET ? TESTNET_API : MAINNET_API;
+
+    // Chain ID must be dynamic: HL Testnet = 1337, HL Mainnet = 42161 (Arbitrum)
+    this.domain = {
+      name: 'Exchange',
+      version: '1',
+      chainId: cfg.HYPERLIQUID_TESTNET ? 1337 : 42161,
+      verifyingContract: '0x0000000000000000000000000000000000000000' as `0x${string}`,
+    };
     
     logger.info('[hyperliquid] client initialised', {
       address: this.wallet.address,
       testnet: cfg.HYPERLIQUID_TESTNET,
+      chainId: this.domain.chainId,
     });
   }
 
@@ -112,7 +129,7 @@ class HyperliquidClient {
           limitPx: this.roundPrice(opts.isBuy ? midPrice * 1.1 : midPrice * 0.9),
           sz: this.roundSize(sizeBase, szDecimals),
           reduceOnly: opts.reduceOnly ?? false,
-          orderType: { limit: { tif: 'Gtc' } }
+          orderType: { limit: { tif: 'Ioc' } } // Market orders must use Ioc (Immediate or Cancel)
         }],
         grouping: 'na'
       };
@@ -134,6 +151,7 @@ class HyperliquidClient {
           return { success: true, txHash: result.filled.oid.toString() };
         }
         if (result.resting) {
+           // With Ioc, resting should generally not happen for the full size unless partially filled
            return { success: true, txHash: result.resting.oid.toString() };
         }
         if (result.error) {
@@ -214,13 +232,16 @@ class HyperliquidClient {
 
     const isBuy = currentSize < 0; // if short, we buy
     
+    // Defensive leverage parsing: HL sometimes returns leverage as an object { type: string, value: number }
+    const leverageValue = typeof pos.position.leverage === 'object' ? pos.position.leverage.value : pos.position.leverage;
+
     // Pass raw sizeBase to avoid slippage effects on size calculation
     return this.placeMarketOrder({
       symbol,
       isBuy,
       sizeUsd: 0, // Not used if sizeBase is provided
       sizeBase: Math.abs(currentSize),
-      leverage: pos.position.leverage.value,
+      leverage: leverageValue,
       reduceOnly: true,
     });
   }
@@ -239,7 +260,7 @@ class HyperliquidClient {
     const dataToHash = Buffer.concat([Buffer.from(msgpackBytes), nonceBuffer, vaultBuffer]);
     const connectionId = ethers.keccak256(dataToHash);
 
-    const signature = await this.wallet.signTypedData(DOMAIN, TYPES, {
+    const signature = await this.wallet.signTypedData(this.domain, TYPES, {
       source: 'Exchange',
       connectionId: connectionId,
     });
@@ -269,6 +290,11 @@ class HyperliquidClient {
     return { index: idx, szDecimals };
   }
 
+  /**
+   * Fetch mid prices for all assets.
+   * Note: The cache is updated globally for all symbols when any symbol is fetched.
+   * TTL check is also global (all symbols expire together every 30s).
+   */
   private async getMidPrice(symbol: string): Promise<number> {
     // 30 second cache
     if (this.midCache[symbol] && Date.now() - this.midCacheTime < 30_000) {
@@ -292,7 +318,19 @@ class HyperliquidClient {
 }
 
 let _client: HyperliquidClient | null = null;
+
+/**
+ * Gets the singleton Hyperliquid client instance.
+ */
 export function getHyperliquid(): HyperliquidClient {
   if (!_client) _client = new HyperliquidClient();
   return _client;
+}
+
+/**
+ * Resets the Hyperliquid client singleton.
+ * Mandatory for test teardown to avoid leaking state/mocks.
+ */
+export function resetHyperliquid(): void {
+  _client = null;
 }
