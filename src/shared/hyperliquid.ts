@@ -118,6 +118,9 @@ class HyperliquidClient {
   private domain: HlDomain;
   private metaCache: HlMeta | null = null;
   private metaCacheTime = 0;
+  // Global mid-price cache: all symbols are refreshed atomically via `allMids` in
+  // getMidPrice, so a single timestamp is correct. Per-symbol TTL would only be
+  // needed if individual symbols were fetched independently.
   private midCache: Record<string, string> = {};
   private midCacheTime = 0;
 

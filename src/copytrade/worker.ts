@@ -96,8 +96,10 @@ export async function runWorker(maxCycles?: number): Promise<void> {
   }
 }
 
-// Run worker if called directly (script mode)
-if (process.env['NODE_ENV'] !== 'test' && import.meta.url.startsWith('file:') && (process.argv[1]?.endsWith('worker.ts') || process.argv[1]?.endsWith('worker.js'))) {
+// Run worker if called directly (script mode).
+// The import.meta.url + argv check is the real guard; NODE_ENV is not reliable
+// across all test runners and has been removed.
+if (import.meta.url.startsWith('file:') && (process.argv[1]?.endsWith('worker.ts') || process.argv[1]?.endsWith('worker.js'))) {
   runWorker().catch(err => {
     logger.error('[copytrade-worker] fatal error', { 
       error: err instanceof Error ? err.message : String(err) 

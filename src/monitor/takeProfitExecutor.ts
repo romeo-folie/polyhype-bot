@@ -312,6 +312,9 @@ async function attemptSyntheticExit(opts: {
   });
 
   if (result.success) {
+    // Close the PM side in the position ledger. The corresponding HL hedge position
+    // remains open and is tracked independently by the futures monitor, which will
+    // manage and close it via its own execution path.
     await closePosition(redis, position.marketId, position.direction);
     await notifyTakeProfitExecuted({ 
        position, 
