@@ -73,6 +73,8 @@ interface CategoryConfig {
 | **Trade** (`cron:trade`) | `src/execution/index.ts` | **OSINT Pipeline**: Ingest multi-category news → score per category → map to markets → context check → execute new trades |
 | **Monitor** (`cron:monitor`) | `src/monitor/index.ts` | Resolve prices via WS cache → evaluate stop-loss / take-profit / divergence → exit if triggered → auto-redeem resolved winning positions |
 | **Spot** (`cron:spot`) | `src/spot/index.ts` | Poll spot prices → detect significant moves → cross-check Simmer oracle opportunities → execute correlated trades |
+| **Spot Feed** (`worker:spot-feed`) | `src/spot/feeds/manager.ts` | **Fast-Path Feed**: Persistent WebSocket connection to Binance/Helius → hot price cache → publish price_moved event |
+| **Fast Arb** (`worker:arb`) | `src/arb/worker.ts` | **High-Speed Worker**: Listen for price events → sub-200ms trigger → scan for arb → execute hedge |
 
 ### Exit Priority
 
@@ -297,6 +299,8 @@ The Redis lock uses token-based ownership: each run stores a unique token on acq
 | `npm run cron:trade` | Run the full trade pipeline (ingest → map → re-eval → execute) |
 | `npm run cron:monitor` | Run the position monitor (stop-loss / take-profit / divergence) |
 | `npm run cron:spot` | Run the spot price monitor (price moves → correlated market trades) |
+| `npm run worker:spot-feed` | Start real-time Binance/Solana WebSocket data feeds |
+| `npm run worker:arb` | Start the persistent high-speed arbitrage execution worker |
 | `npm run lint` | ESLint |
 | `npm run format` | Prettier |
 | `npm test` | Jest tests |
