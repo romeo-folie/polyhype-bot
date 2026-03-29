@@ -217,16 +217,26 @@ class HyperliquidClient {
       const response = await axios.post(`${this.baseUrl}/exchange`, payload);
       
       if (response.data?.status === 'ok') {
-        const result = response.data.response.data.statuses[0];
-        if (result.filled) {
-          return { success: true, txHash: result.filled.oid.toString() };
+        const statuses = response.data?.response?.data?.statuses;
+        if (!Array.isArray(statuses) || statuses.length === 0) {
+          return { success: false, error: 'HL response missing statuses array' };
         }
-        if (result.resting) {
-           // With Ioc, resting should generally not happen for the full size unless partially filled
-           return { success: true, txHash: result.resting.oid.toString() };
+        const result = statuses[0] as Record<string, unknown> | undefined;
+        if (!result) {
+          return { success: false, error: 'HL statuses[0] is undefined' };
         }
-        if (result.error) {
-          return { success: false, error: result.error };
+        const filled = result['filled'] as { oid?: unknown } | undefined;
+        const resting = result['resting'] as { oid?: unknown } | undefined;
+        const errorMsg = result['error'] as string | undefined;
+        if (filled?.oid != null) {
+          return { success: true, txHash: String(filled.oid) };
+        }
+        if (resting?.oid != null) {
+          // With IOC, resting should not happen for the full size unless partially filled.
+          return { success: true, txHash: String(resting.oid) };
+        }
+        if (errorMsg) {
+          return { success: false, error: errorMsg };
         }
       }
 
@@ -404,7 +414,8 @@ let _clientPrivateKey: string | null = null;
  */
 export function getHyperliquid(): HyperliquidClient {
   const cfg = loadConfig();
-  const currentKey = cfg.POLYGON_WALLET_PRIVATE_KEY ?? null;
+  // Track HYPERLIQUID_PRIVATE_KEY (not POLYGON_WALLET_PRIVATE_KEY which is for CLOB).
+  const currentKey = cfg.HYPERLIQUID_PRIVATE_KEY ?? null;
   if (!_client || currentKey !== _clientPrivateKey) {
     _client = new HyperliquidClient();
     _clientPrivateKey = currentKey;

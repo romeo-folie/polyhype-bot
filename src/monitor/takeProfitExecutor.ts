@@ -369,6 +369,25 @@ async function attemptSyntheticExit(opts: {
   const hl = getHyperliquid();
   const hedgeStakeUsd = position.stakeUsd;
 
+  // Margin cap check — synthetic exit opens a new HL position; must respect global cap.
+  try {
+    const state = await hl.getClearinghouseState();
+    const positions = await hl.getOpenPositions(state);
+    const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
+    const cfg2 = loadConfig();
+    if (totalCurrentMargin + hedgeStakeUsd > cfg2.FUTURES_GLOBAL_MAX_MARGIN_USD) {
+      logger.warn('[take-profit-executor] skipping synthetic exit — global margin cap reached', {
+        current: totalCurrentMargin.toFixed(2),
+        hedge: hedgeStakeUsd.toFixed(2),
+        cap: cfg2.FUTURES_GLOBAL_MAX_MARGIN_USD,
+      });
+      return { success: false, marketId: position.marketId, returnPct, reason, error: 'global_margin_cap' };
+    }
+  } catch (err) {
+    logger.error('[take-profit-executor] margin check failed — aborting synthetic exit', { error: String(err) });
+    return { success: false, marketId: position.marketId, returnPct, reason, error: 'margin_check_failed' };
+  }
+
   logger.info('[take-profit-executor] attempting synthetic exit on HL', { symbol: hlSymbol, isBuy, reason });
 
   const result = await hl.placeMarketOrder({
@@ -379,19 +398,36 @@ async function attemptSyntheticExit(opts: {
   });
 
   if (result.success) {
-    // Record the hedge link. The hedge is intentionally left open here — it is the
-    // active HL position. If the PM side is later closed by any other path (SL/TP),
-    // closePositionWithHedge() will read this key and close the HL leg too.
+    // Persist the hedge link first so any subsequent path knows the HL leg exists.
     await redis.set(`hedge:link:${position.marketId}`, hlSymbol, 'EX', 7 * 24 * 3600);
     logger.info('[take-profit-executor] synthetic exit: hedge link persisted', {
       marketId: position.marketId,
       hlSymbol,
     });
 
-    // Close only the PM side here. The HL hedge remains open and monitored by
-    // futuresMonitor for its own SL/TP. If this PM position is closed by any other
-    // path, closePositionWithHedge() will clean up the HL leg.
-    await closePosition(redis, position.marketId, position.direction);
+    // Close the PM ledger entry. If this fails, roll back the HL hedge to avoid leaving
+    // both legs open simultaneously — that would create unlimited unhedged exposure.
+    try {
+      await closePosition(redis, position.marketId, position.direction);
+    } catch (closeErr) {
+      logger.error('[take-profit-executor] CRITICAL: PM close failed after HL hedge opened — rolling back HL', {
+        marketId: position.marketId,
+        hlSymbol,
+        error: closeErr instanceof Error ? closeErr.message : String(closeErr),
+      });
+      // Attempt to close the HL position to restore a clean state.
+      const rollback = await hl.closePosition(hlSymbol).catch((e: unknown) => ({ success: false, error: String(e) }));
+      if (!rollback.success) {
+        logger.error('[take-profit-executor] HL rollback failed — manual intervention required', {
+          marketId: position.marketId,
+          hlSymbol,
+          rollbackError: rollback.error,
+        });
+      }
+      await redis.del(`hedge:link:${position.marketId}`).catch(() => {});
+      return { success: false, marketId: position.marketId, returnPct, reason, error: 'pm_close_failed_hedge_rolled_back' };
+    }
+
     await notifyTakeProfitExecuted({ 
        position, 
        currentPrice, 

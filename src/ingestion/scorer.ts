@@ -56,7 +56,9 @@ function parseScores(raw: string, batchLength: number): ScoreResult[] {
 
 async function scoreBatchGemini(items: RssItem[], systemPrompt: string): Promise<ScoreResult[]> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (!geminiKey) throw new Error('GEMINI_API_KEY is not set — cannot call Gemini scorer');
+  const genAI = new GoogleGenerativeAI(geminiKey);
   const model = genAI.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
 
   const result = await Promise.race([

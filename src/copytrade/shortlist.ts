@@ -25,11 +25,16 @@ const CATEGORY_MAP: Record<string, string> = {
   crypto: 'CRYPTO',
 };
 
-export function resolveCategories(scope: string[]): string[] {
+export function resolveCategories(scope: string | string[]): string[] {
+  // Normalise: accept legacy string values (e.g. 'all', 'crypto') from callers
+  // that haven't been updated, or from test fixtures. Config always emits string[].
+  const scopes = Array.isArray(scope) ? scope : scope.split(',').map(s => s.trim()).filter(Boolean);
+  if (scopes.includes('all') || scopes.length === 0) return ['OVERALL'];
   const cats = new Set<string>();
-  for (const s of scope) {
-    if (CATEGORY_MAP[s]) {
-      cats.add(CATEGORY_MAP[s]);
+  for (const s of scopes) {
+    const mapped = CATEGORY_MAP[s];
+    if (mapped) {
+      cats.add(mapped);
     } else {
       cats.add('OVERALL');
     }

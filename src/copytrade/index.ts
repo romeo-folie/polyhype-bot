@@ -64,11 +64,13 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
  * Check if a market title or description matches any keyword from the allowed categories.
  * Keywords are matched as whole words to avoid false positives from short tokens.
  */
-export function matchesCategory(title: string, description: string | null, allowedScopes: string[]): boolean {
-  if (allowedScopes.includes('all')) return true;
+export function matchesCategory(title: string, description: string | null, allowedScopes: string | string[]): boolean {
+  // Normalise: accept legacy string callers and test fixtures that haven't migrated yet.
+  const scopes = Array.isArray(allowedScopes) ? allowedScopes : allowedScopes.split(',').map(s => s.trim());
+  if (scopes.includes('all') || scopes.length === 0) return true;
 
   const lowerText = `${title} ${description ?? ''}`.toLowerCase();
-  for (const scope of allowedScopes) {
+  for (const scope of scopes) {
     const keywords = CATEGORY_KEYWORDS[scope];
     if (keywords?.some((kw) => {
       // Multi-word phrases: use substring match (the phrase already acts as its own boundary).
