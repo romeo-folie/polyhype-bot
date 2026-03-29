@@ -438,6 +438,10 @@ See `.env.example` for full documentation. Highlights:
 | `OUTCOME_MAX_PER_CATEGORY` | — | Max outcomes per category before pruning (default 500) |
 | `CONTEXT_INJECTION_ENABLED` | — | Inject historical outcomes into LLM prompts (default true) |
 | `CONTEXT_INJECTION_LIMIT` | — | Number of outcomes injected per prompt (default 5) |
+| `SCORER_CACHE_TTL_S` | — | Cache LLM urgency scores per article URL in seconds (default 3600 = 1h) |
+| `CONSENSUS_CACHE_ENABLED` | — | Enable Redis cache for consensus estimates (default true) |
+| `CONSENSUS_CACHE_TTL_S` | — | Cache TTL for consensus estimates in seconds (default 1800 = 30 min) |
+| `CONSENSUS_SAMPLES` | — | LLM samples per consensus estimate (default 2, max 5) |
 
 ---
 

@@ -87,6 +87,12 @@ const envSchema = z.object({
   CONTEXT_INJECTION_ENABLED: z.coerce.boolean().optional().default(true),
   CONTEXT_INJECTION_LIMIT: z.coerce.number().int().min(1).max(10).optional().default(5),
 
+  // LLM rate reduction caches
+  SCORER_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
+  CONSENSUS_CACHE_ENABLED: z.coerce.boolean().optional().default(true),
+  CONSENSUS_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(1800),
+  CONSENSUS_SAMPLES: z.coerce.number().int().min(1).max(5).optional().default(2),
+
   // Copytrade signals
   COPYTRADE_ENABLED: z.coerce.boolean().optional().default(false),
   COPYTRADE_WALLETS: z.string().optional().default(''),

@@ -8,6 +8,7 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
     GEMINI_MODEL: 'gemini-2.5-flash',
     LLM_PROVIDER: 'gemini', // default: try Gemini first, fall back to OpenAI
     URGENCY_THRESHOLD: 8,
+    SCORER_CACHE_TTL_S: 3600,
   })),
 }));
 
@@ -160,5 +161,67 @@ describe('scoreItems', () => {
 
     const call = mockGenerateContent.mock.calls[0]?.[0];
     expect(call?.systemInstruction?.parts?.[0]?.text).toBe(meta.systemPrompt);
+  });
+
+  it('returns cached score without LLM call when cache hit', async () => {
+    const cachedItem = {
+      title: 'Cached headline',
+      url: 'https://example.com/cached-headline',
+      publishedAt: '2026-01-01T00:00:00.000Z',
+      source: 'Test Source',
+      urgencyScore: 9,
+      keywords: ['cached'],
+      categoryId: 'test',
+      categoryLabel: 'Test Category',
+      entityContext: 'test entities',
+      sentiment: 'YES',
+    };
+
+    const mockRedis = {
+      get: jest.fn<(key: string) => Promise<string | null>>().mockResolvedValue(JSON.stringify(cachedItem)),
+      set: jest.fn<() => Promise<string>>().mockResolvedValue('OK'),
+    };
+
+    const items = [makeItem('Cached headline')];
+    const result = await scoreItems(items, { ...meta, redis: mockRedis as any });
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.urgencyScore).toBe(9);
+    expect(result[0]!.keywords).toEqual(['cached']);
+    // LLM should NOT have been called
+    expect(mockGenerateContent).not.toHaveBeenCalled();
+    expect(mockChatCreate).not.toHaveBeenCalled();
+  });
+
+  it('calls LLM and caches result on cache miss', async () => {
+    mockGenerateContent.mockResolvedValue({
+      response: {
+        text: () =>
+          JSON.stringify({
+            results: [{ score: 7, keywords: ['new'], sentiment: 'NO' }],
+          }),
+      },
+    });
+
+    const mockRedis = {
+      get: jest.fn<(key: string) => Promise<string | null>>().mockResolvedValue(null),
+      set: jest.fn<() => Promise<string>>().mockResolvedValue('OK'),
+    };
+
+    const items = [makeItem('New headline')];
+    const result = await scoreItems(items, { ...meta, redis: mockRedis as any });
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.urgencyScore).toBe(7);
+    // LLM was called
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    // Result was cached
+    expect(mockRedis.set).toHaveBeenCalledTimes(1);
+    expect(mockRedis.set).toHaveBeenCalledWith(
+      expect.stringMatching(/^scored:/),
+      expect.any(String),
+      'EX',
+      3600,
+    );
   });
 });

@@ -34,6 +34,7 @@ async function runCategoryPipeline(
     categoryId: category.id,
     categoryLabel: category.label,
     entityContext: category.entityContext,
+    redis,
   });
 
   const boosted = applyTimingBoost(scored);
