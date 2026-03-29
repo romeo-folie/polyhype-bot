@@ -99,7 +99,7 @@ export async function getOpenPositions(redis: Redis): Promise<Position[]> {
   const positions: Position[] = [];
   for (const key of keys) {
     const raw = await redis.hgetall(key);
-    if (!raw || !raw['marketId']) {
+    if (!raw.marketId) {
       // Key expired — remove from index
       await redis.zrem(POSITIONS_INDEX_KEY, key);
       continue;
@@ -140,21 +140,21 @@ export async function hasOpenPosition(
 
 function deserialisePosition(raw: Record<string, string>): Position {
   const pos: Position = {
-    marketId: raw['marketId'] ?? '',
-    conditionId: raw['conditionId'] ?? '',
-    clobTokenIds: raw['clobTokenIds'] ? (JSON.parse(raw['clobTokenIds']) as string[]) : [],
-    question: raw['question'] ?? '',
-    direction: (raw['direction'] ?? 'YES') as 'YES' | 'NO',
-    entryPrice: parseFloat(raw['entryPrice'] ?? '0'),
-    stakeUsd: parseFloat(raw['stakeUsd'] ?? '0'),
-    consensusProbability: parseFloat(raw['consensusProbability'] ?? '0'),
-    edgeMagnitude: parseFloat(raw['edgeMagnitude'] ?? '0'),
-    sourcedFrom: raw['sourcedFrom'] ?? '',
-    openedAt: raw['openedAt'] ?? new Date().toISOString(),
-    executionVenue: (raw['executionVenue'] === 'clob' ? 'clob' : 'simmer'),
+    marketId: raw.marketId ?? '',
+    conditionId: raw.conditionId ?? '',
+    clobTokenIds: raw.clobTokenIds ? (JSON.parse(raw.clobTokenIds) as string[]) : [],
+    question: raw.question ?? '',
+    direction: (raw.direction ?? 'YES') as 'YES' | 'NO',
+    entryPrice: parseFloat(raw.entryPrice ?? '0'),
+    stakeUsd: parseFloat(raw.stakeUsd ?? '0'),
+    consensusProbability: parseFloat(raw.consensusProbability ?? '0'),
+    edgeMagnitude: parseFloat(raw.edgeMagnitude ?? '0'),
+    sourcedFrom: raw.sourcedFrom ?? '',
+    openedAt: raw.openedAt ?? new Date().toISOString(),
+    executionVenue: (raw.executionVenue === 'clob' ? 'clob' : 'simmer'),
   };
-  if (raw['consensusStddev']) pos.consensusStddev = parseFloat(raw['consensusStddev']);
-  if (raw['txHash']) pos.txHash = raw['txHash'];
-  if (raw['sharesHeld']) pos.sharesHeld = parseFloat(raw['sharesHeld']);
+  if (raw.consensusStddev) pos.consensusStddev = parseFloat(raw.consensusStddev);
+  if (raw.txHash) pos.txHash = raw.txHash;
+  if (raw.sharesHeld) pos.sharesHeld = parseFloat(raw.sharesHeld);
   return pos;
 }
