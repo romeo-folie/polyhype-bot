@@ -123,6 +123,20 @@ export async function getOpenPositions(redis: Redis): Promise<Position[]> {
 }
 
 /**
+ * Fetch a single open position by marketId + direction. Returns null if not found.
+ */
+export async function getPosition(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+): Promise<Position | null> {
+  const key = `${POSITION_KEY_PREFIX}${marketId}:${direction}`;
+  const raw = await redis.hgetall(key);
+  if (!raw.marketId) return null;
+  return deserialisePosition(raw);
+}
+
+/**
  * Remove a position from the ledger (after take-profit or manual close).
  */
 export async function closePosition(

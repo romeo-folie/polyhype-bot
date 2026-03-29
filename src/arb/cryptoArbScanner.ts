@@ -123,6 +123,9 @@ export async function scanCryptoArb(
   const minEdge = cfg.CRYPTO_ARB_MIN_EDGE;
   const opportunities: CryptoArbOpportunity[] = [];
 
+  // Fetch bankroll once before the loop — avoids a Redis round-trip per market.
+  const bankroll = await getBankroll(redis);
+
   const feed = getPriceFeed(redis);
 
   for (const market of markets) {
@@ -157,7 +160,6 @@ export async function scanCryptoArb(
       if (deduped) continue;
 
       // 6. Edge-scaled fixed-fraction sizing
-      const bankroll = await getBankroll(redis);
       const kellyStake = bankroll * netEdge * cfg.CRYPTO_ARB_MAX_STAKE_FRACTION;
       const maxStake = cfg.MAX_BET_FRACTION * bankroll;
       const stakeUsd = Math.min(kellyStake, maxStake);

@@ -18,7 +18,7 @@ import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
-import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
+import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { Redis } from 'ioredis';
 import type { Position } from '../execution/positionLedger.js';
@@ -129,7 +129,7 @@ async function executeSimmerExit(opts: {
       const proceedsUsd = sharesToSell * currentPrice;
       await creditProceeds(redis, proceedsUsd);
       await recordOutcome(redis, {
-        source: 'osint',
+        source: inferSource(position.sourcedFrom ?? ''),
         category: inferCategory(position.question),
         question: position.question.slice(0, 200),
         direction: position.direction as 'YES' | 'NO',
@@ -273,7 +273,7 @@ async function executeClobExit(opts: {
       const proceedsUsd = sharesToSell * currentPrice;
       await creditProceeds(redis, proceedsUsd);
       await recordOutcome(redis, {
-        source: 'osint',
+        source: inferSource(position.sourcedFrom ?? ''),
         category: inferCategory(position.question),
         question: position.question.slice(0, 200),
         direction: position.direction as 'YES' | 'NO',

@@ -30,6 +30,18 @@ export interface PositionOutcome {
 }
 
 /**
+ * Map a position's `sourcedFrom` field to the PositionOutcome source enum.
+ */
+export function inferSource(sourcedFrom: string): PositionOutcome['source'] {
+  const s = sourcedFrom.toLowerCase();
+  if (s.startsWith('copytrade:')) return 'copytrade';
+  if (s.startsWith('crypto-arb:')) return 'crypto-arb';
+  if (s.startsWith('spot:') || s.startsWith('spot ')) return 'spot';
+  if (s.startsWith('arb:') || s.startsWith('market arb')) return 'arb';
+  return 'osint'; // default: OSINT news pipeline
+}
+
+/**
  * Infer a category from a market question using keyword matching.
  */
 export function inferCategory(question: string): string {

@@ -272,13 +272,18 @@ export async function executeSignal(
       const cal = await getCalibrationStats(redis, category);
       const correctedEdge = applyCalibrationCorrection(signal.edgeMagnitude ?? 0, cal, cfg.CALIBRATION_MIN_SAMPLES);
       if (correctedEdge !== signal.edgeMagnitude) {
+        // Scale stakeUsd proportionally so the correction actually changes trade size.
+        const correctionFactor = cal!.edgeCorrectionFactor;
+        const correctedStake = Math.max(0, signal.stakeUsd * correctionFactor);
         logger.info('[executor] calibration correction applied', {
           category,
           originalEdge: signal.edgeMagnitude,
           correctedEdge,
-          factor: cal?.edgeCorrectionFactor,
+          originalStake: signal.stakeUsd,
+          correctedStake,
+          factor: correctionFactor,
         });
-        signal = { ...signal, edgeMagnitude: correctedEdge };
+        signal = { ...signal, edgeMagnitude: correctedEdge, stakeUsd: correctedStake };
       }
     } catch (err) {
       logger.warn('[executor] calibration lookup failed (non-fatal)', {

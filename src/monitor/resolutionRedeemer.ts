@@ -17,11 +17,11 @@
 
 import { logger } from '../shared/logger.js';
 import { getSimmerPositions, submitRedeem, SimmerError } from '../shared/simmer.js';
-import { closePosition, getOpenPositions } from '../execution/positionLedger.js';
+import { closePosition, getOpenPositions, getPosition } from '../execution/positionLedger.js';
 import { redeemClobOutcome } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
-import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
+import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
 import type { Redis } from 'ioredis';
 
 export interface RedemptionResult {
@@ -80,6 +80,8 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
         if (redeemResult.success) {
           // Remove from Redis ledger — treat direction as uppercase to match ledger keys
           const direction = side.toUpperCase() as 'YES' | 'NO';
+          // Cross-reference ledger BEFORE closing to preserve sourcedFrom.
+          const ledgerPos = await getPosition(redis, pos.market_id, direction);
           await closePosition(redis, pos.market_id, direction);
 
           // Credit face value (resolved = $1/share) to bankroll
@@ -90,13 +92,10 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
 
           // Record outcome (Phase 8).
           // redeemable === true means Polymarket confirmed our direction won.
-          // Any position reaching this block has passed the redeemable filter,
-          // so we can safely derive result from redeemable. Be explicit rather than
-          // hardcoding 'won' in case a future code path passes non-redeemable positions.
           const simmerWon = pos.redeemable === true;
           const posAny = pos as Record<string, unknown>;
-          const stakeUsd = typeof posAny['stakeUsd'] === 'number' ? posAny['stakeUsd'] : null;
-          const openedAt = typeof posAny['openedAt'] === 'string' ? posAny['openedAt'] : null;
+          const stakeUsd = ledgerPos?.stakeUsd ?? (typeof posAny['stakeUsd'] === 'number' ? posAny['stakeUsd'] : null);
+          const openedAt = ledgerPos?.openedAt ?? (typeof posAny['openedAt'] === 'string' ? posAny['openedAt'] : null);
           if (!stakeUsd) {
             logger.warn('[redeemer] Simmer position missing stakeUsd for outcome calibration', {
               market_id: pos.market_id,
@@ -104,16 +103,16 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
           }
           const question = pos.question ?? pos.market_id;
           await recordOutcome(redis, {
-            source: 'osint',
+            source: inferSource(ledgerPos?.sourcedFrom ?? ''),
             category: inferCategory(question),
             question: question.slice(0, 200),
             direction: direction,
-            consensusProbability: typeof posAny['consensusProbability'] === 'number' ? posAny['consensusProbability'] : 0.5,
-            divergence: typeof posAny['edgeMagnitude'] === 'number' ? posAny['edgeMagnitude'] : 0,
+            consensusProbability: ledgerPos?.consensusProbability ?? (typeof posAny['consensusProbability'] === 'number' ? posAny['consensusProbability'] : 0.5),
+            divergence: ledgerPos?.edgeMagnitude ?? (typeof posAny['edgeMagnitude'] === 'number' ? posAny['edgeMagnitude'] : 0),
             result: simmerWon ? 'won' : 'lost',
             returnPct: proceedsUsdc > 0 && stakeUsd ? ((proceedsUsdc - stakeUsd) / stakeUsd) * 100 : 0,
             holdingHours: openedAt ? (Date.now() - new Date(openedAt).getTime()) / 3600000 : 0,
-            executionVenue: typeof posAny['executionVenue'] === 'string' ? posAny['executionVenue'] : 'simmer',
+            executionVenue: ledgerPos?.executionVenue ?? (typeof posAny['executionVenue'] === 'string' ? posAny['executionVenue'] : 'simmer'),
           });
 
           // Notify
@@ -247,7 +246,7 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): P
 
       // Record outcome (Phase 8)
       await recordOutcome(redis, {
-        source: 'osint',
+        source: inferSource(pos.sourcedFrom ?? ''),
         category: inferCategory(pos.question ?? pos.marketId),
         question: (pos.question ?? pos.marketId).slice(0, 200),
         direction: pos.direction as 'YES' | 'NO',

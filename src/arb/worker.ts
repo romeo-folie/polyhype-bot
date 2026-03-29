@@ -28,6 +28,7 @@ export class ArbitrageWorker {
   private maxTradesPerMin: number;
   private lastScanTime = 0;
   private lastCryptoArbTime = 0;
+  private lastCryptoArbTradeTime = 0;
   private isScanning = false;
   private timer: NodeJS.Timeout | null = null;
 
@@ -174,6 +175,13 @@ export class ArbitrageWorker {
       const opportunities = await scanCryptoArb(move, redis);
 
       for (const opp of opportunities) {
+        // Per-trade rate limit: enforce minInterval between individual trades, not just scans.
+        const tradeNow = Date.now();
+        if (tradeNow - this.lastCryptoArbTradeTime < minIntervalMs) {
+          logger.debug('[crypto-arb] per-trade governor throttle, skipping remaining opportunities');
+          break;
+        }
+
         try {
           const signal: TradeSignal = {
             marketId: opp.marketId,
@@ -217,6 +225,8 @@ export class ArbitrageWorker {
 
             // Deduct stake from bankroll cache
             await deductStake(redis, opp.stakeUsd);
+            // Update per-trade timestamp so the next iteration respects the rate limit.
+            this.lastCryptoArbTradeTime = Date.now();
 
             // Set dedup key
             const dedupKey = `arb:crypto:${opp.marketId}:${opp.direction}`;
