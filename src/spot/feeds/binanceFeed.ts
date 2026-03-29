@@ -15,7 +15,7 @@ export class BinanceFeed {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectCount = 0;
 
-  constructor(symbols: string[] = ['btcusdt', 'ethusdt', 'solusdt']) {
+  constructor(symbols: string[] = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt', 'bnbusdt', 'taousdt', 'dogeusdt', 'adausdt', 'avaxusdt', 'linkusdt', 'suiusdt']) {
     this.symbols = symbols.map(s => s.toLowerCase());
   }
 
