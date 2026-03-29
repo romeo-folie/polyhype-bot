@@ -1,6 +1,6 @@
 # Polymarket Geopolitical Trading Agent
 
-Autonomous multi-signal trading agent for Polymarket prediction markets. Combines OSINT pipelines, whale wallet mirroring, real-time spot price arbitrage, and Hyperliquid futures hedging into a single risk-managed system.
+Autonomous multi-signal trading agent for Polymarket prediction markets. Combines OSINT pipelines, whale wallet mirroring, real-time spot price arbitrage, crypto latency arbitrage, and Hyperliquid futures hedging into a single risk-managed system.
 
 ---
 
@@ -17,8 +17,10 @@ graph TD
     end
 
     subgraph "Arbitrage Worker (Persistent)"
-        AW[ArbitrageWorker\nRedis sub + 10s baseline] --> AS[Arb Scanner\nGamma cross-check]
+        AW[ArbitrageWorker\nRedis sub + 10s baseline] --> AS[YES+NO Arb Scanner\nGamma cross-check]
         AS --> EXEC
+        AW -->|spot:price_moved| CA[Crypto Latency Arb\nBS formula, no LLM]
+        CA --> EXEC
     end
 
     subgraph "Copytrade Worker (Persistent, 2s loop)"
@@ -78,7 +80,7 @@ graph TD
 | Process | Script | Interval | Purpose |
 |---------|--------|----------|---------|
 | **Spot Feed Worker** | `worker:spot-feed` | Persistent | Binance WS + Helius Solana feeds → Redis hot-price cache → publish `spot:price_moved` |
-| **Arbitrage Worker** | `worker:arb` | Persistent (sub + 10s) | Redis pub/sub fast-path + 10s baseline scan for Polymarket arb opportunities |
+| **Arbitrage Worker** | `worker:arb` | Persistent (sub + 10s) | Two arb paths: (1) YES+NO combined < $1 sweep on 10s baseline; (2) crypto latency arb on every `spot:price_moved` event — BS fair value vs stale PM price, no LLM, sub-500ms |
 | **Copytrade Worker** | `worker:copytrade` | Persistent (2s loop) | Mirror expert whale wallets with category/liquidity/slippage guardrails |
 | **Futures Monitor** | `monitor:futures` | Persistent (5s poll) | HL perp SL/TP/max-hold enforcement for delta hedges and synthetic exits |
 | **OSINT Pipeline** | `cron:trade` | 5 min | RSS + GDELT ingest → LLM score → Gamma mapping → divergence → execute |
@@ -136,18 +138,47 @@ Shortlist auto-refresh queries the leaderboard by PnL/volume thresholds and opti
 ### 3. Spot → Arb Path (`worker:spot-feed` + `worker:arb`)
 
 ```
-BinanceFeed (WebSocket, configurable symbols)
-HeliusFeed (Helius/Pyth, SOL price)
+BinanceFeed (WebSocket) — assets: BTC, ETH, SOL, XRP, BNB, TAO, DOGE, ADA, AVAX, LINK, SUI
+HeliusFeed (Helius/Pyth) — SOL price
   → Redis hot-price cache (per-symbol)
   → Publish `spot:price_moved` event
 
-ArbitrageWorker:
-  Fast-path: subscribe to `spot:price_moved` → immediate scan trigger
-  Baseline:  10s interval scan (catches moves missed between events)
-  → Arb Scanner: Gamma API cross-check, detect Polymarket lag
-  → Rate limiter (max 45 trades/min)
+ArbitrageWorker — two independent arb paths run on every event:
+
+  Path A — YES+NO combined arbitrage (baseline + fast-path):
+    Fast-path: spot:price_moved → immediate sweep trigger
+    Baseline:  10s interval sweep (catches moves missed between events)
+    → Scan 1,000 active markets: yesAsk + noAsk < $1.00 - fees
+    → Execute both legs sequentially (YES first, NO only if YES fills)
+
+  Path B — Crypto latency arbitrage (fast-path only, Phase 7):
+    spot:price_moved → map symbol to asset → find correlated PM price-target markets
+    → Redis market cache (1h TTL, fallback to Gamma search)
+    → Fetch current PM price from WS cache (sub-second)
+    → Compute fair value: Black-Scholes binary formula (<1ms, no LLM)
+    → edge = |fairValue - pmPrice| - fees
+    → If edge > CRYPTO_ARB_MIN_EDGE (default 8%): execute directional trade
+    → 5-min dedup per (marketId, direction)
+
+  Shared: Rate limiter (max 45 orders/min across both paths)
   → Execution Router
 ```
+
+**Tracked assets (Path B):**
+
+| Binance symbol | Asset ID | Search terms |
+|---|---|---|
+| btcusdt | bitcoin | bitcoin, BTC |
+| ethusdt | ethereum | ethereum, ETH |
+| solusdt | solana | solana, SOL |
+| xrpusdt | ripple | XRP, ripple |
+| bnbusdt | binancecoin | BNB, binance coin |
+| taousdt | bittensor | TAO, bittensor |
+| dogeusdt | dogecoin | dogecoin, DOGE |
+| adausdt | cardano | cardano, ADA |
+| avaxusdt | avalanche | avalanche, AVAX |
+| linkusdt | chainlink | chainlink, LINK |
+| suiusdt | sui | SUI |
 
 ### 4. Spot Monitor (`cron:spot`)
 
@@ -272,7 +303,8 @@ Redis position ledger → all open positions
 | `src/mapping/` | Gamma API client, entity extraction, consensus probability, Half-Kelly sizing, divergence |
 | `src/spot/` | Spot poller, threshold detector, market correlator, fast consensus estimator |
 | `src/spot/feeds/` | BinanceFeed (WebSocket), HeliusFeed (Helius/Pyth), FeedManager |
-| `src/arb/` | ArbitrageWorker (pub/sub + baseline), arb scanner |
+| `src/arb/` | ArbitrageWorker (pub/sub + baseline), YES+NO arb scanner, crypto latency arb scanner (Phase 7) |
+| `src/arb/cryptoArbScanner.ts` | Crypto latency arb — BS fair value computation, asset→market mapping, Redis market cache, dedup |
 | `src/copytrade/` | Whale wallet worker, leaderboard shortlist refresh |
 | `src/execution/` | Executor (venue router, pre-trade context check), position ledger, Telegram notifications |
 | `src/monitor/` | Price resolver (WS + REST), SL/TP/divergence evaluator, resolution redeemer |
@@ -388,6 +420,11 @@ See `.env.example` for full documentation. Highlights:
 | `SPOT_MONITOR_ENABLED` | — | Master switch for spot monitor |
 | `BINANCE_WS_ENABLED` | — | Enable Binance WebSocket feed |
 | `HELIUS_API_KEY` | — | Enable Solana/Pyth real-time feed |
+| `CRYPTO_ARB_ENABLED` | — | Master switch for crypto latency arb (Phase 7, default true) |
+| `CRYPTO_ARB_MIN_EDGE` | — | Minimum net edge after fees to enter crypto arb (default 0.08 = 8%) |
+| `CRYPTO_ARB_MAX_STAKE_FRACTION` | — | Max fraction of bankroll per crypto arb trade (default 0.03 = 3%) |
+| `CRYPTO_ARB_DEDUP_TTL_S` | — | Dedup window per market/direction in seconds (default 300 = 5 min) |
+| `CRYPTO_ARB_MARKET_CACHE_TTL_S` | — | Cache TTL for Gamma market search results (default 3600 = 1h) |
 
 ---
 
