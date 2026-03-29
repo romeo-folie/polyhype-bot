@@ -95,14 +95,10 @@ async function executeHyperliquidSignal(
   const hl = getHyperliquid();
 
   try {
-    // 1. Margin & Equity Check
-    // getClearinghouseState is called once internally by getOpenPositions().
-    // We also need the raw state for accountValue, so we call it directly here
-    // and pass positions from that same state to avoid a redundant API round-trip.
-    const [state, positions] = await Promise.all([
-      hl.getClearinghouseState(),
-      hl.getOpenPositions(),
-    ]);
+    // 1. Margin & Equity Check — single API call.
+    // getOpenPositions() can accept a pre-fetched state to avoid a second round-trip.
+    const state = await hl.getClearinghouseState();
+    const positions = await hl.getOpenPositions(state);
     const accountValue = parseFloat(state?.marginSummary?.accountValue || '0');
 
     // Solvency check: basic safety to avoid sending orders that will definitely fail.

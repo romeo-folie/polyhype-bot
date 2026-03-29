@@ -30,14 +30,21 @@ export const HL_SYMBOL_MAP: Record<string, string> = {
 
 /**
  * Resolves a text string (headline or question) to a Hyperliquid asset symbol.
- * Substring matching against both original asset IDs and symbols.
+ *
+ * Uses word-boundary regex matching to prevent short symbols ('sol', 'op', 'arb', etc.)
+ * from matching common English words and triggering false-positive futures trades.
+ * Long IDs (>= 6 chars, e.g. 'bitcoin') are matched as substrings; short IDs
+ * and all symbols require a word boundary on each side.
  */
 export function resolveHlSymbol(text: string): string | undefined {
   const lowerText = text.toLowerCase();
   for (const [id, symbol] of Object.entries(HL_SYMBOL_MAP)) {
-    if (lowerText.includes(id) || lowerText.includes(symbol.toLowerCase())) {
-      return symbol;
-    }
+    // Long IDs are unambiguous enough for substring matching.
+    if (id.length >= 6 && lowerText.includes(id)) return symbol;
+    // Short IDs and all ticker symbols require word boundaries.
+    const wbId = new RegExp(`\\b${id}\\b`, 'i');
+    const wbSym = new RegExp(`\\b${symbol.toLowerCase()}\\b`, 'i');
+    if (wbId.test(lowerText) || wbSym.test(lowerText)) return symbol;
   }
   return undefined;
 }
@@ -199,10 +206,11 @@ class HyperliquidClient {
   }
 
   /**
-   * Retrieve all open perp positions specifically structured for the agent.
+   * Retrieve all open perp positions, optionally from a pre-fetched state object.
+   * Pass a pre-fetched state to avoid an extra API round-trip.
    */
-  async getOpenPositions(): Promise<HlPosition[]> {
-    const state = await this.getClearinghouseState();
+  async getOpenPositions(preloadedState?: any): Promise<HlPosition[]> {
+    const state = preloadedState ?? await this.getClearinghouseState();
     if (!state?.assetPositions) return [];
 
     return state.assetPositions.map((ap: any) => ({

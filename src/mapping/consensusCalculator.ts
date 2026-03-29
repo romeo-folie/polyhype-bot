@@ -204,9 +204,30 @@ export async function estimateConsensusProbability(opts: {
   return { probability: mean, reasoning, stddev, sampleCount: results.length };
 }
 
+// Module-level singleton clients — created once, reused across all estimateSentiment calls.
+let _sentimentOpenAIClient: import('openai').OpenAI | null = null;
+let _sentimentGeminiClient: import('@google/generative-ai').GoogleGenerativeAI | null = null;
+
+function getSentimentOpenAI(): import('openai').OpenAI {
+  if (!_sentimentOpenAIClient) {
+    const { OpenAI } = require('openai') as typeof import('openai');
+    _sentimentOpenAIClient = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
+  }
+  return _sentimentOpenAIClient;
+}
+
+function getSentimentGemini(): import('@google/generative-ai').GoogleGenerativeAI {
+  if (!_sentimentGeminiClient) {
+    const { GoogleGenerativeAI } = require('@google/generative-ai') as typeof import('@google/generative-ai');
+    _sentimentGeminiClient = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
+  }
+  return _sentimentGeminiClient;
+}
+
 /**
- * Rapid sentiment check for futures trading. 
+ * Rapid sentiment check for futures trading.
  * Performs a single-call zero-shot classification: POSITIVE, NEGATIVE, or NEUTRAL.
+ * LLM clients are created once and reused across calls.
  */
 export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHORT' | 'NEUTRAL'> {
   const provider = loadConfig().LLM_PROVIDER;
@@ -221,15 +242,13 @@ export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHO
   let raw = '';
   try {
     if (useGemini) {
-      const { GoogleGenerativeAI } = await import('@google/generative-ai');
-      const genai = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
+      const genai = getSentimentGemini();
       const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
       const prompt = `${system}\n\nHeadline: ${headline}`;
       const result = await model.generateContent(prompt);
       raw = result.response.text().trim().toUpperCase();
     } else if (useOpenAI) {
-      const { OpenAI } = await import('openai');
-      const client = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
+      const client = getSentimentOpenAI();
       const completion = await client.chat.completions.create({
         model: loadConfig().OPENAI_MODEL,
         messages: [{ role: 'system', content: system }, { role: 'user', content: headline }],
