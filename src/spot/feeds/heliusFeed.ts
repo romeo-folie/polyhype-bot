@@ -67,9 +67,14 @@ export class HeliusFeed {
 
     this.ws.on('close', () => {
       if (this.ws) {
+        const MAX_RECONNECTS = 10;
+        if (this.reconnectCount >= MAX_RECONNECTS) {
+          logger.error(`[pyth] max reconnect attempts (${MAX_RECONNECTS}) reached — giving up`);
+          return;
+        }
         this.reconnectCount++;
         const delay = Math.min(1000 * Math.pow(2, this.reconnectCount), 30000);
-        logger.warn(`[pyth] connection closed, reconnecting in ${String(delay / 1000)}s (attempt ${String(this.reconnectCount)})...`);
+        logger.warn(`[pyth] connection closed, reconnecting in ${String(delay / 1000)}s (attempt ${String(this.reconnectCount)}/${MAX_RECONNECTS})...`);
         this.reconnectTimeout = setTimeout(() => { this.start(); }, delay);
       }
     });

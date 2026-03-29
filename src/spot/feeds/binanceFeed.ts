@@ -95,11 +95,17 @@ export class BinanceFeed {
     }
   }
 
+  private readonly MAX_RECONNECTS = 10;
+
   private reconnect(): void {
     if (this.reconnectTimer) return;
+    if (this.reconnectCount >= this.MAX_RECONNECTS) {
+      logger.error(`[binance] max reconnect attempts (${this.MAX_RECONNECTS}) reached — giving up`);
+      return;
+    }
     this.reconnectCount++;
     const delay = Math.min(1000 * Math.pow(2, this.reconnectCount), 30000);
-    logger.warn(`[binance] reconnecting in ${String(delay / 1000)}s (attempt ${String(this.reconnectCount)})...`);
+    logger.warn(`[binance] reconnecting in ${String(delay / 1000)}s (attempt ${String(this.reconnectCount)}/${this.MAX_RECONNECTS})...`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.start();

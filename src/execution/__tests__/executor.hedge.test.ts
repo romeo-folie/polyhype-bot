@@ -80,10 +80,7 @@ describe('Delta Hedging Integration', () => {
     expect(result.skipped).toBe(false);
     expect(result.executionVenue).toBe('simmer');
 
-    // Give the async triggerDeltaHedge (voided) a moment to execute
-    await new Promise(r => setTimeout(r, 100));
-
-    // Verify HL hedge was triggered
+    // Verify HL hedge was triggered (awaited synchronously — no timeout needed)
     expect(mockPlaceMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
       symbol: 'BTC',
       isBuy: false, // SHORT
@@ -113,7 +110,6 @@ describe('Delta Hedging Integration', () => {
     };
 
     await executeSignal(signal as any, mockRedis);
-    await new Promise(r => setTimeout(r, 100));
 
     expect(mockPlaceMarketOrder).not.toHaveBeenCalled();
   });

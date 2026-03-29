@@ -105,8 +105,14 @@ async function executeHyperliquidSignal(
 
     // Solvency check: basic safety to avoid sending orders that will definitely fail.
     // Real-time margin checks happen on the HL side.
-    if (accountValue < 0.01) {
-       logger.warn('[executor] skipping — account has zero or near-zero equity', { accountValue: accountValue.toFixed(2) });
+    // Equity floor: require at least FUTURES_MAX_PER_TRADE_USD.
+    // $0.01 was effectively meaningless; use a floor that guarantees one trade can execute.
+    const equityFloor = cfg.FUTURES_MAX_PER_TRADE_USD;
+    if (accountValue < equityFloor) {
+       logger.warn('[executor] skipping — account equity below floor', {
+         accountValue: accountValue.toFixed(2),
+         floor: equityFloor.toFixed(2),
+       });
        return { signal, skipped: true, skipReason: 'insufficient_equity' };
     }
 

@@ -42,7 +42,6 @@ export async function runWorker(maxCycles?: number): Promise<void> {
         loadConfig(true); // flush cache
         logger.info('[copytrade-worker] configuration refreshed from .env');
       }
-      const cycleConfig = loadConfig(); // snapshot for this iteration
 
       const bankrollUsd = await getBankroll(redis);
       const { signals, exits } = await runCopytrade(redis, bankrollUsd);
