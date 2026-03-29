@@ -37,7 +37,7 @@ export interface ExecutionResult {
   error?: string;
   executionVenue?: 'simmer' | 'clob' | 'hyperliquid';
   /** True if a delta hedge was placed on HL for this trade. */
-  hedgePlaced?: boolean;
+  hedgeAttempted?: boolean;
 }
 
 function idempotencyKey(signal: TradeSignal): string {
@@ -447,7 +447,7 @@ export async function executeSignal(
         });
 
         // Fire-and-forget the delta hedge — do not block PM trade confirmation on HL latency.
-        // hedgePlaced is reported as true optimistically; errors are logged inside triggerDeltaHedge.
+        // hedgeAttempted is reported as true optimistically; errors are logged inside triggerDeltaHedge.
         void triggerDeltaHedge(signal, redis, knownSessionExposureUsd).catch((err) => {
           logger.warn('[executor] delta hedge async error (non-fatal)', {
             marketId: signal.marketId,
@@ -455,7 +455,7 @@ export async function executeSignal(
           });
         });
         const exeResult: ExecutionResult = {
-          signal, skipped: false, tradeResult, executionVenue: 'simmer', hedgePlaced: true,
+          signal, skipped: false, tradeResult, executionVenue: 'simmer', hedgeAttempted: true,
         };
         return exeResult;
       }
@@ -522,7 +522,7 @@ export async function executeSignal(
       skipped: false,
       tradeResult,
       executionVenue: 'clob',
-      hedgePlaced: true,
+      hedgeAttempted: true,
     };
   }
 
@@ -555,7 +555,7 @@ export async function executeSignals(
     if (result.tradeResult?.success) {
       if (result.executionVenue === 'hyperliquid') {
         sessionExposureUsd += signal.stakeUsd;
-      } else if (result.hedgePlaced) {
+      } else if (result.hedgeAttempted) {
         // Hedge was confirmed placed — add its margin to session exposure.
         sessionExposureUsd += signal.stakeUsd;
       }

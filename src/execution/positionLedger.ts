@@ -59,6 +59,21 @@ function positionKey(marketId: string, direction: Position['direction']): string
 }
 
 /**
+ * Human-readable label for a position direction.
+ * PM positions use YES/NO; futures positions use LONG/SHORT.
+ * Exported so notification and logging code uses a single consistent formatter.
+ */
+export function formatDirection(direction: Position['direction']): string {
+  switch (direction) {
+    case 'YES': return 'YES ↑';
+    case 'NO':  return 'NO ↓';
+    case 'LONG':  return 'LONG ↑';
+    case 'SHORT': return 'SHORT ↓';
+    default: return direction;
+  }
+}
+
+/**
  * Persist an open position to Redis.
  */
 export async function recordPosition(

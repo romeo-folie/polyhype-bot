@@ -1,4 +1,4 @@
-import { statSync } from 'fs';
+import { promises as fsPromises } from 'fs';
 import dotenv from 'dotenv';
 dotenv.config();
 import { loadConfig } from '../shared/config.js';
@@ -97,7 +97,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
         // The shortlist writer uses atomic rename (temp → .env), so stat the file and
         // only reload if it was last modified more than 2s ago (rename has completed).
         try {
-          const envStat = statSync('.env');
+          const envStat = await fsPromises.stat('.env');
           const ageMs = Date.now() - envStat.mtimeMs;
           if (ageMs > 2_000) {
             dotenv.config({ override: true });
@@ -144,7 +144,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
               executionVenue: result.executionVenue ?? 'simmer',
             });
             // Accumulate HL margin so subsequent signals in this cycle respect the cap.
-            if (result.executionVenue === 'hyperliquid' || result.hedgePlaced) {
+            if (result.executionVenue === 'hyperliquid' || result.hedgeAttempted) {
               sessionExposureUsd += signal.stakeUsd;
             }
           }
