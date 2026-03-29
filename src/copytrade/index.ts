@@ -67,7 +67,7 @@ export function matchesCategory(title: string, description: string | null, allow
   const lowerText = `${title} ${description ?? ''}`.toLowerCase();
   for (const scope of allowedScopes) {
     const keywords = CATEGORY_KEYWORDS[scope];
-    if (keywords && keywords.some((kw) => lowerText.includes(kw))) {
+    if (keywords?.some((kw) => lowerText.includes(kw))) {
       return true;
     }
   }

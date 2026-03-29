@@ -38,7 +38,7 @@ export async function runMonitor(): Promise<void> {
   // Wrapped in a 10s timeout so upstream latency can never stall startup.
   void Promise.race([
     runClobProbe(),
-    new Promise<void>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 10_000)),
+    new Promise<void>((_, reject) => setTimeout(() => { reject(new Error('probe timeout')); }, 10_000)),
   ]).catch((err) => {
     logger.warn('[monitor] CLOB probe failed — continuing', {
       error: err instanceof Error ? err.message : String(err),
@@ -82,7 +82,7 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
   // feed.watch() is idempotent and CONNECTING-safe — safe to call in bulk here.
   const feed = getPriceFeed(redis);
   await Promise.all(
-    positions.map((p) => feed.watch(p.marketId, p.clobTokenIds).catch(() => undefined)),
+    positions.map((p) => feed.watch(p.marketId, p.clobTokenIds ?? []).catch(() => undefined)),
   );
 
   // 2b. Fetch current prices for all positions

@@ -72,7 +72,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
 
     for (const pos of redeemable) {
       if (results.length > 0) await sleep(REDEEM_DELAY_MS);
-      const side = pos.side as 'yes' | 'no';
+      const side = pos.side;
       try {
         const redeemResult = await submitRedeem({ market_id: pos.market_id, side });
 
@@ -161,7 +161,15 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): P
   logger.info('[redeemer] checking CLOB positions for resolution', { count: clobPositions.length });
 
   for (const pos of clobPositions) {
-    const side = pos.direction.toLowerCase() as 'yes' | 'no';
+    // CLOB positions are always YES/NO — LONG/SHORT are HL-only and filtered above
+    if (pos.direction !== 'YES' && pos.direction !== 'NO') continue;
+    if (!pos.conditionId) {
+      logger.warn('[redeemer] CLOB position missing conditionId — skipping', { marketId: pos.marketId });
+      continue;
+    }
+
+    const pmDirection = pos.direction;
+    const side = pmDirection.toLowerCase() as 'yes' | 'no';
 
     try {
       // Check resolution via Gamma API
@@ -184,7 +192,7 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): P
 
       const redeemResult = await redeemClobOutcome({
         conditionId: pos.conditionId,
-        direction: pos.direction,
+        direction: pmDirection,
       });
 
       if (!redeemResult.success) {
@@ -261,11 +269,11 @@ async function checkMarketResolved(
       return null;
     }
 
-    const data = (await resp.json()) as Array<{
+    const data = (await resp.json()) as {
       closed?: boolean;
       resolved?: boolean;
       outcome?: string;
-    }>;
+    }[];
 
     const market = data[0];
     if (!market) return null;

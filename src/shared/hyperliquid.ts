@@ -32,7 +32,7 @@ export const HL_SYMBOL_MAP: Record<string, string> = {
  * Pre-compiled regex patterns for resolveHlSymbol.
  * Created once at module load time to avoid re-allocating RegExp objects on every call.
  */
-const HL_SYMBOL_PATTERNS: Array<{ id: string; symbol: string; longId: boolean; wbId: RegExp; wbSym: RegExp }> =
+const HL_SYMBOL_PATTERNS: { id: string; symbol: string; longId: boolean; wbId: RegExp; wbSym: RegExp }[] =
   Object.entries(HL_SYMBOL_MAP).map(([id, symbol]) => ({
     id,
     symbol,
@@ -97,7 +97,7 @@ interface HlMeta {
 
 interface HlClearinghouseState {
   marginSummary: { accountValue: string };
-  assetPositions: Array<{
+  assetPositions: {
     position: {
       coin: string;
       szi: string;
@@ -106,7 +106,7 @@ interface HlClearinghouseState {
       unrealizedPnl: string;
       marginUsed: string;
     };
-  }>;
+  }[];
 }
 
 /**
@@ -256,7 +256,7 @@ class HyperliquidClient {
    */
   async getOpenPositions(preloadedState?: HlClearinghouseState): Promise<HlPosition[]> {
     const state = preloadedState ?? await this.getClearinghouseState();
-    if (!state?.assetPositions) return [];
+    if (!state.assetPositions) return [];
 
     return state.assetPositions.map((ap) => ({
       symbol: ap.position.coin,
@@ -338,8 +338,8 @@ class HyperliquidClient {
     this.metaCache = response.data as HlMeta;
     this.metaCacheTime = Date.now();
     
-    const idx = (this.metaCache?.universe ?? []).findIndex((u) => u.name === symbol);
-    const szDecimals = this.metaCache?.universe?.[idx]?.szDecimals ?? 4;
+    const idx = (this.metaCache.universe ?? []).findIndex((u) => u.name === symbol);
+    const szDecimals = this.metaCache.universe[idx]?.szDecimals ?? 4;
     return { index: idx, szDecimals };
   }
 

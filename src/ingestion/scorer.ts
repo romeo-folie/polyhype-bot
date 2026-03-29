@@ -56,7 +56,7 @@ function parseScores(raw: string, batchLength: number): ScoreResult[] {
 
 async function scoreBatchGemini(items: RssItem[], systemPrompt: string): Promise<ScoreResult[]> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const genAI = new GoogleGenerativeAI(process.env['GEMINI_API_KEY']!);
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
   const model = genAI.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
 
   const result = await Promise.race([
@@ -66,7 +66,7 @@ async function scoreBatchGemini(items: RssItem[], systemPrompt: string): Promise
       generationConfig: { responseMimeType: 'application/json' },
     }),
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Gemini timeout')), TIMEOUT_MS),
+      setTimeout(() => { reject(new Error('Gemini timeout')); }, TIMEOUT_MS),
     ),
   ]);
 
@@ -76,10 +76,10 @@ async function scoreBatchGemini(items: RssItem[], systemPrompt: string): Promise
 
 async function scoreBatchOpenAI(items: RssItem[], systemPrompt: string): Promise<ScoreResult[]> {
   const { default: OpenAI } = await import('openai');
-  const client = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => { controller.abort(); }, TIMEOUT_MS);
 
   try {
     const response = await client.chat.completions.create(
@@ -106,7 +106,7 @@ async function scoreBatch(items: RssItem[], systemPrompt: string): Promise<Score
   // Prefer Gemini if key available, fall back to OpenAI
   const provider = loadConfig().LLM_PROVIDER;
 
-  if (provider === 'gemini' && process.env['GEMINI_API_KEY']) {
+  if (provider === 'gemini' && process.env.GEMINI_API_KEY) {
     try {
       return await scoreBatchGemini(items, systemPrompt);
     } catch (err) {
@@ -116,7 +116,7 @@ async function scoreBatch(items: RssItem[], systemPrompt: string): Promise<Score
     }
   }
 
-  if (process.env['OPENAI_API_KEY']) {
+  if (process.env.OPENAI_API_KEY) {
     return scoreBatchOpenAI(items, systemPrompt);
   }
 

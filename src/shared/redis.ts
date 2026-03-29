@@ -14,7 +14,7 @@ let _subscriber: Redis | null = null;
 export function getRedis(): Redis {
   if (_client) return _client;
 
-  const url = process.env['REDIS_URL'];
+  const url = process.env.REDIS_URL;
   if (!url) {
     throw new Error('REDIS_URL environment variable is not set');
   }
@@ -35,7 +35,7 @@ export function getRedis(): Redis {
 export function getSubscriberRedis(): Redis {
   if (_subscriber) return _subscriber;
 
-  const url = process.env['REDIS_URL'];
+  const url = process.env.REDIS_URL;
   if (!url) {
     throw new Error('REDIS_URL environment variable is not set');
   }

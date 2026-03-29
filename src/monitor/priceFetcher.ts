@@ -49,7 +49,7 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
         position.direction === 'YES' ? cachedPrice : 1 - cachedPrice;
       return {
         marketId: position.marketId,
-        direction: position.direction,
+        direction: position.direction as 'YES' | 'NO',
         currentOutcomePrice,
         currentYesPrice: cachedPrice,
       };
@@ -82,7 +82,7 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
 
     return {
       marketId: position.marketId,
-      direction: position.direction,
+      direction: position.direction as 'YES' | 'NO',
       currentOutcomePrice,
       currentYesPrice,
     };

@@ -70,7 +70,7 @@ async function callLlmForCorrelation(
     `If ${assetId} rises significantly in price, does that make this market MORE likely or LESS likely to resolve YES?\n` +
     'Answer with ONLY one word: "positive" (more likely YES) or "negative" (less likely YES).';
 
-  const useGemini = cfg.LLM_PROVIDER === 'gemini' && Boolean(process.env['GEMINI_API_KEY']);
+  const useGemini = cfg.LLM_PROVIDER === 'gemini' && Boolean(process.env.GEMINI_API_KEY);
 
   if (useGemini) {
     try {
@@ -82,7 +82,7 @@ async function callLlmForCorrelation(
     }
   }
 
-  if (process.env['OPENAI_API_KEY']) {
+  if (process.env.OPENAI_API_KEY) {
     return await callOpenAICorrelation(prompt);
   }
 
@@ -93,13 +93,13 @@ async function callLlmForCorrelation(
 
 async function callGeminiCorrelation(prompt: string): Promise<'positive' | 'negative'> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const genai = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
+  const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '');
   const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
 
   const result = await Promise.race([
     model.generateContent(prompt),
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Gemini timeout')), 15_000),
+      setTimeout(() => { reject(new Error('Gemini timeout')); }, 15_000),
     ),
   ]);
 
@@ -109,7 +109,7 @@ async function callGeminiCorrelation(prompt: string): Promise<'positive' | 'nega
 
 async function callOpenAICorrelation(prompt: string): Promise<'positive' | 'negative'> {
   const { OpenAI } = await import('openai');
-  const client = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
   const completion = await client.chat.completions.create(
     {

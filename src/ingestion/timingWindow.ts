@@ -69,7 +69,7 @@ export function applyTimingBoost(
   return items.map((item) => {
     const boosted = Math.min(MAX_URGENCY_SCORE, item.urgencyScore * multiplier);
     logger.debug('[timing] boosted urgency score', {
-      title: item.title?.slice(0, 80),
+      title: item.title.slice(0, 80),
       original: item.urgencyScore,
       boosted,
       window: windowName,

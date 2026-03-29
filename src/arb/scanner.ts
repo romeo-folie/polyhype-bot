@@ -203,9 +203,9 @@ export async function executeArb(
   function withTimeout<T>(promise: Promise<T>): Promise<T> {
     let timer: ReturnType<typeof setTimeout>;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('submitClobBuy timeout')), 15_000);
+      timer = setTimeout(() => { reject(new Error('submitClobBuy timeout')); }, 15_000);
     });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+    return Promise.race([promise, timeout]).finally(() => { clearTimeout(timer); });
   }
 
   // Sequential execution to minimize unhedged exposure.
@@ -246,7 +246,7 @@ export async function executeArb(
       question: opp.question, 
       stakeUsd: yesUsd, 
       noError: noResult.error 
-    }).catch(err => logger.error('[arb] alert failed', { err }));
+    }).catch(err => { logger.error('[arb] alert failed', { err }); });
     
     await deductStake(redis, yesUsd * (1 + cfg.ARB_FEE_RATE));
     return {

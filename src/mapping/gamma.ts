@@ -57,8 +57,8 @@ interface SearchEventsOptions {
 
 export function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+  const timer = setTimeout(() => { controller.abort(); }, timeoutMs);
+  return fetch(url, { signal: controller.signal }).finally(() => { clearTimeout(timer); });
 }
 
 /**
@@ -199,7 +199,7 @@ export async function getActiveMarkets(
     const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
     if (!res.ok) throw new Error(`Gamma markets error: ${res.status}`);
 
-    const data = (await res.json()) as unknown;
+    const data = (await res.json());
     if (!Array.isArray(data) || data.length === 0) break;
 
     const batch = (data as GammaMarket[]).slice(0, maxTotal - results.length);

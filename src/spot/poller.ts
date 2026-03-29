@@ -20,21 +20,19 @@ export interface SpotPrice {
   timestamp: number; // epoch ms
 }
 
-interface CoinGeckoResponse {
-  [id: string]: { usd?: number; last_updated_at?: number };
-}
+type CoinGeckoResponse = Record<string, { usd?: number; last_updated_at?: number }>;
 
 interface YahooChartResponse {
   chart?: {
-    result?: Array<{ meta?: { regularMarketPrice?: number } }>;
+    result?: { meta?: { regularMarketPrice?: number } }[];
     error?: { code?: string; description?: string };
   };
 }
 
 function fetchWithTimeout(url: string, opts: RequestInit = {}): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  return fetch(url, { ...opts, signal: controller.signal }).finally(() => clearTimeout(timer));
+  const timer = setTimeout(() => { controller.abort(); }, REQUEST_TIMEOUT_MS);
+  return fetch(url, { ...opts, signal: controller.signal }).finally(() => { clearTimeout(timer); });
 }
 
 /**
@@ -84,7 +82,7 @@ export async function fetchCommodityPrice(ticker: string): Promise<SpotPrice | n
   }
 
   const data = (await res.json()) as YahooChartResponse;
-  const price = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+  const price = data.chart?.result?.[0]?.meta?.regularMarketPrice;
   if (price == null) return null;
 
   return { assetId: ticker, price, timestamp: Date.now() };

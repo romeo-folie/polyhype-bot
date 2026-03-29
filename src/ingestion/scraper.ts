@@ -61,7 +61,7 @@ function isRateLimitError(err: unknown): boolean {
 }
 
 async function fetchGdeltCombined(): Promise<RssItem[]> {
-  const retryDelayMs = process.env['NODE_ENV'] === 'test' ? 0 : GDELT_RETRY_DELAY_MS;
+  const retryDelayMs = process.env.NODE_ENV === 'test' ? 0 : GDELT_RETRY_DELAY_MS;
 
   const params = new URLSearchParams({
     query: GDELT_THEME_QUERY,
@@ -94,7 +94,7 @@ async function fetchGdeltCombined(): Promise<RssItem[]> {
     }
   }
 
-  const articles = data?.articles ?? [];
+  const articles = data.articles ?? [];
   const items: RssItem[] = [];
 
   for (const article of articles) {

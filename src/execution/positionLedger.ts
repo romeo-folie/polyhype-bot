@@ -152,7 +152,7 @@ export async function hasOpenPosition(
 // ── Deserialisation ────────────────────────────────────────────────────────
 
 function deserialisePosition(raw: Record<string, string>): Position {
-  const venue = raw['executionVenue'] as Position['executionVenue'];
+  const venue = raw.executionVenue as Position['executionVenue'];
   const pos: Position = {
     marketId: raw.marketId ?? '',
     conditionId: raw.conditionId,
@@ -164,7 +164,7 @@ function deserialisePosition(raw: Record<string, string>): Position {
     edgeMagnitude: parseFloat(raw.edgeMagnitude ?? '0'),
     sourcedFrom: raw.sourcedFrom ?? '',
     openedAt: raw.openedAt ?? new Date().toISOString(),
-    executionVenue: (venue || 'simmer') as Position['executionVenue'],
+    executionVenue: (venue || 'simmer'),
   };
 
   if (raw.consensusProbability) pos.consensusProbability = parseFloat(raw.consensusProbability);

@@ -29,7 +29,7 @@ export function resolveCategories(scope: string[]): string[] {
   const cats = new Set<string>();
   for (const s of scope) {
     if (CATEGORY_MAP[s]) {
-      cats.add(CATEGORY_MAP[s]!);
+      cats.add(CATEGORY_MAP[s]);
     } else {
       cats.add('OVERALL');
     }
@@ -171,7 +171,7 @@ export async function run(): Promise<void> {
   logger.info('[copytrade-shortlist] COPYTRADE_WALLETS updated', { count: wallets.length });
 }
 
-if (process.env['NODE_ENV'] !== 'test') {
+if (process.env.NODE_ENV !== 'test') {
   run().catch((err) => {
     logger.error('[copytrade-shortlist] failed', {
       error: err instanceof Error ? err.message : String(err),

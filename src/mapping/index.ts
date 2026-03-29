@@ -102,7 +102,7 @@ export async function runMapping(
 
       // Resolve price: WS cache first, then fall back to Gamma snapshot
       let currentYesPrice = candidate.currentYesPrice;
-      if (opts?.redis && opts?.feed) {
+      if (opts?.redis && opts.feed) {
         const wsPrice = await resolveYesPrice(candidate.marketId, opts.redis, opts.feed);
         if (wsPrice !== null) currentYesPrice = wsPrice;
       }
@@ -142,7 +142,7 @@ export async function runMapping(
         hasTrade,
         skipReason,
         direction: decision?.direction,
-        stakeUsd: decision?.stakeUsd?.toFixed(2),
+        stakeUsd: decision?.stakeUsd.toFixed(2),
       });
 
       if (hasTrade && decision) {

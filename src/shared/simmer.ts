@@ -86,8 +86,8 @@ const SimmerPositionSchema = z.object({
 });
 
 function deriveSide(raw: Record<string, unknown>): 'yes' | 'no' | null {
-  const yes = Number(raw['shares_yes'] ?? 0);
-  const no = Number(raw['shares_no'] ?? 0);
+  const yes = Number(raw.shares_yes ?? 0);
+  const no = Number(raw.shares_no ?? 0);
   if (Number.isFinite(yes) && yes > 0 && (!Number.isFinite(no) || no <= 0)) return 'yes';
   if (Number.isFinite(no) && no > 0 && (!Number.isFinite(yes) || yes <= 0)) return 'no';
   return null;
@@ -112,8 +112,8 @@ function normalisePosition(raw: Record<string, unknown>): Record<string, unknown
   }
 
   if (!('shares' in next)) {
-    const yes = Number(next['shares_yes'] ?? 0);
-    const no = Number(next['shares_no'] ?? 0);
+    const yes = Number(next.shares_yes ?? 0);
+    const no = Number(next.shares_no ?? 0);
     const side = typeof next.side === 'string' ? next.side : null;
 
     if (side === 'yes' && Number.isFinite(yes) && yes > 0) {
@@ -136,8 +136,8 @@ function normalisePosition(raw: Record<string, unknown>): Record<string, unknown
   }
 
   if (!('value_usdc' in next)) {
-    const price = Number(next['current_price'] ?? NaN);
-    const shares = Number(next['shares'] ?? NaN);
+    const price = Number(next.current_price ?? NaN);
+    const shares = Number(next.shares ?? NaN);
     if (Number.isFinite(price) && Number.isFinite(shares)) {
       next.value_usdc = price * shares;
     }
@@ -335,7 +335,7 @@ export async function getSimmerPositions(opts: {
     throw new SimmerError(`Simmer positions API returned HTTP ${resp.status.toString()}`, resp.status, body);
   }
 
-  const raw = (await resp.json()) as unknown;
+  const raw = (await resp.json());
   // API may return { positions: [...] } or a bare array
   const arr = Array.isArray(raw) ? raw : ((raw as Record<string, unknown>).positions ?? []);
   const positions: SimmerPosition[] = [];

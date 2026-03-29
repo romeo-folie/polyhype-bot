@@ -53,7 +53,7 @@ async function callOpenAI(
   currentYesPrice: number,
 ): Promise<ConsensusResult> {
   const { OpenAI } = await import('openai');
-  const client = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
   const completion = await client.chat.completions.create(
     {
@@ -83,7 +83,7 @@ async function callGemini(
   currentYesPrice: number,
 ): Promise<ConsensusResult> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const genai = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
+  const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '');
   const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
 
   const prompt =
@@ -93,7 +93,7 @@ async function callGemini(
   const result = await Promise.race([
     model.generateContent(prompt),
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Gemini timeout')), TIMEOUT_MS),
+      setTimeout(() => { reject(new Error('Gemini timeout')); }, TIMEOUT_MS),
     ),
   ]);
 
@@ -128,8 +128,8 @@ async function estimateSingle(opts: {
   currentYesPrice: number;
 }): Promise<ConsensusResult> {
   const provider = loadConfig().LLM_PROVIDER;
-  const useGemini = provider === 'gemini' && Boolean(process.env['GEMINI_API_KEY']);
-  const useOpenAI = Boolean(process.env['OPENAI_API_KEY']);
+  const useGemini = provider === 'gemini' && Boolean(process.env.GEMINI_API_KEY);
+  const useOpenAI = Boolean(process.env.OPENAI_API_KEY);
 
   if (useGemini) {
     try {
@@ -162,8 +162,8 @@ export async function estimateConsensusProbability(opts: {
   headline: string;
   currentYesPrice: number;
 }): Promise<ConsensusEstimate> {
-  const useGemini = Boolean(process.env['GEMINI_API_KEY']);
-  const useOpenAI = Boolean(process.env['OPENAI_API_KEY']);
+  const useGemini = Boolean(process.env.GEMINI_API_KEY);
+  const useOpenAI = Boolean(process.env.OPENAI_API_KEY);
 
   // Determine sample distribution
   const calls: Promise<ConsensusResult>[] = [];
@@ -213,7 +213,7 @@ let _sentimentGeminiClient: import('@google/generative-ai').GoogleGenerativeAI |
 async function getSentimentOpenAI(): Promise<import('openai').OpenAI> {
   if (!_sentimentOpenAIClient) {
     const { OpenAI } = await import('openai');
-    _sentimentOpenAIClient = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
+    _sentimentOpenAIClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   }
   return _sentimentOpenAIClient;
 }
@@ -221,7 +221,7 @@ async function getSentimentOpenAI(): Promise<import('openai').OpenAI> {
 async function getSentimentGemini(): Promise<import('@google/generative-ai').GoogleGenerativeAI> {
   if (!_sentimentGeminiClient) {
     const { GoogleGenerativeAI } = await import('@google/generative-ai');
-    _sentimentGeminiClient = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
+    _sentimentGeminiClient = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '');
   }
   return _sentimentGeminiClient;
 }
@@ -233,8 +233,8 @@ async function getSentimentGemini(): Promise<import('@google/generative-ai').Goo
  */
 export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHORT' | 'NEUTRAL'> {
   const provider = loadConfig().LLM_PROVIDER;
-  const useGemini = provider === 'gemini' && Boolean(process.env['GEMINI_API_KEY']);
-  const useOpenAI = Boolean(process.env['OPENAI_API_KEY']);
+  const useGemini = provider === 'gemini' && Boolean(process.env.GEMINI_API_KEY);
+  const useOpenAI = Boolean(process.env.OPENAI_API_KEY);
 
   const system = 'You are a high-speed financial sentiment classifier. ' +
     'Classify the given headline as POSITIVE or NEGATIVE for the relevant asset. ' +

@@ -27,7 +27,7 @@ function buildEntitySystemPrompt(entityContext: string): string {
 
 async function extractEntitiesOpenAI(headline: string, entityContext: string): Promise<string[]> {
   const { OpenAI } = await import('openai');
-  const client = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const systemPrompt = buildEntitySystemPrompt(entityContext);
   const completion = await client.chat.completions.create(
     {
@@ -50,14 +50,14 @@ async function extractEntitiesOpenAI(headline: string, entityContext: string): P
 
 async function extractEntitiesGemini(headline: string, entityContext: string): Promise<string[]> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const genai = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
+  const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '');
   const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
   const systemPrompt = buildEntitySystemPrompt(entityContext);
 
   const result = await Promise.race([
     model.generateContent(`${systemPrompt}\n\n${headline}`),
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Gemini timeout')), TIMEOUT_MS),
+      setTimeout(() => { reject(new Error('Gemini timeout')); }, TIMEOUT_MS),
     ),
   ]);
 
@@ -73,8 +73,8 @@ async function extractEntitiesGemini(headline: string, entityContext: string): P
  */
 export async function extractEntities(headline: string, entityContext: string): Promise<string[]> {
   const provider = loadConfig().LLM_PROVIDER;
-  const useGemini = provider === 'gemini' && Boolean(process.env['GEMINI_API_KEY']);
-  const useOpenAI = Boolean(process.env['OPENAI_API_KEY']);
+  const useGemini = provider === 'gemini' && Boolean(process.env.GEMINI_API_KEY);
+  const useOpenAI = Boolean(process.env.OPENAI_API_KEY);
 
   if (useGemini) {
     try {

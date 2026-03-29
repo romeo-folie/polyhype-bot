@@ -101,7 +101,7 @@ async function executeHyperliquidSignal(
     // getOpenPositions() can accept a pre-fetched state to avoid a second round-trip.
     const state = await hl.getClearinghouseState();
     const positions = await hl.getOpenPositions(state);
-    const accountValue = parseFloat(state?.marginSummary?.accountValue || '0');
+    const accountValue = parseFloat(state.marginSummary.accountValue || '0');
 
     // Solvency check: basic safety to avoid sending orders that will definitely fail.
     // Real-time margin checks happen on the HL side.

@@ -19,8 +19,8 @@ interface WorkerOptions {
 export class ArbitrageWorker {
   private baselineIntervalMs: number;
   private maxTradesPerMin: number;
-  private lastScanTime: number = 0;
-  private isScanning: boolean = false;
+  private lastScanTime = 0;
+  private isScanning = false;
   private timer: NodeJS.Timeout | null = null;
 
   constructor(options: WorkerOptions = {}) {

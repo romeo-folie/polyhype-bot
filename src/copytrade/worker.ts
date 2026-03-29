@@ -101,7 +101,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
 //   - import.meta.url + argv: primary ESM guard against accidental execution when imported
 //   - NODE_ENV !== 'test': belt-and-suspenders; the test suite sets this explicitly to
 //     prevent this block from firing during dynamic import in worker.test.ts
-if (process.env['NODE_ENV'] !== 'test' && import.meta.url.startsWith('file:') && (process.argv[1]?.endsWith('worker.ts') || process.argv[1]?.endsWith('worker.js'))) {
+if (process.env.NODE_ENV !== 'test' && import.meta.url.startsWith('file:') && (process.argv[1]?.endsWith('worker.ts') || process.argv[1]?.endsWith('worker.js'))) {
   runWorker().catch(err => {
     logger.error('[copytrade-worker] fatal error', { 
       error: err instanceof Error ? err.message : String(err) 
