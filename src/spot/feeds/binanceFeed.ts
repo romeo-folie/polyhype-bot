@@ -10,6 +10,7 @@ import { getRedis } from '../../shared/redis.js';
  */
 export class BinanceFeed {
   private ws: WebSocket | null = null;
+  private tickerCount: Record<string, number> = {};
   private symbols: string[];
   private reconnectTimer: NodeJS.Timeout | null = null;
 
@@ -81,7 +82,11 @@ export class BinanceFeed {
 
     await pipeline.exec();
     
-    logger.debug('[binance] updated', { symbol, price });
+    // Pulse: log to info once every 20 updates per symbol to show "life"
+    this.tickerCount[symbol] = (this.tickerCount[symbol] || 0) + 1;
+    if (this.tickerCount[symbol] % 20 === 0) {
+      logger.info(`[binance] ${symbol.toUpperCase()} tick: $${price.toLocaleString()}`);
+    }
   }
 
   private reconnect(): void {

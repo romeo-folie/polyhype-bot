@@ -20,6 +20,7 @@ export class HeliusFeed {
   private connection: Connection;
   private symbols: string[];
   private subscriptionIds: number[] = [];
+  private tickerCount: Record<string, number> = {};
 
   constructor(apiKey: string, symbols: string[] = ['SOL']) {
     const url = `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
@@ -85,7 +86,11 @@ export class HeliusFeed {
 
       await pipeline.exec();
 
-      logger.debug('[helius] updated', { symbol, price });
+      // Pulse: log to info for "life"
+      this.tickerCount[symbol] = (this.tickerCount[symbol] || 0) + 1;
+      if (this.tickerCount[symbol] % 5 === 0) {
+        logger.info(`[helius] ${symbol.toUpperCase()} tick (on-chain): $${price.toLocaleString()}`);
+      }
     } catch (err) {
       logger.error('[helius] parse error', { symbol, error: String(err) });
     }
