@@ -31,6 +31,14 @@ graph TD
         M1[Price Feed WS/REST] --> M2[Stop-Loss/Take-Profit]
         M2 --> M3[Auto-Redeem]
     end
+
+    subgraph "Futures Monitor (Persistent 5s)"
+        F1[HL Position Poll] --> F2[Threshold Check]
+        F2 -->|Trigger| F3[HL Market Close]
+    end
+
+    PM_Trade[Polymarket YES Fill] -->|Success| Hedge[HL Delta Hedge]
+    Hedge --> F1
 ```
 
 ### Execution Flow Details
@@ -38,8 +46,9 @@ graph TD
 | Flow | Logic | Interval | Priority |
 | :--- | :--- | :--- | :--- |
 | **Copytrade** | Latency-critical. Mirrors expert wallets immediately. | 2 seconds | High |
+| **Futures Monitor**| Safety-critical. Enforces futures Stop-Loss/Take-Profit. | 5 seconds | High |
 | **OSINT** | Context-heavy. Monitors global events and maps to markets. | 5 minutes | Medium |
-| **Monitor** | Maintenance. Manages exits and redemptions. | 5 minutes | N/A |
+| **Monitor** | Maintenance. Manages Polymarket exits and redemptions. | 5 minutes | N/A |
 
 
 ### Ingestion Categories (Phase 5)
@@ -75,15 +84,18 @@ interface CategoryConfig {
 | **Spot** (`cron:spot`) | `src/spot/index.ts` | Poll spot prices → detect significant moves → cross-check Simmer oracle opportunities → execute correlated trades |
 | **Spot Feed** (`worker:spot-feed`) | `src/spot/feeds/manager.ts` | **Fast-Path Feed**: Persistent WebSocket connection to Binance/Helius → hot price cache → publish price_moved event |
 | **Fast Arb** (`worker:arb`) | `src/arb/worker.ts` | **High-Speed Worker**: Listen for price events → sub-200ms trigger → scan for arb → execute hedge |
+| **Futures Monitor** (`monitor:futures`) | `src/monitor/futuresMonitor.ts` | **Risk Worker**: Sub-second PnL tracking for Hyperliquid perps → execute SL/TP thresholds |
 
 ### Exit Priority
 
 | Priority | Trigger | Cost | Where |
 |----------|---------|------|-------|
-| 1 | **Stop-loss** — loss ≥ 30% | Free (price check) | Monitor cycle |
-| 2 | **Take-profit** — gain ≥ 25% | Free (price check) | Monitor cycle |
-| 3 | **Signal re-eval** — edge evaporated | LLM call | Trade cycle |
-| 4 | **Divergence closed** — market reached consensus | Free (price check) | Monitor cycle |
+| 1 | **Futures Stop-loss** — loss ≥ 1.5% | Free (perps) | Futures Worker |
+| 2 | **Futures Take-profit** — gain ≥ 3.0% | Free (perps) | Futures Worker |
+| 3 | **Polymarket Stop-loss** — loss ≥ 30% | Free (price check) | Monitor cycle |
+| 4 | **Polymarket Take-profit** — gain ≥ 25% | Free (price check) | Monitor cycle |
+| 5 | **Signal re-eval** — edge evaporated | LLM call | Trade cycle |
+| 6 | **Divergence closed** — market reached consensus | Free (price check) | Monitor cycle |
 
 ### Execution Venues (Model B — venue-aware lifecycle)
 
@@ -94,19 +106,21 @@ interface CategoryConfig {
 
 Each position records its `executionVenue` (`simmer` or `clob`). The full lifecycle — entry, take-profit exit, and redemption — routes through the venue that opened the position. CLOB positions are exited via `submitClobSell` and redeemed by checking the Gamma API for market resolution status.
 
-### 4. High-Speed Arbitrage Mode (Optional)
-
-For real-time arbitrage (sub-second latency), run the dedicated worker and price feeds instead of the standard cron:
-
-```bash
-# Start real-time Binance/Solana feeds
-npm run worker:spot-feed
-
-# Start the long-running arb worker
-npm run worker:arb
-```
-
 The worker uses **Binance WebSockets** and **Helius/Pyth on-chain data** to detect massive price moves and front-run Polymarket adjustments. See [docs/arbitrage-worker.md](docs/arbitrage-worker.md) for more details.
+
+### 5. Hyperliquid Futures & Delta Hedging
+
+The agent captures intraday momentum on **Hyperliquid Perpetuals** to maximize alpha and manage risk:
+
+- **Latency Arbitrage**: Captures spot price moves on HL perps before Polymarket order books adjust.
+- **Delta Hedging**: Automatically opens a 1:1 SHORT on HL after a successful Polymarket NEWS buy. This neutralizes market exposure while keeping the geopolitical "headline" alpha.
+- **Synthetic Exits**: Fallback exit path. If Polymarket liquidity is too low to sell, the agent opens an equal-and-opposite perp position on HL to "freeze" the trade's P&L.
+- **Risk Control**: Hard-coded **$50 Global Margin Cap** and **$10 Max Margin Per Trade** to protect the bankroll.
+
+To start the safety monitor:
+```bash
+npm run monitor:futures
+```
 
 ## 📁 Architecture
 
@@ -209,9 +223,13 @@ npm install
 
 # 3. Configure environment
 cp .env.example .env
+
+# Safely sync new keys from .env.example if upgrading
+npx tsx scripts/sync-env.ts
+
 # Required: REDIS_URL, SIMMER_API_KEY, OPENAI_API_KEY (or GEMINI_API_KEY),
 #           TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, POLYGON_WALLET_PRIVATE_KEY
-# See .env.example for all optional tuning knobs.
+# Optional: HYPERLIQUID_PRIVATE_KEY (required for futures)
 
 # 4. Verify build
 npm run build
@@ -301,6 +319,8 @@ The Redis lock uses token-based ownership: each run stores a unique token on acq
 | `npm run cron:spot` | Run the spot price monitor (price moves → correlated market trades) |
 | `npm run worker:spot-feed` | Start real-time Binance/Solana WebSocket data feeds |
 | `npm run worker:arb` | Start the persistent high-speed arbitrage execution worker |
+| `npm run monitor:futures` | Start the persistent high-frequency futures risk monitor |
+| `npm run sync-env` | Safely append missing keys from .env.example to .env |
 | `npm run lint` | ESLint |
 | `npm run format` | Prettier |
 | `npm test` | Jest tests |

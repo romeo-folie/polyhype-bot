@@ -79,7 +79,7 @@ function slippageBps(fillPrice: number, currentPrice: number): number {
   return Math.abs(currentPrice - fillPrice) / fillPrice * 10_000;
 }
 
-function positionKey(marketId: string, direction: 'YES' | 'NO'): string {
+function positionKey(marketId: string, direction: Position['direction']): string {
   return `${marketId}:${direction}`;
 }
 
@@ -102,7 +102,7 @@ async function fetchWalletTrades(wallet: string, limit = DEFAULT_TRADE_LIMIT): P
   return Array.isArray(data) ? data : [];
 }
 
-function tradeDirection(trade: ActivityTrade): 'YES' | 'NO' {
+function tradeDirection(trade: ActivityTrade): Position['direction'] {
   return trade.outcomeIndex === 0 ? 'YES' : 'NO';
 }
 

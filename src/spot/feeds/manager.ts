@@ -46,7 +46,11 @@ async function main() {
   process.on('SIGINT', shutdown);
 }
 
-main().catch((err) => {
-  logger.error('[feeds-manager] fatal error', { error: String(err) });
-  process.exit(1);
-});
+// CLI entrypoint
+const isMain = process.argv[1]?.endsWith('manager.ts') || process.argv[1]?.endsWith('manager.js');
+if (isMain) {
+  main().catch((err) => {
+    logger.error('[feeds-manager] fatal error', { error: String(err) });
+    process.exit(1);
+  });
+}

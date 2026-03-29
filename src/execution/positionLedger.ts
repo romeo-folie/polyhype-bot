@@ -18,17 +18,21 @@ const POSITION_TTL_SECONDS = 30 * 24 * 3600; // 30 days
 const POSITIONS_INDEX_KEY = 'positions:index'; // sorted set: score = openedAt ms
 
 export interface Position {
+  /** Polymarket numeric ID or Hyperliquid symbol (used as primary key in ledger) */
   marketId: string;
-  conditionId: string;
-  clobTokenIds: string[];
+  /** Polymarket-specific fields (optional for futures) */
+  conditionId?: string | undefined;
+  clobTokenIds?: string[] | undefined;
+  /** Question or trade reasoning */
   question: string;
-  direction: 'YES' | 'NO';
-  /** Entry price of the purchased outcome (0–1) */
+  /** Direction: YES/NO for PM, LONG/SHORT for futures */
+  direction: 'YES' | 'NO' | 'LONG' | 'SHORT';
+  /** Entry price of the purchased outcome (0–1 for PM, USD price for futures) */
   entryPrice: number;
-  /** Amount staked in USDC */
+  /** Amount staked in USDC (margin for futures) */
   stakeUsd: number;
-  /** Consensus probability at time of entry */
-  consensusProbability: number;
+  /** Consensus probability at time of entry (for PM) */
+  consensusProbability?: number | undefined;
   /** Consensus stddev at time of entry (for post-trade analysis) */
   consensusStddev?: number | undefined;
   /** Original edge magnitude */
@@ -37,15 +41,20 @@ export interface Position {
   sourcedFrom: string;
   /** ISO timestamp */
   openedAt: string;
-  /** tx_hash from Simmer, if available */
+  /** tx_hash from the venue, if available */
   txHash?: string | undefined;
-  /** Shares purchased — used when closing the position via sell order */
+  /** Shares purchased — used when closing manually */
   sharesHeld?: number | undefined;
   /** Venue via which this position was entered */
-  executionVenue: 'simmer' | 'clob';
+  executionVenue: 'simmer' | 'clob' | 'hyperliquid';
+  /** Futures-specific metadata */
+  isFutures?: boolean | undefined;
+  leverage?: number | undefined;
+  symbol?: string | undefined;
+  side?: 'long' | 'short' | undefined;
 }
 
-function positionKey(marketId: string, direction: string): string {
+function positionKey(marketId: string, direction: Position['direction']): string {
   return `${POSITION_KEY_PREFIX}${marketId}:${direction}`;
 }
 
@@ -62,13 +71,13 @@ export async function recordPosition(
   // Store position as a flat hash
   await redis.hset(key, {
     marketId: position.marketId,
-    conditionId: position.conditionId,
-    clobTokenIds: JSON.stringify(position.clobTokenIds),
+    conditionId: position.conditionId ?? '',
+    clobTokenIds: JSON.stringify(position.clobTokenIds || []),
     question: position.question,
     direction: position.direction,
     entryPrice: String(position.entryPrice),
     stakeUsd: String(position.stakeUsd),
-    consensusProbability: String(position.consensusProbability),
+    consensusProbability: position.consensusProbability !== undefined ? String(position.consensusProbability) : '',
     edgeMagnitude: String(position.edgeMagnitude),
     sourcedFrom: position.sourcedFrom,
     openedAt: position.openedAt,
@@ -76,6 +85,10 @@ export async function recordPosition(
     txHash: position.txHash ?? '',
     sharesHeld: position.sharesHeld !== undefined ? String(position.sharesHeld) : '',
     executionVenue: position.executionVenue,
+    isFutures: position.isFutures ? 'true' : 'false',
+    leverage: position.leverage !== undefined ? String(position.leverage) : '',
+    symbol: position.symbol ?? '',
+    side: position.side ?? '',
   });
   await redis.expire(key, POSITION_TTL_SECONDS);
 
@@ -115,7 +128,7 @@ export async function getOpenPositions(redis: Redis): Promise<Position[]> {
 export async function closePosition(
   redis: Redis,
   marketId: string,
-  direction: 'YES' | 'NO',
+  direction: Position['direction'],
 ): Promise<void> {
   const key = positionKey(marketId, direction);
   await redis.del(key);
@@ -129,7 +142,7 @@ export async function closePosition(
 export async function hasOpenPosition(
   redis: Redis,
   marketId: string,
-  direction: 'YES' | 'NO',
+  direction: Position['direction'],
 ): Promise<boolean> {
   const key = positionKey(marketId, direction);
   const exists = await redis.exists(key);
@@ -139,23 +152,32 @@ export async function hasOpenPosition(
 // ── Deserialisation ────────────────────────────────────────────────────────
 
 function deserialisePosition(raw: Record<string, string>): Position {
+  const venue = raw['executionVenue'] as Position['executionVenue'];
   const pos: Position = {
     marketId: raw['marketId'] ?? '',
-    conditionId: raw['conditionId'] ?? '',
+    conditionId: raw['conditionId'],
     clobTokenIds: raw['clobTokenIds'] ? (JSON.parse(raw['clobTokenIds']) as string[]) : [],
     question: raw['question'] ?? '',
-    direction: (raw['direction'] ?? 'YES') as 'YES' | 'NO',
+    direction: (raw['direction'] ?? 'YES') as Position['direction'],
     entryPrice: parseFloat(raw['entryPrice'] ?? '0'),
     stakeUsd: parseFloat(raw['stakeUsd'] ?? '0'),
-    consensusProbability: parseFloat(raw['consensusProbability'] ?? '0'),
     edgeMagnitude: parseFloat(raw['edgeMagnitude'] ?? '0'),
     sourcedFrom: raw['sourcedFrom'] ?? '',
     openedAt: raw['openedAt'] ?? new Date().toISOString(),
-    executionVenue: (raw['executionVenue'] === 'clob' ? 'clob' : 'simmer'),
+    executionVenue: venue || 'simmer',
   };
+  if (raw['consensusProbability']) pos.consensusProbability = parseFloat(raw['consensusProbability']);
   if (raw['consensusStddev']) pos.consensusStddev = parseFloat(raw['consensusStddev']);
   if (raw['txHash']) pos.txHash = raw['txHash'];
   if (raw['sharesHeld']) pos.sharesHeld = parseFloat(raw['sharesHeld']);
+  
+  if (raw['isFutures'] === 'true') {
+    pos.isFutures = true;
+    if (raw['leverage']) pos.leverage = parseFloat(raw['leverage']);
+    if (raw['symbol']) pos.symbol = raw['symbol'];
+    if (raw['side']) pos.side = raw['side'] as 'long' | 'short';
+  }
+
   return pos;
 }
 // ── CLI Entrypoint ─────────────────────────────────────────────────────────
@@ -183,13 +205,13 @@ async function main() {
     }
   } else if (args[0] === '--remove' && args[1] && args[2]) {
     const marketId = args[1];
-    const direction = args[2].toUpperCase() as 'YES' | 'NO';
+    const direction = args[2].toUpperCase() as Position['direction'];
     await closePosition(redis, marketId, direction);
     console.log(`Successfully removed ${marketId}:${direction} from ledger.`);
   } else {
     console.log('Usage:');
     console.log('  npx tsx src/execution/positionLedger.ts --list');
-    console.log('  npx tsx src/execution/positionLedger.ts --remove <marketId> <YES|NO>');
+    console.log('  npx tsx src/execution/positionLedger.ts --remove <marketId> <YES|NO|LONG|SHORT>');
   }
 
   await closeRedis();

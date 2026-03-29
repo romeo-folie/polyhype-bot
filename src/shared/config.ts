@@ -91,6 +91,22 @@ const envSchema = z.object({
   COPYTRADE_SHORTLIST_MIN_PNL_USD: z.coerce.number().min(0).optional().default(10000),
   COPYTRADE_SHORTLIST_MIN_VOL_USD: z.coerce.number().min(0).optional().default(100000),
   COPYTRADE_SHORTLIST_AUTO_APPLY: z.coerce.boolean().optional().default(true),
+
+  // --- CRYPTO FUTURES (Phase: futures) ---
+  FUTURES_ENABLED: z.coerce.boolean().optional().default(false),
+  // Hyperliquid credentials
+  HYPERLIQUID_PRIVATE_KEY: z.string().optional(),
+  HYPERLIQUID_AGENT_WALLET: z.string().optional(),
+  HYPERLIQUID_TESTNET: z.coerce.boolean().optional().default(true),
+
+  // Risk & Control
+  FUTURES_GLOBAL_MAX_MARGIN_USD: z.coerce.number().min(0).optional().default(50),
+  FUTURES_MAX_PER_TRADE_USD: z.coerce.number().min(0).optional().default(10),
+  FUTURES_DEFAULT_LEVERAGE: z.coerce.number().int().min(1).max(50).optional().default(5),
+  FUTURES_MAX_HOLD_HOURS: z.coerce.number().int().min(1).optional().default(4),
+  FUTURES_STOP_LOSS_PCT: z.coerce.number().default(-1.5),
+  FUTURES_TAKE_PROFIT_PCT: z.coerce.number().default(3.0),
+  FUTURES_EXIT_ON_SIGNAL_FADE: z.coerce.boolean().optional().default(true),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
@@ -132,6 +148,13 @@ export function loadConfig(forceReload = false): AppConfig {
       throw new Error(
         'POLYMARKET_FUNDER_ADDRESS is required when POLYMARKET_SIGNATURE_TYPE is 1 (proxy) or 2 (gnosis safe)',
       );
+    }
+  }
+
+  // Futures: Cross-validate credentials if enabled
+  if (cfg.FUTURES_ENABLED) {
+    if (!cfg.HYPERLIQUID_PRIVATE_KEY) {
+      throw new Error('HYPERLIQUID_PRIVATE_KEY is required when FUTURES_ENABLED=true');
     }
   }
 

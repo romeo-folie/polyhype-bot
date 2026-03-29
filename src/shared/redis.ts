@@ -7,6 +7,7 @@
 
 import { Redis } from 'ioredis';
 import { logger } from './logger.js';
+import { loadConfig } from './config.js';
 
 let _client: Redis | null = null;
 let _subscriber: Redis | null = null;
