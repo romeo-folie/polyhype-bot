@@ -107,6 +107,8 @@ const envSchema = z.object({
   FUTURES_STOP_LOSS_PCT: z.coerce.number().default(-1.5),
   FUTURES_TAKE_PROFIT_PCT: z.coerce.number().default(3.0),
   FUTURES_EXIT_ON_SIGNAL_FADE: z.coerce.boolean().optional().default(true),
+  // Max slippage fraction for IoC market orders (e.g. 0.02 = 2%). Conservative default.
+  FUTURES_IOC_SLIPPAGE: z.coerce.number().min(0.001).max(0.10).optional().default(0.02),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

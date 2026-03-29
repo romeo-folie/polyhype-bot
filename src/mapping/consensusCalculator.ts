@@ -205,20 +205,22 @@ export async function estimateConsensusProbability(opts: {
 }
 
 // Module-level singleton clients — created once, reused across all estimateSentiment calls.
+// Module-level singleton clients — lazy-initialized on first use, reused thereafter.
+// Using await import() (ESM-safe) instead of require().
 let _sentimentOpenAIClient: import('openai').OpenAI | null = null;
 let _sentimentGeminiClient: import('@google/generative-ai').GoogleGenerativeAI | null = null;
 
-function getSentimentOpenAI(): import('openai').OpenAI {
+async function getSentimentOpenAI(): Promise<import('openai').OpenAI> {
   if (!_sentimentOpenAIClient) {
-    const { OpenAI } = require('openai') as typeof import('openai');
+    const { OpenAI } = await import('openai');
     _sentimentOpenAIClient = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
   }
   return _sentimentOpenAIClient;
 }
 
-function getSentimentGemini(): import('@google/generative-ai').GoogleGenerativeAI {
+async function getSentimentGemini(): Promise<import('@google/generative-ai').GoogleGenerativeAI> {
   if (!_sentimentGeminiClient) {
-    const { GoogleGenerativeAI } = require('@google/generative-ai') as typeof import('@google/generative-ai');
+    const { GoogleGenerativeAI } = await import('@google/generative-ai');
     _sentimentGeminiClient = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
   }
   return _sentimentGeminiClient;
@@ -242,13 +244,13 @@ export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHO
   let raw = '';
   try {
     if (useGemini) {
-      const genai = getSentimentGemini();
+      const genai = await getSentimentGemini();
       const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
       const prompt = `${system}\n\nHeadline: ${headline}`;
       const result = await model.generateContent(prompt);
       raw = result.response.text().trim().toUpperCase();
     } else if (useOpenAI) {
-      const client = getSentimentOpenAI();
+      const client = await getSentimentOpenAI();
       const completion = await client.chat.completions.create({
         model: loadConfig().OPENAI_MODEL,
         messages: [{ role: 'system', content: system }, { role: 'user', content: headline }],

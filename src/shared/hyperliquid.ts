@@ -133,7 +133,9 @@ class HyperliquidClient {
         orders: [{
           asset: index,
           isBuy: opts.isBuy,
-          limitPx: this.roundPrice(opts.isBuy ? midPrice * 1.1 : midPrice * 0.9),
+          limitPx: this.roundPrice(opts.isBuy
+            ? midPrice * (1 + loadConfig().FUTURES_IOC_SLIPPAGE)
+            : midPrice * (1 - loadConfig().FUTURES_IOC_SLIPPAGE)),
           sz: this.roundSize(sizeBase, szDecimals),
           reduceOnly: opts.reduceOnly ?? false,
           orderType: { limit: { tif: 'Ioc' } } // Market orders must use Ioc (Immediate or Cancel)

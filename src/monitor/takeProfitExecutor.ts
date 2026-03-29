@@ -18,7 +18,7 @@ import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
-import { getHyperliquid, HL_SYMBOL_MAP } from '../shared/hyperliquid.js';
+import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { Redis } from 'ioredis';
 import type { Position } from '../execution/positionLedger.js';
 import type { ExitReason } from './takeProfitEvaluator.js';
@@ -293,16 +293,8 @@ async function attemptSyntheticExit(opts: {
     return { success: false, marketId: position.marketId, returnPct, reason, error: 'Futures disabled' };
   }
 
-  // 1. Identify correlated asset
-  let hlSymbol: string | undefined;
-  const lowerQuestion = position.question.toLowerCase();
-  for (const [id, symbol] of Object.entries(HL_SYMBOL_MAP)) {
-    if (lowerQuestion.includes(id) || lowerQuestion.includes((symbol as string).toLowerCase())) {
-      hlSymbol = symbol as string;
-      break;
-    }
-  }
-
+  // 1. Identify correlated asset — use resolveHlSymbol (word-boundary safe).
+  const hlSymbol = resolveHlSymbol(position.question);
   if (!hlSymbol) return { success: false, marketId: position.marketId, returnPct, reason, error: 'No correlated asset found' };
 
   // 2. Open Synthetic Exit (Hedge)

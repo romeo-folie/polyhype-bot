@@ -34,6 +34,8 @@ export interface ExecutionResult {
   tradeResult?: SimmerTradeResult;
   error?: string;
   executionVenue?: 'simmer' | 'clob' | 'hyperliquid';
+  /** True if a delta hedge was placed on HL for this trade. */
+  hedgePlaced?: boolean;
 }
 
 function idempotencyKey(signal: TradeSignal): string {
@@ -167,13 +169,14 @@ async function executeHyperliquidSignal(
  * Automatically open an offsetting Short position on HL after a PM YES buy.
  * Only triggers if the signal is NOT already a futures signal.
  */
+/** Returns true if the hedge was placed successfully. */
 async function triggerDeltaHedge(
   pmSignal: TradeSignal,
   redis: Redis,
   knownSessionExposureUsd = 0,
-): Promise<void> {
+): Promise<boolean> {
   const cfg = loadConfig();
-  if (!cfg.FUTURES_ENABLED || pmSignal.isFutures) return;
+  if (!cfg.FUTURES_ENABLED || pmSignal.isFutures) return false;
 
   const hl = getHyperliquid();
 
@@ -190,11 +193,11 @@ async function triggerDeltaHedge(
          hedge: pmSignal.stakeUsd.toFixed(2),
          cap: cfg.FUTURES_GLOBAL_MAX_MARGIN_USD,
        });
-       return;
+       return false;
     }
   } catch (err) {
     logger.error('[executor] margin check failed for hedge', { error: String(err) });
-    return; // Safety first
+    return false; // Safety first
   }
 
   // 2. Identify the correlated asset symbol using shared logic
@@ -202,7 +205,7 @@ async function triggerDeltaHedge(
 
   if (!hlSymbol) {
     logger.debug('[executor] no correlated HL asset found for hedge', { pmMarketId: pmSignal.marketId });
-    return;
+    return false;
   }
 
   // 3. Execute 1:1 Delta Hedge (Short)
@@ -225,6 +228,7 @@ async function triggerDeltaHedge(
     logger.info('[executor] delta hedge successful', { hlSymbol, txHash: result.txHash });
     // Link the hedge in Redis for tracking
     await redis.set(`hedge:link:${pmSignal.marketId}`, hlSymbol, 'EX', 7 * 24 * 3600);
+    return true;
   } else {
     const errMsg = result.error ?? 'unknown error';
     logger.warn('[executor] delta hedge failed', { hlSymbol, error: errMsg });
@@ -232,6 +236,7 @@ async function triggerDeltaHedge(
       { marketId: pmSignal.marketId, question: pmSignal.question, direction: pmSignal.direction, stakeUsd: pmSignal.stakeUsd } as TradeSignal,
       `Delta hedge failed for ${hlSymbol}: ${errMsg}`,
     ).catch(() => { /* best-effort notification */ });
+    return false;
   }
 }
 
@@ -369,10 +374,11 @@ export async function executeSignal(
           txHash: tradeResult.tx_hash,
         });
 
-        const exeResult: ExecutionResult = { signal, skipped: false, tradeResult, executionVenue: 'simmer' };
-        // Trigger Delta Hedge (for News signals)
-        void triggerDeltaHedge(signal, redis, knownSessionExposureUsd);
-        
+        // Trigger Delta Hedge and await result for accurate session exposure tracking.
+        const hedgeOk = await triggerDeltaHedge(signal, redis, knownSessionExposureUsd);
+        const exeResult: ExecutionResult = {
+          signal, skipped: false, tradeResult, executionVenue: 'simmer', hedgePlaced: hedgeOk,
+        };
         return exeResult;
       }
 
@@ -432,8 +438,9 @@ export async function executeSignal(
       tradeResult,
       executionVenue: 'clob',
     };
-    // Trigger Delta Hedge (for News signals)
-    void triggerDeltaHedge(signal, redis, knownSessionExposureUsd);
+    // Trigger Delta Hedge and await result for accurate session exposure tracking.
+    const hedgeOk = await triggerDeltaHedge(signal, redis, knownSessionExposureUsd);
+    (execResult as ExecutionResult & { hedgePlaced?: boolean }).hedgePlaced = hedgeOk;
 
     return execResult;
   }
@@ -463,24 +470,14 @@ export async function executeSignals(
   for (const signal of signals) {
     const result = await executeSignal(signal, redis, sessionExposureUsd);
     
-    // If trade succeeded, track the exposure to account for API lag in the next signal's margin check
-    if (result.tradeResult?.success && (result.executionVenue === 'hyperliquid' || result.executionVenue === 'clob' || result.executionVenue === 'simmer')) {
-       // Only increment session exposure if it consumes HL margin (Hedges for simmer/clob also consume margin)
-       // Wait, simmer/clob trades don't consume HL margin themselves, but the hedge does.
-       // However, triggerDeltaHedge is void (background).
-       // So we should ideally increment exposure if the hedge was triggered.
-       // But triggerDeltaHedge is void... so we don't know yet if it succeeded.
-       // We'll conservatively assume it will trigger if futures are enabled.
-       const cfg = loadConfig();
-       if (result.executionVenue === 'hyperliquid') {
-          sessionExposureUsd += signal.stakeUsd;
-       } else if (cfg.FUTURES_ENABLED && !signal.isFutures) {
-          // Check if resolved asset exists (shared logic matches triggerDeltaHedge)
-          const symbol = resolveHlSymbol(signal.question);
-          if (symbol) {
-             sessionExposureUsd += signal.stakeUsd;
-          }
-       }
+    // If trade succeeded, track HL margin consumed so subsequent margin checks account for API lag.
+    if (result.tradeResult?.success) {
+      if (result.executionVenue === 'hyperliquid') {
+        sessionExposureUsd += signal.stakeUsd;
+      } else if (result.hedgePlaced) {
+        // Hedge was confirmed placed — add its margin to session exposure.
+        sessionExposureUsd += signal.stakeUsd;
+      }
     }
     
     results.push(result);
