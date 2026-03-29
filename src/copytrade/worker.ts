@@ -16,9 +16,36 @@ import { deductStake, getBankroll } from '../shared/bankroll.js';
  *
  * @param maxCycles  Optional limit for testing (runs infinitely if undefined)
  */
+const WORKER_LOCK_KEY = 'copytrade:worker:lock';
+const WORKER_LOCK_TTL_SEC = 300; // 5 min — longer than any realistic cycle
+
 export async function runWorker(maxCycles?: number): Promise<void> {
   const redis = getRedis();
   const cfg = loadConfig();
+
+  // Duplicate-instance guard: only one worker may run at a time.
+  const lockToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const acquired = await redis.set(WORKER_LOCK_KEY, lockToken, 'EX', WORKER_LOCK_TTL_SEC, 'NX');
+  if (!acquired) {
+    logger.warn('[copytrade-worker] another instance is already running — exiting');
+    return;
+  }
+
+  // Refresh lock every 60s while running.
+  const lockRefresh = setInterval(() => {
+    redis.eval(
+      `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("expire",KEYS[1],ARGV[2]) else return 0 end`,
+      1, WORKER_LOCK_KEY, lockToken, String(WORKER_LOCK_TTL_SEC),
+    ).catch(() => {});
+  }, 60_000);
+
+  const releaseLock = async () => {
+    clearInterval(lockRefresh);
+    await redis.eval(
+      `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) else return 0 end`,
+      1, WORKER_LOCK_KEY, lockToken,
+    ).catch(() => {});
+  };
 
   logger.info('[copytrade-worker] started', { 
     wallets: cfg.COPYTRADE_WALLETS,
@@ -38,9 +65,21 @@ export async function runWorker(maxCycles?: number): Promise<void> {
       // Re-load before reading config for this iteration so the same snapshot is used
       // throughout the cycle — prevents race conditions from mid-cycle config changes.
       if (iterations > 0 && iterations % 100 === 0) {
-        dotenv.config({ override: true });
-        loadConfig(true); // flush cache
-        logger.info('[copytrade-worker] configuration refreshed from .env');
+        // Guard against reading a partially-written .env during shortlist auto-apply.
+        // The shortlist writer uses atomic rename (temp → .env), so stat the file and
+        // only reload if it was last modified more than 2s ago (rename has completed).
+        try {
+          const { statSync } = await import('fs');
+          const envStat = statSync('.env');
+          const ageMs = Date.now() - envStat.mtimeMs;
+          if (ageMs > 2_000) {
+            dotenv.config({ override: true });
+            loadConfig(true); // flush cache
+            logger.info('[copytrade-worker] configuration refreshed from .env');
+          }
+        } catch {
+          // .env missing or unreadable — skip reload, keep running with cached config
+        }
       }
 
       const bankrollUsd = await getBankroll(redis);
@@ -48,6 +87,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
 
       if (signals.length > 0) {
         logger.info('[copytrade-worker] new signals detected', { count: signals.length });
+        let sessionExposureUsd = 0;
         for (const signal of signals) {
           // Double-check bankroll before execution
           const currentBankroll = await getBankroll(redis);
@@ -56,7 +96,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
             continue;
           }
 
-          const result = await executeSignal(signal, redis);
+          const result = await executeSignal(signal, redis, sessionExposureUsd);
           if (result.tradeResult?.success) {
             await deductStake(redis, signal.stakeUsd);
             await recordPosition(redis, {
@@ -76,6 +116,10 @@ export async function runWorker(maxCycles?: number): Promise<void> {
               sharesHeld: result.tradeResult.shares_bought,
               executionVenue: result.executionVenue ?? 'simmer',
             });
+            // Accumulate HL margin so subsequent signals in this cycle respect the cap.
+            if (result.executionVenue === 'hyperliquid' || result.hedgePlaced) {
+              sessionExposureUsd += signal.stakeUsd;
+            }
           }
         }
       }
@@ -106,6 +150,8 @@ export async function runWorker(maxCycles?: number): Promise<void> {
     if (maxCycles !== undefined && iterations >= maxCycles) break;
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
   }
+
+  await releaseLock();
 }
 
 // Run worker if called directly (script mode).

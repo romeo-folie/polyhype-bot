@@ -362,7 +362,9 @@ class HyperliquidClient {
   }
 
   private roundPrice(px: number): number {
-    return parseFloat(px.toPrecision(5));
+    // toPrecision(5) truncates BTC prices (~$95,000) to 5 sig figs, losing sub-dollar precision.
+    // Use 6 significant figures to preserve meaningful price resolution across all traded assets.
+    return parseFloat(px.toPrecision(6));
   }
 
   private roundSize(sz: number, szDecimals: number): number {

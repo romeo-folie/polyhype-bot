@@ -56,8 +56,9 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         const pnlUsd = parseFloat(pos.position.unrealizedPnl);
         const sziRaw = parseFloat(pos.position.szi);
         const size = Math.abs(sziRaw);
-        // Skip dust positions (szi == 0) to avoid division-by-zero and phantom exits.
-        if (size === 0) continue;
+        // Skip dust positions (szi == 0) and invalid entry prices to avoid
+        // division-by-zero in priceChangePct and spurious stop-loss exits.
+        if (size === 0 || !Number.isFinite(entryPx) || entryPx === 0) continue;
         const positionValue = size * entryPx;
         const direction = sziRaw > 0 ? 'LONG' : 'SHORT';
 
@@ -121,8 +122,16 @@ export async function runFuturesMonitorWorker(): Promise<void> {
 // CLI entrypoint
 const isMain = process.argv[1]?.endsWith('futuresMonitor.ts') || process.argv[1]?.endsWith('futuresMonitor.js');
 if (isMain) {
+  const shutdown = async () => {
+    logger.info('[futures-monitor] shutting down...');
+    await closeRedis();
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => { void shutdown(); });
+  process.on('SIGINT', () => { void shutdown(); });
+
   runFuturesMonitorWorker().catch((err) => {
-    logger.error('[futures-monitor] fatal worker error', { error: err.message });
+    logger.error('[futures-monitor] fatal worker error', { error: err instanceof Error ? err.message : String(err) });
     process.exit(1);
   });
 }
