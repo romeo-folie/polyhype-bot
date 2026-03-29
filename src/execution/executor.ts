@@ -18,6 +18,7 @@ import { submitClobBuy } from '../shared/clob.js';
 import { hasOpenPosition } from './positionLedger.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { loadConfig } from '../shared/config.js';
+import { notifyTradeError } from './telegram.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
@@ -95,9 +96,15 @@ async function executeHyperliquidSignal(
 
   try {
     // 1. Margin & Equity Check
-    const state = await hl.getClearinghouseState();
+    // getClearinghouseState is called once internally by getOpenPositions().
+    // We also need the raw state for accountValue, so we call it directly here
+    // and pass positions from that same state to avoid a redundant API round-trip.
+    const [state, positions] = await Promise.all([
+      hl.getClearinghouseState(),
+      hl.getOpenPositions(),
+    ]);
     const accountValue = parseFloat(state?.marginSummary?.accountValue || '0');
-    
+
     // Solvency check: basic safety to avoid sending orders that will definitely fail.
     // Real-time margin checks happen on the HL side.
     if (accountValue < 0.01) {
@@ -106,7 +113,6 @@ async function executeHyperliquidSignal(
     }
 
     // Check if we're already at the global margin cap
-    const positions = await hl.getOpenPositions();
     const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
     
     // Safety: Account for HL API propagation delay by adding known session exposure
@@ -224,7 +230,12 @@ async function triggerDeltaHedge(
     // Link the hedge in Redis for tracking
     await redis.set(`hedge:link:${pmSignal.marketId}`, hlSymbol, 'EX', 7 * 24 * 3600);
   } else {
-    logger.warn('[executor] delta hedge failed', { hlSymbol, error: result.error });
+    const errMsg = result.error ?? 'unknown error';
+    logger.warn('[executor] delta hedge failed', { hlSymbol, error: errMsg });
+    void notifyTradeError(
+      { marketId: pmSignal.marketId, question: pmSignal.question, direction: pmSignal.direction, stakeUsd: pmSignal.stakeUsd } as TradeSignal,
+      `Delta hedge failed for ${hlSymbol}: ${errMsg}`,
+    ).catch(() => { /* best-effort notification */ });
   }
 }
 
@@ -246,6 +257,15 @@ export async function executeSignal(
 
   // 2) Route Futures signals to specialized handler
   if (signal.isFutures) {
+    // Open position check for futures — prevent stacking from multiple signal sources.
+    const alreadyHoldingFutures = await hasOpenPosition(redis, signal.marketId, signal.direction);
+    if (alreadyHoldingFutures) {
+      logger.info('[executor] skipping futures — already holding position', {
+        marketId: signal.marketId,
+        direction: signal.direction,
+      });
+      return { signal, skipped: true, skipReason: 'position_already_open' };
+    }
     const result = await executeHyperliquidSignal(signal, redis, knownSessionExposureUsd);
     if (result.tradeResult?.success) {
       await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);

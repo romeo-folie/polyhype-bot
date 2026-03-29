@@ -18,3 +18,7 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+pr_feedback.txt
+pr_feedback.txt
+review_feedback.txt
+*.feedback.txt
