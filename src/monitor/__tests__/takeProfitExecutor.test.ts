@@ -49,6 +49,21 @@ jest.unstable_mockModule('../../shared/bankroll.js', () => ({
   creditProceeds: jest.fn<() => Promise<number>>().mockResolvedValue(100),
 }));
 
+jest.unstable_mockModule('../../shared/outcomeRecorder.js', () => ({
+  recordOutcome: jest.fn().mockResolvedValue(undefined),
+  inferCategory: jest.fn().mockReturnValue('geopolitical'),
+  inferSource: jest.fn().mockReturnValue('osint'),
+}));
+
+jest.unstable_mockModule('../../shared/hyperliquid.js', () => ({
+  getHyperliquid: jest.fn(() => ({
+    closePosition: jest.fn().mockResolvedValue({ success: true }),
+    getClearinghouseState: jest.fn().mockResolvedValue({}),
+    getOpenPositions: jest.fn().mockResolvedValue([]),
+  })),
+  resolveHlSymbol: jest.fn().mockReturnValue(null),
+}));
+
 const { submitSell, resolveSimmerMarketId } = await import('../../shared/simmer.js');
 const { submitClobSell } = await import('../../shared/clob.js');
 const { closePosition } = await import('../../execution/positionLedger.js');
@@ -81,7 +96,11 @@ function makePosition(overrides: Partial<Position> = {}): Position {
 }
 
 function makeRedis() {
-  return {} as Parameters<typeof executeTakeProfit>[0]['redis'];
+  return {
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn().mockResolvedValue('OK'),
+    del: jest.fn().mockResolvedValue(1),
+  } as unknown as Parameters<typeof executeTakeProfit>[0]['redis'];
 }
 
 describe('executeTakeProfit', () => {
@@ -192,7 +211,7 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
-    expect(mockClose).toHaveBeenCalledWith(makeRedis(), 'mkt-1', 'YES');
+    expect(mockClose).toHaveBeenCalledWith(expect.objectContaining({ get: expect.any(Function) }), 'mkt-1', 'YES');
     expect(mockNotify).toHaveBeenCalledTimes(1);
   });
 
@@ -293,7 +312,7 @@ describe('executeTakeProfit', () => {
       expect.objectContaining({ tokenId: 'tok-yes', shares: 12.5, orderType: 'FAK' }),
     );
     expect(mockSell).not.toHaveBeenCalled();
-    expect(mockClose).toHaveBeenCalledWith(makeRedis(), 'mkt-1', 'YES');
+    expect(mockClose).toHaveBeenCalledWith(expect.objectContaining({ get: expect.any(Function) }), 'mkt-1', 'YES');
   });
 
   it('routes CLOB-venue NO position to correct token ID', async () => {
