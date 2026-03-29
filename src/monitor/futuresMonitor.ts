@@ -70,6 +70,19 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         } else if (priceChangePct >= cfg.FUTURES_TAKE_PROFIT_PCT) {
           shouldExit = true;
           reason = `Take-Profit triggered (${priceChangePct.toFixed(2)}%)`;
+        } else {
+          // 3. Time-based max-hold exit
+          const firstSeenKey = `futures:first-seen:${symbol}`;
+          let firstSeen = await redis.get(firstSeenKey);
+          if (!firstSeen) {
+            firstSeen = Date.now().toString();
+            await redis.set(firstSeenKey, firstSeen, 'EX', 3600 * 24 * 7);
+          }
+          const ageHours = (Date.now() - parseInt(firstSeen)) / (1000 * 3600);
+          if (ageHours >= cfg.FUTURES_MAX_HOLD_HOURS) {
+            shouldExit = true;
+            reason = `Max hold hours reached (${ageHours.toFixed(1)}h >= ${cfg.FUTURES_MAX_HOLD_HOURS}h)`;
+          }
         }
 
         if (shouldExit) {
@@ -78,9 +91,12 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           const result = await hl.closePosition(symbol);
           if (result.success) {
             logger.info('[futures-monitor] exit successful', { symbol, txHash: result.txHash });
-            // Cleanup ledger (match by LONG/SHORT direction)
+            // Cleanup ledger and tracking
             const direction = parseFloat(pos.position.szi) > 0 ? 'LONG' : 'SHORT';
-            await closeLedgerPosition(redis, symbol, direction);
+            await Promise.all([
+              closeLedgerPosition(redis, symbol, direction),
+              redis.del(`futures:first-seen:${symbol}`),
+            ]);
           } else {
             logger.error('[futures-monitor] exit failed', { symbol, error: result.error });
             await notifyTradeError({ marketId: symbol, question: 'Futures Auto-Exit' } as any, result.error || 'Unknown exit error');

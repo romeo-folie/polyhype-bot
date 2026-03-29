@@ -199,7 +199,8 @@ export async function mapNewsToFutures(
     for (const [assetId, symbol] of Object.entries(HL_SYMBOL_MAP)) {
       if (lowerTitle.includes(assetId) || lowerTitle.includes(symbol.toLowerCase())) {
         // Sentiment check
-        const isPositive = !/hacked|crash|ban|illegal|denied|plunge|rejection/i.test(lowerTitle);
+        const negativePattern = /hacked|crash|ban|illegal|denied|plunge|rejection|liquidation|sues|suit|investigation|exploit|vulnerability|scam|fraud|arrest|bankrupt|insolvent|delist/i;
+        const isPositive = !negativePattern.test(lowerTitle);
         const direction = isPositive ? 'LONG' : 'SHORT';
         
         const stakeUsd = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);

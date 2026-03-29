@@ -57,6 +57,8 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
 
   if (highUrgencyItems.length > 0) {
     try {
+      // 2. Continuous Monitoring — Re-evaluate open positions against fresh OSINT before opening new ones. 
+      // This prevents "doubling down" on trades where our informational edge has already evaporated or flipped.
       const reevalResult = await reEvaluatePositions(highUrgencyItems, redis);
       if (reevalResult.exited > 0) {
         logger.info('[execution] signal re-evaluation triggered exits', {
@@ -98,6 +100,9 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
   let skipped = 0;
 
   for (const signal of signals) {
+    // 4. Phase 3 — execute mapping signals one at a time.
+    // The executor handles idempotency via Redis, ensuring the same signal won't fire twice
+    // even if a news item is repeatedly ingestion by the source feed within the lifecycle window.
     const result = await executeSignal(signal, redis);
 
     if (result.skipped) {
@@ -117,6 +122,8 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
 
     if (result.tradeResult?.success) {
       executed++;
+      // Immediate bankroll deduction ensures follow-on mapping cycles in this same tick
+      // respect the reduced capital, preventing over-allocation or leverage-recursion.
       await deductStake(redis, result.signal.stakeUsd);
 
       // Record in ledger

@@ -71,19 +71,23 @@ describe('HyperliquidClient', () => {
   it('placeMarketOrder calculates sizeUsd correctly', async () => {
     const client = getHyperliquid();
     
-    // assetIndex
+    // 1. getMeta
     (mockedAxios.post as jest.Mock).mockResolvedValueOnce({
-      data: { universe: [{ name: 'BTC' }] },
+      data: { universe: [{ name: 'BTC', szDecimals: 3, index: 0 }] },
     });
-    // midPrice
+    // 2. updateLeverage
+    (mockedAxios.post as jest.Mock).mockResolvedValueOnce({
+      data: { status: 'ok' },
+    });
+    // 3. getAllMids (for getMidPrice)
     (mockedAxios.post as jest.Mock).mockResolvedValueOnce({
       data: { BTC: '50000' },
     });
-    // execution
+    // 4. execution
     (mockedAxios.post as jest.Mock).mockResolvedValueOnce({
       data: {
         status: 'ok',
-        response: { data: { statuses: [{ filled: { oid: 12345 } }] } },
+        response: { type: 'order', data: { statuses: [{ filled: { oid: 12345 } }] } },
       },
     });
 
@@ -95,6 +99,6 @@ describe('HyperliquidClient', () => {
     });
 
     expect(result.success).toBe(true);
-    expect(mockedAxios.post).toHaveBeenCalledTimes(3);
+    expect(mockedAxios.post).toHaveBeenCalledTimes(4);
   });
 });

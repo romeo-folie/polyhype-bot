@@ -102,11 +102,21 @@ export async function notifyTradeError(
 /**
  * Notify on a take-profit exit.
  */
+export type TakeProfitReason =
+  | 'take_profit_threshold'
+  | 'divergence_closed'
+  | 'stop_loss'
+  | 'signal_reeval'
+  | 'copytrade_mirror'
+  | 'synthetic'
+  | 'futures_sl'
+  | 'futures_tp';
+
 export async function notifyTakeProfitExecuted(opts: {
   position: Position;
   currentPrice: number;
   returnPct: number;
-  reason: 'take_profit_threshold' | 'divergence_closed' | 'stop_loss' | 'signal_reeval' | 'copytrade_mirror' | string;
+  reason: TakeProfitReason;
 }): Promise<void> {
   const { position, currentPrice, returnPct, reason } = opts;
   const reasonLabels: Record<string, string> = {

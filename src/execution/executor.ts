@@ -93,11 +93,18 @@ async function executeHyperliquidSignal(
   const hl = getHyperliquid();
 
   try {
-    // 1. Margin Check
+    // 1. Margin & Equity Check
     const state = await hl.getClearinghouseState();
-    // Use accountValue as a proxy for available collateral/equity
     const accountValue = parseFloat(state?.marginSummary?.accountValue || '0');
     
+    if (accountValue < signal.stakeUsd) {
+      logger.warn('[executor] skipping — insufficient HL equity', {
+        accountValue: accountValue.toFixed(2),
+        required: signal.stakeUsd.toFixed(2),
+      });
+      return { signal, skipped: true, skipReason: 'insufficient_equity' };
+    }
+
     // Check if we're already at the global margin cap
     const positions = await hl.getOpenPositions();
     const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
@@ -158,13 +165,32 @@ async function executeHyperliquidSignal(
  */
 async function triggerDeltaHedge(
   pmSignal: TradeSignal,
-  pmExecution: ExecutionResult,
   redis: Redis,
 ): Promise<void> {
   const cfg = loadConfig();
   if (!cfg.FUTURES_ENABLED || pmSignal.isFutures) return;
 
-  // 1. Identify the correlated asset symbol
+  const hl = getHyperliquid();
+
+  // 1. Margin Check (Added guard)
+  try {
+    const positions = await hl.getOpenPositions();
+    const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
+    
+    if (totalCurrentMargin + pmSignal.stakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
+       logger.warn('[executor] skipping delta hedge — global margin cap reached', {
+         current: totalCurrentMargin.toFixed(2),
+         hedge: pmSignal.stakeUsd.toFixed(2),
+         cap: cfg.FUTURES_GLOBAL_MAX_MARGIN_USD,
+       });
+       return;
+    }
+  } catch (err) {
+    logger.error('[executor] margin check failed for hedge', { error: String(err) });
+    return; // Safety first
+  }
+
+  // 2. Identify the correlated asset symbol
   let hlSymbol: string | undefined;
   const lowerQuestion = pmSignal.question.toLowerCase();
   
@@ -181,7 +207,6 @@ async function triggerDeltaHedge(
   }
 
   // 2. Execute 1:1 Delta Hedge (Short)
-  const hl = getHyperliquid();
   const hedgeStakeUsd = pmSignal.stakeUsd;
 
   logger.info('[executor] opening delta hedge on Hyperliquid', {
@@ -210,9 +235,24 @@ export async function executeSignal(
   signal: TradeSignal,
   redis: Redis,
 ): Promise<ExecutionResult> {
-  // 0) Route Futures signals to specialized handler
+  // 1) Idempotency check (Moved up to cover all platforms)
+  const key = idempotencyKey(signal);
+  const alreadyFired = await redis.get(key);
+  if (alreadyFired) {
+    logger.info('[executor] skipping — idempotency key already set', {
+      marketId: signal.marketId,
+      key,
+    });
+    return { signal, skipped: true, skipReason: 'already_executed' };
+  }
+
+  // 2) Route Futures signals to specialized handler
   if (signal.isFutures) {
-    return executeHyperliquidSignal(signal, redis);
+    const result = await executeHyperliquidSignal(signal, redis);
+    if (result.tradeResult?.success) {
+      await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
+    }
+    return result;
   }
 
   // 1) Stake floor check
@@ -234,16 +274,7 @@ export async function executeSignal(
     return { signal, skipped: true, skipReason: 'position_already_open' };
   }
 
-  // 3) Idempotency check
-  const key = idempotencyKey(signal);
-  const alreadyFired = await redis.get(key);
-  if (alreadyFired) {
-    logger.info('[executor] skipping — idempotency key already set', {
-      marketId: signal.marketId,
-      key,
-    });
-    return { signal, skipped: true, skipReason: 'already_executed' };
-  }
+  // 3) Stake floor check
 
   // 3) Try Simmer first
   const simmerId = await resolveSimmerMarketId(signal.question);
@@ -328,7 +359,7 @@ export async function executeSignal(
 
         const exeResult: ExecutionResult = { signal, skipped: false, tradeResult, executionVenue: 'simmer' };
         // Trigger Delta Hedge (for News signals)
-        void triggerDeltaHedge(signal, exeResult, redis);
+        void triggerDeltaHedge(signal, redis);
         
         return exeResult;
       }
@@ -390,7 +421,7 @@ export async function executeSignal(
       executionVenue: 'clob',
     };
     // Trigger Delta Hedge (for News signals)
-    void triggerDeltaHedge(signal, exeResult, redis);
+    void triggerDeltaHedge(signal, redis);
 
     return exeResult;
   }
