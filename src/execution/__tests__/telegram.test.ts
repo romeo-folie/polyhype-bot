@@ -7,6 +7,17 @@ jest.unstable_mockModule('../../shared/logger.js', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
+// Mock Config
+jest.unstable_mockModule('../../shared/config.js', () => ({
+  loadConfig: jest.fn(() => ({
+    REDIS_URL: 'redis://localhost:6379',
+    SIMMER_API_KEY: 'test-key',
+    OPENAI_API_KEY: 'test-openai',
+    TELEGRAM_BOT_TOKEN: process.env['TELEGRAM_BOT_TOKEN'],
+    TELEGRAM_CHAT_ID: process.env['TELEGRAM_CHAT_ID'],
+  })),
+}));
+
 const mockFetch = jest.fn<typeof fetch>();
 (global as unknown as { fetch: typeof mockFetch }).fetch = mockFetch;
 

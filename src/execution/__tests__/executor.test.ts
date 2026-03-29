@@ -29,6 +29,16 @@ jest.unstable_mockModule('../../shared/logger.js', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
+jest.unstable_mockModule('../../shared/config.js', () => ({
+  loadConfig: jest.fn(() => ({
+    REDIS_URL: 'redis://localhost:6379',
+    SIMMER_API_KEY: 'test-key',
+    DIVERGENCE_THRESHOLD: 0.1,
+    OPENAI_API_KEY: 'test-openai',
+    FUTURES_ENABLED: false,
+  })),
+}));
+
 const { submitTrade, resolveSimmerMarketId } = await import('../../shared/simmer.js');
 const { submitClobBuy } = await import('../../shared/clob.js');
 const { hasOpenPosition } = await import('../positionLedger.js');

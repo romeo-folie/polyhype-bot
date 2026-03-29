@@ -8,6 +8,7 @@
  */
 
 import { logger } from '../shared/logger.js';
+import { loadConfig } from '../shared/config.js';
 import type { TradeSignal } from '../mapping/index.js';
 import type { Position } from './positionLedger.js';
 
@@ -35,8 +36,9 @@ async function sendMessage(token: string, chatId: string, text: string): Promise
  * Send a notification if Telegram is configured. No-ops silently if not.
  */
 async function notify(text: string): Promise<void> {
-  const token = process.env['TELEGRAM_BOT_TOKEN'];
-  const chatId = process.env['TELEGRAM_CHAT_ID'];
+  const cfg = loadConfig();
+  const token = cfg.TELEGRAM_BOT_TOKEN;
+  const chatId = cfg.TELEGRAM_CHAT_ID;
 
   if (!token || !chatId) {
     logger.info('[telegram] not configured — skipping notification');
@@ -63,7 +65,7 @@ export async function notifyTradeExecuted(
   txHash: string | undefined,
 ): Promise<void> {
   const edgePct = (signal.edgeMagnitude * 100).toFixed(1);
-  const consensusPct = (signal.consensusProbability * 100).toFixed(1);
+  const consensusPct = ((signal.consensusProbability ?? 0.5) * 100).toFixed(1);
   const outcomePct = (signal.outcomePrice * 100).toFixed(1);
 
   const text =
@@ -84,7 +86,7 @@ export async function notifyTradeExecuted(
  * Notify on a failed trade execution.
  */
 export async function notifyTradeError(
-  signal: TradeSignal,
+  signal: { question: string; direction: string; stakeUsd: number; marketId?: string },
   error: string,
 ): Promise<void> {
   const text =
@@ -100,29 +102,44 @@ export async function notifyTradeError(
 /**
  * Notify on a take-profit exit.
  */
+export type TakeProfitReason =
+  | 'take_profit_threshold'
+  | 'divergence_closed'
+  | 'stop_loss'
+  | 'signal_reeval'
+  | 'copytrade_mirror'
+  | 'synthetic'
+  | 'futures_sl'
+  | 'futures_tp';
+
 export async function notifyTakeProfitExecuted(opts: {
   position: Position;
   currentPrice: number;
   returnPct: number;
-  reason: 'take_profit_threshold' | 'divergence_closed' | 'stop_loss' | 'signal_reeval' | 'copytrade_mirror';
+  reason: TakeProfitReason;
+  mechanismDetail?: string;
 }): Promise<void> {
-  const { position, currentPrice, returnPct, reason } = opts;
+  const { position, currentPrice, returnPct, reason, mechanismDetail } = opts;
   const reasonLabels: Record<string, string> = {
     take_profit_threshold: '🎯 Take-profit threshold reached',
     divergence_closed: '📉 Divergence closed',
     stop_loss: '🛑 Stop-loss triggered',
     signal_reeval: '🔄 Signal re-evaluation — edge evaporated',
     copytrade_mirror: '🧲 Copytrade mirror exit',
+    synthetic: '🛡️ Synthetic exit (Hedged on Hyperliquid)',
+    futures_sl: '🛑 Futures Stop-Loss triggered',
+    futures_tp: '🎯 Futures Take-Profit triggered',
   };
-  const reasonLabel = reasonLabels[reason] ?? reason;
+  let reasonLabel = reasonLabels[reason] ?? reason;
+  if (mechanismDetail) reasonLabel = `${reasonLabel} [${mechanismDetail}]`;
 
   const text =
     `💰 <b>Position Closed</b>\n\n` +
     `<b>Market:</b> ${escapeHtml(position.question)}\n` +
     `<b>Direction:</b> ${position.direction}\n` +
-    `<b>Entry price:</b> ${(position.entryPrice * 100).toFixed(1)}%\n` +
-    `<b>Exit price:</b> ${(currentPrice * 100).toFixed(1)}%\n` +
-    `<b>Return:</b> +${returnPct.toFixed(1)}%\n` +
+    `<b>Entry price:</b> ${position.isFutures ? '$' + position.entryPrice.toFixed(2) : (position.entryPrice * 100).toFixed(1) + '%'}\n` +
+    `<b>Exit price:</b> ${position.isFutures ? '$' + currentPrice.toFixed(2) : (currentPrice * 100).toFixed(1) + '%'}\n` +
+    `<b>Return:</b> ${returnPct > 0 ? '+' : ''}${returnPct.toFixed(1)}%\n` +
     `<b>Stake:</b> $${position.stakeUsd.toFixed(2)} USDC\n\n` +
     `<b>Reason:</b> ${reasonLabel}`;
 

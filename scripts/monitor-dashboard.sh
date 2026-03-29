@@ -14,6 +14,7 @@ if [ $? != 0 ]; then
   pm2 list | grep -q "pga-feeds" || pm2 start "npx tsx src/spot/feeds/manager.ts" --name pga-feeds
   pm2 list | grep -q "pga-arb" || pm2 start "npx tsx src/arb/worker.ts" --name pga-arb
   pm2 list | grep -q "pga-worker" || pm2 start "npx tsx src/copytrade/worker.ts" --name pga-worker
+  pm2 list | grep -q "pga-futures" || pm2 start "npx tsx src/monitor/futuresMonitor.ts" --name pga-futures
 
   # Create session and first pane (Feeds)
   tmux new-session -d -s $SESSION_NAME -n 'Dashboard' 'pm2 logs pga-feeds'
@@ -31,13 +32,18 @@ if [ $? != 0 ]; then
   # Select pane 2 and split for Monitor
   tmux select-pane -t $SESSION_NAME:0.2
   tmux split-window -v -t $SESSION_NAME 'tail -f /tmp/pga-monitor.log'
-  
-  # Select pane 4 and split for PM2 Monitor
+
+  # Select pane 4 and split for Futures Monitor
   tmux select-pane -t $SESSION_NAME:0.4
+  tmux split-window -v -t $SESSION_NAME 'pm2 logs pga-futures'
+  
+  # Select pane 5 and split for PM2 Monitor
+  tmux select-pane -t $SESSION_NAME:0.5
   tmux split-window -v -t $SESSION_NAME 'pm2 monit'
   
   # Equalize panes
   tmux select-layout -t $SESSION_NAME tiled
+
 else
   echo "[monitor] Session $SESSION_NAME already exists, attaching..."
 fi

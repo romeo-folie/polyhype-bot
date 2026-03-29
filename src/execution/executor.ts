@@ -16,6 +16,9 @@ import { logger } from '../shared/logger.js';
 import { submitTrade, resolveSimmerMarketId, getMarketContext, SimmerError } from '../shared/simmer.js';
 import { submitClobBuy } from '../shared/clob.js';
 import { hasOpenPosition } from './positionLedger.js';
+import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
+import { loadConfig } from '../shared/config.js';
+import { notifyTradeError } from './telegram.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
@@ -30,7 +33,9 @@ export interface ExecutionResult {
   skipReason?: string;
   tradeResult?: SimmerTradeResult;
   error?: string;
-  executionVenue?: 'simmer' | 'clob';
+  executionVenue?: 'simmer' | 'clob' | 'hyperliquid';
+  /** True if a delta hedge was placed on HL for this trade. */
+  hedgePlaced?: boolean;
 }
 
 function idempotencyKey(signal: TradeSignal): string {
@@ -40,8 +45,8 @@ function idempotencyKey(signal: TradeSignal): string {
 }
 
 function clobTokenForSignal(signal: TradeSignal): string | null {
-  if (signal.direction === 'YES') return signal.clobTokenIds[0] ?? null;
-  return signal.clobTokenIds[1] ?? null;
+  if (signal.direction === 'YES') return signal.clobTokenIds?.[0] ?? null;
+  return signal.clobTokenIds?.[1] ?? null;
 }
 
 function isMarketNotFoundMessage(msg: string | null | undefined): boolean {
@@ -83,30 +88,164 @@ async function tryExecuteViaClob(signal: TradeSignal): Promise<{
   return { ok: false, tradeResult, error: clobResult.error ?? 'CLOB trade failed' };
 }
 
+async function executeHyperliquidSignal(
+  signal: TradeSignal,
+  redis: Redis,
+  knownSessionExposureUsd = 0,
+): Promise<ExecutionResult> {
+  const cfg = loadConfig();
+  const hl = getHyperliquid();
+
+  try {
+    // 1. Margin & Equity Check — single API call.
+    // getOpenPositions() can accept a pre-fetched state to avoid a second round-trip.
+    const state = await hl.getClearinghouseState();
+    const positions = await hl.getOpenPositions(state);
+    const accountValue = parseFloat(state?.marginSummary?.accountValue || '0');
+
+    // Solvency check: basic safety to avoid sending orders that will definitely fail.
+    // Real-time margin checks happen on the HL side.
+    if (accountValue < 0.01) {
+       logger.warn('[executor] skipping — account has zero or near-zero equity', { accountValue: accountValue.toFixed(2) });
+       return { signal, skipped: true, skipReason: 'insufficient_equity' };
+    }
+
+    // Check if we're already at the global margin cap
+    const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
+    
+    // Safety: Account for HL API propagation delay by adding known session exposure
+    if (totalCurrentMargin + knownSessionExposureUsd + signal.stakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
+      logger.warn('[executor] skipping — global margin cap exceeded (including session exposure)', {
+        current: totalCurrentMargin.toFixed(2),
+        session: knownSessionExposureUsd.toFixed(2),
+        requested: signal.stakeUsd.toFixed(2),
+        cap: cfg.FUTURES_GLOBAL_MAX_MARGIN_USD,
+      });
+      return { signal, skipped: true, skipReason: 'global_margin_cap' };
+    }
+
+    // 2. Submit Order
+    logger.info('[executor] submitting Hyperliquid trade', {
+      symbol: signal.marketId,
+      direction: signal.direction,
+      stakeUsd: signal.stakeUsd,
+      leverage: signal.leverage || cfg.FUTURES_DEFAULT_LEVERAGE,
+    });
+
+    const tradeResult = await hl.placeMarketOrder({
+      symbol: signal.marketId,
+      isBuy: signal.direction === 'LONG',
+      sizeUsd: signal.stakeUsd,
+      leverage: signal.leverage || cfg.FUTURES_DEFAULT_LEVERAGE,
+    });
+
+    if (tradeResult.success) {
+      return {
+        signal,
+        skipped: false,
+        tradeResult: { success: true, tx_hash: tradeResult.txHash, shares_bought: 0 },
+        executionVenue: 'hyperliquid',
+      };
+    }
+
+    return {
+      signal,
+      skipped: false,
+      error: tradeResult.error || 'Hyperliquid order failed',
+      executionVenue: 'hyperliquid',
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      signal,
+      skipped: false,
+      error: `Hyperliquid execution error: ${message}`,
+      executionVenue: 'hyperliquid',
+    };
+  }
+}
+
+/**
+ * Automatically open an offsetting Short position on HL after a PM YES buy.
+ * Only triggers if the signal is NOT already a futures signal.
+ */
+/** Returns true if the hedge was placed successfully. */
+async function triggerDeltaHedge(
+  pmSignal: TradeSignal,
+  redis: Redis,
+  knownSessionExposureUsd = 0,
+): Promise<boolean> {
+  const cfg = loadConfig();
+  if (!cfg.FUTURES_ENABLED || pmSignal.isFutures) return false;
+
+  const hl = getHyperliquid();
+
+  // 1. Margin Check (Added guard)
+  try {
+    const positions = await hl.getOpenPositions();
+    const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
+    
+    // Safety: Account for session exposure to prevent overshooting cap during multi-signal cycles
+    if (totalCurrentMargin + knownSessionExposureUsd + pmSignal.stakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
+       logger.warn('[executor] skipping delta hedge — global margin cap reached (including session exposure)', {
+         current: totalCurrentMargin.toFixed(2),
+         session: knownSessionExposureUsd.toFixed(2),
+         hedge: pmSignal.stakeUsd.toFixed(2),
+         cap: cfg.FUTURES_GLOBAL_MAX_MARGIN_USD,
+       });
+       return false;
+    }
+  } catch (err) {
+    logger.error('[executor] margin check failed for hedge', { error: String(err) });
+    return false; // Safety first
+  }
+
+  // 2. Identify the correlated asset symbol using shared logic
+  const hlSymbol = resolveHlSymbol(pmSignal.question);
+
+  if (!hlSymbol) {
+    logger.debug('[executor] no correlated HL asset found for hedge', { pmMarketId: pmSignal.marketId });
+    return false;
+  }
+
+  // 3. Execute 1:1 Delta Hedge (Short)
+  const hedgeStakeUsd = pmSignal.stakeUsd;
+
+  logger.info('[executor] opening delta hedge on Hyperliquid', {
+    pmMarketId: pmSignal.marketId,
+    hlSymbol,
+    stakeUsd: hedgeStakeUsd,
+  });
+
+  const result = await hl.placeMarketOrder({
+    symbol: hlSymbol,
+    isBuy: false, // SHORT to hedge a PM YES/LONG
+    sizeUsd: hedgeStakeUsd,
+    leverage: 1, // Hedge positions use 1x leverage to maximize safety
+  });
+
+  if (result.success) {
+    logger.info('[executor] delta hedge successful', { hlSymbol, txHash: result.txHash });
+    // Link the hedge in Redis for tracking
+    await redis.set(`hedge:link:${pmSignal.marketId}`, hlSymbol, 'EX', 7 * 24 * 3600);
+    return true;
+  } else {
+    const errMsg = result.error ?? 'unknown error';
+    logger.warn('[executor] delta hedge failed', { hlSymbol, error: errMsg });
+    void notifyTradeError(
+      { marketId: pmSignal.marketId, question: pmSignal.question, direction: pmSignal.direction, stakeUsd: pmSignal.stakeUsd } as TradeSignal,
+      `Delta hedge failed for ${hlSymbol}: ${errMsg}`,
+    ).catch(() => { /* best-effort notification */ });
+    return false;
+  }
+}
+
 export async function executeSignal(
   signal: TradeSignal,
   redis: Redis,
+  knownSessionExposureUsd = 0,
 ): Promise<ExecutionResult> {
-  // 1) Stake floor check
-  if (signal.stakeUsd < MIN_STAKE_USD) {
-    logger.info('[executor] skipping — stake below floor', {
-      marketId: signal.marketId,
-      stakeUsd: signal.stakeUsd,
-    });
-    return { signal, skipped: true, skipReason: 'stake_below_floor' };
-  }
-
-  // 2) Open position check — don't stack into a market we already hold
-  const alreadyHolding = await hasOpenPosition(redis, signal.marketId, signal.direction);
-  if (alreadyHolding) {
-    logger.info('[executor] skipping — already holding position in this market', {
-      marketId: signal.marketId,
-      direction: signal.direction,
-    });
-    return { signal, skipped: true, skipReason: 'position_already_open' };
-  }
-
-  // 3) Idempotency check
+  // 1) Idempotency check (Moved up to cover all platforms)
   const key = idempotencyKey(signal);
   const alreadyFired = await redis.get(key);
   if (alreadyFired) {
@@ -117,12 +256,49 @@ export async function executeSignal(
     return { signal, skipped: true, skipReason: 'already_executed' };
   }
 
-  // 3) Try Simmer first
+  // 2) Route Futures signals to specialized handler
+  if (signal.isFutures) {
+    // Open position check for futures — prevent stacking from multiple signal sources.
+    const alreadyHoldingFutures = await hasOpenPosition(redis, signal.marketId, signal.direction);
+    if (alreadyHoldingFutures) {
+      logger.info('[executor] skipping futures — already holding position', {
+        marketId: signal.marketId,
+        direction: signal.direction,
+      });
+      return { signal, skipped: true, skipReason: 'position_already_open' };
+    }
+    const result = await executeHyperliquidSignal(signal, redis, knownSessionExposureUsd);
+    if (result.tradeResult?.success) {
+      await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
+    }
+    return result;
+  }
+
+  // 3) Stake floor check
+  if (signal.stakeUsd < MIN_STAKE_USD) {
+    logger.info('[executor] skipping — stake below floor', {
+      marketId: signal.marketId,
+      stakeUsd: signal.stakeUsd,
+    });
+    return { signal, skipped: true, skipReason: 'stake_below_floor' };
+  }
+
+  // 4) Open position check — don't stack into a market we already hold
+  const alreadyHolding = await hasOpenPosition(redis, signal.marketId, signal.direction);
+  if (alreadyHolding) {
+    logger.info('[executor] skipping — already holding position in this market', {
+      marketId: signal.marketId,
+      direction: signal.direction,
+    });
+    return { signal, skipped: true, skipReason: 'position_already_open' };
+  }
+
+  // 5) Try Simmer first
   const simmerId = await resolveSimmerMarketId(signal.question);
 
   if (simmerId) {
     // Context safeguard check — flip-flop detection, resolution criteria, market status
-    const ctx = await getMarketContext(simmerId, signal.consensusProbability);
+    const ctx = await getMarketContext(simmerId, signal.consensusProbability || 0.5);
     if (ctx) {
       // Gate 1: market already resolved or closed
       if (ctx.market.status === 'resolved' || ctx.market.status === 'closed') {
@@ -188,7 +364,7 @@ export async function executeSignal(
         market_id: simmerId,
         side: signal.direction.toLowerCase() as 'yes' | 'no',
         amount: signal.stakeUsd,
-        reasoning: `OSINT signal: "${signal.sourcedFrom}" — consensus P=${signal.consensusProbability.toFixed(2)}, market P=${signal.outcomePrice.toFixed(2)}, edge=${signal.edgeMagnitude.toFixed(2)}. ${signal.reasoning}`,
+        reasoning: `OSINT signal: "${signal.sourcedFrom}" — consensus P=${signal.consensusProbability?.toFixed(2) ?? 'N/A'}, market P=${signal.outcomePrice.toFixed(2)}, edge=${signal.edgeMagnitude.toFixed(2)}. ${signal.reasoning}`,
       });
 
       if (tradeResult.success) {
@@ -197,7 +373,13 @@ export async function executeSignal(
           marketId: signal.marketId,
           txHash: tradeResult.tx_hash,
         });
-        return { signal, skipped: false, tradeResult, executionVenue: 'simmer' };
+
+        // Trigger Delta Hedge and await result for accurate session exposure tracking.
+        const hedgeOk = await triggerDeltaHedge(signal, redis, knownSessionExposureUsd);
+        const exeResult: ExecutionResult = {
+          signal, skipped: false, tradeResult, executionVenue: 'simmer', hedgePlaced: hedgeOk,
+        };
+        return exeResult;
       }
 
       // Simmer returned success=false — only fall back for market-unavailable cases
@@ -241,7 +423,7 @@ export async function executeSignal(
     });
   }
 
-  // 4) CLOB fallback
+  // 6) CLOB fallback
   const clob = await tryExecuteViaClob(signal);
   if (clob.ok && clob.tradeResult?.success) {
     const tradeResult = clob.tradeResult;
@@ -250,12 +432,17 @@ export async function executeSignal(
       marketId: signal.marketId,
       txHash: tradeResult.tx_hash,
     });
-    return {
+    const execResult: ExecutionResult = {
       signal,
       skipped: false,
       tradeResult,
       executionVenue: 'clob',
     };
+    // Trigger Delta Hedge and await result for accurate session exposure tracking.
+    const hedgeOk = await triggerDeltaHedge(signal, redis, knownSessionExposureUsd);
+    (execResult as ExecutionResult & { hedgePlaced?: boolean }).hedgePlaced = hedgeOk;
+
+    return execResult;
   }
 
   const fallbackError = clob.error ?? 'CLOB fallback failed';
@@ -278,8 +465,21 @@ export async function executeSignals(
   redis: Redis,
 ): Promise<ExecutionResult[]> {
   const results: ExecutionResult[] = [];
+  let sessionExposureUsd = 0;
+
   for (const signal of signals) {
-    const result = await executeSignal(signal, redis);
+    const result = await executeSignal(signal, redis, sessionExposureUsd);
+    
+    // If trade succeeded, track HL margin consumed so subsequent margin checks account for API lag.
+    if (result.tradeResult?.success) {
+      if (result.executionVenue === 'hyperliquid') {
+        sessionExposureUsd += signal.stakeUsd;
+      } else if (result.hedgePlaced) {
+        // Hedge was confirmed placed — add its margin to session exposure.
+        sessionExposureUsd += signal.stakeUsd;
+      }
+    }
+    
     results.push(result);
   }
   return results;

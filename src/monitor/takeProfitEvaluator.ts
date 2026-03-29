@@ -17,7 +17,15 @@
 import type { Position } from '../execution/positionLedger.js';
 import type { CurrentPrice } from './priceFetcher.js';
 
-export type ExitReason = 'take_profit_threshold' | 'divergence_closed' | 'stop_loss' | 'signal_reeval' | 'copytrade_mirror';
+export type ExitReason = 
+  | 'take_profit_threshold' 
+  | 'divergence_closed' 
+  | 'stop_loss' 
+  | 'signal_reeval' 
+  | 'copytrade_mirror'
+  | 'synthetic'
+  | 'futures_sl'
+  | 'futures_tp';
 
 export interface ExitDecision {
   shouldExit: boolean;
@@ -59,8 +67,8 @@ export function evaluateTakeProfit(
   // NO position:  we expected YES to fall → exit when YES price <= our P(YES) estimate
   const divergenceClosed =
     direction === 'YES'
-      ? currentYesPrice >= consensusProbability
-      : currentYesPrice <= consensusProbability;
+      ? currentYesPrice >= (consensusProbability ?? 0.5)
+      : currentYesPrice <= (consensusProbability ?? 0.5);
 
   if (divergenceClosed) {
     return { shouldExit: true, reason: 'divergence_closed', returnDecimal, returnPct };

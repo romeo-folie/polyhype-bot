@@ -18,6 +18,7 @@ import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
+import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { Redis } from 'ioredis';
 import type { Position } from '../execution/positionLedger.js';
 import type { ExitReason } from './takeProfitEvaluator.js';
@@ -143,6 +144,10 @@ async function executeSimmerExit(opts: {
     } else {
       const error = tradeResult.error ?? 'unknown error from Simmer';
       
+      // FALLBACK: Attempt Synthetic Exit on HL if primary venue fails
+      const synthetic = await attemptSyntheticExit({ position, currentPrice, returnPct, reason, redis });
+      if (synthetic.success) return synthetic;
+
       // AUTO-RECOVERY: If shares mismatch, fetch actual balance and retry ONCE
       if (error.toLowerCase().includes('insufficient shares')) {
         logger.warn('[take-profit-executor] share mismatch detected — sync and retry', {
@@ -210,10 +215,15 @@ async function executeClobExit(opts: {
 }): Promise<TakeProfitResult> {
   const { position, currentPrice, returnPct, reason, redis, sharesToSell } = opts;
 
-  // Get the correct token ID: index 0 for YES, index 1 for NO
+  // 1. Venue Guard: Ensure we don't attempt CLOB token extraction for HL positions
+  if (position.executionVenue === 'hyperliquid') {
+    return { success: false, marketId: position.marketId, error: 'Hyperliquid exit not yet implemented via CLOB route', returnPct, reason };
+  }
+
+  // 2. Extract token ID
   const tokenId = position.direction === 'YES'
-    ? position.clobTokenIds[0]
-    : position.clobTokenIds[1];
+    ? position.clobTokenIds?.[0]
+    : position.clobTokenIds?.[1];
 
   if (!tokenId) {
     const error = 'CLOB exit failed: missing token ID for direction ' + position.direction;
@@ -264,4 +274,61 @@ async function executeClobExit(opts: {
     });
     return { marketId: position.marketId, success: false, error: message, returnPct, reason };
   }
+}
+
+/**
+ * If the primary venue fails, "close" the risk by opening an offsetting perp on Hyperliquid.
+ */
+async function attemptSyntheticExit(opts: {
+  position: Position;
+  currentPrice: number;
+  returnPct: number;
+  reason: ExitReason;
+  redis: Redis;
+}): Promise<TakeProfitResult> {
+  const { position, currentPrice, returnPct, reason, redis } = opts;
+  const cfg = loadConfig();
+
+  if (!cfg.FUTURES_ENABLED) {
+    return { success: false, marketId: position.marketId, returnPct, reason, error: 'Futures disabled' };
+  }
+
+  // 1. Identify correlated asset — use resolveHlSymbol (word-boundary safe).
+  const hlSymbol = resolveHlSymbol(position.question);
+  if (!hlSymbol) return { success: false, marketId: position.marketId, returnPct, reason, error: 'No correlated asset found' };
+
+  // 2. Open Synthetic Exit (Hedge)
+  const isBuy = position.direction === 'NO'; // If we were long NO, we buy the asset to hedge. If YES, we short.
+  const hl = getHyperliquid();
+  const hedgeStakeUsd = position.stakeUsd;
+
+  logger.info('[take-profit-executor] attempting synthetic exit on HL', { symbol: hlSymbol, isBuy, reason });
+
+  const result = await hl.placeMarketOrder({
+    symbol: hlSymbol,
+    isBuy,
+    sizeUsd: hedgeStakeUsd,
+    leverage: 1,
+  });
+
+  if (result.success) {
+    await closePosition(redis, position.marketId, position.direction);
+    await notifyTakeProfitExecuted({ 
+       position, 
+       currentPrice, 
+       returnPct, 
+       reason: 'synthetic',
+       mechanismDetail: reason,
+    });
+    
+    return {
+      marketId: position.marketId,
+      success: true,
+      returnPct,
+      reason,
+      txHash: result.txHash,
+    };
+  }
+
+  return { success: false, marketId: position.marketId, returnPct, reason, error: result.error || 'Synthetic exit failed' };
 }

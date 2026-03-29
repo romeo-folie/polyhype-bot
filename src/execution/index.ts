@@ -14,8 +14,9 @@ import process from 'node:process';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
 import { runIngestion } from '../ingestion/index.js';
-import { runMapping } from '../mapping/index.js';
+import { runMapping, mapNewsToFutures } from '../mapping/index.js';
 import { executeSignal } from './executor.js';
+import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import { recordPosition } from './positionLedger.js';
 import { notifyTradeExecuted, notifyTradeError } from './telegram.js';
 import { reEvaluatePositions } from '../monitor/signalReeval.js';
@@ -25,17 +26,9 @@ import type { TradeSignal } from '../mapping/index.js';
 
 /**
  * Run the full ingestion → mapping → execution pipeline.
- *
- * This is the cron entrypoint for the main trading loop.
  */
 export async function runExecution(): Promise<void> {
   const redis = getRedis();
-
-  // Prevent overlapping runs — ingestion + LLM mapping can exceed the 5-min cron
-  // interval on slow networks / cold LLM responses. Without a lock, a second cron
-  // tick spawns a second process that races for the same signals and double-executes.
-  // Token-based: only the acquiring run can release the lock (safe if TTL expires
-  // and a newer run reacquires before the older run finishes).
   const lockToken = await acquireLock('execution:lock', 270);
   if (!lockToken) {
     logger.info('[execution] previous cycle still running, skipping');
@@ -51,10 +44,8 @@ export async function runExecution(): Promise<void> {
 
 async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<void> {
   const bankrollUsd = await getBankroll(redis);
-
   logger.info('[execution] pipeline starting', { bankrollUsd });
 
-  // 1. Phase 1 — ingest OSINT (Long-tail latency)
   let highUrgencyItems: ScoredItem[] = [];
   try {
     highUrgencyItems = await runIngestion();
@@ -62,19 +53,15 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
     logger.error('[execution] ingestion failed — continuing', {
       error: err instanceof Error ? err.message : String(err),
     });
-    highUrgencyItems = [] as never;
+    highUrgencyItems = [];
   }
 
-  // 2. Re-evaluate existing positions against fresh OSINT before executing new signals.
-  // NOTE: re-eval runs BEFORE new signal execution intentionally. If re-eval exits
-  // a position and the same cycle's mapping produces a new entry signal for that
-  // market, the idempotency key (1h TTL in Redis) prevents re-entry within the
-  // same window. This is the desired behavior — an exited position should not be
-  // immediately re-entered on the same cycle's OSINT.
   if (highUrgencyItems.length > 0) {
     try {
+      // 2. Continuous Monitoring — Re-evaluate open positions against fresh OSINT before opening new ones. 
+      // This prevents "doubling down" on trades where our informational edge has already evaporated or flipped.
       const reevalResult = await reEvaluatePositions(highUrgencyItems, redis);
-      if (reevalResult.exited > 0) {
+      if (reevalResult.exited > 0 || reevalResult.errors > 0) {
         logger.info('[execution] signal re-evaluation triggered exits', {
           exited: reevalResult.exited,
           held: reevalResult.held,
@@ -88,29 +75,42 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
     }
   }
 
-  let signals: TradeSignal[] = [];
+  const signals: TradeSignal[] = [];
 
   if (highUrgencyItems.length > 0) {
     // 3. Phase 2 — map to trade signals
     try {
-      signals = await runMapping(highUrgencyItems, bankrollUsd);
+      // a) High-speed Futures Mapping (breaking news)
+      const futuresSignals = await mapNewsToFutures(highUrgencyItems, bankrollUsd);
+      if (futuresSignals.length > 0) {
+        logger.info('[execution] news-to-futures signals generated', { count: futuresSignals.length });
+        signals.push(...futuresSignals);
+      }
+
+      // b) Standard Polymarket Mapping (entity extraction + comparison)
+      const pmSignals = await runMapping(highUrgencyItems, bankrollUsd);
+      signals.push(...pmSignals);
     } catch (err) {
       logger.error('[execution] mapping failed — continuing', {
         error: err instanceof Error ? err.message : String(err),
       });
-      signals = [];
     }
   }
 
   // 4. Phase 3 — execute mapping signals one at a time
-  const results = [];
   let executed = 0;
   let failed = 0;
   let skipped = 0;
+  let sessionExposureUsd = 0;
 
   for (const signal of signals) {
-    const result = await executeSignal(signal, redis);
-    results.push(result);
+    // 4. Execution Loop — Cycle through signals and attempt execution on the primary or fallback venue.
+    // This loop is sequential to simplify bankroll management and prevent race conditions on shared account margin.
+    //
+    // The executor handles Idempotency (Grip-it-and-rip-it): ensures the same signal hash isn't fired twice
+    // within the 3600s Redis window, protecting against feed re-ingestion noise or redundant LLM calls
+    // during extreme breaking news cycles.
+    const result = await executeSignal(signal, redis, sessionExposureUsd);
 
     if (result.skipped) {
       skipped++;
@@ -129,9 +129,8 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
 
     if (result.tradeResult?.success) {
       executed++;
-
-      // Deduct immediately — keeps the bankroll cache accurate for the next
-      // signal in this cycle (prevents over-allocation and Simmer rejections).
+      // Immediate bankroll deduction ensures follow-on mapping cycles in this same tick
+      // respect the reduced capital, preventing over-allocation or leverage-recursion.
       await deductStake(redis, result.signal.stakeUsd);
 
       // Record in ledger
@@ -143,15 +142,25 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         direction: result.signal.direction,
         entryPrice: result.signal.outcomePrice,
         stakeUsd: result.signal.stakeUsd,
-        consensusProbability: result.signal.consensusProbability,
+        consensusProbability: result.signal.consensusProbability ?? 0.5,
         consensusStddev: result.signal.consensusStddev,
         edgeMagnitude: result.signal.edgeMagnitude,
         sourcedFrom: result.signal.sourcedFrom,
         openedAt: new Date().toISOString(),
         txHash: result.tradeResult.tx_hash,
         sharesHeld: result.tradeResult.shares_bought,
-        executionVenue: result.executionVenue ?? 'simmer',
+        executionVenue: result.executionVenue || 'simmer',
+        isFutures: result.signal.isFutures,
+        leverage: result.signal.leverage,
+        symbol: result.signal.symbol || (result.signal.isFutures ? result.signal.marketId : undefined),
       });
+
+      // Track HL margin consumed for accurate margin cap checks in subsequent signals.
+      if (result.executionVenue === 'hyperliquid') {
+        sessionExposureUsd += signal.stakeUsd;
+      } else if (result.hedgePlaced) {
+        sessionExposureUsd += signal.stakeUsd;
+      }
 
       await notifyTradeExecuted(result.signal, result.tradeResult.tx_hash);
     } else if (result.tradeResult && !result.tradeResult.success) {
@@ -163,7 +172,6 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
   logger.info('[execution] pipeline complete', { executed, failed, skipped });
 }
 
-// Entrypoint when run directly (npx tsx src/execution/index.ts)
 const isMain = process.argv[1]?.endsWith('execution/index.ts') ?? false;
 if (isMain) {
   runExecution()

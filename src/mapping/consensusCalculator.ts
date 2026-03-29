@@ -203,3 +203,68 @@ export async function estimateConsensusProbability(opts: {
 
   return { probability: mean, reasoning, stddev, sampleCount: results.length };
 }
+
+// Module-level singleton clients — created once, reused across all estimateSentiment calls.
+// Module-level singleton clients — lazy-initialized on first use, reused thereafter.
+// Using await import() (ESM-safe) instead of require().
+let _sentimentOpenAIClient: import('openai').OpenAI | null = null;
+let _sentimentGeminiClient: import('@google/generative-ai').GoogleGenerativeAI | null = null;
+
+async function getSentimentOpenAI(): Promise<import('openai').OpenAI> {
+  if (!_sentimentOpenAIClient) {
+    const { OpenAI } = await import('openai');
+    _sentimentOpenAIClient = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
+  }
+  return _sentimentOpenAIClient;
+}
+
+async function getSentimentGemini(): Promise<import('@google/generative-ai').GoogleGenerativeAI> {
+  if (!_sentimentGeminiClient) {
+    const { GoogleGenerativeAI } = await import('@google/generative-ai');
+    _sentimentGeminiClient = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
+  }
+  return _sentimentGeminiClient;
+}
+
+/**
+ * Rapid sentiment check for futures trading.
+ * Performs a single-call zero-shot classification: POSITIVE, NEGATIVE, or NEUTRAL.
+ * LLM clients are created once and reused across calls.
+ */
+export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHORT' | 'NEUTRAL'> {
+  const provider = loadConfig().LLM_PROVIDER;
+  const useGemini = provider === 'gemini' && Boolean(process.env['GEMINI_API_KEY']);
+  const useOpenAI = Boolean(process.env['OPENAI_API_KEY']);
+
+  const system = 'You are a high-speed financial sentiment classifier. ' +
+    'Classify the given headline as POSITIVE or NEGATIVE for the relevant asset. ' +
+    'If the impact is ambiguous or insignificant, return NEUTRAL. ' +
+    'Return ONLY the word: POSITIVE, NEGATIVE, or NEUTRAL.';
+
+  let raw = '';
+  try {
+    if (useGemini) {
+      const genai = await getSentimentGemini();
+      const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
+      const prompt = `${system}\n\nHeadline: ${headline}`;
+      const result = await model.generateContent(prompt);
+      raw = result.response.text().trim().toUpperCase();
+    } else if (useOpenAI) {
+      const client = await getSentimentOpenAI();
+      const completion = await client.chat.completions.create({
+        model: loadConfig().OPENAI_MODEL,
+        messages: [{ role: 'system', content: system }, { role: 'user', content: headline }],
+        max_tokens: 10,
+        temperature: 0,
+      });
+      raw = (completion.choices[0]?.message?.content ?? '').trim().toUpperCase();
+    }
+  } catch (err) {
+    logger.warn('[sentiment-calc] LLM failed, falling back to NEUTRAL', { error: String(err) });
+    return 'NEUTRAL';
+  }
+
+  if (raw.includes('POSITIVE')) return 'LONG';
+  if (raw.includes('NEGATIVE')) return 'SHORT';
+  return 'NEUTRAL';
+}
