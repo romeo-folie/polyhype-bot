@@ -34,6 +34,7 @@ const envSchema = z.object({
   // Model selection (optional — defaults to recommended fast/cheap models)
   OPENAI_MODEL: z.string().optional().default('gpt-4o-mini'),
   GEMINI_MODEL: z.string().optional().default('gemini-2.5-flash'),
+  ANTHROPIC_MODEL: z.string().optional().default('claude-3-5-haiku-20241022'),
 
   // Tuning knobs (all optional — defaults apply)
   LLM_PROVIDER: z.enum(['openai', 'gemini']).optional().default('openai'),
