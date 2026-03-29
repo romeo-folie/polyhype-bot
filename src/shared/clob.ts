@@ -412,10 +412,13 @@ export async function redeemClobOutcome(input: {
       // It uses the (v + 4) suffix which is a required Gnosis-specific trick for EOA signatures
       // to distinguish them from other signature types in the Safe's internal signature validator.
       const sig = signer.signingKey.sign(safeTxHash);
-      const r = sig.r;
-      const s = sig.s;
+      // Strip 0x prefix from r and s before concatenation.
+      // sig.r and sig.s include the leading 0x — concatenating without stripping
+      // produces a malformed 132-byte signature instead of the expected 65 bytes.
+      const r = sig.r.slice(2);
+      const s = sig.s.slice(2);
       const v = sig.v + 4;
-      const safeSignature = r + s.slice(2) + v.toString(16).padStart(2, '0');
+      const safeSignature = '0x' + r + s + v.toString(16).padStart(2, '0');
 
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       const tx = await safe.execTransaction(

@@ -75,8 +75,10 @@ const envSchema = z.object({
   // Copytrade signals
   COPYTRADE_ENABLED: z.coerce.boolean().optional().default(false),
   COPYTRADE_WALLETS: z.string().optional().default(''),
-  COPYTRADE_MARKET_SCOPE: z.enum(['weather', 'all']).optional().default('all')
-    .transform((s: string) => s.split(',').map((v: string) => v.trim().toLowerCase())),
+  // Comma-separated category list. Examples: 'all', 'weather', 'weather,geopolitics'
+  COPYTRADE_MARKET_SCOPE: z.string().optional().default('all').transform(
+    (v) => v.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+  ),
   COPYTRADE_SIZE_SCALE: z.coerce.number().min(0).optional().default(0.1),
   COPYTRADE_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(25),
   COPYTRADE_MAX_SLIPPAGE_BPS: z.coerce.number().min(0).optional().default(200),
@@ -104,6 +106,9 @@ const envSchema = z.object({
   FUTURES_MAX_PER_TRADE_USD: z.coerce.number().min(0).optional().default(10),
   FUTURES_DEFAULT_LEVERAGE: z.coerce.number().int().min(1).max(50).optional().default(5),
   FUTURES_MAX_HOLD_HOURS: z.coerce.number().int().min(1).optional().default(4),
+  // Notional-based SL/TP thresholds (percentage of margin used, NOT account equity).
+  // At 5x leverage a 1.5% notional SL represents a 7.5% equity drawdown.
+  // Use values relative to notional, not leverage-adjusted equity.
   FUTURES_STOP_LOSS_PCT: z.coerce.number().default(-1.5),
   FUTURES_TAKE_PROFIT_PCT: z.coerce.number().default(3.0),
   FUTURES_EXIT_ON_SIGNAL_FADE: z.coerce.boolean().optional().default(true),
