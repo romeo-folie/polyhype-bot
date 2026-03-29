@@ -231,6 +231,21 @@ async function executeClobExit(opts: {
     return { marketId: position.marketId, success: false, error, returnPct, reason };
   }
 
+  // Polymarket CLOB rejects orders below $1.00 notional (shares × currentPrice).
+  // Positions this small are better left for the resolution redeemer (which pays $1/share at settlement).
+  const CLOB_MIN_ORDER_USD = 1.0;
+  const notionalUsd = sharesToSell * currentPrice;
+  if (notionalUsd < CLOB_MIN_ORDER_USD) {
+    logger.warn('[take-profit-executor] CLOB sell below minimum notional — skipping, will resolve at settlement', {
+      marketId: position.marketId,
+      shares: sharesToSell,
+      currentPrice,
+      notionalUsd: notionalUsd.toFixed(4),
+      minUsd: CLOB_MIN_ORDER_USD,
+    });
+    return { marketId: position.marketId, success: false, error: `CLOB sell below minimum: $${notionalUsd.toFixed(4)} < $${String(CLOB_MIN_ORDER_USD)}`, returnPct, reason };
+  }
+
   try {
     const clobResult = await submitClobSell({
       tokenId,

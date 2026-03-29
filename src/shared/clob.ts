@@ -17,6 +17,8 @@ const POLYGON_CHAIN_ID = 137;
 // Hard timeout for CLOB order submission. The SDK has no built-in timeout;
 // without this a hung connection would keep the cron process alive indefinitely.
 const CLOB_ORDER_TIMEOUT_MS = 30_000;
+/** Polymarket CLOB protocol minimum — orders below this are rejected with "not enough balance / order amount". */
+const CLOB_MIN_ORDER_USD = 1.0;
 
 const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
 const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
@@ -251,6 +253,13 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
     // mechanism — the proxy contract accesses funds directly, bypassing approve().
     // getBalanceAllowance().allowance returns 0 for these accounts even when trading
     // is fully operational. Balance check only: gate on actual USDC balance.
+    if (input.amountUsd < CLOB_MIN_ORDER_USD) {
+      return {
+        success: false,
+        error: `CLOB order below minimum size: ${String(input.amountUsd)} USDC < ${String(CLOB_MIN_ORDER_USD)} USDC minimum`,
+      };
+    }
+
     const bal = await getClobBalance();
     if (bal !== null && bal.balance < input.amountUsd) {
       return {
