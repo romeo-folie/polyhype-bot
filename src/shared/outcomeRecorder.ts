@@ -89,9 +89,15 @@ export async function recordOutcome(
       const pruned: string[] = await redis.zpopmin(`outcomes:${outcome.category}`, excess);
       const prunedIds = pruned.filter((_v, i) => i % 2 === 0);
       if (prunedIds.length > 0) {
+        // Remove from the global index.
         await redis.zrem('outcomes:all', ...prunedIds);
-        await redis.zrem(`outcomes:source:${outcome.source}`, ...prunedIds);
-        // Also delete the hash entries to free memory
+        // Remove from each pruned outcome's actual source set (read from its hash),
+        // not the current outcome's source — they may differ for cross-source prunes.
+        for (const prunedId of prunedIds) {
+          const src = await redis.hget(`outcome:${prunedId}`, 'source');
+          if (src) await redis.zrem(`outcomes:source:${src}`, prunedId);
+        }
+        // Delete the hash entries to free memory.
         const hashKeys = prunedIds.map(id => `outcome:${id}`);
         await redis.del(...hashKeys);
       }
