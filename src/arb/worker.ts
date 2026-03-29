@@ -29,6 +29,9 @@ export class ArbitrageWorker {
   private lastScanTime = 0;
   private lastCryptoArbTime = 0;
   private lastCryptoArbTradeTime = 0;
+  // Shared rate-limit timestamp across scan and crypto-arb paths.
+  // Both consume from the same Polymarket order budget (maxTradesPerMin).
+  private lastAnyTradeTime = 0;
   private isScanning = false;
   private timer: NodeJS.Timeout | null = null;
 
@@ -98,11 +101,10 @@ export class ArbitrageWorker {
       return;
     }
 
-    // Rate Limit Governor: min time between scans based on maxTradesPerMin.
-    // 60,000ms / 45 trades = ~1.3s per trade.
+    // Rate Limit Governor: shared budget across scan + crypto-arb (same Polymarket order limit).
     const minIntervalMs = 60000 / this.maxTradesPerMin;
     const now = Date.now();
-    const elapsed = now - this.lastScanTime;
+    const elapsed = now - Math.max(this.lastScanTime, this.lastAnyTradeTime);
 
     if (elapsed < minIntervalMs) {
       logger.debug(`[arb-worker] governor throttle: ${elapsed}ms < ${minIntervalMs.toFixed(0)}ms, skipping`);
@@ -111,6 +113,7 @@ export class ArbitrageWorker {
 
     this.isScanning = true;
     this.lastScanTime = now;
+    this.lastAnyTradeTime = now;
 
     try {
       logger.info(`[arb-worker] scan started (${source})`);
@@ -178,10 +181,11 @@ export class ArbitrageWorker {
       const opportunities = await scanCryptoArb(move, redis);
 
       for (const opp of opportunities) {
-        // Per-trade rate limit: enforce minInterval between individual trades, not just scans.
+        // Per-trade rate limit: check shared budget (scan + crypto-arb share one Polymarket quota).
         const tradeNow = Date.now();
-        if (tradeNow - this.lastCryptoArbTradeTime < minIntervalMs) {
-          logger.debug('[crypto-arb] per-trade governor throttle, skipping remaining opportunities');
+        const lastAny = Math.max(this.lastCryptoArbTradeTime, this.lastAnyTradeTime);
+        if (tradeNow - lastAny < minIntervalMs) {
+          logger.debug('[crypto-arb] per-trade governor throttle (shared budget), skipping remaining opportunities');
           break;
         }
 
@@ -200,17 +204,23 @@ export class ArbitrageWorker {
             reasoning: `Crypto latency arb: fair=${opp.fairValuePrice.toFixed(3)}, pm=${opp.currentPmPrice.toFixed(3)}, edge=${opp.edge.toFixed(3)}`,
           };
 
+          // executor.executeSignal handles execution only — it does NOT record the position
+          // or deduct the stake. This worker is the single call site for those operations.
+          // Do NOT route through execution/index.executeSignals — that path is for OSINT signals
+          // and would double-record.
           const result = await executeSignal(signal, redis);
 
           if (result.tradeResult?.success) {
+            // Use result.signal.stakeUsd (calibration-corrected) rather than opp.stakeUsd.
+            const executedStake = result.signal.stakeUsd;
             logger.info('[crypto-arb] trade executed', {
               marketId: opp.marketId,
               direction: opp.direction,
-              stakeUsd: opp.stakeUsd,
+              stakeUsd: executedStake,
               edge: opp.edge.toFixed(4),
             });
 
-            // Record position
+            // Single record point for this position — executor.ts does not record.
             await recordPosition(redis, {
               marketId: opp.marketId,
               conditionId: opp.conditionId,
@@ -218,18 +228,19 @@ export class ArbitrageWorker {
               question: opp.question,
               direction: opp.direction,
               entryPrice: opp.currentPmPrice,
-              stakeUsd: opp.stakeUsd,
+              stakeUsd: executedStake,
               consensusProbability: opp.fairValuePrice,
-              edgeMagnitude: opp.edge,
+              edgeMagnitude: result.signal.edgeMagnitude ?? opp.edge,
               openedAt: new Date().toISOString(),
               sourcedFrom: `crypto-arb:${opp.assetId}`,
               executionVenue: result.executionVenue ?? 'simmer',
             });
 
-            // Deduct stake from bankroll cache
-            await deductStake(redis, opp.stakeUsd);
+            // Single deduct point — executor.ts does not deduct.
+            await deductStake(redis, executedStake);
             // Update per-trade timestamp so the next iteration respects the rate limit.
             this.lastCryptoArbTradeTime = Date.now();
+            this.lastAnyTradeTime = this.lastCryptoArbTradeTime;
 
             // Set dedup key
             const dedupKey = `arb:crypto:${opp.marketId}:${opp.direction}`;

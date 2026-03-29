@@ -15,6 +15,7 @@ import { getBankroll, deductStake } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { notifyUnhedgedArbPosition } from '../execution/telegram.js';
+import { recordPosition } from '../execution/positionLedger.js';
 import type { Redis } from 'ioredis';
 
 // Max arb trades per scan run (2 trades = 4 orders, well within 60 orders/min limit)
@@ -258,6 +259,20 @@ export async function executeArb(
       stakeUsd: yesUsd, 
       noError: noResult.error 
     }).catch(err => { logger.error('[arb] alert failed', { err }); });
+
+    // Record the unhedged YES position in the ledger so the take-profit monitor
+    // tracks it and can attempt a manual exit rather than leaving it invisible.
+    await recordPosition(redis, {
+      marketId: opp.marketId,
+      question: opp.question,
+      direction: 'YES',
+      entryPrice: opp.yesAsk,
+      stakeUsd: yesUsd,
+      edgeMagnitude: opp.edge,
+      openedAt: new Date().toISOString(),
+      sourcedFrom: 'arb:unhedged-yes',
+      executionVenue: 'clob',
+    }).catch(err => { logger.error('[arb] failed to record unhedged position', { err }); });
     
     await deductStake(redis, yesUsd * (1 + cfg.ARB_FEE_RATE));
     return {

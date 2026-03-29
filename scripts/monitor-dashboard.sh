@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 # PGA Monitor Dashboard
 # 6-pane tmux session — all persistent workers + cron logs.
 # Usage: bash scripts/monitor-dashboard.sh  (run from anywhere)

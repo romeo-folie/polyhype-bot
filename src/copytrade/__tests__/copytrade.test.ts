@@ -1,6 +1,6 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 
-const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
+const mockLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 
 let configOverride = {
   COPYTRADE_ENABLED: true,
@@ -15,15 +15,15 @@ let configOverride = {
   MAX_BET_FRACTION: 0.1,
 };
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({ logger: mockLogger }));
+vi.mock('../../shared/logger.js', () => ({ logger: mockLogger }));
 
-const mockDedup = jest.fn() as any;
-jest.unstable_mockModule('../../shared/redis.js', () => ({ dedup: mockDedup }));
+const mockDedup = vi.fn();
+vi.mock('../../shared/redis.js', () => ({ dedup: mockDedup }));
 
-const mockFetchWithTimeout = jest.fn() as any;
-const mockGetMarketBySlug = jest.fn() as any;
-jest.unstable_mockModule('../../mapping/gamma.js', async () => {
-  const actual = await import('../../mapping/gamma.js');
+const mockFetchWithTimeout = vi.fn();
+const mockGetMarketBySlug = vi.fn();
+vi.mock('../../mapping/gamma.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../mapping/gamma.js')>();
   return {
     ...actual,
     fetchWithTimeout: mockFetchWithTimeout,
@@ -31,23 +31,23 @@ jest.unstable_mockModule('../../mapping/gamma.js', async () => {
   };
 });
 
-const mockGetOpenPositions = jest.fn() as any;
-jest.unstable_mockModule('../../execution/positionLedger.js', () => ({
+const mockGetOpenPositions = vi.fn();
+vi.mock('../../execution/positionLedger.js', () => ({
   getOpenPositions: mockGetOpenPositions,
 }));
 
-const mockFetchCurrentPrice = jest.fn() as any;
-jest.unstable_mockModule('../../monitor/priceFetcher.js', () => ({
+const mockFetchCurrentPrice = vi.fn();
+vi.mock('../../monitor/priceFetcher.js', () => ({
   fetchCurrentPrice: mockFetchCurrentPrice,
 }));
 
-const mockExecuteTakeProfit = jest.fn() as any;
-jest.unstable_mockModule('../../monitor/takeProfitExecutor.js', () => ({
+const mockExecuteTakeProfit = vi.fn();
+vi.mock('../../monitor/takeProfitExecutor.js', () => ({
   executeTakeProfit: mockExecuteTakeProfit,
 }));
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => configOverride),
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => configOverride),
 }));
 
 const makeTrade = (overrides?: Partial<Record<string, unknown>>) => ({
@@ -133,7 +133,7 @@ describe('runCopytrade', () => {
     mockGetMarketBySlug.mockResolvedValue(makeMarket({ outcomePrices: '["0.9","0.1"]' }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
@@ -150,7 +150,7 @@ describe('runCopytrade', () => {
     }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
@@ -164,7 +164,7 @@ describe('runCopytrade', () => {
     mockGetMarketBySlug.mockResolvedValue(makeMarket({ outcomePrices: '["0.6","0.4"]' }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
@@ -204,7 +204,7 @@ describe('runCopytrade', () => {
     mockExecuteTakeProfit.mockResolvedValue({ success: true });
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
@@ -219,7 +219,7 @@ describe('runCopytrade', () => {
     mockGetMarketBySlug.mockResolvedValue(makeMarket({ outcomePrices: '["0.6","0.4"]' }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     await runCopytrade(redis as any, 1000);
@@ -236,7 +236,7 @@ describe('runCopytrade', () => {
       .mockResolvedValueOnce(makeMarket({ outcomePrices: '["0.6","0.4"]' }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
@@ -249,7 +249,7 @@ describe('runCopytrade', () => {
     mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [] } as Response);
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     await runCopytrade(redis as any, 1000);
 
     // Should call fetchWithTimeout for each wallet
