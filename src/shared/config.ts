@@ -54,7 +54,7 @@ const envSchema = z.object({
   SPOT_LOOKBACK_MINUTES: z.coerce.number().int().min(1).optional().default(5),
   SPOT_COOLDOWN_MINUTES: z.coerce.number().int().min(1).optional().default(30),
   SPOT_DIVERGENCE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.12),
-  SPOT_CRYPTO_ASSETS: z.string().optional().default('bitcoin,ethereum'),
+  SPOT_CRYPTO_ASSETS: z.string().optional().default('bitcoin,ethereum,solana,ripple,binancecoin,bittensor,dogecoin,cardano,avalanche,chainlink,sui'),
   SPOT_COMMODITY_ASSETS: z.string().optional().default('CL=F,GC=F'),
 
   // Arbitrage scanner (Phase: arb)
@@ -71,6 +71,13 @@ const envSchema = z.object({
   ARB_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.05),
   // Polymarket taker fee rate per trade (~2% default). Configurable for fee tier changes.
   ARB_FEE_RATE: z.coerce.number().min(0).max(1).optional().default(0.02),
+
+  // Crypto latency arbitrage (Phase 7)
+  CRYPTO_ARB_ENABLED: z.coerce.boolean().optional().default(true),
+  CRYPTO_ARB_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
+  CRYPTO_ARB_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.03),
+  CRYPTO_ARB_DEDUP_TTL_S: z.coerce.number().int().positive().optional().default(300),
+  CRYPTO_ARB_MARKET_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
 
   // Copytrade signals
   COPYTRADE_ENABLED: z.coerce.boolean().optional().default(false),

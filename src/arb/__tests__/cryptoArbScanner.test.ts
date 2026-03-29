@@ -1,0 +1,188 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { SpotMove } from '../../spot/thresholdDetector.js';
+
+// --- Mocks ---
+
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
+    CRYPTO_ARB_ENABLED: true,
+    CRYPTO_ARB_MIN_EDGE: 0.08,
+    CRYPTO_ARB_MAX_STAKE_FRACTION: 0.03,
+    CRYPTO_ARB_DEDUP_TTL_S: 300,
+    CRYPTO_ARB_MARKET_CACHE_TTL_S: 3600,
+    ARB_FEE_RATE: 0.02,
+    MAX_BET_FRACTION: 0.1,
+    WS_ENABLED: false,
+  })),
+}));
+
+const mockFindCorrelatedMarkets = vi.fn();
+vi.mock('../../spot/marketCorrelator.js', () => ({
+  findCorrelatedMarkets: (...args: unknown[]) => mockFindCorrelatedMarkets(...args),
+}));
+
+const mockEstimateFastConsensus = vi.fn();
+vi.mock('../../spot/fastPathConsensus.js', () => ({
+  estimateFastConsensus: (...args: unknown[]) => mockEstimateFastConsensus(...args),
+}));
+
+vi.mock('../../shared/feedSingleton.js', () => ({
+  getPriceFeed: vi.fn(() => ({
+    getCachedPrice: vi.fn().mockResolvedValue(null),
+  })),
+}));
+
+vi.mock('../../shared/bankroll.js', () => ({
+  getBankroll: vi.fn().mockResolvedValue(1000),
+}));
+
+const mockRedis = {
+  get: vi.fn().mockResolvedValue(null),
+  set: vi.fn().mockResolvedValue('OK'),
+};
+
+function makeMove(overrides: Partial<SpotMove> = {}): SpotMove {
+  return {
+    assetId: 'bitcoin',
+    currentPrice: 65000,
+    referencePrice: 62000,
+    changePercent: 4.84,
+    windowMinutes: 5,
+    detectedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function makeMarket(overrides: Record<string, unknown> = {}) {
+  return {
+    marketId: 'mkt-1',
+    conditionId: 'cond-1',
+    clobTokenIds: ['yes-tok', 'no-tok'],
+    question: 'Will Bitcoin be above $100,000 on June 30, 2026?',
+    description: null,
+    currentYesPrice: 0.60,
+    correlationDirection: 'positive' as const,
+    ...overrides,
+  };
+}
+
+describe('cryptoArbScanner', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRedis.get.mockResolvedValue(null);
+    mockRedis.set.mockResolvedValue('OK');
+  });
+
+  it('detects YES edge on price-target market', async () => {
+    const { scanCryptoArb } = await import('../cryptoArbScanner.js');
+
+    mockFindCorrelatedMarkets.mockResolvedValue([makeMarket()]);
+    mockEstimateFastConsensus.mockResolvedValue({
+      probability: 0.75,
+      reasoning: 'formula',
+      method: 'formula',
+      stddev: 0,
+    });
+
+    const opps = await scanCryptoArb(makeMove(), mockRedis as never);
+
+    expect(opps).toHaveLength(1);
+    expect(opps[0]!.direction).toBe('YES');
+    // edge = |0.75 - 0.60| - 0.02 = 0.13
+    expect(opps[0]!.edge).toBeCloseTo(0.13, 2);
+    expect(opps[0]!.tokenId).toBe('yes-tok');
+    expect(opps[0]!.marketId).toBe('mkt-1');
+  });
+
+  it('detects NO edge when fair value below PM price', async () => {
+    const { scanCryptoArb } = await import('../cryptoArbScanner.js');
+
+    mockFindCorrelatedMarkets.mockResolvedValue([makeMarket({ currentYesPrice: 0.45 })]);
+    mockEstimateFastConsensus.mockResolvedValue({
+      probability: 0.30,
+      reasoning: 'formula',
+      method: 'formula',
+      stddev: 0,
+    });
+
+    const opps = await scanCryptoArb(makeMove(), mockRedis as never);
+
+    expect(opps).toHaveLength(1);
+    expect(opps[0]!.direction).toBe('NO');
+    // edge = |0.30 - 0.45| - 0.02 = 0.13
+    expect(opps[0]!.edge).toBeCloseTo(0.13, 2);
+    expect(opps[0]!.tokenId).toBe('no-tok');
+  });
+
+  it('returns empty when edge below threshold', async () => {
+    const { scanCryptoArb } = await import('../cryptoArbScanner.js');
+
+    mockFindCorrelatedMarkets.mockResolvedValue([makeMarket({ currentYesPrice: 0.60 })]);
+    // edge = |0.65 - 0.60| - 0.02 = 0.03 < 0.08
+    mockEstimateFastConsensus.mockResolvedValue({
+      probability: 0.65,
+      reasoning: 'formula',
+      method: 'formula',
+      stddev: 0,
+    });
+
+    const opps = await scanCryptoArb(makeMove(), mockRedis as never);
+    expect(opps).toHaveLength(0);
+  });
+
+  it('skips market when dedup key exists', async () => {
+    const { scanCryptoArb } = await import('../cryptoArbScanner.js');
+
+    mockFindCorrelatedMarkets.mockResolvedValue([makeMarket()]);
+    mockEstimateFastConsensus.mockResolvedValue({
+      probability: 0.75,
+      reasoning: 'formula',
+      method: 'formula',
+      stddev: 0,
+    });
+
+    // Simulate dedup key exists for this market+direction
+    mockRedis.get.mockImplementation((key: string) => {
+      if (key === 'arb:crypto:mkt-1:YES') return Promise.resolve('1');
+      return Promise.resolve(null);
+    });
+
+    const opps = await scanCryptoArb(makeMove(), mockRedis as never);
+    expect(opps).toHaveLength(0);
+  });
+
+  it('uses cached markets when available', async () => {
+    const { scanCryptoArb } = await import('../cryptoArbScanner.js');
+
+    const cachedMarkets = [makeMarket()];
+    mockRedis.get.mockImplementation((key: string) => {
+      if (key === 'crypto:markets:bitcoin') return Promise.resolve(JSON.stringify(cachedMarkets));
+      return Promise.resolve(null);
+    });
+
+    mockEstimateFastConsensus.mockResolvedValue({
+      probability: 0.75,
+      reasoning: 'formula',
+      method: 'formula',
+      stddev: 0,
+    });
+
+    const opps = await scanCryptoArb(makeMove(), mockRedis as never);
+
+    expect(opps).toHaveLength(1);
+    // findCorrelatedMarkets should NOT be called when cache hit
+    expect(mockFindCorrelatedMarkets).not.toHaveBeenCalled();
+  });
+
+  it('returns empty for unknown asset without error', async () => {
+    const { scanCryptoArb } = await import('../cryptoArbScanner.js');
+
+    const opps = await scanCryptoArb(
+      makeMove({ assetId: 'unknown-coin' }),
+      mockRedis as never,
+    );
+
+    expect(opps).toHaveLength(0);
+    expect(mockFindCorrelatedMarkets).not.toHaveBeenCalled();
+  });
+});
