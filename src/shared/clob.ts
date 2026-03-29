@@ -6,7 +6,7 @@
  */
 
 import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client';
-import { Wallet, Contract, Interface, JsonRpcProvider, getBytes } from 'ethers';
+import { Wallet, Contract, Interface, JsonRpcProvider } from 'ethers';
 import { loadConfig } from './config.js';
 import { logger } from './logger.js';
 import { getRedis } from './redis.js';
@@ -137,6 +137,7 @@ export async function getClobClient(): Promise<ClobClient> {
       const bootstrap = new ClobClient(
         CLOB_HOST,
         POLYGON_CHAIN_ID,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-explicit-any
         signer as any, // TODO: Replace with proper SignerV6 interface when SDK is updated
         undefined,     // no creds yet
         sigType,
@@ -149,6 +150,7 @@ export async function getClobClient(): Promise<ClobClient> {
     return new ClobClient(
       CLOB_HOST,
       POLYGON_CHAIN_ID,
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-explicit-any
       signer as any, // TODO: Replace with proper SignerV6 interface when SDK is updated
       creds,
       sigType,
@@ -195,17 +197,17 @@ function orderWithTimeout<T>(promise: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`CLOB order timed out after ${CLOB_ORDER_TIMEOUT_MS}ms`)),
+      () => { reject(new Error(`CLOB order timed out after ${String(CLOB_ORDER_TIMEOUT_MS)}ms`)); },
       CLOB_ORDER_TIMEOUT_MS,
     );
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  return Promise.race([promise, timeout]).finally(() => { clearTimeout(timer); });
 }
 
 function parseOrderResponse(raw: unknown): ClobTradeResult {
   const resp = raw as OrderResponse;
 
-  if (resp.success === false) {
+  if (!resp.success) {
     return {
       success: false,
       error: resp.errorMsg || 'CLOB order rejected',
@@ -213,7 +215,7 @@ function parseOrderResponse(raw: unknown): ClobTradeResult {
     };
   }
 
-  const txHash = resp.transactionsHashes?.[0];
+  const txHash = resp.transactionsHashes[0];
   const takingAmount = parseFloat(resp.takingAmount);
 
   return {
@@ -255,7 +257,7 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
       ? (input.orderType === 'FOK' ? OrderType.FOK : OrderType.FAK)
       : (cfg.CLOB_ORDER_TYPE === 'FOK' ? OrderType.FOK : OrderType.FAK);
 
-    const raw = await orderWithTimeout(client.createAndPostMarketOrder(
+    const raw: unknown = await orderWithTimeout(client.createAndPostMarketOrder(
       {
         tokenID: input.tokenId,
         amount: input.amountUsd,
@@ -298,7 +300,7 @@ export async function submitClobSell(input: ClobSellInput): Promise<ClobTradeRes
       orderType: resolvedOrderType,
     });
 
-    const raw = await orderWithTimeout(client.createAndPostMarketOrder(
+    const raw: unknown = await orderWithTimeout(client.createAndPostMarketOrder(
       {
         tokenID: input.tokenId,
         amount: input.shares,
@@ -367,7 +369,7 @@ export async function redeemClobOutcome(input: {
   try {
     const provider = new JsonRpcProvider('https://polygon-rpc.com');
     const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
-    const sigType = cfg.POLYMARKET_SIGNATURE_TYPE ?? 0;
+    const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;
     const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
 
     const ctfInterface = new Interface(CTF_ABI);
@@ -386,11 +388,14 @@ export async function redeemClobOutcome(input: {
         conditionId: input.conditionId,
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
       const safe = new Contract(funderAddress, SAFE_ABI, signer) as any;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       const nonce = await safe.nonce();
 
       // Sign the transaction following Gnosis Safe specs
-      const safeTxHash = await safe.getTransactionHash(
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      const safeTxHash: string = await safe.getTransactionHash(
         CTF_ADDRESS,
         0, // value
         data,
@@ -412,6 +417,7 @@ export async function redeemClobOutcome(input: {
       const v = sig.v + 4;
       const safeSignature = r + s.slice(2) + v.toString(16).padStart(2, '0');
 
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       const tx = await safe.execTransaction(
         CTF_ADDRESS,
         0,
@@ -424,7 +430,9 @@ export async function redeemClobOutcome(input: {
         safeSignature,
       );
 
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       const receipt = await tx.wait();
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
       return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
     } else {
       // Standard EOA logic

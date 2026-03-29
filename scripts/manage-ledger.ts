@@ -35,7 +35,10 @@ async function main() {
   await closeRedis();
 }
 
-main().catch(err => {
-  console.error('CLI Error:', err);
-  process.exit(1);
-});
+const isMain = process.argv[1]?.endsWith('manage-ledger.ts') || process.argv[1]?.endsWith('manage-ledger.js');
+if (isMain) {
+  main().catch((err: unknown) => {
+    console.error('CLI Error:', err);
+    process.exit(1);
+  });
+}

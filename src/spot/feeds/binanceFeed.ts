@@ -38,11 +38,11 @@ export class BinanceFeed {
 
     this.ws.on('message', (data: string) => {
       try {
-        const msg = JSON.parse(data);
+        const msg = JSON.parse(data.toString()) as { s?: string; c?: string; E?: number };
         // Binance @ticker format:
         // { "s":"BTCUSDT", "c":"65000.50", "E": 123456789 }
         if (msg.s && msg.c) {
-          void this.handleTicker(msg);
+          void this.handleTicker(msg as { s: string; c: string; E?: number });
         }
       } catch (err) {
         logger.error('[binance] message parse error', { error: String(err) });
@@ -59,11 +59,11 @@ export class BinanceFeed {
     });
   }
 
-  private async handleTicker(msg: any): Promise<void> {
+  private async handleTicker(msg: { s: string; c: string; E?: number }): Promise<void> {
     try {
       const symbol = msg.s.toLowerCase();
       const price = parseFloat(msg.c);
-      const timestamp = msg.E || Date.now();
+      const timestamp = msg.E ?? Date.now();
 
       const redis = getRedis();
       const lastKey = `spot:last:${symbol}`;
@@ -73,7 +73,7 @@ export class BinanceFeed {
       // Update latest
       pipeline.set(lastKey, JSON.stringify({ price, timestamp, source: 'binance' }));
       // Add to history (score=timestamp)
-      pipeline.zadd(pricesKey, timestamp, `${timestamp}:${price}`);
+      pipeline.zadd(pricesKey, timestamp, `${String(timestamp)}:${String(price)}`);
       // Prune history (keep 60m)
       pipeline.zremrangebyscore(pricesKey, '-inf', timestamp - 60 * 60 * 1000);
       // Expire
@@ -86,9 +86,9 @@ export class BinanceFeed {
       await pipeline.exec();
       
       // Pulse: log to info once every 20 updates per symbol to show "life"
-      this.tickerCount[symbol] = (this.tickerCount[symbol] || 0) + 1;
-      if (this.tickerCount[symbol] % 20 === 0) {
-        logger.info(`[binance] ${symbol.toUpperCase()} tick: $${price.toLocaleString()}`);
+      this.tickerCount[symbol] = (this.tickerCount[symbol] ?? 0) + 1;
+      if ((this.tickerCount[symbol] ?? 0) % 20 === 0) {
+        logger.info(`[binance] ${symbol.toUpperCase()} tick: $${String(price)}`);
       }
     } catch (err) {
       logger.error('[binance] handleTicker error', { error: String(err) });
@@ -99,7 +99,7 @@ export class BinanceFeed {
     if (this.reconnectTimer) return;
     this.reconnectCount++;
     const delay = Math.min(1000 * Math.pow(2, this.reconnectCount), 30000);
-    logger.warn(`[binance] reconnecting in ${delay / 1000}s (attempt ${this.reconnectCount})...`);
+    logger.warn(`[binance] reconnecting in ${String(delay / 1000)}s (attempt ${String(this.reconnectCount)})...`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.start();
