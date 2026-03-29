@@ -6,10 +6,10 @@
 type Level = 'debug' | 'info' | 'warn' | 'error';
 
 const COLORS: Record<Level, string> = {
-  debug: '\x1b[90m', // Gray
-  info: '\x1b[36m',  // Cyan
-  warn: '\x1b[33m',  // Yellow
-  error: '\x1b[31m', // Red
+  debug: '\x1b[38;5;244m', // Visible Gray
+  info: '\x1b[36m',       // Cyan
+  warn: '\x1b[33m',       // Yellow
+  error: '\x1b[31m',      // Red
 };
 const RESET = '\x1b[0m';
 const DIM = '\x1b[2m';
