@@ -16,17 +16,17 @@ if [ $? != 0 ]; then
   pm2 list | grep -q "pga-worker" || pm2 start "npx tsx src/copytrade/worker.ts" --name pga-worker
 
   # Create session and first pane (Feeds)
-  tmux new-session -d -s $SESSION_NAME -n 'Dashboard' 'pm2 logs pga-feeds'
+  tmux new-session -d -s $SESSION_NAME -n 'Dashboard' 'pm2 logs --raw pga-feeds'
   
   # Split 1: Arb Worker
-  tmux split-window -h -t $SESSION_NAME 'pm2 logs pga-arb'
+  tmux split-window -h -t $SESSION_NAME 'pm2 logs --raw pga-arb'
   
   # Split 2: News Pipeline
   tmux split-window -v -t $SESSION_NAME 'tail -f /tmp/pga-trade.log'
   
   # Select first pane and split for Copytrade
   tmux select-pane -t $SESSION_NAME:0.0
-  tmux split-window -v -t $SESSION_NAME 'pm2 logs pga-worker'
+  tmux split-window -v -t $SESSION_NAME 'pm2 logs --raw pga-worker'
   
   # Select pane 2 and split for Monitor
   tmux select-pane -t $SESSION_NAME:0.2
