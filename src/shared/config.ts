@@ -58,6 +58,12 @@ const envSchema = z.object({
 
   // Arbitrage scanner (Phase: arb)
   ARB_ENABLED: z.coerce.boolean().optional().default(true),
+  ARB_WORKER_ENABLED: z.coerce.boolean().optional().default(true),
+
+  // Feeds
+  BINANCE_WS_ENABLED: z.coerce.boolean().optional().default(true),
+  BINANCE_SYMBOLS: z.string().optional().default('btcusdt,ethusdt,solusdt'),
+  HELIUS_API_KEY: z.string().optional(),
   // Minimum NET edge (after ~2% per-leg Polymarket fees) to enter an arb trade.
   // Raised from 0.04 to 0.05 to ensure profit after fees.
   ARB_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.05),

@@ -92,11 +92,21 @@ interface CategoryConfig {
 
 Each position records its `executionVenue` (`simmer` or `clob`). The full lifecycle — entry, take-profit exit, and redemption — routes through the venue that opened the position. CLOB positions are exited via `submitClobSell` and redeemed by checking the Gamma API for market resolution status.
 
-### Copytrade Signals (Phase 6)
+### 4. High-Speed Arbitrage Mode (Optional)
 
-Copytrade ingests wallet fills from the Polymarket Data API and mirrors them into PGA as `TradeSignal`s.
+For real-time arbitrage (sub-second latency), run the dedicated worker and price feeds instead of the standard cron:
 
-Env knobs:
+```bash
+# Start real-time Binance/Solana feeds
+npm run worker:spot-feed
+
+# Start the long-running arb worker
+npm run worker:arb
+```
+
+The worker uses **Binance WebSockets** and **Helius/Pyth on-chain data** to detect massive price moves and front-run Polymarket adjustments. See [docs/arbitrage-worker.md](docs/arbitrage-worker.md) for more details.
+
+## 📁 Architecture
 
 - `COPYTRADE_ENABLED` — master switch
 - `COPYTRADE_WALLETS` — comma-separated profile addresses
