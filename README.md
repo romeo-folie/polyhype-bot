@@ -1,235 +1,305 @@
 # Polymarket Geopolitical Trading Agent
 
-Autonomous agent that monitors multi-category OSINT feeds, maps high-urgency events to Polymarket prediction contracts, and executes trades with automatic position management.
+Autonomous multi-signal trading agent for Polymarket prediction markets. Combines OSINT pipelines, whale wallet mirroring, real-time spot price arbitrage, and Hyperliquid futures hedging into a single risk-managed system.
 
-## Hybrid Architecture
+---
 
-The system operates using two decoupled execution paths to balance speed and resource efficiency:
+## Architecture Overview
 
-1.  **Low-Latency Worker (Persistent)**: Polls high-frequency sources (copytrade wallets) every 2 seconds for immediate execution.
-2.  **OSINT Pipeline (Scheduled)**: Ingests news feeds and GDELT every 5 minutes, performing multi-stage LLM analysis (scoring → mapping → execution).
+The system runs as **seven concurrent processes** — two persistent workers plus five periodic pipelines — each independently signalling trades through a shared execution layer.
 
 ```mermaid
 graph TD
-    subgraph "Persistent Worker (2s Loop)"
-        W1[Whale Wallet Poll] --> W2[Category Filter]
-        W2 --> W3[Mirror Signal]
-        W3 --> EXEC[Execution Router]
+    subgraph "Real-Time Feeds (Persistent)"
+        BF[BinanceFeed\nWebSocket] --> RC[(Redis\nhot-price cache)]
+        HF[HeliusFeed\nSolana/Pyth] --> RC
+        RC -->|pub: spot:price_moved| AW
     end
 
-    subgraph "OSINT Pipeline (5m Cron)"
-        O1[News/GDELT Ingest] --> O2[LLM Urgency Scorer]
-        O2 --> O3[Gamma Market Mapping]
-        O3 --> O4[Signal Re-eval]
-        O4 --> EXEC
+    subgraph "Arbitrage Worker (Persistent)"
+        AW[ArbitrageWorker\nRedis sub + 10s baseline] --> AS[Arb Scanner\nGamma cross-check]
+        AS --> EXEC
     end
 
-    EXEC --> S[Simmer SDK]
-    EXEC --> C[Polymarket CLOB]
-    
-    subgraph "Position Monitor (5m Cron)"
-        M1[Price Feed WS/REST] --> M2[Stop-Loss/Take-Profit]
-        M2 --> M3[Auto-Redeem]
+    subgraph "Copytrade Worker (Persistent, 2s loop)"
+        SL[Shortlist\nLeaderboard refresh] --> CW[Worker\nWallet poller]
+        CW --> CF[Category + Liquidity\nFilter]
+        CF --> EXEC
     end
 
-    subgraph "Futures Monitor (Persistent 5s)"
-        F1[HL Position Poll] --> F2[Threshold Check]
-        F2 -->|Trigger| F3[HL Market Close]
+    subgraph "OSINT Pipeline (5min cron)"
+        RSS[RSS + GDELT\nIngestion] --> US[LLM Urgency\nScorer]
+        US --> TW[Timing Window\nMultiplier]
+        TW --> MM[Gamma Market\nMapper]
+        MM --> CC[Consensus\nCalculator]
+        CC --> DC[Divergence\nCalculator]
+        DC --> EXEC
     end
 
-    PM_Trade[Polymarket YES Fill] -->|Success| Hedge[HL Delta Hedge]
-    Hedge --> F1
+    subgraph "Spot Monitor (1min cron)"
+        SP[Spot Poller\nCoinGecko/Binance] --> TD[Threshold\nDetector]
+        TD --> MC[Market\nCorrelator]
+        MC --> FC[Fast Consensus\nBS formula / LLM]
+        FC --> EXEC
+    end
+
+    subgraph "Execution Layer (shared)"
+        EXEC[Executor\nVenue Router] --> SIM[Simmer SDK\nprimary]
+        EXEC --> CLOB[Polymarket CLOB\nfallback]
+        EXEC -->|YES buy success| DH[Delta Hedge\non HL]
+        DH --> FM
+        SIM --> PL[(Redis\nPosition Ledger)]
+        CLOB --> PL
+    end
+
+    subgraph "Position Monitor (5min cron)"
+        PL --> PM[Monitor\nPrice resolver]
+        PM --> SL_TP[Stop-Loss /\nTake-Profit\nEvaluator]
+        SL_TP -->|exit| EXEC
+        SL_TP --> RR[Resolution\nRedeemer]
+    end
+
+    subgraph "Futures Monitor (Persistent, 5s loop)"
+        FM[HL Position\nPoll] --> FT[Threshold\nCheck SL/TP/TTL]
+        FT -->|close| HL[Hyperliquid\nPerps API]
+    end
+
+    subgraph "Bankroll"
+        BK[getBankroll\nSimmer portfolio] --> EXEC
+        EXEC -->|deductStake| BK
+        RR -->|creditProceeds| BK
+    end
 ```
 
-### Execution Flow Details
+---
 
-| Flow | Logic | Interval | Priority |
-| :--- | :--- | :--- | :--- |
-| **Copytrade** | Latency-critical. Mirrors expert wallets immediately. | 2 seconds | High |
-| **Futures Monitor**| Safety-critical. Enforces futures Stop-Loss/Take-Profit. | 5 seconds | High |
-| **OSINT** | Context-heavy. Monitors global events and maps to markets. | 5 minutes | Medium |
-| **Monitor** | Maintenance. Manages Polymarket exits and redemptions. | 5 minutes | N/A |
+## Processes
 
+| Process | Script | Interval | Purpose |
+|---------|--------|----------|---------|
+| **Spot Feed Worker** | `worker:spot-feed` | Persistent | Binance WS + Helius Solana feeds → Redis hot-price cache → publish `spot:price_moved` |
+| **Arbitrage Worker** | `worker:arb` | Persistent (sub + 10s) | Redis pub/sub fast-path + 10s baseline scan for Polymarket arb opportunities |
+| **Copytrade Worker** | `worker:copytrade` | Persistent (2s loop) | Mirror expert whale wallets with category/liquidity/slippage guardrails |
+| **Futures Monitor** | `monitor:futures` | Persistent (5s poll) | HL perp SL/TP/max-hold enforcement for delta hedges and synthetic exits |
+| **OSINT Pipeline** | `cron:trade` | 5 min | RSS + GDELT ingest → LLM score → Gamma mapping → divergence → execute |
+| **Position Monitor** | `cron:monitor` | 5 min | PM price resolution → SL/TP/divergence exits → auto-redeem resolved positions |
+| **Spot Monitor** | `cron:spot` | 1 min | Spot price move detection → correlated Polymarket market search → fast consensus → execute |
 
-### Ingestion Categories (Phase 5)
+---
 
-All ingestion categories use a shared `CategoryConfig` interface:
+## Data Flow Details
 
-```ts
-interface CategoryConfig {
-  id: string;
-  label: string;
-  feeds: { url: string; headers?: Record<string, string> }[];
-  scorerPrompt: string;
-  scoreThreshold: number;
-  entityContext: string;
-}
+### 1. OSINT Pipeline (`cron:trade`)
+
+```
+RSS feeds + GDELT
+  → LLM urgency scorer (per-category prompts, score 1–10)
+  → Timing window multiplier (×1.20 Asia, ×1.15 EU/ME windows)
+  → Gamma API market search (entity extraction + keyword match)
+  → Multi-sample LLM consensus probability estimate
+  → Half-Kelly divergence sizing
+  → Execution Router
 ```
 
-| Category | ID | Threshold |
+Five ingestion categories run in parallel per tick:
+
+| Category | ID | Score Threshold |
 |---|---|---|
 | Geopolitical | `geopolitical` | 8 |
 | Macro / Central Bank | `macro` | 8 |
 | Crypto / Regulatory | `crypto-regulatory` | 8 |
-| AI / Tech Company Events | `ai-tech` | 7 |
-| US Politics (Non-Election) | `us-politics` | 7 |
+| AI / Tech | `ai-tech` | 7 |
+| US Politics | `us-politics` | 7 |
 
-### Data Flow Summary
+Timing window boosts are applied after LLM scoring and are capped at 10:
 
-| Cycle | Entrypoint | What happens |
-|-------|-----------|--------------|
-| **Copytrade** (`worker:copytrade`) | `src/copytrade/worker.ts` | **Persistent Worker**: Parallel wallet polling → fetch high-frequency trades → filter by category keywords → apply liquidity-aware sizing → execute via Simmer/CLOB |
-| **Trade** (`cron:trade`) | `src/execution/index.ts` | **OSINT Pipeline**: Ingest multi-category news → score per category → map to markets → context check → execute new trades |
-| **Monitor** (`cron:monitor`) | `src/monitor/index.ts` | Resolve prices via WS cache → evaluate stop-loss / take-profit / divergence → exit if triggered → auto-redeem resolved winning positions |
-| **Spot** (`cron:spot`) | `src/spot/index.ts` | Poll spot prices → detect significant moves → cross-check Simmer oracle opportunities → execute correlated trades |
-| **Spot Feed** (`worker:spot-feed`) | `src/spot/feeds/manager.ts` | **Fast-Path Feed**: Persistent WebSocket connection to Binance/Helius → hot price cache → publish price_moved event |
-| **Fast Arb** (`worker:arb`) | `src/arb/worker.ts` | **High-Speed Worker**: Listen for price events → sub-200ms trigger → scan for arb → execute hedge |
-| **Futures Monitor** (`monitor:futures`) | `src/monitor/futuresMonitor.ts` | **Risk Worker**: Sub-second PnL tracking for Hyperliquid perps → execute SL/TP thresholds |
+| UTC Window | Region | Multiplier |
+|---|---|---|
+| 00:00 – 08:00 | Asia/Pacific | ×1.20 |
+| 06:00 – 14:00 | Europe/Middle East | ×1.15 |
+| Outside windows | — | ×1.00 |
 
-### Exit Priority
+### 2. Copytrade Worker (`worker:copytrade`)
 
-| Priority | Trigger | Cost | Where |
-|----------|---------|------|-------|
-| 1 | **Futures Stop-loss** — loss ≥ 1.5% | Free (perps) | Futures Worker |
-| 2 | **Futures Take-profit** — gain ≥ 3.0% | Free (perps) | Futures Worker |
-| 3 | **Polymarket Stop-loss** — loss ≥ 30% | Free (price check) | Monitor cycle |
-| 4 | **Polymarket Take-profit** — gain ≥ 25% | Free (price check) | Monitor cycle |
-| 5 | **Signal re-eval** — edge evaporated | LLM call | Trade cycle |
-| 6 | **Divergence closed** — market reached consensus | Free (price check) | Monitor cycle |
+```
+Polymarket leaderboard API (weekly shortlist refresh)
+  → COPYTRADE_WALLETS list
+  → 2s poll loop: fetch recent trades per wallet
+  → Category keyword filter (geopolitics, crypto, macro, etc.)
+  → Liquidity / slippage / time-to-resolve guards
+  → Stake scaling (COPYTRADE_SIZE_SCALE × observed whale size, capped at COPYTRADE_MAX_STAKE_USD)
+  → Execution Router
+```
 
-### Execution Venues (Model B — venue-aware lifecycle)
+Shortlist auto-refresh queries the leaderboard by PnL/volume thresholds and optionally updates `.env` automatically (`COPYTRADE_SHORTLIST_AUTO_APPLY=true`).
+
+### 3. Spot → Arb Path (`worker:spot-feed` + `worker:arb`)
+
+```
+BinanceFeed (WebSocket, configurable symbols)
+HeliusFeed (Helius/Pyth, SOL price)
+  → Redis hot-price cache (per-symbol)
+  → Publish `spot:price_moved` event
+
+ArbitrageWorker:
+  Fast-path: subscribe to `spot:price_moved` → immediate scan trigger
+  Baseline:  10s interval scan (catches moves missed between events)
+  → Arb Scanner: Gamma API cross-check, detect Polymarket lag
+  → Rate limiter (max 45 trades/min)
+  → Execution Router
+```
+
+### 4. Spot Monitor (`cron:spot`)
+
+```
+Spot Poller (CoinGecko REST, configurable assets + lookback window)
+  → Threshold Detector (% move vs rolling window, per-asset cooldown via Redis)
+  → Market Correlator (Gamma search + LLM correlation direction, cached 24h)
+  → Fast Consensus Estimator:
+      price-target markets → Black-Scholes binary formula (<1ms, no API)
+      event markets       → LLM ensemble (same as OSINT pipeline)
+  → Divergence Calculator → Execution Router
+```
+
+### 5. Execution Layer (shared)
+
+All signals from every pipeline route through `executor.ts`:
+
+```
+Pre-trade context check (Simmer /context endpoint):
+  - Market resolved/closed → skip
+  - Already have open position on same side → skip
+  - Flip-flop warning → skip
+  - Market has fees → skip
+
+Venue routing:
+  Primary:  Simmer SDK (managed wallet, simple API)
+  Fallback: Polymarket CLOB (local key signing, 3 sig type modes)
+
+Post-trade:
+  - Record position in Redis ledger (marketId, venue, direction, entry price, stake, txHash)
+  - Deduct stake from in-process bankroll cache
+  - If YES buy + FUTURES_ENABLED: open delta hedge on Hyperliquid (1:1 SHORT)
+  - Telegram notification
+```
+
+**Execution venues:**
 
 | Venue | When used | Auth |
-|-------|-----------|------|
-| **Simmer** (primary) | Market exists in Simmer catalogue | `SIMMER_API_KEY` |
-| **Polymarket CLOB** (fallback) | Market not in Simmer | `POLYGON_WALLET_PRIVATE_KEY` (local signing) |
+|---|---|---|
+| **Simmer** (primary) | Market in Simmer catalogue | `SIMMER_API_KEY` |
+| **Polymarket CLOB** (fallback) | Market not in Simmer | `POLYGON_WALLET_PRIVATE_KEY` |
+| **Hyperliquid** (hedging) | After Simmer YES fill; HL symbol exists | `HYPERLIQUID_PRIVATE_KEY` |
 
-Each position records its `executionVenue` (`simmer` or `clob`). The full lifecycle — entry, take-profit exit, and redemption — routes through the venue that opened the position. CLOB positions are exited via `submitClobSell` and redeemed by checking the Gamma API for market resolution status.
+CLOB signature modes:
 
-The worker uses **Binance WebSockets** and **Helius/Pyth on-chain data** to detect massive price moves and front-run Polymarket adjustments. See [docs/arbitrage-worker.md](docs/arbitrage-worker.md) for more details.
+| Type | Account | `POLYMARKET_FUNDER_ADDRESS` |
+|---|---|---|
+| `0` EOA | MetaMask / hardware wallet | Not required |
+| `1` POLY_PROXY | Magic / Google OAuth wallet | Required |
+| `2` POLY_GNOSIS_SAFE | Gnosis Safe multisig | Required |
 
-### 5. Hyperliquid Futures & Delta Hedging
+### 6. Hyperliquid Futures & Delta Hedging
 
-The agent captures intraday momentum on **Hyperliquid Perpetuals** to maximize alpha and manage risk:
+After a successful Polymarket YES fill, the executor optionally opens an offsetting SHORT on Hyperliquid Perpetuals:
 
-- **Latency Arbitrage**: Captures spot price moves on HL perps before Polymarket order books adjust.
-- **Delta Hedging**: Automatically opens a 1:1 SHORT on HL after a successful Polymarket NEWS buy. This neutralizes market exposure while keeping the geopolitical "headline" alpha.
-- **Synthetic Exits**: Fallback exit path. If Polymarket liquidity is too low to sell, the agent opens an equal-and-opposite perp position on HL to "freeze" the trade's P&L.
-- **Risk Control**: Hard-coded **$50 Global Margin Cap** and **$10 Max Margin Per Trade** to protect the bankroll.
+- **Delta hedge**: 1:1 SHORT at entry, sized to match PM stake. Neutralises directional exposure while retaining the geopolitical headline alpha.
+- **Synthetic exit**: If PM liquidity is too thin to exit, `takeProfitExecutor` opens an equal-and-opposite HL position to freeze P&L. PM side closes in the Redis ledger; HL side is managed independently by the futures monitor.
+- **Latency arb**: ArbitrageWorker detects spot moves on Binance/Helius and front-runs Polymarket order book adjustments via HL perps.
+- **Risk limits**: Global margin cap (`FUTURES_GLOBAL_MARGIN_CAP_USD`, default $50) and per-trade cap (`FUTURES_MAX_MARGIN_USD`, default $10).
 
-To start the safety monitor:
-```bash
-npm run monitor:futures
+**Futures Monitor** (`monitor:futures`, 5s poll):
+- Tracks all open HL perp positions
+- Enforces `FUTURES_STOP_LOSS_PCT` and `FUTURES_TAKE_PROFIT_PCT` thresholds
+- Max hold time enforced (`FUTURES_MAX_HOLD_HOURS`)
+- Executes HL market close + Telegram notification on trigger
+
+### 7. Position Monitor (`cron:monitor`)
+
+```
+Redis position ledger → all open positions
+  → Price resolution:
+      1. CLOB WebSocket cache (Redis, 30s TTL) — sub-second freshness
+      2. Gamma REST fallback
+  → Evaluators (per position):
+      Stop-loss (default 30% down)     → exit
+      Take-profit (default 25% up)     → exit
+      Signal re-eval (LLM edge check)  → exit if edge < floor
+      Divergence closed (market consensus reached) → exit
+  → Resolution Redeemer:
+      Simmer: check resolved status → POST /redeem (rate-limited, 9/min)
+      CLOB: check Gamma API resolution → on-chain redemption → credit bankroll
 ```
 
-## 📁 Architecture
+**Exit priority:**
 
-- `COPYTRADE_ENABLED` — master switch
-- `COPYTRADE_WALLETS` — comma-separated profile addresses
-- `COPYTRADE_MARKET_SCOPE` —    *   **Scope Filtering**: Limit copying to specific domains by keyword (`geopolitics`, `weather`, `sports`, `crypto`, `macro`, `ai-tech`, `us-politics`).
-- `COPYTRADE_SIZE_SCALE` — scale factor vs observed USDC size (e.g. 0.1 mirrors 10% of whale size)
-- `COPYTRADE_MAX_STAKE_USD` — cap per trade
-- `COPYTRADE_MAX_SLIPPAGE_BPS` — skip if price moved too far (200 bps = 2%)
-- `COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS` — skip near-resolution markets
-- `COPYTRADE_MIN_LIQUIDITY` — skip thin markets
-- `COPYTRADE_EXIT_MODE` — `mirror` (follow whale sells) or `rules` (standard PGA exits)
-- `COPYTRADE_POLL_INTERVAL_MS` — worker loop speed (default 2s)
+| Priority | Trigger | Where |
+|---|---|---|
+| 1 | Futures stop-loss ≥ configured % | Futures Monitor |
+| 2 | Futures take-profit ≥ configured % | Futures Monitor |
+| 3 | Polymarket stop-loss ≥ 30% | Position Monitor |
+| 4 | Polymarket take-profit ≥ 25% | Position Monitor |
+| 5 | Signal re-eval — edge evaporated | Position Monitor |
+| 6 | Divergence closed | Position Monitor |
 
-Copytrade shortlist automation (weekly refresh of `COPYTRADE_WALLETS`):
+### 8. Bankroll
 
-- `COPYTRADE_SHORTLIST_TIME_WINDOW` — `DAY` | `WEEK` | `MONTH` | `ALL`
-- `COPYTRADE_SHORTLIST_TOP_N` — number of wallets to apply
-- `COPYTRADE_SHORTLIST_MIN_PNL_USD` — minimum PnL filter (USD)
-- `COPYTRADE_SHORTLIST_MIN_VOL_USD` — minimum volume filter (USD)
-- `COPYTRADE_SHORTLIST_AUTO_APPLY` — update `.env` automatically (`true`/`false`)
+`bankroll.ts` maintains an in-process cache of the live Simmer portfolio balance (15s TTL):
 
-Run (cron example):
+- `getBankroll()` — fetches from Simmer portfolio API, uses last-known on fetch failure
+- `deductStake()` — immediately adjusts the cache after a trade so consecutive signals in the same cycle size correctly
+- `creditProceeds()` — credits CLOB redemption proceeds back (Simmer tracks its own wallet; CLOB proceeds are on-chain)
 
-```bash
-# Weekly shortlist refresh (Mon 06:00 GMT)
-0 6 * * MON /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh \
-  npm run cron:shortlist \
-  >> /tmp/pga-copytrade-shortlist.log 2>&1
-```
+---
 
-### CLOB Account Modes
+## Overlap Protection
 
-| Signature Type | Value | Description | Requires `POLYMARKET_FUNDER_ADDRESS` |
-|----------------|-------|-------------|--------------------------------------|
-| EOA | `0` | Direct browser/EOA wallet (default) | No |
-| POLY_PROXY | `1` | Polymarket proxy (magic/email wallet) | Yes |
-| POLY_GNOSIS_SAFE | `2` | Gnosis Safe multisig | Yes |
+| Layer | Applies to | Mechanism |
+|---|---|---|
+| `flock` in `run.sh` | All cron pipelines | OS file lock per script — blocks second cron tick if prior OS process still running |
+| Redis overlap lock | `cron:trade`, `cron:monitor`, `cron:spot` | Token-based `SET NX EX` + Lua compare-and-delete release — safe across long LLM cycles |
+| `ARB_ENABLED` flag | `worker:arb` | Exits immediately if disabled — no lock needed (cycles are short) |
+| `WS_ENABLED=false` | All | Disables CLOB WebSocket subscriptions — REST-only mode for test environments |
 
-Set `POLYMARKET_SIGNATURE_TYPE` in `.env`. Types 1 and 2 require `POLYMARKET_FUNDER_ADDRESS` — startup will fail if it's missing.
+---
 
-### CLOB Startup Probe
+## Module Reference
 
-The monitor entrypoint runs `runClobProbe()` at startup. It logs:
-- Signer and funder addresses
-- Signature type
-- USDC collateral balance and allowance
-- Open CLOB order count
+| Module | Description |
+|---|---|
+| `src/ingestion/` | RSS + GDELT scraping, Redis dedup, LLM urgency scoring, timing window |
+| `src/ingestion/categories/` | `CategoryConfig` registry — per-category feeds, scorer prompts, thresholds |
+| `src/mapping/` | Gamma API client, entity extraction, consensus probability, Half-Kelly sizing, divergence |
+| `src/spot/` | Spot poller, threshold detector, market correlator, fast consensus estimator |
+| `src/spot/feeds/` | BinanceFeed (WebSocket), HeliusFeed (Helius/Pyth), FeedManager |
+| `src/arb/` | ArbitrageWorker (pub/sub + baseline), arb scanner |
+| `src/copytrade/` | Whale wallet worker, leaderboard shortlist refresh |
+| `src/execution/` | Executor (venue router, pre-trade context check), position ledger, Telegram notifications |
+| `src/monitor/` | Price resolver (WS + REST), SL/TP/divergence evaluator, resolution redeemer |
+| `src/shared/hyperliquid.ts` | Hyperliquid perps client — order placement, position queries, mid-price cache |
+| `src/shared/bankroll.ts` | Live bankroll tracker (Simmer portfolio), in-process cache |
+| `src/shared/clob.ts` | Polymarket CLOB client — order signing, balance, on-chain redemption |
+| `src/shared/simmer.ts` | Simmer SDK wrapper — opportunities, context, portfolio, redeem |
+| `src/shared/redis.ts` | Redis client, pub/sub, distributed lock (token-based) |
+| `src/shared/feedSingleton.ts` | Shared `ClobPriceFeed` singleton — WS order book subscriptions for watched markets |
 
-This is fire-and-forget — probe failures are logged but never crash the process.
-
-### Price Resolution
-
-All price lookups go through `resolveYesPrice()`, which checks the CLOB WebSocket cache (Redis, 30s TTL) before falling back to Gamma REST. A single `ClobPriceFeed` singleton subscribes to market order-book updates for all watched markets:
-
-- High-urgency OSINT markets are subscribed when they enter the divergence calculator
-- Spot-triggered correlated markets are subscribed at trade time
-- Open position markets are subscribed at monitor startup
-
-Set `WS_ENABLED=false` to disable WebSocket subscriptions (REST-only mode; useful in test environments).
-
-### Pre-Trade Context Check (Simmer)
-
-Before every Simmer trade, `executor.ts` calls `GET /api/sdk/context/{market_id}` and skips the trade if:
-
-- Market is resolved or closed
-- Simmer already sees an open position on the same side (prevents doubling up)
-- Simmer flags a severe flip-flop warning (signal instability)
-- Market has fees (fee drag erodes geopolitical edge at typical stake sizes)
-
-### Auto-Redemption
-
-The monitor cycle automatically redeems winning positions on resolved markets via the Simmer API (`resolutionRedeemer.ts`). Redemptions are Telegram-notified with the profit amount.
-
-### Timing Window Multiplier
-
-OSINT urgency scores are boosted by a regional timing window after LLM scoring:
-
-| Window (UTC) | Region | Multiplier | Rationale |
-|---|---|---|---|
-| 00:00 – 08:00 | Asia/Pacific | ×1.20 | US asleep — geopolitical repricing lag is widest |
-| 06:00 – 14:00 | Europe/Middle East | ×1.15 | US waking — partial repricing lag |
-| Outside windows | — | ×1.00 | No adjustment |
-
-Scores are capped at 10. Configure via `TIMING_WINDOW_ENABLED` (default `true`).
+---
 
 ## Setup
 
 ```bash
 # 1. Start Redis
 docker run -d --name pga-redis --restart unless-stopped -p 6379:6379 redis:alpine
-# REDIS_URL=redis://localhost:6379
-#
-# Or use a custom port (e.g. if 6379 is taken):
-# docker run -d --name pga-redis --restart unless-stopped -p 6385:6379 redis:alpine
-# REDIS_URL=redis://localhost:6385
 
 # 2. Install dependencies
 npm install
 
 # 3. Configure environment
 cp .env.example .env
+# Fill in required values (see .env.example for full docs)
 
-# Safely sync new keys from .env.example if upgrading
-npx tsx scripts/sync-env.ts
-
-# Required: REDIS_URL, SIMMER_API_KEY, OPENAI_API_KEY (or GEMINI_API_KEY),
-#           TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, POLYGON_WALLET_PRIVATE_KEY
-# Optional: HYPERLIQUID_PRIVATE_KEY (required for futures)
+# Safely sync new keys from .env.example if upgrading:
+npm run sync-env
 
 # 4. Verify build
 npm run build
@@ -237,123 +307,90 @@ npm run build
 # 5. Probe Simmer connectivity
 npm run probe:simmer
 
-# 6. Initialize Copytrade Shortlist (Highly Recommended)
-# Fetches the top-performing whale wallets for Copytrade.
+# 6. Initialize copytrade shortlist
 npm run cron:shortlist
-
-# 7. Start the Low-Latency Worker
-# It is recommended to run this using a process manager like PM2
-npm run worker:copytrade
-
-# 8. Run scheduled monitor cycles via cron (every 5 min)
-# See crontab example below.
 ```
 
-### Running the Agent
+### Running with PM2 (recommended)
 
-The agent uses a hybrid architecture: a **persistent worker** for high-frequency signals (Copytrade) and **cron jobs** for periodic maintenance/OSINT tasks.
-
-#### Persistent Worker (Copytrade)
-Run the worker directly or using `pm2` for reliability:
 ```bash
-# Direct
-npm run worker:copytrade
+# Persistent workers
+pm2 start "npm run worker:copytrade"  --name pga-copytrade
+pm2 start "npm run worker:arb"        --name pga-arb
+pm2 start "npm run worker:spot-feed"  --name pga-spot-feed
+pm2 start "npm run monitor:futures"   --name pga-futures
 
-# With PM2 (Recommended)
-pm2 start "npm run worker:copytrade" --name pga-worker
+# Periodic pipelines (or use the crontab below)
+pm2 start "npm run cron:trade"        --name pga-trade   --cron "*/5 * * * *"
+pm2 start "npm run cron:monitor"      --name pga-monitor --cron "*/5 * * * *"
+pm2 start "npm run cron:spot"         --name pga-spot    --cron "* * * * *"
 ```
 
-#### Scheduled Jobs (Cron)
-Cron jobs handle the broader OSINT pipeline and position monitoring. A `run.sh` wrapper script is included to manage `.env` loading and use `flock(1)` to prevent overlapping runs.
+### Crontab (alternative to PM2 for periodic jobs)
 
 ```cron
 PATH=/usr/local/bin:/usr/bin:/bin
 
-# OSINT News Pipeline (Every 5 min)
-*/5 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/execution/index.ts >> /tmp/pga-trade.log 2>&1
+# OSINT pipeline (every 5 min)
+*/5 * * * * /path/to/pga/run.sh npx tsx src/execution/index.ts >> /tmp/pga-trade.log 2>&1
 
-# Position Monitor (Every 5 min)
-*/5 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/monitor/index.ts >> /tmp/pga-monitor.log 2>&1
+# Position monitor (every 5 min)
+*/5 * * * * /path/to/pga/run.sh npx tsx src/monitor/index.ts >> /tmp/pga-monitor.log 2>&1
 
-# Spot Price Monitor (Every 1 min)
-* * * * *   /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/spot/index.ts >> /tmp/pga-spot.log 2>&1
+# Spot price monitor (every 1 min)
+* * * * *   /path/to/pga/run.sh npx tsx src/spot/index.ts >> /tmp/pga-spot.log 2>&1
 
-# Arbitrage Scanner (Every 15 min)
-*/15 * * * * /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/arb/index.ts >> /tmp/pga-arb.log 2>&1
-
-# Copytrade Shortlist Refresh (Every Monday at 6 AM)
-0 6 * * MON /path/to/polymarket-geopolitical-agent/run.sh npx tsx /path/to/polymarket-geopolitical-agent/src/copytrade/shortlist.ts >> /tmp/pga-copytrade-shortlist.log 2>&1
+# Copytrade shortlist refresh (Monday 06:00 GMT)
+0 6 * * MON /path/to/pga/run.sh npx tsx src/copytrade/shortlist.ts >> /tmp/pga-shortlist.log 2>&1
 ```
 
-### Monitoring & Logs
+> **Note:** `worker:arb`, `worker:copytrade`, `worker:spot-feed`, and `monitor:futures` are persistent — run them via PM2, not cron.
 
-The agent follows a standard logging pattern. You can monitor the system in real-time by tailing the relevant log files (as defined in your crontab/PM2 config):
-
-| Component | Fast Tailing Command |
-| :--- | :--- |
-| **OSINT Pipeline** | `tail -f /tmp/pga-trade.log` |
-| **Copytrade Worker** | `pm2 logs pga-worker` OR `tail -f /tmp/pga-copytrade.log` |
-| **Position Monitor** | `tail -f /tmp/pga-monitor.log` |
-| **Spot Price Feed** | `tail -f /tmp/pga-spot.log` |
-
-#### Overlap protection
-
-| Layer | Applies to | Mechanism | Protects against |
-|---|---|---|---|
-| `flock` in `run.sh` | All pipelines | OS-level file lock per script (`/tmp/pga-<script>.lock`) | Second cron tick firing while prior OS process is still alive |
-| Redis overlap lock | `execution`, `monitor`, `spot` | Token-based `SET ... EX NX` + Lua compare-and-delete release | Slow cycle (LLM latency, Simmer API) running longer than the lock TTL; prevents a long-running process from releasing a lock it no longer owns |
-| WebSocket feed cleanup | `monitor`, `spot` | `destroyPriceFeed()` in `finally` | Open WS connection holding the Node event loop open after work is done |
-
-The Redis lock uses token-based ownership: each run stores a unique token on acquire and releases with a Lua script that only deletes if the stored value still matches. This prevents an expired long-running process from evicting a newer run's lock.
-
-`arb` only uses `flock` (its cycles are short and have no WS feed); the Redis lock applies to the three pipelines that make LLM calls.
+---
 
 ## Scripts
 
 | Script | Description |
 |---|---|
 | `npm run build` | TypeScript type-check (no emit) |
-| `npm run probe:simmer` | Verify Simmer SDK connectivity |
-| `npm run cron:trade` | Run the full trade pipeline (ingest → map → re-eval → execute) |
-| `npm run cron:monitor` | Run the position monitor (stop-loss / take-profit / divergence) |
-| `npm run cron:spot` | Run the spot price monitor (price moves → correlated market trades) |
-| `npm run worker:spot-feed` | Start real-time Binance/Solana WebSocket data feeds |
-| `npm run worker:arb` | Start the persistent high-speed arbitrage execution worker |
-| `npm run monitor:futures` | Start the persistent high-frequency futures risk monitor |
-| `npm run sync-env` | Safely append missing keys from .env.example to .env |
 | `npm run lint` | ESLint |
 | `npm run format` | Prettier |
-| `npm test` | Jest tests |
+| `npm test` | Vitest test suite |
+| `npm run probe:simmer` | Verify Simmer SDK connectivity |
+| `npm run cron:trade` | Run OSINT pipeline once |
+| `npm run cron:monitor` | Run position monitor once |
+| `npm run cron:spot` | Run spot monitor once |
+| `npm run worker:copytrade` | Start persistent copytrade worker |
+| `npm run worker:arb` | Start persistent arbitrage worker |
+| `npm run worker:spot-feed` | Start persistent Binance/Helius WebSocket feeds |
+| `npm run monitor:futures` | Start persistent Hyperliquid futures monitor |
+| `npm run cron:shortlist` | Refresh copytrade wallet shortlist from leaderboard |
+| `npm run sync-env` | Append missing keys from `.env.example` to `.env` |
 
-## Module Documentation
+---
 
-| Module | README | Description |
-|--------|--------|-------------|
-| `src/shared/` | [README](src/shared/README.md) | Config, Redis client, Simmer SDK wrapper (`context` + `opportunities` endpoints), CLOB WebSocket feed, price cache, logger |
-| `src/ingestion/` | [README](src/ingestion/README.md) | RSS + GDELT ingestion, Redis dedup, LLM urgency scoring, timing window multiplier |
-| `src/ingestion/categories/` | [README](src/ingestion/categories/README.md) | CategoryConfig registry for multi-category ingestion (feeds, scorer prompts, thresholds, entity context) |
-| `src/mapping/` | [README](src/mapping/README.md) | Gamma API client, entity extraction, consensus probability, Half-Kelly sizing |
-| `src/execution/` | [README](src/execution/README.md) | Simmer pre-trade context check, execution router, Redis position ledger, Telegram notifications |
-| `src/monitor/` | [README](src/monitor/README.md) | WS-backed price resolution, stop-loss / take-profit / divergence evaluator, auto-redemption of resolved positions |
-| `src/spot/` | — | Spot price monitor: polls CoinGecko/Yahoo Finance, Simmer oracle cross-check, correlates to Polymarket, executes trades |
+## Key Environment Variables
+
+See `.env.example` for full documentation. Highlights:
+
+| Variable | Required | Description |
+|---|---|---|
+| `REDIS_URL` | ✅ | Redis connection string |
+| `SIMMER_API_KEY` | ✅ | Primary execution venue |
+| `OPENAI_API_KEY` / `GEMINI_API_KEY` | ✅ (one) | LLM for scoring/mapping/consensus |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | ✅ | Trade notifications |
+| `POLYGON_WALLET_PRIVATE_KEY` | ✅ | CLOB fallback signing |
+| `HYPERLIQUID_PRIVATE_KEY` | For futures | HL order signing |
+| `POLYMARKET_FUNDER_ADDRESS` | Sig types 1+2 | Proxy/Safe funder address |
+| `FUTURES_ENABLED` | — | Master switch for delta hedging + futures monitor |
+| `COPYTRADE_ENABLED` | — | Master switch for copytrade worker |
+| `ARB_ENABLED` | — | Master switch for arbitrage worker |
+| `SPOT_MONITOR_ENABLED` | — | Master switch for spot monitor |
+| `BINANCE_WS_ENABLED` | — | Enable Binance WebSocket feed |
+| `HELIUS_API_KEY` | — | Enable Solana/Pyth real-time feed |
+
+---
 
 ## Phases
 
-See [docs/PHASES.md](docs/PHASES.md) for the full phase breakdown.
-See [docs/PRD.md](docs/PRD.md) for product requirements.
-
-## Environment Variables
-
-See `.env.example` for full documentation of all required and optional variables.
-
-## Development Notes
-
-- **One PR per phase.** Tasks within a phase are tracked as GitHub sub-issues under the phase epic.
-- **Romeo merges all PRs.** Never merge your own work.
-- Phase 0: scaffolding + Simmer SDK validation.
-- Phase 1: ingestion & urgency scoring.
-- Phase 2: market mapping & execution logic.
-- Phase 3: execution orchestration & Telegram notifications.
-- Phase 4: position monitor & take-profit.
-- Phase 5: multi-category market expansion.
-- Phase 6: spot price monitor — parallel signal source from live asset prices.
+See [docs/PHASES.md](docs/PHASES.md) and [docs/PRD.md](docs/PRD.md).
