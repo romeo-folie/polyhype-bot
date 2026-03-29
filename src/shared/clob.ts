@@ -6,7 +6,7 @@
  */
 
 import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client';
-import { Wallet } from '@ethersproject/wallet';
+import { Wallet, Contract, Interface, JsonRpcProvider, getBytes } from 'ethers';
 import { loadConfig } from './config.js';
 import { logger } from './logger.js';
 import { getRedis } from './redis.js';
@@ -17,6 +17,19 @@ const POLYGON_CHAIN_ID = 137;
 // Hard timeout for CLOB order submission. The SDK has no built-in timeout;
 // without this a hung connection would keep the cron process alive indefinitely.
 const CLOB_ORDER_TIMEOUT_MS = 30_000;
+
+const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
+const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+
+const CTF_ABI = [
+  'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)',
+];
+
+const SAFE_ABI = [
+  'function execTransaction(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address refundReceiver, bytes calldata signatures) external returns (bool success)',
+  'function getTransactionHash(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address refundReceiver, uint256 _nonce) public view returns (bytes32)',
+  'function nonce() public view returns (uint256)',
+];
 
 export interface ClobBuyInput {
   tokenId: string;
@@ -34,7 +47,7 @@ export interface ClobSellInput {
 
 export interface ClobTradeResult {
   success: boolean;
-  tx_hash?: string;
+  tx_hash?: string | undefined;
   shares_bought?: number;
   error?: string;
   raw?: unknown;
@@ -124,7 +137,7 @@ export async function getClobClient(): Promise<ClobClient> {
       const bootstrap = new ClobClient(
         CLOB_HOST,
         POLYGON_CHAIN_ID,
-        signer,
+        signer as any,
         undefined,     // no creds yet
         sigType,
         funderAddress,
@@ -136,7 +149,7 @@ export async function getClobClient(): Promise<ClobClient> {
     return new ClobClient(
       CLOB_HOST,
       POLYGON_CHAIN_ID,
-      signer,
+      signer as any,
       creds,
       sigType,
       funderAddress,
@@ -334,5 +347,102 @@ export async function getClobBalance(): Promise<{ balance: number; allowance: nu
     return { balance, allowance };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Redeem winning outcome tokens for USDC.e on-chain.
+ *
+ * Supports both standard EOA wallets (sigType 0) and Proxy/Gnosis Safe wallets (sigType 1).
+ */
+export async function redeemClobOutcome(input: {
+  conditionId: string;
+  direction: 'YES' | 'NO';
+}): Promise<ClobTradeResult> {
+  const cfg = loadConfig();
+  if (!cfg.POLYGON_WALLET_PRIVATE_KEY) {
+    return { success: false, error: 'POLYGON_WALLET_PRIVATE_KEY required' };
+  }
+
+  try {
+    const provider = new JsonRpcProvider('https://polygon-rpc.com');
+    const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
+    const sigType = cfg.POLYMARKET_SIGNATURE_TYPE ?? 0;
+    const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
+
+    const ctfInterface = new Interface(CTF_ABI);
+    const indexSets = input.direction === 'YES' ? [1] : [2];
+    const data = ctfInterface.encodeFunctionData('redeemPositions', [
+      USDC_E_ADDRESS,
+      '0x0000000000000000000000000000000000000000000000000000000000000000',
+      input.conditionId,
+      indexSets,
+    ]);
+
+    if (sigType === 1) {
+      // Proxy/Gnosis Safe logic
+      logger.info('[clob] executing redemption via Proxy wallet', {
+        funderAddress,
+        conditionId: input.conditionId,
+      });
+
+      const safe = new Contract(funderAddress, SAFE_ABI, signer) as any;
+      const nonce = await safe.nonce();
+
+      // Sign the transaction following Gnosis Safe specs
+      const safeTxHash = await safe.getTransactionHash(
+        CTF_ADDRESS,
+        0, // value
+        data,
+        0, // operation: Call
+        0, // safeTxGas
+        0, // baseGas
+        0, // gasPrice
+        '0x0000000000000000000000000000000000000000', // refundReceiver
+        nonce,
+      );
+
+      // Gnosis Safe expects v + 4 for EOA signatures in some versions, or simple concat.
+      // Ethers v6 signer.signingKey.sign(safeTxHash) returns a Signature object.
+      // For Gnosis Safe, we usually want a direct EOA signature: r + s + (v + 4)
+      const sig = signer.signingKey.sign(safeTxHash);
+      const r = sig.r;
+      const s = sig.s;
+      const v = sig.v + 4;
+      const safeSignature = r + s.slice(2) + v.toString(16).padStart(2, '0');
+
+      const tx = await safe.execTransaction(
+        CTF_ADDRESS,
+        0,
+        data,
+        0,
+        0,
+        0,
+        0,
+        '0x0000000000000000000000000000000000000000',
+        safeSignature,
+      );
+
+      const receipt = await tx.wait();
+      return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
+    } else {
+      // Standard EOA logic
+      logger.info('[clob] executing redemption via EOA wallet', {
+        conditionId: input.conditionId,
+        address: signer.address,
+      });
+      const tx = await signer.sendTransaction({
+        to: CTF_ADDRESS,
+        data,
+      });
+      const receipt = await tx.wait();
+      return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
+    }
+  } catch (err) {
+    logger.error('[clob] redemption failed', {
+      error: err instanceof Error ? err.message : String(err),
+      conditionId: input.conditionId,
+    });
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

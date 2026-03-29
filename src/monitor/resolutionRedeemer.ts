@@ -18,6 +18,7 @@
 import { logger } from '../shared/logger.js';
 import { getSimmerPositions, submitRedeem, SimmerError } from '../shared/simmer.js';
 import { closePosition, getOpenPositions } from '../execution/positionLedger.js';
+import { redeemClobOutcome } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
 import type { Redis } from 'ioredis';
@@ -53,7 +54,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
     resolvedPositions = await getSimmerPositions({
       status: 'resolved',
       venue: 'polymarket',
-      source: 'sdk:polymarket-geopolitical-agent',
+      // REMOVED: source filter. We want to redeem any winning position for this wallet regardless of tagging.
     });
   } catch (err) {
     logger.warn('[redeemer] failed to fetch resolved positions — skipping redemption cycle', {
@@ -62,7 +63,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
     return results;
   }
 
-  const redeemable = resolvedPositions.filter((p) => p.redeemable === true);
+  const redeemable = resolvedPositions.filter((p: any) => p.redeemable === true);
 
   if (redeemable.length === 0) {
     logger.debug('[redeemer] no redeemable positions found');
@@ -153,7 +154,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
  */
 async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): Promise<void> {
   const allPositions = await getOpenPositions(redis);
-  const clobPositions = allPositions.filter((p) => p.executionVenue === 'clob');
+  const clobPositions = allPositions.filter((p: any) => p.executionVenue === 'clob');
 
   if (clobPositions.length === 0) return;
 
@@ -175,11 +176,27 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): P
         direction: pos.direction,
       });
 
-      // Close the position in Redis.
-      // NOTE: This is a ledger-only close. On-chain conditional token redemption
-      // must be handled separately (e.g. via a manual script or future automation).
-      // For won positions, we credit face value to the bankroll cache to keep
-      // position sizing accurate until the next Simmer portfolio refresh.
+      // On-chain redemption for CLOB positions
+      logger.info('[redeemer] attempting on-chain CLOB redemption', {
+        marketId: pos.marketId,
+        conditionId: pos.conditionId,
+      });
+
+      const redeemResult = await redeemClobOutcome({
+        conditionId: pos.conditionId,
+        direction: pos.direction,
+      });
+
+      if (!redeemResult.success) {
+        logger.warn('[redeemer] on-chain CLOB redemption failed — will retry next cycle', {
+          marketId: pos.marketId,
+          error: redeemResult.error,
+        });
+        results.push({ marketId: pos.marketId, side, success: false, error: redeemResult.error ?? 'Unknown error' });
+        continue;
+      }
+
+      // Close the position in Redis after successful redemption
       await closePosition(redis, pos.marketId, pos.direction);
 
       // If won: credit shares as USDC (each winning share = $1)
@@ -192,12 +209,14 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): P
       }
 
       // Notify
-      await notifyRedemptionExecuted({
+      const notifyOpts: any = {
         marketId: pos.marketId,
         question: pos.question,
         side,
         valueUsdc: proceedsUsdc,
-      });
+      };
+      if (redeemResult.tx_hash) notifyOpts.txHash = redeemResult.tx_hash;
+      await notifyRedemptionExecuted(notifyOpts);
 
       logger.info('[redeemer] CLOB position redeemed', {
         marketId: pos.marketId,

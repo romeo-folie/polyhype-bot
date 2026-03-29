@@ -1,39 +1,57 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockCreateAndPostMarketOrder = jest.fn<(...args: any[]) => Promise<any>>();
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGetTickSize = jest.fn<(...args: any[]) => Promise<string>>();
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGetNegRisk = jest.fn<(...args: any[]) => Promise<boolean>>();
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGetBalanceAllowance = jest.fn<(...args: any[]) => Promise<any>>();
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockUpdateBalanceAllowance = jest.fn<(...args: any[]) => Promise<any>>();
+const mockCreateAndPostMarketOrder = vi.fn();
+const mockGetTickSize = vi.fn();
+const mockGetNegRisk = vi.fn();
+const mockGetBalanceAllowance = vi.fn();
+const mockUpdateBalanceAllowance = vi.fn();
+const mockSendTransaction = vi.fn();
+const mockWait = vi.fn();
+const mockExecTransaction = vi.fn();
+const mockNonce = vi.fn();
+const mockGetTransactionHash = vi.fn();
 
-const mockClobClient = {
-  createAndPostMarketOrder: mockCreateAndPostMarketOrder,
-  getTickSize: mockGetTickSize,
-  getNegRisk: mockGetNegRisk,
-  getBalanceAllowance: mockGetBalanceAllowance,
-  updateBalanceAllowance: mockUpdateBalanceAllowance,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  createOrDeriveApiKey: jest.fn<() => Promise<any>>().mockResolvedValue({ apiKey: 'test', secret: 'test', passphrase: 'test' }),
-};
+// Mock ethers v6
+vi.mock('ethers', () => ({
+  Wallet: vi.fn(() => ({
+    address: '0xtest',
+    sendTransaction: mockSendTransaction,
+    signingKey: {
+      sign: () => ({
+        r: '0x' + '0'.repeat(64),
+        s: '0x' + '0'.repeat(64),
+        v: 27,
+      }),
+    },
+  })),
+  Contract: vi.fn(() => ({
+    execTransaction: mockExecTransaction,
+    nonce: mockNonce,
+    getTransactionHash: mockGetTransactionHash,
+  })),
+  Interface: vi.fn(() => ({
+    encodeFunctionData: vi.fn(() => '0xencodeddata'),
+  })),
+  JsonRpcProvider: vi.fn(() => ({})),
+  getBytes: vi.fn((val) => val),
+}));
 
-jest.unstable_mockModule('@polymarket/clob-client', () => ({
-  ClobClient: jest.fn(() => mockClobClient),
+vi.mock('@polymarket/clob-client', () => ({
+  ClobClient: vi.fn(() => ({
+    createAndPostMarketOrder: mockCreateAndPostMarketOrder,
+    getTickSize: mockGetTickSize,
+    getNegRisk: mockGetNegRisk,
+    getBalanceAllowance: mockGetBalanceAllowance,
+    updateBalanceAllowance: mockUpdateBalanceAllowance,
+    createOrDeriveApiKey: vi.fn().mockResolvedValue({ apiKey: 'test', secret: 'test', passphrase: 'test' }),
+  })),
   OrderType: { FOK: 'FOK', FAK: 'FAK' },
   Side: { BUY: 'BUY', SELL: 'SELL' },
   AssetType: { COLLATERAL: 'COLLATERAL' },
 }));
 
-jest.unstable_mockModule('@ethersproject/wallet', () => ({
-  Wallet: jest.fn(() => ({ address: '0xtest' })),
-}));
-
-jest.unstable_mockModule('../config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../config.js', () => ({
+  loadConfig: vi.fn(() => ({
     CLOB_FALLBACK_ENABLED: true,
     POLYGON_WALLET_PRIVATE_KEY: '0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
     POLYMARKET_SIGNATURE_TYPE: 0,
@@ -42,27 +60,23 @@ jest.unstable_mockModule('../config.js', () => ({
   })),
 }));
 
-jest.unstable_mockModule('../logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+vi.mock('../logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-const mockRedisGet = jest.fn<() => Promise<string | null>>().mockResolvedValue(null);
-const mockRedisSet = jest.fn<() => Promise<string>>().mockResolvedValue('OK');
-const mockRedisDel = jest.fn<() => Promise<number>>().mockResolvedValue(1);
-
-jest.unstable_mockModule('../redis.js', () => ({
-  getRedis: jest.fn(() => ({
-    get: mockRedisGet,
-    set: mockRedisSet,
-    del: mockRedisDel,
+vi.mock('../redis.js', () => ({
+  getRedis: vi.fn(() => ({
+    get: vi.fn().mockResolvedValue(null),
+    set: vi.fn().mockResolvedValue('OK'),
+    del: vi.fn().mockResolvedValue(1),
   })),
 }));
 
-const { submitClobBuy, submitClobSell, getClobBalance } = await import('../clob.js');
+const { submitClobBuy, submitClobSell, getClobBalance, redeemClobOutcome } = await import('../clob.js');
 
 describe('submitClobBuy', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     mockGetTickSize.mockResolvedValue('0.01');
     mockGetNegRisk.mockResolvedValue(false);
     mockGetBalanceAllowance.mockResolvedValue({ balance: '1000000000', allowance: '1000000000' });
@@ -128,7 +142,7 @@ describe('submitClobBuy', () => {
 
 describe('submitClobSell', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     mockGetTickSize.mockResolvedValue('0.01');
     mockGetNegRisk.mockResolvedValue(false);
   });
@@ -182,7 +196,7 @@ describe('submitClobSell', () => {
 
 describe('getClobBalance', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     mockUpdateBalanceAllowance.mockResolvedValue(undefined);
   });
 
@@ -200,5 +214,40 @@ describe('getClobBalance', () => {
     const result = await getClobBalance();
 
     expect(result).toBeNull();
+  });
+});
+
+describe('redeemClobOutcome', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockWait.mockResolvedValue({ hash: '0xredeemhash' });
+    mockSendTransaction.mockResolvedValue({ wait: mockWait });
+    mockExecTransaction.mockResolvedValue({ wait: mockWait });
+    mockNonce.mockResolvedValue(42);
+    mockGetTransactionHash.mockResolvedValue('0xsafetxhash');
+  });
+
+  it('executes via EOA when sigType=0', async () => {
+    const result = await redeemClobOutcome({ conditionId: 'cond-123', direction: 'YES' });
+
+    expect(result.success).toBe(true);
+    expect(result.tx_hash).toBe('0xredeemhash');
+    expect(mockSendTransaction).toHaveBeenCalled();
+  });
+
+  it('executes via Safe Proxy when sigType=1', async () => {
+    const { loadConfig } = await import('../config.js');
+    (loadConfig as any).mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: '0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      POLYMARKET_SIGNATURE_TYPE: 1,
+      POLYMARKET_FUNDER_ADDRESS: '0xproxyaddress',
+      CLOB_FALLBACK_ENABLED: true,
+    });
+
+    const result = await redeemClobOutcome({ conditionId: 'cond-123', direction: 'NO' });
+
+    expect(result.success).toBe(true);
+    expect(result.tx_hash).toBe('0xredeemhash');
+    expect(mockExecTransaction).toHaveBeenCalled();
   });
 });

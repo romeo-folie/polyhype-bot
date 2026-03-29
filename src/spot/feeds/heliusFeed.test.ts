@@ -1,18 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { HeliusFeed } from './heliusFeed.js';
 import { getRedis } from '../../shared/redis.js';
+import WebSocket from 'ws';
 
 // Mock Redis singleton
+const mockPipeline = {
+  hset: vi.fn().mockReturnThis(),
+  publish: vi.fn().mockReturnThis(),
+  exec: vi.fn().mockResolvedValue([]),
+};
+
 const mockRedis = {
-  pipeline: vi.fn(() => ({
-    zadd: vi.fn().mockReturnThis(),
-    zremrangebyscore: vi.fn().mockReturnThis(),
-    set: vi.fn().mockReturnThis(),
-    expire: vi.fn().mockReturnThis(),
-    publish: vi.fn().mockReturnThis(),
-    exec: vi.fn().mockResolvedValue([]),
-  })),
-  set: vi.fn().mockReturnThis(),
+  pipeline: vi.fn(() => mockPipeline),
 };
 
 vi.mock('../../shared/redis.js', () => ({
@@ -20,53 +19,75 @@ vi.mock('../../shared/redis.js', () => ({
   closeRedis: vi.fn(),
 }));
 
-// Mock Solana and Pyth
-vi.mock('@solana/web3.js', () => ({
-  Connection: vi.fn(() => ({
-    onAccountChange: vi.fn((addr, callback) => {
-       // Store callback to simulate account change
-       (global as any)._onAccountChangeCallback = callback;
-       return 1; // subId
-    }),
-    removeAccountChangeListener: vi.fn(),
-  })),
-  PublicKey: vi.fn((addr) => ({ toString: () => addr })),
-}));
+// Mock WebSocket
+vi.mock('ws', () => {
+  return {
+    default: vi.fn().mockImplementation(() => ({
+      on: vi.fn(),
+      send: vi.fn(),
+      terminate: vi.fn(),
+      removeAllListeners: vi.fn(),
+    })),
+  };
+});
 
-vi.mock('@pythnetwork/client', () => ({
-  parsePriceData: vi.fn(() => ({
-    aggregate: { price: 200.50 },
-  })),
-}));
-
-describe('HeliusFeed', () => {
+describe('HeliusFeed (Hermes)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('should initialize and subscribe to Pyth accounts', async () => {
-    const feed = new HeliusFeed('fake-key', ['SOL']);
+  it('should initialize and subscribe to price feeds on open', async () => {
+    const feed = new HeliusFeed('fake-key', ['SOL', 'BTC']);
+    
+    // Catch the 'open' callback
+    let openCallback: () => void = () => {};
+    const mockWs = {
+      on: vi.fn((event, cb) => {
+        if (event === 'open') openCallback = cb;
+      }),
+      send: vi.fn(),
+    };
+    (WebSocket as unknown as any).mockReturnValue(mockWs);
+
     await feed.start();
 
-    const { Connection } = await import('@solana/web3.js');
-    expect(Connection).toHaveBeenCalled();
+    // Trigger open
+    openCallback();
+
+    expect(mockWs.send).toHaveBeenCalledWith(expect.stringContaining('subscribe'));
+    expect(mockWs.send).toHaveBeenCalledWith(expect.stringContaining('0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d'));
   });
 
-  it('should parse Pyth update and update Redis', async () => {
+  it('should handle price_update messages and update Redis', async () => {
     const feed = new HeliusFeed('fake-key', ['SOL']);
+    
+    let messageCallback: (data: string) => void = () => {};
+    const mockWs = {
+      on: vi.fn((event, cb) => {
+        if (event === 'message') messageCallback = cb;
+      }),
+      send: vi.fn(),
+    };
+    (WebSocket as unknown as any).mockReturnValue(mockWs);
+
     await feed.start();
 
-    // Simulate account change
-    const mockAccountInfo = {
-      data: Buffer.alloc(100),
-      executable: false,
-      lamports: 1000,
-      owner: null as any,
+    // Simulate Hermes message
+    const mockMsg = {
+      type: 'price_update',
+      price_feed: {
+        id: '0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d',
+        price: {
+          price: '20050',
+          expo: -2
+        }
+      }
     };
     
-    const callback = (global as any)._onAccountChangeCallback;
-    await callback(mockAccountInfo);
+    await messageCallback(JSON.stringify(mockMsg));
 
     expect(mockRedis.pipeline).toHaveBeenCalled();
+    expect(mockPipeline.hset).toHaveBeenCalledWith('spot:prices', 'sol', '200.5');
+    expect(mockPipeline.publish).toHaveBeenCalledWith('spot:price_moved', expect.stringContaining('sol'));
   });
 });
