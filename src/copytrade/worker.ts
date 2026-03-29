@@ -32,12 +32,15 @@ export async function runWorker(maxCycles?: number): Promise<void> {
     if (maxCycles !== undefined && iterations >= maxCycles) break;
 
     try {
-      // Refresh config from .env every 100 cycles to pick up shortlist updates (hot-reloading)
+      // Refresh config from .env every 100 cycles to pick up shortlist updates (hot-reloading).
+      // Re-load before reading config for this iteration so the same snapshot is used
+      // throughout the cycle — prevents race conditions from mid-cycle config changes.
       if (iterations > 0 && iterations % 100 === 0) {
         dotenv.config({ override: true });
         loadConfig(true); // flush cache
         logger.info('[copytrade-worker] configuration refreshed from .env');
       }
+      const cycleConfig = loadConfig(); // snapshot for this iteration
 
       const bankrollUsd = await getBankroll(redis);
       const { signals, exits } = await runCopytrade(redis, bankrollUsd);

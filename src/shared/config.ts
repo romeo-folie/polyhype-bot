@@ -75,7 +75,7 @@ const envSchema = z.object({
   // Copytrade signals
   COPYTRADE_ENABLED: z.coerce.boolean().optional().default(false),
   COPYTRADE_WALLETS: z.string().optional().default(''),
-  COPYTRADE_MARKET_SCOPE: z.string().optional().default('all')
+  COPYTRADE_MARKET_SCOPE: z.enum(['weather', 'all']).optional().default('all')
     .transform((s: string) => s.split(',').map((v: string) => v.trim().toLowerCase())),
   COPYTRADE_SIZE_SCALE: z.coerce.number().min(0).optional().default(0.1),
   COPYTRADE_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(25),

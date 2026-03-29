@@ -1,10 +1,18 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 
-// Set mandatory environment variables BEFORE any imports that might trigger config validation
-process.env['NODE_ENV'] = 'test';
-process.env['REDIS_URL'] = 'redis://localhost:6379';
-process.env['SIMMER_API_KEY'] = 'test-simmer-key';
-process.env['GEMINI_API_KEY'] = 'test-gemini-key';
+// Snapshot and restore env vars to prevent global namespace pollution between test files.
+let _savedEnv: NodeJS.ProcessEnv;
+beforeEach(() => {
+  _savedEnv = { ...process.env };
+  // Set mandatory environment variables for config validation
+  process.env['NODE_ENV'] = 'test';
+  process.env['REDIS_URL'] = 'redis://localhost:6379';
+  process.env['SIMMER_API_KEY'] = 'test-simmer-key';
+  process.env['GEMINI_API_KEY'] = 'test-gemini-key';
+});
+afterEach(() => {
+  process.env = _savedEnv;
+});
 
 const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
 const mockRedis = { get: jest.fn(), set: jest.fn(), setex: jest.fn(), del: jest.fn() };

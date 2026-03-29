@@ -1,38 +1,29 @@
 /**
- * High-performance pretty logger for live monitoring.
- * Outputs colored, readable text instead of raw JSON for dashboard visibility.
+ * Minimal structured logger.
+ * Outputs JSON lines to stdout for easy parsing by log aggregators.
  */
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
 
-const COLORS: Record<Level, string> = {
-  debug: '\x1b[38;5;244m', // Visible Gray
-  info: '\x1b[36m',       // Cyan
-  warn: '\x1b[33m',       // Yellow
-  error: '\x1b[31m',      // Red
-};
-const RESET = '\x1b[0m';
-const DIM = '\x1b[2m';
+interface LogRecord {
+  ts: string;
+  level: Level;
+  msg: string;
+  [key: string]: unknown;
+}
 
 function log(level: Level, msg: string, extra?: Record<string, unknown>): void {
-  const ts = new Date().toLocaleTimeString('en-GB', { hour12: false });
-  const color = COLORS[level];
-  
-  // Format the main message line
-  let output = `${DIM}${ts}${RESET} ${color}${level.toUpperCase().padEnd(5)}${RESET} ${msg}`;
-  
-  // Flatten and colorize extra data if present
-  if (extra && Object.keys(extra).length > 0) {
-    const extraStr = Object.entries(extra)
-      .map(([k, v]) => `${DIM}${k}=${RESET}${v}`)
-      .join(' ');
-    output += ` ${DIM}|${RESET} ${extraStr}`;
-  }
-
+  const record: LogRecord = {
+    ts: new Date().toISOString(),
+    level,
+    msg,
+    ...extra,
+  };
+  const line = JSON.stringify(record);
   if (level === 'error') {
-    process.stderr.write(output + '\n');
+    console.error(line);
   } else {
-    process.stdout.write(output + '\n');
+    console.log(line);
   }
 }
 

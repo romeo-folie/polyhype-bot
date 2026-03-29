@@ -39,6 +39,8 @@
 - **Acceptance Criteria:** All categories run per tick with shared pipeline and tests cover scoring + entity extraction per category.
 - **Complexity:** Moderate
 
+## Phase 6: Copytrade Wallet Signals
+
 - **Goals:** Mirror trades from configurable wallet(s) into PGA with guardrails via a low-latency persistent worker.
 - **Deliverables:** Persistent wallet activity worker, signal generator, slippage/liquidity/time guards, multi-LLM consensus ensemble, optional mirror-exit mode.
 - **Acceptance Criteria:** Copytrade signals execute with sub-5s latency and obey guardrails; tests verify ensemble and liquidity gates.

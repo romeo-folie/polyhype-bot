@@ -78,14 +78,45 @@ export interface HlPosition {
   };
 }
 
+interface HlDomain {
+  name: string;
+  version: string;
+  chainId: number;
+  verifyingContract: `0x${string}`;
+}
+
+interface HlMetaUniverse {
+  name: string;
+  szDecimals: number;
+  [key: string]: unknown;
+}
+
+interface HlMeta {
+  universe: HlMetaUniverse[];
+}
+
+interface HlClearinghouseState {
+  marginSummary: { accountValue: string };
+  assetPositions: Array<{
+    position: {
+      coin: string;
+      szi: string;
+      entryPx: string;
+      leverage: { type: string; value: number } | number;
+      unrealizedPnl: string;
+      marginUsed: string;
+    };
+  }>;
+}
+
 /**
  * Hyperliquid Client Singleton
  */
 class HyperliquidClient {
   private wallet: ethers.Wallet;
   private baseUrl: string;
-  private domain: any;
-  private metaCache: any = null;
+  private domain: HlDomain;
+  private metaCache: HlMeta | null = null;
   private metaCacheTime = 0;
   private midCache: Record<string, string> = {};
   private midCacheTime = 0;
@@ -208,7 +239,7 @@ class HyperliquidClient {
   /**
    * Fetch current Clearinghouse state (balance/margin).
    */
-  async getClearinghouseState(): Promise<any> {
+  async getClearinghouseState(): Promise<HlClearinghouseState> {
     const response = await axios.post(`${this.baseUrl}/info`, {
       type: 'clearinghouseState',
       user: this.wallet.address,
@@ -220,11 +251,11 @@ class HyperliquidClient {
    * Retrieve all open perp positions, optionally from a pre-fetched state object.
    * Pass a pre-fetched state to avoid an extra API round-trip.
    */
-  async getOpenPositions(preloadedState?: any): Promise<HlPosition[]> {
+  async getOpenPositions(preloadedState?: HlClearinghouseState): Promise<HlPosition[]> {
     const state = preloadedState ?? await this.getClearinghouseState();
     if (!state?.assetPositions) return [];
 
-    return state.assetPositions.map((ap: any) => ({
+    return state.assetPositions.map((ap) => ({
       symbol: ap.position.coin,
       position: {
         szi: ap.position.szi,
@@ -267,7 +298,7 @@ class HyperliquidClient {
 
   // --- Private Helpers ---
 
-  private async signAction(action: any, nonce: number): Promise<any> {
+  private async signAction(action: Record<string, unknown>, nonce: number): Promise<{ r: string; s: string; v: number }> {
     const msgpackBytes = msgpack.encode(action);
     
     // HL expects: keccak256(msgpack(action) + nonce(8 bytes) + vaultAddress(20 bytes))
@@ -296,15 +327,15 @@ class HyperliquidClient {
   private async getAssetMeta(symbol: string): Promise<{ index: number; szDecimals: number }> {
     // 1 hour cache
     if (this.metaCache && Date.now() - this.metaCacheTime < 3600_000) {
-      const idx = this.metaCache.universe.findIndex((u: any) => u.name === symbol);
-      return { index: idx, szDecimals: this.metaCache.universe[idx]?.szDecimals || 4 };
+      const idx = this.metaCache.universe.findIndex((u) => u.name === symbol);
+      return { index: idx, szDecimals: this.metaCache.universe[idx]?.szDecimals ?? 4 };
     }
 
     const response = await axios.post(`${this.baseUrl}/info`, { type: 'meta' });
-    this.metaCache = response.data;
+    this.metaCache = response.data as HlMeta;
     this.metaCacheTime = Date.now();
     
-    const idx = (this.metaCache?.universe || []).findIndex((u: any) => u.name === symbol);
+    const idx = (this.metaCache?.universe ?? []).findIndex((u) => u.name === symbol);
     const szDecimals = this.metaCache?.universe?.[idx]?.szDecimals ?? 4;
     return { index: idx, szDecimals };
   }
