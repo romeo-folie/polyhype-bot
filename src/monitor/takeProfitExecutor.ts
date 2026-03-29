@@ -312,9 +312,16 @@ async function attemptSyntheticExit(opts: {
   });
 
   if (result.success) {
-    // Close the PM side in the position ledger. The corresponding HL hedge position
-    // remains open and is tracked independently by the futures monitor, which will
-    // manage and close it via its own execution path.
+    // Record the hedge link so the futures monitor can close the HL position independently.
+    // Without this, the synthetic exit leaves an orphaned HL position with no tracking reference.
+    await redis.set(`hedge:link:${position.marketId}`, hlSymbol, 'EX', 7 * 24 * 3600);
+    logger.info('[take-profit-executor] synthetic exit: hedge link persisted', {
+      marketId: position.marketId,
+      hlSymbol,
+    });
+
+    // Close the PM side in the position ledger. The HL hedge position remains open
+    // and will be managed by the futures monitor via the hedge:link key above.
     await closePosition(redis, position.marketId, position.direction);
     await notifyTakeProfitExecuted({ 
        position, 

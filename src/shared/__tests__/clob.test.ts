@@ -1,4 +1,5 @@
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+const vi = jest;
 
 const mockCreateAndPostMarketOrder = vi.fn();
 const mockGetTickSize = vi.fn();

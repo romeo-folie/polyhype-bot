@@ -1,5 +1,5 @@
-import 'dotenv/config';
 import dotenv from 'dotenv';
+dotenv.config();
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { getRedis } from '../shared/redis.js';

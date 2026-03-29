@@ -54,9 +54,12 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         const symbol = pos.symbol;
         const entryPx = parseFloat(pos.position.entryPx);
         const pnlUsd = parseFloat(pos.position.unrealizedPnl);
-        const size = Math.abs(parseFloat(pos.position.szi));
+        const sziRaw = parseFloat(pos.position.szi);
+        const size = Math.abs(sziRaw);
+        // Skip dust positions (szi == 0) to avoid division-by-zero and phantom exits.
+        if (size === 0) continue;
         const positionValue = size * entryPx;
-        const direction = parseFloat(pos.position.szi) > 0 ? 'LONG' : 'SHORT';
+        const direction = sziRaw > 0 ? 'LONG' : 'SHORT';
 
         // Price change % — independent of leverage
         const priceChangePct = (pnlUsd / positionValue) * 100;

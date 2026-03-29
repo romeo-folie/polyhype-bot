@@ -298,7 +298,7 @@ export async function executeSignal(
 
   if (simmerId) {
     // Context safeguard check — flip-flop detection, resolution criteria, market status
-    const ctx = await getMarketContext(simmerId, signal.consensusProbability || 0.5);
+    const ctx = await getMarketContext(simmerId, signal.consensusProbability ?? 0.5);
     if (ctx) {
       // Gate 1: market already resolved or closed
       if (ctx.market.status === 'resolved' || ctx.market.status === 'closed') {
