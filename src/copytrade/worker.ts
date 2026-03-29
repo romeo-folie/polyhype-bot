@@ -68,7 +68,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
     await redis.eval(
       `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) else return 0 end`,
       1, WORKER_LOCK_KEY, lockToken,
-    ).catch(() => {});
+    ).catch((e: unknown) => { logger.warn('[copytrade-worker] lock release failed', { error: String(e) }); });
   };
 
   logger.info('[copytrade-worker] started', { 

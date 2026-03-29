@@ -1,10 +1,9 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 // Snapshot and restore env vars to prevent global namespace pollution between test files.
 let _savedEnv: NodeJS.ProcessEnv;
 beforeEach(() => {
   _savedEnv = { ...process.env };
-  // Set mandatory environment variables for config validation
   process.env['NODE_ENV'] = 'test';
   process.env['REDIS_URL'] = 'redis://localhost:6379';
   process.env['SIMMER_API_KEY'] = 'test-simmer-key';
@@ -14,73 +13,75 @@ afterEach(() => {
   process.env = _savedEnv;
 });
 
-const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
-const mockRedis = { get: jest.fn(), set: jest.fn().mockResolvedValue('OK'), setex: jest.fn(), del: jest.fn(), eval: jest.fn().mockResolvedValue(1) };
+const mockLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+const mockRedis = {
+  get: vi.fn(),
+  set: vi.fn().mockResolvedValue('OK'),
+  setex: vi.fn(),
+  del: vi.fn(),
+  eval: vi.fn().mockResolvedValue(1),
+};
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({ logger: mockLogger }));
-jest.unstable_mockModule('../../shared/redis.js', () => ({ 
-  getRedis: jest.fn(() => mockRedis),
-  closeRedis: jest.fn()
+vi.mock('../../shared/logger.js', () => ({ logger: mockLogger }));
+vi.mock('../../shared/redis.js', () => ({
+  getRedis: vi.fn(() => mockRedis),
+  closeRedis: vi.fn(),
 }));
-
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
     COPYTRADE_WALLETS: '0x1',
     COPYTRADE_MARKET_SCOPE: ['all'],
-    SIMMER_API_KEY: 'test-simmer-key'
-  }))
+    SIMMER_API_KEY: 'test-simmer-key',
+    COPYTRADE_POLL_INTERVAL_MS: 0,
+  })),
 }));
 
-const mockRunCopytrade = jest.fn() as any;
-jest.unstable_mockModule('../index.js', () => ({ runCopytrade: mockRunCopytrade }));
+const mockRunCopytrade = vi.fn();
+vi.mock('../index.js', () => ({ runCopytrade: mockRunCopytrade }));
 
-const mockExecuteSignal = jest.fn() as any;
-jest.unstable_mockModule('../../execution/executor.js', () => ({ executeSignal: mockExecuteSignal }));
+const mockExecuteSignal = vi.fn();
+vi.mock('../../execution/executor.js', () => ({ executeSignal: mockExecuteSignal }));
 
-const mockRecordPosition = jest.fn() as any;
-jest.unstable_mockModule('../../execution/positionLedger.js', () => ({ recordPosition: mockRecordPosition }));
+const mockRecordPosition = vi.fn();
+vi.mock('../../execution/positionLedger.js', () => ({ recordPosition: mockRecordPosition }));
 
-const mockDeductStake = jest.fn() as any;
-const mockGetBankroll = jest.fn() as any;
-jest.unstable_mockModule('../../shared/bankroll.js', () => ({ 
+const mockDeductStake = vi.fn();
+const mockGetBankroll = vi.fn();
+vi.mock('../../shared/bankroll.js', () => ({
   deductStake: mockDeductStake,
-  getBankroll: mockGetBankroll
+  getBankroll: mockGetBankroll,
 }));
 
 describe('copytrade worker', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     mockGetBankroll.mockResolvedValue(1000);
+    // Default: lock acquisition succeeds (eval returns 1)
+    mockRedis.eval.mockResolvedValue(1);
+    mockRedis.get.mockResolvedValue(null);
   });
 
   it('executes signals and records positions', async () => {
-    const signal = { 
-      marketId: 'm1', 
-      stakeUsd: 10, 
-      question: 'Q', 
+    const signal = {
+      marketId: 'm1',
+      stakeUsd: 10,
+      question: 'Q',
       direction: 'YES',
       conditionId: 'c1',
       clobTokenIds: ['t1', 't2'],
       outcomePrice: 0.5,
-      sourcedFrom: 'copy'
+      sourcedFrom: 'copy',
     };
-    
-    // 1. Mock runCopytrade to return a signal
+
     mockRunCopytrade.mockResolvedValueOnce({ signals: [signal], exits: 0 });
-    // 2. Mock executeSignal to return success
-    mockExecuteSignal.mockResolvedValue({ 
-      tradeResult: { success: true, tx_hash: '0x123', shares_bought: 20 } 
+    mockExecuteSignal.mockResolvedValue({
+      signal,
+      tradeResult: { success: true, tx_hash: '0x123', shares_bought: 20 },
+      executionVenue: 'simmer',
     });
-    // 3. To break the loop after one iteration, we can make the next call throw
-    mockRunCopytrade.mockImplementationOnce(() => { throw new Error('stop-loop'); });
 
     const { runWorker } = await import('../worker.js');
-    
-    try {
-        await runWorker(1); // Run 1 cycle
-    } catch (e: any) {
-        if (e.message !== 'stop-loop') throw e;
-    }
+    await runWorker(1);
 
     expect(mockRunCopytrade).toHaveBeenCalled();
     expect(mockExecuteSignal).toHaveBeenCalledWith(signal, mockRedis, 0);

@@ -44,7 +44,7 @@ async function closePositionWithHedge(redis: Redis, marketId: string, direction:
     } catch (err) {
       logger.warn('[take-profit-executor] error closing linked HL hedge', { marketId, hlSymbol, error: String(err) });
     }
-    await redis.del(`hedge:link:${marketId}`).catch(() => {});
+    await redis.del(`hedge:link:${marketId}`).catch((e: unknown) => { logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', { marketId, error: String(e) }); });
   }
 }
 import type { ExitReason } from './takeProfitEvaluator.js';
@@ -424,7 +424,7 @@ async function attemptSyntheticExit(opts: {
           rollbackError: rollback.error,
         });
       }
-      await redis.del(`hedge:link:${position.marketId}`).catch(() => {});
+      await redis.del(`hedge:link:${position.marketId}`).catch((e: unknown) => { logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', { marketId: position.marketId, error: String(e) }); });
       return { success: false, marketId: position.marketId, returnPct, reason, error: 'pm_close_failed_hedge_rolled_back' };
     }
 

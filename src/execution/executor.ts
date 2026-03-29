@@ -170,7 +170,9 @@ async function executeHyperliquidSignal(
       // The cap check subtracts any margin growth above baseline from pending,
       // so once HL reflects the position, pending contribution drops to zero.
       const newPendingEntry = { amount: signal.stakeUsd, baseline: totalCurrentMargin };
-      await redis.set('hl:pending_margin_usd', JSON.stringify(newPendingEntry), 'EX', 30).catch(() => {});
+      await redis.set('hl:pending_margin_usd', JSON.stringify(newPendingEntry), 'EX', 30).catch((e: unknown) => {
+        logger.debug('[executor] failed to record pending margin (non-fatal)', { error: String(e) });
+      });
       return {
         signal,
         skipped: false,

@@ -29,6 +29,7 @@ export class ArbitrageWorker {
   private lastScanTime = 0;
   private lastCryptoArbTime = 0;
   private lastCryptoArbTradeTime = 0;
+  private isCryptoArbRunning = false;
   // Shared rate-limit timestamp across scan and crypto-arb paths.
   // Both consume from the same Polymarket order budget (maxTradesPerMin).
   private lastAnyTradeTime = 0;
@@ -164,17 +165,24 @@ export class ArbitrageWorker {
   }
 
   private async triggerCryptoArb(move: SpotMove): Promise<void> {
+    // Concurrency lock: concurrent pub/sub messages could both pass the time check
+    // before either updates lastCryptoArbTime. The lock ensures only one scan runs at a time.
+    if (this.isCryptoArbRunning) {
+      logger.debug('[crypto-arb] scan already in progress, skipping');
+      return;
+    }
     try {
       const cfg = loadConfig();
       if (!cfg.CRYPTO_ARB_ENABLED) return;
 
-      // Rate-limit governor (same logic as triggerScan but independent counter)
+      // Rate-limit governor (shared budget with regular scan)
       const minIntervalMs = 60000 / this.maxTradesPerMin;
       const now = Date.now();
       if (now - this.lastCryptoArbTime < minIntervalMs) {
         logger.debug('[crypto-arb] governor throttle, skipping');
         return;
       }
+      this.isCryptoArbRunning = true;
       this.lastCryptoArbTime = now;
 
       const redis = getRedis();
@@ -268,6 +276,8 @@ export class ArbitrageWorker {
         assetId: move.assetId,
         error: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      this.isCryptoArbRunning = false;
     }
   }
 
@@ -277,7 +287,9 @@ export class ArbitrageWorker {
       this.timer = null;
     }
     const subscriber = getSubscriberRedis();
-    void subscriber.unsubscribe('spot:price_moved').catch(() => {});
+    void subscriber.unsubscribe('spot:price_moved').catch((e: unknown) => {
+      logger.debug('[arb-worker] unsubscribe failed (non-fatal)', { error: String(e) });
+    });
   }
 }
 
