@@ -7,6 +7,20 @@
 SESSION_NAME="pga"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Dependency checks
+for cmd in pm2 tmux; do
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "[monitor] ERROR: '$cmd' is not installed or not in PATH." >&2
+    echo "[monitor] Install instructions:" >&2
+    case "$cmd" in
+      pm2)  echo "  npm install -g pm2" >&2 ;;
+      tmux) echo "  brew install tmux  # macOS" >&2
+            echo "  sudo apt-get install tmux  # Ubuntu/Debian" >&2 ;;
+    esac
+    exit 1
+  fi
+done
 PM2_LOGS="${HOME}/.pm2/logs"
 
 cd "$PROJECT_DIR" || exit 1

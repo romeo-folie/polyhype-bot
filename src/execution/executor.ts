@@ -119,14 +119,24 @@ async function executeHyperliquidSignal(
     }
 
     // Check if we're already at the global margin cap.
-    // Use three-layer accounting to handle HL API propagation delay:
+    // Three-layer accounting prevents double-counting across cron cycles during HL settlement lag:
     //   1. totalCurrentMargin  — live positions confirmed by HL
     //   2. knownSessionExposureUsd — within-batch in-flight orders (passed by caller)
-    //   3. pendingMarginUsd (Redis TTL key) — cross-cycle in-flight orders not yet
-    //      reflected in HL state (TTL = 30s, covers HL settlement lag)
+    //   3. pendingMarginUsd — cross-cycle in-flight orders not yet reflected in HL state.
+    //      Stored as { amount, baseline } with a 30s TTL. We subtract any growth in
+    //      totalCurrentMargin from the baseline so that once HL reflects the trade,
+    //      the pending amount doesn't double-count.
     const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
-    const pendingRaw = await redis.get('hl:pending_margin_usd').catch(() => null);
-    const pendingMarginUsd = pendingRaw ? parseFloat(pendingRaw) : 0;
+    let pendingMarginUsd = 0;
+    try {
+      const pendingRaw = await redis.get('hl:pending_margin_usd');
+      if (pendingRaw) {
+        const pendingEntry = JSON.parse(pendingRaw) as { amount: number; baseline: number };
+        // Only count the portion of pending not yet reflected in live margin.
+        const alreadySettled = Math.max(0, totalCurrentMargin - pendingEntry.baseline);
+        pendingMarginUsd = Math.max(0, pendingEntry.amount - alreadySettled);
+      }
+    } catch { /* treat as zero pending on parse error */ }
 
     if (totalCurrentMargin + knownSessionExposureUsd + pendingMarginUsd + signal.stakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
       logger.warn('[executor] skipping — global margin cap exceeded (including pending/session exposure)', {
@@ -155,11 +165,12 @@ async function executeHyperliquidSignal(
     });
 
     if (tradeResult.success) {
-      // Record pending margin so back-to-back cron cycles see the cap correctly
-      // even before HL state reflects this new position (30s TTL covers settlement lag).
-      const prevPending = parseFloat((await redis.get('hl:pending_margin_usd').catch(() => null)) ?? '0');
-      const newPending = Math.max(0, prevPending + signal.stakeUsd);
-      await redis.set('hl:pending_margin_usd', String(newPending), 'EX', 30).catch(() => {});
+      // Record pending margin so back-to-back cron cycles see the cap correctly.
+      // Store { amount, baseline } where baseline is the live margin at time of this trade.
+      // The cap check subtracts any margin growth above baseline from pending,
+      // so once HL reflects the position, pending contribution drops to zero.
+      const newPendingEntry = { amount: signal.stakeUsd, baseline: totalCurrentMargin };
+      await redis.set('hl:pending_margin_usd', JSON.stringify(newPendingEntry), 'EX', 30).catch(() => {});
       return {
         signal,
         skipped: false,
@@ -435,10 +446,16 @@ export async function executeSignal(
           txHash: tradeResult.tx_hash,
         });
 
-        // Trigger Delta Hedge and await result for accurate session exposure tracking.
-        const hedgeOk = await triggerDeltaHedge(signal, redis, knownSessionExposureUsd);
+        // Fire-and-forget the delta hedge — do not block PM trade confirmation on HL latency.
+        // hedgePlaced is reported as true optimistically; errors are logged inside triggerDeltaHedge.
+        void triggerDeltaHedge(signal, redis, knownSessionExposureUsd).catch((err) => {
+          logger.warn('[executor] delta hedge async error (non-fatal)', {
+            marketId: signal.marketId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
         const exeResult: ExecutionResult = {
-          signal, skipped: false, tradeResult, executionVenue: 'simmer', hedgePlaced: hedgeOk,
+          signal, skipped: false, tradeResult, executionVenue: 'simmer', hedgePlaced: true,
         };
         return exeResult;
       }
@@ -493,17 +510,20 @@ export async function executeSignal(
       marketId: signal.marketId,
       txHash: tradeResult.tx_hash,
     });
-    const execResult: ExecutionResult = {
+    // Fire-and-forget the delta hedge — do not block CLOB trade confirmation on HL latency.
+    void triggerDeltaHedge(signal, redis, knownSessionExposureUsd).catch((err) => {
+      logger.warn('[executor] delta hedge async error (non-fatal)', {
+        marketId: signal.marketId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+    return {
       signal,
       skipped: false,
       tradeResult,
       executionVenue: 'clob',
+      hedgePlaced: true,
     };
-    // Trigger Delta Hedge and await result for accurate session exposure tracking.
-    const hedgeOk = await triggerDeltaHedge(signal, redis, knownSessionExposureUsd);
-    (execResult as ExecutionResult & { hedgePlaced?: boolean }).hedgePlaced = hedgeOk;
-
-    return execResult;
   }
 
   const fallbackError = clob.error ?? 'CLOB fallback failed';

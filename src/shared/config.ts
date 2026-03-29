@@ -111,6 +111,8 @@ const envSchema = z.object({
 
   // --- CRYPTO FUTURES (Phase: futures) ---
   FUTURES_ENABLED: z.coerce.boolean().optional().default(false),
+  // When true: log HL orders instead of submitting them. Safe validation path.
+  HL_DRY_RUN: z.coerce.boolean().optional().default(false),
   // Hyperliquid credentials
   HYPERLIQUID_PRIVATE_KEY: z.string().optional(),
   HYPERLIQUID_AGENT_WALLET: z.string().optional(),

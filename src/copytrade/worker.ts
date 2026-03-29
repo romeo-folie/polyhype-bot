@@ -33,11 +33,34 @@ export async function runWorker(maxCycles?: number): Promise<void> {
   }
 
   // Refresh lock every 60s while running.
+  // Track consecutive refresh failures: after 3 failures (~3 min), abort the worker
+  // rather than silently running without holding the lock (which allows duplicate instances).
+  let lockRefreshFailures = 0;
+  const MAX_LOCK_REFRESH_FAILURES = 3;
+  let lockLost = false;
   const lockRefresh = setInterval(() => {
     redis.eval(
       `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("expire",KEYS[1],ARGV[2]) else return 0 end`,
       1, WORKER_LOCK_KEY, lockToken, String(WORKER_LOCK_TTL_SEC),
-    ).catch(() => {});
+    ).then((result) => {
+      lockRefreshFailures = 0;
+      if (result === 0) {
+        // Lock was taken by another instance — stop this worker.
+        logger.error('[copytrade-worker] lock lost to another instance — aborting');
+        lockLost = true;
+      }
+    }).catch((err) => {
+      lockRefreshFailures++;
+      logger.warn('[copytrade-worker] lock refresh failed', {
+        attempt: lockRefreshFailures,
+        max: MAX_LOCK_REFRESH_FAILURES,
+        error: String(err),
+      });
+      if (lockRefreshFailures >= MAX_LOCK_REFRESH_FAILURES) {
+        logger.error('[copytrade-worker] lock refresh failed too many times — aborting to prevent duplicate instances');
+        lockLost = true;
+      }
+    });
   }, 60_000);
 
   const releaseLock = async () => {
@@ -59,6 +82,10 @@ export async function runWorker(maxCycles?: number): Promise<void> {
   let iterations = 0;
 
   while (true) {
+    if (lockLost) {
+      logger.error('[copytrade-worker] stopping — lock lost or refresh failed');
+      break;
+    }
     if (maxCycles !== undefined && iterations >= maxCycles) break;
 
     try {

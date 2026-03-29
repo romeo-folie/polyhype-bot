@@ -48,18 +48,21 @@ export function parseWalletList(raw: string | undefined): string[] {
     .map((s) => s.toLowerCase());
 }
 
+// Keywords are checked as whole words (word-boundary anchored) to prevent
+// short tokens like 'un' or 'cold' matching unrelated substrings.
 const CATEGORY_KEYWORDS: Record<string, string[]> = {
-  weather: ['rain', 'snow', 'storm', 'hurricane', 'temperature', 'precipitation', 'tornado', 'wind', 'heat', 'cold'],
-  geopolitics: ['war', 'conflict', 'un', 'sanctions', 'treaty', 'military', 'invasion', 'ceasefire', 'nuclear'],
+  weather: ['rain', 'snow', 'storm', 'hurricane', 'temperature', 'precipitation', 'tornado', 'wind', 'heat wave', 'cold snap', 'blizzard', 'drought'],
+  geopolitics: ['war', 'conflict', 'united nations', 'sanctions', 'treaty', 'military', 'invasion', 'ceasefire', 'nuclear'],
   sports: ['olympics', 'nfl', 'nba', 'soccer', 'fifa', 'super bowl', 'championship', 'world cup'],
-  crypto: ['bitcoin', 'ethereum', 'doge', 'dogecoin', 'sec', 'etf', 'bnb', 'tao', 'regulation', 'coinbase', 'binance', 'halving', 'solana', 'xrp', 'ripple', 'shiba', 'shib', 'pepe', 'crypto', 'cryptocurrency', 'coin', 'token', 'blockchain'],
+  crypto: ['bitcoin', 'ethereum', 'doge', 'dogecoin', 'sec', 'etf', 'bnb', 'tao', 'regulation', 'coinbase', 'binance', 'halving', 'solana', 'xrp', 'ripple', 'shiba', 'shib', 'pepe', 'crypto', 'cryptocurrency', 'blockchain'],
   macro: ['fed', 'inflation', 'cpi', 'gdp', 'recession', 'interest rate', 'rate cut', 'rate hike', 'central bank'],
   'ai-tech': ['openai', 'nvidia', 'gemini', 'anthropic', 'gpu', 'llm', 'silicon'],
-  'us-politics': ['election', 'biden', 'trump', 'senate', 'house', 'congress', 'white house', 'democrat', 'republican'],
+  'us-politics': ['election', 'biden', 'trump', 'senate', 'congress', 'white house', 'democrat', 'republican'],
 };
 
 /**
  * Check if a market title or description matches any keyword from the allowed categories.
+ * Keywords are matched as whole words to avoid false positives from short tokens.
  */
 export function matchesCategory(title: string, description: string | null, allowedScopes: string[]): boolean {
   if (allowedScopes.includes('all')) return true;
@@ -67,7 +70,12 @@ export function matchesCategory(title: string, description: string | null, allow
   const lowerText = `${title} ${description ?? ''}`.toLowerCase();
   for (const scope of allowedScopes) {
     const keywords = CATEGORY_KEYWORDS[scope];
-    if (keywords?.some((kw) => lowerText.includes(kw))) {
+    if (keywords?.some((kw) => {
+      // Multi-word phrases: use substring match (the phrase already acts as its own boundary).
+      // Single words: anchor with \b to prevent 'un' matching 'until', 'cold' matching 'colder'.
+      if (kw.includes(' ')) return lowerText.includes(kw);
+      return new RegExp(`\\b${kw}\\b`).test(lowerText);
+    })) {
       return true;
     }
   }

@@ -132,10 +132,16 @@ export async function executeArb(
   const cfg = loadConfig();
   const combined = opp.yesAsk + opp.noAsk;
 
+  // Bankroll-fraction sizing: risk at most ARB_MAX_STAKE_FRACTION of current bankroll per arb.
+  // This caps drawdown from a single bad trade while allowing position growth as bankroll grows.
   const bankroll = await getBankroll(redis);
   const totalBudget = bankroll * cfg.ARB_MAX_STAKE_FRACTION;
 
+  // Combined price < 1.0 is the arb condition: buying both YES and NO costs less than $1/share.
+  // The edge (profit per share) = 1.0 - combined. totalBudget / combined = number of share pairs.
   if (totalBudget < 2.0) {
+    // Minimum viable arb: need at least 1 share on each side. At combined ≈ 0.98 the min budget
+    // is ~$2. Below this, fee drag exceeds expected profit.
     return {
       marketId: opp.marketId,
       success: false,
@@ -148,6 +154,8 @@ export async function executeArb(
   }
 
   if (combined < MIN_COMBINED || !isFinite(combined)) {
+    // combined <= 0 or NaN indicates a data error (stale quotes, invalid market).
+    // Guard here prevents division-by-zero / infinite share count in the line below.
     return {
       marketId: opp.marketId,
       success: false,
@@ -159,6 +167,8 @@ export async function executeArb(
     };
   }
 
+  // shares = how many YES+NO pairs we can buy within budget.
+  // yesUsd / noUsd = cost of each leg. Their sum = totalBudget (within rounding).
   const shares = totalBudget / combined;
   const yesUsd = shares * opp.yesAsk;
   const noUsd  = shares * opp.noAsk;

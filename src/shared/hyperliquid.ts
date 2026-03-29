@@ -161,6 +161,18 @@ class HyperliquidClient {
     reduceOnly?: boolean;
     sizeBase?: number; // Added to avoid double lookup if possible
   }): Promise<{ success: boolean; txHash?: string; error?: string }> {
+    // Dry-run mode: log the order without submitting — safe validation path.
+    if (loadConfig().HL_DRY_RUN) {
+      logger.info('[hyperliquid] DRY RUN — order not submitted', {
+        symbol: opts.symbol,
+        isBuy: opts.isBuy,
+        sizeUsd: opts.sizeUsd,
+        leverage: opts.leverage,
+        reduceOnly: opts.reduceOnly ?? false,
+      });
+      return { success: true, txHash: 'dry-run' };
+    }
+
     try {
       // 1. Get asset index for the symbol
       const { index, szDecimals } = await this.getAssetMeta(opts.symbol);
@@ -382,12 +394,21 @@ class HyperliquidClient {
 }
 
 let _client: HyperliquidClient | null = null;
+let _clientPrivateKey: string | null = null;
 
 /**
  * Gets the singleton Hyperliquid client instance.
+ * If the private key in config has changed since the last call (e.g. after a config
+ * hot-reload), the singleton is automatically invalidated and a new client is created.
+ * This prevents stale credentials being used after a key rotation.
  */
 export function getHyperliquid(): HyperliquidClient {
-  if (!_client) _client = new HyperliquidClient();
+  const cfg = loadConfig();
+  const currentKey = cfg.POLYGON_WALLET_PRIVATE_KEY ?? null;
+  if (!_client || currentKey !== _clientPrivateKey) {
+    _client = new HyperliquidClient();
+    _clientPrivateKey = currentKey;
+  }
   return _client;
 }
 
@@ -397,4 +418,5 @@ export function getHyperliquid(): HyperliquidClient {
  */
 export function resetHyperliquid(): void {
   _client = null;
+  _clientPrivateKey = null;
 }

@@ -143,9 +143,12 @@ export class ArbitrageWorker {
         if (prevPrice != null && prevPrice > 0) referencePrice = prevPrice;
       } catch { /* keep currentPrice as fallback */ }
     }
-    const changePercent = referencePrice > 0
+    const changePercent = referencePrice > 0 && referencePrice !== currentPrice
       ? ((currentPrice - referencePrice) / referencePrice) * 100
       : 0;
+    if (changePercent === 0) {
+      logger.debug('[crypto-arb] no previous price for reference — changePercent defaulting to 0', { symbol, assetId });
+    }
 
     return this.triggerCryptoArb({
       assetId,
