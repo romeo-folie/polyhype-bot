@@ -138,9 +138,10 @@ describe('estimateConsensusProbability', () => {
   it('throws when no API keys configured', async () => {
     delete process.env['GEMINI_API_KEY'];
     delete process.env['OPENAI_API_KEY'];
+    delete process.env['ANTHROPIC_API_KEY'];
 
     await expect(estimateConsensusProbability(BASE_OPTS)).rejects.toThrow(
-      'All consensus samples failed',
+      'No LLM providers configured',
     );
   });
 

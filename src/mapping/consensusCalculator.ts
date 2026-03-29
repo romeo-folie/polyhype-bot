@@ -79,6 +79,34 @@ async function callOpenAI(
   return parseResult(raw);
 }
 
+async function callAnthropic(
+  question: string,
+  description: string | null,
+  headline: string,
+  currentYesPrice: number,
+): Promise<ConsensusResult> {
+  const Anthropic = (await import('@anthropic-ai/sdk')).default;
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  const completion = await client.messages.create(
+    {
+      model: loadConfig().ANTHROPIC_MODEL,
+      max_tokens: 200,
+      system: buildSystemPrompt(),
+      messages: [
+        {
+          role: 'user',
+          content: buildUserPrompt({ question, description, headline, currentYesPrice }),
+        },
+      ],
+    },
+    { signal: AbortSignal.timeout(TIMEOUT_MS) } as Parameters<typeof client.messages.create>[1],
+  );
+
+  const raw = completion.content[0]?.type === 'text' ? completion.content[0].text : '{}';
+  return parseResult(raw);
+}
+
 async function callGemini(
   question: string,
   description: string | null,
@@ -215,16 +243,23 @@ export async function estimateConsensusProbability(opts: {
     }
   }
 
-  // Determine sample distribution — use enriched headline for context injection
+  // Build provider list — round-robin N_SAMPLES calls across all available providers.
+  // Adding a new provider is a one-line change here; N_SAMPLES controls total call count.
+  const useAnthropic = Boolean(process.env.ANTHROPIC_API_KEY);
+  type ProviderFn = (q: string, d: string | null, h: string, p: number) => Promise<ConsensusResult>;
+  const providers: ProviderFn[] = [
+    ...(useOpenAI   ? [callOpenAI   as ProviderFn] : []),
+    ...(useGemini   ? [callGemini   as ProviderFn] : []),
+    ...(useAnthropic ? [callAnthropic as ProviderFn] : []),
+  ];
+
   const calls: Promise<ConsensusResult>[] = [];
-  if (useGemini && useOpenAI) {
-    calls.push(callGemini(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice));
-    calls.push(callOpenAI(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice));
-  } else {
-    // Fallback to single-provider parallel sampling
-    for (let i = 0; i < N_SAMPLES; i++) {
-      calls.push(estimateSingle({ ...opts, headline: enrichedHeadline }));
-    }
+  if (providers.length === 0) {
+    throw new Error('No LLM providers configured — set OPENAI_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY');
+  }
+  for (let i = 0; i < N_SAMPLES; i++) {
+    const provider = providers[i % providers.length]!;
+    calls.push(provider(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice));
   }
 
   const settled = await Promise.allSettled(calls);
