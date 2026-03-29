@@ -12,7 +12,22 @@ interface LogRecord {
   [key: string]: unknown;
 }
 
+const levels: Record<Level, number> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
+};
+
+function getLogLevel(): number {
+  const level = (process.env['LOG_LEVEL'] || 'info').toLowerCase() as Level;
+  return levels[level] ?? 1;
+}
+
 function log(level: Level, msg: string, extra?: Record<string, unknown>): void {
+  const currentLevel = getLogLevel();
+  if (levels[level] < currentLevel) return;
+
   const record: LogRecord = {
     ts: new Date().toISOString(),
     level,
