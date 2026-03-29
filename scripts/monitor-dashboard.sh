@@ -1,101 +1,85 @@
 #!/usr/bin/env zsh
 # PGA Monitor Dashboard
-# 6-pane tmux session covering all persistent workers and cron logs.
-# Uses tail -f on pm2 log files directly — avoids pm2 CLI version incompatibilities.
-# Usage: bash scripts/monitor-dashboard.sh
+# 6-pane tmux session — all persistent workers + cron logs.
+# Usage: bash scripts/monitor-dashboard.sh  (run from anywhere)
 
-SESSION_NAME="pga"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+set -e
 
-# Dependency checks
+SESSION="pga"
+PM2_LOGS="${HOME}/.pm2/logs"
+PROJECT_DIR="${0:a:h:h}"   # zsh: absolute path of this script's parent directory
+
+# ── Dependency checks ──────────────────────────────────────────────────────────
 for cmd in pm2 tmux; do
   if ! command -v "$cmd" &>/dev/null; then
-    echo "[monitor] ERROR: '$cmd' is not installed or not in PATH." >&2
-    echo "[monitor] Install instructions:" >&2
-    case "$cmd" in
-      pm2)  echo "  npm install -g pm2" >&2 ;;
-      tmux) echo "  brew install tmux  # macOS" >&2
-            echo "  sudo apt-get install tmux  # Ubuntu/Debian" >&2 ;;
-    esac
-    exit 1
+    echo "ERROR: '$cmd' not found in PATH." >&2; exit 1
   fi
 done
-PM2_LOGS="${HOME}/.pm2/logs"
 
-cd "$PROJECT_DIR" || exit 1
+# ── Start missing workers ──────────────────────────────────────────────────────
+cd "$PROJECT_DIR"
 
-# Ensure all persistent workers are running — name:script pairs
-WORKER_NAMES=(pga-spot-feed pga-arb pga-copytrade pga-futures)
-WORKER_SCRIPTS=("worker:spot-feed" "worker:arb" "worker:copytrade" "monitor:futures")
+typeset -A WORKERS
+WORKERS=(
+  pga-spot-feed  "worker:spot-feed"
+  pga-arb        "worker:arb"
+  pga-copytrade  "worker:copytrade"
+  pga-futures    "monitor:futures"
+)
 
-for i in {1..${#WORKER_NAMES[@]}}; do
-  name="${WORKER_NAMES[$i]}"
-  script="${WORKER_SCRIPTS[$i]}"
-  if ! pm2 list | grep -q "$name"; then
-    echo "[monitor] Starting $name (npm run $script)"
+for name script in ${(kv)WORKERS}; do
+  if ! pm2 list | grep -qw "$name"; then
+    echo "[monitor] starting $name"
     pm2 start "npm run $script" --name "$name"
   fi
 done
 
-# Remove stale legacy process names if they exist
+# Remove stale legacy names
 for stale in pga-feeds pga-worker; do
-  if pm2 list | grep -q "$stale"; then
-    echo "[monitor] Removing stale process: $stale"
-    pm2 delete "$stale"
-  fi
+  pm2 list | grep -qw "$stale" && pm2 delete "$stale" || true
 done
 
-pm2 save --force > /dev/null
+pm2 save --force &>/dev/null
 
-# Ensure all log files exist (touch prevents tail from failing on first run)
+# ── Ensure log files exist ─────────────────────────────────────────────────────
 for name in pga-spot-feed pga-arb pga-copytrade pga-futures; do
-  touch "${PM2_LOGS}/${name}-out.log" "${PM2_LOGS}/${name}-error.log" 2>/dev/null || true
+  touch "${PM2_LOGS}/${name}-out.log" 2>/dev/null || true
 done
 touch /tmp/pga-trade.log /tmp/pga-monitor.log
 
-# Attach to existing session if it exists
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-  echo "[monitor] Session $SESSION_NAME already exists, attaching..."
-  tmux attach-session -t "$SESSION_NAME"
+# ── Attach if session already running ─────────────────────────────────────────
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "[monitor] attaching to existing session..."
+  tmux attach-session -t "$SESSION"
   exit 0
 fi
 
-echo "[monitor] Creating tmux session: $SESSION_NAME"
+# ── Build dashboard ────────────────────────────────────────────────────────────
+# Pass commands directly to split-window — no send-keys, no timing race.
+# Layout (tiled, 2 columns x 3 rows):
+#  spot-feed  │  arb
+#  copytrade  │  futures
+#  cron:trade │  cron:monitor
 
-# Create session — remain-on-exit keeps panes open if command exits
-tmux new-session -d -s "$SESSION_NAME" -n 'Dashboard'
-tmux set-option -t "$SESSION_NAME" remain-on-exit on
+tmux new-session  -d -s "$SESSION" -n Dashboard \
+  "tail -f '${PM2_LOGS}/pga-spot-feed-out.log'"
 
-# Pane 0: spot-feed out log
-tmux send-keys -t "$SESSION_NAME:0.0" \
-  "echo '=== pga-spot-feed ===' && tail -f '${PM2_LOGS}/pga-spot-feed-out.log'" Enter
+tmux split-window -t "$SESSION" \
+  "tail -f '${PM2_LOGS}/pga-arb-out.log'"
 
-# Pane 1: arb out log (split right)
-tmux split-window -h -t "$SESSION_NAME:0.0"
-tmux send-keys -t "$SESSION_NAME:0.1" \
-  "echo '=== pga-arb ===' && tail -f '${PM2_LOGS}/pga-arb-out.log'" Enter
+tmux split-window -t "$SESSION" \
+  "tail -f '${PM2_LOGS}/pga-copytrade-out.log'"
 
-# Pane 2: copytrade out log (split below pane 0)
-tmux split-window -v -t "$SESSION_NAME:0.0"
-tmux send-keys -t "$SESSION_NAME:0.2" \
-  "echo '=== pga-copytrade ===' && tail -f '${PM2_LOGS}/pga-copytrade-out.log'" Enter
+tmux split-window -t "$SESSION" \
+  "tail -f '${PM2_LOGS}/pga-futures-out.log'"
 
-# Pane 3: futures out log (split below pane 1)
-tmux split-window -v -t "$SESSION_NAME:0.1"
-tmux send-keys -t "$SESSION_NAME:0.3" \
-  "echo '=== pga-futures ===' && tail -f '${PM2_LOGS}/pga-futures-out.log'" Enter
+tmux split-window -t "$SESSION" \
+  "tail -f /tmp/pga-trade.log"
 
-# Pane 4: OSINT trade cron log
-tmux split-window -v -t "$SESSION_NAME:0.2"
-tmux send-keys -t "$SESSION_NAME:0.4" \
-  "echo '=== cron:trade ===' && tail -f /tmp/pga-trade.log" Enter
+tmux split-window -t "$SESSION" \
+  "tail -f /tmp/pga-monitor.log"
 
-# Pane 5: position monitor cron log
-tmux split-window -v -t "$SESSION_NAME:0.3"
-tmux send-keys -t "$SESSION_NAME:0.5" \
-  "echo '=== cron:monitor ===' && tail -f /tmp/pga-monitor.log" Enter
-
-tmux select-layout -t "$SESSION_NAME" tiled
-tmux select-pane -t "$SESSION_NAME:0.0"
-tmux attach-session -t "$SESSION_NAME"
+tmux select-layout  -t "$SESSION" tiled
+tmux set-option     -t "$SESSION" remain-on-exit on
+tmux select-pane    -t "$SESSION:0.0"
+tmux attach-session -t "$SESSION"
