@@ -137,6 +137,15 @@ export async function scanCryptoArb(
 
       // 3. Estimate fair value via BS formula (no LLM for price-target markets)
       const consensus = await estimateFastConsensus(move, market);
+
+      if (consensus.method === 'llm') {
+        logger.debug('[crypto-arb] skipping non-price-target market — LLM path not used in fast arb', {
+          marketId: market.marketId,
+          question: market.question.slice(0, 80),
+        });
+        continue;
+      }
+
       const fairValue = consensus.probability;
 
       // 4. Compute edge and direction

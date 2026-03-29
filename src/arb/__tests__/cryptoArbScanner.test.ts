@@ -174,6 +174,23 @@ describe('cryptoArbScanner', () => {
     expect(mockFindCorrelatedMarkets).not.toHaveBeenCalled();
   });
 
+  it('skips market when estimateFastConsensus returns method=llm', async () => {
+    const { scanCryptoArb } = await import('../cryptoArbScanner.js');
+
+    mockFindCorrelatedMarkets.mockResolvedValue([makeMarket()]);
+    mockEstimateFastConsensus.mockResolvedValue({
+      probability: 0.75,
+      reasoning: 'llm fallback',
+      method: 'llm',
+      stddev: 0.05,
+    });
+
+    const opps = await scanCryptoArb(makeMove(), mockRedis as never);
+
+    expect(opps).toHaveLength(0);
+    expect(mockEstimateFastConsensus).toHaveBeenCalledTimes(1);
+  });
+
   it('returns empty for unknown asset without error', async () => {
     const { scanCryptoArb } = await import('../cryptoArbScanner.js');
 

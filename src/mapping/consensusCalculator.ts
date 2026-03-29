@@ -8,6 +8,7 @@
  */
 
 import process from 'node:process';
+import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRecentOutcomes, inferCategory } from '../shared/outcomeRecorder.js';
@@ -150,12 +151,10 @@ async function estimateSingle(opts: {
   throw new Error('No LLM provider configured (OPENAI_API_KEY or GEMINI_API_KEY required)');
 }
 
-const N_SAMPLES = 3;
-
 /**
  * Estimate the true YES probability for a market given a triggering headline.
  *
- * Runs N_SAMPLES calls and returns mean + stddev for confidence gating.
+ * Runs CONSENSUS_SAMPLES calls and returns mean + stddev for confidence gating.
  * Distributes samples across both OpenAI and Gemini if both are available (Multi-LLM Ensemble).
  */
 export async function estimateConsensusProbability(opts: {
@@ -166,8 +165,24 @@ export async function estimateConsensusProbability(opts: {
   redis?: Redis;
 }): Promise<ConsensusEstimate> {
   const cfg = loadConfig();
+  const N_SAMPLES = cfg.CONSENSUS_SAMPLES;
   const useGemini = Boolean(process.env.GEMINI_API_KEY);
   const useOpenAI = Boolean(process.env.OPENAI_API_KEY);
+
+  // Check consensus cache
+  if (cfg.CONSENSUS_CACHE_ENABLED && opts.redis) {
+    const priceBucket = Math.round(opts.currentYesPrice / 0.05) * 0.05;
+    const raw = `${opts.question}|${opts.headline.slice(0, 200)}|${priceBucket.toFixed(2)}`;
+    const cacheKey = 'consensus:' + createHash('sha256').update(raw).digest('hex');
+    try {
+      const cached = await opts.redis.get(cacheKey);
+      if (cached) {
+        return JSON.parse(cached) as ConsensusEstimate;
+      }
+    } catch {
+      // cache read failed — fall through to LLM
+    }
+  }
 
   // Phase 8a: Context injection — prepend recent outcomes to headline
   let enrichedHeadline = opts.headline;
@@ -194,7 +209,6 @@ export async function estimateConsensusProbability(opts: {
   // Determine sample distribution — use enriched headline for context injection
   const calls: Promise<ConsensusResult>[] = [];
   if (useGemini && useOpenAI) {
-    calls.push(callGemini(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice));
     calls.push(callGemini(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice));
     calls.push(callOpenAI(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice));
   } else {
@@ -226,7 +240,21 @@ export async function estimateConsensusProbability(opts: {
   const variance = results.reduce((s, x) => s + (x - mean) ** 2, 0) / results.length;
   const stddev = Math.sqrt(variance);
 
-  return { probability: mean, reasoning, stddev, sampleCount: results.length };
+  const estimate: ConsensusEstimate = { probability: mean, reasoning, stddev, sampleCount: results.length };
+
+  // Cache the result
+  if (cfg.CONSENSUS_CACHE_ENABLED && opts.redis) {
+    const priceBucket = Math.round(opts.currentYesPrice / 0.05) * 0.05;
+    const raw = `${opts.question}|${opts.headline.slice(0, 200)}|${priceBucket.toFixed(2)}`;
+    const cacheKey = 'consensus:' + createHash('sha256').update(raw).digest('hex');
+    try {
+      await opts.redis.set(cacheKey, JSON.stringify(estimate), 'EX', cfg.CONSENSUS_CACHE_TTL_S);
+    } catch {
+      // cache write failed — non-fatal
+    }
+  }
+
+  return estimate;
 }
 
 // Module-level singleton clients — created once, reused across all estimateSentiment calls.

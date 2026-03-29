@@ -6,9 +6,11 @@
  */
 
 import process from 'node:process';
+import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import type { RssItem } from './rss.js';
+import type { Redis } from 'ioredis';
 
 export interface ScoredItem extends RssItem {
   urgencyScore: number;
@@ -133,23 +135,45 @@ export async function scoreItems(
     categoryId: string;
     categoryLabel: string;
     entityContext: string;
+    redis?: Redis;
   },
 ): Promise<ScoredItem[]> {
   if (items.length === 0) return [];
 
+  const cfg = loadConfig();
   const scored: ScoredItem[] = [];
   const systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
 
-  // Process in batches of BATCH_SIZE
-  for (let i = 0; i < items.length; i += BATCH_SIZE) {
-    const batch = items.slice(i, i + BATCH_SIZE);
+  // Separate items into cache-hit and cache-miss buckets
+  const toScore: RssItem[] = [];
+  if (opts.redis) {
+    for (const item of items) {
+      const cacheKey = 'scored:' + createHash('sha256').update(item.url).digest('hex');
+      try {
+        const cached = await opts.redis.get(cacheKey);
+        if (cached) {
+          scored.push(JSON.parse(cached) as ScoredItem);
+          continue;
+        }
+      } catch {
+        // cache read failed — fall through to LLM
+      }
+      toScore.push(item);
+    }
+  } else {
+    toScore.push(...items);
+  }
+
+  // Process cache-misses in batches of BATCH_SIZE
+  for (let i = 0; i < toScore.length; i += BATCH_SIZE) {
+    const batch = toScore.slice(i, i + BATCH_SIZE);
     try {
       const results = await scoreBatch(batch, systemPrompt);
 
       for (let j = 0; j < batch.length; j++) {
         const item = batch[j]!;
         const result = results[j];
-        scored.push({
+        const scoredItem: ScoredItem = {
           ...item,
           urgencyScore: result?.score ?? 1,
           keywords: result?.keywords ?? [],
@@ -157,7 +181,18 @@ export async function scoreItems(
           categoryLabel: opts.categoryLabel,
           entityContext: opts.entityContext,
           sentiment: result?.sentiment ?? 'NEUTRAL',
-        });
+        };
+        scored.push(scoredItem);
+
+        // Cache the scored item
+        if (opts.redis) {
+          const cacheKey = 'scored:' + createHash('sha256').update(item.url).digest('hex');
+          try {
+            await opts.redis.set(cacheKey, JSON.stringify(scoredItem), 'EX', cfg.SCORER_CACHE_TTL_S);
+          } catch {
+            // cache write failed — non-fatal
+          }
+        }
       }
     } catch (err) {
       logger.error('[scorer] batch scoring failed — assigning default score 1', {
