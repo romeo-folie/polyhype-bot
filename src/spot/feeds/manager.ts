@@ -21,14 +21,11 @@ async function main() {
     feeds.push(binance);
   }
 
-  if (cfg.HELIUS_API_KEY) {
-    // For TDD, we currently support SOL from Helius/Pyth
-    const helius = new HeliusFeed(cfg.HELIUS_API_KEY, ['SOL']);
-    await helius.start();
-    feeds.push(helius);
-  } else {
-    logger.warn('[feeds-manager] HELIUS_API_KEY missing — Solana real-time feeds disabled');
-  }
+  // Pyth Hermes feed — always started, no API key required (public endpoint).
+  // Covers BTC, ETH, SOL with oracle-grade accuracy. HELIUS_API_KEY is unused.
+  const pyth = new HeliusFeed('', ['SOL', 'BTC', 'ETH']);
+  pyth.start();
+  feeds.push(pyth);
 
   logger.info('[feeds-manager] all feeds started');
 
