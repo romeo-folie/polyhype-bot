@@ -1,92 +1,85 @@
-import { Connection, PublicKey, type AccountInfo } from '@solana/web3.js';
+import { Connection, PublicKey, AccountInfo } from '@solana/web3.js';
 import { parsePriceData } from '@pythnetwork/client';
 import { logger } from '../../shared/logger.js';
 import { getRedis } from '../../shared/redis.js';
 
-// Mapping of ticker symbols to Pyth account addresses
+/**
+ * Pyth Network Price Account IDs on Solana Mainnet.
+ */
 const PYTH_ACCOUNTS: Record<string, string> = {
-  'SOL': 'H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG', // Mainnet SOL/USD
-  'BTC': 'GVXRSae21x2HAd67YM5NooJC9iLeDbaS3vF6p7o9nZk',  // Mainnet BTC/USD
-  'ETH': 'JBu1mRs7zS9vM9hc88mPfv7mYkLez27QJ4SuRQGms2M',  // Mainnet ETH/USD
+  BTC: 'GVXRSBjTuSvU9K79qSgbt7Wqrq97neB9Jhcic65tD8Sx',
+  ETH: 'JBu1pE2waHcbMNeGTKsGMBvuyY6MvbevR6p9u89nK9An',
+  SOL: 'H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG',
 };
 
 /**
- * Helius / Solana Pyth Network Feed.
- * 
- * Uses standard Solana RPC WebSockets via Helius infrastructure to monitor 
- * Pyth price accounts with sub-second latency.
+ * Helius WebSocket Feed for Solana/Pyth data.
+ * Monitors account changes for Pyth price accounts to get real-time price moves.
  */
 export class HeliusFeed {
   private connection: Connection;
-  private symbols: string[];
   private subscriptionIds: number[] = [];
   private tickerCount: Record<string, number> = {};
 
-  constructor(apiKey: string, symbols: string[] = ['SOL']) {
+  constructor(apiKey: string, private symbols: string[] = ['SOL']) {
     const url = `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
+    // Explicitly use the wss protocol for the connection
     const wsUrl = `wss://mainnet.helius-rpc.com/?api-key=${apiKey}`;
-    
     this.connection = new Connection(url, {
       wsEndpoint: wsUrl,
-      commitment: 'processed',
+      commitment: 'confirmed',
     });
-    this.symbols = symbols.map(s => s.toUpperCase());
   }
 
   public async start(): Promise<void> {
     logger.info('[helius] starting feeds', { symbols: this.symbols });
 
     for (const symbol of this.symbols) {
-      const addr = PYTH_ACCOUNTS[symbol];
-      if (!addr) {
-        logger.warn(`[helius] no Pyth account mapping for ${symbol}, skipping`);
+      const pubkey = PYTH_ACCOUNTS[symbol];
+      if (!pubkey) {
+        logger.warn('[helius] symbol not found in Pyth map', { symbol });
         continue;
       }
 
-      const pubkey = new PublicKey(addr);
-      
-      const subId = this.connection.onAccountChange(
-        pubkey,
-        (accountInfo: AccountInfo<Buffer>) => {
-          void this.handleAccountChange(symbol, accountInfo);
-        },
-        'processed'
-      );
+      logger.info(`[helius] subscribing to ${symbol} (Pyth: ${pubkey})...`);
 
-      this.subscriptionIds.push(subId);
-      logger.info(`[helius] subscribed to ${symbol} (Pyth: ${addr})`);
+      try {
+        const id = this.connection.onAccountChange(
+          new PublicKey(pubkey),
+          (accountInfo) => {
+            void this.handleUpdate(symbol, accountInfo);
+          },
+          'confirmed',
+        );
+        this.subscriptionIds.push(id);
+        logger.info(`[helius] subscription active for ${symbol}`);
+      } catch (err) {
+        logger.error(`[helius] failed to subscribe to ${symbol}`, { error: String(err) });
+      }
     }
   }
 
-  private async handleAccountChange(symbol: string, accountInfo: AccountInfo<Buffer>): Promise<void> {
+  private async handleUpdate(symbol: string, accountInfo: AccountInfo<Buffer>): Promise<void> {
     try {
       const priceData = parsePriceData(accountInfo.data);
       const price = priceData.aggregate.price;
       const timestamp = Date.now();
 
-      if (price == null || isNaN(price)) return;
+      if (!isFinite(price) || price <= 0) return;
 
       const redis = getRedis();
-      const lastKey = `spot:last:${symbol.toLowerCase()}`;
-      const pricesKey = `spot:prices:${symbol.toLowerCase()}`;
-
       const pipeline = redis.pipeline();
-      // Update latest
-      pipeline.set(lastKey, JSON.stringify({ price, timestamp, source: 'helius' }));
-      // Add to history
-      pipeline.zadd(pricesKey, timestamp, `${timestamp}:${price}`);
-      // Prune history
-      pipeline.zremrangebyscore(pricesKey, '-inf', timestamp - 60 * 60 * 1000);
-      // Expire
-      pipeline.expire(lastKey, 7200);
-      pipeline.expire(pricesKey, 7200);
-      
+
+      // Update spot price cache
+      pipeline.hset('spot:prices', symbol.toLowerCase(), price.toString());
+      pipeline.hset('spot:last_updated', symbol.toLowerCase(), timestamp.toString());
+
       // Publish event for Arb Worker
       pipeline.publish('spot:price_moved', JSON.stringify({ symbol: symbol.toLowerCase(), price, timestamp }));
 
       await pipeline.exec();
 
-      // Pulse: log to info for "life"
+      // Pulse: log to info once every 5 updates per symbol to show "life"
       this.tickerCount[symbol] = (this.tickerCount[symbol] || 0) + 1;
       if (this.tickerCount[symbol] % 5 === 0) {
         logger.info(`[helius] ${symbol.toUpperCase()} tick (on-chain): $${price.toLocaleString()}`);
@@ -96,9 +89,10 @@ export class HeliusFeed {
     }
   }
 
-  public async stop(): Promise<void> {
-    for (const subId of this.subscriptionIds) {
-      await this.connection.removeAccountChangeListener(subId).catch(() => {});
+  public stop(): void {
+    logger.info('[helius] stopping feeds');
+    for (const id of this.subscriptionIds) {
+      void this.connection.removeAccountChangeListener(id).catch(() => {});
     }
     this.subscriptionIds = [];
   }

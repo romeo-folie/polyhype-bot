@@ -26,6 +26,8 @@ async function main() {
     const helius = new HeliusFeed(cfg.HELIUS_API_KEY, ['SOL']);
     await helius.start();
     feeds.push(helius);
+  } else {
+    logger.warn('[feeds-manager] HELIUS_API_KEY missing — Solana real-time feeds disabled');
   }
 
   logger.info('[feeds-manager] all feeds started');
