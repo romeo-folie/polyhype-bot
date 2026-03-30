@@ -1,5 +1,8 @@
 #!/bin/sh
-# PGA Monitor Dashboard — 6 panes with colored component labels
+# PGA Monitor Dashboard
+# Window 0 (Dashboard): 4 worker panes side by side
+# Window 1 (Trade):     cron:trade log   — switch with Ctrl+B 1
+# Window 2 (Monitor):   cron:monitor log — switch with Ctrl+B 2
 # Usage: ./scripts/monitor-dashboard.sh
 
 SESSION="pga"
@@ -43,30 +46,29 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
-# Colors (ANSI codes): 36=cyan 33=yellow 32=green 35=magenta 34=blue 31=red
-# sed colorizes [component-labels] in each log line
-C36="tail -f '${PM2_LOGS}/pga-spot-feed-out.log' | sed 's/\(\[[^]]*\]\)/\x1b[36m\1\x1b[0m/g'"
-C33="tail -f '${PM2_LOGS}/pga-arb-out.log'       | sed 's/\(\[[^]]*\]\)/\x1b[33m\1\x1b[0m/g'"
-C32="tail -f '${PM2_LOGS}/pga-copytrade-out.log'  | sed 's/\(\[[^]]*\]\)/\x1b[32m\1\x1b[0m/g'"
-C35="tail -f '${PM2_LOGS}/pga-futures-out.log'    | sed 's/\(\[[^]]*\]\)/\x1b[35m\1\x1b[0m/g'"
-C34="tail -f /tmp/pga-trade.log                   | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
-C31="tail -f /tmp/pga-monitor.log                 | sed 's/\(\[[^]]*\]\)/\x1b[31m\1\x1b[0m/g'"
+# sed colorizes [component-labels] with per-pane ANSI colors
+# 36=cyan 33=yellow 32=green 35=magenta 34=blue 31=red
+W0="tail -f '${PM2_LOGS}/pga-spot-feed-out.log' | sed 's/\(\[[^]]*\]\)/\x1b[36m\1\x1b[0m/g'"
+W1="tail -f '${PM2_LOGS}/pga-arb-out.log'       | sed 's/\(\[[^]]*\]\)/\x1b[33m\1\x1b[0m/g'"
+W2="tail -f '${PM2_LOGS}/pga-copytrade-out.log'  | sed 's/\(\[[^]]*\]\)/\x1b[32m\1\x1b[0m/g'"
+W3="tail -f '${PM2_LOGS}/pga-futures-out.log'    | sed 's/\(\[[^]]*\]\)/\x1b[35m\1\x1b[0m/g'"
+W4="tail -f /tmp/pga-trade.log                   | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
+W5="tail -f /tmp/pga-monitor.log                 | sed 's/\(\[[^]]*\]\)/\x1b[31m\1\x1b[0m/g'"
 
-# Create one window per source, then join into a single tiled window
-tmux new-session  -d -s "$SESSION" -n spot-feed   "sh -c \"$C36\""
-tmux new-window      -t "$SESSION"  -n arb         "sh -c \"$C33\""
-tmux new-window      -t "$SESSION"  -n copytrade   "sh -c \"$C32\""
-tmux new-window      -t "$SESSION"  -n futures     "sh -c \"$C35\""
-tmux new-window      -t "$SESSION"  -n trade-log   "sh -c \"$C34\""
-tmux new-window      -t "$SESSION"  -n monitor-log "sh -c \"$C31\""
+# ── Window 0: Dashboard (4 worker panes) ──────────────────────────────────────
+tmux new-session -d -s "$SESSION" -n Dashboard "sh -c \"$W0\""
+tmux split-window -h -t "${SESSION}:Dashboard" "sh -c \"$W1\""
+tmux split-window -v -t "${SESSION}:Dashboard.0" "sh -c \"$W2\""
+tmux split-window -v -t "${SESSION}:Dashboard.1" "sh -c \"$W3\""
+tmux select-layout -t "${SESSION}:Dashboard" tiled
 
-tmux join-pane -s "${SESSION}:arb"         -t "${SESSION}:spot-feed"
-tmux join-pane -s "${SESSION}:copytrade"   -t "${SESSION}:spot-feed"
-tmux join-pane -s "${SESSION}:futures"     -t "${SESSION}:spot-feed"
-tmux join-pane -s "${SESSION}:trade-log"   -t "${SESSION}:spot-feed"
-tmux join-pane -s "${SESSION}:monitor-log" -t "${SESSION}:spot-feed"
+# ── Window 1: cron:trade ──────────────────────────────────────────────────────
+tmux new-window -t "$SESSION" -n "trade" "sh -c \"$W4\""
 
-tmux select-layout  -t "${SESSION}:spot-feed" tiled
+# ── Window 2: cron:monitor ────────────────────────────────────────────────────
+tmux new-window -t "$SESSION" -n "monitor" "sh -c \"$W5\""
+
 tmux set-option     -t "$SESSION" remain-on-exit on
-tmux select-pane    -t "${SESSION}:spot-feed.0"
+tmux select-window  -t "${SESSION}:Dashboard"
+tmux select-pane    -t "${SESSION}:Dashboard.0"
 tmux attach-session -t "$SESSION"
