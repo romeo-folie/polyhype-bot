@@ -20,7 +20,7 @@ import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { loadConfig } from '../shared/config.js';
 import { getCalibrationStats, applyCalibrationCorrection } from '../shared/calibration.js';
 import { inferCategory } from '../shared/outcomeRecorder.js';
-import { notifyTradeError } from './telegram.js';
+import { notifyTradeError, notifyTradeExecuted } from './telegram.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
@@ -457,6 +457,7 @@ export async function executeSignal(
           marketId: signal.marketId,
           txHash: tradeResult.tx_hash,
         });
+        void notifyTradeExecuted(signal, tradeResult.tx_hash).catch(() => {});
 
         // Fire-and-forget the delta hedge — do not block PM trade confirmation on HL latency.
         // hedgeRequested is reported as true optimistically; errors are logged inside triggerDeltaHedge.
@@ -532,6 +533,7 @@ export async function executeSignal(
       marketId: signal.marketId,
       txHash: tradeResult.tx_hash,
     });
+    void notifyTradeExecuted(signal, tradeResult.tx_hash).catch(() => {});
     // Fire-and-forget the delta hedge — do not block CLOB trade confirmation on HL latency.
     void triggerDeltaHedge(signal, redis, knownSessionExposureUsd).catch((err) => {
       logger.warn('[executor] delta hedge async error (non-fatal)', {
