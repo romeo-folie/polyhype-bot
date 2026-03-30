@@ -124,7 +124,7 @@ const envSchema = z.object({
   // Hyperliquid credentials
   HYPERLIQUID_PRIVATE_KEY: z.string().optional(),
   HYPERLIQUID_AGENT_WALLET: z.string().optional(),
-  HYPERLIQUID_TESTNET: z.coerce.boolean().optional().default(true),
+  HYPERLIQUID_TESTNET: z.coerce.boolean().optional().default(false),
 
   // Risk & Control
   FUTURES_GLOBAL_MAX_MARGIN_USD: z.coerce.number().min(0).optional().default(50),
