@@ -76,17 +76,19 @@ describe('copytrade shortlist', () => {
     expect(selected.map(e => e.proxyWallet)).not.toContain('0xB');
   });
 
-  it('minVolPnlRatio is skipped when pnl <= 0', async () => {
+  it('minVolPnlRatio is skipped when pnl <= 0, avoiding division by zero', async () => {
     const { selectWallets } = await import('../shortlist.js');
     const entries = [
-      { rank: '1', proxyWallet: '0xA', userName: 'a', vol: 50000, pnl: 0 },    // pnl=0 → skip ratio check
-      { rank: '2', proxyWallet: '0xB', userName: 'b', vol: 50000, pnl: -100 },  // pnl<0 → skip ratio check
+      { rank: '1', proxyWallet: '0xA', userName: 'a', vol: 50000, pnl: 0 },   // pnl=0 → skip ratio check (would div/0)
+      { rank: '2', proxyWallet: '0xB', userName: 'b', vol: 50000, pnl: 100 }, // pnl>0, ratio = 500 > 1.0 ✓
     ];
 
-    // Without the guard, 50000/0 = Infinity which would always pass (or NaN crash).
-    // With the guard (pnl > 0 required), both wallets pass through.
+    // Both pass: 0xA bypasses ratio guard (pnl not > 0), 0xB passes ratio check.
+    // minPnl=0 and minVol=0 so neither threshold filters them.
     const { selected } = selectWallets(entries, 0, 0, 5, 1.0);
     expect(selected).toHaveLength(2);
+    expect(selected.map(e => e.proxyWallet)).toContain('0xA');
+    expect(selected.map(e => e.proxyWallet)).toContain('0xB');
   });
 
   it('updates .env with atomic write and replacement', async () => {
