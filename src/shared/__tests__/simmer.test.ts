@@ -69,3 +69,58 @@ describe('getSimmerPositions', () => {
     }));
   });
 });
+
+describe('setAgentAutoRedeem', () => {
+  it('sends PATCH request with auto_redeem_enabled=true', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true }),
+    });
+
+    const { setAgentAutoRedeem } = await import('../simmer.js');
+    await setAgentAutoRedeem(true);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://api.simmer.markets/api/sdk/agents/me/settings',
+      expect.objectContaining({
+        method: 'PATCH',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer test',
+        }),
+        body: JSON.stringify({ auto_redeem_enabled: true }),
+      }),
+    );
+  });
+
+  it('sends PATCH request with auto_redeem_enabled=false', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true }),
+    });
+
+    const { setAgentAutoRedeem } = await import('../simmer.js');
+    await setAgentAutoRedeem(false);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://api.simmer.markets/api/sdk/agents/me/settings',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ auto_redeem_enabled: false }),
+      }),
+    );
+  });
+
+  it('throws SimmerError on HTTP 4xx/5xx', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: 'Forbidden' }),
+    });
+
+    const { setAgentAutoRedeem } = await import('../simmer.js');
+    await expect(setAgentAutoRedeem(true)).rejects.toThrow('Simmer agent settings API returned HTTP 403');
+  });
+});
