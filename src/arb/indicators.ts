@@ -128,6 +128,12 @@ export function computeMACDFromCandles(
   slowPeriod: number,
   signalPeriod: number,
 ): MACDResult | null {
+  // fastPeriod must be strictly less than slowPeriod — the MACD line is meaningful only when
+  // the fast EMA reacts quicker than the slow EMA. Misconfigured periods produce invalid output.
+  if (fastPeriod >= slowPeriod) {
+    return null; // invalid configuration — caller should swap periods
+  }
+
   const closes = candles.map((c) => c.close);
   if (closes.length < slowPeriod + signalPeriod) return null;
 

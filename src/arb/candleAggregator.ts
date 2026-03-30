@@ -61,8 +61,8 @@ export async function buildCandles(
     candles.push({
       openTime,
       open: prices[0]!,
-      high: Math.max(...prices),
-      low: Math.min(...prices),
+      high: prices.reduce((m, p) => (p > m ? p : m), prices[0]!),
+      low: prices.reduce((m, p) => (p < m ? p : m), prices[0]!),
       close: prices[prices.length - 1]!,
       volume: prices.length,
     });

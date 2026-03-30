@@ -153,8 +153,9 @@ export async function scanCryptoArb(
     if (confluence.score < cfg.CRYPTO_ARB_MIN_CONFLUENCE_SCORE) {
       // Cold start (score=0, no signals) warrants higher log level for ops visibility
       const isWarmingUp = confluence.score === 0 && Object.keys(confluence.signals).length === 0;
-      const logLevel = isWarmingUp ? 'warn' : 'debug';
-      logger[logLevel]('[crypto-arb] insufficient indicator confluence — skipping', {
+      // Cold start produces a high volume of fires (every 5s for ~26 min) — keep at debug
+      // to avoid warn log flooding during the warmup window.
+      logger.debug('[crypto-arb] insufficient indicator confluence — skipping', {
         score: confluence.score,
         direction: confluence.direction,
         signals: confluence.signals,
@@ -266,24 +267,29 @@ export async function scanCryptoArb(
         continue;
       }
 
-      // Direction alignment with confluence
-      // Assumes markets are positively correlated with BTC (e.g., "Will BTC exceed $100k?")
-      // For negatively correlated markets, this filter would need inversion
+      // Direction alignment with confluence.
+      // For positive correlation (BTC up → YES more likely): confluence UP → expect YES.
+      // For negative correlation (BTC up → YES less likely): confluence UP → expect NO.
       if (confluenceDirection && confluenceDirection !== 'NEUTRAL') {
-        const expectUp = confluenceDirection === 'UP';
-        if (direction === 'YES' && !expectUp) {
-          logger.debug('[crypto-arb] direction mismatch — confluence bearish, edge bullish — skipping', {
+        const isPositiveCorrelation = market.correlationDirection !== 'negative';
+        const confluenceUp = confluenceDirection === 'UP';
+        // Effective expected direction after accounting for correlation sign.
+        const expectYes = isPositiveCorrelation ? confluenceUp : !confluenceUp;
+        if (direction === 'YES' && !expectYes) {
+          logger.debug('[crypto-arb] direction mismatch — confluence vs edge after correlation adjustment — skipping', {
             marketId: market.marketId,
             direction,
             confluenceDirection,
+            correlationDirection: market.correlationDirection,
           });
           continue;
         }
-        if (direction === 'NO' && expectUp) {
-          logger.debug('[crypto-arb] direction mismatch — confluence bullish, edge bearish — skipping', {
+        if (direction === 'NO' && expectYes) {
+          logger.debug('[crypto-arb] direction mismatch — confluence vs edge after correlation adjustment — skipping', {
             marketId: market.marketId,
             direction,
             confluenceDirection,
+            correlationDirection: market.correlationDirection,
           });
           continue;
         }
