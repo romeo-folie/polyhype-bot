@@ -101,7 +101,10 @@ export function scoreFromValues(
     direction = 'NEUTRAL';
   }
 
-  const score = Math.max(upCount, downCount);
+  // Net score: agreeing votes minus dissenting votes.
+  // Distinguishes genuine consensus (2-0 → score 2) from mixed signals (2-1 → score 1).
+  // A 2-1 split now has lower score than 2-0, matching the intent of CRYPTO_ARB_MIN_CONFLUENCE_SCORE.
+  const score = Math.max(upCount, downCount) - Math.min(upCount, downCount);
 
   return { direction, score, signals };
 }

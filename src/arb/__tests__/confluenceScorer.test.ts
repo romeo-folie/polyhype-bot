@@ -61,16 +61,17 @@ describe('scoreFromValues', () => {
     expect(result.signals.stochastic).toBeUndefined();
   });
 
-  it('1 UP vs 1 DOWN vs 1 null → score=1, direction determined by majority', () => {
-    // rsi=UP, macd=DOWN, stoch=null → tie 1:1 → NEUTRAL
+  it('1 UP vs 1 DOWN vs 1 null → net score=0, direction=NEUTRAL (dissent cancels)', () => {
+    // rsi=UP, macd=DOWN, stoch=null → tie 1:1 → net = 1-1 = 0 (active disagreement)
     const result = scoreFromValues(bullishRSI, bearishMACD, null);
-    expect(result.score).toBe(1);
-    expect(result.direction).toBe('NEUTRAL'); // tie
+    expect(result.score).toBe(0);
+    expect(result.direction).toBe('NEUTRAL');
   });
 
-  it('2 UP vs 1 DOWN → score=2, direction=UP', () => {
+  it('2 UP vs 1 DOWN → net score=1, direction=UP (dissent penalises)', () => {
+    // net = 2-1 = 1 — mixed signals reduce confidence vs clean 2-0
     const result = scoreFromValues(bullishRSI, bullishMACD, bearishStoch);
-    expect(result.score).toBe(2);
+    expect(result.score).toBe(1);
     expect(result.direction).toBe('UP');
   });
 

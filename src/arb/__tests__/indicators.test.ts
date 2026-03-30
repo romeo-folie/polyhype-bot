@@ -33,11 +33,13 @@ describe('computeEMA', () => {
   });
 
   it('seeds correctly with SMA and applies multiplier', () => {
-    // period=3: SMA([1,2,3])=2, then EMA[3] = 4 * 0.5 + 2 * 0.5 = 3
+    // period=3, input=[1,2,3,4]: SMA([1,2,3])=2, then EMA for values[3]=4: 4*0.5+2*0.5=3
+    // Result is trimmed: result[0]=seed(2), result[1]=EMA(3). Length = 4-3+1 = 2.
     const result = computeEMA([1, 2, 3, 4], 3);
     expect(result).not.toBeNull();
-    expect(result![2]).toBeCloseTo(2, 5); // seed
-    expect(result![3]).toBeCloseTo(3, 5); // 4 * 0.5 + 2 * 0.5
+    expect(result!).toHaveLength(2);
+    expect(result![0]).toBeCloseTo(2, 5); // seed at index 0
+    expect(result![1]).toBeCloseTo(3, 5); // 4 * 0.5 + 2 * 0.5
   });
 });
 

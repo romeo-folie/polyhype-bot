@@ -25,17 +25,19 @@ export function computeEMA(values: number[], period: number): number[] | null {
   if (values.length < period) return null;
 
   const k = 2 / (period + 1);
-  const ema: number[] = new Array<number>(values.length).fill(NaN);
 
-  // Seed with SMA of first `period` values; indices 0..period-2 remain NaN (warmup).
+  // Seed with SMA of first `period` values.
   let sum = 0;
   for (let i = 0; i < period; i++) {
     sum += values[i]!;
   }
-  ema[period - 1] = sum / period;
 
+  // Return only the valid portion (period-1 onwards) — avoids NaN holes in the return value.
+  // ema[0] = SMA seed (aligns with values[period-1]).
+  // Length = values.length - period + 1.
+  const ema: number[] = [sum / period];
   for (let i = period; i < values.length; i++) {
-    ema[i] = values[i]! * k + ema[i - 1]! * (1 - k);
+    ema.push(values[i]! * k + ema[ema.length - 1]! * (1 - k));
   }
 
   return ema;
@@ -133,10 +135,15 @@ export function computeMACDFromCandles(
   const slowEMA = computeEMA(closes, slowPeriod);
   if (!fastEMA || !slowEMA) return null;
 
-  // MACD line = fastEMA - slowEMA (only valid from slowPeriod-1 onwards)
+  // MACD line = fastEMA - slowEMA.
+  // computeEMA now returns a trimmed array (length = closes.length - period + 1).
+  // fastEMA[j] aligns with closes[fastPeriod-1+j]; slowEMA[j] aligns with closes[slowPeriod-1+j].
+  // The MACD line is valid from closes[slowPeriod-1] onward — i.e., slowEMA indices 0..N-1
+  // and fastEMA indices (slowPeriod-fastPeriod)..N-1 (fastEMA is longer than slowEMA).
   const macdLine: number[] = [];
-  for (let i = slowPeriod - 1; i < closes.length; i++) {
-    macdLine.push(fastEMA[i]! - slowEMA[i]!);
+  const fastOffset = slowPeriod - fastPeriod; // fastEMA index offset relative to slowEMA
+  for (let j = 0; j < slowEMA.length; j++) {
+    macdLine.push(fastEMA[fastOffset + j]! - slowEMA[j]!);
   }
 
   if (macdLine.length < signalPeriod) return null;
