@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { SpotMove } from '../../spot/thresholdDetector.js';
+import type { Redis } from 'ioredis';
 
 // --- Mocks ---
 
@@ -201,5 +202,97 @@ describe('cryptoArbScanner', () => {
 
     expect(opps).toHaveLength(0);
     expect(mockFindCorrelatedMarkets).not.toHaveBeenCalled();
+  });
+});
+
+// ── computeVolatility ───────────────────────────────────────────────────────
+
+function makeRedisWithPrices(prices: (number | null)[]): Redis {
+  // Encode as "timestamp:price" sorted-set members (only the value part matters)
+  const entries = prices.map((p, i) =>
+    p != null ? `${String(1000 + i)}:${String(p)}` : `${String(1000 + i)}:NaN`,
+  );
+  return {
+    zrange: vi.fn().mockResolvedValue(entries),
+  } as unknown as Redis;
+}
+
+describe('computeVolatility', () => {
+  it('returns null when fewer than 2 entries', async () => {
+    const { computeVolatility } = await import('../cryptoArbScanner.js');
+    const redis = { zrange: vi.fn().mockResolvedValue(['1000:50000']) } as unknown as Redis;
+    expect(await computeVolatility('btcusdt', redis)).toBeNull();
+  });
+
+  it('computes mean absolute percentage change correctly', async () => {
+    const { computeVolatility } = await import('../cryptoArbScanner.js');
+    // 100 → 110 → 99 → changes: +10%, -10%
+    // MAPC = (0.10 + 0.10) / 2 = 0.10
+    const redis = makeRedisWithPrices([100, 110, 99]);
+    const vol = await computeVolatility('btcusdt', redis);
+    expect(vol).not.toBeNull();
+    expect(vol!).toBeCloseTo(0.10, 5);
+  });
+
+  it('forward-fills invalid entries instead of creating gaps', async () => {
+    const { computeVolatility } = await import('../cryptoArbScanner.js');
+    // 100, NaN (filled to 100), 110 → changes: 0%, +10%
+    // MAPC = (0 + 0.10) / 2 = 0.05  (not 0.10 which a gap would produce)
+    const redis = makeRedisWithPrices([100, null, 110]);
+    const vol = await computeVolatility('btcusdt', redis);
+    expect(vol).not.toBeNull();
+    expect(vol!).toBeCloseTo(0.05, 5);
+  });
+
+  it('returns null when all entries are invalid', async () => {
+    const { computeVolatility } = await import('../cryptoArbScanner.js');
+    const redis = makeRedisWithPrices([null, null, null]);
+    expect(await computeVolatility('btcusdt', redis)).toBeNull();
+  });
+});
+
+// ── Volatility gate ─────────────────────────────────────────────────────────
+
+describe('scanCryptoArb — volatility gate', () => {
+  const gatedConfig = {
+    CRYPTO_ARB_ENABLED: true,
+    CRYPTO_ARB_VOLATILITY_GATE_ENABLED: true,
+    CRYPTO_ARB_MIN_VOLATILITY: 0.005,
+    CRYPTO_ARB_MAX_VOLATILITY: 0.10,
+    CRYPTO_ARB_MIN_EDGE: 0.08,
+    CRYPTO_ARB_MAX_STAKE_FRACTION: 0.03,
+    CRYPTO_ARB_DEDUP_TTL_S: 300,
+    CRYPTO_ARB_MARKET_CACHE_TTL_S: 3600,
+    ARB_FEE_RATE: 0.02,
+    MAX_BET_FRACTION: 0.1,
+    WS_ENABLED: false,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('skips scan when volatility is below floor (flat market)', async () => {
+    const { loadConfig } = await import('../../shared/config.js');
+    vi.mocked(loadConfig).mockReturnValue(gatedConfig as never);
+
+    const { scanCryptoArb } = await import('../cryptoArbScanner.js');
+
+    // Very low vol: 100 → 100.001 → 100.002 → ~0.001% each step
+    const redis = makeRedisWithPrices([100, 100.001, 100.002]);
+    const opps = await scanCryptoArb(makeMove({ assetId: 'bitcoin' }), redis as never);
+    expect(opps).toHaveLength(0);
+  });
+
+  it('skips scan when volatility exceeds ceiling (too spiky)', async () => {
+    const { loadConfig } = await import('../../shared/config.js');
+    vi.mocked(loadConfig).mockReturnValue(gatedConfig as never);
+
+    const { scanCryptoArb } = await import('../cryptoArbScanner.js');
+
+    // Very high vol: 100 → 150 → 75 → 50% each step
+    const redis = makeRedisWithPrices([100, 150, 75]);
+    const opps = await scanCryptoArb(makeMove({ assetId: 'bitcoin' }), redis as never);
+    expect(opps).toHaveLength(0);
   });
 });

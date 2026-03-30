@@ -73,15 +73,30 @@ const DEDUP_PREFIX = 'arb:crypto:';
  * ATR proxy = mean absolute price change over the last N ticks.
  * Returns null if insufficient data.
  */
-async function computeVolatility(symbol: string, redis: Redis, periods = 14): Promise<number | null> {
-  // Retrieve the last (periods + 1) price records — need N+1 to get N changes
+/**
+ * Compute mean absolute percentage change (MAPC) over the last `periods` ticks.
+ * Exported for unit testing.
+ *
+ * Non-contiguous gap fix: invalid entries are replaced with the previous valid price
+ * rather than removed — this preserves tick order and avoids inflated vol from gaps.
+ */
+export async function computeVolatility(symbol: string, redis: Redis, periods = 14): Promise<number | null> {
+  // Retrieve the last (periods + 1) price records — need N+1 to compute N returns.
   const key = `spot:prices:${symbol}`;
   const entries = await redis.zrange(key, -(periods + 1), -1);
   if (entries.length < 2) return null;
 
-  const prices = entries
-    .map(e => parseFloat(e.split(':')[1] ?? '0'))
-    .filter(p => isFinite(p) && p > 0);
+  // Parse and forward-fill invalid entries so gaps don't create phantom price jumps.
+  const prices: number[] = [];
+  for (const e of entries) {
+    const p = parseFloat(e.split(':')[1] ?? '0');
+    if (isFinite(p) && p > 0) {
+      prices.push(p);
+    } else if (prices.length > 0) {
+      prices.push(prices[prices.length - 1]!); // forward-fill
+    }
+    // If prices is still empty (first entry is invalid), skip
+  }
 
   if (prices.length < 2) return null;
 
