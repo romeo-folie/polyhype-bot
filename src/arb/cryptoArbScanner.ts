@@ -208,10 +208,36 @@ export async function scanCryptoArb(
   }
 
   if (!markets) {
-    markets = await findCorrelatedMarkets(move);
-    if (markets.length > 0) {
-      await redis.set(cacheKey, JSON.stringify(markets), 'EX', cfg.CRYPTO_ARB_MARKET_CACHE_TTL_S);
+    // Check for active Gamma backoff (set on 429 or repeated empty results)
+    const backoffKey = `${MARKET_CACHE_PREFIX}backoff:${move.assetId}`;
+    const backoff = await redis.get(backoffKey);
+    if (backoff) {
+      logger.debug('[crypto-arb] Gamma backoff active — skipping market lookup', {
+        assetId: move.assetId,
+      });
+      return [];
     }
+
+    try {
+      markets = await findCorrelatedMarkets(move);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const is429 = msg.includes('429');
+      const backoffTtl = is429 ? 300 : 60; // 5 min on 429, 1 min on other errors
+      await redis.set(backoffKey, '1', 'EX', backoffTtl);
+      logger.warn('[crypto-arb] Gamma market lookup failed — backing off', {
+        assetId: move.assetId,
+        error: msg,
+        backoffSeconds: backoffTtl,
+      });
+      return [];
+    }
+
+    // Cache results regardless of length — empty result is valid and prevents
+    // hammering Gamma on every tick when no markets match the asset.
+    // Use a shorter TTL for empty results so we retry sooner.
+    const ttl = markets.length > 0 ? cfg.CRYPTO_ARB_MARKET_CACHE_TTL_S : 120;
+    await redis.set(cacheKey, JSON.stringify(markets), 'EX', ttl);
   }
 
   const feeRate = cfg.ARB_FEE_RATE;

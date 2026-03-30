@@ -146,10 +146,10 @@ export async function findCorrelatedMarkets(move: SpotMove): Promise<CorrelatedM
     try {
       events = await searchEvents({ query, limit: 10, activeOnly: true });
     } catch (err) {
-      logger.warn('[spot-correlator] Gamma search failed', {
-        query,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const msg = err instanceof Error ? err.message : String(err);
+      // Re-throw 429s so the caller (cryptoArbScanner) can apply backoff.
+      if (msg.includes('429')) throw err;
+      logger.warn('[spot-correlator] Gamma search failed', { query, error: msg });
       continue;
     }
 
