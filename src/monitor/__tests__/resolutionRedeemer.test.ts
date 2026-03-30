@@ -11,6 +11,7 @@ const mockNotifyRedemptionExecuted = jest.fn<(...args: any[]) => Promise<void>>(
 jest.unstable_mockModule('../../shared/simmer.js', () => ({
   getSimmerPositions: mockGetSimmerPositions,
   submitRedeem: mockSubmitRedeem,
+  resolveSimmerMarketId: jest.fn().mockResolvedValue(null), // fallback won't fire in these tests
   SimmerError: class extends Error {
     statusCode = 500;
   },
@@ -19,6 +20,21 @@ jest.unstable_mockModule('../../shared/simmer.js', () => ({
 jest.unstable_mockModule('../../execution/positionLedger.js', () => ({
   closePosition: mockClosePosition,
   getOpenPositions: mockGetOpenPositions,
+  getPosition: jest.fn().mockResolvedValue(null), // no ledger entry for Simmer positions in tests
+}));
+
+jest.unstable_mockModule('../../shared/outcomeRecorder.js', () => ({
+  recordOutcome: jest.fn().mockResolvedValue(undefined),
+  inferCategory: jest.fn().mockReturnValue('geopolitical'),
+  inferSource: jest.fn().mockReturnValue('osint'),
+}));
+
+jest.unstable_mockModule('../../shared/config.js', () => ({
+  loadConfig: jest.fn().mockReturnValue({
+    SIMMER_API_KEY: 'test-key',
+    OUTCOME_HISTORY_DAYS: 180,
+    OUTCOME_MAX_PER_CATEGORY: 500,
+  }),
 }));
 
 jest.unstable_mockModule('../../shared/clob.js', () => ({

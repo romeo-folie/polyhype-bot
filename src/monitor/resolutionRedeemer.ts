@@ -16,7 +16,7 @@
  */
 
 import { logger } from '../shared/logger.js';
-import { getSimmerPositions, submitRedeem, SimmerError } from '../shared/simmer.js';
+import { getSimmerPositions, submitRedeem, resolveSimmerMarketId, SimmerError } from '../shared/simmer.js';
 import { closePosition, getOpenPositions, getPosition } from '../execution/positionLedger.js';
 import type { Position } from '../execution/positionLedger.js';
 import { redeemClobOutcome } from '../shared/clob.js';
@@ -168,6 +168,21 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
     await redeemClobPositions(redis, results);
   } catch (err) {
     logger.warn('[redeemer] CLOB position redemption scan failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // ── Simmer ledger fallback ─────────────────────────────────────────────────
+  // Polymarket may settle a market before Simmer marks it redeemable in their API.
+  // This fallback scans Redis ledger Simmer positions against Gamma directly and
+  // force-calls submitRedeem for any that Gamma confirms as resolved+won — regardless
+  // of whether Simmer's /positions?status=resolved returned them above.
+  // Deduplicates against positions already redeemed in this cycle.
+  const alreadyRedeemed = new Set(results.filter(r => r.success).map(r => r.marketId));
+  try {
+    await redeemSimmerLedgerFallback(redis, results, alreadyRedeemed);
+  } catch (err) {
+    logger.warn('[redeemer] Simmer ledger fallback scan failed', {
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -363,5 +378,150 @@ async function checkMarketResolved(
       error: err instanceof Error ? err.message : String(err),
     });
     return null;
+  }
+}
+
+/**
+ * Fallback redemption scan for Simmer-venue positions in the Redis ledger.
+ *
+ * Simmer's API may lag behind Polymarket's on-chain settlement — a market can show
+ * "Claim" on the Polymarket UI for hours before Simmer marks it redeemable. This
+ * function cross-references all open Simmer positions in Redis against the Gamma API
+ * directly and force-calls submitRedeem for any that Gamma confirms as resolved+won.
+ *
+ * Deduplicates against the alreadyRedeemed set to avoid double-redemption.
+ */
+async function redeemSimmerLedgerFallback(
+  redis: Redis,
+  results: RedemptionResult[],
+  alreadyRedeemed: Set<string>,
+): Promise<void> {
+  const allPositions = await getOpenPositions(redis);
+  const simmerPositions = allPositions.filter(
+    (p: Position) => (p.executionVenue === 'simmer' || !p.executionVenue) &&
+      p.direction !== 'LONG' && p.direction !== 'SHORT',
+  );
+
+  if (simmerPositions.length === 0) return;
+
+  logger.info('[redeemer] Simmer ledger fallback: checking for unredeemed wins', {
+    count: simmerPositions.length,
+  });
+
+  for (const pos of simmerPositions) {
+    if (alreadyRedeemed.has(pos.marketId)) continue;
+    if (!pos.conditionId) {
+      logger.debug('[redeemer] Simmer fallback: skipping position without conditionId', {
+        marketId: pos.marketId,
+      });
+      continue;
+    }
+
+    const pmDirection = pos.direction as 'YES' | 'NO';
+    const side = pmDirection.toLowerCase() as 'yes' | 'no';
+
+    try {
+      const resolved = await checkMarketResolved(pos.conditionId);
+      if (!resolved) continue;
+
+      const won = resolved.outcome === pmDirection;
+      if (!won) {
+        // Market resolved against us — close ledger entry without redeeming
+        logger.info('[redeemer] Simmer fallback: position resolved as loss, closing ledger', {
+          marketId: pos.marketId,
+          direction: pos.direction,
+          outcome: resolved.outcome,
+        });
+        await closePosition(redis, pos.marketId, pos.direction);
+        await recordOutcome(redis, {
+          source: inferSource(pos.sourcedFrom ?? ''),
+          category: inferCategory(pos.question ?? pos.marketId),
+          question: (pos.question ?? pos.marketId).slice(0, 200),
+          direction: pmDirection,
+          consensusProbability: pos.consensusProbability ?? 0.5,
+          divergence: pos.edgeMagnitude ?? 0,
+          result: 'lost',
+          returnPct: -100,
+          holdingHours: pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000 : 0,
+          executionVenue: pos.executionVenue ?? 'simmer',
+        });
+        results.push({ marketId: pos.marketId, side, success: false, error: 'resolved_as_loss' });
+        continue;
+      }
+
+      logger.info('[redeemer] Simmer fallback: won position detected via Gamma — attempting Simmer redeem', {
+        marketId: pos.marketId,
+        direction: pos.direction,
+        outcome: resolved.outcome,
+      });
+
+      // Resolve Simmer's internal UUID (required for submitRedeem)
+      const simmerId = await resolveSimmerMarketId(pos.question ?? '');
+      if (!simmerId) {
+        logger.warn('[redeemer] Simmer fallback: cannot resolve Simmer UUID', {
+          marketId: pos.marketId,
+          question: pos.question?.slice(0, 80),
+        });
+        continue;
+      }
+
+      const redeemResult = await submitRedeem({ market_id: simmerId, side });
+
+      if (redeemResult.success) {
+        alreadyRedeemed.add(pos.marketId);
+        await closePosition(redis, pos.marketId, pos.direction);
+
+        const proceedsUsdc = pos.sharesHeld ?? pos.stakeUsd / pos.entryPrice;
+        if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
+
+        await recordOutcome(redis, {
+          source: inferSource(pos.sourcedFrom ?? ''),
+          category: inferCategory(pos.question ?? pos.marketId),
+          question: (pos.question ?? pos.marketId).slice(0, 200),
+          direction: pmDirection,
+          consensusProbability: pos.consensusProbability ?? 0.5,
+          divergence: pos.edgeMagnitude ?? 0,
+          result: 'won',
+          returnPct: pos.stakeUsd > 0 ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
+          holdingHours: pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000 : 0,
+          executionVenue: pos.executionVenue ?? 'simmer',
+        });
+
+        const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
+          marketId: pos.marketId,
+          question: pos.question ?? pos.marketId,
+          side,
+          valueUsdc: proceedsUsdc,
+        };
+        if (redeemResult.tx_hash) notifyOpts.txHash = redeemResult.tx_hash;
+        await notifyRedemptionExecuted(notifyOpts);
+
+        logger.info('[redeemer] Simmer fallback: redemption successful', {
+          marketId: pos.marketId,
+          side,
+          valueUsdc: proceedsUsdc,
+          txHash: redeemResult.tx_hash,
+        });
+
+        results.push({
+          marketId: pos.marketId,
+          side,
+          success: true,
+          valueUsdc: proceedsUsdc,
+          ...(redeemResult.tx_hash ? { txHash: redeemResult.tx_hash } : {}),
+        });
+      } else {
+        logger.warn('[redeemer] Simmer fallback: submitRedeem returned success=false', {
+          marketId: pos.marketId,
+          error: redeemResult.error,
+        });
+        results.push({ marketId: pos.marketId, side, success: false, error: redeemResult.error ?? 'simmer_redeem_failed' });
+      }
+    } catch (err) {
+      logger.warn('[redeemer] Simmer fallback: error processing position', {
+        marketId: pos.marketId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
