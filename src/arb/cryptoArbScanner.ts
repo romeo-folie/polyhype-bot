@@ -67,6 +67,32 @@ const MARKET_CACHE_PREFIX = 'crypto:markets:';
 const DEDUP_PREFIX = 'arb:crypto:';
 
 /**
+ * Compute ATR-like volatility for an asset from the BinanceFeed rolling price series.
+ *
+ * Uses `spot:prices:<symbol>` sorted set (timestamp → price stored as "ts:price" members).
+ * ATR proxy = mean absolute price change over the last N ticks.
+ * Returns null if insufficient data.
+ */
+async function computeVolatility(symbol: string, redis: Redis, periods = 14): Promise<number | null> {
+  // Retrieve the last (periods + 1) price records — need N+1 to get N changes
+  const key = `spot:prices:${symbol}`;
+  const entries = await redis.zrange(key, -(periods + 1), -1);
+  if (entries.length < 2) return null;
+
+  const prices = entries
+    .map(e => parseFloat(e.split(':')[1] ?? '0'))
+    .filter(p => isFinite(p) && p > 0);
+
+  if (prices.length < 2) return null;
+
+  let sumAbsChange = 0;
+  for (let i = 1; i < prices.length; i++) {
+    sumAbsChange += Math.abs((prices[i]! - prices[i - 1]!) / prices[i - 1]!);
+  }
+  return sumAbsChange / (prices.length - 1); // mean absolute % change
+}
+
+/**
  * Scan for crypto latency arb opportunities triggered by a spot price move.
  */
 export async function scanCryptoArb(
@@ -77,6 +103,35 @@ export async function scanCryptoArb(
 
   if (!cfg.CRYPTO_ARB_ENABLED) {
     return [];
+  }
+
+  // Volatility gate: skip if market is too flat (no edge) or too spiky (unpredictable)
+  // Uses the symbol from the SpotMove — maps assetId back to Binance symbol
+  if (cfg.CRYPTO_ARB_VOLATILITY_GATE_ENABLED) {
+    const symbol = Object.entries(BINANCE_SYMBOL_TO_ASSET).find(([, v]) => v === move.assetId)?.[0];
+    if (symbol) {
+      const volatility = await computeVolatility(symbol, redis);
+      if (volatility !== null) {
+        if (volatility < cfg.CRYPTO_ARB_MIN_VOLATILITY) {
+          logger.debug('[crypto-arb] volatility below floor — skipping (flat market)', {
+            assetId: move.assetId,
+            symbol,
+            volatility: volatility.toFixed(6),
+            floor: cfg.CRYPTO_ARB_MIN_VOLATILITY,
+          });
+          return [];
+        }
+        if (volatility > cfg.CRYPTO_ARB_MAX_VOLATILITY) {
+          logger.debug('[crypto-arb] volatility above ceiling — skipping (too spiky)', {
+            assetId: move.assetId,
+            symbol,
+            volatility: volatility.toFixed(6),
+            ceiling: cfg.CRYPTO_ARB_MAX_VOLATILITY,
+          });
+          return [];
+        }
+      }
+    }
   }
 
   // Unknown asset — no search queries mapped
