@@ -67,18 +67,11 @@ const MARKET_CACHE_PREFIX = 'crypto:markets:';
 const DEDUP_PREFIX = 'arb:crypto:';
 
 /**
- * Compute ATR-like volatility for an asset from the BinanceFeed rolling price series.
- *
- * Uses `spot:prices:<symbol>` sorted set (timestamp → price stored as "ts:price" members).
- * ATR proxy = mean absolute price change over the last N ticks.
- * Returns null if insufficient data.
- */
-/**
  * Compute mean absolute percentage change (MAPC) over the last `periods` ticks.
+ * Uses `spot:prices:<symbol>` sorted set (members stored as "ts:price").
+ * Invalid entries are forward-filled to preserve tick order and avoid phantom vol spikes.
+ * Returns null if insufficient data.
  * Exported for unit testing.
- *
- * Non-contiguous gap fix: invalid entries are replaced with the previous valid price
- * rather than removed — this preserves tick order and avoids inflated vol from gaps.
  */
 export async function computeVolatility(symbol: string, redis: Redis, periods = 14): Promise<number | null> {
   // Retrieve the last (periods + 1) price records — need N+1 to compute N returns.
