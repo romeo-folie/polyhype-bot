@@ -15,7 +15,6 @@ import { getBankroll } from '../shared/bankroll.js';
 import { scoreConfluence } from './confluenceScorer.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { Redis } from 'ioredis';
-import { scoreConfluence } from './confluenceScorer.js';
 
 export interface CryptoArbOpportunity {
   marketId: string;
@@ -150,52 +149,28 @@ export async function scanCryptoArb(
 
   // Confluence gate — BTC only, configurable
   if (cfg.CONFLUENCE_GATE_ENABLED && move.assetId === 'bitcoin' && symbol) {
-    {
-      const confluence = await scoreConfluence(symbol, redis);
-      if (confluence.score < cfg.CRYPTO_ARB_MIN_CONFLUENCE_SCORE) {
-        logger.debug('[crypto-arb] insufficient indicator confluence — skipping', {
-          score: confluence.score,
-          direction: confluence.direction,
-          signals: confluence.signals,
-          assetId: move.assetId,
-          reason: confluence.score === 0 ? 'no_indicator_data' : 'conflicting_signals',
-        });
-        return [];
-      }
-      // Direction filter: only evaluate YES when bullish, NO when bearish
-      confluenceDirection = confluence.direction;
-      logger.debug('[crypto-arb] confluence gate passed', {
+    const confluence = await scoreConfluence(symbol, redis);
+    if (confluence.score < cfg.CRYPTO_ARB_MIN_CONFLUENCE_SCORE) {
+      // Cold start (score=0, no signals) warrants higher log level for ops visibility
+      const isWarmingUp = confluence.score === 0 && Object.keys(confluence.signals).length === 0;
+      const logLevel = isWarmingUp ? 'warn' : 'debug';
+      logger[logLevel]('[crypto-arb] insufficient indicator confluence — skipping', {
         score: confluence.score,
         direction: confluence.direction,
         signals: confluence.signals,
         assetId: move.assetId,
+        reason: isWarmingUp ? 'cold_start_no_indicator_data' : 'conflicting_signals',
       });
+      return [];
     }
-  }
-
-  // Confluence gate — BTC only, requires CRYPTO_ARB_MIN_CONFLUENCE_SCORE indicators to agree
-  let confluenceDirection: 'UP' | 'DOWN' | 'NEUTRAL' | null = null;
-  if (cfg.CONFLUENCE_GATE_ENABLED && move.assetId === 'bitcoin') {
-    const btcSymbol = Object.entries(BINANCE_SYMBOL_TO_ASSET).find(([, v]) => v === move.assetId)?.[0];
-    if (btcSymbol) {
-      const confluence = await scoreConfluence(btcSymbol, redis);
-      if (confluence.score < cfg.CRYPTO_ARB_MIN_CONFLUENCE_SCORE) {
-        logger.debug('[crypto-arb] insufficient indicator confluence — skipping', {
-          assetId: move.assetId,
-          score: confluence.score,
-          direction: confluence.direction,
-          signals: confluence.signals,
-        });
-        return [];
-      }
-      confluenceDirection = confluence.direction;
-      logger.debug('[crypto-arb] confluence gate passed', {
-        assetId: move.assetId,
-        score: confluence.score,
-        direction: confluence.direction,
-        signals: confluence.signals,
-      });
-    }
+    // Direction filter: only evaluate YES when bullish, NO when bearish
+    confluenceDirection = confluence.direction;
+    logger.debug('[crypto-arb] confluence gate passed', {
+      score: confluence.score,
+      direction: confluence.direction,
+      signals: confluence.signals,
+      assetId: move.assetId,
+    });
   }
 
   // Unknown asset — no search queries mapped

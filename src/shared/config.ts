@@ -158,16 +158,6 @@ const envSchema = z.object({
   FUTURES_EXIT_ON_SIGNAL_FADE: z.coerce.boolean().optional().default(true),
   // Max slippage fraction for IoC market orders (e.g. 0.02 = 2%). Conservative default.
   FUTURES_IOC_SLIPPAGE: z.coerce.number().min(0.001).max(0.10).optional().default(0.02),
-
-  // Phase 9 — Indicator confluence gate
-  CONFLUENCE_GATE_ENABLED: z.coerce.boolean().optional().default(true),
-  CRYPTO_ARB_MIN_CONFLUENCE_SCORE: z.coerce.number().int().min(0).max(3).optional().default(2),
-  RSI_PERIOD: z.coerce.number().int().min(2).optional().default(14),
-  MACD_FAST: z.coerce.number().int().min(1).optional().default(12),
-  MACD_SLOW: z.coerce.number().int().min(1).optional().default(26),
-  MACD_SIGNAL: z.coerce.number().int().min(1).optional().default(9),
-  STOCHASTIC_K_PERIOD: z.coerce.number().int().min(1).optional().default(14),
-  STOCHASTIC_D_PERIOD: z.coerce.number().int().min(1).optional().default(3),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
@@ -217,6 +207,11 @@ export function loadConfig(forceReload = false): AppConfig {
     if (!cfg.HYPERLIQUID_PRIVATE_KEY) {
       throw new Error('HYPERLIQUID_PRIVATE_KEY is required when FUTURES_ENABLED=true');
     }
+  }
+
+  // Phase 9: Cross-validate MACD periods
+  if (cfg.MACD_FAST >= cfg.MACD_SLOW) {
+    throw new Error('MACD_FAST must be less than MACD_SLOW');
   }
 
   return _config;
