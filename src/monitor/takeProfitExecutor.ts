@@ -75,8 +75,11 @@ export async function executeTakeProfit(opts: {
   // Sell the same side we bought (sell YES shares to exit a YES position)
   const sellSide = position.direction.toLowerCase() as 'yes' | 'no';
 
-  // Use tracked shares if available; fall back to estimating from stake/entry price
-  const sharesToSell = position.sharesHeld ?? position.stakeUsd / position.entryPrice;
+  // Use tracked shares if available; fall back to estimating from stake/entry price.
+  // Floor to 6 decimal places to avoid rounding overshoot vs actual CLOB balance
+  // (Polymarket fills at fractional shares; stakeUsd/entryPrice can exceed actual holdings).
+  const rawShares = position.sharesHeld ?? position.stakeUsd / position.entryPrice;
+  const sharesToSell = Math.floor(rawShares * 1_000_000) / 1_000_000;
 
   // Guard against legacy Redis positions with entryPrice=0 or NaN sharesHeld
   if (!isFinite(sharesToSell) || sharesToSell <= 0) {
