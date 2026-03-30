@@ -122,27 +122,25 @@ export async function scanCryptoArb(
   const symbol = Object.entries(BINANCE_SYMBOL_TO_ASSET).find(([, v]) => v === move.assetId)?.[0];
 
   if (cfg.CRYPTO_ARB_VOLATILITY_GATE_ENABLED && symbol) {
-    {
-      const volatility = await computeVolatility(symbol, redis);
-      if (volatility !== null) {
-        if (volatility < cfg.CRYPTO_ARB_MIN_VOLATILITY) {
-          logger.debug('[crypto-arb] volatility below floor — skipping (flat market)', {
-            assetId: move.assetId,
-            symbol,
-            volatility: volatility.toFixed(6),
-            floor: cfg.CRYPTO_ARB_MIN_VOLATILITY,
-          });
-          return [];
-        }
-        if (volatility > cfg.CRYPTO_ARB_MAX_VOLATILITY) {
-          logger.debug('[crypto-arb] volatility above ceiling — skipping (too spiky)', {
-            assetId: move.assetId,
-            symbol,
-            volatility: volatility.toFixed(6),
-            ceiling: cfg.CRYPTO_ARB_MAX_VOLATILITY,
-          });
-          return [];
-        }
+    const volatility = await computeVolatility(symbol, redis);
+    if (volatility !== null) {
+      if (volatility < cfg.CRYPTO_ARB_MIN_VOLATILITY) {
+        logger.debug('[crypto-arb] volatility below floor — skipping (flat market)', {
+          assetId: move.assetId,
+          symbol,
+          volatility: volatility.toFixed(6),
+          floor: cfg.CRYPTO_ARB_MIN_VOLATILITY,
+        });
+        return [];
+      }
+      if (volatility > cfg.CRYPTO_ARB_MAX_VOLATILITY) {
+        logger.debug('[crypto-arb] volatility above ceiling — skipping (too spiky)', {
+          assetId: move.assetId,
+          symbol,
+          volatility: volatility.toFixed(6),
+          ceiling: cfg.CRYPTO_ARB_MAX_VOLATILITY,
+        });
+        return [];
       }
     }
   }
@@ -278,14 +276,6 @@ export async function scanCryptoArb(
           });
           continue;
         }
-      }
-
-      // 4b. Direction alignment with confluence (BTC only)
-      // Only trade YES on bullish confluence, NO on bearish confluence.
-      if (confluenceDirection && confluenceDirection !== 'NEUTRAL') {
-        const expectUp = confluenceDirection === 'UP';
-        if (direction === 'YES' && !expectUp) continue;
-        if (direction === 'NO' && expectUp) continue;
       }
 
       // 5. Dedup check
