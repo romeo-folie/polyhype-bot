@@ -226,7 +226,7 @@ async function triggerDeltaHedge(
        return false;
     }
   } catch (err) {
-    logger.error('[executor] margin check failed for hedge', { error: String(err) });
+    logger.error('[executor] margin check failed for hedge', { error: err instanceof Error ? err.message : '[non-Error thrown]' });
     return false; // Safety first
   }
 

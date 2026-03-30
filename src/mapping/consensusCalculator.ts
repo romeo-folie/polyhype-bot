@@ -16,6 +16,22 @@ import type { Redis } from 'ioredis';
 
 const TIMEOUT_MS = 25_000;
 
+/**
+ * Extract a safe error message from any thrown value.
+ * Axios errors include the full request config (headers, auth keys) in String(err).
+ * We only log err.message — never the full object — to prevent credential leaks.
+ */
+function sanitiseError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  // Avoid String(err) on Axios/fetch errors which serialise request config + auth headers.
+  if (typeof err === 'object' && err !== null) {
+    const msg = (err as Record<string, unknown>)['message'];
+    if (typeof msg === 'string') return msg;
+    return '[non-Error object thrown — message unavailable]';
+  }
+  return String(err);
+}
+
 function buildSystemPrompt(): string {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   return (
@@ -288,7 +304,7 @@ export async function estimateConsensusProbability(opts: {
       if (reasoning === '') reasoning = outcome.value.reasoning;
     } else {
       logger.warn('[consensus-calc] sample failed', {
-        error: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason),
+        error: sanitiseError(outcome.reason),
       });
     }
   }
