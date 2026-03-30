@@ -176,7 +176,7 @@ async function estimateSingle(opts: {
     return await callOpenAI(opts.question, opts.description, opts.headline, opts.currentYesPrice);
   }
 
-  throw new Error('No LLM provider configured (OPENAI_API_KEY or GEMINI_API_KEY required)');
+  throw new Error('No LLM provider configured (OPENAI_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY required)');
 }
 
 /**
@@ -205,8 +205,6 @@ export async function estimateConsensusProbability(opts: {
 }): Promise<ConsensusEstimate> {
   const cfg = loadConfig();
   const N_SAMPLES = cfg.CONSENSUS_SAMPLES;
-  const useGemini = Boolean(process.env.GEMINI_API_KEY);
-  const useOpenAI = Boolean(process.env.OPENAI_API_KEY);
 
   // Check consensus cache
   if (cfg.CONSENSUS_CACHE_ENABLED && opts.redis) {
@@ -245,6 +243,8 @@ export async function estimateConsensusProbability(opts: {
 
   // Build provider list — round-robin N_SAMPLES calls across all available providers.
   // Adding a new provider is a one-line change here; N_SAMPLES controls total call count.
+  const useOpenAI   = Boolean(process.env.OPENAI_API_KEY);
+  const useGemini   = Boolean(process.env.GEMINI_API_KEY);
   const useAnthropic = Boolean(process.env.ANTHROPIC_API_KEY);
   type ProviderFn = (q: string, d: string | null, h: string, p: number) => Promise<ConsensusResult>;
   const providers: ProviderFn[] = [

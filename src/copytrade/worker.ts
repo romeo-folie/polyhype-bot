@@ -104,8 +104,11 @@ export async function runWorker(maxCycles?: number): Promise<void> {
             loadConfig(true); // flush cache
             logger.info('[copytrade-worker] configuration refreshed from .env');
           }
-        } catch {
-          // .env missing or unreadable — skip reload, keep running with cached config
+        } catch (err) {
+          // .env missing, unreadable, or permissions error — skip reload, keep running with cached config
+          logger.debug('[copytrade-worker] .env stat failed during hot-reload check', {
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       }
 
