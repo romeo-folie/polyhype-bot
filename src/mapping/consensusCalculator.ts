@@ -72,7 +72,7 @@ async function callOpenAI(
       max_tokens: 200,
       temperature: 0.1,
     },
-    { signal: AbortSignal.timeout(TIMEOUT_MS) },
+    { signal: (() => { const ctrl = new AbortController(); setTimeout(() => ctrl.abort(), TIMEOUT_MS); return ctrl.signal; })() },
   );
 
   const raw = completion.choices[0]?.message?.content ?? '{}';
@@ -100,7 +100,7 @@ async function callAnthropic(
         },
       ],
     },
-    { signal: AbortSignal.timeout(TIMEOUT_MS) } as Parameters<typeof client.messages.create>[1],
+    { signal: (() => { const ctrl = new AbortController(); setTimeout(() => ctrl.abort(), TIMEOUT_MS); return ctrl.signal; })() } as Parameters<typeof client.messages.create>[1],
   );
 
   const raw = completion.content[0]?.type === 'text' ? completion.content[0].text : '{}';
@@ -301,22 +301,28 @@ export async function estimateConsensusProbability(opts: {
 
 // Module-level singleton clients — created once, reused across all estimateSentiment calls.
 // Module-level singleton clients — lazy-initialized on first use, reused thereafter.
-// Using await import() (ESM-safe) instead of require().
+// Key rotation: compare current env var to the key used at last construction; recreate if changed.
 let _sentimentOpenAIClient: import('openai').OpenAI | null = null;
+let _sentimentOpenAIKey: string | null = null;
 let _sentimentGeminiClient: import('@google/generative-ai').GoogleGenerativeAI | null = null;
+let _sentimentGeminiKey: string | null = null;
 
 async function getSentimentOpenAI(): Promise<import('openai').OpenAI> {
-  if (!_sentimentOpenAIClient) {
+  const currentKey = process.env.OPENAI_API_KEY ?? null;
+  if (!_sentimentOpenAIClient || currentKey !== _sentimentOpenAIKey) {
     const { OpenAI } = await import('openai');
-    _sentimentOpenAIClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    _sentimentOpenAIClient = new OpenAI({ apiKey: currentKey ?? undefined });
+    _sentimentOpenAIKey = currentKey;
   }
   return _sentimentOpenAIClient;
 }
 
 async function getSentimentGemini(): Promise<import('@google/generative-ai').GoogleGenerativeAI> {
-  if (!_sentimentGeminiClient) {
+  const currentKey = process.env.GEMINI_API_KEY ?? null;
+  if (!_sentimentGeminiClient || currentKey !== _sentimentGeminiKey) {
     const { GoogleGenerativeAI } = await import('@google/generative-ai');
-    _sentimentGeminiClient = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '');
+    _sentimentGeminiClient = new GoogleGenerativeAI(currentKey ?? '');
+    _sentimentGeminiKey = currentKey;
   }
   return _sentimentGeminiClient;
 }

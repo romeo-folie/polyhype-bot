@@ -40,7 +40,7 @@ async function extractEntitiesOpenAI(headline: string, entityContext: string): P
       max_tokens: 150,
       temperature: 0,
     },
-    { signal: AbortSignal.timeout(TIMEOUT_MS) },
+    { signal: (() => { const ctrl = new AbortController(); setTimeout(() => ctrl.abort(), TIMEOUT_MS); return ctrl.signal; })() },
   );
 
   const raw = completion.choices[0]?.message?.content ?? '{}';

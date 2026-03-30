@@ -426,7 +426,7 @@ See `.env.example` for full documentation. Highlights:
 | `ARB_ENABLED` | — | Master switch for arbitrage worker |
 | `SPOT_MONITOR_ENABLED` | — | Master switch for spot monitor |
 | `BINANCE_WS_ENABLED` | — | Enable Binance WebSocket feed |
-| `HELIUS_API_KEY` | — | Enable Solana/Pyth real-time feed |
+| `HELIUS_API_KEY` | — | **Unused** — Pyth Hermes endpoint is public; no key required |
 | `CRYPTO_ARB_ENABLED` | — | Master switch for crypto latency arb (Phase 7, default true) |
 | `CRYPTO_ARB_MIN_EDGE` | — | Minimum net edge after fees to enter crypto arb (default 0.08 = 8%) |
 | `CRYPTO_ARB_MAX_STAKE_FRACTION` | — | Max fraction of bankroll per crypto arb trade (default 0.03 = 3%) |
