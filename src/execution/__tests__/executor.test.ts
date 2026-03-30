@@ -38,6 +38,7 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
     FUTURES_ENABLED: false,
     CALIBRATION_ENABLED: true,
     CALIBRATION_MIN_SAMPLES: 20,
+    MIN_BET_USD: 1,  // low floor for tests — individual test cases set stakeUsd below this
   })),
 }));
 

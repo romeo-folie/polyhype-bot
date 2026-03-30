@@ -82,6 +82,7 @@ const envSchema = z.object({
 
   // Continuous improvement (Phase 8)
   CALIBRATION_ENABLED: z.coerce.boolean().optional().default(true),
+  MIN_BET_USD: z.coerce.number().min(0).optional().default(5),
   CALIBRATION_MIN_SAMPLES: z.coerce.number().int().positive().optional().default(20),
   OUTCOME_HISTORY_DAYS: z.coerce.number().int().positive().optional().default(180),
   OUTCOME_MAX_PER_CATEGORY: z.coerce.number().int().positive().optional().default(500),

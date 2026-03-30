@@ -26,7 +26,9 @@ import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
 
 const IDEMPOTENCY_TTL_SECONDS = 3600; // 1 hour
-const MIN_STAKE_USD = 0.01; // below this: skip (rounding noise)
+// MIN_STAKE_USD is loaded from config (MIN_BET_USD, default $5).
+// Prevents dust positions that can't be redeemed and burn fees on tiny stakes.
+const getMinStake = () => loadConfig().MIN_BET_USD;
 const IDEMPOTENCY_KEY_PREFIX = 'trade:executed:';
 
 export interface ExecutionResult {
@@ -354,11 +356,13 @@ export async function executeSignal(
     return result;
   }
 
-  // 3) Stake floor check
-  if (signal.stakeUsd < MIN_STAKE_USD) {
+  // 3) Stake floor check (MIN_BET_USD, default $5)
+  const minStake = getMinStake();
+  if (signal.stakeUsd < minStake) {
     logger.info('[executor] skipping — stake below floor', {
       marketId: signal.marketId,
       stakeUsd: signal.stakeUsd,
+      minBetUsd: minStake,
     });
     return { signal, skipped: true, skipReason: 'stake_below_floor' };
   }
