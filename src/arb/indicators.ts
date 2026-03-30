@@ -25,9 +25,9 @@ export function computeEMA(values: number[], period: number): number[] | null {
   if (values.length < period) return null;
 
   const k = 2 / (period + 1);
-  const ema: number[] = new Array<number>(values.length);
+  const ema: number[] = new Array<number>(values.length).fill(NaN);
 
-  // Seed with SMA of first `period` values
+  // Seed with SMA of first `period` values; indices 0..period-2 remain NaN (warmup).
   let sum = 0;
   for (let i = 0; i < period; i++) {
     sum += values[i]!;
