@@ -43,6 +43,8 @@ export interface TradeSignal {
   isFutures?: boolean;
   leverage?: number;
   symbol?: string;
+  /** True when the Gamma market has fees enabled — executor skips CLOB for these */
+  feesEnabled?: boolean;
 }
 
 /**

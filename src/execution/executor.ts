@@ -513,7 +513,17 @@ export async function executeSignal(
     });
   }
 
-  // 6) CLOB fallback
+  // 6) Fee gate — skip CLOB if Gamma reports fees enabled on this market.
+  // Simmer has its own fee gate (ctx.market.fee_rate_bps) earlier in the flow.
+  // This gate covers the CLOB-only path (markets not in Simmer catalogue).
+  if (signal.feesEnabled === true) {
+    logger.info('[executor] skipping CLOB — market has fees enabled', {
+      marketId: signal.marketId,
+    });
+    return { signal, skipped: true, skipReason: 'fee_market:clob_path' };
+  }
+
+  // 7) CLOB fallback
   const clob = await tryExecuteViaClob(signal);
   if (clob.ok && clob.tradeResult?.success) {
     const tradeResult = clob.tradeResult;

@@ -21,6 +21,8 @@ export interface CorrelatedMarket {
   description: string | null;
   currentYesPrice: number;
   correlationDirection: 'positive' | 'negative';
+  /** True when the Gamma market has fees enabled — skip for CLOB execution */
+  feesEnabled: boolean;
 }
 
 /** Asset-specific search queries for Gamma API. */
@@ -197,6 +199,7 @@ export async function findCorrelatedMarkets(move: SpotMove): Promise<CorrelatedM
           description: market.description,
           currentYesPrice,
           correlationDirection,
+          feesEnabled: market.feesEnabled === true,
         });
       }
     }

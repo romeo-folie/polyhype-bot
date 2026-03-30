@@ -210,6 +210,7 @@ export class ArbitrageWorker {
             outcomePrice: opp.currentPmPrice,
             sourcedFrom: `crypto-arb:${opp.assetId}`,
             reasoning: `Crypto latency arb: fair=${opp.fairValuePrice.toFixed(3)}, pm=${opp.currentPmPrice.toFixed(3)}, edge=${opp.edge.toFixed(3)}`,
+            feesEnabled: opp.feesEnabled,
           };
 
           // executor.executeSignal handles execution only — it does NOT record the position

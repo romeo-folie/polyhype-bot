@@ -27,6 +27,8 @@ export interface CryptoArbOpportunity {
   edge: number;
   stakeUsd: number;
   assetId: string;
+  /** True when the market has fees enabled — executor will skip CLOB submission */
+  feesEnabled: boolean;
 }
 
 /** Asset-specific search queries for Gamma API. */
@@ -193,7 +195,16 @@ export async function scanCryptoArb(
 
   for (const market of markets) {
     try {
-      // 2. Get current PM YES price (WS cache → fallback to struct)
+      // 2a. Skip fee markets — fee drag kills arb edge and CLOB rejects them
+      if (market.feesEnabled) {
+        logger.debug('[crypto-arb] skipping fee market', {
+          marketId: market.marketId,
+          question: market.question.slice(0, 80),
+        });
+        continue;
+      }
+
+      // 2b. Get current PM YES price (WS cache → fallback to struct)
       const wsPrice = await feed.getCachedPrice(market.marketId);
       const currentPmPrice = wsPrice ?? market.currentYesPrice;
       if (!isFinite(currentPmPrice) || currentPmPrice <= 0 || currentPmPrice >= 1) continue;
@@ -255,6 +266,7 @@ export async function scanCryptoArb(
         edge: netEdge,
         stakeUsd,
         assetId: move.assetId,
+        feesEnabled: market.feesEnabled,
       });
     } catch (err) {
       logger.warn('[crypto-arb] error processing market', {

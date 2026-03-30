@@ -45,6 +45,10 @@ export interface GammaMarket {
   liquidity: string;
   endDate: string | null;
   description: string | null;
+  /** True when the market charges fees (Polymarket fee markets — avoid for arb/execution) */
+  feesEnabled?: boolean;
+  /** Fee type string when feesEnabled=true (e.g. "taker", "both"). Null when no fees. */
+  feeType?: string | null;
 }
 
 interface SearchEventsOptions {
