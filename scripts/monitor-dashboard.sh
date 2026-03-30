@@ -43,36 +43,22 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
-# Create session with pane 0 — spot-feed
-tmux new-session -d -s "$SESSION" -n Dashboard \
-  "tail -f '${PM2_LOGS}/pga-spot-feed-out.log'"
+# Create 6 separate windows, one per log source
+tmux new-session  -d -s "$SESSION" -n spot-feed  "tail -f '${PM2_LOGS}/pga-spot-feed-out.log'"
+tmux new-window      -t "$SESSION"  -n arb        "tail -f '${PM2_LOGS}/pga-arb-out.log'"
+tmux new-window      -t "$SESSION"  -n copytrade  "tail -f '${PM2_LOGS}/pga-copytrade-out.log'"
+tmux new-window      -t "$SESSION"  -n futures    "tail -f '${PM2_LOGS}/pga-futures-out.log'"
+tmux new-window      -t "$SESSION"  -n trade-log  "tail -f /tmp/pga-trade.log"
+tmux new-window      -t "$SESSION"  -n monitor-log "tail -f /tmp/pga-monitor.log"
 
-# Always split the FIRST pane (index 0) to grow the list downward
-# Each new split-window without -t defaults to most-recently-active,
-# so we explicitly target pane 0 each time then rebalance at the end.
+# Join all windows into window 0 as panes
+tmux join-pane -s "${SESSION}:arb"         -t "${SESSION}:spot-feed"
+tmux join-pane -s "${SESSION}:copytrade"   -t "${SESSION}:spot-feed"
+tmux join-pane -s "${SESSION}:futures"     -t "${SESSION}:spot-feed"
+tmux join-pane -s "${SESSION}:trade-log"   -t "${SESSION}:spot-feed"
+tmux join-pane -s "${SESSION}:monitor-log" -t "${SESSION}:spot-feed"
 
-# Pane 1: arb
-tmux split-window -t "${SESSION}:Dashboard.0" \
-  "tail -f '${PM2_LOGS}/pga-arb-out.log'"
-
-# Pane 2: copytrade
-tmux split-window -t "${SESSION}:Dashboard.0" \
-  "tail -f '${PM2_LOGS}/pga-copytrade-out.log'"
-
-# Pane 3: futures
-tmux split-window -t "${SESSION}:Dashboard.0" \
-  "tail -f '${PM2_LOGS}/pga-futures-out.log'"
-
-# Pane 4: cron:trade
-tmux split-window -t "${SESSION}:Dashboard.0" \
-  "tail -f /tmp/pga-trade.log"
-
-# Pane 5: cron:monitor
-tmux split-window -t "${SESSION}:Dashboard.0" \
-  "tail -f /tmp/pga-monitor.log"
-
-# Rebalance into a clean tiled grid
-tmux select-layout  -t "$SESSION" tiled
+tmux select-layout  -t "${SESSION}:spot-feed" tiled
 tmux set-option     -t "$SESSION" remain-on-exit on
-tmux select-pane    -t "${SESSION}:Dashboard.0"
+tmux select-pane    -t "${SESSION}:spot-feed.0"
 tmux attach-session -t "$SESSION"
