@@ -12,6 +12,7 @@ import { getPriceFeed } from '../shared/feedSingleton.js';
 import { findCorrelatedMarkets, type CorrelatedMarket } from '../spot/marketCorrelator.js';
 import { estimateFastConsensus } from '../spot/fastPathConsensus.js';
 import { getBankroll } from '../shared/bankroll.js';
+import { scoreConfluence } from './confluenceScorer.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { Redis } from 'ioredis';
 
@@ -117,31 +118,59 @@ export async function scanCryptoArb(
 
   // Volatility gate: skip if market is too flat (no edge) or too spiky (unpredictable)
   // Uses the symbol from the SpotMove — maps assetId back to Binance symbol
-  if (cfg.CRYPTO_ARB_VOLATILITY_GATE_ENABLED) {
-    const symbol = Object.entries(BINANCE_SYMBOL_TO_ASSET).find(([, v]) => v === move.assetId)?.[0];
-    if (symbol) {
-      const volatility = await computeVolatility(symbol, redis);
-      if (volatility !== null) {
-        if (volatility < cfg.CRYPTO_ARB_MIN_VOLATILITY) {
-          logger.debug('[crypto-arb] volatility below floor — skipping (flat market)', {
-            assetId: move.assetId,
-            symbol,
-            volatility: volatility.toFixed(6),
-            floor: cfg.CRYPTO_ARB_MIN_VOLATILITY,
-          });
-          return [];
-        }
-        if (volatility > cfg.CRYPTO_ARB_MAX_VOLATILITY) {
-          logger.debug('[crypto-arb] volatility above ceiling — skipping (too spiky)', {
-            assetId: move.assetId,
-            symbol,
-            volatility: volatility.toFixed(6),
-            ceiling: cfg.CRYPTO_ARB_MAX_VOLATILITY,
-          });
-          return [];
-        }
+  let confluenceDirection: 'UP' | 'DOWN' | 'NEUTRAL' | undefined;  // Captured for direction filter in market loop
+
+  // Extract symbol once for both gates (avoid duplicate lookups)
+  const symbol = Object.entries(BINANCE_SYMBOL_TO_ASSET).find(([, v]) => v === move.assetId)?.[0];
+
+  if (cfg.CRYPTO_ARB_VOLATILITY_GATE_ENABLED && symbol) {
+    const volatility = await computeVolatility(symbol, redis);
+    if (volatility !== null) {
+      if (volatility < cfg.CRYPTO_ARB_MIN_VOLATILITY) {
+        logger.debug('[crypto-arb] volatility below floor — skipping (flat market)', {
+          assetId: move.assetId,
+          symbol,
+          volatility: volatility.toFixed(6),
+          floor: cfg.CRYPTO_ARB_MIN_VOLATILITY,
+        });
+        return [];
+      }
+      if (volatility > cfg.CRYPTO_ARB_MAX_VOLATILITY) {
+        logger.debug('[crypto-arb] volatility above ceiling — skipping (too spiky)', {
+          assetId: move.assetId,
+          symbol,
+          volatility: volatility.toFixed(6),
+          ceiling: cfg.CRYPTO_ARB_MAX_VOLATILITY,
+        });
+        return [];
       }
     }
+  }
+
+  // Confluence gate — BTC only, configurable
+  if (cfg.CONFLUENCE_GATE_ENABLED && move.assetId === 'bitcoin' && symbol) {
+    const confluence = await scoreConfluence(symbol, redis);
+    if (confluence.score < cfg.CRYPTO_ARB_MIN_CONFLUENCE_SCORE) {
+      // Cold start (score=0, no signals) warrants higher log level for ops visibility
+      const isWarmingUp = confluence.score === 0 && Object.keys(confluence.signals).length === 0;
+      const logLevel = isWarmingUp ? 'warn' : 'debug';
+      logger[logLevel]('[crypto-arb] insufficient indicator confluence — skipping', {
+        score: confluence.score,
+        direction: confluence.direction,
+        signals: confluence.signals,
+        assetId: move.assetId,
+        reason: isWarmingUp ? 'cold_start_no_indicator_data' : 'conflicting_signals',
+      });
+      return [];
+    }
+    // Direction filter: only evaluate YES when bullish, NO when bearish
+    confluenceDirection = confluence.direction;
+    logger.debug('[crypto-arb] confluence gate passed', {
+      score: confluence.score,
+      direction: confluence.direction,
+      signals: confluence.signals,
+      assetId: move.assetId,
+    });
   }
 
   // Unknown asset — no search queries mapped
@@ -235,6 +264,29 @@ export async function scanCryptoArb(
         direction = 'NO';
       } else {
         continue;
+      }
+
+      // Direction alignment with confluence
+      // Assumes markets are positively correlated with BTC (e.g., "Will BTC exceed $100k?")
+      // For negatively correlated markets, this filter would need inversion
+      if (confluenceDirection && confluenceDirection !== 'NEUTRAL') {
+        const expectUp = confluenceDirection === 'UP';
+        if (direction === 'YES' && !expectUp) {
+          logger.debug('[crypto-arb] direction mismatch — confluence bearish, edge bullish — skipping', {
+            marketId: market.marketId,
+            direction,
+            confluenceDirection,
+          });
+          continue;
+        }
+        if (direction === 'NO' && expectUp) {
+          logger.debug('[crypto-arb] direction mismatch — confluence bullish, edge bearish — skipping', {
+            marketId: market.marketId,
+            direction,
+            confluenceDirection,
+          });
+          continue;
+        }
       }
 
       // 5. Dedup check
