@@ -157,8 +157,20 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
               ? err.message
               : String(err);
 
-        logger.error('[redeemer] redemption failed', { marketId: pos.market_id, side, error: message });
-        results.push({ marketId: pos.market_id, side, success: false, error: message });
+        // HTTP 400 from Simmer = already redeemed externally or not claimable.
+        // Close the ledger entry to stop retrying on every cycle.
+        if (err instanceof SimmerError && err.statusCode === 400) {
+          logger.warn('[redeemer] Simmer 400 — position likely already redeemed externally, closing ledger', {
+            marketId: pos.market_id,
+            side,
+          });
+          const direction = side.toUpperCase() as 'YES' | 'NO';
+          await closePosition(redis, pos.market_id, direction).catch(() => {});
+          results.push({ marketId: pos.market_id, side, success: false, error: 'already_redeemed_externally' });
+        } else {
+          logger.error('[redeemer] redemption failed', { marketId: pos.market_id, side, error: message });
+          results.push({ marketId: pos.market_id, side, success: false, error: message });
+        }
       }
     }
   }
@@ -352,8 +364,10 @@ async function checkMarketResolved(
         if (yesPrice === 1) return { outcome: 'YES' };
         if (noPrice === 1) return { outcome: 'NO' };
 
-        // Both non-1: market closed but not yet settled on-chain (e.g. pending resolution)
-        logger.warn('[redeemer] market closed but outcomePrices not yet settled', {
+        // Both non-1: market closed but not yet settled on-chain.
+        // Polymarket settles on-chain after the resolution window (can take hours/days).
+        // This is expected — downgrade to debug to avoid log spam every 5 min.
+        logger.debug('[redeemer] market closed but outcomePrices not yet settled — will retry', {
           conditionId,
           outcomePrices: market.outcomePrices,
         });
