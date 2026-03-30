@@ -244,6 +244,17 @@ async function triggerDeltaHedge(
   // 3. Execute 1:1 Delta Hedge (Short)
   const hedgeStakeUsd = pmSignal.stakeUsd;
 
+  // HL rejects orders below ~$10 notional with HTTP 422. Skip hedge if stake is too small
+  // rather than burning an API call that will fail.
+  const HL_MIN_ORDER_USD = 10;
+  if (hedgeStakeUsd < HL_MIN_ORDER_USD) {
+    logger.info('[executor] skipping delta hedge — stake below HL minimum notional', {
+      stakeUsd: hedgeStakeUsd,
+      minUsd: HL_MIN_ORDER_USD,
+    });
+    return false;
+  }
+
   logger.info('[executor] opening delta hedge on Hyperliquid', {
     pmMarketId: pmSignal.marketId,
     hlSymbol,
