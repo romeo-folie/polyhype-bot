@@ -43,31 +43,23 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
-# Color code: sed highlights [component-name] in square brackets
-# Each pane gets a distinct color for its component labels:
-#   cyan    = spot/feed/pyth/binance
-#   yellow  = arb/scanner/crypto
-#   green   = copytrade/shortlist/bankroll
-#   magenta = futures/hyperliquid/executor/hedge
-#   blue    = trade pipeline (osint/ingestion/mapping/consensus/reeval/redeemer)
-#   red     = monitor/take-profit/stop-loss
+# Colors (ANSI codes): 36=cyan 33=yellow 32=green 35=magenta 34=blue 31=red
+# sed colorizes [component-labels] in each log line
+C36="tail -f '${PM2_LOGS}/pga-spot-feed-out.log' | sed 's/\(\[[^]]*\]\)/\x1b[36m\1\x1b[0m/g'"
+C33="tail -f '${PM2_LOGS}/pga-arb-out.log'       | sed 's/\(\[[^]]*\]\)/\x1b[33m\1\x1b[0m/g'"
+C32="tail -f '${PM2_LOGS}/pga-copytrade-out.log'  | sed 's/\(\[[^]]*\]\)/\x1b[32m\1\x1b[0m/g'"
+C35="tail -f '${PM2_LOGS}/pga-futures-out.log'    | sed 's/\(\[[^]]*\]\)/\x1b[35m\1\x1b[0m/g'"
+C34="tail -f /tmp/pga-trade.log                   | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
+C31="tail -f /tmp/pga-monitor.log                 | sed 's/\(\[[^]]*\]\)/\x1b[31m\1\x1b[0m/g'"
 
-# sed expression: colorize anything in [square-brackets] with the given ANSI code
-color_cmd() {
-  color="$1"; logfile="$2"
-  # ANSI: \033[<code>m = color on, \033[0m = reset
-  tail -f "$logfile" | sed "s/\(\[[^]]*\]\)/\\033[${color}m\\1\\033[0m/g"
-}
+# Create one window per source, then join into a single tiled window
+tmux new-session  -d -s "$SESSION" -n spot-feed   "sh -c \"$C36\""
+tmux new-window      -t "$SESSION"  -n arb         "sh -c \"$C33\""
+tmux new-window      -t "$SESSION"  -n copytrade   "sh -c \"$C32\""
+tmux new-window      -t "$SESSION"  -n futures     "sh -c \"$C35\""
+tmux new-window      -t "$SESSION"  -n trade-log   "sh -c \"$C34\""
+tmux new-window      -t "$SESSION"  -n monitor-log "sh -c \"$C31\""
 
-# Colors: 36=cyan 33=yellow 32=green 35=magenta 34=blue 31=red
-tmux new-session  -d -s "$SESSION" -n spot-feed   "$(color_cmd 36 "${PM2_LOGS}/pga-spot-feed-out.log")"
-tmux new-window      -t "$SESSION"  -n arb         "$(color_cmd 33 "${PM2_LOGS}/pga-arb-out.log")"
-tmux new-window      -t "$SESSION"  -n copytrade   "$(color_cmd 32 "${PM2_LOGS}/pga-copytrade-out.log")"
-tmux new-window      -t "$SESSION"  -n futures     "$(color_cmd 35 "${PM2_LOGS}/pga-futures-out.log")"
-tmux new-window      -t "$SESSION"  -n trade-log   "$(color_cmd 34 /tmp/pga-trade.log)"
-tmux new-window      -t "$SESSION"  -n monitor-log "$(color_cmd 31 /tmp/pga-monitor.log)"
-
-# Join all windows into the first window as panes
 tmux join-pane -s "${SESSION}:arb"         -t "${SESSION}:spot-feed"
 tmux join-pane -s "${SESSION}:copytrade"   -t "${SESSION}:spot-feed"
 tmux join-pane -s "${SESSION}:futures"     -t "${SESSION}:spot-feed"
