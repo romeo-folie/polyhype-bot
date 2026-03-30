@@ -6,6 +6,7 @@ import { scanCryptoArb, BINANCE_SYMBOL_TO_ASSET } from './cryptoArbScanner.js';
 import { executeSignal } from '../execution/executor.js';
 import { recordPosition } from '../execution/positionLedger.js';
 import { deductStake } from '../shared/bankroll.js';
+import { setAgentAutoRedeem } from '../shared/simmer.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { TradeSignal } from '../mapping/index.js';
 
@@ -48,10 +49,18 @@ export class ArbitrageWorker {
       return;
     }
 
+    // Sync Simmer agent auto-redeem setting at startup
+    void setAgentAutoRedeem(cfg.SIMMER_AUTO_REDEEM_ENABLED).catch((err) => {
+      logger.warn('[arb-worker] failed to set Simmer auto-redeem — continuing', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
     logger.info('[arb-worker] starting long-running worker', {
       baselineIntervalMs: this.baselineIntervalMs,
       maxTradesPerMin: this.maxTradesPerMin,
       cryptoArbEnabled: cfg.CRYPTO_ARB_ENABLED,
+      simmerAutoRedeem: cfg.SIMMER_AUTO_REDEEM_ENABLED,
     });
 
     // 1. Subscribe to real-time price updates

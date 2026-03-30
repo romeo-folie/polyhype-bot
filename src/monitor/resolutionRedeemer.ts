@@ -23,6 +23,7 @@ import { redeemClobOutcome } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
 import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
+import { loadConfig } from '../shared/config.js';
 import type { Redis } from 'ioredis';
 
 export interface RedemptionResult {
@@ -49,6 +50,15 @@ function sleep(ms: number): Promise<void> {
  */
 export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionResult[]> {
   const results: RedemptionResult[] = [];
+
+  // Log auto-redeem status for visibility in PM2 logs
+  const cfg = loadConfig();
+  logger.debug('[redeemer] Simmer auto-redeem setting', {
+    enabled: cfg.SIMMER_AUTO_REDEEM_ENABLED,
+    note: cfg.SIMMER_AUTO_REDEEM_ENABLED
+      ? 'Simmer-venue positions auto-redeemed by Simmer agent; CLOB positions handled here'
+      : 'All redemptions handled manually',
+  });
 
   // ── Simmer redemptions (unchanged) ────────────────────────────────────────
   let resolvedPositions;
