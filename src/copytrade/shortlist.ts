@@ -85,8 +85,21 @@ export async function updateEnvWallets(wallets: string[]): Promise<void> {
   await fs.rename(tempPath, envPath);
 }
 
-export function selectWallets(entries: LeaderboardEntry[], minPnl: number, minVol: number, topN: number) {
-  const filtered = entries.filter((entry) => entry.pnl >= minPnl && entry.vol >= minVol);
+export function selectWallets(
+  entries: LeaderboardEntry[],
+  minPnl: number,
+  minVol: number,
+  topN: number,
+  minVolPnlRatio = 0,          // vol/pnl >= this — filters lucky one-hit wallets vs systematic traders
+) {
+  const filtered = entries.filter((entry) => {
+    if (entry.pnl < minPnl) return false;
+    if (entry.vol < minVol) return false;
+    // Vol/PnL ratio: systematic traders have high volume relative to PnL
+    // A lucky one-off trader has low vol (few trades) but high PnL — we want to avoid those
+    if (minVolPnlRatio > 0 && entry.pnl > 0 && (entry.vol / entry.pnl) < minVolPnlRatio) return false;
+    return true;
+  });
   const selected: LeaderboardEntry[] = [];
   const seen = new Set<string>();
 
@@ -122,6 +135,7 @@ export async function run(): Promise<void> {
   const topN = cfg.COPYTRADE_SHORTLIST_TOP_N;
   const minPnl = cfg.COPYTRADE_SHORTLIST_MIN_PNL_USD;
   const minVol = cfg.COPYTRADE_SHORTLIST_MIN_VOL_USD;
+  const minVolPnlRatio = cfg.COPYTRADE_SHORTLIST_MIN_VOL_PNL_RATIO;
 
   const combinedWallets = new Set<string>();
   const stats: Record<string, number> = {};
@@ -134,7 +148,7 @@ export async function run(): Promise<void> {
         continue;
       }
 
-      const { selected, backfilled } = selectWallets(leaderboard, minPnl, minVol, topN);
+      const { selected, backfilled } = selectWallets(leaderboard, minPnl, minVol, topN, minVolPnlRatio);
       const results = [...selected, ...backfilled];
       
       results.forEach((entry) => combinedWallets.add(entry.proxyWallet));

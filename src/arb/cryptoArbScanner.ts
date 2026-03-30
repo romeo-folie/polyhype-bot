@@ -67,6 +67,40 @@ const MARKET_CACHE_PREFIX = 'crypto:markets:';
 const DEDUP_PREFIX = 'arb:crypto:';
 
 /**
+ * Compute mean absolute percentage change (MAPC) over the last `periods` ticks.
+ * Uses `spot:prices:<symbol>` sorted set (members stored as "ts:price").
+ * Invalid entries are forward-filled to preserve tick order and avoid phantom vol spikes.
+ * Returns null if insufficient data.
+ * Exported for unit testing.
+ */
+export async function computeVolatility(symbol: string, redis: Redis, periods = 14): Promise<number | null> {
+  // Retrieve the last (periods + 1) price records — need N+1 to compute N returns.
+  const key = `spot:prices:${symbol}`;
+  const entries = await redis.zrange(key, -(periods + 1), -1);
+  if (entries.length < 2) return null;
+
+  // Parse and forward-fill invalid entries so gaps don't create phantom price jumps.
+  const prices: number[] = [];
+  for (const e of entries) {
+    const p = parseFloat(e.split(':')[1] ?? '0');
+    if (isFinite(p) && p > 0) {
+      prices.push(p);
+    } else if (prices.length > 0) {
+      prices.push(prices[prices.length - 1]!); // forward-fill
+    }
+    // If prices is still empty (first entry is invalid), skip
+  }
+
+  if (prices.length < 2) return null;
+
+  let sumAbsChange = 0;
+  for (let i = 1; i < prices.length; i++) {
+    sumAbsChange += Math.abs((prices[i]! - prices[i - 1]!) / prices[i - 1]!);
+  }
+  return sumAbsChange / (prices.length - 1); // mean absolute % change
+}
+
+/**
  * Scan for crypto latency arb opportunities triggered by a spot price move.
  */
 export async function scanCryptoArb(
@@ -77,6 +111,35 @@ export async function scanCryptoArb(
 
   if (!cfg.CRYPTO_ARB_ENABLED) {
     return [];
+  }
+
+  // Volatility gate: skip if market is too flat (no edge) or too spiky (unpredictable)
+  // Uses the symbol from the SpotMove — maps assetId back to Binance symbol
+  if (cfg.CRYPTO_ARB_VOLATILITY_GATE_ENABLED) {
+    const symbol = Object.entries(BINANCE_SYMBOL_TO_ASSET).find(([, v]) => v === move.assetId)?.[0];
+    if (symbol) {
+      const volatility = await computeVolatility(symbol, redis);
+      if (volatility !== null) {
+        if (volatility < cfg.CRYPTO_ARB_MIN_VOLATILITY) {
+          logger.debug('[crypto-arb] volatility below floor — skipping (flat market)', {
+            assetId: move.assetId,
+            symbol,
+            volatility: volatility.toFixed(6),
+            floor: cfg.CRYPTO_ARB_MIN_VOLATILITY,
+          });
+          return [];
+        }
+        if (volatility > cfg.CRYPTO_ARB_MAX_VOLATILITY) {
+          logger.debug('[crypto-arb] volatility above ceiling — skipping (too spiky)', {
+            assetId: move.assetId,
+            symbol,
+            volatility: volatility.toFixed(6),
+            ceiling: cfg.CRYPTO_ARB_MAX_VOLATILITY,
+          });
+          return [];
+        }
+      }
+    }
   }
 
   // Unknown asset — no search queries mapped

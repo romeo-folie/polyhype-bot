@@ -75,6 +75,11 @@ const envSchema = z.object({
 
   // Crypto latency arbitrage (Phase 7)
   CRYPTO_ARB_ENABLED: z.coerce.boolean().optional().default(true),
+  CRYPTO_ARB_VOLATILITY_GATE_ENABLED: z.coerce.boolean().optional().default(true),
+  // Mean absolute % price change per tick. Below floor = flat market, above ceiling = too spiky.
+  // Defaults tuned for 1-min BTC ticks: floor 0.0003 (~0.03%), ceiling 0.008 (~0.8%)
+  CRYPTO_ARB_MIN_VOLATILITY: z.coerce.number().min(0).optional().default(0.0003),
+  CRYPTO_ARB_MAX_VOLATILITY: z.coerce.number().min(0).optional().default(0.008),
   CRYPTO_ARB_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   CRYPTO_ARB_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.03),
   CRYPTO_ARB_DEDUP_TTL_S: z.coerce.number().int().positive().optional().default(300),
@@ -116,6 +121,10 @@ const envSchema = z.object({
   COPYTRADE_SHORTLIST_MIN_PNL_USD: z.coerce.number().min(0).optional().default(10000),
   COPYTRADE_SHORTLIST_MIN_VOL_USD: z.coerce.number().min(0).optional().default(100000),
   COPYTRADE_SHORTLIST_AUTO_APPLY: z.coerce.boolean().optional().default(true),
+  // vol/pnl ratio filter: systematic high-frequency traders have high vol relative to PnL.
+  // Default 2.0 = must have traded at least 2x their PnL in volume (filters lucky one-offs).
+  // Set to 0 to disable.
+  COPYTRADE_SHORTLIST_MIN_VOL_PNL_RATIO: z.coerce.number().min(0).optional().default(2),
 
   // --- CRYPTO FUTURES (Phase: futures) ---
   FUTURES_ENABLED: z.coerce.boolean().optional().default(false),
