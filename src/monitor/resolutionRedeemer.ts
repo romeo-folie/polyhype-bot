@@ -163,6 +163,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
           logger.warn('[redeemer] Simmer 400 — position likely already redeemed externally, closing ledger', {
             marketId: pos.market_id,
             side,
+            simmerBody: err.body,  // log Simmer's response body for diagnosis
           });
           const direction = side.toUpperCase() as 'YES' | 'NO';
           await closePosition(redis, pos.market_id, direction).catch(() => {});
