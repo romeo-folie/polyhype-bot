@@ -6,6 +6,7 @@ import { fetchWithTimeout, getMarketBySlug, parseClobTokenIds, parseOutcomePrice
 import { getOpenPositions } from '../execution/positionLedger.js';
 import { fetchCurrentPrice } from '../monitor/priceFetcher.js';
 import { executeTakeProfit } from '../monitor/takeProfitExecutor.js';
+import { getPriceFeed } from '../shared/feedSingleton.js';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
 import type { ExitReason } from '../monitor/takeProfitEvaluator.js';
@@ -232,16 +233,21 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         continue;
       }
 
-      if (market.endDate) {
-        const hoursToResolve = (new Date(market.endDate).getTime() - Date.now()) / 3_600_000;
-        if (hoursToResolve < cfg.COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS) {
-          logger.info('[copytrade] skipped near-resolution market', {
-            marketId: market.id,
-            hoursToResolve: hoursToResolve.toFixed(2),
-          });
-          await markDedup();
-          continue;
-        }
+      if (!market.endDate) {
+        // No endDate — cannot determine time to resolution. Skip to avoid entering
+        // markets that may resolve imminently.
+        logger.info('[copytrade] skipped market with no endDate', { marketId: market.id, slug: trade.slug });
+        await markDedup();
+        continue;
+      }
+      const hoursToResolve = (new Date(market.endDate).getTime() - Date.now()) / 3_600_000;
+      if (hoursToResolve < cfg.COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS) {
+        logger.info('[copytrade] skipped near-resolution market', {
+          marketId: market.id,
+          hoursToResolve: hoursToResolve.toFixed(2),
+        });
+        await markDedup();
+        continue;
       }
 
       const liquidity = Number.parseFloat(market.liquidity ?? '0');
@@ -256,11 +262,17 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
 
       const clobTokenIds = parseClobTokenIds(market.clobTokenIds);
       const prices = parseOutcomePrices(market.outcomePrices);
-      const currentYesPrice = Number.parseFloat(prices[0] ?? '0');
-      if (!Number.isFinite(currentYesPrice)) {
+      const gammaYesPrice = Number.parseFloat(prices[0] ?? '0');
+      if (!Number.isFinite(gammaYesPrice)) {
         logger.warn('[copytrade] invalid price from Gamma', { marketId: market.id });
         continue;
       }
+
+      // Prefer WS feed price (real-time) over Gamma price (potentially cached).
+      // WS feed is keyed by marketId — falls back to Gamma if no live price available.
+      const feed = getPriceFeed(redis);
+      const wsPrice = await feed.getCachedPrice(market.id).catch(() => null);
+      const currentYesPrice = (wsPrice !== null && Number.isFinite(wsPrice)) ? wsPrice : gammaYesPrice;
 
       const direction = tradeDirection(trade);
       const currentOutcomePrice = direction === 'YES' ? currentYesPrice : 1 - currentYesPrice;
