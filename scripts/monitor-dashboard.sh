@@ -51,7 +51,7 @@ W4="tail -f /tmp/pga-trade.log                   | sed 's/\(\[[^]]*\]\)/\x1b[34m
 W5="tail -f /tmp/pga-monitor.log                 | sed 's/\(\[[^]]*\]\)/\x1b[31m\1\x1b[0m/g'"
 
 # Create 6 separate windows first (each gets full terminal height)
-tmux new-session  -d -s "$SESSION" -n w0 "sh -c \"$W0\""
+tmux new-session  -d -s "$SESSION" -n w0 -x 220 -y 60 "sh -c \"$W0\""
 tmux new-window      -t "$SESSION"  -n w1 "sh -c \"$W1\""
 tmux new-window      -t "$SESSION"  -n w2 "sh -c \"$W2\""
 tmux new-window      -t "$SESSION"  -n w3 "sh -c \"$W3\""
