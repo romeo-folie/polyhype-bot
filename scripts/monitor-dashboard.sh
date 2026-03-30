@@ -1,5 +1,5 @@
 #!/bin/sh
-# PGA Monitor Dashboard — 6 panes in 2 columns x 3 rows (even-horizontal layout)
+# PGA Monitor Dashboard — 6 panes in 2x3 grid
 # Usage: ./scripts/monitor-dashboard.sh
 
 SESSION="pga"
@@ -43,7 +43,6 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
-# sed colorizes [component-labels] with per-pane ANSI colors
 W0="tail -f '${PM2_LOGS}/pga-spot-feed-out.log' | sed 's/\(\[[^]]*\]\)/\x1b[36m\1\x1b[0m/g'"
 W1="tail -f '${PM2_LOGS}/pga-arb-out.log'       | sed 's/\(\[[^]]*\]\)/\x1b[33m\1\x1b[0m/g'"
 W2="tail -f '${PM2_LOGS}/pga-copytrade-out.log'  | sed 's/\(\[[^]]*\]\)/\x1b[32m\1\x1b[0m/g'"
@@ -51,23 +50,31 @@ W3="tail -f '${PM2_LOGS}/pga-futures-out.log'    | sed 's/\(\[[^]]*\]\)/\x1b[35m
 W4="tail -f /tmp/pga-trade.log                   | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
 W5="tail -f /tmp/pga-monitor.log                 | sed 's/\(\[[^]]*\]\)/\x1b[31m\1\x1b[0m/g'"
 
-# Create 6 windows, join into one, then use even-horizontal (2 columns)
-tmux new-session  -d -s "$SESSION" -n spot-feed   "sh -c \"$W0\""
-tmux new-window      -t "$SESSION"  -n arb         "sh -c \"$W1\""
-tmux new-window      -t "$SESSION"  -n copytrade   "sh -c \"$W2\""
-tmux new-window      -t "$SESSION"  -n futures     "sh -c \"$W3\""
-tmux new-window      -t "$SESSION"  -n trade-log   "sh -c \"$W4\""
-tmux new-window      -t "$SESSION"  -n monitor-log "sh -c \"$W5\""
+# Create 6 separate windows first (each gets full terminal height)
+tmux new-session  -d -s "$SESSION" -n w0 "sh -c \"$W0\""
+tmux new-window      -t "$SESSION"  -n w1 "sh -c \"$W1\""
+tmux new-window      -t "$SESSION"  -n w2 "sh -c \"$W2\""
+tmux new-window      -t "$SESSION"  -n w3 "sh -c \"$W3\""
+tmux new-window      -t "$SESSION"  -n w4 "sh -c \"$W4\""
+tmux new-window      -t "$SESSION"  -n w5 "sh -c \"$W5\""
 
-tmux join-pane -s "${SESSION}:arb"         -t "${SESSION}:spot-feed"
-tmux join-pane -s "${SESSION}:copytrade"   -t "${SESSION}:spot-feed"
-tmux join-pane -s "${SESSION}:futures"     -t "${SESSION}:spot-feed"
-tmux join-pane -s "${SESSION}:trade-log"   -t "${SESSION}:spot-feed"
-tmux join-pane -s "${SESSION}:monitor-log" -t "${SESSION}:spot-feed"
+# Join windows into w0 one at a time, rebalancing after each join
+# This prevents any pane from becoming too small to accept the next join
+tmux join-pane -s "${SESSION}:w1" -t "${SESSION}:w0"
+tmux select-layout -t "${SESSION}:w0" tiled
 
-# even-horizontal: 2 equal columns, panes stacked vertically within each column
-# Each pane gets 1/3 of terminal height — more space than tiled's 1/3 of full grid
-tmux select-layout  -t "${SESSION}:spot-feed" even-horizontal
-tmux set-option     -t "$SESSION" remain-on-exit on
-tmux select-pane    -t "${SESSION}:spot-feed.0"
+tmux join-pane -s "${SESSION}:w2" -t "${SESSION}:w0"
+tmux select-layout -t "${SESSION}:w0" tiled
+
+tmux join-pane -s "${SESSION}:w3" -t "${SESSION}:w0"
+tmux select-layout -t "${SESSION}:w0" tiled
+
+tmux join-pane -s "${SESSION}:w4" -t "${SESSION}:w0"
+tmux select-layout -t "${SESSION}:w0" tiled
+
+tmux join-pane -s "${SESSION}:w5" -t "${SESSION}:w0"
+tmux select-layout -t "${SESSION}:w0" tiled
+
+tmux set-option  -t "$SESSION" remain-on-exit on
+tmux select-pane -t "${SESSION}:w0.0"
 tmux attach-session -t "$SESSION"
