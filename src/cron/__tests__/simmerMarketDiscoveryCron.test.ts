@@ -1,30 +1,35 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 
-const mockDiscoverUnimportedMarkets = jest.fn();
-const mockImportMarket = jest.fn();
+const mockDiscoverUnimportedMarkets = vi.fn();
+const mockImportMarket = vi.fn();
 const mockLogger = {
-  info: jest.fn(),
-  warn: jest.fn(),
-  debug: jest.fn(),
-  error: jest.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  debug: vi.fn(),
+  error: vi.fn(),
 };
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
     SIMMER_AUTO_IMPORT_ENABLED: true,
   })),
 }));
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({
+vi.mock('../../shared/logger.js', () => ({
   logger: mockLogger,
 }));
 
-jest.unstable_mockModule('../../shared/simmerImport.js', () => ({
+vi.mock('../../shared/simmerImport.js', () => ({
   discoverUnimportedMarkets: mockDiscoverUnimportedMarkets,
   importMarket: mockImportMarket,
 }));
 
 beforeEach(() => {
+  // Reset module registry so each test gets a fresh cron module execution.
+  // Without this, the first import() is cached and subsequent tests reuse
+  // the same module instance (and the same mock call counts).
+  vi.resetModules();
+  vi.clearAllMocks();
   mockDiscoverUnimportedMarkets.mockReset();
   mockImportMarket.mockReset();
   mockLogger.info.mockReset();
@@ -41,10 +46,7 @@ describe('simmerMarketDiscoveryCron', () => {
     mockDiscoverUnimportedMarkets.mockResolvedValue(discovered);
     mockImportMarket.mockResolvedValue({ success: true, marketId: 'test-id' });
 
-    // Dynamically import to use mocked modules
     await import('../../cron/simmerMarketDiscoveryCron.js');
-
-    // Wait for async operations
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(mockDiscoverUnimportedMarkets).toHaveBeenCalledWith({ limit: 50 });
@@ -64,7 +66,6 @@ describe('simmerMarketDiscoveryCron', () => {
     await import('../../cron/simmerMarketDiscoveryCron.js');
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    // Should import only 2 markets (skip the one without URL)
     expect(mockImportMarket).toHaveBeenCalledTimes(2);
   });
 

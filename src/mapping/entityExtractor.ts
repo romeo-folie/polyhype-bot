@@ -128,6 +128,9 @@ const MIN_LIQUIDITY = 100; // USDC — skip ghost markets
  * Filters out markets with liquidity below MIN_LIQUIDITY.
  */
 export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateMarket[]> {
+  // Hoist config read — avoids repeated loadConfig() calls inside the triple-nested market loop below.
+  const cfg = loadConfig();
+
   // Combine scorer keywords with LLM-extracted entities for richer queries
   let entities: string[] = [];
   try {
@@ -189,7 +192,6 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
 
           // Fire-and-forget Simmer import if enabled.
           // Pre-registers market in Simmer for enriched trading (divergence, tags, internal ID).
-          const cfg = loadConfig();
           if (cfg.SIMMER_AUTO_IMPORT_ENABLED && event.slug) {
             const polymarketUrl = `https://polymarket.com/event/${event.slug}`;
             void importMarket(polymarketUrl).catch((err) => {
