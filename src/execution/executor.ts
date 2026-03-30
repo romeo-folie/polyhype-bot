@@ -58,6 +58,15 @@ function isMarketNotFoundMessage(msg: string | null | undefined): boolean {
   return /market\s+not\s+found/i.test(msg);
 }
 
+/**
+ * Returns true for Simmer rejections that should fall through to CLOB.
+ * "Order too small" = Simmer's 5-share minimum; CLOB has no share minimum.
+ */
+function shouldFallbackToClob(msg: string | null | undefined): boolean {
+  if (!msg) return false;
+  return isMarketNotFoundMessage(msg) || /order too small/i.test(msg);
+}
+
 async function tryExecuteViaClob(signal: TradeSignal): Promise<{
   ok: boolean;
   tradeResult?: SimmerTradeResult;
@@ -473,8 +482,9 @@ export async function executeSignal(
         return exeResult;
       }
 
-      // Simmer returned success=false — only fall back for market-unavailable cases
-      if (!isMarketNotFoundMessage(tradeResult.error)) {
+      // Simmer returned success=false — fall back to CLOB for recoverable rejections
+      // (market not found, order too small for Simmer's 5-share minimum)
+      if (!shouldFallbackToClob(tradeResult.error)) {
         logger.warn('[executor] Simmer trade returned success=false', {
           marketId: signal.marketId,
           error: tradeResult.error,
@@ -482,7 +492,7 @@ export async function executeSignal(
         return { signal, skipped: false, tradeResult, executionVenue: 'simmer' };
       }
 
-      logger.warn('[executor] Simmer market unavailable; attempting CLOB fallback', {
+      logger.warn('[executor] Simmer rejected — attempting CLOB fallback', {
         marketId: signal.marketId,
         error: tradeResult.error,
       });
@@ -493,8 +503,8 @@ export async function executeSignal(
           ? err.message
           : String(err);
 
-      // Only fall back on market-not-found style failures
-      if (!isMarketNotFoundMessage(message)) {
+      // Only fall back on recoverable Simmer failures
+      if (!shouldFallbackToClob(message)) {
         logger.error('[executor] Simmer submission failed', {
           marketId: signal.marketId,
           error: message,
