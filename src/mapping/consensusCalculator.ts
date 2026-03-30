@@ -58,22 +58,29 @@ async function callOpenAI(
   const { OpenAI } = await import('openai');
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  const completion = await client.chat.completions.create(
-    {
-      model: loadConfig().OPENAI_MODEL,
-      messages: [
-        { role: 'system', content: buildSystemPrompt() },
-        {
-          role: 'user',
-          content: buildUserPrompt({ question, description, headline, currentYesPrice }),
-        },
-      ],
-      response_format: { type: 'json_object' },
-      max_tokens: 200,
-      temperature: 0.1,
-    },
-    { signal: (() => { const ctrl = new AbortController(); setTimeout(() => ctrl.abort(), TIMEOUT_MS); return ctrl.signal; })() },
-  );
+  const abortCtrl = new AbortController();
+  const abortTimer = setTimeout(() => abortCtrl.abort(), TIMEOUT_MS);
+  let completion: Awaited<ReturnType<typeof client.chat.completions.create>>;
+  try {
+    completion = await client.chat.completions.create(
+      {
+        model: loadConfig().OPENAI_MODEL,
+        messages: [
+          { role: 'system', content: buildSystemPrompt() },
+          {
+            role: 'user',
+            content: buildUserPrompt({ question, description, headline, currentYesPrice }),
+          },
+        ],
+        response_format: { type: 'json_object' },
+        max_tokens: 200,
+        temperature: 0.1,
+      },
+      { signal: abortCtrl.signal },
+    );
+  } finally {
+    clearTimeout(abortTimer);
+  }
 
   const raw = completion.choices[0]?.message?.content ?? '{}';
   return parseResult(raw);
@@ -88,20 +95,27 @@ async function callAnthropic(
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-  const completion = await client.messages.create(
-    {
-      model: loadConfig().ANTHROPIC_MODEL,
-      max_tokens: 200,
-      system: buildSystemPrompt(),
-      messages: [
-        {
-          role: 'user',
-          content: buildUserPrompt({ question, description, headline, currentYesPrice }),
-        },
-      ],
-    },
-    { signal: (() => { const ctrl = new AbortController(); setTimeout(() => ctrl.abort(), TIMEOUT_MS); return ctrl.signal; })() } as Parameters<typeof client.messages.create>[1],
-  );
+  const abortCtrl = new AbortController();
+  const abortTimer = setTimeout(() => abortCtrl.abort(), TIMEOUT_MS);
+  let completion: Awaited<ReturnType<typeof client.messages.create>>;
+  try {
+    completion = await client.messages.create(
+      {
+        model: loadConfig().ANTHROPIC_MODEL,
+        max_tokens: 200,
+        system: buildSystemPrompt(),
+        messages: [
+          {
+            role: 'user',
+            content: buildUserPrompt({ question, description, headline, currentYesPrice }),
+          },
+        ],
+      },
+      { signal: abortCtrl.signal } as Parameters<typeof client.messages.create>[1],
+    );
+  } finally {
+    clearTimeout(abortTimer);
+  }
 
   const raw = completion.content[0]?.type === 'text' ? completion.content[0].text : '{}';
   return parseResult(raw);

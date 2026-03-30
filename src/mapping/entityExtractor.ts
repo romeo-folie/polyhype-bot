@@ -29,19 +29,26 @@ async function extractEntitiesOpenAI(headline: string, entityContext: string): P
   const { OpenAI } = await import('openai');
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const systemPrompt = buildEntitySystemPrompt(entityContext);
-  const completion = await client.chat.completions.create(
-    {
-      model: loadConfig().OPENAI_MODEL,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: headline },
-      ],
-      response_format: { type: 'json_object' },
-      max_tokens: 150,
-      temperature: 0,
-    },
-    { signal: (() => { const ctrl = new AbortController(); setTimeout(() => ctrl.abort(), TIMEOUT_MS); return ctrl.signal; })() },
-  );
+  const abortCtrl = new AbortController();
+  const abortTimer = setTimeout(() => abortCtrl.abort(), TIMEOUT_MS);
+  let completion: Awaited<ReturnType<typeof client.chat.completions.create>>;
+  try {
+    completion = await client.chat.completions.create(
+      {
+        model: loadConfig().OPENAI_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: headline },
+        ],
+        response_format: { type: 'json_object' },
+        max_tokens: 150,
+        temperature: 0,
+      },
+      { signal: abortCtrl.signal },
+    );
+  } finally {
+    clearTimeout(abortTimer);
+  }
 
   const raw = completion.choices[0]?.message?.content ?? '{}';
   const parsed = JSON.parse(raw) as { entities?: string[] };

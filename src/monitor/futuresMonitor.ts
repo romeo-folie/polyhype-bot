@@ -19,6 +19,8 @@ import { notifyTradeError } from '../execution/telegram.js';
 import { closePosition as closeLedgerPosition, getOpenPositions } from '../execution/positionLedger.js';
 
 const POLL_INTERVAL_MS = 5000; // 5 seconds — safe for rate limits, fast enough for intraday
+const MONITOR_LOCK_KEY = 'futures-monitor:lock';
+const MONITOR_LOCK_TTL_SEC = 30; // Must be > POLL_INTERVAL_MS; refreshed every cycle.
 
 export async function runFuturesMonitorWorker(): Promise<void> {
   const cfg = loadConfig();
@@ -30,14 +32,34 @@ export async function runFuturesMonitorWorker(): Promise<void> {
     return;
   }
 
+  // Distributed lock — prevents duplicate PM2 instances from issuing conflicting close orders.
+  const lockToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const acquired = await redis.set(MONITOR_LOCK_KEY, lockToken, 'EX', MONITOR_LOCK_TTL_SEC, 'NX');
+  if (!acquired) {
+    logger.warn('[futures-monitor] another instance is already running — exiting');
+    return;
+  }
+
   logger.info('[futures-monitor] starting persistent monitor', {
     pollInterval: `${String(POLL_INTERVAL_MS)}ms`,
     stopLoss: `${String(cfg.FUTURES_STOP_LOSS_PCT)}%`,
     takeProfit: `${String(cfg.FUTURES_TAKE_PROFIT_PCT)}%`,
   });
 
+  const releaseLock = async () => {
+    await redis.eval(
+      `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) else return 0 end`,
+      1, MONITOR_LOCK_KEY, lockToken,
+    ).catch((e: unknown) => { logger.warn('[futures-monitor] lock release failed', { error: String(e) }); });
+  };
+
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    // Refresh lock TTL each cycle to stay alive.
+    await redis.eval(
+      `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("expire",KEYS[1],ARGV[2]) else return 0 end`,
+      1, MONITOR_LOCK_KEY, lockToken, String(MONITOR_LOCK_TTL_SEC),
+    ).catch((e: unknown) => { logger.warn('[futures-monitor] lock refresh failed', { error: String(e) }); });
     try {
       const positions = await hl.getOpenPositions();
       

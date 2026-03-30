@@ -15,7 +15,9 @@ export class BinanceFeed {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectCount = 0;
 
-  constructor(symbols: string[] = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt', 'bnbusdt', 'taousdt', 'dogeusdt', 'adausdt', 'avaxusdt', 'linkusdt', 'suiusdt', 'shibusdt', 'pepeusdt']) {
+  constructor(symbols: string[] = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt', 'bnbusdt', 'taousdt', 'dogeusdt', 'adausdt', 'avaxusdt', 'linkusdt', 'suiusdt']) {
+    // Note: shibusdt/pepeusdt removed from defaults — SHIB/PEPE have no Hyperliquid perp entries
+    // in HL_SYMBOL_MAP, so spot moves would never trigger valid arb cycles. Add back if HL lists them.
     this.symbols = symbols.map(s => s.toLowerCase());
   }
 

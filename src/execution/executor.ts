@@ -564,14 +564,12 @@ export async function executeSignals(
   for (const signal of signals) {
     const result = await executeSignal(signal, redis, sessionExposureUsd);
     
-    // If trade succeeded, track HL margin consumed so subsequent margin checks account for API lag.
-    if (result.tradeResult?.success) {
-      if (result.executionVenue === 'hyperliquid') {
-        sessionExposureUsd += signal.stakeUsd;
-      } else if (result.hedgeAttempted) {
-        // Hedge was confirmed placed — add its margin to session exposure.
-        sessionExposureUsd += signal.stakeUsd;
-      }
+    // If trade succeeded on HL, track margin so subsequent margin checks account for API lag.
+    // Do NOT add hedgeAttempted to session exposure — the hedge is fire-and-forget and may
+    // not have executed; adding it optimistically would cause false margin-cap rejections.
+    // The hedge's margin will appear in the next cycle's live positions from HL.
+    if (result.tradeResult?.success && result.executionVenue === 'hyperliquid') {
+      sessionExposureUsd += signal.stakeUsd;
     }
     
     results.push(result);

@@ -18,6 +18,7 @@
 import { logger } from '../shared/logger.js';
 import { getSimmerPositions, submitRedeem, SimmerError } from '../shared/simmer.js';
 import { closePosition, getOpenPositions, getPosition } from '../execution/positionLedger.js';
+import type { Position } from '../execution/positionLedger.js';
 import { redeemClobOutcome } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
@@ -64,7 +65,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
     return results;
   }
 
-  const redeemable = resolvedPositions.filter((p: any) => p.redeemable === true);
+  const redeemable = resolvedPositions.filter((p) => p.redeemable === true);
 
   if (redeemable.length === 0) {
     logger.debug('[redeemer] no redeemable positions found');
@@ -182,7 +183,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
  */
 async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): Promise<void> {
   const allPositions = await getOpenPositions(redis);
-  const clobPositions = allPositions.filter((p: any) => p.executionVenue === 'clob');
+  const clobPositions = allPositions.filter((p: Position) => p.executionVenue === 'clob');
 
   if (clobPositions.length === 0) return;
 
@@ -259,14 +260,13 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): P
       });
 
       // Notify
-      const notifyOpts: any = {
+      await notifyRedemptionExecuted({
         marketId: pos.marketId,
-        question: pos.question,
+        question: pos.question ?? pos.marketId,
         side,
         valueUsdc: proceedsUsdc,
-      };
-      if (redeemResult.tx_hash) notifyOpts.txHash = redeemResult.tx_hash;
-      await notifyRedemptionExecuted(notifyOpts);
+        ...(redeemResult.tx_hash ? { txHash: redeemResult.tx_hash } : {}),
+      });
 
       logger.info('[redeemer] CLOB position redeemed', {
         marketId: pos.marketId,
