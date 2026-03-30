@@ -233,21 +233,16 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         continue;
       }
 
-      if (!market.endDate) {
-        // No endDate — cannot determine time to resolution. Skip to avoid entering
-        // markets that may resolve imminently.
-        logger.info('[copytrade] skipped market with no endDate', { marketId: market.id, slug: trade.slug });
-        await markDedup();
-        continue;
-      }
-      const hoursToResolve = (new Date(market.endDate).getTime() - Date.now()) / 3_600_000;
-      if (hoursToResolve < cfg.COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS) {
-        logger.info('[copytrade] skipped near-resolution market', {
-          marketId: market.id,
-          hoursToResolve: hoursToResolve.toFixed(2),
-        });
-        await markDedup();
-        continue;
+      if (market.endDate) {
+        const hoursToResolve = (new Date(market.endDate).getTime() - Date.now()) / 3_600_000;
+        if (hoursToResolve < cfg.COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS) {
+          logger.info('[copytrade] skipped near-resolution market', {
+            marketId: market.id,
+            hoursToResolve: hoursToResolve.toFixed(2),
+          });
+          await markDedup();
+          continue;
+        }
       }
 
       const liquidity = Number.parseFloat(market.liquidity ?? '0');
