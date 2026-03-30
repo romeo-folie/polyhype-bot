@@ -54,28 +54,40 @@ fi
 
 echo "[monitor] creating tmux session: $SESSION"
 
-# ── Build dashboard ────────────────────────────────────────────────────────────
-# Commands passed directly to split-window — no send-keys, no timing races.
+# ── Build 6-pane layout ────────────────────────────────────────────────────────
+# Strategy: create a 3-window session, each window split into 2 panes side-by-side.
+# Window 1: Workers (spot-feed | arb)
+# Window 2: Workers (copytrade | futures)
+# Window 3: Cron logs (trade | monitor)
+# Then merge into a single window with 6 panes using join-pane.
+#
+# Simpler approach: build left column first, then right column using split-h/v targeting.
 
-tmux new-session  -d -s "$SESSION" -n Dashboard \
+# Window with pane 0: spot-feed
+tmux new-session -d -s "$SESSION" -n Dashboard \
   "tail -f '${PM2_LOGS}/pga-spot-feed-out.log'"
 
-tmux split-window -t "$SESSION" \
+# Split pane 0 vertically → pane 1: arb
+tmux split-window -v -t "${SESSION}:0.0" \
   "tail -f '${PM2_LOGS}/pga-arb-out.log'"
 
-tmux split-window -t "$SESSION" \
+# Split pane 1 vertically → pane 2: copytrade
+tmux split-window -v -t "${SESSION}:0.1" \
   "tail -f '${PM2_LOGS}/pga-copytrade-out.log'"
 
-tmux split-window -t "$SESSION" \
+# Split pane 0 horizontally → pane 3: futures (right of spot-feed)
+tmux split-window -h -t "${SESSION}:0.0" \
   "tail -f '${PM2_LOGS}/pga-futures-out.log'"
 
-tmux split-window -t "$SESSION" \
+# Split pane 3 vertically → pane 4: cron:trade
+tmux split-window -v -t "${SESSION}:0.3" \
   "tail -f /tmp/pga-trade.log"
 
-tmux split-window -t "$SESSION" \
+# Split pane 4 vertically → pane 5: cron:monitor
+tmux split-window -v -t "${SESSION}:0.4" \
   "tail -f /tmp/pga-monitor.log"
 
 tmux select-layout  -t "$SESSION" tiled
 tmux set-option     -t "$SESSION" remain-on-exit on
-tmux select-pane    -t "$SESSION:0.0"
+tmux select-pane    -t "${SESSION}:0.0"
 tmux attach-session -t "$SESSION"
