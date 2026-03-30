@@ -1,119 +1,74 @@
 /**
- * Candle Aggregator — Phase 9
+ * Candle aggregator.
  *
- * Resamples raw tick data from BinanceFeed (stored in Redis sorted sets)
- * into 1-minute OHLCV candles for technical indicator computation.
+ * Resamples raw tick data from the BinanceFeed sorted set into 1-minute OHLCV candles.
+ * BinanceFeed stores ticks as: key=spot:prices:<symbol>, members="<timestamp>:<price>", score=timestamp(ms)
  */
 
 import type { Redis } from 'ioredis';
 
 export interface OHLCVCandle {
-  openTime: number;   // bucket start ms
+  openTime: number; // bucket start ms (floor of minute)
   open: number;
   high: number;
   low: number;
   close: number;
-  volume: number;     // tick count as volume proxy
+  volume: number; // tick count as volume proxy
 }
+
+const MINUTE_MS = 60_000;
+const DEFAULT_LOOKBACK_MS = 60 * MINUTE_MS; // 60 minutes
 
 /**
  * Build 1-minute OHLCV candles from the raw tick sorted set.
  * Returns candles sorted oldest-first.
  * Exported for unit testing.
- *
- * @param symbol - Binance symbol (e.g. 'btcusdt')
- * @param redis - Redis client
- * @param lookbackMs - Lookback window in milliseconds (default: 60 minutes)
- * @returns Array of OHLCV candles sorted by openTime ascending
  */
 export async function buildCandles(
   symbol: string,
   redis: Redis,
-  lookbackMs = 40 * 60 * 1000,  // 40 minutes default (enough for MACD slow=26 + signal=9)
+  lookbackMs: number = DEFAULT_LOOKBACK_MS,
 ): Promise<OHLCVCandle[]> {
   const key = `spot:prices:${symbol}`;
   const now = Date.now();
-  const minScore = now - lookbackMs;
+  const from = now - lookbackMs;
 
-  // Fetch all ticks in the lookback window
-  // Members are stored as "timestamp:price", score is the timestamp
-  let entries: string[];
-  try {
-    entries = await redis.zrangebyscore(key, minScore, now);
-  } catch (err) {
-    return [];  // Redis failure → return empty candles
-  }
+  const entries = await redis.zrangebyscore(key, from, '+inf');
+  if (entries.length === 0) return [];
 
-  if (entries.length === 0) {
-    return [];
-  }
-
-  // Parse ticks: "timestamp:price" → { timestamp, price }
-  interface Tick {
-    timestamp: number;
-    price: number;
-  }
-
-  const ticks: Tick[] = [];
+  // Group ticks into 1-minute buckets
+  const buckets = new Map<number, number[]>();
   for (const entry of entries) {
-    const parts = entry.split(':');
-    const timestamp = parseInt(parts[0] ?? '0', 10);
-    const price = parseFloat(parts[1] ?? '0');
+    const colonIdx = entry.indexOf(':');
+    if (colonIdx === -1) continue;
+    const ts = parseInt(entry.slice(0, colonIdx), 10);
+    const price = parseFloat(entry.slice(colonIdx + 1));
+    if (!isFinite(ts) || !isFinite(price) || price <= 0) continue;
 
-    // Skip invalid entries
-    if (isFinite(timestamp) && timestamp > 0 && isFinite(price) && price > 0) {
-      ticks.push({ timestamp, price });
+    const bucket = Math.floor(ts / MINUTE_MS) * MINUTE_MS;
+    const existing = buckets.get(bucket);
+    if (existing) {
+      existing.push(price);
+    } else {
+      buckets.set(bucket, [price]);
     }
   }
 
-  if (ticks.length === 0) {
-    return [];
-  }
+  if (buckets.size === 0) return [];
 
-  // Group ticks by 1-minute buckets
-  const buckets = new Map<number, Tick[]>();
-
-  for (const tick of ticks) {
-    const bucketStart = Math.floor(tick.timestamp / 60_000) * 60_000;
-    const existing = buckets.get(bucketStart) ?? [];
-    existing.push(tick);
-    buckets.set(bucketStart, existing);
-  }
-
-  // Build OHLCV candles from each bucket
   const candles: OHLCVCandle[] = [];
-
-  for (const [openTime, bucketTicks] of buckets.entries()) {
-    if (bucketTicks.length === 0) continue;
-
-    // Sort ticks by timestamp within bucket to ensure correct open/close
-    bucketTicks.sort((a, b) => a.timestamp - b.timestamp);
-
-    const open = bucketTicks[0]!.price;
-    const close = bucketTicks[bucketTicks.length - 1]!.price;
-
-    // Find high/low without spread operator (avoids stack overflow on large tick counts)
-    let high = bucketTicks[0]!.price;
-    let low = bucketTicks[0]!.price;
-    for (const tick of bucketTicks) {
-      if (tick.price > high) high = tick.price;
-      if (tick.price < low) low = tick.price;
-    }
-
-    const volume = bucketTicks.length;  // tick count as volume proxy
-
+  for (const [openTime, prices] of buckets) {
     candles.push({
       openTime,
-      open,
-      high,
-      low,
-      close,
-      volume,
+      open: prices[0]!,
+      high: Math.max(...prices),
+      low: Math.min(...prices),
+      close: prices[prices.length - 1]!,
+      volume: prices.length,
     });
   }
 
-  // Sort candles by openTime ascending (oldest first)
+  // Sort ascending by openTime
   candles.sort((a, b) => a.openTime - b.openTime);
-
   return candles;
 }

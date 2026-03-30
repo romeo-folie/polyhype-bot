@@ -12,6 +12,7 @@ import { getPriceFeed } from '../shared/feedSingleton.js';
 import { findCorrelatedMarkets, type CorrelatedMarket } from '../spot/marketCorrelator.js';
 import { estimateFastConsensus } from '../spot/fastPathConsensus.js';
 import { getBankroll } from '../shared/bankroll.js';
+import { scoreConfluence } from './confluenceScorer.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { Redis } from 'ioredis';
 import { scoreConfluence } from './confluenceScorer.js';
@@ -172,6 +173,31 @@ export async function scanCryptoArb(
     }
   }
 
+  // Confluence gate — BTC only, requires CRYPTO_ARB_MIN_CONFLUENCE_SCORE indicators to agree
+  let confluenceDirection: 'UP' | 'DOWN' | 'NEUTRAL' | null = null;
+  if (cfg.CONFLUENCE_GATE_ENABLED && move.assetId === 'bitcoin') {
+    const btcSymbol = Object.entries(BINANCE_SYMBOL_TO_ASSET).find(([, v]) => v === move.assetId)?.[0];
+    if (btcSymbol) {
+      const confluence = await scoreConfluence(btcSymbol, redis);
+      if (confluence.score < cfg.CRYPTO_ARB_MIN_CONFLUENCE_SCORE) {
+        logger.debug('[crypto-arb] insufficient indicator confluence — skipping', {
+          assetId: move.assetId,
+          score: confluence.score,
+          direction: confluence.direction,
+          signals: confluence.signals,
+        });
+        return [];
+      }
+      confluenceDirection = confluence.direction;
+      logger.debug('[crypto-arb] confluence gate passed', {
+        assetId: move.assetId,
+        score: confluence.score,
+        direction: confluence.direction,
+        signals: confluence.signals,
+      });
+    }
+  }
+
   // Unknown asset — no search queries mapped
   const queries = CRYPTO_ASSET_SEARCH_QUERIES[move.assetId];
   if (!queries) {
@@ -277,6 +303,14 @@ export async function scanCryptoArb(
           });
           continue;
         }
+      }
+
+      // 4b. Direction alignment with confluence (BTC only)
+      // Only trade YES on bullish confluence, NO on bearish confluence.
+      if (confluenceDirection && confluenceDirection !== 'NEUTRAL') {
+        const expectUp = confluenceDirection === 'UP';
+        if (direction === 'YES' && !expectUp) continue;
+        if (direction === 'NO' && expectUp) continue;
       }
 
       // 5. Dedup check

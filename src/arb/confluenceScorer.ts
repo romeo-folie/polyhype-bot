@@ -1,16 +1,26 @@
 /**
- * Confluence Scorer — Phase 9
+ * Confluence scorer.
  *
- * Aggregates RSI, MACD, and Stochastic signals into a single confluence score
- * with direction (UP/DOWN/NEUTRAL) for BTC crypto-arb gating.
+ * Aggregates RSI, MACD, and Stochastic signals into a directional score.
+ * Score 0–3: count of indicators agreeing on same direction.
+ * Direction: UP (bullish) or DOWN (bearish) or NEUTRAL.
+ *
+ * Rules:
+ *   RSI:        < 30 → oversold (+1 UP), > 70 → overbought (+1 DOWN)
+ *   MACD:       histogram > 0 AND macdLine > signalLine → bullish_cross (+1 UP)
+ *               histogram < 0 AND macdLine < signalLine → bearish_cross (+1 DOWN)
+ *   Stochastic: %K > %D AND both below 20 → oversold_cross (+1 UP)
+ *               %K < %D AND both above 80 → overbought_cross (+1 DOWN)
  */
 
 import type { Redis } from 'ioredis';
-import { computeRSI, computeMACD, computeStochastic } from './indicators.js';
+import { buildCandles } from './candleAggregator.js';
+import { computeRSIFromCandles, computeMACDFromCandles, computeStochasticFromCandles } from './indicators.js';
+import { loadConfig } from '../shared/config.js';
 
 export interface ConfluenceScore {
   direction: 'UP' | 'DOWN' | 'NEUTRAL';
-  score: number;        // 0–3: count of indicators agreeing on direction
+  score: number; // 0 (no signal) to 3 (all 3 agree)
   signals: {
     rsi?: 'oversold' | 'overbought' | 'neutral';
     macd?: 'bullish_cross' | 'bearish_cross' | 'neutral';
@@ -18,89 +28,80 @@ export interface ConfluenceScore {
   };
 }
 
-/**
- * Score confluence across RSI, MACD, and Stochastic indicators.
- *
- * Signal rules:
- * - RSI: < 30 → oversold (+1 UP), > 70 → overbought (+1 DOWN), else neutral
- * - MACD: histogram > 0 AND macdLine > signalLine → bullish_cross (+1 UP),
- *         histogram < 0 AND macdLine < signalLine → bearish_cross (+1 DOWN), else neutral
- * - Stochastic: %K > %D AND both below 20 → oversold_cross (+1 UP),
- *               %K < %D AND both above 80 → overbought_cross (+1 DOWN), else neutral
- *
- * @param symbol - Binance symbol (e.g. 'btcusdt')
- * @param redis - Redis client
- * @returns ConfluenceScore with direction, score (0-3), and individual signals
- */
-export async function scoreConfluence(
-  symbol: string,
-  redis: Redis,
-): Promise<ConfluenceScore> {
-  // Compute all indicators in parallel
-  const [rsi, macd, stochastic] = await Promise.all([
-    computeRSI(symbol, redis),
-    computeMACD(symbol, redis),
-    computeStochastic(symbol, redis),
-  ]);
+export async function scoreConfluence(symbol: string, redis: Redis): Promise<ConfluenceScore> {
+  const cfg = loadConfig();
+
+  // Build candles once for all three indicators (avoids triple Redis fetch)
+  const candles = await buildCandles(symbol, redis);
+
+  // Compute all three indicators from the same candle set
+  const rsi = computeRSIFromCandles(candles, cfg.RSI_PERIOD);
+  const macd = computeMACDFromCandles(candles, cfg.MACD_FAST, cfg.MACD_SLOW, cfg.MACD_SIGNAL);
+  const stoch = computeStochasticFromCandles(candles, cfg.STOCHASTIC_K_PERIOD, cfg.STOCHASTIC_D_PERIOD);
+
+  return scoreFromValues(rsi, macd, stoch);
+}
+
+/** Exported for unit testing with pre-computed values. */
+export function scoreFromValues(
+  rsi: number | null,
+  macd: { macdLine: number; signalLine: number; histogram: number } | null,
+  stoch: { k: number; d: number } | null,
+): ConfluenceScore {
+  let upCount = 0;
+  let downCount = 0;
 
   const signals: ConfluenceScore['signals'] = {};
-  let upVotes = 0;
-  let downVotes = 0;
 
-  // ── RSI signal ──
+  // RSI signal
   if (rsi !== null) {
     if (rsi < 30) {
       signals.rsi = 'oversold';
-      upVotes++;
+      upCount++;
     } else if (rsi > 70) {
       signals.rsi = 'overbought';
-      downVotes++;
+      downCount++;
     } else {
       signals.rsi = 'neutral';
     }
   }
 
-  // ── MACD signal ──
+  // MACD signal
   if (macd !== null) {
     if (macd.histogram > 0 && macd.macdLine > macd.signalLine) {
       signals.macd = 'bullish_cross';
-      upVotes++;
+      upCount++;
     } else if (macd.histogram < 0 && macd.macdLine < macd.signalLine) {
       signals.macd = 'bearish_cross';
-      downVotes++;
+      downCount++;
     } else {
       signals.macd = 'neutral';
     }
   }
 
-  // ── Stochastic signal ──
-  if (stochastic !== null) {
-    if (stochastic.k > stochastic.d && stochastic.k < 20 && stochastic.d < 20) {
+  // Stochastic signal
+  if (stoch !== null) {
+    if (stoch.k > stoch.d && stoch.k < 20 && stoch.d < 20) {
       signals.stochastic = 'oversold_cross';
-      upVotes++;
-    } else if (stochastic.k < stochastic.d && stochastic.k > 80 && stochastic.d > 80) {
+      upCount++;
+    } else if (stoch.k < stoch.d && stoch.k > 80 && stoch.d > 80) {
       signals.stochastic = 'overbought_cross';
-      downVotes++;
+      downCount++;
     } else {
       signals.stochastic = 'neutral';
     }
   }
 
-  // Determine direction and score
   let direction: 'UP' | 'DOWN' | 'NEUTRAL';
-  let score: number;
-
-  if (upVotes > downVotes) {
+  if (upCount > downCount) {
     direction = 'UP';
-    score = upVotes;
-  } else if (downVotes > upVotes) {
+  } else if (downCount > upCount) {
     direction = 'DOWN';
-    score = downVotes;
   } else {
-    // Tie or all neutral
     direction = 'NEUTRAL';
-    score = upVotes;  // could be 0 or a tie value
   }
+
+  const score = Math.max(upCount, downCount);
 
   return { direction, score, signals };
 }

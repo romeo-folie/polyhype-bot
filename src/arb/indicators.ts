@@ -1,22 +1,53 @@
 /**
- * Technical Indicators — Phase 9
+ * Technical indicators for the crypto-arb confluence engine.
  *
- * RSI, MACD, and Stochastic Oscillator computed from OHLCV candles.
- * All functions return null when insufficient data is available.
+ * All indicators are computed from 1-minute OHLCV candles built from the
+ * BinanceFeed tick series (spot:prices:<symbol> sorted set).
+ *
+ * Functions return null when insufficient data is available.
  */
 
 import type { Redis } from 'ioredis';
-import { buildCandles } from './candleAggregator.js';
+import { buildCandles, type OHLCVCandle } from './candleAggregator.js';
 import { loadConfig } from '../shared/config.js';
 
+// ---------------------------------------------------------------------------
+// EMA helper (used internally by MACD)
+// ---------------------------------------------------------------------------
+
 /**
- * Compute RSI using Wilder smoothing.
- * Returns null if fewer than (period + 1) candles available.
- *
- * @param symbol - Binance symbol (e.g. 'btcusdt')
- * @param redis - Redis client
- * @param period - RSI period (default from config, typically 14)
- * @returns RSI value (0-100) or null if insufficient data
+ * Compute EMA for a series of values.
+ * EMA[0] = SMA of first `period` values.
+ * EMA[i] = value[i] * k + EMA[i-1] * (1 - k), k = 2 / (period + 1).
+ * Returns null if fewer than `period` values are provided.
+ */
+export function computeEMA(values: number[], period: number): number[] | null {
+  if (values.length < period) return null;
+
+  const k = 2 / (period + 1);
+  const ema: number[] = new Array<number>(values.length);
+
+  // Seed with SMA of first `period` values
+  let sum = 0;
+  for (let i = 0; i < period; i++) {
+    sum += values[i]!;
+  }
+  ema[period - 1] = sum / period;
+
+  for (let i = period; i < values.length; i++) {
+    ema[i] = values[i]! * k + ema[i - 1]! * (1 - k);
+  }
+
+  return ema;
+}
+
+// ---------------------------------------------------------------------------
+// RSI (Wilder smoothing)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute RSI using Wilder's smoothing method.
+ * Returns the most recent RSI value (0–100), or null if insufficient data.
  */
 export async function computeRSI(
   symbol: string,
@@ -24,70 +55,54 @@ export async function computeRSI(
   period?: number,
 ): Promise<number | null> {
   const cfg = loadConfig();
-  const rsiPeriod = period ?? cfg.RSI_PERIOD;
-
+  const p = period ?? cfg.RSI_PERIOD;
   const candles = await buildCandles(symbol, redis);
+  return computeRSIFromCandles(candles, p);
+}
 
-  // Need at least (period + 1) candles to compute first RSI
-  if (candles.length < rsiPeriod + 1) {
-    return null;
+/** Exported for unit testing without Redis. */
+export function computeRSIFromCandles(candles: OHLCVCandle[], period: number): number | null {
+  const closes = candles.map((c) => c.close);
+  if (closes.length < period + 1) return null;
+
+  // Initial average gain/loss over first `period` changes
+  let avgGain = 0;
+  let avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
+    const change = closes[i]! - closes[i - 1]!;
+    if (change > 0) avgGain += change;
+    else avgLoss += Math.abs(change);
+  }
+  avgGain /= period;
+  avgLoss /= period;
+
+  // Wilder smoothing for remaining periods
+  for (let i = period + 1; i < closes.length; i++) {
+    const change = closes[i]! - closes[i - 1]!;
+    const gain = change > 0 ? change : 0;
+    const loss = change < 0 ? Math.abs(change) : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
   }
 
-  const closes = candles.map(c => c.close);
-
-  // Compute price changes
-  const changes: number[] = [];
-  for (let i = 1; i < closes.length; i++) {
-    changes.push(closes[i]! - closes[i - 1]!);
-  }
-
-  // Split into gains and losses
-  const gains = changes.map(c => (c > 0 ? c : 0));
-  const losses = changes.map(c => (c < 0 ? -c : 0));
-
-  // Initial average gain/loss (SMA of first `period` values)
-  let avgGain = gains.slice(0, rsiPeriod).reduce((sum, g) => sum + g, 0) / rsiPeriod;
-  let avgLoss = losses.slice(0, rsiPeriod).reduce((sum, l) => sum + l, 0) / rsiPeriod;
-
-  // Apply Wilder smoothing for remaining values
-  for (let i = rsiPeriod; i < gains.length; i++) {
-    avgGain = (avgGain * (rsiPeriod - 1) + gains[i]!) / rsiPeriod;
-    avgLoss = (avgLoss * (rsiPeriod - 1) + losses[i]!) / rsiPeriod;
-  }
-
-  // Calculate RSI with edge case handling
-  if (avgLoss === 0 && avgGain === 0) {
-    return 50;  // Flat market → neutral RSI
-  }
-  if (avgLoss === 0) {
-    return 100;  // Pure gains → RSI = 100
-  }
-  if (avgGain === 0) {
-    return 0;    // Pure losses → RSI = 0
-  }
-
+  if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
-  const rsi = 100 - (100 / (1 + rs));
+  return 100 - 100 / (1 + rs);
+}
 
-  // Guard against NaN/Infinity from numerical errors
-  if (!isFinite(rsi)) {
-    return 50;  // Fallback to neutral
-  }
+// ---------------------------------------------------------------------------
+// MACD
+// ---------------------------------------------------------------------------
 
-  return rsi;
+export interface MACDResult {
+  macdLine: number;
+  signalLine: number;
+  histogram: number;
 }
 
 /**
- * Compute MACD (line, signal, histogram).
- * Uses EMA for smoothing.
- * Returns null if insufficient candles.
- *
- * @param symbol - Binance symbol
- * @param redis - Redis client
- * @param fastPeriod - Fast EMA period (default from config, typically 12)
- * @param slowPeriod - Slow EMA period (default from config, typically 26)
- * @param signalPeriod - Signal line EMA period (default from config, typically 9)
- * @returns { macdLine, signalLine, histogram } or null
+ * Compute MACD (line, signal, histogram) from candle closes.
+ * Returns the most recent values, or null if insufficient data.
  */
 export async function computeMACD(
   symbol: string,
@@ -95,163 +110,107 @@ export async function computeMACD(
   fastPeriod?: number,
   slowPeriod?: number,
   signalPeriod?: number,
-): Promise<{ macdLine: number; signalLine: number; histogram: number } | null> {
+): Promise<MACDResult | null> {
   const cfg = loadConfig();
   const fast = fastPeriod ?? cfg.MACD_FAST;
   const slow = slowPeriod ?? cfg.MACD_SLOW;
   const signal = signalPeriod ?? cfg.MACD_SIGNAL;
-
   const candles = await buildCandles(symbol, redis);
+  return computeMACDFromCandles(candles, fast, slow, signal);
+}
 
-  // Need at least slow + signal candles for full MACD
-  if (candles.length < slow + signal) {
-    return null;
+/** Exported for unit testing without Redis. */
+export function computeMACDFromCandles(
+  candles: OHLCVCandle[],
+  fastPeriod: number,
+  slowPeriod: number,
+  signalPeriod: number,
+): MACDResult | null {
+  const closes = candles.map((c) => c.close);
+  if (closes.length < slowPeriod + signalPeriod) return null;
+
+  const fastEMA = computeEMA(closes, fastPeriod);
+  const slowEMA = computeEMA(closes, slowPeriod);
+  if (!fastEMA || !slowEMA) return null;
+
+  // MACD line = fastEMA - slowEMA (only valid from slowPeriod-1 onwards)
+  const macdLine: number[] = [];
+  for (let i = slowPeriod - 1; i < closes.length; i++) {
+    macdLine.push(fastEMA[i]! - slowEMA[i]!);
   }
 
-  const closes = candles.map(c => c.close);
+  if (macdLine.length < signalPeriod) return null;
 
-  // Compute EMA
-  const emaFast = computeEMA(closes, fast);
-  const emaSlow = computeEMA(closes, slow);
+  const signalEMA = computeEMA(macdLine, signalPeriod);
+  if (!signalEMA) return null;
 
-  if (emaFast === null || emaSlow === null) {
-    return null;
-  }
+  const lastMacd = macdLine[macdLine.length - 1]!;
+  const lastSignal = signalEMA[signalEMA.length - 1]!;
 
-  const macdLine = emaFast - emaSlow;
+  return {
+    macdLine: lastMacd,
+    signalLine: lastSignal,
+    histogram: lastMacd - lastSignal,
+  };
+}
 
-  // Compute MACD line series for signal EMA
-  const macdSeries: number[] = [];
-  for (let i = slow - 1; i < closes.length; i++) {
-    const fastVal = computeEMAAtIndex(closes, fast, i);
-    const slowVal = computeEMAAtIndex(closes, slow, i);
-    if (fastVal !== null && slowVal !== null) {
-      macdSeries.push(fastVal - slowVal);
-    }
-  }
+// ---------------------------------------------------------------------------
+// Stochastic Oscillator
+// ---------------------------------------------------------------------------
 
-  if (macdSeries.length < signal) {
-    return null;
-  }
-
-  const signalLine = computeEMA(macdSeries, signal);
-
-  if (signalLine === null) {
-    return null;
-  }
-
-  const histogram = macdLine - signalLine;
-
-  // Guard against NaN/Infinity
-  if (!isFinite(macdLine) || !isFinite(signalLine) || !isFinite(histogram)) {
-    return null;
-  }
-
-  return { macdLine, signalLine, histogram };
+export interface StochasticResult {
+  k: number; // %K
+  d: number; // %D (SMA of %K)
 }
 
 /**
  * Compute Stochastic Oscillator (%K and %D).
  * %K = (close - lowestLow) / (highestHigh - lowestLow) * 100
  * %D = SMA of last dPeriod %K values
- * Returns null if insufficient candles.
- *
- * @param symbol - Binance symbol
- * @param redis - Redis client
- * @param kPeriod - %K period (default from config, typically 14)
- * @param dPeriod - %D SMA period (default from config, typically 3)
- * @returns { k: number, d: number } or null
+ * Returns the most recent values, or null if insufficient data.
  */
 export async function computeStochastic(
   symbol: string,
   redis: Redis,
   kPeriod?: number,
   dPeriod?: number,
-): Promise<{ k: number; d: number } | null> {
+): Promise<StochasticResult | null> {
   const cfg = loadConfig();
-  const k = kPeriod ?? cfg.STOCHASTIC_K_PERIOD;
-  const d = dPeriod ?? cfg.STOCHASTIC_D_PERIOD;
-
+  const kP = kPeriod ?? cfg.STOCHASTIC_K_PERIOD;
+  const dP = dPeriod ?? cfg.STOCHASTIC_D_PERIOD;
   const candles = await buildCandles(symbol, redis);
+  return computeStochasticFromCandles(candles, kP, dP);
+}
 
-  // Need at least k + d - 1 candles to compute %D
-  if (candles.length < k + d - 1) {
-    return null;
-  }
+/** Exported for unit testing without Redis. */
+export function computeStochasticFromCandles(
+  candles: OHLCVCandle[],
+  kPeriod: number,
+  dPeriod: number,
+): StochasticResult | null {
+  if (candles.length < kPeriod + dPeriod - 1) return null;
 
-  // Compute %K for each candle (starting at index k-1)
+  // Compute %K for each position from kPeriod onwards
   const kValues: number[] = [];
-
-  for (let i = k - 1; i < candles.length; i++) {
-    const window = candles.slice(i - k + 1, i + 1);
-    const high = Math.max(...window.map(c => c.high));
-    const low = Math.min(...window.map(c => c.low));
+  for (let i = kPeriod - 1; i < candles.length; i++) {
+    const window = candles.slice(i - kPeriod + 1, i + 1);
+    const highestHigh = Math.max(...window.map((c) => c.high));
+    const lowestLow = Math.min(...window.map((c) => c.low));
     const close = candles[i]!.close;
 
-    if (high === low) {
-      // Avoid division by zero — set %K to 50 (neutral)
-      kValues.push(50);
+    if (highestHigh === lowestLow) {
+      kValues.push(50); // flat range — neutral
     } else {
-      const kValue = ((close - low) / (high - low)) * 100;
-      kValues.push(kValue);
+      kValues.push(((close - lowestLow) / (highestHigh - lowestLow)) * 100);
     }
   }
 
-  if (kValues.length < d) {
-    return null;
-  }
+  if (kValues.length < dPeriod) return null;
 
-  // Latest %K
-  const latestK = kValues[kValues.length - 1]!;
+  // %D = SMA of last dPeriod %K values
+  const lastK = kValues[kValues.length - 1]!;
+  const dWindow = kValues.slice(-dPeriod);
+  const lastD = dWindow.reduce((sum, v) => sum + v, 0) / dPeriod;
 
-  // %D = SMA of last d %K values
-  const dWindow = kValues.slice(-d);
-  const latestD = dWindow.reduce((sum, val) => sum + val, 0) / d;
-
-  // Guard against NaN/Infinity
-  if (!isFinite(latestK) || !isFinite(latestD)) {
-    return null;
-  }
-
-  return { k: latestK, d: latestD };
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Helper functions
-// ────────────────────────────────────────────────────────────────────────────
-
-/**
- * Compute EMA for a price series.
- * Returns the latest EMA value or null if insufficient data.
- */
-function computeEMA(prices: number[], period: number): number | null {
-  if (prices.length < period) {
-    return null;
-  }
-
-  // Initial SMA
-  const sma = prices.slice(0, period).reduce((sum, p) => sum + p, 0) / period;
-  let ema = sma;
-
-  const k = 2 / (period + 1);
-
-  // Apply EMA formula for remaining values
-  for (let i = period; i < prices.length; i++) {
-    ema = prices[i]! * k + ema * (1 - k);
-  }
-
-  return ema;
-}
-
-/**
- * Compute EMA value at a specific index in the price series.
- * Used for building MACD line series.
- */
-function computeEMAAtIndex(prices: number[], period: number, index: number): number | null {
-  if (index < period - 1) {
-    return null;
-  }
-
-  const slice = prices.slice(0, index + 1);
-  return computeEMA(slice, period);
+  return { k: lastK, d: lastD };
 }

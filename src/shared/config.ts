@@ -85,6 +85,16 @@ const envSchema = z.object({
   CRYPTO_ARB_DEDUP_TTL_S: z.coerce.number().int().positive().optional().default(300),
   CRYPTO_ARB_MARKET_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
 
+  // Phase 9 — Indicator confluence gate
+  CONFLUENCE_GATE_ENABLED: z.coerce.boolean().optional().default(true),
+  CRYPTO_ARB_MIN_CONFLUENCE_SCORE: z.coerce.number().int().min(0).max(3).optional().default(2),
+  RSI_PERIOD: z.coerce.number().int().min(2).optional().default(14),
+  MACD_FAST: z.coerce.number().int().min(1).optional().default(12),
+  MACD_SLOW: z.coerce.number().int().min(1).optional().default(26),
+  MACD_SIGNAL: z.coerce.number().int().min(1).optional().default(9),
+  STOCHASTIC_K_PERIOD: z.coerce.number().int().min(1).optional().default(14),
+  STOCHASTIC_D_PERIOD: z.coerce.number().int().min(1).optional().default(3),
+
   // Continuous improvement (Phase 8)
   CALIBRATION_ENABLED: z.coerce.boolean().optional().default(true),
   MIN_BET_USD: z.coerce.number().min(0).optional().default(5),
