@@ -9,6 +9,7 @@
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { searchEvents, parseOutcomePrices, parseClobTokenIds } from './gamma.js';
+import { importMarket } from '../shared/simmerImport.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 
 const TIMEOUT_MS = 20_000;
@@ -185,6 +186,19 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
             description: market.description ?? null,
             matchedQuery: query,
           });
+
+          // Fire-and-forget Simmer import if enabled.
+          // Pre-registers market in Simmer for enriched trading (divergence, tags, internal ID).
+          const cfg = loadConfig();
+          if (cfg.SIMMER_AUTO_IMPORT_ENABLED && event.slug) {
+            const polymarketUrl = `https://polymarket.com/event/${event.slug}`;
+            void importMarket(polymarketUrl).catch((err) => {
+              logger.debug('[entity-extractor] simmer import failed (non-blocking)', {
+                marketId: market.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          }
         }
       }
     } catch (err) {
