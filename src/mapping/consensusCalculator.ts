@@ -147,7 +147,9 @@ async function callGemini(
 }
 
 function parseResult(raw: string): ConsensusResult {
-  const parsed = JSON.parse(raw) as { probability?: unknown; reasoning?: unknown };
+  // Strip markdown code fences — some models wrap JSON in ```json ... ``` despite instructions
+  const cleaned = raw.replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
+  const parsed = JSON.parse(cleaned) as { probability?: unknown; reasoning?: unknown };
   const probability = Number(parsed.probability);
   if (!isFinite(probability) || probability < 0 || probability > 1) {
     throw new Error(`Invalid probability: ${String(parsed.probability)}`);
