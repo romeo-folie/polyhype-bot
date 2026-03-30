@@ -1,40 +1,39 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 
-// 1. Mock Node/HTTP dependencies first for ESM
-jest.unstable_mockModule('axios', () => ({
+vi.mock('axios', () => ({
   default: {
-    post: jest.fn(),
-    get: jest.fn(),
+    post: vi.fn(),
+    get: vi.fn(),
   },
 }));
 
-// 2. Mock Config
-jest.unstable_mockModule('../config.js', () => ({
-  loadConfig: jest.fn().mockReturnValue({
+vi.mock('../config.js', () => ({
+  loadConfig: vi.fn().mockReturnValue({
     HYPERLIQUID_PRIVATE_KEY: '0x1234567890123456789012345678901234567890123456789012345678901234',
     HYPERLIQUID_TESTNET: true,
+    HL_DRY_RUN: false,
+    FUTURES_IOC_SLIPPAGE: 0.002,
   }),
 }));
 
-// 3. Mock Logger
-jest.unstable_mockModule('../logger.js', () => ({
+vi.mock('../logger.js', () => ({
   logger: {
-    info: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-    warn: jest.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    warn: vi.fn(),
   },
 }));
 
-// 4. Import modules after mocks
 const { default: axios } = await import('axios');
-const { getHyperliquid, HL_SYMBOL_MAP } = await import('../hyperliquid.js');
+const { getHyperliquid, resetHyperliquid, HL_SYMBOL_MAP } = await import('../hyperliquid.js');
 
-const mockedAxios = axios as jest.Mocked<typeof axios>;
+const mockedAxiosPost = vi.mocked(axios.post);
 
 describe('HyperliquidClient', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
+    resetHyperliquid();
   });
 
   it('correctly maps assets in HL_SYMBOL_MAP', () => {
@@ -59,7 +58,7 @@ describe('HyperliquidClient', () => {
       ],
     };
 
-    (mockedAxios.post as jest.Mock).mockResolvedValueOnce({ data: mockState });
+    mockedAxiosPost.mockResolvedValueOnce({ data: mockState });
 
     const positions = await client.getOpenPositions();
 
@@ -70,21 +69,17 @@ describe('HyperliquidClient', () => {
 
   it('placeMarketOrder calculates sizeUsd correctly', async () => {
     const client = getHyperliquid();
-    
+
     // 1. getMeta
-    (mockedAxios.post as jest.Mock).mockResolvedValueOnce({
+    mockedAxiosPost.mockResolvedValueOnce({
       data: { universe: [{ name: 'BTC', szDecimals: 3, index: 0 }] },
     });
     // 2. updateLeverage
-    (mockedAxios.post as jest.Mock).mockResolvedValueOnce({
-      data: { status: 'ok' },
-    });
+    mockedAxiosPost.mockResolvedValueOnce({ data: { status: 'ok' } });
     // 3. getAllMids (for getMidPrice)
-    (mockedAxios.post as jest.Mock).mockResolvedValueOnce({
-      data: { BTC: '50000' },
-    });
+    mockedAxiosPost.mockResolvedValueOnce({ data: { BTC: '50000' } });
     // 4. execution
-    (mockedAxios.post as jest.Mock).mockResolvedValueOnce({
+    mockedAxiosPost.mockResolvedValueOnce({
       data: {
         status: 'ok',
         response: { type: 'order', data: { statuses: [{ filled: { oid: 12345 } }] } },
@@ -99,6 +94,29 @@ describe('HyperliquidClient', () => {
     });
 
     expect(result.success).toBe(true);
-    expect(mockedAxios.post).toHaveBeenCalledTimes(4);
+    expect(mockedAxiosPost).toHaveBeenCalledTimes(4);
+  });
+
+  it('placeMarketOrder returns error when midPrice is zero', async () => {
+    const client = getHyperliquid();
+
+    // getMeta
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { universe: [{ name: 'BTC', szDecimals: 3, index: 0 }] },
+    });
+    // updateLeverage
+    mockedAxiosPost.mockResolvedValueOnce({ data: { status: 'ok' } });
+    // getMidPrice returns 0
+    mockedAxiosPost.mockResolvedValueOnce({ data: { BTC: '0' } });
+
+    const result = await client.placeMarketOrder({
+      symbol: 'BTC',
+      isBuy: true,
+      sizeUsd: 100,
+      leverage: 5,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/invalid value/);
   });
 });

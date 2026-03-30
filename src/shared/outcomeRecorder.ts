@@ -47,10 +47,12 @@ export function inferSource(sourcedFrom: string): PositionOutcome['source'] {
 export function inferCategory(question: string): string {
   const q = question.toLowerCase();
 
-  if (/bitcoin|btc|eth|crypto|solana|doge|dogecoin|xrp|ripple|shib|shiba|pepe|binance|coinbase/.test(q)) {
+  // Short tokens (eth, sol, btc, etc.) are anchored with \b to prevent false matches
+  // like "methane" → eth, "absolute" → sol, "protocol" → btc.
+  if (/bitcoin|\bbtc\b|\beth\b|ethereum|crypto|\bsolana\b|\bsol\b|\bdoge\b|dogecoin|\bxrp\b|ripple|\bshib\b|shiba|\bpepe\b|binance|coinbase/.test(q)) {
     return 'crypto-regulatory';
   }
-  if (/fed|rate|gdp|inflation|bank|cpi|recession/.test(q)) {
+  if (/\bfed\b|\brate\b|\bgdp\b|inflation|\bbank\b|\bcpi\b|recession/.test(q)) {
     return 'macro';
   }
   if (/trump|biden|election|congress|senate|white house|democrat|republican/.test(q)) {

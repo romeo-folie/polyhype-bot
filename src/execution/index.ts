@@ -158,7 +158,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
       // Track HL margin consumed for accurate margin cap checks in subsequent signals.
       if (result.executionVenue === 'hyperliquid') {
         sessionExposureUsd += signal.stakeUsd;
-      } else if (result.hedgeAttempted) {
+      } else if (result.hedgeRequested) {
         sessionExposureUsd += signal.stakeUsd;
       }
 

@@ -37,7 +37,7 @@ export interface ExecutionResult {
   error?: string;
   executionVenue?: 'simmer' | 'clob' | 'hyperliquid';
   /** True if a delta hedge was placed on HL for this trade. */
-  hedgeAttempted?: boolean;
+  hedgeRequested?: boolean;
 }
 
 function idempotencyKey(signal: TradeSignal): string {
@@ -122,21 +122,15 @@ async function executeHyperliquidSignal(
     // Three-layer accounting prevents double-counting across cron cycles during HL settlement lag:
     //   1. totalCurrentMargin  — live positions confirmed by HL
     //   2. knownSessionExposureUsd — within-batch in-flight orders (passed by caller)
-    //   3. pendingMarginUsd — cross-cycle in-flight orders not yet reflected in HL state.
-    //      Stored as { amount, baseline } with a 30s TTL. We subtract any growth in
-    //      totalCurrentMargin from the baseline so that once HL reflects the trade,
-    //      the pending amount doesn't double-count.
+    //   3. pendingMarginUsd — cross-cycle in-flight orders, tracked as a Redis float counter
+    //      (INCRBYFLOAT is atomic — concurrent trades add correctly rather than overwriting).
+    //      TTL = 30s; once HL reflects the trade, the counter expires naturally.
     const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
     let pendingMarginUsd = 0;
     try {
       const pendingRaw = await redis.get('hl:pending_margin_usd');
-      if (pendingRaw) {
-        const pendingEntry = JSON.parse(pendingRaw) as { amount: number; baseline: number };
-        // Only count the portion of pending not yet reflected in live margin.
-        const alreadySettled = Math.max(0, totalCurrentMargin - pendingEntry.baseline);
-        pendingMarginUsd = Math.max(0, pendingEntry.amount - alreadySettled);
-      }
-    } catch { /* treat as zero pending on parse error */ }
+      pendingMarginUsd = pendingRaw ? Math.max(0, parseFloat(pendingRaw)) : 0;
+    } catch { /* treat as zero on error */ }
 
     if (totalCurrentMargin + knownSessionExposureUsd + pendingMarginUsd + signal.stakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
       logger.warn('[executor] skipping — global margin cap exceeded (including pending/session exposure)', {
@@ -165,14 +159,15 @@ async function executeHyperliquidSignal(
     });
 
     if (tradeResult.success) {
-      // Record pending margin so back-to-back cron cycles see the cap correctly.
-      // Store { amount, baseline } where baseline is the live margin at time of this trade.
-      // The cap check subtracts any margin growth above baseline from pending,
-      // so once HL reflects the position, pending contribution drops to zero.
-      const newPendingEntry = { amount: signal.stakeUsd, baseline: totalCurrentMargin };
-      await redis.set('hl:pending_margin_usd', JSON.stringify(newPendingEntry), 'EX', 30).catch((e: unknown) => {
+      // Atomically add this trade's stake to the pending counter.
+      // INCRBYFLOAT is atomic — concurrent trades accumulate correctly rather than overwriting.
+      // TTL is refreshed to 30s; expires naturally once HL reflects the positions.
+      try {
+        await redis.incrbyfloat('hl:pending_margin_usd', signal.stakeUsd);
+        await redis.expire('hl:pending_margin_usd', 30);
+      } catch (e: unknown) {
         logger.debug('[executor] failed to record pending margin (non-fatal)', { error: String(e) });
-      });
+      }
       return {
         signal,
         skipped: false,
@@ -460,7 +455,7 @@ export async function executeSignal(
         });
 
         // Fire-and-forget the delta hedge — do not block PM trade confirmation on HL latency.
-        // hedgeAttempted is reported as true optimistically; errors are logged inside triggerDeltaHedge.
+        // hedgeRequested is reported as true optimistically; errors are logged inside triggerDeltaHedge.
         void triggerDeltaHedge(signal, redis, knownSessionExposureUsd).catch((err) => {
           logger.warn('[executor] delta hedge async error (non-fatal)', {
             marketId: signal.marketId,
@@ -468,7 +463,7 @@ export async function executeSignal(
           });
         });
         const exeResult: ExecutionResult = {
-          signal, skipped: false, tradeResult, executionVenue: 'simmer', hedgeAttempted: true,
+          signal, skipped: false, tradeResult, executionVenue: 'simmer', hedgeRequested: true,
         };
         return exeResult;
       }
@@ -535,7 +530,7 @@ export async function executeSignal(
       skipped: false,
       tradeResult,
       executionVenue: 'clob',
-      hedgeAttempted: true,
+      hedgeRequested: true,
     };
   }
 
@@ -565,7 +560,7 @@ export async function executeSignals(
     const result = await executeSignal(signal, redis, sessionExposureUsd);
     
     // If trade succeeded on HL, track margin so subsequent margin checks account for API lag.
-    // Do NOT add hedgeAttempted to session exposure — the hedge is fire-and-forget and may
+    // Do NOT add hedgeRequested to session exposure — the hedge is fire-and-forget and may
     // not have executed; adding it optimistically would cause false margin-cap rejections.
     // The hedge's margin will appear in the next cycle's live positions from HL.
     if (result.tradeResult?.success && result.executionVenue === 'hyperliquid') {

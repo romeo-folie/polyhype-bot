@@ -240,7 +240,7 @@ describe('redeemClobOutcome', () => {
 
   it('executes via Safe Proxy when sigType=1', async () => {
     const { loadConfig } = await import('../config.js');
-    (loadConfig as any).mockReturnValue({
+    vi.mocked(loadConfig).mockReturnValue({
       POLYGON_WALLET_PRIVATE_KEY: '0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
       POLYMARKET_SIGNATURE_TYPE: 1,
       POLYMARKET_FUNDER_ADDRESS: '0xproxyaddress',

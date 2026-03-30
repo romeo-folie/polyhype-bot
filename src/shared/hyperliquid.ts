@@ -185,8 +185,11 @@ class HyperliquidClient {
         return { success: false, error: `updateLeverage failed for ${opts.symbol} — order aborted to avoid wrong-leverage trade` };
       }
 
-      // 3. Size calculation
+      // 3. Size calculation — guard against zero/invalid mid price to prevent Infinity order size.
       const midPrice = await this.getMidPrice(opts.symbol);
+      if (!midPrice || !isFinite(midPrice) || midPrice <= 0) {
+        return { success: false, error: `getMidPrice returned invalid value (${String(midPrice)}) for ${opts.symbol} — order aborted` };
+      }
       const sizeBase = opts.sizeBase ?? (opts.sizeUsd / midPrice);
 
       // 4. Construct the Action
