@@ -257,26 +257,25 @@ export async function estimateConsensusProbability(opts: {
     }
   }
 
-  // Build provider list — round-robin N_SAMPLES calls across all available providers.
-  // Adding a new provider is a one-line change here; N_SAMPLES controls total call count.
-  const useOpenAI   = Boolean(process.env.OPENAI_API_KEY);
-  const useGemini   = Boolean(process.env.GEMINI_API_KEY);
+  // Call each configured provider exactly once — one vote per model, no duplicates.
+  // CONSENSUS_SAMPLES is no longer used to drive call count; it is kept in config
+  // for backwards compatibility but ignored here.
+  const useOpenAI    = Boolean(process.env.OPENAI_API_KEY);
+  const useGemini    = Boolean(process.env.GEMINI_API_KEY);
   const useAnthropic = Boolean(process.env.ANTHROPIC_API_KEY);
   type ProviderFn = (q: string, d: string | null, h: string, p: number) => Promise<ConsensusResult>;
   const providers: ProviderFn[] = [
-    ...(useOpenAI   ? [callOpenAI   as ProviderFn] : []),
-    ...(useGemini   ? [callGemini   as ProviderFn] : []),
+    ...(useOpenAI    ? [callOpenAI    as ProviderFn] : []),
+    ...(useGemini    ? [callGemini    as ProviderFn] : []),
     ...(useAnthropic ? [callAnthropic as ProviderFn] : []),
   ];
 
-  const calls: Promise<ConsensusResult>[] = [];
   if (providers.length === 0) {
     throw new Error('No LLM providers configured — set OPENAI_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY');
   }
-  for (let i = 0; i < N_SAMPLES; i++) {
-    const provider = providers[i % providers.length]!;
-    calls.push(provider(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice));
-  }
+  const calls = providers.map((provider) =>
+    provider(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice),
+  );
 
   const settled = await Promise.allSettled(calls);
 
