@@ -23,6 +23,7 @@ import { redeemClobOutcome } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
 import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
+// Note: loadConfig is not imported here — all config reads happen in callers or sub-functions.
 import type { Redis } from 'ioredis';
 
 export interface RedemptionResult {

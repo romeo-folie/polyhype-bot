@@ -20,6 +20,7 @@ import { evaluateTakeProfit } from './takeProfitEvaluator.js';
 import { executeTakeProfit } from './takeProfitExecutor.js';
 import { redeemResolvedPositions } from './resolutionRedeemer.js';
 import { runClobProbe } from '../shared/clobProbe.js';
+import { setAgentAutoRedeem } from '../shared/simmer.js';
 
 export async function runMonitor(): Promise<void> {
   const redis = getRedis();
@@ -146,6 +147,14 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
 // Entrypoint when run directly (npx tsx src/monitor/index.ts)
 const isMain = process.argv[1]?.endsWith('monitor/index.ts') ?? false;
 if (isMain) {
+  // Sync Simmer agent auto-redeem setting at startup
+  const cfg = loadConfig();
+  void setAgentAutoRedeem(cfg.SIMMER_AUTO_REDEEM_ENABLED).catch((err) => {
+    logger.warn('[monitor] failed to set Simmer auto-redeem — continuing', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+
   runMonitor()
     .catch((err: unknown) => {
       logger.error('[monitor] fatal error', {

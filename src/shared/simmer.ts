@@ -607,3 +607,44 @@ export async function getPortfolio(): Promise<SimmerPortfolio> {
 
   return parsed.data;
 }
+
+/**
+ * Set auto-redeem setting for the Simmer agent.
+ *
+ * When enabled, Simmer automatically redeems winning positions.
+ * This handles Simmer-venue redemptions; CLOB positions still require manual redemption.
+ *
+ * @param enabled - true to enable auto-redeem, false to disable
+ * @throws {SimmerError} on HTTP 4xx/5xx or network failure
+ */
+export async function setAgentAutoRedeem(enabled: boolean): Promise<void> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
+  const SETTINGS_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/agents/me/settings`;
+
+  const resp = await fetch(SETTINGS_ENDPOINT, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ auto_redeem_enabled: enabled }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+
+  let responseBody: unknown;
+  try {
+    responseBody = await resp.json();
+  } catch {
+    responseBody = await resp.text().catch(() => '(unreadable body)');
+  }
+
+  if (!resp.ok) {
+    throw new SimmerError(
+      `Simmer agent settings API returned HTTP ${resp.status.toString()}`,
+      resp.status,
+      responseBody,
+    );
+  }
+
+  logger.info('[simmer] auto-redeem setting updated', { enabled });
+}
