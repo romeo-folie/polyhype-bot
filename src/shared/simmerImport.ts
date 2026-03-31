@@ -16,13 +16,6 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 // ── Request / response types ──────────────────────────────────────────────────
 
-/** Input to POST /api/sdk/markets/import. */
-export interface SimmerImportInput {
-  /** Polymarket event or single market URL. */
-  polymarket_url: string;
-  /** true = public tracking market (default). */
-  shared?: boolean;
-}
 
 /** Zod schema for Simmer import response. */
 const SimmerImportResultSchema = z.object({

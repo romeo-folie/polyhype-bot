@@ -85,9 +85,13 @@ export async function main(): Promise<void> {
   });
 }
 
-main().catch((err) => {
-  logger.error('[simmer-discovery] fatal error', {
-    error: err instanceof Error ? err.message : String(err),
+const isMain = process.argv[1]?.endsWith('simmerMarketDiscoveryCron.ts')
+  || process.argv[1]?.endsWith('simmerMarketDiscoveryCron.js');
+if (isMain) {
+  main().catch((err) => {
+    logger.error('[simmer-discovery] fatal error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    process.exit(1);
   });
-  process.exit(1);
-});
+}
