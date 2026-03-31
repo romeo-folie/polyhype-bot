@@ -23,6 +23,14 @@ export const CLOB_MIN_ORDER_USD = 1.0;
 const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
 const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 
+// Public Polygon RPC endpoints for automatic failover when the user-configured
+// RPC is down, requires auth, or is rate-limited.
+const POLYGON_FALLBACK_RPCS = [
+  'https://polygon-rpc.com',
+  'https://polygon.llamarpc.com',
+  'https://polygon-bor-rpc.publicnode.com',
+];
+
 // Cached Polygon provider — reused across fetchClobTokenBalance and redeemClobOutcome
 // calls to avoid spinning up a new JsonRpcProvider per invocation.
 let _polygonProvider: JsonRpcProvider | null = null;
@@ -92,6 +100,42 @@ const CLOB_CREDS_REDIS_KEY = 'clob:api_creds';
 const CLOB_CREDS_TTL_SECONDS = 23 * 3600;
 
 const USDC_RAW_RE = /balance:\s*(\d+),\s*order amount:\s*(\d+)/i;
+
+/** Force provider reset — called when the current RPC fails. */
+function resetPolygonProvider(): void {
+  _polygonProvider = null;
+  _polygonProviderRpcUrl = null;
+}
+
+/**
+ * Build an ordered RPC URL list: user-configured first, then public fallbacks (deduped).
+ */
+function buildRpcList(): string[] {
+  const userRpc = loadConfig().POLYGON_RPC_URL;
+  const rpcUrls: string[] = [];
+  if (userRpc) rpcUrls.push(userRpc);
+  for (const rpc of POLYGON_FALLBACK_RPCS) {
+    if (!rpcUrls.includes(rpc)) rpcUrls.push(rpc);
+  }
+  return rpcUrls;
+}
+
+/**
+ * Parse actual on-chain balance from a CLOB "not enough balance" error.
+ *
+ * Polymarket's CLOB returns errors like:
+ *   "not enough balance / allowance: the balance is not enough → balance: 3266460, order amount: 3280000"
+ *
+ * The balance value is in 6-decimal raw units (1 share = 1_000_000 raw units).
+ * Returns the actual balance in shares (human units), or null if unparseable.
+ */
+export function parseBalanceFromClobError(errorMsg: string): number | null {
+  const match = USDC_RAW_RE.exec(errorMsg);
+  if (!match?.[1]) return null;
+  const rawBalance = parseInt(match[1], 10);
+  if (!isFinite(rawBalance) || rawBalance < 0) return null;
+  return rawBalance / 1_000_000;
+}
 
 function normaliseError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -430,28 +474,29 @@ export async function fetchClobTokenBalance(tokenId: string): Promise<ClobBalanc
     return { ok: false, error: 'wallet key missing' };
   }
 
-  const rpcUrl = cfg.POLYGON_RPC_URL ?? 'https://polygon-rpc.com';
+  const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY).address;
+  const rpcUrls = buildRpcList();
+  const ctfAbi = ['function balanceOf(address account, uint256 id) view returns (uint256)'];
+  let lastError = '';
 
-  try {
-    const provider = getPolygonProvider(rpcUrl);
-    const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
-    const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
-
-    // ERC-1155 balanceOf(account, id) returns uint256
-    const ctfAbi = ['function balanceOf(address account, uint256 id) view returns (uint256)'];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as any;
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const balance: bigint = await ctf.balanceOf(funderAddress, tokenId);
-
-    // Convert bigint to number. Polymarket tokens use 6 decimals, so values fit safely in JS number.
-    return { ok: true, balance: Number(balance) };
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    logger.warn('[clob] failed to fetch on-chain token balance', { tokenId, error: errMsg });
-    return { ok: false, error: errMsg };
+  for (const rpcUrl of rpcUrls) {
+    try {
+      resetPolygonProvider(); // force fresh provider for each attempt
+      const provider = getPolygonProvider(rpcUrl);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as any;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      const balance: bigint = await ctf.balanceOf(funderAddress, tokenId);
+      return { ok: true, balance: Number(balance) };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      logger.warn('[clob] RPC balance fetch failed — trying next', { rpcUrl, tokenId, error: lastError });
+      resetPolygonProvider();
+    }
   }
+
+  logger.warn('[clob] all RPCs failed for token balance', { tokenId, error: lastError });
+  return { ok: false, error: lastError };
 }
 
 /**
@@ -468,10 +513,32 @@ export async function redeemClobOutcome(input: {
     return { success: false, error: 'POLYGON_WALLET_PRIVATE_KEY required' };
   }
 
-  const rpcUrl = cfg.POLYGON_RPC_URL ?? 'https://polygon-rpc.com';
-  try {
-    const provider = getPolygonProvider(rpcUrl);
-    const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
+  const rpcUrls = buildRpcList();
+  let lastError = '';
+
+  for (const rpcUrl of rpcUrls) {
+    try {
+      resetPolygonProvider();
+      const result = await redeemClobOutcomeWithRpc(input, cfg, rpcUrl);
+      return result;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      logger.warn('[clob] RPC redemption failed — trying next', { rpcUrl, conditionId: input.conditionId, error: lastError });
+      resetPolygonProvider();
+    }
+  }
+
+  logger.error('[clob] all RPCs failed for redemption', { conditionId: input.conditionId, error: lastError });
+  return { success: false, error: lastError };
+}
+
+async function redeemClobOutcomeWithRpc(
+  input: { conditionId: string; direction: 'YES' | 'NO' },
+  cfg: ReturnType<typeof loadConfig>,
+  rpcUrl: string,
+): Promise<ClobTradeResult> {
+  const provider = getPolygonProvider(rpcUrl);
+  const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY!, provider);
     const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;
     const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
 
@@ -553,11 +620,4 @@ export async function redeemClobOutcome(input: {
       const receipt = await tx.wait();
       return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
     }
-  } catch (err) {
-    logger.error('[clob] redemption failed', {
-      error: err instanceof Error ? err.message : String(err),
-      conditionId: input.conditionId,
-    });
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
-  }
 }

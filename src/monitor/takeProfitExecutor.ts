@@ -13,7 +13,7 @@
 
 import { logger } from '../shared/logger.js';
 import { submitSell, resolveSimmerMarketId, getSimmerPositions, SimmerError } from '../shared/simmer.js';
-import { submitClobSell, fetchClobTokenBalance, type ClobBalanceResult, CLOB_MIN_ORDER_USD } from '../shared/clob.js';
+import { submitClobSell, fetchClobTokenBalance, parseBalanceFromClobError, type ClobBalanceResult, CLOB_MIN_ORDER_USD } from '../shared/clob.js';
 import { closePosition, markPositionSynthHedged } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
@@ -302,14 +302,15 @@ async function executeClobExit(opts: {
 
   let actualBalance: number;
   if (!balanceResult.ok) {
-    // Both attempts failed — use 99.99% of Redis value as safe approximation to prevent overshoot.
-    logger.warn('[take-profit-executor] balance fetch failed after retry — using 99.99% fallback', {
+    // Both attempts failed — use 98% of Redis value as conservative approximation.
+    // (Previously 99.99%, which still overshot due to FAK partial fills.)
+    logger.warn('[take-profit-executor] balance fetch failed after retry — using 98% fallback', {
       marketId: position.marketId,
       tokenId,
       sharesToSell,
       error: balanceResult.error,
     });
-    actualBalance = sharesToSell * 0.9999;
+    actualBalance = sharesToSell * 0.98;
   } else {
     actualBalance = balanceResult.balance;
   }
@@ -388,14 +389,69 @@ async function executeClobExit(opts: {
       };
       if (clobResult.tx_hash) successResult.txHash = clobResult.tx_hash;
       return successResult;
-    } else {
-      const error = clobResult.error ?? 'CLOB sell failed';
-      logger.warn('[take-profit-executor] CLOB sell returned success=false', {
-        marketId: position.marketId,
-        error,
-      });
-      return { marketId: position.marketId, success: false, error, returnPct, reason };
     }
+
+    // ── Auto-retry: parse actual balance from CLOB error and retry once ─────
+    const error = clobResult.error ?? 'CLOB sell failed';
+    if (error.toLowerCase().includes('not enough balance')) {
+      const parsedBalance = parseBalanceFromClobError(error);
+      if (parsedBalance !== null && parsedBalance > 0 && parsedBalance < safeShares) {
+        logger.info('[take-profit-executor] retrying with CLOB-reported balance', {
+          marketId: position.marketId,
+          previousShares: safeShares,
+          clobBalance: parsedBalance,
+        });
+
+        const retryShares = Math.floor(parsedBalance * 1_000_000) / 1_000_000;
+        const retryNotional = retryShares * currentPrice;
+        if (retryShares > 0 && retryNotional >= CLOB_MIN_ORDER_USD) {
+          const retryResult = await submitClobSell({
+            tokenId,
+            shares: retryShares,
+            orderType: loadConfig().CLOB_ORDER_TYPE,
+          });
+
+          if (retryResult.success) {
+            await closePositionWithHedge(redis, position.marketId, position.direction);
+            const proceedsUsd = retryShares * currentPrice;
+            await creditProceeds(redis, proceedsUsd);
+            await recordOutcome(redis, {
+              source: inferSource(position.sourcedFrom ?? ''),
+              category: inferCategory(position.question),
+              question: position.question.slice(0, 200),
+              direction: position.direction as 'YES' | 'NO',
+              consensusProbability: position.consensusProbability ?? 0.5,
+              divergence: position.edgeMagnitude ?? 0,
+              result: returnPct >= 0 ? 'won' : 'lost',
+              returnPct,
+              holdingHours: position.openedAt ? (Date.now() - new Date(position.openedAt).getTime()) / 3600000 : 0,
+              executionVenue: position.executionVenue ?? 'clob',
+            });
+            await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
+
+            logger.info('[take-profit-executor] exit successful after balance retry (clob)', {
+              marketId: position.marketId,
+              txHash: retryResult.tx_hash,
+              shares: retryShares,
+            });
+
+            return {
+              marketId: position.marketId,
+              success: true,
+              returnPct,
+              reason,
+              ...(retryResult.tx_hash ? { txHash: retryResult.tx_hash } : {}),
+            };
+          }
+        }
+      }
+    }
+
+    logger.warn('[take-profit-executor] CLOB sell returned success=false', {
+      marketId: position.marketId,
+      error,
+    });
+    return { marketId: position.marketId, success: false, error, returnPct, reason };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error('[take-profit-executor] CLOB exit trade failed', {
