@@ -18,6 +18,7 @@ import { runMapping, mapNewsToFutures } from '../mapping/index.js';
 import { executeSignal } from './executor.js';
 import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import { recordPosition } from './positionLedger.js';
+import { resolveSimmerMarketId, getSimmerPositions } from '../shared/simmer.js';
 import { notifyTradeExecuted, notifyTradeError } from './telegram.js';
 import { reEvaluatePositions } from '../monitor/signalReeval.js';
 import { getBankroll, deductStake } from '../shared/bankroll.js';
@@ -133,6 +134,28 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
       // respect the reduced capital, preventing over-allocation or leverage-recursion.
       await deductStake(redis, result.signal.stakeUsd);
 
+      // Compute sharesHeld — prefer actual fill from venue, fall back to estimate.
+      let estimatedShares: number | undefined;
+      let sharesHeld: number | undefined;
+      if (result.tradeResult.shares_bought != null) {
+        sharesHeld = result.tradeResult.shares_bought;
+      } else {
+        // Simmer sometimes omits shares_bought — fall back to estimate from stake/price.
+        // This can overstate actual fill on partial fills; log a warning for reconciliation.
+        estimatedShares = result.signal.outcomePrice > 0
+          ? result.signal.stakeUsd / result.signal.outcomePrice
+          : undefined;
+        sharesHeld = estimatedShares;
+        if (estimatedShares != null) {
+          logger.warn('[execution] shares_bought unavailable — using estimated sharesHeld (stakeUsd/outcomePrice)', {
+            marketId: result.signal.marketId,
+            estimatedShares,
+            stakeUsd: result.signal.stakeUsd,
+            outcomePrice: result.signal.outcomePrice,
+          });
+        }
+      }
+
       // Record in ledger
       await recordPosition(redis, {
         marketId: result.signal.marketId,
@@ -148,15 +171,39 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         sourcedFrom: result.signal.sourcedFrom,
         openedAt: new Date().toISOString(),
         txHash: result.tradeResult.tx_hash,
-        sharesHeld: result.tradeResult.shares_bought ??
-          (result.signal.outcomePrice > 0
-            ? result.signal.stakeUsd / result.signal.outcomePrice
-            : undefined), // undefined is safer than Infinity/NaN — sharesHeld is optional
+        sharesHeld,
         executionVenue: result.executionVenue || 'simmer',
         isFutures: result.signal.isFutures,
         leverage: result.signal.leverage,
         symbol: result.signal.symbol || (result.signal.isFutures ? result.signal.marketId : undefined),
       });
+
+      // Simmer fill reconciliation: if shares_bought was unavailable and we used an
+      // estimate, query Simmer after a short delay to get the confirmed fill amount.
+      if (!result.tradeResult.shares_bought && result.executionVenue === 'simmer') {
+        setTimeout(async () => {
+          try {
+            const simmerId = await resolveSimmerMarketId(signal.question);
+            if (!simmerId) return;
+            const livePositions = await getSimmerPositions({ status: 'active' });
+            const side = signal.direction.toLowerCase() as 'yes' | 'no';
+            const match = livePositions.find(p => p.market_id === simmerId && p.side === side);
+            if (match?.shares && match.shares > 0 && match.shares !== estimatedShares) {
+              // Update Redis ledger with actual fill
+              await redis.hset(`position:${signal.marketId}:${signal.direction}`, 'sharesHeld', String(match.shares));
+              logger.info('[execution] reconciled sharesHeld with Simmer actual fill', {
+                marketId: signal.marketId,
+                estimated: estimatedShares,
+                actual: match.shares,
+              });
+            }
+          } catch (err) {
+            logger.warn('[execution] Simmer fill reconciliation failed (non-fatal)', {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }, 2000);
+      }
 
       // Track HL margin consumed for accurate margin cap checks in subsequent signals.
       if (result.executionVenue === 'hyperliquid') {

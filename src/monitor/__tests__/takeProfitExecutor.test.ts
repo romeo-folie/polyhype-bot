@@ -300,6 +300,7 @@ describe('executeTakeProfit', () => {
   // ── CLOB venue routing ────────────────────────────────────────────────────
 
   it('routes CLOB-venue position to submitClobSell instead of submitSell', async () => {
+    mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 15.0 });
     mockClobSell.mockResolvedValue({ success: true, tx_hash: '0xclobexit' });
 
     const result = await executeTakeProfit({
