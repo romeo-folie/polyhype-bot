@@ -42,11 +42,12 @@ export async function main(): Promise<void> {
   let imported = 0;
   let alreadyImported = 0;
   let failed = 0;
+  let skipped = 0;
 
   for (const market of toImport) {
     if (!market.polymarket_url) {
       logger.warn('[simmer-discovery] skipping market without URL', { market });
-      failed++;
+      skipped++;
       continue;
     }
 
@@ -81,6 +82,7 @@ export async function main(): Promise<void> {
     discovered: discovered.length,
     imported,
     alreadyImported,
+    skipped,
     failed,
   });
 }

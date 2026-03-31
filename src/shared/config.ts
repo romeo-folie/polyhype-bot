@@ -13,8 +13,10 @@ const envSchema = z.object({
   SIMMER_API_KEY: z.string().min(1, 'SIMMER_API_KEY is required'),
 
   // Simmer — market import and auto-redeem
-  SIMMER_AUTO_IMPORT_ENABLED: z.coerce.boolean().optional().default(false),
-  SIMMER_AUTO_REDEEM_ENABLED: z.coerce.boolean().optional().default(true),
+  SIMMER_AUTO_IMPORT_ENABLED: z.string().optional().default('false')
+    .transform((v) => !['false', '0', ''].includes(v.trim().toLowerCase())),
+  SIMMER_AUTO_REDEEM_ENABLED: z.string().optional().default('true')
+    .transform((v) => !['false', '0', ''].includes(v.trim().toLowerCase())),
 
   // LLM — at least one must be set (validated below)
   OPENAI_API_KEY: z.string().optional(),
