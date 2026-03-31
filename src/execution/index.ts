@@ -148,7 +148,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         sourcedFrom: result.signal.sourcedFrom,
         openedAt: new Date().toISOString(),
         txHash: result.tradeResult.tx_hash,
-        sharesHeld: result.tradeResult.shares_bought,
+        sharesHeld: result.tradeResult.shares_bought ?? result.signal.stakeUsd / result.signal.outcomePrice,
         executionVenue: result.executionVenue || 'simmer',
         isFutures: result.signal.isFutures,
         leverage: result.signal.leverage,
