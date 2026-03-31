@@ -268,7 +268,11 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): P
       // If won: credit shares as USDC (each winning share = $1)
       const won = (resolved.outcome === 'YES' && pos.direction === 'YES') ||
                   (resolved.outcome === 'NO' && pos.direction === 'NO');
-      const proceedsUsdc = won ? (pos.sharesHeld ?? pos.stakeUsd / pos.entryPrice) : 0;
+      const entryPriceSafe = pos.entryPrice > 0 && Number.isFinite(pos.entryPrice);
+      if (!entryPriceSafe && pos.sharesHeld == null) {
+        logger.warn('[redeemer] entryPrice is zero/invalid — using 0 proceeds', { marketId: pos.marketId });
+      }
+      const proceedsUsdc = won ? (pos.sharesHeld ?? (entryPriceSafe ? pos.stakeUsd / pos.entryPrice : 0)) : 0;
 
       if (proceedsUsdc > 0) {
         await creditProceeds(redis, proceedsUsdc);
@@ -487,7 +491,11 @@ async function redeemSimmerLedgerFallback(
         alreadyRedeemed.add(pos.marketId);
         await closePosition(redis, pos.marketId, pos.direction);
 
-        const proceedsUsdc = pos.sharesHeld ?? pos.stakeUsd / pos.entryPrice;
+        const entryPriceSafe = pos.entryPrice > 0 && Number.isFinite(pos.entryPrice);
+        if (!entryPriceSafe && pos.sharesHeld == null) {
+          logger.warn('[redeemer] Simmer fallback: entryPrice is zero/invalid — using 0 proceeds', { marketId: pos.marketId });
+        }
+        const proceedsUsdc = pos.sharesHeld ?? (entryPriceSafe ? pos.stakeUsd / pos.entryPrice : 0);
         if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
 
         await recordOutcome(redis, {

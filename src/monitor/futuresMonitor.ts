@@ -22,6 +22,9 @@ const POLL_INTERVAL_MS = 5000; // 5 seconds — safe for rate limits, fast enoug
 const MONITOR_LOCK_KEY = 'futures-monitor:lock';
 const MONITOR_LOCK_TTL_SEC = 30; // Must be > POLL_INTERVAL_MS; refreshed every cycle.
 
+// Module-level reference to releaseLock so the shutdown handler can call it
+let _releaseLock: (() => Promise<void>) | null = null;
+
 export async function runFuturesMonitorWorker(): Promise<void> {
   const cfg = loadConfig();
   const redis = getRedis();
@@ -52,6 +55,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
       1, MONITOR_LOCK_KEY, lockToken,
     ).catch((e: unknown) => { logger.warn('[futures-monitor] lock release failed', { error: String(e) }); });
   };
+  _releaseLock = releaseLock;
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -146,6 +150,7 @@ const isMain = process.argv[1]?.endsWith('futuresMonitor.ts') || process.argv[1]
 if (isMain) {
   const shutdown = async () => {
     logger.info('[futures-monitor] shutting down...');
+    if (_releaseLock) await _releaseLock();
     await closeRedis();
     process.exit(0);
   };
