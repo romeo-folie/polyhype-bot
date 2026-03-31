@@ -30,7 +30,7 @@ jest.unstable_mockModule('../../shared/clob.js', () => ({
   submitClobSell: jest.fn(),
   submitClobBuy: jest.fn(),
   getClobBalance: jest.fn(),
-  fetchClobTokenBalance: jest.fn().mockResolvedValue(999),
+  fetchClobTokenBalance: jest.fn().mockResolvedValue({ ok: true, balance: 999 }),
 }));
 
 jest.unstable_mockModule('../../execution/positionLedger.js', () => ({
