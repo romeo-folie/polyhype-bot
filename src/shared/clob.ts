@@ -32,23 +32,30 @@ const POLYGON_PUBLIC_RPCS = [
   'https://polygon-bor-rpc.publicnode.com',
 ];
 
-// Cached Polygon provider — reused across calls.
-let _polygonProvider: JsonRpcProvider | null = null;
-let _polygonProviderRpcUrl: string | null = null;
+// Polymarket ERC-1155 tokens use 6 decimals (1 share = 1,000,000 raw units).
+const CLOB_TOKEN_DECIMALS = 6;
+const CLOB_TOKEN_DIVISOR = 10 ** CLOB_TOKEN_DECIMALS; // 1_000_000
 
-function getPolygonProvider(rpcUrl: string): JsonRpcProvider {
-  if (!_polygonProvider || _polygonProviderRpcUrl !== rpcUrl) {
-    const polygonNetwork = new Network('matic', 137);
-    _polygonProvider = new JsonRpcProvider(rpcUrl, polygonNetwork, { staticNetwork: polygonNetwork });
-    _polygonProviderRpcUrl = rpcUrl;
+/**
+ * Build the ordered RPC URL list: user-configured first, then public fallbacks (deduped).
+ */
+function buildRpcList(): string[] {
+  const userRpc = process.env['POLYGON_RPC_URL'];
+  const rpcUrls: string[] = [];
+  if (userRpc) rpcUrls.push(userRpc);
+  for (const rpc of POLYGON_PUBLIC_RPCS) {
+    if (!rpcUrls.includes(rpc)) rpcUrls.push(rpc);
   }
-  return _polygonProvider;
+  return rpcUrls;
 }
 
-/** Force provider reset — called when the current RPC fails. */
-function resetPolygonProvider(): void {
-  _polygonProvider = null;
-  _polygonProviderRpcUrl = null;
+/**
+ * Create a fresh JsonRpcProvider for a given RPC URL.
+ * No caching — each failover attempt gets its own provider to avoid stale connections.
+ */
+function createProvider(rpcUrl: string): JsonRpcProvider {
+  const polygonNetwork = new Network('matic', 137);
+  return new JsonRpcProvider(rpcUrl, polygonNetwork, { staticNetwork: polygonNetwork });
 }
 
 export interface ClobBuyInput {
@@ -113,7 +120,7 @@ export function parseBalanceFromClobError(errorMsg: string): number | null {
   if (!match?.[1]) return null;
   const rawBalance = parseInt(match[1], 10);
   if (!isFinite(rawBalance) || rawBalance < 0) return null;
-  return rawBalance / 1_000_000;
+  return rawBalance / CLOB_TOKEN_DIVISOR;
 }
 
 async function loadPersistedCreds(): Promise<ApiKeyCreds | null> {
@@ -379,7 +386,7 @@ export async function getClobBalance(): Promise<{ balance: number; allowance: nu
     const result = await typedClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
 
     // Values are in USDC base units (6 decimals). Convert to whole USDC.
-    const USDC_BASE = 1_000_000;
+    const USDC_BASE = CLOB_TOKEN_DIVISOR;
     const balance = parseFloat(result.balance ?? '0') / USDC_BASE;
     const allowance = parseFloat(result.allowance ?? '0') / USDC_BASE;
     if (!isFinite(balance) || !isFinite(allowance)) return null;
@@ -411,31 +418,23 @@ export async function fetchClobTokenBalance(tokenId: string): Promise<ClobBalanc
   }
 
   const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? new Wallet6(cfg.POLYGON_WALLET_PRIVATE_KEY).address;
-
-  // Build ordered RPC list: user-configured first, then public fallbacks (deduped).
-  const userRpc = (process as unknown as { env: Record<string, string | undefined> }).env["POLYGON_RPC_URL"];
-  const rpcUrls: string[] = [];
-  if (userRpc) rpcUrls.push(userRpc);
-  for (const rpc of POLYGON_PUBLIC_RPCS) {
-    if (!rpcUrls.includes(rpc)) rpcUrls.push(rpc);
-  }
+  const rpcUrls = buildRpcList();
 
   const ctfAbi = ['function balanceOf(address account, uint256 id) view returns (uint256)'];
   let lastError = '';
 
   for (const rpcUrl of rpcUrls) {
     try {
-      resetPolygonProvider(); // force fresh provider for each attempt
-      const provider = getPolygonProvider(rpcUrl);
+      const provider = createProvider(rpcUrl);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as any;
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const balance: bigint = await ctf.balanceOf(funderAddress, tokenId);
-      return { ok: true, balance: Number(balance) };
+      const rawBalance: bigint = await ctf.balanceOf(funderAddress, tokenId);
+      // Convert 6-decimal raw units to human-readable shares (1 share = 1,000,000 raw).
+      return { ok: true, balance: Number(rawBalance) / CLOB_TOKEN_DIVISOR };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       logger.warn('[clob] RPC balance fetch failed — trying next', { rpcUrl, tokenId, error: lastError });
-      resetPolygonProvider();
     }
   }
 
@@ -461,21 +460,13 @@ export async function redeemClobOutcome(input: {
     'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)',
   ];
 
-  // Build ordered RPC list
-  const userRpc = (process as unknown as { env: Record<string, string | undefined> }).env["POLYGON_RPC_URL"];
-  const rpcUrls: string[] = [];
-  if (userRpc) rpcUrls.push(userRpc);
-  for (const rpc of POLYGON_PUBLIC_RPCS) {
-    if (!rpcUrls.includes(rpc)) rpcUrls.push(rpc);
-  }
-
+  const rpcUrls = buildRpcList();
   const indexSets = input.direction === 'YES' ? [1] : [2];
   let lastError = '';
 
   for (const rpcUrl of rpcUrls) {
     try {
-      resetPolygonProvider();
-      const provider = getPolygonProvider(rpcUrl);
+      const provider = createProvider(rpcUrl);
       const signer = new Wallet6(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -494,7 +485,6 @@ export async function redeemClobOutcome(input: {
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       logger.warn('[clob] RPC redemption failed — trying next', { rpcUrl, conditionId: input.conditionId, error: lastError });
-      resetPolygonProvider();
     }
   }
 
