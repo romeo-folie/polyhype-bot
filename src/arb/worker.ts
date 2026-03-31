@@ -69,7 +69,7 @@ export class ArbitrageWorker {
 
     subscriber.on('message', (channel, message) => {
       if (channel === 'spot:price_moved') {
-        let parsed: { symbol?: string; price?: number; timestamp?: number };
+        let parsed: { symbol?: string; price?: number; timestamp?: number; previousPrice?: number | null };
         try {
           parsed = JSON.parse(message);
         } catch {
@@ -86,6 +86,7 @@ export class ArbitrageWorker {
             String(parsed.symbol),
             parsed.price as number,
             parsed.timestamp as number | undefined,
+            parsed.previousPrice ?? null,
           );
         }
       }
@@ -141,21 +142,33 @@ export class ArbitrageWorker {
    * Trigger crypto latency arb path. Runs independently of the YES+NO arb scan.
    * All errors are caught — must never crash the worker.
    */
-  private async triggerCryptoArbFromTicker(symbol: string, currentPrice: number, tsMs?: number): Promise<void> {
+  private async triggerCryptoArbFromTicker(
+    symbol: string,
+    currentPrice: number,
+    tsMs?: number,
+    previousPrice?: number | null,
+  ): Promise<void> {
     const assetId = BINANCE_SYMBOL_TO_ASSET[symbol];
     if (!assetId) return;
 
-    // Resolve previous price for meaningful referencePrice / changePercent.
-    const redis = getRedis();
-    const lastRaw = await redis.get(`spot:last:${symbol}`).catch(() => null);
+    // Use previousPrice from pub/sub payload (read BEFORE the write).
+    // Fall back to spot:prices sorted set if payload didn't include it.
     let referencePrice = currentPrice;
-    if (lastRaw) {
-      try {
-        const last = JSON.parse(lastRaw) as { price?: unknown };
-        const prevPrice = typeof last.price === 'number' ? last.price : null;
-        if (prevPrice != null && prevPrice > 0) referencePrice = prevPrice;
-      } catch { /* keep currentPrice as fallback */ }
+    if (previousPrice != null && previousPrice > 0) {
+      referencePrice = previousPrice;
+    } else {
+      // Fallback: read second-to-last entry from the sorted set
+      const redis = getRedis();
+      const entries = await redis.zrange(`spot:prices:${symbol}`, -2, -2).catch(() => []);
+      if (entries.length > 0) {
+        const colonIdx = entries[0]!.indexOf(':');
+        const histPrice = parseFloat(entries[0]!.substring(colonIdx + 1));
+        if (isFinite(histPrice) && histPrice > 0) {
+          referencePrice = histPrice;
+        }
+      }
     }
+
     const changePercent = referencePrice > 0 && referencePrice !== currentPrice
       ? ((currentPrice - referencePrice) / referencePrice) * 100
       : 0;

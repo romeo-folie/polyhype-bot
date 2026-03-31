@@ -71,6 +71,19 @@ export class BinanceFeed {
       const lastKey = `spot:last:${symbol}`;
       const pricesKey = `spot:prices:${symbol}`;
 
+      // Read the CURRENT value before overwriting — this becomes the previous price
+      // for the arb worker's reference price comparison.
+      let previousPrice: number | null = null;
+      try {
+        const existing = await redis.get(lastKey);
+        if (existing) {
+          const parsed = JSON.parse(existing) as { price?: number };
+          if (typeof parsed.price === 'number' && parsed.price > 0) {
+            previousPrice = parsed.price;
+          }
+        }
+      } catch { /* first tick — no previous price yet */ }
+
       const pipeline = redis.pipeline();
       // Update latest
       pipeline.set(lastKey, JSON.stringify({ price, timestamp, source: 'binance' }));
@@ -81,9 +94,9 @@ export class BinanceFeed {
       // Expire
       pipeline.expire(lastKey, 7200);
       pipeline.expire(pricesKey, 7200);
-      
-      // Publish event for Arb Worker
-      pipeline.publish('spot:price_moved', JSON.stringify({ symbol, price, timestamp }));
+
+      // Publish event for Arb Worker — include previousPrice so it doesn't need to re-read
+      pipeline.publish('spot:price_moved', JSON.stringify({ symbol, price, timestamp, previousPrice }));
 
       const pipelineResults = await pipeline.exec();
       // Check for per-command errors in the pipeline result.

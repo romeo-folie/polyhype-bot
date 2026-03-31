@@ -62,6 +62,7 @@ const mockRedis = {
   }),
   get: vi.fn().mockResolvedValue(null),
   set: vi.fn().mockResolvedValue('OK'),
+  zrange: vi.fn().mockResolvedValue([]),
   pipeline: vi.fn(() => ({
       exec: vi.fn().mockResolvedValue([]),
   })),
