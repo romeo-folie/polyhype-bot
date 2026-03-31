@@ -392,6 +392,41 @@ export async function getClobBalance(): Promise<{ balance: number; allowance: nu
 }
 
 /**
+ * Fetch actual on-chain ERC-1155 balance for a CLOB token.
+ * Used to sync sharesToSell against the real fill amount (Redis records order size, not fill size).
+ */
+export async function fetchClobTokenBalance(tokenId: string): Promise<number> {
+  const cfg = loadConfig();
+  if (!cfg.POLYGON_WALLET_PRIVATE_KEY) {
+    logger.warn('[clob] cannot fetch token balance — wallet key missing');
+    return 0;
+  }
+
+  try {
+    const provider = new JsonRpcProvider('https://polygon-rpc.com');
+    const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
+    const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
+
+    // ERC-1155 balanceOf(account, id) returns uint256
+    const ctfAbi = ['function balanceOf(address account, uint256 id) view returns (uint256)'];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as any;
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const balance: bigint = await ctf.balanceOf(funderAddress, tokenId);
+
+    // Convert bigint to number. Polymarket tokens use 6 decimals, so values fit safely in JS number.
+    return Number(balance);
+  } catch (err) {
+    logger.warn('[clob] failed to fetch on-chain token balance', {
+      tokenId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return 0; // Return 0 on error so caller can degrade gracefully
+  }
+}
+
+/**
  * Redeem winning outcome tokens for USDC.e on-chain.
  *
  * Supports both standard EOA wallets (sigType 0) and Proxy/Gnosis Safe wallets (sigType 1).

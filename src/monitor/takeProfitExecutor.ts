@@ -13,7 +13,7 @@
 
 import { logger } from '../shared/logger.js';
 import { submitSell, resolveSimmerMarketId, getSimmerPositions, SimmerError } from '../shared/simmer.js';
-import { submitClobSell } from '../shared/clob.js';
+import { submitClobSell, fetchClobTokenBalance } from '../shared/clob.js';
 import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
@@ -289,16 +289,66 @@ async function executeClobExit(opts: {
     return { marketId: position.marketId, success: false, error: `CLOB sell below minimum: $${notionalUsd.toFixed(4)} < $${String(CLOB_MIN_ORDER_USD)}`, returnPct, reason };
   }
 
+  // Fetch actual on-chain balance to avoid rounding overshoot.
+  // Redis records the order size, not the fill size. Partial fills mean actualBalance < sharesToSell.
+  let actualBalance = await fetchClobTokenBalance(tokenId);
+
+  // If balance fetch failed (returned 0 from network error), use 99.99% of Redis value as safe approximation.
+  // Check this BEFORE the near-zero check to distinguish fetch errors from actual zero balance.
+  if (actualBalance === 0 && sharesToSell > 0) {
+    logger.warn('[take-profit-executor] balance fetch failed — using 99.99% fallback', {
+      marketId: position.marketId,
+      tokenId,
+      sharesToSell,
+    });
+    actualBalance = Math.floor(sharesToSell * 0.9999);
+  }
+
+  // Bug 3: Ghost position cleanup — if balance is near-zero, close the stale ledger entry.
+  if (actualBalance < 0.001) {
+    logger.error('[take-profit-executor] on-chain balance near-zero — closing stale ledger entry', {
+      marketId: position.marketId,
+      tokenId,
+      actualBalance,
+      redisShares: sharesToSell,
+    });
+    await closePositionWithHedge(redis, position.marketId, position.direction);
+    return { marketId: position.marketId, success: false, error: 'stale_position_cleared', returnPct, reason };
+  }
+
+  // Use the minimum of (tracked shares, actual balance) to prevent overshoot.
+  const safeShares = Math.min(sharesToSell, actualBalance);
+
+  // Log drift when actual balance is less than Redis-tracked shares.
+  if (actualBalance < sharesToSell) {
+    logger.info('[take-profit-executor] CLOB balance sync: using actual balance', {
+      marketId: position.marketId,
+      sharesToSell,
+      actualBalance,
+      diff: sharesToSell - actualBalance,
+    });
+  }
+
+  if (safeShares <= 0) {
+    logger.warn('[take-profit-executor] safe shares <= 0 after balance sync — skipping sell', {
+      marketId: position.marketId,
+      sharesToSell,
+      actualBalance,
+      safeShares,
+    });
+    return { marketId: position.marketId, success: false, error: 'safe_shares_zero', returnPct, reason };
+  }
+
   try {
     const clobResult = await submitClobSell({
       tokenId,
-      shares: sharesToSell,
+      shares: safeShares,
       orderType: loadConfig().CLOB_ORDER_TYPE,
     });
 
     if (clobResult.success) {
       await closePositionWithHedge(redis, position.marketId, position.direction);
-      const proceedsUsd = sharesToSell * currentPrice;
+      const proceedsUsd = safeShares * currentPrice;
       await creditProceeds(redis, proceedsUsd);
       await recordOutcome(redis, {
         source: inferSource(position.sourcedFrom ?? ''),
