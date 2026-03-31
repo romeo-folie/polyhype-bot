@@ -13,7 +13,7 @@
 
 import { logger } from '../shared/logger.js';
 import { submitSell, resolveSimmerMarketId, getSimmerPositions, SimmerError } from '../shared/simmer.js';
-import { submitClobSell, fetchClobTokenBalance } from '../shared/clob.js';
+import { submitClobSell, fetchClobTokenBalance, type ClobBalanceResult } from '../shared/clob.js';
 import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
@@ -76,10 +76,13 @@ export async function executeTakeProfit(opts: {
   const sellSide = position.direction.toLowerCase() as 'yes' | 'no';
 
   // Use tracked shares if available; fall back to estimating from stake/entry price.
-  // Floor to 6 decimal places to avoid rounding overshoot vs actual CLOB balance
-  // (Polymarket fills at fractional shares; stakeUsd/entryPrice can exceed actual holdings).
+  // Truncate to 6 decimal places to avoid rounding overshoot vs actual CLOB balance.
+  // Use truncation (floor toward zero), not rounding — rounding up could exceed fill size.
+  // Avoid truncating values smaller than 1e-6 to zero (which would trip the <= 0 guard below).
   const rawShares = position.sharesHeld ?? position.stakeUsd / position.entryPrice;
-  const sharesToSell = Math.floor(rawShares * 1_000_000) / 1_000_000;
+  const sharesToSell = rawShares >= 1e-6
+    ? Math.floor(rawShares * 1_000_000) / 1_000_000
+    : rawShares; // sub-micro values: keep as-is; the <= 0 / NaN guard handles truly invalid values
 
   // Guard against legacy Redis positions with entryPrice=0 or NaN sharesHeld
   if (!isFinite(sharesToSell) || sharesToSell <= 0) {
@@ -289,23 +292,31 @@ async function executeClobExit(opts: {
     return { marketId: position.marketId, success: false, error: `CLOB sell below minimum: $${notionalUsd.toFixed(4)} < $${String(CLOB_MIN_ORDER_USD)}`, returnPct, reason };
   }
 
-  // Fetch actual on-chain balance to avoid rounding overshoot.
-  // Redis records the order size, not the fill size. Partial fills mean actualBalance < sharesToSell.
-  let actualBalance = await fetchClobTokenBalance(tokenId);
+  // Fetch actual on-chain balance with one retry to handle transient RPC failures.
+  // Uses discriminated result so genuine zero balance is handled differently from fetch errors.
+  let balanceResult: ClobBalanceResult = await fetchClobTokenBalance(tokenId);
+  if (!balanceResult.ok) {
+    // Retry once before falling back.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    balanceResult = await fetchClobTokenBalance(tokenId);
+  }
 
-  // If balance fetch failed (returned 0 from network error), use 99.99% of Redis value as safe approximation.
-  // Check this BEFORE the near-zero check to distinguish fetch errors from actual zero balance.
-  if (actualBalance === 0 && sharesToSell > 0) {
-    logger.warn('[take-profit-executor] balance fetch failed — using 99.99% fallback', {
+  let actualBalance: number;
+  if (!balanceResult.ok) {
+    // Both attempts failed — use 99.99% of Redis value as safe approximation to prevent overshoot.
+    logger.warn('[take-profit-executor] balance fetch failed after retry — using 99.99% fallback', {
       marketId: position.marketId,
       tokenId,
       sharesToSell,
+      error: balanceResult.error,
     });
-    actualBalance = Math.floor(sharesToSell * 0.9999);
+    actualBalance = sharesToSell * 0.9999;
+  } else {
+    actualBalance = balanceResult.balance;
   }
 
-  // Bug 3: Ghost position cleanup — if balance is near-zero, close the stale ledger entry.
-  if (actualBalance < 0.001) {
+  // Ghost position cleanup — genuine zero balance (not a fetch error) means stale ledger entry.
+  if (balanceResult.ok && actualBalance < 0.001) {
     logger.error('[take-profit-executor] on-chain balance near-zero — closing stale ledger entry', {
       marketId: position.marketId,
       tokenId,

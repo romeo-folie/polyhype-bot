@@ -395,15 +395,28 @@ export async function getClobBalance(): Promise<{ balance: number; allowance: nu
  * Fetch actual on-chain ERC-1155 balance for a CLOB token.
  * Used to sync sharesToSell against the real fill amount (Redis records order size, not fill size).
  */
-export async function fetchClobTokenBalance(tokenId: string): Promise<number> {
+export type ClobBalanceResult =
+  | { ok: true; balance: number }
+  | { ok: false; error: string };
+
+/**
+ * Fetch the on-chain ERC-1155 token balance for a CLOB outcome token.
+ *
+ * Returns a discriminated result so callers can distinguish a genuine zero
+ * balance (ok:true, balance:0) from a fetch error (ok:false) — these require
+ * different handling: zero balance triggers ghost cleanup, errors should degrade
+ * gracefully without touching the ledger.
+ */
+export async function fetchClobTokenBalance(tokenId: string): Promise<ClobBalanceResult> {
   const cfg = loadConfig();
   if (!cfg.POLYGON_WALLET_PRIVATE_KEY) {
-    logger.warn('[clob] cannot fetch token balance — wallet key missing');
-    return 0;
+    return { ok: false, error: 'wallet key missing' };
   }
 
+  const rpcUrl = cfg.POLYGON_RPC_URL ?? 'https://polygon-rpc.com';
+
   try {
-    const provider = new JsonRpcProvider('https://polygon-rpc.com');
+    const provider = new JsonRpcProvider(rpcUrl);
     const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
     const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
 
@@ -416,13 +429,11 @@ export async function fetchClobTokenBalance(tokenId: string): Promise<number> {
     const balance: bigint = await ctf.balanceOf(funderAddress, tokenId);
 
     // Convert bigint to number. Polymarket tokens use 6 decimals, so values fit safely in JS number.
-    return Number(balance);
+    return { ok: true, balance: Number(balance) };
   } catch (err) {
-    logger.warn('[clob] failed to fetch on-chain token balance', {
-      tokenId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return 0; // Return 0 on error so caller can degrade gracefully
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger.warn('[clob] failed to fetch on-chain token balance', { tokenId, error: errMsg });
+    return { ok: false, error: errMsg };
   }
 }
 
@@ -440,8 +451,9 @@ export async function redeemClobOutcome(input: {
     return { success: false, error: 'POLYGON_WALLET_PRIVATE_KEY required' };
   }
 
+  const rpcUrl = cfg.POLYGON_RPC_URL ?? 'https://polygon-rpc.com';
   try {
-    const provider = new JsonRpcProvider('https://polygon-rpc.com');
+    const provider = new JsonRpcProvider(rpcUrl);
     const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
     const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;
     const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
