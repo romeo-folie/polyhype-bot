@@ -35,11 +35,10 @@ export const HL_SYMBOL_MAP: Record<string, string> = {
  * Pre-compiled regex patterns for resolveHlSymbol.
  * Created once at module load time to avoid re-allocating RegExp objects on every call.
  */
-const HL_SYMBOL_PATTERNS: { id: string; symbol: string; longId: boolean; wbId: RegExp; wbSym: RegExp }[] =
+const HL_SYMBOL_PATTERNS: { id: string; symbol: string; wbId: RegExp; wbSym: RegExp }[] =
   Object.entries(HL_SYMBOL_MAP).map(([id, symbol]) => ({
     id,
     symbol,
-    longId: id.length >= 6,
     wbId: new RegExp(`\\b${id}\\b`, 'i'),
     wbSym: new RegExp(`\\b${symbol.toLowerCase()}\\b`, 'i'),
   }));
@@ -54,8 +53,7 @@ const HL_SYMBOL_PATTERNS: { id: string; symbol: string; longId: boolean; wbId: R
  */
 export function resolveHlSymbol(text: string): string | undefined {
   const lowerText = text.toLowerCase();
-  for (const { id, symbol, longId, wbId, wbSym } of HL_SYMBOL_PATTERNS) {
-    if (longId && lowerText.includes(id)) return symbol;
+  for (const { wbId, symbol, wbSym } of HL_SYMBOL_PATTERNS) {
     if (wbId.test(lowerText) || wbSym.test(lowerText)) return symbol;
   }
   return undefined;

@@ -85,7 +85,16 @@ export class BinanceFeed {
       // Publish event for Arb Worker
       pipeline.publish('spot:price_moved', JSON.stringify({ symbol, price, timestamp }));
 
-      await pipeline.exec();
+      const pipelineResults = await pipeline.exec();
+      // Check for per-command errors in the pipeline result.
+      if (pipelineResults) {
+        for (const [err] of pipelineResults) {
+          if (err) {
+            logger.warn('[binance] pipeline command error', { symbol, error: String(err) });
+            break; // Log once per tick — avoid log flooding on persistent issues
+          }
+        }
+      }
       
       // Pulse: log to info once every 20 updates per symbol to show "life"
       this.tickerCount[symbol] = (this.tickerCount[symbol] ?? 0) + 1;

@@ -18,10 +18,23 @@ const POLYGON_CHAIN_ID = 137;
 // without this a hung connection would keep the cron process alive indefinitely.
 const CLOB_ORDER_TIMEOUT_MS = 30_000;
 /** Polymarket CLOB protocol minimum — orders below this are rejected with "not enough balance / order amount". */
-const CLOB_MIN_ORDER_USD = 1.0;
+export const CLOB_MIN_ORDER_USD = 1.0;
 
 const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
 const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+
+// Cached Polygon provider — reused across fetchClobTokenBalance and redeemClobOutcome
+// calls to avoid spinning up a new JsonRpcProvider per invocation.
+let _polygonProvider: JsonRpcProvider | null = null;
+let _polygonProviderRpcUrl: string | null = null;
+
+function getPolygonProvider(rpcUrl: string): JsonRpcProvider {
+  if (!_polygonProvider || _polygonProviderRpcUrl !== rpcUrl) {
+    _polygonProvider = new JsonRpcProvider(rpcUrl);
+    _polygonProviderRpcUrl = rpcUrl;
+  }
+  return _polygonProvider;
+}
 
 const CTF_ABI = [
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)',
@@ -416,7 +429,7 @@ export async function fetchClobTokenBalance(tokenId: string): Promise<ClobBalanc
   const rpcUrl = cfg.POLYGON_RPC_URL ?? 'https://polygon-rpc.com';
 
   try {
-    const provider = new JsonRpcProvider(rpcUrl);
+    const provider = getPolygonProvider(rpcUrl);
     const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
     const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
 
@@ -453,7 +466,7 @@ export async function redeemClobOutcome(input: {
 
   const rpcUrl = cfg.POLYGON_RPC_URL ?? 'https://polygon-rpc.com';
   try {
-    const provider = new JsonRpcProvider(rpcUrl);
+    const provider = getPolygonProvider(rpcUrl);
     const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
     const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;
     const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;

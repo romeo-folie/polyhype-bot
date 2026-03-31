@@ -160,8 +160,8 @@ const envSchema = z.object({
   // Notional-based SL/TP thresholds (percentage of margin used, NOT account equity).
   // At 5x leverage a 1.5% notional SL represents a 7.5% equity drawdown.
   // Use values relative to notional, not leverage-adjusted equity.
-  FUTURES_STOP_LOSS_PCT: z.coerce.number().default(-1.5),
-  FUTURES_TAKE_PROFIT_PCT: z.coerce.number().default(3.0),
+  FUTURES_STOP_LOSS_PCT: z.coerce.number().max(-0.01, 'FUTURES_STOP_LOSS_PCT must be negative').default(-1.5),
+  FUTURES_TAKE_PROFIT_PCT: z.coerce.number().min(0.01, 'FUTURES_TAKE_PROFIT_PCT must be positive').default(3.0),
   FUTURES_EXIT_ON_SIGNAL_FADE: z.coerce.boolean().optional().default(true),
   // Max slippage fraction for IoC market orders (e.g. 0.02 = 2%). Conservative default.
   FUTURES_IOC_SLIPPAGE: z.coerce.number().min(0.001).max(0.10).optional().default(0.02),

@@ -13,8 +13,8 @@
 
 import { logger } from '../shared/logger.js';
 import { submitSell, resolveSimmerMarketId, getSimmerPositions, SimmerError } from '../shared/simmer.js';
-import { submitClobSell, fetchClobTokenBalance, type ClobBalanceResult } from '../shared/clob.js';
-import { closePosition } from '../execution/positionLedger.js';
+import { submitClobSell, fetchClobTokenBalance, type ClobBalanceResult, CLOB_MIN_ORDER_USD } from '../shared/clob.js';
+import { closePosition, markPositionSynthHedged } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
@@ -279,7 +279,6 @@ async function executeClobExit(opts: {
 
   // Polymarket CLOB rejects orders below $1.00 notional (shares × currentPrice).
   // Positions this small are better left for the resolution redeemer (which pays $1/share at settlement).
-  const CLOB_MIN_ORDER_USD = 1.0;
   const notionalUsd = sharesToSell * currentPrice;
   if (notionalUsd < CLOB_MIN_ORDER_USD) {
     logger.warn('[take-profit-executor] CLOB sell below minimum notional — skipping, will resolve at settlement', {
@@ -462,22 +461,24 @@ async function attemptSyntheticExit(opts: {
   });
 
   if (result.success) {
-    // Persist the hedge link first so any subsequent path knows the HL leg exists.
+    // Persist the hedge link so the redeemer can find and close the HL leg at settlement.
     await redis.set(`hedge:link:${position.marketId}`, hlSymbol, 'EX', 7 * 24 * 3600);
     logger.info('[take-profit-executor] synthetic exit: hedge link persisted', {
       marketId: position.marketId,
       hlSymbol,
     });
 
-    // Close the PM ledger entry. If this fails, roll back the HL hedge to avoid leaving
-    // both legs open simultaneously — that would create unlimited unhedged exposure.
+    // Mark the PM position as synthetically hedged rather than removing it.
+    // The PM shares are still held on-chain — removing the ledger entry would make them
+    // invisible to the redeemer and orphan them permanently. The redeemer handles final
+    // settlement when the market resolves.
     try {
-      await closePosition(redis, position.marketId, position.direction);
-    } catch (closeErr) {
-      logger.error('[take-profit-executor] CRITICAL: PM close failed after HL hedge opened — rolling back HL', {
+      await markPositionSynthHedged(redis, position.marketId, position.direction);
+    } catch (markErr) {
+      logger.error('[take-profit-executor] CRITICAL: failed to mark PM position as synthHedged — rolling back HL', {
         marketId: position.marketId,
         hlSymbol,
-        error: closeErr instanceof Error ? closeErr.message : String(closeErr),
+        error: markErr instanceof Error ? markErr.message : String(markErr),
       });
       // Attempt to close the HL position to restore a clean state.
       const rollback = await hl.closePosition(hlSymbol).catch((e: unknown) => ({ success: false, error: String(e) }));
@@ -489,7 +490,7 @@ async function attemptSyntheticExit(opts: {
         });
       }
       await redis.del(`hedge:link:${position.marketId}`).catch((e: unknown) => { logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', { marketId: position.marketId, error: String(e) }); });
-      return { success: false, marketId: position.marketId, returnPct, reason, error: 'pm_close_failed_hedge_rolled_back' };
+      return { success: false, marketId: position.marketId, returnPct, reason, error: 'synth_hedge_mark_failed_rolled_back' };
     }
 
     await notifyTakeProfitExecuted({ 
