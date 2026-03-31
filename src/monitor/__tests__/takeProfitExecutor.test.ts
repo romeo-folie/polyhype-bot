@@ -30,6 +30,7 @@ jest.unstable_mockModule('../../shared/clob.js', () => ({
   submitClobSell: jest.fn(),
   submitClobBuy: jest.fn(),
   getClobBalance: jest.fn(),
+  fetchClobTokenBalance: jest.fn().mockResolvedValue(999),
 }));
 
 jest.unstable_mockModule('../../execution/positionLedger.js', () => ({
@@ -65,7 +66,7 @@ jest.unstable_mockModule('../../shared/hyperliquid.js', () => ({
 }));
 
 const { submitSell, resolveSimmerMarketId } = await import('../../shared/simmer.js');
-const { submitClobSell } = await import('../../shared/clob.js');
+const { submitClobSell, fetchClobTokenBalance } = await import('../../shared/clob.js');
 const { closePosition } = await import('../../execution/positionLedger.js');
 const { notifyTakeProfitExecuted } = await import('../../execution/telegram.js');
 const { executeTakeProfit } = await import('../takeProfitExecutor.js');
@@ -73,6 +74,7 @@ const { executeTakeProfit } = await import('../takeProfitExecutor.js');
 const mockSell = submitSell as jest.MockedFunction<typeof submitSell>;
 const mockResolveSimmerMarketId = resolveSimmerMarketId as jest.MockedFunction<typeof resolveSimmerMarketId>;
 const mockClobSell = submitClobSell as jest.MockedFunction<typeof submitClobSell>;
+const mockFetchClobTokenBalance = fetchClobTokenBalance as jest.MockedFunction<typeof fetchClobTokenBalance>;
 const mockClose = closePosition as jest.MockedFunction<typeof closePosition>;
 const mockNotify = notifyTakeProfitExecuted as jest.MockedFunction<typeof notifyTakeProfitExecuted>;
 
