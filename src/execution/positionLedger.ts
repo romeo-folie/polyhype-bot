@@ -83,6 +83,17 @@ export async function recordPosition(
   const key = positionKey(position.marketId, position.direction);
   const openedAtMs = new Date(position.openedAt).getTime();
 
+  // Validate sharesHeld — warn if 0 or undefined (indicates missing shares_bought from venue).
+  if (position.sharesHeld === undefined || position.sharesHeld === 0) {
+    logger.warn('[ledger] position recorded with zero or undefined sharesHeld — exit may require fallback calculation', {
+      marketId: position.marketId,
+      direction: position.direction,
+      sharesHeld: position.sharesHeld,
+      stakeUsd: position.stakeUsd,
+      entryPrice: position.entryPrice,
+    });
+  }
+
   // Store position as a flat hash
   await redis.hset(key, {
     marketId: position.marketId,
@@ -98,7 +109,7 @@ export async function recordPosition(
     openedAt: position.openedAt,
     consensusStddev: position.consensusStddev !== undefined ? String(position.consensusStddev) : '',
     txHash: position.txHash ?? '',
-    sharesHeld: position.sharesHeld !== undefined ? String(position.sharesHeld) : '',
+    sharesHeld: position.sharesHeld !== undefined ? String(position.sharesHeld) : '0',
     executionVenue: position.executionVenue,
     isFutures: position.isFutures ? 'true' : 'false',
     leverage: position.leverage !== undefined ? String(position.leverage) : '',

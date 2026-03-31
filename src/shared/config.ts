@@ -22,6 +22,7 @@ const envSchema = z.object({
 
   // Wallet / direct CLOB execution
   POLYGON_WALLET_PRIVATE_KEY: z.string().optional(),
+  POLYGON_RPC_URL: z.string().url().optional(), // defaults to public RPC in clob.ts if absent
   POLYMARKET_FUNDER_ADDRESS: z.string().optional(),
   POLYMARKET_SIGNATURE_TYPE: z.coerce.number().int().min(0).max(2).optional().default(0),
   CLOB_FALLBACK_ENABLED: z.string().optional().default('true')
