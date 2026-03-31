@@ -162,6 +162,46 @@ async function callGemini(
   return parseResult(raw);
 }
 
+async function callDeepSeek(
+  question: string,
+  description: string | null,
+  headline: string,
+  currentYesPrice: number,
+): Promise<ConsensusResult> {
+  const { default: OpenAI } = await import('openai');
+  const client = new OpenAI({
+    apiKey: process.env.DEEPSEEK_API_KEY,
+    baseURL: 'https://api.deepseek.com',
+  });
+
+  const abortCtrl = new AbortController();
+  const abortTimer = setTimeout(() => abortCtrl.abort(), TIMEOUT_MS);
+  let completion: Awaited<ReturnType<typeof client.chat.completions.create>>;
+  try {
+    completion = await client.chat.completions.create(
+      {
+        model: loadConfig().DEEPSEEK_MODEL,
+        messages: [
+          { role: 'system', content: buildSystemPrompt() },
+          {
+            role: 'user',
+            content: buildUserPrompt({ question, description, headline, currentYesPrice }),
+          },
+        ],
+        response_format: { type: 'json_object' },
+        max_tokens: 200,
+        temperature: 0.1,
+      },
+      { signal: abortCtrl.signal },
+    );
+  } finally {
+    clearTimeout(abortTimer);
+  }
+
+  const raw = completion.choices[0]?.message?.content ?? '{}';
+  return parseResult(raw);
+}
+
 function parseResult(raw: string): ConsensusResult {
   // Strip markdown code fences — some models wrap JSON in ```json ... ``` despite instructions
   const cleaned = raw.replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
@@ -205,7 +245,23 @@ async function estimateSingle(opts: {
   }
 
   if (useOpenAI) {
-    return await callOpenAI(opts.question, opts.description, opts.headline, opts.currentYesPrice);
+    try {
+      return await callOpenAI(opts.question, opts.description, opts.headline, opts.currentYesPrice);
+    } catch (err) {
+      logger.warn('[consensus-calc] OpenAI failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (process.env.DEEPSEEK_API_KEY) {
+    try {
+      return await callDeepSeek(opts.question, opts.description, opts.headline, opts.currentYesPrice);
+    } catch (err) {
+      logger.warn('[consensus-calc] DeepSeek failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   throw new Error('No LLM provider configured (OPENAI_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY required)');
@@ -279,11 +335,13 @@ export async function estimateConsensusProbability(opts: {
   const useOpenAI    = Boolean(process.env.OPENAI_API_KEY);
   const useGemini    = Boolean(process.env.GEMINI_API_KEY);
   const useAnthropic = Boolean(process.env.ANTHROPIC_API_KEY);
+  const useDeepSeek  = Boolean(process.env.DEEPSEEK_API_KEY);
   type ProviderFn = (q: string, d: string | null, h: string, p: number) => Promise<ConsensusResult>;
   const providers: ProviderFn[] = [
     ...(useOpenAI    ? [callOpenAI    as ProviderFn] : []),
     ...(useGemini    ? [callGemini    as ProviderFn] : []),
     ...(useAnthropic ? [callAnthropic as ProviderFn] : []),
+    ...(useDeepSeek  ? [callDeepSeek  as ProviderFn] : []),
   ];
 
   if (providers.length === 0) {

@@ -42,6 +42,7 @@ const envSchema = z.object({
   OPENAI_MODEL: z.string().optional().default('gpt-4o-mini'),
   GEMINI_MODEL: z.string().optional().default('gemini-2.5-flash'),
   ANTHROPIC_MODEL: z.string().optional().default('claude-haiku-4-5'),
+  DEEPSEEK_MODEL: z.string().optional().default('deepseek-reasoner'),
 
   // Tuning knobs (all optional — defaults apply)
   LLM_PROVIDER: z.enum(['openai', 'gemini']).optional().default('openai'),
