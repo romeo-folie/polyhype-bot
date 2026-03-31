@@ -14,7 +14,7 @@
 import { logger } from '../shared/logger.js';
 import { submitSell, resolveSimmerMarketId, getSimmerPositions, SimmerError } from '../shared/simmer.js';
 import { submitClobSell, fetchClobTokenBalance, parseBalanceFromClobError, type ClobBalanceResult, CLOB_MIN_ORDER_USD } from '../shared/clob.js';
-import { closePosition, markPositionSynthHedged } from '../execution/positionLedger.js';
+import { closePosition, markPositionSynthHedged, markPositionPendingSettlement } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
@@ -313,13 +313,15 @@ async function executeClobExit(opts: {
   // Positions this small are better left for the resolution redeemer (which pays $1/share at settlement).
   const notionalUsd = sharesToSell * currentPrice;
   if (notionalUsd < CLOB_MIN_ORDER_USD) {
-    logger.warn('[take-profit-executor] CLOB sell below minimum notional — skipping, will resolve at settlement', {
+    logger.warn('[take-profit-executor] CLOB sell below minimum notional — marking pendingSettlement', {
       marketId: position.marketId,
       shares: sharesToSell,
       currentPrice,
       notionalUsd: notionalUsd.toFixed(4),
       minUsd: CLOB_MIN_ORDER_USD,
     });
+    await markPositionPendingSettlement(redis, position.marketId, position.direction);
+
     return { marketId: position.marketId, success: false, error: `CLOB sell below minimum: $${notionalUsd.toFixed(4)} < $${String(CLOB_MIN_ORDER_USD)}`, returnPct, reason };
   }
 

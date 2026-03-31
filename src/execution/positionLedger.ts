@@ -50,6 +50,9 @@ export interface Position {
   /** True when an HL synthetic hedge has been opened for this PM position.
    * The PM shares are still held on-chain; the redeemer handles final settlement. */
   synthHedged?: boolean | undefined;
+  /** True when the position's notional is below the CLOB $1 minimum.
+   * The monitor skips these — they resolve at market settlement via the redeemer. */
+  pendingSettlement?: boolean | undefined;
   /** Futures-specific metadata */
   isFutures?: boolean | undefined;
   leverage?: number | undefined;
@@ -115,6 +118,7 @@ export async function recordPosition(
     sharesHeld: position.sharesHeld !== undefined ? String(position.sharesHeld) : '0',
     executionVenue: position.executionVenue,
     synthHedged: position.synthHedged ? 'true' : 'false',
+    pendingSettlement: position.pendingSettlement ? 'true' : 'false',
     isFutures: position.isFutures ? 'true' : 'false',
     leverage: position.leverage !== undefined ? String(position.leverage) : '',
     symbol: position.symbol ?? '',
@@ -195,6 +199,20 @@ export async function markPositionSynthHedged(
 }
 
 /**
+ * Mark a position as pending settlement (below CLOB minimum notional).
+ * The monitor skips these — they resolve at market settlement via the redeemer.
+ */
+export async function markPositionPendingSettlement(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+): Promise<void> {
+  const key = positionKey(marketId, direction);
+  await redis.hset(key, { pendingSettlement: 'true' });
+  logger.info('[ledger] position marked pendingSettlement', { marketId, direction });
+}
+
+/**
  * Check if a position exists for a given market + direction.
  */
 export async function hasOpenPosition(
@@ -231,6 +249,7 @@ function deserialisePosition(raw: Record<string, string>): Position {
   if (raw.sharesHeld) pos.sharesHeld = parseFloat(raw.sharesHeld);
   
   if (raw.synthHedged === 'true') pos.synthHedged = true;
+  if (raw.pendingSettlement === 'true') pos.pendingSettlement = true;
   if (raw.isFutures === 'true') {
     pos.isFutures = true;
     if (raw.leverage) pos.leverage = parseFloat(raw.leverage);

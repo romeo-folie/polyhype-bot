@@ -95,6 +95,17 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
   let priceError = 0;
 
   for (const position of positions) {
+    // Positions flagged as pendingSettlement are below the CLOB $1 minimum —
+    // skip them silently; the resolution redeemer handles settlement.
+    if (position.pendingSettlement === true) {
+      logger.debug('[monitor] skipping pendingSettlement position', {
+        marketId: position.marketId,
+        direction: position.direction,
+      });
+      held++;
+      continue;
+    }
+
     const currentPrice = priceMap.get(`${position.marketId}:${position.direction}`);
 
     if (!currentPrice) {
