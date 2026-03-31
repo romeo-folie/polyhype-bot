@@ -147,6 +147,9 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
   const queries = Array.from(querySet).slice(0, 5); // cap at 5 searches
 
   const seen = new Map<string, CandidateMarket>();
+  // Track slugs already queued for import to prevent bursting concurrent API calls
+  // when the same event appears across multiple search queries.
+  const importedSlugs = new Set<string>();
 
   for (const query of queries) {
     try {
@@ -191,8 +194,10 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
           });
 
           // Fire-and-forget Simmer import if enabled.
-          // Pre-registers market in Simmer for enriched trading (divergence, tags, internal ID).
-          if (cfg.SIMMER_AUTO_IMPORT_ENABLED && event.slug) {
+          // Deduplicates by event slug — same event won't be re-queued if it appears
+          // in multiple query results, avoiding API burst.
+          if (cfg.SIMMER_AUTO_IMPORT_ENABLED && event.slug && !importedSlugs.has(event.slug)) {
+            importedSlugs.add(event.slug);
             const polymarketUrl = `https://polymarket.com/event/${event.slug}`;
             void importMarket(polymarketUrl).catch((err) => {
               logger.debug('[entity-extractor] simmer import failed (non-blocking)', {

@@ -19,7 +19,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const cfg = loadConfig();
 
   if (!cfg.SIMMER_AUTO_IMPORT_ENABLED) {
