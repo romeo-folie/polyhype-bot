@@ -6,7 +6,7 @@
  */
 
 import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client';
-import { Wallet, Contract, Interface, JsonRpcProvider, Network } from 'ethers';
+import { Wallet, Contract, Interface, JsonRpcProvider, Network, FetchRequest } from 'ethers';
 import { loadConfig } from './config.js';
 import { logger } from './logger.js';
 import { getRedis } from './redis.js';
@@ -36,13 +36,19 @@ const POLYGON_FALLBACK_RPCS = [
 let _polygonProvider: JsonRpcProvider | null = null;
 let _polygonProviderRpcUrl: string | null = null;
 
+/** Per-RPC timeout — bounds total failover to ~40s for 4 RPCs. */
+const RPC_TIMEOUT_MS = 10_000;
+
 function getPolygonProvider(rpcUrl: string): JsonRpcProvider {
   if (!_polygonProvider || _polygonProviderRpcUrl !== rpcUrl) {
     // Pass staticNetwork to skip ethers v6 auto-detection — without this, a slow or
     // temporarily unreachable RPC causes JsonRpcProvider to spin in an infinite 1s
     // retry loop that never resolves and keeps the process alive forever.
+    // FetchRequest timeout caps each RPC call to 10s.
     const polygonNetwork = new Network('matic', 137);
-    _polygonProvider = new JsonRpcProvider(rpcUrl, polygonNetwork, { staticNetwork: polygonNetwork });
+    const fetchReq = new FetchRequest(rpcUrl);
+    fetchReq.timeout = RPC_TIMEOUT_MS;
+    _polygonProvider = new JsonRpcProvider(fetchReq, polygonNetwork, { staticNetwork: polygonNetwork });
     _polygonProviderRpcUrl = rpcUrl;
   }
   return _polygonProvider;
@@ -539,85 +545,79 @@ async function redeemClobOutcomeWithRpc(
 ): Promise<ClobTradeResult> {
   const provider = getPolygonProvider(rpcUrl);
   const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY!, provider);
-    const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;
-    const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
+  const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;
+  const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
 
-    const ctfInterface = new Interface(CTF_ABI);
-    const indexSets = input.direction === 'YES' ? [1] : [2];
-    const data = ctfInterface.encodeFunctionData('redeemPositions', [
-      USDC_E_ADDRESS,
-      '0x0000000000000000000000000000000000000000000000000000000000000000',
-      input.conditionId,
-      indexSets,
-    ]);
+  const ctfInterface = new Interface(CTF_ABI);
+  const indexSets = input.direction === 'YES' ? [1] : [2];
+  const data = ctfInterface.encodeFunctionData('redeemPositions', [
+    USDC_E_ADDRESS,
+    '0x0000000000000000000000000000000000000000000000000000000000000000',
+    input.conditionId,
+    indexSets,
+  ]);
 
-    if (sigType === 1) {
-      // Proxy/Gnosis Safe logic
-      logger.info('[clob] executing redemption via Proxy wallet', {
-        funderAddress,
-        conditionId: input.conditionId,
-      });
+  if (sigType === 1) {
+    // Proxy/Gnosis Safe logic
+    logger.info('[clob] executing redemption via Proxy wallet', {
+      funderAddress,
+      conditionId: input.conditionId,
+    });
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
-      const safe = new Contract(funderAddress, SAFE_ABI, signer) as any;
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const nonce = await safe.nonce();
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
+    const safe = new Contract(funderAddress, SAFE_ABI, signer) as any;
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const nonce = await safe.nonce();
 
-      // Sign the transaction following Gnosis Safe specs
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const safeTxHash: string = await safe.getTransactionHash(
-        CTF_ADDRESS,
-        0, // value
-        data,
-        0, // operation: Call
-        0, // safeTxGas
-        0, // baseGas
-        0, // gasPrice
-        '0x0000000000000000000000000000000000000000', // refundReceiver
-        nonce,
-      );
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const safeTxHash: string = await safe.getTransactionHash(
+      CTF_ADDRESS,
+      0, // value
+      data,
+      0, // operation: Call
+      0, // safeTxGas
+      0, // baseGas
+      0, // gasPrice
+      '0x0000000000000000000000000000000000000000', // refundReceiver
+      nonce,
+    );
 
-      // Sign the transaction following Gnosis Safe specs.
-      // NOTE: This implementation assumes Gnosis Safe v1.1.1 or v1.3.0 with standard EOA signing.
-      // It uses the (v + 4) suffix which is a required Gnosis-specific trick for EOA signatures
-      // to distinguish them from other signature types in the Safe's internal signature validator.
-      const sig = signer.signingKey.sign(safeTxHash);
-      // Strip 0x prefix from r and s before concatenation.
-      // sig.r and sig.s include the leading 0x — concatenating without stripping
-      // produces a malformed 132-byte signature instead of the expected 65 bytes.
-      const r = sig.r.slice(2);
-      const s = sig.s.slice(2);
-      const v = sig.v + 4;
-      const safeSignature = '0x' + r + s + v.toString(16).padStart(2, '0');
+    // Gnosis Safe v1.1.1/v1.3.0 EOA signing: (v + 4) suffix distinguishes EOA signatures
+    // from other types in the Safe's internal signature validator.
+    const sig = signer.signingKey.sign(safeTxHash);
+    const r = sig.r.slice(2);
+    const s = sig.s.slice(2);
+    const v = sig.v + 4;
+    const safeSignature = '0x' + r + s + v.toString(16).padStart(2, '0');
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const tx = await safe.execTransaction(
-        CTF_ADDRESS,
-        0,
-        data,
-        0,
-        0,
-        0,
-        0,
-        '0x0000000000000000000000000000000000000000',
-        safeSignature,
-      );
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const tx = await safe.execTransaction(
+      CTF_ADDRESS,
+      0,
+      data,
+      0,
+      0,
+      0,
+      0,
+      '0x0000000000000000000000000000000000000000',
+      safeSignature,
+    );
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const receipt = await tx.wait();
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-      return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
-    } else {
-      // Standard EOA logic
-      logger.info('[clob] executing redemption via EOA wallet', {
-        conditionId: input.conditionId,
-        address: signer.address,
-      });
-      const tx = await signer.sendTransaction({
-        to: CTF_ADDRESS,
-        data,
-      });
-      const receipt = await tx.wait();
-      return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
-    }
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const receipt = await tx.wait();
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+    return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
+  } else {
+    // Standard EOA logic
+    logger.info('[clob] executing redemption via EOA wallet', {
+      conditionId: input.conditionId,
+      address: signer.address,
+    });
+    const tx = await signer.sendTransaction({
+      to: CTF_ADDRESS,
+      data,
+    });
+    const receipt = await tx.wait();
+    return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
+  }
 }

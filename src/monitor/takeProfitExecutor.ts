@@ -251,6 +251,38 @@ async function executeSimmerExit(opts: {
   }
 }
 
+/** Post-sell cleanup: close position, credit proceeds, record outcome, notify. */
+async function finalizeClobExit(
+  redis: Redis,
+  position: Position,
+  shares: number,
+  currentPrice: number,
+  returnPct: number,
+  reason: ExitReason,
+  txHash?: string,
+): Promise<TakeProfitResult> {
+  await closePositionWithHedge(redis, position.marketId, position.direction);
+  const proceedsUsd = shares * currentPrice;
+  await creditProceeds(redis, proceedsUsd);
+  await recordOutcome(redis, {
+    source: inferSource(position.sourcedFrom ?? ''),
+    category: inferCategory(position.question),
+    question: position.question.slice(0, 200),
+    direction: position.direction as 'YES' | 'NO',
+    consensusProbability: position.consensusProbability ?? 0.5,
+    divergence: position.edgeMagnitude ?? 0,
+    result: returnPct >= 0 ? 'won' : 'lost',
+    returnPct,
+    holdingHours: position.openedAt ? (Date.now() - new Date(position.openedAt).getTime()) / 3600000 : 0,
+    executionVenue: position.executionVenue ?? 'clob',
+  });
+  await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
+
+  const result: TakeProfitResult = { marketId: position.marketId, success: true, returnPct, reason };
+  if (txHash) result.txHash = txHash;
+  return result;
+}
+
 async function executeClobExit(opts: {
   position: Position;
   currentPrice: number;
@@ -358,37 +390,12 @@ async function executeClobExit(opts: {
     });
 
     if (clobResult.success) {
-      await closePositionWithHedge(redis, position.marketId, position.direction);
-      const proceedsUsd = safeShares * currentPrice;
-      await creditProceeds(redis, proceedsUsd);
-      await recordOutcome(redis, {
-        source: inferSource(position.sourcedFrom ?? ''),
-        category: inferCategory(position.question),
-        question: position.question.slice(0, 200),
-        direction: position.direction as 'YES' | 'NO',
-        consensusProbability: position.consensusProbability ?? 0.5,
-        divergence: position.edgeMagnitude ?? 0,
-        result: returnPct >= 0 ? 'won' : 'lost',
-        returnPct,
-        holdingHours: position.openedAt ? (Date.now() - new Date(position.openedAt).getTime()) / 3600000 : 0,
-        executionVenue: position.executionVenue ?? 'clob',
-      });
-      await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
-
       logger.info('[take-profit-executor] exit successful (clob)', {
         marketId: position.marketId,
         txHash: clobResult.tx_hash,
         returnPct: returnPct.toFixed(2),
       });
-
-      const successResult: TakeProfitResult = {
-        marketId: position.marketId,
-        success: true,
-        returnPct,
-        reason,
-      };
-      if (clobResult.tx_hash) successResult.txHash = clobResult.tx_hash;
-      return successResult;
+      return finalizeClobExit(redis, position, safeShares, currentPrice, returnPct, reason, clobResult.tx_hash);
     }
 
     // ── Auto-retry: parse actual balance from CLOB error and retry once ─────
@@ -412,36 +419,12 @@ async function executeClobExit(opts: {
           });
 
           if (retryResult.success) {
-            await closePositionWithHedge(redis, position.marketId, position.direction);
-            const proceedsUsd = retryShares * currentPrice;
-            await creditProceeds(redis, proceedsUsd);
-            await recordOutcome(redis, {
-              source: inferSource(position.sourcedFrom ?? ''),
-              category: inferCategory(position.question),
-              question: position.question.slice(0, 200),
-              direction: position.direction as 'YES' | 'NO',
-              consensusProbability: position.consensusProbability ?? 0.5,
-              divergence: position.edgeMagnitude ?? 0,
-              result: returnPct >= 0 ? 'won' : 'lost',
-              returnPct,
-              holdingHours: position.openedAt ? (Date.now() - new Date(position.openedAt).getTime()) / 3600000 : 0,
-              executionVenue: position.executionVenue ?? 'clob',
-            });
-            await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
-
             logger.info('[take-profit-executor] exit successful after balance retry (clob)', {
               marketId: position.marketId,
               txHash: retryResult.tx_hash,
               shares: retryShares,
             });
-
-            return {
-              marketId: position.marketId,
-              success: true,
-              returnPct,
-              reason,
-              ...(retryResult.tx_hash ? { txHash: retryResult.tx_hash } : {}),
-            };
+            return finalizeClobExit(redis, position, retryShares, currentPrice, returnPct, reason, retryResult.tx_hash);
           }
         }
       }
