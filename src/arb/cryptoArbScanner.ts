@@ -301,16 +301,8 @@ export async function scanCryptoArb(
         const confluenceUp = confluenceDirection === 'UP';
         // Effective expected direction after accounting for correlation sign.
         const expectYes = isPositiveCorrelation ? confluenceUp : !confluenceUp;
-        if (direction === 'YES' && !expectYes) {
-          logger.debug('[crypto-arb] direction mismatch — confluence vs edge after correlation adjustment — skipping', {
-            marketId: market.marketId,
-            direction,
-            confluenceDirection,
-            correlationDirection: market.correlationDirection,
-          });
-          continue;
-        }
-        if (direction === 'NO' && expectYes) {
+        const directionAligned = (direction === 'YES') === expectYes;
+        if (!directionAligned) {
           logger.debug('[crypto-arb] direction mismatch — confluence vs edge after correlation adjustment — skipping', {
             marketId: market.marketId,
             direction,

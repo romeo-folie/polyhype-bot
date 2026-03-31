@@ -67,6 +67,10 @@ const TYPES = {
   ],
 };
 
+// Monotonic nonce generator to prevent collision when Date.now() is called twice in the same millisecond.
+let _hlNonce = Date.now();
+function nextHlNonce(): number { return ++_hlNonce; }
+
 export interface HlPosition {
   symbol: string;
   position: {
@@ -206,7 +210,7 @@ class HyperliquidClient {
         grouping: 'na'
       };
 
-      const nonce = Date.now();
+      const nonce = nextHlNonce();
       const signature = await this.signAction(action, nonce);
 
       const payload = {
@@ -261,7 +265,7 @@ class HyperliquidClient {
         leverage: leverage,
       };
       
-      const nonce = Date.now();
+      const nonce = nextHlNonce();
       const signature = await this.signAction(action, nonce);
       await axios.post(`${this.baseUrl}/exchange`, { action, nonce, signature });
       return true;

@@ -320,7 +320,8 @@ async function main() {
   await worker.start();
 }
 
-const isMain = process.argv[1]?.endsWith('arb/worker.ts') ?? false;
+const isMain = (process.argv[1]?.endsWith('arb/worker.ts') ?? false) ||
+               (process.argv[1]?.endsWith('arb/worker.js') ?? false);
 if (isMain) {
   main().catch((err) => {
     logger.error('[arb-worker] fatal error', { error: String(err) });

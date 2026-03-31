@@ -39,7 +39,7 @@ export interface ExecutionResult {
   error?: string;
   executionVenue?: 'simmer' | 'clob' | 'hyperliquid';
   /** True if a delta hedge was placed on HL for this trade. */
-  hedgeRequested?: boolean;
+  hedgeAttempted?: boolean;
 }
 
 function idempotencyKey(signal: TradeSignal): string {
@@ -469,7 +469,7 @@ export async function executeSignal(
         void notifyTradeExecuted(signal, tradeResult.tx_hash).catch(() => {});
 
         // Fire-and-forget the delta hedge — do not block PM trade confirmation on HL latency.
-        // hedgeRequested is reported as true optimistically; errors are logged inside triggerDeltaHedge.
+        // hedgeAttempted is reported as true optimistically; errors are logged inside triggerDeltaHedge.
         void triggerDeltaHedge(signal, redis, knownSessionExposureUsd).catch((err) => {
           logger.warn('[executor] delta hedge async error (non-fatal)', {
             marketId: signal.marketId,
@@ -477,7 +477,7 @@ export async function executeSignal(
           });
         });
         const exeResult: ExecutionResult = {
-          signal, skipped: false, tradeResult, executionVenue: 'simmer', hedgeRequested: true,
+          signal, skipped: false, tradeResult, executionVenue: 'simmer', hedgeAttempted: true,
         };
         return exeResult;
       }
@@ -556,7 +556,7 @@ export async function executeSignal(
       skipped: false,
       tradeResult,
       executionVenue: 'clob',
-      hedgeRequested: true,
+      hedgeAttempted: true,
     };
   }
 
@@ -584,9 +584,9 @@ export async function executeSignals(
 
   for (const signal of signals) {
     const result = await executeSignal(signal, redis, sessionExposureUsd);
-    
+
     // If trade succeeded on HL, track margin so subsequent margin checks account for API lag.
-    // Do NOT add hedgeRequested to session exposure — the hedge is fire-and-forget and may
+    // Do NOT add hedgeAttempted to session exposure — the hedge is fire-and-forget and may
     // not have executed; adding it optimistically would cause false margin-cap rejections.
     // The hedge's margin will appear in the next cycle's live positions from HL.
     if (result.tradeResult?.success && result.executionVenue === 'hyperliquid') {
