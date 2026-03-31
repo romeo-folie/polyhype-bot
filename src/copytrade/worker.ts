@@ -71,6 +71,20 @@ export async function runWorker(maxCycles?: number): Promise<void> {
     ).catch((e: unknown) => { logger.warn('[copytrade-worker] lock release failed', { error: String(e) }); });
   };
 
+  // Release lock on graceful shutdown (PM2 restart, SIGTERM, Ctrl+C).
+  // Without this, PM2 restart races the 300s TTL and the new instance exits immediately.
+  const onShutdown = (signal: string) => {
+    logger.info('[copytrade-worker] shutdown signal received — releasing lock', { signal });
+    releaseLock()
+      .then(() => {
+        redis.quit().catch(() => {});
+        process.exit(0);
+      })
+      .catch(() => process.exit(1));
+  };
+  process.once('SIGTERM', () => onShutdown('SIGTERM'));
+  process.once('SIGINT', () => onShutdown('SIGINT'));
+
   logger.info('[copytrade-worker] started', { 
     wallets: cfg.COPYTRADE_WALLETS,
     scope: cfg.COPYTRADE_MARKET_SCOPE
