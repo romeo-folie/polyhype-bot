@@ -31,6 +31,7 @@ jest.unstable_mockModule('../../shared/clob.js', () => ({
   submitClobBuy: jest.fn(),
   getClobBalance: jest.fn(),
   fetchClobTokenBalance: jest.fn().mockResolvedValue({ ok: true, balance: 999 }),
+  parseBalanceFromClobError: jest.fn().mockReturnValue(null),
   CLOB_MIN_ORDER_USD: 1.0,
 }));
 

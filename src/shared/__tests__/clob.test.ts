@@ -36,6 +36,8 @@ vi.mock('ethers', () => ({
     encodeFunctionData: vi.fn(() => '0xencodeddata'),
   })),
   JsonRpcProvider: vi.fn(() => ({})),
+  Network: vi.fn(() => ({})),
+  FetchRequest: vi.fn(() => ({ timeout: 0 })),
   getBytes: vi.fn((val) => val),
 }));
 
@@ -60,6 +62,9 @@ vi.mock('../config.js', () => ({
     POLYMARKET_SIGNATURE_TYPE: 0,
     POLYMARKET_FUNDER_ADDRESS: undefined,
     CLOB_ORDER_TYPE: 'FAK',
+    // Pin a single RPC URL so buildRpcList() makes exactly one attempt — prevents
+    // flakiness in CI (Node 20) from the 4-URL public fallback list exhaustion.
+    POLYGON_RPC_URL: 'http://mock-rpc.test',
   })),
 }));
 
@@ -245,6 +250,7 @@ describe('redeemClobOutcome', () => {
       POLYMARKET_SIGNATURE_TYPE: 1,
       POLYMARKET_FUNDER_ADDRESS: '0xproxyaddress',
       CLOB_FALLBACK_ENABLED: true,
+      POLYGON_RPC_URL: 'http://mock-rpc.test',
     });
 
     const result = await redeemClobOutcome({ conditionId: 'cond-123', direction: 'NO' });
@@ -252,5 +258,32 @@ describe('redeemClobOutcome', () => {
     expect(result.success).toBe(true);
     expect(result.tx_hash).toBe('0xredeemhash');
     expect(mockExecTransaction).toHaveBeenCalled();
+  });
+});
+
+describe('parseBalanceFromClobError', () => {
+  let parseBalanceFromClobError: typeof import('../clob.js').parseBalanceFromClobError;
+
+  beforeEach(async () => {
+    ({ parseBalanceFromClobError } = await import('../clob.js'));
+  });
+
+  it('extracts balance from CLOB error message', () => {
+    const error = 'not enough balance / allowance: the balance is not enough -> balance: 3266460, order amount: 3280000';
+    expect(parseBalanceFromClobError(error)).toBeCloseTo(3.26646, 5);
+  });
+
+  it('handles HTML-encoded arrow in error', () => {
+    const error = 'not enough balance / allowance: the balance is not enough &gt; balance: 2916310, order amount: 2920000';
+    expect(parseBalanceFromClobError(error)).toBeCloseTo(2.91631, 5);
+  });
+
+  it('returns null for unrelated error messages', () => {
+    expect(parseBalanceFromClobError('CLOB order rejected')).toBeNull();
+    expect(parseBalanceFromClobError('')).toBeNull();
+  });
+
+  it('returns null for non-numeric balance', () => {
+    expect(parseBalanceFromClobError('balance: abc, order amount: 100')).toBeNull();
   });
 });

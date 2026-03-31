@@ -6,7 +6,7 @@
  */
 
 import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client';
-import { Wallet, Contract, Interface, JsonRpcProvider, Network } from 'ethers';
+import { Wallet, Contract, Interface, JsonRpcProvider, Network, FetchRequest } from 'ethers';
 import { loadConfig } from './config.js';
 import { logger } from './logger.js';
 import { getRedis } from './redis.js';
@@ -23,18 +23,32 @@ export const CLOB_MIN_ORDER_USD = 1.0;
 const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
 const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 
+// Public Polygon RPC endpoints for automatic failover when the user-configured
+// RPC is down, requires auth, or is rate-limited.
+const POLYGON_FALLBACK_RPCS = [
+  'https://polygon-rpc.com',
+  'https://polygon.llamarpc.com',
+  'https://polygon-bor-rpc.publicnode.com',
+];
+
 // Cached Polygon provider — reused across fetchClobTokenBalance and redeemClobOutcome
 // calls to avoid spinning up a new JsonRpcProvider per invocation.
 let _polygonProvider: JsonRpcProvider | null = null;
 let _polygonProviderRpcUrl: string | null = null;
+
+/** Per-RPC timeout — bounds total failover to ~40s for 4 RPCs. */
+const RPC_TIMEOUT_MS = 10_000;
 
 function getPolygonProvider(rpcUrl: string): JsonRpcProvider {
   if (!_polygonProvider || _polygonProviderRpcUrl !== rpcUrl) {
     // Pass staticNetwork to skip ethers v6 auto-detection — without this, a slow or
     // temporarily unreachable RPC causes JsonRpcProvider to spin in an infinite 1s
     // retry loop that never resolves and keeps the process alive forever.
+    // FetchRequest timeout caps each RPC call to 10s.
     const polygonNetwork = new Network('matic', 137);
-    _polygonProvider = new JsonRpcProvider(rpcUrl, polygonNetwork, { staticNetwork: polygonNetwork });
+    const fetchReq = new FetchRequest(rpcUrl);
+    fetchReq.timeout = RPC_TIMEOUT_MS;
+    _polygonProvider = new JsonRpcProvider(fetchReq, polygonNetwork, { staticNetwork: polygonNetwork });
     _polygonProviderRpcUrl = rpcUrl;
   }
   return _polygonProvider;
@@ -92,6 +106,42 @@ const CLOB_CREDS_REDIS_KEY = 'clob:api_creds';
 const CLOB_CREDS_TTL_SECONDS = 23 * 3600;
 
 const USDC_RAW_RE = /balance:\s*(\d+),\s*order amount:\s*(\d+)/i;
+
+/** Force provider reset — called when the current RPC fails. */
+function resetPolygonProvider(): void {
+  _polygonProvider = null;
+  _polygonProviderRpcUrl = null;
+}
+
+/**
+ * Build an ordered RPC URL list: user-configured first, then public fallbacks (deduped).
+ */
+function buildRpcList(): string[] {
+  const userRpc = loadConfig().POLYGON_RPC_URL;
+  const rpcUrls: string[] = [];
+  if (userRpc) rpcUrls.push(userRpc);
+  for (const rpc of POLYGON_FALLBACK_RPCS) {
+    if (!rpcUrls.includes(rpc)) rpcUrls.push(rpc);
+  }
+  return rpcUrls;
+}
+
+/**
+ * Parse actual on-chain balance from a CLOB "not enough balance" error.
+ *
+ * Polymarket's CLOB returns errors like:
+ *   "not enough balance / allowance: the balance is not enough → balance: 3266460, order amount: 3280000"
+ *
+ * The balance value is in 6-decimal raw units (1 share = 1_000_000 raw units).
+ * Returns the actual balance in shares (human units), or null if unparseable.
+ */
+export function parseBalanceFromClobError(errorMsg: string): number | null {
+  const match = USDC_RAW_RE.exec(errorMsg);
+  if (!match?.[1]) return null;
+  const rawBalance = parseInt(match[1], 10);
+  if (!isFinite(rawBalance) || rawBalance < 0) return null;
+  return rawBalance / 1_000_000;
+}
 
 function normaliseError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -430,28 +480,29 @@ export async function fetchClobTokenBalance(tokenId: string): Promise<ClobBalanc
     return { ok: false, error: 'wallet key missing' };
   }
 
-  const rpcUrl = cfg.POLYGON_RPC_URL ?? 'https://polygon-rpc.com';
+  const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY).address;
+  const rpcUrls = buildRpcList();
+  const ctfAbi = ['function balanceOf(address account, uint256 id) view returns (uint256)'];
+  let lastError = '';
 
-  try {
-    const provider = getPolygonProvider(rpcUrl);
-    const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
-    const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
-
-    // ERC-1155 balanceOf(account, id) returns uint256
-    const ctfAbi = ['function balanceOf(address account, uint256 id) view returns (uint256)'];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as any;
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const balance: bigint = await ctf.balanceOf(funderAddress, tokenId);
-
-    // Convert bigint to number. Polymarket tokens use 6 decimals, so values fit safely in JS number.
-    return { ok: true, balance: Number(balance) };
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    logger.warn('[clob] failed to fetch on-chain token balance', { tokenId, error: errMsg });
-    return { ok: false, error: errMsg };
+  for (const rpcUrl of rpcUrls) {
+    try {
+      resetPolygonProvider(); // force fresh provider for each attempt
+      const provider = getPolygonProvider(rpcUrl);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as any;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      const balance: bigint = await ctf.balanceOf(funderAddress, tokenId);
+      return { ok: true, balance: Number(balance) };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      logger.warn('[clob] RPC balance fetch failed — trying next', { rpcUrl, tokenId, error: lastError });
+      resetPolygonProvider();
+    }
   }
+
+  logger.warn('[clob] all RPCs failed for token balance', { tokenId, error: lastError });
+  return { ok: false, error: lastError };
 }
 
 /**
@@ -468,96 +519,105 @@ export async function redeemClobOutcome(input: {
     return { success: false, error: 'POLYGON_WALLET_PRIVATE_KEY required' };
   }
 
-  const rpcUrl = cfg.POLYGON_RPC_URL ?? 'https://polygon-rpc.com';
-  try {
-    const provider = getPolygonProvider(rpcUrl);
-    const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
-    const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;
-    const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
+  const rpcUrls = buildRpcList();
+  let lastError = '';
 
-    const ctfInterface = new Interface(CTF_ABI);
-    const indexSets = input.direction === 'YES' ? [1] : [2];
-    const data = ctfInterface.encodeFunctionData('redeemPositions', [
-      USDC_E_ADDRESS,
-      '0x0000000000000000000000000000000000000000000000000000000000000000',
-      input.conditionId,
-      indexSets,
-    ]);
-
-    if (sigType === 1) {
-      // Proxy/Gnosis Safe logic
-      logger.info('[clob] executing redemption via Proxy wallet', {
-        funderAddress,
-        conditionId: input.conditionId,
-      });
-
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
-      const safe = new Contract(funderAddress, SAFE_ABI, signer) as any;
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const nonce = await safe.nonce();
-
-      // Sign the transaction following Gnosis Safe specs
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const safeTxHash: string = await safe.getTransactionHash(
-        CTF_ADDRESS,
-        0, // value
-        data,
-        0, // operation: Call
-        0, // safeTxGas
-        0, // baseGas
-        0, // gasPrice
-        '0x0000000000000000000000000000000000000000', // refundReceiver
-        nonce,
-      );
-
-      // Sign the transaction following Gnosis Safe specs.
-      // NOTE: This implementation assumes Gnosis Safe v1.1.1 or v1.3.0 with standard EOA signing.
-      // It uses the (v + 4) suffix which is a required Gnosis-specific trick for EOA signatures
-      // to distinguish them from other signature types in the Safe's internal signature validator.
-      const sig = signer.signingKey.sign(safeTxHash);
-      // Strip 0x prefix from r and s before concatenation.
-      // sig.r and sig.s include the leading 0x — concatenating without stripping
-      // produces a malformed 132-byte signature instead of the expected 65 bytes.
-      const r = sig.r.slice(2);
-      const s = sig.s.slice(2);
-      const v = sig.v + 4;
-      const safeSignature = '0x' + r + s + v.toString(16).padStart(2, '0');
-
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const tx = await safe.execTransaction(
-        CTF_ADDRESS,
-        0,
-        data,
-        0,
-        0,
-        0,
-        0,
-        '0x0000000000000000000000000000000000000000',
-        safeSignature,
-      );
-
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const receipt = await tx.wait();
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-      return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
-    } else {
-      // Standard EOA logic
-      logger.info('[clob] executing redemption via EOA wallet', {
-        conditionId: input.conditionId,
-        address: signer.address,
-      });
-      const tx = await signer.sendTransaction({
-        to: CTF_ADDRESS,
-        data,
-      });
-      const receipt = await tx.wait();
-      return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
+  for (const rpcUrl of rpcUrls) {
+    try {
+      resetPolygonProvider();
+      const result = await redeemClobOutcomeWithRpc(input, cfg, rpcUrl);
+      return result;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      logger.warn('[clob] RPC redemption failed — trying next', { rpcUrl, conditionId: input.conditionId, error: lastError });
+      resetPolygonProvider();
     }
-  } catch (err) {
-    logger.error('[clob] redemption failed', {
-      error: err instanceof Error ? err.message : String(err),
+  }
+
+  logger.error('[clob] all RPCs failed for redemption', { conditionId: input.conditionId, error: lastError });
+  return { success: false, error: lastError };
+}
+
+async function redeemClobOutcomeWithRpc(
+  input: { conditionId: string; direction: 'YES' | 'NO' },
+  cfg: ReturnType<typeof loadConfig>,
+  rpcUrl: string,
+): Promise<ClobTradeResult> {
+  const provider = getPolygonProvider(rpcUrl);
+  const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY!, provider);
+  const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;
+  const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
+
+  const ctfInterface = new Interface(CTF_ABI);
+  const indexSets = input.direction === 'YES' ? [1] : [2];
+  const data = ctfInterface.encodeFunctionData('redeemPositions', [
+    USDC_E_ADDRESS,
+    '0x0000000000000000000000000000000000000000000000000000000000000000',
+    input.conditionId,
+    indexSets,
+  ]);
+
+  if (sigType === 1) {
+    // Proxy/Gnosis Safe logic
+    logger.info('[clob] executing redemption via Proxy wallet', {
+      funderAddress,
       conditionId: input.conditionId,
     });
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
+    const safe = new Contract(funderAddress, SAFE_ABI, signer) as any;
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const nonce = await safe.nonce();
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const safeTxHash: string = await safe.getTransactionHash(
+      CTF_ADDRESS,
+      0, // value
+      data,
+      0, // operation: Call
+      0, // safeTxGas
+      0, // baseGas
+      0, // gasPrice
+      '0x0000000000000000000000000000000000000000', // refundReceiver
+      nonce,
+    );
+
+    // Gnosis Safe v1.1.1/v1.3.0 EOA signing: (v + 4) suffix distinguishes EOA signatures
+    // from other types in the Safe's internal signature validator.
+    const sig = signer.signingKey.sign(safeTxHash);
+    const r = sig.r.slice(2);
+    const s = sig.s.slice(2);
+    const v = sig.v + 4;
+    const safeSignature = '0x' + r + s + v.toString(16).padStart(2, '0');
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const tx = await safe.execTransaction(
+      CTF_ADDRESS,
+      0,
+      data,
+      0,
+      0,
+      0,
+      0,
+      '0x0000000000000000000000000000000000000000',
+      safeSignature,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const receipt = await tx.wait();
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+    return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
+  } else {
+    // Standard EOA logic
+    logger.info('[clob] executing redemption via EOA wallet', {
+      conditionId: input.conditionId,
+      address: signer.address,
+    });
+    const tx = await signer.sendTransaction({
+      to: CTF_ADDRESS,
+      data,
+    });
+    const receipt = await tx.wait();
+    return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
   }
 }
