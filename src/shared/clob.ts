@@ -6,7 +6,7 @@
  */
 
 import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client';
-import { Wallet, Contract, Interface, JsonRpcProvider } from 'ethers';
+import { Wallet, Contract, Interface, JsonRpcProvider, Network } from 'ethers';
 import { loadConfig } from './config.js';
 import { logger } from './logger.js';
 import { getRedis } from './redis.js';
@@ -30,7 +30,11 @@ let _polygonProviderRpcUrl: string | null = null;
 
 function getPolygonProvider(rpcUrl: string): JsonRpcProvider {
   if (!_polygonProvider || _polygonProviderRpcUrl !== rpcUrl) {
-    _polygonProvider = new JsonRpcProvider(rpcUrl);
+    // Pass staticNetwork to skip ethers v6 auto-detection — without this, a slow or
+    // temporarily unreachable RPC causes JsonRpcProvider to spin in an infinite 1s
+    // retry loop that never resolves and keeps the process alive forever.
+    const polygonNetwork = new Network('matic', 137);
+    _polygonProvider = new JsonRpcProvider(rpcUrl, polygonNetwork, { staticNetwork: polygonNetwork });
     _polygonProviderRpcUrl = rpcUrl;
   }
   return _polygonProvider;
