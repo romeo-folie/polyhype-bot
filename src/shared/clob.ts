@@ -493,7 +493,9 @@ export async function fetchClobTokenBalance(tokenId: string): Promise<ClobBalanc
       const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as any;
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       const balance: bigint = await ctf.balanceOf(funderAddress, tokenId);
-      return { ok: true, balance: Number(balance) };
+      // Polymarket conditional tokens use 6 decimal places (CONDITIONAL_TOKEN_DECIMALS = 6).
+      // balanceOf() returns raw ERC-1155 units — divide by 1e6 to get human-readable shares.
+      return { ok: true, balance: Number(balance) / 1_000_000 };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       logger.warn('[clob] RPC balance fetch failed — trying next', { rpcUrl, tokenId, error: lastError });

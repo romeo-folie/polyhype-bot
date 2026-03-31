@@ -30,7 +30,7 @@ jest.unstable_mockModule('../../shared/clob.js', () => ({
   submitClobSell: jest.fn(),
   submitClobBuy: jest.fn(),
   getClobBalance: jest.fn(),
-  fetchClobTokenBalance: jest.fn().mockResolvedValue({ ok: true, balance: 999 }),
+  fetchClobTokenBalance: jest.fn().mockResolvedValue({ ok: true, balance: 5.0 }),
   parseBalanceFromClobError: jest.fn().mockReturnValue(null),
   CLOB_MIN_ORDER_USD: 1.0,
 }));
@@ -363,5 +363,24 @@ describe('executeTakeProfit', () => {
     expect(result.success).toBe(false);
     expect(result.error).toBe('CLOB order rejected');
     expect(mockClose).not.toHaveBeenCalled();
+  });
+
+  it('caps CLOB sell at actual on-chain balance when it is less than Redis-tracked shares', async () => {
+    // On-chain balance is 2.5 but ledger says 3.0 — sell should use 2.5
+    mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 2.5 });
+    mockClobSell.mockResolvedValue({ success: true, tx_hash: '0xcapped' });
+
+    const result = await executeTakeProfit({
+      position: makePosition({ executionVenue: 'clob', sharesHeld: 3.0, direction: 'YES' }),
+      currentPrice: 0.65,
+      returnPct: 20,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockClobSell).toHaveBeenCalledWith(
+      expect.objectContaining({ shares: 2.5 }),
+    );
   });
 });
