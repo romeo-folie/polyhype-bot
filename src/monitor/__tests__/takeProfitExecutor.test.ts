@@ -30,6 +30,9 @@ jest.unstable_mockModule('../../shared/clob.js', () => ({
   submitClobSell: jest.fn(),
   submitClobBuy: jest.fn(),
   getClobBalance: jest.fn(),
+  fetchClobTokenBalance: jest.fn().mockResolvedValue({ ok: true, balance: 100 }),
+  parseBalanceFromClobError: jest.fn().mockReturnValue(null),
+  CLOB_MIN_ORDER_USD: 1.0,
 }));
 
 jest.unstable_mockModule('../../execution/positionLedger.js', () => ({

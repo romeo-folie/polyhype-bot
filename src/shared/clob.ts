@@ -7,6 +7,7 @@
 
 import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client';
 import { Wallet } from '@ethersproject/wallet';
+import { Wallet as Wallet6, Contract, JsonRpcProvider, Network } from 'ethers';
 import { loadConfig } from './config.js';
 import { logger } from './logger.js';
 import { getRedis } from './redis.js';
@@ -17,6 +18,38 @@ const POLYGON_CHAIN_ID = 137;
 // Hard timeout for CLOB order submission. The SDK has no built-in timeout;
 // without this a hung connection would keep the cron process alive indefinitely.
 const CLOB_ORDER_TIMEOUT_MS = 30_000;
+/** Polymarket CLOB protocol minimum — orders below this are rejected. */
+export const CLOB_MIN_ORDER_USD = 1.0;
+
+const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
+const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+
+// Ordered list of public Polygon RPC endpoints for balance lookups.
+// First entry is user-configured (POLYGON_RPC_URL); remaining are free public fallbacks.
+const POLYGON_PUBLIC_RPCS = [
+  'https://polygon-rpc.com',
+  'https://polygon.llamarpc.com',
+  'https://polygon-bor-rpc.publicnode.com',
+];
+
+// Cached Polygon provider — reused across calls.
+let _polygonProvider: JsonRpcProvider | null = null;
+let _polygonProviderRpcUrl: string | null = null;
+
+function getPolygonProvider(rpcUrl: string): JsonRpcProvider {
+  if (!_polygonProvider || _polygonProviderRpcUrl !== rpcUrl) {
+    const polygonNetwork = new Network('matic', 137);
+    _polygonProvider = new JsonRpcProvider(rpcUrl, polygonNetwork, { staticNetwork: polygonNetwork });
+    _polygonProviderRpcUrl = rpcUrl;
+  }
+  return _polygonProvider;
+}
+
+/** Force provider reset — called when the current RPC fails. */
+function resetPolygonProvider(): void {
+  _polygonProvider = null;
+  _polygonProviderRpcUrl = null;
+}
 
 export interface ClobBuyInput {
   tokenId: string;
@@ -59,9 +92,28 @@ let cachedClient: Promise<ClobClient> | null = null;
 const CLOB_CREDS_REDIS_KEY = 'clob:api_creds';
 const CLOB_CREDS_TTL_SECONDS = 23 * 3600;
 
+const BALANCE_RAW_RE = /balance:\s*(\d+),\s*order amount:\s*(\d+)/i;
+
 function normaliseError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/**
+ * Parse actual on-chain balance from a CLOB "not enough balance" error.
+ *
+ * Polymarket's CLOB returns errors like:
+ *   "not enough balance / allowance: the balance is not enough → balance: 3266460, order amount: 3280000"
+ *
+ * The balance value is in 6-decimal raw units (1 share = 1_000_000 raw units).
+ * Returns the actual balance in shares (human units), or null if unparseable.
+ */
+export function parseBalanceFromClobError(errorMsg: string): number | null {
+  const match = BALANCE_RAW_RE.exec(errorMsg);
+  if (!match?.[1]) return null;
+  const rawBalance = parseInt(match[1], 10);
+  if (!isFinite(rawBalance) || rawBalance < 0) return null;
+  return rawBalance / 1_000_000;
 }
 
 async function loadPersistedCreds(): Promise<ApiKeyCreds | null> {
@@ -335,4 +387,117 @@ export async function getClobBalance(): Promise<{ balance: number; allowance: nu
   } catch {
     return null;
   }
+}
+
+// ── On-chain balance & redemption ───────────────────────────────────────────
+
+export type ClobBalanceResult =
+  | { ok: true; balance: number }
+  | { ok: false; error: string };
+
+/**
+ * Fetch the on-chain ERC-1155 token balance for a CLOB outcome token.
+ *
+ * Tries the user-configured POLYGON_RPC_URL first, then falls back through
+ * POLYGON_PUBLIC_RPCS on failure (auth-required, rate-limited, down).
+ *
+ * Returns a discriminated result so callers can distinguish a genuine zero
+ * balance from a fetch error.
+ */
+export async function fetchClobTokenBalance(tokenId: string): Promise<ClobBalanceResult> {
+  const cfg = loadConfig();
+  if (!cfg.POLYGON_WALLET_PRIVATE_KEY) {
+    return { ok: false, error: 'wallet key missing' };
+  }
+
+  const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? new Wallet6(cfg.POLYGON_WALLET_PRIVATE_KEY).address;
+
+  // Build ordered RPC list: user-configured first, then public fallbacks (deduped).
+  const userRpc = (process as unknown as { env: Record<string, string | undefined> }).env["POLYGON_RPC_URL"];
+  const rpcUrls: string[] = [];
+  if (userRpc) rpcUrls.push(userRpc);
+  for (const rpc of POLYGON_PUBLIC_RPCS) {
+    if (!rpcUrls.includes(rpc)) rpcUrls.push(rpc);
+  }
+
+  const ctfAbi = ['function balanceOf(address account, uint256 id) view returns (uint256)'];
+  let lastError = '';
+
+  for (const rpcUrl of rpcUrls) {
+    try {
+      resetPolygonProvider(); // force fresh provider for each attempt
+      const provider = getPolygonProvider(rpcUrl);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as any;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      const balance: bigint = await ctf.balanceOf(funderAddress, tokenId);
+      return { ok: true, balance: Number(balance) };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      logger.warn('[clob] RPC balance fetch failed — trying next', { rpcUrl, tokenId, error: lastError });
+      resetPolygonProvider();
+    }
+  }
+
+  logger.warn('[clob] all RPCs failed for token balance', { tokenId, error: lastError });
+  return { ok: false, error: lastError };
+}
+
+/**
+ * Redeem winning outcome tokens for USDC.e on-chain.
+ *
+ * Tries the user-configured RPC first, then falls back through public RPCs.
+ */
+export async function redeemClobOutcome(input: {
+  conditionId: string;
+  direction: 'YES' | 'NO';
+}): Promise<ClobTradeResult> {
+  const cfg = loadConfig();
+  if (!cfg.POLYGON_WALLET_PRIVATE_KEY) {
+    return { success: false, error: 'POLYGON_WALLET_PRIVATE_KEY required' };
+  }
+
+  const CTF_REDEEM_ABI = [
+    'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)',
+  ];
+
+  // Build ordered RPC list
+  const userRpc = (process as unknown as { env: Record<string, string | undefined> }).env["POLYGON_RPC_URL"];
+  const rpcUrls: string[] = [];
+  if (userRpc) rpcUrls.push(userRpc);
+  for (const rpc of POLYGON_PUBLIC_RPCS) {
+    if (!rpcUrls.includes(rpc)) rpcUrls.push(rpc);
+  }
+
+  const indexSets = input.direction === 'YES' ? [1] : [2];
+  let lastError = '';
+
+  for (const rpcUrl of rpcUrls) {
+    try {
+      resetPolygonProvider();
+      const provider = getPolygonProvider(rpcUrl);
+      const signer = new Wallet6(cfg.POLYGON_WALLET_PRIVATE_KEY, provider);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ctf = new Contract(CTF_ADDRESS, CTF_REDEEM_ABI, signer) as any;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      const tx = await ctf.redeemPositions(
+        USDC_E_ADDRESS,
+        '0x0000000000000000000000000000000000000000000000000000000000000000',
+        input.conditionId,
+        indexSets,
+      );
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      const receipt = await tx.wait();
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      logger.warn('[clob] RPC redemption failed — trying next', { rpcUrl, conditionId: input.conditionId, error: lastError });
+      resetPolygonProvider();
+    }
+  }
+
+  logger.error('[clob] all RPCs failed for redemption', { conditionId: input.conditionId, error: lastError });
+  return { success: false, error: lastError };
 }

@@ -13,7 +13,7 @@
 
 import { logger } from '../shared/logger.js';
 import { submitSell, resolveSimmerMarketId, SimmerError } from '../shared/simmer.js';
-import { submitClobSell } from '../shared/clob.js';
+import { submitClobSell, fetchClobTokenBalance, parseBalanceFromClobError, CLOB_MIN_ORDER_USD, type ClobBalanceResult } from '../shared/clob.js';
 import { closePosition } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
@@ -185,16 +185,91 @@ async function executeClobExit(opts: {
     return { marketId: position.marketId, success: false, error, returnPct, reason };
   }
 
+  // ── Pre-flight: check notional minimum ────────────────────────────────────
+  const notionalUsd = sharesToSell * currentPrice;
+  if (notionalUsd < CLOB_MIN_ORDER_USD) {
+    logger.warn('[take-profit-executor] CLOB sell below minimum notional — skipping, will resolve at settlement', {
+      marketId: position.marketId,
+      shares: sharesToSell,
+      currentPrice,
+      notionalUsd: notionalUsd.toFixed(4),
+      minUsd: CLOB_MIN_ORDER_USD,
+    });
+    return { marketId: position.marketId, success: false, error: `CLOB sell below minimum: $${notionalUsd.toFixed(4)} < $${String(CLOB_MIN_ORDER_USD)}`, returnPct, reason };
+  }
+
+  // ── Pre-flight: fetch actual on-chain balance with RPC failover ───────────
+  let balanceResult: ClobBalanceResult = await fetchClobTokenBalance(tokenId);
+  if (!balanceResult.ok) {
+    // Retry once after a short delay
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    balanceResult = await fetchClobTokenBalance(tokenId);
+  }
+
+  let safeShares: number;
+  if (!balanceResult.ok) {
+    // Both attempts failed — use 98% of Redis value as conservative approximation.
+    // (Previously 99.99%, which still overshot due to FAK partial fills.)
+    logger.warn('[take-profit-executor] balance fetch failed after retry — using 98% fallback', {
+      marketId: position.marketId,
+      tokenId,
+      sharesToSell,
+      error: balanceResult.error,
+    });
+    safeShares = sharesToSell * 0.98;
+  } else {
+    // Ghost position cleanup — genuine zero balance means stale ledger entry.
+    if (balanceResult.balance < 0.001) {
+      logger.error('[take-profit-executor] on-chain balance near-zero — closing stale ledger entry', {
+        marketId: position.marketId,
+        tokenId,
+        actualBalance: balanceResult.balance,
+        redisShares: sharesToSell,
+      });
+      await closePosition(redis, position.marketId, position.direction);
+      return { marketId: position.marketId, success: false, error: 'stale_position_cleared', returnPct, reason };
+    }
+
+    safeShares = Math.min(sharesToSell, balanceResult.balance);
+    if (balanceResult.balance < sharesToSell) {
+      logger.info('[take-profit-executor] CLOB balance sync: using actual balance', {
+        marketId: position.marketId,
+        sharesToSell,
+        actualBalance: balanceResult.balance,
+        diff: sharesToSell - balanceResult.balance,
+      });
+    }
+  }
+
+  // Truncate to 6 decimal places (CLOB precision) — floor to avoid overshoot.
+  safeShares = Math.floor(safeShares * 1_000_000) / 1_000_000;
+  if (safeShares <= 0) {
+    return { marketId: position.marketId, success: false, error: 'safe_shares_zero', returnPct, reason };
+  }
+
+  // Re-check notional after balance adjustment
+  const adjNotional = safeShares * currentPrice;
+  if (adjNotional < CLOB_MIN_ORDER_USD) {
+    logger.warn('[take-profit-executor] CLOB sell below minimum after balance sync — skipping', {
+      marketId: position.marketId,
+      safeShares,
+      currentPrice,
+      adjNotional: adjNotional.toFixed(4),
+    });
+    return { marketId: position.marketId, success: false, error: `CLOB sell below minimum after sync: $${adjNotional.toFixed(4)}`, returnPct, reason };
+  }
+
+  // ── Submit sell order ─────────────────────────────────────────────────────
   try {
     const clobResult = await submitClobSell({
       tokenId,
-      shares: sharesToSell,
+      shares: safeShares,
       orderType: loadConfig().CLOB_ORDER_TYPE,
     });
 
     if (clobResult.success) {
       await closePosition(redis, position.marketId, position.direction);
-      const proceedsUsd = sharesToSell * currentPrice;
+      const proceedsUsd = safeShares * currentPrice;
       await creditProceeds(redis, proceedsUsd);
       await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
 
@@ -212,14 +287,58 @@ async function executeClobExit(opts: {
       };
       if (clobResult.tx_hash) successResult.txHash = clobResult.tx_hash;
       return successResult;
-    } else {
-      const error = clobResult.error ?? 'CLOB sell failed';
-      logger.warn('[take-profit-executor] CLOB sell returned success=false', {
-        marketId: position.marketId,
-        error,
-      });
-      return { marketId: position.marketId, success: false, error, returnPct, reason };
     }
+
+    // ── Auto-retry: parse actual balance from CLOB error and retry once ─────
+    const error = clobResult.error ?? 'CLOB sell failed';
+    if (error.toLowerCase().includes('not enough balance')) {
+      const parsedBalance = parseBalanceFromClobError(error);
+      if (parsedBalance !== null && parsedBalance > 0 && parsedBalance < safeShares) {
+        logger.info('[take-profit-executor] retrying with CLOB-reported balance', {
+          marketId: position.marketId,
+          previousShares: safeShares,
+          clobBalance: parsedBalance,
+        });
+
+        // Truncate parsed balance to 6 decimals and floor
+        const retryShares = Math.floor(parsedBalance * 1_000_000) / 1_000_000;
+        const retryNotional = retryShares * currentPrice;
+        if (retryShares > 0 && retryNotional >= CLOB_MIN_ORDER_USD) {
+          const retryResult = await submitClobSell({
+            tokenId,
+            shares: retryShares,
+            orderType: loadConfig().CLOB_ORDER_TYPE,
+          });
+
+          if (retryResult.success) {
+            await closePosition(redis, position.marketId, position.direction);
+            const proceedsUsd = retryShares * currentPrice;
+            await creditProceeds(redis, proceedsUsd);
+            await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
+
+            logger.info('[take-profit-executor] exit successful after retry (clob)', {
+              marketId: position.marketId,
+              txHash: retryResult.tx_hash,
+              shares: retryShares,
+            });
+
+            return {
+              marketId: position.marketId,
+              success: true,
+              returnPct,
+              reason,
+              ...(retryResult.tx_hash ? { txHash: retryResult.tx_hash } : {}),
+            };
+          }
+        }
+      }
+    }
+
+    logger.warn('[take-profit-executor] CLOB sell returned success=false', {
+      marketId: position.marketId,
+      error,
+    });
+    return { marketId: position.marketId, success: false, error, returnPct, reason };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error('[take-profit-executor] CLOB exit trade failed', {

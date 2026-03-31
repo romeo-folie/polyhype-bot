@@ -20,6 +20,8 @@ const envSchema = z.object({
 
   // Wallet / direct CLOB execution
   POLYGON_WALLET_PRIVATE_KEY: z.string().optional(),
+  // POLYGON_RPC_URL is read directly from process.env in clob.ts (not via Zod)
+  // to support the multi-RPC fallback list without Zod URL validation blocking empty values.
   POLYMARKET_FUNDER_ADDRESS: z.string().optional(),
   POLYMARKET_SIGNATURE_TYPE: z.coerce.number().int().min(0).max(2).optional().default(0),
   CLOB_FALLBACK_ENABLED: z.string().optional().default('true')

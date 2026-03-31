@@ -17,7 +17,9 @@
 
 import { logger } from '../shared/logger.js';
 import { getSimmerPositions, submitRedeem, SimmerError } from '../shared/simmer.js';
+import { redeemClobOutcome } from '../shared/clob.js';
 import { closePosition, getOpenPositions } from '../execution/positionLedger.js';
+import type { Position } from '../execution/positionLedger.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
 import type { Redis } from 'ioredis';
@@ -50,10 +52,11 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
   // ── Simmer redemptions (unchanged) ────────────────────────────────────────
   let resolvedPositions;
   try {
+    // REMOVED: source filter. We want to redeem any winning position for this wallet
+    // regardless of tagging (copytrade, spot, arb, osint — all should be claimed).
     resolvedPositions = await getSimmerPositions({
       status: 'resolved',
       venue: 'polymarket',
-      source: 'sdk:polymarket-geopolitical-agent',
     });
   } catch (err) {
     logger.warn('[redeemer] failed to fetch resolved positions — skipping redemption cycle', {
@@ -153,13 +156,17 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
  */
 async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): Promise<void> {
   const allPositions = await getOpenPositions(redis);
-  const clobPositions = allPositions.filter((p) => p.executionVenue === 'clob');
+  const clobPositions = allPositions.filter((p: Position) => p.executionVenue === 'clob');
 
   if (clobPositions.length === 0) return;
 
   logger.info('[redeemer] checking CLOB positions for resolution', { count: clobPositions.length });
 
   for (const pos of clobPositions) {
+    if (!pos.conditionId) {
+      logger.warn('[redeemer] CLOB position missing conditionId — skipping', { marketId: pos.marketId });
+      continue;
+    }
     const side = pos.direction.toLowerCase() as 'yes' | 'no';
 
     try {
@@ -175,18 +182,35 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): P
         direction: pos.direction,
       });
 
-      // Close the position in Redis.
-      // NOTE: This is a ledger-only close. On-chain conditional token redemption
-      // must be handled separately (e.g. via a manual script or future automation).
-      // For won positions, we credit face value to the bankroll cache to keep
-      // position sizing accurate until the next Simmer portfolio refresh.
-      await closePosition(redis, pos.marketId, pos.direction);
-
-      // If won: credit shares as USDC (each winning share = $1)
+      // If won: attempt on-chain redemption before closing ledger
       const won = (resolved.outcome === 'YES' && pos.direction === 'YES') ||
                   (resolved.outcome === 'NO' && pos.direction === 'NO');
-      const proceedsUsdc = won ? (pos.sharesHeld ?? pos.stakeUsd / pos.entryPrice) : 0;
 
+      if (won) {
+        logger.info('[redeemer] attempting on-chain CLOB redemption', {
+          marketId: pos.marketId,
+          conditionId: pos.conditionId,
+        });
+
+        const redeemResult = await redeemClobOutcome({
+          conditionId: pos.conditionId,
+          direction: pos.direction as 'YES' | 'NO',
+        });
+
+        if (!redeemResult.success) {
+          logger.warn('[redeemer] on-chain CLOB redemption failed — will retry next cycle', {
+            marketId: pos.marketId,
+            error: redeemResult.error,
+          });
+          results.push({ marketId: pos.marketId, side, success: false, error: redeemResult.error ?? 'redemption_failed' });
+          continue;
+        }
+      }
+
+      // Close the position in Redis after successful redemption (or loss)
+      await closePosition(redis, pos.marketId, pos.direction);
+
+      const proceedsUsdc = won ? (pos.sharesHeld ?? pos.stakeUsd / pos.entryPrice) : 0;
       if (proceedsUsdc > 0) {
         await creditProceeds(redis, proceedsUsdc);
       }
@@ -246,6 +270,7 @@ async function checkMarketResolved(
       closed?: boolean;
       resolved?: boolean;
       outcome?: string;
+      outcomePrices?: string;
     }>;
 
     const market = data[0];
@@ -253,14 +278,38 @@ async function checkMarketResolved(
 
     if (!market.resolved && !market.closed) return null;
 
-    // Gamma outcome field is typically "Yes" or "No"
+    // Gamma does NOT always return an `outcome` field on resolved markets.
+    // The winner is determined from `outcomePrices`: the winning outcome has price "1",
+    // the losing outcome has price "0". outcomes[0] = YES, outcomes[1] = NO.
+    // outcomePrices is a JSON-encoded string, e.g. '["0","1"]' means NO won.
+    if (market.outcomePrices) {
+      try {
+        const prices: string[] = JSON.parse(market.outcomePrices) as string[];
+        const yesPrice = parseFloat(prices[0] ?? '0');
+        const noPrice = parseFloat(prices[1] ?? '0');
+
+        if (yesPrice === 1) return { outcome: 'YES' };
+        if (noPrice === 1) return { outcome: 'NO' };
+
+        // Both non-1: market closed but not yet settled on-chain.
+        logger.debug('[redeemer] market closed but outcomePrices not yet settled — will retry', {
+          conditionId,
+          outcomePrices: market.outcomePrices,
+        });
+        return null;
+      } catch {
+        logger.warn('[redeemer] failed to parse outcomePrices', { conditionId, outcomePrices: market.outcomePrices });
+        return null;
+      }
+    }
+
+    // Legacy fallback: some older markets may still have an outcome field
     const outcomeStr = (market.outcome ?? '').toUpperCase();
     if (outcomeStr === 'YES' || outcomeStr === 'NO') {
       return { outcome: outcomeStr };
     }
 
-    // If resolved but outcome is unclear, treat as unresolved and retry next cycle
-    logger.warn('[redeemer] market resolved with unclear outcome — skipping until parseable', { conditionId, outcome: market.outcome });
+    logger.warn('[redeemer] market resolved but outcome not determinable', { conditionId });
     return null;
   } catch (err) {
     logger.warn('[redeemer] Gamma market check failed', {
