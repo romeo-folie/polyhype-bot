@@ -37,6 +37,7 @@ vi.mock('ethers', () => ({
   })),
   JsonRpcProvider: vi.fn(() => ({})),
   Network: vi.fn(() => ({})),
+  FetchRequest: vi.fn(() => ({ timeout: 0 })),
   getBytes: vi.fn((val) => val),
 }));
 
@@ -222,8 +223,22 @@ describe('getClobBalance', () => {
 });
 
 describe('redeemClobOutcome', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+  beforeEach(async () => {
+    // resetAllMocks clears both call records AND implementations — prevents state
+    // leak from the never-resolving promise set in the timeout tests above.
+    vi.resetAllMocks();
+    // Re-apply all mock implementations from a clean slate.
+    // Pin POLYGON_RPC_URL so buildRpcList() produces a single deterministic URL,
+    // eliminating flakiness from 4-RPC fallover ordering in CI (Node 20).
+    const { loadConfig } = await import('../config.js');
+    vi.mocked(loadConfig).mockReturnValue({
+      CLOB_FALLBACK_ENABLED: true,
+      POLYGON_WALLET_PRIVATE_KEY: '0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      POLYMARKET_SIGNATURE_TYPE: 0,
+      POLYMARKET_FUNDER_ADDRESS: undefined,
+      CLOB_ORDER_TYPE: 'FAK',
+      POLYGON_RPC_URL: 'http://mock-rpc.test',
+    });
     mockWait.mockResolvedValue({ hash: '0xredeemhash' });
     mockSendTransaction.mockResolvedValue({ wait: mockWait });
     mockExecTransaction.mockResolvedValue({ wait: mockWait });
@@ -246,6 +261,7 @@ describe('redeemClobOutcome', () => {
       POLYMARKET_SIGNATURE_TYPE: 1,
       POLYMARKET_FUNDER_ADDRESS: '0xproxyaddress',
       CLOB_FALLBACK_ENABLED: true,
+      POLYGON_RPC_URL: 'http://mock-rpc.test',
     });
 
     const result = await redeemClobOutcome({ conditionId: 'cond-123', direction: 'NO' });
