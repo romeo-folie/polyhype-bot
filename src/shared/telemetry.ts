@@ -29,3 +29,13 @@ export async function recordCopytradeMalformed(redis: Redis, reason: string): Pr
 export async function recordCopytradeMetric(redis: Redis, metric: string, label = 'count'): Promise<void> {
   await hincrby(redis, `${BASE_KEY}:copytrade:${metric}`, label);
 }
+
+export async function recordExecutionMetric(redis: Redis, metric: string, label = 'count'): Promise<void> {
+  await hincrby(redis, `${BASE_KEY}:execution:${metric}`, label);
+}
+
+export async function recordExecutionTiming(redis: Redis, metric: string, ms: number): Promise<void> {
+  const rounded = Math.max(0, Math.round(ms));
+  await hincrby(redis, `${BASE_KEY}:execution:${metric}`, 'sum_ms', rounded);
+  await hincrby(redis, `${BASE_KEY}:execution:${metric}`, 'count', 1);
+}

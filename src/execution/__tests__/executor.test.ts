@@ -393,7 +393,8 @@ describe('execution mode', () => {
     expect(mockSubmit).not.toHaveBeenCalled();
   });
 
-  it('skips taker when edge below TAKER_MIN_EDGE', async () => {
+  it('skips taker when edge below TAKER_MIN_EDGE in hybrid mode', async () => {
+    mockConfig.EXECUTION_MODE = 'hybrid';
     mockConfig.TAKER_MIN_EDGE = 0.3;
     const redis = makeRedis();
 

@@ -129,7 +129,7 @@ function resolveMakerPrice(book: { bids: Array<{ price: string }>; asks: Array<{
 async function tryExecuteViaClobMaker(
   signal: TradeSignal,
   cfg: ReturnType<typeof loadConfig>,
-): Promise<{ ok: boolean; tradeResult?: SimmerTradeResult; error?: string; filledStakeUsd?: number }> {
+): Promise<{ ok: boolean; tradeResult?: SimmerTradeResult; error?: string; filledStakeUsd?: number; waitMs: number }> {
   if (!cfg.CLOB_FALLBACK_ENABLED) {
     return { ok: false, error: 'clob_disabled' };
   }
@@ -155,6 +155,7 @@ async function tryExecuteViaClobMaker(
     return { ok: false, error: 'maker_below_min_size' };
   }
 
+  const startedAt = Date.now();
   logger.info('[executor] submitting maker order on CLOB', {
     marketId: signal.marketId,
     tokenId,
@@ -174,12 +175,12 @@ async function tryExecuteViaClobMaker(
   });
 
   if (!result.success || !result.order_id) {
-    return { ok: false, error: result.error ?? 'maker_order_rejected' };
+    return { ok: false, error: result.error ?? 'maker_order_rejected', waitMs: Date.now() - startedAt };
   }
 
   if (cfg.MAKER_MAX_WAIT_MS <= 0) {
     await cancelClobOrder(result.order_id);
-    return { ok: false, error: 'maker_not_filled' };
+    return { ok: false, error: 'maker_not_filled', waitMs: Date.now() - startedAt };
   }
 
   const deadline = Date.now() + cfg.MAKER_MAX_WAIT_MS;
@@ -199,14 +200,14 @@ async function tryExecuteViaClobMaker(
         success: true,
         shares_bought: matched,
       };
-      return { ok: true, tradeResult, filledStakeUsd };
+      return { ok: true, tradeResult, filledStakeUsd, waitMs: Date.now() - startedAt };
     }
 
     await sleep(cfg.MAKER_POLL_INTERVAL_MS);
   }
 
   await cancelClobOrder(result.order_id);
-  return { ok: false, error: 'maker_not_filled' };
+  return { ok: false, error: 'maker_not_filled', waitMs: Date.now() - startedAt };
 }
 
 async function tryExecuteViaClob(signal: TradeSignal): Promise<{
@@ -530,6 +531,7 @@ export async function executeSignal(
   }
 
   const executionMode = cfg.EXECUTION_MODE;
+  void recordExecutionMetric(redis, 'mode', executionMode).catch(() => {});
   const simmerId = await resolveSimmerMarketId(signal.question);
 
   if (simmerId) {
@@ -587,13 +589,21 @@ export async function executeSignal(
     }
   }
 
+  let makerAttempted = false;
+  let makerFilled = false;
+
   if (executionMode !== 'taker' && !signal.isFutures && signal.feesEnabled !== true) {
+    makerAttempted = true;
+    void recordExecutionMetric(redis, 'maker_attempted').catch(() => {});
     const makerAttempt = await tryExecuteViaClobMaker(signal, cfg);
+    void recordExecutionTiming(redis, 'maker_wait_ms', makerAttempt.waitMs).catch(() => {});
     if (makerAttempt.ok && makerAttempt.tradeResult?.success) {
       if (makerAttempt.filledStakeUsd && makerAttempt.filledStakeUsd > 0 && makerAttempt.filledStakeUsd !== signal.stakeUsd) {
         signal = { ...signal, stakeUsd: makerAttempt.filledStakeUsd };
       }
 
+      makerFilled = true;
+      void recordExecutionMetric(redis, 'maker_filled').catch(() => {});
       await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
       logger.info('[executor] maker order filled on CLOB', {
         marketId: signal.marketId,
@@ -627,7 +637,10 @@ export async function executeSignal(
     }
   }
 
-  if (executionMode !== 'maker') {
+  if (executionMode === 'hybrid') {
+    if (makerAttempted && !makerFilled) {
+      void recordExecutionMetric(redis, 'taker_fallback').catch(() => {});
+    }
     const takerGate = canExecuteTaker(signal, cfg);
     if (!takerGate.ok) {
       logger.info('[executor] skipping — taker gate blocked', {
