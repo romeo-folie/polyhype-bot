@@ -45,6 +45,10 @@ export interface GammaMarket {
   liquidity: string;
   endDate: string | null;
   description: string | null;
+  /** True when the market charges fees (Polymarket fee markets — avoid for arb/execution) */
+  feesEnabled?: boolean;
+  /** Fee type string when feesEnabled=true (e.g. "taker", "both"). Null when no fees. */
+  feeType?: string | null;
 }
 
 interface SearchEventsOptions {
@@ -57,8 +61,8 @@ interface SearchEventsOptions {
 
 export function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+  const timer = setTimeout(() => { controller.abort(); }, timeoutMs);
+  return fetch(url, { signal: controller.signal }).finally(() => { clearTimeout(timer); });
 }
 
 /**

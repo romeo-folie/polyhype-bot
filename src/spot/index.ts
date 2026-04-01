@@ -23,6 +23,7 @@ import { executeSignals } from '../execution/executor.js';
 import { recordPosition, hasOpenPosition } from '../execution/positionLedger.js';
 import { notifyTradeExecuted, notifyTradeError } from '../execution/telegram.js';
 import { getOpportunities } from '../shared/simmer.js';
+import { HL_SYMBOL_MAP } from '../shared/hyperliquid.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 /**
@@ -78,10 +79,34 @@ async function runSpotMonitorInner(
 
   logger.info('[spot] detected moves', { count: moves.length });
 
-  // 3. For each move, find correlated markets and generate signals
+  // 3. For each move, identify Futures signals first (High Speed)
   const signals: TradeSignal[] = [];
 
   for (const move of moves) {
+    // Futures Path: Immediate execution for crypto perps
+    const hlSymbol = HL_SYMBOL_MAP[move.assetId];
+    if (cfg.FUTURES_ENABLED && hlSymbol) {
+      // Check if we're already holding this perp on this side
+      const alreadyOpen = await hasOpenPosition(redis, hlSymbol, move.changePercent > 0 ? 'LONG' : 'SHORT');
+      
+      if (!alreadyOpen) {
+        const stakeUsd = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
+        
+        signals.push({
+          marketId: hlSymbol,
+          question: `Hyperliquid Perp: ${hlSymbol} ${move.changePercent > 0 ? 'LONG' : 'SHORT'}`,
+          direction: move.changePercent > 0 ? 'LONG' : 'SHORT',
+          stakeUsd,
+          edgeMagnitude: Math.abs(move.changePercent) / 100, // proxy edge by move magnitude
+          outcomePrice: move.currentPrice,
+          isFutures: true,
+          leverage: cfg.FUTURES_DEFAULT_LEVERAGE,
+          sourcedFrom: `Spot: ${move.assetId} ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(1)}% in ${String(move.windowMinutes)}min`,
+          reasoning: `Intraday momentum detected on ${move.assetId}. Current price: ${String(move.currentPrice)}. Scaling into ${hlSymbol} perp.`,
+        });
+      }
+    }
+
     let markets;
     try {
       markets = await findCorrelatedMarkets(move);

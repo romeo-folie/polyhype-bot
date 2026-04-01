@@ -1,8 +1,8 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CATEGORIES } from '../../ingestion/categories/index.js';
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
     LLM_PROVIDER: 'openai',
@@ -10,10 +10,10 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockChatCreate = jest.fn<(...args: any[]) => any>();
+const mockChatCreate = vi.fn<(...args: any[]) => any>();
 
-jest.unstable_mockModule('openai', () => ({
-  OpenAI: jest.fn().mockImplementation(() => ({
+vi.mock('openai', () => ({
+  OpenAI: vi.fn().mockImplementation(() => ({
     chat: {
       completions: {
         create: mockChatCreate,

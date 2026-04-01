@@ -75,4 +75,5 @@ jobs:
         run: |
           npx vitest run --reporter=verbose \
             src/copytrade/__tests__/copytrade.test.ts \
-            src/copytrade/__tests__/shortlist.test.ts
+            src/copytrade/__tests__/shortlist.test.ts \
+            src/copytrade/__tests__/worker.test.ts

@@ -6,15 +6,12 @@ dist/
 .env
 .env.local
 .env.*.local
-
 # Logs
 *.log
 logs/
-
 # Build artefacts
 *.db
 *.tsbuildinfo
-
 # OS
 .DS_Store
 Thumbs.db

@@ -9,11 +9,12 @@ import { Redis } from 'ioredis';
 import { logger } from './logger.js';
 
 let _client: Redis | null = null;
+let _subscriber: Redis | null = null;
 
 export function getRedis(): Redis {
   if (_client) return _client;
 
-  const url = process.env['REDIS_URL'];
+  const url = process.env.REDIS_URL;
   if (!url) {
     throw new Error('REDIS_URL environment variable is not set');
   }
@@ -31,11 +32,32 @@ export function getRedis(): Redis {
   return _client;
 }
 
+export function getSubscriberRedis(): Redis {
+  if (_subscriber) return _subscriber;
+
+  const url = process.env.REDIS_URL;
+  if (!url) {
+    throw new Error('REDIS_URL environment variable is not set');
+  }
+
+  _subscriber = new Redis(url, {
+    maxRetriesPerRequest: null, // Subscriptions stay open
+    enableReadyCheck: true,
+    lazyConnect: true,
+  });
+
+  return _subscriber;
+}
+
 /** Gracefully disconnect. Call on process exit. */
 export async function closeRedis(): Promise<void> {
   if (_client) {
     await _client.quit();
     _client = null;
+  }
+  if (_subscriber) {
+    await _subscriber.quit();
+    _subscriber = null;
   }
 }
 

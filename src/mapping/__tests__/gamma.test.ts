@@ -1,4 +1,4 @@
-import { jest, describe, it, expect, afterEach, beforeEach } from '@jest/globals';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { parseYesPrice, parseOutcomePrices, parseClobTokenIds } from '../gamma.js';
 
 // ─── parseOutcomePrices unit tests ────────────────────────────────────────────
@@ -71,7 +71,7 @@ describe('parseYesPrice', () => {
 
 // ─── searchEvents (network call) ─────────────────────────────────────────────
 
-const mockFetch = jest.fn<typeof fetch>();
+const mockFetch = vi.fn<typeof fetch>();
 
 // Replace global fetch with mock
 (global as unknown as { fetch: typeof mockFetch }).fetch = mockFetch;

@@ -9,6 +9,7 @@
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { searchEvents, parseOutcomePrices, parseClobTokenIds } from './gamma.js';
+import { importMarket } from '../shared/simmerImport.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 
 const TIMEOUT_MS = 20_000;
@@ -27,21 +28,28 @@ function buildEntitySystemPrompt(entityContext: string): string {
 
 async function extractEntitiesOpenAI(headline: string, entityContext: string): Promise<string[]> {
   const { OpenAI } = await import('openai');
-  const client = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] });
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const systemPrompt = buildEntitySystemPrompt(entityContext);
-  const completion = await client.chat.completions.create(
-    {
-      model: loadConfig().OPENAI_MODEL,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: headline },
-      ],
-      response_format: { type: 'json_object' },
-      max_tokens: 150,
-      temperature: 0,
-    },
-    { signal: AbortSignal.timeout(TIMEOUT_MS) },
-  );
+  const abortCtrl = new AbortController();
+  const abortTimer = setTimeout(() => abortCtrl.abort(), TIMEOUT_MS);
+  let completion: Awaited<ReturnType<typeof client.chat.completions.create>>;
+  try {
+    completion = await client.chat.completions.create(
+      {
+        model: loadConfig().OPENAI_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: headline },
+        ],
+        response_format: { type: 'json_object' },
+        max_tokens: 150,
+        temperature: 0,
+      },
+      { signal: abortCtrl.signal },
+    );
+  } finally {
+    clearTimeout(abortTimer);
+  }
 
   const raw = completion.choices[0]?.message?.content ?? '{}';
   const parsed = JSON.parse(raw) as { entities?: string[] };
@@ -50,14 +58,14 @@ async function extractEntitiesOpenAI(headline: string, entityContext: string): P
 
 async function extractEntitiesGemini(headline: string, entityContext: string): Promise<string[]> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const genai = new GoogleGenerativeAI(process.env['GEMINI_API_KEY'] ?? '');
+  const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '');
   const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
   const systemPrompt = buildEntitySystemPrompt(entityContext);
 
   const result = await Promise.race([
     model.generateContent(`${systemPrompt}\n\n${headline}`),
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Gemini timeout')), TIMEOUT_MS),
+      setTimeout(() => { reject(new Error('Gemini timeout')); }, TIMEOUT_MS),
     ),
   ]);
 
@@ -73,8 +81,8 @@ async function extractEntitiesGemini(headline: string, entityContext: string): P
  */
 export async function extractEntities(headline: string, entityContext: string): Promise<string[]> {
   const provider = loadConfig().LLM_PROVIDER;
-  const useGemini = provider === 'gemini' && Boolean(process.env['GEMINI_API_KEY']);
-  const useOpenAI = Boolean(process.env['OPENAI_API_KEY']);
+  const useGemini = provider === 'gemini' && Boolean(process.env.GEMINI_API_KEY);
+  const useOpenAI = Boolean(process.env.OPENAI_API_KEY);
 
   if (useGemini) {
     try {
@@ -120,6 +128,9 @@ const MIN_LIQUIDITY = 100; // USDC — skip ghost markets
  * Filters out markets with liquidity below MIN_LIQUIDITY.
  */
 export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateMarket[]> {
+  // Hoist config read — avoids repeated loadConfig() calls inside the triple-nested market loop below.
+  const cfg = loadConfig();
+
   // Combine scorer keywords with LLM-extracted entities for richer queries
   let entities: string[] = [];
   try {
@@ -136,6 +147,9 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
   const queries = Array.from(querySet).slice(0, 5); // cap at 5 searches
 
   const seen = new Map<string, CandidateMarket>();
+  // Track slugs already queued for import to prevent bursting concurrent API calls
+  // when the same event appears across multiple search queries.
+  const importedSlugs = new Set<string>();
 
   for (const query of queries) {
     try {
@@ -178,6 +192,20 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
             description: market.description ?? null,
             matchedQuery: query,
           });
+
+          // Fire-and-forget Simmer import if enabled.
+          // Deduplicates by event slug — same event won't be re-queued if it appears
+          // in multiple query results, avoiding API burst.
+          if (cfg.SIMMER_AUTO_IMPORT_ENABLED && event.slug && !importedSlugs.has(event.slug)) {
+            importedSlugs.add(event.slug);
+            const polymarketUrl = `https://polymarket.com/event/${event.slug}`;
+            void importMarket(polymarketUrl).catch((err) => {
+              logger.debug('[entity-extractor] simmer import failed (non-blocking)', {
+                marketId: market.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          }
         }
       }
     } catch (err) {

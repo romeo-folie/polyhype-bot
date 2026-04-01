@@ -1,4 +1,4 @@
-import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { extractKeywords, STOP_WORDS } from '../signalReeval.js';
 
 // ── extractKeywords unit tests ──────────────────────────────────────────────

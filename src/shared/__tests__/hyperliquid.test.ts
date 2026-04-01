@@ -1,0 +1,122 @@
+import { vi, describe, it, expect, beforeEach } from 'vitest';
+
+vi.mock('axios', () => ({
+  default: {
+    post: vi.fn(),
+    get: vi.fn(),
+  },
+}));
+
+vi.mock('../config.js', () => ({
+  loadConfig: vi.fn().mockReturnValue({
+    HYPERLIQUID_PRIVATE_KEY: '0x1234567890123456789012345678901234567890123456789012345678901234',
+    HYPERLIQUID_TESTNET: true,
+    HL_DRY_RUN: false,
+    FUTURES_IOC_SLIPPAGE: 0.002,
+  }),
+}));
+
+vi.mock('../logger.js', () => ({
+  logger: {
+    info: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    warn: vi.fn(),
+  },
+}));
+
+const { default: axios } = await import('axios');
+const { getHyperliquid, resetHyperliquid, HL_SYMBOL_MAP } = await import('../hyperliquid.js');
+
+const mockedAxiosPost = vi.mocked(axios.post);
+
+describe('HyperliquidClient', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetHyperliquid();
+  });
+
+  it('correctly maps assets in HL_SYMBOL_MAP', () => {
+    expect(HL_SYMBOL_MAP['bitcoin']).toBe('BTC');
+    expect(HL_SYMBOL_MAP['ethereum']).toBe('ETH');
+  });
+
+  it('getOpenPositions structures data correctly', async () => {
+    const client = getHyperliquid();
+    const mockState = {
+      assetPositions: [
+        {
+          position: {
+            coin: 'BTC',
+            szi: '0.1',
+            entryPx: '50000',
+            leverage: { type: 'cross', value: 5 },
+            unrealizedPnl: '100',
+            marginUsed: '1000',
+          },
+        },
+      ],
+    };
+
+    mockedAxiosPost.mockResolvedValueOnce({ data: mockState });
+
+    const positions = await client.getOpenPositions();
+
+    expect(positions).toHaveLength(1);
+    expect(positions[0]!.symbol).toBe('BTC');
+    expect(positions[0]!.position.szi).toBe('0.1');
+  });
+
+  it('placeMarketOrder calculates sizeUsd correctly', async () => {
+    const client = getHyperliquid();
+
+    // 1. getMeta
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { universe: [{ name: 'BTC', szDecimals: 3, index: 0 }] },
+    });
+    // 2. updateLeverage
+    mockedAxiosPost.mockResolvedValueOnce({ data: { status: 'ok' } });
+    // 3. getAllMids (for getMidPrice)
+    mockedAxiosPost.mockResolvedValueOnce({ data: { BTC: '50000' } });
+    // 4. execution
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: {
+        status: 'ok',
+        response: { type: 'order', data: { statuses: [{ filled: { oid: 12345 } }] } },
+      },
+    });
+
+    const result = await client.placeMarketOrder({
+      symbol: 'BTC',
+      isBuy: true,
+      sizeUsd: 100,
+      leverage: 5,
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockedAxiosPost).toHaveBeenCalledTimes(4);
+  });
+
+  it('placeMarketOrder returns error when midPrice is zero', async () => {
+    const client = getHyperliquid();
+
+    // getMeta
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { universe: [{ name: 'BTC', szDecimals: 3, index: 0 }] },
+    });
+    // updateLeverage
+    mockedAxiosPost.mockResolvedValueOnce({ data: { status: 'ok' } });
+    // getMidPrice returns 0
+    mockedAxiosPost.mockResolvedValueOnce({ data: { BTC: '0' } });
+
+    const result = await client.placeMarketOrder({
+      symbol: 'BTC',
+      isBuy: true,
+      sizeUsd: 100,
+      leverage: 5,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/invalid value/);
+  });
+});

@@ -11,12 +11,18 @@
     "build": "tsc --noEmit",
     "build:emit": "tsc",
     "start": "node dist/index.js",
+    "worker:copytrade": "npx tsx src/copytrade/worker.ts",
+    "monitor:futures": "npx tsx src/monitor/futuresMonitor.ts",
     "cron:trade": "npx tsx src/execution/index.ts",
     "cron:monitor": "npx tsx src/monitor/index.ts",
     "cron:ingest": "npx tsx src/ingestion/index.ts",
     "cron:spot": "npx tsx src/spot/index.ts",
     "cron:arb": "npx tsx src/arb/index.ts",
-    "cron:copytrade-shortlist": "npx tsx src/copytrade/shortlist.ts",
+    "worker:spot-feed": "npx tsx src/spot/feeds/manager.ts",
+    "worker:arb": "npx tsx src/arb/worker.ts",
+    "cron:shortlist": "npx tsx src/copytrade/shortlist.ts",
+    "cron:calibrate": "npx tsx src/cron/calibrate.ts",
+    "sync-env": "npx tsx scripts/sync-env.ts",
     "probe:simmer": "npx tsx scripts/probe-simmer.ts",
     "probe:clob-allowance": "npx tsx scripts/probe-clob-allowance.ts",
     "test": "vitest run --reporter=verbose",
@@ -25,9 +31,14 @@
     "format": "prettier --write 'src/**/*.ts' 'scripts/**/*.ts'"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
     "@ethersproject/wallet": "^5.8.0",
     "@google/generative-ai": "^0.24.1",
+    "@msgpack/msgpack": "^3.1.3",
+    "@polymarket/builder-relayer-client": "^0.0.8",
     "@polymarket/clob-client": "^5.8.0",
+    "@pythnetwork/client": "^2.22.1",
+    "@solana/web3.js": "^1.98.4",
     "axios": "^1.13.6",
     "cheerio": "^1.2.0",
     "ethers": "^6.16.0",
@@ -38,7 +49,9 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@jest/globals": "^30.3.0",
     "@types/cheerio": "^0.22.35",
+    "@types/jest": "^30.0.0",
     "@types/node": "^20.11.0",
     "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^7.0.0",
@@ -49,5 +62,9 @@
     "tsx": "^4.7.0",
     "typescript": "^5.3.3",
     "vitest": "^1.6.1"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": ">=4.0.0",
+    "@rollup/rollup-linux-x64-musl": ">=4.0.0"
   }
 }

@@ -16,6 +16,8 @@
 import { z } from 'zod';
 import { loadConfig } from './config.js';
 import { logger } from './logger.js';
+import { getRedis } from './redis.js';
+import { recordCopytradeMalformed } from './telemetry.js';
 
 const SIMMER_BASE_URL = 'https://api.simmer.markets';
 const TRADE_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/trade`;
@@ -86,8 +88,8 @@ const SimmerPositionSchema = z.object({
 });
 
 function deriveSide(raw: Record<string, unknown>): 'yes' | 'no' | null {
-  const yes = Number(raw['shares_yes'] ?? 0);
-  const no = Number(raw['shares_no'] ?? 0);
+  const yes = Number(raw.shares_yes ?? 0);
+  const no = Number(raw.shares_no ?? 0);
   if (Number.isFinite(yes) && yes > 0 && (!Number.isFinite(no) || no <= 0)) return 'yes';
   if (Number.isFinite(no) && no > 0 && (!Number.isFinite(yes) || yes <= 0)) return 'no';
   return null;
@@ -112,8 +114,8 @@ function normalisePosition(raw: Record<string, unknown>): Record<string, unknown
   }
 
   if (!('shares' in next)) {
-    const yes = Number(next['shares_yes'] ?? 0);
-    const no = Number(next['shares_no'] ?? 0);
+    const yes = Number(next.shares_yes ?? 0);
+    const no = Number(next.shares_no ?? 0);
     const side = typeof next.side === 'string' ? next.side : null;
 
     if (side === 'yes' && Number.isFinite(yes) && yes > 0) {
@@ -136,8 +138,8 @@ function normalisePosition(raw: Record<string, unknown>): Record<string, unknown
   }
 
   if (!('value_usdc' in next)) {
-    const price = Number(next['current_price'] ?? NaN);
-    const shares = Number(next['shares'] ?? NaN);
+    const price = Number(next.current_price ?? NaN);
+    const shares = Number(next.shares ?? NaN);
     if (Number.isFinite(price) && Number.isFinite(shares)) {
       next.value_usdc = price * shares;
     }
@@ -335,18 +337,46 @@ export async function getSimmerPositions(opts: {
     throw new SimmerError(`Simmer positions API returned HTTP ${resp.status.toString()}`, resp.status, body);
   }
 
-  const raw = (await resp.json()) as unknown;
+  const raw = (await resp.json());
   // API may return { positions: [...] } or a bare array
   const arr = Array.isArray(raw) ? raw : ((raw as Record<string, unknown>).positions ?? []);
   const positions: SimmerPosition[] = [];
+  let telemetryRedis: ReturnType<typeof getRedis> | null = null;
+  try {
+    telemetryRedis = getRedis();
+  } catch {
+    telemetryRedis = null;
+  }
+  const recordMalformed = async (reason: string): Promise<void> => {
+    if (!telemetryRedis) return;
+    await recordCopytradeMalformed(telemetryRedis, reason).catch(() => {});
+  };
   for (const item of arr as unknown[]) {
-    const candidate = typeof item === 'object' && item !== null
-      ? normalisePosition(item as Record<string, unknown>)
-      : item;
+    const rawRecord = typeof item === 'object' && item !== null
+      ? (item as Record<string, unknown>)
+      : null;
+    const candidate = rawRecord ? normalisePosition(rawRecord) : item;
+
+    if (rawRecord) {
+      const inferredSide = (!('side' in rawRecord)) ? deriveSide(rawRecord) : null;
+      if (inferredSide) {
+        await recordMalformed('inferred_side');
+      }
+      const yes = Number(rawRecord.shares_yes ?? 0);
+      const no = Number(rawRecord.shares_no ?? 0);
+      if (Number.isFinite(yes) && Number.isFinite(no) && yes > 0 && no > 0) {
+        await recordMalformed('ambiguous_shares');
+      }
+      if (!('side' in rawRecord) && inferredSide == null) {
+        await recordMalformed('missing_side');
+      }
+    }
+
     const parsed = SimmerPositionSchema.safeParse(candidate);
     if (parsed.success) {
       positions.push(parsed.data);
     } else {
+      await recordMalformed('invalid_payload');
       logger.warn('[simmer] skipping malformed position entry', {
         error: parsed.error.message,
         raw: JSON.stringify(item).slice(0, 200),
@@ -606,4 +636,45 @@ export async function getPortfolio(): Promise<SimmerPortfolio> {
   }
 
   return parsed.data;
+}
+
+/**
+ * Set auto-redeem setting for the Simmer agent.
+ *
+ * When enabled, Simmer automatically redeems winning positions.
+ * This handles Simmer-venue redemptions; CLOB positions still require manual redemption.
+ *
+ * @param enabled - true to enable auto-redeem, false to disable
+ * @throws {SimmerError} on HTTP 4xx/5xx or network failure
+ */
+export async function setAgentAutoRedeem(enabled: boolean): Promise<void> {
+  const { SIMMER_API_KEY: apiKey } = loadConfig();
+  const SETTINGS_ENDPOINT = `${SIMMER_BASE_URL}/api/sdk/agents/me/settings`;
+
+  const resp = await fetch(SETTINGS_ENDPOINT, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ auto_redeem_enabled: enabled }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+
+  let responseBody: unknown;
+  try {
+    responseBody = await resp.json();
+  } catch {
+    responseBody = await resp.text().catch(() => '(unreadable body)');
+  }
+
+  if (!resp.ok) {
+    throw new SimmerError(
+      `Simmer agent settings API returned HTTP ${resp.status.toString()}`,
+      resp.status,
+      responseBody,
+    );
+  }
+
+  logger.info('[simmer] auto-redeem setting updated', { enabled });
 }

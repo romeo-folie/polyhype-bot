@@ -38,6 +38,18 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
     // (fetchAllCurrentPrices callers should call feed.watch() before the read loop).
     // Calling watch() on every fetch invocation caused repeated subscription attempts
     // and obscured WS connection logic.
+    // priceFetcher only handles Polymarket positions (YES/NO).
+    // Futures positions (LONG/SHORT) are managed by futuresMonitor — skip them here
+    // rather than silently casting an invalid direction.
+    if (position.direction !== 'YES' && position.direction !== 'NO') {
+      logger.debug('[price-fetcher] skipping non-PM position', {
+        marketId: position.marketId,
+        direction: position.direction,
+      });
+      return null;
+    }
+    const pmDirection: 'YES' | 'NO' = position.direction;
+
     const redis = getRedis();
     const feed = getPriceFeed(redis);
 
@@ -45,11 +57,10 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
     const cachedPrice = await feed.getCachedPrice(position.marketId);
     if (cachedPrice !== null) {
       logger.debug('[price-fetcher] WS cache hit', { marketId: position.marketId, price: cachedPrice });
-      const currentOutcomePrice =
-        position.direction === 'YES' ? cachedPrice : 1 - cachedPrice;
+      const currentOutcomePrice = pmDirection === 'YES' ? cachedPrice : 1 - cachedPrice;
       return {
         marketId: position.marketId,
-        direction: position.direction,
+        direction: pmDirection,
         currentOutcomePrice,
         currentYesPrice: cachedPrice,
       };
@@ -77,12 +88,11 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
 
     // For YES positions: the price we care about is the YES price
     // For NO positions: we bought NO at (1 - yesPrice), current value = (1 - currentYesPrice)
-    const currentOutcomePrice =
-      position.direction === 'YES' ? currentYesPrice : 1 - currentYesPrice;
+    const currentOutcomePrice = pmDirection === 'YES' ? currentYesPrice : 1 - currentYesPrice;
 
     return {
       marketId: position.marketId,
-      direction: position.direction,
+      direction: pmDirection,
       currentOutcomePrice,
       currentYesPrice,
     };

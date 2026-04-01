@@ -1,21 +1,21 @@
-import { jest, describe, it, expect } from '@jest/globals';
+import { describe, it, expect, vi } from 'vitest';
 import type { SpotMove } from '../thresholdDetector.js';
 import type { CorrelatedMarket } from '../marketCorrelator.js';
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn().mockReturnValue({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn().mockReturnValue({
     LLM_PROVIDER: 'openai',
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
   }),
 }));
 
-jest.unstable_mockModule('../../mapping/consensusCalculator.js', () => ({
-  estimateConsensusProbability: jest.fn(),
+vi.mock('../../mapping/consensusCalculator.js', () => ({
+  estimateConsensusProbability: vi.fn(),
 }));
 
 const { estimateConsensusProbability } = await import('../../mapping/consensusCalculator.js');
@@ -23,9 +23,7 @@ const { extractPriceTarget, formulaProbability, estimateFastConsensus } = await 
   '../fastPathConsensus.js'
 );
 
-const mockEstimate = estimateConsensusProbability as jest.MockedFunction<
-  typeof estimateConsensusProbability
->;
+const mockEstimate = vi.mocked(estimateConsensusProbability);
 
 function makeMove(overrides: Partial<SpotMove> = {}): SpotMove {
   return {

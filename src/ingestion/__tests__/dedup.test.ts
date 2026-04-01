@@ -1,7 +1,7 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { RssItem } from '../rss.js';
 
-const mockSet = jest.fn<(...args: unknown[]) => Promise<string | null>>();
+const mockSet = vi.fn<(...args: unknown[]) => Promise<string | null>>();
 
 const { filterSeen } = await import('../dedup.js');
 

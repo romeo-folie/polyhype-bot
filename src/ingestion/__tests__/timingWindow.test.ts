@@ -1,4 +1,4 @@
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect } from 'vitest';
 import { getTimingMultiplier, applyTimingBoost } from '../timingWindow.js';
 import type { ScoredItem } from '../scorer.js';
 

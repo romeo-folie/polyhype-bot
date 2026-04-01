@@ -156,12 +156,12 @@ export class ClobPriceFeed {
       const m = msg as Record<string, unknown>;
 
       if (
-        m['type'] === 'price_change' &&
-        typeof m['asset_id'] === 'string' &&
-        typeof m['price'] === 'string'
+        m.type === 'price_change' &&
+        typeof m.asset_id === 'string' &&
+        typeof m.price === 'string'
       ) {
-        const tokenId = m['asset_id'];
-        const price = parseFloat(m['price']);
+        const tokenId = m.asset_id;
+        const price = parseFloat(m.price);
         if (!isFinite(price)) continue;
 
         const marketId = this.tokenToMarket.get(tokenId);
@@ -190,6 +190,6 @@ export class ClobPriceFeed {
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** this.reconnectAttempt, RECONNECT_MAX_MS);
     this.reconnectAttempt++;
     logger.info('[clob-ws] reconnecting', { attempt: this.reconnectAttempt, delayMs: delay });
-    this.reconnectTimer = setTimeout(() => this.connect(), delay);
+    this.reconnectTimer = setTimeout(() => { this.connect(); }, delay);
   }
 }

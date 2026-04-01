@@ -1,28 +1,43 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Mock loadConfig so tests don't need REDIS_URL / SIMMER_* env vars
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
+    OPENAI_API_KEY: 'test-openai-key',
+    GEMINI_API_KEY: 'test-gemini-key',
+    ANTHROPIC_API_KEY: undefined,
+    DEEPSEEK_API_KEY: undefined,
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
-    LLM_PROVIDER: 'gemini', // default: try Gemini first, fall back to OpenAI
+    LLM_PROVIDER: 'gemini',
+    CONTEXT_INJECTION_ENABLED: true,
+    CONTEXT_INJECTION_LIMIT: 5,
+    CONSENSUS_CACHE_ENABLED: false,
+    CONSENSUS_CACHE_TTL_S: 1800,
   })),
 }));
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockGetRecentOutcomes = vi.fn<(...args: any[]) => any>();
+vi.mock('../../shared/outcomeRecorder.js', () => ({
+  getRecentOutcomes: mockGetRecentOutcomes,
+  inferCategory: vi.fn(() => 'geopolitical'),
+}));
+
 // Suppress logger output in tests
-jest.unstable_mockModule('../../shared/logger.js', () => ({
+vi.mock('../../shared/logger.js', () => ({
   logger: {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
   },
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGenerateContent = jest.fn<(...args: any[]) => any>();
-jest.unstable_mockModule('@google/generative-ai', () => ({
-  GoogleGenerativeAI: jest.fn().mockImplementation(() => ({
+const mockGenerateContent = vi.fn<(...args: any[]) => any>();
+vi.mock('@google/generative-ai', () => ({
+  GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
     getGenerativeModel: () => ({
       generateContent: mockGenerateContent,
     }),
@@ -30,15 +45,15 @@ jest.unstable_mockModule('@google/generative-ai', () => ({
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockChatCreate = jest.fn<(...args: any[]) => any>();
-const mockOpenAIConstructor = jest.fn().mockImplementation(() => ({
+const mockChatCreate = vi.fn<(...args: any[]) => any>();
+const mockOpenAIConstructor = vi.fn().mockImplementation(() => ({
   chat: {
     completions: {
       create: mockChatCreate,
     },
   },
 }));
-jest.unstable_mockModule('openai', () => ({
+vi.mock('openai', () => ({
   default: mockOpenAIConstructor,
   OpenAI: mockOpenAIConstructor,
 }));
@@ -56,6 +71,8 @@ describe('estimateConsensusProbability', () => {
   beforeEach(() => {
     mockGenerateContent.mockReset();
     mockChatCreate.mockReset();
+    mockGetRecentOutcomes.mockReset();
+    mockGetRecentOutcomes.mockResolvedValue([]);
     process.env['GEMINI_API_KEY'] = 'test-gemini-key';
     process.env['OPENAI_API_KEY'] = 'test-openai-key';
   });
@@ -65,71 +82,53 @@ describe('estimateConsensusProbability', () => {
     delete process.env['OPENAI_API_KEY'];
   });
 
-  it('returns mean and stddev from N=3 samples', async () => {
-    // Return different probabilities across 3 calls: 0.70, 0.72, 0.68
+  it('returns mean and stddev from N=2 samples (dual provider)', async () => {
+    // Return different probabilities across 2 calls: 0.70, 0.72
     let callCount = 0;
-    const probs = [0.70, 0.72, 0.68];
+    const probs = [0.70, 0.72];
+    // Gemini handles 1 call
     mockGenerateContent.mockImplementation(async () => {
       const p = probs[callCount++]!;
       return {
         response: {
-          text: () => JSON.stringify({ probability: p, reasoning: `Call ${callCount}` }),
+          text: () => JSON.stringify({ probability: p, reasoning: `Gemini ${callCount}` }),
         },
       };
     });
-
-    const result = await estimateConsensusProbability(BASE_OPTS);
-
-    // mean = (0.70 + 0.72 + 0.68) / 3 = 0.70
-    expect(result.probability).toBeCloseTo(0.70, 4);
-    // stddev = sqrt(((0.70-0.70)^2 + (0.72-0.70)^2 + (0.68-0.70)^2) / 3)
-    //        = sqrt((0 + 0.0004 + 0.0004) / 3) = sqrt(0.000267) ≈ 0.01633
-    expect(result.stddev).toBeCloseTo(0.01633, 3);
-    expect(result.sampleCount).toBe(3);
-    // Parallel calls — reasoning comes from whichever resolves first; any call label is valid
-    expect(['Call 1', 'Call 2', 'Call 3']).toContain(result.reasoning);
-    expect(mockGenerateContent).toHaveBeenCalledTimes(3);
-  });
-
-  it('returns result with sampleCount=1 when 2 of 3 calls fail', async () => {
-    let callCount = 0;
-    mockGenerateContent.mockImplementation(async () => {
-      callCount++;
-      if (callCount <= 2) throw new Error('Gemini unavailable');
-      return {
-        response: {
-          text: () => JSON.stringify({ probability: 0.65, reasoning: 'only success' }),
-        },
-      };
-    });
-    // OpenAI also fails (so fallback doesn't produce extra samples)
-    mockChatCreate.mockRejectedValue(new Error('OpenAI unavailable'));
-
-    const result = await estimateConsensusProbability(BASE_OPTS);
-    expect(result.probability).toBeCloseTo(0.65);
-    expect(result.sampleCount).toBe(1);
-    expect(result.stddev).toBe(0); // single sample → 0 variance
-  });
-
-  it('falls back to OpenAI when Gemini fails for all samples', async () => {
-    mockGenerateContent.mockRejectedValue(new Error('Gemini unavailable'));
-    let callCount = 0;
-    const probs = [0.65, 0.67, 0.63];
+    // OpenAI handles 1 call
     mockChatCreate.mockImplementation(async () => {
       const p = probs[callCount++]!;
       return {
         choices: [
-          { message: { content: JSON.stringify({ probability: p, reasoning: 'OpenAI fallback' }) } },
+          { message: { content: JSON.stringify({ probability: p, reasoning: 'OpenAI 1' }) } },
         ],
       };
     });
 
     const result = await estimateConsensusProbability(BASE_OPTS);
-    expect(result.probability).toBeCloseTo(0.65, 2);
-    expect(result.sampleCount).toBe(3);
-    // Gemini fails 3 times, OpenAI succeeds 3 times
-    expect(mockGenerateContent).toHaveBeenCalledTimes(3);
-    expect(mockChatCreate).toHaveBeenCalledTimes(3);
+
+    // mean = (0.70 + 0.72) / 2 = 0.71
+    expect(result.probability).toBeCloseTo(0.71, 4);
+    expect(result.sampleCount).toBe(2);
+    // Distributions: 1 Gemini, 1 OpenAI
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    expect(mockChatCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns result with sampleCount=1 when Gemini fails in dual-provider mode', async () => {
+    // Ensemble (1 Gem, 1 OA): mock Gem to fail.
+    mockGenerateContent.mockRejectedValue(new Error('Gemini unavailable'));
+    // Mock OA to succeed once
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ probability: 0.65, reasoning: 'OA success' }) } }]
+    });
+
+    const result = await estimateConsensusProbability(BASE_OPTS);
+    expect(result.probability).toBeCloseTo(0.65);
+    expect(result.sampleCount).toBe(1);
+    expect(result.stddev).toBe(0);
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    expect(mockChatCreate).toHaveBeenCalledTimes(1);
   });
 
   it('throws when all samples fail', async () => {
@@ -140,12 +139,39 @@ describe('estimateConsensusProbability', () => {
   });
 
   it('throws when no API keys configured', async () => {
-    delete process.env['GEMINI_API_KEY'];
-    delete process.env['OPENAI_API_KEY'];
+    const { loadConfig } = await import('../../shared/config.js');
+    (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: undefined,
+      GEMINI_API_KEY: undefined,
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
+      OPENAI_MODEL: 'gpt-4o-mini',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+      LLM_PROVIDER: 'gemini',
+      CONTEXT_INJECTION_ENABLED: true,
+      CONTEXT_INJECTION_LIMIT: 5,
+      CONSENSUS_CACHE_ENABLED: false,
+      CONSENSUS_CACHE_TTL_S: 1800,
+      });
 
     await expect(estimateConsensusProbability(BASE_OPTS)).rejects.toThrow(
-      'All consensus samples failed',
+      'No LLM providers configured',
     );
+
+    // Restore default config
+    (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
+      OPENAI_MODEL: 'gpt-4o-mini',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+      LLM_PROVIDER: 'gemini',
+      CONTEXT_INJECTION_ENABLED: true,
+      CONTEXT_INJECTION_LIMIT: 5,
+      CONSENSUS_CACHE_ENABLED: false,
+      CONSENSUS_CACHE_TTL_S: 1800,
+      });
   });
 
   it('handles null description gracefully', async () => {
@@ -154,10 +180,111 @@ describe('estimateConsensusProbability', () => {
         text: () => JSON.stringify({ probability: 0.5, reasoning: 'Uncertain' }),
       },
     });
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ probability: 0.5, reasoning: 'OA Uncertain' }) } }]
+    });
 
     const result = await estimateConsensusProbability({ ...BASE_OPTS, description: null });
     expect(result.probability).toBeCloseTo(0.5);
-    expect(result.sampleCount).toBe(3);
+    expect(result.sampleCount).toBe(2);
+  });
+
+  it('injects context block into prompt when 3+ outcomes available', async () => {
+    mockGetRecentOutcomes.mockResolvedValue([
+      { question: 'Q1', direction: 'YES', consensusProbability: 0.7, result: 'won', returnPct: 10, holdingHours: 5 },
+      { question: 'Q2', direction: 'NO', consensusProbability: 0.6, result: 'lost', returnPct: -5, holdingHours: 3 },
+      { question: 'Q3', direction: 'YES', consensusProbability: 0.8, result: 'won', returnPct: 15, holdingHours: 8 },
+    ]);
+
+    let callCount = 0;
+    const probs = [0.70, 0.72];
+    mockGenerateContent.mockImplementation(async (_prompt: string) => {
+      const p = probs[callCount++]!;
+      return { response: { text: () => JSON.stringify({ probability: p, reasoning: `G${callCount}` }) } };
+    });
+    mockChatCreate.mockImplementation(async (_opts: any) => {
+      const p = probs[callCount++]!;
+      return { choices: [{ message: { content: JSON.stringify({ probability: p, reasoning: 'O1' }) } }] };
+    });
+
+    const mockRedis = { get: vi.fn<() => Promise<null>>().mockResolvedValue(null), set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'), zrevrange: vi.fn(), hgetall: vi.fn() };
+    await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
+
+    // The Gemini call receives the full prompt as a single string — check it includes the context block
+    const geminiCall = mockGenerateContent.mock.calls[0]?.[0] as string;
+    expect(geminiCall).toContain('Recent track record on geopolitical');
+    expect(geminiCall).toContain('Q1');
+    expect(geminiCall).toContain('calibrate your estimate');
+  });
+
+  it('does not inject context with fewer than 3 outcomes', async () => {
+    mockGetRecentOutcomes.mockResolvedValue([
+      { question: 'Q1', direction: 'YES', consensusProbability: 0.7, result: 'won', returnPct: 10, holdingHours: 5 },
+    ]);
+
+    mockGenerateContent.mockImplementation(async () => {
+      return { response: { text: () => JSON.stringify({ probability: 0.7, reasoning: 'test' }) } };
+    });
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ probability: 0.7, reasoning: 'test' }) } }],
+    });
+
+    const mockRedis = { get: vi.fn<() => Promise<null>>().mockResolvedValue(null), set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'), zrevrange: vi.fn(), hgetall: vi.fn() };
+    await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
+
+    const geminiCall = mockGenerateContent.mock.calls[0]?.[0] as string;
+    expect(geminiCall).not.toContain('Recent track record');
+  });
+
+  it('skips context injection when CONTEXT_INJECTION_ENABLED=false', async () => {
+    const { loadConfig } = await import('../../shared/config.js');
+    (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
+      OPENAI_MODEL: 'gpt-4o-mini',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+      LLM_PROVIDER: 'gemini',
+      CONTEXT_INJECTION_ENABLED: false,
+      CONTEXT_INJECTION_LIMIT: 5,
+      CONSENSUS_CACHE_ENABLED: false,
+      CONSENSUS_CACHE_TTL_S: 1800,
+      });
+
+    mockGetRecentOutcomes.mockResolvedValue([
+      { question: 'Q1', direction: 'YES', consensusProbability: 0.7, result: 'won', returnPct: 10, holdingHours: 5 },
+      { question: 'Q2', direction: 'NO', consensusProbability: 0.6, result: 'lost', returnPct: -5, holdingHours: 3 },
+      { question: 'Q3', direction: 'YES', consensusProbability: 0.8, result: 'won', returnPct: 15, holdingHours: 8 },
+    ]);
+
+    mockGenerateContent.mockResolvedValue({
+      response: { text: () => JSON.stringify({ probability: 0.7, reasoning: 'test' }) },
+    });
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ probability: 0.7, reasoning: 'test' }) } }],
+    });
+
+    const mockRedis = { get: vi.fn<() => Promise<null>>().mockResolvedValue(null), set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'), zrevrange: vi.fn(), hgetall: vi.fn() };
+    await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
+
+    // getRecentOutcomes should not have been called
+    expect(mockGetRecentOutcomes).not.toHaveBeenCalled();
+
+    // Restore config
+    (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
+      OPENAI_MODEL: 'gpt-4o-mini',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+      LLM_PROVIDER: 'gemini',
+      CONTEXT_INJECTION_ENABLED: true,
+      CONTEXT_INJECTION_LIMIT: 5,
+      CONSENSUS_CACHE_ENABLED: false,
+      CONSENSUS_CACHE_TTL_S: 1800,
+      });
   });
 
   it('throws on invalid probability value when all providers return bad data', async () => {
@@ -177,7 +304,147 @@ describe('estimateConsensusProbability', () => {
       ],
     });
 
-    // All 3 samples will fail parsing → throws "All consensus samples failed"
+    // All 2 samples will fail parsing → throws "All consensus samples failed"
     await expect(estimateConsensusProbability(BASE_OPTS)).rejects.toThrow('All consensus samples failed');
+  });
+
+  it('returns cached consensus estimate without LLM calls (cache hit)', async () => {
+    const { loadConfig } = await import('../../shared/config.js');
+    (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
+      OPENAI_MODEL: 'gpt-4o-mini',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+      LLM_PROVIDER: 'gemini',
+      CONTEXT_INJECTION_ENABLED: true,
+      CONTEXT_INJECTION_LIMIT: 5,
+      CONSENSUS_CACHE_ENABLED: true,
+      CONSENSUS_CACHE_TTL_S: 1800,
+      });
+
+    const cachedEstimate = {
+      probability: 0.65,
+      reasoning: 'cached reasoning',
+      stddev: 0.02,
+      sampleCount: 2,
+    };
+
+    const mockRedis = {
+      get: vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(JSON.stringify(cachedEstimate)),
+      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
+    };
+
+    const result = await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
+
+    expect(result.probability).toBe(0.65);
+    expect(result.reasoning).toBe('cached reasoning');
+    expect(result.sampleCount).toBe(2);
+    // LLM should NOT have been called
+    expect(mockGenerateContent).not.toHaveBeenCalled();
+    expect(mockChatCreate).not.toHaveBeenCalled();
+
+    // Restore config
+    (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
+      OPENAI_MODEL: 'gpt-4o-mini',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+      LLM_PROVIDER: 'gemini',
+      CONTEXT_INJECTION_ENABLED: true,
+      CONTEXT_INJECTION_LIMIT: 5,
+      CONSENSUS_CACHE_ENABLED: false,
+      CONSENSUS_CACHE_TTL_S: 1800,
+      });
+  });
+
+  it('calls LLM and caches result on cache miss', async () => {
+    const { loadConfig } = await import('../../shared/config.js');
+    (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
+      OPENAI_MODEL: 'gpt-4o-mini',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+      LLM_PROVIDER: 'gemini',
+      CONTEXT_INJECTION_ENABLED: false,
+      CONTEXT_INJECTION_LIMIT: 5,
+      CONSENSUS_CACHE_ENABLED: true,
+      CONSENSUS_CACHE_TTL_S: 1800,
+      });
+
+    mockGenerateContent.mockResolvedValue({
+      response: { text: () => JSON.stringify({ probability: 0.7, reasoning: 'fresh' }) },
+    });
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ probability: 0.7, reasoning: 'fresh' }) } }],
+    });
+
+    const mockRedis = {
+      get: vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(null),
+      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
+    };
+
+    const result = await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
+
+    expect(result.probability).toBeCloseTo(0.7);
+    // LLM was called
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    expect(mockChatCreate).toHaveBeenCalledTimes(1);
+    // Result was cached
+    expect(mockRedis.set).toHaveBeenCalledWith(
+      expect.stringMatching(/^consensus:/),
+      expect.any(String),
+      'EX',
+      1800,
+    );
+
+    // Restore config
+    (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
+      OPENAI_MODEL: 'gpt-4o-mini',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+      LLM_PROVIDER: 'gemini',
+      CONTEXT_INJECTION_ENABLED: true,
+      CONTEXT_INJECTION_LIMIT: 5,
+      CONSENSUS_CACHE_ENABLED: false,
+      CONSENSUS_CACHE_TTL_S: 1800,
+      });
+  });
+
+  it('bypasses cache when CONSENSUS_CACHE_ENABLED=false', async () => {
+    mockGenerateContent.mockResolvedValue({
+      response: { text: () => JSON.stringify({ probability: 0.7, reasoning: 'no cache' }) },
+    });
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ probability: 0.7, reasoning: 'no cache' }) } }],
+    });
+
+    const mockRedis = {
+      get: vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(null),
+      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
+    };
+
+    // Default config has CONSENSUS_CACHE_ENABLED=false
+    const result = await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
+
+    expect(result.probability).toBeCloseTo(0.7);
+    // LLM was called despite redis being available
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+    // Redis get should NOT have been called for consensus cache
+    // (it may be called for context injection, but not for consensus cache key)
+    expect(mockRedis.set).not.toHaveBeenCalledWith(
+      expect.stringMatching(/^consensus:/),
+      expect.any(String),
+      'EX',
+      expect.any(Number),
+    );
   });
 });

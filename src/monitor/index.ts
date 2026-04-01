@@ -20,6 +20,8 @@ import { evaluateTakeProfit } from './takeProfitEvaluator.js';
 import { executeTakeProfit } from './takeProfitExecutor.js';
 import { redeemResolvedPositions } from './resolutionRedeemer.js';
 import { runClobProbe } from '../shared/clobProbe.js';
+import { setAgentAutoRedeem } from '../shared/simmer.js';
+import { shouldRunReconciliation, runReconciliation } from './reconciliation.js';
 
 export async function runMonitor(): Promise<void> {
   const redis = getRedis();
@@ -38,7 +40,7 @@ export async function runMonitor(): Promise<void> {
   // Wrapped in a 10s timeout so upstream latency can never stall startup.
   void Promise.race([
     runClobProbe(),
-    new Promise<void>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 10_000)),
+    new Promise<void>((_, reject) => setTimeout(() => { reject(new Error('probe timeout')); }, 10_000)),
   ]).catch((err) => {
     logger.warn('[monitor] CLOB probe failed — continuing', {
       error: err instanceof Error ? err.message : String(err),
@@ -82,7 +84,7 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
   // feed.watch() is idempotent and CONNECTING-safe — safe to call in bulk here.
   const feed = getPriceFeed(redis);
   await Promise.all(
-    positions.map((p) => feed.watch(p.marketId, p.clobTokenIds).catch(() => undefined)),
+    positions.map((p) => feed.watch(p.marketId, p.clobTokenIds ?? []).catch(() => undefined)),
   );
 
   // 2b. Fetch current prices for all positions
@@ -94,6 +96,26 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
   let priceError = 0;
 
   for (const position of positions) {
+    // Positions flagged as pendingSettlement are below the CLOB $1 minimum —
+    // skip them silently; the resolution redeemer handles settlement.
+    if (position.pendingSettlement === true) {
+      logger.debug('[monitor] skipping pendingSettlement position', {
+        marketId: position.marketId,
+        direction: position.direction,
+      });
+      held++;
+      continue;
+    }
+
+    if (position.reconciliationStatus === 'terminal_no_balance') {
+      logger.debug('[monitor] skipping terminal_no_balance position', {
+        marketId: position.marketId,
+        direction: position.direction,
+      });
+      held++;
+      continue;
+    }
+
     const currentPrice = priceMap.get(`${position.marketId}:${position.direction}`);
 
     if (!currentPrice) {
@@ -141,11 +163,24 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
   }
 
   logger.info('[monitor] cycle complete', { exited, held, priceError });
+
+  // Run hourly reconciliation pass (every 12 cycles at 5-min intervals)
+  if (await shouldRunReconciliation(redis)) {
+    await runReconciliation(redis);
+  }
 }
 
 // Entrypoint when run directly (npx tsx src/monitor/index.ts)
 const isMain = process.argv[1]?.endsWith('monitor/index.ts') ?? false;
 if (isMain) {
+  // Sync Simmer agent auto-redeem setting at startup
+  const cfg = loadConfig();
+  void setAgentAutoRedeem(cfg.SIMMER_AUTO_REDEEM_ENABLED).catch((err) => {
+    logger.warn('[monitor] failed to set Simmer auto-redeem — continuing', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+
   runMonitor()
     .catch((err: unknown) => {
       logger.error('[monitor] fatal error', {

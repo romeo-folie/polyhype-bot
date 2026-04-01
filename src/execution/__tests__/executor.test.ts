@@ -1,10 +1,10 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { TradeSignal } from '../../mapping/index.js';
 
-jest.unstable_mockModule('../../shared/simmer.js', () => ({
-  submitTrade: jest.fn(),
-  resolveSimmerMarketId: jest.fn(),
-  getMarketContext: jest.fn<() => Promise<null>>().mockResolvedValue(null),
+vi.mock('../../shared/simmer.js', () => ({
+  submitTrade: vi.fn(),
+  resolveSimmerMarketId: vi.fn(),
+  getMarketContext: vi.fn<() => Promise<null>>().mockResolvedValue(null),
   SimmerError: class SimmerError extends Error {
     statusCode: number;
     body: unknown;
@@ -17,16 +17,43 @@ jest.unstable_mockModule('../../shared/simmer.js', () => ({
   },
 }));
 
-jest.unstable_mockModule('../../shared/clob.js', () => ({
-  submitClobBuy: jest.fn(),
+vi.mock('../../shared/clob.js', () => ({
+  submitClobBuy: vi.fn(),
 }));
 
-jest.unstable_mockModule('../positionLedger.js', () => ({
-  hasOpenPosition: jest.fn(),
+vi.mock('../positionLedger.js', () => ({
+  hasOpenPosition: vi.fn(),
 }));
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
+    REDIS_URL: 'redis://localhost:6379',
+    SIMMER_API_KEY: 'test-key',
+    DIVERGENCE_THRESHOLD: 0.1,
+    OPENAI_API_KEY: 'test-openai',
+    FUTURES_ENABLED: false,
+    CALIBRATION_ENABLED: true,
+    CALIBRATION_MIN_SAMPLES: 20,
+    MIN_BET_USD: 1,  // low floor for tests — individual test cases set stakeUsd below this
+  })),
+}));
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockGetCalibrationStats = vi.fn<(...args: any[]) => any>().mockResolvedValue(null);
+vi.mock('../../shared/calibration.js', () => ({
+  getCalibrationStats: mockGetCalibrationStats,
+  applyCalibrationCorrection: vi.fn((edge: number, stats: any, min: number) => {
+    if (!stats || stats.sampleSize < min) return edge;
+    return edge * stats.edgeCorrectionFactor;
+  }),
+}));
+
+vi.mock('../../shared/outcomeRecorder.js', () => ({
+  inferCategory: vi.fn(() => 'geopolitical'),
 }));
 
 const { submitTrade, resolveSimmerMarketId } = await import('../../shared/simmer.js');
@@ -34,10 +61,10 @@ const { submitClobBuy } = await import('../../shared/clob.js');
 const { hasOpenPosition } = await import('../positionLedger.js');
 const { executeSignal, executeSignals } = await import('../executor.js');
 
-const mockSubmit = submitTrade as jest.MockedFunction<typeof submitTrade>;
-const mockResolve = resolveSimmerMarketId as jest.MockedFunction<typeof resolveSimmerMarketId>;
-const mockSubmitClob = submitClobBuy as jest.MockedFunction<typeof submitClobBuy>;
-const mockHasPosition = hasOpenPosition as jest.MockedFunction<typeof hasOpenPosition>;
+const mockSubmit = vi.mocked(submitTrade);
+const mockResolve = vi.mocked(resolveSimmerMarketId);
+const mockSubmitClob = vi.mocked(submitClobBuy);
+const mockHasPosition = vi.mocked(hasOpenPosition);
 
 function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
   return {
@@ -60,8 +87,8 @@ function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
 
 function makeRedis() {
   return {
-    get: jest.fn<() => Promise<string | null>>().mockResolvedValue(null),
-    set: jest.fn<() => Promise<'OK'>>().mockResolvedValue('OK'),
+    get: vi.fn<() => Promise<string | null>>().mockResolvedValue(null),
+    set: vi.fn<() => Promise<'OK'>>().mockResolvedValue('OK'),
   };
 }
 
@@ -71,6 +98,8 @@ describe('executeSignal', () => {
     mockResolve.mockReset();
     mockSubmitClob.mockReset();
     mockHasPosition.mockReset();
+    mockGetCalibrationStats.mockReset();
+    mockGetCalibrationStats.mockResolvedValue(null);
 
     // Default: available in Simmer, Simmer succeeds, no open position
     mockResolve.mockResolvedValue('simmer-uuid-123');
@@ -203,12 +232,60 @@ describe('executeSignal', () => {
   });
 });
 
+describe('calibration correction', () => {
+  beforeEach(() => {
+    mockSubmit.mockReset();
+    mockResolve.mockReset();
+    mockSubmitClob.mockReset();
+    mockHasPosition.mockReset();
+    mockGetCalibrationStats.mockReset();
+
+    mockResolve.mockResolvedValue('simmer-uuid-123');
+    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
+    mockHasPosition.mockResolvedValue(false);
+  });
+
+  it('applies calibration correction when stats are available', async () => {
+    mockGetCalibrationStats.mockResolvedValue({
+      category: 'geopolitical',
+      sampleSize: 30,
+      winRate: 0.5,
+      avgReturn: 0,
+      edgeCorrectionFactor: 0.8,
+      buckets: [],
+    });
+
+    const redis = makeRedis();
+    const signal = makeSignal({ edgeMagnitude: 0.2 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(signal, redis as any);
+
+    expect(result.skipped).toBe(false);
+    // The signal passed to Simmer should have corrected edge in reasoning
+    expect(mockSubmit).toHaveBeenCalled();
+  });
+
+  it('does not apply correction when stats is null', async () => {
+    mockGetCalibrationStats.mockResolvedValue(null);
+
+    const redis = makeRedis();
+    const signal = makeSignal({ edgeMagnitude: 0.2 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(signal, redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.tradeResult?.success).toBe(true);
+  });
+});
+
 describe('executeSignals', () => {
   beforeEach(() => {
     mockSubmit.mockReset();
     mockResolve.mockReset();
     mockSubmitClob.mockReset();
     mockHasPosition.mockReset();
+    mockGetCalibrationStats.mockReset();
+    mockGetCalibrationStats.mockResolvedValue(null);
 
     mockResolve.mockResolvedValue('simmer-uuid-123');
     mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });

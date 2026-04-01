@@ -1,4 +1,4 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ClobPriceFeed, WS_PRICE_KEY } from '../clobWebSocket.js';
 
 // ── Mock Redis ──────────────────────────────────────────────────────────────
@@ -6,7 +6,7 @@ import { ClobPriceFeed, WS_PRICE_KEY } from '../clobWebSocket.js';
 function makeMockRedis() {
   const store = new Map<string, { value: string; expireAt: number }>();
   return {
-    get: jest.fn(async (key: string) => {
+    get: vi.fn(async (key: string) => {
       const entry = store.get(key);
       if (!entry) return null;
       if (Date.now() > entry.expireAt) {
@@ -15,7 +15,7 @@ function makeMockRedis() {
       }
       return entry.value;
     }),
-    setex: jest.fn(async (key: string, ttl: number, value: string | number) => {
+    setex: vi.fn(async (key: string, ttl: number, value: string | number) => {
       store.set(key, { value: String(value), expireAt: Date.now() + ttl * 1000 });
       return 'OK';
     }),

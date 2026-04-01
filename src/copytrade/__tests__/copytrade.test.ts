@@ -1,11 +1,11 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 
-const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
+const mockLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 
 let configOverride = {
   COPYTRADE_ENABLED: true,
   COPYTRADE_WALLETS: '0xabc',
-  COPYTRADE_MARKET_SCOPE: 'weather',
+  COPYTRADE_MARKET_SCOPE: ['weather', 'geopolitics'],
   COPYTRADE_SIZE_SCALE: 0.1,
   COPYTRADE_MAX_STAKE_USD: 25,
   COPYTRADE_MAX_SLIPPAGE_BPS: 200,
@@ -15,15 +15,15 @@ let configOverride = {
   MAX_BET_FRACTION: 0.1,
 };
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({ logger: mockLogger }));
+vi.mock('../../shared/logger.js', () => ({ logger: mockLogger }));
 
-const mockDedup = jest.fn() as any;
-jest.unstable_mockModule('../../shared/redis.js', () => ({ dedup: mockDedup }));
+const mockDedup = vi.fn();
+vi.mock('../../shared/redis.js', () => ({ dedup: mockDedup }));
 
-const mockFetchWithTimeout = jest.fn() as any;
-const mockGetMarketBySlug = jest.fn() as any;
-jest.unstable_mockModule('../../mapping/gamma.js', async () => {
-  const actual = await import('../../mapping/gamma.js');
+const mockFetchWithTimeout = vi.fn();
+const mockGetMarketBySlug = vi.fn();
+vi.mock('../../mapping/gamma.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../mapping/gamma.js')>();
   return {
     ...actual,
     fetchWithTimeout: mockFetchWithTimeout,
@@ -31,23 +31,23 @@ jest.unstable_mockModule('../../mapping/gamma.js', async () => {
   };
 });
 
-const mockGetOpenPositions = jest.fn() as any;
-jest.unstable_mockModule('../../execution/positionLedger.js', () => ({
+const mockGetOpenPositions = vi.fn();
+vi.mock('../../execution/positionLedger.js', () => ({
   getOpenPositions: mockGetOpenPositions,
 }));
 
-const mockFetchCurrentPrice = jest.fn() as any;
-jest.unstable_mockModule('../../monitor/priceFetcher.js', () => ({
+const mockFetchCurrentPrice = vi.fn();
+vi.mock('../../monitor/priceFetcher.js', () => ({
   fetchCurrentPrice: mockFetchCurrentPrice,
 }));
 
-const mockExecuteTakeProfit = jest.fn() as any;
-jest.unstable_mockModule('../../monitor/takeProfitExecutor.js', () => ({
+const mockExecuteTakeProfit = vi.fn();
+vi.mock('../../monitor/takeProfitExecutor.js', () => ({
   executeTakeProfit: mockExecuteTakeProfit,
 }));
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => configOverride),
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => configOverride),
 }));
 
 const makeTrade = (overrides?: Partial<Record<string, unknown>>) => ({
@@ -81,7 +81,7 @@ const makeMarket = (overrides?: Partial<Record<string, unknown>>) => ({
   volume: '10000',
   liquidity: '5000',
   endDate: new Date(Date.now() + 12 * 3600_000).toISOString(),
-  description: null,
+  description: 'Expect cold rain and wind.',
   ...overrides,
 });
 
@@ -97,7 +97,7 @@ beforeEach(() => {
   configOverride = {
     COPYTRADE_ENABLED: true,
     COPYTRADE_WALLETS: '0xabc',
-    COPYTRADE_MARKET_SCOPE: 'weather',
+    COPYTRADE_MARKET_SCOPE: ['weather', 'geopolitics'],
     COPYTRADE_SIZE_SCALE: 0.1,
     COPYTRADE_MAX_STAKE_USD: 25,
     COPYTRADE_MAX_SLIPPAGE_BPS: 200,
@@ -116,11 +116,13 @@ describe('copytrade helpers', () => {
     expect(parseWalletList(' 0xabc , 0xdef ')).toEqual(['0xabc', '0xdef']);
   });
 
-  it('detects weather markets by title', async () => {
-    const { isWeatherMarket } = await import('../index.js');
-    expect(isWeatherMarket('Will the highest temperature in Shenzhen be 28°C on March 25?')).toBe(true);
-    expect(isWeatherMarket('Precipitation in NYC in April?')).toBe(true);
-    expect(isWeatherMarket('Will the price of Bitcoin be above $70k?')).toBe(false);
+  it('detects markets by category keywords in title or description', async () => {
+    const { matchesCategory } = await import('../index.js');
+    expect(matchesCategory('Will it rain in NYC?', null, ['weather'])).toBe(true);
+    expect(matchesCategory('Market Title', 'Military action in Middle East', ['geopolitics'])).toBe(true);
+    expect(matchesCategory('Bitcoin price above $100k?', null, ['crypto'])).toBe(true);
+    expect(matchesCategory('Anything here', null, ['all'])).toBe(true);
+    expect(matchesCategory('Bitcoin price above $100k?', null, ['weather'])).toBe(false);
   });
 });
 
@@ -131,7 +133,7 @@ describe('runCopytrade', () => {
     mockGetMarketBySlug.mockResolvedValue(makeMarket({ outcomePrices: '["0.9","0.1"]' }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
@@ -148,7 +150,7 @@ describe('runCopytrade', () => {
     }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
@@ -162,7 +164,7 @@ describe('runCopytrade', () => {
     mockGetMarketBySlug.mockResolvedValue(makeMarket({ outcomePrices: '["0.6","0.4"]' }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
@@ -202,7 +204,7 @@ describe('runCopytrade', () => {
     mockExecuteTakeProfit.mockResolvedValue({ success: true });
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
@@ -217,7 +219,7 @@ describe('runCopytrade', () => {
     mockGetMarketBySlug.mockResolvedValue(makeMarket({ outcomePrices: '["0.6","0.4"]' }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     await runCopytrade(redis as any, 1000);
@@ -234,11 +236,27 @@ describe('runCopytrade', () => {
       .mockResolvedValueOnce(makeMarket({ outcomePrices: '["0.6","0.4"]' }));
 
     const { runCopytrade } = await import('../index.js');
-    const redis = { get: jest.fn(), set: jest.fn() } as any;
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
 
     expect(result.signals).toHaveLength(1);
+  });
+
+  it('polls multiple wallets in parallel', async () => {
+    configOverride = { ...configOverride, COPYTRADE_WALLETS: '0x1,0x2,0x3' };
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [] } as Response);
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    await runCopytrade(redis as any, 1000);
+
+    // Should call fetchWithTimeout for each wallet
+    expect(mockFetchWithTimeout).toHaveBeenCalledTimes(3);
+    const urls = mockFetchWithTimeout.mock.calls.map((c: any) => c[0] as string);
+    expect(urls.some((u: any) => u.includes('user=0x1'))).toBe(true);
+    expect(urls.some((u: any) => u.includes('user=0x2'))).toBe(true);
+    expect(urls.some((u: any) => u.includes('user=0x3'))).toBe(true);
   });
 });

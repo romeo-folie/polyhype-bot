@@ -12,6 +12,10 @@
 #   ./run.sh npx tsx src/spot/index.ts
 #   ./run.sh npx tsx src/arb/index.ts
 #
+# NOTE: This wrapper is for SHORT-LIVED cron tasks. 
+#       DO NOT use it for persistent workers (e.g. src/copytrade/worker.ts)
+#       as flock(1) will block subsequent manual restarts or health checks.
+#
 # Crontab example (use absolute paths; redirect logs):
 #   */5 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/execution/index.ts >> /tmp/pga-trade.log 2>&1
 #   */5 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/monitor/index.ts >> /tmp/pga-monitor.log 2>&1

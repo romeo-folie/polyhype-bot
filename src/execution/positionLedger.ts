@@ -7,28 +7,30 @@
  * - Mark positions as closed after take-profit or expiry
  *
  * Storage: Redis hash per position, keyed by `position:<marketId>:<direction>`
- * TTL: 30 days (max expected market lifetime)
  */
 
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 
 const POSITION_KEY_PREFIX = 'position:';
-const POSITION_TTL_SECONDS = 30 * 24 * 3600; // 30 days
 const POSITIONS_INDEX_KEY = 'positions:index'; // sorted set: score = openedAt ms
 
 export interface Position {
+  /** Polymarket numeric ID or Hyperliquid symbol (used as primary key in ledger) */
   marketId: string;
-  conditionId: string;
-  clobTokenIds: string[];
+  /** Polymarket-specific fields (optional for futures) */
+  conditionId?: string | undefined;
+  clobTokenIds?: string[] | undefined;
+  /** Question or trade reasoning */
   question: string;
-  direction: 'YES' | 'NO';
-  /** Entry price of the purchased outcome (0–1) */
+  /** Direction: YES/NO for PM, LONG/SHORT for futures */
+  direction: 'YES' | 'NO' | 'LONG' | 'SHORT';
+  /** Entry price of the purchased outcome (0–1 for PM, USD price for futures) */
   entryPrice: number;
-  /** Amount staked in USDC */
+  /** Amount staked in USDC (margin for futures) */
   stakeUsd: number;
-  /** Consensus probability at time of entry */
-  consensusProbability: number;
+  /** Consensus probability at time of entry (for PM) */
+  consensusProbability?: number | undefined;
   /** Consensus stddev at time of entry (for post-trade analysis) */
   consensusStddev?: number | undefined;
   /** Original edge magnitude */
@@ -37,16 +39,44 @@ export interface Position {
   sourcedFrom: string;
   /** ISO timestamp */
   openedAt: string;
-  /** tx_hash from Simmer, if available */
+  /** tx_hash from the venue, if available */
   txHash?: string | undefined;
-  /** Shares purchased — used when closing the position via sell order */
+  /** Shares purchased — used when closing manually */
   sharesHeld?: number | undefined;
   /** Venue via which this position was entered */
-  executionVenue: 'simmer' | 'clob';
+  executionVenue: 'simmer' | 'clob' | 'hyperliquid';
+  /** Optional reconciliation status for exit/settlement */
+  reconciliationStatus?: string | undefined;
+  /** True when an HL synthetic hedge has been opened for this PM position.
+   * The PM shares are still held on-chain; the redeemer handles final settlement. */
+  synthHedged?: boolean | undefined;
+  /** True when the position's notional is below the CLOB $1 minimum.
+   * The monitor skips these — they resolve at market settlement via the redeemer. */
+  pendingSettlement?: boolean | undefined;
+  /** Futures-specific metadata */
+  isFutures?: boolean | undefined;
+  leverage?: number | undefined;
+  symbol?: string | undefined;
+  side?: 'long' | 'short' | undefined;
 }
 
-function positionKey(marketId: string, direction: string): string {
+function positionKey(marketId: string, direction: Position['direction']): string {
   return `${POSITION_KEY_PREFIX}${marketId}:${direction}`;
+}
+
+/**
+ * Human-readable label for a position direction.
+ * PM positions use YES/NO; futures positions use LONG/SHORT.
+ * Exported so notification and logging code uses a single consistent formatter.
+ */
+export function formatDirection(direction: Position['direction']): string {
+  switch (direction) {
+    case 'YES': return 'YES ↑';
+    case 'NO':  return 'NO ↓';
+    case 'LONG':  return 'LONG ↑';
+    case 'SHORT': return 'SHORT ↓';
+    default: return direction;
+  }
 }
 
 /**
@@ -59,16 +89,27 @@ export async function recordPosition(
   const key = positionKey(position.marketId, position.direction);
   const openedAtMs = new Date(position.openedAt).getTime();
 
+  // Validate sharesHeld — warn if 0 or undefined (indicates missing shares_bought from venue).
+  if (position.sharesHeld === undefined || position.sharesHeld === 0) {
+    logger.warn('[ledger] position recorded with zero or undefined sharesHeld — exit may require fallback calculation', {
+      marketId: position.marketId,
+      direction: position.direction,
+      sharesHeld: position.sharesHeld,
+      stakeUsd: position.stakeUsd,
+      entryPrice: position.entryPrice,
+    });
+  }
+
   // Store position as a flat hash
   await redis.hset(key, {
     marketId: position.marketId,
-    conditionId: position.conditionId,
-    clobTokenIds: JSON.stringify(position.clobTokenIds),
+    conditionId: position.conditionId ?? '',
+    clobTokenIds: JSON.stringify(position.clobTokenIds || []),
     question: position.question,
     direction: position.direction,
     entryPrice: String(position.entryPrice),
     stakeUsd: String(position.stakeUsd),
-    consensusProbability: String(position.consensusProbability),
+    consensusProbability: position.consensusProbability !== undefined ? String(position.consensusProbability) : '',
     edgeMagnitude: String(position.edgeMagnitude),
     sourcedFrom: position.sourcedFrom,
     openedAt: position.openedAt,
@@ -76,8 +117,13 @@ export async function recordPosition(
     txHash: position.txHash ?? '',
     sharesHeld: position.sharesHeld !== undefined ? String(position.sharesHeld) : '',
     executionVenue: position.executionVenue,
+    synthHedged: position.synthHedged ? 'true' : 'false',
+    pendingSettlement: position.pendingSettlement ? 'true' : 'false',
+    isFutures: position.isFutures ? 'true' : 'false',
+    leverage: position.leverage !== undefined ? String(position.leverage) : '',
+    symbol: position.symbol ?? '',
+    side: position.side ?? '',
   });
-  await redis.expire(key, POSITION_TTL_SECONDS);
 
   // Add to sorted index (score = openedAt ms for chronological retrieval)
   await redis.zadd(POSITIONS_INDEX_KEY, openedAtMs, key);
@@ -99,7 +145,7 @@ export async function getOpenPositions(redis: Redis): Promise<Position[]> {
   const positions: Position[] = [];
   for (const key of keys) {
     const raw = await redis.hgetall(key);
-    if (!raw || !raw['marketId']) {
+    if (!raw.marketId) {
       // Key expired — remove from index
       await redis.zrem(POSITIONS_INDEX_KEY, key);
       continue;
@@ -110,12 +156,26 @@ export async function getOpenPositions(redis: Redis): Promise<Position[]> {
 }
 
 /**
+ * Fetch a single open position by marketId + direction. Returns null if not found.
+ */
+export async function getPosition(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+): Promise<Position | null> {
+  const key = `${POSITION_KEY_PREFIX}${marketId}:${direction}`;
+  const raw = await redis.hgetall(key);
+  if (!raw.marketId) return null;
+  return deserialisePosition(raw);
+}
+
+/**
  * Remove a position from the ledger (after take-profit or manual close).
  */
 export async function closePosition(
   redis: Redis,
   marketId: string,
-  direction: 'YES' | 'NO',
+  direction: Position['direction'],
 ): Promise<void> {
   const key = positionKey(marketId, direction);
   await redis.del(key);
@@ -124,12 +184,55 @@ export async function closePosition(
 }
 
 /**
+ * Mark a position as synthetically hedged without removing it from the ledger.
+ * The PM shares are still held on-chain; the redeemer handles final settlement.
+ */
+export async function markPositionSynthHedged(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+): Promise<void> {
+  const key = positionKey(marketId, direction);
+  await redis.hset(key, { synthHedged: 'true' });
+  logger.info('[ledger] position marked synthHedged', { marketId, direction });
+}
+
+/**
+ * Mark a position as pending settlement (below CLOB minimum notional).
+ * The monitor skips these — they resolve at market settlement via the redeemer.
+ */
+export async function markPositionPendingSettlement(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+): Promise<void> {
+  const key = positionKey(marketId, direction);
+  await redis.hset(key, { pendingSettlement: 'true' });
+  logger.info('[ledger] position marked pendingSettlement', { marketId, direction });
+}
+
+export async function updatePositionShares(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+  sharesHeld: number,
+  reconciliationStatus?: string,
+): Promise<void> {
+  const key = positionKey(marketId, direction);
+  await redis.hset(key, {
+    sharesHeld: String(sharesHeld),
+    ...(reconciliationStatus ? { reconciliationStatus } : {}),
+  });
+  logger.info('[ledger] position shares reconciled', { marketId, direction, sharesHeld, reconciliationStatus });
+}
+
+/**
  * Check if a position exists for a given market + direction.
  */
 export async function hasOpenPosition(
   redis: Redis,
   marketId: string,
-  direction: 'YES' | 'NO',
+  direction: Position['direction'],
 ): Promise<boolean> {
   const key = positionKey(marketId, direction);
   const exists = await redis.exists(key);
@@ -139,22 +242,35 @@ export async function hasOpenPosition(
 // ── Deserialisation ────────────────────────────────────────────────────────
 
 function deserialisePosition(raw: Record<string, string>): Position {
+  const venue = raw.executionVenue as Position['executionVenue'];
   const pos: Position = {
-    marketId: raw['marketId'] ?? '',
-    conditionId: raw['conditionId'] ?? '',
-    clobTokenIds: raw['clobTokenIds'] ? (JSON.parse(raw['clobTokenIds']) as string[]) : [],
-    question: raw['question'] ?? '',
-    direction: (raw['direction'] ?? 'YES') as 'YES' | 'NO',
-    entryPrice: parseFloat(raw['entryPrice'] ?? '0'),
-    stakeUsd: parseFloat(raw['stakeUsd'] ?? '0'),
-    consensusProbability: parseFloat(raw['consensusProbability'] ?? '0'),
-    edgeMagnitude: parseFloat(raw['edgeMagnitude'] ?? '0'),
-    sourcedFrom: raw['sourcedFrom'] ?? '',
-    openedAt: raw['openedAt'] ?? new Date().toISOString(),
-    executionVenue: (raw['executionVenue'] === 'clob' ? 'clob' : 'simmer'),
+    marketId: raw.marketId ?? '',
+    conditionId: raw.conditionId,
+    clobTokenIds: raw.clobTokenIds ? (JSON.parse(raw.clobTokenIds) as string[]) : [],
+    question: raw.question ?? '',
+    direction: (raw.direction ?? 'YES') as Position['direction'],
+    entryPrice: parseFloat(raw.entryPrice ?? '0'),
+    stakeUsd: parseFloat(raw.stakeUsd ?? '0'),
+    edgeMagnitude: parseFloat(raw.edgeMagnitude ?? '0'),
+    sourcedFrom: raw.sourcedFrom ?? '',
+    openedAt: raw.openedAt ?? new Date().toISOString(),
+    executionVenue: (venue || 'simmer'),
   };
-  if (raw['consensusStddev']) pos.consensusStddev = parseFloat(raw['consensusStddev']);
-  if (raw['txHash']) pos.txHash = raw['txHash'];
-  if (raw['sharesHeld']) pos.sharesHeld = parseFloat(raw['sharesHeld']);
+
+  if (raw.consensusProbability) pos.consensusProbability = parseFloat(raw.consensusProbability);
+  if (raw.consensusStddev) pos.consensusStddev = parseFloat(raw.consensusStddev);
+  if (raw.txHash) pos.txHash = raw.txHash;
+  if (raw.sharesHeld) pos.sharesHeld = parseFloat(raw.sharesHeld);
+  if (raw.reconciliationStatus) pos.reconciliationStatus = raw.reconciliationStatus;
+  
+  if (raw.synthHedged === 'true') pos.synthHedged = true;
+  if (raw.pendingSettlement === 'true') pos.pendingSettlement = true;
+  if (raw.isFutures === 'true') {
+    pos.isFutures = true;
+    if (raw.leverage) pos.leverage = parseFloat(raw.leverage);
+    if (raw.symbol) pos.symbol = raw.symbol;
+    if (raw.side) pos.side = raw.side as 'long' | 'short';
+  }
+
   return pos;
 }

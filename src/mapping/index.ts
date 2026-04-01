@@ -12,32 +12,39 @@
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { findCandidateMarkets } from './entityExtractor.js';
-import { estimateConsensusProbability } from './consensusCalculator.js';
+import { estimateConsensusProbability, estimateSentiment } from './consensusCalculator.js';
 import { computeDivergence } from './divergenceCalculator.js';
 import { resolveYesPrice } from '../shared/priceCache.js';
+import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { TradeDecision } from './divergenceCalculator.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 import type { Redis } from 'ioredis';
 import type { ClobPriceFeed } from '../shared/clobWebSocket.js';
 
 export interface TradeSignal {
-  /** Gamma market ID */
+  /** Gamma market ID or Hyperliquid symbol */
   marketId: string;
-  conditionId: string;
-  clobTokenIds: string[];
+  conditionId?: string;
+  clobTokenIds?: string[];
   question: string;
-  direction: TradeDecision['direction'];
+  direction: 'YES' | 'NO' | 'LONG' | 'SHORT';
   stakeUsd: number;
   edgeMagnitude: number;
-  consensusProbability: number;
+  consensusProbability?: number;
   /** Standard deviation of consensus probability across N LLM samples */
-  consensusStddev: number;
+  consensusStddev?: number;
   outcomePrice: number;
-  halfKellyFraction: number;
+  halfKellyFraction?: number;
   /** The OSINT headline that triggered this signal */
   sourcedFrom: string;
   /** LLM reasoning for the probability estimate */
   reasoning: string;
+  /** Futures-specific */
+  isFutures?: boolean;
+  leverage?: number;
+  symbol?: string;
+  /** True when the Gamma market has fees enabled — executor skips CLOB for these */
+  feesEnabled?: boolean;
 }
 
 /**
@@ -97,7 +104,7 @@ export async function runMapping(
 
       // Resolve price: WS cache first, then fall back to Gamma snapshot
       let currentYesPrice = candidate.currentYesPrice;
-      if (opts?.redis && opts?.feed) {
+      if (opts?.redis && opts.feed) {
         const wsPrice = await resolveYesPrice(candidate.marketId, opts.redis, opts.feed);
         if (wsPrice !== null) currentYesPrice = wsPrice;
       }
@@ -109,6 +116,7 @@ export async function runMapping(
           description: candidate.description,
           headline: item.title,
           currentYesPrice,
+          ...(opts?.redis ? { redis: opts.redis } : {}),
         });
       } catch (err) {
         logger.warn('[mapping] consensus estimation failed', {
@@ -125,6 +133,7 @@ export async function runMapping(
         bankrollUsd,
         divergenceThreshold,
         maxBetFraction,
+        bookDepthUsd: candidate.liquidity,
       });
 
       logger.info('[mapping] divergence result', {
@@ -136,7 +145,7 @@ export async function runMapping(
         hasTrade,
         skipReason,
         direction: decision?.direction,
-        stakeUsd: decision?.stakeUsd?.toFixed(2),
+        stakeUsd: decision?.stakeUsd.toFixed(2),
       });
 
       if (hasTrade && decision) {
@@ -169,6 +178,53 @@ export async function runMapping(
     itemsProcessed: items.length,
     signalsGenerated: signals.length,
   });
+
+  return signals;
+}
+
+/**
+ * High-speed mapping for News -> Futures.
+ */
+export async function mapNewsToFutures(
+  items: ScoredItem[],
+  bankrollUsd: number,
+): Promise<TradeSignal[]> {
+  const cfg = loadConfig();
+  if (!cfg.FUTURES_ENABLED) return [];
+
+  const signals: TradeSignal[] = [];
+
+  for (const item of items) {
+    if (item.urgencyScore < cfg.URGENCY_THRESHOLD) continue;
+
+    // 1. Identify asset using shared symbol resolution logic
+    const symbol = resolveHlSymbol(item.title);
+    if (!symbol) continue;
+
+    // 2. Perform zero-shot LLM sentiment analysis
+    const direction = await estimateSentiment(item.title);
+    if (direction === 'NEUTRAL') {
+      logger.info('[mapping] skipping HL signal — neutral sentiment', { symbol, title: item.title });
+      continue;
+    }
+    
+    const stakeUsd = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
+    
+    signals.push({
+      marketId: symbol,
+      question: `News Futures: ${symbol} ${direction}`,
+      direction,
+      stakeUsd,
+      edgeMagnitude: item.urgencyScore / 10,
+      outcomePrice: 0, // Market order
+      isFutures: true,
+      leverage: cfg.FUTURES_DEFAULT_LEVERAGE,
+      sourcedFrom: `News: ${item.title}`,
+      reasoning: `High-urgency news detected for ${symbol} with ${direction} sentiment. Urgency: ${item.urgencyScore}. Executing single-signal HL Perp via rapid LLM classification.`,
+    });
+    
+    // Only one futures signal per news item to prevent over-trading
+  }
 
   return signals;
 }

@@ -1,24 +1,33 @@
 /**
  * Cold-start bankroll tests — separate file so lastKnownBalance starts as null.
  *
- * Jest loads each test file in a fresh module registry, so module-level state
+ * Vitest loads each test file in a fresh module registry, so module-level state
  * (lastKnownBalance) is guaranteed to be null at the start of this file.
  */
-import { jest, describe, it, expect } from '@jest/globals';
+import { describe, it, expect, vi } from 'vitest';
 
-const mockGetPortfolio = jest.fn<() => Promise<never>>();
+const mockGetPortfolio = vi.fn<() => Promise<never>>();
 
-jest.unstable_mockModule('../simmer.js', () => ({
+vi.mock('../simmer.js', () => ({
   getPortfolio: mockGetPortfolio,
 }));
 
-jest.unstable_mockModule('../logger.js', () => ({
+vi.mock('../logger.js', () => ({
   logger: {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
   },
+}));
+
+vi.mock('../config.js', () => ({
+  loadConfig: vi.fn(() => ({
+    POLYGON_WALLET_PRIVATE_KEY: undefined, // no on-chain check in cold-start tests
+    POLYGON_RPC_URL: undefined,
+  })),
+  USDC_E_ADDRESS: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
+  POLYGON_FALLBACK_RPCS: ['https://polygon-rpc.com'],
 }));
 
 // Fresh import — lastKnownBalance is null in this file's module instance.

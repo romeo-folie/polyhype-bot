@@ -1,11 +1,11 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn().mockReturnValue({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn().mockReturnValue({
     SPOT_CRYPTO_ASSETS: 'bitcoin,ethereum',
     SPOT_COMMODITY_ASSETS: 'CL=F,GC=F',
   }),
@@ -13,25 +13,25 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
 
 // Mock Redis
 const mockPipeline = {
-  zadd: jest.fn().mockReturnThis(),
-  zremrangebyscore: jest.fn().mockReturnThis(),
-  set: jest.fn().mockReturnThis(),
-  expire: jest.fn().mockReturnThis(),
-  exec: jest.fn<() => Promise<unknown>>().mockResolvedValue([]),
+  zadd: vi.fn().mockReturnThis(),
+  zremrangebyscore: vi.fn().mockReturnThis(),
+  set: vi.fn().mockReturnThis(),
+  expire: vi.fn().mockReturnThis(),
+  exec: vi.fn<() => Promise<unknown>>().mockResolvedValue([]),
 };
 
 const mockRedis = {
-  pipeline: jest.fn().mockReturnValue(mockPipeline),
-  zrangebyscore: jest.fn<() => Promise<string[]>>().mockResolvedValue([]),
-  zrange: jest.fn<() => Promise<string[]>>().mockResolvedValue([]),
+  pipeline: vi.fn().mockReturnValue(mockPipeline),
+  zrangebyscore: vi.fn<() => Promise<string[]>>().mockResolvedValue([]),
+  zrange: vi.fn<() => Promise<string[]>>().mockResolvedValue([]),
 };
 
-jest.unstable_mockModule('../../shared/redis.js', () => ({
-  getRedis: jest.fn().mockReturnValue(mockRedis),
+vi.mock('../../shared/redis.js', () => ({
+  getRedis: vi.fn().mockReturnValue(mockRedis),
 }));
 
 // Mock global fetch
-const mockFetch = jest.fn<typeof globalThis.fetch>();
+const mockFetch = vi.fn<typeof globalThis.fetch>();
 globalThis.fetch = mockFetch as typeof globalThis.fetch;
 
 const { fetchCryptoPrices, fetchCommodityPrice, storePrice, getPriceAtLookback, pollSpotPrices } =

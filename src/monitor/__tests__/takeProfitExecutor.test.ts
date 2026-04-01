@@ -1,19 +1,19 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Position } from '../../execution/positionLedger.js';
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
     CLOB_ORDER_TYPE: 'FAK',
   })),
 }));
 
-jest.unstable_mockModule('../../shared/simmer.js', () => ({
-  submitSell: jest.fn(),
-  resolveSimmerMarketId: jest.fn(),
+vi.mock('../../shared/simmer.js', () => ({
+  submitSell: vi.fn(),
+  resolveSimmerMarketId: vi.fn(),
   SimmerError: class SimmerError extends Error {
     statusCode: number;
     body: unknown;
@@ -26,40 +26,63 @@ jest.unstable_mockModule('../../shared/simmer.js', () => ({
   },
 }));
 
-jest.unstable_mockModule('../../shared/clob.js', () => ({
-  submitClobSell: jest.fn(),
-  submitClobBuy: jest.fn(),
-  getClobBalance: jest.fn(),
+vi.mock('../../shared/clob.js', () => ({
+  submitClobSell: vi.fn(),
+  submitClobBuy: vi.fn(),
+  getClobBalance: vi.fn(),
+  fetchClobTokenBalance: vi.fn().mockResolvedValue({ ok: true, balance: 5.0 }),
+  parseBalanceFromClobError: vi.fn().mockReturnValue(null),
+  CLOB_MIN_ORDER_USD: 1.0,
 }));
 
-jest.unstable_mockModule('../../execution/positionLedger.js', () => ({
-  closePosition: jest.fn(),
-  getOpenPositions: jest.fn(),
-  recordPosition: jest.fn(),
-  hasOpenPosition: jest.fn(),
+vi.mock('../../execution/positionLedger.js', () => ({
+  closePosition: vi.fn(),
+  getOpenPositions: vi.fn(),
+  recordPosition: vi.fn(),
+  hasOpenPosition: vi.fn(),
+  updatePositionShares: vi.fn(),
+  markPositionSynthHedged: vi.fn(),
+  markPositionPendingSettlement: vi.fn(),
 }));
 
-jest.unstable_mockModule('../../execution/telegram.js', () => ({
-  notifyTakeProfitExecuted: jest.fn(),
-  notifyTradeExecuted: jest.fn(),
-  notifyTradeError: jest.fn(),
+vi.mock('../../execution/telegram.js', () => ({
+  notifyTakeProfitExecuted: vi.fn(),
+  notifyTradeExecuted: vi.fn(),
+  notifyTradeError: vi.fn(),
 }));
 
-jest.unstable_mockModule('../../shared/bankroll.js', () => ({
-  creditProceeds: jest.fn<() => Promise<number>>().mockResolvedValue(100),
+vi.mock('../../shared/bankroll.js', () => ({
+  creditProceeds: vi.fn<() => Promise<number>>().mockResolvedValue(100),
+}));
+
+vi.mock('../../shared/outcomeRecorder.js', () => ({
+  recordOutcome: vi.fn().mockResolvedValue(undefined),
+  inferCategory: vi.fn().mockReturnValue('geopolitical'),
+  inferSource: vi.fn().mockReturnValue('osint'),
+}));
+
+vi.mock('../../shared/hyperliquid.js', () => ({
+  getHyperliquid: vi.fn(() => ({
+    closePosition: vi.fn().mockResolvedValue({ success: true }),
+    getClearinghouseState: vi.fn().mockResolvedValue({}),
+    getOpenPositions: vi.fn().mockResolvedValue([]),
+  })),
+  resolveHlSymbol: vi.fn().mockReturnValue(null),
 }));
 
 const { submitSell, resolveSimmerMarketId } = await import('../../shared/simmer.js');
-const { submitClobSell } = await import('../../shared/clob.js');
-const { closePosition } = await import('../../execution/positionLedger.js');
+const { submitClobSell, fetchClobTokenBalance } = await import('../../shared/clob.js');
+const { closePosition, updatePositionShares } = await import('../../execution/positionLedger.js');
 const { notifyTakeProfitExecuted } = await import('../../execution/telegram.js');
 const { executeTakeProfit } = await import('../takeProfitExecutor.js');
 
-const mockSell = submitSell as jest.MockedFunction<typeof submitSell>;
-const mockResolveSimmerMarketId = resolveSimmerMarketId as jest.MockedFunction<typeof resolveSimmerMarketId>;
-const mockClobSell = submitClobSell as jest.MockedFunction<typeof submitClobSell>;
-const mockClose = closePosition as jest.MockedFunction<typeof closePosition>;
-const mockNotify = notifyTakeProfitExecuted as jest.MockedFunction<typeof notifyTakeProfitExecuted>;
+const mockSell = vi.mocked(submitSell);
+const mockResolveSimmerMarketId = vi.mocked(resolveSimmerMarketId);
+const mockClobSell = vi.mocked(submitClobSell);
+const mockFetchClobTokenBalance = vi.mocked(fetchClobTokenBalance);
+const mockClose = vi.mocked(closePosition);
+const mockUpdateShares = vi.mocked(updatePositionShares);
+const mockNotify = vi.mocked(notifyTakeProfitExecuted);
 
 function makePosition(overrides: Partial<Position> = {}): Position {
   return {
@@ -81,7 +104,11 @@ function makePosition(overrides: Partial<Position> = {}): Position {
 }
 
 function makeRedis() {
-  return {} as Parameters<typeof executeTakeProfit>[0]['redis'];
+  return {
+    get: vi.fn().mockResolvedValue(null),
+    set: vi.fn().mockResolvedValue('OK'),
+    del: vi.fn().mockResolvedValue(1),
+  } as unknown as Parameters<typeof executeTakeProfit>[0]['redis'];
 }
 
 describe('executeTakeProfit', () => {
@@ -90,10 +117,12 @@ describe('executeTakeProfit', () => {
     mockResolveSimmerMarketId.mockReset();
     mockClobSell.mockReset();
     mockClose.mockReset();
+    mockUpdateShares.mockReset();
     mockNotify.mockReset();
     // Default: Simmer resolves to a stable UUID for all tests
     mockResolveSimmerMarketId.mockResolvedValue('simmer-uuid-abc123');
     mockClose.mockResolvedValue(undefined);
+    mockUpdateShares.mockResolvedValue(undefined);
     mockNotify.mockResolvedValue(undefined);
   });
 
@@ -192,7 +221,7 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
-    expect(mockClose).toHaveBeenCalledWith(makeRedis(), 'mkt-1', 'YES');
+    expect(mockClose).toHaveBeenCalledWith(expect.objectContaining({ get: expect.any(Function) }), 'mkt-1', 'YES');
     expect(mockNotify).toHaveBeenCalledTimes(1);
   });
 
@@ -255,9 +284,17 @@ describe('executeTakeProfit', () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error).toMatch(/invalid sharesToSell/);
+    expect(result.error).toMatch(/terminal_no_balance/);
     expect(mockSell).not.toHaveBeenCalled();
     expect(mockClose).not.toHaveBeenCalled();
+    // Verify terminal flag was set
+    expect(mockUpdateShares).toHaveBeenCalledWith(
+      expect.anything(),
+      'mkt-1',
+      'YES',
+      0,
+      'terminal_no_balance'
+    );
   });
 
   it('aborts without calling submitSell when sharesHeld is 0', async () => {
@@ -277,6 +314,7 @@ describe('executeTakeProfit', () => {
   // ── CLOB venue routing ────────────────────────────────────────────────────
 
   it('routes CLOB-venue position to submitClobSell instead of submitSell', async () => {
+    mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 15.0 });
     mockClobSell.mockResolvedValue({ success: true, tx_hash: '0xclobexit' });
 
     const result = await executeTakeProfit({
@@ -293,7 +331,7 @@ describe('executeTakeProfit', () => {
       expect.objectContaining({ tokenId: 'tok-yes', shares: 12.5, orderType: 'FAK' }),
     );
     expect(mockSell).not.toHaveBeenCalled();
-    expect(mockClose).toHaveBeenCalledWith(makeRedis(), 'mkt-1', 'YES');
+    expect(mockClose).toHaveBeenCalledWith(expect.objectContaining({ get: expect.any(Function) }), 'mkt-1', 'YES');
   });
 
   it('routes CLOB-venue NO position to correct token ID', async () => {
@@ -340,5 +378,24 @@ describe('executeTakeProfit', () => {
     expect(result.success).toBe(false);
     expect(result.error).toBe('CLOB order rejected');
     expect(mockClose).not.toHaveBeenCalled();
+  });
+
+  it('caps CLOB sell at actual on-chain balance when it is less than Redis-tracked shares', async () => {
+    // On-chain balance is 2.5 but ledger says 3.0 — sell should use 2.5
+    mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 2.5 });
+    mockClobSell.mockResolvedValue({ success: true, tx_hash: '0xcapped' });
+
+    const result = await executeTakeProfit({
+      position: makePosition({ executionVenue: 'clob', sharesHeld: 3.0, direction: 'YES' }),
+      currentPrice: 0.65,
+      returnPct: 20,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockClobSell).toHaveBeenCalledWith(
+      expect.objectContaining({ shares: 2.5 }),
+    );
   });
 });

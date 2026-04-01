@@ -1,9 +1,9 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-const mockFetch = jest.fn() as any;
+const mockFetch = vi.fn() as any;
 
-jest.unstable_mockModule('../config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../config.js', () => ({
+  loadConfig: vi.fn(() => ({
     SIMMER_API_KEY: 'test',
   })),
 }));
@@ -67,5 +67,60 @@ describe('getSimmerPositions', () => {
       shares: 5,
       value_usdc: 1.25,
     }));
+  });
+});
+
+describe('setAgentAutoRedeem', () => {
+  it('sends PATCH request with auto_redeem_enabled=true', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true }),
+    });
+
+    const { setAgentAutoRedeem } = await import('../simmer.js');
+    await setAgentAutoRedeem(true);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://api.simmer.markets/api/sdk/agents/me/settings',
+      expect.objectContaining({
+        method: 'PATCH',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer test',
+        }),
+        body: JSON.stringify({ auto_redeem_enabled: true }),
+      }),
+    );
+  });
+
+  it('sends PATCH request with auto_redeem_enabled=false', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true }),
+    });
+
+    const { setAgentAutoRedeem } = await import('../simmer.js');
+    await setAgentAutoRedeem(false);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://api.simmer.markets/api/sdk/agents/me/settings',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ auto_redeem_enabled: false }),
+      }),
+    );
+  });
+
+  it('throws SimmerError on HTTP 4xx/5xx', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: 'Forbidden' }),
+    });
+
+    const { setAgentAutoRedeem } = await import('../simmer.js');
+    await expect(setAgentAutoRedeem(true)).rejects.toThrow('Simmer agent settings API returned HTTP 403');
   });
 });

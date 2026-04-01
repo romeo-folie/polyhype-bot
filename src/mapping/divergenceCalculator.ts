@@ -38,6 +38,8 @@ export interface DivergenceInput {
   divergenceThreshold: number;
   /** Maximum fraction of bankroll per trade. Typically 0.10 = 10%. */
   maxBetFraction: number;
+  /** Available liquidity in USD at the current price level (optional) */
+  bookDepthUsd?: number;
 }
 
 export interface DivergenceResult {
@@ -63,6 +65,7 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
     bankrollUsd,
     divergenceThreshold,
     maxBetFraction,
+    bookDepthUsd,
   } = input;
 
   // Gate 1: Noisy signal — stddev too high
@@ -99,7 +102,12 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
 
   const halfKellyFraction = computeHalfKelly(tradeProbability, outcomePrice);
   const cappedFraction = Math.min(halfKellyFraction, maxBetFraction);
-  const stakeUsd = Math.max(0, cappedFraction * bankrollUsd);
+  const rawStakeUsd = Math.max(0, cappedFraction * bankrollUsd);
+
+  // Liquidity Gate: cap stake at 20% of book depth if available
+  const stakeUsd = input.bookDepthUsd !== undefined
+    ? Math.min(rawStakeUsd, input.bookDepthUsd * 0.2)
+    : rawStakeUsd;
 
   return {
     hasTrade: true,
