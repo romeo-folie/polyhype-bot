@@ -60,10 +60,20 @@ const CTF_ABI = [
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)',
 ];
 
-const SAFE_ABI = [
-  'function execTransaction(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address refundReceiver, bytes calldata signatures) external returns (bool success)',
-  'function getTransactionHash(address to, uint256 value, bytes calldata data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address refundReceiver, uint256 _nonce) public view returns (bytes32)',
-  'function nonce() public view returns (uint256)',
+/**
+ * Polymarket ProxyWalletFactory — deployed at a fixed address on Polygon mainnet.
+ * All sigType=1 (Polymarket Magic proxy wallet) transactions are routed through this
+ * factory, which forwards calls to the user's EIP-1167 proxy wallet.
+ *
+ * ABI reverse-engineered from on-chain txs: selector 0x34ee9791 =
+ *   proxy((bool delegateCall, address to, uint256 value, bytes data)[] calls)
+ *
+ * The factory verifies the caller owns the proxy and executes the ProxyCalls.
+ * delegateCall=true is used in all observed Polymarket redemption transactions.
+ */
+const PROXY_WALLET_FACTORY_ADDRESS = '0xaB45c5A4B0c941a2F231C04C3f49182e1A254052';
+const PROXY_WALLET_FACTORY_ABI = [
+  'function proxy((bool delegateCall, address to, uint256 value, bytes data)[] calls) external payable',
 ];
 
 export interface ClobBuyInput {
@@ -555,59 +565,38 @@ async function redeemClobOutcomeWithRpc(
   const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
 
   const ctfInterface = new Interface(CTF_ABI);
-  const indexSets = input.direction === 'YES' ? [1] : [2];
+  // Pass both indexSets [1, 2] — the CTF contract redeems whichever outcome tokens
+  // the wallet actually holds (i.e. the winning side). Using both avoids needing to
+  // know which specific index won; the contract ignores zero-balance outcomes.
   const data = ctfInterface.encodeFunctionData('redeemPositions', [
     USDC_E_ADDRESS,
     '0x0000000000000000000000000000000000000000000000000000000000000000',
     input.conditionId,
-    indexSets,
+    [1, 2],
   ]);
 
   if (sigType === 1) {
-    // Proxy/Gnosis Safe logic
-    logger.info('[clob] executing redemption via Proxy wallet', {
+    // Polymarket Magic Proxy Wallet (EIP-1167 minimal proxy, non-Safe).
+    // Redemptions must go through the ProxyWalletFactory which routes to the user's
+    // proxy contract. The factory exposes:
+    //   proxy((bool delegateCall, address to, uint256 value, bytes data)[] calls)
+    // delegateCall=true matches all observed Polymarket redemption transactions.
+    logger.info('[clob] executing redemption via Polymarket ProxyWalletFactory', {
       funderAddress,
       conditionId: input.conditionId,
     });
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
-    const safe = new Contract(funderAddress, SAFE_ABI, signer) as any;
+    const factory = new Contract(PROXY_WALLET_FACTORY_ADDRESS, PROXY_WALLET_FACTORY_ABI, signer) as any;
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const nonce = await safe.nonce();
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const safeTxHash: string = await safe.getTransactionHash(
-      CTF_ADDRESS,
-      0, // value
-      data,
-      0, // operation: Call
-      0, // safeTxGas
-      0, // baseGas
-      0, // gasPrice
-      '0x0000000000000000000000000000000000000000', // refundReceiver
-      nonce,
-    );
-
-    // Gnosis Safe v1.1.1/v1.3.0 EOA signing: (v + 4) suffix distinguishes EOA signatures
-    // from other types in the Safe's internal signature validator.
-    const sig = signer.signingKey.sign(safeTxHash);
-    const r = sig.r.slice(2);
-    const s = sig.s.slice(2);
-    const v = sig.v + 4;
-    const safeSignature = '0x' + r + s + v.toString(16).padStart(2, '0');
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const tx = await safe.execTransaction(
-      CTF_ADDRESS,
-      0,
-      data,
-      0,
-      0,
-      0,
-      0,
-      '0x0000000000000000000000000000000000000000',
-      safeSignature,
-    );
+    const tx = await factory.proxy([
+      {
+        delegateCall: true,
+        to: CTF_ADDRESS,
+        value: 0,
+        data,
+      },
+    ]);
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     const receipt = await tx.wait();

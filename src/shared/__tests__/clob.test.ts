@@ -7,9 +7,7 @@ const mockGetBalanceAllowance = vi.fn();
 const mockUpdateBalanceAllowance = vi.fn();
 const mockSendTransaction = vi.fn();
 const mockWait = vi.fn();
-const mockExecTransaction = vi.fn();
-const mockNonce = vi.fn();
-const mockGetTransactionHash = vi.fn();
+const mockProxy = vi.fn();
 
 // Mock ethers v6
 vi.mock('ethers', () => ({
@@ -19,18 +17,10 @@ vi.mock('ethers', () => ({
     // ethers v6 renamed _signTypedData → signTypedData; clob.ts patches _signTypedData
     // back onto the wallet. The mock must expose signTypedData so the patch doesn't throw.
     signTypedData: vi.fn().mockResolvedValue('0xsig'),
-    signingKey: {
-      sign: () => ({
-        r: '0x' + '0'.repeat(64),
-        s: '0x' + '0'.repeat(64),
-        v: 27,
-      }),
-    },
+    signingKey: {},
   })),
   Contract: vi.fn(() => ({
-    execTransaction: mockExecTransaction,
-    nonce: mockNonce,
-    getTransactionHash: mockGetTransactionHash,
+    proxy: mockProxy,
   })),
   Interface: vi.fn(() => ({
     encodeFunctionData: vi.fn(() => '0xencodeddata'),
@@ -233,9 +223,7 @@ describe('redeemClobOutcome', () => {
     vi.clearAllMocks();
     mockWait.mockResolvedValue({ hash: '0xredeemhash' });
     mockSendTransaction.mockResolvedValue({ wait: mockWait });
-    mockExecTransaction.mockResolvedValue({ wait: mockWait });
-    mockNonce.mockResolvedValue(42);
-    mockGetTransactionHash.mockResolvedValue('0xsafetxhash');
+    mockProxy.mockResolvedValue({ wait: mockWait });
   });
 
   it('executes via EOA when sigType=0', async () => {
@@ -244,9 +232,10 @@ describe('redeemClobOutcome', () => {
     expect(result.success).toBe(true);
     expect(result.tx_hash).toBe('0xredeemhash');
     expect(mockSendTransaction).toHaveBeenCalled();
+    expect(mockProxy).not.toHaveBeenCalled();
   });
 
-  it('executes via Safe Proxy when sigType=1', async () => {
+  it('executes via ProxyWalletFactory when sigType=1', async () => {
     const { loadConfig } = await import('../config.js');
     vi.mocked(loadConfig).mockReturnValue({
       POLYGON_WALLET_PRIVATE_KEY: '0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
@@ -260,7 +249,15 @@ describe('redeemClobOutcome', () => {
 
     expect(result.success).toBe(true);
     expect(result.tx_hash).toBe('0xredeemhash');
-    expect(mockExecTransaction).toHaveBeenCalled();
+    // Must call factory.proxy(), not EOA sendTransaction
+    expect(mockProxy).toHaveBeenCalledOnce();
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+    // Verify ProxyCall shape: delegateCall=true, to=CTF, value=0
+    const [calls] = mockProxy.mock.calls[0] as [Array<{ delegateCall: boolean; to: string; value: number; data: string }>];
+    expect(calls).toHaveLength(1);
+    expect(calls[0].delegateCall).toBe(true);
+    expect(calls[0].to).toBe('0x4d97dcd97ec945f40cf65f87097ace5ea0476045');
+    expect(calls[0].value).toBe(0);
   });
 });
 
