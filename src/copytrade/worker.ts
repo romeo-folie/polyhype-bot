@@ -1,6 +1,7 @@
 import { promises as fsPromises } from 'fs';
 import dotenv from 'dotenv';
-dotenv.config();
+// Note: top-level dotenv.config() removed — config.ts loads dotenv via 'import dotenv/config'.
+// The dotenv import is retained for the hot-reload path (~line 148) which uses dotenv.config({ override: true }).
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { getRedis } from '../shared/redis.js';

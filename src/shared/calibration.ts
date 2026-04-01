@@ -76,13 +76,22 @@ export async function computeCalibration(
       bucketData.set(br.label, { wins: 0, total: 0 });
     }
 
+    // Fetch all outcome records in a single pipeline round-trip instead of N sequential hgetall calls.
+    const pipeline = redis.pipeline();
     for (const id of ids) {
-      const data = await redis.hgetall(`outcome:${id}`);
-      if (!data || !data.id) continue;
+      pipeline.hgetall(`outcome:${id}`);
+    }
+    const pipelineResults = await pipeline.exec();
+    const allData: Record<string, string>[] = (pipelineResults ?? []).map(
+      ([err, val]) => (err || !val ? {} : (val as Record<string, string>)),
+    );
 
-      const result = data.result as string;
-      const returnPct = Number(data.returnPct) || 0;
-      const prob = Number(data.consensusProbability) || 0;
+    for (const data of allData) {
+      if (!data || !data['id']) continue;
+
+      const result = data['result'] as string;
+      const returnPct = Number(data['returnPct']) || 0;
+      const prob = Number(data['consensusProbability']) || 0;
       const isWin = result === 'won';
 
       if (isWin) wins++;

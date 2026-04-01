@@ -430,7 +430,10 @@ async function checkOnChainResolution(
       const fetchReq = new FetchRequest(rpcUrl);
       fetchReq.timeout = 10_000;
       const provider = new JsonRpcProvider(fetchReq, polygonNetwork, { staticNetwork: polygonNetwork });
-      const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as any;
+      const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as Contract & {
+        payoutDenominator(conditionId: string): Promise<bigint>;
+        payoutNumerators(conditionId: string, index: number): Promise<bigint>;
+      };
 
       const denominator: bigint = await ctf.payoutDenominator(conditionId);
       if (denominator === 0n) {

@@ -448,26 +448,36 @@ export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHO
     'If the impact is ambiguous or insignificant, return NEUTRAL. ' +
     'Return ONLY the word: POSITIVE, NEGATIVE, or NEUTRAL.';
 
+  /** Hard timeout for sentiment calls — must not block the futures pipeline. */
+  const SENTIMENT_TIMEOUT_MS = 10_000;
+
   let raw = '';
   try {
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('estimateSentiment timeout')), SENTIMENT_TIMEOUT_MS),
+    );
+
     if (useGemini) {
       const genai = await getSentimentGemini();
-      const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
+      const model = genai.getGenerativeModel({ model: cfg.GEMINI_MODEL });
       const prompt = `${system}\n\nHeadline: ${headline}`;
-      const result = await model.generateContent(prompt);
+      const result = await Promise.race([model.generateContent(prompt), timeoutPromise]);
       raw = result.response.text().trim().toUpperCase();
     } else if (useOpenAI) {
       const client = await getSentimentOpenAI();
-      const completion = await client.chat.completions.create({
-        model: loadConfig().OPENAI_MODEL,
-        messages: [{ role: 'system', content: system }, { role: 'user', content: headline }],
-        max_tokens: 10,
-        temperature: 0,
-      });
+      const completion = await Promise.race([
+        client.chat.completions.create({
+          model: cfg.OPENAI_MODEL,
+          messages: [{ role: 'system', content: system }, { role: 'user', content: headline }],
+          max_tokens: 10,
+          temperature: 0,
+        }),
+        timeoutPromise,
+      ]);
       raw = (completion.choices[0]?.message?.content ?? '').trim().toUpperCase();
     }
   } catch (err) {
-    logger.warn('[sentiment-calc] LLM failed, falling back to NEUTRAL', { error: String(err) });
+    logger.warn('[sentiment-calc] LLM failed or timed out, falling back to NEUTRAL', { error: String(err) });
     return 'NEUTRAL';
   }
 

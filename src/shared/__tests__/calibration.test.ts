@@ -22,9 +22,25 @@ function makeRedis(outcomes: OutcomeData[] = []) {
 
   let cachedCalibration: string | null = null;
 
+  // Pipeline mock — collects hgetall commands and executes them against hashStore.
+  const pipelineCommands: string[] = [];
+  const pipelineMock = {
+    hgetall: vi.fn<any>((key: string) => {
+      pipelineCommands.push(key);
+      return pipelineMock; // chainable
+    }),
+    exec: vi.fn<any>(async () =>
+      pipelineCommands.map((key) => [null, hashStore.get(key) ?? {}]),
+    ),
+  };
+
   return {
     zrange: vi.fn<any>(async () => ids),
     hgetall: vi.fn<any>(async (key: string) => hashStore.get(key) ?? {}),
+    pipeline: vi.fn<any>(() => {
+      pipelineCommands.length = 0; // reset for each pipeline() call
+      return pipelineMock;
+    }),
     set: vi.fn<any>(async (_k: string, v: string) => {
       cachedCalibration = v;
       return 'OK';

@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import axios from 'axios';
 import * as msgpack from '@msgpack/msgpack';
+import { createHash } from 'node:crypto';
 import { loadConfig } from './config.js';
 import { logger } from './logger.js';
 
@@ -414,7 +415,17 @@ class HyperliquidClient {
 }
 
 let _client: HyperliquidClient | null = null;
-let _clientPrivateKey: string | null = null;
+/**
+ * SHA-256 hash of the private key used to construct the current client.
+ * We store a hash (not the raw key) so the module-level variable cannot be
+ * used to reconstruct the key from a heap dump or process snapshot.
+ */
+let _clientKeyHash: string | null = null;
+
+/** Hash a private key for comparison — never store the raw key at module level. */
+function hashKey(key: string): string {
+  return createHash('sha256').update(key).digest('hex');
+}
 
 /**
  * Gets the singleton Hyperliquid client instance.
@@ -424,11 +435,11 @@ let _clientPrivateKey: string | null = null;
  */
 export function getHyperliquid(): HyperliquidClient {
   const cfg = loadConfig();
-  // Track HYPERLIQUID_PRIVATE_KEY (not POLYGON_WALLET_PRIVATE_KEY which is for CLOB).
-  const currentKey = cfg.HYPERLIQUID_PRIVATE_KEY ?? null;
-  if (!_client || currentKey !== _clientPrivateKey) {
+  // Track HYPERLIQUID_PRIVATE_KEY via its hash — never store the raw key at module level.
+  const currentKeyHash = cfg.HYPERLIQUID_PRIVATE_KEY ? hashKey(cfg.HYPERLIQUID_PRIVATE_KEY) : null;
+  if (!_client || currentKeyHash !== _clientKeyHash) {
     _client = new HyperliquidClient();
-    _clientPrivateKey = currentKey;
+    _clientKeyHash = currentKeyHash;
   }
   return _client;
 }
@@ -439,5 +450,5 @@ export function getHyperliquid(): HyperliquidClient {
  */
 export function resetHyperliquid(): void {
   _client = null;
-  _clientPrivateKey = null;
+  _clientKeyHash = null;
 }
