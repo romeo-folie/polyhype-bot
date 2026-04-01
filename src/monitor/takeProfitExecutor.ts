@@ -14,7 +14,7 @@
 import { logger } from '../shared/logger.js';
 import { submitSell, resolveSimmerMarketId, getSimmerPositions, SimmerError } from '../shared/simmer.js';
 import { submitClobSell, fetchClobTokenBalance, parseBalanceFromClobError, type ClobBalanceResult, CLOB_MIN_ORDER_USD } from '../shared/clob.js';
-import { closePosition, markPositionSynthHedged, markPositionPendingSettlement } from '../execution/positionLedger.js';
+import { closePosition, markPositionSynthHedged, markPositionPendingSettlement, updatePositionShares } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
@@ -87,13 +87,15 @@ export async function executeTakeProfit(opts: {
 
   // Guard against legacy Redis positions with entryPrice=0 or NaN sharesHeld
   if (!isFinite(sharesToSell) || sharesToSell <= 0) {
-    const error = `invalid sharesToSell (${String(sharesToSell)}) — entryPrice=${String(position.entryPrice)}, sharesHeld=${String(position.sharesHeld)}. Skipping sell to prevent bad order.`;
+    const error = `terminal_no_balance: invalid sharesToSell (${String(sharesToSell)}) — entryPrice=${String(position.entryPrice)}, sharesHeld=${String(position.sharesHeld)}`;
     logger.error('[take-profit-executor] aborting sell — invalid share count', {
       marketId: position.marketId,
       sharesToSell,
       entryPrice: position.entryPrice,
       sharesHeld: position.sharesHeld,
     });
+    // Durable-flag position so monitor loop does not retry
+    await updatePositionShares(redis, position.marketId, position.direction, 0, 'terminal_no_balance').catch(() => {});
     return { marketId: position.marketId, success: false, error, returnPct, reason };
   }
 
@@ -208,25 +210,40 @@ async function executeSimmerExit(opts: {
 
         const livePositions = await getSimmerPositions({ status: 'active' });
         const liveMatch = livePositions.find(p => p.market_id === simmerId && p.side === sellSide);
-        
-        if (liveMatch?.shares && liveMatch.shares > 0 && liveMatch.shares < sharesToSell) {
+        const actualShares = liveMatch?.shares ?? 0;
+
+        if (!liveMatch || !Number.isFinite(actualShares) || actualShares <= 0) {
+          logger.warn('[take-profit-executor] live balance is zero — marking terminal_no_balance', {
+            marketId: position.marketId,
+            actualShares,
+          });
+          await updatePositionShares(redis, position.marketId, position.direction, 0, 'terminal_no_balance').catch(() => {});
+          await closePositionWithHedge(redis, position.marketId, position.direction);
+          return { marketId: position.marketId, success: false, error: 'terminal_no_balance', returnPct, reason };
+        }
+
+        const cappedShares = Math.min(actualShares, sharesToSell);
+        await updatePositionShares(redis, position.marketId, position.direction, cappedShares, cappedShares < sharesToSell ? 'reconciled_partial_exit' : 'reconciled_actual');
+        const retryShares = Math.floor(cappedShares * 1_000_000) / 1_000_000;
+
+        if (retryShares > 0) {
           logger.info('[take-profit-executor] retrying with actual balance', {
             marketId: position.marketId,
-            actualShares: liveMatch.shares.toFixed(4)
+            actualShares: retryShares.toFixed(4)
           });
-          
+
           const retryResult = await submitSell({
             market_id: simmerId,
             side: sellSide,
             action: 'sell',
-            shares: liveMatch.shares,
-            reasoning: `Recovery exit: ${reason} (Sync from ${sharesToSell.toFixed(4)} to ${liveMatch.shares.toFixed(4)})`,
+            shares: retryShares,
+            reasoning: `Recovery exit: ${reason} (Sync from ${sharesToSell.toFixed(4)} to ${retryShares.toFixed(4)})`,
           });
 
           if (retryResult.success) {
             await closePositionWithHedge(redis, position.marketId, position.direction);
             const freshReturnPct = position.entryPrice > 0 ? ((currentPrice - position.entryPrice) / position.entryPrice) * 100 : 0;
-            await creditProceeds(redis, liveMatch.shares * currentPrice);
+            await creditProceeds(redis, retryShares * currentPrice);
             await recordPositionOutcome(redis, position, {
               result: freshReturnPct >= 0 ? 'won' : 'lost',
               returnPct: freshReturnPct,
@@ -358,8 +375,9 @@ async function executeClobExit(opts: {
       actualBalance,
       redisShares: sharesToSell,
     });
+    await updatePositionShares(redis, position.marketId, position.direction, 0, 'terminal_no_balance').catch(() => {});
     await closePositionWithHedge(redis, position.marketId, position.direction);
-    return { marketId: position.marketId, success: false, error: 'stale_position_cleared', returnPct, reason };
+    return { marketId: position.marketId, success: false, error: 'terminal_no_balance', returnPct, reason };
   }
 
   // Use the minimum of (tracked shares, actual balance) to prevent overshoot.
@@ -396,7 +414,9 @@ async function executeClobExit(opts: {
       actualBalance,
       safeShares,
     });
-    return { marketId: position.marketId, success: false, error: 'safe_shares_zero', returnPct, reason };
+    await updatePositionShares(redis, position.marketId, position.direction, 0, 'terminal_no_balance').catch(() => {});
+    await closePositionWithHedge(redis, position.marketId, position.direction);
+    return { marketId: position.marketId, success: false, error: 'terminal_no_balance', returnPct, reason };
   }
 
   try {

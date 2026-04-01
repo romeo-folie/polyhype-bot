@@ -10,6 +10,7 @@ import { executeSignal } from '../execution/executor.js';
 import { recordPosition } from '../execution/positionLedger.js';
 import { deductStake, getBankroll } from '../shared/bankroll.js';
 import { SimmerError } from '../shared/simmer.js';
+import { recordCopytradeFilter, recordCopytradeMetric } from '../shared/telemetry.js';
 
 /**
  * Persistent worker for low-latency copy-trading.
@@ -176,6 +177,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
           const currentBankroll = await getBankroll(redis);
           if (signal.stakeUsd > currentBankroll) {
             logger.warn('[copytrade-worker] insufficient bankroll for signal', { signal });
+            await recordCopytradeFilter(redis, 'insufficient_bankroll').catch(() => {});
             continue;
           }
 
@@ -199,6 +201,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
               sharesHeld: result.tradeResult.shares_bought,
               executionVenue: result.executionVenue ?? 'simmer',
             });
+            await recordCopytradeMetric(redis, 'executed').catch(() => {});
             // Accumulate HL margin so subsequent signals in this cycle respect the cap.
             if (result.executionVenue === 'hyperliquid') {
               sessionExposureUsd += signal.stakeUsd;
@@ -209,6 +212,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
 
       if (exits > 0) {
         logger.info('[copytrade-worker] mirror exits processed', { count: exits });
+        await recordCopytradeMetric(redis, 'exits').catch(() => {});
       }
 
       if (iterations % 100 === 0) {

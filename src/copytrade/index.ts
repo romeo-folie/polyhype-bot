@@ -7,6 +7,7 @@ import { getOpenPositions } from '../execution/positionLedger.js';
 import { fetchCurrentPrice } from '../monitor/priceFetcher.js';
 import { executeTakeProfit } from '../monitor/takeProfitExecutor.js';
 import { getPriceFeed } from '../shared/feedSingleton.js';
+import { recordCopytradeFilter, recordCopytradeMetric } from '../shared/telemetry.js';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
 import type { ExitReason } from '../monitor/takeProfitEvaluator.js';
@@ -215,10 +216,13 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       walletLatestTs.set(wallet, Math.max(walletLatestTs.get(wallet) ?? 0, trade.timestamp));
     };
 
+    await recordCopytradeMetric(redis, 'candidate_seen').catch(() => {});
+
     try {
       const market = await getMarketBySlug(trade.slug);
       if (!market) {
         logger.warn('[copytrade] market lookup failed', { slug: trade.slug });
+        await recordCopytradeFilter(redis, 'market_lookup_failed').catch(() => {});
         continue;
       }
 
@@ -230,12 +234,14 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
           question: market.question,
           scope: cfg.COPYTRADE_MARKET_SCOPE,
         });
+        await recordCopytradeFilter(redis, 'scope').catch(() => {});
         await markDedup();
         continue;
       }
 
       if (!market.active || market.closed) {
         logger.info('[copytrade] skipped inactive market', { marketId: market.id, slug: trade.slug });
+        await recordCopytradeFilter(redis, 'inactive_market').catch(() => {});
         await markDedup();
         continue;
       }
@@ -247,6 +253,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
             marketId: market.id,
             hoursToResolve: hoursToResolve.toFixed(2),
           });
+          await recordCopytradeFilter(redis, 'near_resolution').catch(() => {});
           await markDedup();
           continue;
         }
@@ -258,6 +265,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
           marketId: market.id,
           liquidity,
         });
+        await recordCopytradeFilter(redis, 'low_liquidity').catch(() => {});
         await markDedup();
         continue;
       }
@@ -267,6 +275,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       const gammaYesPrice = Number.parseFloat(prices[0] ?? '0');
       if (!Number.isFinite(gammaYesPrice)) {
         logger.warn('[copytrade] invalid price from Gamma', { marketId: market.id });
+        await recordCopytradeFilter(redis, 'invalid_price').catch(() => {});
         continue;
       }
 
@@ -284,6 +293,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
           marketId: market.id,
           slippageBps: slippage.toFixed(1),
         });
+        await recordCopytradeFilter(redis, 'slippage').catch(() => {});
         await markDedup();
         continue;
       }
@@ -296,6 +306,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         const walletKey = trade.proxyWallet.toLowerCase();
         const positionsToExit = positionIndex.get(`${positionKey(market.id, direction)}:${walletKey}`) ?? [];
         if (positionsToExit.length === 0) {
+          await recordCopytradeFilter(redis, 'mirror_no_position').catch(() => {});
           await markDedup();
           continue;
         }
@@ -355,6 +366,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
           scaledStake,
           maxStake,
         });
+        await recordCopytradeFilter(redis, 'stake_floor').catch(() => {});
         await markDedup();
         continue;
       }
@@ -379,6 +391,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       };
 
       signals.push(signal);
+      await recordCopytradeMetric(redis, 'signals_created').catch(() => {});
       await markDedup();
     } catch (err) {
       logger.warn('[copytrade] trade processing failed', {

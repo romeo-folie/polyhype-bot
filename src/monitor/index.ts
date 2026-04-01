@@ -106,6 +106,15 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
       continue;
     }
 
+    if (position.reconciliationStatus === 'terminal_no_balance') {
+      logger.debug('[monitor] skipping terminal_no_balance position', {
+        marketId: position.marketId,
+        direction: position.direction,
+      });
+      held++;
+      continue;
+    }
+
     const currentPrice = priceMap.get(`${position.marketId}:${position.direction}`);
 
     if (!currentPrice) {

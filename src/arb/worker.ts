@@ -7,6 +7,7 @@ import { executeSignal } from '../execution/executor.js';
 import { recordPosition } from '../execution/positionLedger.js';
 import { deductStake } from '../shared/bankroll.js';
 import { setAgentAutoRedeem } from '../shared/simmer.js';
+import { recordCryptoArbGate, recordCryptoArbEvent, recordCryptoArbMetric } from '../shared/telemetry.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { TradeSignal } from '../mapping/index.js';
 
@@ -26,8 +27,11 @@ interface WorkerOptions {
  */
 export class ArbitrageWorker {
   private baselineIntervalMs: number;
-  private maxTradesPerMin: number;
+  private globalMaxTradesPerMin: number;
+  private arbMaxTradesPerMin: number;
+  private cryptoArbMaxTradesPerMin: number;
   private lastScanTime = 0;
+  private lastArbTradeTime = 0;
   private lastCryptoArbTime = 0;
   private lastCryptoArbTradeTime = 0;
   private isCryptoArbRunning = false;
@@ -39,14 +43,56 @@ export class ArbitrageWorker {
 
   constructor(options: WorkerOptions = {}) {
     this.baselineIntervalMs = options.baselineIntervalMs ?? 10000; // 10s baseline
-    this.maxTradesPerMin = options.maxTradesPerMin ?? 45; // safety buffer below 60
+    const defaultMax = options.maxTradesPerMin ?? 45; // safety buffer below 60
+    this.globalMaxTradesPerMin = defaultMax;
+    this.arbMaxTradesPerMin = defaultMax;
+    this.cryptoArbMaxTradesPerMin = defaultMax;
   }
 
   public async start(): Promise<void> {
     const cfg = loadConfig();
+    this.globalMaxTradesPerMin = cfg.ARB_GLOBAL_MAX_TRADES_PER_MIN;
+    this.arbMaxTradesPerMin = cfg.ARB_MAX_TRADES_PER_MIN;
+    this.cryptoArbMaxTradesPerMin = cfg.CRYPTO_ARB_MAX_TRADES_PER_MIN;
     if (!cfg.ARB_ENABLED) {
       logger.info('[arb-worker] arbitrage disabled in config, exiting');
       return;
+    }
+
+    logger.info('[crypto-arb] config snapshot', {
+      cryptoArbEnabled: cfg.CRYPTO_ARB_ENABLED,
+      volatilityGateEnabled: cfg.CRYPTO_ARB_VOLATILITY_GATE_ENABLED,
+      minVolatility: cfg.CRYPTO_ARB_MIN_VOLATILITY,
+      maxVolatility: cfg.CRYPTO_ARB_MAX_VOLATILITY,
+      minEdge: cfg.CRYPTO_ARB_MIN_EDGE,
+      maxStakeFraction: cfg.CRYPTO_ARB_MAX_STAKE_FRACTION,
+      dedupTtlSec: cfg.CRYPTO_ARB_DEDUP_TTL_S,
+      marketCacheTtlSec: cfg.CRYPTO_ARB_MARKET_CACHE_TTL_S,
+      confluenceGateEnabled: cfg.CONFLUENCE_GATE_ENABLED,
+      minConfluenceScore: cfg.CRYPTO_ARB_MIN_CONFLUENCE_SCORE,
+      binanceWsEnabled: cfg.BINANCE_WS_ENABLED,
+      binanceSymbols: cfg.BINANCE_SYMBOLS,
+      globalMaxTradesPerMin: cfg.ARB_GLOBAL_MAX_TRADES_PER_MIN,
+      arbMaxTradesPerMin: cfg.ARB_MAX_TRADES_PER_MIN,
+      cryptoArbMaxTradesPerMin: cfg.CRYPTO_ARB_MAX_TRADES_PER_MIN,
+    });
+
+    const symbols = cfg.BINANCE_SYMBOLS.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const symbolAssets = symbols.map((s) => BINANCE_SYMBOL_TO_ASSET[s]).filter(Boolean);
+    const unknownSymbols = symbols.filter((s) => !BINANCE_SYMBOL_TO_ASSET[s]);
+    if (unknownSymbols.length > 0) {
+      logger.warn('[crypto-arb] unknown Binance symbols configured', { symbols: unknownSymbols });
+    }
+    if (cfg.CRYPTO_ARB_ENABLED && !cfg.BINANCE_WS_ENABLED) {
+      logger.warn('[crypto-arb] crypto arb enabled but Binance WS disabled');
+    }
+    if (cfg.CRYPTO_ARB_ENABLED && symbolAssets.length === 0) {
+      logger.warn('[crypto-arb] crypto arb enabled but no Binance symbols mapped to assets');
+    }
+    const spotAssets = cfg.SPOT_CRYPTO_ASSETS.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const uncoveredAssets = spotAssets.filter((asset) => !symbolAssets.includes(asset));
+    if (cfg.CRYPTO_ARB_ENABLED && uncoveredAssets.length > 0) {
+      logger.warn('[crypto-arb] spot assets missing Binance feed coverage', { assets: uncoveredAssets });
     }
 
     // Sync Simmer agent auto-redeem setting at startup
@@ -58,7 +104,9 @@ export class ArbitrageWorker {
 
     logger.info('[arb-worker] starting long-running worker', {
       baselineIntervalMs: this.baselineIntervalMs,
-      maxTradesPerMin: this.maxTradesPerMin,
+      globalMaxTradesPerMin: this.globalMaxTradesPerMin,
+      arbMaxTradesPerMin: this.arbMaxTradesPerMin,
+      cryptoArbMaxTradesPerMin: this.cryptoArbMaxTradesPerMin,
       cryptoArbEnabled: cfg.CRYPTO_ARB_ENABLED,
       simmerAutoRedeem: cfg.SIMMER_AUTO_REDEEM_ENABLED,
     });
@@ -77,6 +125,7 @@ export class ArbitrageWorker {
           return;
         }
         logger.debug('[arb-worker] price move detected (Fast-Path)', parsed);
+        void recordCryptoArbEvent(getRedis(), 'spot_event').catch(() => {});
         void this.triggerScan('fast-path');
 
         // Trigger crypto latency arb path (independent of YES+NO arb scan).
@@ -112,23 +161,34 @@ export class ArbitrageWorker {
       return;
     }
 
-    // Rate Limit Governor: shared budget across scan + crypto-arb (same Polymarket order limit).
-    const minIntervalMs = 60000 / this.maxTradesPerMin;
+    // Rate Limit Governor: global budget + per-strategy budget.
     const now = Date.now();
-    const elapsed = now - Math.max(this.lastScanTime, this.lastAnyTradeTime);
+    const globalMinIntervalMs = 60000 / this.globalMaxTradesPerMin;
+    const arbMinIntervalMs = 60000 / this.arbMaxTradesPerMin;
+    const globalElapsed = now - this.lastAnyTradeTime;
+    const arbElapsed = now - Math.max(this.lastScanTime, this.lastArbTradeTime);
 
-    if (elapsed < minIntervalMs) {
-      logger.debug(`[arb-worker] governor throttle: ${elapsed}ms < ${minIntervalMs.toFixed(0)}ms, skipping`);
+    if (globalElapsed < globalMinIntervalMs) {
+      logger.debug(`[arb-worker] global governor throttle: ${globalElapsed}ms < ${globalMinIntervalMs.toFixed(0)}ms, skipping`);
+      void recordCryptoArbGate(getRedis(), 'global_governor').catch(() => {});
+      return;
+    }
+
+    if (arbElapsed < arbMinIntervalMs) {
+      logger.debug(`[arb-worker] arb governor throttle: ${arbElapsed}ms < ${arbMinIntervalMs.toFixed(0)}ms, skipping`);
+      void recordCryptoArbGate(getRedis(), 'arb_governor').catch(() => {});
       return;
     }
 
     this.isScanning = true;
     this.lastScanTime = now;
+    this.lastArbTradeTime = now;
     this.lastAnyTradeTime = now;
 
     try {
       logger.info(`[arb-worker] scan started (${source})`);
       const redis = getRedis();
+      await recordCryptoArbMetric(redis, 'arb_scans').catch(() => {});
       await runArbScan(redis);
     } catch (err) {
       logger.error('[arb-worker] scan failed', { error: String(err) });
@@ -197,25 +257,43 @@ export class ArbitrageWorker {
       const cfg = loadConfig();
       if (!cfg.CRYPTO_ARB_ENABLED) return;
 
-      // Rate-limit governor (shared budget with regular scan)
-      const minIntervalMs = 60000 / this.maxTradesPerMin;
+      // Rate-limit governor (global + per-strategy)
+      const globalMinIntervalMs = 60000 / this.globalMaxTradesPerMin;
+      const cryptoMinIntervalMs = 60000 / this.cryptoArbMaxTradesPerMin;
       const now = Date.now();
-      if (now - this.lastCryptoArbTime < minIntervalMs) {
-        logger.debug('[crypto-arb] governor throttle, skipping');
+      if (now - this.lastAnyTradeTime < globalMinIntervalMs) {
+        logger.debug('[crypto-arb] global governor throttle, skipping');
+        void recordCryptoArbGate(getRedis(), 'global_governor').catch(() => {});
+        return;
+      }
+      if (now - this.lastCryptoArbTime < cryptoMinIntervalMs) {
+        logger.debug('[crypto-arb] per-strategy governor throttle, skipping');
+        void recordCryptoArbGate(getRedis(), 'crypto_arb_governor').catch(() => {});
         return;
       }
       this.isCryptoArbRunning = true;
       this.lastCryptoArbTime = now;
 
       const redis = getRedis();
+      await recordCryptoArbMetric(redis, 'crypto_arb_scans').catch(() => {});
       const opportunities = await scanCryptoArb(move, redis);
+      if (opportunities.length > 0) {
+        await recordCryptoArbMetric(redis, 'opportunities_found').catch(() => {});
+      }
 
       for (const opp of opportunities) {
         // Per-trade rate limit: check shared budget (scan + crypto-arb share one Polymarket quota).
         const tradeNow = Date.now();
-        const lastAny = Math.max(this.lastCryptoArbTradeTime, this.lastAnyTradeTime);
-        if (tradeNow - lastAny < minIntervalMs) {
-          logger.debug('[crypto-arb] per-trade governor throttle (shared budget), skipping remaining opportunities');
+        const globalMinIntervalMs = 60000 / this.globalMaxTradesPerMin;
+        const cryptoMinIntervalMs = 60000 / this.cryptoArbMaxTradesPerMin;
+        if (tradeNow - this.lastAnyTradeTime < globalMinIntervalMs) {
+          logger.debug('[crypto-arb] per-trade global governor throttle, skipping remaining opportunities');
+          void recordCryptoArbGate(redis, 'global_governor').catch(() => {});
+          break;
+        }
+        if (tradeNow - this.lastCryptoArbTradeTime < cryptoMinIntervalMs) {
+          logger.debug('[crypto-arb] per-trade strategy governor throttle, skipping remaining opportunities');
+          void recordCryptoArbGate(redis, 'crypto_arb_governor').catch(() => {});
           break;
         }
 
@@ -250,6 +328,7 @@ export class ArbitrageWorker {
               stakeUsd: executedStake,
               edge: opp.edge.toFixed(4),
             });
+            await recordCryptoArbMetric(redis, 'trades_executed').catch(() => {});
 
             // Single record point for this position — executor.ts does not record.
             await recordPosition(redis, {
@@ -281,6 +360,8 @@ export class ArbitrageWorker {
               marketId: opp.marketId,
               reason: result.skipReason,
             });
+            const skipReason = result.skipReason ? `exec_${result.skipReason}` : 'exec_skipped';
+            await recordCryptoArbGate(redis, skipReason).catch(() => {});
           } else if (result.error) {
             logger.warn('[crypto-arb] execution error', {
               marketId: opp.marketId,

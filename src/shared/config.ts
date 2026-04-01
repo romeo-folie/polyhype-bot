@@ -94,6 +94,9 @@ const envSchema = z.object({
   // Arbitrage scanner (Phase: arb)
   ARB_ENABLED: z.coerce.boolean().optional().default(true),
   ARB_WORKER_ENABLED: z.coerce.boolean().optional().default(true),
+  ARB_GLOBAL_MAX_TRADES_PER_MIN: z.coerce.number().int().min(1).optional().default(45),
+  ARB_MAX_TRADES_PER_MIN: z.coerce.number().int().min(1).optional().default(30),
+  CRYPTO_ARB_MAX_TRADES_PER_MIN: z.coerce.number().int().min(1).optional().default(15),
 
   // Feeds
   BINANCE_WS_ENABLED: z.coerce.boolean().optional().default(true),
@@ -136,6 +139,11 @@ const envSchema = z.object({
   OUTCOME_MAX_PER_CATEGORY: z.coerce.number().int().positive().optional().default(500),
   CONTEXT_INJECTION_ENABLED: z.coerce.boolean().optional().default(true),
   CONTEXT_INJECTION_LIMIT: z.coerce.number().int().min(1).max(10).optional().default(5),
+
+  // Redeemer guardrails
+  REDEEMER_DUPLICATE_WINDOW_S: z.coerce.number().int().min(60).optional().default(3_600),
+  REDEEMER_DUST_THRESHOLD_USDC: z.coerce.number().min(0).optional().default(0.25),
+  REDEEMER_FALLBACK_STALE_TTL_S: z.coerce.number().int().min(60).optional().default(21_600),
 
   // LLM rate reduction caches
   SCORER_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
