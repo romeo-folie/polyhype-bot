@@ -66,6 +66,8 @@ vi.mock('../config.js', () => ({
     // flakiness in CI (Node 20) from the 4-URL public fallback list exhaustion.
     POLYGON_RPC_URL: 'http://mock-rpc.test',
   })),
+  CTF_ADDRESS: '0x4d97dcd97ec945f40cf65f87097ace5ea0476045',
+  USDC_E_ADDRESS: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
 }));
 
 vi.mock('../logger.js', () => ({

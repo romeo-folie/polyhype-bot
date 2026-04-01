@@ -85,7 +85,10 @@ describe('Delta Hedging Integration', () => {
     expect(result.skipped).toBe(false);
     expect(result.executionVenue).toBe('simmer');
 
-    // Verify HL hedge was triggered (awaited synchronously — no timeout needed)
+    // The delta hedge is fire-and-forget (void triggerDeltaHedge), so give it a tick to resolve
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Verify HL hedge was triggered
     expect(mockPlaceMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
       symbol: 'BTC',
       isBuy: false, // SHORT

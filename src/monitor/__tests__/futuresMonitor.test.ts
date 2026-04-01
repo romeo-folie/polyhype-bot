@@ -22,9 +22,10 @@ vi.mock('../../shared/logger.js', () => ({
 
 // Mock Redis
 const mockRedis = {
-  get: vi.fn(),
-  set: vi.fn(),
-  del: vi.fn(),
+  get: vi.fn().mockResolvedValue(null),
+  set: vi.fn().mockResolvedValue('OK'),
+  del: vi.fn().mockResolvedValue(1),
+  eval: vi.fn().mockResolvedValue(1),
 };
 
 vi.mock('../../shared/redis.js', () => ({

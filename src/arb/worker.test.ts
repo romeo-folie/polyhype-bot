@@ -146,14 +146,31 @@ describe('ArbitrageWorker', () => {
       executionVenue: 'simmer',
     });
 
-    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
+    // Use a very high maxTradesPerMin so the shared governor doesn't throttle the
+    // crypto-arb per-trade check (the regular triggerScan also updates lastAnyTradeTime).
+    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000, maxTradesPerMin: 100000 });
     await worker.start();
 
     const callback = onRedisMessage!;
-    await callback('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 65000, timestamp: Date.now() }));
+
+    // The per-trade governor checks Date.now() against lastAnyTradeTime (set by triggerScan).
+    // Both fire concurrently from the same callback, so we need Date.now() to advance
+    // between triggerScan setting lastAnyTradeTime and triggerCryptoArb's for-loop check.
+    let dateNowCalls = 0;
+    const realDateNow = Date.now.bind(Date);
+    const dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
+      dateNowCalls++;
+      // After the first few calls (scan setup), advance the clock by 2ms per call
+      // so the per-trade governor check sees enough elapsed time.
+      return realDateNow() + (dateNowCalls > 2 ? dateNowCalls * 2 : 0);
+    });
+
+    await callback('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 65000, timestamp: realDateNow() }));
 
     // Wait for async crypto arb to complete
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 100));
+
+    dateNowSpy.mockRestore();
 
     expect(mockScanCryptoArb).toHaveBeenCalledTimes(1);
     expect(mockExecuteSignal).toHaveBeenCalledWith(

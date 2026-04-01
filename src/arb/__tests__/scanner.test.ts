@@ -40,14 +40,14 @@ vi.mock('../../execution/telegram.js', () => ({
 }));
 
 const mockGetActiveMarkets = vi.fn<() => Promise<unknown[]>>();
-const { parseOutcomePrices: realParseOutcomePrices, parseClobTokenIds: realParseClobTokenIds } =
-  await import('../../mapping/gamma.js');
-
-vi.mock('../../mapping/gamma.js', () => ({
-  getActiveMarkets: mockGetActiveMarkets,
-  parseOutcomePrices: realParseOutcomePrices,
-  parseClobTokenIds: realParseClobTokenIds,
-}));
+vi.mock('../../mapping/gamma.js', async () => {
+  const actual = await vi.importActual<typeof import('../../mapping/gamma.js')>('../../mapping/gamma.js');
+  return {
+    getActiveMarkets: mockGetActiveMarkets,
+    parseOutcomePrices: actual.parseOutcomePrices,
+    parseClobTokenIds: actual.parseClobTokenIds,
+  };
+});
 
 const { scanForArb, executeArb } = await import('../scanner.js');
 

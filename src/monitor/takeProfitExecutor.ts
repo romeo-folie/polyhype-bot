@@ -195,7 +195,8 @@ async function executeSimmerExit(opts: {
       if (synthetic.success) return synthetic;
 
       // Simmer minimum order check — mark pendingSettlement if cost too low
-      if (error.toLowerCase().includes('cost too low') || error.toLowerCase().includes('below') && error.toLowerCase().includes('minimum')) {
+      const errLower = error.toLowerCase();
+      if (errLower.includes('cost too low') || (errLower.includes('below') && errLower.includes('minimum'))) {
         logger.warn('[take-profit-executor] Simmer order below minimum — marking pendingSettlement', {
           marketId: position.marketId,
           error,
