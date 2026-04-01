@@ -194,6 +194,16 @@ async function executeSimmerExit(opts: {
       const synthetic = await attemptSyntheticExit({ position, currentPrice, returnPct, reason, redis });
       if (synthetic.success) return synthetic;
 
+      // Simmer minimum order check — mark pendingSettlement if cost too low
+      if (error.toLowerCase().includes('cost too low') || error.toLowerCase().includes('below') && error.toLowerCase().includes('minimum')) {
+        logger.warn('[take-profit-executor] Simmer order below minimum — marking pendingSettlement', {
+          marketId: position.marketId,
+          error,
+        });
+        await markPositionPendingSettlement(redis, position.marketId, position.direction);
+        return { marketId: position.marketId, success: false, error, returnPct, reason };
+      }
+
       // AUTO-RECOVERY: If shares mismatch, fetch actual balance and retry ONCE
       if (error.toLowerCase().includes('insufficient shares')) {
         logger.warn('[take-profit-executor] share mismatch detected — sync and retry', {
@@ -364,6 +374,20 @@ async function executeClobExit(opts: {
   // Use the minimum of (tracked shares, actual balance) to prevent overshoot.
   const safeShares = Math.min(sharesToSell, actualBalance);
 
+  // Re-check notional after balance sync — actual balance may be too small to sell
+  const postSyncNotional = safeShares * currentPrice;
+  if (postSyncNotional < CLOB_MIN_ORDER_USD) {
+    logger.warn('[take-profit-executor] post-sync notional below minimum — marking pendingSettlement', {
+      marketId: position.marketId,
+      safeShares,
+      currentPrice,
+      postSyncNotional: postSyncNotional.toFixed(4),
+      minUsd: CLOB_MIN_ORDER_USD,
+    });
+    await markPositionPendingSettlement(redis, position.marketId, position.direction);
+    return { marketId: position.marketId, success: false, error: `post-sync below minimum: $${postSyncNotional.toFixed(4)} < $${String(CLOB_MIN_ORDER_USD)}`, returnPct, reason };
+  }
+
   // Log drift when actual balance is less than Redis-tracked shares.
   if (actualBalance < sharesToSell) {
     logger.info('[take-profit-executor] CLOB balance sync: using actual balance', {
@@ -430,6 +454,14 @@ async function executeClobExit(opts: {
           }
         }
       }
+    }
+
+    // Dead market: no buyers at any price — mark pendingSettlement
+    if (error.toLowerCase().includes('no match')) {
+      logger.warn('[take-profit-executor] CLOB sell has no matching buyers — marking pendingSettlement', {
+        marketId: position.marketId,
+      });
+      await markPositionPendingSettlement(redis, position.marketId, position.direction);
     }
 
     logger.warn('[take-profit-executor] CLOB sell returned success=false', {
