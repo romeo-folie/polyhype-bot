@@ -72,7 +72,7 @@ async function callOpenAI(
   currentYesPrice: number,
 ): Promise<ConsensusResult> {
   const { OpenAI } = await import('openai');
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const client = new OpenAI({ apiKey: loadConfig().OPENAI_API_KEY });
 
   const abortCtrl = new AbortController();
   const abortTimer = setTimeout(() => abortCtrl.abort(), TIMEOUT_MS);
@@ -144,7 +144,7 @@ async function callGemini(
   currentYesPrice: number,
 ): Promise<ConsensusResult> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '');
+  const genai = new GoogleGenerativeAI(loadConfig().GEMINI_API_KEY ?? '');
   const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
 
   const prompt =
@@ -282,8 +282,8 @@ async function estimateSingle(opts: {
 /**
  * Estimate the true YES probability for a market given a triggering headline.
  *
- * Runs CONSENSUS_SAMPLES calls and returns mean + stddev for confidence gating.
- * Distributes samples across both OpenAI and Gemini if both are available (Multi-LLM Ensemble).
+ * Calls each configured LLM provider once and returns mean + stddev for confidence gating.
+ * Each provider gets one vote — no duplicates. Supports OpenAI, Gemini, Anthropic, and DeepSeek.
  */
 /**
  * Build a stable cache key for a consensus estimate.
@@ -304,7 +304,6 @@ export async function estimateConsensusProbability(opts: {
   redis?: Redis;
 }): Promise<ConsensusEstimate> {
   const cfg = loadConfig();
-  const N_SAMPLES = cfg.CONSENSUS_SAMPLES;
 
   // Check consensus cache
   if (cfg.CONSENSUS_CACHE_ENABLED && opts.redis) {
@@ -342,9 +341,6 @@ export async function estimateConsensusProbability(opts: {
   }
 
   // Call each configured provider exactly once — one vote per model, no duplicates.
-  // CONSENSUS_SAMPLES is no longer used to drive call count; it is kept in config
-  // for backwards compatibility but ignored here.
-  const cfg = loadConfig();
   const useOpenAI    = Boolean(cfg.OPENAI_API_KEY);
   const useGemini    = Boolean(cfg.GEMINI_API_KEY);
   const useAnthropic = Boolean(cfg.ANTHROPIC_API_KEY);
@@ -410,7 +406,7 @@ let _sentimentGeminiClient: import('@google/generative-ai').GoogleGenerativeAI |
 let _sentimentGeminiKey: string | null = null;
 
 async function getSentimentOpenAI(): Promise<import('openai').OpenAI> {
-  const currentKey = process.env.OPENAI_API_KEY ?? null;
+  const currentKey = loadConfig().OPENAI_API_KEY ?? null;
   if (!_sentimentOpenAIClient || currentKey !== _sentimentOpenAIKey) {
     const { OpenAI } = await import('openai');
     _sentimentOpenAIClient = new OpenAI({ apiKey: currentKey ?? undefined });
@@ -420,7 +416,7 @@ async function getSentimentOpenAI(): Promise<import('openai').OpenAI> {
 }
 
 async function getSentimentGemini(): Promise<import('@google/generative-ai').GoogleGenerativeAI> {
-  const currentKey = process.env.GEMINI_API_KEY ?? null;
+  const currentKey = loadConfig().GEMINI_API_KEY ?? null;
   if (!_sentimentGeminiClient || currentKey !== _sentimentGeminiKey) {
     const { GoogleGenerativeAI } = await import('@google/generative-ai');
     _sentimentGeminiClient = new GoogleGenerativeAI(currentKey ?? '');
@@ -435,9 +431,9 @@ async function getSentimentGemini(): Promise<import('@google/generative-ai').Goo
  * LLM clients are created once and reused across calls.
  */
 export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHORT' | 'NEUTRAL'> {
-  const provider = loadConfig().LLM_PROVIDER;
-  const useGemini = provider === 'gemini' && Boolean(process.env.GEMINI_API_KEY);
-  const useOpenAI = Boolean(process.env.OPENAI_API_KEY);
+  const cfg = loadConfig();
+  const useGemini = cfg.LLM_PROVIDER === 'gemini' && Boolean(cfg.GEMINI_API_KEY);
+  const useOpenAI = Boolean(cfg.OPENAI_API_KEY);
 
   const system = 'You are a high-speed financial sentiment classifier. ' +
     'Classify the given headline as POSITIVE or NEGATIVE for the relevant asset. ' +

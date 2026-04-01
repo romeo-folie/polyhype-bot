@@ -58,9 +58,9 @@ function parseScores(raw: string, batchLength: number): ScoreResult[] {
 
 async function scoreBatchGemini(items: RssItem[], systemPrompt: string): Promise<ScoreResult[]> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const geminiKey = process.env.GEMINI_API_KEY;
-  if (!geminiKey) throw new Error('GEMINI_API_KEY is not set — cannot call Gemini scorer');
-  const genAI = new GoogleGenerativeAI(geminiKey);
+  const cfg = loadConfig();
+  if (!cfg.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not set — cannot call Gemini scorer');
+  const genAI = new GoogleGenerativeAI(cfg.GEMINI_API_KEY);
   const model = genAI.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
 
   const result = await Promise.race([
@@ -80,7 +80,7 @@ async function scoreBatchGemini(items: RssItem[], systemPrompt: string): Promise
 
 async function scoreBatchOpenAI(items: RssItem[], systemPrompt: string): Promise<ScoreResult[]> {
   const { default: OpenAI } = await import('openai');
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const client = new OpenAI({ apiKey: loadConfig().OPENAI_API_KEY });
 
   const controller = new AbortController();
   const timer = setTimeout(() => { controller.abort(); }, TIMEOUT_MS);
@@ -108,9 +108,9 @@ async function scoreBatchOpenAI(items: RssItem[], systemPrompt: string): Promise
 
 async function scoreBatch(items: RssItem[], systemPrompt: string): Promise<ScoreResult[]> {
   // Prefer Gemini if key available, fall back to OpenAI
-  const provider = loadConfig().LLM_PROVIDER;
+  const cfg = loadConfig();
 
-  if (provider === 'gemini' && process.env.GEMINI_API_KEY) {
+  if (cfg.LLM_PROVIDER === 'gemini' && cfg.GEMINI_API_KEY) {
     try {
       return await scoreBatchGemini(items, systemPrompt);
     } catch (err) {
@@ -120,7 +120,7 @@ async function scoreBatch(items: RssItem[], systemPrompt: string): Promise<Score
     }
   }
 
-  if (process.env.OPENAI_API_KEY) {
+  if (cfg.OPENAI_API_KEY) {
     return scoreBatchOpenAI(items, systemPrompt);
   }
 

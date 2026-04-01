@@ -3,6 +3,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // Mock loadConfig so tests don't need REDIS_URL / SIMMER_* env vars
 vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => ({
+    OPENAI_API_KEY: 'test-openai-key',
+    GEMINI_API_KEY: 'test-gemini-key',
+    ANTHROPIC_API_KEY: undefined,
+    DEEPSEEK_API_KEY: undefined,
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
     LLM_PROVIDER: 'gemini',
@@ -136,13 +140,41 @@ describe('estimateConsensusProbability', () => {
   });
 
   it('throws when no API keys configured', async () => {
-    delete process.env['GEMINI_API_KEY'];
-    delete process.env['OPENAI_API_KEY'];
-    delete process.env['ANTHROPIC_API_KEY'];
+    const { loadConfig } = await import('../../shared/config.js');
+    (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: undefined,
+      GEMINI_API_KEY: undefined,
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
+      OPENAI_MODEL: 'gpt-4o-mini',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+      LLM_PROVIDER: 'gemini',
+      CONTEXT_INJECTION_ENABLED: true,
+      CONTEXT_INJECTION_LIMIT: 5,
+      CONSENSUS_CACHE_ENABLED: false,
+      CONSENSUS_CACHE_TTL_S: 1800,
+      CONSENSUS_SAMPLES: 2,
+    });
 
     await expect(estimateConsensusProbability(BASE_OPTS)).rejects.toThrow(
       'No LLM providers configured',
     );
+
+    // Restore default config
+    (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
+      OPENAI_MODEL: 'gpt-4o-mini',
+      GEMINI_MODEL: 'gemini-2.5-flash',
+      LLM_PROVIDER: 'gemini',
+      CONTEXT_INJECTION_ENABLED: true,
+      CONTEXT_INJECTION_LIMIT: 5,
+      CONSENSUS_CACHE_ENABLED: false,
+      CONSENSUS_CACHE_TTL_S: 1800,
+      CONSENSUS_SAMPLES: 2,
+    });
   });
 
   it('handles null description gracefully', async () => {
@@ -210,6 +242,10 @@ describe('estimateConsensusProbability', () => {
   it('skips context injection when CONTEXT_INJECTION_ENABLED=false', async () => {
     const { loadConfig } = await import('../../shared/config.js');
     (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
       OPENAI_MODEL: 'gpt-4o-mini',
       GEMINI_MODEL: 'gemini-2.5-flash',
       LLM_PROVIDER: 'gemini',
@@ -241,6 +277,10 @@ describe('estimateConsensusProbability', () => {
 
     // Restore config
     (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
       OPENAI_MODEL: 'gpt-4o-mini',
       GEMINI_MODEL: 'gemini-2.5-flash',
       LLM_PROVIDER: 'gemini',
@@ -276,6 +316,10 @@ describe('estimateConsensusProbability', () => {
   it('returns cached consensus estimate without LLM calls (cache hit)', async () => {
     const { loadConfig } = await import('../../shared/config.js');
     (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
       OPENAI_MODEL: 'gpt-4o-mini',
       GEMINI_MODEL: 'gemini-2.5-flash',
       LLM_PROVIDER: 'gemini',
@@ -309,6 +353,10 @@ describe('estimateConsensusProbability', () => {
 
     // Restore config
     (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
       OPENAI_MODEL: 'gpt-4o-mini',
       GEMINI_MODEL: 'gemini-2.5-flash',
       LLM_PROVIDER: 'gemini',
@@ -323,6 +371,10 @@ describe('estimateConsensusProbability', () => {
   it('calls LLM and caches result on cache miss', async () => {
     const { loadConfig } = await import('../../shared/config.js');
     (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
       OPENAI_MODEL: 'gpt-4o-mini',
       GEMINI_MODEL: 'gemini-2.5-flash',
       LLM_PROVIDER: 'gemini',
@@ -361,6 +413,10 @@ describe('estimateConsensusProbability', () => {
 
     // Restore config
     (loadConfig as any).mockReturnValue({
+      OPENAI_API_KEY: 'test-openai-key',
+      GEMINI_API_KEY: 'test-gemini-key',
+      ANTHROPIC_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
       OPENAI_MODEL: 'gpt-4o-mini',
       GEMINI_MODEL: 'gemini-2.5-flash',
       LLM_PROVIDER: 'gemini',
