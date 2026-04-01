@@ -47,6 +47,8 @@ export interface Position {
   sharesHeld?: number | undefined;
   /** Venue via which this position was entered */
   executionVenue: 'simmer' | 'clob' | 'hyperliquid';
+  /** Optional reconciliation status for exit/settlement */
+  reconciliationStatus?: string | undefined;
   /** True when an HL synthetic hedge has been opened for this PM position.
    * The PM shares are still held on-chain; the redeemer handles final settlement. */
   synthHedged?: boolean | undefined;
@@ -212,6 +214,21 @@ export async function markPositionPendingSettlement(
   logger.info('[ledger] position marked pendingSettlement', { marketId, direction });
 }
 
+export async function updatePositionShares(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+  sharesHeld: number,
+  reconciliationStatus?: string,
+): Promise<void> {
+  const key = positionKey(marketId, direction);
+  await redis.hset(key, {
+    sharesHeld: String(sharesHeld),
+    ...(reconciliationStatus ? { reconciliationStatus } : {}),
+  });
+  logger.info('[ledger] position shares reconciled', { marketId, direction, sharesHeld, reconciliationStatus });
+}
+
 /**
  * Check if a position exists for a given market + direction.
  */
@@ -247,6 +264,7 @@ function deserialisePosition(raw: Record<string, string>): Position {
   if (raw.consensusStddev) pos.consensusStddev = parseFloat(raw.consensusStddev);
   if (raw.txHash) pos.txHash = raw.txHash;
   if (raw.sharesHeld) pos.sharesHeld = parseFloat(raw.sharesHeld);
+  if (raw.reconciliationStatus) pos.reconciliationStatus = raw.reconciliationStatus;
   
   if (raw.synthHedged === 'true') pos.synthHedged = true;
   if (raw.pendingSettlement === 'true') pos.pendingSettlement = true;

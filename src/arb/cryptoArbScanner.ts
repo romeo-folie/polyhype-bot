@@ -12,6 +12,7 @@ import { getPriceFeed } from '../shared/feedSingleton.js';
 import { findCorrelatedMarkets, type CorrelatedMarket } from '../spot/marketCorrelator.js';
 import { estimateFastConsensus } from '../spot/fastPathConsensus.js';
 import { getBankroll } from '../shared/bankroll.js';
+import { recordCryptoArbGate } from '../shared/telemetry.js';
 import { scoreConfluence } from './confluenceScorer.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { Redis } from 'ioredis';
@@ -113,6 +114,7 @@ export async function scanCryptoArb(
   const cfg = loadConfig();
 
   if (!cfg.CRYPTO_ARB_ENABLED) {
+    await recordCryptoArbGate(redis, 'disabled');
     return [];
   }
 
@@ -133,6 +135,7 @@ export async function scanCryptoArb(
           volatility: volatility.toFixed(6),
           floor: cfg.CRYPTO_ARB_MIN_VOLATILITY,
         });
+        await recordCryptoArbGate(redis, 'volatility_floor');
         return [];
       }
       if (volatility > cfg.CRYPTO_ARB_MAX_VOLATILITY) {
@@ -142,6 +145,7 @@ export async function scanCryptoArb(
           volatility: volatility.toFixed(6),
           ceiling: cfg.CRYPTO_ARB_MAX_VOLATILITY,
         });
+        await recordCryptoArbGate(redis, 'volatility_ceiling');
         return [];
       }
     }
@@ -162,6 +166,7 @@ export async function scanCryptoArb(
         assetId: move.assetId,
         reason: isWarmingUp ? 'cold_start_no_indicator_data' : 'conflicting_signals',
       });
+      await recordCryptoArbGate(redis, 'confluence_block');
       return [];
     }
     // Direction filter: only evaluate YES when bullish, NO when bearish
@@ -178,6 +183,7 @@ export async function scanCryptoArb(
   const queries = CRYPTO_ASSET_SEARCH_QUERIES[move.assetId];
   if (!queries) {
     logger.debug('[crypto-arb] unknown asset, skipping', { assetId: move.assetId });
+    await recordCryptoArbGate(redis, 'unknown_asset');
     return [];
   }
 
@@ -215,6 +221,7 @@ export async function scanCryptoArb(
       logger.debug('[crypto-arb] Gamma backoff active — skipping market lookup', {
         assetId: move.assetId,
       });
+      await recordCryptoArbGate(redis, 'gamma_backoff');
       return [];
     }
 
@@ -230,6 +237,7 @@ export async function scanCryptoArb(
         error: msg,
         backoffSeconds: backoffTtl,
       });
+      await recordCryptoArbGate(redis, 'gamma_lookup_error');
       return [];
     }
 
@@ -238,6 +246,11 @@ export async function scanCryptoArb(
     // Use a shorter TTL for empty results so we retry sooner.
     const ttl = markets.length > 0 ? cfg.CRYPTO_ARB_MARKET_CACHE_TTL_S : 120;
     await redis.set(cacheKey, JSON.stringify(markets), 'EX', ttl);
+  }
+
+  if (!markets || markets.length == 0) {
+    await recordCryptoArbGate(redis, 'no_correlated_market');
+    return [];
   }
 
   const feeRate = cfg.ARB_FEE_RATE;
@@ -257,13 +270,17 @@ export async function scanCryptoArb(
           marketId: market.marketId,
           question: market.question.slice(0, 80),
         });
+        await recordCryptoArbGate(redis, 'fees_enabled');
         continue;
       }
 
       // 2b. Get current PM YES price (WS cache → fallback to struct)
       const wsPrice = await feed.getCachedPrice(market.marketId);
       const currentPmPrice = wsPrice ?? market.currentYesPrice;
-      if (!isFinite(currentPmPrice) || currentPmPrice <= 0 || currentPmPrice >= 1) continue;
+      if (!isFinite(currentPmPrice) || currentPmPrice <= 0 || currentPmPrice >= 1) {
+        await recordCryptoArbGate(redis, 'invalid_price');
+        continue;
+      }
 
       // 3. Estimate fair value via BS formula (no LLM for price-target markets)
       const consensus = await estimateFastConsensus(move, market);
@@ -273,6 +290,7 @@ export async function scanCryptoArb(
           marketId: market.marketId,
           question: market.question.slice(0, 80),
         });
+        await recordCryptoArbGate(redis, 'non_price_target');
         continue;
       }
 
@@ -282,7 +300,10 @@ export async function scanCryptoArb(
       const rawEdge = Math.abs(fairValue - currentPmPrice);
       const netEdge = rawEdge - feeRate;
 
-      if (netEdge < minEdge) continue;
+      if (netEdge < minEdge) {
+        await recordCryptoArbGate(redis, 'min_edge');
+        continue;
+      }
 
       let direction: 'YES' | 'NO';
       if (fairValue > currentPmPrice + feeRate) {
@@ -309,6 +330,7 @@ export async function scanCryptoArb(
             confluenceDirection,
             correlationDirection: market.correlationDirection,
           });
+          await recordCryptoArbGate(redis, 'direction_mismatch');
           continue;
         }
       }
@@ -316,14 +338,20 @@ export async function scanCryptoArb(
       // 5. Dedup check
       const dedupKey = `${DEDUP_PREFIX}${market.marketId}:${direction}`;
       const deduped = await redis.get(dedupKey);
-      if (deduped) continue;
+      if (deduped) {
+        await recordCryptoArbGate(redis, 'dedup');
+        continue;
+      }
 
       // 6. Edge-scaled fixed-fraction sizing
       const kellyStake = bankroll * netEdge * cfg.CRYPTO_ARB_MAX_STAKE_FRACTION;
       const maxStake = cfg.MAX_BET_FRACTION * bankroll;
       const stakeUsd = Math.min(kellyStake, maxStake);
 
-      if (stakeUsd < 0.01) continue;
+      if (stakeUsd < 0.01) {
+        await recordCryptoArbGate(redis, 'stake_floor');
+        continue;
+      }
 
       // Resolve tokenId: YES = clobTokenIds[0], NO = clobTokenIds[1]
       const tokenId = direction === 'YES'
