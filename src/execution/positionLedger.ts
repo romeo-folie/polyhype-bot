@@ -7,14 +7,12 @@
  * - Mark positions as closed after take-profit or expiry
  *
  * Storage: Redis hash per position, keyed by `position:<marketId>:<direction>`
- * TTL: 30 days (max expected market lifetime)
  */
 
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 
 const POSITION_KEY_PREFIX = 'position:';
-const POSITION_TTL_SECONDS = 30 * 24 * 3600; // 30 days
 const POSITIONS_INDEX_KEY = 'positions:index'; // sorted set: score = openedAt ms
 
 export interface Position {
@@ -126,7 +124,6 @@ export async function recordPosition(
     symbol: position.symbol ?? '',
     side: position.side ?? '',
   });
-  await redis.expire(key, POSITION_TTL_SECONDS);
 
   // Add to sorted index (score = openedAt ms for chronological retrieval)
   await redis.zadd(POSITIONS_INDEX_KEY, openedAtMs, key);
