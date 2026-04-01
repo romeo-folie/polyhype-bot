@@ -2,7 +2,8 @@
  * Confluence scorer.
  *
  * Aggregates RSI, MACD, and Stochastic signals into a directional score.
- * Score 0–3: net agreement (agreeing votes minus dissenting votes).
+ * Score 0–3: net agreement (max(up,down) - min(up,down)).
+ * e.g. 2-0 → score 2; 2-1 → score 1; 3-0 → score 3.
  * e.g., 2 UP + 1 DOWN → score 1; 2 UP + 0 DOWN → score 2; 3 UP → score 3.
  * Direction: UP (bullish) or DOWN (bearish) or NEUTRAL.
  *
@@ -21,7 +22,7 @@ import { loadConfig } from '../shared/config.js';
 
 export interface ConfluenceScore {
   direction: 'UP' | 'DOWN' | 'NEUTRAL';
-  score: number; // 0 (no signal) to 3 (all 3 agree)
+  score: number; // net agreement: 0 (no signal/split) to 3 (all agree)
   signals: {
     rsi?: 'oversold' | 'overbought' | 'neutral';
     macd?: 'bullish_cross' | 'bearish_cross' | 'neutral';

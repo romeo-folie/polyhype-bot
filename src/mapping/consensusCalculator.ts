@@ -7,7 +7,6 @@
  * Returns a number in [0, 1].
  */
 
-import process from 'node:process';
 import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
