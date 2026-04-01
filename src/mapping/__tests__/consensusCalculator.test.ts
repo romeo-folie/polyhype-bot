@@ -14,7 +14,6 @@ vi.mock('../../shared/config.js', () => ({
     CONTEXT_INJECTION_LIMIT: 5,
     CONSENSUS_CACHE_ENABLED: false,
     CONSENSUS_CACHE_TTL_S: 1800,
-    CONSENSUS_SAMPLES: 2,
   })),
 }));
 
@@ -153,8 +152,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: false,
       CONSENSUS_CACHE_TTL_S: 1800,
-      CONSENSUS_SAMPLES: 2,
-    });
+      });
 
     await expect(estimateConsensusProbability(BASE_OPTS)).rejects.toThrow(
       'No LLM providers configured',
@@ -173,8 +171,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: false,
       CONSENSUS_CACHE_TTL_S: 1800,
-      CONSENSUS_SAMPLES: 2,
-    });
+      });
   });
 
   it('handles null description gracefully', async () => {
@@ -253,8 +250,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: false,
       CONSENSUS_CACHE_TTL_S: 1800,
-      CONSENSUS_SAMPLES: 2,
-    });
+      });
 
     mockGetRecentOutcomes.mockResolvedValue([
       { question: 'Q1', direction: 'YES', consensusProbability: 0.7, result: 'won', returnPct: 10, holdingHours: 5 },
@@ -288,8 +284,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: false,
       CONSENSUS_CACHE_TTL_S: 1800,
-      CONSENSUS_SAMPLES: 2,
-    });
+      });
   });
 
   it('throws on invalid probability value when all providers return bad data', async () => {
@@ -327,8 +322,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: true,
       CONSENSUS_CACHE_TTL_S: 1800,
-      CONSENSUS_SAMPLES: 2,
-    });
+      });
 
     const cachedEstimate = {
       probability: 0.65,
@@ -364,8 +358,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: false,
       CONSENSUS_CACHE_TTL_S: 1800,
-      CONSENSUS_SAMPLES: 2,
-    });
+      });
   });
 
   it('calls LLM and caches result on cache miss', async () => {
@@ -382,8 +375,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: true,
       CONSENSUS_CACHE_TTL_S: 1800,
-      CONSENSUS_SAMPLES: 2,
-    });
+      });
 
     mockGenerateContent.mockResolvedValue({
       response: { text: () => JSON.stringify({ probability: 0.7, reasoning: 'fresh' }) },
@@ -424,8 +416,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: false,
       CONSENSUS_CACHE_TTL_S: 1800,
-      CONSENSUS_SAMPLES: 2,
-    });
+      });
   });
 
   it('bypasses cache when CONSENSUS_CACHE_ENABLED=false', async () => {

@@ -22,10 +22,21 @@ const TIMEOUT_MS = 25_000;
  * We only log err.message — never the full object — to prevent credential leaks.
  */
 function sanitiseError(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  // Avoid String(err) on Axios/fetch errors which serialise request config + auth headers.
+  if (err instanceof Error) {
+    // Axios errors carry request config (potentially with auth headers) in err.config.
+    // Only return the message — never serialise the full error object.
+    return err.message;
+  }
+  // Guard against non-Error objects (e.g. Axios response objects) that may contain
+  // sensitive headers or auth tokens when serialised.
   if (typeof err === 'object' && err !== null) {
-    const msg = (err as Record<string, unknown>)['message'];
+    // Strip axios config.headers if present to prevent credential leaks
+    const axiosErr = err as Record<string, unknown>;
+    if (axiosErr['config'] && typeof axiosErr['config'] === 'object') {
+      const config = axiosErr['config'] as Record<string, unknown>;
+      delete config['headers'];
+    }
+    const msg = axiosErr['message'];
     if (typeof msg === 'string') return msg;
     return '[non-Error object thrown — message unavailable]';
   }

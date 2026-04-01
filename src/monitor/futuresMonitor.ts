@@ -60,10 +60,18 @@ export async function runFuturesMonitorWorker(): Promise<void> {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     // Refresh lock TTL each cycle to stay alive.
-    await redis.eval(
+    const lockRefreshResult = await redis.eval(
       `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("expire",KEYS[1],ARGV[2]) else return 0 end`,
       1, MONITOR_LOCK_KEY, lockToken, String(MONITOR_LOCK_TTL_SEC),
-    ).catch((e: unknown) => { logger.warn('[futures-monitor] lock refresh failed', { error: String(e) }); });
+    ).catch((e: unknown) => {
+      logger.warn('[futures-monitor] lock refresh failed', { error: String(e) });
+      return -1; // Treat Redis error as indeterminate — do NOT break, just warn
+    });
+
+    if (lockRefreshResult === 0) {
+      logger.error('[futures-monitor] lock stolen by another instance — shutting down');
+      break;
+    }
     try {
       const positions = await hl.getOpenPositions();
       

@@ -24,7 +24,7 @@ import { redeemClobOutcome } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
 import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
-import { loadConfig } from '../shared/config.js';
+import { loadConfig, CTF_ADDRESS } from '../shared/config.js';
 import type { Redis } from 'ioredis';
 
 export interface RedemptionResult {
@@ -413,7 +413,6 @@ async function checkMarketResolved(
 async function checkOnChainResolution(
   conditionId: string,
 ): Promise<{ outcome: 'YES' | 'NO' } | null> {
-  const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
   const ctfAbi = [
     'function payoutNumerators(bytes32 conditionId, uint256 index) view returns (uint256)',
     'function payoutDenominator(bytes32 conditionId) view returns (uint256)',

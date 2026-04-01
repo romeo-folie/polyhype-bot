@@ -8,6 +8,11 @@ import 'dotenv/config';
 import process from 'node:process';
 import { z } from 'zod';
 
+/** Polymarket Conditional Tokens Framework (CTF) contract on Polygon mainnet. */
+export const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
+/** USDC.e (bridged USDC) on Polygon mainnet — used for CLOB approvals. */
+export const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+
 const envSchema = z.object({
   REDIS_URL: z.string().url('REDIS_URL must be a valid URL'),
   SIMMER_API_KEY: z.string().min(1, 'SIMMER_API_KEY is required'),
@@ -118,7 +123,6 @@ const envSchema = z.object({
   SCORER_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
   CONSENSUS_CACHE_ENABLED: z.coerce.boolean().optional().default(true),
   CONSENSUS_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(1800),
-  CONSENSUS_SAMPLES: z.coerce.number().int().min(1).max(5).optional().default(2),
 
   // Copytrade signals
   COPYTRADE_ENABLED: z.coerce.boolean().optional().default(false),

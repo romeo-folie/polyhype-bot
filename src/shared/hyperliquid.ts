@@ -8,6 +8,9 @@ import { logger } from './logger.js';
 const MAINNET_API = 'https://api.hyperliquid.xyz';
 const TESTNET_API = 'https://api.hyperliquid-testnet.xyz';
 
+/** Hard timeout for all HL API requests — prevents hung workers. */
+const HL_REQUEST_TIMEOUT_MS = 15_000;
+
 // --- Hyperliquid Asset Mapping ---
 /** Mapping of external asset IDs (CoinGecko/Binance/Yahoo) to HL perp symbols */
 export const HL_SYMBOL_MAP: Record<string, string> = {
@@ -134,6 +137,8 @@ class HyperliquidClient {
     if (!cfg.HYPERLIQUID_PRIVATE_KEY) {
       throw new Error('HYPERLIQUID_PRIVATE_KEY is missing');
     }
+    // SECURITY: this.wallet stores a live ethers.Wallet with the private key.
+    // Never log this.wallet or pass it to error reporters — only log this.wallet.address.
     this.wallet = new ethers.Wallet(cfg.HYPERLIQUID_PRIVATE_KEY);
     this.baseUrl = cfg.HYPERLIQUID_TESTNET ? TESTNET_API : MAINNET_API;
 
@@ -219,8 +224,8 @@ class HyperliquidClient {
         signature,
       };
 
-      const response = await axios.post(`${this.baseUrl}/exchange`, payload);
-      
+      const response = await axios.post(`${this.baseUrl}/exchange`, payload, { timeout: HL_REQUEST_TIMEOUT_MS });
+
       if (response.data?.status === 'ok') {
         const statuses = response.data?.response?.data?.statuses;
         if (!Array.isArray(statuses) || statuses.length === 0) {
@@ -267,7 +272,7 @@ class HyperliquidClient {
       
       const nonce = nextHlNonce();
       const signature = await this.signAction(action, nonce);
-      await axios.post(`${this.baseUrl}/exchange`, { action, nonce, signature });
+      await axios.post(`${this.baseUrl}/exchange`, { action, nonce, signature }, { timeout: HL_REQUEST_TIMEOUT_MS });
       return true;
     } catch (err) {
       logger.error('[hyperliquid] updateLeverage failed — caller must abort order', { symbol, leverage, error: String(err) });
@@ -282,7 +287,7 @@ class HyperliquidClient {
     const response = await axios.post(`${this.baseUrl}/info`, {
       type: 'clearinghouseState',
       user: this.wallet.address,
-    });
+    }, { timeout: HL_REQUEST_TIMEOUT_MS });
     return response.data;
   }
 
@@ -370,7 +375,7 @@ class HyperliquidClient {
       return { index: idx, szDecimals: this.metaCache.universe[idx]?.szDecimals ?? 4 };
     }
 
-    const response = await axios.post(`${this.baseUrl}/info`, { type: 'meta' });
+    const response = await axios.post(`${this.baseUrl}/info`, { type: 'meta' }, { timeout: HL_REQUEST_TIMEOUT_MS });
     this.metaCache = response.data as HlMeta;
     this.metaCacheTime = Date.now();
     
@@ -390,7 +395,7 @@ class HyperliquidClient {
       return parseFloat(this.midCache[symbol]);
     }
 
-    const response = await axios.post(`${this.baseUrl}/info`, { type: 'allMids' });
+    const response = await axios.post(`${this.baseUrl}/info`, { type: 'allMids' }, { timeout: HL_REQUEST_TIMEOUT_MS });
     this.midCache = response.data || {};
     this.midCacheTime = Date.now();
     

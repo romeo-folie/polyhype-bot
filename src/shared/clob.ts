@@ -5,9 +5,22 @@
  * Trades are signed locally with POLYGON_WALLET_PRIVATE_KEY.
  */
 
+/**
+ * ethers v5 ↔ v6 bridge note:
+ *
+ * The project uses ethers v6, but @polymarket/clob-client expects an ethers v5
+ * Wallet (specifically the `_signTypedData` method). ethers v6 renamed this to
+ * `signTypedData`. We create a v6 Wallet and patch `_signTypedData` onto it in
+ * getClobClient() to satisfy the SDK's interface without downgrading ethers.
+ *
+ * @ethersproject/wallet (v5) is retained as a direct dependency because
+ * src/shared/clobProbe.ts still imports it for Simmer's signing flow.
+ * It can be removed once clobProbe.ts is migrated to ethers v6.
+ */
+
 import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client';
 import { Wallet, Contract, Interface, JsonRpcProvider, Network, FetchRequest } from 'ethers';
-import { loadConfig } from './config.js';
+import { loadConfig, CTF_ADDRESS, USDC_E_ADDRESS } from './config.js';
 import { logger } from './logger.js';
 import { getRedis } from './redis.js';
 import type { ApiKeyCreds } from '@polymarket/clob-client';
@@ -19,9 +32,6 @@ const POLYGON_CHAIN_ID = 137;
 const CLOB_ORDER_TIMEOUT_MS = 30_000;
 /** Polymarket CLOB protocol minimum — orders below this are rejected with "not enough balance / order amount". */
 export const CLOB_MIN_ORDER_USD = 1.0;
-
-const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
-const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 
 // Public Polygon RPC endpoints for automatic failover when the user-configured
 // RPC is down, requires auth, or is rate-limited.
