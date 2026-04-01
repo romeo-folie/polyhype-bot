@@ -44,8 +44,14 @@ export async function getOnChainUsdcBalance(): Promise<number> {
     return 0;
   }
 
-  // Derive wallet address once and cache it — creating a new Wallet on every call is wasteful.
-  if (!_cachedWalletAddress) {
+  // For sigType=1 (POLY_PROXY), funds are held in POLYMARKET_FUNDER_ADDRESS, not the signer wallet.
+  // The signer is only used for signing transactions; the proxy contract holds the actual collateral.
+  // For sigType=0 (EOA), the signer wallet IS the funder — derive address from the private key.
+  const sigType = cfg.POLYMARKET_SIGNATURE_TYPE ?? 0;
+  if (sigType === 1 && cfg.POLYMARKET_FUNDER_ADDRESS) {
+    // Use the funder address directly — no key derivation needed.
+    _cachedWalletAddress = cfg.POLYMARKET_FUNDER_ADDRESS;
+  } else if (!_cachedWalletAddress) {
     _cachedWalletAddress = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY).address;
   }
   const walletAddress = _cachedWalletAddress;

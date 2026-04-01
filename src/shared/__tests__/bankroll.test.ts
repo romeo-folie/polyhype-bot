@@ -228,6 +228,26 @@ describe('getOnChainUsdcBalance', () => {
       '[bankroll] all RPCs failed for on-chain USDC.e balance — returning 0',
     );
   });
+
+  it('uses POLYMARKET_FUNDER_ADDRESS for sigType=1 (POLY_PROXY) instead of signer wallet', async () => {
+    // POLY_PROXY accounts hold collateral in the funder/proxy address, not the signer wallet.
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+      POLYMARKET_SIGNATURE_TYPE: 1,
+      POLYMARKET_FUNDER_ADDRESS: '0xFunderProxy',
+    });
+    mockBalanceOf.mockResolvedValue(5_200_000n); // $5.20
+
+    const { Contract } = await import('ethers');
+    const balance = await getOnChainUsdcBalance();
+
+    expect(balance).toBeCloseTo(5.20, 5);
+    // balanceOf must be called with the funder address, not the signer wallet address
+    expect(Contract).toHaveBeenCalled();
+    const contractInstance = vi.mocked(Contract).mock.results[0]!.value as { balanceOf: typeof mockBalanceOf };
+    expect(contractInstance.balanceOf).toHaveBeenCalledWith('0xFunderProxy');
+  });
 });
 
 // Note: cold-start throw path tested in bankroll.coldstart.test.ts
