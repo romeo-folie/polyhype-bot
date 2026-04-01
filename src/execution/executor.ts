@@ -20,6 +20,7 @@ import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { loadConfig } from '../shared/config.js';
 import { getCalibrationStats, applyCalibrationCorrection } from '../shared/calibration.js';
 import { inferCategory } from '../shared/outcomeRecorder.js';
+import { recordExecutionMetric, recordExecutionTiming } from '../shared/telemetry.js';
 import { notifyTradeError, notifyTradeExecuted } from './telegram.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
 import type { TickSize } from '@polymarket/clob-client';
