@@ -29,4 +29,3 @@ export async function recordCopytradeMalformed(redis: Redis, reason: string): Pr
 export async function recordCopytradeMetric(redis: Redis, metric: string, label = 'count'): Promise<void> {
   await hincrby(redis, `${BASE_KEY}:copytrade:${metric}`, label);
 }
-*** End of File

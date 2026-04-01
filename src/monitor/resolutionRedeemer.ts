@@ -416,7 +416,7 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
           void notifyManualRedemptionRequired({
             conditionId: conditionId,
             direction: pmDirection,
-            question: pos.question,
+            question: pos.question ?? undefined,
             ...(pos.sharesHeld != null && { estimatedUsdc: pos.sharesHeld }),
           }).catch(() => {});
           // Close the ledger entry so we don't re-alert every cycle
@@ -452,7 +452,7 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
         await creditProceeds(redis, proceedsUsdc);
       }
       const postBalance = await refreshTokenBalance(tokenId);
-      await markRedeemerSuccess(redis, conditionId, proceedsUsdc, postBalance ?? 0, cfg, redeemResult.tx_hash);
+      await markRedeemerSuccess(redis, conditionId, proceedsUsdc, postBalance ?? 0, cfg, redeemResult.tx_hash ?? undefined);
       logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), { marketId: pos.marketId, postBalance });
 
       // Record outcome (Phase 8)
@@ -788,7 +788,7 @@ async function redeemSimmerLedgerFallback(
           void notifyManualRedemptionRequired({
             conditionId: conditionId,
             direction: pmDirection,
-            question: pos.question,
+            question: pos.question ?? undefined,
             ...(pos.sharesHeld != null && { estimatedUsdc: pos.sharesHeld }),
           }).catch(() => {});
           await closePosition(redis, pos.marketId, pos.direction);
@@ -821,7 +821,7 @@ async function redeemSimmerLedgerFallback(
         if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
         const tokenId = pickClobTokenId(pos);
         const postBalance = await refreshTokenBalance(tokenId);
-        await markRedeemerSuccess(redis, conditionId, proceedsUsdc, postBalance ?? 0, cfg, redeemResult.tx_hash);
+        await markRedeemerSuccess(redis, conditionId, proceedsUsdc, postBalance ?? 0, cfg, redeemResult.tx_hash ?? undefined);
         logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), { marketId: pos.marketId, postBalance });
 
         await recordOutcome(redis, {
@@ -896,7 +896,6 @@ async function redeemOrphanClobPositions(
   alreadyRedeemed: Set<string>,
   cfg: AppConfig,
 ): Promise<void> {
-  const cfg = loadConfig();
   if (!cfg.POLYGON_WALLET_PRIVATE_KEY) return;
 
   const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ??
