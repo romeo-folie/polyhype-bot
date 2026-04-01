@@ -68,6 +68,7 @@ vi.mock('../config.js', () => ({
   })),
   CTF_ADDRESS: '0x4d97dcd97ec945f40cf65f87097ace5ea0476045',
   USDC_E_ADDRESS: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
+  POLYGON_FALLBACK_RPCS: ['http://mock-rpc.test'],
 }));
 
 vi.mock('../logger.js', () => ({
