@@ -47,9 +47,13 @@ const envSchema = z.object({
   POLYGON_RPC_URL: z.string().url().optional(), // defaults to public RPC in clob.ts if absent
   POLYMARKET_FUNDER_ADDRESS: z.string().optional(),
   POLYMARKET_SIGNATURE_TYPE: z.coerce.number().int().min(0).max(2).optional().default(0),
-  // Builder Relayer — required for on-chain redemptions with Magic Proxy wallet (sigType=1)
-  POLYMARKET_RELAYER_URL: z.string().url().optional(),
-  POLYMARKET_BUILDER_API_KEY: z.string().optional(),
+  // Builder Relayer — for on-chain redemptions with Magic Proxy wallet (sigType=1)
+  // Relayer URL defaults to the Polymarket production endpoint (no config needed)
+  // Authenticate with EITHER Relayer API Key OR Builder API Key
+  POLYMARKET_RELAYER_URL: z.string().url().optional().default('https://relayer-v2.polymarket.com'),
+  POLYMARKET_RELAYER_API_KEY: z.string().optional(),        // Relayer API key (simpler auth)
+  POLYMARKET_RELAYER_API_KEY_ADDRESS: z.string().optional(), // Address owning the relayer key
+  POLYMARKET_BUILDER_API_KEY: z.string().optional(),        // Builder API key (alternative auth)
   POLYMARKET_BUILDER_SECRET: z.string().optional(),
   POLYMARKET_BUILDER_PASSPHRASE: z.string().optional(),
   CLOB_FALLBACK_ENABLED: z.string().optional().default('true')

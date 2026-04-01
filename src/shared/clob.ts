@@ -577,50 +577,72 @@ async function redeemClobOutcomeWithRpc(
 
   if (sigType === 1) {
     // Polymarket Magic Proxy Wallet — redemptions go through the Builder Relayer.
-    // The relayer signs and broadcasts the tx gaslessly on behalf of the proxy owner.
-    // Requires POLYMARKET_RELAYER_URL + builder credentials in config.
-    if (!cfg.POLYMARKET_RELAYER_URL) {
-      logger.warn('[clob] sigType=1: POLYMARKET_RELAYER_URL not configured — manual redemption required', {
+    // API: POST https://relayer-v2.polymarket.com/submit
+    // Auth: RELAYER_API_KEY + RELAYER_API_KEY_ADDRESS headers (simplest path)
+    //    or Builder API Key HMAC headers (POLY_BUILDER_* headers)
+    // Signing: GSN-style struct hash over (from, to, data, txFee, gasPrice, gasLimit, nonce, relayHub, relay)
+
+    const hasRelayerKey = cfg.POLYMARKET_RELAYER_API_KEY && cfg.POLYMARKET_RELAYER_API_KEY_ADDRESS;
+    const hasBuilderKey = cfg.POLYMARKET_BUILDER_API_KEY && cfg.POLYMARKET_BUILDER_SECRET && cfg.POLYMARKET_BUILDER_PASSPHRASE;
+
+    if (!hasRelayerKey && !hasBuilderKey) {
+      logger.warn('[clob] sigType=1: no relayer or builder credentials configured — manual redemption required', {
         conditionId: input.conditionId,
-        instruction: 'Set POLYMARKET_RELAYER_URL, POLYMARKET_BUILDER_API_KEY, POLYMARKET_BUILDER_SECRET, POLYMARKET_BUILDER_PASSPHRASE in .env',
+        instruction: 'Set POLYMARKET_RELAYER_API_KEY + POLYMARKET_RELAYER_API_KEY_ADDRESS in .env',
       });
       return { success: false, error: 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED' };
     }
 
     const { RelayClient, RelayerTxType } = await import('@polymarket/builder-relayer-client');
-    // Use the builder-signing-sdk bundled inside builder-relayer-client to avoid version mismatch
-    const { BuilderConfig } = await import('@polymarket/builder-relayer-client/node_modules/@polymarket/builder-signing-sdk/dist/index.js' as string);
     const { privateKeyToAccount } = await import('viem/accounts');
     const { createWalletClient, http } = await import('viem');
     const { polygon } = await import('viem/chains');
 
+    const relayerUrl = cfg.POLYMARKET_RELAYER_URL ?? 'https://relayer-v2.polymarket.com';
     const account = privateKeyToAccount(cfg.POLYGON_WALLET_PRIVATE_KEY! as `0x${string}`);
     const wallet = createWalletClient({ account, chain: polygon, transport: http(rpcUrl) });
 
-    let builderConfig: InstanceType<typeof BuilderConfig> | undefined;
-    if (cfg.POLYMARKET_BUILDER_API_KEY && cfg.POLYMARKET_BUILDER_SECRET && cfg.POLYMARKET_BUILDER_PASSPHRASE) {
+    // Build BuilderConfig only if builder keys are present
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let builderConfig: any = undefined;
+    if (hasBuilderKey) {
+      const { BuilderConfig } = await import('@polymarket/builder-relayer-client/node_modules/@polymarket/builder-signing-sdk/dist/index.js' as string);
       builderConfig = new BuilderConfig({
         localBuilderCreds: {
-          key: cfg.POLYMARKET_BUILDER_API_KEY,
-          secret: cfg.POLYMARKET_BUILDER_SECRET,
-          passphrase: cfg.POLYMARKET_BUILDER_PASSPHRASE,
+          key: cfg.POLYMARKET_BUILDER_API_KEY!,
+          secret: cfg.POLYMARKET_BUILDER_SECRET!,
+          passphrase: cfg.POLYMARKET_BUILDER_PASSPHRASE!,
         },
       });
     }
 
+    // When using Relayer API Key auth, patch the httpClient to inject the headers.
+    // The RelayClient uses builderConfig for auth; for relayer key auth we override
+    // the send method to inject RELAYER_API_KEY / RELAYER_API_KEY_ADDRESS headers.
     // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-    const relayClient = new RelayClient(
-      cfg.POLYMARKET_RELAYER_URL,
-      137, // Polygon mainnet
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      wallet as any,
-      builderConfig,
-      RelayerTxType.PROXY,
-    );
+    const relayClient = new RelayClient(relayerUrl, 137, wallet as any, builderConfig, RelayerTxType.PROXY);
 
-    logger.info('[clob] executing redemption via Builder Relayer (sigType=1)', {
+    if (hasRelayerKey && !hasBuilderKey) {
+      // Monkey-patch: inject relayer key headers into every request
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const originalSend = (relayClient as any).httpClient.send.bind((relayClient as any).httpClient);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (relayClient as any).httpClient.send = async (url: string, method: string, options: any) => {
+        options = options ?? {};
+        options.headers = {
+          ...(options.headers ?? {}),
+          'RELAYER_API_KEY': cfg.POLYMARKET_RELAYER_API_KEY!,
+          'RELAYER_API_KEY_ADDRESS': cfg.POLYMARKET_RELAYER_API_KEY_ADDRESS!,
+        };
+        return originalSend(url, method, options);
+      };
+    }
+
+    logger.info('[clob] executing redemption via Polymarket Relayer (sigType=1)', {
       conditionId: input.conditionId,
       funderAddress,
+      relayerUrl,
+      authType: hasRelayerKey ? 'relayer-key' : 'builder-key',
     });
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
@@ -628,7 +650,7 @@ async function redeemClobOutcomeWithRpc(
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
     const txHash: string | undefined = (response as any).transactionHash ?? undefined;
 
-    logger.info('[clob] Builder Relayer redemption submitted', {
+    logger.info('[clob] Relayer redemption submitted', {
       conditionId: input.conditionId,
       txHash,
     });
