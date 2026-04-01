@@ -18,6 +18,7 @@
  */
 import type { Redis } from 'ioredis';
 import { Contract, JsonRpcProvider, Network, FetchRequest, Wallet } from 'ethers';
+import { createHash } from 'node:crypto';
 import { getPortfolio } from './simmer.js';
 import { loadConfig, USDC_E_ADDRESS, POLYGON_FALLBACK_RPCS } from './config.js';
 import { logger } from './logger.js';
@@ -28,8 +29,10 @@ const ERC20_BALANCE_ABI = ['function balanceOf(address account) view returns (ui
 /** Per-RPC call timeout (ms) — prevents hung provider from blocking the pipeline. */
 const RPC_TIMEOUT_MS = 10_000;
 
-/** Cached wallet address — derived once from private key, reused on subsequent calls. */
+/** Cached wallet address — derived from private key, invalidated when the key changes. */
 let _cachedWalletAddress: string | null = null;
+/** SHA-256 hash of the key used to derive _cachedWalletAddress — detects config hot-reload key rotation. */
+let _cachedWalletKeyHash: string | null = null;
 
 /**
  * Fetch the USDC.e balance held in the Polygon wallet.
@@ -45,14 +48,17 @@ export async function getOnChainUsdcBalance(): Promise<number> {
   }
 
   // For sigType=1 (POLY_PROXY), funds are held in POLYMARKET_FUNDER_ADDRESS, not the signer wallet.
-  // The signer is only used for signing transactions; the proxy contract holds the actual collateral.
   // For sigType=0 (EOA), the signer wallet IS the funder — derive address from the private key.
   const sigType = cfg.POLYMARKET_SIGNATURE_TYPE ?? 0;
+  const currentKeyHash = createHash('sha256').update(cfg.POLYGON_WALLET_PRIVATE_KEY).digest('hex');
   if (sigType === 1 && cfg.POLYMARKET_FUNDER_ADDRESS) {
-    // Use the funder address directly — no key derivation needed.
+    // Use the funder address directly — no key derivation needed; always up to date from config.
     _cachedWalletAddress = cfg.POLYMARKET_FUNDER_ADDRESS;
-  } else if (!_cachedWalletAddress) {
+    _cachedWalletKeyHash = currentKeyHash;
+  } else if (!_cachedWalletAddress || currentKeyHash !== _cachedWalletKeyHash) {
+    // Derive from key — re-derive if key changed (config hot-reload).
     _cachedWalletAddress = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY).address;
+    _cachedWalletKeyHash = currentKeyHash;
   }
   const walletAddress = _cachedWalletAddress;
   const userRpc = cfg.POLYGON_RPC_URL;
@@ -101,6 +107,7 @@ export function _resetCacheForTests(): void {
   lastKnownBalance = null;
   lastFetchTime = 0;
   _cachedWalletAddress = null;
+  _cachedWalletKeyHash = null;
 }
 
 /**

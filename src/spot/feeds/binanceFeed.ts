@@ -82,7 +82,11 @@ export class BinanceFeed {
             previousPrice = parsed.price;
           }
         }
-      } catch { /* first tick — no previous price yet */ }
+      } catch (err) {
+        logger.debug('[binance-feed] first tick or price parse error (non-fatal)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
 
       const pipeline = redis.pipeline();
       // Update latest

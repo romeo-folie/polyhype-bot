@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import { logger } from '../../shared/logger.js';
 import { loadConfig } from '../../shared/config.js';
 import { BinanceFeed } from './binanceFeed.js';

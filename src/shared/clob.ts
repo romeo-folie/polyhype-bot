@@ -41,7 +41,7 @@ let _polygonProviderRpcUrl: string | null = null;
 /** Per-RPC timeout — bounds total failover to ~40s for 4 RPCs. */
 const RPC_TIMEOUT_MS = 10_000;
 
-function getPolygonProvider(rpcUrl: string): JsonRpcProvider {
+export function getPolygonProvider(rpcUrl: string): JsonRpcProvider {
   if (!_polygonProvider || _polygonProviderRpcUrl !== rpcUrl) {
     // Pass staticNetwork to skip ethers v6 auto-detection — without this, a slow or
     // temporarily unreachable RPC causes JsonRpcProvider to spin in an infinite 1s
@@ -120,7 +120,7 @@ const CLOB_CREDS_TTL_SECONDS = 23 * 3600;
 const USDC_RAW_RE = /balance:\s*(\d+),\s*order amount:\s*(\d+)/i;
 
 /** Force provider reset — called when the current RPC fails. */
-function resetPolygonProvider(): void {
+export function resetPolygonProvider(): void {
   _polygonProvider = null;
   _polygonProviderRpcUrl = null;
 }

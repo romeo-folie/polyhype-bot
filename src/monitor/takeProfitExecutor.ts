@@ -18,7 +18,7 @@ import { closePosition, markPositionSynthHedged, markPositionPendingSettlement }
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
-import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
+import { recordPositionOutcome } from '../shared/positionOutcomeRecorder.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { Redis } from 'ioredis';
 import type { Position } from '../execution/positionLedger.js';
@@ -160,17 +160,9 @@ async function executeSimmerExit(opts: {
       await closePositionWithHedge(redis, position.marketId, position.direction);
       const proceedsUsd = sharesToSell * currentPrice;
       await creditProceeds(redis, proceedsUsd);
-      await recordOutcome(redis, {
-        source: inferSource(position.sourcedFrom ?? ''),
-        category: inferCategory(position.question ?? ''),
-        question: (position.question ?? '').slice(0, 200),
-        direction: position.direction as 'YES' | 'NO',
-        consensusProbability: position.consensusProbability ?? 0.5,
-        divergence: position.edgeMagnitude ?? 0,
+      await recordPositionOutcome(redis, position, {
         result: returnPct >= 0 ? 'won' : 'lost',
         returnPct,
-        holdingHours: position.openedAt ? (Date.now() - new Date(position.openedAt).getTime()) / 3600000 : 0,
-        executionVenue: position.executionVenue ?? 'simmer',
       });
       await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
 
@@ -235,17 +227,9 @@ async function executeSimmerExit(opts: {
             await closePositionWithHedge(redis, position.marketId, position.direction);
             const freshReturnPct = position.entryPrice > 0 ? ((currentPrice - position.entryPrice) / position.entryPrice) * 100 : 0;
             await creditProceeds(redis, liveMatch.shares * currentPrice);
-            await recordOutcome(redis, {
-              source: inferSource(position.sourcedFrom ?? ''),
-              category: inferCategory(position.question ?? ''),
-              question: (position.question ?? '').slice(0, 200),
-              direction: position.direction as 'YES' | 'NO',
-              consensusProbability: position.consensusProbability ?? 0.5,
-              divergence: position.edgeMagnitude ?? 0,
+            await recordPositionOutcome(redis, position, {
               result: freshReturnPct >= 0 ? 'won' : 'lost',
               returnPct: freshReturnPct,
-              holdingHours: position.openedAt ? (Date.now() - new Date(position.openedAt).getTime()) / 3600000 : 0,
-              executionVenue: position.executionVenue ?? 'simmer',
             });
             await notifyTakeProfitExecuted({ position, currentPrice, returnPct: freshReturnPct, reason });
             return { marketId: position.marketId, success: true, returnPct: freshReturnPct, reason, txHash: retryResult.tx_hash };
@@ -288,17 +272,10 @@ async function finalizeClobExit(
   await closePositionWithHedge(redis, position.marketId, position.direction);
   const proceedsUsd = shares * currentPrice;
   await creditProceeds(redis, proceedsUsd);
-  await recordOutcome(redis, {
-    source: inferSource(position.sourcedFrom ?? ''),
-    category: inferCategory(position.question ?? ''),
-    question: (position.question ?? '').slice(0, 200),
-    direction: position.direction as 'YES' | 'NO',
-    consensusProbability: position.consensusProbability ?? 0.5,
-    divergence: position.edgeMagnitude ?? 0,
+  await recordPositionOutcome(redis, position, {
     result: returnPct >= 0 ? 'won' : 'lost',
     returnPct,
-    holdingHours: position.openedAt ? (Date.now() - new Date(position.openedAt).getTime()) / 3600000 : 0,
-    executionVenue: position.executionVenue ?? 'clob',
+    executionVenueOverride: 'clob',
   });
   await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
 

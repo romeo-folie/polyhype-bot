@@ -15,12 +15,12 @@
  * Rate limit: Simmer redeem is 10/minute. We process sequentially to stay within limits.
  */
 
-import { Contract, JsonRpcProvider, Network, FetchRequest } from 'ethers';
+import { Contract } from 'ethers';
 import { logger } from '../shared/logger.js';
 import { getSimmerPositions, submitRedeem, resolveSimmerMarketId, SimmerError } from '../shared/simmer.js';
 import { closePosition, getOpenPositions, getPosition } from '../execution/positionLedger.js';
 import type { Position } from '../execution/positionLedger.js';
-import { redeemClobOutcome } from '../shared/clob.js';
+import { redeemClobOutcome, getPolygonProvider, resetPolygonProvider } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
 import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
@@ -233,6 +233,8 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): P
     try {
       // Check resolution via Gamma API
       const resolved = await checkMarketResolved(pos.conditionId);
+      // Rate limit Gamma calls (200ms inter-call delay)
+      await new Promise((r) => setTimeout(r, 200));
 
       if (!resolved) continue;
 
@@ -427,10 +429,7 @@ async function checkOnChainResolution(
 
   for (const rpcUrl of rpcUrls) {
     try {
-      const polygonNetwork = new Network('matic', 137);
-      const fetchReq = new FetchRequest(rpcUrl);
-      fetchReq.timeout = 10_000;
-      const provider = new JsonRpcProvider(fetchReq, polygonNetwork, { staticNetwork: polygonNetwork });
+      const provider = getPolygonProvider(rpcUrl);
       const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as Contract & {
         payoutDenominator(conditionId: string): Promise<bigint>;
         payoutNumerators(conditionId: string, index: number): Promise<bigint>;
@@ -463,6 +462,7 @@ async function checkOnChainResolution(
         rpcUrl,
         error: err instanceof Error ? err.message : String(err),
       });
+      resetPolygonProvider();
       continue;
     }
   }
@@ -512,6 +512,8 @@ async function redeemSimmerLedgerFallback(
 
     try {
       const resolved = await checkMarketResolved(pos.conditionId);
+      // Rate limit Gamma calls (200ms inter-call delay)
+      await new Promise((r) => setTimeout(r, 200));
       if (!resolved) continue;
 
       const won = resolved.outcome === pmDirection;

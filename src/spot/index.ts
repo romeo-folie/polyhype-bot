@@ -8,7 +8,6 @@
  * idempotency layer, and Telegram notifications.
  */
 
-import 'dotenv/config';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
