@@ -24,7 +24,7 @@ import { redeemClobOutcome } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
 import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
-import { loadConfig, CTF_ADDRESS } from '../shared/config.js';
+import { loadConfig, CTF_ADDRESS, POLYGON_FALLBACK_RPCS } from '../shared/config.js';
 import type { Redis } from 'ioredis';
 
 export interface RedemptionResult {
@@ -420,9 +420,10 @@ async function checkOnChainResolution(
 
   // Build RPC list (same pattern as clob.ts)
   const cfg = loadConfig();
-  const rpcUrls: string[] = [];
-  if (cfg.POLYGON_RPC_URL) rpcUrls.push(cfg.POLYGON_RPC_URL);
-  rpcUrls.push('https://polygon-rpc.com', 'https://polygon.llamarpc.com', 'https://polygon-bor-rpc.publicnode.com');
+  const rpcUrls: string[] = [
+    ...(cfg.POLYGON_RPC_URL ? [cfg.POLYGON_RPC_URL] : []),
+    ...POLYGON_FALLBACK_RPCS.filter((r) => r !== cfg.POLYGON_RPC_URL),
+  ];
 
   for (const rpcUrl of rpcUrls) {
     try {

@@ -524,12 +524,11 @@ async function attemptSyntheticExit(opts: {
     const state = await hl.getClearinghouseState();
     const positions = await hl.getOpenPositions(state);
     const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
-    const cfg2 = loadConfig();
-    if (totalCurrentMargin + hedgeStakeUsd > cfg2.FUTURES_GLOBAL_MAX_MARGIN_USD) {
+    if (totalCurrentMargin + hedgeStakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
       logger.warn('[take-profit-executor] skipping synthetic exit — global margin cap reached', {
         current: totalCurrentMargin.toFixed(2),
         hedge: hedgeStakeUsd.toFixed(2),
-        cap: cfg2.FUTURES_GLOBAL_MAX_MARGIN_USD,
+        cap: cfg.FUTURES_GLOBAL_MAX_MARGIN_USD,
       });
       return { success: false, marketId: position.marketId, returnPct, reason, error: 'global_margin_cap' };
     }

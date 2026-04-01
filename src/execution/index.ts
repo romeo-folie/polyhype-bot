@@ -206,9 +206,9 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
       }
 
       // Track HL margin consumed for accurate margin cap checks in subsequent signals.
+      // Only count confirmed HL executions — hedgeDispatched is fire-and-forget and may
+      // never actually open a position; counting it would overstate session exposure.
       if (result.executionVenue === 'hyperliquid') {
-        sessionExposureUsd += signal.stakeUsd;
-      } else if (result.hedgeDispatched) {
         sessionExposureUsd += signal.stakeUsd;
       }
 

@@ -452,10 +452,11 @@ export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHO
   const SENTIMENT_TIMEOUT_MS = 10_000;
 
   let raw = '';
+  let sentimentTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('estimateSentiment timeout')), SENTIMENT_TIMEOUT_MS),
-    );
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      sentimentTimer = setTimeout(() => reject(new Error('estimateSentiment timeout')), SENTIMENT_TIMEOUT_MS);
+    });
 
     if (useGemini) {
       const genai = await getSentimentGemini();
@@ -479,6 +480,8 @@ export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHO
   } catch (err) {
     logger.warn('[sentiment-calc] LLM failed or timed out, falling back to NEUTRAL', { error: String(err) });
     return 'NEUTRAL';
+  } finally {
+    clearTimeout(sentimentTimer);
   }
 
   if (raw.includes('POSITIVE')) return 'LONG';

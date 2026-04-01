@@ -531,7 +531,6 @@ export async function redeemClobOutcome(input: {
 
   for (const rpcUrl of rpcUrls) {
     try {
-      resetPolygonProvider();
       const result = await redeemClobOutcomeWithRpc(input, cfg, rpcUrl);
       return result;
     } catch (err) {
