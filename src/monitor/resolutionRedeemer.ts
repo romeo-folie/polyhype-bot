@@ -20,11 +20,13 @@ import { logger } from '../shared/logger.js';
 import { getSimmerPositions, submitRedeem, resolveSimmerMarketId, SimmerError } from '../shared/simmer.js';
 import { closePosition, getOpenPositions, getPosition } from '../execution/positionLedger.js';
 import type { Position } from '../execution/positionLedger.js';
-import { redeemClobOutcome, getPolygonProvider, resetPolygonProvider } from '../shared/clob.js';
+import { redeemClobOutcome, getPolygonProvider, resetPolygonProvider, getClobClient, fetchClobTokenBalance } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
 import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
+import { Wallet } from 'ethers';
 import { loadConfig, CTF_ADDRESS, POLYGON_FALLBACK_RPCS } from '../shared/config.js';
+import { getRedis } from '../shared/redis.js';
 import type { Redis } from 'ioredis';
 
 export interface RedemptionResult {
@@ -198,6 +200,20 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
     await redeemSimmerLedgerFallback(redis, results, alreadyRedeemed);
   } catch (err) {
     logger.warn('[redeemer] Simmer ledger fallback scan failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // ── Orphan CLOB sweep ──────────────────────────────────────────────────────
+  // Catches positions that executed on-chain but were never recorded in the Redis
+  // ledger (e.g. due to the parseOrderResponse crash). Queries the CLOB trades API
+  // directly, checks on-chain token balances, and redeems any won-but-unredeemed
+  // tokens found — regardless of whether a ledger entry exists.
+  const allRedeemedMarkets = new Set(results.filter(r => r.success).map(r => r.marketId));
+  try {
+    await redeemOrphanClobPositions(results, allRedeemedMarkets);
+  } catch (err) {
+    logger.warn('[redeemer] orphan CLOB sweep failed', {
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -662,6 +678,150 @@ async function redeemSimmerLedgerFallback(
     } catch (err) {
       logger.warn('[redeemer] Simmer fallback: error processing position', {
         marketId: pos.marketId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
+/**
+ * Orphan CLOB sweep.
+ *
+ * Queries the CLOB trades API for all BUY trades made by this account.
+ * For each unique token, checks the on-chain conditional token balance.
+ * If balance > 0 and the market has resolved in our favour, redeems it.
+ *
+ * This catches positions that executed on-chain but were never written to Redis
+ * (e.g. due to a response-parsing crash before recordPosition was called).
+ */
+async function redeemOrphanClobPositions(
+  results: RedemptionResult[],
+  alreadyRedeemed: Set<string>,
+): Promise<void> {
+  const cfg = loadConfig();
+  if (!cfg.POLYGON_WALLET_PRIVATE_KEY) return;
+
+  const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ??
+    new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY!).address;
+
+  let client: Awaited<ReturnType<typeof getClobClient>>;
+  try {
+    client = await getClobClient();
+  } catch (err) {
+    logger.warn('[redeemer] orphan sweep: failed to get CLOB client', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  // Pull all BUY trades for this account (paginated, up to 500)
+  let trades: Array<{ asset_id: string; market: string; side: string; size: string; outcome: string }> = [];
+  try {
+    const raw = await client.getTrades({ maker_address: funderAddress as string });
+    trades = (raw ?? []) as typeof trades;
+  } catch (err) {
+    logger.warn('[redeemer] orphan sweep: failed to fetch trades', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  if (trades.length === 0) return;
+
+  // Net up token balances from trade history: BUY adds, SELL subtracts.
+  // Key: asset_id (token ID) → { conditionId (market), netShares, outcome ('Yes'|'No') }
+  const tokenMap = new Map<string, { conditionId: string; outcome: string; netShares: number }>();
+  for (const t of trades) {
+    const size = parseFloat(t.size);
+    if (!isFinite(size) || size <= 0) continue;
+    const existing = tokenMap.get(t.asset_id);
+    const delta = t.side === 'BUY' ? size : -size;
+    if (existing) {
+      existing.netShares += delta;
+    } else {
+      tokenMap.set(t.asset_id, { conditionId: t.market, outcome: t.outcome, netShares: delta });
+    }
+  }
+
+  // Filter to tokens where net > 0 (still holding) and market not already redeemed this cycle
+  const candidates = [...tokenMap.entries()]
+    .filter(([, v]) => v.netShares > 0.001)
+    .filter(([, v]) => !alreadyRedeemed.has(v.conditionId));
+
+  if (candidates.length === 0) return;
+
+  logger.info('[redeemer] orphan sweep: checking on-chain balances', { count: candidates.length });
+
+  for (const [tokenId, { conditionId, outcome }] of candidates) {
+    try {
+      // Check actual on-chain balance — trade history may be stale
+      const balResult = await fetchClobTokenBalance(tokenId);
+      if (!balResult.ok || balResult.balance <= 0) continue;
+
+      // Check if market resolved and in our favour
+      const resolved = await checkMarketResolved(conditionId);
+      await sleep(200); // rate-limit Gamma calls
+
+      if (!resolved) continue;
+
+      // outcome from trades API is 'Yes' or 'No' (mixed case)
+      const direction = outcome.toUpperCase() as 'YES' | 'NO';
+      if (resolved.outcome !== direction) {
+        // Lost — tokens will expire worthless, nothing to redeem
+        logger.debug('[redeemer] orphan sweep: resolved as loss', { conditionId, direction, outcome: resolved.outcome });
+        continue;
+      }
+
+      logger.info('[redeemer] orphan sweep: found unredeemed winning position', {
+        conditionId,
+        direction,
+        tokenId: tokenId.slice(0, 20) + '...',
+        onChainBalance: balResult.balance,
+      });
+
+      const redeemResult = await redeemClobOutcome({ conditionId, direction });
+
+      if (redeemResult.success) {
+        alreadyRedeemed.add(conditionId);
+        const valueUsdc = balResult.balance; // 1 winning token = 1 USDC
+        await creditProceeds(await getRedis(), valueUsdc);
+
+        const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
+          marketId: conditionId,
+          question: conditionId, // no question text available for orphans
+          side: direction.toLowerCase() as 'yes' | 'no',
+          valueUsdc,
+        };
+        if (redeemResult.tx_hash) notifyOpts.txHash = redeemResult.tx_hash;
+        await notifyRedemptionExecuted(notifyOpts);
+
+        logger.info('[redeemer] orphan sweep: redemption successful', {
+          conditionId, direction, valueUsdc, txHash: redeemResult.tx_hash,
+        });
+
+        results.push({
+          marketId: conditionId,
+          side: direction.toLowerCase() as 'yes' | 'no',
+          success: true,
+          valueUsdc,
+          ...(redeemResult.tx_hash ? { txHash: redeemResult.tx_hash } : {}),
+        });
+      } else {
+        logger.warn('[redeemer] orphan sweep: redemption failed', {
+          conditionId, error: redeemResult.error,
+        });
+        results.push({
+          marketId: conditionId,
+          side: direction.toLowerCase() as 'yes' | 'no',
+          success: false,
+          error: redeemResult.error ?? 'orphan_redeem_failed',
+        });
+      }
+
+      await sleep(1_000); // pace redemptions
+    } catch (err) {
+      logger.warn('[redeemer] orphan sweep: error processing token', {
+        tokenId: tokenId.slice(0, 20),
         error: err instanceof Error ? err.message : String(err),
       });
     }
