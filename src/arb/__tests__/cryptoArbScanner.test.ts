@@ -40,6 +40,7 @@ vi.mock('../../shared/bankroll.js', () => ({
 const mockRedis = {
   get: vi.fn().mockResolvedValue(null),
   set: vi.fn().mockResolvedValue('OK'),
+  hincrby: vi.fn().mockResolvedValue(1),
 };
 
 function makeMove(overrides: Partial<SpotMove> = {}): SpotMove {
@@ -214,6 +215,7 @@ function makeRedisWithPrices(prices: (number | null)[]): Redis {
   );
   return {
     zrange: vi.fn().mockResolvedValue(entries),
+    hincrby: vi.fn().mockResolvedValue(1),
   } as unknown as Redis;
 }
 

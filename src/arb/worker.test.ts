@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ArbitrageWorker } from './worker.js';
 import { runArbScan } from './scanner.js';
+import { loadConfig } from '../shared/config.js';
+
+// Config override pattern for per-test rate-limit configs
+let configOverride: Record<string, unknown> = {};
 
 // Mock Config
 vi.mock('../shared/config.js', () => ({
@@ -12,6 +16,10 @@ vi.mock('../shared/config.js', () => ({
     CRYPTO_ARB_MAX_STAKE_FRACTION: 0.03,
     CRYPTO_ARB_DEDUP_TTL_S: 300,
     CRYPTO_ARB_MARKET_CACHE_TTL_S: 3600,
+    BINANCE_SYMBOLS: 'btcusdt,ethusdt,solusdt',
+    SPOT_CRYPTO_ASSETS: 'bitcoin,ethereum,solana',
+    ARB_GLOBAL_MAX_TRADES_PER_MIN: 45,
+    ...configOverride,
   })),
 }));
 
@@ -47,6 +55,21 @@ vi.mock('../shared/bankroll.js', () => ({
   deductStake: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Mock telemetry (all no-ops)
+vi.mock('../shared/telemetry.js', () => ({
+  recordCryptoArbGate: vi.fn().mockResolvedValue(undefined),
+  recordCryptoArbEvent: vi.fn().mockResolvedValue(undefined),
+  recordCryptoArbMetric: vi.fn().mockResolvedValue(undefined),
+  recordCopytradeFilter: vi.fn().mockResolvedValue(undefined),
+  recordCopytradeMalformed: vi.fn().mockResolvedValue(undefined),
+  recordCopytradeMetric: vi.fn().mockResolvedValue(undefined),
+}));
+
+// Mock simmer (auto-redeem setting)
+vi.mock('../shared/simmer.js', () => ({
+  setAgentAutoRedeem: vi.fn().mockResolvedValue(undefined),
+}));
+
 // Mock Redis with Pub/Sub listeners
 // Local capture of the Redis pub/sub message callback — avoids global namespace
 // pollution that could cause collisions if test files run concurrently.
@@ -63,6 +86,7 @@ const mockRedis = {
   get: vi.fn().mockResolvedValue(null),
   set: vi.fn().mockResolvedValue('OK'),
   zrange: vi.fn().mockResolvedValue([]),
+  hincrby: vi.fn().mockResolvedValue(1),
   pipeline: vi.fn(() => ({
       exec: vi.fn().mockResolvedValue([]),
   })),
@@ -79,6 +103,19 @@ vi.mock('../shared/redis.js', () => ({
 describe('ArbitrageWorker', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    configOverride = {}; // Reset config override
+    // Re-apply implementations cleared by clearAllMocks
+    mockRedis.on.mockImplementation((event: string, callback: (channel: string, msg: string) => void) => {
+      if (event === 'message') {
+        onRedisMessage = callback;
+      }
+    });
+    mockRedis.subscribe.mockResolvedValue(1);
+    mockRedis.unsubscribe.mockResolvedValue(1);
+    mockRedis.get.mockResolvedValue(null);
+    mockRedis.set.mockResolvedValue('OK');
+    mockRedis.zrange.mockResolvedValue([]);
+    mockRedis.hincrby.mockResolvedValue(1);
   });
 
   it('should subscribe to spot:price_moved and baseline scan', async () => {
@@ -100,14 +137,20 @@ describe('ArbitrageWorker', () => {
     const callback = onRedisMessage!;
     await callback('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 65000 }));
 
-    expect(runArbScan).toHaveBeenCalled();
+    // triggerScan is fire-and-forget inside the handler — wait for async completion
+    await vi.waitFor(() => expect(runArbScan).toHaveBeenCalled(), { timeout: 500 });
 
     worker.stop();
   });
 
   it('should respect rate limiting (governor)', async () => {
-     // Config with high rate limit for testing
-     const worker = new ArbitrageWorker({ baselineIntervalMs: 100, maxTradesPerMin: 1 });
+     // Override config so start() sets rate limit to 1 trade/min (overrides constructor arg)
+     configOverride = {
+       ARB_GLOBAL_MAX_TRADES_PER_MIN: 1,
+       ARB_MAX_TRADES_PER_MIN: 1,
+       CRYPTO_ARB_MAX_TRADES_PER_MIN: 1,
+     };
+     const worker = new ArbitrageWorker({ baselineIntervalMs: 100 });
      await worker.start();
 
      const callback = onRedisMessage!;
@@ -117,8 +160,8 @@ describe('ArbitrageWorker', () => {
      // 2nd trigger (should be ignored by governor if interval too short)
      await callback('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 65200 }));
 
-     // Scan only called once because governor throttles it
-     expect(runArbScan).toHaveBeenCalledTimes(1);
+     // triggerScan is fire-and-forget — wait for first scan to complete, then assert count
+     await vi.waitFor(() => expect(runArbScan).toHaveBeenCalledTimes(1), { timeout: 500 });
 
      worker.stop();
   });
@@ -148,21 +191,26 @@ describe('ArbitrageWorker', () => {
 
     // Use a very high maxTradesPerMin so the shared governor doesn't throttle the
     // crypto-arb per-trade check (the regular triggerScan also updates lastAnyTradeTime).
-    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000, maxTradesPerMin: 100000 });
+    configOverride = {
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 100000,
+      ARB_MAX_TRADES_PER_MIN: 100000,
+      CRYPTO_ARB_MAX_TRADES_PER_MIN: 100000,
+    };
+    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
     await worker.start();
 
     const callback = onRedisMessage!;
 
     // The per-trade governor checks Date.now() against lastAnyTradeTime (set by triggerScan).
-    // Both fire concurrently from the same callback, so we need Date.now() to advance
-    // between triggerScan setting lastAnyTradeTime and triggerCryptoArb's for-loop check.
+    // Both triggerScan and triggerCryptoArb fire concurrently from the same callback.
+    // triggerScan sets lastAnyTradeTime early, so we need Date.now() to advance
+    // enough between each call so the crypto arb governor check passes.
     let dateNowCalls = 0;
     const realDateNow = Date.now.bind(Date);
     const dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
       dateNowCalls++;
-      // After the first few calls (scan setup), advance the clock by 2ms per call
-      // so the per-trade governor check sees enough elapsed time.
-      return realDateNow() + (dateNowCalls > 2 ? dateNowCalls * 2 : 0);
+      // Advance by 10ms per call (more than enough for 100000 trades/min = 0.6ms min interval)
+      return realDateNow() + dateNowCalls * 10;
     });
 
     await callback('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 65000, timestamp: realDateNow() }));
