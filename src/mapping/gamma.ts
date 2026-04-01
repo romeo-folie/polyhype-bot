@@ -203,7 +203,7 @@ export async function getActiveMarkets(
     const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
     if (!res.ok) throw new Error(`Gamma markets error: ${res.status}`);
 
-    const data = (await res.json());
+    const data = (await res.json()) as unknown;
     if (!Array.isArray(data) || data.length === 0) break;
 
     const batch = (data as GammaMarket[]).slice(0, maxTotal - results.length);

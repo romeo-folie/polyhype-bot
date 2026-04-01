@@ -103,11 +103,11 @@ export async function executeTakeProfit(opts: {
     sharesToSell: sharesToSell.toFixed(4),
     returnPct: returnPct.toFixed(2),
     reason,
-    venue: position.executionVenue,
+    venue: position.executionVenue ?? 'simmer',
   });
 
   // Route to the correct venue
-  const venue = position.executionVenue;
+  const venue = position.executionVenue ?? 'simmer';
   if (venue === 'clob') {
     return executeClobExit({ position, currentPrice, returnPct, reason, redis, sharesToSell });
   }
@@ -161,8 +161,8 @@ async function executeSimmerExit(opts: {
       await creditProceeds(redis, proceedsUsd);
       await recordOutcome(redis, {
         source: inferSource(position.sourcedFrom ?? ''),
-        category: inferCategory(position.question),
-        question: position.question.slice(0, 200),
+        category: inferCategory(position.question ?? ''),
+        question: (position.question ?? '').slice(0, 200),
         direction: position.direction as 'YES' | 'NO',
         consensusProbability: position.consensusProbability ?? 0.5,
         divergence: position.edgeMagnitude ?? 0,
@@ -277,8 +277,8 @@ async function finalizeClobExit(
   await creditProceeds(redis, proceedsUsd);
   await recordOutcome(redis, {
     source: inferSource(position.sourcedFrom ?? ''),
-    category: inferCategory(position.question),
-    question: position.question.slice(0, 200),
+    category: inferCategory(position.question ?? ''),
+    question: (position.question ?? '').slice(0, 200),
     direction: position.direction as 'YES' | 'NO',
     consensusProbability: position.consensusProbability ?? 0.5,
     divergence: position.edgeMagnitude ?? 0,

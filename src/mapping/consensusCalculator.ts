@@ -30,12 +30,9 @@ function sanitiseError(err: unknown): string {
   // Guard against non-Error objects (e.g. Axios response objects) that may contain
   // sensitive headers or auth tokens when serialised.
   if (typeof err === 'object' && err !== null) {
-    // Strip axios config.headers if present to prevent credential leaks
+    // Extract message without mutating the original error object.
+    // Axios errors embed request config (with auth headers) — never serialise the full object.
     const axiosErr = err as Record<string, unknown>;
-    if (axiosErr['config'] && typeof axiosErr['config'] === 'object') {
-      const config = axiosErr['config'] as Record<string, unknown>;
-      delete config['headers'];
-    }
     const msg = axiosErr['message'];
     if (typeof msg === 'string') return msg;
     return '[non-Error object thrown — message unavailable]';

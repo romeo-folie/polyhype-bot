@@ -151,11 +151,11 @@ export async function scoreItems(
       try {
         const cached = await opts.redis.get(cacheKey);
         if (cached) {
-          const item = JSON.parse(cached) as ScoredItem;
-          if (typeof item.publishedAt === 'string') {
-            item.publishedAt = new Date(item.publishedAt);
+          const cachedItem = JSON.parse(cached) as ScoredItem;
+          if (typeof cachedItem.publishedAt === 'string') {
+            cachedItem.publishedAt = new Date(cachedItem.publishedAt);
           }
-          scored.push(item);
+          scored.push(cachedItem);
           continue;
         }
       } catch {
