@@ -576,25 +576,64 @@ async function redeemClobOutcomeWithRpc(
   ]);
 
   if (sigType === 1) {
-    // Polymarket Magic Proxy Wallet accounts: the POLYGON_WALLET_PRIVATE_KEY is the
-    // CLOB API signing key, NOT the Magic Link EOA that owns the proxy wallet.
-    // The factory routes calls based on msg.sender, but our signer is not registered
-    // as the proxy owner — transactions succeed on-chain but no tokens move.
-    //
-    // Magic Link proxy wallets can only be redeemed through:
-    //   (a) Polymarket's UI (Magic Link managed backend), or
-    //   (b) Simmer's submitRedeem API (for positions Simmer has tracked)
-    //
-    // Return a structured error so callers can surface a manual-action alert.
-    logger.warn('[clob] sigType=1 (Magic Proxy): on-chain redemption not supported — manual action required', {
+    // Polymarket Magic Proxy Wallet — redemptions go through the Builder Relayer.
+    // The relayer signs and broadcasts the tx gaslessly on behalf of the proxy owner.
+    // Requires POLYMARKET_RELAYER_URL + builder credentials in config.
+    if (!cfg.POLYMARKET_RELAYER_URL) {
+      logger.warn('[clob] sigType=1: POLYMARKET_RELAYER_URL not configured — manual redemption required', {
+        conditionId: input.conditionId,
+        instruction: 'Set POLYMARKET_RELAYER_URL, POLYMARKET_BUILDER_API_KEY, POLYMARKET_BUILDER_SECRET, POLYMARKET_BUILDER_PASSPHRASE in .env',
+      });
+      return { success: false, error: 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED' };
+    }
+
+    const { RelayClient, RelayerTxType } = await import('@polymarket/builder-relayer-client');
+    // Use the builder-signing-sdk bundled inside builder-relayer-client to avoid version mismatch
+    const { BuilderConfig } = await import('@polymarket/builder-relayer-client/node_modules/@polymarket/builder-signing-sdk/dist/index.js' as string);
+    const { privateKeyToAccount } = await import('viem/accounts');
+    const { createWalletClient, http } = await import('viem');
+    const { polygon } = await import('viem/chains');
+
+    const account = privateKeyToAccount(cfg.POLYGON_WALLET_PRIVATE_KEY! as `0x${string}`);
+    const wallet = createWalletClient({ account, chain: polygon, transport: http(rpcUrl) });
+
+    let builderConfig: InstanceType<typeof BuilderConfig> | undefined;
+    if (cfg.POLYMARKET_BUILDER_API_KEY && cfg.POLYMARKET_BUILDER_SECRET && cfg.POLYMARKET_BUILDER_PASSPHRASE) {
+      builderConfig = new BuilderConfig({
+        localBuilderCreds: {
+          key: cfg.POLYMARKET_BUILDER_API_KEY,
+          secret: cfg.POLYMARKET_BUILDER_SECRET,
+          passphrase: cfg.POLYMARKET_BUILDER_PASSPHRASE,
+        },
+      });
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+    const relayClient = new RelayClient(
+      cfg.POLYMARKET_RELAYER_URL,
+      137, // Polygon mainnet
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      wallet as any,
+      builderConfig,
+      RelayerTxType.PROXY,
+    );
+
+    logger.info('[clob] executing redemption via Builder Relayer (sigType=1)', {
       conditionId: input.conditionId,
       funderAddress,
-      instruction: 'Claim winnings at polymarket.com',
     });
-    return {
-      success: false,
-      error: 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED',
-    };
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    const response = await relayClient.execute([{ to: CTF_ADDRESS as `0x${string}`, data, value: '0' }]);
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+    const txHash: string | undefined = (response as any).transactionHash ?? undefined;
+
+    logger.info('[clob] Builder Relayer redemption submitted', {
+      conditionId: input.conditionId,
+      txHash,
+    });
+
+    return { success: true, ...(txHash ? { tx_hash: txHash } : {}), raw: response };
   } else {
     // Standard EOA logic
     logger.info('[clob] executing redemption via EOA wallet', {

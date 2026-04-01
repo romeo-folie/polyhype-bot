@@ -47,6 +47,11 @@ const envSchema = z.object({
   POLYGON_RPC_URL: z.string().url().optional(), // defaults to public RPC in clob.ts if absent
   POLYMARKET_FUNDER_ADDRESS: z.string().optional(),
   POLYMARKET_SIGNATURE_TYPE: z.coerce.number().int().min(0).max(2).optional().default(0),
+  // Builder Relayer — required for on-chain redemptions with Magic Proxy wallet (sigType=1)
+  POLYMARKET_RELAYER_URL: z.string().url().optional(),
+  POLYMARKET_BUILDER_API_KEY: z.string().optional(),
+  POLYMARKET_BUILDER_SECRET: z.string().optional(),
+  POLYMARKET_BUILDER_PASSPHRASE: z.string().optional(),
   CLOB_FALLBACK_ENABLED: z.string().optional().default('true')
     .refine((v: string) => ['true', 'false', '1', '0'].includes(v.trim().toLowerCase()), {
       message: "CLOB_FALLBACK_ENABLED must be 'true', 'false', '1', or '0'",
