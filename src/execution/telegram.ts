@@ -55,6 +55,43 @@ async function notify(text: string): Promise<void> {
   }
 }
 
+// ── Formatting helpers ──────────────────────────────────────────────────────
+
+/**
+ * Format a prediction-market probability price.
+ * Shows both the raw decimal and the implied percentage so it's unambiguous:
+ *   e.g. 0.285 → "0.285 (28.5% implied)"
+ */
+function fmtProb(price: number): string {
+  return `${price.toFixed(3)} (${(price * 100).toFixed(1)}% implied)`;
+}
+
+/**
+ * Format a futures/perp price as a plain dollar value.
+ */
+function fmtFiat(price: number): string {
+  return `$${price.toFixed(2)}`;
+}
+
+/**
+ * Format a signed return percentage with leading +/-.
+ */
+function fmtReturn(pct: number): string {
+  return `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`;
+}
+
+/**
+ * Format a venue label for display.
+ */
+function fmtVenue(venue: string): string {
+  const labels: Record<string, string> = {
+    simmer: 'Simmer',
+    clob: 'CLOB',
+    hyperliquid: 'Hyperliquid',
+  };
+  return labels[venue] ?? venue.toUpperCase();
+}
+
 // ── Message formatters ──────────────────────────────────────────────────────
 
 /**
@@ -63,21 +100,27 @@ async function notify(text: string): Promise<void> {
 export async function notifyTradeExecuted(
   signal: TradeSignal,
   txHash: string | undefined,
+  opts?: { venue?: string; sharesFilled?: number },
 ): Promise<void> {
   const edgePct = (signal.edgeMagnitude * 100).toFixed(1);
   const consensusPct = ((signal.consensusProbability ?? 0.5) * 100).toFixed(1);
   const outcomePct = (signal.outcomePrice * 100).toFixed(1);
+  const venue = opts?.venue ? fmtVenue(opts.venue) : 'Simmer';
+  const sharesLine = opts?.sharesFilled != null && opts.sharesFilled > 0
+    ? `<b>Shares:</b> ${opts.sharesFilled.toFixed(4)}\n`
+    : '';
 
   const text =
     `🟢 <b>Trade Executed</b>\n\n` +
     `<b>Market:</b> ${escapeHtml(signal.question)}\n` +
-    `<b>Direction:</b> ${signal.direction}\n` +
-    `<b>Stake:</b> $${signal.stakeUsd.toFixed(2)} USDC\n\n` +
-    `<b>Edge:</b> ${edgePct}%\n` +
-    `<b>Our P:</b> ${consensusPct}% vs market ${outcomePct}%\n` +
-    `<b>Reasoning:</b> ${escapeHtml(signal.reasoning)}\n\n` +
+    `<b>Direction:</b> ${signal.direction}  |  <b>Venue:</b> ${venue}\n` +
+    `<b>Entry price:</b> ${fmtProb(signal.outcomePrice)}\n` +
+    `<b>Stake:</b> $${signal.stakeUsd.toFixed(2)} USDC\n` +
+    sharesLine +
+    `\n<b>Edge:</b> ${edgePct}%  |  <b>Our P:</b> ${consensusPct}% vs market ${outcomePct}%\n` +
     `<b>Source:</b> ${escapeHtml(signal.sourcedFrom)}\n` +
-    (txHash ? `<b>Tx:</b> <code>${escapeHtml(txHash)}</code>` : '');
+    `<b>Reasoning:</b> ${escapeHtml(signal.reasoning)}\n` +
+    (txHash ? `\n<b>Tx:</b> <code>${escapeHtml(txHash)}</code>` : '');
 
   await notify(text);
 }
@@ -88,13 +131,17 @@ export async function notifyTradeExecuted(
 export async function notifyTradeError(
   signal: { question: string; direction: string; stakeUsd: number; marketId?: string },
   error: string,
+  opts?: { venue?: string },
 ): Promise<void> {
+  const venue = opts?.venue ? fmtVenue(opts.venue) : undefined;
+
   const text =
     `🔴 <b>Trade Failed</b>\n\n` +
     `<b>Market:</b> ${escapeHtml(signal.question)}\n` +
-    `<b>Direction:</b> ${signal.direction}\n` +
-    `<b>Stake:</b> $${signal.stakeUsd.toFixed(2)} USDC\n\n` +
-    `<b>Error:</b> ${escapeHtml(error)}`;
+    `<b>Direction:</b> ${signal.direction}` + (venue ? `  |  <b>Venue:</b> ${venue}` : '') + `\n` +
+    `<b>Intended stake:</b> $${signal.stakeUsd.toFixed(2)} USDC\n` +
+    (signal.marketId ? `<b>Market ID:</b> <code>${escapeHtml(signal.marketId)}</code>\n` : '') +
+    `\n<b>Error:</b> ${escapeHtml(error)}`;
 
   await notify(text);
 }
@@ -133,15 +180,29 @@ export async function notifyTakeProfitExecuted(opts: {
   let reasonLabel = reasonLabels[reason] ?? reason;
   if (mechanismDetail) reasonLabel = `${reasonLabel} [${mechanismDetail}]`;
 
+  const isFutures = position.isFutures === true;
+  const venue = fmtVenue(position.executionVenue);
+
+  // Absolute P&L: returnPct is already (exitPrice/entryPrice - 1) * 100 for PM positions
+  const pnlUsdc = position.stakeUsd * (returnPct / 100);
+  const pnlLine = `<b>P&amp;L:</b> ${pnlUsdc >= 0 ? '+' : ''}$${pnlUsdc.toFixed(2)} USDC (${fmtReturn(returnPct)})`;
+
+  const sharesLine = position.sharesHeld != null && position.sharesHeld > 0
+    ? `<b>Shares:</b> ${position.sharesHeld.toFixed(4)}\n`
+    : '';
+
+  const entryFmt = isFutures ? fmtFiat(position.entryPrice) : fmtProb(position.entryPrice);
+  const exitFmt = isFutures ? fmtFiat(currentPrice) : fmtProb(currentPrice);
+
   const text =
     `💰 <b>Position Closed</b>\n\n` +
     `<b>Market:</b> ${escapeHtml(position.question)}\n` +
-    `<b>Direction:</b> ${position.direction}\n` +
-    `<b>Entry price:</b> ${position.isFutures ? '$' + position.entryPrice.toFixed(2) : (position.entryPrice * 100).toFixed(1) + '%'}\n` +
-    `<b>Exit price:</b> ${position.isFutures ? '$' + currentPrice.toFixed(2) : (currentPrice * 100).toFixed(1) + '%'}\n` +
-    `<b>Return:</b> ${returnPct > 0 ? '+' : ''}${returnPct.toFixed(1)}%\n` +
-    `<b>Stake:</b> $${position.stakeUsd.toFixed(2)} USDC\n\n` +
-    `<b>Reason:</b> ${reasonLabel}`;
+    `<b>Direction:</b> ${position.direction}  |  <b>Venue:</b> ${venue}\n` +
+    `<b>Entry:</b> ${entryFmt}  →  <b>Exit:</b> ${exitFmt}\n` +
+    sharesLine +
+    `<b>Stake:</b> $${position.stakeUsd.toFixed(2)} USDC\n` +
+    pnlLine + `\n` +
+    `\n<b>Reason:</b> ${reasonLabel}`;
 
   await notify(text);
 }
@@ -154,13 +215,19 @@ export async function notifyUnhedgedArbPosition(opts: {
   marketId: string;
   question: string;
   stakeUsd: number;
+  yesPrice?: number;
   noError?: string | undefined;
 }): Promise<void> {
+  const yesPriceLine = opts.yesPrice != null
+    ? `<b>YES fill price:</b> ${fmtProb(opts.yesPrice)}\n`
+    : '';
+
   const text =
     `🚨 <b>CRITICAL: Unhedged Arb Position</b>\n\n` +
     `<b>Market:</b> ${escapeHtml(opts.question)}\n` +
     `<b>Market ID:</b> <code>${escapeHtml(opts.marketId)}</code>\n` +
     `<b>YES stake:</b> $${opts.stakeUsd.toFixed(2)} USDC — <b>NO leg FAILED</b>\n` +
+    yesPriceLine +
     (opts.noError ? `<b>NO error:</b> ${escapeHtml(opts.noError)}\n` : '') +
     `\n⚠️ <b>Action required: manually close or hedge the YES position.</b>`;
 
@@ -176,14 +243,20 @@ export async function notifyRedemptionExecuted(opts: {
   side: 'yes' | 'no';
   txHash?: string;
   valueUsdc: number;
+  stakeUsd?: number;
 }): Promise<void> {
   const { question, side, txHash, valueUsdc } = opts;
+  const profitLine = opts.stakeUsd != null && opts.stakeUsd > 0
+    ? `\n<b>Profit:</b> +$${(valueUsdc - opts.stakeUsd).toFixed(2)} USDC (stake was $${opts.stakeUsd.toFixed(2)})`
+    : '';
 
   const text =
     `🏆 <b>Position Redeemed</b>\n\n` +
     `<b>Market:</b> ${escapeHtml(question)}\n` +
-    `<b>Side:</b> ${side.toUpperCase()}\n` +
-    `<b>Proceeds:</b> $${valueUsdc.toFixed(2)} USDC${txHash ? `\n<b>Tx:</b> <code>${escapeHtml(txHash)}</code>` : ''}`;
+    `<b>Winning side:</b> ${side.toUpperCase()}\n` +
+    `<b>Proceeds:</b> $${valueUsdc.toFixed(2)} USDC` +
+    profitLine +
+    (txHash ? `\n<b>Tx:</b> <code>${escapeHtml(txHash)}</code>` : '');
 
   await notify(text);
 }

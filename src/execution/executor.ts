@@ -285,6 +285,7 @@ async function triggerDeltaHedge(
     void notifyTradeError(
       { marketId: pmSignal.marketId, question: pmSignal.question, direction: pmSignal.direction, stakeUsd: pmSignal.stakeUsd } as TradeSignal,
       `Delta hedge failed for ${hlSymbol}: ${errMsg}`,
+      { venue: 'hyperliquid' },
     ).catch(() => { /* best-effort notification */ });
     return false;
   }
@@ -466,7 +467,7 @@ export async function executeSignal(
           marketId: signal.marketId,
           txHash: tradeResult.tx_hash,
         });
-        void notifyTradeExecuted(signal, tradeResult.tx_hash).catch(() => {});
+        void notifyTradeExecuted(signal, tradeResult.tx_hash, { venue: 'simmer', ...(tradeResult.shares_bought != null && { sharesFilled: tradeResult.shares_bought }) }).catch(() => {});
 
         // Fire-and-forget the delta hedge — do not block PM trade confirmation on HL latency.
         // hedgeDispatched is reported as true optimistically; errors are logged inside triggerDeltaHedge.
