@@ -15,6 +15,7 @@
  * Rate limit: Simmer redeem is 10/minute. We process sequentially to stay within limits.
  */
 
+import { Contract, JsonRpcProvider, Network, FetchRequest } from 'ethers';
 import { logger } from '../shared/logger.js';
 import { getSimmerPositions, submitRedeem, resolveSimmerMarketId, SimmerError } from '../shared/simmer.js';
 import { closePosition, getOpenPositions, getPosition } from '../execution/positionLedger.js';
@@ -23,7 +24,7 @@ import { redeemClobOutcome } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted } from '../execution/telegram.js';
 import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
-// Note: loadConfig is not imported here — all config reads happen in callers or sub-functions.
+import { loadConfig } from '../shared/config.js';
 import type { Redis } from 'ioredis';
 
 export interface RedemptionResult {
@@ -377,7 +378,9 @@ async function checkMarketResolved(
           conditionId,
           outcomePrices: market.outcomePrices,
         });
-        return null;
+        // Gamma hasn't updated outcomePrices yet — check on-chain directly.
+        // The CTF contract's payoutDenominator is set when reportPayouts() is called.
+        return checkOnChainResolution(conditionId);
       } catch {
         logger.warn('[redeemer] failed to parse outcomePrices', { conditionId, outcomePrices: market.outcomePrices });
         return null;
@@ -399,6 +402,70 @@ async function checkMarketResolved(
     });
     return null;
   }
+}
+
+/**
+ * On-chain fallback: query the CTF contract directly for payout resolution.
+ *
+ * Used when Gamma API returns outcomePrices ["0","0"] for a closed market —
+ * the on-chain reportPayouts() may already have been called.
+ */
+async function checkOnChainResolution(
+  conditionId: string,
+): Promise<{ outcome: 'YES' | 'NO' } | null> {
+  const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
+  const ctfAbi = [
+    'function payoutNumerators(bytes32 conditionId, uint256 index) view returns (uint256)',
+    'function payoutDenominator(bytes32 conditionId) view returns (uint256)',
+  ];
+
+  // Build RPC list (same pattern as clob.ts)
+  const cfg = loadConfig();
+  const rpcUrls: string[] = [];
+  if (cfg.POLYGON_RPC_URL) rpcUrls.push(cfg.POLYGON_RPC_URL);
+  rpcUrls.push('https://polygon-rpc.com', 'https://polygon.llamarpc.com', 'https://polygon-bor-rpc.publicnode.com');
+
+  for (const rpcUrl of rpcUrls) {
+    try {
+      const polygonNetwork = new Network('matic', 137);
+      const fetchReq = new FetchRequest(rpcUrl);
+      fetchReq.timeout = 10_000;
+      const provider = new JsonRpcProvider(fetchReq, polygonNetwork, { staticNetwork: polygonNetwork });
+      const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as any;
+
+      const denominator: bigint = await ctf.payoutDenominator(conditionId);
+      if (denominator === 0n) {
+        // Not resolved on-chain yet either
+        return null;
+      }
+
+      const yesNumerator: bigint = await ctf.payoutNumerators(conditionId, 0);
+      const noNumerator: bigint = await ctf.payoutNumerators(conditionId, 1);
+
+      if (yesNumerator > 0n && noNumerator === 0n) {
+        logger.info('[redeemer] on-chain resolution detected (Gamma lagging)', { conditionId, outcome: 'YES' });
+        return { outcome: 'YES' };
+      }
+      if (noNumerator > 0n && yesNumerator === 0n) {
+        logger.info('[redeemer] on-chain resolution detected (Gamma lagging)', { conditionId, outcome: 'NO' });
+        return { outcome: 'NO' };
+      }
+
+      // Both non-zero or both zero after denominator > 0 — unusual, log and skip
+      logger.warn('[redeemer] on-chain payouts ambiguous', { conditionId, yesNumerator: yesNumerator.toString(), noNumerator: noNumerator.toString() });
+      return null;
+    } catch (err) {
+      logger.warn('[redeemer] on-chain resolution check failed — trying next RPC', {
+        conditionId,
+        rpcUrl,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+  }
+
+  logger.warn('[redeemer] all RPCs failed for on-chain resolution check', { conditionId });
+  return null;
 }
 
 /**
