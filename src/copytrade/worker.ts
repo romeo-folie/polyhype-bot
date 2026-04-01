@@ -199,7 +199,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
               executionVenue: result.executionVenue ?? 'simmer',
             });
             // Accumulate HL margin so subsequent signals in this cycle respect the cap.
-            if (result.executionVenue === 'hyperliquid' || result.hedgeDispatched) {
+            if (result.executionVenue === 'hyperliquid') {
               sessionExposureUsd += signal.stakeUsd;
             }
           }
