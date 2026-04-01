@@ -23,6 +23,8 @@ import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { Redis } from 'ioredis';
 import type { Position } from '../execution/positionLedger.js';
 
+import type { ExitReason } from './takeProfitEvaluator.js';
+
 /**
  * Close a PM position from the ledger and, if a delta-hedge link exists,
  * also close the linked HL position. Called from all take-profit exit paths
@@ -47,7 +49,6 @@ async function closePositionWithHedge(redis: Redis, marketId: string, direction:
     await redis.del(`hedge:link:${marketId}`).catch((e: unknown) => { logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', { marketId, error: String(e) }); });
   }
 }
-import type { ExitReason } from './takeProfitEvaluator.js';
 
 export interface TakeProfitResult {
   marketId: string;

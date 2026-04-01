@@ -19,21 +19,17 @@
 import type { Redis } from 'ioredis';
 import { Contract, JsonRpcProvider, Network, FetchRequest, Wallet } from 'ethers';
 import { getPortfolio } from './simmer.js';
-import { loadConfig, USDC_E_ADDRESS } from './config.js';
+import { loadConfig, USDC_E_ADDRESS, POLYGON_FALLBACK_RPCS } from './config.js';
 import { logger } from './logger.js';
 
 /** ERC-20 minimal ABI — only balanceOf needed. */
 const ERC20_BALANCE_ABI = ['function balanceOf(address account) view returns (uint256)'];
 
-/** Public Polygon RPC fallbacks — mirrors clob.ts list. */
-const POLYGON_FALLBACK_RPCS = [
-  'https://polygon-rpc.com',
-  'https://polygon.llamarpc.com',
-  'https://rpc-mainnet.matic.quorum.network',
-];
-
 /** Per-RPC call timeout (ms) — prevents hung provider from blocking the pipeline. */
 const RPC_TIMEOUT_MS = 10_000;
+
+/** Cached wallet address — derived once from private key, reused on subsequent calls. */
+let _cachedWalletAddress: string | null = null;
 
 /**
  * Fetch the USDC.e balance held in the Polygon wallet.
@@ -48,7 +44,11 @@ export async function getOnChainUsdcBalance(): Promise<number> {
     return 0;
   }
 
-  const walletAddress = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY).address;
+  // Derive wallet address once and cache it — creating a new Wallet on every call is wasteful.
+  if (!_cachedWalletAddress) {
+    _cachedWalletAddress = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY).address;
+  }
+  const walletAddress = _cachedWalletAddress;
   const userRpc = cfg.POLYGON_RPC_URL;
   const rpcUrls = [
     ...(userRpc ? [userRpc] : []),
@@ -94,6 +94,7 @@ let lastFetchTime = 0;
 export function _resetCacheForTests(): void {
   lastKnownBalance = null;
   lastFetchTime = 0;
+  _cachedWalletAddress = null;
 }
 
 /**

@@ -12,6 +12,15 @@ import { z } from 'zod';
 export const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
 /** USDC.e (bridged USDC) on Polygon mainnet — used for CLOB approvals. */
 export const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+/**
+ * Public Polygon RPC fallback endpoints — used by clob.ts and bankroll.ts.
+ * Order matters: first is tried first. publicnode.com is last (rate-limited on free tier).
+ */
+export const POLYGON_FALLBACK_RPCS = [
+  'https://polygon-rpc.com',
+  'https://polygon.llamarpc.com',
+  'https://polygon-bor-rpc.publicnode.com',
+];
 
 const envSchema = z.object({
   REDIS_URL: z.string().url('REDIS_URL must be a valid URL'),

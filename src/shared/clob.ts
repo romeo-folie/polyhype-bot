@@ -20,7 +20,7 @@
 
 import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client';
 import { Wallet, Contract, Interface, JsonRpcProvider, Network, FetchRequest } from 'ethers';
-import { loadConfig, CTF_ADDRESS, USDC_E_ADDRESS } from './config.js';
+import { loadConfig, CTF_ADDRESS, USDC_E_ADDRESS, POLYGON_FALLBACK_RPCS } from './config.js';
 import { logger } from './logger.js';
 import { getRedis } from './redis.js';
 import type { ApiKeyCreds } from '@polymarket/clob-client';
@@ -32,14 +32,6 @@ const POLYGON_CHAIN_ID = 137;
 const CLOB_ORDER_TIMEOUT_MS = 30_000;
 /** Polymarket CLOB protocol minimum — orders below this are rejected with "not enough balance / order amount". */
 export const CLOB_MIN_ORDER_USD = 1.0;
-
-// Public Polygon RPC endpoints for automatic failover when the user-configured
-// RPC is down, requires auth, or is rate-limited.
-const POLYGON_FALLBACK_RPCS = [
-  'https://polygon-rpc.com',
-  'https://polygon.llamarpc.com',
-  'https://polygon-bor-rpc.publicnode.com',
-];
 
 // Cached Polygon provider — reused across fetchClobTokenBalance and redeemClobOutcome
 // calls to avoid spinning up a new JsonRpcProvider per invocation.
@@ -497,7 +489,6 @@ export async function fetchClobTokenBalance(tokenId: string): Promise<ClobBalanc
 
   for (const rpcUrl of rpcUrls) {
     try {
-      resetPolygonProvider(); // force fresh provider for each attempt
       const provider = getPolygonProvider(rpcUrl);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as any;

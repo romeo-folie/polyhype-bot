@@ -27,6 +27,7 @@ vi.mock('../config.js', () => ({
     POLYGON_RPC_URL: undefined,
   })),
   USDC_E_ADDRESS: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
+  POLYGON_FALLBACK_RPCS: ['https://polygon-rpc.com'],
 }));
 
 // Fresh import — lastKnownBalance is null in this file's module instance.

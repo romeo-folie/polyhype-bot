@@ -115,7 +115,7 @@ export async function recordPosition(
     openedAt: position.openedAt,
     consensusStddev: position.consensusStddev !== undefined ? String(position.consensusStddev) : '',
     txHash: position.txHash ?? '',
-    sharesHeld: position.sharesHeld !== undefined ? String(position.sharesHeld) : '0',
+    sharesHeld: position.sharesHeld !== undefined ? String(position.sharesHeld) : '',
     executionVenue: position.executionVenue,
     synthHedged: position.synthHedged ? 'true' : 'false',
     pendingSettlement: position.pendingSettlement ? 'true' : 'false',
