@@ -306,6 +306,10 @@ function orderWithTimeout<T>(promise: Promise<T>): Promise<T> {
 }
 
 function parseOrderResponse(raw: unknown): ClobTradeResult {
+  if (raw == null || typeof raw !== 'object') {
+    return { success: false, error: `CLOB returned unexpected response: ${JSON.stringify(raw)}`, raw };
+  }
+
   const resp = raw as OrderResponse;
 
   if (!resp.success) {
@@ -316,7 +320,7 @@ function parseOrderResponse(raw: unknown): ClobTradeResult {
     };
   }
 
-  const txHash = resp.transactionsHashes[0];
+  const txHash = Array.isArray(resp.transactionsHashes) ? resp.transactionsHashes[0] : undefined;
   const takingAmount = parseFloat(resp.takingAmount);
 
   return {
