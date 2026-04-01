@@ -40,6 +40,9 @@ vi.mock('../../execution/positionLedger.js', () => ({
   getOpenPositions: vi.fn(),
   recordPosition: vi.fn(),
   hasOpenPosition: vi.fn(),
+  updatePositionShares: vi.fn(),
+  markPositionSynthHedged: vi.fn(),
+  markPositionPendingSettlement: vi.fn(),
 }));
 
 vi.mock('../../execution/telegram.js', () => ({
@@ -69,7 +72,7 @@ vi.mock('../../shared/hyperliquid.js', () => ({
 
 const { submitSell, resolveSimmerMarketId } = await import('../../shared/simmer.js');
 const { submitClobSell, fetchClobTokenBalance } = await import('../../shared/clob.js');
-const { closePosition } = await import('../../execution/positionLedger.js');
+const { closePosition, updatePositionShares } = await import('../../execution/positionLedger.js');
 const { notifyTakeProfitExecuted } = await import('../../execution/telegram.js');
 const { executeTakeProfit } = await import('../takeProfitExecutor.js');
 
@@ -78,6 +81,7 @@ const mockResolveSimmerMarketId = vi.mocked(resolveSimmerMarketId);
 const mockClobSell = vi.mocked(submitClobSell);
 const mockFetchClobTokenBalance = vi.mocked(fetchClobTokenBalance);
 const mockClose = vi.mocked(closePosition);
+const mockUpdateShares = vi.mocked(updatePositionShares);
 const mockNotify = vi.mocked(notifyTakeProfitExecuted);
 
 function makePosition(overrides: Partial<Position> = {}): Position {
@@ -113,10 +117,12 @@ describe('executeTakeProfit', () => {
     mockResolveSimmerMarketId.mockReset();
     mockClobSell.mockReset();
     mockClose.mockReset();
+    mockUpdateShares.mockReset();
     mockNotify.mockReset();
     // Default: Simmer resolves to a stable UUID for all tests
     mockResolveSimmerMarketId.mockResolvedValue('simmer-uuid-abc123');
     mockClose.mockResolvedValue(undefined);
+    mockUpdateShares.mockResolvedValue(undefined);
     mockNotify.mockResolvedValue(undefined);
   });
 
@@ -278,9 +284,17 @@ describe('executeTakeProfit', () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error).toMatch(/invalid sharesToSell/);
+    expect(result.error).toMatch(/terminal_no_balance/);
     expect(mockSell).not.toHaveBeenCalled();
     expect(mockClose).not.toHaveBeenCalled();
+    // Verify terminal flag was set
+    expect(mockUpdateShares).toHaveBeenCalledWith(
+      expect.anything(),
+      'mkt-1',
+      'YES',
+      0,
+      'terminal_no_balance'
+    );
   });
 
   it('aborts without calling submitSell when sharesHeld is 0', async () => {

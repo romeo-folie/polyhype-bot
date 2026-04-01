@@ -56,7 +56,16 @@ vi.mock('../../shared/logger.js', () => ({
 const { redeemResolvedPositions } = await import('../resolutionRedeemer.js');
 
 describe('redeemResolvedPositions', () => {
-  const mockRedis = {} as any;
+  const mockRedis = {
+    exists: vi.fn().mockResolvedValue(0),
+    hgetall: vi.fn().mockResolvedValue({}),
+    hset: vi.fn().mockResolvedValue('OK'),
+    expire: vi.fn().mockResolvedValue(1),
+    set: vi.fn().mockResolvedValue('OK'),
+    del: vi.fn().mockResolvedValue(1),
+    smembers: vi.fn().mockResolvedValue([]),
+    sadd: vi.fn().mockResolvedValue(1),
+  } as any;
 
   beforeEach(() => {
     vi.clearAllMocks();

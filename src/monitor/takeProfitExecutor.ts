@@ -94,6 +94,8 @@ export async function executeTakeProfit(opts: {
       entryPrice: position.entryPrice,
       sharesHeld: position.sharesHeld,
     });
+    // Durable-flag position so monitor loop does not retry
+    await updatePositionShares(redis, position.marketId, position.direction, 0, 'terminal_no_balance').catch(() => {});
     return { marketId: position.marketId, success: false, error, returnPct, reason };
   }
 
