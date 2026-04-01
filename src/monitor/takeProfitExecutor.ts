@@ -233,8 +233,20 @@ async function executeSimmerExit(opts: {
 
           if (retryResult.success) {
             await closePositionWithHedge(redis, position.marketId, position.direction);
-            await creditProceeds(redis, liveMatch.shares * currentPrice);
             const freshReturnPct = position.entryPrice > 0 ? ((currentPrice - position.entryPrice) / position.entryPrice) * 100 : 0;
+            await creditProceeds(redis, liveMatch.shares * currentPrice);
+            await recordOutcome(redis, {
+              source: inferSource(position.sourcedFrom ?? ''),
+              category: inferCategory(position.question ?? ''),
+              question: (position.question ?? '').slice(0, 200),
+              direction: position.direction as 'YES' | 'NO',
+              consensusProbability: position.consensusProbability ?? 0.5,
+              divergence: position.edgeMagnitude ?? 0,
+              result: freshReturnPct >= 0 ? 'won' : 'lost',
+              returnPct: freshReturnPct,
+              holdingHours: position.openedAt ? (Date.now() - new Date(position.openedAt).getTime()) / 3600000 : 0,
+              executionVenue: position.executionVenue ?? 'simmer',
+            });
             await notifyTakeProfitExecuted({ position, currentPrice, returnPct: freshReturnPct, reason });
             return { marketId: position.marketId, success: true, returnPct: freshReturnPct, reason, txHash: retryResult.tx_hash };
           }
