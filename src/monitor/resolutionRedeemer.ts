@@ -550,10 +550,56 @@ async function redeemSimmerLedgerFallback(
       // Resolve Simmer's internal UUID (required for submitRedeem)
       const simmerId = await resolveSimmerMarketId(pos.question ?? '');
       if (!simmerId) {
-        logger.warn('[redeemer] Simmer fallback: cannot resolve Simmer UUID', {
+        logger.warn('[redeemer] Simmer fallback: cannot resolve Simmer UUID — attempting on-chain redemption', {
           marketId: pos.marketId,
           question: pos.question?.slice(0, 80),
+          conditionId: pos.conditionId,
         });
+
+        // Fall back to direct on-chain redemption via ProxyWalletFactory.
+        // This handles old/resolved markets that no longer appear in Simmer search results.
+        const onChainResult = await redeemClobOutcome({
+          conditionId: pos.conditionId,
+          direction: pmDirection,
+        });
+
+        if (onChainResult.success) {
+          alreadyRedeemed.add(pos.marketId);
+          await closePosition(redis, pos.marketId, pos.direction);
+          const proceedsUsdc = pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : 0);
+          if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
+          await recordOutcome(redis, {
+            source: inferSource(pos.sourcedFrom ?? ''),
+            category: inferCategory(pos.question ?? pos.marketId),
+            question: (pos.question ?? pos.marketId).slice(0, 200),
+            direction: pmDirection,
+            consensusProbability: pos.consensusProbability ?? 0.5,
+            divergence: pos.edgeMagnitude ?? 0,
+            result: 'won',
+            returnPct: pos.stakeUsd > 0 ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
+            holdingHours: pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000 : 0,
+            executionVenue: pos.executionVenue ?? 'simmer',
+          });
+          const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
+            marketId: pos.marketId,
+            question: pos.question ?? pos.marketId,
+            side,
+            valueUsdc: proceedsUsdc,
+            stakeUsd: pos.stakeUsd,
+          };
+          if (onChainResult.tx_hash) notifyOpts.txHash = onChainResult.tx_hash;
+          await notifyRedemptionExecuted(notifyOpts);
+          logger.info('[redeemer] Simmer fallback: on-chain redemption successful', {
+            marketId: pos.marketId, conditionId: pos.conditionId, valueUsdc: proceedsUsdc,
+          });
+          results.push({ marketId: pos.marketId, side, success: true, valueUsdc: proceedsUsdc,
+            ...(onChainResult.tx_hash ? { txHash: onChainResult.tx_hash } : {}) });
+        } else {
+          logger.warn('[redeemer] Simmer fallback: on-chain redemption also failed', {
+            marketId: pos.marketId, conditionId: pos.conditionId, error: onChainResult.error,
+          });
+          results.push({ marketId: pos.marketId, side, success: false, error: onChainResult.error ?? 'on-chain redemption failed' });
+        }
         continue;
       }
 
