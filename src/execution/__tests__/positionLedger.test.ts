@@ -71,7 +71,7 @@ describe('recordPosition', () => {
     await recordPosition(redis as any, makePosition());
 
     expect(redis.hset).toHaveBeenCalledTimes(1);
-    expect(redis.expire).toHaveBeenCalledTimes(1);
+    expect(redis.expire).toHaveBeenCalledTimes(0);
     expect(redis.zadd).toHaveBeenCalledTimes(1);
   });
 
