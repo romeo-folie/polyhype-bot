@@ -576,32 +576,25 @@ async function redeemClobOutcomeWithRpc(
   ]);
 
   if (sigType === 1) {
-    // Polymarket Magic Proxy Wallet (EIP-1167 minimal proxy, non-Safe).
-    // Redemptions must go through the ProxyWalletFactory which routes to the user's
-    // proxy contract. The factory exposes:
-    //   proxy((bool delegateCall, address to, uint256 value, bytes data)[] calls)
-    // delegateCall=true matches all observed Polymarket redemption transactions.
-    logger.info('[clob] executing redemption via Polymarket ProxyWalletFactory', {
-      funderAddress,
+    // Polymarket Magic Proxy Wallet accounts: the POLYGON_WALLET_PRIVATE_KEY is the
+    // CLOB API signing key, NOT the Magic Link EOA that owns the proxy wallet.
+    // The factory routes calls based on msg.sender, but our signer is not registered
+    // as the proxy owner — transactions succeed on-chain but no tokens move.
+    //
+    // Magic Link proxy wallets can only be redeemed through:
+    //   (a) Polymarket's UI (Magic Link managed backend), or
+    //   (b) Simmer's submitRedeem API (for positions Simmer has tracked)
+    //
+    // Return a structured error so callers can surface a manual-action alert.
+    logger.warn('[clob] sigType=1 (Magic Proxy): on-chain redemption not supported — manual action required', {
       conditionId: input.conditionId,
+      funderAddress,
+      instruction: 'Claim winnings at polymarket.com',
     });
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
-    const factory = new Contract(PROXY_WALLET_FACTORY_ADDRESS, PROXY_WALLET_FACTORY_ABI, signer) as any;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const tx = await factory.proxy([
-      {
-        delegateCall: true,
-        to: CTF_ADDRESS,
-        value: 0,
-        data,
-      },
-    ]);
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const receipt = await tx.wait();
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-    return { success: true, tx_hash: receipt?.hash ?? undefined, raw: receipt };
+    return {
+      success: false,
+      error: 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED',
+    };
   } else {
     // Standard EOA logic
     logger.info('[clob] executing redemption via EOA wallet', {

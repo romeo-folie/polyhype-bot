@@ -262,6 +262,33 @@ export async function notifyRedemptionExecuted(opts: {
 }
 
 /**
+ * Notify that a CLOB position won but cannot be auto-redeemed (Magic Proxy wallet).
+ * Prompts Romeo to claim manually on polymarket.com.
+ */
+export async function notifyManualRedemptionRequired(opts: {
+  conditionId: string;
+  direction: 'YES' | 'NO';
+  question?: string;
+  estimatedUsdc?: number;
+}): Promise<void> {
+  const amountLine = opts.estimatedUsdc != null && opts.estimatedUsdc > 0
+    ? `\n<b>Estimated value:</b> ~$${opts.estimatedUsdc.toFixed(2)} USDC`
+    : '';
+  const questionLine = opts.question ? `\n<b>Market:</b> ${escapeHtml(opts.question)}` : '';
+
+  const text =
+    `💸 <b>Manual Redemption Required</b>\n` +
+    questionLine +
+    `\n<b>Direction:</b> ${opts.direction} (won)` +
+    amountLine +
+    `\n<b>Condition:</b> <code>${escapeHtml(opts.conditionId.slice(0, 20))}...</code>` +
+    `\n\n⚠️ Magic Proxy wallet — cannot auto-redeem on-chain.\n` +
+    `<b>Action:</b> Claim at <a href="https://polymarket.com">polymarket.com</a>`;
+
+  await notify(text);
+}
+
+/**
  * Notify weekly calibration summary (Phase 8b).
  */
 export async function notifyCalibrationUpdate(lines: string[]): Promise<void> {

@@ -22,7 +22,7 @@ import { closePosition, getOpenPositions, getPosition } from '../execution/posit
 import type { Position } from '../execution/positionLedger.js';
 import { redeemClobOutcome, getPolygonProvider, resetPolygonProvider, getClobClient, fetchClobTokenBalance } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
-import { notifyRedemptionExecuted } from '../execution/telegram.js';
+import { notifyRedemptionExecuted, notifyManualRedemptionRequired } from '../execution/telegram.js';
 import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
 import { Wallet } from 'ethers';
 import { loadConfig, CTF_ADDRESS, POLYGON_FALLBACK_RPCS } from '../shared/config.js';
@@ -273,10 +273,26 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[]): P
       });
 
       if (!redeemResult.success) {
-        logger.warn('[redeemer] on-chain CLOB redemption failed — will retry next cycle', {
-          marketId: pos.marketId,
-          error: redeemResult.error,
-        });
+        if (redeemResult.error === 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED') {
+          logger.warn('[redeemer] sigType=1: CLOB position requires manual redemption on polymarket.com', {
+            marketId: pos.marketId,
+            conditionId: pos.conditionId,
+            direction: pmDirection,
+          });
+          void notifyManualRedemptionRequired({
+            conditionId: pos.conditionId,
+            direction: pmDirection,
+            question: pos.question,
+            ...(pos.sharesHeld != null && { estimatedUsdc: pos.sharesHeld }),
+          }).catch(() => {});
+          // Close the ledger entry so we don't re-alert every cycle
+          await closePosition(redis, pos.marketId, pos.direction);
+        } else {
+          logger.warn('[redeemer] on-chain CLOB redemption failed — will retry next cycle', {
+            marketId: pos.marketId,
+            error: redeemResult.error,
+          });
+        }
         results.push({ marketId: pos.marketId, side, success: false, error: redeemResult.error ?? 'Unknown error' });
         continue;
       }
@@ -610,6 +626,18 @@ async function redeemSimmerLedgerFallback(
           });
           results.push({ marketId: pos.marketId, side, success: true, valueUsdc: proceedsUsdc,
             ...(onChainResult.tx_hash ? { txHash: onChainResult.tx_hash } : {}) });
+        } else if (onChainResult.error === 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED') {
+          logger.warn('[redeemer] Simmer fallback: sigType=1 requires manual redemption', {
+            marketId: pos.marketId, conditionId: pos.conditionId,
+          });
+          void notifyManualRedemptionRequired({
+            conditionId: pos.conditionId,
+            direction: pmDirection,
+            question: pos.question,
+            ...(pos.sharesHeld != null && { estimatedUsdc: pos.sharesHeld }),
+          }).catch(() => {});
+          await closePosition(redis, pos.marketId, pos.direction);
+          results.push({ marketId: pos.marketId, side, success: false, error: onChainResult.error });
         } else {
           logger.warn('[redeemer] Simmer fallback: on-chain redemption also failed', {
             marketId: pos.marketId, conditionId: pos.conditionId, error: onChainResult.error,
@@ -743,10 +771,18 @@ async function redeemOrphanClobPositions(
     }
   }
 
-  // Filter to tokens where net > 0 (still holding) and market not already redeemed this cycle
+  // Load previously notified manual-claim conditionIds from Redis (TTL 30 days)
+  const redis = await getRedis();
+  const notifiedKey = 'redeemer:manual-notified';
+  const notifiedRaw = await redis.smembers(notifiedKey).catch(() => [] as string[]);
+  const notifiedSet = new Set(notifiedRaw);
+
+  // Filter to tokens where net > 0 (still holding), not already redeemed this cycle,
+  // and not already notified for manual claim
   const candidates = [...tokenMap.entries()]
     .filter(([, v]) => v.netShares > 0.001)
-    .filter(([, v]) => !alreadyRedeemed.has(v.conditionId));
+    .filter(([, v]) => !alreadyRedeemed.has(v.conditionId))
+    .filter(([, v]) => !notifiedSet.has(v.conditionId));
 
   if (candidates.length === 0) return;
 
@@ -805,6 +841,25 @@ async function redeemOrphanClobPositions(
           success: true,
           valueUsdc,
           ...(redeemResult.tx_hash ? { txHash: redeemResult.tx_hash } : {}),
+        });
+      } else if (redeemResult.error === 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED') {
+        logger.warn('[redeemer] orphan sweep: sigType=1 — manual claim required', {
+          conditionId, direction, onChainBalance: balResult.balance,
+        });
+        void notifyManualRedemptionRequired({
+          conditionId,
+          direction,
+          estimatedUsdc: balResult.balance,
+        }).catch(() => {});
+        // Persist to Redis so we don't re-alert on subsequent cycles (TTL 30 days)
+        await redis.sadd(notifiedKey, conditionId).catch(() => {});
+        await redis.expire(notifiedKey, 30 * 24 * 3600).catch(() => {});
+        alreadyRedeemed.add(conditionId);
+        results.push({
+          marketId: conditionId,
+          side: direction.toLowerCase() as 'yes' | 'no',
+          success: false,
+          error: redeemResult.error,
         });
       } else {
         logger.warn('[redeemer] orphan sweep: redemption failed', {

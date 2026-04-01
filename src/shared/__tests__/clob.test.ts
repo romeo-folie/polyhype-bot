@@ -235,7 +235,7 @@ describe('redeemClobOutcome', () => {
     expect(mockProxy).not.toHaveBeenCalled();
   });
 
-  it('executes via ProxyWalletFactory when sigType=1', async () => {
+  it('returns MAGIC_PROXY_MANUAL_REDEEM_REQUIRED when sigType=1', async () => {
     const { loadConfig } = await import('../config.js');
     vi.mocked(loadConfig).mockReturnValue({
       POLYGON_WALLET_PRIVATE_KEY: '0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
@@ -247,17 +247,12 @@ describe('redeemClobOutcome', () => {
 
     const result = await redeemClobOutcome({ conditionId: 'cond-123', direction: 'NO' });
 
-    expect(result.success).toBe(true);
-    expect(result.tx_hash).toBe('0xredeemhash');
-    // Must call factory.proxy(), not EOA sendTransaction
-    expect(mockProxy).toHaveBeenCalledOnce();
+    // sigType=1 (Magic Proxy) cannot auto-redeem — must be done manually on polymarket.com
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('MAGIC_PROXY_MANUAL_REDEEM_REQUIRED');
+    // No on-chain calls should be made
+    expect(mockProxy).not.toHaveBeenCalled();
     expect(mockSendTransaction).not.toHaveBeenCalled();
-    // Verify ProxyCall shape: delegateCall=true, to=CTF, value=0
-    const [calls] = mockProxy.mock.calls[0] as [Array<{ delegateCall: boolean; to: string; value: number; data: string }>];
-    expect(calls).toHaveLength(1);
-    expect(calls[0].delegateCall).toBe(true);
-    expect(calls[0].to).toBe('0x4d97dcd97ec945f40cf65f87097ace5ea0476045');
-    expect(calls[0].value).toBe(0);
   });
 });
 
