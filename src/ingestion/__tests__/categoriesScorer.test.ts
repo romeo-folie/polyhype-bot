@@ -4,10 +4,13 @@ import { CATEGORIES } from '../categories/index.js';
 
 vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => ({
+    OPENAI_API_KEY: 'test-openai-key',
+    GEMINI_API_KEY: 'test-gemini-key',
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
     LLM_PROVIDER: 'gemini',
     URGENCY_THRESHOLD: 8,
+    SCORER_CACHE_TTL_S: 3600,
   })),
 }));
 
@@ -84,13 +87,6 @@ describe('category scorer prompts', () => {
   beforeEach(() => {
     mockGenerateContent.mockReset();
     mockChatCreate.mockReset();
-    process.env['GEMINI_API_KEY'] = 'test-gemini-key';
-    process.env['OPENAI_API_KEY'] = 'test-openai-key';
-  });
-
-  afterEach(() => {
-    delete process.env['GEMINI_API_KEY'];
-    delete process.env['OPENAI_API_KEY'];
   });
 
   for (const category of CATEGORIES) {
