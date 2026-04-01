@@ -19,6 +19,7 @@
  */
 
 import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client';
+import type { OrderBookSummary, OpenOrder, TickSize } from '@polymarket/clob-client';
 import { Wallet, Contract, Interface, JsonRpcProvider, Network, FetchRequest } from 'ethers';
 import { loadConfig, CTF_ADDRESS, USDC_E_ADDRESS, POLYGON_FALLBACK_RPCS } from './config.js';
 import { logger } from './logger.js';
@@ -83,6 +84,16 @@ export interface ClobBuyInput {
   orderType?: 'FOK' | 'FAK';
 }
 
+export interface ClobLimitBuyInput {
+  tokenId: string;
+  price: number;
+  size: number;
+  tickSize: TickSize;
+  negRisk: boolean;
+  orderType?: 'GTC';
+  postOnly?: boolean;
+}
+
 export interface ClobSellInput {
   tokenId: string;
   /** Number of conditional tokens to sell */
@@ -94,6 +105,7 @@ export interface ClobTradeResult {
   success: boolean;
   tx_hash?: string | undefined;
   shares_bought?: number;
+  order_id?: string | undefined;
   error?: string;
   raw?: unknown;
 }
@@ -336,6 +348,7 @@ function parseOrderResponse(raw: unknown): ClobTradeResult {
   return {
     success: true,
     ...(txHash ? { tx_hash: txHash } : {}),
+    ...(resp.orderID ? { order_id: resp.orderID } : {}),
     ...(isFinite(takingAmount) && takingAmount > 0 ? { shares_bought: takingAmount } : {}),
     raw,
   };
@@ -392,6 +405,81 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
     return parseOrderResponse(raw);
   } catch (err) {
     return { success: false, error: normaliseError(err) };
+  }
+}
+
+/**
+ * Fetch the current CLOB order book for a given token.
+ */
+export async function getClobOrderBook(tokenId: string): Promise<OrderBookSummary | null> {
+  try {
+    const client = await getClobClient();
+    const book = await orderWithTimeout(client.getOrderBook(tokenId));
+    return book ?? null;
+  } catch (err) {
+    logger.warn('[clob] failed to fetch order book', {
+      tokenId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Submit a post-only limit buy on the CLOB.
+ */
+export async function submitClobLimitBuy(input: ClobLimitBuyInput): Promise<ClobTradeResult> {
+  const cfg = loadConfig();
+  if (!cfg.CLOB_FALLBACK_ENABLED) {
+    return { success: false, error: 'CLOB fallback disabled (CLOB_FALLBACK_ENABLED=false)' };
+  }
+
+  try {
+    const client = await getClobClient();
+    const raw: unknown = await orderWithTimeout(client.createAndPostOrder(
+      {
+        tokenID: input.tokenId,
+        price: input.price,
+        side: Side.BUY,
+        size: input.size,
+      },
+      { tickSize: input.tickSize, negRisk: input.negRisk },
+      OrderType.GTC,
+      false,
+      input.postOnly ?? false,
+    ));
+
+    return parseOrderResponse(raw);
+  } catch (err) {
+    return { success: false, error: normaliseError(err) };
+  }
+}
+
+/**
+ * Fetch a specific CLOB order by ID.
+ */
+export async function getClobOrder(orderId: string): Promise<OpenOrder | null> {
+  try {
+    const client = await getClobClient();
+    const order = await orderWithTimeout(client.getOrder(orderId));
+    return order ?? null;
+  } catch (err) {
+    logger.warn('[clob] failed to fetch order', { orderId, error: err instanceof Error ? err.message : String(err) });
+    return null;
+  }
+}
+
+/**
+ * Cancel a CLOB order by ID.
+ */
+export async function cancelClobOrder(orderId: string): Promise<boolean> {
+  try {
+    const client = await getClobClient();
+    await orderWithTimeout(client.cancelOrder({ orderID: orderId }));
+    return true;
+  } catch (err) {
+    logger.warn('[clob] failed to cancel order', { orderId, error: err instanceof Error ? err.message : String(err) });
+    return false;
   }
 }
 

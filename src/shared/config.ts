@@ -74,6 +74,17 @@ const envSchema = z.object({
   URGENCY_THRESHOLD: z.coerce.number().int().min(1).max(10).optional().default(8),
   DIVERGENCE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.1),
   MAX_BET_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.1),
+
+  // Execution microstructure controls
+  EXECUTION_MODE: z.enum(['hybrid', 'maker', 'taker']).optional().default('hybrid'),
+  MAKER_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(20_000),
+  MAKER_POLL_INTERVAL_MS: z.coerce.number().int().min(50).optional().default(1000),
+  MAKER_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(5),
+  TAKER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.1),
+  TAIL_TAKER_BLOCK: z.coerce.boolean().optional().default(true),
+  TAIL_PRICE_THRESHOLD: z.coerce.number().min(0).max(0.5).optional().default(0.2),
+  TAIL_TAKER_OVERRIDE_EDGE: z.coerce.number().min(0).max(1).optional().default(0.2),
+
   TAKE_PROFIT_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.25),
   STOP_LOSS_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.30),
   REEVAL_ENABLED: z.coerce.boolean().optional().default(true),

@@ -15,17 +15,21 @@ TradeSignal[]
 ## Modules
 
 ### `executor.ts`
-Wraps `submitTrade` with two safety layers before calling the Simmer SDK:
+Wraps execution with safety layers before calling Simmer/CLOB:
 
-1. **Stake floor check** — skips signals with `stakeUsd < $0.01` (rounding noise)
+1. **Stake floor check** — skips signals with `stakeUsd < MIN_BET_USD`
 2. **Idempotency guard** — SHA-256 key of `marketId:direction:stakeUsd` stored in Redis (TTL: 1 h). Prevents double-firing if the cron runs twice or crashes mid-execution.
+3. **Execution mode** — `EXECUTION_MODE=hybrid|maker|taker`
+   - **hybrid** (default): try CLOB post-only maker order, then fall back to taker
+   - **maker**: post-only maker only; no taker fallback
+   - **taker**: current Simmer/CLOB market order path
 
 Returns `ExecutionResult` — never throws. All errors captured in `result.error`.
 
-Signals are processed **sequentially** (not in parallel) to avoid hammering the Simmer skill.
+Signals are processed **sequentially** (not in parallel) to avoid hammering the venue.
 
 ### `positionLedger.ts`
-Redis-backed position store. Each position is a flat hash at key `position:<marketId>:<direction>` with a 30-day TTL.
+Redis-backed position store. Each position is a flat hash at key `position:<marketId>:<direction>` (no TTL; explicit close/removal only).
 
 A sorted set (`positions:index`, score = `openedAt` ms) allows chronological listing without scanning all keys.
 
