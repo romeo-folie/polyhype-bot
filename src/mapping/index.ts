@@ -15,7 +15,7 @@ import { findCandidateMarkets } from './entityExtractor.js';
 import { estimateConsensusProbability, estimateSentiment } from './consensusCalculator.js';
 import { computeDivergence } from './divergenceCalculator.js';
 import { resolveYesPrice } from '../shared/priceCache.js';
-import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
+import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { TradeDecision } from './divergenceCalculator.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 import type { Redis } from 'ioredis';

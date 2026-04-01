@@ -5,7 +5,6 @@
  * as fallback. Batches up to 10 items per API call.
  */
 
-import process from 'node:process';
 import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';

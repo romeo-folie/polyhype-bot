@@ -13,6 +13,7 @@ const mockRedis = {
     exec: vi.fn().mockResolvedValue([]),
   })),
   set: vi.fn().mockResolvedValue('OK'),
+  get: vi.fn().mockResolvedValue(null),
   on: vi.fn(),
 };
 
@@ -65,9 +66,12 @@ describe('BinanceFeed', () => {
       E: Date.now(),
     });
 
-    await messageHandler(rawMessage);
+    messageHandler(rawMessage);
 
-    const redis = getRedis();
-    expect(redis.pipeline).toHaveBeenCalled();
+    // handleTicker is fire-and-forget (void) — wait for the pipeline write to settle
+    await vi.waitFor(() => {
+      const redis = getRedis();
+      expect(redis.pipeline).toHaveBeenCalled();
+    });
   });
 });

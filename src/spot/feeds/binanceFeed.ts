@@ -56,7 +56,7 @@ export class BinanceFeed {
     });
 
     this.ws.on('close', () => {
-      logger.warn('[binance] connection closed, reconnecting in 5s...');
+      logger.warn('[binance] connection closed, scheduling reconnect...');
       this.reconnect();
     });
   }

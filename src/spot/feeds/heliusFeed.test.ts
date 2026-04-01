@@ -91,9 +91,12 @@ describe('HeliusFeed (Hermes)', () => {
       }
     };
     
-    await messageCallback(JSON.stringify(mockMsg));
+    messageCallback(JSON.stringify(mockMsg));
 
-    expect(mockRedis.pipeline).toHaveBeenCalled();
+    // handleUpdate is fire-and-forget (void) — wait for the pipeline write to settle
+    await vi.waitFor(() => {
+      expect(mockRedis.pipeline).toHaveBeenCalled();
+    });
     expect(mockPipeline.hset).toHaveBeenCalledWith('spot:prices', 'sol', '200.5');
     expect(mockPipeline.publish).toHaveBeenCalledWith('spot:price_moved', expect.stringContaining('sol'));
   });
