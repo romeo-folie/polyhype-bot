@@ -50,7 +50,7 @@ export class HeliusFeed {
       }
     });
 
-    this.ws.on('message', (data: string) => {
+    this.ws.on('message', (data: import('ws').RawData) => {
       try {
         const msg = JSON.parse(data.toString()) as { type?: string; price_feed?: { id: string; price: { price: string; expo: number } } };
         if (msg.type === 'price_update' && msg.price_feed) {

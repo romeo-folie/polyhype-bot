@@ -5,7 +5,7 @@
  * Runs every 30 minutes to populate Simmer's market catalog with high-volume
  * Polymarket markets for enriched trading (divergence scores, tags, internal IDs).
  *
- * Schedule: every 30 minutes (cron: * /30 * * * *)
+ * Schedule: every 30 minutes (cron: 0,30 * * * *)
  */
 
 import { loadConfig } from '../shared/config.js';

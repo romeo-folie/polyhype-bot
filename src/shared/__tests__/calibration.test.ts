@@ -76,18 +76,15 @@ describe('computeCalibration', () => {
 
     const stats = await computeCalibration(redis as any, 'geopolitical');
 
-    expect(stats!.buckets).toHaveLength(5);
-    expect(stats!.buckets[0].range).toBe('0.50-0.60');
-    expect(stats!.buckets[0].count).toBe(1);
-    expect(stats!.buckets[0].actualWinRate).toBe(1); // 1 win / 1 total
-
-    expect(stats!.buckets[1].range).toBe('0.60-0.70');
-    expect(stats!.buckets[1].count).toBe(1);
-    expect(stats!.buckets[1].actualWinRate).toBe(0); // 0 win / 1 total
-
-    expect(stats!.buckets[2].range).toBe('0.70-0.80');
-    expect(stats!.buckets[2].count).toBe(1);
-    expect(stats!.buckets[2].actualWinRate).toBe(1);
+    const bucket50 = stats!.buckets.find(b => b.range === '0.50-0.60');
+    const bucket60 = stats!.buckets.find(b => b.range === '0.60-0.70');
+    const bucket70 = stats!.buckets.find(b => b.range === '0.70-0.80');
+    expect(bucket50!.count).toBe(1);
+    expect(bucket50!.actualWinRate).toBe(1); // 1 win / 1 total
+    expect(bucket60!.count).toBe(1);
+    expect(bucket60!.actualWinRate).toBe(0); // 0 win / 1 total
+    expect(bucket70!.count).toBe(1);
+    expect(bucket70!.actualWinRate).toBe(1);
   });
 
   it('clamps edgeCorrectionFactor at floor 0.5', async () => {

@@ -38,7 +38,7 @@ export class BinanceFeed {
       }
     });
 
-    this.ws.on('message', (data: string) => {
+    this.ws.on('message', (data: import('ws').RawData) => {
       try {
         const msg = JSON.parse(data.toString()) as { s?: string; c?: string; E?: number };
         // Binance @ticker format:

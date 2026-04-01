@@ -2,7 +2,8 @@
  * Confluence scorer.
  *
  * Aggregates RSI, MACD, and Stochastic signals into a directional score.
- * Score 0–3: count of indicators agreeing on same direction.
+ * Score 0–3: net agreement (agreeing votes minus dissenting votes).
+ * e.g., 2 UP + 1 DOWN → score 1; 2 UP + 0 DOWN → score 2; 3 UP → score 3.
  * Direction: UP (bullish) or DOWN (bearish) or NEUTRAL.
  *
  * Rules:
