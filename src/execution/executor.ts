@@ -101,6 +101,22 @@ function canExecuteTaker(
   return { ok: true };
 }
 
+async function confirmMakerCancel(orderId: string): Promise<boolean> {
+  const cancelled = await cancelClobOrder(orderId);
+  if (cancelled) return true;
+
+  // Retry briefly and confirm terminal state
+  for (const delay of [250, 500, 750]) {
+    await sleep(delay);
+    const order = await getClobOrder(orderId);
+    if (!order) return true;
+    const status = String(order.status ?? '').toLowerCase();
+    if (status && ['cancelled', 'canceled', 'filled'].includes(status)) return true;
+  }
+
+  return false;
+}
+
 function resolveMakerPrice(book: { bids: Array<{ price: string }>; asks: Array<{ price: string }>; tick_size: string }, priceEdgeBps: number): number | null {
   const tick = parseFloat(book.tick_size);
   if (!isFinite(tick) || tick <= 0) return null;
@@ -179,7 +195,10 @@ async function tryExecuteViaClobMaker(
   }
 
   if (cfg.MAKER_MAX_WAIT_MS <= 0) {
-    await cancelClobOrder(result.order_id);
+    const cancelled = await confirmMakerCancel(result.order_id);
+    if (!cancelled) {
+      return { ok: false, error: 'maker_cancel_unconfirmed', waitMs: Date.now() - startedAt };
+    }
     return { ok: false, error: 'maker_not_filled', waitMs: Date.now() - startedAt };
   }
 
@@ -192,7 +211,10 @@ async function tryExecuteViaClobMaker(
     const original = parseFloat(order.original_size ?? '0');
     if (matched > 0) {
       if (isFinite(original) && matched + 1e-9 < original) {
-        await cancelClobOrder(result.order_id);
+        const cancelled = await confirmMakerCancel(result.order_id);
+        if (!cancelled) {
+          return { ok: false, error: 'maker_cancel_unconfirmed', waitMs: Date.now() - startedAt };
+        }
       }
 
       const filledStakeUsd = matched * price;
@@ -206,7 +228,10 @@ async function tryExecuteViaClobMaker(
     await sleep(cfg.MAKER_POLL_INTERVAL_MS);
   }
 
-  await cancelClobOrder(result.order_id);
+  const cancelled = await confirmMakerCancel(result.order_id);
+  if (!cancelled) {
+    return { ok: false, error: 'maker_cancel_unconfirmed', waitMs: Date.now() - startedAt };
+  }
   return { ok: false, error: 'maker_not_filled', waitMs: Date.now() - startedAt };
 }
 
