@@ -94,7 +94,6 @@ export async function executeTakeProfit(opts: {
       entryPrice: position.entryPrice,
       sharesHeld: position.sharesHeld,
     });
-    await closePositionWithHedge(redis, position.marketId, position.direction).catch(() => {});
     return { marketId: position.marketId, success: false, error, returnPct, reason };
   }
 
