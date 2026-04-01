@@ -65,6 +65,7 @@ describe('redeemResolvedPositions', () => {
     del: vi.fn().mockResolvedValue(1),
     smembers: vi.fn().mockResolvedValue([]),
     sadd: vi.fn().mockResolvedValue(1),
+    sismember: vi.fn().mockResolvedValue(0),
   } as any;
 
   beforeEach(() => {

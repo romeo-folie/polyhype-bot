@@ -42,6 +42,8 @@ const REDEEM_DELAY_MS = 6_500; // ~9/min, safely under Simmer's 10/min limit
 
 const REDEEMER_SUCCESS_PREFIX = 'redeemer:recent-success:';
 const REDEEMER_FALLBACK_STALE_PREFIX = 'redeemer:stale-fallback:';
+const REDEEMER_MANUAL_NOTIFY_KEY = 'redeemer:manual-notified';
+const REDEEMER_MANUAL_NOTIFY_TTL_S = 30 * 24 * 3600;
 
 type RedeemerSkipReason = 'skipped_recent_success' | 'skipped_dust' | 'stale_no_balance';
 
@@ -134,6 +136,14 @@ async function shouldSkipRedeemer(
     return 'skipped_recent_success';
   }
   return null;
+}
+
+async function shouldNotifyManual(red: Redis, conditionId: string): Promise<boolean> {
+  const already = await red.sismember(REDEEMER_MANUAL_NOTIFY_KEY, conditionId).catch(() => 0);
+  if (already) return false;
+  await red.sadd(REDEEMER_MANUAL_NOTIFY_KEY, conditionId).catch(() => {});
+  await red.expire(REDEEMER_MANUAL_NOTIFY_KEY, REDEEMER_MANUAL_NOTIFY_TTL_S).catch(() => {});
+  return true;
 }
 
 function logRedeemerSkip(reason: RedeemerSkipReason, conditionId: string, metadata: Record<string, unknown> = {}): void {
@@ -424,12 +434,14 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
             conditionId: conditionId,
             direction: pmDirection,
           });
-          void notifyManualRedemptionRequired({
-            conditionId: conditionId,
-            direction: pmDirection,
-            question: pos.question ?? undefined,
-            ...(pos.sharesHeld != null && { estimatedUsdc: pos.sharesHeld }),
-          }).catch(() => {});
+          if (await shouldNotifyManual(redis, conditionId)) {
+            void notifyManualRedemptionRequired({
+              conditionId: conditionId,
+              direction: pmDirection,
+              question: pos.question ?? undefined,
+              ...(pos.sharesHeld != null && { estimatedUsdc: pos.sharesHeld }),
+            }).catch(() => {});
+          }
           // Close the ledger entry so we don't re-alert every cycle
           await closePosition(redis, pos.marketId, pos.direction);
         } else {
@@ -796,12 +808,14 @@ async function redeemSimmerLedgerFallback(
           logger.warn('[redeemer] Simmer fallback: sigType=1 requires manual redemption', {
             marketId: pos.marketId, conditionId: conditionId,
           });
-          void notifyManualRedemptionRequired({
-            conditionId: conditionId,
-            direction: pmDirection,
-            question: pos.question ?? undefined,
-            ...(pos.sharesHeld != null && { estimatedUsdc: pos.sharesHeld }),
-          }).catch(() => {});
+          if (await shouldNotifyManual(redis, conditionId)) {
+            void notifyManualRedemptionRequired({
+              conditionId: conditionId,
+              direction: pmDirection,
+              question: pos.question ?? undefined,
+              ...(pos.sharesHeld != null && { estimatedUsdc: pos.sharesHeld }),
+            }).catch(() => {});
+          }
           await closePosition(redis, pos.marketId, pos.direction);
           results.push({ marketId: pos.marketId, side, success: false, error: onChainResult.error });
         } else {
@@ -953,16 +967,10 @@ async function redeemOrphanClobPositions(
 
   // Load previously notified manual-claim conditionIds from Redis (TTL 30 days)
   const redis = getRedis();
-  const notifiedKey = 'redeemer:manual-notified';
-  const notifiedRaw = await redis.smembers(notifiedKey).catch(() => [] as string[]);
-  const notifiedSet = new Set(notifiedRaw);
-
-  // Filter to tokens where net > 0 (still holding), not already redeemed this cycle,
-  // and not already notified for manual claim
+  // Filter to tokens where net > 0 (still holding), and not already redeemed this cycle
   const candidates = [...tokenMap.entries()]
     .filter(([, v]) => v.netShares > 0.001)
-    .filter(([, v]) => !alreadyRedeemed.has(v.conditionId))
-    .filter(([, v]) => !notifiedSet.has(v.conditionId));
+    .filter(([, v]) => !alreadyRedeemed.has(v.conditionId));
 
   if (candidates.length === 0) return;
 
@@ -1036,14 +1044,13 @@ async function redeemOrphanClobPositions(
         logger.warn('[redeemer] orphan sweep: sigType=1 — manual claim required', {
           conditionId, direction, onChainBalance: balResult.balance,
         });
-        void notifyManualRedemptionRequired({
-          conditionId,
-          direction,
-          estimatedUsdc: balResult.balance,
-        }).catch(() => {});
-        // Persist to Redis so we don't re-alert on subsequent cycles (TTL 30 days)
-        await redis.sadd(notifiedKey, conditionId).catch(() => {});
-        await redis.expire(notifiedKey, 30 * 24 * 3600).catch(() => {});
+        if (await shouldNotifyManual(redis, conditionId)) {
+          void notifyManualRedemptionRequired({
+            conditionId,
+            direction,
+            estimatedUsdc: balResult.balance,
+          }).catch(() => {});
+        }
         alreadyRedeemed.add(conditionId);
         results.push({
           marketId: conditionId,
