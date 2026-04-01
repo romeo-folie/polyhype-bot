@@ -1,56 +1,56 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-const mockGetSimmerPositions = jest.fn<(...args: any[]) => Promise<any>>();
-const mockSubmitRedeem = jest.fn<(...args: any[]) => Promise<any>>();
-const mockClosePosition = jest.fn<(...args: any[]) => Promise<void>>();
-const mockGetOpenPositions = jest.fn<(...args: any[]) => Promise<any[]>>();
-const mockRedeemClobOutcome = jest.fn<(...args: any[]) => Promise<any>>();
-const mockCreditProceeds = jest.fn<(...args: any[]) => Promise<void>>();
-const mockNotifyRedemptionExecuted = jest.fn<(...args: any[]) => Promise<void>>();
+const mockGetSimmerPositions = vi.fn<(...args: any[]) => Promise<any>>();
+const mockSubmitRedeem = vi.fn<(...args: any[]) => Promise<any>>();
+const mockClosePosition = vi.fn<(...args: any[]) => Promise<void>>();
+const mockGetOpenPositions = vi.fn<(...args: any[]) => Promise<any[]>>();
+const mockRedeemClobOutcome = vi.fn<(...args: any[]) => Promise<any>>();
+const mockCreditProceeds = vi.fn<(...args: any[]) => Promise<void>>();
+const mockNotifyRedemptionExecuted = vi.fn<(...args: any[]) => Promise<void>>();
 
-jest.unstable_mockModule('../../shared/simmer.js', () => ({
+vi.mock('../../shared/simmer.js', () => ({
   getSimmerPositions: mockGetSimmerPositions,
   submitRedeem: mockSubmitRedeem,
-  resolveSimmerMarketId: jest.fn().mockResolvedValue(null), // fallback won't fire in these tests
+  resolveSimmerMarketId: vi.fn().mockResolvedValue(null), // fallback won't fire in these tests
   SimmerError: class extends Error {
     statusCode = 500;
   },
 }));
 
-jest.unstable_mockModule('../../execution/positionLedger.js', () => ({
+vi.mock('../../execution/positionLedger.js', () => ({
   closePosition: mockClosePosition,
   getOpenPositions: mockGetOpenPositions,
-  getPosition: jest.fn().mockResolvedValue(null), // no ledger entry for Simmer positions in tests
+  getPosition: vi.fn().mockResolvedValue(null), // no ledger entry for Simmer positions in tests
 }));
 
-jest.unstable_mockModule('../../shared/outcomeRecorder.js', () => ({
-  recordOutcome: jest.fn().mockResolvedValue(undefined),
-  inferCategory: jest.fn().mockReturnValue('geopolitical'),
-  inferSource: jest.fn().mockReturnValue('osint'),
+vi.mock('../../shared/outcomeRecorder.js', () => ({
+  recordOutcome: vi.fn().mockResolvedValue(undefined),
+  inferCategory: vi.fn().mockReturnValue('geopolitical'),
+  inferSource: vi.fn().mockReturnValue('osint'),
 }));
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn().mockReturnValue({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn().mockReturnValue({
     SIMMER_API_KEY: 'test-key',
     OUTCOME_HISTORY_DAYS: 180,
     OUTCOME_MAX_PER_CATEGORY: 500,
   }),
 }));
 
-jest.unstable_mockModule('../../shared/clob.js', () => ({
+vi.mock('../../shared/clob.js', () => ({
   redeemClobOutcome: mockRedeemClobOutcome,
 }));
 
-jest.unstable_mockModule('../../shared/bankroll.js', () => ({
+vi.mock('../../shared/bankroll.js', () => ({
   creditProceeds: mockCreditProceeds,
 }));
 
-jest.unstable_mockModule('../../execution/telegram.js', () => ({
+vi.mock('../../execution/telegram.js', () => ({
   notifyRedemptionExecuted: mockNotifyRedemptionExecuted,
 }));
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
 const { redeemResolvedPositions } = await import('../resolutionRedeemer.js');
@@ -59,11 +59,11 @@ describe('redeemResolvedPositions', () => {
   const mockRedis = {} as any;
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     mockGetSimmerPositions.mockResolvedValue([]);
     mockGetOpenPositions.mockResolvedValue([]);
     // Mock global fetch for Gamma API check
-    global.fetch = jest.fn().mockImplementation(() =>
+    global.fetch = vi.fn().mockImplementation(() =>
       Promise.resolve({
         ok: true,
         json: () => Promise.resolve([{ resolved: true, outcome: 'YES' }]),

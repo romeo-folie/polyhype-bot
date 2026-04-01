@@ -69,6 +69,13 @@ export function matchesCategory(title: string, description: string | null, allow
   if (allowedScopes.includes('all') || allowedScopes.length === 0) return true;
   const scopes = allowedScopes;
 
+  // Warn about unrecognized scope values
+  for (const scope of scopes) {
+    if (scope !== 'all' && !CATEGORY_KEYWORDS[scope]) {
+      logger.warn('[copytrade] unknown COPYTRADE_MARKET_SCOPE value — will match nothing', { scope, knownCategories: Object.keys(CATEGORY_KEYWORDS) });
+    }
+  }
+
   const lowerText = `${title} ${description ?? ''}`.toLowerCase();
   for (const scope of scopes) {
     const keywords = CATEGORY_KEYWORDS[scope];

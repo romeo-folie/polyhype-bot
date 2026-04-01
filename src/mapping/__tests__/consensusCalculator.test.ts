@@ -1,8 +1,8 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Mock loadConfig so tests don't need REDIS_URL / SIMMER_* env vars
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
     LLM_PROVIDER: 'gemini',
@@ -15,26 +15,26 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGetRecentOutcomes = jest.fn<(...args: any[]) => any>();
-jest.unstable_mockModule('../../shared/outcomeRecorder.js', () => ({
+const mockGetRecentOutcomes = vi.fn<(...args: any[]) => any>();
+vi.mock('../../shared/outcomeRecorder.js', () => ({
   getRecentOutcomes: mockGetRecentOutcomes,
-  inferCategory: jest.fn(() => 'geopolitical'),
+  inferCategory: vi.fn(() => 'geopolitical'),
 }));
 
 // Suppress logger output in tests
-jest.unstable_mockModule('../../shared/logger.js', () => ({
+vi.mock('../../shared/logger.js', () => ({
   logger: {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
   },
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGenerateContent = jest.fn<(...args: any[]) => any>();
-jest.unstable_mockModule('@google/generative-ai', () => ({
-  GoogleGenerativeAI: jest.fn().mockImplementation(() => ({
+const mockGenerateContent = vi.fn<(...args: any[]) => any>();
+vi.mock('@google/generative-ai', () => ({
+  GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
     getGenerativeModel: () => ({
       generateContent: mockGenerateContent,
     }),
@@ -42,15 +42,15 @@ jest.unstable_mockModule('@google/generative-ai', () => ({
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockChatCreate = jest.fn<(...args: any[]) => any>();
-const mockOpenAIConstructor = jest.fn().mockImplementation(() => ({
+const mockChatCreate = vi.fn<(...args: any[]) => any>();
+const mockOpenAIConstructor = vi.fn().mockImplementation(() => ({
   chat: {
     completions: {
       create: mockChatCreate,
     },
   },
 }));
-jest.unstable_mockModule('openai', () => ({
+vi.mock('openai', () => ({
   default: mockOpenAIConstructor,
   OpenAI: mockOpenAIConstructor,
 }));
@@ -178,7 +178,7 @@ describe('estimateConsensusProbability', () => {
       return { choices: [{ message: { content: JSON.stringify({ probability: p, reasoning: 'O1' }) } }] };
     });
 
-    const mockRedis = { get: jest.fn<() => Promise<null>>().mockResolvedValue(null), set: jest.fn<() => Promise<string>>().mockResolvedValue('OK'), zrevrange: jest.fn(), hgetall: jest.fn() };
+    const mockRedis = { get: vi.fn<() => Promise<null>>().mockResolvedValue(null), set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'), zrevrange: vi.fn(), hgetall: vi.fn() };
     await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
 
     // The Gemini call receives the full prompt as a single string — check it includes the context block
@@ -200,7 +200,7 @@ describe('estimateConsensusProbability', () => {
       choices: [{ message: { content: JSON.stringify({ probability: 0.7, reasoning: 'test' }) } }],
     });
 
-    const mockRedis = { get: jest.fn<() => Promise<null>>().mockResolvedValue(null), set: jest.fn<() => Promise<string>>().mockResolvedValue('OK'), zrevrange: jest.fn(), hgetall: jest.fn() };
+    const mockRedis = { get: vi.fn<() => Promise<null>>().mockResolvedValue(null), set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'), zrevrange: vi.fn(), hgetall: vi.fn() };
     await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
 
     const geminiCall = mockGenerateContent.mock.calls[0]?.[0] as string;
@@ -209,7 +209,7 @@ describe('estimateConsensusProbability', () => {
 
   it('skips context injection when CONTEXT_INJECTION_ENABLED=false', async () => {
     const { loadConfig } = await import('../../shared/config.js');
-    (loadConfig as jest.Mock).mockReturnValue({
+    (loadConfig as any).mockReturnValue({
       OPENAI_MODEL: 'gpt-4o-mini',
       GEMINI_MODEL: 'gemini-2.5-flash',
       LLM_PROVIDER: 'gemini',
@@ -233,14 +233,14 @@ describe('estimateConsensusProbability', () => {
       choices: [{ message: { content: JSON.stringify({ probability: 0.7, reasoning: 'test' }) } }],
     });
 
-    const mockRedis = { get: jest.fn<() => Promise<null>>().mockResolvedValue(null), set: jest.fn<() => Promise<string>>().mockResolvedValue('OK'), zrevrange: jest.fn(), hgetall: jest.fn() };
+    const mockRedis = { get: vi.fn<() => Promise<null>>().mockResolvedValue(null), set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'), zrevrange: vi.fn(), hgetall: vi.fn() };
     await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
 
     // getRecentOutcomes should not have been called
     expect(mockGetRecentOutcomes).not.toHaveBeenCalled();
 
     // Restore config
-    (loadConfig as jest.Mock).mockReturnValue({
+    (loadConfig as any).mockReturnValue({
       OPENAI_MODEL: 'gpt-4o-mini',
       GEMINI_MODEL: 'gemini-2.5-flash',
       LLM_PROVIDER: 'gemini',
@@ -275,7 +275,7 @@ describe('estimateConsensusProbability', () => {
 
   it('returns cached consensus estimate without LLM calls (cache hit)', async () => {
     const { loadConfig } = await import('../../shared/config.js');
-    (loadConfig as jest.Mock).mockReturnValue({
+    (loadConfig as any).mockReturnValue({
       OPENAI_MODEL: 'gpt-4o-mini',
       GEMINI_MODEL: 'gemini-2.5-flash',
       LLM_PROVIDER: 'gemini',
@@ -294,8 +294,8 @@ describe('estimateConsensusProbability', () => {
     };
 
     const mockRedis = {
-      get: jest.fn<(key: string) => Promise<string | null>>().mockResolvedValue(JSON.stringify(cachedEstimate)),
-      set: jest.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      get: vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(JSON.stringify(cachedEstimate)),
+      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
     };
 
     const result = await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
@@ -308,7 +308,7 @@ describe('estimateConsensusProbability', () => {
     expect(mockChatCreate).not.toHaveBeenCalled();
 
     // Restore config
-    (loadConfig as jest.Mock).mockReturnValue({
+    (loadConfig as any).mockReturnValue({
       OPENAI_MODEL: 'gpt-4o-mini',
       GEMINI_MODEL: 'gemini-2.5-flash',
       LLM_PROVIDER: 'gemini',
@@ -322,7 +322,7 @@ describe('estimateConsensusProbability', () => {
 
   it('calls LLM and caches result on cache miss', async () => {
     const { loadConfig } = await import('../../shared/config.js');
-    (loadConfig as jest.Mock).mockReturnValue({
+    (loadConfig as any).mockReturnValue({
       OPENAI_MODEL: 'gpt-4o-mini',
       GEMINI_MODEL: 'gemini-2.5-flash',
       LLM_PROVIDER: 'gemini',
@@ -341,8 +341,8 @@ describe('estimateConsensusProbability', () => {
     });
 
     const mockRedis = {
-      get: jest.fn<(key: string) => Promise<string | null>>().mockResolvedValue(null),
-      set: jest.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      get: vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(null),
+      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
     };
 
     const result = await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
@@ -360,7 +360,7 @@ describe('estimateConsensusProbability', () => {
     );
 
     // Restore config
-    (loadConfig as jest.Mock).mockReturnValue({
+    (loadConfig as any).mockReturnValue({
       OPENAI_MODEL: 'gpt-4o-mini',
       GEMINI_MODEL: 'gemini-2.5-flash',
       LLM_PROVIDER: 'gemini',
@@ -381,8 +381,8 @@ describe('estimateConsensusProbability', () => {
     });
 
     const mockRedis = {
-      get: jest.fn<(key: string) => Promise<string | null>>().mockResolvedValue(null),
-      set: jest.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      get: vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(null),
+      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
     };
 
     // Default config has CONSENSUS_CACHE_ENABLED=false

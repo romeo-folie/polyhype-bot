@@ -1,19 +1,19 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Position } from '../../execution/positionLedger.js';
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
     CLOB_ORDER_TYPE: 'FAK',
   })),
 }));
 
-jest.unstable_mockModule('../../shared/simmer.js', () => ({
-  submitSell: jest.fn(),
-  resolveSimmerMarketId: jest.fn(),
+vi.mock('../../shared/simmer.js', () => ({
+  submitSell: vi.fn(),
+  resolveSimmerMarketId: vi.fn(),
   SimmerError: class SimmerError extends Error {
     statusCode: number;
     body: unknown;
@@ -26,45 +26,45 @@ jest.unstable_mockModule('../../shared/simmer.js', () => ({
   },
 }));
 
-jest.unstable_mockModule('../../shared/clob.js', () => ({
-  submitClobSell: jest.fn(),
-  submitClobBuy: jest.fn(),
-  getClobBalance: jest.fn(),
-  fetchClobTokenBalance: jest.fn().mockResolvedValue({ ok: true, balance: 5.0 }),
-  parseBalanceFromClobError: jest.fn().mockReturnValue(null),
+vi.mock('../../shared/clob.js', () => ({
+  submitClobSell: vi.fn(),
+  submitClobBuy: vi.fn(),
+  getClobBalance: vi.fn(),
+  fetchClobTokenBalance: vi.fn().mockResolvedValue({ ok: true, balance: 5.0 }),
+  parseBalanceFromClobError: vi.fn().mockReturnValue(null),
   CLOB_MIN_ORDER_USD: 1.0,
 }));
 
-jest.unstable_mockModule('../../execution/positionLedger.js', () => ({
-  closePosition: jest.fn(),
-  getOpenPositions: jest.fn(),
-  recordPosition: jest.fn(),
-  hasOpenPosition: jest.fn(),
+vi.mock('../../execution/positionLedger.js', () => ({
+  closePosition: vi.fn(),
+  getOpenPositions: vi.fn(),
+  recordPosition: vi.fn(),
+  hasOpenPosition: vi.fn(),
 }));
 
-jest.unstable_mockModule('../../execution/telegram.js', () => ({
-  notifyTakeProfitExecuted: jest.fn(),
-  notifyTradeExecuted: jest.fn(),
-  notifyTradeError: jest.fn(),
+vi.mock('../../execution/telegram.js', () => ({
+  notifyTakeProfitExecuted: vi.fn(),
+  notifyTradeExecuted: vi.fn(),
+  notifyTradeError: vi.fn(),
 }));
 
-jest.unstable_mockModule('../../shared/bankroll.js', () => ({
-  creditProceeds: jest.fn<() => Promise<number>>().mockResolvedValue(100),
+vi.mock('../../shared/bankroll.js', () => ({
+  creditProceeds: vi.fn<() => Promise<number>>().mockResolvedValue(100),
 }));
 
-jest.unstable_mockModule('../../shared/outcomeRecorder.js', () => ({
-  recordOutcome: jest.fn().mockResolvedValue(undefined),
-  inferCategory: jest.fn().mockReturnValue('geopolitical'),
-  inferSource: jest.fn().mockReturnValue('osint'),
+vi.mock('../../shared/outcomeRecorder.js', () => ({
+  recordOutcome: vi.fn().mockResolvedValue(undefined),
+  inferCategory: vi.fn().mockReturnValue('geopolitical'),
+  inferSource: vi.fn().mockReturnValue('osint'),
 }));
 
-jest.unstable_mockModule('../../shared/hyperliquid.js', () => ({
-  getHyperliquid: jest.fn(() => ({
-    closePosition: jest.fn().mockResolvedValue({ success: true }),
-    getClearinghouseState: jest.fn().mockResolvedValue({}),
-    getOpenPositions: jest.fn().mockResolvedValue([]),
+vi.mock('../../shared/hyperliquid.js', () => ({
+  getHyperliquid: vi.fn(() => ({
+    closePosition: vi.fn().mockResolvedValue({ success: true }),
+    getClearinghouseState: vi.fn().mockResolvedValue({}),
+    getOpenPositions: vi.fn().mockResolvedValue([]),
   })),
-  resolveHlSymbol: jest.fn().mockReturnValue(null),
+  resolveHlSymbol: vi.fn().mockReturnValue(null),
 }));
 
 const { submitSell, resolveSimmerMarketId } = await import('../../shared/simmer.js');
@@ -73,12 +73,12 @@ const { closePosition } = await import('../../execution/positionLedger.js');
 const { notifyTakeProfitExecuted } = await import('../../execution/telegram.js');
 const { executeTakeProfit } = await import('../takeProfitExecutor.js');
 
-const mockSell = submitSell as jest.MockedFunction<typeof submitSell>;
-const mockResolveSimmerMarketId = resolveSimmerMarketId as jest.MockedFunction<typeof resolveSimmerMarketId>;
-const mockClobSell = submitClobSell as jest.MockedFunction<typeof submitClobSell>;
-const mockFetchClobTokenBalance = fetchClobTokenBalance as jest.MockedFunction<typeof fetchClobTokenBalance>;
-const mockClose = closePosition as jest.MockedFunction<typeof closePosition>;
-const mockNotify = notifyTakeProfitExecuted as jest.MockedFunction<typeof notifyTakeProfitExecuted>;
+const mockSell = vi.mocked(submitSell);
+const mockResolveSimmerMarketId = vi.mocked(resolveSimmerMarketId);
+const mockClobSell = vi.mocked(submitClobSell);
+const mockFetchClobTokenBalance = vi.mocked(fetchClobTokenBalance);
+const mockClose = vi.mocked(closePosition);
+const mockNotify = vi.mocked(notifyTakeProfitExecuted);
 
 function makePosition(overrides: Partial<Position> = {}): Position {
   return {
@@ -101,9 +101,9 @@ function makePosition(overrides: Partial<Position> = {}): Position {
 
 function makeRedis() {
   return {
-    get: jest.fn().mockResolvedValue(null),
-    set: jest.fn().mockResolvedValue('OK'),
-    del: jest.fn().mockResolvedValue(1),
+    get: vi.fn().mockResolvedValue(null),
+    set: vi.fn().mockResolvedValue('OK'),
+    del: vi.fn().mockResolvedValue(1),
   } as unknown as Parameters<typeof executeTakeProfit>[0]['redis'];
 }
 

@@ -1,11 +1,11 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn().mockReturnValue({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn().mockReturnValue({
     SPOT_MOVE_THRESHOLD: 3,
     SPOT_LOOKBACK_MINUTES: 5,
     SPOT_COOLDOWN_MINUTES: 30,
@@ -13,14 +13,14 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
 }));
 
 const mockRedis = {
-  get: jest.fn<() => Promise<string | null>>().mockResolvedValue(null),
-  set: jest.fn<() => Promise<'OK'>>().mockResolvedValue('OK'),
-  zrangebyscore: jest.fn<() => Promise<string[]>>().mockResolvedValue([]),
-  zrange: jest.fn<() => Promise<string[]>>().mockResolvedValue([]),
+  get: vi.fn<() => Promise<string | null>>().mockResolvedValue(null),
+  set: vi.fn<() => Promise<'OK'>>().mockResolvedValue('OK'),
+  zrangebyscore: vi.fn<() => Promise<string[]>>().mockResolvedValue([]),
+  zrange: vi.fn<() => Promise<string[]>>().mockResolvedValue([]),
 };
 
-jest.unstable_mockModule('../../shared/redis.js', () => ({
-  getRedis: jest.fn().mockReturnValue(mockRedis),
+vi.mock('../../shared/redis.js', () => ({
+  getRedis: vi.fn().mockReturnValue(mockRedis),
 }));
 
 const { detectMoves } = await import('../thresholdDetector.js');

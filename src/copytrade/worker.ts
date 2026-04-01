@@ -146,8 +146,14 @@ export async function runWorker(maxCycles?: number): Promise<void> {
           const ageMs = Date.now() - envStat.mtimeMs;
           if (ageMs > 2_000) {
             dotenv.config({ override: true });
-            loadConfig(true); // flush cache
-            logger.info('[copytrade-worker] configuration refreshed from .env');
+            try {
+              loadConfig(true); // flush cache
+              logger.info('[copytrade-worker] configuration refreshed from .env');
+            } catch (configErr) {
+              logger.warn('[copytrade-worker] config validation failed during hot-reload — keeping previous config', {
+                error: configErr instanceof Error ? configErr.message : String(configErr),
+              });
+            }
           }
         } catch (err) {
           // .env missing, unreadable, or permissions error — skip reload, keep running with cached config

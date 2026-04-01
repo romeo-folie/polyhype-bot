@@ -1,46 +1,51 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Redis } from 'ioredis';
 
 // Mock Config
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn().mockReturnValue({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn().mockReturnValue({
     FUTURES_ENABLED: true,
     FUTURES_GLOBAL_MAX_MARGIN_USD: 50,
+    CALIBRATION_ENABLED: false,
+    CALIBRATION_MIN_SAMPLES: 20,
+    MIN_BET_USD: 5,
+    FUTURES_MAX_PER_TRADE_USD: 10,
+    FUTURES_DEFAULT_LEVERAGE: 5,
   }),
 }));
 
 // Mock Logger
-jest.unstable_mockModule('../../shared/logger.js', () => ({
+vi.mock('../../shared/logger.js', () => ({
   logger: {
-    info: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-    warn: jest.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    warn: vi.fn(),
   },
 }));
 
 // Mock Position Ledger
-jest.unstable_mockModule('../positionLedger.js', () => ({
-  hasOpenPosition: jest.fn().mockResolvedValue(false),
-  recordPosition: jest.fn(),
+vi.mock('../positionLedger.js', () => ({
+  hasOpenPosition: vi.fn().mockResolvedValue(false),
+  recordPosition: vi.fn(),
 }));
 
 // Mock Simmer
-jest.unstable_mockModule('../../shared/simmer.js', () => ({
-  submitTrade: jest.fn().mockResolvedValue({ success: true, tx_hash: '0xabc' }),
-  resolveSimmerMarketId: jest.fn().mockResolvedValue('simmer-abc'),
-  getMarketContext: jest.fn().mockResolvedValue({ market: { status: 'open' }, position: { has_position: false }, discipline: { warning_level: 'none' } }),
+vi.mock('../../shared/simmer.js', () => ({
+  submitTrade: vi.fn().mockResolvedValue({ success: true, tx_hash: '0xabc' }),
+  resolveSimmerMarketId: vi.fn().mockResolvedValue('simmer-abc'),
+  getMarketContext: vi.fn().mockResolvedValue({ market: { status: 'open' }, position: { has_position: false }, discipline: { warning_level: 'none' } }),
 }));
 
 // Mock Hyperliquid Client
-const mockPlaceMarketOrder = jest.fn();
-jest.unstable_mockModule('../../shared/hyperliquid.js', () => ({
-  getHyperliquid: jest.fn().mockReturnValue({
-    getOpenPositions: jest.fn().mockResolvedValue([]),
+const mockPlaceMarketOrder = vi.fn();
+vi.mock('../../shared/hyperliquid.js', () => ({
+  getHyperliquid: vi.fn().mockReturnValue({
+    getOpenPositions: vi.fn().mockResolvedValue([]),
     placeMarketOrder: mockPlaceMarketOrder,
   }),
   // resolveHlSymbol replaces the old HL_SYMBOL_MAP inline loop
-  resolveHlSymbol: jest.fn().mockImplementation((text: string) => {
+  resolveHlSymbol: vi.fn().mockImplementation((text: string) => {
     const lower = text.toLowerCase();
     if (lower.includes('bitcoin')) return 'BTC';
     if (lower.includes('ethereum')) return 'ETH';
@@ -52,13 +57,13 @@ const { executeSignal } = await import('../executor.js');
 
 describe('Delta Hedging Integration', () => {
   const mockRedis = {
-    get: jest.fn(),
-    set: jest.fn(),
-    exists: jest.fn(),
+    get: vi.fn(),
+    set: vi.fn(),
+    exists: vi.fn(),
   } as unknown as Redis;
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   it('triggers a 1:1 delta hedge on HL after a successful PM buy', async () => {

@@ -1,9 +1,9 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-const mockFetch = jest.fn() as any;
+const mockFetch = vi.fn() as any;
 
-jest.unstable_mockModule('../config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../config.js', () => ({
+  loadConfig: vi.fn(() => ({
     SIMMER_API_KEY: 'test',
   })),
 }));

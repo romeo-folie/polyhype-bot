@@ -1,8 +1,8 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // Mock logger
-jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
 const { recordPosition, getOpenPositions, closePosition, hasOpenPosition } =
@@ -34,31 +34,31 @@ function makeRedis() {
   const zsets: Record<string, Array<[number, string]>> = {};
 
   return {
-    hset: jest.fn(async (key: string, fields: Record<string, string>) => {
+    hset: vi.fn(async (key: string, fields: Record<string, string>) => {
       store[key] = { ...(store[key] ?? {}), ...fields };
       return 1;
     }),
-    expire: jest.fn(async () => 1),
-    zadd: jest.fn(async (key: string, score: number, member: string) => {
+    expire: vi.fn(async () => 1),
+    zadd: vi.fn(async (key: string, score: number, member: string) => {
       if (!zsets[key]) zsets[key] = [];
       zsets[key]!.push([score, member]);
       return 1;
     }),
-    zrange: jest.fn(async (key: string) => {
+    zrange: vi.fn(async (key: string) => {
       return (zsets[key] ?? []).map(([, member]) => member);
     }),
-    zrem: jest.fn(async (key: string, member: string) => {
+    zrem: vi.fn(async (key: string, member: string) => {
       if (zsets[key]) {
         zsets[key] = zsets[key]!.filter(([, m]) => m !== member);
       }
       return 1;
     }),
-    hgetall: jest.fn(async (key: string) => store[key] ?? null),
-    del: jest.fn(async (key: string) => {
+    hgetall: vi.fn(async (key: string) => store[key] ?? null),
+    del: vi.fn(async (key: string) => {
       delete store[key];
       return 1;
     }),
-    exists: jest.fn(async (key: string) => (store[key] ? 1 : 0)),
+    exists: vi.fn(async (key: string) => (store[key] ? 1 : 0)),
     _store: store,
     _zsets: zsets,
   };

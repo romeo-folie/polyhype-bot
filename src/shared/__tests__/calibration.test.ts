@@ -1,11 +1,11 @@
-import { jest, describe, it, expect } from '@jest/globals';
+import { describe, it, expect, vi } from 'vitest';
 
-jest.unstable_mockModule('../logger.js', () => ({
+vi.mock('../logger.js', () => ({
   logger: {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
   },
 }));
 
@@ -23,13 +23,13 @@ function makeRedis(outcomes: OutcomeData[] = []) {
   let cachedCalibration: string | null = null;
 
   return {
-    zrange: jest.fn<any>(async () => ids),
-    hgetall: jest.fn<any>(async (key: string) => hashStore.get(key) ?? {}),
-    set: jest.fn<any>(async (_k: string, v: string) => {
+    zrange: vi.fn<any>(async () => ids),
+    hgetall: vi.fn<any>(async (key: string) => hashStore.get(key) ?? {}),
+    set: vi.fn<any>(async (_k: string, v: string) => {
       cachedCalibration = v;
       return 'OK';
     }),
-    get: jest.fn<any>(async (key: string) => {
+    get: vi.fn<any>(async (key: string) => {
       if (key.startsWith('calibration:')) return cachedCalibration;
       return null;
     }),

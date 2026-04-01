@@ -1,7 +1,7 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-jest.unstable_mockModule('../config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../config.js', () => ({
+  loadConfig: vi.fn(() => ({
     OUTCOME_HISTORY_DAYS: 180,
     OUTCOME_MAX_PER_CATEGORY: 3,
     CONTEXT_INJECTION_LIMIT: 5,
@@ -9,12 +9,12 @@ jest.unstable_mockModule('../config.js', () => ({
   })),
 }));
 
-jest.unstable_mockModule('../logger.js', () => ({
+vi.mock('../logger.js', () => ({
   logger: {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
   },
 }));
 
@@ -42,30 +42,30 @@ function makeRedis() {
   const sortedSets = new Map<string, { score: number; member: string }[]>();
 
   return {
-    hset: jest.fn<any>(async (key: string, fields: Record<string, string>) => {
+    hset: vi.fn<any>(async (key: string, fields: Record<string, string>) => {
       store.set(key, { ...fields });
       return Object.keys(fields).length;
     }),
-    hgetall: jest.fn<any>(async (key: string) => {
+    hgetall: vi.fn<any>(async (key: string) => {
       return store.get(key) ?? {};
     }),
-    expire: jest.fn<any>(async () => 1),
-    zadd: jest.fn<any>(async (key: string, score: number, member: string) => {
+    expire: vi.fn<any>(async () => 1),
+    zadd: vi.fn<any>(async (key: string, score: number, member: string) => {
       if (!sortedSets.has(key)) sortedSets.set(key, []);
       sortedSets.get(key)!.push({ score, member });
       return 1;
     }),
-    zcard: jest.fn<any>(async (key: string) => {
+    zcard: vi.fn<any>(async (key: string) => {
       return sortedSets.get(key)?.length ?? 0;
     }),
-    zpopmin: jest.fn<any>(async (key: string, count: number) => {
+    zpopmin: vi.fn<any>(async (key: string, count: number) => {
       const set = sortedSets.get(key);
       if (!set) return [];
       set.sort((a, b) => a.score - b.score);
       const removed = set.splice(0, count);
       return removed.flatMap((r) => [r.member, String(r.score)]);
     }),
-    zrevrange: jest.fn<any>(async (key: string, start: number, stop: number) => {
+    zrevrange: vi.fn<any>(async (key: string, start: number, stop: number) => {
       const set = sortedSets.get(key);
       if (!set) return [];
       set.sort((a, b) => b.score - a.score);
@@ -109,7 +109,7 @@ describe('recordOutcome', () => {
     // Should not throw
     await recordOutcome(redis as any, makeOutcome());
 
-    expect((logger.warn as jest.Mock)).toHaveBeenCalledWith(
+    expect((logger.warn as any)).toHaveBeenCalledWith(
       expect.stringContaining('failed to record outcome'),
       expect.any(Object),
     );

@@ -21,6 +21,8 @@ const envSchema = z.object({
   // LLM — at least one must be set (validated below)
   OPENAI_API_KEY: z.string().optional(),
   GEMINI_API_KEY: z.string().optional(),
+  ANTHROPIC_API_KEY: z.string().optional(),
+  DEEPSEEK_API_KEY: z.string().optional(),
 
   // Telegram
   TELEGRAM_BOT_TOKEN: z.string().optional(),
@@ -184,8 +186,8 @@ export function loadConfig(forceReload = false): AppConfig {
   const cfg = parsed.data;
 
   // At least one LLM provider must be configured
-  if (!cfg.OPENAI_API_KEY && !cfg.GEMINI_API_KEY) {
-    throw new Error('At least one of OPENAI_API_KEY or GEMINI_API_KEY must be set');
+  if (!cfg.OPENAI_API_KEY && !cfg.GEMINI_API_KEY && !cfg.ANTHROPIC_API_KEY && !cfg.DEEPSEEK_API_KEY) {
+    throw new Error('At least one LLM API key must be set (OPENAI_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, or DEEPSEEK_API_KEY)');
   }
 
   _config = cfg;

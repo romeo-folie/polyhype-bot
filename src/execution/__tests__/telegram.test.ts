@@ -1,15 +1,15 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { TradeSignal } from '../../mapping/index.js';
 import type { Position } from '../positionLedger.js';
 
 // Mock logger
-jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
 // Mock Config
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
     REDIS_URL: 'redis://localhost:6379',
     SIMMER_API_KEY: 'test-key',
     OPENAI_API_KEY: 'test-openai',
@@ -18,7 +18,7 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
   })),
 }));
 
-const mockFetch = jest.fn<typeof fetch>();
+const mockFetch = vi.fn<typeof fetch>();
 (global as unknown as { fetch: typeof mockFetch }).fetch = mockFetch;
 
 const { notifyTradeExecuted, notifyTradeError, notifyTakeProfitExecuted } =

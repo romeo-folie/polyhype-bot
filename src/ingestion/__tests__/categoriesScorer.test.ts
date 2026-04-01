@@ -1,9 +1,9 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { RssItem } from '../rss.js';
 import { CATEGORIES } from '../categories/index.js';
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
     LLM_PROVIDER: 'gemini',
@@ -12,9 +12,9 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGenerateContent = jest.fn<(...args: any[]) => any>();
-jest.unstable_mockModule('@google/generative-ai', () => ({
-  GoogleGenerativeAI: jest.fn().mockImplementation(() => ({
+const mockGenerateContent = vi.fn<(...args: any[]) => any>();
+vi.mock('@google/generative-ai', () => ({
+  GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
     getGenerativeModel: () => ({
       generateContent: mockGenerateContent,
     }),
@@ -22,9 +22,9 @@ jest.unstable_mockModule('@google/generative-ai', () => ({
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockChatCreate = jest.fn<(...args: any[]) => any>();
-jest.unstable_mockModule('openai', () => ({
-  default: jest.fn().mockImplementation(() => ({
+const mockChatCreate = vi.fn<(...args: any[]) => any>();
+vi.mock('openai', () => ({
+  default: vi.fn().mockImplementation(() => ({
     chat: {
       completions: {
         create: mockChatCreate,

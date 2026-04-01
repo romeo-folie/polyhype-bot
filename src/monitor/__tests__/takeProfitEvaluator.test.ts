@@ -1,4 +1,4 @@
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect } from 'vitest';
 import { evaluateTakeProfit } from '../takeProfitEvaluator.js';
 import type { Position } from '../../execution/positionLedger.js';
 import type { CurrentPrice } from '../priceFetcher.js';

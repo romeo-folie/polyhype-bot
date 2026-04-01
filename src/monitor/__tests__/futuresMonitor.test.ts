@@ -1,8 +1,8 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // Mock Config
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn().mockReturnValue({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn().mockReturnValue({
     FUTURES_ENABLED: true,
     FUTURES_STOP_LOSS_PCT: -1.5,
     FUTURES_TAKE_PROFIT_PCT: 3.0,
@@ -11,61 +11,61 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
 }));
 
 // Mock Logger
-jest.unstable_mockModule('../../shared/logger.js', () => ({
+vi.mock('../../shared/logger.js', () => ({
   logger: {
-    info: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-    warn: jest.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    warn: vi.fn(),
   },
 }));
 
 // Mock Redis
 const mockRedis = {
-  get: jest.fn(),
-  set: jest.fn(),
-  del: jest.fn(),
+  get: vi.fn(),
+  set: vi.fn(),
+  del: vi.fn(),
 };
 
-jest.unstable_mockModule('../../shared/redis.js', () => ({
-  getRedis: jest.fn().mockReturnValue(mockRedis),
-  closeRedis: jest.fn(),
+vi.mock('../../shared/redis.js', () => ({
+  getRedis: vi.fn().mockReturnValue(mockRedis),
+  closeRedis: vi.fn(),
 }));
 
 // Mock Hyperliquid Client
-const mockGetOpenPositions = jest.fn();
-const mockClosePosition = jest.fn();
-jest.unstable_mockModule('../../shared/hyperliquid.js', () => ({
-  getHyperliquid: jest.fn().mockReturnValue({
+const mockGetOpenPositions = vi.fn();
+const mockClosePosition = vi.fn();
+vi.mock('../../shared/hyperliquid.js', () => ({
+  getHyperliquid: vi.fn().mockReturnValue({
     getOpenPositions: mockGetOpenPositions,
     closePosition: mockClosePosition,
   }),
 }));
 
 // Mock Position Ledger
-const mockGetLedgerPositions = jest.fn();
-const mockCloseLedgerPosition = jest.fn();
-jest.unstable_mockModule('../../execution/positionLedger.js', () => ({
+const mockGetLedgerPositions = vi.fn();
+const mockCloseLedgerPosition = vi.fn();
+vi.mock('../../execution/positionLedger.js', () => ({
   getOpenPositions: mockGetLedgerPositions,
   closePosition: mockCloseLedgerPosition,
 }));
 
 // Mock Telegram
-jest.unstable_mockModule('../../execution/telegram.js', () => ({
-  notifyTradeError: jest.fn(),
-  notifyTakeProfitExecuted: jest.fn(),
+vi.mock('../../execution/telegram.js', () => ({
+  notifyTradeError: vi.fn(),
+  notifyTakeProfitExecuted: vi.fn(),
 }));
 
 const { runFuturesMonitorWorker } = await import('../futuresMonitor.js');
 
 describe('futuresMonitor', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     // Break the while(true) loop after one tick.
     // We throw WITHOUT calling fn() so the Promise constructor rejects (uncaught resolve
     // would swallow the throw). The rejection propagates past the inner try/catch
     // (which only wraps the work, not the bottom sleep) and bubbles up to runTick.
-    jest.spyOn(global, 'setTimeout').mockImplementation((_fn: any) => {
+    vi.spyOn(global, 'setTimeout').mockImplementation((_fn: any) => {
       throw new Error('TEST_COMPLETE');
     });
 

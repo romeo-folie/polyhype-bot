@@ -1,15 +1,15 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGet = jest.fn<(...args: any[]) => any>();
+const mockGet = vi.fn<(...args: any[]) => any>();
 
-jest.unstable_mockModule('axios', () => ({
+vi.mock('axios', () => ({
   default: { get: mockGet },
   get: mockGet,
 }));
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
 const { scrapeHeadlines } = await import('../scraper.js');
@@ -60,7 +60,7 @@ describe('scrapeHeadlines (GDELT)', () => {
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    vi.restoreAllMocks();
   });
 
   it('returns deduplicated English articles from combined GDELT query', async () => {

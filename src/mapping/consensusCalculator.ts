@@ -109,7 +109,7 @@ async function callAnthropic(
   currentYesPrice: number,
 ): Promise<ConsensusResult> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const client = new Anthropic({ apiKey: loadConfig().ANTHROPIC_API_KEY });
 
   const abortCtrl = new AbortController();
   const abortTimer = setTimeout(() => abortCtrl.abort(), TIMEOUT_MS);
@@ -170,7 +170,7 @@ async function callDeepSeek(
 ): Promise<ConsensusResult> {
   const { default: OpenAI } = await import('openai');
   const client = new OpenAI({
-    apiKey: process.env.DEEPSEEK_API_KEY,
+    apiKey: loadConfig().DEEPSEEK_API_KEY,
     baseURL: 'https://api.deepseek.com',
   });
 
@@ -223,16 +223,17 @@ export interface ConsensusEstimate {
   sampleCount: number;       // how many calls succeeded
 }
 
-/** Single-call estimate — tries Gemini first, falls back to OpenAI. */
+/** Single-call estimate — tries Gemini first, falls back to OpenAI, then Anthropic, then DeepSeek. */
 async function estimateSingle(opts: {
   question: string;
   description: string | null;
   headline: string;
   currentYesPrice: number;
 }): Promise<ConsensusResult> {
-  const provider = loadConfig().LLM_PROVIDER;
-  const useGemini = provider === 'gemini' && Boolean(process.env.GEMINI_API_KEY);
-  const useOpenAI = Boolean(process.env.OPENAI_API_KEY);
+  const cfg = loadConfig();
+  const provider = cfg.LLM_PROVIDER;
+  const useGemini = provider === 'gemini' && Boolean(cfg.GEMINI_API_KEY);
+  const useOpenAI = Boolean(cfg.OPENAI_API_KEY);
 
   if (useGemini) {
     try {
@@ -254,7 +255,18 @@ async function estimateSingle(opts: {
     }
   }
 
-  if (process.env.DEEPSEEK_API_KEY) {
+  const useAnthropic = Boolean(cfg.ANTHROPIC_API_KEY);
+  if (useAnthropic) {
+    try {
+      return await callAnthropic(opts.question, opts.description, opts.headline, opts.currentYesPrice);
+    } catch (err) {
+      logger.warn('[consensus-calc] Anthropic failed, trying DeepSeek', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (cfg.DEEPSEEK_API_KEY) {
     try {
       return await callDeepSeek(opts.question, opts.description, opts.headline, opts.currentYesPrice);
     } catch (err) {
@@ -264,7 +276,7 @@ async function estimateSingle(opts: {
     }
   }
 
-  throw new Error('No LLM provider configured (OPENAI_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY required)');
+  throw new Error('No LLM provider configured (OPENAI_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, or DEEPSEEK_API_KEY required)');
 }
 
 /**
@@ -332,10 +344,11 @@ export async function estimateConsensusProbability(opts: {
   // Call each configured provider exactly once — one vote per model, no duplicates.
   // CONSENSUS_SAMPLES is no longer used to drive call count; it is kept in config
   // for backwards compatibility but ignored here.
-  const useOpenAI    = Boolean(process.env.OPENAI_API_KEY);
-  const useGemini    = Boolean(process.env.GEMINI_API_KEY);
-  const useAnthropic = Boolean(process.env.ANTHROPIC_API_KEY);
-  const useDeepSeek  = Boolean(process.env.DEEPSEEK_API_KEY);
+  const cfg = loadConfig();
+  const useOpenAI    = Boolean(cfg.OPENAI_API_KEY);
+  const useGemini    = Boolean(cfg.GEMINI_API_KEY);
+  const useAnthropic = Boolean(cfg.ANTHROPIC_API_KEY);
+  const useDeepSeek  = Boolean(cfg.DEEPSEEK_API_KEY);
   type ProviderFn = (q: string, d: string | null, h: string, p: number) => Promise<ConsensusResult>;
   const providers: ProviderFn[] = [
     ...(useOpenAI    ? [callOpenAI    as ProviderFn] : []),
@@ -345,7 +358,7 @@ export async function estimateConsensusProbability(opts: {
   ];
 
   if (providers.length === 0) {
-    throw new Error('No LLM providers configured — set OPENAI_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY');
+    throw new Error('No LLM providers configured — set OPENAI_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, or DEEPSEEK_API_KEY');
   }
   const calls = providers.map((provider) =>
     provider(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice),

@@ -1,19 +1,19 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-const mockGetPortfolio = jest.fn<() => Promise<{ balance_usdc: number }>>();
+const mockGetPortfolio = vi.fn<() => Promise<{ balance_usdc: number }>>();
 
-jest.unstable_mockModule('../simmer.js', () => ({
+vi.mock('../simmer.js', () => ({
   getPortfolio: mockGetPortfolio,
 }));
 
 const mockLogger = {
-  info: jest.fn(),
-  warn: jest.fn(),
-  error: jest.fn(),
-  debug: jest.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
 };
 
-jest.unstable_mockModule('../logger.js', () => ({
+vi.mock('../logger.js', () => ({
   logger: mockLogger,
 }));
 
@@ -22,7 +22,7 @@ const { getBankroll, setBankroll, deductStake, creditProceeds, _resetCacheForTes
 
 describe('bankroll', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     _resetCacheForTests();
     mockGetPortfolio.mockResolvedValue({ balance_usdc: 100 });
   });

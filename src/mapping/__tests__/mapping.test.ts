@@ -1,19 +1,19 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { ScoredItem } from '../../ingestion/scorer.js';
 
 // Mock entity extractor
-jest.unstable_mockModule('../entityExtractor.js', () => ({
-  findCandidateMarkets: jest.fn(),
+vi.mock('../entityExtractor.js', () => ({
+  findCandidateMarkets: vi.fn(),
 }));
 
 // Mock consensus calculator
-jest.unstable_mockModule('../consensusCalculator.js', () => ({
-  estimateConsensusProbability: jest.fn(),
+vi.mock('../consensusCalculator.js', () => ({
+  estimateConsensusProbability: vi.fn(),
 }));
 
 // Mock config
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn().mockReturnValue({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn().mockReturnValue({
     DIVERGENCE_THRESHOLD: 0.1,
     MAX_BET_FRACTION: 0.1,
     LLM_PROVIDER: 'openai',
@@ -26,8 +26,8 @@ const { findCandidateMarkets } = await import('../entityExtractor.js');
 const { estimateConsensusProbability } = await import('../consensusCalculator.js');
 const { runMapping } = await import('../index.js');
 
-const mockFindCandidates = findCandidateMarkets as jest.MockedFunction<typeof findCandidateMarkets>;
-const mockEstimate = estimateConsensusProbability as jest.MockedFunction<typeof estimateConsensusProbability>;
+const mockFindCandidates = vi.mocked(findCandidateMarkets);
+const mockEstimate = vi.mocked(estimateConsensusProbability);
 
 function makeScoredItem(overrides: Partial<ScoredItem> = {}): ScoredItem {
   return {
@@ -64,7 +64,7 @@ describe('runMapping', () => {
   });
 
   afterEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   it('returns a trade signal when edge ≥ threshold', async () => {

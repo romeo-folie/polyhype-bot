@@ -1,42 +1,42 @@
-import { jest, describe, it, expect, afterEach } from '@jest/globals';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { Position } from '../../execution/positionLedger.js';
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
 // Mock the gamma module
-jest.unstable_mockModule('../../mapping/gamma.js', () => ({
-  getMarket: jest.fn(),
-  parseOutcomePrices: jest.fn(),
-  searchEvents: jest.fn(),
-  parseYesPrice: jest.fn(),
+vi.mock('../../mapping/gamma.js', () => ({
+  getMarket: vi.fn(),
+  parseOutcomePrices: vi.fn(),
+  searchEvents: vi.fn(),
+  parseYesPrice: vi.fn(),
 }));
 
 // Mock redis + price feed so fetchCurrentPrice doesn't need a real connection
 const mockFeed = {
-  watch: jest.fn(async () => {}),
-  getCachedPrice: jest.fn(async () => null as number | null),
-  unwatch: jest.fn(),
-  destroy: jest.fn(),
+  watch: vi.fn(async () => {}),
+  getCachedPrice: vi.fn(async () => null as number | null),
+  unwatch: vi.fn(),
+  destroy: vi.fn(),
 };
 
-jest.unstable_mockModule('../../shared/redis.js', () => ({
-  getRedis: jest.fn(() => ({})),
-  closeRedis: jest.fn(async () => {}),
-  dedup: jest.fn(async () => true),
+vi.mock('../../shared/redis.js', () => ({
+  getRedis: vi.fn(() => ({})),
+  closeRedis: vi.fn(async () => {}),
+  dedup: vi.fn(async () => true),
 }));
 
-jest.unstable_mockModule('../../shared/feedSingleton.js', () => ({
-  getPriceFeed: jest.fn(() => mockFeed),
-  destroyPriceFeed: jest.fn(),
+vi.mock('../../shared/feedSingleton.js', () => ({
+  getPriceFeed: vi.fn(() => mockFeed),
+  destroyPriceFeed: vi.fn(),
 }));
 
 const { getMarket, parseOutcomePrices } = await import('../../mapping/gamma.js');
 const { fetchCurrentPrice, fetchAllCurrentPrices } = await import('../priceFetcher.js');
 
-const mockGetMarket = getMarket as jest.MockedFunction<typeof getMarket>;
-const mockParseOutcomePrices = parseOutcomePrices as jest.MockedFunction<typeof parseOutcomePrices>;
+const mockGetMarket = vi.mocked(getMarket);
+const mockParseOutcomePrices = vi.mocked(parseOutcomePrices);
 
 function makePosition(overrides: Partial<Position> = {}): Position {
   return {

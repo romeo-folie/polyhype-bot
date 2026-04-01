@@ -1,4 +1,4 @@
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect } from 'vitest';
 import { computeDivergence, computeHalfKelly, NOISE_STDDEV_THRESHOLD } from '../divergenceCalculator.js';
 
 const DEFAULT_INPUT = {

@@ -1,21 +1,21 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // --- Mocks ---
 
-const mockSubmitClobBuy = jest.fn<() => Promise<{ success: boolean; error?: string }>>();
-jest.unstable_mockModule('../../shared/clob.js', () => ({
+const mockSubmitClobBuy = vi.fn<() => Promise<{ success: boolean; error?: string }>>();
+vi.mock('../../shared/clob.js', () => ({
   submitClobBuy: mockSubmitClobBuy,
 }));
 
-const mockGetBankroll = jest.fn<() => Promise<number>>();
-const mockDeductStake = jest.fn<() => Promise<number>>();
-jest.unstable_mockModule('../../shared/bankroll.js', () => ({
+const mockGetBankroll = vi.fn<() => Promise<number>>();
+const mockDeductStake = vi.fn<() => Promise<number>>();
+vi.mock('../../shared/bankroll.js', () => ({
   getBankroll: mockGetBankroll,
   deductStake: mockDeductStake,
 }));
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
     CLOB_FALLBACK_ENABLED: true,
     ARB_ENABLED: true,
     ARB_MIN_EDGE: 0.05,
@@ -24,26 +24,26 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
   })),
 }));
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({
+vi.mock('../../shared/logger.js', () => ({
   logger: {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
   },
 }));
 
 // Mock Telegram so unhedged alert doesn't make real HTTP calls
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-jest.unstable_mockModule('../../execution/telegram.js', () => ({
-  notifyUnhedgedArbPosition: jest.fn<() => Promise<void>>().mockResolvedValue(),
+vi.mock('../../execution/telegram.js', () => ({
+  notifyUnhedgedArbPosition: vi.fn<() => Promise<void>>().mockResolvedValue(),
 }));
 
-const mockGetActiveMarkets = jest.fn<() => Promise<unknown[]>>();
+const mockGetActiveMarkets = vi.fn<() => Promise<unknown[]>>();
 const { parseOutcomePrices: realParseOutcomePrices, parseClobTokenIds: realParseClobTokenIds } =
   await import('../../mapping/gamma.js');
 
-jest.unstable_mockModule('../../mapping/gamma.js', () => ({
+vi.mock('../../mapping/gamma.js', () => ({
   getActiveMarkets: mockGetActiveMarkets,
   parseOutcomePrices: realParseOutcomePrices,
   parseClobTokenIds: realParseClobTokenIds,
@@ -59,17 +59,17 @@ const FEE_RATE = 0.02;
 function makeRedis() {
   const store = new Map<string, string>();
   return {
-    get: jest.fn(async (key: string) => store.get(key) ?? null),
-    set: jest.fn(async (key: string, value: string, ...args: unknown[]) => {
+    get: vi.fn(async (key: string) => store.get(key) ?? null),
+    set: vi.fn(async (key: string, value: string, ...args: unknown[]) => {
       if (args.includes('NX') && store.has(key)) return null;
       store.set(key, value);
       return 'OK';
     }),
-    setex: jest.fn(async (key: string, _ttl: number, value: string) => {
+    setex: vi.fn(async (key: string, _ttl: number, value: string) => {
       store.set(key, value);
       return 'OK';
     }),
-    del: jest.fn(async (key: string) => {
+    del: vi.fn(async (key: string) => {
       const had = store.has(key) ? 1 : 0;
       store.delete(key);
       return had;
@@ -105,7 +105,7 @@ describe('scanForArb', () => {
 
   beforeEach(() => {
     redis = makeRedis();
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   it('returns market with net edge > ARB_MIN_EDGE (0.05)', async () => {
@@ -201,7 +201,7 @@ describe('executeArb', () => {
 
   beforeEach(() => {
     redis = makeRedis();
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     mockGetBankroll.mockResolvedValue(100);
     mockDeductStake.mockResolvedValue(90);
   });

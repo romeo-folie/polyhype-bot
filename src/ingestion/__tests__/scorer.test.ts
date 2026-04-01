@@ -1,9 +1,9 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { RssItem } from '../rss.js';
 
 // Mock loadConfig so scorer tests don't need REDIS_URL / SIMMER_* env vars
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn(() => ({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
     LLM_PROVIDER: 'gemini', // default: try Gemini first, fall back to OpenAI
@@ -14,9 +14,9 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
 
 // Mock the Google Generative AI module
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGenerateContent = jest.fn<(...args: any[]) => any>();
-jest.unstable_mockModule('@google/generative-ai', () => ({
-  GoogleGenerativeAI: jest.fn().mockImplementation(() => ({
+const mockGenerateContent = vi.fn<(...args: any[]) => any>();
+vi.mock('@google/generative-ai', () => ({
+  GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
     getGenerativeModel: () => ({
       generateContent: mockGenerateContent,
     }),
@@ -25,9 +25,9 @@ jest.unstable_mockModule('@google/generative-ai', () => ({
 
 // Mock the OpenAI module
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockChatCreate = jest.fn<(...args: any[]) => any>();
-jest.unstable_mockModule('openai', () => ({
-  default: jest.fn().mockImplementation(() => ({
+const mockChatCreate = vi.fn<(...args: any[]) => any>();
+vi.mock('openai', () => ({
+  default: vi.fn().mockImplementation(() => ({
     chat: {
       completions: {
         create: mockChatCreate,
@@ -178,8 +178,8 @@ describe('scoreItems', () => {
     };
 
     const mockRedis = {
-      get: jest.fn<(key: string) => Promise<string | null>>().mockResolvedValue(JSON.stringify(cachedItem)),
-      set: jest.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      get: vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(JSON.stringify(cachedItem)),
+      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
     };
 
     const items = [makeItem('Cached headline')];
@@ -204,8 +204,8 @@ describe('scoreItems', () => {
     });
 
     const mockRedis = {
-      get: jest.fn<(key: string) => Promise<string | null>>().mockResolvedValue(null),
-      set: jest.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      get: vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(null),
+      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
     };
 
     const items = [makeItem('New headline')];

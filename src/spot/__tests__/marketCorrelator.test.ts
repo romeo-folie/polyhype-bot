@@ -1,12 +1,12 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { SpotMove } from '../thresholdDetector.js';
 
-jest.unstable_mockModule('../../shared/logger.js', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-jest.unstable_mockModule('../../shared/config.js', () => ({
-  loadConfig: jest.fn().mockReturnValue({
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn().mockReturnValue({
     LLM_PROVIDER: 'gemini',
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
@@ -14,26 +14,26 @@ jest.unstable_mockModule('../../shared/config.js', () => ({
 }));
 
 const mockRedis = {
-  get: jest.fn<() => Promise<string | null>>().mockResolvedValue(null),
-  set: jest.fn<() => Promise<'OK'>>().mockResolvedValue('OK'),
+  get: vi.fn<() => Promise<string | null>>().mockResolvedValue(null),
+  set: vi.fn<() => Promise<'OK'>>().mockResolvedValue('OK'),
 };
 
-jest.unstable_mockModule('../../shared/redis.js', () => ({
-  getRedis: jest.fn().mockReturnValue(mockRedis),
+vi.mock('../../shared/redis.js', () => ({
+  getRedis: vi.fn().mockReturnValue(mockRedis),
 }));
 
-jest.unstable_mockModule('../../mapping/gamma.js', () => ({
-  searchEvents: jest.fn(),
-  parseOutcomePrices: jest.fn(),
-  parseClobTokenIds: jest.fn(),
+vi.mock('../../mapping/gamma.js', () => ({
+  searchEvents: vi.fn(),
+  parseOutcomePrices: vi.fn(),
+  parseClobTokenIds: vi.fn(),
 }));
 
 // Mock LLM modules
-jest.unstable_mockModule('@google/generative-ai', () => ({
-  GoogleGenerativeAI: jest.fn().mockImplementation(() => ({
+vi.mock('@google/generative-ai', () => ({
+  GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
     getGenerativeModel: () => ({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      generateContent: jest.fn<any>().mockResolvedValue({
+      generateContent: vi.fn<any>().mockResolvedValue({
         response: { text: () => 'positive' },
       }),
     }),
@@ -45,9 +45,9 @@ const { searchEvents, parseOutcomePrices, parseClobTokenIds } = await import(
 );
 const { findCorrelatedMarkets } = await import('../marketCorrelator.js');
 
-const mockSearchEvents = searchEvents as jest.MockedFunction<typeof searchEvents>;
-const mockParseOutcomePrices = parseOutcomePrices as jest.MockedFunction<typeof parseOutcomePrices>;
-const mockParseClobTokenIds = parseClobTokenIds as jest.MockedFunction<typeof parseClobTokenIds>;
+const mockSearchEvents = vi.mocked(searchEvents);
+const mockParseOutcomePrices = vi.mocked(parseOutcomePrices);
+const mockParseClobTokenIds = vi.mocked(parseClobTokenIds);
 
 function makeMove(overrides: Partial<SpotMove> = {}): SpotMove {
   return {
