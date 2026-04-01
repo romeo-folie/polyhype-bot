@@ -9,6 +9,7 @@ import { runCopytrade } from './index.js';
 import { executeSignal } from '../execution/executor.js';
 import { recordPosition } from '../execution/positionLedger.js';
 import { deductStake, getBankroll } from '../shared/bankroll.js';
+import { SimmerError } from '../shared/simmer.js';
 
 /**
  * Persistent worker for low-latency copy-trading.
@@ -221,7 +222,16 @@ export async function runWorker(maxCycles?: number): Promise<void> {
         error: (err as Error).message,
         consecutiveFailures,
       });
-      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+
+      // 429: Simmer is rate-limiting — back off immediately with exponential delay
+      // (cap at 5 minutes) and do NOT count towards the circuit breaker since this
+      // is an expected transient condition, not a code/config failure.
+      if (err instanceof SimmerError && err.statusCode === 429) {
+        const rateLimitBackoffMs = Math.min(5_000 * Math.pow(2, consecutiveFailures - 1), 300_000);
+        logger.warn('[copytrade-worker] rate-limited by Simmer — backing off', { backoffMs: rateLimitBackoffMs });
+        await new Promise(resolve => setTimeout(resolve, rateLimitBackoffMs));
+        consecutiveFailures--; // 429 is not a real failure — don't advance the circuit breaker
+      } else if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         const backoffMs = Math.min(1000 * Math.pow(2, consecutiveFailures - MAX_CONSECUTIVE_FAILURES), 60_000);
         logger.warn('[copytrade-worker] circuit breaker: backing off', { backoffMs, consecutiveFailures });
         await new Promise(resolve => setTimeout(resolve, backoffMs));
