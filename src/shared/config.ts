@@ -152,7 +152,7 @@ const envSchema = z.object({
   CONTEXT_INJECTION_LIMIT: z.coerce.number().int().min(1).max(10).optional().default(5),
 
   // Redeemer guardrails
-  REDEEMER_DUPLICATE_WINDOW_S: z.coerce.number().int().min(60).optional().default(3_600),
+  REDEEMER_DUPLICATE_WINDOW_S: z.coerce.number().int().min(60).optional().default(30 * 24 * 3600),
   REDEEMER_DUST_THRESHOLD_USDC: z.coerce.number().min(0).optional().default(0.25),
   REDEEMER_FALLBACK_STALE_TTL_S: z.coerce.number().int().min(60).optional().default(21_600),
 
