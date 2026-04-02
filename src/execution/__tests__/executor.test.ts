@@ -73,9 +73,16 @@ vi.mock('../../shared/outcomeRecorder.js', () => ({
   inferCategory: vi.fn(() => 'geopolitical'),
 }));
 
+vi.mock('../../shared/telemetry.js', () => ({
+  recordExecutionMetric: vi.fn().mockResolvedValue(undefined),
+  recordExecutionTiming: vi.fn().mockResolvedValue(undefined),
+  recordExecutionEvent: vi.fn().mockResolvedValue(undefined),
+}));
+
 const { submitTrade, resolveSimmerMarketId } = await import('../../shared/simmer.js');
 const { submitClobBuy, getClobOrderBook, submitClobLimitBuy, getClobOrder, cancelClobOrder } = await import('../../shared/clob.js');
 const { hasOpenPosition } = await import('../positionLedger.js');
+const { recordExecutionMetric, recordExecutionTiming, recordExecutionEvent } = await import('../../shared/telemetry.js');
 const { executeSignal, executeSignals } = await import('../executor.js');
 
 const mockSubmit = vi.mocked(submitTrade);
@@ -86,6 +93,9 @@ const mockSubmitLimit = vi.mocked(submitClobLimitBuy);
 const mockGetOrder = vi.mocked(getClobOrder);
 const mockCancelOrder = vi.mocked(cancelClobOrder);
 const mockHasPosition = vi.mocked(hasOpenPosition);
+const mockRecordExecutionMetric = vi.mocked(recordExecutionMetric);
+const mockRecordExecutionTiming = vi.mocked(recordExecutionTiming);
+const mockRecordExecutionEvent = vi.mocked(recordExecutionEvent);
 
 function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
   return {
@@ -124,6 +134,12 @@ describe('executeSignal', () => {
     mockCancelOrder.mockReset();
     mockHasPosition.mockReset();
     mockGetCalibrationStats.mockReset();
+    mockRecordExecutionMetric.mockReset();
+    mockRecordExecutionTiming.mockReset();
+    mockRecordExecutionEvent.mockReset();
+    mockRecordExecutionMetric.mockResolvedValue(undefined);
+    mockRecordExecutionTiming.mockResolvedValue(undefined);
+    mockRecordExecutionEvent.mockResolvedValue(undefined);
     mockGetCalibrationStats.mockResolvedValue(null);
 
     mockConfig.EXECUTION_MODE = 'taker';
@@ -216,6 +232,19 @@ describe('executeSignal', () => {
       expect.objectContaining({ tokenId: 'tok-yes', amountUsd: 5.0 }),
     );
     expect(redis.set).toHaveBeenCalledTimes(1);
+    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'clob_fallback', 'simmer_market_missing');
+    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'clob_fallback_success', 'simmer_market_missing');
+    expect(mockRecordExecutionEvent).toHaveBeenCalledWith(
+      redis as any,
+      'execution_attempt',
+      expect.objectContaining({
+        executionPath: 'clob_fallback',
+        finalExecutionPath: 'clob_fallback',
+        finalVenue: 'clob',
+        fallbackReason: 'simmer_market_missing',
+        executionSucceeded: true,
+      }),
+    );
   });
 
   it('falls back to CLOB when Simmer says market not found', async () => {
@@ -243,6 +272,16 @@ describe('executeSignal', () => {
     expect(result.error).toContain('insufficient balance');
     expect(result.tradeResult?.success).toBe(false);
     expect(redis.set).not.toHaveBeenCalled();
+    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'errors', 'clob_fallback_failed');
+    expect(mockRecordExecutionEvent).toHaveBeenCalledWith(
+      redis as any,
+      'execution_attempt',
+      expect.objectContaining({
+        finalExecutionPath: 'error',
+        errorClass: 'clob_fallback_failed',
+        executionSucceeded: false,
+      }),
+    );
   });
 
   it('does not fallback to CLOB on non-market Simmer errors', async () => {
@@ -327,6 +366,12 @@ describe('execution mode', () => {
     mockCancelOrder.mockReset();
     mockHasPosition.mockReset();
     mockGetCalibrationStats.mockReset();
+    mockRecordExecutionMetric.mockReset();
+    mockRecordExecutionTiming.mockReset();
+    mockRecordExecutionEvent.mockReset();
+    mockRecordExecutionMetric.mockResolvedValue(undefined);
+    mockRecordExecutionTiming.mockResolvedValue(undefined);
+    mockRecordExecutionEvent.mockResolvedValue(undefined);
     mockGetCalibrationStats.mockResolvedValue(null);
 
     mockConfig.EXECUTION_MODE = 'taker';
@@ -391,6 +436,59 @@ describe('execution mode', () => {
     expect(result.skipped).toBe(false);
     expect(result.executionVenue).toBe('clob');
     expect(mockSubmit).not.toHaveBeenCalled();
+    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'maker_attempted', 'count');
+    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'maker_filled', 'count');
+    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'maker_full_fill', 'count');
+    expect(mockRecordExecutionTiming).toHaveBeenCalledWith(redis as any, 'maker_wait_ms', expect.any(Number));
+    expect(mockRecordExecutionEvent).toHaveBeenCalledWith(
+      redis as any,
+      'execution_attempt',
+      expect.objectContaining({
+        executionPath: 'maker_fill',
+        finalExecutionPath: 'maker_fill',
+        finalOrderType: 'maker',
+        makerFillStatus: 'full',
+        executionSucceeded: true,
+      }),
+    );
+  });
+
+  it('records maker timeout telemetry when maker mode does not fill', async () => {
+    mockConfig.EXECUTION_MODE = 'maker';
+    mockConfig.MAKER_MAX_WAIT_MS = 0;
+
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.49', size: '100' }],
+      asks: [{ price: '0.51', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+    mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-timeout' });
+    mockCancelOrder.mockResolvedValue(true);
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('maker_not_filled');
+    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'maker_timeout', 'count');
+    expect(mockRecordExecutionEvent).toHaveBeenCalledWith(
+      redis as any,
+      'execution_attempt',
+      expect.objectContaining({
+        finalExecutionPath: 'maker_timeout',
+        skipReason: 'maker_not_filled',
+        makerFillStatus: 'timeout',
+        executionSucceeded: false,
+      }),
+    );
   });
 
   it('skips taker when edge below TAKER_MIN_EDGE in hybrid mode', async () => {
