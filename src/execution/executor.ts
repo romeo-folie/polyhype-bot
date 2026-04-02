@@ -169,13 +169,13 @@ async function tryExecuteViaClobMaker(
 
   const price = resolveMakerPrice(book, cfg.MAKER_PRICE_EDGE_BPS);
   if (price === null) {
-    return { ok: false, error: 'maker_bad_price', waitMs: Date.now() - startedAt, makerBestBid: bestBid, makerBestAsk: bestAsk, makerMidPrice: mid ?? undefined, makerSpreadBps: spreadBps ?? undefined, makerFillStatus: 'rejected' };
+    return { ok: false, error: 'maker_bad_price', waitMs: Date.now() - startedAt, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'rejected' };
   }
 
   const size = signal.stakeUsd / price;
   const minOrderSize = parseFloat(book.min_order_size ?? '0');
   if (isFinite(minOrderSize) && minOrderSize > 0 && size < minOrderSize) {
-    return { ok: false, error: 'maker_below_min_size', waitMs: Date.now() - startedAt, makerBestBid: bestBid, makerBestAsk: bestAsk, makerMidPrice: mid ?? undefined, makerSpreadBps: spreadBps ?? undefined, makerFillStatus: 'rejected' };
+    return { ok: false, error: 'maker_below_min_size', waitMs: Date.now() - startedAt, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'rejected' };
   }
 
   logger.info('[executor] submitting maker order on CLOB', {
@@ -197,15 +197,15 @@ async function tryExecuteViaClobMaker(
   });
 
   if (!result.success || !result.order_id) {
-    return { ok: false, error: result.error ?? 'maker_order_rejected', waitMs: Date.now() - startedAt, makerOrderId: result.order_id ?? undefined, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, makerMidPrice: mid ?? undefined, makerSpreadBps: spreadBps ?? undefined, makerFillStatus: 'rejected' };
+    return { ok: false, error: result.error ?? 'maker_order_rejected', waitMs: Date.now() - startedAt, ...(result.order_id ? { makerOrderId: result.order_id } : {}), makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'rejected' };
   }
 
   if (cfg.MAKER_MAX_WAIT_MS <= 0) {
     const cancelled = await confirmMakerCancel(result.order_id);
     if (!cancelled) {
-      return { ok: false, error: 'maker_cancel_unconfirmed', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, makerMidPrice: mid ?? undefined, makerSpreadBps: spreadBps ?? undefined, makerFillStatus: 'cancel_unconfirmed' };
+      return { ok: false, error: 'maker_cancel_unconfirmed', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'cancel_unconfirmed' };
     }
-    return { ok: false, error: 'maker_not_filled', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, makerMidPrice: mid ?? undefined, makerSpreadBps: spreadBps ?? undefined, makerFillStatus: 'timeout' };
+    return { ok: false, error: 'maker_not_filled', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'timeout' };
   }
 
   const deadline = Date.now() + cfg.MAKER_MAX_WAIT_MS;
@@ -219,7 +219,7 @@ async function tryExecuteViaClobMaker(
       if (isFinite(original) && matched + 1e-9 < original) {
         const cancelled = await confirmMakerCancel(result.order_id);
         if (!cancelled) {
-          return { ok: false, error: 'maker_cancel_unconfirmed', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, makerMidPrice: mid ?? undefined, makerSpreadBps: spreadBps ?? undefined, makerFillStatus: 'cancel_unconfirmed' };
+          return { ok: false, error: 'maker_cancel_unconfirmed', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'cancel_unconfirmed' };
         }
       }
 
@@ -228,7 +228,7 @@ async function tryExecuteViaClobMaker(
         success: true,
         shares_bought: matched,
       };
-      return { ok: true, tradeResult, filledStakeUsd, waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, makerMidPrice: mid ?? undefined, makerSpreadBps: spreadBps ?? undefined, makerFillStatus: (matched + 1e-9 < original ? 'partial' : 'full'), makerSharesFilled: matched };
+      return { ok: true, tradeResult, filledStakeUsd, waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: (matched + 1e-9 < original ? 'partial' : 'full'), makerSharesFilled: matched };
     }
 
     await sleep(cfg.MAKER_POLL_INTERVAL_MS);
@@ -236,9 +236,9 @@ async function tryExecuteViaClobMaker(
 
   const cancelled = await confirmMakerCancel(result.order_id);
   if (!cancelled) {
-    return { ok: false, error: 'maker_cancel_unconfirmed', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, makerMidPrice: mid ?? undefined, makerSpreadBps: spreadBps ?? undefined, makerFillStatus: 'cancel_unconfirmed' };
+    return { ok: false, error: 'maker_cancel_unconfirmed', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'cancel_unconfirmed' };
   }
-  return { ok: false, error: 'maker_not_filled', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, makerMidPrice: mid ?? undefined, makerSpreadBps: spreadBps ?? undefined, makerFillStatus: 'timeout' };
+  return { ok: false, error: 'maker_not_filled', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'timeout' };
 }
 
 async function tryExecuteViaClob(signal: TradeSignal): Promise<{
@@ -281,33 +281,6 @@ async function executeHyperliquidSignal(
   knownSessionExposureUsd = 0,
 ): Promise<ExecutionResult> {
   const cfg = loadConfig();
-  const isTail = isTailPrice(signal.outcomePrice, cfg.TAIL_PRICE_THRESHOLD);
-  const baseEvent = {
-    executionId,
-    timestamp: new Date().toISOString(),
-    marketId: signal.marketId,
-    question: signal.question,
-    direction: signal.direction,
-    modeConfigured: cfg.EXECUTION_MODE,
-    edgeMagnitude: signal.edgeMagnitude,
-    consensusProbability: signal.consensusProbability,
-    marketProbability: signal.outcomePrice,
-    stakeUsdRequested: signal.stakeUsd,
-    feesEnabled: signal.feesEnabled ?? false,
-    isFutures: signal.isFutures ?? false,
-    isTailPrice: isTail,
-    tailThreshold: cfg.TAIL_PRICE_THRESHOLD,
-    takerMinEdge: cfg.TAKER_MIN_EDGE,
-    makerMaxWaitMs: cfg.MAKER_MAX_WAIT_MS,
-    makerPriceEdgeBps: cfg.MAKER_PRICE_EDGE_BPS,
-    makerPollIntervalMs: cfg.MAKER_POLL_INTERVAL_MS,
-  } as const;
-
-  const recordSkip = (reason: string) => {
-    void recordExecutionMetric(redis, 'skipped', reason).catch(() => {});
-    emitExecutionEvent({ ...baseEvent, finalExecutionPath: 'skipped', skipReason: reason });
-    return { signal, skipped: true, skipReason: reason };
-  };
   const hl = getHyperliquid();
 
   try {
@@ -416,33 +389,6 @@ async function triggerDeltaHedge(
   knownSessionExposureUsd = 0,
 ): Promise<boolean> {
   const cfg = loadConfig();
-  const isTail = isTailPrice(signal.outcomePrice, cfg.TAIL_PRICE_THRESHOLD);
-  const baseEvent = {
-    executionId,
-    timestamp: new Date().toISOString(),
-    marketId: signal.marketId,
-    question: signal.question,
-    direction: signal.direction,
-    modeConfigured: cfg.EXECUTION_MODE,
-    edgeMagnitude: signal.edgeMagnitude,
-    consensusProbability: signal.consensusProbability,
-    marketProbability: signal.outcomePrice,
-    stakeUsdRequested: signal.stakeUsd,
-    feesEnabled: signal.feesEnabled ?? false,
-    isFutures: signal.isFutures ?? false,
-    isTailPrice: isTail,
-    tailThreshold: cfg.TAIL_PRICE_THRESHOLD,
-    takerMinEdge: cfg.TAKER_MIN_EDGE,
-    makerMaxWaitMs: cfg.MAKER_MAX_WAIT_MS,
-    makerPriceEdgeBps: cfg.MAKER_PRICE_EDGE_BPS,
-    makerPollIntervalMs: cfg.MAKER_POLL_INTERVAL_MS,
-  } as const;
-
-  const recordSkip = (reason: string) => {
-    void recordExecutionMetric(redis, 'skipped', reason).catch(() => {});
-    emitExecutionEvent({ ...baseEvent, finalExecutionPath: 'skipped', skipReason: reason });
-    return { signal, skipped: true, skipReason: reason };
-  };
   if (!cfg.FUTURES_ENABLED || pmSignal.isFutures) return false;
 
   const hl = getHyperliquid();
@@ -533,7 +479,9 @@ export async function executeSignal(
       void recordExecutionMetric(redis, 'errors', 'telemetry_emit_failed').catch(() => {});
     });
   };
-  // 1) Idempotency check (Moved up to cover all platforms)
+
+  // 1) Idempotency check (Moved up to cover all platforms, executes before baseEvent setup)
+  const cfg = loadConfig();
   const key = idempotencyKey(signal);
   const alreadyFired = await redis.get(key);
   if (alreadyFired) {
@@ -541,11 +489,11 @@ export async function executeSignal(
       marketId: signal.marketId,
       key,
     });
-    return recordSkip('already_executed');
+    void recordExecutionMetric(redis, 'skipped', 'already_executed').catch(() => {});
+    return { signal, skipped: true, skipReason: 'already_executed' };
   }
 
   // 1b) Calibration correction (Phase 8b) — adjust edge before sizing
-  const cfg = loadConfig();
   const isTail = isTailPrice(signal.outcomePrice, cfg.TAIL_PRICE_THRESHOLD);
   const baseEvent = {
     executionId,
