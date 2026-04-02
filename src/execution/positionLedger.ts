@@ -291,22 +291,22 @@ function deserialisePosition(raw: Record<string, string>): Position {
     executionVenue: (venue || 'simmer'),
   };
 
-  if (raw.consensusProbability) pos.consensusProbability = parseFloat(raw.consensusProbability);
-  if (raw.consensusStddev) pos.consensusStddev = parseFloat(raw.consensusStddev);
+  if (raw.consensusProbability !== undefined && raw.consensusProbability !== '') pos.consensusProbability = parseFloat(raw.consensusProbability);
+  if (raw.consensusStddev !== undefined && raw.consensusStddev !== '') pos.consensusStddev = parseFloat(raw.consensusStddev);
   if (raw.txHash) pos.txHash = raw.txHash;
-  if (raw.sharesHeld) pos.sharesHeld = parseFloat(raw.sharesHeld);
+  if (raw.sharesHeld !== undefined && raw.sharesHeld !== '') pos.sharesHeld = parseFloat(raw.sharesHeld);
   if (raw.modeConfigured) pos.modeConfigured = raw.modeConfigured as Position['modeConfigured'];
   if (raw.entryExecutionPath) pos.entryExecutionPath = raw.entryExecutionPath;
   if (raw.entryOrderType) pos.entryOrderType = raw.entryOrderType as Position['entryOrderType'];
-  if (raw.decisionBestBid) pos.decisionBestBid = parseFloat(raw.decisionBestBid);
-  if (raw.decisionBestAsk) pos.decisionBestAsk = parseFloat(raw.decisionBestAsk);
-  if (raw.decisionMidPrice) pos.decisionMidPrice = parseFloat(raw.decisionMidPrice);
-  if (raw.decisionSpreadBps) pos.decisionSpreadBps = parseFloat(raw.decisionSpreadBps);
-  if (raw.counterfactualImmediateTakerPrice) pos.counterfactualImmediateTakerPrice = parseFloat(raw.counterfactualImmediateTakerPrice);
-  if (raw.counterfactualImmediateTakerShares) pos.counterfactualImmediateTakerShares = parseFloat(raw.counterfactualImmediateTakerShares);
-  if (raw.counterfactualImmediateTakerCostUsd) pos.counterfactualImmediateTakerCostUsd = parseFloat(raw.counterfactualImmediateTakerCostUsd);
-  if (raw.makerPriceImprovementBps) pos.makerPriceImprovementBps = parseFloat(raw.makerPriceImprovementBps);
-  if (raw.makerPriceImprovementUsd) pos.makerPriceImprovementUsd = parseFloat(raw.makerPriceImprovementUsd);
+  if (raw.decisionBestBid !== undefined && raw.decisionBestBid !== '') pos.decisionBestBid = parseFloat(raw.decisionBestBid);
+  if (raw.decisionBestAsk !== undefined && raw.decisionBestAsk !== '') pos.decisionBestAsk = parseFloat(raw.decisionBestAsk);
+  if (raw.decisionMidPrice !== undefined && raw.decisionMidPrice !== '') pos.decisionMidPrice = parseFloat(raw.decisionMidPrice);
+  if (raw.decisionSpreadBps !== undefined && raw.decisionSpreadBps !== '') pos.decisionSpreadBps = parseFloat(raw.decisionSpreadBps);
+  if (raw.counterfactualImmediateTakerPrice !== undefined && raw.counterfactualImmediateTakerPrice !== '') pos.counterfactualImmediateTakerPrice = parseFloat(raw.counterfactualImmediateTakerPrice);
+  if (raw.counterfactualImmediateTakerShares !== undefined && raw.counterfactualImmediateTakerShares !== '') pos.counterfactualImmediateTakerShares = parseFloat(raw.counterfactualImmediateTakerShares);
+  if (raw.counterfactualImmediateTakerCostUsd !== undefined && raw.counterfactualImmediateTakerCostUsd !== '') pos.counterfactualImmediateTakerCostUsd = parseFloat(raw.counterfactualImmediateTakerCostUsd);
+  if (raw.makerPriceImprovementBps !== undefined && raw.makerPriceImprovementBps !== '') pos.makerPriceImprovementBps = parseFloat(raw.makerPriceImprovementBps);
+  if (raw.makerPriceImprovementUsd !== undefined && raw.makerPriceImprovementUsd !== '') pos.makerPriceImprovementUsd = parseFloat(raw.makerPriceImprovementUsd);
   if (raw.fallbackReason) pos.fallbackReason = raw.fallbackReason;
   if (raw.reconciliationStatus) pos.reconciliationStatus = raw.reconciliationStatus;
   
@@ -314,7 +314,7 @@ function deserialisePosition(raw: Record<string, string>): Position {
   if (raw.pendingSettlement === 'true') pos.pendingSettlement = true;
   if (raw.isFutures === 'true') {
     pos.isFutures = true;
-    if (raw.leverage) pos.leverage = parseFloat(raw.leverage);
+    if (raw.leverage !== undefined && raw.leverage !== '') pos.leverage = parseFloat(raw.leverage);
     if (raw.symbol) pos.symbol = raw.symbol;
     if (raw.side) pos.side = raw.side as 'long' | 'short';
   }

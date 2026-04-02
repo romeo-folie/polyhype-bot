@@ -216,4 +216,32 @@ describe('executionVenue', () => {
     expect(positions[0]!.makerPriceImprovementUsd).toBe(0.2);
     expect(positions[0]!.fallbackReason).toBe('simmer_market_missing');
   });
+
+  it('preserves zero values for numeric benchmark fields (regression: truthiness guard)', async () => {
+    const redis = makeRedis();
+    await recordPosition(redis as any, makePosition({
+      executionVenue: 'clob',
+      modeConfigured: 'hybrid',
+      decisionBestBid: 0,
+      decisionBestAsk: 0,
+      decisionMidPrice: 0,
+      decisionSpreadBps: 0,
+      counterfactualImmediateTakerPrice: 0,
+      counterfactualImmediateTakerShares: 0,
+      counterfactualImmediateTakerCostUsd: 0,
+      makerPriceImprovementBps: 0,
+      makerPriceImprovementUsd: 0,
+    }));
+    const positions = await getOpenPositions(redis as any);
+
+    expect(positions[0]!.decisionBestBid).toBe(0);
+    expect(positions[0]!.decisionBestAsk).toBe(0);
+    expect(positions[0]!.decisionMidPrice).toBe(0);
+    expect(positions[0]!.decisionSpreadBps).toBe(0);
+    expect(positions[0]!.counterfactualImmediateTakerPrice).toBe(0);
+    expect(positions[0]!.counterfactualImmediateTakerShares).toBe(0);
+    expect(positions[0]!.counterfactualImmediateTakerCostUsd).toBe(0);
+    expect(positions[0]!.makerPriceImprovementBps).toBe(0);
+    expect(positions[0]!.makerPriceImprovementUsd).toBe(0);
+  });
 });

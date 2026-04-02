@@ -227,6 +227,36 @@ describe('getRecentOutcomes', () => {
     expect(outcomes[0]!.makerPriceImprovementBps).toBe(12.25);
     expect(outcomes[0]!.makerPriceImprovementUsd).toBe(0.42);
   });
+
+  it('preserves zero values for numeric attribution fields (regression: truthiness guard)', async () => {
+    const redis = makeRedis();
+    redis.zrevrange.mockResolvedValue(['zero-id']);
+    redis.hgetall.mockResolvedValue({
+      id: 'zero-id',
+      closedAt: '2026-01-01T00:00:00Z',
+      source: 'osint',
+      category: 'geopolitical',
+      question: 'Zero value test',
+      direction: 'YES',
+      consensusProbability: '0.7',
+      divergence: '0.1',
+      result: 'won',
+      returnPct: '0',
+      holdingHours: '0',
+      executionVenue: 'clob',
+      urgencyScore: '0',
+      decisionSpreadBps: '0',
+      makerPriceImprovementBps: '0',
+      makerPriceImprovementUsd: '0',
+    });
+
+    const outcomes = await getRecentOutcomes(redis as any, 'geopolitical');
+
+    expect(outcomes[0]!.urgencyScore).toBe(0);
+    expect(outcomes[0]!.decisionSpreadBps).toBe(0);
+    expect(outcomes[0]!.makerPriceImprovementBps).toBe(0);
+    expect(outcomes[0]!.makerPriceImprovementUsd).toBe(0);
+  });
 });
 
 describe('inferCategory', () => {

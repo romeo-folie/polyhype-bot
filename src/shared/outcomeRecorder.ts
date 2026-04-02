@@ -173,14 +173,14 @@ export async function getRecentOutcomes(
       executionVenue: data.executionVenue ?? '',
     };
     if (data.executionId) parsed.executionId = data.executionId;
-    if (data.urgencyScore) parsed.urgencyScore = Number(data.urgencyScore);
+    if (data.urgencyScore !== undefined && data.urgencyScore !== '') parsed.urgencyScore = Number(data.urgencyScore);
     if (data.modeConfigured) parsed.modeConfigured = data.modeConfigured as NonNullable<PositionOutcome['modeConfigured']>;
     if (data.entryExecutionPath) parsed.entryExecutionPath = data.entryExecutionPath;
     if (data.entryOrderType) parsed.entryOrderType = data.entryOrderType as NonNullable<PositionOutcome['entryOrderType']>;
     if (data.fallbackReason) parsed.fallbackReason = data.fallbackReason;
-    if (data.decisionSpreadBps) parsed.decisionSpreadBps = Number(data.decisionSpreadBps);
-    if (data.makerPriceImprovementBps) parsed.makerPriceImprovementBps = Number(data.makerPriceImprovementBps);
-    if (data.makerPriceImprovementUsd) parsed.makerPriceImprovementUsd = Number(data.makerPriceImprovementUsd);
+    if (data.decisionSpreadBps !== undefined && data.decisionSpreadBps !== '') parsed.decisionSpreadBps = Number(data.decisionSpreadBps);
+    if (data.makerPriceImprovementBps !== undefined && data.makerPriceImprovementBps !== '') parsed.makerPriceImprovementBps = Number(data.makerPriceImprovementBps);
+    if (data.makerPriceImprovementUsd !== undefined && data.makerPriceImprovementUsd !== '') parsed.makerPriceImprovementUsd = Number(data.makerPriceImprovementUsd);
     outcomes.push(parsed);
   }
 
