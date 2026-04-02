@@ -153,23 +153,23 @@ async function tryExecuteViaClobMaker(
 
   const tokenId = clobTokenForSignal(signal);
   if (!tokenId) {
-    return { ok: false, error: 'maker_unavailable:missing_clob_token' };
+    return { ok: false, error: 'maker_unavailable:missing_clob_token', waitMs: Date.now() - startedAt };
   }
 
   const book = await getClobOrderBook(tokenId);
   if (!book) {
-    return { ok: false, error: 'maker_no_orderbook' };
+    return { ok: false, error: 'maker_no_orderbook', waitMs: Date.now() - startedAt };
   }
 
   const price = resolveMakerPrice(book, cfg.MAKER_PRICE_EDGE_BPS);
   if (price === null) {
-    return { ok: false, error: 'maker_bad_price' };
+    return { ok: false, error: 'maker_bad_price', waitMs: Date.now() - startedAt };
   }
 
   const size = signal.stakeUsd / price;
   const minOrderSize = parseFloat(book.min_order_size ?? '0');
   if (isFinite(minOrderSize) && minOrderSize > 0 && size < minOrderSize) {
-    return { ok: false, error: 'maker_below_min_size' };
+    return { ok: false, error: 'maker_below_min_size', waitMs: Date.now() - startedAt };
   }
 
   const startedAt = Date.now();
