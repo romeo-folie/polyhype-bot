@@ -158,6 +158,23 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         }
       }
 
+      const tradeResultPrice = result.tradeResult.price;
+      const impliedFillPrice = (sharesHeld != null && isFinite(sharesHeld) && sharesHeld > 0)
+        ? (result.signal.stakeUsd / sharesHeld)
+        : undefined;
+      const makerPostedPrice = (() => {
+        const raw = (result.decisionBenchmark as Record<string, unknown> | undefined)?.['makerPostedPrice'];
+        return (typeof raw === 'number' && isFinite(raw) && raw > 0) ? raw : undefined;
+      })();
+      const entryPrice =
+        (typeof tradeResultPrice === 'number' && isFinite(tradeResultPrice) && tradeResultPrice > 0)
+          ? tradeResultPrice
+          : (impliedFillPrice != null && isFinite(impliedFillPrice) && impliedFillPrice > 0)
+            ? impliedFillPrice
+            : (makerPostedPrice != null)
+              ? makerPostedPrice
+              : result.signal.outcomePrice;
+
       // Record in ledger
       await recordPosition(redis, {
         marketId: result.signal.marketId,
@@ -166,7 +183,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         clobTokenIds: result.signal.clobTokenIds,
         question: result.signal.question,
         direction: result.signal.direction,
-        entryPrice: result.signal.outcomePrice,
+        entryPrice,
         stakeUsd: result.signal.stakeUsd,
         consensusProbability: result.signal.consensusProbability ?? 0.5,
         consensusStddev: result.signal.consensusStddev,
