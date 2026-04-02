@@ -16,6 +16,7 @@ import type { Redis } from 'ioredis';
 export interface PositionOutcome {
   id: string;
   closedAt: string;
+  executionId?: string;
   source: 'osint' | 'copytrade' | 'spot' | 'arb' | 'crypto-arb';
   category: string;
   question: string;
@@ -27,6 +28,13 @@ export interface PositionOutcome {
   returnPct: number;
   holdingHours: number;
   executionVenue: string;
+  modeConfigured?: 'hybrid' | 'maker' | 'taker';
+  entryExecutionPath?: string;
+  entryOrderType?: 'maker' | 'taker' | 'none';
+  fallbackReason?: string;
+  decisionSpreadBps?: number;
+  makerPriceImprovementBps?: number;
+  makerPriceImprovementUsd?: number;
 }
 
 /**
@@ -153,20 +161,28 @@ export async function getRecentOutcomes(
       const parsed: PositionOutcome = {
         id: data.id,
         closedAt: data.closedAt ?? '',
-        source: data.source as PositionOutcome['source'],
-        category: data.category ?? '',
-        question: data.question ?? '',
-        direction: data.direction as 'YES' | 'NO',
-        consensusProbability: Number(data.consensusProbability) || 0,
+      source: data.source as PositionOutcome['source'],
+      category: data.category ?? '',
+      question: data.question ?? '',
+      direction: data.direction as 'YES' | 'NO',
+      consensusProbability: Number(data.consensusProbability) || 0,
         divergence: Number(data.divergence) || 0,
         result: data.result as 'won' | 'lost' | 'pushed',
-        returnPct: Number(data.returnPct) || 0,
-        holdingHours: Number(data.holdingHours) || 0,
-        executionVenue: data.executionVenue ?? '',
-      };
-      if (data.urgencyScore) parsed.urgencyScore = Number(data.urgencyScore);
-      outcomes.push(parsed);
-    }
+      returnPct: Number(data.returnPct) || 0,
+      holdingHours: Number(data.holdingHours) || 0,
+      executionVenue: data.executionVenue ?? '',
+    };
+    if (data.executionId) parsed.executionId = data.executionId;
+    if (data.urgencyScore) parsed.urgencyScore = Number(data.urgencyScore);
+    if (data.modeConfigured) parsed.modeConfigured = data.modeConfigured as NonNullable<PositionOutcome['modeConfigured']>;
+    if (data.entryExecutionPath) parsed.entryExecutionPath = data.entryExecutionPath;
+    if (data.entryOrderType) parsed.entryOrderType = data.entryOrderType as NonNullable<PositionOutcome['entryOrderType']>;
+    if (data.fallbackReason) parsed.fallbackReason = data.fallbackReason;
+    if (data.decisionSpreadBps) parsed.decisionSpreadBps = Number(data.decisionSpreadBps);
+    if (data.makerPriceImprovementBps) parsed.makerPriceImprovementBps = Number(data.makerPriceImprovementBps);
+    if (data.makerPriceImprovementUsd) parsed.makerPriceImprovementUsd = Number(data.makerPriceImprovementUsd);
+    outcomes.push(parsed);
+  }
 
     return outcomes;
   } catch (err) {

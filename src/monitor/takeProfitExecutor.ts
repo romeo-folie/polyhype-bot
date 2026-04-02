@@ -58,7 +58,6 @@ function emitExecutionOutcome(redis: Redis, position: Position, returnPct: numbe
     executionId: position.executionId,
     marketId: position.marketId,
     direction: position.direction,
-    modeConfigured: loadConfig().EXECUTION_MODE,
     finalExecutionPath: 'take_profit',
     entryPrice: position.entryPrice,
     exitPrice: exitPrice,
@@ -66,6 +65,14 @@ function emitExecutionOutcome(redis: Redis, position: Position, returnPct: numbe
     exitTimestamp: new Date().toISOString(),
     realizedPnlUsd: realizedPnlUsd,
     realizedRoi: returnPct / 100,
+    executionVenue: position.executionVenue,
+    modeConfigured: position.modeConfigured ?? loadConfig().EXECUTION_MODE,
+    entryExecutionPath: position.entryExecutionPath ?? null,
+    entryOrderType: position.entryOrderType ?? null,
+    fallbackReason: position.fallbackReason ?? null,
+    decisionSpreadBps: position.decisionSpreadBps ?? null,
+    makerPriceImprovementBps: position.makerPriceImprovementBps ?? null,
+    makerPriceImprovementUsd: position.makerPriceImprovementUsd ?? null,
     closedReason: reason,
   }).catch(() => {});
 }

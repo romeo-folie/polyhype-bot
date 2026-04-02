@@ -9,14 +9,31 @@ import { recordOutcome, inferCategory, inferSource } from './outcomeRecorder.js'
  */
 export async function recordPositionOutcome(
   redis: Redis,
-  position: Pick<Position, 'sourcedFrom' | 'question' | 'direction' | 'consensusProbability' | 'edgeMagnitude' | 'openedAt' | 'executionVenue'>,
+  position: Pick<
+    Position,
+    | 'executionId'
+    | 'sourcedFrom'
+    | 'question'
+    | 'direction'
+    | 'consensusProbability'
+    | 'edgeMagnitude'
+    | 'openedAt'
+    | 'executionVenue'
+    | 'modeConfigured'
+    | 'entryExecutionPath'
+    | 'entryOrderType'
+    | 'fallbackReason'
+    | 'decisionSpreadBps'
+    | 'makerPriceImprovementBps'
+    | 'makerPriceImprovementUsd'
+  >,
   opts: {
     result: 'won' | 'lost';
     returnPct: number;
     executionVenueOverride?: string;
   },
 ): Promise<void> {
-  await recordOutcome(redis, {
+  const outcome = {
     source: inferSource(position.sourcedFrom ?? ''),
     category: inferCategory(position.question ?? ''),
     question: (position.question ?? '').slice(0, 200),
@@ -29,5 +46,17 @@ export async function recordPositionOutcome(
       ? (Date.now() - new Date(position.openedAt).getTime()) / 3600000
       : 0,
     executionVenue: opts.executionVenueOverride ?? position.executionVenue ?? 'simmer',
+  } as const;
+
+  await recordOutcome(redis, {
+    ...outcome,
+    ...(position.executionId ? { executionId: position.executionId } : {}),
+    ...(position.modeConfigured ? { modeConfigured: position.modeConfigured } : {}),
+    ...(position.entryExecutionPath ? { entryExecutionPath: position.entryExecutionPath } : {}),
+    ...(position.entryOrderType ? { entryOrderType: position.entryOrderType } : {}),
+    ...(position.fallbackReason ? { fallbackReason: position.fallbackReason } : {}),
+    ...(position.decisionSpreadBps !== undefined ? { decisionSpreadBps: position.decisionSpreadBps } : {}),
+    ...(position.makerPriceImprovementBps !== undefined ? { makerPriceImprovementBps: position.makerPriceImprovementBps } : {}),
+    ...(position.makerPriceImprovementUsd !== undefined ? { makerPriceImprovementUsd: position.makerPriceImprovementUsd } : {}),
   });
 }
