@@ -435,6 +435,9 @@ describe('execution mode', () => {
 
     expect(result.skipped).toBe(false);
     expect(result.executionVenue).toBe('clob');
+    expect(result.modeConfigured).toBe('maker');
+    expect(result.entryExecutionPath).toBe('maker_fill');
+    expect(result.entryOrderType).toBe('maker');
     expect(result.decisionBenchmark?.decisionBestAsk).toBe(0.51);
     expect(result.decisionBenchmark?.makerPriceImprovementUsd).toBeCloseTo((0.51 - 0.49) * 10, 6);
     expect(mockSubmit).not.toHaveBeenCalled();
@@ -531,6 +534,9 @@ describe('execution mode', () => {
 
     expect(result.skipped).toBe(false);
     expect(result.executionVenue).toBe('simmer');
+    expect(result.modeConfigured).toBe('taker');
+    expect(result.entryExecutionPath).toBe('taker_direct');
+    expect(result.entryOrderType).toBe('taker');
     expect(result.decisionBenchmark?.decisionBestAsk).toBe(0.51);
     expect(mockRecordExecutionEvent).toHaveBeenCalledTimes(1);
     const [, , payload] = mockRecordExecutionEvent.mock.calls[0]!;

@@ -431,6 +431,9 @@ async function executeHyperliquidSignal(
         skipped: false,
         tradeResult: { success: true, tx_hash: tradeResult.txHash, shares_bought: 0 },
         executionVenue: 'hyperliquid',
+        modeConfigured: cfg.EXECUTION_MODE,
+        entryExecutionPath: 'hyperliquid_fill',
+        entryOrderType: 'taker',
       };
     }
 
@@ -906,6 +909,10 @@ export async function executeSignal(
         skipped: false,
         tradeResult: makerAttempt.tradeResult,
         executionVenue: 'clob',
+        modeConfigured: cfg.EXECUTION_MODE,
+        entryExecutionPath: makerTelemetry.makerFillStatus === 'partial' ? 'maker_partial_fill' : 'maker_fill',
+        entryOrderType: 'maker',
+        decisionBenchmark: makerTelemetry as DecisionBenchmark,
         hedgeDispatched: true,
       };
     }
@@ -1004,7 +1011,15 @@ export async function executeSignal(
           });
         });
         const exeResult: ExecutionResult = {
-          signal, skipped: false, tradeResult, executionVenue: 'simmer', hedgeDispatched: true,
+          signal,
+          skipped: false,
+          tradeResult,
+          executionVenue: 'simmer',
+          modeConfigured: cfg.EXECUTION_MODE,
+          entryExecutionPath: takerPath ?? 'taker_direct',
+          entryOrderType: 'taker',
+          decisionBenchmark: makerTelemetry as DecisionBenchmark,
+          hedgeDispatched: true,
         };
         return exeResult;
       }
@@ -1027,7 +1042,16 @@ export async function executeSignal(
           errorClass: 'simmer_trade_failed',
           errorMessage: tradeResult.error ?? 'Simmer trade failed',
         });
-        return { signal, skipped: false, tradeResult, executionVenue: 'simmer' };
+        return {
+          signal,
+          skipped: false,
+          tradeResult,
+          executionVenue: 'simmer',
+          modeConfigured: cfg.EXECUTION_MODE,
+          entryExecutionPath: takerPath ?? 'taker_direct',
+          entryOrderType: 'taker',
+          decisionBenchmark: makerTelemetry as DecisionBenchmark,
+        };
       }
 
       logger.warn('[executor] Simmer rejected — attempting CLOB fallback', {
@@ -1059,7 +1083,16 @@ export async function executeSignal(
           errorClass: 'simmer_submit_failed',
           errorMessage: message,
         });
-        return { signal, skipped: false, error: message, executionVenue: 'simmer' };
+        return {
+          signal,
+          skipped: false,
+          error: message,
+          executionVenue: 'simmer',
+          modeConfigured: cfg.EXECUTION_MODE,
+          entryExecutionPath: takerPath ?? 'taker_direct',
+          entryOrderType: 'taker',
+          decisionBenchmark: makerTelemetry as DecisionBenchmark,
+        };
       }
 
       logger.warn('[executor] Simmer market unavailable (exception); attempting CLOB fallback', {
@@ -1129,6 +1162,11 @@ export async function executeSignal(
       skipped: false,
       tradeResult,
       executionVenue: 'clob',
+      modeConfigured: cfg.EXECUTION_MODE,
+      entryExecutionPath: clobFallbackReason ? 'clob_fallback' : 'clob_direct',
+      entryOrderType: 'taker',
+      decisionBenchmark: makerTelemetry as DecisionBenchmark,
+      fallbackReason: clobFallbackReason ?? undefined,
       hedgeDispatched: true,
     };
   }
@@ -1156,6 +1194,11 @@ export async function executeSignal(
     ...(clob.tradeResult ? { tradeResult: clob.tradeResult } : {}),
     error: fallbackError,
     executionVenue: 'clob',
+    modeConfigured: cfg.EXECUTION_MODE,
+    entryExecutionPath: clobFallbackReason ? 'clob_fallback' : 'clob_direct',
+    entryOrderType: 'taker',
+    decisionBenchmark: makerTelemetry as DecisionBenchmark,
+    fallbackReason: clobFallbackReason ?? undefined,
   };
 }
 
