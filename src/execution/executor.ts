@@ -579,7 +579,7 @@ export async function executeSignal(
       finalOrderType,
       executionSucceeded: false,
       skipReason: reason,
-      extra,
+      ...(extra ? { extra } : {}),
     });
     return { signal, skipped: true, skipReason: reason };
   };
@@ -650,7 +650,7 @@ export async function executeSignal(
         finalVenue: 'hyperliquid',
         finalOrderType: 'none',
         executionSucceeded: false,
-        skipReason: result.skipReason,
+        ...(result.skipReason ? { skipReason: result.skipReason } : {}),
       });
     } else if (result.error) {
       safeRecordExecutionMetric('errors', 'hyperliquid_execution_failed');
@@ -1018,7 +1018,7 @@ export async function executeSignal(
       finalStakeUsdExecuted: signal.stakeUsd,
       executionSucceeded: true,
       hedgeTriggered: true,
-      extra: clobFallbackReason ? { fallbackReason: clobFallbackReason } : undefined,
+      ...(clobFallbackReason ? { extra: { fallbackReason: clobFallbackReason } } : {}),
     });
     logger.info('[executor] trade submitted successfully via CLOB fallback', {
       marketId: signal.marketId,
@@ -1051,7 +1051,7 @@ export async function executeSignal(
     executionSucceeded: false,
     errorClass: 'clob_fallback_failed',
     errorMessage: fallbackError,
-    extra: clobFallbackReason ? { fallbackReason: clobFallbackReason } : undefined,
+    ...(clobFallbackReason ? { extra: { fallbackReason: clobFallbackReason } } : {}),
   });
   logger.error('[executor] CLOB fallback failed', {
     marketId: signal.marketId,
