@@ -14,14 +14,16 @@
 import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { submitTrade, resolveSimmerMarketId, getMarketContext, SimmerError } from '../shared/simmer.js';
-import { submitClobBuy } from '../shared/clob.js';
+import { submitClobBuy, getClobOrderBook, submitClobLimitBuy, getClobOrder, cancelClobOrder } from '../shared/clob.js';
 import { hasOpenPosition } from './positionLedger.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { loadConfig } from '../shared/config.js';
 import { getCalibrationStats, applyCalibrationCorrection } from '../shared/calibration.js';
 import { inferCategory } from '../shared/outcomeRecorder.js';
+import { recordExecutionMetric, recordExecutionTiming, recordExecutionEvent } from '../shared/telemetry.js';
 import { notifyTradeError, notifyTradeExecuted } from './telegram.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
+import type { TickSize } from '@polymarket/clob-client';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
 
@@ -65,6 +67,178 @@ function isMarketNotFoundMessage(msg: string | null | undefined): boolean {
 function shouldFallbackToClob(msg: string | null | undefined): boolean {
   if (!msg) return false;
   return isMarketNotFoundMessage(msg) || /order too small/i.test(msg);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function roundDownToTick(value: number, tick: number): number {
+  if (!isFinite(value) || !isFinite(tick) || tick <= 0) return value;
+  const rounded = Math.floor(value / tick) * tick;
+  return parseFloat(rounded.toFixed(6));
+}
+
+function isTailPrice(price: number, threshold: number): boolean {
+  if (!isFinite(price) || !isFinite(threshold)) return false;
+  return price <= threshold || price >= 1 - threshold;
+}
+
+function canExecuteTaker(
+  signal: TradeSignal,
+  cfg: ReturnType<typeof loadConfig>,
+): { ok: true } | { ok: false; reason: string } {
+  const edge = signal.edgeMagnitude ?? 0;
+  if (edge < cfg.TAKER_MIN_EDGE) {
+    return { ok: false, reason: 'taker_edge_below_min' };
+  }
+
+  if (cfg.TAIL_TAKER_BLOCK && isTailPrice(signal.outcomePrice, cfg.TAIL_PRICE_THRESHOLD)) {
+    if (edge < cfg.TAIL_TAKER_OVERRIDE_EDGE) {
+      return { ok: false, reason: 'taker_tail_blocked' };
+    }
+  }
+
+  return { ok: true };
+}
+
+async function confirmMakerCancel(orderId: string): Promise<boolean> {
+  const cancelled = await cancelClobOrder(orderId);
+  if (cancelled) return true;
+
+  // Retry briefly and confirm terminal state
+  for (const delay of [250, 500, 750]) {
+    await sleep(delay);
+    const order = await getClobOrder(orderId);
+    if (!order) return true;
+    const status = String(order.status ?? '').toLowerCase();
+    if (status && ['cancelled', 'canceled', 'filled'].includes(status)) return true;
+  }
+
+  return false;
+}
+
+function resolveMakerPrice(book: { bids: Array<{ price: string }>; asks: Array<{ price: string }>; tick_size: string }, priceEdgeBps: number): number | null {
+  const tick = parseFloat(book.tick_size);
+  if (!isFinite(tick) || tick <= 0) return null;
+
+  const bestBid = parseFloat(book.bids?.[0]?.price ?? '0');
+  const bestAsk = parseFloat(book.asks?.[0]?.price ?? '0');
+  const improvement = priceEdgeBps / 10_000;
+
+  let price = bestBid > 0 ? bestBid + improvement : 0;
+  if (price <= 0 && bestAsk > 0) {
+    price = bestAsk - tick;
+  }
+
+  if (bestAsk > 0) {
+    price = Math.min(price, bestAsk - tick);
+  }
+
+  price = Math.max(price, tick);
+  price = Math.min(price, 1 - tick);
+  price = roundDownToTick(price, tick);
+
+  if (!isFinite(price) || price <= 0) return null;
+  return price;
+}
+
+async function tryExecuteViaClobMaker(
+  signal: TradeSignal,
+  cfg: ReturnType<typeof loadConfig>,
+): Promise<{ ok: boolean; tradeResult?: SimmerTradeResult; error?: string; filledStakeUsd?: number; waitMs: number; makerOrderId?: string; makerPostedPrice?: number; makerPostedSize?: number; makerBestBid?: number; makerBestAsk?: number; makerMidPrice?: number; makerSpreadBps?: number; makerFillStatus?: 'none' | 'partial' | 'full' | 'timeout' | 'rejected' | 'cancel_unconfirmed'; makerSharesFilled?: number }> {
+  const startedAt = Date.now();
+  if (!cfg.CLOB_FALLBACK_ENABLED) {
+    return { ok: false, error: 'clob_disabled', waitMs: Date.now() - startedAt };
+  }
+
+  const tokenId = clobTokenForSignal(signal);
+  if (!tokenId) {
+    return { ok: false, error: 'maker_unavailable:missing_clob_token', waitMs: Date.now() - startedAt };
+  }
+
+  const book = await getClobOrderBook(tokenId);
+  if (!book) {
+    return { ok: false, error: 'maker_no_orderbook', waitMs: Date.now() - startedAt };
+  }
+
+  const bestBid = parseFloat(book.bids?.[0]?.price ?? '0');
+  const bestAsk = parseFloat(book.asks?.[0]?.price ?? '0');
+  const mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : null;
+  const spreadBps = bestBid > 0 && bestAsk > 0 && mid ? ((bestAsk - bestBid) / mid) * 10000 : null;
+
+  const price = resolveMakerPrice(book, cfg.MAKER_PRICE_EDGE_BPS);
+  if (price === null) {
+    return { ok: false, error: 'maker_bad_price', waitMs: Date.now() - startedAt, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'rejected' };
+  }
+
+  const size = signal.stakeUsd / price;
+  const minOrderSize = parseFloat(book.min_order_size ?? '0');
+  if (isFinite(minOrderSize) && minOrderSize > 0 && size < minOrderSize) {
+    return { ok: false, error: 'maker_below_min_size', waitMs: Date.now() - startedAt, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'rejected' };
+  }
+
+  logger.info('[executor] submitting maker order on CLOB', {
+    marketId: signal.marketId,
+    tokenId,
+    price,
+    size,
+    stakeUsd: signal.stakeUsd,
+  });
+
+  const result = await submitClobLimitBuy({
+    tokenId,
+    price,
+    size,
+    tickSize: book.tick_size as TickSize,
+    negRisk: book.neg_risk,
+    orderType: 'GTC',
+    postOnly: true,
+  });
+
+  if (!result.success || !result.order_id) {
+    return { ok: false, error: result.error ?? 'maker_order_rejected', waitMs: Date.now() - startedAt, ...(result.order_id ? { makerOrderId: result.order_id } : {}), makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'rejected' };
+  }
+
+  if (cfg.MAKER_MAX_WAIT_MS <= 0) {
+    const cancelled = await confirmMakerCancel(result.order_id);
+    if (!cancelled) {
+      return { ok: false, error: 'maker_cancel_unconfirmed', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'cancel_unconfirmed' };
+    }
+    return { ok: false, error: 'maker_not_filled', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'timeout' };
+  }
+
+  const deadline = Date.now() + cfg.MAKER_MAX_WAIT_MS;
+  while (Date.now() < deadline) {
+    const order = await getClobOrder(result.order_id);
+    if (!order) break;
+
+    const matched = parseFloat(order.size_matched ?? '0');
+    const original = parseFloat(order.original_size ?? '0');
+    if (matched > 0) {
+      if (isFinite(original) && matched + 1e-9 < original) {
+        const cancelled = await confirmMakerCancel(result.order_id);
+        if (!cancelled) {
+          return { ok: false, error: 'maker_cancel_unconfirmed', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'cancel_unconfirmed' };
+        }
+      }
+
+      const filledStakeUsd = matched * price;
+      const tradeResult: SimmerTradeResult = {
+        success: true,
+        shares_bought: matched,
+      };
+      return { ok: true, tradeResult, filledStakeUsd, waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: (matched + 1e-9 < original ? 'partial' : 'full'), makerSharesFilled: matched };
+    }
+
+    await sleep(cfg.MAKER_POLL_INTERVAL_MS);
+  }
+
+  const cancelled = await confirmMakerCancel(result.order_id);
+  if (!cancelled) {
+    return { ok: false, error: 'maker_cancel_unconfirmed', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'cancel_unconfirmed' };
+  }
+  return { ok: false, error: 'maker_not_filled', waitMs: Date.now() - startedAt, makerOrderId: result.order_id, makerPostedPrice: price, makerPostedSize: size, makerBestBid: bestBid, makerBestAsk: bestAsk, ...(mid ? { makerMidPrice: mid } : {}), ...(spreadBps ? { makerSpreadBps: spreadBps } : {}), makerFillStatus: 'timeout' };
 }
 
 async function tryExecuteViaClob(signal: TradeSignal): Promise<{
@@ -296,7 +470,19 @@ export async function executeSignal(
   redis: Redis,
   knownSessionExposureUsd = 0,
 ): Promise<ExecutionResult> {
-  // 1) Idempotency check (Moved up to cover all platforms)
+  const executionId = createHash('sha256').update(`${signal.marketId}:${signal.direction}:${Date.now()}:${Math.random()}`).digest('hex').slice(0, 16);
+  signal = { ...signal, executionId };
+  const decisionStartedAt = Date.now();
+  const modeConfigured = loadConfig().EXECUTION_MODE;
+  void recordExecutionMetric(redis, 'mode', modeConfigured).catch(() => {});
+  const emitExecutionEvent = (payload: Record<string, unknown>) => {
+    void recordExecutionEvent(redis, 'execution_attempt', payload).catch(() => {
+      void recordExecutionMetric(redis, 'errors', 'telemetry_emit_failed').catch(() => {});
+    });
+  };
+
+  // 1) Idempotency check (Moved up to cover all platforms, executes before baseEvent setup)
+  const cfg = loadConfig();
   const key = idempotencyKey(signal);
   const alreadyFired = await redis.get(key);
   if (alreadyFired) {
@@ -304,11 +490,38 @@ export async function executeSignal(
       marketId: signal.marketId,
       key,
     });
+    void recordExecutionMetric(redis, 'skipped', 'already_executed').catch(() => {});
     return { signal, skipped: true, skipReason: 'already_executed' };
   }
 
   // 1b) Calibration correction (Phase 8b) — adjust edge before sizing
-  const cfg = loadConfig();
+  const isTail = isTailPrice(signal.outcomePrice, cfg.TAIL_PRICE_THRESHOLD);
+  const baseEvent = {
+    executionId,
+    timestamp: new Date().toISOString(),
+    marketId: signal.marketId,
+    question: signal.question,
+    direction: signal.direction,
+    modeConfigured: cfg.EXECUTION_MODE,
+    edgeMagnitude: signal.edgeMagnitude,
+    consensusProbability: signal.consensusProbability,
+    marketProbability: signal.outcomePrice,
+    stakeUsdRequested: signal.stakeUsd,
+    feesEnabled: signal.feesEnabled ?? false,
+    isFutures: signal.isFutures ?? false,
+    isTailPrice: isTail,
+    tailThreshold: cfg.TAIL_PRICE_THRESHOLD,
+    takerMinEdge: cfg.TAKER_MIN_EDGE,
+    makerMaxWaitMs: cfg.MAKER_MAX_WAIT_MS,
+    makerPriceEdgeBps: cfg.MAKER_PRICE_EDGE_BPS,
+    makerPollIntervalMs: cfg.MAKER_POLL_INTERVAL_MS,
+  } as const;
+
+  const recordSkip = (reason: string) => {
+    void recordExecutionMetric(redis, 'skipped', reason).catch(() => {});
+    emitExecutionEvent({ ...baseEvent, finalExecutionPath: 'skipped', skipReason: reason });
+    return { signal, skipped: true, skipReason: reason };
+  };
   if (cfg.CALIBRATION_ENABLED && !signal.isFutures) {
     try {
       const category = inferCategory(signal.question);
@@ -347,7 +560,7 @@ export async function executeSignal(
         marketId: signal.marketId,
         direction: signal.direction,
       });
-      return { signal, skipped: true, skipReason: 'already_executed' };
+      return recordSkip('already_executed');
     }
 
     // Open position check for futures — prevent stacking from multiple signal sources.
@@ -357,7 +570,7 @@ export async function executeSignal(
         marketId: signal.marketId,
         direction: signal.direction,
       });
-      return { signal, skipped: true, skipReason: 'position_already_open' };
+      return recordSkip('position_already_open');
     }
     const result = await executeHyperliquidSignal(signal, redis, knownSessionExposureUsd);
     if (result.tradeResult?.success) {
@@ -374,7 +587,7 @@ export async function executeSignal(
       stakeUsd: signal.stakeUsd,
       minBetUsd: minStake,
     });
-    return { signal, skipped: true, skipReason: 'stake_below_floor' };
+    return recordSkip('stake_below_floor');
   }
 
   // 4) Open position check — don't stack into a market we already hold
@@ -384,10 +597,10 @@ export async function executeSignal(
       marketId: signal.marketId,
       direction: signal.direction,
     });
-    return { signal, skipped: true, skipReason: 'position_already_open' };
+    return recordSkip('position_already_open');
   }
 
-  // 5) Try Simmer first
+  const executionMode = cfg.EXECUTION_MODE;
   const simmerId = await resolveSimmerMarketId(signal.question);
 
   if (simmerId) {
@@ -400,7 +613,7 @@ export async function executeSignal(
           marketId: signal.marketId,
           status: ctx.market.status,
         });
-        return { signal, skipped: true, skipReason: `market_${ctx.market.status}` };
+        return recordSkip(`market_${ctx.market.status}`);
       }
 
       // Gate 2: Simmer already knows we have a position on this side
@@ -409,7 +622,7 @@ export async function executeSignal(
           marketId: signal.marketId,
           side: ctx.position.side,
         });
-        return { signal, skipped: true, skipReason: 'simmer_position_exists' };
+        return recordSkip('simmer_position_exists');
       }
 
       // Gate 3: severe flip-flop warning — we've been reversing too much on this market
@@ -419,7 +632,7 @@ export async function executeSignal(
           flipFlopWarning: ctx.discipline.flip_flop_warning,
           directionChanges24h: ctx.discipline.direction_changes_24h,
         });
-        return { signal, skipped: true, skipReason: 'flip_flop_severe' };
+        return recordSkip('flip_flop_severe');
       }
 
       // Gate 4: market has fees — fee drag erodes edge on geopolitical markets
@@ -428,7 +641,7 @@ export async function executeSignal(
           marketId: signal.marketId,
           feeRateBps: ctx.market.fee_rate_bps,
         });
-        return { signal, skipped: true, skipReason: `fee_market:${ctx.market.fee_rate_bps.toString()}bps` };
+        return recordSkip(`fee_market:${ctx.market.fee_rate_bps.toString()}bps`);
       }
 
       logger.info('[executor] context check passed', {
@@ -443,7 +656,121 @@ export async function executeSignal(
         simmerId,
       });
     }
+  }
 
+  let makerAttempted = false;
+  let makerFilled = false;
+  let makerTelemetry: Record<string, unknown> = {};
+  let takerPath: 'taker_direct' | 'hybrid_taker_fallback' | null = null;
+  let decisionSubmitted = false;
+
+  if (executionMode !== 'taker' && !signal.isFutures && signal.feesEnabled !== true) {
+    makerAttempted = true;
+    if (!decisionSubmitted) {
+      decisionSubmitted = true;
+      void recordExecutionTiming(redis, 'decision_to_submit_ms', Date.now() - decisionStartedAt).catch(() => {});
+    }
+    void recordExecutionMetric(redis, 'maker_attempted').catch(() => {});
+    const makerAttempt = await tryExecuteViaClobMaker(signal, cfg);
+    void recordExecutionTiming(redis, 'maker_wait_ms', makerAttempt.waitMs).catch(() => {});
+    makerTelemetry = {
+      makerAttempted: true,
+      makerOrderId: makerAttempt.makerOrderId ?? null,
+      makerPostedPrice: makerAttempt.makerPostedPrice ?? null,
+      makerPostedSize: makerAttempt.makerPostedSize ?? null,
+      makerOrderAccepted: makerAttempt.ok && makerAttempt.tradeResult?.success === true,
+      makerWaitMs: makerAttempt.waitMs,
+      makerFillStatus: makerAttempt.makerFillStatus ?? 'none',
+      makerSharesFilled: makerAttempt.makerSharesFilled ?? null,
+      makerFilledStakeUsd: makerAttempt.filledStakeUsd ?? null,
+      makerCancelConfirmed: makerAttempt.makerFillStatus === 'cancel_unconfirmed' ? false : null,
+      decisionBestBid: makerAttempt.makerBestBid ?? null,
+      decisionBestAsk: makerAttempt.makerBestAsk ?? null,
+      decisionMidPrice: makerAttempt.makerMidPrice ?? null,
+      decisionSpreadBps: makerAttempt.makerSpreadBps ?? null,
+      counterfactualImmediateTakerPrice: makerAttempt.makerBestAsk ?? null,
+      counterfactualImmediateTakerCostUsd: makerAttempt.makerBestAsk ? signal.stakeUsd : null,
+    };
+    if (makerAttempt.ok && makerAttempt.tradeResult?.success) {
+      if (makerAttempt.filledStakeUsd && makerAttempt.filledStakeUsd > 0 && makerAttempt.filledStakeUsd !== signal.stakeUsd) {
+        signal = { ...signal, stakeUsd: makerAttempt.filledStakeUsd };
+      }
+
+      makerFilled = true;
+      void recordExecutionMetric(redis, 'maker_filled').catch(() => {});
+      await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
+      if (makerTelemetry.makerFillStatus === 'partial') {
+        void recordExecutionMetric(redis, 'maker_partial_fill').catch(() => {});
+      } else {
+        void recordExecutionMetric(redis, 'maker_full_fill').catch(() => {});
+      }
+      logger.info('[executor] maker order filled on CLOB', {
+        marketId: signal.marketId,
+        stakeUsd: signal.stakeUsd,
+        sharesFilled: makerAttempt.tradeResult.shares_bought,
+      });
+      void notifyTradeExecuted(signal, undefined, { venue: 'clob', ...(makerAttempt.tradeResult.shares_bought != null && { sharesFilled: makerAttempt.tradeResult.shares_bought }) }).catch(() => {});
+
+      void triggerDeltaHedge(signal, redis, knownSessionExposureUsd).catch((err) => {
+        logger.warn('[executor] delta hedge async error (non-fatal)', {
+          marketId: signal.marketId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
+      emitExecutionEvent({
+        ...baseEvent,
+        ...makerTelemetry,
+        executionPath: 'maker_fill',
+        finalExecutionPath: makerTelemetry.makerFillStatus === 'partial' ? 'maker_partial_fill' : 'maker_fill',
+        finalVenue: 'clob',
+        finalOrderType: 'maker',
+        finalSharesFilled: makerAttempt.tradeResult?.shares_bought ?? null,
+        finalStakeUsdExecuted: signal.stakeUsd,
+        executionSucceeded: true,
+        hedgeTriggered: true,
+      });
+      return {
+        signal,
+        skipped: false,
+        tradeResult: makerAttempt.tradeResult,
+        executionVenue: 'clob',
+        hedgeDispatched: true,
+      };
+    }
+
+    if (executionMode === 'maker') {
+      logger.info('[executor] maker mode — no taker fallback', {
+        marketId: signal.marketId,
+        reason: makerAttempt.error ?? 'maker_not_filled',
+      });
+      return recordSkip(makerAttempt.error ?? 'maker_not_filled');
+    }
+  }
+
+  if (executionMode === 'hybrid') {
+    if (makerAttempted && !makerFilled) {
+      void recordExecutionMetric(redis, 'taker_fallback').catch(() => {});
+    }
+    const takerGate = canExecuteTaker(signal, cfg);
+    if (!takerGate.ok) {
+      logger.info('[executor] skipping — taker gate blocked', {
+        marketId: signal.marketId,
+        reason: takerGate.reason,
+      });
+      return recordSkip(takerGate.reason);
+    }
+  }
+
+  // 5) Try Simmer first
+
+  if (simmerId) {
+    takerPath = executionMode === 'taker' ? 'taker_direct' : (makerAttempted && !makerFilled ? 'hybrid_taker_fallback' : 'taker_direct');
+    if (takerPath === 'taker_direct') {
+      void recordExecutionMetric(redis, 'taker_direct').catch(() => {});
+    } else {
+      void recordExecutionMetric(redis, 'taker_fallback').catch(() => {});
+    }
     logger.info('[executor] submitting trade via Simmer', {
       marketId: signal.marketId,
       simmerId,
@@ -453,6 +780,10 @@ export async function executeSignal(
       consensusP: signal.consensusProbability,
     });
 
+    if (!decisionSubmitted) {
+      decisionSubmitted = true;
+      void recordExecutionTiming(redis, 'decision_to_submit_ms', Date.now() - decisionStartedAt).catch(() => {});
+    }
     try {
       const tradeResult = await submitTrade({
         market_id: simmerId,
@@ -463,6 +794,18 @@ export async function executeSignal(
 
       if (tradeResult.success) {
         await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
+        emitExecutionEvent({
+          ...baseEvent,
+          ...makerTelemetry,
+          executionPath: takerPath,
+          finalExecutionPath: takerPath,
+          finalVenue: 'simmer',
+          finalOrderType: 'taker',
+          finalSharesFilled: tradeResult.shares_bought ?? null,
+          finalStakeUsdExecuted: signal.stakeUsd,
+          executionSucceeded: true,
+          hedgeTriggered: true,
+        });
         logger.info('[executor] trade submitted successfully via Simmer', {
           marketId: signal.marketId,
           txHash: tradeResult.tx_hash,
@@ -532,10 +875,14 @@ export async function executeSignal(
     logger.info('[executor] skipping CLOB — market has fees enabled', {
       marketId: signal.marketId,
     });
-    return { signal, skipped: true, skipReason: 'fee_market:clob_path' };
+    return recordSkip('fee_market:clob_path');
   }
 
   // 7) CLOB fallback
+  if (!decisionSubmitted) {
+    decisionSubmitted = true;
+    void recordExecutionTiming(redis, 'decision_to_submit_ms', Date.now() - decisionStartedAt).catch(() => {});
+  }
   const clob = await tryExecuteViaClob(signal);
   if (clob.ok && clob.tradeResult?.success) {
     const tradeResult = clob.tradeResult;
@@ -562,6 +909,18 @@ export async function executeSignal(
   }
 
   const fallbackError = clob.error ?? 'CLOB fallback failed';
+  void recordExecutionMetric(redis, 'errors', 'clob_fallback_failed').catch(() => {});
+  emitExecutionEvent({
+    ...baseEvent,
+    ...makerTelemetry,
+    executionPath: 'execution_error',
+    finalExecutionPath: 'error',
+    finalVenue: 'clob',
+    finalOrderType: 'taker',
+    executionSucceeded: false,
+    errorClass: 'clob_fallback_failed',
+    errorMessage: fallbackError,
+  });
   logger.error('[executor] CLOB fallback failed', {
     marketId: signal.marketId,
     error: fallbackError,

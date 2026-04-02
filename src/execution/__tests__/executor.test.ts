@@ -19,6 +19,10 @@ vi.mock('../../shared/simmer.js', () => ({
 
 vi.mock('../../shared/clob.js', () => ({
   submitClobBuy: vi.fn(),
+  getClobOrderBook: vi.fn(),
+  submitClobLimitBuy: vi.fn(),
+  getClobOrder: vi.fn(),
+  cancelClobOrder: vi.fn(),
 }));
 
 vi.mock('../positionLedger.js', () => ({
@@ -29,17 +33,30 @@ vi.mock('../../shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
+const mockConfig = {
+  REDIS_URL: 'redis://localhost:6379',
+  SIMMER_API_KEY: 'test-key',
+  DIVERGENCE_THRESHOLD: 0.1,
+  OPENAI_API_KEY: 'test-openai',
+  FUTURES_ENABLED: false,
+  CALIBRATION_ENABLED: true,
+  CALIBRATION_MIN_SAMPLES: 20,
+  MIN_BET_USD: 1,  // low floor for tests — individual test cases set stakeUsd below this
+  EXECUTION_MODE: 'taker',
+  MAKER_MAX_WAIT_MS: 0,
+  MAKER_POLL_INTERVAL_MS: 10,
+  MAKER_PRICE_EDGE_BPS: 0,
+  TAKER_MIN_EDGE: 0,
+  TAIL_TAKER_BLOCK: false,
+  TAIL_PRICE_THRESHOLD: 0.2,
+  TAIL_TAKER_OVERRIDE_EDGE: 0.2,
+  CLOB_FALLBACK_ENABLED: true,
+};
+
+const mockLoadConfig = vi.fn(() => mockConfig);
+
 vi.mock('../../shared/config.js', () => ({
-  loadConfig: vi.fn(() => ({
-    REDIS_URL: 'redis://localhost:6379',
-    SIMMER_API_KEY: 'test-key',
-    DIVERGENCE_THRESHOLD: 0.1,
-    OPENAI_API_KEY: 'test-openai',
-    FUTURES_ENABLED: false,
-    CALIBRATION_ENABLED: true,
-    CALIBRATION_MIN_SAMPLES: 20,
-    MIN_BET_USD: 1,  // low floor for tests — individual test cases set stakeUsd below this
-  })),
+  loadConfig: mockLoadConfig,
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -57,13 +74,17 @@ vi.mock('../../shared/outcomeRecorder.js', () => ({
 }));
 
 const { submitTrade, resolveSimmerMarketId } = await import('../../shared/simmer.js');
-const { submitClobBuy } = await import('../../shared/clob.js');
+const { submitClobBuy, getClobOrderBook, submitClobLimitBuy, getClobOrder, cancelClobOrder } = await import('../../shared/clob.js');
 const { hasOpenPosition } = await import('../positionLedger.js');
 const { executeSignal, executeSignals } = await import('../executor.js');
 
 const mockSubmit = vi.mocked(submitTrade);
 const mockResolve = vi.mocked(resolveSimmerMarketId);
 const mockSubmitClob = vi.mocked(submitClobBuy);
+const mockGetOrderBook = vi.mocked(getClobOrderBook);
+const mockSubmitLimit = vi.mocked(submitClobLimitBuy);
+const mockGetOrder = vi.mocked(getClobOrder);
+const mockCancelOrder = vi.mocked(cancelClobOrder);
 const mockHasPosition = vi.mocked(hasOpenPosition);
 
 function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
@@ -97,14 +118,31 @@ describe('executeSignal', () => {
     mockSubmit.mockReset();
     mockResolve.mockReset();
     mockSubmitClob.mockReset();
+    mockGetOrderBook.mockReset();
+    mockSubmitLimit.mockReset();
+    mockGetOrder.mockReset();
+    mockCancelOrder.mockReset();
     mockHasPosition.mockReset();
     mockGetCalibrationStats.mockReset();
     mockGetCalibrationStats.mockResolvedValue(null);
+
+    mockConfig.EXECUTION_MODE = 'taker';
+    mockConfig.MAKER_MAX_WAIT_MS = 0;
+    mockConfig.MAKER_POLL_INTERVAL_MS = 10;
+    mockConfig.MAKER_PRICE_EDGE_BPS = 0;
+    mockConfig.TAKER_MIN_EDGE = 0;
+    mockConfig.TAIL_TAKER_BLOCK = false;
+    mockConfig.TAIL_PRICE_THRESHOLD = 0.2;
+    mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
 
     // Default: available in Simmer, Simmer succeeds, no open position
     mockResolve.mockResolvedValue('simmer-uuid-123');
     mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
     mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
+    mockGetOrderBook.mockResolvedValue(null);
+    mockSubmitLimit.mockResolvedValue({ success: false, error: 'maker_reject' });
+    mockGetOrder.mockResolvedValue(null);
+    mockCancelOrder.mockResolvedValue(true);
     mockHasPosition.mockResolvedValue(false);
   });
 
@@ -278,18 +316,126 @@ describe('calibration correction', () => {
   });
 });
 
+describe('execution mode', () => {
+  beforeEach(() => {
+    mockSubmit.mockReset();
+    mockResolve.mockReset();
+    mockSubmitClob.mockReset();
+    mockGetOrderBook.mockReset();
+    mockSubmitLimit.mockReset();
+    mockGetOrder.mockReset();
+    mockCancelOrder.mockReset();
+    mockHasPosition.mockReset();
+    mockGetCalibrationStats.mockReset();
+    mockGetCalibrationStats.mockResolvedValue(null);
+
+    mockConfig.EXECUTION_MODE = 'taker';
+    mockConfig.MAKER_MAX_WAIT_MS = 0;
+    mockConfig.MAKER_POLL_INTERVAL_MS = 10;
+    mockConfig.MAKER_PRICE_EDGE_BPS = 0;
+    mockConfig.TAKER_MIN_EDGE = 0;
+    mockConfig.TAIL_TAKER_BLOCK = false;
+    mockConfig.TAIL_PRICE_THRESHOLD = 0.2;
+    mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
+
+    mockResolve.mockResolvedValue('simmer-uuid-123');
+    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
+    mockGetOrderBook.mockResolvedValue(null);
+    mockSubmitLimit.mockResolvedValue({ success: false, error: 'maker_reject' });
+    mockGetOrder.mockResolvedValue(null);
+    mockCancelOrder.mockResolvedValue(true);
+    mockHasPosition.mockResolvedValue(false);
+  });
+
+  it('executes maker path when EXECUTION_MODE=maker and maker fills', async () => {
+    mockConfig.EXECUTION_MODE = 'maker';
+    mockConfig.MAKER_MAX_WAIT_MS = 10;
+
+    mockResolve.mockResolvedValue('simmer-uuid-123');
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.49', size: '100' }],
+      asks: [{ price: '0.51', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+    mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-1' });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-1',
+      status: 'filled',
+      owner: '0x1',
+      maker_address: '0x1',
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      side: 'BUY',
+      original_size: '10',
+      size_matched: '10',
+      price: '0.49',
+      associate_trades: [],
+      outcome: 'YES',
+      created_at: Date.now(),
+      expiration: '',
+      order_type: 'GTC',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('clob');
+    expect(mockSubmit).not.toHaveBeenCalled();
+  });
+
+  it('skips taker when edge below TAKER_MIN_EDGE in hybrid mode', async () => {
+    mockConfig.EXECUTION_MODE = 'hybrid';
+    mockConfig.TAKER_MIN_EDGE = 0.3;
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ edgeMagnitude: 0.1 }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('taker_edge_below_min');
+    expect(mockSubmit).not.toHaveBeenCalled();
+  });
+});
+
 describe('executeSignals', () => {
   beforeEach(() => {
     mockSubmit.mockReset();
     mockResolve.mockReset();
     mockSubmitClob.mockReset();
+    mockGetOrderBook.mockReset();
+    mockSubmitLimit.mockReset();
+    mockGetOrder.mockReset();
+    mockCancelOrder.mockReset();
     mockHasPosition.mockReset();
     mockGetCalibrationStats.mockReset();
     mockGetCalibrationStats.mockResolvedValue(null);
 
+    mockConfig.EXECUTION_MODE = 'taker';
+    mockConfig.MAKER_MAX_WAIT_MS = 0;
+    mockConfig.MAKER_POLL_INTERVAL_MS = 10;
+    mockConfig.MAKER_PRICE_EDGE_BPS = 0;
+    mockConfig.TAKER_MIN_EDGE = 0;
+    mockConfig.TAIL_TAKER_BLOCK = false;
+    mockConfig.TAIL_PRICE_THRESHOLD = 0.2;
+    mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
+
     mockResolve.mockResolvedValue('simmer-uuid-123');
     mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
     mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
+    mockGetOrderBook.mockResolvedValue(null);
+    mockSubmitLimit.mockResolvedValue({ success: false, error: 'maker_reject' });
+    mockGetOrder.mockResolvedValue(null);
+    mockCancelOrder.mockResolvedValue(true);
     mockHasPosition.mockResolvedValue(false);
   });
 

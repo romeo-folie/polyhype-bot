@@ -26,6 +26,7 @@ export interface TradeSignal {
   marketId: string;
   conditionId?: string;
   clobTokenIds?: string[];
+  executionId?: string;
   question: string;
   direction: 'YES' | 'NO' | 'LONG' | 'SHORT';
   stakeUsd: number;

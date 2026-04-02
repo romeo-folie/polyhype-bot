@@ -19,6 +19,7 @@ import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
 import { recordPositionOutcome } from '../shared/positionOutcomeRecorder.js';
+import { recordExecutionEvent } from '../shared/telemetry.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { Redis } from 'ioredis';
 import type { Position } from '../execution/positionLedger.js';
@@ -48,6 +49,25 @@ async function closePositionWithHedge(redis: Redis, marketId: string, direction:
     }
     await redis.del(`hedge:link:${marketId}`).catch((e: unknown) => { logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', { marketId, error: String(e) }); });
   }
+}
+
+function emitExecutionOutcome(redis: Redis, position: Position, returnPct: number, exitPrice: number, reason: ExitReason): void {
+  if (!position.executionId) return;
+  const realizedPnlUsd = position.stakeUsd * (returnPct / 100);
+  void recordExecutionEvent(redis, 'execution_outcome', {
+    executionId: position.executionId,
+    marketId: position.marketId,
+    direction: position.direction,
+    modeConfigured: loadConfig().EXECUTION_MODE,
+    finalExecutionPath: 'take_profit',
+    entryPrice: position.entryPrice,
+    exitPrice: exitPrice,
+    entryTimestamp: position.openedAt,
+    exitTimestamp: new Date().toISOString(),
+    realizedPnlUsd: realizedPnlUsd,
+    realizedRoi: returnPct / 100,
+    closedReason: reason,
+  }).catch(() => {});
 }
 
 export interface TakeProfitResult {
@@ -166,6 +186,7 @@ async function executeSimmerExit(opts: {
         result: returnPct >= 0 ? 'won' : 'lost',
         returnPct,
       });
+      emitExecutionOutcome(redis, position, returnPct, currentPrice, reason);
       await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
 
       logger.info('[take-profit-executor] exit successful (simmer)', {

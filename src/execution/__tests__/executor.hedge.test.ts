@@ -11,6 +11,12 @@ vi.mock('../../shared/config.js', () => ({
     MIN_BET_USD: 5,
     FUTURES_MAX_PER_TRADE_USD: 10,
     FUTURES_DEFAULT_LEVERAGE: 5,
+    EXECUTION_MODE: 'taker',
+    TAKER_MIN_EDGE: 0,
+    TAIL_TAKER_BLOCK: false,
+    TAIL_PRICE_THRESHOLD: 0.2,
+    TAIL_TAKER_OVERRIDE_EDGE: 0.2,
+    CLOB_FALLBACK_ENABLED: false,
   }),
 }));
 

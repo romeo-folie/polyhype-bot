@@ -107,7 +107,7 @@ export async function runReconciliation(redis: Redis): Promise<void> {
             marketId: ledgerPos.marketId,
             direction: ledgerPos.direction,
             venue: 'simmer',
-            ledgerShares: ledgerPos.sharesHeld,
+            ledgerShares: ledgerPos.sharesHeld ?? 0,
             reason: 'position in ledger but not found on Simmer',
           });
         } else {
@@ -213,7 +213,7 @@ export async function runReconciliation(redis: Redis): Promise<void> {
         marketId: simmerPos.market_id,
         direction: simmerPos.side.toUpperCase(),
         venue: 'simmer',
-        venueShares: simmerPos.shares,
+        venueShares: simmerPos.shares ?? 0,
         reason: 'position exists on Simmer but no matching ledger entry',
       });
     }

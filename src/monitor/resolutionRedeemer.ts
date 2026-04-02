@@ -224,6 +224,17 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
     for (const pos of redeemable) {
       if (results.length > 0) await sleep(REDEEM_DELAY_MS);
       const side = pos.side;
+      const reportedBalance = pos.value_usdc ?? pos.shares ?? null;
+      const posAny = pos as Record<string, unknown>;
+      const dedupeConditionId =
+        typeof posAny['condition_id'] === 'string' && posAny['condition_id'].length > 0
+          ? (posAny['condition_id'] as string)
+          : pos.market_id;
+      const skipReason = await shouldSkipRedeemer(redis, dedupeConditionId, side, reportedBalance, cfg);
+      if (skipReason) {
+        logRedeemerSkip(skipReason, dedupeConditionId, { marketId: pos.market_id, reportedBalance });
+        continue;
+      }
       try {
         const redeemResult = await submitRedeem({ market_id: pos.market_id, side });
 
@@ -239,6 +250,15 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
           if (proceedsUsdc > 0) {
             await creditProceeds(redis, proceedsUsdc);
           }
+          await markRedeemerSuccess(
+            redis,
+            dedupeConditionId,
+            side,
+            proceedsUsdc,
+            reportedBalance ?? proceedsUsdc ?? 0,
+            cfg,
+            redeemResult.tx_hash ?? undefined,
+          );
 
           // Record outcome (Phase 8).
           // redeemable === true means Polymarket confirmed our direction won.
@@ -409,6 +429,10 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
 
       if (!resolved) continue;
 
+      const resolvedQuestion = pos.question && pos.question.trim().length > 0
+        ? pos.question
+        : (resolved.question ?? pos.marketId);
+
       logger.info('[redeemer] CLOB market resolved', {
         marketId: pos.marketId,
         conditionId: conditionId,
@@ -438,7 +462,7 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
             void notifyManualRedemptionRequired({
               conditionId: conditionId,
               direction: pmDirection,
-              question: pos.question ?? undefined,
+              question: resolvedQuestion,
               ...(pos.sharesHeld != null && { estimatedUsdc: pos.sharesHeld }),
             }).catch(() => {});
           }
@@ -481,8 +505,8 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
       // Record outcome (Phase 8)
       await recordOutcome(redis, {
         source: inferSource(pos.sourcedFrom ?? ''),
-        category: inferCategory(pos.question ?? pos.marketId),
-        question: (pos.question ?? pos.marketId).slice(0, 200),
+        category: inferCategory(resolvedQuestion),
+        question: resolvedQuestion.slice(0, 200),
         direction: pos.direction as 'YES' | 'NO',
         consensusProbability: pos.consensusProbability ?? 0.5,
         divergence: pos.edgeMagnitude ?? 0,
@@ -495,7 +519,7 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
       // Notify
       await notifyRedemptionExecuted({
         marketId: pos.marketId,
-        question: pos.question ?? pos.marketId,
+        question: resolvedQuestion,
         side,
         valueUsdc: proceedsUsdc,
         ...(redeemResult.tx_hash ? { txHash: redeemResult.tx_hash } : {}),
@@ -532,7 +556,7 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
  */
 async function checkMarketResolved(
   conditionId: string,
-): Promise<{ outcome: 'YES' | 'NO' } | null> {
+): Promise<{ outcome: 'YES' | 'NO'; question?: string } | null> {
   try {
     const url = `https://gamma-api.polymarket.com/markets?condition_id=${encodeURIComponent(conditionId)}`;
     const resp = await fetch(url, {
@@ -550,12 +574,20 @@ async function checkMarketResolved(
       outcome?: string;
       outcomePrices?: string;
       outcomes?: string;
+      question?: string;
+      title?: string;
     }[];
 
     const market = data[0];
     if (!market) return null;
 
     if (!market.resolved && !market.closed) return null;
+
+    const question = typeof market.question === 'string'
+      ? market.question
+      : typeof market.title === 'string'
+        ? market.title
+        : undefined;
 
     // Gamma does NOT return an `outcome` field on resolved markets.
     // The winner is determined from `outcomePrices`: the winning outcome has price "1",
@@ -567,8 +599,8 @@ async function checkMarketResolved(
         const yesPrice = parseFloat(prices[0] ?? '0');
         const noPrice = parseFloat(prices[1] ?? '0');
 
-        if (yesPrice === 1) return { outcome: 'YES' };
-        if (noPrice === 1) return { outcome: 'NO' };
+        if (yesPrice === 1) return question ? { outcome: 'YES', question } : { outcome: 'YES' };
+        if (noPrice === 1) return question ? { outcome: 'NO', question } : { outcome: 'NO' };
 
         // Both non-1: market closed but not yet settled on-chain.
         // Polymarket settles on-chain after the resolution window (can take hours/days).
@@ -579,7 +611,8 @@ async function checkMarketResolved(
         });
         // Gamma hasn't updated outcomePrices yet — check on-chain directly.
         // The CTF contract's payoutDenominator is set when reportPayouts() is called.
-        return checkOnChainResolution(conditionId);
+        const onChain = await checkOnChainResolution(conditionId);
+        return onChain ? (question ? { ...onChain, question } : onChain) : null;
       } catch {
         logger.warn('[redeemer] failed to parse outcomePrices', { conditionId, outcomePrices: market.outcomePrices });
         return null;
@@ -589,7 +622,7 @@ async function checkMarketResolved(
     // Legacy fallback: some older markets may still have an outcome field
     const outcomeStr = (market.outcome ?? '').toUpperCase();
     if (outcomeStr === 'YES' || outcomeStr === 'NO') {
-      return { outcome: outcomeStr };
+      return question ? { outcome: outcomeStr, question } : { outcome: outcomeStr };
     }
 
     logger.warn('[redeemer] market resolved but outcome not determinable', { conditionId });
@@ -697,8 +730,8 @@ async function redeemSimmerLedgerFallback(
   });
 
   for (const pos of simmerPositions) {
-    if (alreadyRedeemed.has(pos.marketId)) continue;
     const conditionId = pos.conditionId;
+    if (alreadyRedeemed.has(pos.marketId) || (conditionId && alreadyRedeemed.has(conditionId))) continue;
     if (!conditionId) {
       logger.debug('[redeemer] Simmer fallback: skipping position without conditionId', {
         marketId: pos.marketId,
@@ -722,6 +755,10 @@ async function redeemSimmerLedgerFallback(
       await new Promise((r) => setTimeout(r, 200));
       if (!resolved) continue;
 
+      const resolvedQuestion = pos.question && pos.question.trim().length > 0
+        ? pos.question
+        : (resolved.question ?? pos.marketId);
+
       const won = resolved.outcome === pmDirection;
       if (!won) {
         // Market resolved against us — close ledger entry without redeeming
@@ -733,8 +770,8 @@ async function redeemSimmerLedgerFallback(
         await closePosition(redis, pos.marketId, pos.direction);
         await recordOutcome(redis, {
           source: inferSource(pos.sourcedFrom ?? ''),
-          category: inferCategory(pos.question ?? pos.marketId),
-          question: (pos.question ?? pos.marketId).slice(0, 200),
+          category: inferCategory(resolvedQuestion),
+          question: resolvedQuestion.slice(0, 200),
           direction: pmDirection,
           consensusProbability: pos.consensusProbability ?? 0.5,
           divergence: pos.edgeMagnitude ?? 0,
@@ -754,11 +791,11 @@ async function redeemSimmerLedgerFallback(
       });
 
       // Resolve Simmer's internal UUID (required for submitRedeem)
-      const simmerId = await resolveSimmerMarketId(pos.question ?? '');
+      const simmerId = await resolveSimmerMarketId(resolvedQuestion);
       if (!simmerId) {
         logger.warn('[redeemer] Simmer fallback: cannot resolve Simmer UUID — attempting on-chain redemption', {
           marketId: pos.marketId,
-          question: pos.question?.slice(0, 80),
+          question: resolvedQuestion.slice(0, 80),
           conditionId: conditionId,
         });
 
@@ -771,6 +808,7 @@ async function redeemSimmerLedgerFallback(
 
         if (onChainResult.success) {
           alreadyRedeemed.add(pos.marketId);
+          alreadyRedeemed.add(conditionId);
           await closePosition(redis, pos.marketId, pos.direction);
           const proceedsUsdc = pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : 0);
           if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
@@ -780,8 +818,8 @@ async function redeemSimmerLedgerFallback(
           logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), { marketId: pos.marketId, postBalance });
           await recordOutcome(redis, {
             source: inferSource(pos.sourcedFrom ?? ''),
-            category: inferCategory(pos.question ?? pos.marketId),
-            question: (pos.question ?? pos.marketId).slice(0, 200),
+            category: inferCategory(resolvedQuestion),
+            question: resolvedQuestion.slice(0, 200),
             direction: pmDirection,
             consensusProbability: pos.consensusProbability ?? 0.5,
             divergence: pos.edgeMagnitude ?? 0,
@@ -792,7 +830,7 @@ async function redeemSimmerLedgerFallback(
           });
           const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
             marketId: pos.marketId,
-            question: pos.question ?? pos.marketId,
+            question: resolvedQuestion,
             side,
             valueUsdc: proceedsUsdc,
             stakeUsd: pos.stakeUsd,
@@ -812,7 +850,7 @@ async function redeemSimmerLedgerFallback(
             void notifyManualRedemptionRequired({
               conditionId: conditionId,
               direction: pmDirection,
-              question: pos.question ?? undefined,
+              question: resolvedQuestion,
               ...(pos.sharesHeld != null && { estimatedUsdc: pos.sharesHeld }),
             }).catch(() => {});
           }
@@ -836,6 +874,7 @@ async function redeemSimmerLedgerFallback(
 
       if (redeemResult.success) {
         alreadyRedeemed.add(pos.marketId);
+        alreadyRedeemed.add(conditionId);
         await closePosition(redis, pos.marketId, pos.direction);
 
         const entryPriceSafe = pos.entryPrice > 0 && Number.isFinite(pos.entryPrice);
@@ -851,8 +890,8 @@ async function redeemSimmerLedgerFallback(
 
         await recordOutcome(redis, {
           source: inferSource(pos.sourcedFrom ?? ''),
-          category: inferCategory(pos.question ?? pos.marketId),
-          question: (pos.question ?? pos.marketId).slice(0, 200),
+          category: inferCategory(resolvedQuestion),
+          question: resolvedQuestion.slice(0, 200),
           direction: pmDirection,
           consensusProbability: pos.consensusProbability ?? 0.5,
           divergence: pos.edgeMagnitude ?? 0,
@@ -864,7 +903,7 @@ async function redeemSimmerLedgerFallback(
 
         const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
           marketId: pos.marketId,
-          question: pos.question ?? pos.marketId,
+          question: resolvedQuestion,
           side,
           valueUsdc: proceedsUsdc,
         };
@@ -997,6 +1036,7 @@ async function redeemOrphanClobPositions(
       await sleep(200); // rate-limit Gamma calls
 
       if (!resolved) continue;
+      const resolvedQuestion = resolved.question ?? conditionId;
       if (resolved.outcome !== direction) {
         // Lost — tokens will expire worthless, nothing to redeem
         logger.debug('[redeemer] orphan sweep: resolved as loss', { conditionId, direction, outcome: resolved.outcome });
@@ -1022,7 +1062,7 @@ async function redeemOrphanClobPositions(
 
         const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
           marketId: conditionId,
-          question: conditionId, // no question text available for orphans
+          question: resolvedQuestion,
           side: direction.toLowerCase() as 'yes' | 'no',
           valueUsdc,
         };
@@ -1048,6 +1088,7 @@ async function redeemOrphanClobPositions(
           void notifyManualRedemptionRequired({
             conditionId,
             direction,
+            question: resolvedQuestion,
             estimatedUsdc: balResult.balance,
           }).catch(() => {});
         }
