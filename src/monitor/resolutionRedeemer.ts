@@ -225,9 +225,14 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
       if (results.length > 0) await sleep(REDEEM_DELAY_MS);
       const side = pos.side;
       const reportedBalance = pos.value_usdc ?? pos.shares ?? null;
-      const skipReason = await shouldSkipRedeemer(redis, pos.market_id, side, reportedBalance, cfg);
+      const posAny = pos as Record<string, unknown>;
+      const dedupeConditionId =
+        typeof posAny['condition_id'] === 'string' && posAny['condition_id'].length > 0
+          ? (posAny['condition_id'] as string)
+          : pos.market_id;
+      const skipReason = await shouldSkipRedeemer(redis, dedupeConditionId, side, reportedBalance, cfg);
       if (skipReason) {
-        logRedeemerSkip(skipReason, pos.market_id, { marketId: pos.market_id, reportedBalance });
+        logRedeemerSkip(skipReason, dedupeConditionId, { marketId: pos.market_id, reportedBalance });
         continue;
       }
       try {
@@ -247,7 +252,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
           }
           await markRedeemerSuccess(
             redis,
-            pos.market_id,
+            dedupeConditionId,
             side,
             proceedsUsdc,
             reportedBalance ?? proceedsUsdc ?? 0,
