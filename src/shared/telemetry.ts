@@ -39,3 +39,10 @@ export async function recordExecutionTiming(redis: Redis, metric: string, ms: nu
   await hincrby(redis, `${BASE_KEY}:execution:${metric}`, 'sum_ms', rounded);
   await hincrby(redis, `${BASE_KEY}:execution:${metric}`, 'count', 1);
 }
+
+export async function recordExecutionEvent(redis: Redis, event: string, payload: Record<string, unknown>): Promise<void> {
+  const key = `${BASE_KEY}:execution:events`;
+  const entry = JSON.stringify({ event, ...payload });
+  await redis.lpush(key, entry);
+  await redis.ltrim(key, 0, 499);
+}

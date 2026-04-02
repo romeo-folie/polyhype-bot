@@ -20,6 +20,8 @@ export interface Position {
   marketId: string;
   /** Polymarket-specific fields (optional for futures) */
   conditionId?: string | undefined;
+  /** Execution attempt correlation ID */
+  executionId?: string | undefined;
   clobTokenIds?: string[] | undefined;
   /** Question or trade reasoning */
   question: string;
@@ -104,6 +106,7 @@ export async function recordPosition(
   await redis.hset(key, {
     marketId: position.marketId,
     conditionId: position.conditionId ?? '',
+    executionId: position.executionId ?? '',
     clobTokenIds: JSON.stringify(position.clobTokenIds || []),
     question: position.question,
     direction: position.direction,
@@ -246,6 +249,7 @@ function deserialisePosition(raw: Record<string, string>): Position {
   const pos: Position = {
     marketId: raw.marketId ?? '',
     conditionId: raw.conditionId,
+    executionId: raw.executionId || undefined,
     clobTokenIds: raw.clobTokenIds ? (JSON.parse(raw.clobTokenIds) as string[]) : [],
     question: raw.question ?? '',
     direction: (raw.direction ?? 'YES') as Position['direction'],
