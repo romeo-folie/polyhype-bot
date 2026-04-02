@@ -149,7 +149,7 @@ async function tryExecuteViaClobMaker(
 ): Promise<{ ok: boolean; tradeResult?: SimmerTradeResult; error?: string; filledStakeUsd?: number; waitMs: number }> {
   const startedAt = Date.now();
   if (!cfg.CLOB_FALLBACK_ENABLED) {
-    return { ok: false, error: 'clob_disabled' };
+    return { ok: false, error: 'clob_disabled', waitMs: Date.now() - startedAt };
   }
 
   const tokenId = clobTokenForSignal(signal);
