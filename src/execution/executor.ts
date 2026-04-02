@@ -147,6 +147,7 @@ async function tryExecuteViaClobMaker(
   signal: TradeSignal,
   cfg: ReturnType<typeof loadConfig>,
 ): Promise<{ ok: boolean; tradeResult?: SimmerTradeResult; error?: string; filledStakeUsd?: number; waitMs: number }> {
+  const startedAt = Date.now();
   if (!cfg.CLOB_FALLBACK_ENABLED) {
     return { ok: false, error: 'clob_disabled' };
   }
@@ -172,7 +173,6 @@ async function tryExecuteViaClobMaker(
     return { ok: false, error: 'maker_below_min_size', waitMs: Date.now() - startedAt };
   }
 
-  const startedAt = Date.now();
   logger.info('[executor] submitting maker order on CLOB', {
     marketId: signal.marketId,
     tokenId,
