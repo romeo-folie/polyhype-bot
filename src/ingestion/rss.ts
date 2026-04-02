@@ -21,6 +21,10 @@ const DEFAULT_FEEDS: FeedConfig[] = [
 ];
 
 const FEED_TIMEOUT_MS = 10_000;
+const DEFAULT_HEADERS: Record<string, string> = {
+  'user-agent': process.env.RSS_USER_AGENT ?? 'Mozilla/5.0 (compatible; PGA/1.0; +https://llmrates.live)',
+  accept: 'application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.1',
+};
 
 export async function fetchRssFeeds(feeds?: FeedConfig[]): Promise<RssItem[]> {
   const urls: FeedConfig[] =
@@ -45,10 +49,11 @@ export async function fetchRssFeeds(feeds?: FeedConfig[]): Promise<RssItem[]> {
         const requestInit: RequestInit = {
           redirect: 'follow',
           signal: controller.signal,
+          headers: {
+            ...DEFAULT_HEADERS,
+            ...(feedConfig.headers ?? {}),
+          },
         };
-        if (feedConfig.headers) {
-          requestInit.headers = feedConfig.headers;
-        }
 
         const response = await fetch(feedConfig.url, requestInit);
         if (!response.ok) {
@@ -76,9 +81,12 @@ export async function fetchRssFeeds(feeds?: FeedConfig[]): Promise<RssItem[]> {
     }),
   );
 
-  for (const result of settled) {
+  for (const [index, result] of settled.entries()) {
     if (result.status === 'rejected') {
-      logger.warn('[rss] feed fetch failed', { error: String(result.reason) });
+      logger.warn('[rss] feed fetch failed', {
+        url: urls[index]?.url,
+        error: String(result.reason),
+      });
     }
   }
 
