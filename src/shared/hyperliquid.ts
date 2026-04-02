@@ -168,7 +168,7 @@ class HyperliquidClient {
     leverage: number;
     reduceOnly?: boolean;
     sizeBase?: number; // Added to avoid double lookup if possible
-  }): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  }): Promise<{ success: boolean; txHash?: string; price?: number; error?: string }> {
     // Dry-run mode: log the order without submitting — safe validation path.
     if (loadConfig().HL_DRY_RUN) {
       logger.info('[hyperliquid] DRY RUN — order not submitted', {
@@ -240,11 +240,11 @@ class HyperliquidClient {
         const resting = result['resting'] as { oid?: unknown } | undefined;
         const errorMsg = result['error'] as string | undefined;
         if (filled?.oid != null) {
-          return { success: true, txHash: String(filled.oid) };
+          return { success: true, txHash: String(filled.oid), price: midPrice };
         }
         if (resting?.oid != null) {
           // With IOC, resting should not happen for the full size unless partially filled.
-          return { success: true, txHash: String(resting.oid) };
+          return { success: true, txHash: String(resting.oid), price: midPrice };
         }
         if (errorMsg) {
           return { success: false, error: errorMsg };

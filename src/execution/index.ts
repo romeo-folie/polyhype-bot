@@ -138,7 +138,9 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
       // Compute sharesHeld — prefer actual fill from venue, fall back to estimate.
       let estimatedShares: number | undefined;
       let sharesHeld: number | undefined;
-      if (result.tradeResult.shares_bought != null) {
+      if (result.sharesFilled != null) {
+        sharesHeld = result.sharesFilled;
+      } else if (result.tradeResult.shares_bought != null) {
         sharesHeld = result.tradeResult.shares_bought;
       } else {
         // Simmer sometimes omits shares_bought — fall back to estimate from stake/price.
@@ -158,6 +160,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         }
       }
 
+
       // Record in ledger
       await recordPosition(redis, {
         marketId: result.signal.marketId,
@@ -166,7 +169,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         clobTokenIds: result.signal.clobTokenIds,
         question: result.signal.question,
         direction: result.signal.direction,
-        entryPrice: result.signal.outcomePrice,
+        entryPrice: result.entryPrice ?? result.signal.outcomePrice,
         stakeUsd: result.signal.stakeUsd,
         consensusProbability: result.signal.consensusProbability ?? 0.5,
         consensusStddev: result.signal.consensusStddev,
@@ -176,6 +179,19 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         txHash: result.tradeResult.tx_hash,
         sharesHeld,
         executionVenue: result.executionVenue || 'simmer',
+        modeConfigured: result.modeConfigured,
+        entryExecutionPath: result.entryExecutionPath,
+        entryOrderType: result.entryOrderType,
+        decisionBestBid: result.decisionBenchmark?.decisionBestBid ?? undefined,
+        decisionBestAsk: result.decisionBenchmark?.decisionBestAsk ?? undefined,
+        decisionMidPrice: result.decisionBenchmark?.decisionMidPrice ?? undefined,
+        decisionSpreadBps: result.decisionBenchmark?.decisionSpreadBps ?? undefined,
+        counterfactualImmediateTakerPrice: result.decisionBenchmark?.counterfactualImmediateTakerPrice ?? undefined,
+        counterfactualImmediateTakerShares: result.decisionBenchmark?.counterfactualImmediateTakerShares ?? undefined,
+        counterfactualImmediateTakerCostUsd: result.decisionBenchmark?.counterfactualImmediateTakerCostUsd ?? undefined,
+        makerPriceImprovementBps: result.decisionBenchmark?.makerPriceImprovementBps ?? undefined,
+        makerPriceImprovementUsd: result.decisionBenchmark?.makerPriceImprovementUsd ?? undefined,
+        fallbackReason: result.fallbackReason,
         isFutures: result.signal.isFutures,
         leverage: result.signal.leverage,
         symbol: result.signal.symbol || (result.signal.isFutures ? result.signal.marketId : undefined),

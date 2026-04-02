@@ -189,6 +189,74 @@ describe('getRecentOutcomes', () => {
     expect(outcomes).toHaveLength(1);
     expect(outcomes[0].id).toBe('good-id');
   });
+
+  it('parses optional execution attribution fields', async () => {
+    const redis = makeRedis();
+    redis.zrevrange.mockResolvedValue(['rich-id']);
+    redis.hgetall.mockResolvedValue({
+      id: 'rich-id',
+      executionId: 'exec-123',
+      closedAt: '2026-01-01T00:00:00Z',
+      source: 'osint',
+      category: 'geopolitical',
+      question: 'Rich question',
+      direction: 'YES',
+      consensusProbability: '0.7',
+      divergence: '0.1',
+      result: 'won',
+      returnPct: '10',
+      holdingHours: '5',
+      executionVenue: 'clob',
+      modeConfigured: 'hybrid',
+      entryExecutionPath: 'maker_fill',
+      entryOrderType: 'maker',
+      fallbackReason: 'simmer_market_missing',
+      decisionSpreadBps: '37.5',
+      makerPriceImprovementBps: '12.25',
+      makerPriceImprovementUsd: '0.42',
+    });
+
+    const outcomes = await getRecentOutcomes(redis as any, 'geopolitical');
+
+    expect(outcomes[0]!.executionId).toBe('exec-123');
+    expect(outcomes[0]!.modeConfigured).toBe('hybrid');
+    expect(outcomes[0]!.entryExecutionPath).toBe('maker_fill');
+    expect(outcomes[0]!.entryOrderType).toBe('maker');
+    expect(outcomes[0]!.fallbackReason).toBe('simmer_market_missing');
+    expect(outcomes[0]!.decisionSpreadBps).toBe(37.5);
+    expect(outcomes[0]!.makerPriceImprovementBps).toBe(12.25);
+    expect(outcomes[0]!.makerPriceImprovementUsd).toBe(0.42);
+  });
+
+  it('preserves zero values for numeric attribution fields (regression: truthiness guard)', async () => {
+    const redis = makeRedis();
+    redis.zrevrange.mockResolvedValue(['zero-id']);
+    redis.hgetall.mockResolvedValue({
+      id: 'zero-id',
+      closedAt: '2026-01-01T00:00:00Z',
+      source: 'osint',
+      category: 'geopolitical',
+      question: 'Zero value test',
+      direction: 'YES',
+      consensusProbability: '0.7',
+      divergence: '0.1',
+      result: 'won',
+      returnPct: '0',
+      holdingHours: '0',
+      executionVenue: 'clob',
+      urgencyScore: '0',
+      decisionSpreadBps: '0',
+      makerPriceImprovementBps: '0',
+      makerPriceImprovementUsd: '0',
+    });
+
+    const outcomes = await getRecentOutcomes(redis as any, 'geopolitical');
+
+    expect(outcomes[0]!.urgencyScore).toBe(0);
+    expect(outcomes[0]!.decisionSpreadBps).toBe(0);
+    expect(outcomes[0]!.makerPriceImprovementBps).toBe(0);
+    expect(outcomes[0]!.makerPriceImprovementUsd).toBe(0);
+  });
 });
 
 describe('inferCategory', () => {

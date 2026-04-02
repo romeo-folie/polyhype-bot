@@ -47,6 +47,23 @@ export interface Position {
   sharesHeld?: number | undefined;
   /** Venue via which this position was entered */
   executionVenue: 'simmer' | 'clob' | 'hyperliquid';
+  /** Configured execution mode at entry time */
+  modeConfigured?: 'hybrid' | 'maker' | 'taker' | undefined;
+  /** Final entry path selected by the executor */
+  entryExecutionPath?: string | undefined;
+  /** Order type used for the entry path */
+  entryOrderType?: 'maker' | 'taker' | 'none' | undefined;
+  /** Decision-time microstructure snapshot */
+  decisionBestBid?: number | undefined;
+  decisionBestAsk?: number | undefined;
+  decisionMidPrice?: number | undefined;
+  decisionSpreadBps?: number | undefined;
+  counterfactualImmediateTakerPrice?: number | undefined;
+  counterfactualImmediateTakerShares?: number | undefined;
+  counterfactualImmediateTakerCostUsd?: number | undefined;
+  makerPriceImprovementBps?: number | undefined;
+  makerPriceImprovementUsd?: number | undefined;
+  fallbackReason?: string | undefined;
   /** Optional reconciliation status for exit/settlement */
   reconciliationStatus?: string | undefined;
   /** True when an HL synthetic hedge has been opened for this PM position.
@@ -120,6 +137,19 @@ export async function recordPosition(
     txHash: position.txHash ?? '',
     sharesHeld: position.sharesHeld !== undefined ? String(position.sharesHeld) : '',
     executionVenue: position.executionVenue,
+    modeConfigured: position.modeConfigured ?? '',
+    entryExecutionPath: position.entryExecutionPath ?? '',
+    entryOrderType: position.entryOrderType ?? '',
+    decisionBestBid: position.decisionBestBid !== undefined ? String(position.decisionBestBid) : '',
+    decisionBestAsk: position.decisionBestAsk !== undefined ? String(position.decisionBestAsk) : '',
+    decisionMidPrice: position.decisionMidPrice !== undefined ? String(position.decisionMidPrice) : '',
+    decisionSpreadBps: position.decisionSpreadBps !== undefined ? String(position.decisionSpreadBps) : '',
+    counterfactualImmediateTakerPrice: position.counterfactualImmediateTakerPrice !== undefined ? String(position.counterfactualImmediateTakerPrice) : '',
+    counterfactualImmediateTakerShares: position.counterfactualImmediateTakerShares !== undefined ? String(position.counterfactualImmediateTakerShares) : '',
+    counterfactualImmediateTakerCostUsd: position.counterfactualImmediateTakerCostUsd !== undefined ? String(position.counterfactualImmediateTakerCostUsd) : '',
+    makerPriceImprovementBps: position.makerPriceImprovementBps !== undefined ? String(position.makerPriceImprovementBps) : '',
+    makerPriceImprovementUsd: position.makerPriceImprovementUsd !== undefined ? String(position.makerPriceImprovementUsd) : '',
+    fallbackReason: position.fallbackReason ?? '',
     synthHedged: position.synthHedged ? 'true' : 'false',
     pendingSettlement: position.pendingSettlement ? 'true' : 'false',
     isFutures: position.isFutures ? 'true' : 'false',
@@ -261,17 +291,30 @@ function deserialisePosition(raw: Record<string, string>): Position {
     executionVenue: (venue || 'simmer'),
   };
 
-  if (raw.consensusProbability) pos.consensusProbability = parseFloat(raw.consensusProbability);
-  if (raw.consensusStddev) pos.consensusStddev = parseFloat(raw.consensusStddev);
+  if (raw.consensusProbability !== undefined && raw.consensusProbability !== '') pos.consensusProbability = parseFloat(raw.consensusProbability);
+  if (raw.consensusStddev !== undefined && raw.consensusStddev !== '') pos.consensusStddev = parseFloat(raw.consensusStddev);
   if (raw.txHash) pos.txHash = raw.txHash;
-  if (raw.sharesHeld) pos.sharesHeld = parseFloat(raw.sharesHeld);
+  if (raw.sharesHeld !== undefined && raw.sharesHeld !== '') pos.sharesHeld = parseFloat(raw.sharesHeld);
+  if (raw.modeConfigured) pos.modeConfigured = raw.modeConfigured as Position['modeConfigured'];
+  if (raw.entryExecutionPath) pos.entryExecutionPath = raw.entryExecutionPath;
+  if (raw.entryOrderType) pos.entryOrderType = raw.entryOrderType as Position['entryOrderType'];
+  if (raw.decisionBestBid !== undefined && raw.decisionBestBid !== '') pos.decisionBestBid = parseFloat(raw.decisionBestBid);
+  if (raw.decisionBestAsk !== undefined && raw.decisionBestAsk !== '') pos.decisionBestAsk = parseFloat(raw.decisionBestAsk);
+  if (raw.decisionMidPrice !== undefined && raw.decisionMidPrice !== '') pos.decisionMidPrice = parseFloat(raw.decisionMidPrice);
+  if (raw.decisionSpreadBps !== undefined && raw.decisionSpreadBps !== '') pos.decisionSpreadBps = parseFloat(raw.decisionSpreadBps);
+  if (raw.counterfactualImmediateTakerPrice !== undefined && raw.counterfactualImmediateTakerPrice !== '') pos.counterfactualImmediateTakerPrice = parseFloat(raw.counterfactualImmediateTakerPrice);
+  if (raw.counterfactualImmediateTakerShares !== undefined && raw.counterfactualImmediateTakerShares !== '') pos.counterfactualImmediateTakerShares = parseFloat(raw.counterfactualImmediateTakerShares);
+  if (raw.counterfactualImmediateTakerCostUsd !== undefined && raw.counterfactualImmediateTakerCostUsd !== '') pos.counterfactualImmediateTakerCostUsd = parseFloat(raw.counterfactualImmediateTakerCostUsd);
+  if (raw.makerPriceImprovementBps !== undefined && raw.makerPriceImprovementBps !== '') pos.makerPriceImprovementBps = parseFloat(raw.makerPriceImprovementBps);
+  if (raw.makerPriceImprovementUsd !== undefined && raw.makerPriceImprovementUsd !== '') pos.makerPriceImprovementUsd = parseFloat(raw.makerPriceImprovementUsd);
+  if (raw.fallbackReason) pos.fallbackReason = raw.fallbackReason;
   if (raw.reconciliationStatus) pos.reconciliationStatus = raw.reconciliationStatus;
   
   if (raw.synthHedged === 'true') pos.synthHedged = true;
   if (raw.pendingSettlement === 'true') pos.pendingSettlement = true;
   if (raw.isFutures === 'true') {
     pos.isFutures = true;
-    if (raw.leverage) pos.leverage = parseFloat(raw.leverage);
+    if (raw.leverage !== undefined && raw.leverage !== '') pos.leverage = parseFloat(raw.leverage);
     if (raw.symbol) pos.symbol = raw.symbol;
     if (raw.side) pos.side = raw.side as 'long' | 'short';
   }
