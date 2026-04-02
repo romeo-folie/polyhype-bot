@@ -284,6 +284,7 @@ async function runSpotMonitorInner(
     if (result.skipped) {
       logger.info('[spot] signal skipped', {
         marketId: result.signal.marketId,
+      executionId: result.signal.executionId,
         reason: result.skipReason,
       });
       continue;
@@ -292,6 +293,7 @@ async function runSpotMonitorInner(
     if (result.error) {
       logger.error('[spot] trade execution failed', {
         marketId: result.signal.marketId,
+      executionId: result.signal.executionId,
         error: result.error,
       });
       await notifyTradeError(result.signal, result.error);
@@ -306,6 +308,7 @@ async function runSpotMonitorInner(
     // Record position
     await recordPosition(redis, {
       marketId: result.signal.marketId,
+      executionId: result.signal.executionId,
       conditionId: result.signal.conditionId,
       clobTokenIds: result.signal.clobTokenIds,
       question: result.signal.question,
@@ -325,6 +328,7 @@ async function runSpotMonitorInner(
 
     logger.info('[spot] trade executed', {
       marketId: result.signal.marketId,
+      executionId: result.signal.executionId,
       direction: result.signal.direction,
       stakeUsd: result.signal.stakeUsd,
       venue: result.executionVenue,

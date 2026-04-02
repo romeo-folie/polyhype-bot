@@ -324,6 +324,7 @@ export class ArbitrageWorker {
             const executedStake = result.signal.stakeUsd;
             logger.info('[crypto-arb] trade executed', {
               marketId: opp.marketId,
+              executionId: result.signal.executionId,
               direction: opp.direction,
               stakeUsd: executedStake,
               edge: opp.edge.toFixed(4),
@@ -333,6 +334,7 @@ export class ArbitrageWorker {
             // Single record point for this position — executor.ts does not record.
             await recordPosition(redis, {
               marketId: opp.marketId,
+              executionId: result.signal.executionId,
               conditionId: opp.conditionId,
               clobTokenIds: opp.clobTokenIds,
               question: opp.question,
@@ -358,6 +360,7 @@ export class ArbitrageWorker {
           } else if (result.skipped) {
             logger.debug('[crypto-arb] signal skipped', {
               marketId: opp.marketId,
+              executionId: result.signal.executionId,
               reason: result.skipReason,
             });
             const skipReason = result.skipReason ? `exec_${result.skipReason}` : 'exec_skipped';
@@ -365,6 +368,7 @@ export class ArbitrageWorker {
           } else if (result.error) {
             logger.warn('[crypto-arb] execution error', {
               marketId: opp.marketId,
+              executionId: result.signal.executionId,
               error: result.error,
             });
           }

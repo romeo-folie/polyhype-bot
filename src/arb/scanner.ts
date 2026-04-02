@@ -264,6 +264,7 @@ export async function executeArb(
     // tracks it and can attempt a manual exit rather than leaving it invisible.
     await recordPosition(redis, {
       marketId: opp.marketId,
+      executionId: `unhedged-${Date.now()}`,
       question: opp.question,
       direction: 'YES',
       entryPrice: opp.yesAsk,

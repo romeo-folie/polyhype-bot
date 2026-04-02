@@ -471,6 +471,7 @@ export async function executeSignal(
   knownSessionExposureUsd = 0,
 ): Promise<ExecutionResult> {
   const executionId = createHash('sha256').update(`${signal.marketId}:${signal.direction}:${Date.now()}:${Math.random()}`).digest('hex').slice(0, 16);
+  signal = { ...signal, executionId };
   const decisionStartedAt = Date.now();
   const modeConfigured = loadConfig().EXECUTION_MODE;
   void recordExecutionMetric(redis, 'mode', modeConfigured).catch(() => {});

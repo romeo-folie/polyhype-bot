@@ -117,6 +117,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
       skipped++;
       logger.info('[execution] signal skipped', {
         marketId: result.signal.marketId,
+        executionId: result.signal.executionId,
         reason: result.skipReason,
       });
       continue;
@@ -149,6 +150,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         if (estimatedShares != null) {
           logger.warn('[execution] shares_bought unavailable — using estimated sharesHeld (stakeUsd/outcomePrice)', {
             marketId: result.signal.marketId,
+        executionId: result.signal.executionId,
             estimatedShares,
             stakeUsd: result.signal.stakeUsd,
             outcomePrice: result.signal.outcomePrice,
@@ -159,6 +161,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
       // Record in ledger
       await recordPosition(redis, {
         marketId: result.signal.marketId,
+        executionId: result.signal.executionId,
         conditionId: result.signal.conditionId,
         clobTokenIds: result.signal.clobTokenIds,
         question: result.signal.question,

@@ -186,6 +186,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
             await deductStake(redis, signal.stakeUsd);
             await recordPosition(redis, {
               marketId: signal.marketId,
+              executionId: result.signal.executionId,
               conditionId: signal.conditionId,
               clobTokenIds: signal.clobTokenIds,
               question: signal.question,
