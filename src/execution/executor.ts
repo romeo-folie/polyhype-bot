@@ -43,6 +43,8 @@ export interface ExecutionResult {
   modeConfigured?: 'hybrid' | 'maker' | 'taker';
   entryExecutionPath?: string;
   entryOrderType?: 'maker' | 'taker' | 'none';
+  entryPrice?: number | null;
+  sharesFilled?: number | null;
   decisionBenchmark?: DecisionBenchmark;
   fallbackReason?: string;
   /** True if a delta hedge was placed on HL for this trade. */
@@ -340,6 +342,8 @@ async function tryExecuteViaClob(signal: TradeSignal): Promise<{
     success: clobResult.success,
     tx_hash: clobResult.tx_hash,
     shares_bought: clobResult.shares_bought,
+    price: clobResult.price,
+    cost: clobResult.cost,
     error: clobResult.error,
     raw: clobResult.raw,
   };
@@ -434,6 +438,7 @@ async function executeHyperliquidSignal(
         modeConfigured: cfg.EXECUTION_MODE,
         entryExecutionPath: 'hyperliquid_fill',
         entryOrderType: 'taker',
+        entryPrice: tradeResult.price ?? null,
       };
     }
 
@@ -720,6 +725,7 @@ export async function executeSignal(
         finalSharesFilled: result.tradeResult.shares_bought ?? null,
         finalStakeUsdExecuted: signal.stakeUsd,
       });
+      return { ...result, entryPrice: result.entryPrice ?? signal.outcomePrice };
     } else if (result.skipped) {
       finalizeAttempt({
         finalExecutionPath: 'skipped',
@@ -912,6 +918,8 @@ export async function executeSignal(
         modeConfigured: cfg.EXECUTION_MODE,
         entryExecutionPath: makerTelemetry.makerFillStatus === 'partial' ? 'maker_partial_fill' : 'maker_fill',
         entryOrderType: 'maker',
+        entryPrice: makerAttempt.makerPostedPrice ?? null,
+        sharesFilled: makerAttempt.makerSharesFilled ?? null,
         decisionBenchmark: makerTelemetry as DecisionBenchmark,
         hedgeDispatched: true,
       };
@@ -1018,6 +1026,8 @@ export async function executeSignal(
           modeConfigured: cfg.EXECUTION_MODE,
           entryExecutionPath: takerPath ?? 'taker_direct',
           entryOrderType: 'taker',
+          entryPrice: tradeResult.price ?? signal.outcomePrice,
+          sharesFilled: tradeResult.shares_bought ?? null,
           decisionBenchmark: makerTelemetry as DecisionBenchmark,
           hedgeDispatched: true,
         };
@@ -1166,8 +1176,10 @@ export async function executeSignal(
       entryExecutionPath: clobFallbackReason ? 'clob_fallback' : 'clob_direct',
       entryOrderType: 'taker',
       decisionBenchmark: makerTelemetry as DecisionBenchmark,
-      fallbackReason: clobFallbackReason ?? undefined,
+      fallbackReason: clobFallbackReason ?? null,
       hedgeDispatched: true,
+      entryPrice: tradeResult.price ?? signal.outcomePrice,
+      sharesFilled: tradeResult.shares_bought ?? null,
     };
   }
 

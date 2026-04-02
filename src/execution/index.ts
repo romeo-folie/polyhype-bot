@@ -138,7 +138,9 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
       // Compute sharesHeld — prefer actual fill from venue, fall back to estimate.
       let estimatedShares: number | undefined;
       let sharesHeld: number | undefined;
-      if (result.tradeResult.shares_bought != null) {
+      if (result.sharesFilled != null) {
+        sharesHeld = result.sharesFilled;
+      } else if (result.tradeResult.shares_bought != null) {
         sharesHeld = result.tradeResult.shares_bought;
       } else {
         // Simmer sometimes omits shares_bought — fall back to estimate from stake/price.
@@ -158,22 +160,6 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         }
       }
 
-      const tradeResultPrice = result.tradeResult.price;
-      const impliedFillPrice = (sharesHeld != null && isFinite(sharesHeld) && sharesHeld > 0)
-        ? (result.signal.stakeUsd / sharesHeld)
-        : undefined;
-      const makerPostedPrice = (() => {
-        const raw = (result.decisionBenchmark as Record<string, unknown> | undefined)?.['makerPostedPrice'];
-        return (typeof raw === 'number' && isFinite(raw) && raw > 0) ? raw : undefined;
-      })();
-      const entryPrice =
-        (typeof tradeResultPrice === 'number' && isFinite(tradeResultPrice) && tradeResultPrice > 0)
-          ? tradeResultPrice
-          : (impliedFillPrice != null && isFinite(impliedFillPrice) && impliedFillPrice > 0)
-            ? impliedFillPrice
-            : (makerPostedPrice != null)
-              ? makerPostedPrice
-              : result.signal.outcomePrice;
 
       // Record in ledger
       await recordPosition(redis, {
@@ -183,7 +169,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
         clobTokenIds: result.signal.clobTokenIds,
         question: result.signal.question,
         direction: result.signal.direction,
-        entryPrice,
+        entryPrice: result.entryPrice ?? result.signal.outcomePrice,
         stakeUsd: result.signal.stakeUsd,
         consensusProbability: result.signal.consensusProbability ?? 0.5,
         consensusStddev: result.signal.consensusStddev,

@@ -439,6 +439,8 @@ describe('execution mode', () => {
     expect(result.entryExecutionPath).toBe('maker_fill');
     expect(result.entryOrderType).toBe('maker');
     expect(result.decisionBenchmark?.decisionBestAsk).toBe(0.51);
+    expect(result.entryPrice).toBe(0.49);
+    expect(result.sharesFilled).toBe(10);
     expect(result.decisionBenchmark?.makerPriceImprovementUsd).toBeCloseTo((0.51 - 0.49) * 10, 6);
     expect(mockSubmit).not.toHaveBeenCalled();
     expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'maker_attempted', 'count');
@@ -551,6 +553,29 @@ describe('execution mode', () => {
     expect(payload.counterfactualImmediateTakerShares).toBeCloseTo(5 / 0.51, 6);
     expect(payload.counterfactualImmediateTakerCostUsd).toBeCloseTo(5, 6);
     expect(payload.executionSucceeded).toBe(true);
+  });
+
+  it('populates entryPrice from Simmer fill when available', async () => {
+    const redis = makeRedis();
+    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc', price: 0.52, shares_bought: 100 });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ outcomePrice: 0.50 }), redis as any);
+
+    expect(result.entryPrice).toBe(0.52);
+    expect(result.sharesFilled).toBe(100);
+  });
+
+  it('populates entryPrice from CLOB taker fill when available', async () => {
+    const redis = makeRedis();
+    mockResolve.mockResolvedValue(null);
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob', price: 0.53, shares_bought: 100 });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ outcomePrice: 0.50 }), redis as any);
+
+    expect(result.entryPrice).toBe(0.53);
+    expect(result.sharesFilled).toBe(100);
   });
 });
 

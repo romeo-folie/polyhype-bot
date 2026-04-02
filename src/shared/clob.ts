@@ -105,6 +105,8 @@ export interface ClobTradeResult {
   success: boolean;
   tx_hash?: string | undefined;
   shares_bought?: number;
+  price?: number;
+  cost?: number;
   order_id?: string | undefined;
   error?: string;
   raw?: unknown;
@@ -344,12 +346,16 @@ function parseOrderResponse(raw: unknown): ClobTradeResult {
 
   const txHash = Array.isArray(resp.transactionsHashes) ? resp.transactionsHashes[0] : undefined;
   const takingAmount = parseFloat(resp.takingAmount);
+  const makingAmount = parseFloat(resp.makingAmount);
+  const price = takingAmount > 0 ? makingAmount / takingAmount : undefined;
 
   return {
     success: true,
     ...(txHash ? { tx_hash: txHash } : {}),
     ...(resp.orderID ? { order_id: resp.orderID } : {}),
     ...(isFinite(takingAmount) && takingAmount > 0 ? { shares_bought: takingAmount } : {}),
+    ...(price !== undefined && isFinite(price) ? { price } : {}),
+    ...(isFinite(makingAmount) && makingAmount > 0 ? { cost: makingAmount } : {}),
     raw,
   };
 }
