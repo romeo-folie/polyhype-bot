@@ -40,8 +40,25 @@ export interface ExecutionResult {
   tradeResult?: SimmerTradeResult;
   error?: string;
   executionVenue?: 'simmer' | 'clob' | 'hyperliquid';
+  modeConfigured?: 'hybrid' | 'maker' | 'taker';
+  entryExecutionPath?: string;
+  entryOrderType?: 'maker' | 'taker' | 'none';
+  decisionBenchmark?: DecisionBenchmark;
+  fallbackReason?: string;
   /** True if a delta hedge was placed on HL for this trade. */
   hedgeDispatched?: boolean;
+}
+
+interface DecisionBenchmark {
+  decisionBestBid?: number | null;
+  decisionBestAsk?: number | null;
+  decisionMidPrice?: number | null;
+  decisionSpreadBps?: number | null;
+  counterfactualImmediateTakerPrice?: number | null;
+  counterfactualImmediateTakerShares?: number | null;
+  counterfactualImmediateTakerCostUsd?: number | null;
+  makerPriceImprovementBps?: number | null;
+  makerPriceImprovementUsd?: number | null;
 }
 
 function idempotencyKey(signal: TradeSignal): string {
@@ -82,6 +99,62 @@ function roundDownToTick(value: number, tick: number): number {
 function isTailPrice(price: number, threshold: number): boolean {
   if (!isFinite(price) || !isFinite(threshold)) return false;
   return price <= threshold || price >= 1 - threshold;
+}
+
+function buildDecisionBenchmark(
+  signal: TradeSignal,
+  book: { bids: Array<{ price: string }>; asks: Array<{ price: string }>; tick_size: string },
+): DecisionBenchmark {
+  const bestBid = parseFloat(book.bids?.[0]?.price ?? '0');
+  const bestAsk = parseFloat(book.asks?.[0]?.price ?? '0');
+  const hasBestBid = isFinite(bestBid) && bestBid > 0;
+  const hasBestAsk = isFinite(bestAsk) && bestAsk > 0;
+  const mid = hasBestBid && hasBestAsk ? (bestBid + bestAsk) / 2 : null;
+  const spreadBps = hasBestBid && hasBestAsk && mid
+    ? ((bestAsk - bestBid) / mid) * 10000
+    : null;
+  const takerShares = hasBestAsk ? signal.stakeUsd / bestAsk : null;
+
+  return {
+    decisionBestBid: hasBestBid ? bestBid : null,
+    decisionBestAsk: hasBestAsk ? bestAsk : null,
+    decisionMidPrice: mid,
+    decisionSpreadBps: spreadBps,
+    counterfactualImmediateTakerPrice: hasBestAsk ? bestAsk : null,
+    counterfactualImmediateTakerShares: takerShares,
+    counterfactualImmediateTakerCostUsd: hasBestAsk && takerShares ? takerShares * bestAsk : null,
+  };
+}
+
+async function captureDecisionBenchmark(signal: TradeSignal): Promise<DecisionBenchmark> {
+  const tokenId = clobTokenForSignal(signal);
+  if (!tokenId) return {};
+
+  try {
+    const book = await getClobOrderBook(tokenId);
+    if (!book) return {};
+    return buildDecisionBenchmark(signal, book);
+  } catch {
+    return {};
+  }
+}
+
+function calculateMakerPriceImprovement(
+  takerPrice: number | null | undefined,
+  makerPrice: number | null | undefined,
+  sharesFilled: number | null | undefined,
+): Pick<DecisionBenchmark, 'makerPriceImprovementBps' | 'makerPriceImprovementUsd'> {
+  if (!takerPrice || !makerPrice || !sharesFilled || takerPrice <= 0 || makerPrice <= 0 || sharesFilled <= 0) {
+    return {
+      makerPriceImprovementBps: null,
+      makerPriceImprovementUsd: null,
+    };
+  }
+
+  return {
+    makerPriceImprovementBps: ((takerPrice - makerPrice) / takerPrice) * 10000,
+    makerPriceImprovementUsd: (takerPrice - makerPrice) * sharesFilled,
+  };
 }
 
 function canExecuteTaker(
@@ -750,6 +823,7 @@ export async function executeSignal(
   let takerPath: 'taker_direct' | 'hybrid_taker_fallback' | null = null;
   let decisionSubmitted = false;
   let clobFallbackReason: string | null = null;
+  let takerDecisionBenchmarkPromise: Promise<DecisionBenchmark> | null = null;
 
   if (executionMode !== 'taker' && !signal.isFutures && signal.feesEnabled !== true) {
     makerAttempted = true;
@@ -760,6 +834,15 @@ export async function executeSignal(
     safeRecordExecutionMetric('maker_attempted');
     const makerAttempt = await tryExecuteViaClobMaker(signal, cfg);
     safeRecordExecutionTiming('maker_wait_ms', makerAttempt.waitMs);
+    const makerBenchmark: DecisionBenchmark = {
+      decisionBestBid: makerAttempt.makerBestBid ?? null,
+      decisionBestAsk: makerAttempt.makerBestAsk ?? null,
+      decisionMidPrice: makerAttempt.makerMidPrice ?? null,
+      decisionSpreadBps: makerAttempt.makerSpreadBps ?? null,
+      counterfactualImmediateTakerPrice: makerAttempt.makerBestAsk ?? null,
+      counterfactualImmediateTakerShares: makerAttempt.makerBestAsk ? signal.stakeUsd / makerAttempt.makerBestAsk : null,
+      counterfactualImmediateTakerCostUsd: makerAttempt.makerBestAsk ? signal.stakeUsd : null,
+    };
     makerTelemetry = {
       makerAttempted: true,
       makerOrderId: makerAttempt.makerOrderId ?? null,
@@ -771,12 +854,7 @@ export async function executeSignal(
       makerSharesFilled: makerAttempt.makerSharesFilled ?? null,
       makerFilledStakeUsd: makerAttempt.filledStakeUsd ?? null,
       makerCancelConfirmed: makerAttempt.makerFillStatus === 'cancel_unconfirmed' ? false : null,
-      decisionBestBid: makerAttempt.makerBestBid ?? null,
-      decisionBestAsk: makerAttempt.makerBestAsk ?? null,
-      decisionMidPrice: makerAttempt.makerMidPrice ?? null,
-      decisionSpreadBps: makerAttempt.makerSpreadBps ?? null,
-      counterfactualImmediateTakerPrice: makerAttempt.makerBestAsk ?? null,
-      counterfactualImmediateTakerCostUsd: makerAttempt.makerBestAsk ? signal.stakeUsd : null,
+      ...makerBenchmark,
     };
     if (makerAttempt.ok && makerAttempt.tradeResult?.success) {
       if (makerAttempt.filledStakeUsd && makerAttempt.filledStakeUsd > 0 && makerAttempt.filledStakeUsd !== signal.stakeUsd) {
@@ -784,6 +862,14 @@ export async function executeSignal(
       }
 
       makerFilled = true;
+      Object.assign(
+        makerTelemetry,
+        calculateMakerPriceImprovement(
+          makerBenchmark.counterfactualImmediateTakerPrice,
+          makerAttempt.makerPostedPrice,
+          makerAttempt.tradeResult.shares_bought ?? makerAttempt.makerSharesFilled ?? null,
+        ),
+      );
       safeRecordExecutionMetric('maker_filled');
       await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
       if (makerTelemetry.makerFillStatus === 'partial') {
@@ -863,6 +949,7 @@ export async function executeSignal(
 
   if (simmerId) {
     takerPath = executionMode === 'taker' ? 'taker_direct' : (makerAttempted && !makerFilled ? 'hybrid_taker_fallback' : 'taker_direct');
+    takerDecisionBenchmarkPromise ??= captureDecisionBenchmark(signal);
     if (takerPath === 'taker_direct') {
       safeRecordExecutionMetric('taker_direct');
     } else {
@@ -890,6 +977,7 @@ export async function executeSignal(
       });
 
       if (tradeResult.success) {
+        makerTelemetry = { ...makerTelemetry, ...(await takerDecisionBenchmarkPromise) };
         await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
         finalizeAttempt({
           executionPath: takerPath ?? 'taker_direct',
@@ -924,6 +1012,7 @@ export async function executeSignal(
       // Simmer returned success=false — fall back to CLOB for recoverable rejections
       // (market not found, order too small for Simmer's 5-share minimum)
       if (!shouldFallbackToClob(tradeResult.error)) {
+        makerTelemetry = { ...makerTelemetry, ...(await takerDecisionBenchmarkPromise) };
         logger.warn('[executor] Simmer trade returned success=false', {
           marketId: signal.marketId,
           error: tradeResult.error,
@@ -955,6 +1044,7 @@ export async function executeSignal(
 
       // Only fall back on recoverable Simmer failures
       if (!shouldFallbackToClob(message)) {
+        makerTelemetry = { ...makerTelemetry, ...(await takerDecisionBenchmarkPromise) };
         logger.error('[executor] Simmer submission failed', {
           marketId: signal.marketId,
           error: message,
@@ -1001,10 +1091,12 @@ export async function executeSignal(
     decisionSubmitted = true;
     safeRecordExecutionTiming('decision_to_submit_ms', Date.now() - decisionStartedAt);
   }
+  takerDecisionBenchmarkPromise ??= captureDecisionBenchmark(signal);
   if (clobFallbackReason) {
     safeRecordExecutionMetric('clob_fallback', clobFallbackReason);
   }
   const clob = await tryExecuteViaClob(signal);
+  makerTelemetry = { ...makerTelemetry, ...(await takerDecisionBenchmarkPromise) };
   if (clob.ok && clob.tradeResult?.success) {
     const tradeResult = clob.tradeResult;
     await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);

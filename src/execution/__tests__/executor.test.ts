@@ -435,6 +435,8 @@ describe('execution mode', () => {
 
     expect(result.skipped).toBe(false);
     expect(result.executionVenue).toBe('clob');
+    expect(result.decisionBenchmark?.decisionBestAsk).toBe(0.51);
+    expect(result.decisionBenchmark?.makerPriceImprovementUsd).toBeCloseTo((0.51 - 0.49) * 10, 6);
     expect(mockSubmit).not.toHaveBeenCalled();
     expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'maker_attempted', 'count');
     expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'maker_filled', 'count');
@@ -448,6 +450,10 @@ describe('execution mode', () => {
         finalExecutionPath: 'maker_fill',
         finalOrderType: 'maker',
         makerFillStatus: 'full',
+        counterfactualImmediateTakerPrice: 0.51,
+        counterfactualImmediateTakerShares: expect.closeTo(5 / 0.51, 6),
+        makerPriceImprovementBps: expect.closeTo(((0.51 - 0.49) / 0.51) * 10000, 6),
+        makerPriceImprovementUsd: expect.closeTo((0.51 - 0.49) * 10, 6),
         executionSucceeded: true,
       }),
     );
@@ -502,6 +508,43 @@ describe('execution mode', () => {
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('taker_edge_below_min');
     expect(mockSubmit).not.toHaveBeenCalled();
+  });
+
+  it('captures a direct taker decision benchmark when an order book is available', async () => {
+    mockConfig.EXECUTION_MODE = 'taker';
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.49', size: '100' }],
+      asks: [{ price: '0.51', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('simmer');
+    expect(result.decisionBenchmark?.decisionBestAsk).toBe(0.51);
+    expect(mockRecordExecutionEvent).toHaveBeenCalledTimes(1);
+    const [, , payload] = mockRecordExecutionEvent.mock.calls[0]!;
+    expect(payload.executionPath).toBe('taker_direct');
+    expect(payload.finalExecutionPath).toBe('taker_direct');
+    expect(payload.finalOrderType).toBe('taker');
+    expect(payload.decisionBestBid).toBe(0.49);
+    expect(payload.decisionBestAsk).toBe(0.51);
+    expect(payload.decisionMidPrice).toBe(0.5);
+    expect(payload.decisionSpreadBps).toBeCloseTo(400, 6);
+    expect(payload.counterfactualImmediateTakerPrice).toBe(0.51);
+    expect(payload.counterfactualImmediateTakerShares).toBeCloseTo(5 / 0.51, 6);
+    expect(payload.counterfactualImmediateTakerCostUsd).toBeCloseTo(5, 6);
+    expect(payload.executionSucceeded).toBe(true);
   });
 });
 
