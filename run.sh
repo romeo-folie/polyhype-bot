@@ -11,11 +11,11 @@
 #   ./run.sh npx tsx src/monitor/index.ts
 #   ./run.sh npx tsx src/spot/index.ts
 #   ./run.sh npx tsx src/arb/index.ts
-#   ./run.sh npx tsx src/ingestion/telegramMonitor.ts
 #
 # NOTE: This wrapper is for SHORT-LIVED cron tasks. 
-#       DO NOT use it for persistent workers (e.g. src/copytrade/worker.ts)
+#       DO NOT use it for persistent workers (e.g. src/copytrade/worker.ts, src/ingestion/telegramMonitor.ts)
 #       as flock(1) will block subsequent manual restarts or health checks.
+#       Persistent workers should be managed via PM2, systemd, or equivalent.
 #
 # Crontab example (use absolute paths; redirect logs):
 #   */5 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/execution/index.ts >> /tmp/pga-trade.log 2>&1
