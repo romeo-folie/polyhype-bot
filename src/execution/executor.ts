@@ -105,10 +105,10 @@ function isTailPrice(price: number, threshold: number): boolean {
 
 function buildDecisionBenchmark(
   signal: TradeSignal,
-  book: { bids: Array<{ price: string }>; asks: Array<{ price: string }>; tick_size: string },
+  book: { bids: { price: string }[]; asks: { price: string }[]; tick_size: string },
 ): DecisionBenchmark {
-  const bestBid = parseFloat(book.bids?.[0]?.price ?? '0');
-  const bestAsk = parseFloat(book.asks?.[0]?.price ?? '0');
+  const bestBid = parseFloat(book.bids[0]?.price ?? '0');
+  const bestAsk = parseFloat(book.asks[0]?.price ?? '0');
   const hasBestBid = isFinite(bestBid) && bestBid > 0;
   const hasBestAsk = isFinite(bestAsk) && bestAsk > 0;
   const mid = hasBestBid && hasBestAsk ? (bestBid + bestAsk) / 2 : null;
@@ -164,8 +164,11 @@ function canExecuteTaker(
   cfg: ReturnType<typeof loadConfig>,
 ): { ok: true } | { ok: false; reason: string } {
   const edge = signal.edgeMagnitude ?? 0;
-  if (edge < cfg.TAKER_MIN_EDGE) {
-    return { ok: false, reason: 'taker_edge_below_min' };
+  const category = inferCategory(signal.question);
+  const minEdge = cfg.TAKER_MIN_EDGE_CATEGORIES?.[category] ?? cfg.TAKER_MIN_EDGE;
+
+  if (edge < minEdge) {
+    return { ok: false, reason: `taker_edge_below_min:${category}` };
   }
 
   if (cfg.TAIL_TAKER_BLOCK && isTailPrice(signal.outcomePrice, cfg.TAIL_PRICE_THRESHOLD)) {
@@ -193,12 +196,12 @@ async function confirmMakerCancel(orderId: string): Promise<boolean> {
   return false;
 }
 
-function resolveMakerPrice(book: { bids: Array<{ price: string }>; asks: Array<{ price: string }>; tick_size: string }, priceEdgeBps: number): number | null {
+function resolveMakerPrice(book: { bids: { price: string }[]; asks: { price: string }[]; tick_size: string }, priceEdgeBps: number): number | null {
   const tick = parseFloat(book.tick_size);
   if (!isFinite(tick) || tick <= 0) return null;
 
-  const bestBid = parseFloat(book.bids?.[0]?.price ?? '0');
-  const bestAsk = parseFloat(book.asks?.[0]?.price ?? '0');
+  const bestBid = parseFloat(book.bids[0]?.price ?? '0');
+  const bestAsk = parseFloat(book.asks[0]?.price ?? '0');
   const improvement = priceEdgeBps / 10_000;
 
   let price = bestBid > 0 ? bestBid + improvement : 0;
@@ -237,8 +240,8 @@ async function tryExecuteViaClobMaker(
     return { ok: false, error: 'maker_no_orderbook', waitMs: Date.now() - startedAt };
   }
 
-  const bestBid = parseFloat(book.bids?.[0]?.price ?? '0');
-  const bestAsk = parseFloat(book.asks?.[0]?.price ?? '0');
+  const bestBid = parseFloat(book.bids[0]?.price ?? '0');
+  const bestAsk = parseFloat(book.asks[0]?.price ?? '0');
   const mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : null;
   const spreadBps = bestBid > 0 && bestAsk > 0 && mid ? ((bestAsk - bestBid) / mid) * 10000 : null;
 
@@ -905,7 +908,7 @@ export async function executeSignal(
         finalExecutionPath: makerTelemetry.makerFillStatus === 'partial' ? 'maker_partial_fill' : 'maker_fill',
         finalVenue: 'clob',
         finalOrderType: 'maker',
-        finalSharesFilled: makerAttempt.tradeResult?.shares_bought ?? null,
+        finalSharesFilled: makerAttempt.tradeResult.shares_bought ?? null,
         finalStakeUsdExecuted: signal.stakeUsd,
         executionSucceeded: true,
         hedgeTriggered: true,
@@ -949,7 +952,7 @@ export async function executeSignal(
     }
   }
 
-  if (executionMode === 'hybrid') {
+  if (executionMode === 'hybrid' || executionMode === 'taker') {
     const takerGate = canExecuteTaker(signal, cfg);
     if (!takerGate.ok) {
       logger.info('[executor] skipping — taker gate blocked', {

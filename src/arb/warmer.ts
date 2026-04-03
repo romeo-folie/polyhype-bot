@@ -2,7 +2,7 @@ import { getRedis } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
 import { searchEvents, parseClobTokenIds } from '../mapping/gamma.js';
 import { getPriceFeed } from '../shared/feedSingleton.js';
-import { CRYPTO_ASSET_SEARCH_QUERIES } from './cryptoArbScanner.js';
+import { ASSET_SEARCH_QUERIES } from '../shared/assets.js';
 import { loadConfig } from '../shared/config.js';
 
 /**
@@ -50,13 +50,13 @@ export class ArbMarketWarmer {
     try {
       const redis = getRedis();
       const feed = getPriceFeed(redis);
-      const assets = Object.keys(CRYPTO_ASSET_SEARCH_QUERIES);
+      const assets = Object.keys(ASSET_SEARCH_QUERIES);
       
       let discoveredCount = 0;
       let watchedCount = 0;
 
       for (const assetId of assets) {
-        const queries = CRYPTO_ASSET_SEARCH_QUERIES[assetId] || [assetId];
+        const queries = ASSET_SEARCH_QUERIES[assetId] || [assetId];
         for (const query of queries) {
           try {
             const events = await searchEvents({ query, limit: 10, activeOnly: true });

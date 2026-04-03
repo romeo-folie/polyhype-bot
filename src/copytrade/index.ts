@@ -8,6 +8,7 @@ import { fetchCurrentPrice } from '../monitor/priceFetcher.js';
 import { executeTakeProfit } from '../monitor/takeProfitExecutor.js';
 import { getPriceFeed } from '../shared/feedSingleton.js';
 import { recordCopytradeFilter, recordCopytradeMetric } from '../shared/telemetry.js';
+import { inferCategory } from '../shared/outcomeRecorder.js';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
 import type { ExitReason } from '../monitor/takeProfitEvaluator.js';
@@ -55,11 +56,17 @@ export function parseWalletList(raw: string | undefined): string[] {
 const CATEGORY_KEYWORDS: Record<string, string[]> = {
   weather: ['rain', 'snow', 'storm', 'hurricane', 'temperature', 'precipitation', 'tornado', 'wind', 'heat wave', 'cold snap', 'blizzard', 'drought'],
   geopolitics: ['war', 'conflict', 'united nations', 'sanctions', 'treaty', 'military', 'invasion', 'ceasefire', 'nuclear'],
-  sports: ['olympics', 'nfl', 'nba', 'soccer', 'fifa', 'super bowl', 'championship', 'world cup'],
+  'sports-nba': ['nba', 'basketball', 'lakers', 'warriors', 'celtics', 'playoffs', 'finals', 'mvp'],
+  'sports-nfl': ['nfl', 'american football', 'super bowl', 'touchdown', 'quarterback', 'playoffs'],
+  'sports-soccer': ['soccer', 'fifa', 'world cup', 'champions league', 'premier league', 'epl', 'la liga', 'bundesliga', 'serie a', 'mls'],
+  'sports-mlb': ['mlb', 'baseball', 'world series', 'home run', 'pitcher'],
+  'sports-tennis': ['tennis', 'atp', 'wta', 'grand slam', 'wimbledon', 'roland garros', 'us open', 'australian open'],
+  sports: ['olympics', 'nfl', 'nba', 'soccer', 'fifa', 'super bowl', 'championship', 'world cup', 'mlb', 'atp', 'wta', 'nhl', 'hockey'],
   crypto: ['bitcoin', 'ethereum', 'doge', 'dogecoin', 'sec', 'etf', 'bnb', 'tao', 'regulation', 'coinbase', 'binance', 'halving', 'solana', 'xrp', 'ripple', 'shiba', 'shib', 'pepe', 'crypto', 'cryptocurrency', 'blockchain'],
-  macro: ['fed', 'inflation', 'cpi', 'gdp', 'recession', 'interest rate', 'rate cut', 'rate hike', 'central bank'],
+  macro: ['fed', 'inflation', 'cpi', 'gdp', 'recession', 'interest rate', 'rate cut', 'rate hike', 'central bank', 'economics', 'jobs', 'unemployment', 'yield', 'bond', 'powell', 'yellen', 'treasury', 'rate', 'percentage', 'bps'],
   'ai-tech': ['openai', 'nvidia', 'gemini', 'anthropic', 'gpu', 'llm', 'silicon'],
   'us-politics': ['election', 'biden', 'trump', 'senate', 'congress', 'white house', 'democrat', 'republican'],
+  mentions: ['mention', 'phrase', 'word', 'speech', 'press conference', 'interview', 'transcript', 'say', 'stated', 'announced', 'remark'],
 };
 
 /**
@@ -288,12 +295,18 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       const direction = tradeDirection(trade);
       const currentOutcomePrice = direction === 'YES' ? currentYesPrice : 1 - currentYesPrice;
       const slippage = slippageBps(trade.price, currentOutcomePrice);
-      if (slippage > cfg.COPYTRADE_MAX_SLIPPAGE_BPS) {
+      
+      const category = inferCategory(market.question);
+      const maxSlippage = cfg.COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES?.[category] ?? cfg.COPYTRADE_MAX_SLIPPAGE_BPS;
+
+      if (slippage > maxSlippage) {
         logger.info('[copytrade] skipped high slippage', {
           marketId: market.id,
+          category,
           slippageBps: slippage.toFixed(1),
+          maxSlippageBps: maxSlippage,
         });
-        await recordCopytradeFilter(redis, 'slippage').catch(() => {});
+        await recordCopytradeFilter(redis, `slippage:${category}`).catch(() => {});
         await markDedup();
         continue;
       }

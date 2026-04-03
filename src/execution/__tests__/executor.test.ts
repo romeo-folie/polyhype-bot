@@ -47,6 +47,7 @@ const mockConfig = {
   MAKER_POLL_INTERVAL_MS: 10,
   MAKER_PRICE_EDGE_BPS: 0,
   TAKER_MIN_EDGE: 0,
+  TAKER_MIN_EDGE_CATEGORIES: {},
   TAIL_TAKER_BLOCK: false,
   TAIL_PRICE_THRESHOLD: 0.2,
   TAIL_TAKER_OVERRIDE_EDGE: 0.2,
@@ -147,6 +148,7 @@ describe('executeSignal', () => {
     mockConfig.MAKER_POLL_INTERVAL_MS = 10;
     mockConfig.MAKER_PRICE_EDGE_BPS = 0;
     mockConfig.TAKER_MIN_EDGE = 0;
+    mockConfig.TAKER_MIN_EDGE_CATEGORIES = {};
     mockConfig.TAIL_TAKER_BLOCK = false;
     mockConfig.TAIL_PRICE_THRESHOLD = 0.2;
     mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
@@ -511,8 +513,23 @@ describe('execution mode', () => {
     const result = await executeSignal(makeSignal({ edgeMagnitude: 0.1 }), redis as any);
 
     expect(result.skipped).toBe(true);
-    expect(result.skipReason).toBe('taker_edge_below_min');
+    expect(result.skipReason).toBe('taker_edge_below_min:geopolitical');
     expect(mockSubmit).not.toHaveBeenCalled();
+  });
+
+  it('respects category-specific TAKER_MIN_EDGE overrides', async () => {
+    mockConfig.EXECUTION_MODE = 'taker';
+    mockConfig.TAKER_MIN_EDGE = 0.05;
+    mockConfig.TAKER_MIN_EDGE_CATEGORIES = { geopolitical: 0.15 };
+    const redis = makeRedis();
+
+    // 10% edge should be blocked by 15% category limit, even though global 5% allows it
+    const signal = makeSignal({ edgeMagnitude: 0.10 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(signal, redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('taker_edge_below_min:geopolitical');
   });
 
   it('captures a direct taker decision benchmark when an order book is available', async () => {

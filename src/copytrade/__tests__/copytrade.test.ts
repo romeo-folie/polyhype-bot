@@ -13,6 +13,8 @@ let configOverride = {
   COPYTRADE_MIN_LIQUIDITY: 1000,
   COPYTRADE_EXIT_MODE: 'rules',
   MAX_BET_FRACTION: 0.1,
+  TAKER_MIN_EDGE_CATEGORIES: {} as Record<string, number>,
+  COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES: {} as Record<string, number>,
 };
 
 vi.mock('../../shared/logger.js', () => ({ logger: mockLogger }));
@@ -105,6 +107,8 @@ beforeEach(() => {
     COPYTRADE_MIN_LIQUIDITY: 1000,
     COPYTRADE_EXIT_MODE: 'rules',
     MAX_BET_FRACTION: 0.1,
+    TAKER_MIN_EDGE_CATEGORIES: {},
+    COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES: {},
   };
 });
 
@@ -138,6 +142,34 @@ describe('runCopytrade', () => {
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis as any, 1000);
 
+    expect(result.signals).toHaveLength(0);
+  });
+
+  it('respects category-specific slippage overrides', async () => {
+    // Global max is 200, but mentions is 50
+    configOverride = { 
+      ...configOverride, 
+      COPYTRADE_MAX_SLIPPAGE_BPS: 200,
+      COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES: { mentions: 50 },
+      COPYTRADE_MARKET_SCOPE: ['all']
+    };
+
+    // 100 BPS slippage (0.5 to 0.505)
+    // (0.505 - 0.5) / 0.5 * 10000 = 100 BPS
+    const trade = makeTrade({ price: 0.5, title: 'Will Elon Musk say "X"?' });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(makeMarket({ 
+      question: 'Will Elon Musk say "X"?',
+      outcomePrices: '["0.505","0.495"]' 
+    }));
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis as any, 1000);
+
+    // Should be skipped because 100 BPS > 50 BPS (mentions limit)
     expect(result.signals).toHaveLength(0);
   });
 

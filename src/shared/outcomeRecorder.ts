@@ -69,6 +69,21 @@ export function inferCategory(question: string): string {
   if (/\bai\b|openai|nvidia|anthropic|gemini|gpu|llm/.test(q)) {
     return 'ai-tech';
   }
+  if (/\bnba\b|basketball|lakers|warriors|celtics/.test(q)) {
+    return 'sports-nba';
+  }
+  if (/\bnfl\b|american football|super bowl|quarterback/.test(q)) {
+    return 'sports-nfl';
+  }
+  if (/soccer|fifa|champions league|premier league|epl|la liga/.test(q)) {
+    return 'sports-soccer';
+  }
+  if (/olympics|mlb|baseball|tennis|atp|wta|nhl|hockey|championship/.test(q)) {
+    return 'sports';
+  }
+  if (/mention|say|tweet|post|transcript|phrase|word|quoted/.test(q)) {
+    return 'mentions';
+  }
   return 'geopolitical';
 }
 
@@ -156,7 +171,7 @@ export async function getRecentOutcomes(
     const outcomes: PositionOutcome[] = [];
     for (const id of ids) {
       const data = await redis.hgetall(`outcome:${id}`);
-      if (!data || !data.id) continue;
+      if (!data.id) continue;
 
       const parsed: PositionOutcome = {
         id: data.id,
@@ -173,14 +188,14 @@ export async function getRecentOutcomes(
       executionVenue: data.executionVenue ?? '',
     };
     if (data.executionId) parsed.executionId = data.executionId;
-    if (data.urgencyScore !== undefined && data.urgencyScore !== '') parsed.urgencyScore = Number(data.urgencyScore);
+    if (data.urgencyScore !== undefined && data.urgencyScore !== null && data.urgencyScore !== '') parsed.urgencyScore = Number(data.urgencyScore);
     if (data.modeConfigured) parsed.modeConfigured = data.modeConfigured as NonNullable<PositionOutcome['modeConfigured']>;
     if (data.entryExecutionPath) parsed.entryExecutionPath = data.entryExecutionPath;
     if (data.entryOrderType) parsed.entryOrderType = data.entryOrderType as NonNullable<PositionOutcome['entryOrderType']>;
     if (data.fallbackReason) parsed.fallbackReason = data.fallbackReason;
-    if (data.decisionSpreadBps !== undefined && data.decisionSpreadBps !== '') parsed.decisionSpreadBps = Number(data.decisionSpreadBps);
-    if (data.makerPriceImprovementBps !== undefined && data.makerPriceImprovementBps !== '') parsed.makerPriceImprovementBps = Number(data.makerPriceImprovementBps);
-    if (data.makerPriceImprovementUsd !== undefined && data.makerPriceImprovementUsd !== '') parsed.makerPriceImprovementUsd = Number(data.makerPriceImprovementUsd);
+    if (data.decisionSpreadBps !== undefined && data.decisionSpreadBps !== null && data.decisionSpreadBps !== '') parsed.decisionSpreadBps = Number(data.decisionSpreadBps);
+    if (data.makerPriceImprovementBps !== undefined && data.makerPriceImprovementBps !== null && data.makerPriceImprovementBps !== '') parsed.makerPriceImprovementBps = Number(data.makerPriceImprovementBps);
+    if (data.makerPriceImprovementUsd !== undefined && data.makerPriceImprovementUsd !== null && data.makerPriceImprovementUsd !== '') parsed.makerPriceImprovementUsd = Number(data.makerPriceImprovementUsd);
     outcomes.push(parsed);
   }
 
