@@ -155,66 +155,79 @@ async function executeSimmerExit(opts: {
 }): Promise<TakeProfitResult> {
   const { position, currentPrice, returnPct, reason, redis, sellSide, sharesToSell } = opts;
 
+  const question = position.question ?? '';
   let simmerIdResult: string | null = null;
   let simmerError: string | null = null;
 
-  // STEP 1: Attempt sell with the Polymarket marketId (numeric string) first.
-  // Many Simmer environments accept the source market ID directly.
-  try {
-    const tradeResult = await submitSell({
-      market_id: position.marketId,
-      side: sellSide,
-      action: 'sell',
-      shares: sharesToSell,
-      reasoning: `Direct sell: ${reason} — return ${returnPct.toFixed(1)}%`,
-    });
-
-    if (tradeResult.success) {
-      return await finalizeSimmerExit(redis, position, tradeResult, currentPrice, returnPct, reason);
-    }
-    simmerError = tradeResult.error ?? null;
-  } catch (err) {
-    simmerError = err instanceof Error ? err.message : String(err);
-  }
-
-  // STEP 2: Fall back to resolution by question if direct sell failed with "Market not found"
-  if (simmerError && (simmerError.toLowerCase().includes('not found') || simmerError.toLowerCase().includes('invalid market'))) {
-    logger.info('[take-profit-executor] direct sell failed with market_not_found — resolving via question', {
-      marketId: position.marketId,
-      error: simmerError,
-    });
-
-    const question = position.question ?? '';
-    simmerIdResult = await resolveSimmerMarketId(question);
-    
-    if (simmerIdResult) {
-      try {
-        const retryResult = await submitSell({
-          market_id: simmerIdResult,
-          side: sellSide,
-          action: 'sell',
-          shares: sharesToSell,
-          reasoning: `Resolved sell: ${reason} — return ${returnPct.toFixed(1)}%`,
-        });
-
-        if (retryResult.success) {
-          return await finalizeSimmerExit(redis, position, retryResult, currentPrice, returnPct, reason);
-        }
-        simmerError = retryResult.error ?? null;
-      } catch (err) {
-        simmerError = err instanceof Error ? err.message : String(err);
-      }
-    } else {
-      logger.warn('[take-profit-executor] cannot resolve Simmer UUID via question — resolution aborted', {
-        marketId: position.marketId,
-        question: question.slice(0, 80),
+  // STEP 1: Always attempt resolution by question first for precision and UUID consistency.
+  simmerIdResult = await resolveSimmerMarketId(question);
+  
+  if (simmerIdResult) {
+    try {
+      const tradeResult = await submitSell({
+        market_id: simmerIdResult,
+        side: sellSide,
+        action: 'sell',
+        shares: sharesToSell,
+        reasoning: `Resolved sell: ${reason} — return ${returnPct.toFixed(1)}%`,
       });
+
+      if (!tradeResult) {
+        throw new Error('Simmer sell returned no result (empty response)');
+      }
+
+      if (tradeResult.success) {
+        return await finalizeSimmerExit(redis, position, tradeResult, currentPrice, returnPct, reason);
+      }
+      simmerError = tradeResult.error ?? null;
+    } catch (err) {
+      simmerError = err instanceof Error ? err.message : String(err);
     }
   }
 
-  // STEP 3: Fallback to CLOB exit if Simmer still failed and we have CLOB enabled/token IDs
-  if (position.clobTokenIds && position.clobTokenIds.length > 0) {
-    logger.info('[take-profit-executor] Simmer exit failed — falling back to CLOB', {
+  // STEP 2: Fall back to direct numeric ID if resolution failed or resolution result failed with "Market not found"
+  const isResolutionFailure = !simmerIdResult || (simmerError && (simmerError.toLowerCase().includes('not found') || simmerError.toLowerCase().includes('invalid market')));
+
+  if (isResolutionFailure) {
+    logger.info('[take-profit-executor] Simmer resolution failed or returned market_not_found — trying direct numeric ID', {
+      marketId: position.marketId,
+      simmerError,
+    });
+
+    try {
+      const directResult = await submitSell({
+        market_id: position.marketId,
+        side: sellSide,
+        action: 'sell',
+        shares: sharesToSell,
+        reasoning: `Direct numeric sell: ${reason} — return ${returnPct.toFixed(1)}%`,
+      });
+
+      if (!directResult) {
+        throw new Error('Simmer direct sell returned no result (empty response)');
+      }
+
+      if (directResult.success) {
+        return await finalizeSimmerExit(redis, position, directResult, currentPrice, returnPct, reason);
+      }
+      simmerError = directResult.error ?? null;
+    } catch (err) {
+      simmerError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  // STEP 3: Fallback to CLOB exit if Simmer resolution failed and we have CLOB enabled/token IDs.
+  // We ONLY fall back if the failure was a mapping/resolution error (Market not found).
+  // If Simmer gave a real execution error (slippage, balance, etc.), we do NOT fall back to CLOB
+  // to avoid double-charging or out-of-sync state if Simmer's fill was partial.
+  const isAbortedResolution = !simmerIdResult && (!simmerError || simmerError.toLowerCase().includes('resolution failed'));
+  const isMarketNotFoundError = simmerError && (
+    simmerError.toLowerCase().includes('not found') || 
+    simmerError.toLowerCase().includes('invalid market')
+  );
+
+  if ((isAbortedResolution || isMarketNotFoundError) && position.clobTokenIds && position.clobTokenIds.length > 0) {
+    logger.info('[take-profit-executor] Simmer resolution/lookup failed — falling back to CLOB', {
       marketId: position.marketId,
       simmerError,
     });
@@ -222,10 +235,13 @@ async function executeSimmerExit(opts: {
   }
 
   // STEP 4: Attempt Synthetic Exit on HL if all else fails
+  logger.info('[take-profit-executor] Simmer/CLOB failed — attempting synthetic exit', { marketId: position.marketId });
   const synthetic = await attemptSyntheticExit({ position, currentPrice, returnPct, reason, redis });
-  if (synthetic.success) return synthetic;
+  logger.info('[take-profit-executor] synthetic exit result', { marketId: position.marketId, success: synthetic?.success });
+  if (synthetic && synthetic.success) return synthetic;
 
-  return { marketId: position.marketId, success: false, error: simmerError ?? 'Simmer resolution failed', returnPct, reason };
+  const finalError = simmerError ?? 'Simmer resolution failed';
+  return { marketId: position.marketId, success: false, error: finalError, returnPct, reason };
 }
 
 /** Post-sell cleanup for Simmer: close position, credit proceeds, record outcome, notify. */
@@ -412,6 +428,10 @@ async function executeClobExit(opts: {
       shares: safeShares,
       orderType: loadConfig().CLOB_ORDER_TYPE,
     });
+
+    if (!clobResult) {
+      throw new Error('CLOB sell returned no result (empty response)');
+    }
 
     if (clobResult.success) {
       logger.info('[take-profit-executor] exit successful (clob)', {
