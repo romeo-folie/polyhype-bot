@@ -24,7 +24,7 @@ const DEFAULT_FEEDS: FeedConfig[] = [
 ];
 
 const FEED_TIMEOUT_MS = 10_000;
-const DEFAULT_USER_AGENT = 'Mozilla/5.0 (compatible; PGA/1.0; +https://github.com/romeo-folie/polymarket-geopolitical-agent)';
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 function buildDefaultHeaders(): Record<string, string> {
   const raw = process.env.RSS_USER_AGENT;
@@ -32,6 +32,9 @@ function buildDefaultHeaders(): Record<string, string> {
   return {
     'user-agent': userAgent && userAgent.length > 0 ? userAgent : DEFAULT_USER_AGENT,
     accept: 'application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.1',
+    'accept-language': 'en-US,en;q=0.9',
+    'cache-control': 'no-cache',
+    pragma: 'no-cache',
   };
 }
 
@@ -70,7 +73,15 @@ export async function fetchRssFeeds(feeds?: FeedConfig[]): Promise<RssItem[]> {
         }
 
         const xml = await response.text();
+        if (!xml || xml.trim().startsWith('<!DOCTYPE html>')) {
+           throw new Error(`Invalid XML response (likely HTML/WAF block) for ${feedConfig.url}`);
+        }
+
         const feed = await parser.parseString(xml);
+        if (!feed || !feed.items) {
+           throw new Error(`Malformed feed data for ${feedConfig.url}`);
+        }
+
         const source = feed.title ?? feedConfig.url;
 
         for (const item of feed.items) {
