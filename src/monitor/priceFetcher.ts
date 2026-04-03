@@ -11,7 +11,7 @@
  * This is the same field ingested at entry time — consistent comparison.
  */
 
-import { getMarket, parseOutcomePrices } from '../mapping/gamma.js';
+import { getMarket, parseOutcomePrices, parseOutcomes } from '../mapping/gamma.js';
 import { logger } from '../shared/logger.js';
 import { getRedis } from '../shared/redis.js';
 import { getPriceFeed } from '../shared/feedSingleton.js';
@@ -85,7 +85,7 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
 
     // Determine correct indices for YES and NO outcomes.
     // Gamma usually returns ["Yes", "No"] but order is not strictly guaranteed.
-    const outcomes = market.outcomes.map((o) => o.toLowerCase());
+    const outcomes = parseOutcomes(market.outcomes).map((o) => o.toLowerCase());
     const yesIndex = outcomes.indexOf('yes');
     const noIndex = outcomes.indexOf('no');
 

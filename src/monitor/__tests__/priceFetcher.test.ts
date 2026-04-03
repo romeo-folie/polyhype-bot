@@ -9,6 +9,7 @@ vi.mock('../../shared/logger.js', () => ({
 vi.mock('../../mapping/gamma.js', () => ({
   getMarket: vi.fn(),
   parseOutcomePrices: vi.fn(),
+  parseOutcomes: vi.fn(),
   searchEvents: vi.fn(),
   parseYesPrice: vi.fn(),
 }));
@@ -32,11 +33,12 @@ vi.mock('../../shared/feedSingleton.js', () => ({
   destroyPriceFeed: vi.fn(),
 }));
 
-const { getMarket, parseOutcomePrices } = await import('../../mapping/gamma.js');
+const { getMarket, parseOutcomePrices, parseOutcomes } = await import('../../mapping/gamma.js');
 const { fetchCurrentPrice, fetchAllCurrentPrices } = await import('../priceFetcher.js');
 
 const mockGetMarket = vi.mocked(getMarket);
 const mockParseOutcomePrices = vi.mocked(parseOutcomePrices);
+const mockParseOutcomes = vi.mocked(parseOutcomes);
 
 function makePosition(overrides: Partial<Position> = {}): Position {
   return {
@@ -76,6 +78,7 @@ function makeMarket(yesPrice = '0.65', active = true, closed = false) {
 afterEach(() => {
   mockGetMarket.mockReset();
   mockParseOutcomePrices.mockReset();
+  mockParseOutcomes.mockReset();
   mockFeed.getCachedPrice.mockReset();
   mockFeed.getCachedPrice.mockResolvedValue(null);
   mockFeed.watch.mockReset();
@@ -85,6 +88,7 @@ describe('fetchCurrentPrice', () => {
   it('returns current YES price for a YES position', async () => {
     mockGetMarket.mockResolvedValue(makeMarket('0.65'));
     mockParseOutcomePrices.mockReturnValue(['0.65', '0.35']);
+    mockParseOutcomes.mockReturnValue(['Yes', 'No']);
 
     const result = await fetchCurrentPrice(makePosition({ direction: 'YES' }));
 
@@ -97,6 +101,7 @@ describe('fetchCurrentPrice', () => {
   it('returns (1 - yesPrice) as outcome price for a NO position', async () => {
     mockGetMarket.mockResolvedValue(makeMarket('0.65'));
     mockParseOutcomePrices.mockReturnValue(['0.65', '0.35']);
+    mockParseOutcomes.mockReturnValue(['Yes', 'No']);
 
     const result = await fetchCurrentPrice(makePosition({ direction: 'NO' }));
 
@@ -132,6 +137,7 @@ describe('fetchAllCurrentPrices', () => {
   it('returns a map keyed by marketId:direction with prices for all fetchable positions', async () => {
     mockGetMarket.mockResolvedValue(makeMarket('0.65'));
     mockParseOutcomePrices.mockReturnValue(['0.65', '0.35']);
+    mockParseOutcomes.mockReturnValue(['Yes', 'No']);
 
     const positions = [makePosition({ marketId: 'mkt-1', direction: 'YES' })];
     const result = await fetchAllCurrentPrices(positions);
@@ -143,6 +149,7 @@ describe('fetchAllCurrentPrices', () => {
   it('does not overwrite when same market has both YES and NO positions', async () => {
     mockGetMarket.mockResolvedValue(makeMarket('0.65'));
     mockParseOutcomePrices.mockReturnValue(['0.65', '0.35']);
+    mockParseOutcomes.mockReturnValue(['Yes', 'No']);
 
     const positions = [
       makePosition({ marketId: 'mkt-1', direction: 'YES' }),

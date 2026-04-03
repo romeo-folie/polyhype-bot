@@ -38,7 +38,7 @@ export interface GammaMarket {
    * use `parseOutcomePrices()` to normalise before accessing individual prices.
    */
   outcomePrices: string | string[];
-  outcomes: string[];
+  outcomes: string | string[];
   active: boolean;
   closed: boolean;
   volume: string;
@@ -159,6 +159,22 @@ export function parseClobTokenIds(clobTokenIds: string | string[]): string[] {
     throw new Error('Parsed clobTokenIds is not an array');
   } catch (e) {
     throw new Error(`Cannot parse clobTokenIds: "${clobTokenIds}" — ${String(e)}`);
+  }
+}
+
+/**
+ * Normalise `outcomes` from either form returned by Gamma.
+ *
+ * Gamma often returns a JSON-encoded string instead of string[].
+ */
+export function parseOutcomes(outcomes: string | string[]): string[] {
+  if (Array.isArray(outcomes)) return outcomes;
+  try {
+    const parsed = JSON.parse(outcomes) as unknown;
+    if (Array.isArray(parsed)) return parsed as string[];
+    throw new Error('Parsed outcomes is not an array');
+  } catch (e) {
+    throw new Error(`Cannot parse outcomes: "${outcomes}" — ${String(e)}`);
   }
 }
 

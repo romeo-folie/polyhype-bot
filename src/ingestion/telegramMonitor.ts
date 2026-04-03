@@ -81,14 +81,14 @@ export async function startTelegramMonitor(): Promise<void> {
     .filter(Boolean);
 
   // Pre-resolve channel IDs to avoid getEntity calls in the hot path
-  const resolvedChannelIds: string[] = [];
+  const resolvedEntities: any[] = [];
   const channelNameMap = new Map<string, string>(); // ID -> Name
 
   for (const channelName of channels) {
     try {
       const entity = await client.getEntity(channelName);
-      const id = entity.id.toString();
-      resolvedChannelIds.push(id);
+      const id = await client.getPeerId(entity); // Canonical string ID
+      resolvedEntities.push(entity);
       channelNameMap.set(id, (channelName || 'channel').replace(/^@/, ''));
       logger.debug('[telegram] resolved channel', { name: channelName, id });
     } catch (err: unknown) {
@@ -101,22 +101,41 @@ export async function startTelegramMonitor(): Promise<void> {
 
   logger.info('[telegram] monitoring channels', {
     resolved: Array.from(channelNameMap.values()),
-    count: resolvedChannelIds.length,
+    count: resolvedEntities.length,
   });
+
+  let messageCount = 0;
+  // Heartbeat to confirm monitor is still alive
+  setInterval(() => {
+    logger.info('[telegram] heartbeat', {
+      connected: client?.connected,
+      monitoredChannels: resolvedEntities.length,
+      messagesProcessed: messageCount,
+    });
+  }, 60000);
 
   // Event handler for new messages with explicit chat filtering
   client.addEventHandler(async (event: NewMessageEvent) => {
     const message = event.message;
-    if (!message?.text) return;
+    if (!message?.text || !client) return;
 
-    // Fast-path ID check
-    const peerId = message.peerId?.toString();
+    // Fast-path ID check using canonical peer ID
+    const peerId = await client.getPeerId(message.peerId);
     const peerName = (peerId && channelNameMap.get(peerId)) || 'unknown';
 
+    // Log EVERY message received (debug level) to aid troubleshooting
+    logger.debug('[telegram] event received', {
+      peerId,
+      peerName,
+      isMonitored: channelNameMap.has(peerId || ''),
+    });
+
     // If we have resolved IDs, strictly filter here (though NewMessage filter handles most)
-    if (resolvedChannelIds.length > 0 && peerId && !resolvedChannelIds.includes(peerId)) {
+    if (resolvedEntities.length > 0 && peerId && !channelNameMap.has(peerId)) {
       return;
     }
+
+    messageCount++;
 
     const startAt = Date.now();
     const telegramLatency = startAt - message.date * 1000;
@@ -179,7 +198,7 @@ export async function startTelegramMonitor(): Promise<void> {
         peer: peerName,
       });
     }
-  }, new NewMessage(resolvedChannelIds.length > 0 ? { chats: resolvedChannelIds } : {}));
+  }, new NewMessage(resolvedEntities.length > 0 ? { chats: resolvedEntities } : {}));
 }
 
 /**
