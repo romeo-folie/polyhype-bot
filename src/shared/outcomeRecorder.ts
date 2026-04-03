@@ -72,7 +72,7 @@ export function inferCategory(question: string): string {
   if (/\bnba\b|basketball|lakers|warriors|celtics/.test(q)) {
     return 'sports-nba';
   }
-  if (/\bnfl\b|football|super bowl|quarterback/.test(q)) {
+  if (/\bnfl\b|american football|super bowl|quarterback/.test(q)) {
     return 'sports-nfl';
   }
   if (/soccer|fifa|champions league|premier league|epl|la liga/.test(q)) {

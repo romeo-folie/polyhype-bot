@@ -57,7 +57,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   weather: ['rain', 'snow', 'storm', 'hurricane', 'temperature', 'precipitation', 'tornado', 'wind', 'heat wave', 'cold snap', 'blizzard', 'drought'],
   geopolitics: ['war', 'conflict', 'united nations', 'sanctions', 'treaty', 'military', 'invasion', 'ceasefire', 'nuclear'],
   'sports-nba': ['nba', 'basketball', 'lakers', 'warriors', 'celtics', 'playoffs', 'finals', 'mvp'],
-  'sports-nfl': ['nfl', 'football', 'super bowl', 'touchdown', 'quarterback', 'playoffs'],
+  'sports-nfl': ['nfl', 'american football', 'super bowl', 'touchdown', 'quarterback', 'playoffs'],
   'sports-soccer': ['soccer', 'fifa', 'world cup', 'champions league', 'premier league', 'epl', 'la liga', 'bundesliga', 'serie a', 'mls'],
   'sports-mlb': ['mlb', 'baseball', 'world series', 'home run', 'pitcher'],
   'sports-tennis': ['tennis', 'atp', 'wta', 'grand slam', 'wimbledon', 'roland garros', 'us open', 'australian open'],

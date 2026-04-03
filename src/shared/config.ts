@@ -202,7 +202,7 @@ const envSchema = z.object({
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES must be valid JSON' });
       return z.NEVER;
     }
-  }).pipe(z.record(z.string(), z.coerce.number().min(0))),
+  }).pipe(z.record(z.string(), z.coerce.number().min(0).max(10000))),
   COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS: z.coerce.number().min(0).optional().default(6),
   COPYTRADE_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(1000),
   COPYTRADE_EXIT_MODE: z.enum(['mirror', 'rules']).optional().default('rules'),
