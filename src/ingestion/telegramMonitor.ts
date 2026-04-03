@@ -67,7 +67,7 @@ export async function startTelegramMonitor(): Promise<void> {
 
   const channels = channelsStr
     .split(',')
-    .map((s) => s.trim())
+    .map((s) => s.trim().replace(/^@/, ''))
     .filter(Boolean);
   logger.info('[telegram] monitoring channels', { channels });
 
@@ -82,11 +82,11 @@ export async function startTelegramMonitor(): Promise<void> {
     try {
       const peer = await client?.getEntity(message.peerId);
       if (peer instanceof Api.Channel) {
-        peerName = peer.username ?? peer.title ?? 'channel';
+        peerName = (peer.username ?? peer.title ?? 'channel').replace(/^@/, '');
         // Build a valid t.me URL using the username when available; fall back to channel ID
         peerUrlSlug = peer.username ?? `c/${peer.id.toString()}`;
       } else if (peer instanceof Api.Chat) {
-        peerName = peer.title || 'chat';
+        peerName = (peer.title || 'chat').replace(/^@/, '');
         peerUrlSlug = `c/${peer.id.toString()}`;
       }
     } catch {

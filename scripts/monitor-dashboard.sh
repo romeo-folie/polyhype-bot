@@ -37,7 +37,7 @@ pm2 save --force >/dev/null 2>&1
 for name in pga-spot-feed pga-arb pga-copytrade pga-futures pga-telegram; do
   touch "${PM2_LOGS}/${name}-out.log" 2>/dev/null || true
 done
-touch /tmp/pga-trade.log /tmp/pga-monitor.log /tmp/pga-spot.log
+touch /tmp/pga-trade.log /tmp/pga-monitor.log /tmp/pga-spot.log /tmp/pga-ingest.log
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   tmux attach-session -t "$SESSION"
@@ -52,17 +52,18 @@ W4="tail -f '${PM2_LOGS}/pga-telegram-out.log'   | sed 's/\(\[[^]]*\]\)/\x1b[92m
 W5="tail -f /tmp/pga-trade.log                   | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
 W6="tail -f /tmp/pga-monitor.log                 | sed 's/\(\[[^]]*\]\)/\x1b[96m\1\x1b[0m/g'"
 W7="tail -f /tmp/pga-spot.log                    | sed 's/\(\[[^]]*\]\)/\x1b[95m\1\x1b[0m/g'"
+W8="tail -f /tmp/pga-ingest.log                  | sed 's/\(\[[^]]*\]\)/\x1b[93m\1\x1b[0m/g'"
 
-# Create 8 separate windows first
+# Create 9 separate windows first
 tmux new-session  -d -s "$SESSION" -n w0 -x 220 -y 60 "sh -c \"$W0\""
-for i in 1 2 3 4 5 6 7; do
+for i in 1 2 3 4 5 6 7 8; do
   cmd_var="W$i"
   eval cmd_val=\$$cmd_var
   tmux new-window -t "$SESSION" -n "w$i" "sh -c \"$cmd_val\""
 done
 
 # Join windows into w0 re-tiling after each join to keep space balanced
-for i in 1 2 3 4 5 6 7; do
+for i in 1 2 3 4 5 6 7 8; do
   tmux join-pane -s "${SESSION}:w$i" -t "${SESSION}:w0"
   tmux select-layout -t "${SESSION}:w0" tiled
 done
