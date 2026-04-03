@@ -21,8 +21,15 @@ const CATEGORY_MAP: Record<string, string> = {
   geopolitics: 'POLITICS',
   'us-politics': 'POLITICS',
   weather: 'WEATHER',
+  'sports-nba': 'SPORTS',
+  'sports-nfl': 'SPORTS',
+  'sports-soccer': 'SPORTS',
+  'sports-mlb': 'SPORTS',
+  'sports-tennis': 'SPORTS',
   sports: 'SPORTS',
+  macro: 'ECONOMICS',
   crypto: 'CRYPTO',
+  mentions: 'CULTURE',
 };
 
 export function resolveCategories(scope: string[]): string[] {

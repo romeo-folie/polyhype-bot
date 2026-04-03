@@ -87,6 +87,19 @@ const envSchema = z.object({
   MAKER_POLL_INTERVAL_MS: z.coerce.number().int().min(50).optional().default(1000),
   MAKER_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(5),
   TAKER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.1),
+  TAKER_MIN_EDGE_CATEGORIES: z.string().optional().default('{}').transform((v) => {
+    try {
+      const parsed = JSON.parse(v) as unknown;
+      if (typeof parsed !== 'object' || parsed === null) return {};
+      const result: Record<string, number> = {};
+      for (const [k, val] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof val === 'number') result[k] = val;
+      }
+      return result;
+    } catch {
+      return {};
+    }
+  }),
   TAIL_TAKER_BLOCK: z.coerce.boolean().optional().default(true),
   TAIL_PRICE_THRESHOLD: z.coerce.number().min(0).max(0.5).optional().default(0.2),
   TAIL_TAKER_OVERRIDE_EDGE: z.coerce.number().min(0).max(1).optional().default(0.2),
@@ -177,6 +190,19 @@ const envSchema = z.object({
   COPYTRADE_SIZE_SCALE: z.coerce.number().min(0).optional().default(0.1),
   COPYTRADE_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(25),
   COPYTRADE_MAX_SLIPPAGE_BPS: z.coerce.number().min(0).optional().default(200),
+  COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES: z.string().optional().default('{"crypto-regulatory": 100, "mentions": 50, "macro": 150, "us-politics": 200, "geopolitical": 200, "sports": 100}').transform((v) => {
+    try {
+      const parsed = JSON.parse(v) as unknown;
+      if (typeof parsed !== 'object' || parsed === null) return {};
+      const result: Record<string, number> = {};
+      for (const [k, val] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof val === 'number') result[k] = val;
+      }
+      return result;
+    } catch {
+      return {};
+    }
+  }),
   COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS: z.coerce.number().min(0).optional().default(6),
   COPYTRADE_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(1000),
   COPYTRADE_EXIT_MODE: z.enum(['mirror', 'rules']).optional().default('rules'),
