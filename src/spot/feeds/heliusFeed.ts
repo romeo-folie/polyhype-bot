@@ -22,7 +22,10 @@ export class HeliusFeed {
   private reconnectTimeout: NodeJS.Timeout | null = null;
   private reconnectCount = 0;
 
-  constructor(_apiKey: string, private symbols: string[] = ['SOL']) {
+  constructor(
+    _apiKey: string,
+    private symbols: string[] = ['SOL'],
+  ) {
     // API key currently not needed for public Pyth Hermes
   }
 
@@ -37,22 +40,27 @@ export class HeliusFeed {
       logger.info('[pyth] connected to Hermes');
       this.reconnectCount = 0; // Reset on success
       const ids = this.symbols
-        .map(s => PYTH_FEED_IDS[s])
+        .map((s) => PYTH_FEED_IDS[s])
         .filter((id): id is string => Boolean(id))
-        .map(id => `0x${id}`);
+        .map((id) => `0x${id}`);
 
       if (ids.length > 0) {
-        this.ws?.send(JSON.stringify({
-          type: 'subscribe',
-          ids
-        }));
+        this.ws?.send(
+          JSON.stringify({
+            type: 'subscribe',
+            ids,
+          }),
+        );
         logger.info('[pyth] subscribed to price feeds', { count: ids.length });
       }
     });
 
     this.ws.on('message', (data: import('ws').RawData) => {
       try {
-        const msg = JSON.parse(data.toString()) as { type?: string; price_feed?: { id: string; price: { price: string; expo: number } } };
+        const msg = JSON.parse(data.toString()) as {
+          type?: string;
+          price_feed?: { id: string; price: { price: string; expo: number } };
+        };
         if (msg.type === 'price_update' && msg.price_feed) {
           void this.handleUpdate(msg.price_feed);
         }
@@ -74,18 +82,26 @@ export class HeliusFeed {
         }
         this.reconnectCount++;
         const delay = Math.min(1000 * Math.pow(2, this.reconnectCount), 30000);
-        logger.warn(`[pyth] connection closed, reconnecting in ${String(delay / 1000)}s (attempt ${String(this.reconnectCount)}/${MAX_RECONNECTS})...`);
-        this.reconnectTimeout = setTimeout(() => { this.start(); }, delay);
+        logger.warn(
+          `[pyth] connection closed, reconnecting in ${String(delay / 1000)}s (attempt ${String(this.reconnectCount)}/${MAX_RECONNECTS})...`,
+        );
+        this.reconnectTimeout = setTimeout(() => {
+          this.start();
+        }, delay);
       }
     });
   }
 
-  private async handleUpdate(feed: { id: string; price: { price: string; expo: number } }): Promise<void> {
+  private async handleUpdate(feed: {
+    id: string;
+    price: { price: string; expo: number };
+  }): Promise<void> {
     try {
       // Pyth Hermes price is (price * 10^expo)
       const price = Number(feed.price.price) * Math.pow(10, feed.price.expo);
       const feedIdClean = feed.id.startsWith('0x') ? feed.id.slice(2) : feed.id;
-      const symbol = Object.keys(PYTH_FEED_IDS).find(k => PYTH_FEED_IDS[k] === feedIdClean) ?? 'unknown';
+      const symbol =
+        Object.keys(PYTH_FEED_IDS).find((k) => PYTH_FEED_IDS[k] === feedIdClean) ?? 'unknown';
       const timestamp = Date.now();
 
       if (!isFinite(price) || price <= 0 || symbol === 'unknown') return;
@@ -98,7 +114,10 @@ export class HeliusFeed {
       pipeline.hset('spot:last_updated', symbol.toLowerCase(), timestamp.toString());
 
       // Publish event for Arb Worker
-      pipeline.publish('spot:price_moved', JSON.stringify({ symbol: symbol.toLowerCase(), price, timestamp }));
+      pipeline.publish(
+        'spot:price_moved',
+        JSON.stringify({ symbol: symbol.toLowerCase(), price, timestamp }),
+      );
 
       await pipeline.exec();
 

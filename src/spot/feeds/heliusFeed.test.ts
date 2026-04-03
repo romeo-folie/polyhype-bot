@@ -27,7 +27,7 @@ const mockWsCtor = vi.hoisted(() =>
     send: vi.fn(),
     terminate: vi.fn(),
     removeAllListeners: vi.fn(),
-  }))
+  })),
 );
 
 // Provide both default and named export to match:
@@ -45,7 +45,7 @@ describe('HeliusFeed (Hermes)', () => {
 
   it('should initialize and subscribe to price feeds on open', async () => {
     const feed = new HeliusFeed('fake-key', ['SOL', 'BTC']);
-    
+
     // Catch the 'open' callback
     let openCallback: () => void = () => {};
     const mockWs = {
@@ -62,12 +62,14 @@ describe('HeliusFeed (Hermes)', () => {
     openCallback();
 
     expect(mockWs.send).toHaveBeenCalledWith(expect.stringContaining('subscribe'));
-    expect(mockWs.send).toHaveBeenCalledWith(expect.stringContaining('0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d'));
+    expect(mockWs.send).toHaveBeenCalledWith(
+      expect.stringContaining('0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d'),
+    );
   });
 
   it('should handle price_update messages and update Redis', async () => {
     const feed = new HeliusFeed('fake-key', ['SOL']);
-    
+
     let messageCallback: (data: string) => void = () => {};
     const mockWs = {
       on: vi.fn((event, cb) => {
@@ -86,11 +88,11 @@ describe('HeliusFeed (Hermes)', () => {
         id: '0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d',
         price: {
           price: '20050',
-          expo: -2
-        }
-      }
+          expo: -2,
+        },
+      },
     };
-    
+
     messageCallback(JSON.stringify(mockMsg));
 
     // handleUpdate is fire-and-forget (void) — wait for the pipeline write to settle
@@ -98,6 +100,9 @@ describe('HeliusFeed (Hermes)', () => {
       expect(mockRedis.pipeline).toHaveBeenCalled();
     });
     expect(mockPipeline.hset).toHaveBeenCalledWith('spot:prices', 'sol', '200.5');
-    expect(mockPipeline.publish).toHaveBeenCalledWith('spot:price_moved', expect.stringContaining('sol'));
+    expect(mockPipeline.publish).toHaveBeenCalledWith(
+      'spot:price_moved',
+      expect.stringContaining('sol'),
+    );
   });
 });

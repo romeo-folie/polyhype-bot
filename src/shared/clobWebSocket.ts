@@ -79,7 +79,7 @@ export class ClobPriceFeed {
   /** Get the cached YES price for a market. Returns null on cache miss. */
   async getCachedPrice(marketId: string): Promise<number | null> {
     const rawYes = await this.redis.get(WS_YES_PRICE_KEY(marketId));
-    const raw = rawYes ?? await this.redis.get(WS_PRICE_KEY(marketId));
+    const raw = rawYes ?? (await this.redis.get(WS_PRICE_KEY(marketId)));
     if (raw === null) return null;
     const p = parseFloat(raw);
     return isFinite(p) ? p : null;
@@ -220,6 +220,8 @@ export class ClobPriceFeed {
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** this.reconnectAttempt, RECONNECT_MAX_MS);
     this.reconnectAttempt++;
     logger.info('[clob-ws] reconnecting', { attempt: this.reconnectAttempt, delayMs: delay });
-    this.reconnectTimer = setTimeout(() => { this.connect(); }, delay);
+    this.reconnectTimer = setTimeout(() => {
+      this.connect();
+    }, delay);
   }
 }

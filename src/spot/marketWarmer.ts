@@ -33,7 +33,7 @@ async function warmAsset(assetId: string, redis: ReturnType<typeof getRedis>): P
       for (const event of events) {
         for (const market of event.markets) {
           const cacheKey = `mapping:consensus:v2:${market.id}`;
-          
+
           // Only warm if not already cached
           const existing = await redis.get(cacheKey);
           if (existing) continue;
@@ -81,7 +81,7 @@ export async function runMarketWarmer(): Promise<void> {
   logger.info('[market-warmer] starting warm-up cycle', { assetCount: uniqueAssets.length });
 
   for (const assetId of uniqueAssets) {
-    await warmAsset(assetId as string, redis);
+    await warmAsset(assetId, redis);
   }
 
   logger.info('[market-warmer] warm-up cycle complete');

@@ -1,17 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import { scoreFromValues } from '../confluenceScorer.js';
 
-const bullishRSI = 25;    // < 30 → oversold (+1 UP)
-const bearishRSI = 75;    // > 70 → overbought (+1 DOWN)
+const bullishRSI = 25; // < 30 → oversold (+1 UP)
+const bearishRSI = 75; // > 70 → overbought (+1 DOWN)
 const neutralRSI = 50;
 
-const bullishMACD = { macdLine: 1, signalLine: 0.5, histogram: 0.5 };   // histogram > 0, macd > signal
+const bullishMACD = { macdLine: 1, signalLine: 0.5, histogram: 0.5 }; // histogram > 0, macd > signal
 const bearishMACD = { macdLine: -1, signalLine: -0.5, histogram: -0.5 }; // histogram < 0, macd < signal
 // histogram = 0, no divergence → neutral
 const neutralMACD = { macdLine: 0, signalLine: 0, histogram: 0 };
 
-const bullishStoch = { k: 18, d: 10 };  // k > d, both < 20 → oversold_cross
-const bearishStoch = { k: 82, d: 90 };  // k < d, both > 80 → overbought_cross
+const bullishStoch = { k: 18, d: 10 }; // k > d, both < 20 → oversold_cross
+const bearishStoch = { k: 82, d: 90 }; // k < d, both > 80 → overbought_cross
 const neutralStoch = { k: 50, d: 50 };
 
 describe('scoreFromValues', () => {

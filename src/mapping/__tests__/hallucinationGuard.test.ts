@@ -64,21 +64,23 @@ describe('Hallucination Guard Regression Tests', () => {
           slug: 'macron',
           active: true,
           closed: false,
-          markets: [{
-            id: 'mkt-macron',
-            question: 'Will Macron be out by June?',
-            conditionId: 'cond-1',
-            outcomes: ['Yes', 'No'],
-            active: true,
-            closed: false,
-            liquidity: '10000',
-            volume: '50000',
-            outcomePrices: '["0.5", "0.5"]',
-            clobTokenIds: '["yes", "no"]',
-            endDate: '2026-06-30',
-            description: 'French election market',
-          }],
-        }
+          markets: [
+            {
+              id: 'mkt-macron',
+              question: 'Will Macron be out by June?',
+              conditionId: 'cond-1',
+              outcomes: ['Yes', 'No'],
+              active: true,
+              closed: false,
+              liquidity: '10000',
+              volume: '50000',
+              outcomePrices: '["0.5", "0.5"]',
+              clobTokenIds: '["yes", "no"]',
+              endDate: '2026-06-30',
+              description: 'French election market',
+            },
+          ],
+        },
       ]);
 
       const results = await findCorrelatedMarkets({
@@ -102,21 +104,23 @@ describe('Hallucination Guard Regression Tests', () => {
           slug: 'tao-growth',
           active: true,
           closed: false,
-          markets: [{
-            id: 'mkt-tao',
-            question: 'Will there be 100k Bittensor nodes by year end?',
-            conditionId: 'cond-2',
-            outcomes: ['Yes', 'No'],
-            active: true,
-            closed: false,
-            liquidity: '10000',
-            volume: '50000',
-            outcomePrices: '["0.5", "0.5"]',
-            clobTokenIds: '["yes", "no"]',
-            endDate: '2026-12-31',
-            description: 'TAO node market',
-          }],
-        }
+          markets: [
+            {
+              id: 'mkt-tao',
+              question: 'Will there be 100k Bittensor nodes by year end?',
+              conditionId: 'cond-2',
+              outcomes: ['Yes', 'No'],
+              active: true,
+              closed: false,
+              liquidity: '10000',
+              volume: '50000',
+              outcomePrices: '["0.5", "0.5"]',
+              clobTokenIds: '["yes", "no"]',
+              endDate: '2026-12-31',
+              description: 'TAO node market',
+            },
+          ],
+        },
       ]);
 
       const results = await findCorrelatedMarkets({
@@ -142,21 +146,23 @@ describe('Hallucination Guard Regression Tests', () => {
           slug: 'random-trending',
           active: true,
           closed: false,
-          markets: [{
-            id: 'mkt-random',
-            question: 'Will something completely unrelated happen?',
-            conditionId: 'cond-3',
-            outcomes: ['Yes', 'No'],
-            active: true,
-            closed: false,
-            liquidity: '10000',
-            volume: '50000',
-            outcomePrices: '["0.5", "0.5"]',
-            clobTokenIds: '["yes", "no"]',
-            endDate: '2026-12-31',
-            description: 'Unrelated market',
-          }]
-        }
+          markets: [
+            {
+              id: 'mkt-random',
+              question: 'Will something completely unrelated happen?',
+              conditionId: 'cond-3',
+              outcomes: ['Yes', 'No'],
+              active: true,
+              closed: false,
+              liquidity: '10000',
+              volume: '50000',
+              outcomePrices: '["0.5", "0.5"]',
+              clobTokenIds: '["yes", "no"]',
+              endDate: '2026-12-31',
+              description: 'Unrelated market',
+            },
+          ],
+        },
       ]);
 
       const results = await findCandidateMarkets({
@@ -169,7 +175,7 @@ describe('Hallucination Guard Regression Tests', () => {
         categoryId: 'crypto',
         categoryLabel: 'Crypto',
         entityContext: 'bittensor',
-        sentiment: 'NEUTRAL'
+        sentiment: 'NEUTRAL',
       });
 
       expect(results).toHaveLength(0);

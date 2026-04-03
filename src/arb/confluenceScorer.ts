@@ -17,7 +17,11 @@
 
 import type { Redis } from 'ioredis';
 import { buildCandles } from './candleAggregator.js';
-import { computeRSIFromCandles, computeMACDFromCandles, computeStochasticFromCandles } from './indicators.js';
+import {
+  computeRSIFromCandles,
+  computeMACDFromCandles,
+  computeStochasticFromCandles,
+} from './indicators.js';
 import { loadConfig } from '../shared/config.js';
 
 export interface ConfluenceScore {
@@ -39,7 +43,11 @@ export async function scoreConfluence(symbol: string, redis: Redis): Promise<Con
   // Compute all three indicators from the same candle set
   const rsi = computeRSIFromCandles(candles, cfg.RSI_PERIOD);
   const macd = computeMACDFromCandles(candles, cfg.MACD_FAST, cfg.MACD_SLOW, cfg.MACD_SIGNAL);
-  const stoch = computeStochasticFromCandles(candles, cfg.STOCHASTIC_K_PERIOD, cfg.STOCHASTIC_D_PERIOD);
+  const stoch = computeStochasticFromCandles(
+    candles,
+    cfg.STOCHASTIC_K_PERIOD,
+    cfg.STOCHASTIC_D_PERIOD,
+  );
 
   return scoreFromValues(rsi, macd, stoch);
 }

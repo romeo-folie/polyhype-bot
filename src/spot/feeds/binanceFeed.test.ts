@@ -57,8 +57,10 @@ describe('BinanceFeed', () => {
     feed.start();
 
     // Simulate WS onMessage handler
-    const messageHandler = vi.mocked(mockWs.on).mock.calls.find((call) => call[0] === 'message')?.[1] as (data: string) => void;
-    
+    const messageHandler = vi
+      .mocked(mockWs.on)
+      .mock.calls.find((call) => call[0] === 'message')?.[1] as (data: string) => void;
+
     // Binance ticker format (s: symbol, c: close price, E: event time)
     const rawMessage = JSON.stringify({
       s: 'BTCUSDT',

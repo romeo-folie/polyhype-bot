@@ -50,12 +50,15 @@ export async function runWorker(maxCycles?: number): Promise<void> {
     const ownerPidStr = await redis.get(WORKER_LOCK_PID_KEY);
     const ownerPid = ownerPidStr ? parseInt(ownerPidStr, 10) : NaN;
     if (!isNaN(ownerPid) && !isPidAlive(ownerPid)) {
-      logger.warn('[copytrade-worker] stale lock detected — previous owner PID is dead, force-releasing', { ownerPid });
+      logger.warn(
+        '[copytrade-worker] stale lock detected — previous owner PID is dead, force-releasing',
+        { ownerPid: ownerPid.toString() },
+      );
       await redis.del(WORKER_LOCK_KEY, WORKER_LOCK_PID_KEY);
     }
   }
 
-  const lockToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const lockToken = `${Date.now().toString()}-${Math.random().toString(36).slice(2)}`;
   const acquired = await redis.set(WORKER_LOCK_KEY, lockToken, 'EX', WORKER_LOCK_TTL_SEC, 'NX');
   if (!acquired) {
     logger.warn('[copytrade-worker] another instance is already running — exiting');
@@ -73,36 +76,52 @@ export async function runWorker(maxCycles?: number): Promise<void> {
   let lockLost = false;
   const lockRefresh = setInterval(() => {
     // Refresh both the lock key and the PID key TTLs atomically.
-    redis.eval(
-      `if redis.call("get",KEYS[1])==ARGV[1] then redis.call("expire",KEYS[2],ARGV[2]) return redis.call("expire",KEYS[1],ARGV[2]) else return 0 end`,
-      2, WORKER_LOCK_KEY, WORKER_LOCK_PID_KEY, lockToken, String(WORKER_LOCK_TTL_SEC),
-    ).then((result) => {
-      lockRefreshFailures = 0;
-      if (result === 0) {
-        // Lock was taken by another instance — stop this worker.
-        logger.error('[copytrade-worker] lock lost to another instance — aborting');
-        lockLost = true;
-      }
-    }).catch((err) => {
-      lockRefreshFailures++;
-      logger.warn('[copytrade-worker] lock refresh failed', {
-        attempt: lockRefreshFailures,
-        max: MAX_LOCK_REFRESH_FAILURES,
-        error: String(err),
+    redis
+      .eval(
+        `if redis.call("get",KEYS[1])==ARGV[1] then redis.call("expire",KEYS[2],ARGV[2]) return redis.call("expire",KEYS[1],ARGV[2]) else return 0 end`,
+        2,
+        WORKER_LOCK_KEY,
+        WORKER_LOCK_PID_KEY,
+        lockToken,
+        String(WORKER_LOCK_TTL_SEC),
+      )
+      .then((result) => {
+        lockRefreshFailures = 0;
+        if (result === 0) {
+          // Lock was taken by another instance — stop this worker.
+          logger.error('[copytrade-worker] lock lost to another instance — aborting');
+          lockLost = true;
+        }
+      })
+      .catch((err: unknown) => {
+        lockRefreshFailures++;
+        logger.warn('[copytrade-worker] lock refresh failed', {
+          attempt: lockRefreshFailures,
+          max: MAX_LOCK_REFRESH_FAILURES,
+          error: String(err),
+        });
+        if (lockRefreshFailures >= MAX_LOCK_REFRESH_FAILURES) {
+          logger.error(
+            '[copytrade-worker] lock refresh failed too many times — aborting to prevent duplicate instances',
+          );
+          lockLost = true;
+        }
       });
-      if (lockRefreshFailures >= MAX_LOCK_REFRESH_FAILURES) {
-        logger.error('[copytrade-worker] lock refresh failed too many times — aborting to prevent duplicate instances');
-        lockLost = true;
-      }
-    });
   }, 60_000);
 
   const releaseLock = async () => {
     clearInterval(lockRefresh);
-    await redis.eval(
-      `if redis.call("get",KEYS[1])==ARGV[1] then redis.call("del",KEYS[2]) return redis.call("del",KEYS[1]) else return 0 end`,
-      2, WORKER_LOCK_KEY, WORKER_LOCK_PID_KEY, lockToken,
-    ).catch((e: unknown) => { logger.warn('[copytrade-worker] lock release failed', { error: String(e) }); });
+    await redis
+      .eval(
+        `if redis.call("get",KEYS[1])==ARGV[1] then redis.call("del",KEYS[2]) return redis.call("del",KEYS[1]) else return 0 end`,
+        2,
+        WORKER_LOCK_KEY,
+        WORKER_LOCK_PID_KEY,
+        lockToken,
+      )
+      .catch((e: unknown) => {
+        logger.warn('[copytrade-worker] lock release failed', { error: String(e) });
+      });
   };
 
   // Release lock on graceful shutdown (PM2 restart, SIGTERM, Ctrl+C).
@@ -111,17 +130,19 @@ export async function runWorker(maxCycles?: number): Promise<void> {
     logger.info('[copytrade-worker] shutdown signal received — releasing lock', { signal });
     releaseLock()
       .then(() => {
-        redis.quit().catch(() => {});
+        redis.quit().catch(() => {
+          /* ignore quit errors */
+        });
         process.exit(0);
       })
       .catch(() => process.exit(1));
   };
-  process.once('SIGTERM', () => onShutdown('SIGTERM'));
-  process.once('SIGINT', () => onShutdown('SIGINT'));
+  process.once('SIGTERM', () => { onShutdown('SIGTERM'); });
+  process.once('SIGINT', () => { onShutdown('SIGINT'); });
 
-  logger.info('[copytrade-worker] started', { 
+  logger.info('[copytrade-worker] started', {
     wallets: cfg.COPYTRADE_WALLETS,
-    scope: cfg.COPYTRADE_MARKET_SCOPE
+    scope: cfg.COPYTRADE_MARKET_SCOPE,
   });
 
   const POLL_INTERVAL_MS = cfg.COPYTRADE_POLL_INTERVAL_MS;
@@ -129,12 +150,16 @@ export async function runWorker(maxCycles?: number): Promise<void> {
   let consecutiveFailures = 0;
   let iterations = 0;
 
-  while (true) {
+  let running = true;
+  while (running) {
     if (lockLost) {
       logger.error('[copytrade-worker] stopping — lock lost or refresh failed');
       break;
     }
-    if (maxCycles !== undefined && iterations >= maxCycles) break;
+    if (maxCycles !== undefined && iterations >= maxCycles) {
+      running = false;
+      break;
+    }
 
     try {
       // Refresh config from .env every 100 cycles to pick up shortlist updates (hot-reloading).
@@ -153,9 +178,12 @@ export async function runWorker(maxCycles?: number): Promise<void> {
               loadConfig(true); // flush cache
               logger.info('[copytrade-worker] configuration refreshed from .env');
             } catch (configErr) {
-              logger.warn('[copytrade-worker] config validation failed during hot-reload — keeping previous config', {
-                error: configErr instanceof Error ? configErr.message : String(configErr),
-              });
+              logger.warn(
+                '[copytrade-worker] config validation failed during hot-reload — keeping previous config',
+                {
+                  error: configErr instanceof Error ? configErr.message : String(configErr),
+                },
+              );
             }
           }
         } catch (err) {
@@ -177,7 +205,9 @@ export async function runWorker(maxCycles?: number): Promise<void> {
           const currentBankroll = await getBankroll(redis);
           if (signal.stakeUsd > currentBankroll) {
             logger.warn('[copytrade-worker] insufficient bankroll for signal', { signal });
-            await recordCopytradeFilter(redis, 'insufficient_bankroll').catch(() => {});
+            await recordCopytradeFilter(redis, 'insufficient_bankroll').catch(() => {
+              /* ignore telemetry errors */
+            });
             continue;
           }
 
@@ -202,7 +232,9 @@ export async function runWorker(maxCycles?: number): Promise<void> {
               sharesHeld: result.tradeResult.shares_bought,
               executionVenue: result.executionVenue ?? 'simmer',
             });
-            await recordCopytradeMetric(redis, 'executed').catch(() => {});
+            await recordCopytradeMetric(redis, 'executed').catch(() => {
+              /* ignore telemetry errors */
+            });
             // Accumulate HL margin so subsequent signals in this cycle respect the cap.
             if (result.executionVenue === 'hyperliquid') {
               sessionExposureUsd += signal.stakeUsd;
@@ -213,7 +245,9 @@ export async function runWorker(maxCycles?: number): Promise<void> {
 
       if (exits > 0) {
         logger.info('[copytrade-worker] mirror exits processed', { count: exits });
-        await recordCopytradeMetric(redis, 'exits').catch(() => {});
+        await recordCopytradeMetric(redis, 'exits').catch(() => {
+          /* ignore telemetry errors */
+        });
       }
 
       if (iterations % 100 === 0) {
@@ -221,10 +255,10 @@ export async function runWorker(maxCycles?: number): Promise<void> {
       }
 
       consecutiveFailures = 0; // reset circuit breaker on success
-    } catch (err) {
+    } catch (err: unknown) {
       consecutiveFailures++;
       logger.error('[copytrade-worker] cycle failed', {
-        error: (err as Error).message,
+        error: err instanceof Error ? err.message : String(err),
         consecutiveFailures,
       });
 
@@ -233,19 +267,30 @@ export async function runWorker(maxCycles?: number): Promise<void> {
       // is an expected transient condition, not a code/config failure.
       if (err instanceof SimmerError && err.statusCode === 429) {
         const rateLimitBackoffMs = Math.min(5_000 * Math.pow(2, consecutiveFailures - 1), 300_000);
-        logger.warn('[copytrade-worker] rate-limited by Simmer — backing off', { backoffMs: rateLimitBackoffMs });
-        await new Promise(resolve => setTimeout(resolve, rateLimitBackoffMs));
+        logger.warn('[copytrade-worker] rate-limited by Simmer — backing off', {
+          backoffMs: rateLimitBackoffMs,
+        });
+        await new Promise((resolve) => setTimeout(resolve, rateLimitBackoffMs));
         consecutiveFailures--; // 429 is not a real failure — don't advance the circuit breaker
       } else if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        const backoffMs = Math.min(1000 * Math.pow(2, consecutiveFailures - MAX_CONSECUTIVE_FAILURES), 60_000);
-        logger.warn('[copytrade-worker] circuit breaker: backing off', { backoffMs, consecutiveFailures });
-        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        const backoffMs = Math.min(
+          1000 * Math.pow(2, consecutiveFailures - MAX_CONSECUTIVE_FAILURES),
+          60_000,
+        );
+        logger.warn('[copytrade-worker] circuit breaker: backing off', {
+          backoffMs,
+          consecutiveFailures,
+        });
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
       }
     }
 
     iterations++;
-    if (maxCycles !== undefined && iterations >= maxCycles) break;
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+    if (maxCycles !== undefined && iterations >= maxCycles) {
+      running = false;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 
   await releaseLock();
@@ -256,10 +301,15 @@ export async function runWorker(maxCycles?: number): Promise<void> {
 //   - import.meta.url + argv: primary ESM guard against accidental execution when imported
 //   - NODE_ENV !== 'test': belt-and-suspenders; the test suite sets this explicitly to
 //     prevent this block from firing during dynamic import in worker.test.ts
-if (process.env.NODE_ENV !== 'test' && import.meta.url.startsWith('file:') && (process.argv[1]?.endsWith('copytrade/worker.ts') || process.argv[1]?.endsWith('copytrade/worker.js'))) {
-  runWorker().catch(err => {
-    logger.error('[copytrade-worker] fatal error', { 
-      error: err instanceof Error ? err.message : String(err) 
+if (
+  process.env.NODE_ENV !== 'test' &&
+  import.meta.url.startsWith('file:') &&
+  (process.argv[1]?.endsWith('copytrade/worker.ts') ??
+    process.argv[1]?.endsWith('copytrade/worker.js'))
+) {
+  runWorker().catch((err: unknown) => {
+    logger.error('[copytrade-worker] fatal error', {
+      error: err instanceof Error ? err.message : String(err),
     });
     process.exit(1);
   });

@@ -31,8 +31,12 @@ interface YahooChartResponse {
 
 function fetchWithTimeout(url: string, opts: RequestInit = {}): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => { controller.abort(); }, REQUEST_TIMEOUT_MS);
-  return fetch(url, { ...opts, signal: controller.signal }).finally(() => { clearTimeout(timer); });
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+  return fetch(url, { ...opts, signal: controller.signal }).finally(() => {
+    clearTimeout(timer);
+  });
 }
 
 /**
@@ -46,7 +50,7 @@ export async function fetchCryptoPrices(assetIds: string[]): Promise<SpotPrice[]
 
   const res = await fetchWithTimeout(url);
   if (!res.ok) {
-    throw new Error(`CoinGecko API error: ${res.status} ${res.statusText}`);
+    throw new Error(`CoinGecko API error: ${res.status.toString()} ${res.statusText}`);
   }
 
   const data = (await res.json()) as CoinGeckoResponse;
@@ -78,7 +82,9 @@ export async function fetchCommodityPrice(ticker: string): Promise<SpotPrice | n
   });
 
   if (!res.ok) {
-    throw new Error(`Yahoo Finance API error: ${res.status} ${res.statusText} for ${ticker}`);
+    throw new Error(
+      `Yahoo Finance API error: ${res.status.toString()} ${res.statusText} for ${ticker}`,
+    );
   }
 
   const data = (await res.json()) as YahooChartResponse;
@@ -96,12 +102,13 @@ export async function fetchCommodityPrices(tickers: string[]): Promise<SpotPrice
   const prices: SpotPrice[] = [];
 
   for (let i = 0; i < results.length; i++) {
-    const result = results[i]!;
+    const result = results[i];
+    if (!result) continue;
     if (result.status === 'fulfilled' && result.value) {
       prices.push(result.value);
     } else if (result.status === 'rejected') {
       logger.warn('[spot-poller] commodity fetch failed', {
-        ticker: tickers[i],
+        ticker: tickers[i] ?? 'unknown',
         error: result.reason instanceof Error ? result.reason.message : String(result.reason),
       });
     }
@@ -124,7 +131,7 @@ export async function storePrice(sp: SpotPrice): Promise<void> {
 
   const pipeline = redis.pipeline();
   // Add to sorted set (score = timestamp, member = `ts:price` to ensure uniqueness)
-  pipeline.zadd(pricesKey, sp.timestamp, `${sp.timestamp}:${sp.price}`);
+  pipeline.zadd(pricesKey, sp.timestamp, `${sp.timestamp.toString()}:${sp.price.toString()}`);
   // Prune entries older than rolling window
   const cutoff = sp.timestamp - ROLLING_WINDOW_MS;
   pipeline.zremrangebyscore(pricesKey, '-inf', cutoff);
@@ -159,15 +166,16 @@ export async function getPriceAtLookback(
   if (entries.length === 0) {
     // Fall back: get the oldest entry in the window
     const oldest = await redis.zrange(pricesKey, 0, 0);
-    if (oldest.length === 0) return null;
-    return parsePriceEntry(oldest[0]!);
+    if (oldest.length === 0 || !oldest[0]) return null;
+    return parsePriceEntry(oldest[0]);
   }
 
   // Find the entry closest to the target timestamp
-  let bestEntry = entries[0]!;
+  let bestEntry = entries[0] ?? '';
   let bestDelta = Infinity;
 
   for (const entry of entries) {
+    if (!entry) continue;
     const ts = parseTimestampEntry(entry);
     const delta = Math.abs(ts - targetTs);
     if (delta < bestDelta) {
@@ -176,6 +184,7 @@ export async function getPriceAtLookback(
     }
   }
 
+  if (!bestEntry) return null;
   return parsePriceEntry(bestEntry);
 }
 

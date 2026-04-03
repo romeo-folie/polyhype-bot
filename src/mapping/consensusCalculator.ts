@@ -32,7 +32,7 @@ function sanitiseError(err: unknown): string {
     // Extract message without mutating the original error object.
     // Axios errors embed request config (with auth headers) — never serialise the full object.
     const axiosErr = err as Record<string, unknown>;
-    const msg = axiosErr['message'];
+    const msg = axiosErr.message;
     if (typeof msg === 'string') return msg;
     return '[non-Error object thrown — message unavailable]';
   }
@@ -46,7 +46,7 @@ function buildSystemPrompt(): string {
     `Today's date is ${today}. ` +
     'Given a market question, its description, and a breaking news headline, ' +
     'estimate the true probability (0.00–1.00) that the market resolves YES. ' +
-    'Pay close attention to any deadlines in the market question relative to today\'s date. ' +
+    "Pay close attention to any deadlines in the market question relative to today's date. " +
     'IMPORTANT: If the news headline is totally UNRELATED to the market question, ' +
     'return the probability EXACTLY EQUAL to the current market price to signal neutral edge. ' +
     'Return ONLY a JSON object: {"probability": 0.72, "reasoning": "one sentence explaining the link or lack thereof"} ' +
@@ -83,7 +83,7 @@ async function callOpenAI(
   const client = new OpenAI({ apiKey: loadConfig().OPENAI_API_KEY });
 
   const abortCtrl = new AbortController();
-  const abortTimer = setTimeout(() => abortCtrl.abort(), TIMEOUT_MS);
+  const abortTimer = setTimeout(() => { abortCtrl.abort(); }, TIMEOUT_MS);
   let completion: Awaited<ReturnType<typeof client.chat.completions.create>>;
   try {
     completion = await client.chat.completions.create(
@@ -120,7 +120,7 @@ async function callAnthropic(
   const client = new Anthropic({ apiKey: loadConfig().ANTHROPIC_API_KEY });
 
   const abortCtrl = new AbortController();
-  const abortTimer = setTimeout(() => abortCtrl.abort(), TIMEOUT_MS);
+  const abortTimer = setTimeout(() => { abortCtrl.abort(); }, TIMEOUT_MS);
   let completion: Awaited<ReturnType<typeof client.messages.create>>;
   try {
     completion = await client.messages.create(
@@ -163,11 +163,17 @@ async function callGemini(
   const result = await Promise.race([
     model.generateContent(prompt),
     new Promise<never>((_, reject) =>
-      setTimeout(() => { reject(new Error('Gemini timeout')); }, TIMEOUT_MS),
+      setTimeout(() => {
+        reject(new Error('Gemini timeout'));
+      }, TIMEOUT_MS),
     ),
   ]);
 
-  const raw = result.response.text().replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
+  const raw = result.response
+    .text()
+    .replace(/```(?:json)?\s*/g, '')
+    .replace(/```/g, '')
+    .trim();
   return parseResult(raw);
 }
 
@@ -184,7 +190,7 @@ async function callDeepSeek(
   });
 
   const abortCtrl = new AbortController();
-  const abortTimer = setTimeout(() => abortCtrl.abort(), TIMEOUT_MS);
+  const abortTimer = setTimeout(() => { abortCtrl.abort(); }, TIMEOUT_MS);
   let completion: Awaited<ReturnType<typeof client.chat.completions.create>>;
   try {
     completion = await client.chat.completions.create(
@@ -212,7 +218,10 @@ async function callDeepSeek(
 }
 
 function parseResult(raw: string): ConsensusResult {
-  const cleaned = raw.replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
+  const cleaned = raw
+    .replace(/```(?:json)?\s*/g, '')
+    .replace(/```/g, '')
+    .trim();
   const parsed = JSON.parse(cleaned) as { probability?: unknown; reasoning?: unknown };
   const probability = Number(parsed.probability);
   if (!isFinite(probability) || probability < 0 || probability > 1) {
@@ -225,10 +234,10 @@ function parseResult(raw: string): ConsensusResult {
 }
 
 export interface ConsensusEstimate {
-  probability: number;       // mean across N runs
-  reasoning: string;         // reasoning from first call
-  stddev: number;            // standard deviation across N runs
-  sampleCount: number;       // how many calls succeeded
+  probability: number; // mean across N runs
+  reasoning: string; // reasoning from first call
+  stddev: number; // standard deviation across N runs
+  sampleCount: number; // how many calls succeeded
 }
 
 /** Single-call estimate — tries Gemini first, falls back to OpenAI, then Anthropic, then DeepSeek. */
@@ -266,7 +275,12 @@ async function estimateSingle(opts: {
   const useAnthropic = Boolean(cfg.ANTHROPIC_API_KEY);
   if (useAnthropic) {
     try {
-      return await callAnthropic(opts.question, opts.description, opts.headline, opts.currentYesPrice);
+      return await callAnthropic(
+        opts.question,
+        opts.description,
+        opts.headline,
+        opts.currentYesPrice,
+      );
     } catch (err) {
       logger.warn('[consensus-calc] Anthropic failed, trying DeepSeek', {
         error: err instanceof Error ? err.message : String(err),
@@ -276,7 +290,12 @@ async function estimateSingle(opts: {
 
   if (cfg.DEEPSEEK_API_KEY) {
     try {
-      return await callDeepSeek(opts.question, opts.description, opts.headline, opts.currentYesPrice);
+      return await callDeepSeek(
+        opts.question,
+        opts.description,
+        opts.headline,
+        opts.currentYesPrice,
+      );
     } catch (err) {
       logger.warn('[consensus-calc] DeepSeek failed', {
         error: err instanceof Error ? err.message : String(err),
@@ -284,7 +303,9 @@ async function estimateSingle(opts: {
     }
   }
 
-  throw new Error('No LLM provider configured (OPENAI_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, or DEEPSEEK_API_KEY required)');
+  throw new Error(
+    'No LLM provider configured (OPENAI_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, or DEEPSEEK_API_KEY required)',
+  );
 }
 
 /**
@@ -298,7 +319,11 @@ async function estimateSingle(opts: {
  * - Price is bucketed to 0.05 increments to tolerate minor market drift.
  * - Headline is trimmed to remove whitespace variation before slicing.
  */
-function buildConsensusCacheKey(question: string, headline: string, currentYesPrice: number): string {
+function buildConsensusCacheKey(
+  question: string,
+  headline: string,
+  currentYesPrice: number,
+): string {
   const priceBucket = Math.round(currentYesPrice / 0.05) * 0.05;
   const raw = `${question}|${headline.trim().slice(0, 200)}|${priceBucket.toFixed(2)}`;
   return 'consensus:' + createHash('sha256').update(raw).digest('hex');
@@ -335,9 +360,12 @@ export async function estimateConsensusProbability(opts: {
       if (outcomes.length >= 3) {
         const contextBlock =
           `Recent track record on ${category} signals (last ${outcomes.length.toString()} closed positions):\n` +
-          outcomes.map(o =>
-            `• "${o.question.slice(0, 100)}" → ${o.direction} at ${(o.consensusProbability * 100).toFixed(0)}% confidence → ${o.result.toUpperCase()} (${o.returnPct >= 0 ? '+' : ''}${o.returnPct.toFixed(1)}% in ${o.holdingHours.toFixed(1)}h)`,
-          ).join('\n') +
+          outcomes
+            .map(
+              (o) =>
+                `• "${o.question.slice(0, 100)}" → ${o.direction} at ${(o.consensusProbability * 100).toFixed(0)}% confidence → ${o.result.toUpperCase()} (${o.returnPct >= 0 ? '+' : ''}${o.returnPct.toFixed(1)}% in ${o.holdingHours.toFixed(1)}h)`,
+            )
+            .join('\n') +
           '\n\nUse this track record to calibrate your estimate. Adjust probability up or down based on patterns you observe.\n\n';
         enrichedHeadline = contextBlock + opts.headline;
       }
@@ -349,20 +377,22 @@ export async function estimateConsensusProbability(opts: {
   }
 
   // Call each configured provider exactly once — one vote per model, no duplicates.
-  const useOpenAI    = Boolean(cfg.OPENAI_API_KEY);
-  const useGemini    = Boolean(cfg.GEMINI_API_KEY);
+  const useOpenAI = Boolean(cfg.OPENAI_API_KEY);
+  const useGemini = Boolean(cfg.GEMINI_API_KEY);
   const useAnthropic = Boolean(cfg.ANTHROPIC_API_KEY);
-  const useDeepSeek  = Boolean(cfg.DEEPSEEK_API_KEY);
+  const useDeepSeek = Boolean(cfg.DEEPSEEK_API_KEY);
   type ProviderFn = (q: string, d: string | null, h: string, p: number) => Promise<ConsensusResult>;
   const providers: ProviderFn[] = [
-    ...(useOpenAI    ? [callOpenAI    as ProviderFn] : []),
-    ...(useGemini    ? [callGemini    as ProviderFn] : []),
+    ...(useOpenAI ? [callOpenAI as ProviderFn] : []),
+    ...(useGemini ? [callGemini as ProviderFn] : []),
     ...(useAnthropic ? [callAnthropic as ProviderFn] : []),
-    ...(useDeepSeek  ? [callDeepSeek  as ProviderFn] : []),
+    ...(useDeepSeek ? [callDeepSeek as ProviderFn] : []),
   ];
 
   if (providers.length === 0) {
-    throw new Error('No LLM providers configured — set OPENAI_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, or DEEPSEEK_API_KEY');
+    throw new Error(
+      'No LLM providers configured — set OPENAI_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, or DEEPSEEK_API_KEY',
+    );
   }
   const calls = providers.map((provider) =>
     provider(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice),
@@ -390,7 +420,12 @@ export async function estimateConsensusProbability(opts: {
   const variance = results.reduce((s, x) => s + (x - mean) ** 2, 0) / results.length;
   const stddev = Math.sqrt(variance);
 
-  const estimate: ConsensusEstimate = { probability: mean, reasoning, stddev, sampleCount: results.length };
+  const estimate: ConsensusEstimate = {
+    probability: mean,
+    reasoning,
+    stddev,
+    sampleCount: results.length,
+  };
 
   // Cache the result
   if (cfg.CONSENSUS_CACHE_ENABLED && opts.redis) {
@@ -443,7 +478,8 @@ export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHO
   const useGemini = cfg.LLM_PROVIDER === 'gemini' && Boolean(cfg.GEMINI_API_KEY);
   const useOpenAI = Boolean(cfg.OPENAI_API_KEY);
 
-  const system = 'You are a high-speed financial sentiment classifier. ' +
+  const system =
+    'You are a high-speed financial sentiment classifier. ' +
     'Classify the given headline as POSITIVE or NEGATIVE for the relevant asset. ' +
     'If the impact is ambiguous or insignificant, return NEUTRAL. ' +
     'Return ONLY the word: POSITIVE, NEGATIVE, or NEUTRAL.';
@@ -455,7 +491,10 @@ export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHO
   let sentimentTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     const timeoutPromise = new Promise<never>((_, reject) => {
-      sentimentTimer = setTimeout(() => reject(new Error('estimateSentiment timeout')), SENTIMENT_TIMEOUT_MS);
+      sentimentTimer = setTimeout(
+        () => { reject(new Error('estimateSentiment timeout')); },
+        SENTIMENT_TIMEOUT_MS,
+      );
     });
 
     if (useGemini) {
@@ -469,7 +508,10 @@ export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHO
       const completion = await Promise.race([
         client.chat.completions.create({
           model: cfg.OPENAI_MODEL,
-          messages: [{ role: 'system', content: system }, { role: 'user', content: headline }],
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: headline },
+          ],
           max_tokens: 10,
           temperature: 0,
         }),
@@ -478,7 +520,9 @@ export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHO
       raw = (completion.choices[0]?.message?.content ?? '').trim().toUpperCase();
     }
   } catch (err) {
-    logger.warn('[sentiment-calc] LLM failed or timed out, falling back to NEUTRAL', { error: String(err) });
+    logger.warn('[sentiment-calc] LLM failed or timed out, falling back to NEUTRAL', {
+      error: String(err),
+    });
     return 'NEUTRAL';
   } finally {
     clearTimeout(sentimentTimer);

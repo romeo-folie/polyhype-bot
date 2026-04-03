@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { computeDivergence, computeHalfKelly, NOISE_STDDEV_THRESHOLD } from '../divergenceCalculator.js';
+import {
+  computeDivergence,
+  computeHalfKelly,
+  NOISE_STDDEV_THRESHOLD,
+} from '../divergenceCalculator.js';
 
 const DEFAULT_INPUT = {
   bankrollUsd: 100,
@@ -112,7 +116,7 @@ describe('computeDivergence', () => {
       currentYesPrice: 0.5, // Kelly (~0.3) > 10% maxBetFraction ($100)
       bookDepthUsd: 100,
     });
-    
+
     expect(result.hasTrade).toBe(true);
     // Should be capped by book depth: 100 * 0.2 = 20
     expect(result.decision!.stakeUsd).toBeCloseTo(20, 2);
@@ -143,7 +147,7 @@ describe('EV gate & noise gate', () => {
       ...DEFAULT_INPUT,
       consensusProbability: 0.52,
       consensusStddev: 0.05,
-      currentYesPrice: 0.50,
+      currentYesPrice: 0.5,
       divergenceThreshold: 0.01, // low threshold so edge gate doesn't reject first
     });
     expect(result.hasTrade).toBe(false);

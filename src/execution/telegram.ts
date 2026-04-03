@@ -106,10 +106,11 @@ export async function notifyTradeExecuted(
   const consensusPct = ((signal.consensusProbability ?? 0.5) * 100).toFixed(1);
   const outcomePct = (signal.outcomePrice * 100).toFixed(1);
   const venue = opts?.venue ? fmtVenue(opts.venue) : 'Simmer';
-  
-  const sharesLine = opts?.sharesFilled != null && opts.sharesFilled > 0
-    ? `<b>Shares:</b> ${opts.sharesFilled.toFixed(4)}\n`
-    : '';
+
+  const sharesLine =
+    opts?.sharesFilled != null && opts.sharesFilled > 0
+      ? `<b>Shares:</b> ${opts.sharesFilled.toFixed(4)}\n`
+      : '';
 
   let metaLine = '';
   if (signal.latencyMs != null || signal.volatility != null || signal.spreadBps != null) {
@@ -149,7 +150,9 @@ export async function notifyTradeError(
   const text =
     `🔴 <b>Trade Failed</b>\n\n` +
     `<b>Market:</b> ${escapeHtml(signal.question)}\n` +
-    `<b>Direction:</b> ${signal.direction}` + (venue ? `  |  <b>Venue:</b> ${venue}` : '') + `\n` +
+    `<b>Direction:</b> ${signal.direction}` +
+    (venue ? `  |  <b>Venue:</b> ${venue}` : '') +
+    `\n` +
     `<b>Intended stake:</b> $${signal.stakeUsd.toFixed(2)} USDC\n` +
     (signal.marketId ? `<b>Market ID:</b> <code>${escapeHtml(signal.marketId)}</code>\n` : '') +
     `\n<b>Error:</b> ${escapeHtml(error)}`;
@@ -198,9 +201,10 @@ export async function notifyTakeProfitExecuted(opts: {
   const pnlUsdc = position.stakeUsd * (returnPct / 100);
   const pnlLine = `<b>P&amp;L:</b> ${pnlUsdc >= 0 ? '+' : ''}$${pnlUsdc.toFixed(2)} USDC (${fmtReturn(returnPct)})`;
 
-  const sharesLine = position.sharesHeld != null && position.sharesHeld > 0
-    ? `<b>Shares:</b> ${position.sharesHeld.toFixed(4)}\n`
-    : '';
+  const sharesLine =
+    position.sharesHeld != null && position.sharesHeld > 0
+      ? `<b>Shares:</b> ${position.sharesHeld.toFixed(4)}\n`
+      : '';
 
   const entryFmt = isFutures ? fmtFiat(position.entryPrice) : fmtProb(position.entryPrice);
   const exitFmt = isFutures ? fmtFiat(currentPrice) : fmtProb(currentPrice);
@@ -212,7 +216,8 @@ export async function notifyTakeProfitExecuted(opts: {
     `<b>Entry:</b> ${entryFmt}  →  <b>Exit:</b> ${exitFmt}\n` +
     sharesLine +
     `<b>Stake:</b> $${position.stakeUsd.toFixed(2)} USDC\n` +
-    pnlLine + `\n` +
+    pnlLine +
+    `\n` +
     `\n<b>Reason:</b> ${reasonLabel}`;
 
   await notify(text);
@@ -229,9 +234,8 @@ export async function notifyUnhedgedArbPosition(opts: {
   yesPrice?: number;
   noError?: string | undefined;
 }): Promise<void> {
-  const yesPriceLine = opts.yesPrice != null
-    ? `<b>YES fill price:</b> ${fmtProb(opts.yesPrice)}\n`
-    : '';
+  const yesPriceLine =
+    opts.yesPrice != null ? `<b>YES fill price:</b> ${fmtProb(opts.yesPrice)}\n` : '';
 
   const text =
     `🚨 <b>CRITICAL: Unhedged Arb Position</b>\n\n` +
@@ -257,9 +261,10 @@ export async function notifyRedemptionExecuted(opts: {
   stakeUsd?: number;
 }): Promise<void> {
   const { question, side, txHash, valueUsdc } = opts;
-  const profitLine = opts.stakeUsd != null && opts.stakeUsd > 0
-    ? `\n<b>Profit:</b> +$${(valueUsdc - opts.stakeUsd).toFixed(2)} USDC (stake was $${opts.stakeUsd.toFixed(2)})`
-    : '';
+  const profitLine =
+    opts.stakeUsd != null && opts.stakeUsd > 0
+      ? `\n<b>Profit:</b> +$${(valueUsdc - opts.stakeUsd).toFixed(2)} USDC (stake was $${opts.stakeUsd.toFixed(2)})`
+      : '';
 
   const text =
     `🏆 <b>Position Redeemed</b>\n\n` +
@@ -282,9 +287,10 @@ export async function notifyManualRedemptionRequired(opts: {
   question?: string;
   estimatedUsdc?: number;
 }): Promise<void> {
-  const amountLine = opts.estimatedUsdc != null && opts.estimatedUsdc > 0
-    ? `\n<b>Estimated value:</b> ~$${opts.estimatedUsdc.toFixed(2)} USDC`
-    : '';
+  const amountLine =
+    opts.estimatedUsdc != null && opts.estimatedUsdc > 0
+      ? `\n<b>Estimated value:</b> ~$${opts.estimatedUsdc.toFixed(2)} USDC`
+      : '';
   const questionLine = opts.question ? `\n<b>Market:</b> ${escapeHtml(opts.question)}` : '';
 
   const text =
@@ -304,8 +310,7 @@ export async function notifyManualRedemptionRequired(opts: {
  */
 export async function notifyCalibrationUpdate(lines: string[]): Promise<void> {
   const text =
-    `📊 <b>Weekly Calibration Update</b>\n\n` +
-    lines.map((l) => escapeHtml(l)).join('\n');
+    `📊 <b>Weekly Calibration Update</b>\n\n` + lines.map((l) => escapeHtml(l)).join('\n');
 
   await notify(text);
 }
@@ -313,10 +318,7 @@ export async function notifyCalibrationUpdate(lines: string[]): Promise<void> {
 // ── Utility ─────────────────────────────────────────────────────────────────
 
 function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // Export for testing

@@ -1,6 +1,6 @@
 /**
  * Environment Sync Utility.
- * 
+ *
  * Safely appends missing keys from .env.example to your local .env file.
  * Preserves all existing values and comments in both files.
  */
@@ -14,7 +14,7 @@ const EXAMPLE_PATH = path.resolve(process.cwd(), '.env.example');
 function parseKeys(content: string): Set<string> {
   const keys = new Set<string>();
   const lines = content.split('\n');
-  
+
   for (const line of lines) {
     const trimmed = line.trim();
     // Match KEY=VALUE or # KEY=VALUE (optional space after #)
@@ -51,11 +51,15 @@ function main() {
   for (const key of exampleKeys) {
     if (!envKeys.has(key)) {
       // Find the original line in .env.example to preserve its default value/comment status
-      const originalLine = exampleLines.find(line => {
+      const originalLine = exampleLines.find((line) => {
         const trimmed = line.trim();
-        return trimmed.startsWith(key + '=') || trimmed.startsWith('# ' + key + '=') || trimmed.startsWith('#' + key + '=');
+        return (
+          trimmed.startsWith(key + '=') ||
+          trimmed.startsWith('# ' + key + '=') ||
+          trimmed.startsWith('#' + key + '=')
+        );
       });
-      
+
       if (originalLine) {
         missingKeys.push(originalLine);
       }
@@ -68,19 +72,20 @@ function main() {
   }
 
   console.log(`Found ${missingKeys.length} missing keys. Appending to .env...`);
-  
+
   let newEnvContent = envContent;
   if (!newEnvContent.endsWith('\n')) {
     newEnvContent += '\n';
   }
-  
-  newEnvContent += '\n# ── Added by sync-env utility (' + new Date().toISOString().split('T')[0] + ') ──\n';
+
+  newEnvContent +=
+    '\n# ── Added by sync-env utility (' + new Date().toISOString().split('T')[0] + ') ──\n';
   newEnvContent += missingKeys.join('\n') + '\n';
 
   fs.writeFileSync(ENV_PATH, newEnvContent);
-  
+
   console.log('Successfully added:');
-  missingKeys.forEach(line => console.log(`  + ${line.trim()}`));
+  missingKeys.forEach((line) => console.log(`  + ${line.trim()}`));
   console.log('\nDone! Please review your .env to fill in any required secrets.');
 }
 

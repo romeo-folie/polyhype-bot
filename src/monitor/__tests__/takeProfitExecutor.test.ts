@@ -172,9 +172,7 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
-    expect(mockSell).toHaveBeenCalledWith(
-      expect.objectContaining({ side: 'no', action: 'sell' }),
-    );
+    expect(mockSell).toHaveBeenCalledWith(expect.objectContaining({ side: 'no', action: 'sell' }));
   });
 
   it('uses sharesHeld when available', async () => {
@@ -188,9 +186,7 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
-    expect(mockSell).toHaveBeenCalledWith(
-      expect.objectContaining({ shares: 12.5 }),
-    );
+    expect(mockSell).toHaveBeenCalledWith(expect.objectContaining({ shares: 12.5 }));
   });
 
   it('falls back to stake/price estimate when sharesHeld is absent', async () => {
@@ -206,9 +202,7 @@ describe('executeTakeProfit', () => {
     });
 
     // fallback: 5.0 / 0.4 = 12.5
-    expect(mockSell).toHaveBeenCalledWith(
-      expect.objectContaining({ shares: 12.5 }),
-    );
+    expect(mockSell).toHaveBeenCalledWith(expect.objectContaining({ shares: 12.5 }));
   });
 
   it('closes position in ledger on success', async () => {
@@ -222,7 +216,11 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
-    expect(mockClose).toHaveBeenCalledWith(expect.objectContaining({ get: expect.any(Function) }), 'mkt-1', 'YES');
+    expect(mockClose).toHaveBeenCalledWith(
+      expect.objectContaining({ get: expect.any(Function) }),
+      'mkt-1',
+      'YES',
+    );
     expect(mockNotify).toHaveBeenCalledTimes(1);
   });
 
@@ -294,7 +292,7 @@ describe('executeTakeProfit', () => {
       'mkt-1',
       'YES',
       0,
-      'terminal_no_balance'
+      'terminal_no_balance',
     );
   });
 
@@ -332,7 +330,11 @@ describe('executeTakeProfit', () => {
       expect.objectContaining({ tokenId: 'tok-yes', shares: 12.5, orderType: 'FAK' }),
     );
     expect(mockSell).not.toHaveBeenCalled();
-    expect(mockClose).toHaveBeenCalledWith(expect.objectContaining({ get: expect.any(Function) }), 'mkt-1', 'YES');
+    expect(mockClose).toHaveBeenCalledWith(
+      expect.objectContaining({ get: expect.any(Function) }),
+      'mkt-1',
+      'YES',
+    );
   });
 
   it('routes CLOB-venue NO position to correct token ID', async () => {
@@ -346,9 +348,7 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
-    expect(mockClobSell).toHaveBeenCalledWith(
-      expect.objectContaining({ tokenId: 'tok-no' }),
-    );
+    expect(mockClobSell).toHaveBeenCalledWith(expect.objectContaining({ tokenId: 'tok-no' }));
   });
 
   it('returns error when CLOB-venue position has no token ID', async () => {
@@ -395,8 +395,6 @@ describe('executeTakeProfit', () => {
     });
 
     expect(result.success).toBe(true);
-    expect(mockClobSell).toHaveBeenCalledWith(
-      expect.objectContaining({ shares: 2.5 }),
-    );
+    expect(mockClobSell).toHaveBeenCalledWith(expect.objectContaining({ shares: 2.5 }));
   });
 });

@@ -38,7 +38,9 @@ vi.mock('@polymarket/clob-client', () => ({
     getNegRisk: mockGetNegRisk,
     getBalanceAllowance: mockGetBalanceAllowance,
     updateBalanceAllowance: mockUpdateBalanceAllowance,
-    createOrDeriveApiKey: vi.fn().mockResolvedValue({ apiKey: 'test', secret: 'test', passphrase: 'test' }),
+    createOrDeriveApiKey: vi
+      .fn()
+      .mockResolvedValue({ apiKey: 'test', secret: 'test', passphrase: 'test' }),
   })),
   OrderType: { FOK: 'FOK', FAK: 'FAK' },
   Side: { BUY: 'BUY', SELL: 'SELL' },
@@ -48,7 +50,8 @@ vi.mock('@polymarket/clob-client', () => ({
 vi.mock('../config.js', () => ({
   loadConfig: vi.fn(() => ({
     CLOB_FALLBACK_ENABLED: true,
-    POLYGON_WALLET_PRIVATE_KEY: '0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    POLYGON_WALLET_PRIVATE_KEY:
+      '0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
     POLYMARKET_SIGNATURE_TYPE: 0,
     POLYMARKET_FUNDER_ADDRESS: undefined,
     CLOB_ORDER_TYPE: 'FAK',
@@ -73,7 +76,8 @@ vi.mock('../redis.js', () => ({
   })),
 }));
 
-const { submitClobBuy, submitClobSell, getClobBalance, redeemClobOutcome } = await import('../clob.js');
+const { submitClobBuy, submitClobSell, getClobBalance, redeemClobOutcome } =
+  await import('../clob.js');
 
 describe('submitClobBuy', () => {
   beforeEach(() => {
@@ -121,7 +125,10 @@ describe('submitClobBuy', () => {
 
   it('returns error on timeout', async () => {
     mockCreateAndPostMarketOrder.mockImplementation(
-      () => new Promise(() => { /* never resolves */ }),
+      () =>
+        new Promise(() => {
+          /* never resolves */
+        }),
     );
 
     const result = await submitClobBuy({ tokenId: 'tok-yes', amountUsd: 5 });
@@ -185,7 +192,10 @@ describe('submitClobSell', () => {
 
   it('returns error on timeout', async () => {
     mockCreateAndPostMarketOrder.mockImplementation(
-      () => new Promise(() => { /* never resolves */ }),
+      () =>
+        new Promise(() => {
+          /* never resolves */
+        }),
     );
 
     const result = await submitClobSell({ tokenId: 'tok-yes', shares: 10 });
@@ -238,7 +248,8 @@ describe('redeemClobOutcome', () => {
   it('returns MAGIC_PROXY_MANUAL_REDEEM_REQUIRED when sigType=1', async () => {
     const { loadConfig } = await import('../config.js');
     vi.mocked(loadConfig).mockReturnValue({
-      POLYGON_WALLET_PRIVATE_KEY: '0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      POLYGON_WALLET_PRIVATE_KEY:
+        '0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
       POLYMARKET_SIGNATURE_TYPE: 1,
       POLYMARKET_FUNDER_ADDRESS: '0xproxyaddress',
       CLOB_FALLBACK_ENABLED: true,
@@ -264,12 +275,14 @@ describe('parseBalanceFromClobError', () => {
   });
 
   it('extracts balance from CLOB error message', () => {
-    const error = 'not enough balance / allowance: the balance is not enough -> balance: 3266460, order amount: 3280000';
+    const error =
+      'not enough balance / allowance: the balance is not enough -> balance: 3266460, order amount: 3280000';
     expect(parseBalanceFromClobError(error)).toBeCloseTo(3.26646, 5);
   });
 
   it('handles HTML-encoded arrow in error', () => {
-    const error = 'not enough balance / allowance: the balance is not enough &gt; balance: 2916310, order amount: 2920000';
+    const error =
+      'not enough balance / allowance: the balance is not enough &gt; balance: 2916310, order amount: 2920000';
     expect(parseBalanceFromClobError(error)).toBeCloseTo(2.91631, 5);
   });
 

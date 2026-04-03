@@ -96,7 +96,7 @@ const mockRedis = {
   zrange: vi.fn().mockResolvedValue([]),
   hincrby: vi.fn().mockResolvedValue(1),
   pipeline: vi.fn(() => ({
-      exec: vi.fn().mockResolvedValue([]),
+    exec: vi.fn().mockResolvedValue([]),
   })),
 };
 
@@ -113,11 +113,13 @@ describe('ArbitrageWorker', () => {
     vi.clearAllMocks();
     configOverride = {}; // Reset config override
     // Re-apply implementations cleared by clearAllMocks
-    mockRedis.on.mockImplementation((event: string, callback: (channel: string, msg: string) => void) => {
-      if (event === 'message') {
-        onRedisMessage = callback;
-      }
-    });
+    mockRedis.on.mockImplementation(
+      (event: string, callback: (channel: string, msg: string) => void) => {
+        if (event === 'message') {
+          onRedisMessage = callback;
+        }
+      },
+    );
     mockRedis.subscribe.mockResolvedValue(1);
     mockRedis.unsubscribe.mockResolvedValue(1);
     mockRedis.get.mockResolvedValue(null);
@@ -152,26 +154,26 @@ describe('ArbitrageWorker', () => {
   });
 
   it('should respect rate limiting (governor)', async () => {
-     // Override config so start() sets rate limit to 1 trade/min (overrides constructor arg)
-     configOverride = {
-       ARB_GLOBAL_MAX_TRADES_PER_MIN: 1,
-       ARB_MAX_TRADES_PER_MIN: 1,
-       CRYPTO_ARB_MAX_TRADES_PER_MIN: 1,
-     };
-     const worker = new ArbitrageWorker({ baselineIntervalMs: 100 });
-     await worker.start();
+    // Override config so start() sets rate limit to 1 trade/min (overrides constructor arg)
+    configOverride = {
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 1,
+      ARB_MAX_TRADES_PER_MIN: 1,
+      CRYPTO_ARB_MAX_TRADES_PER_MIN: 1,
+    };
+    const worker = new ArbitrageWorker({ baselineIntervalMs: 100 });
+    await worker.start();
 
-     const callback = onRedisMessage!;
+    const callback = onRedisMessage!;
 
-     // 1st trigger
-     await callback('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 65100 }));
-     // 2nd trigger (should be ignored by governor if interval too short)
-     await callback('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 65200 }));
+    // 1st trigger
+    await callback('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 65100 }));
+    // 2nd trigger (should be ignored by governor if interval too short)
+    await callback('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 65200 }));
 
-     // triggerScan is fire-and-forget — wait for first scan to complete, then assert count
-     await vi.waitFor(() => expect(runArbScan).toHaveBeenCalledTimes(1), { timeout: 500 });
+    // triggerScan is fire-and-forget — wait for first scan to complete, then assert count
+    await vi.waitFor(() => expect(runArbScan).toHaveBeenCalledTimes(1), { timeout: 500 });
 
-     worker.stop();
+    worker.stop();
   });
 
   it('should trigger crypto arb on spot:price_moved with known symbol', async () => {
@@ -182,7 +184,7 @@ describe('ArbitrageWorker', () => {
       question: 'Will Bitcoin be above $100,000?',
       direction: 'YES' as const,
       tokenId: 'yes-tok',
-      currentPmPrice: 0.60,
+      currentPmPrice: 0.6,
       fairValuePrice: 0.75,
       edge: 0.13,
       stakeUsd: 3.9,
@@ -221,7 +223,10 @@ describe('ArbitrageWorker', () => {
       return realDateNow() + dateNowCalls * 10;
     });
 
-    await callback('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 65000, timestamp: realDateNow() }));
+    await callback(
+      'spot:price_moved',
+      JSON.stringify({ symbol: 'btcusdt', price: 65000, timestamp: realDateNow() }),
+    );
 
     // Wait for async crypto arb to complete
     await new Promise((r) => setTimeout(r, 100));

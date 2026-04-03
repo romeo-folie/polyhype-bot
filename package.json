@@ -24,6 +24,7 @@
     "warmer:market": "tsx src/spot/marketWarmer.ts",
     "cron:shortlist": "npx tsx src/copytrade/shortlist.ts",
     "cron:calibrate": "npx tsx src/cron/calibrate.ts",
+    "cron:watchlist": "npx tsx src/cron/refreshWatchlist.ts",
     "sync-env": "npx tsx scripts/sync-env.ts",
     "probe:simmer": "npx tsx scripts/probe-simmer.ts",
     "probe:clob-allowance": "npx tsx scripts/probe-clob-allowance.ts",

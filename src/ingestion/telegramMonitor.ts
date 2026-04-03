@@ -15,6 +15,7 @@ import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
 import { scoreItems } from './scorer.js';
 import { processScoredItems } from '../execution/index.js';
+import { matchesWatchlist } from '../shared/watchlist.js';
 import type { NewMessageEvent } from 'telegram/events/NewMessage.js';
 
 let client: TelegramClient | null = null;
@@ -42,7 +43,7 @@ export async function startTelegramMonitor(): Promise<void> {
     return;
   }
 
-  const session = new StringSession(sessionStr || '');
+  const session = new StringSession(sessionStr ?? '');
   client = new TelegramClient(session, apiId, apiHash, {
     connectionRetries: 5,
   });
@@ -64,13 +65,16 @@ export async function startTelegramMonitor(): Promise<void> {
     }
   }
 
-  const channels = channelsStr.split(',').map((s) => s.trim()).filter(Boolean);
+  const channels = channelsStr
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   logger.info('[telegram] monitoring channels', { channels });
 
   // Event handler for new messages
   client.addEventHandler(async (event: NewMessageEvent) => {
     const message = event.message;
-    if (!message || !message.text) return;
+    if (!message.text) return;
 
     // Resolve channel/peer info
     let peerName = 'unknown';
@@ -78,14 +82,16 @@ export async function startTelegramMonitor(): Promise<void> {
     try {
       const peer = await client?.getEntity(message.peerId);
       if (peer instanceof Api.Channel) {
-        peerName = peer.username || peer.title || 'channel';
+        peerName = peer.username ?? peer.title ?? 'channel';
         // Build a valid t.me URL using the username when available; fall back to channel ID
-        peerUrlSlug = peer.username ?? `c/${peer.id}`;
+        peerUrlSlug = peer.username ?? `c/${peer.id.toString()}`;
       } else if (peer instanceof Api.Chat) {
         peerName = peer.title || 'chat';
-        peerUrlSlug = `c/${peer.id}`;
+        peerUrlSlug = `c/${peer.id.toString()}`;
       }
-    } catch { /* best effort */ }
+    } catch {
+      /* best effort */
+    }
 
     // Filter by configured channel list using the resolved name/username
     if (channels.length > 0 && !channels.includes(peerName)) {
@@ -93,24 +99,33 @@ export async function startTelegramMonitor(): Promise<void> {
     }
 
     const startAt = Date.now();
-    const telegramLatency = startAt - (message.date * 1000);
+    const telegramLatency = startAt - message.date * 1000;
     logger.info('[telegram] new message received', {
       from: peerName,
       text: message.text.slice(0, 50) + '...',
-      latency: `${telegramLatency}ms`,
+      latency: `${telegramLatency.toString()}ms`,
     });
 
     try {
       const redis = getRedis();
-      
+
       // 1. Convert to RssItem format for scoring
       const item = {
         title: message.text.trim(),
-        url: `https://t.me/${peerUrlSlug}/${message.id}`,
+        url: `https://t.me/${peerUrlSlug}/${message.id.toString()}`,
         publishedAt: new Date(),
         source: `telegram:${peerName}`,
         latencyMs: telegramLatency,
       };
+
+      // 1.5 Dynamic Watchlist Gate: skip LLM if no market mentions
+      if (!(await matchesWatchlist(item.title, redis))) {
+        logger.debug('[telegram] skipping message — no watchlist match', {
+          from: peerName,
+          text: item.title.slice(0, 50) + '...',
+        });
+        return;
+      }
 
       // 2. Score urgency
       const scored = await scoreItems([item], {
@@ -120,11 +135,11 @@ export async function startTelegramMonitor(): Promise<void> {
         redis,
       });
 
-      const highUrgency = scored.filter(i => i.urgencyScore >= cfg.URGENCY_THRESHOLD);
-      
+      const highUrgency = scored.filter((i) => i.urgencyScore >= cfg.URGENCY_THRESHOLD);
+
       if (highUrgency.length > 0) {
         logger.info('[telegram] high-urgency message triggering execution', {
-          urgency: highUrgency[0]!.urgencyScore,
+          urgency: highUrgency[0]?.urgencyScore,
           latencyMs: Date.now() - startAt,
         });
 
@@ -135,7 +150,7 @@ export async function startTelegramMonitor(): Promise<void> {
           score: scored[0]?.urgencyScore,
         });
       }
-    } catch (err) {
+    } catch (err: unknown) {
       logger.error('[telegram] ingestion error', {
         error: err instanceof Error ? err.message : String(err),
       });
@@ -147,7 +162,7 @@ export async function startTelegramMonitor(): Promise<void> {
  * Main entry point for standalone worker.
  */
 if (process.argv[1]?.endsWith('telegramMonitor.ts')) {
-  startTelegramMonitor().catch((err) => {
+  startTelegramMonitor().catch((err: unknown) => {
     logger.error('[telegram] monitor fatal error', {
       error: err instanceof Error ? err.message : String(err),
     });

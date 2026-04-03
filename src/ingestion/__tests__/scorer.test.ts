@@ -180,7 +180,9 @@ describe('scoreItems', () => {
     };
 
     const mockRedis = {
-      get: vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(JSON.stringify(cachedItem)),
+      get: vi
+        .fn<(key: string) => Promise<string | null>>()
+        .mockResolvedValue(JSON.stringify(cachedItem)),
       set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
     };
 

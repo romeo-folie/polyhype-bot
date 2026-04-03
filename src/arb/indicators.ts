@@ -29,7 +29,8 @@ export function computeEMA(values: number[], period: number): number[] | null {
   // Seed with SMA of first `period` values.
   let sum = 0;
   for (let i = 0; i < period; i++) {
-    sum += values[i]!;
+    const val = values[i];
+    if (val !== undefined) sum += val;
   }
 
   // Return only the valid portion (period-1 onwards) — avoids NaN holes in the return value.
@@ -37,7 +38,11 @@ export function computeEMA(values: number[], period: number): number[] | null {
   // Length = values.length - period + 1.
   const ema: number[] = [sum / period];
   for (let i = period; i < values.length; i++) {
-    ema.push(values[i]! * k + ema[ema.length - 1]! * (1 - k));
+    const val = values[i];
+    const prevEma = ema[ema.length - 1];
+    if (val !== undefined && prevEma !== undefined) {
+      ema.push(val * k + prevEma * (1 - k));
+    }
   }
 
   return ema;
@@ -71,20 +76,28 @@ export function computeRSIFromCandles(candles: OHLCVCandle[], period: number): n
   let avgGain = 0;
   let avgLoss = 0;
   for (let i = 1; i <= period; i++) {
-    const change = closes[i]! - closes[i - 1]!;
-    if (change > 0) avgGain += change;
-    else avgLoss += Math.abs(change);
+    const curr = closes[i];
+    const prev = closes[i - 1];
+    if (curr !== undefined && prev !== undefined) {
+      const change = curr - prev;
+      if (change > 0) avgGain += change;
+      else avgLoss += Math.abs(change);
+    }
   }
   avgGain /= period;
   avgLoss /= period;
 
   // Wilder smoothing for remaining periods
   for (let i = period + 1; i < closes.length; i++) {
-    const change = closes[i]! - closes[i - 1]!;
-    const gain = change > 0 ? change : 0;
-    const loss = change < 0 ? Math.abs(change) : 0;
-    avgGain = (avgGain * (period - 1) + gain) / period;
-    avgLoss = (avgLoss * (period - 1) + loss) / period;
+    const curr = closes[i];
+    const prev = closes[i - 1];
+    if (curr !== undefined && prev !== undefined) {
+      const change = curr - prev;
+      const gain = change > 0 ? change : 0;
+      const loss = change < 0 ? Math.abs(change) : 0;
+      avgGain = (avgGain * (period - 1) + gain) / period;
+      avgLoss = (avgLoss * (period - 1) + loss) / period;
+    }
   }
 
   if (avgLoss === 0) return 100;
@@ -149,7 +162,11 @@ export function computeMACDFromCandles(
   const macdLine: number[] = [];
   const fastOffset = slowPeriod - fastPeriod; // fastEMA index offset relative to slowEMA
   for (let j = 0; j < slowEMA.length; j++) {
-    macdLine.push(fastEMA[fastOffset + j]! - slowEMA[j]!);
+    const fastVal = fastEMA[fastOffset + j];
+    const slowVal = slowEMA[j];
+    if (fastVal !== undefined && slowVal !== undefined) {
+      macdLine.push(fastVal - slowVal);
+    }
   }
 
   if (macdLine.length < signalPeriod) return null;
@@ -157,8 +174,10 @@ export function computeMACDFromCandles(
   const signalEMA = computeEMA(macdLine, signalPeriod);
   if (!signalEMA) return null;
 
-  const lastMacd = macdLine[macdLine.length - 1]!;
-  const lastSignal = signalEMA[signalEMA.length - 1]!;
+  const lastMacd = macdLine[macdLine.length - 1];
+  const lastSignal = signalEMA[signalEMA.length - 1];
+
+  if (lastMacd === undefined || lastSignal === undefined) return null;
 
   return {
     macdLine: lastMacd,
@@ -209,7 +228,9 @@ export function computeStochasticFromCandles(
     const window = candles.slice(i - kPeriod + 1, i + 1);
     const highestHigh = Math.max(...window.map((c) => c.high));
     const lowestLow = Math.min(...window.map((c) => c.low));
-    const close = candles[i]!.close;
+    const candle = candles[i];
+    if (candle === undefined) continue;
+    const close = candle.close;
 
     if (highestHigh === lowestLow) {
       kValues.push(50); // flat range — neutral
@@ -221,7 +242,8 @@ export function computeStochasticFromCandles(
   if (kValues.length < dPeriod) return null;
 
   // %D = SMA of last dPeriod %K values
-  const lastK = kValues[kValues.length - 1]!;
+  const lastK = kValues[kValues.length - 1];
+  if (lastK === undefined) return null;
   const dWindow = kValues.slice(-dPeriod);
   const lastD = dWindow.reduce((sum, v) => sum + v, 0) / dPeriod;
 

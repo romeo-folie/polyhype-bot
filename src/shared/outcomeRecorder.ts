@@ -57,7 +57,11 @@ export function inferCategory(question: string): string {
 
   // Short tokens (eth, sol, btc, etc.) are anchored with \b to prevent false matches
   // like "methane" → eth, "absolute" → sol, "protocol" → btc.
-  if (/bitcoin|\bbtc\b|\beth\b|ethereum|crypto|\bsolana\b|\bsol\b|\bdoge\b|dogecoin|\bxrp\b|ripple|\bshib\b|shiba|\bpepe\b|binance|coinbase/.test(q)) {
+  if (
+    /bitcoin|\bbtc\b|\beth\b|ethereum|crypto|\bsolana\b|\bsol\b|\bdoge\b|dogecoin|\bxrp\b|ripple|\bshib\b|shiba|\bpepe\b|binance|coinbase/.test(
+      q,
+    )
+  ) {
     return 'crypto-regulatory';
   }
   if (/\bfed\b|\brate\b|\bgdp\b|inflation|\bbank\b|\bcpi\b|recession/.test(q)) {
@@ -135,7 +139,7 @@ export async function recordOutcome(
           if (src) await redis.zrem(`outcomes:source:${src}`, prunedId);
         }
         // Delete the hash entries to free memory.
-        const hashKeys = prunedIds.map(id => `outcome:${id}`);
+        const hashKeys = prunedIds.map((id) => `outcome:${id}`);
         await redis.del(...hashKeys);
       }
     }
@@ -176,28 +180,50 @@ export async function getRecentOutcomes(
       const parsed: PositionOutcome = {
         id: data.id,
         closedAt: data.closedAt ?? '',
-      source: data.source as PositionOutcome['source'],
-      category: data.category ?? '',
-      question: data.question ?? '',
-      direction: data.direction as 'YES' | 'NO',
-      consensusProbability: Number(data.consensusProbability) || 0,
+        source: data.source as PositionOutcome['source'],
+        category: data.category ?? '',
+        question: data.question ?? '',
+        direction: data.direction as 'YES' | 'NO',
+        consensusProbability: Number(data.consensusProbability) || 0,
         divergence: Number(data.divergence) || 0,
         result: data.result as 'won' | 'lost' | 'pushed',
-      returnPct: Number(data.returnPct) || 0,
-      holdingHours: Number(data.holdingHours) || 0,
-      executionVenue: data.executionVenue ?? '',
-    };
-    if (data.executionId) parsed.executionId = data.executionId;
-    if (data.urgencyScore !== undefined && data.urgencyScore !== null && data.urgencyScore !== '') parsed.urgencyScore = Number(data.urgencyScore);
-    if (data.modeConfigured) parsed.modeConfigured = data.modeConfigured as NonNullable<PositionOutcome['modeConfigured']>;
-    if (data.entryExecutionPath) parsed.entryExecutionPath = data.entryExecutionPath;
-    if (data.entryOrderType) parsed.entryOrderType = data.entryOrderType as NonNullable<PositionOutcome['entryOrderType']>;
-    if (data.fallbackReason) parsed.fallbackReason = data.fallbackReason;
-    if (data.decisionSpreadBps !== undefined && data.decisionSpreadBps !== null && data.decisionSpreadBps !== '') parsed.decisionSpreadBps = Number(data.decisionSpreadBps);
-    if (data.makerPriceImprovementBps !== undefined && data.makerPriceImprovementBps !== null && data.makerPriceImprovementBps !== '') parsed.makerPriceImprovementBps = Number(data.makerPriceImprovementBps);
-    if (data.makerPriceImprovementUsd !== undefined && data.makerPriceImprovementUsd !== null && data.makerPriceImprovementUsd !== '') parsed.makerPriceImprovementUsd = Number(data.makerPriceImprovementUsd);
-    outcomes.push(parsed);
-  }
+        returnPct: Number(data.returnPct) || 0,
+        holdingHours: Number(data.holdingHours) || 0,
+        executionVenue: data.executionVenue ?? '',
+      };
+      if (data.executionId) parsed.executionId = data.executionId;
+      if (data.urgencyScore !== undefined && data.urgencyScore !== null && data.urgencyScore !== '')
+        parsed.urgencyScore = Number(data.urgencyScore);
+      if (data.modeConfigured)
+        parsed.modeConfigured = data.modeConfigured as NonNullable<
+          PositionOutcome['modeConfigured']
+        >;
+      if (data.entryExecutionPath) parsed.entryExecutionPath = data.entryExecutionPath;
+      if (data.entryOrderType)
+        parsed.entryOrderType = data.entryOrderType as NonNullable<
+          PositionOutcome['entryOrderType']
+        >;
+      if (data.fallbackReason) parsed.fallbackReason = data.fallbackReason;
+      if (
+        data.decisionSpreadBps !== undefined &&
+        data.decisionSpreadBps !== null &&
+        data.decisionSpreadBps !== ''
+      )
+        parsed.decisionSpreadBps = Number(data.decisionSpreadBps);
+      if (
+        data.makerPriceImprovementBps !== undefined &&
+        data.makerPriceImprovementBps !== null &&
+        data.makerPriceImprovementBps !== ''
+      )
+        parsed.makerPriceImprovementBps = Number(data.makerPriceImprovementBps);
+      if (
+        data.makerPriceImprovementUsd !== undefined &&
+        data.makerPriceImprovementUsd !== null &&
+        data.makerPriceImprovementUsd !== ''
+      )
+        parsed.makerPriceImprovementUsd = Number(data.makerPriceImprovementUsd);
+      outcomes.push(parsed);
+    }
 
     return outcomes;
   } catch (err) {

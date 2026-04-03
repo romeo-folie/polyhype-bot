@@ -27,9 +27,15 @@ const envSchema = z.object({
   SIMMER_API_KEY: z.string().min(1, 'SIMMER_API_KEY is required'),
 
   // Simmer — market import and auto-redeem
-  SIMMER_AUTO_IMPORT_ENABLED: z.string().optional().default('false')
+  SIMMER_AUTO_IMPORT_ENABLED: z
+    .string()
+    .optional()
+    .default('false')
     .transform((v) => !['false', '0', ''].includes(v.trim().toLowerCase())),
-  SIMMER_AUTO_REDEEM_ENABLED: z.string().optional().default('true')
+  SIMMER_AUTO_REDEEM_ENABLED: z
+    .string()
+    .optional()
+    .default('true')
     .transform((v) => !['false', '0', ''].includes(v.trim().toLowerCase())),
 
   // LLM — at least one must be set (validated below)
@@ -57,12 +63,15 @@ const envSchema = z.object({
   // Relayer URL defaults to the Polymarket production endpoint (no config needed)
   // Authenticate with EITHER Relayer API Key OR Builder API Key
   POLYMARKET_RELAYER_URL: z.string().url().optional().default('https://relayer-v2.polymarket.com'),
-  POLYMARKET_RELAYER_API_KEY: z.string().optional(),        // Relayer API key (simpler auth)
+  POLYMARKET_RELAYER_API_KEY: z.string().optional(), // Relayer API key (simpler auth)
   POLYMARKET_RELAYER_API_KEY_ADDRESS: z.string().optional(), // Address owning the relayer key
-  POLYMARKET_BUILDER_API_KEY: z.string().optional(),        // Builder API key (alternative auth)
+  POLYMARKET_BUILDER_API_KEY: z.string().optional(), // Builder API key (alternative auth)
   POLYMARKET_BUILDER_SECRET: z.string().optional(),
   POLYMARKET_BUILDER_PASSPHRASE: z.string().optional(),
-  CLOB_FALLBACK_ENABLED: z.string().optional().default('true')
+  CLOB_FALLBACK_ENABLED: z
+    .string()
+    .optional()
+    .default('true')
     .refine((v: string) => ['true', 'false', '1', '0'].includes(v.trim().toLowerCase()), {
       message: "CLOB_FALLBACK_ENABLED must be 'true', 'false', '1', or '0'",
     })
@@ -87,25 +96,36 @@ const envSchema = z.object({
   MAKER_POLL_INTERVAL_MS: z.coerce.number().int().min(50).optional().default(1000),
   MAKER_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(5),
   TAKER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.1),
-  TAKER_MIN_EDGE_CATEGORIES: z.string().optional().default('{}').transform((v, ctx) => {
-    try {
-      const parsed = JSON.parse(v) as unknown;
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'TAKER_MIN_EDGE_CATEGORIES must be a JSON object' });
+  TAKER_MIN_EDGE_CATEGORIES: z
+    .string()
+    .optional()
+    .default('{}')
+    .transform((v, ctx) => {
+      try {
+        const parsed = JSON.parse(v) as unknown;
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'TAKER_MIN_EDGE_CATEGORIES must be a JSON object',
+          });
+          return z.NEVER;
+        }
+        return parsed;
+      } catch {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'TAKER_MIN_EDGE_CATEGORIES must be valid JSON',
+        });
         return z.NEVER;
       }
-      return parsed;
-    } catch {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'TAKER_MIN_EDGE_CATEGORIES must be valid JSON' });
-      return z.NEVER;
-    }
-  }).pipe(z.record(z.string(), z.coerce.number().min(0).max(1))),
+    })
+    .pipe(z.record(z.string(), z.coerce.number().min(0).max(1))),
   TAIL_TAKER_BLOCK: z.coerce.boolean().optional().default(true),
   TAIL_PRICE_THRESHOLD: z.coerce.number().min(0).max(0.5).optional().default(0.2),
   TAIL_TAKER_OVERRIDE_EDGE: z.coerce.number().min(0).max(1).optional().default(0.2),
 
   TAKE_PROFIT_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.25),
-  STOP_LOSS_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.30),
+  STOP_LOSS_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.3),
   REEVAL_ENABLED: z.coerce.boolean().optional().default(true),
   REEVAL_EDGE_FLOOR: z.coerce.number().min(0).max(1).optional().default(0.03),
 
@@ -118,7 +138,12 @@ const envSchema = z.object({
   SPOT_LOOKBACK_MINUTES: z.coerce.number().int().min(1).optional().default(5),
   SPOT_COOLDOWN_MINUTES: z.coerce.number().int().min(1).optional().default(30),
   SPOT_DIVERGENCE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.12),
-  SPOT_CRYPTO_ASSETS: z.string().optional().default('bitcoin,ethereum,solana,ripple,binancecoin,bittensor,dogecoin,cardano,avalanche,chainlink,sui'),
+  SPOT_CRYPTO_ASSETS: z
+    .string()
+    .optional()
+    .default(
+      'bitcoin,ethereum,solana,ripple,binancecoin,bittensor,dogecoin,cardano,avalanche,chainlink,sui',
+    ),
   SPOT_COMMODITY_ASSETS: z.string().optional().default('CL=F,GC=F'),
 
   // Arbitrage scanner (Phase: arb)
@@ -129,8 +154,18 @@ const envSchema = z.object({
   CRYPTO_ARB_MAX_TRADES_PER_MIN: z.coerce.number().int().min(1).optional().default(15),
 
   // Feeds
-  RSS_FEED_URLS: z.string().optional().default('https://rss.nytimes.com/services/xml/rss/nyt/World.xml,https://feeds.skynews.com/feeds/rss/world.xml,https://feeds.bbci.co.uk/news/world/rss.xml,https://www.aljazeera.com/xml/rss/all.xml'),
-  RSS_USER_AGENT: z.string().optional().default('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'),
+  RSS_FEED_URLS: z
+    .string()
+    .optional()
+    .default(
+      'https://rss.nytimes.com/services/xml/rss/nyt/World.xml,https://feeds.skynews.com/feeds/rss/world.xml,https://feeds.bbci.co.uk/news/world/rss.xml,https://www.aljazeera.com/xml/rss/all.xml',
+    ),
+  RSS_USER_AGENT: z
+    .string()
+    .optional()
+    .default(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    ),
   BINANCE_WS_ENABLED: z.coerce.boolean().optional().default(true),
   BINANCE_SYMBOLS: z.string().optional().default('btcusdt,ethusdt,solusdt'),
   HELIUS_API_KEY: z.string().optional(),
@@ -173,7 +208,12 @@ const envSchema = z.object({
   CONTEXT_INJECTION_LIMIT: z.coerce.number().int().min(1).max(10).optional().default(5),
 
   // Redeemer guardrails
-  REDEEMER_DUPLICATE_WINDOW_S: z.coerce.number().int().min(60).optional().default(30 * 24 * 3600),
+  REDEEMER_DUPLICATE_WINDOW_S: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .optional()
+    .default(30 * 24 * 3600),
   REDEEMER_DUST_THRESHOLD_USDC: z.coerce.number().min(0).optional().default(0.25),
   REDEEMER_FALLBACK_STALE_TTL_S: z.coerce.number().int().min(60).optional().default(21_600),
 
@@ -186,32 +226,55 @@ const envSchema = z.object({
   COPYTRADE_ENABLED: z.coerce.boolean().optional().default(false),
   COPYTRADE_WALLETS: z.string().optional().default(''),
   // Comma-separated category list. Examples: 'all', 'weather', 'weather,geopolitics'
-  COPYTRADE_MARKET_SCOPE: z.string().optional().default('all').transform(
-    (v) => v.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
-  ),
+  COPYTRADE_MARKET_SCOPE: z
+    .string()
+    .optional()
+    .default('all')
+    .transform((v) =>
+      v
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
+    ),
   COPYTRADE_SIZE_SCALE: z.coerce.number().min(0).optional().default(0.1),
   COPYTRADE_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(25),
   COPYTRADE_MAX_SLIPPAGE_BPS: z.coerce.number().min(0).optional().default(200),
-  COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES: z.string().optional().default('{"crypto-regulatory": 100, "mentions": 50, "macro": 150, "us-politics": 200, "geopolitical": 200, "sports": 100}').transform((v, ctx) => {
-    try {
-      const parsed = JSON.parse(v) as unknown;
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES must be a JSON object' });
+  COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES: z
+    .string()
+    .optional()
+    .default(
+      '{"crypto-regulatory": 100, "mentions": 50, "macro": 150, "us-politics": 200, "geopolitical": 200, "sports": 100}',
+    )
+    .transform((v, ctx) => {
+      try {
+        const parsed = JSON.parse(v) as unknown;
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES must be a JSON object',
+          });
+          return z.NEVER;
+        }
+        return parsed;
+      } catch {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES must be valid JSON',
+        });
         return z.NEVER;
       }
-      return parsed;
-    } catch {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES must be valid JSON' });
-      return z.NEVER;
-    }
-  }).pipe(z.record(z.string(), z.coerce.number().min(0).max(10000))),
+    })
+    .pipe(z.record(z.string(), z.coerce.number().min(0).max(10000))),
   COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS: z.coerce.number().min(0).optional().default(6),
   COPYTRADE_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(1000),
   COPYTRADE_EXIT_MODE: z.enum(['mirror', 'rules']).optional().default('rules'),
   COPYTRADE_POLL_INTERVAL_MS: z.coerce.number().int().min(500).optional().default(2000),
 
   // Copytrade shortlist automation
-  COPYTRADE_SHORTLIST_TIME_WINDOW: z.enum(['DAY', 'WEEK', 'MONTH', 'ALL']).optional().default('WEEK'),
+  COPYTRADE_SHORTLIST_TIME_WINDOW: z
+    .enum(['DAY', 'WEEK', 'MONTH', 'ALL'])
+    .optional()
+    .default('WEEK'),
   COPYTRADE_SHORTLIST_TOP_N: z.coerce.number().int().min(1).max(50).optional().default(5),
   COPYTRADE_SHORTLIST_MIN_PNL_USD: z.coerce.number().min(0).optional().default(10000),
   COPYTRADE_SHORTLIST_MIN_VOL_USD: z.coerce.number().min(0).optional().default(100000),
@@ -231,18 +294,27 @@ const envSchema = z.object({
   HYPERLIQUID_TESTNET: z.coerce.boolean().optional().default(false),
 
   // Risk & Control
-  FUTURES_GLOBAL_MAX_MARGIN_USD: z.coerce.number().min(0).optional().default(50),
+  FUTURES_GLOBAL_MAX_MARGIN_USD: z.coerce.number().min(0).optional().default(200),
   FUTURES_MAX_PER_TRADE_USD: z.coerce.number().min(0).optional().default(10),
   FUTURES_DEFAULT_LEVERAGE: z.coerce.number().int().min(1).max(50).optional().default(5),
   FUTURES_MAX_HOLD_HOURS: z.coerce.number().int().min(1).optional().default(4),
+  // Minimum urgency score (1-10) for news items to trigger a futures signal.
+  // Lowered from 8 to 6 to increase signal frequency; combined with stake scaling.
+  FUTURES_URGENCY_THRESHOLD: z.coerce.number().int().min(1).max(10).optional().default(6),
   // Notional-based SL/TP thresholds (percentage of margin used, NOT account equity).
   // At 5x leverage a 1.5% notional SL represents a 7.5% equity drawdown.
   // Use values relative to notional, not leverage-adjusted equity.
-  FUTURES_STOP_LOSS_PCT: z.coerce.number().max(-0.01, 'FUTURES_STOP_LOSS_PCT must be negative').default(-1.5),
-  FUTURES_TAKE_PROFIT_PCT: z.coerce.number().min(0.01, 'FUTURES_TAKE_PROFIT_PCT must be positive').default(3.0),
+  FUTURES_STOP_LOSS_PCT: z.coerce
+    .number()
+    .max(-0.01, 'FUTURES_STOP_LOSS_PCT must be negative')
+    .default(-1.5),
+  FUTURES_TAKE_PROFIT_PCT: z.coerce
+    .number()
+    .min(0.01, 'FUTURES_TAKE_PROFIT_PCT must be positive')
+    .default(3.0),
   FUTURES_EXIT_ON_SIGNAL_FADE: z.coerce.boolean().optional().default(true),
   // Max slippage fraction for IoC market orders (e.g. 0.02 = 2%). Conservative default.
-  FUTURES_IOC_SLIPPAGE: z.coerce.number().min(0.001).max(0.10).optional().default(0.02),
+  FUTURES_IOC_SLIPPAGE: z.coerce.number().min(0.001).max(0.1).optional().default(0.02),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
@@ -254,15 +326,24 @@ export function loadConfig(forceReload = false): AppConfig {
 
   const parsed = envSchema.safeParse(process.env);
   if (!parsed.success) {
-    const errors = parsed.error.errors.map((e: z.ZodIssue) => `  ${e.path.join('.')}: ${e.message}`).join('\n');
+    const errors = parsed.error.errors
+      .map((e: z.ZodIssue) => `  ${e.path.join('.')}: ${e.message}`)
+      .join('\n');
     throw new Error(`Configuration validation failed:\n${errors}`);
   }
 
   const cfg = parsed.data;
 
   // At least one LLM provider must be configured
-  if (!cfg.OPENAI_API_KEY && !cfg.GEMINI_API_KEY && !cfg.ANTHROPIC_API_KEY && !cfg.DEEPSEEK_API_KEY) {
-    throw new Error('At least one LLM API key must be set (OPENAI_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, or DEEPSEEK_API_KEY)');
+  if (
+    !cfg.OPENAI_API_KEY &&
+    !cfg.GEMINI_API_KEY &&
+    !cfg.ANTHROPIC_API_KEY &&
+    !cfg.DEEPSEEK_API_KEY
+  ) {
+    throw new Error(
+      'At least one LLM API key must be set (OPENAI_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, or DEEPSEEK_API_KEY)',
+    );
   }
 
   _config = cfg;

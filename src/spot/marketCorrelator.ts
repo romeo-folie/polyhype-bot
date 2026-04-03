@@ -86,7 +86,9 @@ async function callLlmForCorrelation(
       if (text.includes('none')) return 'none';
       if (text.includes('negative')) return 'negative';
       return 'positive';
-    } catch { /* fallback to openai */ }
+    } catch {
+      /* fallback to openai */
+    }
   }
 
   if (process.env.OPENAI_API_KEY) {
@@ -139,7 +141,10 @@ export async function findCorrelatedMarkets(move: SpotMove): Promise<CorrelatedM
       if (!titleLower.includes(qLower)) {
         let hasMatchInMarkets = false;
         for (const m of event.markets) {
-          if (m.question.toLowerCase().includes(qLower) || (m.description || '').toLowerCase().includes(qLower)) {
+          if (
+            m.question.toLowerCase().includes(qLower) ||
+            (m.description || '').toLowerCase().includes(qLower)
+          ) {
             hasMatchInMarkets = true;
             break;
           }
@@ -170,10 +175,7 @@ export async function findCorrelatedMarkets(move: SpotMove): Promise<CorrelatedM
           continue;
         }
 
-        const corrDir = await inferCorrelationDirection(
-          move.assetId,
-          market.question,
-        );
+        const corrDir = await inferCorrelationDirection(move.assetId, market.question);
         if (corrDir === 'none') continue;
 
         correlatedMarkets.push({

@@ -34,7 +34,8 @@ vi.mock('../../execution/telegram.js', () => ({
 // Mock Gamma: return a controlled list of markets
 const mockGetActiveMarkets = vi.fn<(...args: any[]) => any>();
 vi.mock('../../mapping/gamma.js', async () => {
-  const actual = await vi.importActual<typeof import('../../mapping/gamma.js')>('../../mapping/gamma.js');
+  const actual =
+    await vi.importActual<typeof import('../../mapping/gamma.js')>('../../mapping/gamma.js');
   return {
     getActiveMarkets: mockGetActiveMarkets,
     parseOutcomePrices: actual.parseOutcomePrices,
@@ -86,7 +87,10 @@ function makeRedis() {
       store.set(key, value);
       return 'OK';
     }),
-    del: vi.fn(async (key: string) => { store.delete(key); return 1; }),
+    del: vi.fn(async (key: string) => {
+      store.delete(key);
+      return 1;
+    }),
     _store: store,
   };
 }
@@ -134,8 +138,11 @@ describe('runArbScan', () => {
   it('caps execution at MAX_ARB_PER_RUN=2 even when many opportunities exist', async () => {
     // 5 markets all with good edge (gross=0.10, net≈0.08)
     mockGetActiveMarkets.mockResolvedValue([
-      makeMarket('mkt-1'), makeMarket('mkt-2'), makeMarket('mkt-3'),
-      makeMarket('mkt-4'), makeMarket('mkt-5'),
+      makeMarket('mkt-1'),
+      makeMarket('mkt-2'),
+      makeMarket('mkt-3'),
+      makeMarket('mkt-4'),
+      makeMarket('mkt-5'),
     ]);
 
     await runArbScan(redis as any);

@@ -29,7 +29,8 @@ describe('parseClobTokenIds', () => {
   });
 
   it('parses JSON-encoded token id array from Gamma wire format', () => {
-    const raw = '["36135303630970774358991758965953725374791089628290212294816140371870983436829","100818499003359884559774352671825765184103958625070066814408985574716007147193"]';
+    const raw =
+      '["36135303630970774358991758965953725374791089628290212294816140371870983436829","100818499003359884559774352671825765184103958625070066814408985574716007147193"]';
     const parsed = parseClobTokenIds(raw);
     expect(parsed).toHaveLength(2);
     expect(parsed[0]).toMatch(/^\d+$/);
@@ -82,12 +83,14 @@ afterEach(() => {
 
 const { searchEvents, getMarket } = await import('../gamma.js');
 
-function makeGammaEvent(overrides: Partial<{
-  id: string;
-  title: string;
-  active: boolean;
-  closed: boolean;
-}> = {}) {
+function makeGammaEvent(
+  overrides: Partial<{
+    id: string;
+    title: string;
+    active: boolean;
+    closed: boolean;
+  }> = {},
+) {
   return {
     id: overrides.id ?? 'evt-1',
     title: overrides.title ?? 'Will conflict escalate?',

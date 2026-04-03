@@ -47,7 +47,7 @@ export interface TradeSignal {
   /** True when the Gamma market has fees enabled — executor skips CLOB for these */
   feesEnabled?: boolean;
   /** Origin of the signal, used for execution routing (e.g. bypassing Simmer for arb) */
-  source?: 'osint' | 'crypto-arb' | 'futures';
+  source?: 'osint' | 'crypto-arb' | 'futures' | 'copytrade';
   /** Operational metadata for alerts/telemetry */
   latencyMs?: number | undefined;
   volatility?: number | undefined;
@@ -204,7 +204,7 @@ export async function mapNewsToFutures(
   const signals: TradeSignal[] = [];
 
   for (const item of items) {
-    if (item.urgencyScore < cfg.URGENCY_THRESHOLD) continue;
+    if (item.urgencyScore < cfg.FUTURES_URGENCY_THRESHOLD) continue;
 
     // 1. Identify asset using shared symbol resolution logic
     const symbol = resolveHlSymbol(item.title);
@@ -213,12 +213,17 @@ export async function mapNewsToFutures(
     // 2. Perform zero-shot LLM sentiment analysis
     const direction = await estimateSentiment(item.title);
     if (direction === 'NEUTRAL') {
-      logger.info('[mapping] skipping HL signal — neutral sentiment', { symbol, title: item.title });
+      logger.info('[mapping] skipping HL signal — neutral sentiment', {
+        symbol,
+        title: item.title,
+      });
       continue;
     }
-    
-    const stakeUsd = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
-    
+
+    // Scale stakeUsd based on urgency (e.g. 6/10 urgency = 60% of max allowed stake).
+    const maxStake = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
+    const stakeUsd = maxStake * (item.urgencyScore / 10);
+
     signals.push({
       marketId: symbol,
       question: `News Futures: ${symbol} ${direction}`,
@@ -233,7 +238,7 @@ export async function mapNewsToFutures(
       source: 'futures',
       latencyMs: item.latencyMs,
     });
-    
+
     // Only one futures signal per news item to prevent over-trading
   }
 

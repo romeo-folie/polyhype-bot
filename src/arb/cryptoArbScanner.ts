@@ -14,6 +14,7 @@ import { estimateFastConsensus } from '../spot/fastPathConsensus.js';
 import { getBankroll } from '../shared/bankroll.js';
 import { recordCryptoArbGate } from '../shared/telemetry.js';
 import { scoreConfluence } from './confluenceScorer.js';
+import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { Redis } from 'ioredis';
 
@@ -33,10 +34,11 @@ export interface CryptoArbOpportunity {
   feesEnabled: boolean;
   volatility?: number | undefined;
   spreadBps?: number | undefined;
+  /** The correlated Hyperliquid asset symbol, if available for hedging */
+  hlSymbol?: string | undefined;
 }
 
 import { ASSET_SEARCH_QUERIES, BINANCE_SYMBOL_TO_ASSET } from '../shared/assets.js';
-
 
 const MARKET_CACHE_PREFIX = 'crypto:markets:';
 const DEDUP_PREFIX = 'arb:crypto:';
@@ -48,7 +50,11 @@ const DEDUP_PREFIX = 'arb:crypto:';
  * Returns null if insufficient data.
  * Exported for unit testing.
  */
-export async function computeVolatility(symbol: string, redis: Redis, periods = 14): Promise<number | null> {
+export async function computeVolatility(
+  symbol: string,
+  redis: Redis,
+  periods = 14,
+): Promise<number | null> {
   // Retrieve the last (periods + 1) price records — need N+1 to compute N returns.
   const key = `spot:prices:${symbol}`;
   const entries = await redis.zrange(key, -(periods + 1), -1);
@@ -60,8 +66,9 @@ export async function computeVolatility(symbol: string, redis: Redis, periods = 
     const p = parseFloat(e.split(':')[1] ?? '0');
     if (isFinite(p) && p > 0) {
       prices.push(p);
-    } else if (prices.length > 0) {
-      prices.push(prices[prices.length - 1]!); // forward-fill
+    } else {
+      const last = prices[prices.length - 1];
+      if (last !== undefined) prices.push(last); // forward-fill
     }
     // If prices is still empty (first entry is invalid), skip
   }
@@ -70,7 +77,11 @@ export async function computeVolatility(symbol: string, redis: Redis, periods = 
 
   let sumAbsChange = 0;
   for (let i = 1; i < prices.length; i++) {
-    sumAbsChange += Math.abs((prices[i]! - prices[i - 1]!) / prices[i - 1]!);
+    const curr = prices[i];
+    const prev = prices[i - 1];
+    if (curr !== undefined && prev !== undefined && prev !== 0) {
+      sumAbsChange += Math.abs((curr - prev) / prev);
+    }
   }
   return sumAbsChange / (prices.length - 1); // mean absolute % change
 }
@@ -78,10 +89,7 @@ export async function computeVolatility(symbol: string, redis: Redis, periods = 
 /**
  * Scan for crypto latency arb opportunities triggered by a spot price move.
  */
-export async function scanCryptoArb(
-  move: SpotMove,
-  redis: Redis,
-): Promise<CryptoArbOpportunity[]> {
+export async function scanCryptoArb(move: SpotMove, redis: Redis): Promise<CryptoArbOpportunity[]> {
   const cfg = loadConfig();
 
   if (!cfg.CRYPTO_ARB_ENABLED) {
@@ -174,8 +182,8 @@ export async function scanCryptoArb(
       if (
         Array.isArray(parsed) &&
         (parsed.length === 0 ||
-          (typeof (parsed[0] as Record<string, unknown>)['marketId'] === 'string' &&
-           typeof (parsed[0] as Record<string, unknown>)['conditionId'] === 'string'))
+          (typeof (parsed[0] as Record<string, unknown>).marketId === 'string' &&
+            typeof (parsed[0] as Record<string, unknown>).conditionId === 'string'))
       ) {
         markets = parsed as CorrelatedMarket[];
       } else {
@@ -223,7 +231,7 @@ export async function scanCryptoArb(
     await redis.set(cacheKey, JSON.stringify(markets), 'EX', ttl);
   }
 
-  if (!markets || markets.length == 0) {
+  if (!markets || markets.length === 0) {
     await recordCryptoArbGate(redis, 'no_correlated_market');
     return [];
   }
@@ -262,10 +270,13 @@ export async function scanCryptoArb(
       const consensus = await estimateFastConsensus(move, market, dynamicAnnualVol);
 
       if (consensus.method === 'llm') {
-        logger.debug('[crypto-arb] skipping non-price-target market — LLM path not used in fast arb', {
-          marketId: market.marketId,
-          question: market.question.slice(0, 80),
-        });
+        logger.debug(
+          '[crypto-arb] skipping non-price-target market — LLM path not used in fast arb',
+          {
+            marketId: market.marketId,
+            question: market.question.slice(0, 80),
+          },
+        );
         await recordCryptoArbGate(redis, 'non_price_target');
         continue;
       }
@@ -274,7 +285,7 @@ export async function scanCryptoArb(
 
       // 4. Compute edge and direction
       const rawEdge = Math.abs(fairValue - currentPmPrice);
-      
+
       // Dynamic spread buffer: account for current bid-ask spread from WS.
       // Helps avoid entering trades where the "edge" is just the market spread.
       const wsSpread = await feed.getCachedSpread(market.marketId);
@@ -317,12 +328,15 @@ export async function scanCryptoArb(
         const expectYes = isPositiveCorrelation ? confluenceUp : !confluenceUp;
         const directionAligned = (direction === 'YES') === expectYes;
         if (!directionAligned) {
-          logger.debug('[crypto-arb] direction mismatch — confluence vs edge after correlation adjustment — skipping', {
-            marketId: market.marketId,
-            direction,
-            confluenceDirection,
-            correlationDirection: market.correlationDirection,
-          });
+          logger.debug(
+            '[crypto-arb] direction mismatch — confluence vs edge after correlation adjustment — skipping',
+            {
+              marketId: market.marketId,
+              direction,
+              confluenceDirection,
+              correlationDirection: market.correlationDirection,
+            },
+          );
           await recordCryptoArbGate(redis, 'direction_mismatch');
           continue;
         }
@@ -347,9 +361,11 @@ export async function scanCryptoArb(
       }
 
       // Resolve tokenId: YES = clobTokenIds[0], NO = clobTokenIds[1]
-      const tokenId = direction === 'YES'
-        ? (market.clobTokenIds?.[0] ?? '')
-        : (market.clobTokenIds?.[1] ?? '');
+      const tokenId =
+        direction === 'YES' ? (market.clobTokenIds[0] ?? '') : (market.clobTokenIds[1] ?? '');
+
+      // 7. Resolve HL counterpart for delta-neutral arb
+      const hlSymbol = resolveHlSymbol(market.question);
 
       opportunities.push({
         marketId: market.marketId,
@@ -366,6 +382,7 @@ export async function scanCryptoArb(
         feesEnabled: market.feesEnabled,
         volatility: dynamicAnnualVol,
         spreadBps: spreadBuffer * 10000,
+        hlSymbol,
       });
     } catch (err) {
       logger.warn('[crypto-arb] error processing market', {
@@ -382,7 +399,7 @@ export async function scanCryptoArb(
     logger.info('[crypto-arb] opportunities found', {
       assetId: move.assetId,
       count: opportunities.length,
-      topEdge: opportunities[0]!.edge.toFixed(4),
+      topEdge: opportunities[0]?.edge.toFixed(4),
     });
   }
 

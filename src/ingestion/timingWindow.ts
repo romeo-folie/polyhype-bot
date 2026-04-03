@@ -24,13 +24,13 @@ import type { ScoredItem } from './scorer.js';
 interface TimingWindow {
   name: string;
   startHour: number; // UTC hour (inclusive)
-  endHour: number;   // UTC hour (exclusive)
+  endHour: number; // UTC hour (exclusive)
   multiplier: number;
 }
 
 const TIMING_WINDOWS: TimingWindow[] = [
-  { name: 'asia_pacific',    startHour: 0,  endHour: 8,  multiplier: 1.20 },
-  { name: 'europe_mideast',  startHour: 6,  endHour: 14, multiplier: 1.15 },
+  { name: 'asia_pacific', startHour: 0, endHour: 8, multiplier: 1.2 },
+  { name: 'europe_mideast', startHour: 6, endHour: 14, multiplier: 1.15 },
 ];
 
 const MAX_URGENCY_SCORE = 10;
@@ -39,7 +39,10 @@ const MAX_URGENCY_SCORE = 10;
  * Get the active timing multiplier for the given UTC hour.
  * If multiple windows overlap (6–8 UTC), the highest multiplier wins.
  */
-export function getTimingMultiplier(utcHour: number): { multiplier: number; windowName: string | null } {
+export function getTimingMultiplier(utcHour: number): {
+  multiplier: number;
+  windowName: string | null;
+} {
   let best = { multiplier: 1.0, windowName: null as string | null };
   for (const w of TIMING_WINDOWS) {
     if (utcHour >= w.startHour && utcHour < w.endHour) {
@@ -57,10 +60,7 @@ export function getTimingMultiplier(utcHour: number): { multiplier: number; wind
  * Scores are boosted (multiplied) and capped at MAX_URGENCY_SCORE.
  * The `now` parameter is injectable for testing.
  */
-export function applyTimingBoost(
-  items: ScoredItem[],
-  now: Date = new Date(),
-): ScoredItem[] {
+export function applyTimingBoost(items: ScoredItem[], now: Date = new Date()): ScoredItem[] {
   const utcHour = now.getUTCHours();
   const { multiplier, windowName } = getTimingMultiplier(utcHour);
 

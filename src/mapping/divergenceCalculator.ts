@@ -70,7 +70,11 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
 
   // Gate 1: Noisy signal — stddev too high
   if (consensusStddev > NOISE_STDDEV_THRESHOLD) {
-    return { hasTrade: false, decision: null, skipReason: `noisy_signal:stddev=${consensusStddev.toFixed(3)}` };
+    return {
+      hasTrade: false,
+      decision: null,
+      skipReason: `noisy_signal:stddev=${consensusStddev.toFixed(3)}`,
+    };
   }
 
   // Gate 2: EV gate — use pessimistic confidence bound, not point estimate
@@ -78,13 +82,17 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
   // NO trade:  pessimistic p(NO)  = 1 - (p + stddev) (event more likely than estimated)
   const p_lower = Math.max(0, p - consensusStddev);
   const p_upper = Math.min(1, p + consensusStddev);
-  const direction_for_ev: 'YES' | 'NO' = (p - currentYesPrice) > 0 ? 'YES' : 'NO';
+  const direction_for_ev: 'YES' | 'NO' = p - currentYesPrice > 0 ? 'YES' : 'NO';
   const outcomePrice_for_ev = direction_for_ev === 'YES' ? currentYesPrice : 1 - currentYesPrice;
   const p_for_ev = direction_for_ev === 'YES' ? p_lower : 1 - p_upper;
   const payout_for_ev = outcomePrice_for_ev > 0 ? 1 / outcomePrice_for_ev : 0;
   const ev = payout_for_ev > 0 ? p_for_ev * payout_for_ev - 1 : -1;
   if (ev <= 0) {
-    return { hasTrade: false, decision: null, skipReason: `negative_ev:ev=${ev.toFixed(4)},p_lower=${p_lower.toFixed(3)}` };
+    return {
+      hasTrade: false,
+      decision: null,
+      skipReason: `negative_ev:ev=${ev.toFixed(4)},p_lower=${p_lower.toFixed(3)}`,
+    };
   }
 
   const edge = p - currentYesPrice;
@@ -105,9 +113,10 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
   const rawStakeUsd = Math.max(0, cappedFraction * bankrollUsd);
 
   // Liquidity Gate: cap stake at 20% of book depth if available
-  const stakeUsd = input.bookDepthUsd !== undefined
-    ? Math.min(rawStakeUsd, input.bookDepthUsd * 0.2)
-    : rawStakeUsd;
+  const stakeUsd =
+    input.bookDepthUsd !== undefined
+      ? Math.min(rawStakeUsd, input.bookDepthUsd * 0.2)
+      : rawStakeUsd;
 
   return {
     hasTrade: true,

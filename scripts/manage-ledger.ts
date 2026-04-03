@@ -11,15 +11,17 @@ async function main() {
     if (positions.length === 0) {
       console.log('No open positions.');
     } else {
-      console.table(positions.map(p => ({
-        marketId: p.marketId,
-        direction: p.direction,
-        stake: `$${p.stakeUsd.toFixed(2)}`,
-        entry: (p.entryPrice * 100).toFixed(1) + '%',
-        shares: p.sharesHeld?.toFixed(4) ?? 'N/A',
-        venue: p.executionVenue,
-        question: p.question.slice(0, 50) + '...'
-      })));
+      console.table(
+        positions.map((p) => ({
+          marketId: p.marketId,
+          direction: p.direction,
+          stake: `$${p.stakeUsd.toFixed(2)}`,
+          entry: (p.entryPrice * 100).toFixed(1) + '%',
+          shares: p.sharesHeld?.toFixed(4) ?? 'N/A',
+          venue: p.executionVenue,
+          question: p.question.slice(0, 50) + '...',
+        })),
+      );
     }
   } else if (args[0] === '--remove' && args[1] && args[2]) {
     const marketId = args[1];
@@ -35,7 +37,8 @@ async function main() {
   await closeRedis();
 }
 
-const isMain = process.argv[1]?.endsWith('manage-ledger.ts') || process.argv[1]?.endsWith('manage-ledger.js');
+const isMain =
+  process.argv[1]?.endsWith('manage-ledger.ts') || process.argv[1]?.endsWith('manage-ledger.js');
 if (isMain) {
   main().catch((err: unknown) => {
     console.error('CLI Error:', err);

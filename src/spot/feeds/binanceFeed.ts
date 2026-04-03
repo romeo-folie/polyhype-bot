@@ -4,7 +4,7 @@ import { getRedis } from '../../shared/redis.js';
 
 /**
  * Binance WebSocket Price Feed.
- * 
+ *
  * Subscribes to ticker streams and updates Redis "hot price" cache.
  * Emits 'spot:price_moved' event via Redis Pub/Sub to trigger arb worker.
  */
@@ -15,14 +15,28 @@ export class BinanceFeed {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectCount = 0;
 
-  constructor(symbols: string[] = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt', 'bnbusdt', 'taousdt', 'dogeusdt', 'adausdt', 'avaxusdt', 'linkusdt', 'suiusdt']) {
+  constructor(
+    symbols: string[] = [
+      'btcusdt',
+      'ethusdt',
+      'solusdt',
+      'xrpusdt',
+      'bnbusdt',
+      'taousdt',
+      'dogeusdt',
+      'adausdt',
+      'avaxusdt',
+      'linkusdt',
+      'suiusdt',
+    ],
+  ) {
     // Note: shibusdt/pepeusdt removed from defaults — SHIB/PEPE have no Hyperliquid perp entries
     // in HL_SYMBOL_MAP, so spot moves would never trigger valid arb cycles. Add back if HL lists them.
-    this.symbols = symbols.map(s => s.toLowerCase());
+    this.symbols = symbols.map((s) => s.toLowerCase());
   }
 
   public start(): void {
-    const streamNames = this.symbols.map(s => `${s}@ticker`).join('/');
+    const streamNames = this.symbols.map((s) => `${s}@ticker`).join('/');
     const url = `wss://stream.binance.com:9443/ws/${streamNames}`;
 
     logger.info('[binance] connecting to WebSocket', { symbols: this.symbols });
@@ -100,7 +114,10 @@ export class BinanceFeed {
       pipeline.expire(pricesKey, 7200);
 
       // Publish event for Arb Worker — include previousPrice so it doesn't need to re-read
-      pipeline.publish('spot:price_moved', JSON.stringify({ symbol, price, timestamp, previousPrice }));
+      pipeline.publish(
+        'spot:price_moved',
+        JSON.stringify({ symbol, price, timestamp, previousPrice }),
+      );
 
       const pipelineResults = await pipeline.exec();
       // Check for per-command errors in the pipeline result.
@@ -112,7 +129,7 @@ export class BinanceFeed {
           }
         }
       }
-      
+
       // Pulse: log to info once every 20 updates per symbol to show "life"
       this.tickerCount[symbol] = (this.tickerCount[symbol] ?? 0) + 1;
       if ((this.tickerCount[symbol] ?? 0) % 20 === 0) {
@@ -133,7 +150,9 @@ export class BinanceFeed {
     }
     this.reconnectCount++;
     const delay = Math.min(1000 * Math.pow(2, this.reconnectCount), 30000);
-    logger.warn(`[binance] reconnecting in ${String(delay / 1000)}s (attempt ${String(this.reconnectCount)}/${this.MAX_RECONNECTS})...`);
+    logger.warn(
+      `[binance] reconnecting in ${String(delay / 1000)}s (attempt ${String(this.reconnectCount)}/${this.MAX_RECONNECTS})...`,
+    );
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.start();

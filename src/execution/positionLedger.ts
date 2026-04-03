@@ -90,33 +90,38 @@ function positionKey(marketId: string, direction: Position['direction']): string
  */
 export function formatDirection(direction: Position['direction']): string {
   switch (direction) {
-    case 'YES': return 'YES ↑';
-    case 'NO':  return 'NO ↓';
-    case 'LONG':  return 'LONG ↑';
-    case 'SHORT': return 'SHORT ↓';
-    default: return direction;
+    case 'YES':
+      return 'YES ↑';
+    case 'NO':
+      return 'NO ↓';
+    case 'LONG':
+      return 'LONG ↑';
+    case 'SHORT':
+      return 'SHORT ↓';
+    default:
+      return direction;
   }
 }
 
 /**
  * Persist an open position to Redis.
  */
-export async function recordPosition(
-  redis: Redis,
-  position: Position,
-): Promise<void> {
+export async function recordPosition(redis: Redis, position: Position): Promise<void> {
   const key = positionKey(position.marketId, position.direction);
   const openedAtMs = new Date(position.openedAt).getTime();
 
   // Validate sharesHeld — warn if 0 or undefined (indicates missing shares_bought from venue).
   if (position.sharesHeld === undefined || position.sharesHeld === 0) {
-    logger.warn('[ledger] position recorded with zero or undefined sharesHeld — exit may require fallback calculation', {
-      marketId: position.marketId,
-      direction: position.direction,
-      sharesHeld: position.sharesHeld,
-      stakeUsd: position.stakeUsd,
-      entryPrice: position.entryPrice,
-    });
+    logger.warn(
+      '[ledger] position recorded with zero or undefined sharesHeld — exit may require fallback calculation',
+      {
+        marketId: position.marketId,
+        direction: position.direction,
+        sharesHeld: position.sharesHeld,
+        stakeUsd: position.stakeUsd,
+        entryPrice: position.entryPrice,
+      },
+    );
   }
 
   // Store position as a flat hash
@@ -124,12 +129,13 @@ export async function recordPosition(
     marketId: position.marketId,
     conditionId: position.conditionId ?? '',
     executionId: position.executionId ?? '',
-    clobTokenIds: JSON.stringify(position.clobTokenIds || []),
+    clobTokenIds: JSON.stringify(position.clobTokenIds ?? []),
     question: position.question,
     direction: position.direction,
     entryPrice: String(position.entryPrice),
     stakeUsd: String(position.stakeUsd),
-    consensusProbability: position.consensusProbability !== undefined ? String(position.consensusProbability) : '',
+    consensusProbability:
+      position.consensusProbability !== undefined ? String(position.consensusProbability) : '',
     edgeMagnitude: String(position.edgeMagnitude),
     sourcedFrom: position.sourcedFrom,
     openedAt: position.openedAt,
@@ -142,13 +148,30 @@ export async function recordPosition(
     entryOrderType: position.entryOrderType ?? '',
     decisionBestBid: position.decisionBestBid !== undefined ? String(position.decisionBestBid) : '',
     decisionBestAsk: position.decisionBestAsk !== undefined ? String(position.decisionBestAsk) : '',
-    decisionMidPrice: position.decisionMidPrice !== undefined ? String(position.decisionMidPrice) : '',
-    decisionSpreadBps: position.decisionSpreadBps !== undefined ? String(position.decisionSpreadBps) : '',
-    counterfactualImmediateTakerPrice: position.counterfactualImmediateTakerPrice !== undefined ? String(position.counterfactualImmediateTakerPrice) : '',
-    counterfactualImmediateTakerShares: position.counterfactualImmediateTakerShares !== undefined ? String(position.counterfactualImmediateTakerShares) : '',
-    counterfactualImmediateTakerCostUsd: position.counterfactualImmediateTakerCostUsd !== undefined ? String(position.counterfactualImmediateTakerCostUsd) : '',
-    makerPriceImprovementBps: position.makerPriceImprovementBps !== undefined ? String(position.makerPriceImprovementBps) : '',
-    makerPriceImprovementUsd: position.makerPriceImprovementUsd !== undefined ? String(position.makerPriceImprovementUsd) : '',
+    decisionMidPrice:
+      position.decisionMidPrice !== undefined ? String(position.decisionMidPrice) : '',
+    decisionSpreadBps:
+      position.decisionSpreadBps !== undefined ? String(position.decisionSpreadBps) : '',
+    counterfactualImmediateTakerPrice:
+      position.counterfactualImmediateTakerPrice !== undefined
+        ? String(position.counterfactualImmediateTakerPrice)
+        : '',
+    counterfactualImmediateTakerShares:
+      position.counterfactualImmediateTakerShares !== undefined
+        ? String(position.counterfactualImmediateTakerShares)
+        : '',
+    counterfactualImmediateTakerCostUsd:
+      position.counterfactualImmediateTakerCostUsd !== undefined
+        ? String(position.counterfactualImmediateTakerCostUsd)
+        : '',
+    makerPriceImprovementBps:
+      position.makerPriceImprovementBps !== undefined
+        ? String(position.makerPriceImprovementBps)
+        : '',
+    makerPriceImprovementUsd:
+      position.makerPriceImprovementUsd !== undefined
+        ? String(position.makerPriceImprovementUsd)
+        : '',
     fallbackReason: position.fallbackReason ?? '',
     synthHedged: position.synthHedged ? 'true' : 'false',
     pendingSettlement: position.pendingSettlement ? 'true' : 'false',
@@ -256,7 +279,12 @@ export async function updatePositionShares(
     sharesHeld: String(sharesHeld),
     ...(reconciliationStatus ? { reconciliationStatus } : {}),
   });
-  logger.info('[ledger] position shares reconciled', { marketId, direction, sharesHeld, reconciliationStatus });
+  logger.info('[ledger] position shares reconciled', {
+    marketId,
+    direction,
+    sharesHeld,
+    reconciliationStatus,
+  });
 }
 
 /**
@@ -279,7 +307,7 @@ function deserialisePosition(raw: Record<string, string>): Position {
   const pos: Position = {
     marketId: raw.marketId ?? '',
     conditionId: raw.conditionId,
-    executionId: raw.executionId || undefined,
+    executionId: raw.executionId ?? undefined,
     clobTokenIds: raw.clobTokenIds ? (JSON.parse(raw.clobTokenIds) as string[]) : [],
     question: raw.question ?? '',
     direction: (raw.direction ?? 'YES') as Position['direction'],
@@ -288,28 +316,49 @@ function deserialisePosition(raw: Record<string, string>): Position {
     edgeMagnitude: parseFloat(raw.edgeMagnitude ?? '0'),
     sourcedFrom: raw.sourcedFrom ?? '',
     openedAt: raw.openedAt ?? new Date().toISOString(),
-    executionVenue: (venue || 'simmer'),
+    executionVenue: venue || 'simmer',
   };
 
-  if (raw.consensusProbability !== undefined && raw.consensusProbability !== '') pos.consensusProbability = parseFloat(raw.consensusProbability);
-  if (raw.consensusStddev !== undefined && raw.consensusStddev !== '') pos.consensusStddev = parseFloat(raw.consensusStddev);
+  if (raw.consensusProbability !== undefined && raw.consensusProbability !== '')
+    pos.consensusProbability = parseFloat(raw.consensusProbability);
+  if (raw.consensusStddev !== undefined && raw.consensusStddev !== '')
+    pos.consensusStddev = parseFloat(raw.consensusStddev);
   if (raw.txHash) pos.txHash = raw.txHash;
-  if (raw.sharesHeld !== undefined && raw.sharesHeld !== '') pos.sharesHeld = parseFloat(raw.sharesHeld);
+  if (raw.sharesHeld !== undefined && raw.sharesHeld !== '')
+    pos.sharesHeld = parseFloat(raw.sharesHeld);
   if (raw.modeConfigured) pos.modeConfigured = raw.modeConfigured as Position['modeConfigured'];
   if (raw.entryExecutionPath) pos.entryExecutionPath = raw.entryExecutionPath;
   if (raw.entryOrderType) pos.entryOrderType = raw.entryOrderType as Position['entryOrderType'];
-  if (raw.decisionBestBid !== undefined && raw.decisionBestBid !== '') pos.decisionBestBid = parseFloat(raw.decisionBestBid);
-  if (raw.decisionBestAsk !== undefined && raw.decisionBestAsk !== '') pos.decisionBestAsk = parseFloat(raw.decisionBestAsk);
-  if (raw.decisionMidPrice !== undefined && raw.decisionMidPrice !== '') pos.decisionMidPrice = parseFloat(raw.decisionMidPrice);
-  if (raw.decisionSpreadBps !== undefined && raw.decisionSpreadBps !== '') pos.decisionSpreadBps = parseFloat(raw.decisionSpreadBps);
-  if (raw.counterfactualImmediateTakerPrice !== undefined && raw.counterfactualImmediateTakerPrice !== '') pos.counterfactualImmediateTakerPrice = parseFloat(raw.counterfactualImmediateTakerPrice);
-  if (raw.counterfactualImmediateTakerShares !== undefined && raw.counterfactualImmediateTakerShares !== '') pos.counterfactualImmediateTakerShares = parseFloat(raw.counterfactualImmediateTakerShares);
-  if (raw.counterfactualImmediateTakerCostUsd !== undefined && raw.counterfactualImmediateTakerCostUsd !== '') pos.counterfactualImmediateTakerCostUsd = parseFloat(raw.counterfactualImmediateTakerCostUsd);
-  if (raw.makerPriceImprovementBps !== undefined && raw.makerPriceImprovementBps !== '') pos.makerPriceImprovementBps = parseFloat(raw.makerPriceImprovementBps);
-  if (raw.makerPriceImprovementUsd !== undefined && raw.makerPriceImprovementUsd !== '') pos.makerPriceImprovementUsd = parseFloat(raw.makerPriceImprovementUsd);
+  if (raw.decisionBestBid !== undefined && raw.decisionBestBid !== '')
+    pos.decisionBestBid = parseFloat(raw.decisionBestBid);
+  if (raw.decisionBestAsk !== undefined && raw.decisionBestAsk !== '')
+    pos.decisionBestAsk = parseFloat(raw.decisionBestAsk);
+  if (raw.decisionMidPrice !== undefined && raw.decisionMidPrice !== '')
+    pos.decisionMidPrice = parseFloat(raw.decisionMidPrice);
+  if (raw.decisionSpreadBps !== undefined && raw.decisionSpreadBps !== '')
+    pos.decisionSpreadBps = parseFloat(raw.decisionSpreadBps);
+  if (
+    raw.counterfactualImmediateTakerPrice !== undefined &&
+    raw.counterfactualImmediateTakerPrice !== ''
+  )
+    pos.counterfactualImmediateTakerPrice = parseFloat(raw.counterfactualImmediateTakerPrice);
+  if (
+    raw.counterfactualImmediateTakerShares !== undefined &&
+    raw.counterfactualImmediateTakerShares !== ''
+  )
+    pos.counterfactualImmediateTakerShares = parseFloat(raw.counterfactualImmediateTakerShares);
+  if (
+    raw.counterfactualImmediateTakerCostUsd !== undefined &&
+    raw.counterfactualImmediateTakerCostUsd !== ''
+  )
+    pos.counterfactualImmediateTakerCostUsd = parseFloat(raw.counterfactualImmediateTakerCostUsd);
+  if (raw.makerPriceImprovementBps !== undefined && raw.makerPriceImprovementBps !== '')
+    pos.makerPriceImprovementBps = parseFloat(raw.makerPriceImprovementBps);
+  if (raw.makerPriceImprovementUsd !== undefined && raw.makerPriceImprovementUsd !== '')
+    pos.makerPriceImprovementUsd = parseFloat(raw.makerPriceImprovementUsd);
   if (raw.fallbackReason) pos.fallbackReason = raw.fallbackReason;
   if (raw.reconciliationStatus) pos.reconciliationStatus = raw.reconciliationStatus;
-  
+
   if (raw.synthHedged === 'true') pos.synthHedged = true;
   if (raw.pendingSettlement === 'true') pos.pendingSettlement = true;
   if (raw.isFutures === 'true') {

@@ -161,7 +161,7 @@ ArbitrageWorker — two independent arb paths run on every event:
     → If edge > CRYPTO_ARB_MIN_EDGE (default 8%): execute directional trade
     → 5-min dedup per (marketId, direction)
 
-  Shared: Rate limiter (max 45 orders/min across both paths)
+  Shared: Unified Global Governor (Redis-backed, shared Polymarket rate limits across all processes)
   → Execution Router
 ```
 
@@ -212,6 +212,7 @@ Post-trade:
   - Record position in Redis ledger (marketId, venue, direction, entry price, stake, txHash)
   - Deduct stake from in-process bankroll cache
   - If YES buy + FUTURES_ENABLED: open delta hedge on Hyperliquid (1:1 SHORT)
+  - Unified rate limit check (Polymarket only; Hyperliquid exempt)
   - Telegram notification
 ```
 
@@ -237,13 +238,15 @@ After a successful Polymarket YES fill, the executor optionally opens an offsett
 
 - **Delta hedge**: 1:1 SHORT at entry, sized to match PM stake. Neutralises directional exposure while retaining the geopolitical headline alpha.
 - **Synthetic exit**: If PM liquidity is too thin to exit, `takeProfitExecutor` opens an equal-and-opposite HL position to freeze P&L. PM side closes in the Redis ledger; HL side is managed independently by the futures monitor.
-- **Latency arb**: ArbitrageWorker detects spot moves on Binance/Helius and front-runs Polymarket order book adjustments via HL perps.
-- **Risk limits**: Global margin cap (`FUTURES_GLOBAL_MARGIN_CAP_USD`, default $50) and per-trade cap (`FUTURES_MAX_MARGIN_USD`, default $10).
+- **Latency arb**: ArbitrageWorker detects spot moves on Binance/Helius and front-runs Polymarket order book adjustments via HL perps. The scanner automatically prioritizes markets with correlated HL counterparts for delta-neutral arbitrage.
+- **Risk limits**: Global margin cap (`FUTURES_GLOBAL_MAX_MARGIN_USD`, default $200) and per-trade cap (`FUTURES_MAX_PER_TRADE_USD`, default $10).
+- **Urgency gating**: Futures signals from news (OSINT) only fire if urgency > `FUTURES_URGENCY_THRESHOLD` (default 6).
 
 **Futures Monitor** (`monitor:futures`, 5s poll):
 - Tracks all open HL perp positions
 - Enforces `FUTURES_STOP_LOSS_PCT` and `FUTURES_TAKE_PROFIT_PCT` thresholds
 - Max hold time enforced (`FUTURES_MAX_HOLD_HOURS`)
+- Heartbeat logging (every 2 minutes) for health monitoring
 - Executes HL market close + Telegram notification on trigger
 
 ### 7. Position Monitor (`cron:monitor`)
@@ -382,6 +385,9 @@ PATH=/usr/local/bin:/usr/bin:/bin
 
 # Calibration stats refresh (Monday 03:00 GMT)
 0 3 * * MON /path/to/pga/run.sh npx tsx src/cron/calibrate.ts >> /tmp/pga-calibrate.log 2>&1
+
+# Dynamic Watchlist refresh (Every 4 hours)
+0 */4 * * * /path/to/pga/run.sh npx tsx src/cron/refreshWatchlist.ts >> /tmp/pga-watchlist.log 2>&1
 ```
 
 > **Note:** `worker:arb`, `worker:copytrade`, `worker:spot-feed`, and `monitor:futures` are persistent — run them via PM2, not cron.
@@ -407,6 +413,7 @@ PATH=/usr/local/bin:/usr/bin:/bin
 | `npm run worker:telegram` | Start persistent Telegram MTProto monitor |
 | `npm run cron:shortlist` | Refresh copytrade wallet shortlist from leaderboard |
 | `npm run cron:calibrate` | Recompute calibration stats per category (weekly) |
+| `npm run cron:watchlist` | Refresh dynamic watchlist from active markets (every 4h recommended) |
 | `npm run sync-env` | Append missing keys from `.env.example` to `.env` |
 
 ---

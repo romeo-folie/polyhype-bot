@@ -73,7 +73,9 @@ export async function getOnChainUsdcBalance(): Promise<number> {
     try {
       const fetchReq = new FetchRequest(rpcUrl);
       fetchReq.timeout = RPC_TIMEOUT_MS;
-      const provider = new JsonRpcProvider(fetchReq, polygonNetwork, { staticNetwork: polygonNetwork });
+      const provider = new JsonRpcProvider(fetchReq, polygonNetwork, {
+        staticNetwork: polygonNetwork,
+      });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const usdc = new Contract(USDC_E_ADDRESS, ERC20_BALANCE_ABI, provider) as any;
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
@@ -125,10 +127,7 @@ export async function getBankroll(_redis?: Redis): Promise<number> {
   }
 
   try {
-    const [portfolio, onChainUsdc] = await Promise.all([
-      getPortfolio(),
-      getOnChainUsdcBalance(),
-    ]);
+    const [portfolio, onChainUsdc] = await Promise.all([getPortfolio(), getOnChainUsdcBalance()]);
     const simmerUsdc = portfolio.balance_usdc;
     const totalUsdc = simmerUsdc + onChainUsdc;
 
@@ -179,7 +178,10 @@ export async function deductStake(_redis: Redis, stakeUsd: number): Promise<void
   if (lastKnownBalance !== null) {
     lastKnownBalance = Math.max(0, lastKnownBalance - stakeUsd);
   }
-  logger.info('[bankroll] stake deducted from cache', { stakeUsd, remainingCached: lastKnownBalance });
+  logger.info('[bankroll] stake deducted from cache', {
+    stakeUsd,
+    remainingCached: lastKnownBalance,
+  });
 }
 
 /**

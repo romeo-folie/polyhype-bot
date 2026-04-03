@@ -316,11 +316,13 @@ export async function resolveSimmerMarketId(question: string): Promise<string | 
  *
  * @throws {SimmerError} on HTTP 4xx/5xx or network failure
  */
-export async function getSimmerPositions(opts: {
-  status?: 'active' | 'resolved' | 'closed' | 'all';
-  venue?: 'polymarket' | 'sim' | 'kalshi';
-  source?: string;
-} = {}): Promise<SimmerPosition[]> {
+export async function getSimmerPositions(
+  opts: {
+    status?: 'active' | 'resolved' | 'closed' | 'all';
+    venue?: 'polymarket' | 'sim' | 'kalshi';
+    source?: string;
+  } = {},
+): Promise<SimmerPosition[]> {
   const { SIMMER_API_KEY: apiKey } = loadConfig();
   const { status = 'active', venue = 'polymarket', source } = opts;
 
@@ -334,10 +336,14 @@ export async function getSimmerPositions(opts: {
 
   if (!resp.ok) {
     const body = await resp.json().catch(() => resp.text());
-    throw new SimmerError(`Simmer positions API returned HTTP ${resp.status.toString()}`, resp.status, body);
+    throw new SimmerError(
+      `Simmer positions API returned HTTP ${resp.status.toString()}`,
+      resp.status,
+      body,
+    );
   }
 
-  const raw = (await resp.json());
+  const raw = await resp.json();
   // API may return { positions: [...] } or a bare array
   const arr = Array.isArray(raw) ? raw : ((raw as Record<string, unknown>).positions ?? []);
   const positions: SimmerPosition[] = [];
@@ -349,16 +355,17 @@ export async function getSimmerPositions(opts: {
   }
   const recordMalformed = async (reason: string): Promise<void> => {
     if (!telemetryRedis) return;
-    await recordCopytradeMalformed(telemetryRedis, reason).catch(() => {});
+    await recordCopytradeMalformed(telemetryRedis, reason).catch(() => {
+      /* ignore telemetry errors */
+    });
   };
   for (const item of arr as unknown[]) {
-    const rawRecord = typeof item === 'object' && item !== null
-      ? (item as Record<string, unknown>)
-      : null;
+    const rawRecord =
+      typeof item === 'object' && item !== null ? (item as Record<string, unknown>) : null;
     const candidate = rawRecord ? normalisePosition(rawRecord) : item;
 
     if (rawRecord) {
-      const inferredSide = (!('side' in rawRecord)) ? deriveSide(rawRecord) : null;
+      const inferredSide = !('side' in rawRecord) ? deriveSide(rawRecord) : null;
       if (inferredSide) {
         await recordMalformed('inferred_side');
       }
@@ -519,11 +526,13 @@ export interface SimmerOpportunity {
  * signal_source "oracle" = AI multi-model forecast; "crowd" = sim agent activity.
  * Returns empty array on any error (never throws).
  */
-export async function getOpportunities(opts: {
-  venue?: 'polymarket' | 'kalshi' | 'sim';
-  limit?: number;
-  minDivergence?: number;
-} = {}): Promise<SimmerOpportunity[]> {
+export async function getOpportunities(
+  opts: {
+    venue?: 'polymarket' | 'kalshi' | 'sim';
+    limit?: number;
+    minDivergence?: number;
+  } = {},
+): Promise<SimmerOpportunity[]> {
   const { SIMMER_API_KEY: apiKey } = loadConfig();
   const { venue = 'polymarket', limit = 50, minDivergence = 0.03 } = opts;
 
@@ -540,7 +549,9 @@ export async function getOpportunities(opts: {
     });
 
     if (!resp.ok) return [];
-    const data = (await resp.json()) as { opportunities?: SimmerOpportunity[] } | SimmerOpportunity[];
+    const data = (await resp.json()) as
+      | { opportunities?: SimmerOpportunity[] }
+      | SimmerOpportunity[];
     return Array.isArray(data) ? data : (data.opportunities ?? []);
   } catch {
     return [];

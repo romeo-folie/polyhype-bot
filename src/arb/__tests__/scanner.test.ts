@@ -20,7 +20,7 @@ vi.mock('../../shared/config.js', () => ({
     ARB_ENABLED: true,
     ARB_MIN_EDGE: 0.05,
     ARB_MAX_STAKE_FRACTION: 0.05,
-    ARB_FEE_RATE: 0.02,        // env-configurable fee rate
+    ARB_FEE_RATE: 0.02, // env-configurable fee rate
   })),
 }));
 
@@ -41,7 +41,8 @@ vi.mock('../../execution/telegram.js', () => ({
 
 const mockGetActiveMarkets = vi.fn<() => Promise<unknown[]>>();
 vi.mock('../../mapping/gamma.js', async () => {
-  const actual = await vi.importActual<typeof import('../../mapping/gamma.js')>('../../mapping/gamma.js');
+  const actual =
+    await vi.importActual<typeof import('../../mapping/gamma.js')>('../../mapping/gamma.js');
   return {
     getActiveMarkets: mockGetActiveMarkets,
     parseOutcomePrices: actual.parseOutcomePrices,
@@ -115,35 +116,29 @@ describe('scanForArb', () => {
     const opps = await scanForArb(redis as any);
     expect(opps).toHaveLength(1);
     // edge reported is net edge
-    const expectedNet = 0.10 - (0.40 + 0.50) * FEE_RATE;
+    const expectedNet = 0.1 - (0.4 + 0.5) * FEE_RATE;
     expect(opps[0]!.edge).toBeCloseTo(expectedNet, 4);
-    expect(opps[0]!.grossEdge).toBeCloseTo(0.10, 4);
+    expect(opps[0]!.grossEdge).toBeCloseTo(0.1, 4);
     expect(opps[0]!.marketId).toBe('market-1');
   });
 
   it('excludes market with net edge <= ARB_MIN_EDGE (0.05)', async () => {
     // yesAsk=0.48, noAsk=0.49 → gross=0.03, net=0.03-0.97*0.02=0.0106 < 0.05 ✗
-    mockGetActiveMarkets.mockResolvedValue([
-      makeMarket({ outcomePrices: '["0.48","0.49"]' }),
-    ]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket({ outcomePrices: '["0.48","0.49"]' })]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const opps = await scanForArb(redis as any);
     expect(opps).toHaveLength(0);
   });
 
   it('skips market with degenerate zero prices (combined < 0.02)', async () => {
-    mockGetActiveMarkets.mockResolvedValue([
-      makeMarket({ outcomePrices: '["0.00","0.00"]' }),
-    ]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket({ outcomePrices: '["0.00","0.00"]' })]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const opps = await scanForArb(redis as any);
     expect(opps).toHaveLength(0);
   });
 
   it('skips market with near-zero combined price', async () => {
-    mockGetActiveMarkets.mockResolvedValue([
-      makeMarket({ outcomePrices: '["0.005","0.005"]' }),
-    ]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket({ outcomePrices: '["0.005","0.005"]' })]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const opps = await scanForArb(redis as any);
     expect(opps).toHaveLength(0);
@@ -175,8 +170,8 @@ describe('executeArb', () => {
 
   // yesAsk=0.40, noAsk=0.50, combined=0.90
   // gross edge = 0.10; net edge after fees = 0.10 - 0.90*0.02 = 0.082
-  const yesAsk = 0.40;
-  const noAsk = 0.50;
+  const yesAsk = 0.4;
+  const noAsk = 0.5;
   const combined = yesAsk + noAsk;
   const grossEdge = 1 - combined;
   const netEdge = grossEdge - combined * FEE_RATE;
@@ -213,7 +208,7 @@ describe('executeArb', () => {
     expect(result.success).toBe(false);
     expect(result.error).toBe('yes_leg_failed');
     // NO leg should NOT be called if YES fails
-    expect(mockSubmitClobBuy).toHaveBeenCalledTimes(1); 
+    expect(mockSubmitClobBuy).toHaveBeenCalledTimes(1);
     expect(mockDeductStake).not.toHaveBeenCalled();
   });
 
@@ -228,7 +223,10 @@ describe('executeArb', () => {
     expect(result.yesResult?.success).toBe(true);
     expect(result.noResult?.success).toBe(false);
     // YES leg cost + Polymarket taker fees should be deducted from bankroll
-    expect(mockDeductStake).toHaveBeenCalledWith(expect.anything(), expect.closeTo(yesUsd * (1 + FEE_RATE), 4));
+    expect(mockDeductStake).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.closeTo(yesUsd * (1 + FEE_RATE), 4),
+    );
   });
 
   it('guards against unhedged risk when YES fills but NO fails', async () => {
@@ -242,7 +240,10 @@ describe('executeArb', () => {
     expect(result.yesResult?.success).toBe(true);
     expect(result.noResult?.success).toBe(false);
     // YES leg cost + Polymarket taker fees should be deducted from bankroll
-    expect(mockDeductStake).toHaveBeenCalledWith(expect.anything(), expect.closeTo(yesUsd * (1 + FEE_RATE), 4));
+    expect(mockDeductStake).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.closeTo(yesUsd * (1 + FEE_RATE), 4),
+    );
   });
 
   it('deducts yesUsd + noUsd (equal-share total cost) when both legs fill', async () => {
@@ -287,11 +288,13 @@ describe('executeArb', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await executeArb(opp, redis as any);
     // redis.set called with NX flag for atomic claim
-    expect(redis.set).toHaveBeenCalledWith(
-      'arb:attempted:market-1', '1', 'EX', 1800, 'NX',
-    );
+    expect(redis.set).toHaveBeenCalledWith('arb:attempted:market-1', '1', 'EX', 1800, 'NX');
     // setex should NOT be used for the dedup key
-    expect(redis.setex).not.toHaveBeenCalledWith('arb:attempted:market-1', expect.anything(), expect.anything());
+    expect(redis.setex).not.toHaveBeenCalledWith(
+      'arb:attempted:market-1',
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it('returns dedup_concurrent when NX claim fails (concurrent run)', async () => {

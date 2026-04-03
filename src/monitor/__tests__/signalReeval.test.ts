@@ -5,9 +5,7 @@ import { extractKeywords, STOP_WORDS } from '../signalReeval.js';
 
 describe('extractKeywords', () => {
   it('extracts meaningful words from a market question', () => {
-    const keywords = extractKeywords(
-      'Will the US withdraw troops from Syria before 2027?',
-    );
+    const keywords = extractKeywords('Will the US withdraw troops from Syria before 2027?');
     // "will", "from", "before" are stop-words; "the" is < 4 chars
     expect(keywords).toContain('withdraw');
     expect(keywords).toContain('troops');
@@ -20,7 +18,7 @@ describe('extractKeywords', () => {
   });
 
   it('strips punctuation before filtering', () => {
-    const keywords = extractKeywords('Will Biden\'s tariffs increase?');
+    const keywords = extractKeywords("Will Biden's tariffs increase?");
     expect(keywords).toContain('bidens');
     expect(keywords).toContain('tariffs');
     expect(keywords).toContain('increase');
@@ -98,46 +96,40 @@ describe('keyword relevance matching', () => {
 
 describe('edge computation logic', () => {
   // Replicates the edge formula from signalReeval.ts
-  function computeEdge(
-    direction: 'YES' | 'NO',
-    freshP: number,
-    marketP: number,
-  ): number {
-    return direction === 'YES'
-      ? freshP - marketP
-      : (1 - freshP) - (1 - marketP);
+  function computeEdge(direction: 'YES' | 'NO', freshP: number, marketP: number): number {
+    return direction === 'YES' ? freshP - marketP : 1 - freshP - (1 - marketP);
   }
 
   it('YES position: positive edge when freshP > marketP', () => {
     // freshP=0.70, marketP=0.50 → edge=0.20
-    expect(computeEdge('YES', 0.70, 0.50)).toBeCloseTo(0.20);
+    expect(computeEdge('YES', 0.7, 0.5)).toBeCloseTo(0.2);
   });
 
   it('YES position: negative edge (flip) when freshP < marketP', () => {
     // freshP=0.40, marketP=0.60 → edge=-0.20
-    expect(computeEdge('YES', 0.40, 0.60)).toBeCloseTo(-0.20);
+    expect(computeEdge('YES', 0.4, 0.6)).toBeCloseTo(-0.2);
   });
 
   it('YES position: edge below floor triggers exit', () => {
     const edgeFloor = 0.03;
-    const edge = computeEdge('YES', 0.52, 0.50); // edge=0.02 < 0.03
+    const edge = computeEdge('YES', 0.52, 0.5); // edge=0.02 < 0.03
     expect(edge < edgeFloor).toBe(true);
   });
 
   it('YES position: edge above floor holds', () => {
     const edgeFloor = 0.03;
-    const edge = computeEdge('YES', 0.55, 0.50); // edge=0.05 > 0.03
+    const edge = computeEdge('YES', 0.55, 0.5); // edge=0.05 > 0.03
     expect(edge < edgeFloor).toBe(false);
   });
 
   it('NO position: positive edge when freshP < marketP', () => {
     // NO direction: we bet the market will go down
     // freshP=0.30, marketP=0.50 → edge = (1-0.30)-(1-0.50) = 0.70-0.50 = 0.20
-    expect(computeEdge('NO', 0.30, 0.50)).toBeCloseTo(0.20);
+    expect(computeEdge('NO', 0.3, 0.5)).toBeCloseTo(0.2);
   });
 
   it('NO position: direction flip when freshP > marketP', () => {
     // freshP=0.60, marketP=0.50 → edge = (1-0.60)-(1-0.50) = 0.40-0.50 = -0.10
-    expect(computeEdge('NO', 0.60, 0.50)).toBeCloseTo(-0.10);
+    expect(computeEdge('NO', 0.6, 0.5)).toBeCloseTo(-0.1);
   });
 });

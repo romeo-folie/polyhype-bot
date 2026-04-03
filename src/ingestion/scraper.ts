@@ -66,9 +66,9 @@ async function fetchGdeltCombined(): Promise<RssItem[]> {
   const params = new URLSearchParams({
     query: GDELT_THEME_QUERY,
     mode: 'artlist',
-    maxrecords: String(GDELT_MAX_RECORDS),
+    maxrecords: GDELT_MAX_RECORDS.toString(),
     format: 'json',
-    timespan: `${String(GDELT_TIMESPAN_HOURS)}h`,
+    timespan: `${GDELT_TIMESPAN_HOURS.toString()}h`,
   });
 
   const url = `${GDELT_BASE}?${params.toString()}`;
@@ -82,13 +82,13 @@ async function fetchGdeltCombined(): Promise<RssItem[]> {
       });
       data = response.data;
       break;
-    } catch (err) {
+    } catch (err: unknown) {
       const retryable = isRateLimitError(err) && attempt < GDELT_MAX_RETRIES;
       if (!retryable) throw err;
 
       logger.warn('[scraper] GDELT rate-limited; retrying combined fetch', {
-        attempt: attempt + 1,
-        waitMs: retryDelayMs,
+        attempt: (attempt + 1).toString(),
+        waitMs: retryDelayMs.toString(),
       });
       if (retryDelayMs > 0) await sleep(retryDelayMs);
     }
@@ -129,7 +129,7 @@ export async function scrapeHeadlines(): Promise<RssItem[]> {
 
   if (result.status === 'rejected') {
     logger.warn('[scraper] GDELT fetch failed', { error: String(result.reason) });
-    logger.info('[scraper] GDELT fetch complete', { count: 0 });
+    logger.info('[scraper] GDELT fetch complete', { count: '0' });
     return [];
   }
 
@@ -142,6 +142,6 @@ export async function scrapeHeadlines(): Promise<RssItem[]> {
     deduped.push(item);
   }
 
-  logger.info('[scraper] GDELT fetch complete', { count: deduped.length });
+  logger.info('[scraper] GDELT fetch complete', { count: deduped.length.toString() });
   return deduped;
 }

@@ -17,15 +17,31 @@
 
 import { Contract } from 'ethers';
 import { logger } from '../shared/logger.js';
-import { getSimmerPositions, submitRedeem, resolveSimmerMarketId, SimmerError } from '../shared/simmer.js';
+import {
+  getSimmerPositions,
+  submitRedeem,
+  resolveSimmerMarketId,
+  SimmerError,
+} from '../shared/simmer.js';
 import { closePosition, getOpenPositions, getPosition } from '../execution/positionLedger.js';
 import type { Position } from '../execution/positionLedger.js';
-import { redeemClobOutcome, getPolygonProvider, resetPolygonProvider, getClobClient, fetchClobTokenBalance } from '../shared/clob.js';
+import {
+  redeemClobOutcome,
+  getPolygonProvider,
+  resetPolygonProvider,
+  getClobClient,
+  fetchClobTokenBalance,
+} from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { notifyRedemptionExecuted, notifyManualRedemptionRequired } from '../execution/telegram.js';
 import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
 import { Wallet } from 'ethers';
-import { loadConfig, type AppConfig, CTF_ADDRESS, POLYGON_FALLBACK_RPCS } from '../shared/config.js';
+import {
+  loadConfig,
+  type AppConfig,
+  CTF_ADDRESS,
+  POLYGON_FALLBACK_RPCS,
+} from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
 import type { Redis } from 'ioredis';
 
@@ -47,11 +63,11 @@ const REDEEMER_MANUAL_NOTIFY_TTL_S = 30 * 24 * 3600;
 
 type RedeemerSkipReason = 'skipped_recent_success' | 'skipped_dust' | 'stale_no_balance';
 
-type RedemptionState = {
+interface RedemptionState {
   timestamp: number;
   balanceAfter: number;
   amount: number;
-};
+}
 
 type RedeemSide = 'yes' | 'no';
 
@@ -65,9 +81,13 @@ function parseNumber(value: string | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-async function getRedeemerState(redis: Redis, conditionId: string, side: RedeemSide): Promise<RedemptionState | null> {
+async function getRedeemerState(
+  redis: Redis,
+  conditionId: string,
+  side: RedeemSide,
+): Promise<RedemptionState | null> {
   const raw = await redis.hgetall(dedupKey(conditionId, side));
-  if (!raw || !raw.timestamp) return null;
+  if (!raw.timestamp) return null;
   const timestamp = Number.parseInt(raw.timestamp, 10);
   if (!Number.isFinite(timestamp)) return null;
   return {
@@ -95,7 +115,12 @@ async function markRedeemerSuccess(
   await redis.expire(dedupKey(conditionId, side), cfg.REDEEMER_DUPLICATE_WINDOW_S);
 }
 
-async function markFallbackStale(redis: Redis, conditionId: string, side: RedeemSide, cfg: AppConfig): Promise<void> {
+async function markFallbackStale(
+  redis: Redis,
+  conditionId: string,
+  side: RedeemSide,
+  cfg: AppConfig,
+): Promise<void> {
   await redis.set(staleKey(conditionId, side), '1', 'EX', cfg.REDEEMER_FALLBACK_STALE_TTL_S);
 }
 
@@ -146,7 +171,11 @@ async function shouldNotifyManual(red: Redis, conditionId: string): Promise<bool
   return true;
 }
 
-function logRedeemerSkip(reason: RedeemerSkipReason, conditionId: string, metadata: Record<string, unknown> = {}): void {
+function logRedeemerSkip(
+  reason: RedeemerSkipReason,
+  conditionId: string,
+  metadata: Record<string, unknown> = {},
+): void {
   logger.info('[redeemer] skipping redundant redemption', {
     reason,
     conditionId,
@@ -167,7 +196,10 @@ async function refreshTokenBalance(tokenId?: string): Promise<number | null> {
   return balanceResult.ok ? balanceResult.balance : null;
 }
 
-function classifyRedemptionStatus(balanceAfter: number | null, cfg: AppConfig): 'partial_redemption' | 'fully_redeemed' {
+function classifyRedemptionStatus(
+  balanceAfter: number | null,
+  cfg: AppConfig,
+): 'partial_redemption' | 'fully_redeemed' {
   if (balanceAfter === null) return 'fully_redeemed';
   return balanceAfter > cfg.REDEEMER_DUST_THRESHOLD_USDC ? 'partial_redemption' : 'fully_redeemed';
 }
@@ -214,7 +246,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
     return results;
   }
 
-  const redeemable = resolvedPositions.filter((p) => p.redeemable === true);
+  const redeemable = resolvedPositions.filter((p) => p.redeemable);
 
   if (redeemable.length === 0) {
     logger.debug('[redeemer] no redeemable positions found');
@@ -227,12 +259,21 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
       const reportedBalance = pos.value_usdc ?? pos.shares ?? null;
       const posAny = pos as Record<string, unknown>;
       const dedupeConditionId =
-        typeof posAny['condition_id'] === 'string' && posAny['condition_id'].length > 0
-          ? (posAny['condition_id'] as string)
+        typeof posAny.condition_id === 'string' && posAny.condition_id.length > 0
+          ? (posAny.condition_id)
           : pos.market_id;
-      const skipReason = await shouldSkipRedeemer(redis, dedupeConditionId, side, reportedBalance, cfg);
+      const skipReason = await shouldSkipRedeemer(
+        redis,
+        dedupeConditionId,
+        side,
+        reportedBalance,
+        cfg,
+      );
       if (skipReason) {
-        logRedeemerSkip(skipReason, dedupeConditionId, { marketId: pos.market_id, reportedBalance });
+        logRedeemerSkip(skipReason, dedupeConditionId, {
+          marketId: pos.market_id,
+          reportedBalance,
+        });
         continue;
       }
       try {
@@ -262,10 +303,14 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
 
           // Record outcome (Phase 8).
           // redeemable === true means Polymarket confirmed our direction won.
-          const simmerWon = pos.redeemable === true;
+          const simmerWon = pos.redeemable;
           const posAny = pos as Record<string, unknown>;
-          const stakeUsd = ledgerPos?.stakeUsd ?? (typeof posAny['stakeUsd'] === 'number' ? posAny['stakeUsd'] : null);
-          const openedAt = ledgerPos?.openedAt ?? (typeof posAny['openedAt'] === 'string' ? posAny['openedAt'] : null);
+          const stakeUsd =
+            ledgerPos?.stakeUsd ??
+            (typeof posAny.stakeUsd === 'number' ? posAny.stakeUsd : null);
+          const openedAt =
+            ledgerPos?.openedAt ??
+            (typeof posAny.openedAt === 'string' ? posAny.openedAt : null);
           if (!stakeUsd) {
             logger.warn('[redeemer] Simmer position missing stakeUsd for outcome calibration', {
               market_id: pos.market_id,
@@ -277,12 +322,21 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
             category: inferCategory(question),
             question: question.slice(0, 200),
             direction: direction,
-            consensusProbability: ledgerPos?.consensusProbability ?? (typeof posAny['consensusProbability'] === 'number' ? posAny['consensusProbability'] : 0.5),
-            divergence: ledgerPos?.edgeMagnitude ?? (typeof posAny['edgeMagnitude'] === 'number' ? posAny['edgeMagnitude'] : 0),
+            consensusProbability:
+              ledgerPos?.consensusProbability ??
+              (typeof posAny.consensusProbability === 'number'
+                ? posAny.consensusProbability
+                : 0.5),
+            divergence:
+              ledgerPos?.edgeMagnitude ??
+              (typeof posAny.edgeMagnitude === 'number' ? posAny.edgeMagnitude : 0),
             result: simmerWon ? 'won' : 'lost',
-            returnPct: proceedsUsdc > 0 && stakeUsd ? ((proceedsUsdc - stakeUsd) / stakeUsd) * 100 : 0,
+            returnPct:
+              proceedsUsdc > 0 && stakeUsd ? ((proceedsUsdc - stakeUsd) / stakeUsd) * 100 : 0,
             holdingHours: openedAt ? (Date.now() - new Date(openedAt).getTime()) / 3600000 : 0,
-            executionVenue: ledgerPos?.executionVenue ?? (typeof posAny['executionVenue'] === 'string' ? posAny['executionVenue'] : 'simmer'),
+            executionVenue:
+              ledgerPos?.executionVenue ??
+              (typeof posAny.executionVenue === 'string' ? posAny.executionVenue : 'simmer'),
           });
 
           // Notify
@@ -329,16 +383,28 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
         // HTTP 400 from Simmer = already redeemed externally or not claimable.
         // Close the ledger entry to stop retrying on every cycle.
         if (err instanceof SimmerError && err.statusCode === 400) {
-          logger.warn('[redeemer] Simmer 400 — position likely already redeemed externally, closing ledger', {
-            marketId: pos.market_id,
-            side,
-            simmerBody: err.body,  // log Simmer's response body for diagnosis
-          });
+          logger.warn(
+            '[redeemer] Simmer 400 — position likely already redeemed externally, closing ledger',
+            {
+              marketId: pos.market_id,
+              side,
+              simmerBody: err.body, // log Simmer's response body for diagnosis
+            },
+          );
           const direction = side.toUpperCase() as 'YES' | 'NO';
           await closePosition(redis, pos.market_id, direction).catch(() => {});
-          results.push({ marketId: pos.market_id, side, success: false, error: 'already_redeemed_externally' });
+          results.push({
+            marketId: pos.market_id,
+            side,
+            success: false,
+            error: 'already_redeemed_externally',
+          });
         } else {
-          logger.error('[redeemer] redemption failed', { marketId: pos.market_id, side, error: message });
+          logger.error('[redeemer] redemption failed', {
+            marketId: pos.market_id,
+            side,
+            error: message,
+          });
           results.push({ marketId: pos.market_id, side, success: false, error: message });
         }
       }
@@ -360,7 +426,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
   // force-calls submitRedeem for any that Gamma confirms as resolved+won — regardless
   // of whether Simmer's /positions?status=resolved returned them above.
   // Deduplicates against positions already redeemed in this cycle.
-  const alreadyRedeemed = new Set(results.filter(r => r.success).map(r => r.marketId));
+  const alreadyRedeemed = new Set(results.filter((r) => r.success).map((r) => r.marketId));
   try {
     await redeemSimmerLedgerFallback(redis, results, alreadyRedeemed, cfg);
   } catch (err) {
@@ -374,7 +440,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
   // ledger (e.g. due to the parseOrderResponse crash). Queries the CLOB trades API
   // directly, checks on-chain token balances, and redeems any won-but-unredeemed
   // tokens found — regardless of whether a ledger entry exists.
-  const allRedeemedMarkets = new Set(results.filter(r => r.success).map(r => r.marketId));
+  const allRedeemedMarkets = new Set(results.filter((r) => r.success).map((r) => r.marketId));
   try {
     await redeemOrphanClobPositions(results, allRedeemedMarkets, cfg);
   } catch (err) {
@@ -392,7 +458,11 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
  * CLOB positions are not visible to Simmer. We check each one against the
  * Gamma API for resolution status and close accordingly.
  */
-async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cfg: AppConfig): Promise<void> {
+async function redeemClobPositions(
+  redis: Redis,
+  results: RedemptionResult[],
+  cfg: AppConfig,
+): Promise<void> {
   const allPositions = await getOpenPositions(redis);
   const clobPositions = allPositions.filter((p: Position) => p.executionVenue === 'clob');
 
@@ -405,7 +475,9 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
     if (pos.direction !== 'YES' && pos.direction !== 'NO') continue;
     const conditionId = pos.conditionId;
     if (!conditionId) {
-      logger.warn('[redeemer] CLOB position missing conditionId — skipping', { marketId: pos.marketId });
+      logger.warn('[redeemer] CLOB position missing conditionId — skipping', {
+        marketId: pos.marketId,
+      });
       continue;
     }
 
@@ -414,7 +486,8 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
 
     const tokenId = pickClobTokenId(pos);
     const preBalance = await refreshTokenBalance(tokenId);
-    const reportedBalance = preBalance ?? pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : null);
+    const reportedBalance =
+      preBalance ?? pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : null);
     const skipReason = await shouldSkipRedeemer(redis, conditionId, side, reportedBalance, cfg);
     if (skipReason) {
       logRedeemerSkip(skipReason, conditionId, { marketId: pos.marketId, reportedBalance });
@@ -429,9 +502,10 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
 
       if (!resolved) continue;
 
-      const resolvedQuestion = pos.question && pos.question.trim().length > 0
-        ? pos.question
-        : (resolved.question ?? pos.marketId);
+      const resolvedQuestion =
+        pos.question && pos.question.trim().length > 0
+          ? pos.question
+          : (resolved.question ?? pos.marketId);
 
       logger.info('[redeemer] CLOB market resolved', {
         marketId: pos.marketId,
@@ -453,11 +527,14 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
 
       if (!redeemResult.success) {
         if (redeemResult.error === 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED') {
-          logger.warn('[redeemer] sigType=1: CLOB position requires manual redemption on polymarket.com', {
-            marketId: pos.marketId,
-            conditionId: conditionId,
-            direction: pmDirection,
-          });
+          logger.warn(
+            '[redeemer] sigType=1: CLOB position requires manual redemption on polymarket.com',
+            {
+              marketId: pos.marketId,
+              conditionId: conditionId,
+              direction: pmDirection,
+            },
+          );
           if (await shouldNotifyManual(redis, conditionId)) {
             void notifyManualRedemptionRequired({
               conditionId: conditionId,
@@ -474,12 +551,24 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
             error: redeemResult.error,
           });
           const errLower = (redeemResult.error ?? '').toLowerCase();
-          if (errLower.includes('already redeemed') || errLower.includes('position may already be redeemed') || errLower.includes('balance is 0')) {
+          if (
+            errLower.includes('already redeemed') ||
+            errLower.includes('position may already be redeemed') ||
+            errLower.includes('balance is 0')
+          ) {
             await markFallbackStale(redis, conditionId, side, cfg);
-            logRedeemerSkip('stale_no_balance', conditionId, { marketId: pos.marketId, error: redeemResult.error });
+            logRedeemerSkip('stale_no_balance', conditionId, {
+              marketId: pos.marketId,
+              error: redeemResult.error,
+            });
           }
         }
-        results.push({ marketId: pos.marketId, side, success: false, error: redeemResult.error ?? 'Unknown error' });
+        results.push({
+          marketId: pos.marketId,
+          side,
+          success: false,
+          error: redeemResult.error ?? 'Unknown error',
+        });
         continue;
       }
 
@@ -487,27 +576,43 @@ async function redeemClobPositions(redis: Redis, results: RedemptionResult[], cf
       await closePosition(redis, pos.marketId, pos.direction);
 
       // If won: credit shares as USDC (each winning share = $1)
-      const won = (resolved.outcome === 'YES' && pos.direction === 'YES') ||
-                  (resolved.outcome === 'NO' && pos.direction === 'NO');
+      const won =
+        (resolved.outcome === 'YES' && pos.direction === 'YES') ||
+        (resolved.outcome === 'NO' && pos.direction === 'NO');
       const entryPriceSafe = pos.entryPrice > 0 && Number.isFinite(pos.entryPrice);
       if (!entryPriceSafe && pos.sharesHeld == null) {
-        logger.warn('[redeemer] entryPrice is zero/invalid — using 0 proceeds', { marketId: pos.marketId });
+        logger.warn('[redeemer] entryPrice is zero/invalid — using 0 proceeds', {
+          marketId: pos.marketId,
+        });
       }
-      const proceedsUsdc = won ? (pos.sharesHeld ?? (entryPriceSafe ? pos.stakeUsd / pos.entryPrice : 0)) : 0;
+      const proceedsUsdc = won
+        ? (pos.sharesHeld ?? (entryPriceSafe ? pos.stakeUsd / pos.entryPrice : 0))
+        : 0;
 
       if (proceedsUsdc > 0) {
         await creditProceeds(redis, proceedsUsdc);
       }
       const postBalance = await refreshTokenBalance(tokenId);
-      await markRedeemerSuccess(redis, conditionId, side, proceedsUsdc, postBalance ?? 0, cfg, redeemResult.tx_hash ?? undefined);
-      logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), { marketId: pos.marketId, postBalance });
+      await markRedeemerSuccess(
+        redis,
+        conditionId,
+        side,
+        proceedsUsdc,
+        postBalance ?? 0,
+        cfg,
+        redeemResult.tx_hash ?? undefined,
+      );
+      logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), {
+        marketId: pos.marketId,
+        postBalance,
+      });
 
       // Record outcome (Phase 8)
       await recordOutcome(redis, {
         source: inferSource(pos.sourcedFrom ?? ''),
         category: inferCategory(resolvedQuestion),
         question: resolvedQuestion.slice(0, 200),
-        direction: pos.direction as 'YES' | 'NO',
+        direction: pos.direction,
         consensusProbability: pos.consensusProbability ?? 0.5,
         divergence: pos.edgeMagnitude ?? 0,
         result: won ? 'won' : 'lost',
@@ -583,11 +688,12 @@ async function checkMarketResolved(
 
     if (!market.resolved && !market.closed) return null;
 
-    const question = typeof market.question === 'string'
-      ? market.question
-      : typeof market.title === 'string'
-        ? market.title
-        : undefined;
+    const question =
+      typeof market.question === 'string'
+        ? market.question
+        : typeof market.title === 'string'
+          ? market.title
+          : undefined;
 
     // Gamma does NOT return an `outcome` field on resolved markets.
     // The winner is determined from `outcomePrices`: the winning outcome has price "1",
@@ -614,7 +720,10 @@ async function checkMarketResolved(
         const onChain = await checkOnChainResolution(conditionId);
         return onChain ? (question ? { ...onChain, question } : onChain) : null;
       } catch {
-        logger.warn('[redeemer] failed to parse outcomePrices', { conditionId, outcomePrices: market.outcomePrices });
+        logger.warn('[redeemer] failed to parse outcomePrices', {
+          conditionId,
+          outcomePrices: market.outcomePrices,
+        });
         return null;
       }
     }
@@ -675,16 +784,26 @@ async function checkOnChainResolution(
       const noNumerator: bigint = await ctf.payoutNumerators(conditionId, 1);
 
       if (yesNumerator > 0n && noNumerator === 0n) {
-        logger.info('[redeemer] on-chain resolution detected (Gamma lagging)', { conditionId, outcome: 'YES' });
+        logger.info('[redeemer] on-chain resolution detected (Gamma lagging)', {
+          conditionId,
+          outcome: 'YES',
+        });
         return { outcome: 'YES' };
       }
       if (noNumerator > 0n && yesNumerator === 0n) {
-        logger.info('[redeemer] on-chain resolution detected (Gamma lagging)', { conditionId, outcome: 'NO' });
+        logger.info('[redeemer] on-chain resolution detected (Gamma lagging)', {
+          conditionId,
+          outcome: 'NO',
+        });
         return { outcome: 'NO' };
       }
 
       // Both non-zero or both zero after denominator > 0 — unusual, log and skip
-      logger.warn('[redeemer] on-chain payouts ambiguous', { conditionId, yesNumerator: yesNumerator.toString(), noNumerator: noNumerator.toString() });
+      logger.warn('[redeemer] on-chain payouts ambiguous', {
+        conditionId,
+        yesNumerator: yesNumerator.toString(),
+        noNumerator: noNumerator.toString(),
+      });
       return null;
     } catch (err) {
       logger.warn('[redeemer] on-chain resolution check failed — trying next RPC', {
@@ -719,8 +838,10 @@ async function redeemSimmerLedgerFallback(
 ): Promise<void> {
   const allPositions = await getOpenPositions(redis);
   const simmerPositions = allPositions.filter(
-    (p: Position) => (p.executionVenue === 'simmer' || !p.executionVenue) &&
-      p.direction !== 'LONG' && p.direction !== 'SHORT',
+    (p: Position) =>
+      (p.executionVenue === 'simmer' || !p.executionVenue) &&
+      p.direction !== 'LONG' &&
+      p.direction !== 'SHORT',
   );
 
   if (simmerPositions.length === 0) return;
@@ -731,7 +852,8 @@ async function redeemSimmerLedgerFallback(
 
   for (const pos of simmerPositions) {
     const conditionId = pos.conditionId;
-    if (alreadyRedeemed.has(pos.marketId) || (conditionId && alreadyRedeemed.has(conditionId))) continue;
+    if (alreadyRedeemed.has(pos.marketId) || (conditionId && alreadyRedeemed.has(conditionId)))
+      continue;
     if (!conditionId) {
       logger.debug('[redeemer] Simmer fallback: skipping position without conditionId', {
         marketId: pos.marketId,
@@ -742,7 +864,8 @@ async function redeemSimmerLedgerFallback(
     const pmDirection = pos.direction as 'YES' | 'NO';
     const side = pmDirection.toLowerCase() as 'yes' | 'no';
 
-    const reportedBalance = pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : null);
+    const reportedBalance =
+      pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : null);
     const skipReason = await shouldSkipRedeemer(redis, conditionId, side, reportedBalance, cfg);
     if (skipReason) {
       logRedeemerSkip(skipReason, conditionId, { marketId: pos.marketId, reportedBalance });
@@ -755,9 +878,10 @@ async function redeemSimmerLedgerFallback(
       await new Promise((r) => setTimeout(r, 200));
       if (!resolved) continue;
 
-      const resolvedQuestion = pos.question && pos.question.trim().length > 0
-        ? pos.question
-        : (resolved.question ?? pos.marketId);
+      const resolvedQuestion =
+        pos.question && pos.question.trim().length > 0
+          ? pos.question
+          : (resolved.question ?? pos.marketId);
 
       const won = resolved.outcome === pmDirection;
       if (!won) {
@@ -777,27 +901,35 @@ async function redeemSimmerLedgerFallback(
           divergence: pos.edgeMagnitude ?? 0,
           result: 'lost',
           returnPct: -100,
-          holdingHours: pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000 : 0,
+          holdingHours: pos.openedAt
+            ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
+            : 0,
           executionVenue: pos.executionVenue ?? 'simmer',
         });
         results.push({ marketId: pos.marketId, side, success: false, error: 'resolved_as_loss' });
         continue;
       }
 
-      logger.info('[redeemer] Simmer fallback: won position detected via Gamma — attempting Simmer redeem', {
-        marketId: pos.marketId,
-        direction: pos.direction,
-        outcome: resolved.outcome,
-      });
+      logger.info(
+        '[redeemer] Simmer fallback: won position detected via Gamma — attempting Simmer redeem',
+        {
+          marketId: pos.marketId,
+          direction: pos.direction,
+          outcome: resolved.outcome,
+        },
+      );
 
       // Resolve Simmer's internal UUID (required for submitRedeem)
       const simmerId = await resolveSimmerMarketId(resolvedQuestion);
       if (!simmerId) {
-        logger.warn('[redeemer] Simmer fallback: cannot resolve Simmer UUID — attempting on-chain redemption', {
-          marketId: pos.marketId,
-          question: resolvedQuestion.slice(0, 80),
-          conditionId: conditionId,
-        });
+        logger.warn(
+          '[redeemer] Simmer fallback: cannot resolve Simmer UUID — attempting on-chain redemption',
+          {
+            marketId: pos.marketId,
+            question: resolvedQuestion.slice(0, 80),
+            conditionId: conditionId,
+          },
+        );
 
         // Fall back to direct on-chain redemption via ProxyWalletFactory.
         // This handles old/resolved markets that no longer appear in Simmer search results.
@@ -810,12 +942,24 @@ async function redeemSimmerLedgerFallback(
           alreadyRedeemed.add(pos.marketId);
           alreadyRedeemed.add(conditionId);
           await closePosition(redis, pos.marketId, pos.direction);
-          const proceedsUsdc = pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : 0);
+          const proceedsUsdc =
+            pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : 0);
           if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
           const tokenId = pickClobTokenId(pos);
           const postBalance = await refreshTokenBalance(tokenId);
-          await markRedeemerSuccess(redis, conditionId, side, proceedsUsdc, postBalance ?? 0, cfg, onChainResult.tx_hash);
-          logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), { marketId: pos.marketId, postBalance });
+          await markRedeemerSuccess(
+            redis,
+            conditionId,
+            side,
+            proceedsUsdc,
+            postBalance ?? 0,
+            cfg,
+            onChainResult.tx_hash,
+          );
+          logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), {
+            marketId: pos.marketId,
+            postBalance,
+          });
           await recordOutcome(redis, {
             source: inferSource(pos.sourcedFrom ?? ''),
             category: inferCategory(resolvedQuestion),
@@ -825,7 +969,9 @@ async function redeemSimmerLedgerFallback(
             divergence: pos.edgeMagnitude ?? 0,
             result: 'won',
             returnPct: pos.stakeUsd > 0 ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
-            holdingHours: pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000 : 0,
+            holdingHours: pos.openedAt
+              ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
+              : 0,
             executionVenue: pos.executionVenue ?? 'simmer',
           });
           const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
@@ -838,13 +984,21 @@ async function redeemSimmerLedgerFallback(
           if (onChainResult.tx_hash) notifyOpts.txHash = onChainResult.tx_hash;
           await notifyRedemptionExecuted(notifyOpts);
           logger.info('[redeemer] Simmer fallback: on-chain redemption successful', {
-            marketId: pos.marketId, conditionId: conditionId, valueUsdc: proceedsUsdc,
+            marketId: pos.marketId,
+            conditionId: conditionId,
+            valueUsdc: proceedsUsdc,
           });
-          results.push({ marketId: pos.marketId, side, success: true, valueUsdc: proceedsUsdc,
-            ...(onChainResult.tx_hash ? { txHash: onChainResult.tx_hash } : {}) });
+          results.push({
+            marketId: pos.marketId,
+            side,
+            success: true,
+            valueUsdc: proceedsUsdc,
+            ...(onChainResult.tx_hash ? { txHash: onChainResult.tx_hash } : {}),
+          });
         } else if (onChainResult.error === 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED') {
           logger.warn('[redeemer] Simmer fallback: sigType=1 requires manual redemption', {
-            marketId: pos.marketId, conditionId: conditionId,
+            marketId: pos.marketId,
+            conditionId: conditionId,
           });
           if (await shouldNotifyManual(redis, conditionId)) {
             void notifyManualRedemptionRequired({
@@ -855,17 +1009,36 @@ async function redeemSimmerLedgerFallback(
             }).catch(() => {});
           }
           await closePosition(redis, pos.marketId, pos.direction);
-          results.push({ marketId: pos.marketId, side, success: false, error: onChainResult.error });
+          results.push({
+            marketId: pos.marketId,
+            side,
+            success: false,
+            error: onChainResult.error,
+          });
         } else {
           logger.warn('[redeemer] Simmer fallback: on-chain redemption also failed', {
-            marketId: pos.marketId, conditionId: conditionId, error: onChainResult.error,
+            marketId: pos.marketId,
+            conditionId: conditionId,
+            error: onChainResult.error,
           });
           const errLower = (onChainResult.error ?? '').toLowerCase();
-          if (errLower.includes('already redeemed') || errLower.includes('position may already be redeemed') || errLower.includes('balance is 0')) {
+          if (
+            errLower.includes('already redeemed') ||
+            errLower.includes('position may already be redeemed') ||
+            errLower.includes('balance is 0')
+          ) {
             await markFallbackStale(redis, conditionId, side, cfg);
-            logRedeemerSkip('stale_no_balance', conditionId, { marketId: pos.marketId, error: onChainResult.error });
+            logRedeemerSkip('stale_no_balance', conditionId, {
+              marketId: pos.marketId,
+              error: onChainResult.error,
+            });
           }
-          results.push({ marketId: pos.marketId, side, success: false, error: onChainResult.error ?? 'on-chain redemption failed' });
+          results.push({
+            marketId: pos.marketId,
+            side,
+            success: false,
+            error: onChainResult.error ?? 'on-chain redemption failed',
+          });
         }
         continue;
       }
@@ -879,14 +1052,27 @@ async function redeemSimmerLedgerFallback(
 
         const entryPriceSafe = pos.entryPrice > 0 && Number.isFinite(pos.entryPrice);
         if (!entryPriceSafe && pos.sharesHeld == null) {
-          logger.warn('[redeemer] Simmer fallback: entryPrice is zero/invalid — using 0 proceeds', { marketId: pos.marketId });
+          logger.warn('[redeemer] Simmer fallback: entryPrice is zero/invalid — using 0 proceeds', {
+            marketId: pos.marketId,
+          });
         }
         const proceedsUsdc = pos.sharesHeld ?? (entryPriceSafe ? pos.stakeUsd / pos.entryPrice : 0);
         if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
         const tokenId = pickClobTokenId(pos);
         const postBalance = await refreshTokenBalance(tokenId);
-        await markRedeemerSuccess(redis, conditionId, side, proceedsUsdc, postBalance ?? 0, cfg, redeemResult.tx_hash ?? undefined);
-        logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), { marketId: pos.marketId, postBalance });
+        await markRedeemerSuccess(
+          redis,
+          conditionId,
+          side,
+          proceedsUsdc,
+          postBalance ?? 0,
+          cfg,
+          redeemResult.tx_hash ?? undefined,
+        );
+        logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), {
+          marketId: pos.marketId,
+          postBalance,
+        });
 
         await recordOutcome(redis, {
           source: inferSource(pos.sourcedFrom ?? ''),
@@ -897,7 +1083,9 @@ async function redeemSimmerLedgerFallback(
           divergence: pos.edgeMagnitude ?? 0,
           result: 'won',
           returnPct: pos.stakeUsd > 0 ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
-          holdingHours: pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000 : 0,
+          holdingHours: pos.openedAt
+            ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
+            : 0,
           executionVenue: pos.executionVenue ?? 'simmer',
         });
 
@@ -930,11 +1118,23 @@ async function redeemSimmerLedgerFallback(
           error: redeemResult.error,
         });
         const errLower = (redeemResult.error ?? '').toLowerCase();
-        if (errLower.includes('already redeemed') || errLower.includes('position may already be redeemed') || errLower.includes('balance is 0')) {
+        if (
+          errLower.includes('already redeemed') ||
+          errLower.includes('position may already be redeemed') ||
+          errLower.includes('balance is 0')
+        ) {
           await markFallbackStale(redis, conditionId, side, cfg);
-          logRedeemerSkip('stale_no_balance', conditionId, { marketId: pos.marketId, error: redeemResult.error });
+          logRedeemerSkip('stale_no_balance', conditionId, {
+            marketId: pos.marketId,
+            error: redeemResult.error,
+          });
         }
-        results.push({ marketId: pos.marketId, side, success: false, error: redeemResult.error ?? 'simmer_redeem_failed' });
+        results.push({
+          marketId: pos.marketId,
+          side,
+          success: false,
+          error: redeemResult.error ?? 'simmer_redeem_failed',
+        });
       }
     } catch (err) {
       logger.warn('[redeemer] Simmer fallback: error processing position', {
@@ -962,8 +1162,8 @@ async function redeemOrphanClobPositions(
 ): Promise<void> {
   if (!cfg.POLYGON_WALLET_PRIVATE_KEY) return;
 
-  const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ??
-    new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY!).address;
+  const funderAddress =
+    cfg.POLYMARKET_FUNDER_ADDRESS ?? new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY).address;
 
   let client: Awaited<ReturnType<typeof getClobClient>>;
   try {
@@ -976,9 +1176,15 @@ async function redeemOrphanClobPositions(
   }
 
   // Pull all BUY trades for this account (paginated, up to 500)
-  let trades: Array<{ asset_id: string; market: string; side: string; size: string; outcome: string }> = [];
+  let trades: {
+    asset_id: string;
+    market: string;
+    side: string;
+    size: string;
+    outcome: string;
+  }[] = [];
   try {
-    const raw = await client.getTrades({ maker_address: funderAddress as string });
+    const raw = await client.getTrades({ maker_address: funderAddress });
     trades = (raw ?? []) as typeof trades;
   } catch (err) {
     logger.warn('[redeemer] orphan sweep: failed to fetch trades', {
@@ -1027,7 +1233,10 @@ async function redeemOrphanClobPositions(
 
       const skipReason = await shouldSkipRedeemer(redis, conditionId, side, balResult.balance, cfg);
       if (skipReason) {
-        logRedeemerSkip(skipReason, conditionId, { marketId: conditionId, onChainBalance: balResult.balance });
+        logRedeemerSkip(skipReason, conditionId, {
+          marketId: conditionId,
+          onChainBalance: balResult.balance,
+        });
         continue;
       }
 
@@ -1039,7 +1248,11 @@ async function redeemOrphanClobPositions(
       const resolvedQuestion = resolved.question ?? conditionId;
       if (resolved.outcome !== direction) {
         // Lost — tokens will expire worthless, nothing to redeem
-        logger.debug('[redeemer] orphan sweep: resolved as loss', { conditionId, direction, outcome: resolved.outcome });
+        logger.debug('[redeemer] orphan sweep: resolved as loss', {
+          conditionId,
+          direction,
+          outcome: resolved.outcome,
+        });
         continue;
       }
 
@@ -1057,8 +1270,19 @@ async function redeemOrphanClobPositions(
         const valueUsdc = balResult.balance; // 1 winning token = 1 USDC
         await creditProceeds(redis, valueUsdc);
         const postBalance = await refreshTokenBalance(tokenId);
-        await markRedeemerSuccess(redis, conditionId, side, valueUsdc, postBalance ?? 0, cfg, redeemResult.tx_hash);
-        logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), { conditionId, postBalance });
+        await markRedeemerSuccess(
+          redis,
+          conditionId,
+          side,
+          valueUsdc,
+          postBalance ?? 0,
+          cfg,
+          redeemResult.tx_hash,
+        );
+        logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), {
+          conditionId,
+          postBalance,
+        });
 
         const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
           marketId: conditionId,
@@ -1070,7 +1294,10 @@ async function redeemOrphanClobPositions(
         await notifyRedemptionExecuted(notifyOpts);
 
         logger.info('[redeemer] orphan sweep: redemption successful', {
-          conditionId, direction, valueUsdc, txHash: redeemResult.tx_hash,
+          conditionId,
+          direction,
+          valueUsdc,
+          txHash: redeemResult.tx_hash,
         });
 
         results.push({
@@ -1082,7 +1309,9 @@ async function redeemOrphanClobPositions(
         });
       } else if (redeemResult.error === 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED') {
         logger.warn('[redeemer] orphan sweep: sigType=1 — manual claim required', {
-          conditionId, direction, onChainBalance: balResult.balance,
+          conditionId,
+          direction,
+          onChainBalance: balResult.balance,
         });
         if (await shouldNotifyManual(redis, conditionId)) {
           void notifyManualRedemptionRequired({
@@ -1101,7 +1330,8 @@ async function redeemOrphanClobPositions(
         });
       } else {
         logger.warn('[redeemer] orphan sweep: redemption failed', {
-          conditionId, error: redeemResult.error,
+          conditionId,
+          error: redeemResult.error,
         });
         results.push({
           marketId: conditionId,

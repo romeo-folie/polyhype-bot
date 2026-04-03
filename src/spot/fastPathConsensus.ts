@@ -30,13 +30,13 @@ export interface FastConsensusResult {
 
 /** Default annualised volatility estimates by asset class. */
 const DEFAULT_ANNUAL_VOL: Record<string, number> = {
-  bitcoin: 0.80,
-  ethereum: 0.90,
-  'CL=F': 0.40,
-  'GC=F': 0.20,
+  bitcoin: 0.8,
+  ethereum: 0.9,
+  'CL=F': 0.4,
+  'GC=F': 0.2,
 };
 
-const DEFAULT_VOL = 0.60;
+const DEFAULT_VOL = 0.6;
 
 interface PriceTarget {
   targetPrice: number;
@@ -75,8 +75,18 @@ function utcEndOfDay(year: number, month: number, day: number): number {
 
 function extractDeadline(question: string): number | null {
   const months: Record<string, number> = {
-    january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
-    july: 6, august: 7, september: 8, october: 9, november: 10, december: 11,
+    january: 0,
+    february: 1,
+    march: 2,
+    april: 3,
+    may: 4,
+    june: 5,
+    july: 6,
+    august: 7,
+    september: 8,
+    october: 9,
+    november: 10,
+    december: 11,
   };
 
   const monthDayYearMatch = question.match(
@@ -115,8 +125,9 @@ function extractDeadline(question: string): number | null {
 
 function normalCdf(x: number): number {
   const t = 1.0 / (1.0 + 0.2316419 * Math.abs(x));
-  const d = 0.3989423 * Math.exp(-x * x / 2.0);
-  const prob = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  const d = 0.3989423 * Math.exp((-x * x) / 2.0);
+  const prob =
+    d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
   return x > 0 ? 1.0 - prob : prob;
 }
 
@@ -138,7 +149,9 @@ export function formulaProbability(
     return currentPrice < targetPrice ? 0.99 : 0.01;
   }
 
-  const d2 = (Math.log(currentPrice / targetPrice) - 0.5 * annualVol * annualVol * timeToExpiryYears) / volSqrtT;
+  const d2 =
+    (Math.log(currentPrice / targetPrice) - 0.5 * annualVol * annualVol * timeToExpiryYears) /
+    volSqrtT;
   const prob = direction === 'above' ? normalCdf(d2) : 1 - normalCdf(d2);
   return Math.max(0.01, Math.min(0.99, prob));
 }
@@ -186,9 +199,7 @@ If not a price-target market, return {"error": "not_price_target"}.`;
     const targetPrice = Number(parsed.targetPrice);
     const deadlineMs = Number(parsed.deadlineMs);
     const direction =
-      parsed.direction === 'above' || parsed.direction === 'below'
-        ? parsed.direction
-        : null;
+      parsed.direction === 'above' || parsed.direction === 'below' ? parsed.direction : null;
 
     if (
       !direction ||
@@ -223,7 +234,7 @@ export async function estimateFastConsensus(
 ): Promise<FastConsensusResult> {
   const cacheKey = `mapping:consensus:v2:${market.marketId}`;
   const redis = opts?.redis ?? getRedis();
-  
+
   // 1. Hybrid Registry Check
   try {
     const cached = await redis.get(cacheKey);
@@ -253,14 +264,22 @@ export async function estimateFastConsensus(
         };
       }
     }
-  } catch { /* cache miss */ }
+  } catch {
+    /* cache miss */
+  }
 
   // 2. Extraction Path (Regex -> DeepSeek for likely price-target questions only)
   let target = extractPriceTarget(market.question);
   if (!target) {
     const question = market.question || '';
-    const hasPriceCue = /\$|usd\b|us dollars?\b|dollars?\b|\b\d+(?:\.\d+)?k\b|\bprice\b|\babove\b|\bbelow\b|\bat least\b|\bat most\b/i.test(question);
-    const hasDateCue = /\b(on|by|before|after|during|at|end of)\b|jan(?:uary)?\b|feb(?:ruary)?\b|mar(?:ch)?\b|apr(?:il)?\b|may\b|jun(?:e)?\b|jul(?:y)?\b|aug(?:ust)?\b|sep(?:t(?:ember)?)?\b|oct(?:ober)?\b|nov(?:ember)?\b|dec(?:ember)?\b|\b\d{4}\b|\b(today|tomorrow|tonight|this week|this month|this year)\b/i.test(question);
+    const hasPriceCue =
+      /\$|usd\b|us dollars?\b|dollars?\b|\b\d+(?:\.\d+)?k\b|\bprice\b|\babove\b|\bbelow\b|\bat least\b|\bat most\b/i.test(
+        question,
+      );
+    const hasDateCue =
+      /\b(on|by|before|after|during|at|end of)\b|jan(?:uary)?\b|feb(?:ruary)?\b|mar(?:ch)?\b|apr(?:il)?\b|may\b|jun(?:e)?\b|jul(?:y)?\b|aug(?:ust)?\b|sep(?:t(?:ember)?)?\b|oct(?:ober)?\b|nov(?:ember)?\b|dec(?:ember)?\b|\b\d{4}\b|\b(today|tomorrow|tonight|this week|this month|this year)\b/i.test(
+        question,
+      );
     if (hasPriceCue && hasDateCue) {
       target = await deepseekStructuralParse(market.question);
     }

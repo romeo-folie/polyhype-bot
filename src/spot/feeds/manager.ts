@@ -6,7 +6,7 @@ import { closeRedis } from '../../shared/redis.js';
 
 /**
  * Feed Manager.
- * 
+ *
  * Orchestrates multiple real-time data feeds.
  */
 async function main() {
@@ -45,7 +45,7 @@ async function main() {
 // CLI entrypoint
 const isMain = process.argv[1]?.endsWith('manager.ts') || process.argv[1]?.endsWith('manager.js');
 if (isMain) {
-  main().catch((err) => {
+  main().catch((err: unknown) => {
     logger.error('[feeds-manager] fatal error', { error: String(err) });
     process.exit(1);
   });

@@ -34,12 +34,12 @@ export async function recordPositionOutcome(
   },
 ): Promise<void> {
   const outcome = {
-    source: inferSource(position.sourcedFrom ?? ''),
-    category: inferCategory(position.question ?? ''),
-    question: (position.question ?? '').slice(0, 200),
+    source: inferSource(position.sourcedFrom),
+    category: inferCategory(position.question),
+    question: position.question.slice(0, 200),
     direction: position.direction as 'YES' | 'NO',
     consensusProbability: position.consensusProbability ?? 0.5,
-    divergence: position.edgeMagnitude ?? 0,
+    divergence: position.edgeMagnitude,
     result: opts.result,
     returnPct: opts.returnPct,
     holdingHours: position.openedAt
@@ -55,8 +55,14 @@ export async function recordPositionOutcome(
     ...(position.entryExecutionPath ? { entryExecutionPath: position.entryExecutionPath } : {}),
     ...(position.entryOrderType ? { entryOrderType: position.entryOrderType } : {}),
     ...(position.fallbackReason ? { fallbackReason: position.fallbackReason } : {}),
-    ...(position.decisionSpreadBps !== undefined ? { decisionSpreadBps: position.decisionSpreadBps } : {}),
-    ...(position.makerPriceImprovementBps !== undefined ? { makerPriceImprovementBps: position.makerPriceImprovementBps } : {}),
-    ...(position.makerPriceImprovementUsd !== undefined ? { makerPriceImprovementUsd: position.makerPriceImprovementUsd } : {}),
+    ...(position.decisionSpreadBps !== undefined
+      ? { decisionSpreadBps: position.decisionSpreadBps }
+      : {}),
+    ...(position.makerPriceImprovementBps !== undefined
+      ? { makerPriceImprovementBps: position.makerPriceImprovementBps }
+      : {}),
+    ...(position.makerPriceImprovementUsd !== undefined
+      ? { makerPriceImprovementUsd: position.makerPriceImprovementUsd }
+      : {}),
   });
 }

@@ -16,7 +16,6 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 // ── Request / response types ──────────────────────────────────────────────────
 
-
 /** Zod schema for Simmer import response. */
 const SimmerImportResultSchema = z.object({
   success: z.boolean(),
@@ -91,7 +90,10 @@ export async function importMarket(polymarketUrl: string): Promise<{
       logger.warn('[simmer-import] import failed', {
         url: polymarketUrl,
         status: resp.status,
-        body: typeof responseBody === 'string' ? responseBody.slice(0, 200) : JSON.stringify(responseBody).slice(0, 200),
+        body:
+          typeof responseBody === 'string'
+            ? responseBody.slice(0, 200)
+            : JSON.stringify(responseBody).slice(0, 200),
       });
       return {
         success: false,
@@ -144,10 +146,12 @@ export async function importMarket(polymarketUrl: string): Promise<{
  * @param opts.limit - Max results to return (default 50)
  * @returns Array of discoverable markets
  */
-export async function discoverUnimportedMarkets(opts: {
-  tags?: string;
-  limit?: number;
-} = {}): Promise<SimmerDiscoverResult[]> {
+export async function discoverUnimportedMarkets(
+  opts: {
+    tags?: string;
+    limit?: number;
+  } = {},
+): Promise<SimmerDiscoverResult[]> {
   const { SIMMER_API_KEY: apiKey } = loadConfig();
   const { tags, limit = 50 } = opts;
 
@@ -165,7 +169,9 @@ export async function discoverUnimportedMarkets(opts: {
       return [];
     }
 
-    const data = (await resp.json()) as { markets?: SimmerDiscoverResult[] } | SimmerDiscoverResult[];
+    const data = (await resp.json()) as
+      | { markets?: SimmerDiscoverResult[] }
+      | SimmerDiscoverResult[];
     const markets = Array.isArray(data) ? data : (data.markets ?? []);
 
     logger.debug('[simmer-import] discovery complete', { count: markets.length });

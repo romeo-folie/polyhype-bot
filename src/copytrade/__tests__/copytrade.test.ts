@@ -123,7 +123,9 @@ describe('copytrade helpers', () => {
   it('detects markets by category keywords in title or description', async () => {
     const { matchesCategory } = await import('../index.js');
     expect(matchesCategory('Will it rain in NYC?', null, ['weather'])).toBe(true);
-    expect(matchesCategory('Market Title', 'Military action in Middle East', ['geopolitics'])).toBe(true);
+    expect(matchesCategory('Market Title', 'Military action in Middle East', ['geopolitics'])).toBe(
+      true,
+    );
     expect(matchesCategory('Bitcoin price above $100k?', null, ['crypto'])).toBe(true);
     expect(matchesCategory('Anything here', null, ['all'])).toBe(true);
     expect(matchesCategory('Bitcoin price above $100k?', null, ['weather'])).toBe(false);
@@ -147,21 +149,23 @@ describe('runCopytrade', () => {
 
   it('respects category-specific slippage overrides', async () => {
     // Global max is 200, but mentions is 50
-    configOverride = { 
-      ...configOverride, 
+    configOverride = {
+      ...configOverride,
       COPYTRADE_MAX_SLIPPAGE_BPS: 200,
       COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES: { mentions: 50 },
-      COPYTRADE_MARKET_SCOPE: ['all']
+      COPYTRADE_MARKET_SCOPE: ['all'],
     };
 
     // 100 BPS slippage (0.5 to 0.505)
     // (0.505 - 0.5) / 0.5 * 10000 = 100 BPS
     const trade = makeTrade({ price: 0.5, title: 'Will Elon Musk say "X"?' });
     mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
-    mockGetMarketBySlug.mockResolvedValue(makeMarket({ 
-      question: 'Will Elon Musk say "X"?',
-      outcomePrices: '["0.505","0.495"]' 
-    }));
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({
+        question: 'Will Elon Musk say "X"?',
+        outcomePrices: '["0.505","0.495"]',
+      }),
+    );
 
     const { runCopytrade } = await import('../index.js');
     const redis = { get: vi.fn(), set: vi.fn() } as any;
@@ -176,10 +180,12 @@ describe('runCopytrade', () => {
   it('skips near-resolution and low-liquidity markets', async () => {
     const trade = makeTrade();
     mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
-    mockGetMarketBySlug.mockResolvedValue(makeMarket({
-      endDate: new Date(Date.now() + 1 * 3600_000).toISOString(),
-      liquidity: '50',
-    }));
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({
+        endDate: new Date(Date.now() + 1 * 3600_000).toISOString(),
+        liquidity: '50',
+      }),
+    );
 
     const { runCopytrade } = await import('../index.js');
     const redis = { get: vi.fn(), set: vi.fn() } as any;
@@ -262,7 +268,10 @@ describe('runCopytrade', () => {
   it('continues after a trade-level failure', async () => {
     const tradeA = makeTrade({ transactionHash: '0xaaa', slug: 'bad-market' });
     const tradeB = makeTrade({ transactionHash: '0xbbb', slug: 'good-market' });
-    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [tradeA, tradeB] } as Response);
+    mockFetchWithTimeout.mockResolvedValue({
+      ok: true,
+      json: async () => [tradeA, tradeB],
+    } as Response);
     mockGetMarketBySlug
       .mockRejectedValueOnce(new Error('boom'))
       .mockResolvedValueOnce(makeMarket({ outcomePrices: '["0.6","0.4"]' }));
