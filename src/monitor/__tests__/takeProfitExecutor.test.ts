@@ -145,6 +145,7 @@ describe('executeTakeProfit', () => {
 
   it('returns success=false when Simmer UUID cannot be resolved', async () => {
     mockResolveSimmerMarketId.mockResolvedValue(null);
+    mockSell.mockResolvedValue({ success: false, error: 'Market not found in venue' });
 
     const result = await executeTakeProfit({
       position: makePosition({ clobTokenIds: [] }), // Remove CLOB tokens to test resolution exit specifically
@@ -155,7 +156,7 @@ describe('executeTakeProfit', () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('Simmer direct sell returned no result');
+    expect(result.error).toContain('Market not found in venue');
     expect(mockSell).toHaveBeenCalledTimes(1); // One attempt with Numeric ID after UUID resolution failed
     expect(mockClose).not.toHaveBeenCalled();
   });

@@ -12,7 +12,7 @@
  */
 
 import { logger } from '../shared/logger.js';
-import { submitSell, resolveSimmerMarketId, getSimmerPositions, SimmerError } from '../shared/simmer.js';
+import { submitSell, resolveSimmerMarketId } from '../shared/simmer.js';
 import { submitClobSell, fetchClobTokenBalance, parseBalanceFromClobError, type ClobBalanceResult, CLOB_MIN_ORDER_USD } from '../shared/clob.js';
 import { closePosition, markPositionSynthHedged, markPositionPendingSettlement, updatePositionShares } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
@@ -172,10 +172,6 @@ async function executeSimmerExit(opts: {
         reasoning: `Resolved sell: ${reason} — return ${returnPct.toFixed(1)}%`,
       });
 
-      if (!tradeResult) {
-        throw new Error('Simmer sell returned no result (empty response)');
-      }
-
       if (tradeResult.success) {
         return await finalizeSimmerExit(redis, position, sharesToSell, tradeResult, currentPrice, returnPct, reason);
       }
@@ -202,10 +198,6 @@ async function executeSimmerExit(opts: {
         shares: sharesToSell,
         reasoning: `Direct numeric sell: ${reason} — return ${returnPct.toFixed(1)}%`,
       });
-
-      if (!directResult) {
-        throw new Error('Simmer direct sell returned no result (empty response)');
-      }
 
       if (directResult.success) {
         return await finalizeSimmerExit(redis, position, sharesToSell, directResult, currentPrice, returnPct, reason);
@@ -236,7 +228,7 @@ async function executeSimmerExit(opts: {
 
   // STEP 4: Attempt Synthetic Exit on HL if all else fails
   const synthetic = await attemptSyntheticExit({ position, currentPrice, returnPct, reason, redis });
-  if (synthetic && synthetic.success) return synthetic;
+  if (synthetic.success) return synthetic;
 
   const finalError = simmerError ?? 'Simmer resolution failed';
   return { marketId: position.marketId, success: false, error: finalError, returnPct, reason };
@@ -427,10 +419,6 @@ async function executeClobExit(opts: {
       shares: safeShares,
       orderType: loadConfig().CLOB_ORDER_TYPE,
     });
-
-    if (!clobResult) {
-      throw new Error('CLOB sell returned no result (empty response)');
-    }
 
     if (clobResult.success) {
       logger.info('[take-profit-executor] exit successful (clob)', {

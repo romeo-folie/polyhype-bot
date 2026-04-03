@@ -82,7 +82,7 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
 
     // Determine correct indices for YES and NO outcomes.
     // Gamma usually returns ["Yes", "No"] but order is not strictly guaranteed.
-    const outcomes = (market.outcomes || []).map((o) => o.toLowerCase());
+    const outcomes = market.outcomes.map((o) => o.toLowerCase());
     const yesIndex = outcomes.indexOf('yes');
     const noIndex = outcomes.indexOf('no');
 

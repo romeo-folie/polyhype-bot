@@ -86,7 +86,7 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
           venueShares = simmerPos.shares ?? 0;
         }
         simmerMap.delete(key); // Mark as processed for orphan check
-      } else if (ledgerPos.executionVenue === 'clob') {
+      } else {
         venueName = 'clob';
         clobCount++;
         const tokenIds = ledgerPos.clobTokenIds ?? [];
