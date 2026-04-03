@@ -39,7 +39,7 @@ function buildDefaultHeaders(): Record<string, string> {
 }
 
 export async function fetchRssFeeds(feeds?: FeedConfig[]): Promise<RssItem[]> {
-  const urls: FeedConfig[] =
+  const rawUrls: FeedConfig[] =
     feeds ??
     (process.env.RSS_FEED_URLS
       ? process.env.RSS_FEED_URLS
@@ -48,6 +48,11 @@ export async function fetchRssFeeds(feeds?: FeedConfig[]): Promise<RssItem[]> {
           .filter(Boolean)
           .map((url) => ({ url }))
       : DEFAULT_FEEDS);
+
+  const urls = rawUrls.map(f => ({
+    ...f,
+    url: f.url.startsWith('http') ? f.url : `https://${f.url}`
+  }));
 
   const parser = new Parser();
   const results: RssItem[] = [];
