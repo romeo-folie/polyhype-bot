@@ -1,5 +1,10 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { fetchRssFeeds } from '../rss.js';
+import { loadConfig } from '../../shared/config.js';
+
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(),
+}));
 
 vi.mock('rss-parser', () => ({
   default: class Parser {
@@ -23,6 +28,10 @@ describe('fetchRssFeeds', () => {
   const fetchMock = vi.fn();
 
   beforeEach(() => {
+    vi.mocked(loadConfig).mockReturnValue({
+      RSS_FEED_URLS: 'https://rss.nytimes.com/World.xml',
+      RSS_USER_AGENT: 'Mozilla/5.0 ...',
+    } as any);
     fetchMock.mockReset();
     fetchMock.mockResolvedValue({
       ok: true,
@@ -33,7 +42,7 @@ describe('fetchRssFeeds', () => {
   });
 
   afterEach(() => {
-    process.env.RSS_USER_AGENT = originalUserAgent;
+    vi.clearAllMocks();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     delete (globalThis as any).fetch;
   });
@@ -44,7 +53,7 @@ describe('fetchRssFeeds', () => {
       {
         url: 'https://example.com/rss',
         headers: {
-          'user-agent': 'custom-agent',
+          'User-Agent': 'custom-agent',
           'x-test': '1',
         },
       },
@@ -53,18 +62,21 @@ describe('fetchRssFeeds', () => {
     const [, requestInit] = fetchMock.mock.calls[0];
     const headers = (requestInit as RequestInit).headers as Record<string, string>;
 
-    expect(headers['user-agent']).toBe('custom-agent');
+    expect(headers['User-Agent']).toBe('custom-agent');
     expect(headers['x-test']).toBe('1');
-    expect(headers.accept).toContain('application/rss+xml');
+    expect(headers.Accept).toContain('application/rss+xml');
   });
 
-  it('uses trimmed RSS_USER_AGENT when provided', async () => {
-    process.env.RSS_USER_AGENT = '  PGA-Test-Agent  ';
+  it('uses RSS_USER_AGENT from config when provided', async () => {
+    vi.mocked(loadConfig).mockReturnValue({
+      RSS_FEED_URLS: 'https://rss.nytimes.com/World.xml',
+      RSS_USER_AGENT: 'PGA-Test-Agent',
+    } as any);
     await fetchRssFeeds([{ url: 'https://example.com/rss' }]);
 
     const [, requestInit] = fetchMock.mock.calls[0];
     const headers = (requestInit as RequestInit).headers as Record<string, string>;
 
-    expect(headers['user-agent']).toBe('PGA-Test-Agent');
+    expect(headers['User-Agent']).toBe('PGA-Test-Agent');
   });
 });

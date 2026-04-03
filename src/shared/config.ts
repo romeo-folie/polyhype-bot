@@ -129,6 +129,8 @@ const envSchema = z.object({
   CRYPTO_ARB_MAX_TRADES_PER_MIN: z.coerce.number().int().min(1).optional().default(15),
 
   // Feeds
+  RSS_FEED_URLS: z.string().optional().default('https://rss.nytimes.com/services/xml/rss/nyt/World.xml,https://feeds.skynews.com/feeds/rss/world.xml,https://feeds.bbci.co.uk/news/world/rss.xml,https://www.aljazeera.com/xml/rss/all.xml'),
+  RSS_USER_AGENT: z.string().optional().default('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'),
   BINANCE_WS_ENABLED: z.coerce.boolean().optional().default(true),
   BINANCE_SYMBOLS: z.string().optional().default('btcusdt,ethusdt,solusdt'),
   HELIUS_API_KEY: z.string().optional(),

@@ -6,6 +6,7 @@
 
 import Parser from 'rss-parser';
 import { logger } from '../shared/logger.js';
+import { loadConfig } from '../shared/config.js';
 import type { FeedConfig } from './categories/types.js';
 
 export interface RssItem {
@@ -16,38 +17,28 @@ export interface RssItem {
   latencyMs?: number;
 }
 
-const DEFAULT_FEEDS: FeedConfig[] = [
-  { url: 'https://rss.nytimes.com/services/xml/rss/nyt/World.xml' },
-  { url: 'https://feeds.skynews.com/feeds/rss/world.xml' },
-  { url: 'https://feeds.bbci.co.uk/news/world/rss.xml' },
-  { url: 'https://www.aljazeera.com/xml/rss/all.xml' },
-];
-
 const FEED_TIMEOUT_MS = 10_000;
-const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
-function buildDefaultHeaders(): Record<string, string> {
-  const raw = process.env.RSS_USER_AGENT;
-  const userAgent = raw?.trim();
+function buildDefaultHeaders(userAgent: string): Record<string, string> {
   return {
-    'user-agent': userAgent && userAgent.length > 0 ? userAgent : DEFAULT_USER_AGENT,
-    accept: 'application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.1',
-    'accept-language': 'en-US,en;q=0.9',
-    'cache-control': 'no-cache',
-    pragma: 'no-cache',
+    'User-Agent': userAgent,
+    'Accept': 'application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.1',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.google.com/',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
   };
 }
 
 export async function fetchRssFeeds(feeds?: FeedConfig[]): Promise<RssItem[]> {
+  const cfg = loadConfig();
   const rawUrls: FeedConfig[] =
     feeds ??
-    (process.env.RSS_FEED_URLS
-      ? process.env.RSS_FEED_URLS
-          .split(',')
-          .map((u) => u.trim())
-          .filter(Boolean)
-          .map((url) => ({ url }))
-      : DEFAULT_FEEDS);
+    cfg.RSS_FEED_URLS
+      .split(',')
+      .map((u) => u.trim())
+      .filter(Boolean)
+      .map((url) => ({ url }));
 
   const urls = rawUrls.map(f => ({
     ...f,
@@ -67,7 +58,7 @@ export async function fetchRssFeeds(feeds?: FeedConfig[]): Promise<RssItem[]> {
           redirect: 'follow',
           signal: controller.signal,
           headers: {
-            ...buildDefaultHeaders(),
+            ...buildDefaultHeaders(cfg.RSS_USER_AGENT),
             ...(feedConfig.headers ?? {}),
           },
         };

@@ -12,7 +12,7 @@ import { logger } from '../shared/logger.js';
 import { getRedis } from '../shared/redis.js';
 import { searchEvents, parseClobTokenIds } from '../mapping/gamma.js';
 import { estimateFastConsensus } from './fastPathConsensus.js';
-import { BINANCE_SYMBOL_TO_ASSET } from '../arb/cryptoArbScanner.js';
+import { BINANCE_SYMBOL_TO_ASSET } from '../shared/assets.js';
 
 const ASSET_SEARCH_QUERIES: Record<string, string[]> = {
   bitcoin: ['bitcoin', 'BTC', 'price'],
@@ -81,7 +81,7 @@ export async function runMarketWarmer(): Promise<void> {
   logger.info('[market-warmer] starting warm-up cycle', { assetCount: uniqueAssets.length });
 
   for (const assetId of uniqueAssets) {
-    await warmAsset(assetId, redis);
+    await warmAsset(assetId as string, redis);
   }
 
   logger.info('[market-warmer] warm-up cycle complete');
