@@ -35,39 +35,8 @@ export interface CryptoArbOpportunity {
   spreadBps?: number | undefined;
 }
 
-/** Asset-specific search queries for Gamma API. */
-export const CRYPTO_ASSET_SEARCH_QUERIES: Record<string, string[]> = {
-  bitcoin: ['bitcoin', 'BTC'],
-  ethereum: ['ethereum', 'ETH'],
-  solana: ['solana', 'SOL'],
-  ripple: ['XRP', 'ripple'],
-  binancecoin: ['BNB', 'binance coin'],
-  bittensor: ['TAO', 'bittensor'],
-  dogecoin: ['dogecoin', 'DOGE'],
-  cardano: ['cardano', 'ADA'],
-  avalanche: ['avalanche', 'AVAX'],
-  chainlink: ['chainlink', 'LINK'],
-  'shiba-inu': ['SHIB', 'shiba'],
-  sui: ['SUI'],
-  pepe: ['PEPE'],
-};
+import { ASSET_SEARCH_QUERIES, BINANCE_SYMBOL_TO_ASSET } from '../shared/assets.js';
 
-/** Binance WebSocket symbol → CoinGecko asset ID mapping. */
-export const BINANCE_SYMBOL_TO_ASSET: Record<string, string> = {
-  btcusdt: 'bitcoin',
-  ethusdt: 'ethereum',
-  solusdt: 'solana',
-  xrpusdt: 'ripple',
-  bnbusdt: 'binancecoin',
-  taousdt: 'bittensor',
-  dogeusdt: 'dogecoin',
-  adausdt: 'cardano',
-  avaxusdt: 'avalanche',
-  linkusdt: 'chainlink',
-  suiusdt: 'sui',
-  shibusdt: 'shiba-inu',
-  pepeusdt: 'pepe',
-};
 
 const MARKET_CACHE_PREFIX = 'crypto:markets:';
 const DEDUP_PREFIX = 'arb:crypto:';
@@ -186,8 +155,7 @@ export async function scanCryptoArb(
     });
   }
 
-  // Unknown asset — no search queries mapped
-  const queries = CRYPTO_ASSET_SEARCH_QUERIES[move.assetId];
+  const queries = ASSET_SEARCH_QUERIES[move.assetId];
   if (!queries) {
     logger.debug('[crypto-arb] unknown asset, skipping', { assetId: move.assetId });
     await recordCryptoArbGate(redis, 'unknown_asset');

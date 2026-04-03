@@ -29,6 +29,9 @@ export interface CorrelatedMarket {
 const ASSET_SEARCH_QUERIES: Record<string, string[]> = {
   bitcoin: ['bitcoin', 'BTC', 'crypto'],
   ethereum: ['ethereum', 'ETH'],
+  solana: ['solana', 'SOL'],
+  bittensor: ['TAO', 'bittensor'],
+  ripple: ['XRP', 'ripple'],
   'CL=F': ['oil', 'crude', 'OPEC', 'sanctions'],
   'GC=F': ['gold', 'safe haven', 'precious metals'],
 };
@@ -45,12 +48,12 @@ const MIN_LIQUIDITY = 5_000;
 async function inferCorrelationDirection(
   assetId: string,
   question: string,
-): Promise<'positive' | 'negative'> {
+): Promise<'positive' | 'negative' | 'none'> {
   const redis = getRedis();
-  const cacheKey = `spot:correlation:${assetId}:${question}`;
+  const cacheKey = `spot:correlation:v2:${assetId}:${question}`;
 
   const cached = await redis.get(cacheKey);
-  if (cached === 'positive' || cached === 'negative') return cached;
+  if (cached === 'positive' || cached === 'negative' || cached === 'none') return cached as any;
 
   const direction = await callLlmForCorrelation(assetId, question);
 
@@ -61,70 +64,47 @@ async function inferCorrelationDirection(
 async function callLlmForCorrelation(
   assetId: string,
   question: string,
-): Promise<'positive' | 'negative'> {
+): Promise<'positive' | 'negative' | 'none'> {
   const cfg = loadConfig();
 
-  // Always ask about the asset *rising* — this makes the cached answer
-  // direction-independent. The caller accounts for actual move direction.
   const prompt =
     `Asset: ${assetId}\n` +
     `Market question: "${question}"\n\n` +
-    `If ${assetId} rises significantly in price, does that make this market MORE likely or LESS likely to resolve YES?\n` +
-    'Answer with ONLY one word: "positive" (more likely YES) or "negative" (less likely YES).';
+    `If the price of ${assetId} rises significantly, does that have a DIRECT or STRONG INDIRECT impact on this market?\n` +
+    'Answer with "positive" (makes YES more likely), "negative" (makes YES less likely), or "none" (no strong link or irrelevant). ' +
+    'Answer ONLY with one of those three words.';
 
   const useGemini = cfg.LLM_PROVIDER === 'gemini' && Boolean(process.env.GEMINI_API_KEY);
 
   if (useGemini) {
     try {
-      return await callGeminiCorrelation(prompt);
-    } catch (err) {
-      logger.warn('[spot-correlator] Gemini failed for correlation, trying OpenAI', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+      const { GoogleGenerativeAI } = await import('@google/generative-ai');
+      const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '');
+      const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
+      const result = await model.generateContent(prompt);
+      const text = result.response.text().toLowerCase().trim();
+      if (text.includes('none')) return 'none';
+      if (text.includes('negative')) return 'negative';
+      return 'positive';
+    } catch { /* fallback to openai */ }
   }
 
   if (process.env.OPENAI_API_KEY) {
-    return await callOpenAICorrelation(prompt);
-  }
-
-  // Default to positive if no LLM available
-  logger.warn('[spot-correlator] no LLM available for correlation, defaulting to positive');
-  return 'positive';
-}
-
-async function callGeminiCorrelation(prompt: string): Promise<'positive' | 'negative'> {
-  const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '');
-  const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
-
-  const result = await Promise.race([
-    model.generateContent(prompt),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => { reject(new Error('Gemini timeout')); }, 15_000),
-    ),
-  ]);
-
-  const text = result.response.text().toLowerCase().trim();
-  return text.includes('negative') ? 'negative' : 'positive';
-}
-
-async function callOpenAICorrelation(prompt: string): Promise<'positive' | 'negative'> {
-  const { OpenAI } = await import('openai');
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-  const completion = await client.chat.completions.create(
-    {
+    const { OpenAI } = await import('openai');
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const completion = await client.chat.completions.create({
       model: loadConfig().OPENAI_MODEL,
       messages: [{ role: 'user', content: prompt }],
       max_tokens: 10,
       temperature: 0,
-    },
-    { signal: AbortSignal.timeout(15_000) },
-  );
+    });
+    const text = (completion.choices[0]?.message?.content ?? '').toLowerCase().trim();
+    if (text.includes('none')) return 'none';
+    if (text.includes('negative')) return 'negative';
+    return 'positive';
+  }
 
-  const text = (completion.choices[0]?.message?.content ?? '').toLowerCase().trim();
-  return text.includes('negative') ? 'negative' : 'positive';
+  return 'none';
 }
 
 function meetsLiquidityFilter(market: GammaMarket): boolean {
@@ -147,13 +127,26 @@ export async function findCorrelatedMarkets(move: SpotMove): Promise<CorrelatedM
       events = await searchEvents({ query, limit: 10, activeOnly: true });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // Re-throw 429s so the caller (cryptoArbScanner) can apply backoff.
       if (msg.includes('429')) throw err;
-      logger.warn('[spot-correlator] Gamma search failed', { query, error: msg });
       continue;
     }
 
+    const qLower = query.toLowerCase();
+
     for (const event of events) {
+      const titleLower = (event.title || '').toLowerCase();
+      // Only keep if title matches the search query (avoiding fuzzy trends fallback)
+      if (!titleLower.includes(qLower)) {
+        let hasMatchInMarkets = false;
+        for (const m of event.markets) {
+          if (m.question.toLowerCase().includes(qLower) || (m.description || '').toLowerCase().includes(qLower)) {
+            hasMatchInMarkets = true;
+            break;
+          }
+        }
+        if (!hasMatchInMarkets) continue;
+      }
+
       for (const market of event.markets) {
         if (!market.active || market.closed) continue;
         if (seenMarketIds.has(market.id)) continue;
@@ -177,19 +170,11 @@ export async function findCorrelatedMarkets(move: SpotMove): Promise<CorrelatedM
           continue;
         }
 
-        let correlationDirection: 'positive' | 'negative';
-        try {
-          correlationDirection = await inferCorrelationDirection(
-            move.assetId,
-            market.question,
-          );
-        } catch (err) {
-          logger.warn('[spot-correlator] correlation inference failed', {
-            marketId: market.id,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          continue;
-        }
+        const corrDir = await inferCorrelationDirection(
+          move.assetId,
+          market.question,
+        );
+        if (corrDir === 'none') continue;
 
         correlatedMarkets.push({
           marketId: market.id,
@@ -198,7 +183,7 @@ export async function findCorrelatedMarkets(move: SpotMove): Promise<CorrelatedM
           question: market.question,
           description: market.description,
           currentYesPrice,
-          correlationDirection,
+          correlationDirection: corrDir,
           feesEnabled: market.feesEnabled === true,
         });
       }

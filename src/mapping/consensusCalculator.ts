@@ -44,11 +44,12 @@ function buildSystemPrompt(): string {
   return (
     'You are a probabilistic analyst specialising in prediction markets. ' +
     `Today's date is ${today}. ` +
-    'Given a market question, its description, and a relevant breaking news headline, ' +
+    'Given a market question, its description, and a breaking news headline, ' +
     'estimate the true probability (0.00–1.00) that the market resolves YES. ' +
     'Pay close attention to any deadlines in the market question relative to today\'s date. ' +
-    'Account for the current market price only as a weak prior — focus on the news. ' +
-    'Return ONLY a JSON object: {"probability": 0.72, "reasoning": "one sentence"} ' +
+    'IMPORTANT: If the news headline is totally UNRELATED to the market question, ' +
+    'return the probability EXACTLY EQUAL to the current market price to signal neutral edge. ' +
+    'Return ONLY a JSON object: {"probability": 0.72, "reasoning": "one sentence explaining the link or lack thereof"} ' +
     'No markdown, no extra keys.'
   );
 }
@@ -97,7 +98,7 @@ async function callOpenAI(
         ],
         response_format: { type: 'json_object' },
         max_tokens: 200,
-        temperature: 0.1,
+        temperature: 0,
       },
       { signal: abortCtrl.signal },
     );
@@ -133,6 +134,7 @@ async function callAnthropic(
             content: buildUserPrompt({ question, description, headline, currentYesPrice }),
           },
         ],
+        temperature: 0,
       },
       { signal: abortCtrl.signal } as Parameters<typeof client.messages.create>[1],
     );
@@ -197,7 +199,7 @@ async function callDeepSeek(
         ],
         response_format: { type: 'json_object' },
         max_tokens: 200,
-        temperature: 0.1,
+        temperature: 0,
       },
       { signal: abortCtrl.signal },
     );
@@ -210,7 +212,6 @@ async function callDeepSeek(
 }
 
 function parseResult(raw: string): ConsensusResult {
-  // Strip markdown code fences — some models wrap JSON in ```json ... ``` despite instructions
   const cleaned = raw.replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
   const parsed = JSON.parse(cleaned) as { probability?: unknown; reasoning?: unknown };
   const probability = Number(parsed.probability);

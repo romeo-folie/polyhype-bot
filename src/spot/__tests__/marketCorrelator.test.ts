@@ -84,6 +84,8 @@ function makeGammaMarket(
 }
 
 beforeEach(() => {
+  process.env.GEMINI_API_KEY = 'test-key';
+  process.env.OPENAI_API_KEY = 'test-key';
   mockSearchEvents.mockReset();
   mockParseOutcomePrices.mockReset();
   mockParseClobTokenIds.mockReset();

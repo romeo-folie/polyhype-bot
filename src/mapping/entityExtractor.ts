@@ -154,9 +154,23 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
   for (const query of queries) {
     try {
       const events = await searchEvents({ query, limit: 5, activeOnly: true });
+      const qLower = query.toLowerCase();
+
       for (const event of events) {
+        // Strict keyword matching: Polymarket Gamma API often falls back to trending/liquid
+        // markets if the query has no direct hits. We must verify the result is relevant.
+        const titleLower = (event.title || '').toLowerCase();
+        const eventMatches = titleLower.includes(qLower);
+
         for (const market of event.markets ?? []) {
           if (seen.has(market.id)) continue;
+
+          // If event title didn't match, check market question/desc
+          if (!eventMatches) {
+            const mMatch = market.question.toLowerCase().includes(qLower) ||
+                          (market.description || '').toLowerCase().includes(qLower);
+            if (!mMatch) continue;
+          }
 
           const liquidity = parseFloat(market.liquidity ?? '0');
           if (!isFinite(liquidity) || liquidity < MIN_LIQUIDITY) continue;
