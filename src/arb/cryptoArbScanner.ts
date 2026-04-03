@@ -31,6 +31,8 @@ export interface CryptoArbOpportunity {
   assetId: string;
   /** True when the market has fees enabled — executor will skip CLOB submission */
   feesEnabled: boolean;
+  volatility?: number | undefined;
+  spreadBps?: number | undefined;
 }
 
 /** Asset-specific search queries for Gamma API. */
@@ -118,38 +120,43 @@ export async function scanCryptoArb(
     return [];
   }
 
-  // Volatility gate: skip if market is too flat (no edge) or too spiky (unpredictable)
-  // Uses the symbol from the SpotMove — maps assetId back to Binance symbol
-  let confluenceDirection: 'UP' | 'DOWN' | 'NEUTRAL' | undefined;  // Captured for direction filter in market loop
-
   // Extract symbol once for both gates (avoid duplicate lookups)
   const symbol = Object.entries(BINANCE_SYMBOL_TO_ASSET).find(([, v]) => v === move.assetId)?.[0];
 
-  if (cfg.CRYPTO_ARB_VOLATILITY_GATE_ENABLED && symbol) {
-    const volatility = await computeVolatility(symbol, redis);
-    if (volatility !== null) {
-      if (volatility < cfg.CRYPTO_ARB_MIN_VOLATILITY) {
-        logger.debug('[crypto-arb] volatility below floor — skipping (flat market)', {
-          assetId: move.assetId,
-          symbol,
-          volatility: volatility.toFixed(6),
-          floor: cfg.CRYPTO_ARB_MIN_VOLATILITY,
-        });
-        await recordCryptoArbGate(redis, 'volatility_floor');
-        return [];
-      }
-      if (volatility > cfg.CRYPTO_ARB_MAX_VOLATILITY) {
-        logger.debug('[crypto-arb] volatility above ceiling — skipping (too spiky)', {
-          assetId: move.assetId,
-          symbol,
-          volatility: volatility.toFixed(6),
-          ceiling: cfg.CRYPTO_ARB_MAX_VOLATILITY,
-        });
-        await recordCryptoArbGate(redis, 'volatility_ceiling');
-        return [];
+  let dynamicAnnualVol: number | undefined;
+  if (symbol) {
+    const mapc = await computeVolatility(symbol, redis);
+    if (mapc !== null) {
+      // Annualise 1-minute MAPC: MAPC * sqrt(minutes_per_year)
+      // sqrt(365.25 * 24 * 60) ≈ 725.23
+      dynamicAnnualVol = mapc * 725.23;
+
+      if (cfg.CRYPTO_ARB_VOLATILITY_GATE_ENABLED) {
+        if (mapc < cfg.CRYPTO_ARB_MIN_VOLATILITY) {
+          logger.debug('[crypto-arb] volatility below floor — skipping (flat market)', {
+            assetId: move.assetId,
+            symbol,
+            volatility: mapc.toFixed(6),
+            floor: cfg.CRYPTO_ARB_MIN_VOLATILITY,
+          });
+          await recordCryptoArbGate(redis, 'volatility_floor');
+          return [];
+        }
+        if (mapc > cfg.CRYPTO_ARB_MAX_VOLATILITY) {
+          logger.debug('[crypto-arb] volatility above ceiling — skipping (too spiky)', {
+            assetId: move.assetId,
+            symbol,
+            volatility: mapc.toFixed(6),
+            ceiling: cfg.CRYPTO_ARB_MAX_VOLATILITY,
+          });
+          await recordCryptoArbGate(redis, 'volatility_ceiling');
+          return [];
+        }
       }
     }
   }
+
+  let confluenceDirection: 'UP' | 'DOWN' | 'NEUTRAL' | undefined;
 
   // Confluence gate — BTC only, configurable
   if (cfg.CONFLUENCE_GATE_ENABLED && move.assetId === 'bitcoin' && symbol) {
@@ -283,7 +290,8 @@ export async function scanCryptoArb(
       }
 
       // 3. Estimate fair value via BS formula (no LLM for price-target markets)
-      const consensus = await estimateFastConsensus(move, market);
+      // Pass dynamic annualised volatility if available (calculated from recent candles).
+      const consensus = await estimateFastConsensus(move, market, dynamicAnnualVol);
 
       if (consensus.method === 'llm') {
         logger.debug('[crypto-arb] skipping non-price-target market — LLM path not used in fast arb', {
@@ -298,10 +306,27 @@ export async function scanCryptoArb(
 
       // 4. Compute edge and direction
       const rawEdge = Math.abs(fairValue - currentPmPrice);
-      const netEdge = rawEdge - feeRate;
+      
+      // Dynamic spread buffer: account for current bid-ask spread from WS.
+      // Helps avoid entering trades where the "edge" is just the market spread.
+      const wsSpread = await feed.getCachedSpread(market.marketId);
+      const spreadBuffer = wsSpread ?? 0;
+
+      const netEdge = rawEdge - feeRate - spreadBuffer;
 
       if (netEdge < minEdge) {
-        await recordCryptoArbGate(redis, 'min_edge');
+        if (rawEdge - feeRate >= minEdge) {
+          // Edge existed but was eliminated by spread buffer.
+          await recordCryptoArbGate(redis, 'spread_block');
+          logger.debug('[crypto-arb] edge eliminated by spread buffer', {
+            marketId: market.marketId,
+            rawEdge: rawEdge.toFixed(4),
+            spread: spreadBuffer.toFixed(4),
+            netEdge: netEdge.toFixed(4),
+          });
+        } else {
+          await recordCryptoArbGate(redis, 'min_edge');
+        }
         continue;
       }
 
@@ -371,6 +396,8 @@ export async function scanCryptoArb(
         stakeUsd,
         assetId: move.assetId,
         feesEnabled: market.feesEnabled,
+        volatility: dynamicAnnualVol,
+        spreadBps: spreadBuffer * 10000,
       });
     } catch (err) {
       logger.warn('[crypto-arb] error processing market', {

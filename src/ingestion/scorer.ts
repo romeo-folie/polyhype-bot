@@ -130,7 +130,7 @@ async function scoreBatch(items: RssItem[], systemPrompt: string): Promise<Score
 export async function scoreItems(
   items: RssItem[],
   opts: {
-    systemPrompt: string;
+    systemPrompt?: string;
     categoryId: string;
     categoryLabel: string;
     entityContext: string;

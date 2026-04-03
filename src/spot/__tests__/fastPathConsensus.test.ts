@@ -11,7 +11,17 @@ vi.mock('../../shared/config.js', () => ({
     LLM_PROVIDER: 'openai',
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
+    REDIS_URL: 'redis://localhost:6379',
   }),
+}));
+
+const mockRedis = {
+  get: vi.fn().mockResolvedValue(null),
+  set: vi.fn().mockResolvedValue('OK'),
+};
+
+vi.mock('../../shared/redis.js', () => ({
+  getRedis: vi.fn(() => mockRedis),
 }));
 
 vi.mock('../../mapping/consensusCalculator.js', () => ({
@@ -46,6 +56,7 @@ function makeMarket(overrides: Partial<CorrelatedMarket> = {}): CorrelatedMarket
     description: 'Resolves YES if BTC spot price exceeds $100,000 on June 30, 2026.',
     currentYesPrice: 0.6,
     correlationDirection: 'positive',
+    feesEnabled: false,
     ...overrides,
   };
 }
@@ -123,16 +134,15 @@ describe('formulaProbability', () => {
   });
 
   it('handles expired options deterministically', () => {
-    expect(formulaProbability(95000, 80000, 'above', 0.8, 0)).toBe(1);
-    expect(formulaProbability(75000, 80000, 'above', 0.8, 0)).toBe(0);
-    expect(formulaProbability(75000, 80000, 'below', 0.8, 0)).toBe(1);
+    expect(formulaProbability(95000, 80000, 'above', 0.8, 0)).toBe(0.99);
+    expect(formulaProbability(75000, 80000, 'above', 0.8, 0)).toBe(0.01);
+    expect(formulaProbability(75000, 80000, 'below', 0.8, 0)).toBe(0.99);
   });
 
   it('clamps output to [0.01, 0.99]', () => {
     // Very extreme case — far in the money with low vol
     const prob = formulaProbability(200000, 50000, 'above', 0.1, 0.01);
-    expect(prob).toBeLessThanOrEqual(0.99);
-    expect(prob).toBeGreaterThanOrEqual(0.01);
+    expect(prob).toBe(0.99);
   });
 });
 
@@ -184,7 +194,8 @@ describe('estimateFastConsensus', () => {
 
     expect(mockEstimate).toHaveBeenCalledWith(
       expect.objectContaining({
-        headline: expect.stringContaining('+5.2%'),
+        headline: expect.stringContaining('5.2'),
+        redis: mockRedis,
       }),
     );
   });

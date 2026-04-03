@@ -13,15 +13,18 @@ export interface RssItem {
   url: string;
   publishedAt: Date;
   source: string;
+  latencyMs?: number;
 }
 
 const DEFAULT_FEEDS: FeedConfig[] = [
   { url: 'https://rss.nytimes.com/services/xml/rss/nyt/World.xml' },
   { url: 'https://feeds.skynews.com/feeds/rss/world.xml' },
+  { url: 'https://feeds.bbci.co.uk/news/world/rss.xml' },
+  { url: 'https://www.aljazeera.com/xml/rss/all.xml' },
 ];
 
 const FEED_TIMEOUT_MS = 10_000;
-const DEFAULT_USER_AGENT = 'Mozilla/5.0 (compatible; PGA/1.0; +https://llmrates.live)';
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (compatible; PGA/1.0; +https://github.com/romeo-folie/polymarket-geopolitical-agent)';
 
 function buildDefaultHeaders(): Record<string, string> {
   const raw = process.env.RSS_USER_AGENT;

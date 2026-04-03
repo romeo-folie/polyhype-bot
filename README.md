@@ -83,6 +83,7 @@ graph TD
 | **Arbitrage Worker** | `worker:arb` | Persistent (sub + 10s) | Two arb paths: (1) YES+NO combined < $1 sweep on 10s baseline; (2) crypto latency arb on every `spot:price_moved` event — BS fair value vs stale PM price, no LLM, sub-500ms |
 | **Copytrade Worker** | `worker:copytrade` | Persistent (2s loop) | Mirror expert whale wallets with category/liquidity/slippage guardrails |
 | **Futures Monitor** | `monitor:futures` | Persistent (5s poll) | HL perp SL/TP/max-hold enforcement for delta hedges and synthetic exits |
+| **Telegram Monitor** | `worker:telegram` | Persistent | MTProto listener for `dbot_alerts` / `osint_intel` → immediate scoring → execution |
 | **OSINT Pipeline** | `cron:trade` | 5 min | RSS + GDELT ingest → LLM score → Gamma mapping → divergence → execute |
 | **Position Monitor** | `cron:monitor` | 5 min | PM price resolution → SL/TP/divergence exits → auto-redeem resolved positions |
 | **Spot Monitor** | `cron:spot` | 1 min | Spot price move detection → correlated Polymarket market search → fast consensus → execute |
@@ -354,6 +355,7 @@ pm2 start "npm run worker:copytrade"  --name pga-copytrade
 pm2 start "npm run worker:arb"        --name pga-arb
 pm2 start "npm run worker:spot-feed"  --name pga-spot-feed
 pm2 start "npm run monitor:futures"   --name pga-futures
+pm2 start "npm run worker:telegram"   --name pga-telegram
 
 # Periodic pipelines (or use the crontab below)
 pm2 start "npm run cron:trade"        --name pga-trade   --cron "*/5 * * * *"
@@ -402,6 +404,7 @@ PATH=/usr/local/bin:/usr/bin:/bin
 | `npm run worker:arb` | Start persistent arbitrage worker |
 | `npm run worker:spot-feed` | Start persistent Binance/Helius WebSocket feeds |
 | `npm run monitor:futures` | Start persistent Hyperliquid futures monitor |
+| `npm run worker:telegram` | Start persistent Telegram MTProto monitor |
 | `npm run cron:shortlist` | Refresh copytrade wallet shortlist from leaderboard |
 | `npm run cron:calibrate` | Recompute calibration stats per category (weekly) |
 | `npm run sync-env` | Append missing keys from `.env.example` to `.env` |

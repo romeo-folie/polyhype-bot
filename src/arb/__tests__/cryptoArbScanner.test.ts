@@ -30,6 +30,7 @@ vi.mock('../../spot/fastPathConsensus.js', () => ({
 vi.mock('../../shared/feedSingleton.js', () => ({
   getPriceFeed: vi.fn(() => ({
     getCachedPrice: vi.fn().mockResolvedValue(null),
+    getCachedSpread: vi.fn().mockResolvedValue(null),
   })),
 }));
 
@@ -41,6 +42,7 @@ const mockRedis = {
   get: vi.fn().mockResolvedValue(null),
   set: vi.fn().mockResolvedValue('OK'),
   hincrby: vi.fn().mockResolvedValue(1),
+  zrange: vi.fn().mockResolvedValue([]),
 };
 
 function makeMove(overrides: Partial<SpotMove> = {}): SpotMove {

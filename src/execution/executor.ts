@@ -770,7 +770,7 @@ export async function executeSignal(
   }
 
   const executionMode = cfg.EXECUTION_MODE;
-  const simmerId = await resolveSimmerMarketId(signal.question);
+  const simmerId = signal.source === 'crypto-arb' ? null : await resolveSimmerMarketId(signal.question);
 
   if (simmerId) {
     // Context safeguard check — flip-flop detection, resolution criteria, market status

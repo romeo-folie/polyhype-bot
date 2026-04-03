@@ -24,7 +24,9 @@ const RECONNECT_MAX_MS = 30_000;
 // and falls back to Gamma REST on all subsequent price requests.
 const RECONNECT_MAX_ATTEMPTS = 10;
 
-export const WS_PRICE_KEY = (marketId: string): string => `ws:price:${marketId}`;
+export const WS_YES_PRICE_KEY = (marketId: string): string => `ws:price:yes:${marketId}`;
+export const WS_NO_PRICE_KEY = (marketId: string): string => `ws:price:no:${marketId}`;
+export const WS_PRICE_KEY = (marketId: string): string => `ws:price:${marketId}`; // legacy
 
 export class ClobPriceFeed {
   private ws: WebSocket | null = null;
@@ -76,10 +78,26 @@ export class ClobPriceFeed {
 
   /** Get the cached YES price for a market. Returns null on cache miss. */
   async getCachedPrice(marketId: string): Promise<number | null> {
-    const raw = await this.redis.get(WS_PRICE_KEY(marketId));
+    const rawYes = await this.redis.get(WS_YES_PRICE_KEY(marketId));
+    const raw = rawYes ?? await this.redis.get(WS_PRICE_KEY(marketId));
     if (raw === null) return null;
     const p = parseFloat(raw);
     return isFinite(p) ? p : null;
+  }
+
+  /** Get the cached spread (YES+NO-1) if both prices are available. */
+  async getCachedSpread(marketId: string): Promise<number | null> {
+    const [yes, no] = await Promise.all([
+      this.redis.get(WS_YES_PRICE_KEY(marketId)),
+      this.redis.get(WS_NO_PRICE_KEY(marketId)),
+    ]);
+    if (yes === null || no === null) return null;
+    const pYes = parseFloat(yes);
+    const pNo = parseFloat(no);
+    if (!isFinite(pYes) || !isFinite(pNo)) return null;
+    // For a binary market, YES ask + NO ask = 1.0 + spread.
+    // Thus spread = (YES + NO) - 1.0.
+    return Math.max(0, pYes + pNo - 1.0);
   }
 
   destroy(): void {
@@ -167,12 +185,24 @@ export class ClobPriceFeed {
         const marketId = this.tokenToMarket.get(tokenId);
         if (!marketId) continue;
 
-        // Only cache YES token price (index 0 in clobTokenIds)
         const tokens = this.watchedMarkets.get(marketId);
-        if (!tokens || tokens[0] !== tokenId) continue;
+        if (!tokens) continue;
 
-        await this.redis.setex(WS_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, price.toFixed(6));
-        logger.debug('[clob-ws] price cached', { marketId, price });
+        const formattedPrice = price.toFixed(6);
+
+        if (tokens[0] === tokenId) {
+          // YES token price
+          await Promise.all([
+            this.redis.setex(WS_YES_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, formattedPrice),
+            // Backward compatibility
+            this.redis.setex(WS_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, formattedPrice),
+          ]);
+        } else if (tokens[1] === tokenId) {
+          // NO token price
+          await this.redis.setex(WS_NO_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, formattedPrice);
+        }
+
+        logger.debug('[clob-ws] price cached', { marketId, tokenId, price });
       }
     }
   }

@@ -44,8 +44,7 @@ export async function runExecution(): Promise<void> {
 }
 
 async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<void> {
-  const bankrollUsd = await getBankroll(redis);
-  logger.info('[execution] pipeline starting', { bankrollUsd });
+  logger.info('[execution] pipeline starting');
 
   let highUrgencyItems: ScoredItem[] = [];
   try {
@@ -57,6 +56,40 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
     highUrgencyItems = [];
   }
 
+  if (highUrgencyItems.length > 0) {
+    await processScoredItemsInner(highUrgencyItems, redis);
+  }
+
+  logger.info('[execution] pipeline complete');
+}
+
+/**
+ * Process a set of scored items through re-evaluation, mapping, and execution.
+ * Exposed for low-latency triggers (e.g. Telegram monitor).
+ * Acquires the same execution:lock used by runExecution() to prevent concurrent runs.
+ */
+export async function processScoredItems(
+  highUrgencyItems: ScoredItem[],
+  redis: ReturnType<typeof getRedis>,
+): Promise<void> {
+  const lockToken = await acquireLock('execution:lock', 270);
+  if (!lockToken) {
+    logger.info('[execution] processScoredItems: lock held by another runner, skipping');
+    return;
+  }
+  try {
+    await processScoredItemsInner(highUrgencyItems, redis);
+  } finally {
+    await releaseLock('execution:lock', lockToken).catch(() => { /* best effort */ });
+  }
+}
+
+async function processScoredItemsInner(
+  highUrgencyItems: ScoredItem[],
+  redis: ReturnType<typeof getRedis>,
+): Promise<void> {
+  const bankrollUsd = await getBankroll(redis);
+  
   if (highUrgencyItems.length > 0) {
     try {
       // 2. Continuous Monitoring — Re-evaluate open positions against fresh OSINT before opening new ones. 
@@ -221,7 +254,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
               error: err instanceof Error ? err.message : String(err),
             });
           }
-        }, 2000);
+        }, 10000);
       }
 
       // Track HL margin consumed for accurate margin cap checks in subsequent signals.
@@ -238,7 +271,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
     }
   }
 
-  logger.info('[execution] pipeline complete', { executed, failed, skipped });
+  logger.info('[execution] batch processing complete', { executed, failed, skipped });
 }
 
 const isMain = process.argv[1]?.endsWith('execution/index.ts') ?? false;
