@@ -129,4 +129,15 @@ describe('Position Reconciliation Healer', () => {
       expect.stringContaining('healed_mismatch')
     );
   });
+
+  it('performs log-only reconciliation when forceFix is false', async () => {
+    const ledgerPos = { marketId: 'log-1', direction: 'YES', sharesHeld: 100, stakeUsd: 50, entryPrice: 0.5, executionVenue: 'simmer' };
+    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPos]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([{ market_id: 'log-1', side: 'yes', shares: 50 }]);
+
+    await runReconciliation(mockRedis, { forceFix: false });
+
+    expect(mockRedis.hset).not.toHaveBeenCalled();
+    expect(positionLedger.closePosition).not.toHaveBeenCalled();
+  });
 });

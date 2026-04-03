@@ -177,7 +177,7 @@ async function executeSimmerExit(opts: {
       }
 
       if (tradeResult.success) {
-        return await finalizeSimmerExit(redis, position, tradeResult, currentPrice, returnPct, reason);
+        return await finalizeSimmerExit(redis, position, sharesToSell, tradeResult, currentPrice, returnPct, reason);
       }
       simmerError = tradeResult.error ?? null;
     } catch (err) {
@@ -208,7 +208,7 @@ async function executeSimmerExit(opts: {
       }
 
       if (directResult.success) {
-        return await finalizeSimmerExit(redis, position, directResult, currentPrice, returnPct, reason);
+        return await finalizeSimmerExit(redis, position, sharesToSell, directResult, currentPrice, returnPct, reason);
       }
       simmerError = directResult.error ?? null;
     } catch (err) {
@@ -235,9 +235,7 @@ async function executeSimmerExit(opts: {
   }
 
   // STEP 4: Attempt Synthetic Exit on HL if all else fails
-  logger.info('[take-profit-executor] Simmer/CLOB failed — attempting synthetic exit', { marketId: position.marketId });
   const synthetic = await attemptSyntheticExit({ position, currentPrice, returnPct, reason, redis });
-  logger.info('[take-profit-executor] synthetic exit result', { marketId: position.marketId, success: synthetic?.success });
   if (synthetic && synthetic.success) return synthetic;
 
   const finalError = simmerError ?? 'Simmer resolution failed';
@@ -248,13 +246,14 @@ async function executeSimmerExit(opts: {
 async function finalizeSimmerExit(
   redis: Redis,
   position: Position,
+  sharesExited: number,
   tradeResult: { tx_hash?: string | null | undefined },
   currentPrice: number,
   returnPct: number,
   reason: ExitReason,
 ): Promise<TakeProfitResult> {
   await closePositionWithHedge(redis, position.marketId, position.direction);
-  const proceedsUsd = (position.sharesHeld ?? (position.stakeUsd / position.entryPrice)) * currentPrice;
+  const proceedsUsd = sharesExited * currentPrice;
   await creditProceeds(redis, proceedsUsd);
   await recordPositionOutcome(redis, position, {
     result: returnPct >= 0 ? 'won' : 'lost',
@@ -283,14 +282,14 @@ async function finalizeSimmerExit(
 async function finalizeClobExit(
   redis: Redis,
   position: Position,
-  shares: number,
+  sharesExited: number,
   currentPrice: number,
   returnPct: number,
   reason: ExitReason,
-  txHash?: string,
+  txHash?: string | null | undefined,
 ): Promise<TakeProfitResult> {
   await closePositionWithHedge(redis, position.marketId, position.direction);
-  const proceedsUsd = shares * currentPrice;
+  const proceedsUsd = sharesExited * currentPrice;
   await creditProceeds(redis, proceedsUsd);
   await recordPositionOutcome(redis, position, {
     result: returnPct >= 0 ? 'won' : 'lost',
@@ -437,7 +436,7 @@ async function executeClobExit(opts: {
       logger.info('[take-profit-executor] exit successful (clob)', {
         marketId: position.marketId,
         txHash: clobResult.tx_hash,
-        returnPct: returnPct.toFixed(2),
+        shares: safeShares,
       });
       return finalizeClobExit(redis, position, safeShares, currentPrice, returnPct, reason, clobResult.tx_hash);
     }

@@ -1,6 +1,6 @@
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
-import { getOpenPositions, updatePositionShares, closePosition } from '../execution/positionLedger.js';
+import { getOpenPositions, closePosition } from '../execution/positionLedger.js';
 import { getSimmerPositions } from '../shared/simmer.js';
 import { fetchClobTokenBalance } from '../shared/clob.js';
 
@@ -64,9 +64,15 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
     // 4. Reconciliation and Healing loop
     const details: ReconciliationDetail[] = [];
     let healedCount = 0;
+    let ghostsFixed = 0;
     let clobCount = 0;
 
     for (const ledgerPos of activePositions) {
+      // Skip perp positions (LONG/SHORT) or explicit HL execution venues.
+      if (ledgerPos.executionVenue === 'hyperliquid' || ledgerPos.direction === 'LONG' || ledgerPos.direction === 'SHORT') {
+        continue;
+      }
+
       const key = `${ledgerPos.marketId}:${ledgerPos.direction}`;
       let venueShares = 0;
       let foundOnVenue = false;
@@ -87,15 +93,21 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
         const tokenIndex = ledgerPos.direction === 'YES' ? 0 : 1;
         const tokenId = tokenIds[tokenIndex];
 
-        if (tokenId) {
-          const balanceResult = await fetchClobTokenBalance(tokenId);
-          if (balanceResult.ok) {
-            venueShares = balanceResult.balance;
-            foundOnVenue = venueShares > 0.0001; // Allow for dust
-          } else {
-            logger.warn('[reconcile] CLOB balance fetch failed — skipping heal', { marketId: ledgerPos.marketId, tokenId });
-            continue;
-          }
+        if (!tokenId) {
+          logger.warn('[reconcile] CLOB tokenId missing or invalid — unable to verify position, skipping heal', {
+            marketId: ledgerPos.marketId,
+            direction: ledgerPos.direction,
+          });
+          continue;
+        }
+
+        const balanceResult = await fetchClobTokenBalance(tokenId);
+        if (balanceResult.ok) {
+          venueShares = balanceResult.balance;
+          foundOnVenue = venueShares > 0.0001; // Allow for dust
+        } else {
+          logger.warn('[reconcile] CLOB balance fetch failed — skipping heal', { marketId: ledgerPos.marketId, tokenId });
+          continue;
         }
       }
 
@@ -110,7 +122,10 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
           ledgerShares,
         });
         
-        await closePosition(redis, ledgerPos.marketId, ledgerPos.direction);
+        if (opts.forceFix) {
+          await closePosition(redis, ledgerPos.marketId, ledgerPos.direction);
+          ghostsFixed++;
+        }
         details.push({
           type: 'ghost',
           marketId: ledgerPos.marketId,
@@ -119,7 +134,6 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
           ledgerShares,
           reason: 'closed stale ledger entry (ghost)',
         });
-        healedCount++;
         continue;
       }
 
@@ -144,11 +158,14 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
         });
 
         // Write healer: update both shares and entry price in Redis
-        await redis.hset(`position:${ledgerPos.marketId}:${ledgerPos.direction}`, 
-          'sharesHeld', String(venueShares),
-          'entryPrice', String(actualEntryPrice.toFixed(6)),
-          'reconciliationStatus', `healed_mismatch:${new Date().toISOString()}`
-        );
+        if (opts.forceFix) {
+          await redis.hset(`position:${ledgerPos.marketId}:${ledgerPos.direction}`, 
+            'sharesHeld', String(venueShares),
+            'entryPrice', String(actualEntryPrice.toFixed(6)),
+            'reconciliationStatus', `healed_mismatch:${new Date().toISOString()}`
+          );
+          healedCount++;
+        }
 
         details.push({
           type: 'healed',
@@ -159,7 +176,6 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
           venueShares,
           reason: `healed mismatch: derived price ${actualEntryPrice.toFixed(4)} from ${venueShares.toFixed(2)} shares`,
         });
-        healedCount++;
       }
     }
 
@@ -177,13 +193,11 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
 
     // Summary counts
     const orphans = details.filter((d) => d.type === 'orphan').length;
-    const ghosts = details.filter((d) => d.type === 'ghost').length;
-    const healed = details.filter((d) => d.type === 'healed').length;
 
     logger.info('[reconcile] cycle complete', {
       totalInput: activePositions.length,
-      healedCount: healed,
-      ghostsFixed: ghosts,
+      healedCount: healedCount,
+      ghostsFixed: ghostsFixed,
       orphansRemaining: orphans,
       clobChecked: clobCount,
     });

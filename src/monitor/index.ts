@@ -62,14 +62,9 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
 
   logger.info('[monitor] starting position check', { takeProfitThreshold, stopLossThreshold });
 
-  // -- SELF-HEALING: Run an immediate reconciliation on start to fix any stale ledger entries --
-  try {
-    await runReconciliation(redis, { forceFix: true });
-  } catch (err) {
-    logger.warn('[monitor] initial reconciliation failed — continuing with potentially stale data', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  // 1. Initial reconciliation pass (self-healing)
+  logger.info('[monitor] running startup reconciliation pass');
+  await runReconciliation(redis, { forceFix: true });
 
   // 0. Redeem any resolved winning positions first
   const redemptions = await redeemResolvedPositions(redis);

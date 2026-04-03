@@ -102,6 +102,12 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
     // currentOutcomePrice is the price of the side we hold.
     // If the market is healthy, YES + NO prices should sum to approx 1.0.
     // We prefer the direct price of the held outcome if available.
+    // Validate NO price as well if direction is NO
+    if (pmDirection === 'NO' && !Number.isFinite(currentNoPrice)) {
+      logger.warn('[price-fetcher] invalid NO price for outcome', { marketId: position.marketId, outcome: outcomes[resolvedNoIndex] });
+      return null;
+    }
+
     const currentOutcomePrice = pmDirection === 'YES' ? currentYesPrice : currentNoPrice;
 
     return {
