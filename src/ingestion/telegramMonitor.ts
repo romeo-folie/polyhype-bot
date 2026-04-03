@@ -81,14 +81,14 @@ export async function startTelegramMonitor(): Promise<void> {
     .filter(Boolean);
 
   // Pre-resolve channel IDs to avoid getEntity calls in the hot path
-  const resolvedEntities: any[] = [];
+  const resolvedPeerIds: string[] = [];
   const channelNameMap = new Map<string, string>(); // ID -> Name
 
   for (const channelName of channels) {
     try {
       const entity = await client.getEntity(channelName);
       const id = await client.getPeerId(entity); // Canonical string ID
-      resolvedEntities.push(entity);
+      resolvedPeerIds.push(id);
       channelNameMap.set(id, (channelName || 'channel').replace(/^@/, ''));
       logger.debug('[telegram] resolved channel', { name: channelName, id });
     } catch (err: unknown) {
@@ -101,7 +101,7 @@ export async function startTelegramMonitor(): Promise<void> {
 
   logger.info('[telegram] monitoring channels', {
     resolved: Array.from(channelNameMap.values()),
-    count: resolvedEntities.length,
+    count: resolvedPeerIds.length,
   });
 
   let messageCount = 0;
@@ -109,7 +109,7 @@ export async function startTelegramMonitor(): Promise<void> {
   setInterval(() => {
     logger.info('[telegram] heartbeat', {
       connected: client?.connected,
-      monitoredChannels: resolvedEntities.length,
+      monitoredChannels: resolvedPeerIds.length,
       messagesProcessed: messageCount,
     });
   }, 60000);
@@ -131,7 +131,7 @@ export async function startTelegramMonitor(): Promise<void> {
     });
 
     // If we have resolved IDs, strictly filter here (though NewMessage filter handles most)
-    if (resolvedEntities.length > 0 && peerId && !channelNameMap.has(peerId)) {
+    if (resolvedPeerIds.length > 0 && peerId && !channelNameMap.has(peerId)) {
       return;
     }
 
@@ -198,7 +198,7 @@ export async function startTelegramMonitor(): Promise<void> {
         peer: peerName,
       });
     }
-  }, new NewMessage(resolvedEntities.length > 0 ? { chats: resolvedEntities } : {}));
+  }, new NewMessage(resolvedPeerIds.length > 0 ? { chats: resolvedPeerIds } : {}));
 }
 
 /**
