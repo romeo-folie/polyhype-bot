@@ -87,6 +87,7 @@ graph TD
 | **OSINT Pipeline** | `cron:trade` | 5 min | RSS + GDELT ingest → LLM score → Gamma mapping → divergence → execute |
 | **Position Monitor** | `cron:monitor` | 5 min | PM price resolution → SL/TP/divergence exits → auto-redeem resolved positions |
 | **Spot Monitor** | `cron:spot` | 1 min | Spot price move detection → correlated Polymarket market search → fast consensus → execute |
+| **Watchlist Refresh** | `cron:watchlist` | 1 hour | Syncs active Polymarket market keywords with Redis for the Dynamic Watchlist gate |
 
 ---
 
@@ -403,7 +404,7 @@ PATH=/usr/local/bin:/usr/bin:/bin
 | `npm run format` | Prettier |
 | `npm test` | Vitest test suite |
 | `npm run probe:simmer` | Verify Simmer SDK connectivity |
-| `npm run cron:trade` | Run OSINT pipeline once |
+| `npm run cron:trade` | Run OSINT pipeline once (ingest + map + execute) |
 | `npm run cron:monitor` | Run position monitor once |
 | `npm run cron:spot` | Run spot monitor once |
 | `npm run worker:copytrade` | Start persistent copytrade worker |
