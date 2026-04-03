@@ -69,32 +69,42 @@ export async function startTelegramMonitor(): Promise<void> {
     .split(',')
     .map((s) => s.trim().replace(/^@/, ''))
     .filter(Boolean);
-  logger.info('[telegram] monitoring channels', { channels });
 
-  // Event handler for new messages
+  // Pre-resolve channel IDs to avoid getEntity calls in the hot path
+  const resolvedChannelIds: string[] = [];
+  const channelNameMap = new Map<string, string>(); // ID -> Name
+
+  for (const channelName of channels) {
+    try {
+      const entity = await client.getEntity(channelName);
+      const id = entity.id.toString();
+      resolvedChannelIds.push(id);
+      channelNameMap.set(id, (channelName || 'channel').replace(/^@/, ''));
+      logger.debug('[telegram] resolved channel', { name: channelName, id });
+    } catch (err: unknown) {
+      logger.warn('[telegram] could not resolve channel entity at startup', {
+        channel: channelName,
+        error: String(err),
+      });
+    }
+  }
+
+  logger.info('[telegram] monitoring channels', {
+    resolved: Array.from(channelNameMap.values()),
+    count: resolvedChannelIds.length,
+  });
+
+  // Event handler for new messages with explicit chat filtering
   client.addEventHandler(async (event: NewMessageEvent) => {
     const message = event.message;
-    if (!message.text) return;
+    if (!message || !message.text) return;
 
-    // Resolve channel/peer info
-    let peerName = 'unknown';
-    let peerUrlSlug = 'unknown';
-    try {
-      const peer = await client?.getEntity(message.peerId);
-      if (peer instanceof Api.Channel) {
-        peerName = (peer.username ?? peer.title ?? 'channel').replace(/^@/, '');
-        // Build a valid t.me URL using the username when available; fall back to channel ID
-        peerUrlSlug = peer.username ?? `c/${peer.id.toString()}`;
-      } else if (peer instanceof Api.Chat) {
-        peerName = (peer.title || 'chat').replace(/^@/, '');
-        peerUrlSlug = `c/${peer.id.toString()}`;
-      }
-    } catch {
-      /* best effort */
-    }
+    // Fast-path ID check
+    const peerId = message.peerId?.toString();
+    const peerName = (peerId && channelNameMap.get(peerId)) || 'unknown';
 
-    // Filter by configured channel list using the resolved name/username
-    if (channels.length > 0 && !channels.includes(peerName)) {
+    // If we have resolved IDs, strictly filter here (though NewMessage filter handles most)
+    if (resolvedChannelIds.length > 0 && peerId && !resolvedChannelIds.includes(peerId)) {
       return;
     }
 
@@ -102,27 +112,30 @@ export async function startTelegramMonitor(): Promise<void> {
     const telegramLatency = startAt - message.date * 1000;
     logger.info('[telegram] new message received', {
       from: peerName,
-      text: message.text.slice(0, 50) + '...',
+      text: message.text.slice(0, 70).replace(/\n/g, ' ') + '...',
       latency: `${telegramLatency.toString()}ms`,
     });
 
     try {
       const redis = getRedis();
+      const cfgInternal = loadConfig(); // Refresh for threshold changes
 
-      // 1. Convert to RssItem format for scoring
+      // 1. Build Item
+      // Use fallback for URL if username not available
+      const url = `https://t.me/${peerName}/${message.id.toString()}`;
+
       const item = {
         title: message.text.trim(),
-        url: `https://t.me/${peerUrlSlug}/${message.id.toString()}`,
+        url,
         publishedAt: new Date(),
         source: `telegram:${peerName}`,
         latencyMs: telegramLatency,
       };
 
-      // 1.5 Dynamic Watchlist Gate: skip LLM if no market mentions
+      // 1.5 Dynamic Watchlist Gate
       if (!(await matchesWatchlist(item.title, redis))) {
         logger.debug('[telegram] skipping message — no watchlist match', {
           from: peerName,
-          text: item.title.slice(0, 50) + '...',
         });
         return;
       }
@@ -135,7 +148,7 @@ export async function startTelegramMonitor(): Promise<void> {
         redis,
       });
 
-      const highUrgency = scored.filter((i) => i.urgencyScore >= cfg.URGENCY_THRESHOLD);
+      const highUrgency = scored.filter((i) => i.urgencyScore >= cfgInternal.URGENCY_THRESHOLD);
 
       if (highUrgency.length > 0) {
         logger.info('[telegram] high-urgency message triggering execution', {
@@ -143,7 +156,7 @@ export async function startTelegramMonitor(): Promise<void> {
           latencyMs: Date.now() - startAt,
         });
 
-        // 3. Trigger immediate execution (bypass cron lag)
+        // 3. Trigger immediate execution
         await processScoredItems(highUrgency, redis);
       } else {
         logger.debug('[telegram] message ignored (low urgency)', {
@@ -151,11 +164,12 @@ export async function startTelegramMonitor(): Promise<void> {
         });
       }
     } catch (err: unknown) {
-      logger.error('[telegram] ingestion error', {
-        error: err instanceof Error ? err.message : String(err),
+      logger.error('[telegram] error processing message', {
+        error: String(err),
+        peer: peerName,
       });
     }
-  }, new NewMessage({}));
+  }, new NewMessage(resolvedChannelIds.length > 0 ? { chats: resolvedChannelIds } : {}));
 }
 
 /**
