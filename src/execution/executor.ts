@@ -952,7 +952,7 @@ export async function executeSignal(
     }
   }
 
-  if (executionMode === 'hybrid') {
+  if (executionMode === 'hybrid' || executionMode === 'taker') {
     const takerGate = canExecuteTaker(signal, cfg);
     if (!takerGate.ok) {
       logger.info('[executor] skipping — taker gate blocked', {

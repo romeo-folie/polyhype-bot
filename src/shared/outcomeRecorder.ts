@@ -81,6 +81,9 @@ export function inferCategory(question: string): string {
   if (/olympics|mlb|baseball|tennis|atp|wta|nhl|hockey|championship/.test(q)) {
     return 'sports';
   }
+  if (/mention|say|tweet|post|transcript|phrase|word|quoted/.test(q)) {
+    return 'mentions';
+  }
   return 'geopolitical';
 }
 

@@ -517,6 +517,21 @@ describe('execution mode', () => {
     expect(mockSubmit).not.toHaveBeenCalled();
   });
 
+  it('respects category-specific TAKER_MIN_EDGE overrides', async () => {
+    mockConfig.EXECUTION_MODE = 'taker';
+    mockConfig.TAKER_MIN_EDGE = 0.05;
+    mockConfig.TAKER_MIN_EDGE_CATEGORIES = { geopolitical: 0.15 };
+    const redis = makeRedis();
+
+    // 10% edge should be blocked by 15% category limit, even though global 5% allows it
+    const signal = makeSignal({ edgeMagnitude: 0.10 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(signal, redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('taker_edge_below_min:geopolitical');
+  });
+
   it('captures a direct taker decision benchmark when an order book is available', async () => {
     mockConfig.EXECUTION_MODE = 'taker';
     mockGetOrderBook.mockResolvedValue({
