@@ -97,8 +97,8 @@ function extractDeadline(question: string): number | null {
   if (monthYearMatch) {
     const month = months[monthYearMatch[1]!.toLowerCase()]!;
     const year = parseInt(monthYearMatch[2]!, 10);
-    // Use UTC end of the last day of the month
-    const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+    // Use UTC end of the last day of the month (day=0 of next month = last day of current month)
+    const lastDay = new Date(year, month + 1, 0).getUTCDate();
     return utcEndOfDay(year, month, lastDay);
   }
 

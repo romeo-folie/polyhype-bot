@@ -80,7 +80,7 @@ export async function startTelegramMonitor(): Promise<void> {
       if (peer instanceof Api.Channel) {
         peerName = peer.username || peer.title || 'channel';
         // Build a valid t.me URL using the username when available; fall back to channel ID
-        peerUrlSlug = peer.username ? peer.username : `c/${peer.id}`;
+        peerUrlSlug = peer.username ?? `c/${peer.id}`;
       } else if (peer instanceof Api.Chat) {
         peerName = peer.title || 'chat';
         peerUrlSlug = `c/${peer.id}`;
