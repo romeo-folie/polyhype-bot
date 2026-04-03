@@ -182,7 +182,7 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
     }
 
     // 5. Handle Orphans (positions on Simmer but not in ledger)
-    for (const [key, simmerPos] of simmerMap.entries()) {
+    for (const [_key, simmerPos] of simmerMap.entries()) {
       details.push({
         type: 'orphan',
         marketId: simmerPos.market_id,

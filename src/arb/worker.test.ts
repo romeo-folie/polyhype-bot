@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ArbitrageWorker } from './worker.js';
 import { runArbScan } from './scanner.js';
-import { loadConfig } from '../shared/config.js';
 
 // Config override pattern for per-test rate-limit configs
 let configOverride: Record<string, unknown> = {};

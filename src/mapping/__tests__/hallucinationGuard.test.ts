@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { findCorrelatedMarkets } from '../../spot/marketCorrelator.js';
 import { findCandidateMarkets } from '../entityExtractor.js';
-import { estimateConsensusProbability } from '../consensusCalculator.js';
-import { getRedis } from '../../shared/redis.js';
 
 vi.mock('../../shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },

@@ -24,7 +24,7 @@ vi.mock('rss-parser', () => ({
 }));
 
 describe('fetchRssFeeds', () => {
-  const originalUserAgent = process.env.RSS_USER_AGENT;
+  const _originalUserAgent = process.env.RSS_USER_AGENT;
   const fetchMock = vi.fn();
 
   beforeEach(() => {

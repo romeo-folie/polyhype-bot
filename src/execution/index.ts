@@ -16,7 +16,6 @@ import { logger } from '../shared/logger.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping, mapNewsToFutures } from '../mapping/index.js';
 import { executeSignal } from './executor.js';
-import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import { recordPosition } from './positionLedger.js';
 import { resolveSimmerMarketId, getSimmerPositions } from '../shared/simmer.js';
 import { notifyTradeExecuted, notifyTradeError } from './telegram.js';

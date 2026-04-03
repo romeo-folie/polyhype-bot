@@ -14,7 +14,7 @@ import { estimateFastConsensus } from '../spot/fastPathConsensus.js';
 import { getBankroll } from '../shared/bankroll.js';
 import { recordCryptoArbGate } from '../shared/telemetry.js';
 import { scoreConfluence } from './confluenceScorer.js';
-import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
+import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { Redis } from 'ioredis';
 

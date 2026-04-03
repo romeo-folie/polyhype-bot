@@ -69,8 +69,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
   const HEARTBEAT_INTERVAL_MS = 120000; // 2 minutes
 
   // eslint-disable-next-line no-constant-condition
-  let monitorRunning = true;
-  while (monitorRunning) {
+  while (true) {
     // Refresh lock TTL each cycle to stay alive.
     const lockRefreshResult = await redis
       .eval(

@@ -62,11 +62,11 @@ async function main(): Promise<void> {
 
   const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY);
   const signatureType = Number(
-    process.env['PROBE_SIGNATURE_TYPE'] ?? cfg.POLYMARKET_SIGNATURE_TYPE,
+    process.env.PROBE_SIGNATURE_TYPE ?? cfg.POLYMARKET_SIGNATURE_TYPE,
   ) as 0 | 1 | 2;
   const funderAddress =
-    process.env['PROBE_FUNDER_ADDRESS'] ?? cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
-  const forceRederive = process.env['PROBE_FORCE_REDERIVE'] === '1';
+    process.env.PROBE_FUNDER_ADDRESS ?? cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
+  const forceRederive = process.env.PROBE_FORCE_REDERIVE === '1';
 
   console.log('=== CLOB Allowance Probe ===');
   console.log('host           :', HOST);
@@ -76,7 +76,7 @@ async function main(): Promise<void> {
   console.log('signatureType  :', signatureType);
 
   // Connect to Redis to retrieve cached creds
-  const redisUrl = process.env['REDIS_URL'];
+  const redisUrl = process.env.REDIS_URL;
   if (!redisUrl) throw new Error('REDIS_URL is required');
   const redis = new Redis(redisUrl, { maxRetriesPerRequest: 2, lazyConnect: true });
 
@@ -103,7 +103,7 @@ async function main(): Promise<void> {
       funderAddress,
     );
     const derived = await bootstrap.createOrDeriveApiKey();
-    if (!derived || !derived.key) {
+    if (!derived?.key) {
       throw new Error(
         'createOrDeriveApiKey returned empty/undefined — check sig type and funder address',
       );

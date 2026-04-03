@@ -197,7 +197,7 @@ describe('runMapping', () => {
     // The price bounds check lives in findCandidateMarkets (entityExtractor.ts).
     // This test verifies it directly: when the raw Gamma price parses to > 1,
     // the candidate must not be admitted (seen.set never called → empty result).
-    const { findCandidateMarkets: realFinder } = await import('../entityExtractor.js');
+    const { findCandidateMarkets: _realFinder } = await import('../entityExtractor.js');
     // We can't test the real network path here, but we can verify the contract:
     // a candidate built with currentYesPrice = 1.5 must never reach runMapping
     // when the real extractor is in use. We assert via the mock: if the mock

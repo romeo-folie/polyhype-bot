@@ -13,8 +13,8 @@ vi.mock('../../shared/config.js', () => ({
     REDIS_URL: 'redis://localhost:6379',
     SIMMER_API_KEY: 'test-key',
     OPENAI_API_KEY: 'test-openai',
-    TELEGRAM_BOT_TOKEN: process.env['TELEGRAM_BOT_TOKEN'],
-    TELEGRAM_CHAT_ID: process.env['TELEGRAM_CHAT_ID'],
+    TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID,
   })),
 }));
 
@@ -64,13 +64,13 @@ function makePosition(overrides: Partial<Position> = {}): Position {
 describe('Telegram notifications', () => {
   beforeEach(() => {
     mockFetch.mockReset();
-    process.env['TELEGRAM_BOT_TOKEN'] = 'test-token';
-    process.env['TELEGRAM_CHAT_ID'] = 'test-chat';
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+    process.env.TELEGRAM_CHAT_ID = 'test-chat';
   });
 
   afterEach(() => {
-    delete process.env['TELEGRAM_BOT_TOKEN'];
-    delete process.env['TELEGRAM_CHAT_ID'];
+    delete process.env.TELEGRAM_BOT_TOKEN;
+    delete process.env.TELEGRAM_CHAT_ID;
   });
 
   describe('notifyTradeExecuted', () => {
@@ -90,7 +90,7 @@ describe('Telegram notifications', () => {
     });
 
     it('no-ops when bot token is missing', async () => {
-      delete process.env['TELEGRAM_BOT_TOKEN'];
+      delete process.env.TELEGRAM_BOT_TOKEN;
       await notifyTradeExecuted(makeSignal(), undefined);
       expect(mockFetch).not.toHaveBeenCalled();
     });

@@ -16,7 +16,6 @@ import { estimateConsensusProbability, estimateSentiment } from './consensusCalc
 import { computeDivergence } from './divergenceCalculator.js';
 import { resolveYesPrice } from '../shared/priceCache.js';
 import { resolveHlSymbol } from '../shared/hyperliquid.js';
-import type { TradeDecision } from './divergenceCalculator.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 import type { Redis } from 'ioredis';
 import type { ClobPriceFeed } from '../shared/clobWebSocket.js';

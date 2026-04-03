@@ -73,13 +73,13 @@ describe('estimateConsensusProbability', () => {
     mockChatCreate.mockReset();
     mockGetRecentOutcomes.mockReset();
     mockGetRecentOutcomes.mockResolvedValue([]);
-    process.env['GEMINI_API_KEY'] = 'test-gemini-key';
-    process.env['OPENAI_API_KEY'] = 'test-openai-key';
+    process.env.GEMINI_API_KEY = 'test-gemini-key';
+    process.env.OPENAI_API_KEY = 'test-openai-key';
   });
 
   afterEach(() => {
-    delete process.env['GEMINI_API_KEY'];
-    delete process.env['OPENAI_API_KEY'];
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
   });
 
   it('returns mean and stddev from N=2 samples (dual provider)', async () => {

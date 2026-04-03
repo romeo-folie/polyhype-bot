@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 // Mock logger
 vi.mock('../../shared/logger.js', () => ({
@@ -31,7 +31,7 @@ function makePosition(overrides: Partial<Position> = {}): Position {
 
 function makeRedis() {
   const store: Record<string, Record<string, string>> = {};
-  const zsets: Record<string, Array<[number, string]>> = {};
+  const zsets: Record<string, [number, string][]> = {};
 
   return {
     hset: vi.fn(async (key: string, fields: Record<string, string>) => {
@@ -41,7 +41,7 @@ function makeRedis() {
     expire: vi.fn(async () => 1),
     zadd: vi.fn(async (key: string, score: number, member: string) => {
       if (!zsets[key]) zsets[key] = [];
-      zsets[key]!.push([score, member]);
+      zsets[key].push([score, member]);
       return 1;
     }),
     zrange: vi.fn(async (key: string) => {
@@ -49,12 +49,13 @@ function makeRedis() {
     }),
     zrem: vi.fn(async (key: string, member: string) => {
       if (zsets[key]) {
-        zsets[key] = zsets[key]!.filter(([, m]) => m !== member);
+        zsets[key] = zsets[key].filter(([, m]) => m !== member);
       }
       return 1;
     }),
     hgetall: vi.fn(async (key: string) => store[key] ?? null),
     del: vi.fn(async (key: string) => {
+      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
       delete store[key];
       return 1;
     }),
@@ -83,7 +84,7 @@ describe('recordPosition', () => {
 
     const call = redis.hset.mock.calls[0] as [string, Record<string, string>];
     const fields = call[1];
-    expect(fields['clobTokenIds']).toBe('["tok-a","tok-b"]');
+    expect(fields.clobTokenIds).toBe('["tok-a","tok-b"]');
   });
 });
 
@@ -171,9 +172,10 @@ describe('executionVenue', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await recordPosition(redis as any, makePosition({ executionVenue: 'simmer' }));
 
-    // Manually remove the executionVenue field from the stored hash
     const key = Object.keys(redis._store)[0]!;
-    delete redis._store[key]!['executionVenue'];
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { executionVenue: _, ...rest } = redis._store[key]!;
+    redis._store[key] = rest;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const positions = await getOpenPositions(redis as any);

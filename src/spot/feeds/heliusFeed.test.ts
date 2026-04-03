@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { HeliusFeed } from './heliusFeed.js';
-import { getRedis } from '../../shared/redis.js';
 import WebSocket from 'ws';
 
 // Mock Redis singleton

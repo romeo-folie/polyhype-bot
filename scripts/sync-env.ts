@@ -78,8 +78,7 @@ function main() {
     newEnvContent += '\n';
   }
 
-  newEnvContent +=
-    '\n# ── Added by sync-env utility (' + new Date().toISOString().split('T')[0] + ') ──\n';
+  newEnvContent += `\n# ── Added by sync-env utility (${new Date().toISOString().split('T')[0] ?? ''}) ──\n`;
   newEnvContent += missingKeys.join('\n') + '\n';
 
   fs.writeFileSync(ENV_PATH, newEnvContent);

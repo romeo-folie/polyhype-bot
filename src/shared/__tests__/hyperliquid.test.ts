@@ -37,8 +37,8 @@ describe('HyperliquidClient', () => {
   });
 
   it('correctly maps assets in HL_SYMBOL_MAP', () => {
-    expect(HL_SYMBOL_MAP['bitcoin']).toBe('BTC');
-    expect(HL_SYMBOL_MAP['ethereum']).toBe('ETH');
+    expect(HL_SYMBOL_MAP.bitcoin).toBe('BTC');
+    expect(HL_SYMBOL_MAP.ethereum).toBe('ETH');
   });
 
   it('getOpenPositions structures data correctly', async () => {

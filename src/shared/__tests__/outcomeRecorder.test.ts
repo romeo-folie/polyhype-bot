@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('../config.js', () => ({
   loadConfig: vi.fn(() => ({
@@ -121,7 +121,7 @@ describe('getRecentOutcomes', () => {
     const redis = makeRedis();
 
     // Manually set up sorted set with explicit timestamps to ensure ordering
-    const ids = ['id-old', 'id-mid', 'id-new'];
+    const _ids = ['id-old', 'id-mid', 'id-new'];
     redis._sortedSets.set('outcomes:geopolitical', [
       { score: 1000, member: 'id-old' },
       { score: 2000, member: 'id-mid' },
