@@ -53,20 +53,25 @@ W5="tail -f /tmp/pga-trade.log                   | sed 's/\(\[[^]]*\]\)/\x1b[34m
 W6="tail -f /tmp/pga-monitor.log                 | sed 's/\(\[[^]]*\]\)/\x1b[96m\1\x1b[0m/g'"
 W7="tail -f /tmp/pga-spot.log                    | sed 's/\(\[[^]]*\]\)/\x1b[95m\1\x1b[0m/g'"
 
-# Create 8 separate windows first
+# Partition the window into a deterministic 2x4 grid
+# Start with the first worker (Spot Feed)
 tmux new-session  -d -s "$SESSION" -n w0 -x 220 -y 60 "sh -c \"$W0\""
-for i in 1 2 3 4 5 6 7; do
-  cmd_var="W$i"
-  eval cmd_val=\$$cmd_var
-  tmux new-window -t "$SESSION" -n "w$i" "sh -c \"$cmd_val\""
-done
 
-# Join windows into w0 re-tiling after each join to keep space balanced
-for i in 1 2 3 4 5 6 7; do
-  tmux join-pane -s "${SESSION}:w$i" -t "${SESSION}:w0"
-  tmux select-layout -t "${SESSION}:w0" tiled
-done
+# 1. Split vertically for two rows. Top=Workers, Bottom=Logs
+tmux split-window -v -t "${SESSION}:w0.0" "sh -c \"$W4\""
 
+# 2. Split Top row into 4 columns (W1, W2, W3 joined with W0)
+tmux split-window -h -t "${SESSION}:w0.0" "sh -c \"$W1\""
+tmux split-window -h -t "${SESSION}:w0.0" "sh -c \"$W2\""
+tmux split-window -h -t "${SESSION}:w0.0" "sh -c \"$W3\""
+
+# 3. Split Bottom row into 4 columns (W5, W6, W7 joined with W4)
+tmux split-window -h -t "${SESSION}:w0.1" "sh -c \"$W5\""
+tmux split-window -h -t "${SESSION}:w0.1" "sh -c \"$W6\""
+tmux split-window -h -t "${SESSION}:w0.1" "sh -c \"$W7\""
+
+# Force balance and select primary focus
+tmux select-layout -t "${SESSION}:w0" tiled
 tmux set-option  -t "$SESSION" remain-on-exit on
 tmux select-pane -t "${SESSION}:w0.0"
 tmux attach-session -t "$SESSION"
