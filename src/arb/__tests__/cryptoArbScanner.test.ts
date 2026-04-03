@@ -64,7 +64,7 @@ function makeMarket(overrides: Record<string, unknown> = {}) {
     clobTokenIds: ['yes-tok', 'no-tok'],
     question: 'Will Bitcoin be above $100,000 on June 30, 2026?',
     description: null,
-    currentYesPrice: 0.60,
+    currentYesPrice: 0.6,
     correlationDirection: 'positive' as const,
     ...overrides,
   };
@@ -103,7 +103,7 @@ describe('cryptoArbScanner', () => {
 
     mockFindCorrelatedMarkets.mockResolvedValue([makeMarket({ currentYesPrice: 0.45 })]);
     mockEstimateFastConsensus.mockResolvedValue({
-      probability: 0.30,
+      probability: 0.3,
       reasoning: 'formula',
       method: 'formula',
       stddev: 0,
@@ -121,7 +121,7 @@ describe('cryptoArbScanner', () => {
   it('returns empty when edge below threshold', async () => {
     const { scanCryptoArb } = await import('../cryptoArbScanner.js');
 
-    mockFindCorrelatedMarkets.mockResolvedValue([makeMarket({ currentYesPrice: 0.60 })]);
+    mockFindCorrelatedMarkets.mockResolvedValue([makeMarket({ currentYesPrice: 0.6 })]);
     // edge = |0.65 - 0.60| - 0.02 = 0.03 < 0.08
     mockEstimateFastConsensus.mockResolvedValue({
       probability: 0.65,
@@ -198,10 +198,7 @@ describe('cryptoArbScanner', () => {
   it('returns empty for unknown asset without error', async () => {
     const { scanCryptoArb } = await import('../cryptoArbScanner.js');
 
-    const opps = await scanCryptoArb(
-      makeMove({ assetId: 'unknown-coin' }),
-      mockRedis as never,
-    );
+    const opps = await scanCryptoArb(makeMove({ assetId: 'unknown-coin' }), mockRedis as never);
 
     expect(opps).toHaveLength(0);
     expect(mockFindCorrelatedMarkets).not.toHaveBeenCalled();
@@ -235,7 +232,7 @@ describe('computeVolatility', () => {
     const redis = makeRedisWithPrices([100, 110, 99]);
     const vol = await computeVolatility('btcusdt', redis);
     expect(vol).not.toBeNull();
-    expect(vol!).toBeCloseTo(0.10, 5);
+    expect(vol!).toBeCloseTo(0.1, 5);
   });
 
   it('forward-fills invalid entries instead of creating gaps', async () => {
@@ -262,7 +259,7 @@ describe('scanCryptoArb — volatility gate', () => {
     CRYPTO_ARB_ENABLED: true,
     CRYPTO_ARB_VOLATILITY_GATE_ENABLED: true,
     CRYPTO_ARB_MIN_VOLATILITY: 0.005,
-    CRYPTO_ARB_MAX_VOLATILITY: 0.10,
+    CRYPTO_ARB_MAX_VOLATILITY: 0.1,
     CRYPTO_ARB_MIN_EDGE: 0.08,
     CRYPTO_ARB_MAX_STAKE_FRACTION: 0.03,
     CRYPTO_ARB_DEDUP_TTL_S: 300,

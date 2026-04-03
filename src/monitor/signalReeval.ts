@@ -23,12 +23,55 @@ import type { ScoredItem } from '../ingestion/scorer.js';
 // cause nearly every headline to match every position, burning LLM tokens
 // on irrelevant re-evaluations.
 const STOP_WORDS = new Set([
-  'will', 'does', 'have', 'been', 'this', 'that', 'what', 'when', 'where',
-  'which', 'with', 'from', 'into', 'more', 'than', 'them', 'they', 'their',
-  'there', 'then', 'each', 'also', 'most', 'some', 'over', 'only', 'very',
-  'just', 'about', 'after', 'again', 'before', 'being', 'below', 'between',
-  'both', 'could', 'during', 'further', 'here', 'other', 'same', 'should',
-  'such', 'under', 'until', 'while', 'would', 'your',
+  'will',
+  'does',
+  'have',
+  'been',
+  'this',
+  'that',
+  'what',
+  'when',
+  'where',
+  'which',
+  'with',
+  'from',
+  'into',
+  'more',
+  'than',
+  'them',
+  'they',
+  'their',
+  'there',
+  'then',
+  'each',
+  'also',
+  'most',
+  'some',
+  'over',
+  'only',
+  'very',
+  'just',
+  'about',
+  'after',
+  'again',
+  'before',
+  'being',
+  'below',
+  'between',
+  'both',
+  'could',
+  'during',
+  'further',
+  'here',
+  'other',
+  'same',
+  'should',
+  'such',
+  'under',
+  'until',
+  'while',
+  'would',
+  'your',
 ]);
 
 /** Extract meaningful keywords from a market question, filtering stop-words. */
@@ -125,8 +168,7 @@ export async function reEvaluatePositions(
     // Compute fresh edge
     const freshP = freshConsensus.probability;
     const marketP = currentPrice.currentYesPrice;
-    const freshEdge =
-      position.direction === 'YES' ? freshP - marketP : (1 - freshP) - (1 - marketP);
+    const freshEdge = position.direction === 'YES' ? freshP - marketP : 1 - freshP - (1 - marketP);
 
     logger.info('[reeval] position re-evaluated', {
       marketId: position.marketId,

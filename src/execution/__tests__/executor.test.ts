@@ -25,6 +25,20 @@ vi.mock('../../shared/clob.js', () => ({
   cancelClobOrder: vi.fn(),
 }));
 
+vi.mock('../../shared/governor.js', () => ({
+  checkGlobalGovernor: vi.fn().mockResolvedValue({ ok: true, elapsedMs: 1000, minIntervalMs: 100 }),
+  recordGlobalTrade: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../../shared/redis.js', () => ({
+  getRedis: vi.fn().mockReturnValue({
+    set: vi.fn().mockResolvedValue('OK'),
+    get: vi.fn().mockResolvedValue(null),
+    expire: vi.fn().mockResolvedValue(1),
+    incrbyfloat: vi.fn().mockResolvedValue(1),
+  }),
+}));
+
 vi.mock('../positionLedger.js', () => ({
   hasOpenPosition: vi.fn(),
 }));
@@ -41,7 +55,7 @@ const mockConfig = {
   FUTURES_ENABLED: false,
   CALIBRATION_ENABLED: true,
   CALIBRATION_MIN_SAMPLES: 20,
-  MIN_BET_USD: 1,  // low floor for tests — individual test cases set stakeUsd below this
+  MIN_BET_USD: 1, // low floor for tests — individual test cases set stakeUsd below this
   EXECUTION_MODE: 'taker',
   MAKER_MAX_WAIT_MS: 0,
   MAKER_POLL_INTERVAL_MS: 10,
@@ -81,9 +95,11 @@ vi.mock('../../shared/telemetry.js', () => ({
 }));
 
 const { submitTrade, resolveSimmerMarketId } = await import('../../shared/simmer.js');
-const { submitClobBuy, getClobOrderBook, submitClobLimitBuy, getClobOrder, cancelClobOrder } = await import('../../shared/clob.js');
+const { submitClobBuy, getClobOrderBook, submitClobLimitBuy, getClobOrder, cancelClobOrder } =
+  await import('../../shared/clob.js');
 const { hasOpenPosition } = await import('../positionLedger.js');
-const { recordExecutionMetric, recordExecutionTiming, recordExecutionEvent } = await import('../../shared/telemetry.js');
+const { recordExecutionMetric, recordExecutionTiming, recordExecutionEvent } =
+  await import('../../shared/telemetry.js');
 const { executeSignal, executeSignals } = await import('../executor.js');
 
 const mockSubmit = vi.mocked(submitTrade);
@@ -190,6 +206,24 @@ describe('executeSignal', () => {
     expect(mockSubmitClob).not.toHaveBeenCalled();
   });
 
+  it('bypasses taker edge gate for copytrade signals', async () => {
+    mockConfig.EXECUTION_MODE = 'hybrid';
+    mockConfig.TAKER_MIN_EDGE = 0.5; // 50% threshold
+    const redis = makeRedis();
+
+    // Signal with 1% edge (0.01) would usually be blocked by 50% threshold
+    const signal = makeSignal({
+      edgeMagnitude: 0.01,
+      source: 'copytrade',
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(signal, redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('simmer');
+  });
+
   it('skips when idempotency key already exists', async () => {
     const redis = makeRedis();
     redis.get.mockResolvedValue('1');
@@ -216,6 +250,8 @@ describe('executeSignal', () => {
       expect.objectContaining({ market_id: 'simmer-uuid-123', side: 'yes', amount: 5.0 }),
     );
     expect(mockSubmitClob).not.toHaveBeenCalled();
+    // 1 for idempotency, 1 for recordGlobalTrade (if applicable)
+    // Actually, recordGlobalTrade is mocked now, so it shouldn't hit the passed-in mock redis.
     expect(redis.set).toHaveBeenCalledTimes(1);
   });
 
@@ -234,8 +270,16 @@ describe('executeSignal', () => {
       expect.objectContaining({ tokenId: 'tok-yes', amountUsd: 5.0 }),
     );
     expect(redis.set).toHaveBeenCalledTimes(1);
-    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'clob_fallback', 'simmer_market_missing');
-    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'clob_fallback_success', 'simmer_market_missing');
+    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(
+      redis as any,
+      'clob_fallback',
+      'simmer_market_missing',
+    );
+    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(
+      redis as any,
+      'clob_fallback_success',
+      'simmer_market_missing',
+    );
     expect(mockRecordExecutionEvent).toHaveBeenCalledWith(
       redis as any,
       'execution_attempt',
@@ -274,7 +318,11 @@ describe('executeSignal', () => {
     expect(result.error).toContain('insufficient balance');
     expect(result.tradeResult?.success).toBe(false);
     expect(redis.set).not.toHaveBeenCalled();
-    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'errors', 'clob_fallback_failed');
+    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(
+      redis as any,
+      'errors',
+      'clob_fallback_failed',
+    );
     expect(mockRecordExecutionEvent).toHaveBeenCalledWith(
       redis as any,
       'execution_attempt',
@@ -305,9 +353,7 @@ describe('executeSignal', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await executeSignal(makeSignal({ direction: 'NO' }), redis as any);
 
-    expect(mockSubmitClob).toHaveBeenCalledWith(
-      expect.objectContaining({ tokenId: 'tok-no' }),
-    );
+    expect(mockSubmitClob).toHaveBeenCalledWith(expect.objectContaining({ tokenId: 'tok-no' }));
   });
 });
 
@@ -445,10 +491,22 @@ describe('execution mode', () => {
     expect(result.sharesFilled).toBe(10);
     expect(result.decisionBenchmark?.makerPriceImprovementUsd).toBeCloseTo((0.51 - 0.49) * 10, 6);
     expect(mockSubmit).not.toHaveBeenCalled();
-    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'maker_attempted', 'count');
+    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(
+      redis as any,
+      'maker_attempted',
+      'count',
+    );
     expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'maker_filled', 'count');
-    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(redis as any, 'maker_full_fill', 'count');
-    expect(mockRecordExecutionTiming).toHaveBeenCalledWith(redis as any, 'maker_wait_ms', expect.any(Number));
+    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(
+      redis as any,
+      'maker_full_fill',
+      'count',
+    );
+    expect(mockRecordExecutionTiming).toHaveBeenCalledWith(
+      redis as any,
+      'maker_wait_ms',
+      expect.any(Number),
+    );
     expect(mockRecordExecutionEvent).toHaveBeenCalledWith(
       redis as any,
       'execution_attempt',
@@ -524,7 +582,7 @@ describe('execution mode', () => {
     const redis = makeRedis();
 
     // 10% edge should be blocked by 15% category limit, even though global 5% allows it
-    const signal = makeSignal({ edgeMagnitude: 0.10 });
+    const signal = makeSignal({ edgeMagnitude: 0.1 });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeSignal(signal, redis as any);
 
@@ -574,10 +632,15 @@ describe('execution mode', () => {
 
   it('populates entryPrice from Simmer fill when available', async () => {
     const redis = makeRedis();
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc', price: 0.52, shares_bought: 100 });
+    mockSubmit.mockResolvedValue({
+      success: true,
+      tx_hash: '0xabc',
+      price: 0.52,
+      shares_bought: 100,
+    });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await executeSignal(makeSignal({ outcomePrice: 0.50 }), redis as any);
+    const result = await executeSignal(makeSignal({ outcomePrice: 0.5 }), redis as any);
 
     expect(result.entryPrice).toBe(0.52);
     expect(result.sharesFilled).toBe(100);
@@ -586,10 +649,15 @@ describe('execution mode', () => {
   it('populates entryPrice from CLOB taker fill when available', async () => {
     const redis = makeRedis();
     mockResolve.mockResolvedValue(null);
-    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob', price: 0.53, shares_bought: 100 });
+    mockSubmitClob.mockResolvedValue({
+      success: true,
+      tx_hash: '0xclob',
+      price: 0.53,
+      shares_bought: 100,
+    });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await executeSignal(makeSignal({ outcomePrice: 0.50 }), redis as any);
+    const result = await executeSignal(makeSignal({ outcomePrice: 0.5 }), redis as any);
 
     expect(result.entryPrice).toBe(0.53);
     expect(result.sharesFilled).toBe(100);

@@ -29,9 +29,8 @@ vi.mock('../../mapping/consensusCalculator.js', () => ({
 }));
 
 const { estimateConsensusProbability } = await import('../../mapping/consensusCalculator.js');
-const { extractPriceTarget, formulaProbability, estimateFastConsensus } = await import(
-  '../fastPathConsensus.js'
-);
+const { extractPriceTarget, formulaProbability, estimateFastConsensus } =
+  await import('../fastPathConsensus.js');
 
 const mockEstimate = vi.mocked(estimateConsensusProbability);
 

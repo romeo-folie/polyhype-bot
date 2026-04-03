@@ -39,7 +39,9 @@ export async function runExecution(): Promise<void> {
   try {
     await runExecutionInner(redis);
   } finally {
-    await releaseLock('execution:lock', lockToken).catch(() => { /* best effort */ });
+    await releaseLock('execution:lock', lockToken).catch(() => {
+      /* best effort */
+    });
   }
 }
 
@@ -80,7 +82,9 @@ export async function processScoredItems(
   try {
     await processScoredItemsInner(highUrgencyItems, redis);
   } finally {
-    await releaseLock('execution:lock', lockToken).catch(() => { /* best effort */ });
+    await releaseLock('execution:lock', lockToken).catch(() => {
+      /* best effort */
+    });
   }
 }
 
@@ -89,10 +93,10 @@ async function processScoredItemsInner(
   redis: ReturnType<typeof getRedis>,
 ): Promise<void> {
   const bankrollUsd = await getBankroll(redis);
-  
+
   if (highUrgencyItems.length > 0) {
     try {
-      // 2. Continuous Monitoring — Re-evaluate open positions against fresh OSINT before opening new ones. 
+      // 2. Continuous Monitoring — Re-evaluate open positions against fresh OSINT before opening new ones.
       // This prevents "doubling down" on trades where our informational edge has already evaporated or flipped.
       const reevalResult = await reEvaluatePositions(highUrgencyItems, redis);
       if (reevalResult.exited > 0 || reevalResult.errors > 0) {
@@ -117,7 +121,9 @@ async function processScoredItemsInner(
       // a) High-speed Futures Mapping (breaking news)
       const futuresSignals = await mapNewsToFutures(highUrgencyItems, bankrollUsd);
       if (futuresSignals.length > 0) {
-        logger.info('[execution] news-to-futures signals generated', { count: futuresSignals.length });
+        logger.info('[execution] news-to-futures signals generated', {
+          count: futuresSignals.length,
+        });
         signals.push(...futuresSignals);
       }
 
@@ -178,21 +184,24 @@ async function processScoredItemsInner(
       } else {
         // Simmer sometimes omits shares_bought — fall back to estimate from stake/price.
         // This can overstate actual fill on partial fills; log a warning for reconciliation.
-        estimatedShares = result.signal.outcomePrice > 0
-          ? result.signal.stakeUsd / result.signal.outcomePrice
-          : undefined;
+        estimatedShares =
+          result.signal.outcomePrice > 0
+            ? result.signal.stakeUsd / result.signal.outcomePrice
+            : undefined;
         sharesHeld = estimatedShares;
         if (estimatedShares != null) {
-          logger.warn('[execution] shares_bought unavailable — using estimated sharesHeld (stakeUsd/outcomePrice)', {
-            marketId: result.signal.marketId,
-        executionId: result.signal.executionId,
-            estimatedShares,
-            stakeUsd: result.signal.stakeUsd,
-            outcomePrice: result.signal.outcomePrice,
-          });
+          logger.warn(
+            '[execution] shares_bought unavailable — using estimated sharesHeld (stakeUsd/outcomePrice)',
+            {
+              marketId: result.signal.marketId,
+              executionId: result.signal.executionId,
+              estimatedShares,
+              stakeUsd: result.signal.stakeUsd,
+              outcomePrice: result.signal.outcomePrice,
+            },
+          );
         }
       }
-
 
       // Record in ledger
       await recordPosition(redis, {
@@ -219,15 +228,19 @@ async function processScoredItemsInner(
         decisionBestAsk: result.decisionBenchmark?.decisionBestAsk ?? undefined,
         decisionMidPrice: result.decisionBenchmark?.decisionMidPrice ?? undefined,
         decisionSpreadBps: result.decisionBenchmark?.decisionSpreadBps ?? undefined,
-        counterfactualImmediateTakerPrice: result.decisionBenchmark?.counterfactualImmediateTakerPrice ?? undefined,
-        counterfactualImmediateTakerShares: result.decisionBenchmark?.counterfactualImmediateTakerShares ?? undefined,
-        counterfactualImmediateTakerCostUsd: result.decisionBenchmark?.counterfactualImmediateTakerCostUsd ?? undefined,
+        counterfactualImmediateTakerPrice:
+          result.decisionBenchmark?.counterfactualImmediateTakerPrice ?? undefined,
+        counterfactualImmediateTakerShares:
+          result.decisionBenchmark?.counterfactualImmediateTakerShares ?? undefined,
+        counterfactualImmediateTakerCostUsd:
+          result.decisionBenchmark?.counterfactualImmediateTakerCostUsd ?? undefined,
         makerPriceImprovementBps: result.decisionBenchmark?.makerPriceImprovementBps ?? undefined,
         makerPriceImprovementUsd: result.decisionBenchmark?.makerPriceImprovementUsd ?? undefined,
         fallbackReason: result.fallbackReason,
         isFutures: result.signal.isFutures,
         leverage: result.signal.leverage,
-        symbol: result.signal.symbol || (result.signal.isFutures ? result.signal.marketId : undefined),
+        symbol:
+          result.signal.symbol || (result.signal.isFutures ? result.signal.marketId : undefined),
       });
 
       // Simmer fill reconciliation: if shares_bought was unavailable and we used an
@@ -239,7 +252,7 @@ async function processScoredItemsInner(
             if (!simmerId) return;
             const livePositions = await getSimmerPositions({ status: 'active' });
             const side = signal.direction.toLowerCase() as 'yes' | 'no';
-            const match = livePositions.find(p => p.market_id === simmerId && p.side === side);
+            const match = livePositions.find((p) => p.market_id === simmerId && p.side === side);
             if (match?.shares && match.shares > 0 && match.shares !== estimatedShares) {
               const actualEntryPrice = signal.stakeUsd / match.shares;
               // Update Redis ledger with actual fill and actual entry price

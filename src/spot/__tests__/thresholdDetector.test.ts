@@ -38,9 +38,7 @@ describe('detectMoves', () => {
     const refTs = now - 310_000; // ~5 min ago
     mockRedis.zrangebyscore.mockResolvedValue([`${refTs}:65000`]);
 
-    const moves = await detectMoves([
-      { assetId: 'bitcoin', price: 67000, timestamp: now },
-    ]);
+    const moves = await detectMoves([{ assetId: 'bitcoin', price: 67000, timestamp: now }]);
 
     expect(moves).toHaveLength(1);
     expect(moves[0]!.assetId).toBe('bitcoin');
@@ -56,9 +54,7 @@ describe('detectMoves', () => {
     // 1% move — below 3% threshold
     mockRedis.zrangebyscore.mockResolvedValue([`${refTs}:66000`]);
 
-    const moves = await detectMoves([
-      { assetId: 'bitcoin', price: 66660, timestamp: now },
-    ]);
+    const moves = await detectMoves([{ assetId: 'bitcoin', price: 66660, timestamp: now }]);
 
     expect(moves).toHaveLength(0);
   });
@@ -67,9 +63,7 @@ describe('detectMoves', () => {
     mockRedis.zrangebyscore.mockResolvedValue([]);
     mockRedis.zrange.mockResolvedValue([]);
 
-    const moves = await detectMoves([
-      { assetId: 'bitcoin', price: 67000, timestamp: Date.now() },
-    ]);
+    const moves = await detectMoves([{ assetId: 'bitcoin', price: 67000, timestamp: Date.now() }]);
 
     expect(moves).toHaveLength(0);
   });
@@ -80,9 +74,7 @@ describe('detectMoves', () => {
     mockRedis.zrangebyscore.mockResolvedValue([`${refTs}:65000`]);
 
     // First call: triggers
-    const moves1 = await detectMoves([
-      { assetId: 'bitcoin', price: 67000, timestamp: now },
-    ]);
+    const moves1 = await detectMoves([{ assetId: 'bitcoin', price: 67000, timestamp: now }]);
     expect(moves1).toHaveLength(1);
 
     // Simulate cooldown active
@@ -99,9 +91,7 @@ describe('detectMoves', () => {
     const refTs = now - 310_000;
     mockRedis.zrangebyscore.mockResolvedValue([`${refTs}:65000`]);
 
-    await detectMoves([
-      { assetId: 'bitcoin', price: 67000, timestamp: now },
-    ]);
+    await detectMoves([{ assetId: 'bitcoin', price: 67000, timestamp: now }]);
 
     expect(mockRedis.set).toHaveBeenCalledWith(
       'spot:cooldown:bitcoin:up',
@@ -116,18 +106,11 @@ describe('detectMoves', () => {
     const refTs = now - 310_000;
     mockRedis.zrangebyscore.mockResolvedValue([`${refTs}:70000`]);
 
-    const moves = await detectMoves([
-      { assetId: 'bitcoin', price: 67000, timestamp: now },
-    ]);
+    const moves = await detectMoves([{ assetId: 'bitcoin', price: 67000, timestamp: now }]);
 
     expect(moves).toHaveLength(1);
     expect(moves[0]!.changePercent).toBeLessThan(0);
-    expect(mockRedis.set).toHaveBeenCalledWith(
-      'spot:cooldown:bitcoin:down',
-      '1',
-      'EX',
-      1800,
-    );
+    expect(mockRedis.set).toHaveBeenCalledWith('spot:cooldown:bitcoin:down', '1', 'EX', 1800);
   });
 
   it('handles multiple assets in one batch', async () => {
@@ -135,8 +118,8 @@ describe('detectMoves', () => {
     const refTs = now - 310_000;
     // Both exceed threshold
     mockRedis.zrangebyscore
-      .mockResolvedValueOnce([`${refTs}:65000`])  // bitcoin ref
-      .mockResolvedValueOnce([`${refTs}:3000`]);   // ethereum ref
+      .mockResolvedValueOnce([`${refTs}:65000`]) // bitcoin ref
+      .mockResolvedValueOnce([`${refTs}:3000`]); // ethereum ref
 
     const moves = await detectMoves([
       { assetId: 'bitcoin', price: 67000, timestamp: now },

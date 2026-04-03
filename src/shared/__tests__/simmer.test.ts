@@ -18,7 +18,7 @@ describe('getSimmerPositions', () => {
   it('infers side when missing and defaults redeemable=false', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
-      json: async () => ([
+      json: async () => [
         {
           market_id: 'm1',
           question: 'Will X happen?',
@@ -26,26 +26,28 @@ describe('getSimmerPositions', () => {
           shares_no: 0,
           current_price: 0.4,
         },
-      ]),
+      ],
     });
 
     const { getSimmerPositions } = await import('../simmer.js');
     const positions = await getSimmerPositions({ status: 'active', venue: 'polymarket' });
 
     expect(positions).toHaveLength(1);
-    expect(positions[0]).toEqual(expect.objectContaining({
-      market_id: 'm1',
-      side: 'yes',
-      redeemable: false,
-      shares: 10,
-      value_usdc: 4,
-    }));
+    expect(positions[0]).toEqual(
+      expect.objectContaining({
+        market_id: 'm1',
+        side: 'yes',
+        redeemable: false,
+        shares: 10,
+        value_usdc: 4,
+      }),
+    );
   });
 
   it('does not override shares when both yes/no are present and side is known', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
-      json: async () => ([
+      json: async () => [
         {
           market_id: 'm2',
           side: 'yes',
@@ -54,19 +56,21 @@ describe('getSimmerPositions', () => {
           current_price: 0.25,
           redeemable: true,
         },
-      ]),
+      ],
     });
 
     const { getSimmerPositions } = await import('../simmer.js');
     const positions = await getSimmerPositions({ status: 'active', venue: 'polymarket' });
 
     expect(positions).toHaveLength(1);
-    expect(positions[0]).toEqual(expect.objectContaining({
-      market_id: 'm2',
-      side: 'yes',
-      shares: 5,
-      value_usdc: 1.25,
-    }));
+    expect(positions[0]).toEqual(
+      expect.objectContaining({
+        market_id: 'm2',
+        side: 'yes',
+        shares: 5,
+        value_usdc: 1.25,
+      }),
+    );
   });
 });
 
@@ -121,6 +125,8 @@ describe('setAgentAutoRedeem', () => {
     });
 
     const { setAgentAutoRedeem } = await import('../simmer.js');
-    await expect(setAgentAutoRedeem(true)).rejects.toThrow('Simmer agent settings API returned HTTP 403');
+    await expect(setAgentAutoRedeem(true)).rejects.toThrow(
+      'Simmer agent settings API returned HTTP 403',
+    );
   });
 });

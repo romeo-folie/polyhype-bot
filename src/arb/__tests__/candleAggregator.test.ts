@@ -25,11 +25,7 @@ describe('buildCandles', () => {
     const t0b = base + 30_000;
     const t1a = base + MINUTE_MS + 10_000;
 
-    const entries = [
-      `${t0a}:100`,
-      `${t0b}:110`,
-      `${t1a}:105`,
-    ];
+    const entries = [`${t0a}:100`, `${t0b}:110`, `${t1a}:105`];
 
     const redis = makeRedisMock(entries);
     const candles = await buildCandles('btcusdt', redis);
@@ -91,7 +87,7 @@ describe('buildCandles', () => {
       'invalid',
       `${base + 1000}:badprice`,
       `${base + 2000}:100`,
-      `${base + 3000}:0`,    // price <= 0 — skip
+      `${base + 3000}:0`, // price <= 0 — skip
       `${base + 4000}:110`,
     ];
 

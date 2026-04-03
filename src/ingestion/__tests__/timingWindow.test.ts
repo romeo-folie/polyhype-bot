@@ -19,14 +19,14 @@ function makeItem(score: number): ScoredItem {
 describe('getTimingMultiplier', () => {
   it('returns 1.2x during Asia/Pacific window (02:00 UTC)', () => {
     const { multiplier, windowName } = getTimingMultiplier(2);
-    expect(multiplier).toBe(1.20);
+    expect(multiplier).toBe(1.2);
     expect(windowName).toBe('asia_pacific');
   });
 
   it('returns 1.2x at overlap of Asia and Europe (07:00 UTC) — highest wins', () => {
     // 07:00 is in both windows (asia 00-08, europe 06-14); asia (1.2) > europe (1.15)
     const { multiplier, windowName } = getTimingMultiplier(7);
-    expect(multiplier).toBe(1.20);
+    expect(multiplier).toBe(1.2);
     expect(windowName).toBe('asia_pacific');
   });
 

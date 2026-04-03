@@ -61,8 +61,11 @@ async function main(): Promise<void> {
   }
 
   const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY);
-  const signatureType = Number(process.env['PROBE_SIGNATURE_TYPE'] ?? cfg.POLYMARKET_SIGNATURE_TYPE) as 0 | 1 | 2;
-  const funderAddress = process.env['PROBE_FUNDER_ADDRESS'] ?? cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
+  const signatureType = Number(
+    process.env['PROBE_SIGNATURE_TYPE'] ?? cfg.POLYMARKET_SIGNATURE_TYPE,
+  ) as 0 | 1 | 2;
+  const funderAddress =
+    process.env['PROBE_FUNDER_ADDRESS'] ?? cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
   const forceRederive = process.env['PROBE_FORCE_REDERIVE'] === '1';
 
   console.log('=== CLOB Allowance Probe ===');
@@ -91,10 +94,19 @@ async function main(): Promise<void> {
 
   if (!creds) {
     console.log('\n[1/3] deriving API credentials from Polymarket (createOrDeriveApiKey)...');
-    const bootstrap = new ClobClient(HOST, CHAIN_ID, signer, undefined, signatureType, funderAddress);
+    const bootstrap = new ClobClient(
+      HOST,
+      CHAIN_ID,
+      signer,
+      undefined,
+      signatureType,
+      funderAddress,
+    );
     const derived = await bootstrap.createOrDeriveApiKey();
     if (!derived || !derived.key) {
-      throw new Error('createOrDeriveApiKey returned empty/undefined — check sig type and funder address');
+      throw new Error(
+        'createOrDeriveApiKey returned empty/undefined — check sig type and funder address',
+      );
     }
     creds = derived;
     // Persist for future runs
@@ -106,7 +118,9 @@ async function main(): Promise<void> {
 
   const typed = client as unknown as {
     updateBalanceAllowance(params?: { asset_type?: string }): Promise<unknown>;
-    getBalanceAllowance(params: { asset_type: string }): Promise<{ balance?: string; allowance?: string }>;
+    getBalanceAllowance(params: {
+      asset_type: string;
+    }): Promise<{ balance?: string; allowance?: string }>;
   };
 
   console.log('\n[2/3] refresh allowance state (GET /balance-allowance/update) ...');
@@ -131,7 +145,9 @@ async function main(): Promise<void> {
   if (balanceOk) {
     console.log('\n✅ Balance is funded — CLOB trading ready.');
     if (!allowanceOk) {
-      console.log('   (allowance=0 is normal for POLY_PROXY accounts — proxy accesses funds directly)');
+      console.log(
+        '   (allowance=0 is normal for POLY_PROXY accounts — proxy accesses funds directly)',
+      );
     }
   } else {
     console.log('\n⚠️  Balance is zero — fund your Polymarket wallet before trading.');

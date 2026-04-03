@@ -63,7 +63,9 @@ export async function runClobProbe(): Promise<void> {
 
   const typedClient = client as unknown as {
     updateBalanceAllowance(params?: { asset_type?: string }): Promise<void>;
-    getBalanceAllowance(params: { asset_type: string }): Promise<{ balance?: string; allowance?: string }>;
+    getBalanceAllowance(params: {
+      asset_type: string;
+    }): Promise<{ balance?: string; allowance?: string }>;
   };
 
   // Refresh on-chain allowance state before reading.
@@ -91,7 +93,9 @@ export async function runClobProbe(): Promise<void> {
   if (allowanceUsdc === 0) {
     // POLY_PROXY accounts (sig type 1) return allowance=0 by design — the proxy
     // accesses funds directly without a standard ERC20 approve(). Not a blocker.
-    logger.info('[clob-probe] USDC allowance is zero — normal for POLY_PROXY accounts (sig type 1)');
+    logger.info(
+      '[clob-probe] USDC allowance is zero — normal for POLY_PROXY accounts (sig type 1)',
+    );
   }
 
   // Open orders

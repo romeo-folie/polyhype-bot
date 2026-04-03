@@ -7,7 +7,7 @@ import { loadConfig } from '../shared/config.js';
 
 /**
  * Arb Market Warmer.
- * 
+ *
  * Periodically searches for crypto-related price-target markets on Gamma
  * and registers them with the WebSocket ClobPriceFeed. This ensures
  * that order books are pre-warmed in memory before a price move occurs,
@@ -18,7 +18,8 @@ export class ArbMarketWarmer {
   private timer: NodeJS.Timeout | null = null;
   private isRunning = false;
 
-  constructor(intervalMs = 600_000) { // 10 minutes default
+  constructor(intervalMs = 600_000) {
+    // 10 minutes default
     this.intervalMs = intervalMs;
   }
 
@@ -30,14 +31,14 @@ export class ArbMarketWarmer {
     }
 
     logger.info('[warmer] starting arb market warmer', { intervalMs: this.intervalMs });
-    
+
     // Immediate first run
     await this.warmUp();
-    
+
     this.timer = setInterval(() => {
       void this.warmUp().catch((err) => {
-        logger.error('[warmer] periodic warmup failed', { 
-          error: err instanceof Error ? err.message : String(err) 
+        logger.error('[warmer] periodic warmup failed', {
+          error: err instanceof Error ? err.message : String(err),
         });
       });
     }, this.intervalMs);
@@ -51,7 +52,7 @@ export class ArbMarketWarmer {
       const redis = getRedis();
       const feed = getPriceFeed(redis);
       const assets = Object.keys(ASSET_SEARCH_QUERIES);
-      
+
       let discoveredCount = 0;
       let watchedCount = 0;
 
@@ -63,7 +64,7 @@ export class ArbMarketWarmer {
             for (const event of events) {
               for (const market of event.markets) {
                 if (!market.active || market.closed) continue;
-                
+
                 discoveredCount++;
                 try {
                   const clobTokenIds = parseClobTokenIds(market.clobTokenIds);
@@ -77,18 +78,18 @@ export class ArbMarketWarmer {
               }
             }
           } catch (err) {
-            logger.warn('[warmer] search failed for query', { 
-              query, 
-              error: err instanceof Error ? err.message : String(err) 
+            logger.warn('[warmer] search failed for query', {
+              query,
+              error: err instanceof Error ? err.message : String(err),
             });
           }
         }
       }
 
-      logger.info('[warmer] warmup cycle complete', { 
-        discoveredCount, 
+      logger.info('[warmer] warmup cycle complete', {
+        discoveredCount,
         watchedCount,
-        assetsCount: assets.length 
+        assetsCount: assets.length,
       });
     } finally {
       this.isRunning = false;

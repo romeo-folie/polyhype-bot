@@ -85,7 +85,7 @@ describe('estimateConsensusProbability', () => {
   it('returns mean and stddev from N=2 samples (dual provider)', async () => {
     // Return different probabilities across 2 calls: 0.70, 0.72
     let callCount = 0;
-    const probs = [0.70, 0.72];
+    const probs = [0.7, 0.72];
     // Gemini handles 1 call
     mockGenerateContent.mockImplementation(async () => {
       const p = probs[callCount++]!;
@@ -120,7 +120,9 @@ describe('estimateConsensusProbability', () => {
     mockGenerateContent.mockRejectedValue(new Error('Gemini unavailable'));
     // Mock OA to succeed once
     mockChatCreate.mockResolvedValue({
-      choices: [{ message: { content: JSON.stringify({ probability: 0.65, reasoning: 'OA success' }) } }]
+      choices: [
+        { message: { content: JSON.stringify({ probability: 0.65, reasoning: 'OA success' }) } },
+      ],
     });
 
     const result = await estimateConsensusProbability(BASE_OPTS);
@@ -135,7 +137,9 @@ describe('estimateConsensusProbability', () => {
     mockGenerateContent.mockRejectedValue(new Error('Gemini error'));
     mockChatCreate.mockRejectedValue(new Error('OpenAI error'));
 
-    await expect(estimateConsensusProbability(BASE_OPTS)).rejects.toThrow('All consensus samples failed');
+    await expect(estimateConsensusProbability(BASE_OPTS)).rejects.toThrow(
+      'All consensus samples failed',
+    );
   });
 
   it('throws when no API keys configured', async () => {
@@ -152,7 +156,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: false,
       CONSENSUS_CACHE_TTL_S: 1800,
-      });
+    });
 
     await expect(estimateConsensusProbability(BASE_OPTS)).rejects.toThrow(
       'No LLM providers configured',
@@ -171,7 +175,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: false,
       CONSENSUS_CACHE_TTL_S: 1800,
-      });
+    });
   });
 
   it('handles null description gracefully', async () => {
@@ -181,7 +185,9 @@ describe('estimateConsensusProbability', () => {
       },
     });
     mockChatCreate.mockResolvedValue({
-      choices: [{ message: { content: JSON.stringify({ probability: 0.5, reasoning: 'OA Uncertain' }) } }]
+      choices: [
+        { message: { content: JSON.stringify({ probability: 0.5, reasoning: 'OA Uncertain' }) } },
+      ],
     });
 
     const result = await estimateConsensusProbability({ ...BASE_OPTS, description: null });
@@ -191,23 +197,53 @@ describe('estimateConsensusProbability', () => {
 
   it('injects context block into prompt when 3+ outcomes available', async () => {
     mockGetRecentOutcomes.mockResolvedValue([
-      { question: 'Q1', direction: 'YES', consensusProbability: 0.7, result: 'won', returnPct: 10, holdingHours: 5 },
-      { question: 'Q2', direction: 'NO', consensusProbability: 0.6, result: 'lost', returnPct: -5, holdingHours: 3 },
-      { question: 'Q3', direction: 'YES', consensusProbability: 0.8, result: 'won', returnPct: 15, holdingHours: 8 },
+      {
+        question: 'Q1',
+        direction: 'YES',
+        consensusProbability: 0.7,
+        result: 'won',
+        returnPct: 10,
+        holdingHours: 5,
+      },
+      {
+        question: 'Q2',
+        direction: 'NO',
+        consensusProbability: 0.6,
+        result: 'lost',
+        returnPct: -5,
+        holdingHours: 3,
+      },
+      {
+        question: 'Q3',
+        direction: 'YES',
+        consensusProbability: 0.8,
+        result: 'won',
+        returnPct: 15,
+        holdingHours: 8,
+      },
     ]);
 
     let callCount = 0;
-    const probs = [0.70, 0.72];
+    const probs = [0.7, 0.72];
     mockGenerateContent.mockImplementation(async (_prompt: string) => {
       const p = probs[callCount++]!;
-      return { response: { text: () => JSON.stringify({ probability: p, reasoning: `G${callCount}` }) } };
+      return {
+        response: { text: () => JSON.stringify({ probability: p, reasoning: `G${callCount}` }) },
+      };
     });
     mockChatCreate.mockImplementation(async (_opts: any) => {
       const p = probs[callCount++]!;
-      return { choices: [{ message: { content: JSON.stringify({ probability: p, reasoning: 'O1' }) } }] };
+      return {
+        choices: [{ message: { content: JSON.stringify({ probability: p, reasoning: 'O1' }) } }],
+      };
     });
 
-    const mockRedis = { get: vi.fn<() => Promise<null>>().mockResolvedValue(null), set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'), zrevrange: vi.fn(), hgetall: vi.fn() };
+    const mockRedis = {
+      get: vi.fn<() => Promise<null>>().mockResolvedValue(null),
+      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      zrevrange: vi.fn(),
+      hgetall: vi.fn(),
+    };
     await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
 
     // The Gemini call receives the full prompt as a single string — check it includes the context block
@@ -219,7 +255,14 @@ describe('estimateConsensusProbability', () => {
 
   it('does not inject context with fewer than 3 outcomes', async () => {
     mockGetRecentOutcomes.mockResolvedValue([
-      { question: 'Q1', direction: 'YES', consensusProbability: 0.7, result: 'won', returnPct: 10, holdingHours: 5 },
+      {
+        question: 'Q1',
+        direction: 'YES',
+        consensusProbability: 0.7,
+        result: 'won',
+        returnPct: 10,
+        holdingHours: 5,
+      },
     ]);
 
     mockGenerateContent.mockImplementation(async () => {
@@ -229,7 +272,12 @@ describe('estimateConsensusProbability', () => {
       choices: [{ message: { content: JSON.stringify({ probability: 0.7, reasoning: 'test' }) } }],
     });
 
-    const mockRedis = { get: vi.fn<() => Promise<null>>().mockResolvedValue(null), set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'), zrevrange: vi.fn(), hgetall: vi.fn() };
+    const mockRedis = {
+      get: vi.fn<() => Promise<null>>().mockResolvedValue(null),
+      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      zrevrange: vi.fn(),
+      hgetall: vi.fn(),
+    };
     await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
 
     const geminiCall = mockGenerateContent.mock.calls[0]?.[0] as string;
@@ -250,12 +298,33 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: false,
       CONSENSUS_CACHE_TTL_S: 1800,
-      });
+    });
 
     mockGetRecentOutcomes.mockResolvedValue([
-      { question: 'Q1', direction: 'YES', consensusProbability: 0.7, result: 'won', returnPct: 10, holdingHours: 5 },
-      { question: 'Q2', direction: 'NO', consensusProbability: 0.6, result: 'lost', returnPct: -5, holdingHours: 3 },
-      { question: 'Q3', direction: 'YES', consensusProbability: 0.8, result: 'won', returnPct: 15, holdingHours: 8 },
+      {
+        question: 'Q1',
+        direction: 'YES',
+        consensusProbability: 0.7,
+        result: 'won',
+        returnPct: 10,
+        holdingHours: 5,
+      },
+      {
+        question: 'Q2',
+        direction: 'NO',
+        consensusProbability: 0.6,
+        result: 'lost',
+        returnPct: -5,
+        holdingHours: 3,
+      },
+      {
+        question: 'Q3',
+        direction: 'YES',
+        consensusProbability: 0.8,
+        result: 'won',
+        returnPct: 15,
+        holdingHours: 8,
+      },
     ]);
 
     mockGenerateContent.mockResolvedValue({
@@ -265,7 +334,12 @@ describe('estimateConsensusProbability', () => {
       choices: [{ message: { content: JSON.stringify({ probability: 0.7, reasoning: 'test' }) } }],
     });
 
-    const mockRedis = { get: vi.fn<() => Promise<null>>().mockResolvedValue(null), set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'), zrevrange: vi.fn(), hgetall: vi.fn() };
+    const mockRedis = {
+      get: vi.fn<() => Promise<null>>().mockResolvedValue(null),
+      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      zrevrange: vi.fn(),
+      hgetall: vi.fn(),
+    };
     await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
 
     // getRecentOutcomes should not have been called
@@ -284,7 +358,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: false,
       CONSENSUS_CACHE_TTL_S: 1800,
-      });
+    });
   });
 
   it('throws on invalid probability value when all providers return bad data', async () => {
@@ -305,7 +379,9 @@ describe('estimateConsensusProbability', () => {
     });
 
     // All 2 samples will fail parsing → throws "All consensus samples failed"
-    await expect(estimateConsensusProbability(BASE_OPTS)).rejects.toThrow('All consensus samples failed');
+    await expect(estimateConsensusProbability(BASE_OPTS)).rejects.toThrow(
+      'All consensus samples failed',
+    );
   });
 
   it('returns cached consensus estimate without LLM calls (cache hit)', async () => {
@@ -322,7 +398,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: true,
       CONSENSUS_CACHE_TTL_S: 1800,
-      });
+    });
 
     const cachedEstimate = {
       probability: 0.65,
@@ -332,7 +408,9 @@ describe('estimateConsensusProbability', () => {
     };
 
     const mockRedis = {
-      get: vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(JSON.stringify(cachedEstimate)),
+      get: vi
+        .fn<(key: string) => Promise<string | null>>()
+        .mockResolvedValue(JSON.stringify(cachedEstimate)),
       set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
     };
 
@@ -358,7 +436,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: false,
       CONSENSUS_CACHE_TTL_S: 1800,
-      });
+    });
   });
 
   it('calls LLM and caches result on cache miss', async () => {
@@ -375,7 +453,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: true,
       CONSENSUS_CACHE_TTL_S: 1800,
-      });
+    });
 
     mockGenerateContent.mockResolvedValue({
       response: { text: () => JSON.stringify({ probability: 0.7, reasoning: 'fresh' }) },
@@ -416,7 +494,7 @@ describe('estimateConsensusProbability', () => {
       CONTEXT_INJECTION_LIMIT: 5,
       CONSENSUS_CACHE_ENABLED: false,
       CONSENSUS_CACHE_TTL_S: 1800,
-      });
+    });
   });
 
   it('bypasses cache when CONSENSUS_CACHE_ENABLED=false', async () => {
@@ -424,7 +502,9 @@ describe('estimateConsensusProbability', () => {
       response: { text: () => JSON.stringify({ probability: 0.7, reasoning: 'no cache' }) },
     });
     mockChatCreate.mockResolvedValue({
-      choices: [{ message: { content: JSON.stringify({ probability: 0.7, reasoning: 'no cache' }) } }],
+      choices: [
+        { message: { content: JSON.stringify({ probability: 0.7, reasoning: 'no cache' }) } },
+      ],
     });
 
     const mockRedis = {

@@ -87,8 +87,9 @@ export async function main(): Promise<void> {
   });
 }
 
-const isMain = process.argv[1]?.endsWith('simmerMarketDiscoveryCron.ts')
-  || process.argv[1]?.endsWith('simmerMarketDiscoveryCron.js');
+const isMain =
+  process.argv[1]?.endsWith('simmerMarketDiscoveryCron.ts') ||
+  process.argv[1]?.endsWith('simmerMarketDiscoveryCron.js');
 if (isMain) {
   main().catch((err) => {
     logger.error('[simmer-discovery] fatal error', {

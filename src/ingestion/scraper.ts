@@ -66,9 +66,9 @@ async function fetchGdeltCombined(): Promise<RssItem[]> {
   const params = new URLSearchParams({
     query: GDELT_THEME_QUERY,
     mode: 'artlist',
-    maxrecords: String(GDELT_MAX_RECORDS),
+    maxrecords: GDELT_MAX_RECORDS.toString(),
     format: 'json',
-    timespan: `${String(GDELT_TIMESPAN_HOURS)}h`,
+    timespan: `${GDELT_TIMESPAN_HOURS.toString()}h`,
   });
 
   const url = `${GDELT_BASE}?${params.toString()}`;
@@ -82,7 +82,7 @@ async function fetchGdeltCombined(): Promise<RssItem[]> {
       });
       data = response.data;
       break;
-    } catch (err) {
+    } catch (err: unknown) {
       const retryable = isRateLimitError(err) && attempt < GDELT_MAX_RETRIES;
       if (!retryable) throw err;
 

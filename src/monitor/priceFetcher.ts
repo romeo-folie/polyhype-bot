@@ -56,7 +56,10 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
     // Try WS cache first for sub-second freshness
     const cachedPrice = await feed.getCachedPrice(position.marketId);
     if (cachedPrice !== null) {
-      logger.debug('[price-fetcher] WS cache hit', { marketId: position.marketId, price: cachedPrice });
+      logger.debug('[price-fetcher] WS cache hit', {
+        marketId: position.marketId,
+        price: cachedPrice,
+      });
       const currentOutcomePrice = pmDirection === 'YES' ? cachedPrice : 1 - cachedPrice;
       return {
         marketId: position.marketId,

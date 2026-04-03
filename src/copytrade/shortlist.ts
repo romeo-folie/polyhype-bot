@@ -47,7 +47,11 @@ export function resolveCategories(scope: string[]): string[] {
   return cats.size === 0 ? ['OVERALL'] : Array.from(cats);
 }
 
-export async function fetchLeaderboard(category: string, timePeriod: string, limit: number): Promise<LeaderboardEntry[]> {
+export async function fetchLeaderboard(
+  category: string,
+  timePeriod: string,
+  limit: number,
+): Promise<LeaderboardEntry[]> {
   const params = new URLSearchParams({
     category,
     timePeriod,
@@ -97,14 +101,14 @@ export function selectWallets(
   minPnl: number,
   minVol: number,
   topN: number,
-  minVolPnlRatio = 0,          // vol/pnl >= this — filters lucky one-hit wallets vs systematic traders
+  minVolPnlRatio = 0, // vol/pnl >= this — filters lucky one-hit wallets vs systematic traders
 ) {
   const filtered = entries.filter((entry) => {
     if (entry.pnl < minPnl) return false;
     if (entry.vol < minVol) return false;
     // Vol/PnL ratio: systematic traders have high volume relative to PnL
     // A lucky one-off trader has low vol (few trades) but high PnL — we want to avoid those
-    if (minVolPnlRatio > 0 && entry.pnl > 0 && (entry.vol / entry.pnl) < minVolPnlRatio) return false;
+    if (minVolPnlRatio > 0 && entry.pnl > 0 && entry.vol / entry.pnl < minVolPnlRatio) return false;
     return true;
   });
   const selected: LeaderboardEntry[] = [];
@@ -149,27 +153,37 @@ export async function run(): Promise<void> {
 
   for (const category of apiCategories) {
     try {
-      const leaderboard = await fetchLeaderboard(category, timeWindow, Math.max(DEFAULT_MAX_CANDIDATES, topN * 2));
+      const leaderboard = await fetchLeaderboard(
+        category,
+        timeWindow,
+        Math.max(DEFAULT_MAX_CANDIDATES, topN * 2),
+      );
       if (leaderboard.length === 0) {
         logger.warn('[copytrade-shortlist] empty leaderboard response', { category, timeWindow });
         continue;
       }
 
-      const { selected, backfilled } = selectWallets(leaderboard, minPnl, minVol, topN, minVolPnlRatio);
+      const { selected, backfilled } = selectWallets(
+        leaderboard,
+        minPnl,
+        minVol,
+        topN,
+        minVolPnlRatio,
+      );
       const results = [...selected, ...backfilled];
-      
+
       results.forEach((entry) => combinedWallets.add(entry.proxyWallet));
       stats[category] = results.length;
 
-      logger.info('[copytrade-shortlist] category processed', { 
-        category, 
-        selectedCount: selected.length, 
-        backfillCount: backfilled.length 
+      logger.info('[copytrade-shortlist] category processed', {
+        category,
+        selectedCount: selected.length,
+        backfillCount: backfilled.length,
       });
     } catch (err) {
-      logger.error('[copytrade-shortlist] category fetch failed', { 
-        category, 
-        error: err instanceof Error ? err.message : String(err) 
+      logger.error('[copytrade-shortlist] category fetch failed', {
+        category,
+        error: err instanceof Error ? err.message : String(err),
       });
     }
   }

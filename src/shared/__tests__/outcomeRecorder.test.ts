@@ -109,7 +109,7 @@ describe('recordOutcome', () => {
     // Should not throw
     await recordOutcome(redis as any, makeOutcome());
 
-    expect((logger.warn as any)).toHaveBeenCalledWith(
+    expect(logger.warn as any).toHaveBeenCalledWith(
       expect.stringContaining('failed to record outcome'),
       expect.any(Object),
     );
@@ -128,22 +128,46 @@ describe('getRecentOutcomes', () => {
       { score: 3000, member: 'id-new' },
     ]);
     redis._store.set('outcome:id-old', {
-      id: 'id-old', closedAt: '2026-01-01T00:00:00Z', source: 'osint',
-      category: 'geopolitical', question: 'Q1', direction: 'YES',
-      consensusProbability: '0.7', divergence: '0.1', result: 'won',
-      returnPct: '10', holdingHours: '5', executionVenue: 'simmer',
+      id: 'id-old',
+      closedAt: '2026-01-01T00:00:00Z',
+      source: 'osint',
+      category: 'geopolitical',
+      question: 'Q1',
+      direction: 'YES',
+      consensusProbability: '0.7',
+      divergence: '0.1',
+      result: 'won',
+      returnPct: '10',
+      holdingHours: '5',
+      executionVenue: 'simmer',
     });
     redis._store.set('outcome:id-mid', {
-      id: 'id-mid', closedAt: '2026-01-02T00:00:00Z', source: 'osint',
-      category: 'geopolitical', question: 'Q2', direction: 'YES',
-      consensusProbability: '0.7', divergence: '0.1', result: 'won',
-      returnPct: '20', holdingHours: '5', executionVenue: 'simmer',
+      id: 'id-mid',
+      closedAt: '2026-01-02T00:00:00Z',
+      source: 'osint',
+      category: 'geopolitical',
+      question: 'Q2',
+      direction: 'YES',
+      consensusProbability: '0.7',
+      divergence: '0.1',
+      result: 'won',
+      returnPct: '20',
+      holdingHours: '5',
+      executionVenue: 'simmer',
     });
     redis._store.set('outcome:id-new', {
-      id: 'id-new', closedAt: '2026-01-03T00:00:00Z', source: 'osint',
-      category: 'geopolitical', question: 'Q3', direction: 'YES',
-      consensusProbability: '0.7', divergence: '0.1', result: 'won',
-      returnPct: '30', holdingHours: '5', executionVenue: 'simmer',
+      id: 'id-new',
+      closedAt: '2026-01-03T00:00:00Z',
+      source: 'osint',
+      category: 'geopolitical',
+      question: 'Q3',
+      direction: 'YES',
+      consensusProbability: '0.7',
+      divergence: '0.1',
+      result: 'won',
+      returnPct: '30',
+      holdingHours: '5',
+      executionVenue: 'simmer',
     });
 
     const outcomes = await getRecentOutcomes(redis as any, 'geopolitical', 5);

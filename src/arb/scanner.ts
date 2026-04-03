@@ -8,7 +8,6 @@
  * (4 orders) to stay well within limits.
  */
 
-import process from 'node:process';
 import { getActiveMarkets, parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import { submitClobBuy } from '../shared/clob.js';
 import { getBankroll, deductStake } from '../shared/bankroll.js';
@@ -72,8 +71,11 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
     let prices: string[];
     try {
       prices = parseOutcomePrices(market.outcomePrices);
-    } catch (err) {
-      logger.debug('[arb] skipping market — price parse error', { marketId: market.id, err: String(err) });
+    } catch (err: unknown) {
+      logger.debug('[arb] skipping market — price parse error', {
+        marketId: market.id,
+        err: String(err),
+      });
       continue;
     }
     // Binary markets have exactly 2 outcomes — skip multi-outcome markets
@@ -98,8 +100,11 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
     let tokenIds: string[];
     try {
       tokenIds = parseClobTokenIds(market.clobTokenIds);
-    } catch (err) {
-      logger.debug('[arb] skipping market — tokenId parse error', { marketId: market.id, err: String(err) });
+    } catch (err: unknown) {
+      logger.debug('[arb] skipping market — tokenId parse error', {
+        marketId: market.id,
+        err: String(err),
+      });
       continue;
     }
     if (tokenIds.length !== 2) continue;
@@ -111,7 +116,7 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
       noTokenId: tokenIds[1]!,
       yesAsk,
       noAsk,
-      edge,         // net edge (after fees)
+      edge, // net edge (after fees)
       grossEdge,
     });
   }
@@ -122,14 +127,11 @@ export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
 
 /**
  * Execute an arbitrage trade: buy equal SHARES of YES + NO as FOK.
- * 
+ *
  * Sequential Execution: YES leg first; NO leg only if YES fills. This is intentional —
  * submitting both simultaneously would leave an unhedged YES position if the NO leg fails.
  */
-export async function executeArb(
-  opp: ArbOpportunity,
-  redis: Redis,
-): Promise<ArbResult> {
+export async function executeArb(opp: ArbOpportunity, redis: Redis): Promise<ArbResult> {
   const cfg = loadConfig();
   const combined = opp.yesAsk + opp.noAsk;
 
@@ -172,7 +174,7 @@ export async function executeArb(
   // yesUsd / noUsd = cost of each leg. Their sum = totalBudget (within rounding).
   const shares = totalBudget / combined;
   const yesUsd = shares * opp.yesAsk;
-  const noUsd  = shares * opp.noAsk;
+  const noUsd = shares * opp.noAsk;
 
   if (!isFinite(shares) || !isFinite(yesUsd) || !isFinite(noUsd) || shares <= 0) {
     logger.error('[arb] invalid share computation — aborting', {
@@ -215,22 +217,29 @@ export async function executeArb(
   function withTimeout<T>(promise: Promise<T>): Promise<T> {
     let timer: ReturnType<typeof setTimeout>;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => { reject(new Error('submitClobBuy timeout')); }, 15_000);
+      timer = setTimeout(() => {
+        reject(new Error('submitClobBuy timeout'));
+      }, 15_000);
     });
-    return Promise.race([promise, timeout]).finally(() => { clearTimeout(timer); });
+    return Promise.race([promise, timeout]).finally(() => {
+      clearTimeout(timer);
+    });
   }
 
   // Sequential execution to minimize unhedged exposure.
   // We execute Leg A first; if it fails, we never attempt Leg B.
-  const yesResult = await withTimeout(submitClobBuy({ tokenId: opp.yesTokenId, amountUsd: yesUsd, orderType: 'FOK' }))
-    .catch(err => ({ success: false as const, error: String(err) }));
+  const yesResult = await withTimeout(
+    submitClobBuy({ tokenId: opp.yesTokenId, amountUsd: yesUsd, orderType: 'FOK' }),
+  ).catch((err: unknown) => ({ success: false as const, error: String(err) }));
 
   if (!yesResult.success) {
-    logger.info('[arb] YES leg failed (FOK/Price move) — aborting NO leg', { 
-      marketId: opp.marketId, 
-      error: yesResult.error 
+    logger.info('[arb] YES leg failed (FOK/Price move) — aborting NO leg', {
+      marketId: opp.marketId,
+      error: yesResult.error,
     });
-    await redis.del(arbDedupKey(opp.marketId)).catch(() => undefined);
+    await redis.del(arbDedupKey(opp.marketId)).catch(() => {
+      /* ignore delete errors */
+    });
     return {
       marketId: opp.marketId,
       success: false,
@@ -245,26 +254,29 @@ export async function executeArb(
   }
 
   // YES succeeded, now attempt NO
-  const noResult = await withTimeout(submitClobBuy({ tokenId: opp.noTokenId, amountUsd: noUsd, orderType: 'FOK' }))
-    .catch(err => ({ success: false as const, error: String(err) }));
+  const noResult = await withTimeout(
+    submitClobBuy({ tokenId: opp.noTokenId, amountUsd: noUsd, orderType: 'FOK' }),
+  ).catch((err: unknown) => ({ success: false as const, error: String(err) }));
 
   if (!noResult.success) {
-    logger.error('[arb] CRITICAL: YES filled, NO failed — unhedged YES', { 
+    logger.error('[arb] CRITICAL: YES filled, NO failed — unhedged YES', {
       marketId: opp.marketId,
-      noError: noResult.error 
+      noError: noResult.error,
     });
-    notifyUnhedgedArbPosition({ 
-      marketId: opp.marketId, 
-      question: opp.question, 
-      stakeUsd: yesUsd, 
-      noError: noResult.error 
-    }).catch(err => { logger.error('[arb] alert failed', { err }); });
+    notifyUnhedgedArbPosition({
+      marketId: opp.marketId,
+      question: opp.question,
+      stakeUsd: yesUsd,
+      noError: noResult.error,
+    }).catch((err: unknown) => {
+      logger.error('[arb] alert failed', { err: String(err) });
+    });
 
     // Record the unhedged YES position in the ledger so the take-profit monitor
     // tracks it and can attempt a manual exit rather than leaving it invisible.
     await recordPosition(redis, {
       marketId: opp.marketId,
-      executionId: `unhedged-${Date.now()}`,
+      executionId: `unhedged-${Date.now().toString()}`,
       question: opp.question,
       direction: 'YES',
       entryPrice: opp.yesAsk,
@@ -273,8 +285,10 @@ export async function executeArb(
       openedAt: new Date().toISOString(),
       sourcedFrom: 'arb:unhedged-yes',
       executionVenue: 'clob',
-    }).catch(err => { logger.error('[arb] failed to record unhedged position', { err }); });
-    
+    }).catch((err: unknown) => {
+      logger.error('[arb] failed to record unhedged position', { err: String(err) });
+    });
+
     await deductStake(redis, yesUsd * (1 + cfg.ARB_FEE_RATE));
     return {
       marketId: opp.marketId,
@@ -324,7 +338,7 @@ export async function runArbScan(redis: Redis): Promise<void> {
     for (const opp of toExecute) {
       await executeArb(opp, redis);
     }
-  } catch (err) {
+  } catch (err: unknown) {
     logger.error('[arb] scan failed', {
       error: err instanceof Error ? err.message : String(err),
     });

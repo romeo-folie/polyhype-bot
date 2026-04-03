@@ -51,7 +51,9 @@ export function getPolygonProvider(rpcUrl: string): JsonRpcProvider {
     const polygonNetwork = new Network('matic', 137);
     const fetchReq = new FetchRequest(rpcUrl);
     fetchReq.timeout = RPC_TIMEOUT_MS;
-    _polygonProvider = new JsonRpcProvider(fetchReq, polygonNetwork, { staticNetwork: polygonNetwork });
+    _polygonProvider = new JsonRpcProvider(fetchReq, polygonNetwork, {
+      staticNetwork: polygonNetwork,
+    });
     _polygonProviderRpcUrl = rpcUrl;
   }
   return _polygonProvider;
@@ -163,8 +165,9 @@ function buildRpcList(): string[] {
  */
 export function parseBalanceFromClobError(errorMsg: string): number | null {
   const match = USDC_RAW_RE.exec(errorMsg);
-  if (!match?.[1]) return null;
-  const rawBalance = parseInt(match[1], 10);
+  const rawStr = match?.[1];
+  if (!rawStr) return null;
+  const rawBalance = parseInt(rawStr, 10);
   if (!isFinite(rawBalance) || rawBalance < 0) return null;
   return rawBalance / 1_000_000;
 }
@@ -232,13 +235,12 @@ export async function getClobClient(): Promise<ClobClient> {
     // Robustness: verify the source method exists before patching. If a future ethers
     // version removes `signTypedData`, fail loudly here rather than silently passing a
     // broken signer that would produce invalid signatures at trade time.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const signerAny = signer as any;
+    const signerAny = signer as unknown as Record<string, unknown>;
     if (typeof signerAny._signTypedData !== 'function') {
       if (typeof signer.signTypedData !== 'function') {
         throw new Error(
           'ethers Wallet has neither _signTypedData nor signTypedData — ' +
-          'incompatible ethers version; check @polymarket/clob-client peer deps',
+            'incompatible ethers version; check @polymarket/clob-client peer deps',
         );
       }
       signerAny._signTypedData = signer.signTypedData.bind(signer);
@@ -264,7 +266,7 @@ export async function getClobClient(): Promise<ClobClient> {
         POLYGON_CHAIN_ID,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-explicit-any
         signer as any, // TODO: Replace with proper SignerV6 interface when SDK is updated
-        undefined,     // no creds yet
+        undefined, // no creds yet
         sigType,
         funderAddress,
       );
@@ -295,9 +297,16 @@ export async function getClobClient(): Promise<ClobClient> {
     // If the failure looks like an auth error, evict the cached creds so the
     // next cold start doesn't replay a stale/invalid key set.
     const msg = normaliseError(err).toLowerCase();
-    if (msg.includes('api key') || msg.includes('auth') || msg.includes('401') || msg.includes('403')) {
+    if (
+      msg.includes('api key') ||
+      msg.includes('auth') ||
+      msg.includes('401') ||
+      msg.includes('403')
+    ) {
       logger.warn('[clob] auth failure — evicting cached API creds from Redis');
-      void getRedis().del(CLOB_CREDS_REDIS_KEY).catch(() => undefined);
+      void getRedis()
+        .del(CLOB_CREDS_REDIS_KEY)
+        .catch(() => undefined);
     }
   });
 
@@ -321,17 +330,22 @@ export async function evictClobCreds(): Promise<void> {
 function orderWithTimeout<T>(promise: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => { reject(new Error(`CLOB order timed out after ${String(CLOB_ORDER_TIMEOUT_MS)}ms`)); },
-      CLOB_ORDER_TIMEOUT_MS,
-    );
+    timer = setTimeout(() => {
+      reject(new Error(`CLOB order timed out after ${CLOB_ORDER_TIMEOUT_MS.toString()}ms`));
+    }, CLOB_ORDER_TIMEOUT_MS);
   });
-  return Promise.race([promise, timeout]).finally(() => { clearTimeout(timer); });
+  return Promise.race([promise, timeout]).finally(() => {
+    clearTimeout(timer);
+  });
 }
 
 function parseOrderResponse(raw: unknown): ClobTradeResult {
   if (raw == null || typeof raw !== 'object') {
-    return { success: false, error: `CLOB returned unexpected response: ${JSON.stringify(raw)}`, raw };
+    return {
+      success: false,
+      error: `CLOB returned unexpected response: ${JSON.stringify(raw)}`,
+      raw,
+    };
   }
 
   const resp = raw as OrderResponse;
@@ -379,7 +393,7 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
     if (input.amountUsd < CLOB_MIN_ORDER_USD) {
       return {
         success: false,
-        error: `CLOB order below minimum size: ${String(input.amountUsd)} USDC < ${String(CLOB_MIN_ORDER_USD)} USDC minimum`,
+        error: `CLOB order below minimum size: ${input.amountUsd.toString()} USDC < ${CLOB_MIN_ORDER_USD.toString()} USDC minimum`,
       };
     }
 
@@ -387,7 +401,7 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
     if (bal !== null && bal.balance < input.amountUsd) {
       return {
         success: false,
-        error: `Insufficient CLOB balance: ${String(bal.balance)} USDC available, ${String(input.amountUsd)} required`,
+        error: `Insufficient CLOB balance: ${bal.balance.toString()} USDC available, ${input.amountUsd.toString()} required`,
       };
     }
 
@@ -395,18 +409,24 @@ export async function submitClobBuy(input: ClobBuyInput): Promise<ClobTradeResul
     const negRisk = await orderWithTimeout(client.getNegRisk(input.tokenId));
 
     const resolvedOrderType = input.orderType
-      ? (input.orderType === 'FOK' ? OrderType.FOK : OrderType.FAK)
-      : (cfg.CLOB_ORDER_TYPE === 'FOK' ? OrderType.FOK : OrderType.FAK);
+      ? input.orderType === 'FOK'
+        ? OrderType.FOK
+        : OrderType.FAK
+      : cfg.CLOB_ORDER_TYPE === 'FOK'
+        ? OrderType.FOK
+        : OrderType.FAK;
 
-    const raw: unknown = await orderWithTimeout(client.createAndPostMarketOrder(
-      {
-        tokenID: input.tokenId,
-        amount: input.amountUsd,
-        side: Side.BUY,
-      },
-      { tickSize, negRisk },
-      resolvedOrderType,
-    ));
+    const raw: unknown = await orderWithTimeout(
+      client.createAndPostMarketOrder(
+        {
+          tokenID: input.tokenId,
+          amount: input.amountUsd,
+          side: Side.BUY,
+        },
+        { tickSize, negRisk },
+        resolvedOrderType,
+      ),
+    );
 
     return parseOrderResponse(raw);
   } catch (err) {
@@ -442,18 +462,20 @@ export async function submitClobLimitBuy(input: ClobLimitBuyInput): Promise<Clob
 
   try {
     const client = await getClobClient();
-    const raw: unknown = await orderWithTimeout(client.createAndPostOrder(
-      {
-        tokenID: input.tokenId,
-        price: input.price,
-        side: Side.BUY,
-        size: input.size,
-      },
-      { tickSize: input.tickSize, negRisk: input.negRisk },
-      OrderType.GTC,
-      false,
-      input.postOnly ?? false,
-    ));
+    const raw: unknown = await orderWithTimeout(
+      client.createAndPostOrder(
+        {
+          tokenID: input.tokenId,
+          price: input.price,
+          side: Side.BUY,
+          size: input.size,
+        },
+        { tickSize: input.tickSize, negRisk: input.negRisk },
+        OrderType.GTC,
+        false,
+        input.postOnly ?? false,
+      ),
+    );
 
     return parseOrderResponse(raw);
   } catch (err) {
@@ -470,7 +492,10 @@ export async function getClobOrder(orderId: string): Promise<OpenOrder | null> {
     const order = await orderWithTimeout(client.getOrder(orderId));
     return order ?? null;
   } catch (err) {
-    logger.warn('[clob] failed to fetch order', { orderId, error: err instanceof Error ? err.message : String(err) });
+    logger.warn('[clob] failed to fetch order', {
+      orderId,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return null;
   }
 }
@@ -484,7 +509,10 @@ export async function cancelClobOrder(orderId: string): Promise<boolean> {
     await orderWithTimeout(client.cancelOrder({ orderID: orderId }));
     return true;
   } catch (err) {
-    logger.warn('[clob] failed to cancel order', { orderId, error: err instanceof Error ? err.message : String(err) });
+    logger.warn('[clob] failed to cancel order', {
+      orderId,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return false;
   }
 }
@@ -507,8 +535,12 @@ export async function submitClobSell(input: ClobSellInput): Promise<ClobTradeRes
     const negRisk = await orderWithTimeout(client.getNegRisk(input.tokenId));
 
     const resolvedOrderType = input.orderType
-      ? (input.orderType === 'FOK' ? OrderType.FOK : OrderType.FAK)
-      : (cfg.CLOB_ORDER_TYPE === 'FOK' ? OrderType.FOK : OrderType.FAK);
+      ? input.orderType === 'FOK'
+        ? OrderType.FOK
+        : OrderType.FAK
+      : cfg.CLOB_ORDER_TYPE === 'FOK'
+        ? OrderType.FOK
+        : OrderType.FAK;
 
     logger.info('[clob] submitting SELL order', {
       tokenId: input.tokenId,
@@ -516,15 +548,17 @@ export async function submitClobSell(input: ClobSellInput): Promise<ClobTradeRes
       orderType: resolvedOrderType,
     });
 
-    const raw: unknown = await orderWithTimeout(client.createAndPostMarketOrder(
-      {
-        tokenID: input.tokenId,
-        amount: input.shares,
-        side: Side.SELL,
-      },
-      { tickSize, negRisk },
-      resolvedOrderType,
-    ));
+    const raw: unknown = await orderWithTimeout(
+      client.createAndPostMarketOrder(
+        {
+          tokenID: input.tokenId,
+          amount: input.shares,
+          side: Side.SELL,
+        },
+        { tickSize, negRisk },
+        resolvedOrderType,
+      ),
+    );
 
     return parseOrderResponse(raw);
   } catch (err) {
@@ -545,15 +579,19 @@ export async function getClobBalance(): Promise<{ balance: number; allowance: nu
     const client = await getClobClient();
     const typedClient = client as unknown as {
       updateBalanceAllowance(params?: { asset_type?: string }): Promise<void>;
-      getBalanceAllowance(params: { asset_type: string }): Promise<{ balance?: string; allowance?: string }>;
+      getBalanceAllowance(params: {
+        asset_type: string;
+      }): Promise<{ balance?: string; allowance?: string }>;
     };
 
     // Refresh on-chain allowance before reading — avoids stale allowance=0.
-    await typedClient.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL }).catch((err: unknown) => {
-      logger.warn('[clob] allowance refresh failed — reading cached value', {
-        error: err instanceof Error ? err.message : String(err),
+    await typedClient
+      .updateBalanceAllowance({ asset_type: AssetType.COLLATERAL })
+      .catch((err: unknown) => {
+        logger.warn('[clob] allowance refresh failed — reading cached value', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    });
 
     const result = await typedClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
 
@@ -572,9 +610,7 @@ export async function getClobBalance(): Promise<{ balance: number; allowance: nu
  * Fetch actual on-chain ERC-1155 balance for a CLOB token.
  * Used to sync sharesToSell against the real fill amount (Redis records order size, not fill size).
  */
-export type ClobBalanceResult =
-  | { ok: true; balance: number }
-  | { ok: false; error: string };
+export type ClobBalanceResult = { ok: true; balance: number } | { ok: false; error: string };
 
 /**
  * Fetch the on-chain ERC-1155 token balance for a CLOB outcome token.
@@ -590,7 +626,8 @@ export async function fetchClobTokenBalance(tokenId: string): Promise<ClobBalanc
     return { ok: false, error: 'wallet key missing' };
   }
 
-  const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY).address;
+  const funderAddress =
+    cfg.POLYMARKET_FUNDER_ADDRESS ?? new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY).address;
   const rpcUrls = buildRpcList();
   const ctfAbi = ['function balanceOf(address account, uint256 id) view returns (uint256)'];
   let lastError = '';
@@ -598,16 +635,18 @@ export async function fetchClobTokenBalance(tokenId: string): Promise<ClobBalanc
   for (const rpcUrl of rpcUrls) {
     try {
       const provider = getPolygonProvider(rpcUrl);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider) as any;
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const balance: bigint = await ctf.balanceOf(funderAddress, tokenId);
+      const ctf = new Contract(CTF_ADDRESS, ctfAbi, provider);
+      const balance: bigint = (await (ctf as unknown as { balanceOf: (acc: string, id: string) => Promise<bigint> }).balanceOf(funderAddress, tokenId));
       // Polymarket conditional tokens use 6 decimal places (CONDITIONAL_TOKEN_DECIMALS = 6).
       // balanceOf() returns raw ERC-1155 units — divide by 1e6 to get human-readable shares.
       return { ok: true, balance: Number(balance) / 1_000_000 };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
-      logger.warn('[clob] RPC balance fetch failed — trying next', { rpcUrl, tokenId, error: lastError });
+      logger.warn('[clob] RPC balance fetch failed — trying next', {
+        rpcUrl,
+        tokenId,
+        error: lastError,
+      });
       resetPolygonProvider();
     }
   }
@@ -639,12 +678,19 @@ export async function redeemClobOutcome(input: {
       return result;
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
-      logger.warn('[clob] RPC redemption failed — trying next', { rpcUrl, conditionId: input.conditionId, error: lastError });
+      logger.warn('[clob] RPC redemption failed — trying next', {
+        rpcUrl,
+        conditionId: input.conditionId,
+        error: lastError,
+      });
       resetPolygonProvider();
     }
   }
 
-  logger.error('[clob] all RPCs failed for redemption', { conditionId: input.conditionId, error: lastError });
+  logger.error('[clob] all RPCs failed for redemption', {
+    conditionId: input.conditionId,
+    error: lastError,
+  });
   return { success: false, error: lastError };
 }
 
@@ -654,7 +700,9 @@ async function redeemClobOutcomeWithRpc(
   rpcUrl: string,
 ): Promise<ClobTradeResult> {
   const provider = getPolygonProvider(rpcUrl);
-  const signer = new Wallet(cfg.POLYGON_WALLET_PRIVATE_KEY!, provider);
+  const privateKey = cfg.POLYGON_WALLET_PRIVATE_KEY;
+  if (!privateKey) throw new Error('POLYGON_WALLET_PRIVATE_KEY missing');
+  const signer = new Wallet(privateKey, provider);
   const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;
   const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
 
@@ -677,13 +725,20 @@ async function redeemClobOutcomeWithRpc(
     // Signing: GSN-style struct hash over (from, to, data, txFee, gasPrice, gasLimit, nonce, relayHub, relay)
 
     const hasRelayerKey = cfg.POLYMARKET_RELAYER_API_KEY && cfg.POLYMARKET_RELAYER_API_KEY_ADDRESS;
-    const hasBuilderKey = cfg.POLYMARKET_BUILDER_API_KEY && cfg.POLYMARKET_BUILDER_SECRET && cfg.POLYMARKET_BUILDER_PASSPHRASE;
+    const hasBuilderKey =
+      cfg.POLYMARKET_BUILDER_API_KEY &&
+      cfg.POLYMARKET_BUILDER_SECRET &&
+      cfg.POLYMARKET_BUILDER_PASSPHRASE;
 
     if (!hasRelayerKey && !hasBuilderKey) {
-      logger.warn('[clob] sigType=1: no relayer or builder credentials configured — manual redemption required', {
-        conditionId: input.conditionId,
-        instruction: 'Set POLYMARKET_RELAYER_API_KEY + POLYMARKET_RELAYER_API_KEY_ADDRESS in .env',
-      });
+      logger.warn(
+        '[clob] sigType=1: no relayer or builder credentials configured — manual redemption required',
+        {
+          conditionId: input.conditionId,
+          instruction:
+            'Set POLYMARKET_RELAYER_API_KEY + POLYMARKET_RELAYER_API_KEY_ADDRESS in .env',
+        },
+      );
       return { success: false, error: 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED' };
     }
 
@@ -700,7 +755,9 @@ async function redeemClobOutcomeWithRpc(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let builderConfig: any = undefined;
     if (hasBuilderKey) {
-      const { BuilderConfig } = await import('@polymarket/builder-relayer-client/node_modules/@polymarket/builder-signing-sdk/dist/index.js' as string);
+      const { BuilderConfig } = await import(
+        '@polymarket/builder-relayer-client/node_modules/@polymarket/builder-signing-sdk/dist/index.js' as string
+      );
       builderConfig = new BuilderConfig({
         localBuilderCreds: {
           key: cfg.POLYMARKET_BUILDER_API_KEY!,
@@ -714,19 +771,27 @@ async function redeemClobOutcomeWithRpc(
     // The RelayClient uses builderConfig for auth; for relayer key auth we override
     // the send method to inject RELAYER_API_KEY / RELAYER_API_KEY_ADDRESS headers.
     // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-    const relayClient = new RelayClient(relayerUrl, 137, wallet as any, builderConfig, RelayerTxType.PROXY);
+    const relayClient = new RelayClient(
+      relayerUrl,
+      137,
+      wallet as any,
+      builderConfig,
+      RelayerTxType.PROXY,
+    );
 
     if (hasRelayerKey && !hasBuilderKey) {
       // Monkey-patch: inject relayer key headers into every request
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const originalSend = (relayClient as any).httpClient.send.bind((relayClient as any).httpClient);
+      const originalSend = (relayClient as any).httpClient.send.bind(
+        (relayClient as any).httpClient,
+      );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (relayClient as any).httpClient.send = async (url: string, method: string, options: any) => {
         options = options ?? {};
         options.headers = {
           ...(options.headers ?? {}),
-          'RELAYER_API_KEY': cfg.POLYMARKET_RELAYER_API_KEY!,
-          'RELAYER_API_KEY_ADDRESS': cfg.POLYMARKET_RELAYER_API_KEY_ADDRESS!,
+          RELAYER_API_KEY: cfg.POLYMARKET_RELAYER_API_KEY!,
+          RELAYER_API_KEY_ADDRESS: cfg.POLYMARKET_RELAYER_API_KEY_ADDRESS!,
         };
         return originalSend(url, method, options);
       };
@@ -740,7 +805,9 @@ async function redeemClobOutcomeWithRpc(
     });
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const response = await relayClient.execute([{ to: CTF_ADDRESS as `0x${string}`, data, value: '0' }]);
+    const response = await relayClient.execute([
+      { to: CTF_ADDRESS as `0x${string}`, data, value: '0' },
+    ]);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
     const txHash: string | undefined = (response as any).transactionHash ?? undefined;
 

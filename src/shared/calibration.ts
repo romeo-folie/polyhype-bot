@@ -70,7 +70,7 @@ export async function computeCalibration(
     let totalReturn = 0;
     let totalStatedProb = 0;
     let probCount = 0;
-    const bucketData: Map<string, { wins: number; total: number }> = new Map();
+    const bucketData = new Map<string, { wins: number; total: number }>();
 
     for (const br of BUCKET_RANGES) {
       bucketData.set(br.label, { wins: 0, total: 0 });
@@ -82,16 +82,16 @@ export async function computeCalibration(
       pipeline.hgetall(`outcome:${id}`);
     }
     const pipelineResults = await pipeline.exec();
-    const allData: Record<string, string>[] = (pipelineResults ?? []).map(
-      ([err, val]) => (err || !val ? {} : (val as Record<string, string>)),
+    const allData: Record<string, string>[] = (pipelineResults ?? []).map(([err, val]) =>
+      err || !val ? {} : (val as Record<string, string>),
     );
 
     for (const data of allData) {
-      if (!data || !data['id']) continue;
+      if (!data.id) continue;
 
-      const result = data['result'] as string;
-      const returnPct = Number(data['returnPct']) || 0;
-      const prob = Number(data['consensusProbability']) || 0;
+      const result = data.result ?? '';
+      const returnPct = Number(data.returnPct) || 0;
+      const prob = Number(data.consensusProbability) || 0;
       const isWin = result === 'won';
 
       if (isWin) wins++;

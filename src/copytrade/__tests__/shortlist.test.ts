@@ -28,7 +28,13 @@ beforeEach(() => {
 describe('copytrade shortlist', () => {
   it('fetches leaderboard and parses entries', async () => {
     const payload = [
-      { rank: '1', proxyWallet: '0x0000000000000000000000000000000000000abc', userName: 'foo', vol: 200000, pnl: 50000 },
+      {
+        rank: '1',
+        proxyWallet: '0x0000000000000000000000000000000000000abc',
+        userName: 'foo',
+        vol: 200000,
+        pnl: 50000,
+      },
     ];
     mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => payload } as Response);
 
@@ -40,23 +46,46 @@ describe('copytrade shortlist', () => {
 
   it('selects by threshold and backfills to top N', async () => {
     const entries = [
-      { rank: '1', proxyWallet: '0x0000000000000000000000000000000000000001', userName: 'a', vol: 150000, pnl: 20000 },
-      { rank: '2', proxyWallet: '0x0000000000000000000000000000000000000002', userName: 'b', vol: 90000, pnl: 5000 },
-      { rank: '3', proxyWallet: '0x0000000000000000000000000000000000000003', userName: 'c', vol: 200000, pnl: 15000 },
+      {
+        rank: '1',
+        proxyWallet: '0x0000000000000000000000000000000000000001',
+        userName: 'a',
+        vol: 150000,
+        pnl: 20000,
+      },
+      {
+        rank: '2',
+        proxyWallet: '0x0000000000000000000000000000000000000002',
+        userName: 'b',
+        vol: 90000,
+        pnl: 5000,
+      },
+      {
+        rank: '3',
+        proxyWallet: '0x0000000000000000000000000000000000000003',
+        userName: 'c',
+        vol: 200000,
+        pnl: 15000,
+      },
     ];
 
     const { selectWallets } = await import('../shortlist.js');
     const { selected, backfilled } = selectWallets(entries, 10000, 100000, 2);
 
-    expect(selected.map(e => e.proxyWallet)).toEqual([
+    expect(selected.map((e) => e.proxyWallet)).toEqual([
       '0x0000000000000000000000000000000000000001',
       '0x0000000000000000000000000000000000000003',
     ]);
     expect(backfilled).toHaveLength(0);
 
-    const { selected: selected2, backfilled: backfilled2 } = selectWallets(entries, 10000, 250000, 2);
+    const { selected: selected2, backfilled: backfilled2 } = selectWallets(
+      entries,
+      10000,
+      250000,
+      2,
+    );
     expect(selected2).toHaveLength(0);
-    expect(backfilled2.map(e => e.proxyWallet)).toEqual([
+    expect(backfilled2.map((e) => e.proxyWallet)).toEqual([
       '0x0000000000000000000000000000000000000001',
       '0x0000000000000000000000000000000000000002',
     ]);
@@ -67,19 +96,19 @@ describe('copytrade shortlist', () => {
     // vol/pnl ratios: wallet A = 1.5, B = 0.5 (below threshold of 1.0), C = 2.0
     const entries = [
       { rank: '1', proxyWallet: '0xA', userName: 'a', vol: 150000, pnl: 100000 }, // ratio 1.5 ✓
-      { rank: '2', proxyWallet: '0xB', userName: 'b', vol: 50000,  pnl: 100000 }, // ratio 0.5 ✗
+      { rank: '2', proxyWallet: '0xB', userName: 'b', vol: 50000, pnl: 100000 }, // ratio 0.5 ✗
       { rank: '3', proxyWallet: '0xC', userName: 'c', vol: 200000, pnl: 100000 }, // ratio 2.0 ✓
     ];
 
     const { selected } = selectWallets(entries, 50000, 40000, 5, 1.0);
-    expect(selected.map(e => e.proxyWallet)).toEqual(['0xA', '0xC']);
-    expect(selected.map(e => e.proxyWallet)).not.toContain('0xB');
+    expect(selected.map((e) => e.proxyWallet)).toEqual(['0xA', '0xC']);
+    expect(selected.map((e) => e.proxyWallet)).not.toContain('0xB');
   });
 
   it('minVolPnlRatio is skipped when pnl <= 0, avoiding division by zero', async () => {
     const { selectWallets } = await import('../shortlist.js');
     const entries = [
-      { rank: '1', proxyWallet: '0xA', userName: 'a', vol: 50000, pnl: 0 },   // pnl=0 → skip ratio check (would div/0)
+      { rank: '1', proxyWallet: '0xA', userName: 'a', vol: 50000, pnl: 0 }, // pnl=0 → skip ratio check (would div/0)
       { rank: '2', proxyWallet: '0xB', userName: 'b', vol: 50000, pnl: 100 }, // pnl>0, ratio = 500 > 1.0 ✓
     ];
 
@@ -87,8 +116,8 @@ describe('copytrade shortlist', () => {
     // minPnl=0 and minVol=0 so neither threshold filters them.
     const { selected } = selectWallets(entries, 0, 0, 5, 1.0);
     expect(selected).toHaveLength(2);
-    expect(selected.map(e => e.proxyWallet)).toContain('0xA');
-    expect(selected.map(e => e.proxyWallet)).toContain('0xB');
+    expect(selected.map((e) => e.proxyWallet)).toContain('0xA');
+    expect(selected.map((e) => e.proxyWallet)).toContain('0xB');
   });
 
   it('updates .env with atomic write and replacement', async () => {
@@ -102,7 +131,9 @@ describe('copytrade shortlist', () => {
 
     expect(mockWriteFile).toHaveBeenCalledWith(
       expect.stringContaining('.env.tmp'),
-      expect.stringContaining('COPYTRADE_WALLETS=0x0000000000000000000000000000000000000abc,0x0000000000000000000000000000000000000def'),
+      expect.stringContaining(
+        'COPYTRADE_WALLETS=0x0000000000000000000000000000000000000abc,0x0000000000000000000000000000000000000def',
+      ),
       'utf8',
     );
     expect(mockRename).toHaveBeenCalledWith(
@@ -152,11 +183,15 @@ describe('copytrade shortlist', () => {
 
     mockFetchWithTimeout.mockResolvedValueOnce({
       ok: true,
-      json: async () => [{ proxyWallet: '0x1111111111111111111111111111111111111111', vol: 5000, pnl: 2000 }],
+      json: async () => [
+        { proxyWallet: '0x1111111111111111111111111111111111111111', vol: 5000, pnl: 2000 },
+      ],
     } as Response);
     mockFetchWithTimeout.mockResolvedValueOnce({
       ok: true,
-      json: async () => [{ proxyWallet: '0x2222222222222222222222222222222222222222', vol: 5000, pnl: 2000 }],
+      json: async () => [
+        { proxyWallet: '0x2222222222222222222222222222222222222222', vol: 5000, pnl: 2000 },
+      ],
     } as Response);
 
     mockReadFile.mockResolvedValue('COPYTRADE_WALLETS=old\n');
@@ -167,7 +202,9 @@ describe('copytrade shortlist', () => {
     expect(mockFetchWithTimeout).toHaveBeenCalledTimes(2);
     expect(mockWriteFile).toHaveBeenCalledWith(
       expect.anything(),
-      expect.stringContaining('COPYTRADE_WALLETS=0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222'),
+      expect.stringContaining(
+        'COPYTRADE_WALLETS=0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222',
+      ),
       'utf8',
     );
   });

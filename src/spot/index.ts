@@ -51,7 +51,9 @@ export async function runSpotMonitor(): Promise<void> {
     await runSpotMonitorInner(cfg, redis);
   } finally {
     // Release lock explicitly so the next cron run isn't blocked for the full 120s TTL
-    await releaseLock('spot:lock', lockToken).catch(() => { /* best effort */ });
+    await releaseLock('spot:lock', lockToken).catch(() => {
+      /* best effort */
+    });
   }
 }
 
@@ -87,11 +89,18 @@ async function runSpotMonitorInner(
     const hlSymbol = HL_SYMBOL_MAP[move.assetId];
     if (cfg.FUTURES_ENABLED && hlSymbol) {
       // Check if we're already holding this perp on this side
-      const alreadyOpen = await hasOpenPosition(redis, hlSymbol, move.changePercent > 0 ? 'LONG' : 'SHORT');
-      
+      const alreadyOpen = await hasOpenPosition(
+        redis,
+        hlSymbol,
+        move.changePercent > 0 ? 'LONG' : 'SHORT',
+      );
+
       if (!alreadyOpen) {
-        const stakeUsd = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
-        
+        const stakeUsd = Math.min(
+          cfg.FUTURES_MAX_PER_TRADE_USD,
+          bankrollUsd * cfg.MAX_BET_FRACTION,
+        );
+
         signals.push({
           marketId: hlSymbol,
           question: `Hyperliquid Perp: ${hlSymbol} ${move.changePercent > 0 ? 'LONG' : 'SHORT'}`,
@@ -101,8 +110,8 @@ async function runSpotMonitorInner(
           outcomePrice: move.currentPrice,
           isFutures: true,
           leverage: cfg.FUTURES_DEFAULT_LEVERAGE,
-          sourcedFrom: `Spot: ${move.assetId} ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(1)}% in ${String(move.windowMinutes)}min`,
-          reasoning: `Intraday momentum detected on ${move.assetId}. Current price: ${String(move.currentPrice)}. Scaling into ${hlSymbol} perp.`,
+          sourcedFrom: `Spot: ${move.assetId} ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(1)}% in ${move.windowMinutes.toString()}min`,
+          reasoning: `Intraday momentum detected on ${move.assetId}. Current price: ${move.currentPrice.toString()}. Scaling into ${hlSymbol} perp.`,
         });
       }
     }
@@ -110,7 +119,7 @@ async function runSpotMonitorInner(
     let markets;
     try {
       markets = await findCorrelatedMarkets(move);
-    } catch (err) {
+    } catch (err: unknown) {
       logger.error('[spot] failed to find correlated markets', {
         assetId: move.assetId,
         error: err instanceof Error ? err.message : String(err),
@@ -138,7 +147,7 @@ async function runSpotMonitorInner(
       let consensus;
       try {
         consensus = await estimateFastConsensus(move, market);
-      } catch (err) {
+      } catch (err: unknown) {
         logger.warn('[spot] consensus estimation failed', {
           marketId: market.marketId,
           error: err instanceof Error ? err.message : String(err),
@@ -155,9 +164,7 @@ async function runSpotMonitorInner(
       const shouldInvert =
         (market.correlationDirection === 'positive' && move.changePercent < 0) ||
         (market.correlationDirection === 'negative' && move.changePercent > 0);
-      const adjustedProbability = shouldInvert
-        ? 1 - consensus.probability
-        : consensus.probability;
+      const adjustedProbability = shouldInvert ? 1 - consensus.probability : consensus.probability;
 
       // 5. Compute divergence
       // Spot fast-path: formula-based estimates are deterministic (stddev=0).
@@ -177,7 +184,7 @@ async function runSpotMonitorInner(
 
       const sourcedFrom =
         `Spot: ${move.assetId} ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(1)}% ` +
-        `in ${move.windowMinutes}min`;
+        `in ${move.windowMinutes.toString()}min`;
 
       signals.push({
         marketId: market.marketId,
@@ -205,10 +212,12 @@ async function runSpotMonitorInner(
   // 5b. Cross-check with Simmer opportunities — boost confidence when Simmer agrees
   // Fetch opportunities once per cycle (not per signal) to avoid rate limit pressure.
   // If Simmer's AI oracle disagrees with our direction, log it and reduce stake by 50%.
-  const simmerOpps = await getOpportunities({ venue: 'polymarket', limit: 50, minDivergence: 0.03 });
-  const simmerOppByQuestion = new Map(
-    simmerOpps.map((o) => [o.question.toLowerCase().trim(), o]),
-  );
+  const simmerOpps = await getOpportunities({
+    venue: 'polymarket',
+    limit: 50,
+    minDivergence: 0.03,
+  });
+  const simmerOppByQuestion = new Map(simmerOpps.map((o) => [o.question.toLowerCase().trim(), o]));
 
   const crossCheckedSignals = signals.map((signal) => {
     const oppKey = signal.question.toLowerCase().trim();
@@ -284,7 +293,7 @@ async function runSpotMonitorInner(
     if (result.skipped) {
       logger.info('[spot] signal skipped', {
         marketId: result.signal.marketId,
-      executionId: result.signal.executionId,
+        executionId: result.signal.executionId,
         reason: result.skipReason,
       });
       continue;
@@ -293,7 +302,7 @@ async function runSpotMonitorInner(
     if (result.error) {
       logger.error('[spot] trade execution failed', {
         marketId: result.signal.marketId,
-      executionId: result.signal.executionId,
+        executionId: result.signal.executionId,
         error: result.error,
       });
       await notifyTradeError(result.signal, result.error);
@@ -347,7 +356,7 @@ async function runSpotMonitorInner(
 async function main() {
   try {
     await runSpotMonitor();
-  } catch (err) {
+  } catch (err: unknown) {
     logger.error('[spot] fatal error', {
       error: err instanceof Error ? err.message : String(err),
     });

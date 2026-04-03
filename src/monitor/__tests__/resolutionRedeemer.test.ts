@@ -77,7 +77,7 @@ describe('redeemResolvedPositions', () => {
       Promise.resolve({
         ok: true,
         json: () => Promise.resolve([{ resolved: true, outcome: 'YES' }]),
-      } as any)
+      } as any),
     );
   });
 
@@ -134,7 +134,7 @@ describe('redeemResolvedPositions', () => {
       { market_id: 'amm1', side: 'no', redeemable: true, value_usdc: 5 },
     ]);
     mockSubmitRedeem.mockResolvedValue({ success: true });
-    
+
     mockGetOpenPositions.mockResolvedValue([
       { marketId: 'clob1', conditionId: 'cond1', direction: 'YES', executionVenue: 'clob' },
     ]);
@@ -143,6 +143,6 @@ describe('redeemResolvedPositions', () => {
     const results = await redeemResolvedPositions(mockRedis);
 
     expect(results).toHaveLength(2);
-    expect(results.every(r => r.success)).toBe(true);
+    expect(results.every((r) => r.success)).toBe(true);
   });
 });

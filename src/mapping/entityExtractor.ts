@@ -31,7 +31,7 @@ async function extractEntitiesOpenAI(headline: string, entityContext: string): P
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const systemPrompt = buildEntitySystemPrompt(entityContext);
   const abortCtrl = new AbortController();
-  const abortTimer = setTimeout(() => abortCtrl.abort(), TIMEOUT_MS);
+  const abortTimer = setTimeout(() => { abortCtrl.abort(); }, TIMEOUT_MS);
   let completion: Awaited<ReturnType<typeof client.chat.completions.create>>;
   try {
     completion = await client.chat.completions.create(
@@ -65,11 +65,17 @@ async function extractEntitiesGemini(headline: string, entityContext: string): P
   const result = await Promise.race([
     model.generateContent(`${systemPrompt}\n\n${headline}`),
     new Promise<never>((_, reject) =>
-      setTimeout(() => { reject(new Error('Gemini timeout')); }, TIMEOUT_MS),
+      setTimeout(() => {
+        reject(new Error('Gemini timeout'));
+      }, TIMEOUT_MS),
     ),
   ]);
 
-  const raw = result.response.text().replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
+  const raw = result.response
+    .text()
+    .replace(/```(?:json)?\s*/g, '')
+    .replace(/```/g, '')
+    .trim();
   const parsed = JSON.parse(raw) as { entities?: string[] };
   return Array.isArray(parsed.entities) ? parsed.entities.slice(0, 5) : [];
 }
@@ -87,7 +93,7 @@ export async function extractEntities(headline: string, entityContext: string): 
   if (useGemini) {
     try {
       return await extractEntitiesGemini(headline, entityContext);
-    } catch (err) {
+    } catch (err: unknown) {
       logger.warn('[entity-extractor] Gemini failed, trying OpenAI', {
         error: err instanceof Error ? err.message : String(err),
       });
@@ -135,7 +141,7 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
   let entities: string[] = [];
   try {
     entities = await extractEntities(item.title, item.entityContext);
-  } catch (err) {
+  } catch (err: unknown) {
     logger.warn('[entity-extractor] entity extraction failed, falling back to keywords', {
       error: err instanceof Error ? err.message : String(err),
     });
@@ -167,8 +173,9 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
 
           // If event title didn't match, check market question/desc
           if (!eventMatches) {
-            const mMatch = market.question.toLowerCase().includes(qLower) ||
-                          (market.description || '').toLowerCase().includes(qLower);
+            const mMatch =
+              market.question.toLowerCase().includes(qLower) ||
+              (market.description || '').toLowerCase().includes(qLower);
             if (!mMatch) continue;
           }
 
@@ -222,7 +229,7 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
           }
         }
       }
-    } catch (err) {
+    } catch (err: unknown) {
       logger.warn('[entity-extractor] gamma search failed for query', {
         query,
         error: err instanceof Error ? err.message : String(err),

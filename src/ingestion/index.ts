@@ -12,16 +12,14 @@ import { fetchRssFeeds } from './rss.js';
 import { scrapeHeadlines } from './scraper.js';
 import { filterSeen } from './dedup.js';
 import { scoreItems } from './scorer.js';
+import { matchesWatchlist } from '../shared/watchlist.js';
 import { applyTimingBoost } from './timingWindow.js';
 import type { ScoredItem } from './scorer.js';
 import type { Redis } from 'ioredis';
 import type { CategoryConfig } from './categories/types.js';
 import { CATEGORIES } from './categories/index.js';
 
-async function runCategoryPipeline(
-  category: CategoryConfig,
-  redis: Redis,
-): Promise<ScoredItem[]> {
+async function runCategoryPipeline(category: CategoryConfig, redis: Redis): Promise<ScoredItem[]> {
   const [rssItems, scraped] = await Promise.all([
     fetchRssFeeds(category.feeds),
     category.id === 'geopolitical' ? scrapeHeadlines() : Promise.resolve([]),
@@ -29,7 +27,19 @@ async function runCategoryPipeline(
 
   const all = [...rssItems, ...scraped];
   const newItems = await filterSeen(all, redis);
-  const scored = await scoreItems(newItems, {
+
+  // Dynamic Watchlist Gate: Only score items that contain keywords from active markets.
+  // This drastically reduces LLM costs and noise from unrelated world news.
+  const filtered = [];
+  for (const item of newItems) {
+    if (await matchesWatchlist(item.title, redis)) {
+      filtered.push(item);
+    } else {
+      logger.debug('[ingestion] skipping item — no watchlist match', { title: item.title });
+    }
+  }
+
+  const scored = await scoreItems(filtered, {
     systemPrompt: category.scorerPrompt,
     categoryId: category.id,
     categoryLabel: category.label,
@@ -40,7 +50,7 @@ async function runCategoryPipeline(
   const boosted = applyTimingBoost(scored);
   const highUrgency = boosted.filter((i) => i.urgencyScore >= category.scoreThreshold);
   logger.info(
-    `[ingestion] ${category.id}: ${all.length} total → ${newItems.length} new → ${highUrgency.length} high-urgency`,
+    `[ingestion] ${category.id}: ${all.length.toString()} total → ${newItems.length.toString()} new → ${highUrgency.length.toString()} high-urgency`,
   );
   return highUrgency;
 }
@@ -53,8 +63,10 @@ export async function runIngestion(): Promise<ScoredItem[]> {
 
   const highUrgency: ScoredItem[] = [];
   for (let i = 0; i < settled.length; i++) {
-    const result = settled[i]!;
-    const category = CATEGORIES[i]!;
+    const result = settled[i];
+    const category = CATEGORIES[i];
+    if (!result || !category) continue;
+
     if (result.status === 'fulfilled') {
       highUrgency.push(...result.value);
     } else {

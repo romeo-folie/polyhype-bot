@@ -44,7 +44,10 @@ function buildUserPrompt(items: RssItem[]): string {
 
 function parseScores(raw: string, batchLength: number): ScoreResult[] {
   // Strip markdown fences if present
-  const cleaned = raw.replace(/```(?:json)?\s*/g, '').replace(/```/g, '').trim();
+  const cleaned = raw
+    .replace(/```(?:json)?\s*/g, '')
+    .replace(/```/g, '')
+    .trim();
   const parsed = JSON.parse(cleaned) as { results: ScoreResult[] };
   const results = parsed.results ?? [];
   if (results.length !== batchLength) {
@@ -69,7 +72,9 @@ async function scoreBatchGemini(items: RssItem[], systemPrompt: string): Promise
       generationConfig: { responseMimeType: 'application/json' },
     }),
     new Promise<never>((_, reject) =>
-      setTimeout(() => { reject(new Error('Gemini timeout')); }, TIMEOUT_MS),
+      setTimeout(() => {
+        reject(new Error('Gemini timeout'));
+      }, TIMEOUT_MS),
     ),
   ]);
 
@@ -82,7 +87,9 @@ async function scoreBatchOpenAI(items: RssItem[], systemPrompt: string): Promise
   const client = new OpenAI({ apiKey: loadConfig().OPENAI_API_KEY });
 
   const controller = new AbortController();
-  const timer = setTimeout(() => { controller.abort(); }, TIMEOUT_MS);
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, TIMEOUT_MS);
 
   try {
     const response = await client.chat.completions.create(
@@ -191,7 +198,12 @@ export async function scoreItems(
         if (opts.redis) {
           const cacheKey = 'scored:' + createHash('sha256').update(item.url).digest('hex');
           try {
-            await opts.redis.set(cacheKey, JSON.stringify(scoredItem), 'EX', cfg.SCORER_CACHE_TTL_S);
+            await opts.redis.set(
+              cacheKey,
+              JSON.stringify(scoredItem),
+              'EX',
+              cfg.SCORER_CACHE_TTL_S,
+            );
           } catch {
             // cache write failed — non-fatal
           }

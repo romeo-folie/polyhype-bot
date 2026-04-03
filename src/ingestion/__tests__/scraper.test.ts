@@ -124,20 +124,18 @@ describe('scrapeHeadlines (GDELT)', () => {
   it('retries once on 429 and succeeds', async () => {
     const rateLimitError = { response: { status: 429 } };
 
-    mockGet
-      .mockRejectedValueOnce(rateLimitError)
-      .mockResolvedValueOnce({
-        data: {
-          articles: [
-            {
-              url: 'https://example.com/retry-ok',
-              title: 'Retry success article',
-              seendate: '20260319T080000Z',
-              language: 'English',
-            },
-          ],
-        },
-      });
+    mockGet.mockRejectedValueOnce(rateLimitError).mockResolvedValueOnce({
+      data: {
+        articles: [
+          {
+            url: 'https://example.com/retry-ok',
+            title: 'Retry success article',
+            seendate: '20260319T080000Z',
+            language: 'English',
+          },
+        ],
+      },
+    });
 
     const items = await scrapeHeadlines();
     expect(items).toHaveLength(1);

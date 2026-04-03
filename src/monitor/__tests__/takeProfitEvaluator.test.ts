@@ -41,7 +41,7 @@ describe('evaluateTakeProfit', () => {
         makePosition({ entryPrice: 0.5, consensusProbability: 0.7 }),
         makeCurrentPrice({ currentOutcomePrice: 0.3, currentYesPrice: 0.3 }),
         THRESHOLD,
-        0.30,
+        0.3,
       );
       expect(result.shouldExit).toBe(true);
       expect(result.reason).toBe('stop_loss');
@@ -54,7 +54,7 @@ describe('evaluateTakeProfit', () => {
         makePosition({ entryPrice: 0.5, consensusProbability: 0.7 }),
         makeCurrentPrice({ currentOutcomePrice: 0.4, currentYesPrice: 0.4 }),
         THRESHOLD,
-        0.30,
+        0.3,
       );
       expect(result.shouldExit).toBe(false);
     });
@@ -68,7 +68,7 @@ describe('evaluateTakeProfit', () => {
         makePosition({ entryPrice: 0.5, consensusProbability: 0.2 }),
         makeCurrentPrice({ currentOutcomePrice: 0.25, currentYesPrice: 0.25 }),
         THRESHOLD,
-        0.30,
+        0.3,
       );
       expect(result.shouldExit).toBe(true);
       expect(result.reason).toBe('stop_loss');
@@ -134,7 +134,7 @@ describe('evaluateTakeProfit', () => {
       const position = makePosition({
         direction: 'NO',
         entryPrice: 0.68,
-        consensusProbability: 0.30,
+        consensusProbability: 0.3,
       });
       const result = evaluateTakeProfit(
         position,
@@ -155,7 +155,7 @@ describe('evaluateTakeProfit', () => {
       const position = makePosition({
         direction: 'NO',
         entryPrice: 0.55,
-        consensusProbability: 0.30,
+        consensusProbability: 0.3,
       });
       const result = evaluateTakeProfit(
         position,

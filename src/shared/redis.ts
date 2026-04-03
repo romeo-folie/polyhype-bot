@@ -87,7 +87,7 @@ export async function dedup(key: string, ttlSeconds = 86400): Promise<boolean> {
  */
 export async function acquireLock(key: string, ttlSec: number): Promise<string | null> {
   const redis = getRedis();
-  const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const token = `${Date.now().toString()}-${Math.random().toString(36).slice(2)}`;
   const result = await redis.set(key, token, 'EX', ttlSec, 'NX');
   return result === 'OK' ? token : null;
 }
@@ -111,8 +111,12 @@ export async function releaseLock(key: string, token: string): Promise<void> {
 
 // Graceful shutdown — close Redis on process termination signals
 process.on('SIGTERM', () => {
-  void closeRedis().finally(() => { process.exit(0); });
+  void closeRedis().finally(() => {
+    process.exit(0);
+  });
 });
 process.on('SIGINT', () => {
-  void closeRedis().finally(() => { process.exit(0); });
+  void closeRedis().finally(() => {
+    process.exit(0);
+  });
 });

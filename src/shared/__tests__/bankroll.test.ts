@@ -24,7 +24,9 @@ const mockLoadConfig = vi.fn(() => ({
 }));
 
 vi.mock('../config.js', () => ({
-  get loadConfig() { return mockLoadConfig; },
+  get loadConfig() {
+    return mockLoadConfig;
+  },
   USDC_E_ADDRESS: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
   POLYGON_FALLBACK_RPCS: ['https://polygon-rpc.com'],
 }));
@@ -42,8 +44,14 @@ vi.mock('ethers', async (importOriginal) => {
   };
 });
 
-const { getBankroll, setBankroll, deductStake, creditProceeds, _resetCacheForTests, getOnChainUsdcBalance } =
-  await import('../bankroll.js');
+const {
+  getBankroll,
+  setBankroll,
+  deductStake,
+  creditProceeds,
+  _resetCacheForTests,
+  getOnChainUsdcBalance,
+} = await import('../bankroll.js');
 
 describe('bankroll', () => {
   beforeEach(() => {
@@ -51,7 +59,10 @@ describe('bankroll', () => {
     _resetCacheForTests();
     mockGetPortfolio.mockResolvedValue({ balance_usdc: 100 });
     // Default: wallet key not set → on-chain returns 0
-    mockLoadConfig.mockReturnValue({ POLYGON_WALLET_PRIVATE_KEY: undefined, POLYGON_RPC_URL: undefined });
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: undefined,
+      POLYGON_RPC_URL: undefined,
+    });
     mockBalanceOf.mockResolvedValue(0n);
   });
 
@@ -62,14 +73,20 @@ describe('bankroll', () => {
   });
 
   it('returns Simmer + on-chain balance combined when wallet key is set', async () => {
-    mockLoadConfig.mockReturnValue({ POLYGON_WALLET_PRIVATE_KEY: 'test-key', POLYGON_RPC_URL: 'https://polygon-rpc.com' });
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+    });
     mockBalanceOf.mockResolvedValue(40_000_000n); // 40 USDC.e (6 decimals)
     const result = await getBankroll();
     expect(result).toBe(140);
   });
 
   it('logs combined balance with all three components', async () => {
-    mockLoadConfig.mockReturnValue({ POLYGON_WALLET_PRIVATE_KEY: 'test-key', POLYGON_RPC_URL: 'https://polygon-rpc.com' });
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+    });
     mockBalanceOf.mockResolvedValue(40_000_000n);
     await getBankroll();
     expect(mockLogger.info).toHaveBeenCalledWith(
@@ -116,7 +133,10 @@ describe('bankroll', () => {
     _resetCacheForTests();
 
     mockGetPortfolio.mockResolvedValue({ balance_usdc: 200 });
-    mockLoadConfig.mockReturnValue({ POLYGON_WALLET_PRIVATE_KEY: 'test-key', POLYGON_RPC_URL: 'https://polygon-rpc.com' });
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+    });
     mockBalanceOf.mockResolvedValue(20_000_000n); // 20 USDC.e
     const result = await getBankroll();
     expect(result).toBe(220);
@@ -142,7 +162,10 @@ describe('bankroll', () => {
   });
 
   it('degrades to Simmer-only when on-chain RPC fails', async () => {
-    mockLoadConfig.mockReturnValue({ POLYGON_WALLET_PRIVATE_KEY: 'test-key', POLYGON_RPC_URL: 'https://polygon-rpc.com' });
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+    });
     // All RPC attempts fail — getOnChainUsdcBalance returns 0
     mockBalanceOf.mockRejectedValue(new Error('RPC timeout'));
     const result = await getBankroll();
@@ -207,20 +230,29 @@ describe('bankroll', () => {
 
 describe('getOnChainUsdcBalance', () => {
   it('returns 0 immediately when POLYGON_WALLET_PRIVATE_KEY is not set', async () => {
-    mockLoadConfig.mockReturnValue({ POLYGON_WALLET_PRIVATE_KEY: undefined, POLYGON_RPC_URL: undefined });
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: undefined,
+      POLYGON_RPC_URL: undefined,
+    });
     const balance = await getOnChainUsdcBalance();
     expect(balance).toBe(0);
   });
 
   it('returns human-unit USDC.e balance when wallet key is set', async () => {
-    mockLoadConfig.mockReturnValue({ POLYGON_WALLET_PRIVATE_KEY: 'test-key', POLYGON_RPC_URL: 'https://polygon-rpc.com' });
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+    });
     mockBalanceOf.mockResolvedValue(59_580_000n); // $59.58
     const balance = await getOnChainUsdcBalance();
     expect(balance).toBeCloseTo(59.58, 5);
   });
 
   it('returns 0 when all RPCs fail', async () => {
-    mockLoadConfig.mockReturnValue({ POLYGON_WALLET_PRIVATE_KEY: 'test-key', POLYGON_RPC_URL: 'https://polygon-rpc.com' });
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+    });
     mockBalanceOf.mockRejectedValue(new Error('connection refused'));
     const balance = await getOnChainUsdcBalance();
     expect(balance).toBe(0);
@@ -242,10 +274,12 @@ describe('getOnChainUsdcBalance', () => {
     const { Contract } = await import('ethers');
     const balance = await getOnChainUsdcBalance();
 
-    expect(balance).toBeCloseTo(5.20, 5);
+    expect(balance).toBeCloseTo(5.2, 5);
     // balanceOf must be called with the funder address, not the signer wallet address
     expect(Contract).toHaveBeenCalled();
-    const contractInstance = vi.mocked(Contract).mock.results[0]!.value as { balanceOf: typeof mockBalanceOf };
+    const contractInstance = vi.mocked(Contract).mock.results[0]!.value as {
+      balanceOf: typeof mockBalanceOf;
+    };
     expect(contractInstance.balanceOf).toHaveBeenCalledWith('0xFunderProxy');
   });
 });

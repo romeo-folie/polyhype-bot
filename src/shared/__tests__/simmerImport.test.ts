@@ -136,12 +136,12 @@ describe('discoverUnimportedMarkets', () => {
   it('handles bare array response', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
-      json: async () => ([
+      json: async () => [
         {
           polymarket_url: 'https://polymarket.com/event/market-1',
           question: 'Will X happen?',
         },
-      ]),
+      ],
     });
 
     const { discoverUnimportedMarkets } = await import('../simmerImport.js');

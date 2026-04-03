@@ -9,7 +9,8 @@ vi.mock('../logger.js', () => ({
   },
 }));
 
-const { computeCalibration, getCalibrationStats, applyCalibrationCorrection } = await import('../calibration.js');
+const { computeCalibration, getCalibrationStats, applyCalibrationCorrection } =
+  await import('../calibration.js');
 
 type OutcomeData = Record<string, string>;
 
@@ -29,9 +30,7 @@ function makeRedis(outcomes: OutcomeData[] = []) {
       pipelineCommands.push(key);
       return pipelineMock; // chainable
     }),
-    exec: vi.fn<any>(async () =>
-      pipelineCommands.map((key) => [null, hashStore.get(key) ?? {}]),
-    ),
+    exec: vi.fn<any>(async () => pipelineCommands.map((key) => [null, hashStore.get(key) ?? {}])),
   };
 
   return {
@@ -82,19 +81,19 @@ describe('computeCalibration', () => {
 
   it('assigns outcomes to correct buckets', async () => {
     const outcomes = [
-      makeOutcomeData({ consensusProbability: '0.55', result: 'won' }),  // 0.50-0.60
+      makeOutcomeData({ consensusProbability: '0.55', result: 'won' }), // 0.50-0.60
       makeOutcomeData({ consensusProbability: '0.65', result: 'lost' }), // 0.60-0.70
-      makeOutcomeData({ consensusProbability: '0.75', result: 'won' }),  // 0.70-0.80
-      makeOutcomeData({ consensusProbability: '0.85', result: 'won' }),  // 0.80-0.90
+      makeOutcomeData({ consensusProbability: '0.75', result: 'won' }), // 0.70-0.80
+      makeOutcomeData({ consensusProbability: '0.85', result: 'won' }), // 0.80-0.90
       makeOutcomeData({ consensusProbability: '0.95', result: 'lost' }), // 0.90-1.00
     ];
     const redis = makeRedis(outcomes);
 
     const stats = await computeCalibration(redis as any, 'geopolitical');
 
-    const bucket50 = stats!.buckets.find(b => b.range === '0.50-0.60');
-    const bucket60 = stats!.buckets.find(b => b.range === '0.60-0.70');
-    const bucket70 = stats!.buckets.find(b => b.range === '0.70-0.80');
+    const bucket50 = stats!.buckets.find((b) => b.range === '0.50-0.60');
+    const bucket60 = stats!.buckets.find((b) => b.range === '0.60-0.70');
+    const bucket70 = stats!.buckets.find((b) => b.range === '0.70-0.80');
     expect(bucket50!.count).toBe(1);
     expect(bucket50!.actualWinRate).toBe(1); // 1 win / 1 total
     expect(bucket60!.count).toBe(1);
@@ -236,6 +235,6 @@ describe('applyCalibrationCorrection', () => {
       edgeCorrectionFactor: 1.3,
       buckets: [],
     };
-    expect(applyCalibrationCorrection(0.10, stats, 20)).toBeCloseTo(0.13);
+    expect(applyCalibrationCorrection(0.1, stats, 20)).toBeCloseTo(0.13);
   });
 });

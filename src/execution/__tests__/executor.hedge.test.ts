@@ -16,6 +16,7 @@ vi.mock('../../shared/config.js', () => ({
     TAIL_TAKER_BLOCK: false,
     TAIL_PRICE_THRESHOLD: 0.2,
     TAIL_TAKER_OVERRIDE_EDGE: 0.2,
+    TAKER_MIN_EDGE_CATEGORIES: {},
     CLOB_FALLBACK_ENABLED: false,
   }),
 }));
@@ -40,7 +41,13 @@ vi.mock('../positionLedger.js', () => ({
 vi.mock('../../shared/simmer.js', () => ({
   submitTrade: vi.fn().mockResolvedValue({ success: true, tx_hash: '0xabc' }),
   resolveSimmerMarketId: vi.fn().mockResolvedValue('simmer-abc'),
-  getMarketContext: vi.fn().mockResolvedValue({ market: { status: 'open' }, position: { has_position: false }, discipline: { warning_level: 'none' } }),
+  getMarketContext: vi
+    .fn()
+    .mockResolvedValue({
+      market: { status: 'open' },
+      position: { has_position: false },
+      discipline: { warning_level: 'none' },
+    }),
 }));
 
 // Mock Hyperliquid Client
@@ -95,19 +102,21 @@ describe('Delta Hedging Integration', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     // Verify HL hedge was triggered
-    expect(mockPlaceMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
-      symbol: 'BTC',
-      isBuy: false, // SHORT
-      sizeUsd: 10,  // 1:1 stake
-      leverage: 1, 
-    }));
+    expect(mockPlaceMarketOrder).toHaveBeenCalledWith(
+      expect.objectContaining({
+        symbol: 'BTC',
+        isBuy: false, // SHORT
+        sizeUsd: 10, // 1:1 stake
+        leverage: 1,
+      }),
+    );
 
     // Verify Redis link was set
     expect(mockRedis.set).toHaveBeenCalledWith(
       expect.stringContaining('hedge:link:pm-123'),
       'BTC',
       'EX',
-      expect.any(Number)
+      expect.any(Number),
     );
   });
 

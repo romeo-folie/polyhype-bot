@@ -12,9 +12,25 @@
  */
 
 import { logger } from '../shared/logger.js';
-import { submitSell, resolveSimmerMarketId } from '../shared/simmer.js';
-import { submitClobSell, fetchClobTokenBalance, parseBalanceFromClobError, type ClobBalanceResult, CLOB_MIN_ORDER_USD } from '../shared/clob.js';
-import { closePosition, markPositionSynthHedged, markPositionPendingSettlement, updatePositionShares } from '../execution/positionLedger.js';
+import {
+  submitSell,
+  resolveSimmerMarketId,
+  getSimmerPositions,
+  SimmerError,
+} from '../shared/simmer.js';
+import {
+  submitClobSell,
+  fetchClobTokenBalance,
+  parseBalanceFromClobError,
+  type ClobBalanceResult,
+  CLOB_MIN_ORDER_USD,
+} from '../shared/clob.js';
+import {
+  closePosition,
+  markPositionSynthHedged,
+  markPositionPendingSettlement,
+  updatePositionShares,
+} from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
@@ -31,7 +47,11 @@ import type { ExitReason } from './takeProfitEvaluator.js';
  * also close the linked HL position. Called from all take-profit exit paths
  * so hedge positions are never orphaned.
  */
-async function closePositionWithHedge(redis: Redis, marketId: string, direction: Position['direction']): Promise<void> {
+async function closePositionWithHedge(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+): Promise<void> {
   await closePosition(redis, marketId, direction);
   // Check for a linked HL hedge and close it if present.
   const hlSymbol = await redis.get(`hedge:link:${marketId}`).catch(() => null);
@@ -42,16 +62,35 @@ async function closePositionWithHedge(redis: Redis, marketId: string, direction:
       if (result.success) {
         logger.info('[take-profit-executor] closed linked HL hedge', { marketId, hlSymbol });
       } else {
-        logger.warn('[take-profit-executor] failed to close linked HL hedge', { marketId, hlSymbol, error: result.error });
+        logger.warn('[take-profit-executor] failed to close linked HL hedge', {
+          marketId,
+          hlSymbol,
+          error: result.error,
+        });
       }
-    } catch (err) {
-      logger.warn('[take-profit-executor] error closing linked HL hedge', { marketId, hlSymbol, error: String(err) });
+    } catch (err: unknown) {
+      logger.warn('[take-profit-executor] error closing linked HL hedge', {
+        marketId,
+        hlSymbol,
+        error: String(err),
+      });
     }
-    await redis.del(`hedge:link:${marketId}`).catch((e: unknown) => { logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', { marketId, error: String(e) }); });
+    await redis.del(`hedge:link:${marketId}`).catch((e: unknown) => {
+      logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', {
+        marketId,
+        error: String(e),
+      });
+    });
   }
 }
 
-function emitExecutionOutcome(redis: Redis, position: Position, returnPct: number, exitPrice: number, reason: ExitReason): void {
+function emitExecutionOutcome(
+  redis: Redis,
+  position: Position,
+  returnPct: number,
+  exitPrice: number,
+  reason: ExitReason,
+): void {
   if (!position.executionId) return;
   const realizedPnlUsd = position.stakeUsd * (returnPct / 100);
   void recordExecutionEvent(redis, 'execution_outcome', {
@@ -74,7 +113,9 @@ function emitExecutionOutcome(redis: Redis, position: Position, returnPct: numbe
     makerPriceImprovementBps: position.makerPriceImprovementBps ?? null,
     makerPriceImprovementUsd: position.makerPriceImprovementUsd ?? null,
     closedReason: reason,
-  }).catch(() => {});
+  }).catch(() => {
+    /* ignore telemetry errors */
+  });
 }
 
 export interface TakeProfitResult {
@@ -108,13 +149,12 @@ export async function executeTakeProfit(opts: {
   // Use truncation (floor toward zero), not rounding — rounding up could exceed fill size.
   // Avoid truncating values smaller than 1e-6 to zero (which would trip the <= 0 guard below).
   const rawShares = position.sharesHeld ?? position.stakeUsd / position.entryPrice;
-  const sharesToSell = rawShares >= 1e-6
-    ? Math.floor(rawShares * 1_000_000) / 1_000_000
-    : rawShares; // sub-micro values: keep as-is; the <= 0 / NaN guard handles truly invalid values
+  const sharesToSell =
+    rawShares >= 1e-6 ? Math.floor(rawShares * 1_000_000) / 1_000_000 : rawShares; // sub-micro values: keep as-is; the <= 0 / NaN guard handles truly invalid values
 
   // Guard against legacy Redis positions with entryPrice=0 or NaN sharesHeld
   if (!isFinite(sharesToSell) || sharesToSell <= 0) {
-    const error = `terminal_no_balance: invalid sharesToSell (${String(sharesToSell)}) — entryPrice=${String(position.entryPrice)}, sharesHeld=${String(position.sharesHeld)}`;
+    const error = `terminal_no_balance: invalid sharesToSell (${sharesToSell.toString()}) — entryPrice=${position.entryPrice.toString()}, sharesHeld=${(position.sharesHeld ?? 0).toString()}`;
     logger.error('[take-profit-executor] aborting sell — invalid share count', {
       marketId: position.marketId,
       sharesToSell,
@@ -122,7 +162,15 @@ export async function executeTakeProfit(opts: {
       sharesHeld: position.sharesHeld,
     });
     // Durable-flag position so monitor loop does not retry
-    await updatePositionShares(redis, position.marketId, position.direction, 0, 'terminal_no_balance').catch(() => {});
+    await updatePositionShares(
+      redis,
+      position.marketId,
+      position.direction,
+      0,
+      'terminal_no_balance',
+    ).catch(() => {
+      /* ignore update errors */
+    });
     return { marketId: position.marketId, success: false, error, returnPct, reason };
   }
 
@@ -141,7 +189,15 @@ export async function executeTakeProfit(opts: {
   if (venue === 'clob') {
     return executeClobExit({ position, currentPrice, returnPct, reason, redis, sharesToSell });
   }
-  return executeSimmerExit({ position, currentPrice, returnPct, reason, redis, sellSide, sharesToSell });
+  return executeSimmerExit({
+    position,
+    currentPrice,
+    returnPct,
+    reason,
+    redis,
+    sellSide,
+    sharesToSell,
+  });
 }
 
 async function executeSimmerExit(opts: {
@@ -176,6 +232,18 @@ async function executeSimmerExit(opts: {
         return await finalizeSimmerExit(redis, position, sharesToSell, tradeResult, currentPrice, returnPct, reason);
       }
       simmerError = tradeResult.error ?? null;
+
+      // RECOVERY: If shares mismatch, fetch actual balance and retry
+      if (simmerError?.toLowerCase().includes('insufficient shares')) {
+        const recovery = await attemptSimmerRecovery(redis, position, simmerIdResult, sellSide, sharesToSell, currentPrice, returnPct, reason);
+        if (recovery) return recovery;
+      }
+
+      // MINIMUM ORDER: mark pendingSettlement if cost too low
+      if (simmerError?.toLowerCase().includes('cost too low')) {
+        await markPositionPendingSettlement(redis, position.marketId, position.direction);
+        return { marketId: position.marketId, success: false, error: simmerError, returnPct, reason };
+      }
     } catch (err) {
       simmerError = err instanceof Error ? err.message : String(err);
     }
@@ -203,6 +271,12 @@ async function executeSimmerExit(opts: {
         return await finalizeSimmerExit(redis, position, sharesToSell, directResult, currentPrice, returnPct, reason);
       }
       simmerError = directResult.error ?? null;
+
+      // RECOVERY: If shares mismatch, fetch actual balance and retry
+      if (simmerError?.toLowerCase().includes('insufficient shares')) {
+        const recovery = await attemptSimmerRecovery(redis, position, position.marketId, sellSide, sharesToSell, currentPrice, returnPct, reason);
+        if (recovery) return recovery;
+      }
     } catch (err) {
       simmerError = err instanceof Error ? err.message : String(err);
     }
@@ -270,6 +344,89 @@ async function finalizeSimmerExit(
   return successResult;
 }
 
+/** Internal helper for Simmer balance recovery. */
+async function attemptSimmerRecovery(
+  redis: Redis,
+  position: Position,
+  simmerId: string,
+  sellSide: 'yes' | 'no',
+  sharesToSell: number,
+  currentPrice: number,
+  returnPct: number,
+  reason: ExitReason,
+): Promise<TakeProfitResult | null> {
+  logger.warn('[take-profit-executor] share mismatch detected — sync and retry', {
+    marketId: position.marketId,
+    expected: sharesToSell.toFixed(4),
+  });
+
+  try {
+    const livePositions = await getSimmerPositions({ status: 'active' });
+    const liveMatch = livePositions.find(
+      (p) => p.market_id === simmerId && p.side === sellSide,
+    );
+    const actualShares = liveMatch?.shares ?? 0;
+
+    if (!liveMatch || !Number.isFinite(actualShares) || actualShares <= 0) {
+      logger.warn('[take-profit-executor] live balance is zero — marking terminal_no_balance', {
+        marketId: position.marketId,
+        actualShares,
+      });
+      await updatePositionShares(
+        redis,
+        position.marketId,
+        position.direction,
+        0,
+        'terminal_no_balance',
+      ).catch(() => {
+        /* ignore update errors */
+      });
+      await closePositionWithHedge(redis, position.marketId, position.direction);
+      return {
+        marketId: position.marketId,
+        success: false,
+        error: 'terminal_no_balance',
+        returnPct,
+        reason,
+      };
+    }
+
+    const cappedShares = Math.min(actualShares, sharesToSell);
+    await updatePositionShares(
+      redis,
+      position.marketId,
+      position.direction,
+      cappedShares,
+      cappedShares < sharesToSell ? 'reconciled_partial_exit' : 'reconciled_actual',
+    );
+    const retryShares = Math.floor(cappedShares * 1_000_000) / 1_000_000;
+
+    if (retryShares > 0) {
+      logger.info('[take-profit-executor] retrying with actual balance', {
+        marketId: position.marketId,
+        actualShares: retryShares.toFixed(4),
+      });
+
+      const retryResult = await submitSell({
+        market_id: simmerId,
+        side: sellSide,
+        action: 'sell',
+        shares: retryShares,
+        reasoning: `Recovery exit: ${reason} (Sync from ${sharesToSell.toFixed(4)} to ${retryShares.toFixed(4)})`,
+      });
+
+      if (retryResult.success) {
+        return await finalizeSimmerExit(redis, position, retryShares, retryResult, currentPrice, returnPct, reason);
+      }
+    }
+  } catch (err) {
+    logger.warn('[take-profit-executor] Simmer recovery failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return null;
+}
+
 /** Post-sell cleanup: close position, credit proceeds, record outcome, notify. */
 async function finalizeClobExit(
   redis: Redis,
@@ -290,7 +447,12 @@ async function finalizeClobExit(
   });
   await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
 
-  const result: TakeProfitResult = { marketId: position.marketId, success: true, returnPct, reason };
+  const result: TakeProfitResult = {
+    marketId: position.marketId,
+    success: true,
+    returnPct,
+    reason,
+  };
   if (txHash) result.txHash = txHash;
   return result;
 }
@@ -307,13 +469,18 @@ async function executeClobExit(opts: {
 
   // 1. Venue Guard: Ensure we don't attempt CLOB token extraction for HL positions
   if (position.executionVenue === 'hyperliquid') {
-    return { success: false, marketId: position.marketId, error: 'Hyperliquid exit not yet implemented via CLOB route', returnPct, reason };
+    return {
+      success: false,
+      marketId: position.marketId,
+      error: 'Hyperliquid exit not yet implemented via CLOB route',
+      returnPct,
+      reason,
+    };
   }
 
   // 2. Extract token ID
-  const tokenId = position.direction === 'YES'
-    ? position.clobTokenIds?.[0]
-    : position.clobTokenIds?.[1];
+  const tokenId =
+    position.direction === 'YES' ? position.clobTokenIds?.[0] : position.clobTokenIds?.[1];
 
   if (!tokenId) {
     const error = 'CLOB exit failed: missing token ID for direction ' + position.direction;
@@ -325,16 +492,25 @@ async function executeClobExit(opts: {
   // Positions this small are better left for the resolution redeemer (which pays $1/share at settlement).
   const notionalUsd = sharesToSell * currentPrice;
   if (notionalUsd < CLOB_MIN_ORDER_USD) {
-    logger.warn('[take-profit-executor] CLOB sell below minimum notional — marking pendingSettlement', {
-      marketId: position.marketId,
-      shares: sharesToSell,
-      currentPrice,
-      notionalUsd: notionalUsd.toFixed(4),
-      minUsd: CLOB_MIN_ORDER_USD,
-    });
+    logger.warn(
+      '[take-profit-executor] CLOB sell below minimum notional — marking pendingSettlement',
+      {
+        marketId: position.marketId,
+        shares: sharesToSell,
+        currentPrice,
+        notionalUsd: notionalUsd.toFixed(4),
+        minUsd: CLOB_MIN_ORDER_USD,
+      },
+    );
     await markPositionPendingSettlement(redis, position.marketId, position.direction);
 
-    return { marketId: position.marketId, success: false, error: `CLOB sell below minimum: $${notionalUsd.toFixed(4)} < $${String(CLOB_MIN_ORDER_USD)}`, returnPct, reason };
+    return {
+      marketId: position.marketId,
+      success: false,
+      error: `CLOB sell below minimum: $${notionalUsd.toFixed(4)} < $${CLOB_MIN_ORDER_USD.toString()}`,
+      returnPct,
+      reason,
+    };
   }
 
   // Fetch actual on-chain balance with one retry to handle transient RPC failures.
@@ -369,9 +545,23 @@ async function executeClobExit(opts: {
       actualBalance,
       redisShares: sharesToSell,
     });
-    await updatePositionShares(redis, position.marketId, position.direction, 0, 'terminal_no_balance').catch(() => {});
+    await updatePositionShares(
+      redis,
+      position.marketId,
+      position.direction,
+      0,
+      'terminal_no_balance',
+    ).catch(() => {
+      /* ignore update errors */
+    });
     await closePositionWithHedge(redis, position.marketId, position.direction);
-    return { marketId: position.marketId, success: false, error: 'terminal_no_balance', returnPct, reason };
+    return {
+      marketId: position.marketId,
+      success: false,
+      error: 'terminal_no_balance',
+      returnPct,
+      reason,
+    };
   }
 
   // Use the minimum of (tracked shares, actual balance) to prevent overshoot.
@@ -380,15 +570,24 @@ async function executeClobExit(opts: {
   // Re-check notional after balance sync — actual balance may be too small to sell
   const postSyncNotional = safeShares * currentPrice;
   if (postSyncNotional < CLOB_MIN_ORDER_USD) {
-    logger.warn('[take-profit-executor] post-sync notional below minimum — marking pendingSettlement', {
-      marketId: position.marketId,
-      safeShares,
-      currentPrice,
-      postSyncNotional: postSyncNotional.toFixed(4),
-      minUsd: CLOB_MIN_ORDER_USD,
-    });
+    logger.warn(
+      '[take-profit-executor] post-sync notional below minimum — marking pendingSettlement',
+      {
+        marketId: position.marketId,
+        safeShares,
+        currentPrice,
+        postSyncNotional: postSyncNotional.toFixed(4),
+        minUsd: CLOB_MIN_ORDER_USD,
+      },
+    );
     await markPositionPendingSettlement(redis, position.marketId, position.direction);
-    return { marketId: position.marketId, success: false, error: `post-sync below minimum: $${postSyncNotional.toFixed(4)} < $${String(CLOB_MIN_ORDER_USD)}`, returnPct, reason };
+    return {
+      marketId: position.marketId,
+      success: false,
+      error: `post-sync below minimum: $${postSyncNotional.toFixed(4)} < $${CLOB_MIN_ORDER_USD.toString()}`,
+      returnPct,
+      reason,
+    };
   }
 
   // Log drift when actual balance is less than Redis-tracked shares.
@@ -408,9 +607,23 @@ async function executeClobExit(opts: {
       actualBalance,
       safeShares,
     });
-    await updatePositionShares(redis, position.marketId, position.direction, 0, 'terminal_no_balance').catch(() => {});
+    await updatePositionShares(
+      redis,
+      position.marketId,
+      position.direction,
+      0,
+      'terminal_no_balance',
+    ).catch(() => {
+      /* ignore update errors */
+    });
     await closePositionWithHedge(redis, position.marketId, position.direction);
-    return { marketId: position.marketId, success: false, error: 'terminal_no_balance', returnPct, reason };
+    return {
+      marketId: position.marketId,
+      success: false,
+      error: 'terminal_no_balance',
+      returnPct,
+      reason,
+    };
   }
 
   try {
@@ -426,7 +639,15 @@ async function executeClobExit(opts: {
         txHash: clobResult.tx_hash,
         shares: safeShares,
       });
-      return finalizeClobExit(redis, position, safeShares, currentPrice, returnPct, reason, clobResult.tx_hash);
+      return finalizeClobExit(
+        redis,
+        position,
+        safeShares,
+        currentPrice,
+        returnPct,
+        reason,
+        clobResult.tx_hash,
+      );
     }
 
     // ── Auto-retry: parse actual balance from CLOB error and retry once ─────
@@ -455,7 +676,15 @@ async function executeClobExit(opts: {
               txHash: retryResult.tx_hash,
               shares: retryShares,
             });
-            return finalizeClobExit(redis, position, retryShares, currentPrice, returnPct, reason, retryResult.tx_hash);
+            return finalizeClobExit(
+              redis,
+              position,
+              retryShares,
+              currentPrice,
+              returnPct,
+              reason,
+              retryResult.tx_hash,
+            );
           }
         }
       }
@@ -463,9 +692,12 @@ async function executeClobExit(opts: {
 
     // Dead market: no buyers at any price — mark pendingSettlement
     if (error.toLowerCase().includes('no match')) {
-      logger.warn('[take-profit-executor] CLOB sell has no matching buyers — marking pendingSettlement', {
-        marketId: position.marketId,
-      });
+      logger.warn(
+        '[take-profit-executor] CLOB sell has no matching buyers — marking pendingSettlement',
+        {
+          marketId: position.marketId,
+        },
+      );
       await markPositionPendingSettlement(redis, position.marketId, position.direction);
     }
 
@@ -474,7 +706,7 @@ async function executeClobExit(opts: {
       error,
     });
     return { marketId: position.marketId, success: false, error, returnPct, reason };
-  } catch (err) {
+  } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error('[take-profit-executor] CLOB exit trade failed', {
       marketId: position.marketId,
@@ -498,12 +730,25 @@ async function attemptSyntheticExit(opts: {
   const cfg = loadConfig();
 
   if (!cfg.FUTURES_ENABLED) {
-    return { success: false, marketId: position.marketId, returnPct, reason, error: 'Futures disabled' };
+    return {
+      success: false,
+      marketId: position.marketId,
+      returnPct,
+      reason,
+      error: 'Futures disabled',
+    };
   }
 
   // 1. Identify correlated asset — use resolveHlSymbol (word-boundary safe).
   const hlSymbol = resolveHlSymbol(position.question);
-  if (!hlSymbol) return { success: false, marketId: position.marketId, returnPct, reason, error: 'No correlated asset found' };
+  if (!hlSymbol)
+    return {
+      success: false,
+      marketId: position.marketId,
+      returnPct,
+      reason,
+      error: 'No correlated asset found',
+    };
 
   // 2. Open Synthetic Exit (Hedge)
   const isBuy = position.direction === 'NO'; // If we were long NO, we buy the asset to hedge. If YES, we short.
@@ -514,21 +759,42 @@ async function attemptSyntheticExit(opts: {
   try {
     const state = await hl.getClearinghouseState();
     const positions = await hl.getOpenPositions(state);
-    const totalCurrentMargin = positions.reduce((sum, p) => sum + parseFloat(p.position.marginUsed || '0'), 0);
+    const totalCurrentMargin = positions.reduce(
+      (sum, p) => sum + parseFloat(p.position.marginUsed || '0'),
+      0,
+    );
     if (totalCurrentMargin + hedgeStakeUsd > cfg.FUTURES_GLOBAL_MAX_MARGIN_USD) {
       logger.warn('[take-profit-executor] skipping synthetic exit — global margin cap reached', {
         current: totalCurrentMargin.toFixed(2),
         hedge: hedgeStakeUsd.toFixed(2),
         cap: cfg.FUTURES_GLOBAL_MAX_MARGIN_USD,
       });
-      return { success: false, marketId: position.marketId, returnPct, reason, error: 'global_margin_cap' };
+      return {
+        success: false,
+        marketId: position.marketId,
+        returnPct,
+        reason,
+        error: 'global_margin_cap',
+      };
     }
   } catch (err) {
-    logger.error('[take-profit-executor] margin check failed — aborting synthetic exit', { error: String(err) });
-    return { success: false, marketId: position.marketId, returnPct, reason, error: 'margin_check_failed' };
+    logger.error('[take-profit-executor] margin check failed — aborting synthetic exit', {
+      error: String(err),
+    });
+    return {
+      success: false,
+      marketId: position.marketId,
+      returnPct,
+      reason,
+      error: 'margin_check_failed',
+    };
   }
 
-  logger.info('[take-profit-executor] attempting synthetic exit on HL', { symbol: hlSymbol, isBuy, reason });
+  logger.info('[take-profit-executor] attempting synthetic exit on HL', {
+    symbol: hlSymbol,
+    isBuy,
+    reason,
+  });
 
   const result = await hl.placeMarketOrder({
     symbol: hlSymbol,
@@ -552,13 +818,18 @@ async function attemptSyntheticExit(opts: {
     try {
       await markPositionSynthHedged(redis, position.marketId, position.direction);
     } catch (markErr) {
-      logger.error('[take-profit-executor] CRITICAL: failed to mark PM position as synthHedged — rolling back HL', {
-        marketId: position.marketId,
-        hlSymbol,
-        error: markErr instanceof Error ? markErr.message : String(markErr),
-      });
+      logger.error(
+        '[take-profit-executor] CRITICAL: failed to mark PM position as synthHedged — rolling back HL',
+        {
+          marketId: position.marketId,
+          hlSymbol,
+          error: markErr instanceof Error ? markErr.message : String(markErr),
+        },
+      );
       // Attempt to close the HL position to restore a clean state.
-      const rollback = await hl.closePosition(hlSymbol).catch((e: unknown) => ({ success: false, error: String(e) }));
+      const rollback = await hl
+        .closePosition(hlSymbol)
+        .catch((e: unknown) => ({ success: false, error: String(e) }));
       if (!rollback.success) {
         logger.error('[take-profit-executor] HL rollback failed — manual intervention required', {
           marketId: position.marketId,
@@ -566,18 +837,29 @@ async function attemptSyntheticExit(opts: {
           rollbackError: rollback.error,
         });
       }
-      await redis.del(`hedge:link:${position.marketId}`).catch((e: unknown) => { logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', { marketId: position.marketId, error: String(e) }); });
-      return { success: false, marketId: position.marketId, returnPct, reason, error: 'synth_hedge_mark_failed_rolled_back' };
+      await redis.del(`hedge:link:${position.marketId}`).catch((e: unknown) => {
+        logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', {
+          marketId: position.marketId,
+          error: String(e),
+        });
+      });
+      return {
+        success: false,
+        marketId: position.marketId,
+        returnPct,
+        reason,
+        error: 'synth_hedge_mark_failed_rolled_back',
+      };
     }
 
-    await notifyTakeProfitExecuted({ 
-       position, 
-       currentPrice, 
-       returnPct, 
-       reason: 'synthetic',
-       mechanismDetail: reason,
+    await notifyTakeProfitExecuted({
+      position,
+      currentPrice,
+      returnPct,
+      reason: 'synthetic',
+      mechanismDetail: reason,
     });
-    
+
     return {
       marketId: position.marketId,
       success: true,
@@ -587,5 +869,11 @@ async function attemptSyntheticExit(opts: {
     };
   }
 
-  return { success: false, marketId: position.marketId, returnPct, reason, error: result.error || 'Synthetic exit failed' };
+  return {
+    success: false,
+    marketId: position.marketId,
+    returnPct,
+    reason,
+    error: result.error || 'Synthetic exit failed',
+  };
 }

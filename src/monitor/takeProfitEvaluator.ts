@@ -17,11 +17,11 @@
 import type { Position } from '../execution/positionLedger.js';
 import type { CurrentPrice } from './priceFetcher.js';
 
-export type ExitReason = 
-  | 'take_profit_threshold' 
-  | 'divergence_closed' 
-  | 'stop_loss' 
-  | 'signal_reeval' 
+export type ExitReason =
+  | 'take_profit_threshold'
+  | 'divergence_closed'
+  | 'stop_loss'
+  | 'signal_reeval'
   | 'copytrade_mirror'
   | 'synthetic'
   | 'futures_sl'
@@ -43,7 +43,7 @@ export function evaluateTakeProfit(
   position: Position,
   currentPrice: CurrentPrice,
   takeProfitThreshold: number,
-  stopLossThreshold = 0.30,
+  stopLossThreshold = 0.3,
 ): ExitDecision {
   const { entryPrice, consensusProbability, direction } = position;
   const { currentOutcomePrice, currentYesPrice } = currentPrice;

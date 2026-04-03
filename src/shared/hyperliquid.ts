@@ -15,23 +15,23 @@ const HL_REQUEST_TIMEOUT_MS = 15_000;
 // --- Hyperliquid Asset Mapping ---
 /** Mapping of external asset IDs (CoinGecko/Binance/Yahoo) to HL perp symbols */
 export const HL_SYMBOL_MAP: Record<string, string> = {
-  'bitcoin': 'BTC',
-  'ethereum': 'ETH',
-  'solana': 'SOL',
-  'arbitrum': 'ARB',
-  'optimism': 'OP',
-  'chainlink': 'LINK',
+  bitcoin: 'BTC',
+  ethereum: 'ETH',
+  solana: 'SOL',
+  arbitrum: 'ARB',
+  optimism: 'OP',
+  chainlink: 'LINK',
   'avalanche-2': 'AVAX',
   'polygon-hermez': 'POL', // Updated to POL
-  'cardano': 'ADA',
-  'ripple': 'XRP',
-  'dogecoin': 'DOGE',
-  'binancecoin': 'BNB',
-  'bittensor': 'TAO',
-  'sui': 'SUI',
-  'berachain': 'BERA',
+  cardano: 'ADA',
+  ripple: 'XRP',
+  dogecoin: 'DOGE',
+  binancecoin: 'BNB',
+  bittensor: 'TAO',
+  sui: 'SUI',
+  berachain: 'BERA',
   'jupiter-exchange-solana': 'JUP',
-  'pendle': 'PENDLE',
+  pendle: 'PENDLE',
   'ondo-finance': 'ONDO',
 };
 
@@ -65,7 +65,7 @@ export function resolveHlSymbol(text: string): string | undefined {
 
 // EIP-712 Types for Hyperliquid
 const TYPES = {
-  'Agent': [
+  Agent: [
     { name: 'source', type: 'string' },
     { name: 'connectionId', type: 'bytes32' },
   ],
@@ -73,7 +73,9 @@ const TYPES = {
 
 // Monotonic nonce generator to prevent collision when Date.now() is called twice in the same millisecond.
 let _hlNonce = Date.now();
-function nextHlNonce(): number { return ++_hlNonce; }
+function nextHlNonce(): number {
+  return ++_hlNonce;
+}
 
 export interface HlPosition {
   symbol: string;
@@ -102,6 +104,15 @@ interface HlMetaUniverse {
 
 interface HlMeta {
   universe: HlMetaUniverse[];
+}
+
+interface HlExchangeResponse {
+  status: string;
+  response?: {
+    data?: {
+      statuses?: unknown[];
+    };
+  };
 }
 
 interface HlClearinghouseState {
@@ -150,11 +161,11 @@ class HyperliquidClient {
       chainId: cfg.HYPERLIQUID_TESTNET ? 1337 : 42161,
       verifyingContract: '0x0000000000000000000000000000000000000000' as `0x${string}`,
     };
-    
+
     logger.info('[hyperliquid] client initialised', {
       address: this.wallet.address,
       testnet: cfg.HYPERLIQUID_TESTNET,
-      chainId: this.domain.chainId,
+      chainId: this.domain.chainId.toString(),
     });
   }
 
@@ -190,30 +201,40 @@ class HyperliquidClient {
       // Failure is hard-stop: proceeding with wrong leverage is a direct financial risk.
       const leverageOk = await this.updateLeverage(opts.symbol, opts.leverage);
       if (!leverageOk) {
-        return { success: false, error: `updateLeverage failed for ${opts.symbol} — order aborted to avoid wrong-leverage trade` };
+        return {
+          success: false,
+          error: `updateLeverage failed for ${opts.symbol} — order aborted to avoid wrong-leverage trade`,
+        };
       }
 
       // 3. Size calculation — guard against zero/invalid mid price to prevent Infinity order size.
       const midPrice = await this.getMidPrice(opts.symbol);
       if (!midPrice || !isFinite(midPrice) || midPrice <= 0) {
-        return { success: false, error: `getMidPrice returned invalid value (${String(midPrice)}) for ${opts.symbol} — order aborted` };
+        return {
+          success: false,
+          error: `getMidPrice returned invalid value (${midPrice.toString()}) for ${opts.symbol} — order aborted`,
+        };
       }
-      const sizeBase = opts.sizeBase ?? (opts.sizeUsd / midPrice);
+      const sizeBase = opts.sizeBase ?? opts.sizeUsd / midPrice;
 
       // 4. Construct the Action
       const action = {
         type: 'order',
-        orders: [{
-          asset: index,
-          isBuy: opts.isBuy,
-          limitPx: this.roundPrice(opts.isBuy
-            ? midPrice * (1 + loadConfig().FUTURES_IOC_SLIPPAGE)
-            : midPrice * (1 - loadConfig().FUTURES_IOC_SLIPPAGE)),
-          sz: this.roundSize(sizeBase, szDecimals),
-          reduceOnly: opts.reduceOnly ?? false,
-          orderType: { limit: { tif: 'Ioc' } } // Market orders must use Ioc (Immediate or Cancel)
-        }],
-        grouping: 'na'
+        orders: [
+          {
+            asset: index,
+            isBuy: opts.isBuy,
+            limitPx: this.roundPrice(
+              opts.isBuy
+                ? midPrice * (1 + loadConfig().FUTURES_IOC_SLIPPAGE)
+                : midPrice * (1 - loadConfig().FUTURES_IOC_SLIPPAGE),
+            ),
+            sz: this.roundSize(sizeBase, szDecimals),
+            reduceOnly: opts.reduceOnly ?? false,
+            orderType: { limit: { tif: 'Ioc' } }, // Market orders must use Ioc (Immediate or Cancel)
+          },
+        ],
+        grouping: 'na',
       };
 
       const nonce = nextHlNonce();
@@ -225,10 +246,12 @@ class HyperliquidClient {
         signature,
       };
 
-      const response = await axios.post(`${this.baseUrl}/exchange`, payload, { timeout: HL_REQUEST_TIMEOUT_MS });
+      const response = await axios.post<HlExchangeResponse>(`${this.baseUrl}/exchange`, payload, {
+        timeout: HL_REQUEST_TIMEOUT_MS,
+      });
 
-      if (response.data?.status === 'ok') {
-        const statuses = response.data?.response?.data?.statuses;
+      if (response.data.status === 'ok') {
+        const statuses = response.data.response?.data?.statuses;
         if (!Array.isArray(statuses) || statuses.length === 0) {
           return { success: false, error: 'HL response missing statuses array' };
         }
@@ -236,9 +259,9 @@ class HyperliquidClient {
         if (!result) {
           return { success: false, error: 'HL statuses[0] is undefined' };
         }
-        const filled = result['filled'] as { oid?: unknown } | undefined;
-        const resting = result['resting'] as { oid?: unknown } | undefined;
-        const errorMsg = result['error'] as string | undefined;
+        const filled = result.filled as { oid?: unknown } | undefined;
+        const resting = result.resting as { oid?: unknown } | undefined;
+        const errorMsg = result.error as string | undefined;
         if (filled?.oid != null) {
           return { success: true, txHash: String(filled.oid), price: midPrice };
         }
@@ -270,13 +293,21 @@ class HyperliquidClient {
         isCross: true,
         leverage: leverage,
       };
-      
+
       const nonce = nextHlNonce();
       const signature = await this.signAction(action, nonce);
-      await axios.post(`${this.baseUrl}/exchange`, { action, nonce, signature }, { timeout: HL_REQUEST_TIMEOUT_MS });
+      await axios.post(
+        `${this.baseUrl}/exchange`,
+        { action, nonce, signature },
+        { timeout: HL_REQUEST_TIMEOUT_MS },
+      );
       return true;
     } catch (err) {
-      logger.error('[hyperliquid] updateLeverage failed — caller must abort order', { symbol, leverage, error: String(err) });
+      logger.error('[hyperliquid] updateLeverage failed — caller must abort order', {
+        symbol,
+        leverage,
+        error: String(err),
+      });
       return false;
     }
   }
@@ -285,10 +316,14 @@ class HyperliquidClient {
    * Fetch current Clearinghouse state (balance/margin).
    */
   async getClearinghouseState(): Promise<HlClearinghouseState> {
-    const response = await axios.post(`${this.baseUrl}/info`, {
-      type: 'clearinghouseState',
-      user: this.wallet.address,
-    }, { timeout: HL_REQUEST_TIMEOUT_MS });
+    const response = await axios.post<HlClearinghouseState>(
+      `${this.baseUrl}/info`,
+      {
+        type: 'clearinghouseState',
+        user: this.wallet.address,
+      },
+      { timeout: HL_REQUEST_TIMEOUT_MS },
+    );
     return response.data;
   }
 
@@ -297,7 +332,7 @@ class HyperliquidClient {
    * Pass a pre-fetched state to avoid an extra API round-trip.
    */
   async getOpenPositions(preloadedState?: HlClearinghouseState): Promise<HlPosition[]> {
-    const state = preloadedState ?? await this.getClearinghouseState();
+    const state = preloadedState ?? (await this.getClearinghouseState());
     if (!state.assetPositions) return [];
 
     return state.assetPositions.map((ap) => ({
@@ -316,7 +351,9 @@ class HyperliquidClient {
   /**
    * Close a position by symbol.
    */
-  async closePosition(symbol: string): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  async closePosition(
+    symbol: string,
+  ): Promise<{ success: boolean; txHash?: string; error?: string }> {
     const positions = await this.getOpenPositions();
     const pos = positions.find((p) => p.symbol === symbol);
 
@@ -326,9 +363,12 @@ class HyperliquidClient {
     if (Math.abs(currentSize) < 0.0001) return { success: true }; // already closedish
 
     const isBuy = currentSize < 0; // if short, we buy
-    
+
     // Defensive leverage parsing: HL sometimes returns leverage as an object { type: string, value: number }
-    const leverageValue = typeof pos.position.leverage === 'object' ? pos.position.leverage.value : pos.position.leverage;
+    const leverageValue =
+      typeof pos.position.leverage === 'object'
+        ? pos.position.leverage.value
+        : pos.position.leverage;
 
     // Pass raw sizeBase to avoid slippage effects on size calculation
     return this.placeMarketOrder({
@@ -343,15 +383,18 @@ class HyperliquidClient {
 
   // --- Private Helpers ---
 
-  private async signAction(action: Record<string, unknown>, nonce: number): Promise<{ r: string; s: string; v: number }> {
+  private async signAction(
+    action: Record<string, unknown>,
+    nonce: number,
+  ): Promise<{ r: string; s: string; v: number }> {
     const msgpackBytes = msgpack.encode(action);
-    
+
     // HL expects: keccak256(msgpack(action) + nonce(8 bytes) + vaultAddress(20 bytes))
     const nonceBuffer = Buffer.alloc(8);
     nonceBuffer.writeBigUInt64BE(BigInt(nonce));
-    
+
     const vaultBuffer = Buffer.alloc(20); // Default zero address for no vault
-    
+
     const dataToHash = Buffer.concat([Buffer.from(msgpackBytes), nonceBuffer, vaultBuffer]);
     const connectionId = ethers.keccak256(dataToHash);
 
@@ -359,7 +402,7 @@ class HyperliquidClient {
       source: 'Exchange',
       connectionId: connectionId,
     });
-    
+
     const sigSplit = ethers.Signature.from(signature);
 
     return {
@@ -376,11 +419,15 @@ class HyperliquidClient {
       return { index: idx, szDecimals: this.metaCache.universe[idx]?.szDecimals ?? 4 };
     }
 
-    const response = await axios.post(`${this.baseUrl}/info`, { type: 'meta' }, { timeout: HL_REQUEST_TIMEOUT_MS });
+    const response = await axios.post(
+      `${this.baseUrl}/info`,
+      { type: 'meta' },
+      { timeout: HL_REQUEST_TIMEOUT_MS },
+    );
     this.metaCache = response.data as HlMeta;
     this.metaCacheTime = Date.now();
-    
-    const idx = (this.metaCache.universe ?? []).findIndex((u) => u.name === symbol);
+
+    const idx = (this.metaCache.universe).findIndex((u) => u.name === symbol);
     const szDecimals = this.metaCache.universe[idx]?.szDecimals ?? 4;
     return { index: idx, szDecimals };
   }
@@ -393,14 +440,20 @@ class HyperliquidClient {
   private async getMidPrice(symbol: string): Promise<number> {
     // 30 second cache
     if (this.midCache[symbol] && Date.now() - this.midCacheTime < 30_000) {
-      return parseFloat(this.midCache[symbol]);
+      const val = this.midCache[symbol];
+      return val ? parseFloat(val) : 0;
     }
 
-    const response = await axios.post(`${this.baseUrl}/info`, { type: 'allMids' }, { timeout: HL_REQUEST_TIMEOUT_MS });
-    this.midCache = response.data || {};
+    const response = await axios.post<Record<string, string>>(
+      `${this.baseUrl}/info`,
+      { type: 'allMids' },
+      { timeout: HL_REQUEST_TIMEOUT_MS },
+    );
+    this.midCache = response.data ?? {};
     this.midCacheTime = Date.now();
-    
-    return parseFloat(this.midCache[symbol] || '0');
+
+    const val = this.midCache[symbol];
+    return val ? parseFloat(val) : 0;
   }
 
   private roundPrice(px: number): number {

@@ -1,5 +1,5 @@
 #!/bin/sh
-# PGA Monitor Dashboard — 6 panes in 2x3 grid
+# PGA Monitor Dashboard — 8 panes in 2x4 grid
 # Usage: ./scripts/monitor-dashboard.sh
 
 SESSION="pga"
@@ -27,16 +27,17 @@ start_if_missing pga-spot-feed "worker:spot-feed"
 start_if_missing pga-arb       "worker:arb"
 start_if_missing pga-copytrade "worker:copytrade"
 start_if_missing pga-futures   "monitor:futures"
+start_if_missing pga-telegram  "worker:telegram"
 
 for stale in pga-feeds pga-worker; do
   pm2 list | grep -q "$stale" && pm2 delete "$stale" || true
 done
 pm2 save --force >/dev/null 2>&1
 
-for name in pga-spot-feed pga-arb pga-copytrade pga-futures; do
+for name in pga-spot-feed pga-arb pga-copytrade pga-futures pga-telegram; do
   touch "${PM2_LOGS}/${name}-out.log" 2>/dev/null || true
 done
-touch /tmp/pga-trade.log /tmp/pga-monitor.log
+touch /tmp/pga-trade.log /tmp/pga-monitor.log /tmp/pga-spot.log
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   tmux attach-session -t "$SESSION"
@@ -47,33 +48,24 @@ W0="tail -f '${PM2_LOGS}/pga-spot-feed-out.log' | sed 's/\(\[[^]]*\]\)/\x1b[36m\
 W1="tail -f '${PM2_LOGS}/pga-arb-out.log'       | sed 's/\(\[[^]]*\]\)/\x1b[33m\1\x1b[0m/g'"
 W2="tail -f '${PM2_LOGS}/pga-copytrade-out.log'  | sed 's/\(\[[^]]*\]\)/\x1b[32m\1\x1b[0m/g'"
 W3="tail -f '${PM2_LOGS}/pga-futures-out.log'    | sed 's/\(\[[^]]*\]\)/\x1b[35m\1\x1b[0m/g'"
-W4="tail -f /tmp/pga-trade.log                   | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
-W5="tail -f /tmp/pga-monitor.log                 | sed 's/\(\[[^]]*\]\)/\x1b[96m\1\x1b[0m/g'"
+W4="tail -f '${PM2_LOGS}/pga-telegram-out.log'   | sed 's/\(\[[^]]*\]\)/\x1b[92m\1\x1b[0m/g'"
+W5="tail -f /tmp/pga-trade.log                   | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
+W6="tail -f /tmp/pga-monitor.log                 | sed 's/\(\[[^]]*\]\)/\x1b[96m\1\x1b[0m/g'"
+W7="tail -f /tmp/pga-spot.log                    | sed 's/\(\[[^]]*\]\)/\x1b[95m\1\x1b[0m/g'"
 
-# Create 6 separate windows first (each gets full terminal height)
+# Create 8 separate windows first
 tmux new-session  -d -s "$SESSION" -n w0 -x 220 -y 60 "sh -c \"$W0\""
-tmux new-window      -t "$SESSION"  -n w1 "sh -c \"$W1\""
-tmux new-window      -t "$SESSION"  -n w2 "sh -c \"$W2\""
-tmux new-window      -t "$SESSION"  -n w3 "sh -c \"$W3\""
-tmux new-window      -t "$SESSION"  -n w4 "sh -c \"$W4\""
-tmux new-window      -t "$SESSION"  -n w5 "sh -c \"$W5\""
+for i in 1 2 3 4 5 6 7; do
+  cmd_var="W$i"
+  eval cmd_val=\$$cmd_var
+  tmux new-window -t "$SESSION" -n "w$i" "sh -c \"$cmd_val\""
+done
 
-# Join windows into w0 one at a time, rebalancing after each join
-# This prevents any pane from becoming too small to accept the next join
-tmux join-pane -s "${SESSION}:w1" -t "${SESSION}:w0"
-tmux select-layout -t "${SESSION}:w0" tiled
-
-tmux join-pane -s "${SESSION}:w2" -t "${SESSION}:w0"
-tmux select-layout -t "${SESSION}:w0" tiled
-
-tmux join-pane -s "${SESSION}:w3" -t "${SESSION}:w0"
-tmux select-layout -t "${SESSION}:w0" tiled
-
-tmux join-pane -s "${SESSION}:w4" -t "${SESSION}:w0"
-tmux select-layout -t "${SESSION}:w0" tiled
-
-tmux join-pane -s "${SESSION}:w5" -t "${SESSION}:w0"
-tmux select-layout -t "${SESSION}:w0" tiled
+# Join windows into w0 re-tiling after each join to keep space balanced
+for i in 1 2 3 4 5 6 7; do
+  tmux join-pane -s "${SESSION}:w$i" -t "${SESSION}:w0"
+  tmux select-layout -t "${SESSION}:w0" tiled
+done
 
 tmux set-option  -t "$SESSION" remain-on-exit on
 tmux select-pane -t "${SESSION}:w0.0"

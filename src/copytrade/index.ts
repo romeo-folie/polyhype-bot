@@ -1,8 +1,12 @@
-import process from 'node:process';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { dedup } from '../shared/redis.js';
-import { fetchWithTimeout, getMarketBySlug, parseClobTokenIds, parseOutcomePrices } from '../mapping/gamma.js';
+import {
+  fetchWithTimeout,
+  getMarketBySlug,
+  parseClobTokenIds,
+  parseOutcomePrices,
+} from '../mapping/gamma.js';
 import { getOpenPositions } from '../execution/positionLedger.js';
 import { fetchCurrentPrice } from '../monitor/priceFetcher.js';
 import { executeTakeProfit } from '../monitor/takeProfitExecutor.js';
@@ -54,45 +58,175 @@ export function parseWalletList(raw: string | undefined): string[] {
 // Keywords are checked as whole words (word-boundary anchored) to prevent
 // short tokens like 'un' or 'cold' matching unrelated substrings.
 const CATEGORY_KEYWORDS: Record<string, string[]> = {
-  weather: ['rain', 'snow', 'storm', 'hurricane', 'temperature', 'precipitation', 'tornado', 'wind', 'heat wave', 'cold snap', 'blizzard', 'drought'],
-  geopolitics: ['war', 'conflict', 'united nations', 'sanctions', 'treaty', 'military', 'invasion', 'ceasefire', 'nuclear'],
+  weather: [
+    'rain',
+    'snow',
+    'storm',
+    'hurricane',
+    'temperature',
+    'precipitation',
+    'tornado',
+    'wind',
+    'heat wave',
+    'cold snap',
+    'blizzard',
+    'drought',
+  ],
+  geopolitics: [
+    'war',
+    'conflict',
+    'united nations',
+    'sanctions',
+    'treaty',
+    'military',
+    'invasion',
+    'ceasefire',
+    'nuclear',
+  ],
   'sports-nba': ['nba', 'basketball', 'lakers', 'warriors', 'celtics', 'playoffs', 'finals', 'mvp'],
   'sports-nfl': ['nfl', 'american football', 'super bowl', 'touchdown', 'quarterback', 'playoffs'],
-  'sports-soccer': ['soccer', 'fifa', 'world cup', 'champions league', 'premier league', 'epl', 'la liga', 'bundesliga', 'serie a', 'mls'],
+  'sports-soccer': [
+    'soccer',
+    'fifa',
+    'world cup',
+    'champions league',
+    'premier league',
+    'epl',
+    'la liga',
+    'bundesliga',
+    'serie a',
+    'mls',
+  ],
   'sports-mlb': ['mlb', 'baseball', 'world series', 'home run', 'pitcher'],
-  'sports-tennis': ['tennis', 'atp', 'wta', 'grand slam', 'wimbledon', 'roland garros', 'us open', 'australian open'],
-  sports: ['olympics', 'nfl', 'nba', 'soccer', 'fifa', 'super bowl', 'championship', 'world cup', 'mlb', 'atp', 'wta', 'nhl', 'hockey'],
-  crypto: ['bitcoin', 'ethereum', 'doge', 'dogecoin', 'sec', 'etf', 'bnb', 'tao', 'regulation', 'coinbase', 'binance', 'halving', 'solana', 'xrp', 'ripple', 'shiba', 'shib', 'pepe', 'crypto', 'cryptocurrency', 'blockchain'],
-  macro: ['fed', 'inflation', 'cpi', 'gdp', 'recession', 'interest rate', 'rate cut', 'rate hike', 'central bank', 'economics', 'jobs', 'unemployment', 'yield', 'bond', 'powell', 'yellen', 'treasury', 'rate', 'percentage', 'bps'],
+  'sports-tennis': [
+    'tennis',
+    'atp',
+    'wta',
+    'grand slam',
+    'wimbledon',
+    'roland garros',
+    'us open',
+    'australian open',
+  ],
+  sports: [
+    'olympics',
+    'nfl',
+    'nba',
+    'soccer',
+    'fifa',
+    'super bowl',
+    'championship',
+    'world cup',
+    'mlb',
+    'atp',
+    'wta',
+    'nhl',
+    'hockey',
+  ],
+  crypto: [
+    'bitcoin',
+    'ethereum',
+    'doge',
+    'dogecoin',
+    'sec',
+    'etf',
+    'bnb',
+    'tao',
+    'regulation',
+    'coinbase',
+    'binance',
+    'halving',
+    'solana',
+    'xrp',
+    'ripple',
+    'shiba',
+    'shib',
+    'pepe',
+    'crypto',
+    'cryptocurrency',
+    'blockchain',
+  ],
+  macro: [
+    'fed',
+    'inflation',
+    'cpi',
+    'gdp',
+    'recession',
+    'interest rate',
+    'rate cut',
+    'rate hike',
+    'central bank',
+    'economics',
+    'jobs',
+    'unemployment',
+    'yield',
+    'bond',
+    'powell',
+    'yellen',
+    'treasury',
+    'rate',
+    'percentage',
+    'bps',
+  ],
   'ai-tech': ['openai', 'nvidia', 'gemini', 'anthropic', 'gpu', 'llm', 'silicon'],
-  'us-politics': ['election', 'biden', 'trump', 'senate', 'congress', 'white house', 'democrat', 'republican'],
-  mentions: ['mention', 'phrase', 'word', 'speech', 'press conference', 'interview', 'transcript', 'say', 'stated', 'announced', 'remark'],
+  'us-politics': [
+    'election',
+    'biden',
+    'trump',
+    'senate',
+    'congress',
+    'white house',
+    'democrat',
+    'republican',
+  ],
+  mentions: [
+    'mention',
+    'phrase',
+    'word',
+    'speech',
+    'press conference',
+    'interview',
+    'transcript',
+    'say',
+    'stated',
+    'announced',
+    'remark',
+  ],
 };
 
 /**
  * Check if a market title or description matches any keyword from the allowed categories.
  * Keywords are matched as whole words to avoid false positives from short tokens.
  */
-export function matchesCategory(title: string, description: string | null, allowedScopes: string[]): boolean {
+export function matchesCategory(
+  title: string,
+  description: string | null,
+  allowedScopes: string[],
+): boolean {
   if (allowedScopes.includes('all') || allowedScopes.length === 0) return true;
   const scopes = allowedScopes;
 
   // Warn about unrecognized scope values
   for (const scope of scopes) {
     if (scope !== 'all' && !CATEGORY_KEYWORDS[scope]) {
-      logger.warn('[copytrade] unknown COPYTRADE_MARKET_SCOPE value — will match nothing', { scope, knownCategories: Object.keys(CATEGORY_KEYWORDS) });
+      logger.warn('[copytrade] unknown COPYTRADE_MARKET_SCOPE value — will match nothing', {
+        scope,
+        knownCategories: Object.keys(CATEGORY_KEYWORDS),
+      });
     }
   }
 
   const lowerText = `${title} ${description ?? ''}`.toLowerCase();
   for (const scope of scopes) {
     const keywords = CATEGORY_KEYWORDS[scope];
-    if (keywords?.some((kw) => {
-      // Multi-word phrases: use substring match (the phrase already acts as its own boundary).
-      // Single words: anchor with \b to prevent 'un' matching 'until', 'cold' matching 'colder'.
-      if (kw.includes(' ')) return lowerText.includes(kw);
-      return new RegExp(`\\b${kw}\\b`).test(lowerText);
-    })) {
+    if (
+      keywords?.some((kw) => {
+        // Multi-word phrases: use substring match (the phrase already acts as its own boundary).
+        // Single words: anchor with \b to prevent 'un' matching 'until', 'cold' matching 'colder'.
+        if (kw.includes(' ')) return lowerText.includes(kw);
+        return new RegExp(`\\b${kw}\\b`).test(lowerText);
+      })
+    ) {
       return true;
     }
   }
@@ -101,14 +235,17 @@ export function matchesCategory(title: string, description: string | null, allow
 
 function slippageBps(fillPrice: number, currentPrice: number): number {
   if (fillPrice <= 0) return Number.POSITIVE_INFINITY;
-  return Math.abs(currentPrice - fillPrice) / fillPrice * 10_000;
+  return (Math.abs(currentPrice - fillPrice) / fillPrice) * 10_000;
 }
 
 function positionKey(marketId: string, direction: Position['direction']): string {
   return `${marketId}:${direction}`;
 }
 
-async function fetchWalletTrades(wallet: string, limit = DEFAULT_TRADE_LIMIT): Promise<ActivityTrade[]> {
+async function fetchWalletTrades(
+  wallet: string,
+  limit = DEFAULT_TRADE_LIMIT,
+): Promise<ActivityTrade[]> {
   const params = new URLSearchParams({
     user: wallet,
     type: 'TRADE',
@@ -120,7 +257,7 @@ async function fetchWalletTrades(wallet: string, limit = DEFAULT_TRADE_LIMIT): P
   const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
 
   if (!res.ok) {
-    throw new Error(`copytrade activity fetch failed: ${res.status} ${res.statusText}`);
+    throw new Error(`copytrade activity fetch failed: ${res.status.toString()} ${res.statusText}`);
   }
 
   const data = (await res.json()) as ActivityTrade[];
@@ -141,9 +278,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
     return { signals: [], exits: 0 };
   }
 
-  const positions = cfg.COPYTRADE_EXIT_MODE === 'mirror'
-    ? await getOpenPositions(redis)
-    : [];
+  const positions = cfg.COPYTRADE_EXIT_MODE === 'mirror' ? await getOpenPositions(redis) : [];
   const positionIndex = new Map<string, Position[]>();
   for (const position of positions) {
     // Only mirror-close positions that were opened by copytrade.
@@ -190,7 +325,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       if (trade.timestamp <= lastTimestamp) continue;
       if (!trade.transactionHash) continue;
 
-      const dedupKey = `copytrade:tx:${trade.transactionHash}:${trade.asset}:${trade.outcomeIndex}`;
+      const dedupKey = `copytrade:tx:${trade.transactionHash}:${trade.asset}:${trade.outcomeIndex.toString()}`;
       if (localDedup.has(dedupKey)) continue;
 
       pendingTrades.push({ wallet, trade });
@@ -207,7 +342,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
   const walletLatestTs = new Map<string, number>();
 
   for (const { wallet, trade } of ordered) {
-    const dedupKey = `copytrade:tx:${trade.transactionHash}:${trade.asset}:${trade.outcomeIndex}`;
+    const dedupKey = `copytrade:tx:${trade.transactionHash}:${trade.asset}:${trade.outcomeIndex.toString()}`;
     if (localDedup.has(dedupKey)) continue;
 
     // Persistent dedup check (Redis)
@@ -223,13 +358,17 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       walletLatestTs.set(wallet, Math.max(walletLatestTs.get(wallet) ?? 0, trade.timestamp));
     };
 
-    await recordCopytradeMetric(redis, 'candidate_seen').catch(() => {});
+    await recordCopytradeMetric(redis, 'candidate_seen').catch(() => {
+      /* ignore telemetry errors */
+    });
 
     try {
       const market = await getMarketBySlug(trade.slug);
       if (!market) {
         logger.warn('[copytrade] market lookup failed', { slug: trade.slug });
-        await recordCopytradeFilter(redis, 'market_lookup_failed').catch(() => {});
+        await recordCopytradeFilter(redis, 'market_lookup_failed').catch(() => {
+          /* ignore telemetry errors */
+        });
         continue;
       }
 
@@ -241,14 +380,21 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
           question: market.question,
           scope: cfg.COPYTRADE_MARKET_SCOPE,
         });
-        await recordCopytradeFilter(redis, 'scope').catch(() => {});
+        await recordCopytradeFilter(redis, 'scope').catch(() => {
+          /* ignore telemetry errors */
+        });
         await markDedup();
         continue;
       }
 
       if (!market.active || market.closed) {
-        logger.info('[copytrade] skipped inactive market', { marketId: market.id, slug: trade.slug });
-        await recordCopytradeFilter(redis, 'inactive_market').catch(() => {});
+        logger.info('[copytrade] skipped inactive market', {
+          marketId: market.id,
+          slug: trade.slug,
+        });
+        await recordCopytradeFilter(redis, 'inactive_market').catch(() => {
+          /* ignore telemetry errors */
+        });
         await markDedup();
         continue;
       }
@@ -260,19 +406,23 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
             marketId: market.id,
             hoursToResolve: hoursToResolve.toFixed(2),
           });
-          await recordCopytradeFilter(redis, 'near_resolution').catch(() => {});
+          await recordCopytradeFilter(redis, 'near_resolution').catch(() => {
+            /* ignore telemetry errors */
+          });
           await markDedup();
           continue;
         }
       }
 
-      const liquidity = Number.parseFloat(market.liquidity ?? '0');
+      const liquidity = Number.parseFloat(market.liquidity);
       if (!Number.isFinite(liquidity) || liquidity < cfg.COPYTRADE_MIN_LIQUIDITY) {
         logger.info('[copytrade] skipped low-liquidity market', {
           marketId: market.id,
           liquidity,
         });
-        await recordCopytradeFilter(redis, 'low_liquidity').catch(() => {});
+        await recordCopytradeFilter(redis, 'low_liquidity').catch(() => {
+          /* ignore telemetry errors */
+        });
         await markDedup();
         continue;
       }
@@ -282,7 +432,9 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       const gammaYesPrice = Number.parseFloat(prices[0] ?? '0');
       if (!Number.isFinite(gammaYesPrice)) {
         logger.warn('[copytrade] invalid price from Gamma', { marketId: market.id });
-        await recordCopytradeFilter(redis, 'invalid_price').catch(() => {});
+        await recordCopytradeFilter(redis, 'invalid_price').catch(() => {
+          /* ignore telemetry errors */
+        });
         continue;
       }
 
@@ -290,14 +442,16 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       // WS feed is keyed by marketId — falls back to Gamma if no live price available.
       const feed = getPriceFeed(redis);
       const wsPrice = await feed.getCachedPrice(market.id).catch(() => null);
-      const currentYesPrice = (wsPrice !== null && Number.isFinite(wsPrice)) ? wsPrice : gammaYesPrice;
+      const currentYesPrice =
+        wsPrice !== null && Number.isFinite(wsPrice) ? wsPrice : gammaYesPrice;
 
       const direction = tradeDirection(trade);
       const currentOutcomePrice = direction === 'YES' ? currentYesPrice : 1 - currentYesPrice;
       const slippage = slippageBps(trade.price, currentOutcomePrice);
-      
+
       const category = inferCategory(market.question);
-      const maxSlippage = cfg.COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES?.[category] ?? cfg.COPYTRADE_MAX_SLIPPAGE_BPS;
+      const maxSlippage =
+        cfg.COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES[category] ?? cfg.COPYTRADE_MAX_SLIPPAGE_BPS;
 
       if (slippage > maxSlippage) {
         logger.info('[copytrade] skipped high slippage', {
@@ -306,7 +460,9 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
           slippageBps: slippage.toFixed(1),
           maxSlippageBps: maxSlippage,
         });
-        await recordCopytradeFilter(redis, `slippage:${category}`).catch(() => {});
+        await recordCopytradeFilter(redis, `slippage:${category}`).catch(() => {
+          /* ignore telemetry errors */
+        });
         await markDedup();
         continue;
       }
@@ -317,9 +473,12 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
           continue;
         }
         const walletKey = trade.proxyWallet.toLowerCase();
-        const positionsToExit = positionIndex.get(`${positionKey(market.id, direction)}:${walletKey}`) ?? [];
+        const positionsToExit =
+          positionIndex.get(`${positionKey(market.id, direction)}:${walletKey}`) ?? [];
         if (positionsToExit.length === 0) {
-          await recordCopytradeFilter(redis, 'mirror_no_position').catch(() => {});
+          await recordCopytradeFilter(redis, 'mirror_no_position').catch(() => {
+            /* ignore telemetry errors */
+          });
           await markDedup();
           continue;
         }
@@ -379,7 +538,9 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
           scaledStake,
           maxStake,
         });
-        await recordCopytradeFilter(redis, 'stake_floor').catch(() => {});
+        await recordCopytradeFilter(redis, 'stake_floor').catch(() => {
+          /* ignore telemetry errors */
+        });
         await markDedup();
         continue;
       }
@@ -401,10 +562,13 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         halfKellyFraction: 0,
         sourcedFrom: `copytrade:${wallet}`,
         reasoning: `Copytrade mirror of ${wallet} ${trade.side} @ ${trade.price.toFixed(4)} (tx ${trade.transactionHash.slice(0, 10)}...)`,
+        source: 'copytrade',
       };
 
       signals.push(signal);
-      await recordCopytradeMetric(redis, 'signals_created').catch(() => {});
+      await recordCopytradeMetric(redis, 'signals_created').catch(() => {
+        /* ignore telemetry errors */
+      });
       await markDedup();
     } catch (err) {
       logger.warn('[copytrade] trade processing failed', {

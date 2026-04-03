@@ -19,6 +19,10 @@ vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => mockConfig),
 }));
 
+vi.mock('../../shared/watchlist.js', () => ({
+  matchesWatchlist: vi.fn().mockResolvedValue(true),
+}));
+
 const mockRedis = {
   get: vi.fn(),
   set: vi.fn(),
@@ -83,7 +87,7 @@ describe('telegramMonitor', () => {
     await startTelegramMonitor();
 
     const handler = mockAddEventHandler.mock.calls[0][0];
-    
+
     // Simulate event payload with a date field (Unix seconds) to exercise latencyMs path
     const messageDate = Math.floor((Date.now() - 200) / 1000); // 200ms ago
     const mockMessage = {
@@ -92,7 +96,7 @@ describe('telegramMonitor', () => {
       peerId: { channelId: 1 },
       date: messageDate,
     };
-    
+
     mockGetEntity.mockResolvedValue(new Api.Channel({} as any));
     mockScoreItems.mockResolvedValue([
       {
@@ -100,20 +104,21 @@ describe('telegramMonitor', () => {
         urgencyScore: 9,
         source: 'telegram:alpha_channel',
         latencyMs: expect.any(Number),
-      }
+        categoryId: 'geopolitical',
+        categoryLabel: 'Geopolitics',
+        sentiment: 'YES',
+      },
     ]);
 
     await handler({ message: mockMessage });
 
     expect(mockScoreItems).toHaveBeenCalledWith(
-      expect.arrayContaining([
-        expect.objectContaining({ latencyMs: expect.any(Number) }),
-      ]),
+      expect.arrayContaining([expect.objectContaining({ latencyMs: expect.any(Number) })]),
       expect.anything(),
     );
     expect(mockProcessScoredItems).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ urgencyScore: 9 })]),
-      mockRedis
+      mockRedis,
     );
   });
 
@@ -122,8 +127,13 @@ describe('telegramMonitor', () => {
     await startTelegramMonitor();
 
     const handler = mockAddEventHandler.mock.calls[0][0];
-    
-    const mockMessage = { text: 'Routine news...', id: 1002, peerId: { channelId: 1 }, date: Math.floor(Date.now() / 1000) };
+
+    const mockMessage = {
+      text: 'Routine news...',
+      id: 1002,
+      peerId: { channelId: 1 },
+      date: Math.floor(Date.now() / 1000),
+    };
     mockGetEntity.mockResolvedValue(new Api.Channel({} as any));
     mockScoreItems.mockResolvedValue([{ urgencyScore: 3 }]);
 
@@ -137,8 +147,13 @@ describe('telegramMonitor', () => {
     await startTelegramMonitor();
 
     const handler = mockAddEventHandler.mock.calls[0][0];
-    
-    const mockMessage = { text: 'Alert!', id: 1003, peerId: { channelId: 2 }, date: Math.floor(Date.now() / 1000) };
+
+    const mockMessage = {
+      text: 'Alert!',
+      id: 1003,
+      peerId: { channelId: 2 },
+      date: Math.floor(Date.now() / 1000),
+    };
     const otherChannel = new Api.Channel({} as any);
     (otherChannel as any).username = 'other_channel';
     mockGetEntity.mockResolvedValue(otherChannel);

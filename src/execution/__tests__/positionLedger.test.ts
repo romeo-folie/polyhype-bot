@@ -183,22 +183,25 @@ describe('executionVenue', () => {
   it('persists execution path metadata and decision benchmarks', async () => {
     const redis = makeRedis();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await recordPosition(redis as any, makePosition({
-      executionVenue: 'clob',
-      modeConfigured: 'hybrid',
-      entryExecutionPath: 'clob_fallback',
-      entryOrderType: 'taker',
-      decisionBestBid: 0.49,
-      decisionBestAsk: 0.51,
-      decisionMidPrice: 0.5,
-      decisionSpreadBps: 400,
-      counterfactualImmediateTakerPrice: 0.51,
-      counterfactualImmediateTakerShares: 9.8039215686,
-      counterfactualImmediateTakerCostUsd: 5,
-      makerPriceImprovementBps: 392.1568627451,
-      makerPriceImprovementUsd: 0.2,
-      fallbackReason: 'simmer_market_missing',
-    }));
+    await recordPosition(
+      redis as any,
+      makePosition({
+        executionVenue: 'clob',
+        modeConfigured: 'hybrid',
+        entryExecutionPath: 'clob_fallback',
+        entryOrderType: 'taker',
+        decisionBestBid: 0.49,
+        decisionBestAsk: 0.51,
+        decisionMidPrice: 0.5,
+        decisionSpreadBps: 400,
+        counterfactualImmediateTakerPrice: 0.51,
+        counterfactualImmediateTakerShares: 9.8039215686,
+        counterfactualImmediateTakerCostUsd: 5,
+        makerPriceImprovementBps: 392.1568627451,
+        makerPriceImprovementUsd: 0.2,
+        fallbackReason: 'simmer_market_missing',
+      }),
+    );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const positions = await getOpenPositions(redis as any);
 
@@ -219,19 +222,22 @@ describe('executionVenue', () => {
 
   it('preserves zero values for numeric benchmark fields (regression: truthiness guard)', async () => {
     const redis = makeRedis();
-    await recordPosition(redis as any, makePosition({
-      executionVenue: 'clob',
-      modeConfigured: 'hybrid',
-      decisionBestBid: 0,
-      decisionBestAsk: 0,
-      decisionMidPrice: 0,
-      decisionSpreadBps: 0,
-      counterfactualImmediateTakerPrice: 0,
-      counterfactualImmediateTakerShares: 0,
-      counterfactualImmediateTakerCostUsd: 0,
-      makerPriceImprovementBps: 0,
-      makerPriceImprovementUsd: 0,
-    }));
+    await recordPosition(
+      redis as any,
+      makePosition({
+        executionVenue: 'clob',
+        modeConfigured: 'hybrid',
+        decisionBestBid: 0,
+        decisionBestAsk: 0,
+        decisionMidPrice: 0,
+        decisionSpreadBps: 0,
+        counterfactualImmediateTakerPrice: 0,
+        counterfactualImmediateTakerShares: 0,
+        counterfactualImmediateTakerCostUsd: 0,
+        makerPriceImprovementBps: 0,
+        makerPriceImprovementUsd: 0,
+      }),
+    );
     const positions = await getOpenPositions(redis as any);
 
     expect(positions[0]!.decisionBestBid).toBe(0);

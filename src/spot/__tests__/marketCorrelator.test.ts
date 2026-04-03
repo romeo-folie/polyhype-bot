@@ -40,9 +40,8 @@ vi.mock('@google/generative-ai', () => ({
   })),
 }));
 
-const { searchEvents, parseOutcomePrices, parseClobTokenIds } = await import(
-  '../../mapping/gamma.js'
-);
+const { searchEvents, parseOutcomePrices, parseClobTokenIds } =
+  await import('../../mapping/gamma.js');
 const { findCorrelatedMarkets } = await import('../marketCorrelator.js');
 
 const mockSearchEvents = vi.mocked(searchEvents);
@@ -61,12 +60,7 @@ function makeMove(overrides: Partial<SpotMove> = {}): SpotMove {
   };
 }
 
-function makeGammaMarket(
-  id: string,
-  question: string,
-  volume = '50000',
-  liquidity = '10000',
-) {
+function makeGammaMarket(id: string, question: string, volume = '50000', liquidity = '10000') {
   return {
     id,
     question,
@@ -100,7 +94,14 @@ describe('findCorrelatedMarkets', () => {
   it('returns correlated markets from Gamma search', async () => {
     const market = makeGammaMarket('mkt-1', 'Will Bitcoin exceed $100k by June?');
     mockSearchEvents.mockResolvedValue([
-      { id: 'evt-1', title: 'Bitcoin', slug: 'bitcoin', active: true, closed: false, markets: [market] },
+      {
+        id: 'evt-1',
+        title: 'Bitcoin',
+        slug: 'bitcoin',
+        active: true,
+        closed: false,
+        markets: [market],
+      },
     ]);
 
     const results = await findCorrelatedMarkets(makeMove());

@@ -61,8 +61,12 @@ interface SearchEventsOptions {
 
 export function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => { controller.abort(); }, timeoutMs);
-  return fetch(url, { signal: controller.signal }).finally(() => { clearTimeout(timer); });
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+  return fetch(url, { signal: controller.signal }).finally(() => {
+    clearTimeout(timer);
+  });
 }
 
 /**
@@ -74,7 +78,7 @@ export async function searchEvents(opts: SearchEventsOptions): Promise<GammaEven
   const { query, limit = 10, activeOnly = true } = opts;
   const params = new URLSearchParams({
     query,
-    limit: String(limit),
+    limit: limit.toString(),
     ...(activeOnly ? { active: 'true', closed: 'false' } : {}),
   });
 
@@ -82,7 +86,7 @@ export async function searchEvents(opts: SearchEventsOptions): Promise<GammaEven
   const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
 
   if (!res.ok) {
-    throw new Error(`Gamma API error: ${res.status} ${res.statusText} for query="${query}"`);
+    throw new Error(`Gamma API error: ${res.status.toString()} ${res.statusText} for query="${query}"`);
   }
 
   const data = (await res.json()) as GammaEvent[];
@@ -99,7 +103,7 @@ export async function getMarket(marketId: string): Promise<GammaMarket> {
   const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
 
   if (!res.ok) {
-    throw new Error(`Gamma API error: ${res.status} ${res.statusText} for market=${marketId}`);
+    throw new Error(`Gamma API error: ${res.status.toString()} ${res.statusText} for market=${marketId}`);
   }
 
   return (await res.json()) as GammaMarket;
@@ -114,7 +118,7 @@ export async function getMarketBySlug(slug: string): Promise<GammaMarket | null>
   const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
 
   if (!res.ok) {
-    throw new Error(`Gamma API error: ${res.status} ${res.statusText} for slug=${slug}`);
+    throw new Error(`Gamma API error: ${res.status.toString()} ${res.statusText} for slug=${slug}`);
   }
 
   const data = (await res.json()) as GammaMarket[];
@@ -180,10 +184,7 @@ export function parseClobTokenIds(clobTokenIds: string | string[]): string[] {
  * Pagination stops early if a page returns fewer results than requested
  * (signals end of available markets).
  */
-export async function getActiveMarkets(
-  maxTotal = 1000,
-  pageSize = 500,
-): Promise<GammaMarket[]> {
+export async function getActiveMarkets(maxTotal = 1000, pageSize = 500): Promise<GammaMarket[]> {
   const results: GammaMarket[] = [];
   let offset = 0;
 
@@ -193,17 +194,17 @@ export async function getActiveMarkets(
       active: 'true',
       closed: 'false',
       enable_order_book: 'true',
-      limit: String(batchSize),
-      offset: String(offset),
+      limit: batchSize.toString(),
+      offset: offset.toString(),
       order: 'liquidityNum',
       ascending: 'false',
     });
 
     const url = `${BASE_URL}/markets?${params.toString()}`;
     const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
-    if (!res.ok) throw new Error(`Gamma markets error: ${res.status}`);
+    if (!res.ok) throw new Error(`Gamma markets error: ${res.status.toString()}`);
 
-    const data = (await res.json()) as unknown;
+    const data = (await res.json());
     if (!Array.isArray(data) || data.length === 0) break;
 
     const batch = (data as GammaMarket[]).slice(0, maxTotal - results.length);
