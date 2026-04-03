@@ -297,7 +297,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       const slippage = slippageBps(trade.price, currentOutcomePrice);
       
       const category = inferCategory(market.question);
-      const maxSlippage = cfg.COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES[category] ?? cfg.COPYTRADE_MAX_SLIPPAGE_BPS;
+      const maxSlippage = cfg.COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES?.[category] ?? cfg.COPYTRADE_MAX_SLIPPAGE_BPS;
 
       if (slippage > maxSlippage) {
         logger.info('[copytrade] skipped high slippage', {

@@ -165,7 +165,7 @@ function canExecuteTaker(
 ): { ok: true } | { ok: false; reason: string } {
   const edge = signal.edgeMagnitude ?? 0;
   const category = inferCategory(signal.question);
-  const minEdge = cfg.TAKER_MIN_EDGE_CATEGORIES[category] ?? cfg.TAKER_MIN_EDGE;
+  const minEdge = cfg.TAKER_MIN_EDGE_CATEGORIES?.[category] ?? cfg.TAKER_MIN_EDGE;
 
   if (edge < minEdge) {
     return { ok: false, reason: `taker_edge_below_min:${category}` };
