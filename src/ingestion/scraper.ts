@@ -129,7 +129,7 @@ export async function scrapeHeadlines(): Promise<RssItem[]> {
 
   if (result.status === 'rejected') {
     logger.warn('[scraper] GDELT fetch failed', { error: String(result.reason) });
-    logger.info('[scraper] GDELT fetch complete', { count: '0' });
+    logger.info('[scraper] GDELT fetch complete', { count: 0 });
     return [];
   }
 

@@ -89,7 +89,7 @@ export async function computeCalibration(
     for (const data of allData) {
       if (!data.id) continue;
 
-      const result = data.result || '';
+      const result = data.result ?? '';
       const returnPct = Number(data.returnPct) || 0;
       const prob = Number(data.consensusProbability) || 0;
       const isWin = result === 'won';
