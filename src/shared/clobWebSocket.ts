@@ -78,13 +78,14 @@ export class ClobPriceFeed {
 
   /** Get the cached YES price for a market. Returns null on cache miss. */
   async getCachedPrice(marketId: string): Promise<number | null> {
-    const raw = await this.redis.get(WS_YES_PRICE_KEY(marketId)) || await this.redis.get(WS_PRICE_KEY(marketId));
+    const rawYes = await this.redis.get(WS_YES_PRICE_KEY(marketId));
+    const raw = rawYes ?? await this.redis.get(WS_PRICE_KEY(marketId));
     if (raw === null) return null;
     const p = parseFloat(raw);
     return isFinite(p) ? p : null;
   }
 
-  /** Get the cached spread (abs(YES+NO-1)) if both prices are available. */
+  /** Get the cached spread (YES+NO-1) if both prices are available. */
   async getCachedSpread(marketId: string): Promise<number | null> {
     const [yes, no] = await Promise.all([
       this.redis.get(WS_YES_PRICE_KEY(marketId)),
@@ -187,14 +188,18 @@ export class ClobPriceFeed {
         const tokens = this.watchedMarkets.get(marketId);
         if (!tokens) continue;
 
+        const formattedPrice = price.toFixed(6);
+
         if (tokens[0] === tokenId) {
           // YES token price
-          await this.redis.setex(WS_YES_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, price.toFixed(6));
-          // Backward compatibility
-          await this.redis.setex(WS_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, price.toFixed(6));
+          await Promise.all([
+            this.redis.setex(WS_YES_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, formattedPrice),
+            // Backward compatibility
+            this.redis.setex(WS_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, formattedPrice),
+          ]);
         } else if (tokens[1] === tokenId) {
           // NO token price
-          await this.redis.setex(WS_NO_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, price.toFixed(6));
+          await this.redis.setex(WS_NO_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, formattedPrice);
         }
 
         logger.debug('[clob-ws] price cached', { marketId, tokenId, price });

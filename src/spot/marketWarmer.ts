@@ -13,7 +13,6 @@ import { getRedis } from '../shared/redis.js';
 import { searchEvents, parseClobTokenIds } from '../mapping/gamma.js';
 import { estimateFastConsensus } from './fastPathConsensus.js';
 import { BINANCE_SYMBOL_TO_ASSET } from '../arb/cryptoArbScanner.js';
-import type { Redis } from 'ioredis';
 
 const ASSET_SEARCH_QUERIES: Record<string, string[]> = {
   bitcoin: ['bitcoin', 'BTC', 'price'],
@@ -24,7 +23,7 @@ const ASSET_SEARCH_QUERIES: Record<string, string[]> = {
 /**
  * Warm the cache for a specific asset.
  */
-async function warmAsset(assetId: string, redis: Redis): Promise<void> {
+async function warmAsset(assetId: string, redis: ReturnType<typeof getRedis>): Promise<void> {
   const queries = ASSET_SEARCH_QUERIES[assetId] || [assetId];
   logger.info('[market-warmer] warming asset', { assetId, queries });
 
@@ -44,12 +43,12 @@ async function warmAsset(assetId: string, redis: Redis): Promise<void> {
           await estimateFastConsensus(
             {
               assetId,
-              currentPrice: 1, 
+              currentPrice: 1,
+              referencePrice: 1,
               changePercent: 0,
               windowMinutes: 1,
-              timestamp: Date.now(),
-              redis, 
-            } as any,
+              detectedAt: new Date().toISOString(),
+            },
             {
               marketId: market.id,
               conditionId: market.conditionId,
@@ -57,9 +56,11 @@ async function warmAsset(assetId: string, redis: Redis): Promise<void> {
               question: market.question,
               description: market.description,
               currentYesPrice: 0.5,
-              correlationDirection: 'positive', 
+              correlationDirection: 'positive',
               feesEnabled: market.feesEnabled || false,
-            }
+            },
+            undefined,
+            { redis },
           );
         }
       }
@@ -87,7 +88,7 @@ export async function runMarketWarmer(): Promise<void> {
 }
 
 // If run directly
-if (import.meta.url.endsWith(process.argv[1] || '')) {
+if (process.argv[1]?.endsWith('marketWarmer.ts')) {
   runMarketWarmer().catch((err) => {
     logger.error('[market-warmer] fatal error', { error: String(err) });
     process.exit(1);

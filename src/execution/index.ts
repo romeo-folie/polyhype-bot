@@ -57,7 +57,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
   }
 
   if (highUrgencyItems.length > 0) {
-    await processScoredItems(highUrgencyItems, redis);
+    await processScoredItemsInner(highUrgencyItems, redis);
   }
 
   logger.info('[execution] pipeline complete');
@@ -66,8 +66,25 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
 /**
  * Process a set of scored items through re-evaluation, mapping, and execution.
  * Exposed for low-latency triggers (e.g. Telegram monitor).
+ * Acquires the same execution:lock used by runExecution() to prevent concurrent runs.
  */
 export async function processScoredItems(
+  highUrgencyItems: ScoredItem[],
+  redis: ReturnType<typeof getRedis>,
+): Promise<void> {
+  const lockToken = await acquireLock('execution:lock', 270);
+  if (!lockToken) {
+    logger.info('[execution] processScoredItems: lock held by another runner, skipping');
+    return;
+  }
+  try {
+    await processScoredItemsInner(highUrgencyItems, redis);
+  } finally {
+    await releaseLock('execution:lock', lockToken).catch(() => { /* best effort */ });
+  }
+}
+
+async function processScoredItemsInner(
   highUrgencyItems: ScoredItem[],
   redis: ReturnType<typeof getRedis>,
 ): Promise<void> {

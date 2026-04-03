@@ -50,12 +50,18 @@ export async function startTelegramMonitor(): Promise<void> {
   await client.connect();
   logger.info('[telegram] connected to MTProto');
 
-  // If no session string was provided, log the new one for persistence.
+  // If no session string was provided, avoid logging the raw credential by default.
   if (!sessionStr) {
     const newSession = client.session.save() as unknown as string;
-    logger.info('[telegram] new session generated — Save this to TELEGRAM_SESSION_STRING env var:', {
-      session: newSession,
-    });
+    if (process.env.TELEGRAM_LOG_SESSION_STRING === 'true') {
+      process.stdout.write(
+        `[telegram] new session generated — Save this to TELEGRAM_SESSION_STRING env var:\n${newSession}\n`,
+      );
+    } else {
+      logger.info(
+        '[telegram] new session generated but not logged. Set TELEGRAM_LOG_SESSION_STRING=true to print it to stdout once for manual setup.',
+      );
+    }
   }
 
   const channels = channelsStr.split(',').map((s) => s.trim()).filter(Boolean);
@@ -68,16 +74,20 @@ export async function startTelegramMonitor(): Promise<void> {
 
     // Resolve channel/peer info
     let peerName = 'unknown';
+    let peerUrlSlug = 'unknown';
     try {
       const peer = await client?.getEntity(message.peerId);
       if (peer instanceof Api.Channel) {
         peerName = peer.username || peer.title || 'channel';
+        // Build a valid t.me URL using the username when available; fall back to channel ID
+        peerUrlSlug = peer.username ? peer.username : `c/${peer.id}`;
       } else if (peer instanceof Api.Chat) {
         peerName = peer.title || 'chat';
+        peerUrlSlug = `c/${peer.id}`;
       }
     } catch { /* best effort */ }
 
-    // Filter by channel list (if not monitoring all)
+    // Filter by configured channel list using the resolved name/username
     if (channels.length > 0 && !channels.includes(peerName)) {
       return;
     }
@@ -96,7 +106,7 @@ export async function startTelegramMonitor(): Promise<void> {
       // 1. Convert to RssItem format for scoring
       const item = {
         title: message.text.trim(),
-        url: `https://t.me/${peerName}/${message.id}`,
+        url: `https://t.me/${peerUrlSlug}/${message.id}`,
         publishedAt: new Date(),
         source: `telegram:${peerName}`,
         latencyMs: telegramLatency,

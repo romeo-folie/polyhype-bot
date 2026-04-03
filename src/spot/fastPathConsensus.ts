@@ -14,6 +14,7 @@ import { logger } from '../shared/logger.js';
 import { estimateConsensusProbability } from '../mapping/consensusCalculator.js';
 import { getRedis } from '../shared/redis.js';
 import { loadConfig } from '../shared/config.js';
+import type { Redis } from 'ioredis';
 import type { SpotMove } from './thresholdDetector.js';
 import type { CorrelatedMarket } from './marketCorrelator.js';
 
@@ -67,6 +68,11 @@ export function extractPriceTarget(question: string): PriceTarget | null {
   return { targetPrice, direction, deadlineMs, method: 'regex' };
 }
 
+/** Returns UTC end-of-day (23:59:59.999 UTC) for a given year/month/day. */
+function utcEndOfDay(year: number, month: number, day: number): number {
+  return Date.UTC(year, month, day, 23, 59, 59, 999);
+}
+
 function extractDeadline(question: string): number | null {
   const months: Record<string, number> = {
     january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
@@ -81,7 +87,7 @@ function extractDeadline(question: string): number | null {
     const month = months[monthDayYearMatch[1]!.toLowerCase()]!;
     const day = parseInt(monthDayYearMatch[2]!, 10);
     const year = parseInt(monthDayYearMatch[3]!, 10);
-    return new Date(year, month, day).getTime();
+    return utcEndOfDay(year, month, day);
   }
 
   const monthYearMatch = question.match(
@@ -91,13 +97,17 @@ function extractDeadline(question: string): number | null {
   if (monthYearMatch) {
     const month = months[monthYearMatch[1]!.toLowerCase()]!;
     const year = parseInt(monthYearMatch[2]!, 10);
-    // Use last day of the month
-    return new Date(year, month + 1, 0).getTime();
+    // Use UTC end of the last day of the month
+    const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+    return utcEndOfDay(year, month, lastDay);
   }
 
   const isoMatch = question.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
   if (isoMatch) {
-    return new Date(isoMatch[1]! + '-' + isoMatch[2]! + '-' + isoMatch[3]!).getTime();
+    const year = parseInt(isoMatch[1]!, 10);
+    const month = parseInt(isoMatch[2]!, 10) - 1; // zero-indexed
+    const day = parseInt(isoMatch[3]!, 10);
+    return utcEndOfDay(year, month, day);
   }
 
   return null;
@@ -173,10 +183,27 @@ If not a price-target market, return {"error": "not_price_target"}.`;
     const parsed = JSON.parse(content);
     if (parsed.error) return null;
 
+    const targetPrice = Number(parsed.targetPrice);
+    const deadlineMs = Number(parsed.deadlineMs);
+    const direction =
+      parsed.direction === 'above' || parsed.direction === 'below'
+        ? parsed.direction
+        : null;
+
+    if (
+      !direction ||
+      !Number.isFinite(targetPrice) ||
+      targetPrice <= 0 ||
+      !Number.isFinite(deadlineMs) ||
+      deadlineMs <= 0
+    ) {
+      return null;
+    }
+
     return {
-      targetPrice: Number(parsed.targetPrice),
-      direction: parsed.direction,
-      deadlineMs: Number(parsed.deadlineMs),
+      targetPrice,
+      direction,
+      deadlineMs,
       method: 'deepseek',
     };
   } catch (err) {
@@ -192,52 +219,72 @@ export async function estimateFastConsensus(
   move: SpotMove,
   market: CorrelatedMarket,
   annualVol?: number,
+  opts?: { redis?: Redis },
 ): Promise<FastConsensusResult> {
   const cacheKey = `mapping:consensus:v2:${market.marketId}`;
-  const redis = (move as any).redis || getRedis();
+  const redis = opts?.redis ?? getRedis();
   
   // 1. Hybrid Registry Check
   try {
     const cached = await redis.get(cacheKey);
     if (cached) {
       const target = JSON.parse(cached) as PriceTarget;
+      const now = Date.now();
+      // Skip formula path if the market's deadline has already passed
+      if (target.deadlineMs <= now) {
+        // Market is expired — return current price as probability, skip formula
+        logger.debug('[fast-consensus] cached target expired, using spot price', {
+          marketId: market.marketId,
+          deadlineMs: target.deadlineMs,
+        });
+      } else {
+        const prob = formulaProbability(
+          move.currentPrice,
+          target.targetPrice,
+          target.direction,
+          annualVol ?? DEFAULT_ANNUAL_VOL[move.assetId] ?? DEFAULT_VOL,
+          (target.deadlineMs - now) / (365.25 * 24 * 3600 * 1000),
+        );
+        return {
+          probability: prob,
+          method: 'formula',
+          reasoning: `Formula (cached ${target.method}): target=${target.targetPrice}, dir=${target.direction}`,
+          stddev: 0,
+        };
+      }
+    }
+  } catch { /* cache miss */ }
+
+  // 2. Extraction Path (Regex -> DeepSeek for likely price-target questions only)
+  let target = extractPriceTarget(market.question);
+  if (!target) {
+    const question = market.question || '';
+    const hasPriceCue = /\$|usd\b|us dollars?\b|dollars?\b|\b\d+(?:\.\d+)?k\b|\bprice\b|\babove\b|\bbelow\b|\bat least\b|\bat most\b/i.test(question);
+    const hasDateCue = /\b(on|by|before|after|during|at|end of)\b|jan(?:uary)?\b|feb(?:ruary)?\b|mar(?:ch)?\b|apr(?:il)?\b|may\b|jun(?:e)?\b|jul(?:y)?\b|aug(?:ust)?\b|sep(?:t(?:ember)?)?\b|oct(?:ober)?\b|nov(?:ember)?\b|dec(?:ember)?\b|\b\d{4}\b|\b(today|tomorrow|tonight|this week|this month|this year)\b/i.test(question);
+    if (hasPriceCue && hasDateCue) {
+      target = await deepseekStructuralParse(market.question);
+    }
+  }
+
+  if (target) {
+    const now = Date.now();
+    // Only cache and use formula if the market hasn't expired
+    if (target.deadlineMs > now) {
+      await redis.set(cacheKey, JSON.stringify(target), 'EX', 86400).catch(() => {});
       const prob = formulaProbability(
         move.currentPrice,
         target.targetPrice,
         target.direction,
         annualVol ?? DEFAULT_ANNUAL_VOL[move.assetId] ?? DEFAULT_VOL,
-        Math.max(0, (target.deadlineMs - Date.now()) / (365.25 * 24 * 3600 * 1000)),
+        (target.deadlineMs - now) / (365.25 * 24 * 3600 * 1000),
       );
       return {
         probability: prob,
         method: 'formula',
-        reasoning: `Formula (cached ${target.method}): target=${target.targetPrice}, dir=${target.direction}`,
+        reasoning: `Formula (${target.method}): target=${target.targetPrice}, dir=${target.direction}`,
         stddev: 0,
       };
     }
-  } catch { /* cache miss */ }
-
-  // 2. Extraction Path (Regex -> DeepSeek)
-  let target = extractPriceTarget(market.question);
-  if (!target) {
-    target = await deepseekStructuralParse(market.question);
-  }
-
-  if (target) {
-    await redis.set(cacheKey, JSON.stringify(target), 'EX', 86400).catch(() => {});
-    const prob = formulaProbability(
-      move.currentPrice,
-      target.targetPrice,
-      target.direction,
-      annualVol ?? DEFAULT_ANNUAL_VOL[move.assetId] ?? DEFAULT_VOL,
-      Math.max(0, (target.deadlineMs - Date.now()) / (365.25 * 24 * 3600 * 1000)),
-    );
-    return {
-      probability: prob,
-      method: 'formula',
-      reasoning: `Formula (${target.method}): target=${target.targetPrice}, dir=${target.direction}`,
-      stddev: 0,
-    };
   }
 
   // 3. Slow Fallback (Full LLM)
@@ -246,7 +293,7 @@ export async function estimateFastConsensus(
     description: market.description,
     headline: `Spot move detected for ${move.assetId}: ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(2)}% in ${move.windowMinutes}min. Current price: ${move.currentPrice}.`,
     currentYesPrice: market.currentYesPrice,
-    ...(redis ? { redis } : {}),
+    redis,
   });
 
   return {

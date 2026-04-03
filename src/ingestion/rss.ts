@@ -19,7 +19,7 @@ export interface RssItem {
 const DEFAULT_FEEDS: FeedConfig[] = [
   { url: 'https://rss.nytimes.com/services/xml/rss/nyt/World.xml' },
   { url: 'https://feeds.skynews.com/feeds/rss/world.xml' },
-  { url: 'http://feeds.bbci.co.uk/news/world/rss.xml' },
+  { url: 'https://feeds.bbci.co.uk/news/world/rss.xml' },
   { url: 'https://www.aljazeera.com/xml/rss/all.xml' },
 ];
 
