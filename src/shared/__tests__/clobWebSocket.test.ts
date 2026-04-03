@@ -23,43 +23,7 @@ function makeMockRedis() {
   };
 }
 
-// ── Mock ws module ──────────────────────────────────────────────────────────
 
-type WsListener = (...args: unknown[]) => void;
-
-class MockWebSocket {
-  static OPEN = 1;
-  readyState = MockWebSocket.OPEN;
-  private listeners = new Map<string, WsListener[]>();
-
-  sentMessages: string[] = [];
-
-  on(event: string, fn: WsListener) {
-    const list = this.listeners.get(event) ?? [];
-    list.push(fn);
-    this.listeners.set(event, list);
-    // Auto-fire 'open' on next tick
-    if (event === 'open') {
-      setTimeout(() => this.emit('open'), 0);
-    }
-  }
-
-  send(data: string) {
-    this.sentMessages.push(data);
-  }
-
-  close() {
-    this.readyState = 3;
-  }
-
-  emit(event: string, ...args: unknown[]) {
-    for (const fn of this.listeners.get(event) ?? []) {
-      fn(...args);
-    }
-  }
-}
-
-// Patch the module-level import by replacing the prototype connect method
 // We test handleMessage directly since it's the core logic.
 
 describe('ClobPriceFeed', () => {

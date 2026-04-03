@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { scanCryptoArb } from './cryptoArbScanner.js';
-import { loadConfig } from '../shared/config.js';
 import { resolveHlSymbol } from '../shared/hyperliquid.js';
 
 // Mock Config

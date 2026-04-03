@@ -370,5 +370,5 @@ async function main() {
 // Entrypoint when run directly (npx tsx src/spot/index.ts)
 const isMain = process.argv[1]?.endsWith('spot/index.ts') ?? false;
 if (isMain) {
-  main();
+  void main();
 }

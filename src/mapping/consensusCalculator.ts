@@ -8,6 +8,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import type { OpenAI as OpenAIType } from 'openai';
+import type { GoogleGenerativeAI as GoogleGenerativeAIType } from '@google/generative-ai';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRecentOutcomes, inferCategory } from '../shared/outcomeRecorder.js';
@@ -241,7 +243,7 @@ export interface ConsensusEstimate {
 }
 
 /** Single-call estimate — tries Gemini first, falls back to OpenAI, then Anthropic, then DeepSeek. */
-async function estimateSingle(opts: {
+async function _estimateSingle(opts: {
   question: string;
   description: string | null;
   headline: string;
@@ -443,12 +445,12 @@ export async function estimateConsensusProbability(opts: {
 // Module-level singleton clients — created once, reused across all estimateSentiment calls.
 // Module-level singleton clients — lazy-initialized on first use, reused thereafter.
 // Key rotation: compare current env var to the key used at last construction; recreate if changed.
-let _sentimentOpenAIClient: import('openai').OpenAI | null = null;
+let _sentimentOpenAIClient: OpenAIType | null = null;
 let _sentimentOpenAIKey: string | null = null;
-let _sentimentGeminiClient: import('@google/generative-ai').GoogleGenerativeAI | null = null;
+let _sentimentGeminiClient: GoogleGenerativeAIType | null = null;
 let _sentimentGeminiKey: string | null = null;
 
-async function getSentimentOpenAI(): Promise<import('openai').OpenAI> {
+async function getSentimentOpenAI(): Promise<OpenAIType> {
   const currentKey = loadConfig().OPENAI_API_KEY ?? null;
   if (!_sentimentOpenAIClient || currentKey !== _sentimentOpenAIKey) {
     const { OpenAI } = await import('openai');
@@ -458,7 +460,7 @@ async function getSentimentOpenAI(): Promise<import('openai').OpenAI> {
   return _sentimentOpenAIClient;
 }
 
-async function getSentimentGemini(): Promise<import('@google/generative-ai').GoogleGenerativeAI> {
+async function getSentimentGemini(): Promise<GoogleGenerativeAIType> {
   const currentKey = loadConfig().GEMINI_API_KEY ?? null;
   if (!_sentimentGeminiClient || currentKey !== _sentimentGeminiKey) {
     const { GoogleGenerativeAI } = await import('@google/generative-ai');

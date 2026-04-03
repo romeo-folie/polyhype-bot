@@ -89,7 +89,7 @@ describe('telegramMonitor', () => {
     const handler = mockAddEventHandler.mock.calls[0][0];
 
     // Simulate event payload with a date field (Unix seconds) to exercise latencyMs path
-    const messageDate = Math.floor((Date.now() - 200) / 1000); // 200ms ago
+    const _messageDate = Math.floor((Date.now() - 200) / 1000); // 200ms ago
     const mockMessage = {
       text: 'Explosion in major oil hub!',
       id: 1001,

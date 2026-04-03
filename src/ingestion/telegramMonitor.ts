@@ -7,7 +7,7 @@
  * Latency Target: < 500ms from Telegram arrival to execution start.
  */
 
-import { TelegramClient, Api } from 'telegram';
+import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
 import { NewMessage } from 'telegram/events/index.js';
 import { logger } from '../shared/logger.js';
@@ -97,7 +97,7 @@ export async function startTelegramMonitor(): Promise<void> {
   // Event handler for new messages with explicit chat filtering
   client.addEventHandler(async (event: NewMessageEvent) => {
     const message = event.message;
-    if (!message || !message.text) return;
+    if (!message?.text) return;
 
     // Fast-path ID check
     const peerId = message.peerId?.toString();

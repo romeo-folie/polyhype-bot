@@ -114,8 +114,8 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
 
   // Liquidity Gate: cap stake at 20% of book depth if available
   const stakeUsd =
-    input.bookDepthUsd !== undefined
-      ? Math.min(rawStakeUsd, input.bookDepthUsd * 0.2)
+    bookDepthUsd !== undefined
+      ? Math.min(rawStakeUsd, bookDepthUsd * 0.2)
       : rawStakeUsd;
 
   return {

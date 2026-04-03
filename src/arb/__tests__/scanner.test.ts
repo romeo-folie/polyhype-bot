@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-
-// --- Mocks ---
+import type * as GammaModule from '../../mapping/gamma.js';
 
 const mockSubmitClobBuy = vi.fn<() => Promise<{ success: boolean; error?: string }>>();
 vi.mock('../../shared/clob.js', () => ({
@@ -42,7 +41,7 @@ vi.mock('../../execution/telegram.js', () => ({
 const mockGetActiveMarkets = vi.fn<() => Promise<unknown[]>>();
 vi.mock('../../mapping/gamma.js', async () => {
   const actual =
-    await vi.importActual<typeof import('../../mapping/gamma.js')>('../../mapping/gamma.js');
+    await vi.importActual<typeof GammaModule>('../../mapping/gamma.js');
   return {
     getActiveMarkets: mockGetActiveMarkets,
     parseOutcomePrices: actual.parseOutcomePrices,

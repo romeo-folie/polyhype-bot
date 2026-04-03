@@ -8,6 +8,7 @@
  * work with jest.unstable_mockModule).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type * as GammaModule from '../../mapping/gamma.js';
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -35,7 +36,7 @@ vi.mock('../../execution/telegram.js', () => ({
 const mockGetActiveMarkets = vi.fn<(...args: any[]) => any>();
 vi.mock('../../mapping/gamma.js', async () => {
   const actual =
-    await vi.importActual<typeof import('../../mapping/gamma.js')>('../../mapping/gamma.js');
+    await vi.importActual<typeof GammaModule>('../../mapping/gamma.js');
   return {
     getActiveMarkets: mockGetActiveMarkets,
     parseOutcomePrices: actual.parseOutcomePrices,

@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { checkGlobalGovernor, recordGlobalTrade } from './governor.js';
-import { loadConfig } from './config.js';
 
 // Mock Config
 vi.mock('./config.js', () => ({

@@ -1,4 +1,5 @@
 import { WebSocket } from 'ws';
+import type { RawData } from 'ws';
 import { logger } from '../../shared/logger.js';
 import { getRedis } from '../../shared/redis.js';
 
@@ -55,7 +56,7 @@ export class HeliusFeed {
       }
     });
 
-    this.ws.on('message', (data: import('ws').RawData) => {
+    this.ws.on('message', (data: RawData) => {
       try {
         const msg = JSON.parse(data.toString()) as {
           type?: string;

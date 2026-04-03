@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type * as EthersModule from 'ethers';
 
 const mockGetPortfolio = vi.fn<() => Promise<{ balance_usdc: number }>>();
 
@@ -34,7 +35,7 @@ vi.mock('../config.js', () => ({
 // Mock ethers — Contract.balanceOf controls on-chain return value
 const mockBalanceOf = vi.fn<() => Promise<bigint>>().mockResolvedValue(0n);
 vi.mock('ethers', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('ethers')>();
+  const actual = await importOriginal<typeof EthersModule>();
   return {
     ...actual,
     Contract: vi.fn().mockImplementation(() => ({

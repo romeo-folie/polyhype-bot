@@ -74,8 +74,8 @@ const CTF_ABI = [
  * The factory verifies the caller owns the proxy and executes the ProxyCalls.
  * delegateCall=true is used in all observed Polymarket redemption transactions.
  */
-const PROXY_WALLET_FACTORY_ADDRESS = '0xaB45c5A4B0c941a2F231C04C3f49182e1A254052';
-const PROXY_WALLET_FACTORY_ABI = [
+const _PROXY_WALLET_FACTORY_ADDRESS = '0xaB45c5A4B0c941a2F231C04C3f49182e1A254052';
+const _PROXY_WALLET_FACTORY_ABI = [
   'function proxy((bool delegateCall, address to, uint256 value, bytes data)[] calls) external payable',
 ];
 

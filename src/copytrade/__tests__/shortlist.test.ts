@@ -1,4 +1,5 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import type * as GammaModule from '../../mapping/gamma.js';
 
 const mockLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -10,7 +11,7 @@ const mockRename = vi.fn();
 
 vi.mock('../../shared/logger.js', () => ({ logger: mockLogger }));
 vi.mock('../../mapping/gamma.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../mapping/gamma.js')>();
+  const actual = await importOriginal<typeof GammaModule>();
   return { ...actual, fetchWithTimeout: mockFetchWithTimeout };
 });
 vi.mock('../../shared/config.js', () => ({ loadConfig: mockLoadConfig }));

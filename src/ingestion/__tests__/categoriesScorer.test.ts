@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { RssItem } from '../rss.js';
 import { CATEGORIES } from '../categories/index.js';
 

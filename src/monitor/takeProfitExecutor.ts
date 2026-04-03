@@ -16,7 +16,6 @@ import {
   submitSell,
   resolveSimmerMarketId,
   getSimmerPositions,
-  SimmerError,
 } from '../shared/simmer.js';
 import {
   submitClobSell,

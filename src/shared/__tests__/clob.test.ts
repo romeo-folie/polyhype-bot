@@ -1,4 +1,5 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import type * as ClobModule from '../clob.js';
 
 const mockCreateAndPostMarketOrder = vi.fn();
 const mockGetTickSize = vi.fn();
@@ -268,7 +269,7 @@ describe('redeemClobOutcome', () => {
 });
 
 describe('parseBalanceFromClobError', () => {
-  let parseBalanceFromClobError: typeof import('../clob.js').parseBalanceFromClobError;
+  let parseBalanceFromClobError: typeof ClobModule.parseBalanceFromClobError;
 
   beforeEach(async () => {
     ({ parseBalanceFromClobError } = await import('../clob.js'));
