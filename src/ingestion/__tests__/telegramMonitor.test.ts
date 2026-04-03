@@ -57,7 +57,7 @@ vi.mock('telegram', () => ({
       username = 'alpha_channel';
       title = 'Alpha Channel';
     },
-    Chat: class {},
+    Chat: class { id = 'mock-chat-id'; },
   },
 }));
 

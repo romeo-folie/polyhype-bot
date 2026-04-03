@@ -87,7 +87,7 @@ graph TD
 | **OSINT Pipeline** | `cron:trade` | 5 min | RSS + GDELT ingest → LLM score → Gamma mapping → divergence → execute |
 | **Position Monitor** | `cron:monitor` | 5 min | PM price resolution → SL/TP/divergence exits → auto-redeem resolved positions |
 | **Spot Monitor** | `cron:spot` | 1 min | Spot price move detection → correlated Polymarket market search → fast consensus → execute |
-| **Watchlist Refresh** | `cron:watchlist` | 1 hour | Syncs active Polymarket market keywords with Redis for the Dynamic Watchlist gate |
+| **Watchlist Refresh** | `cron:watchlist` | 4 hours | Syncs active Polymarket market keywords with Redis for the Dynamic Watchlist gate |
 
 ---
 

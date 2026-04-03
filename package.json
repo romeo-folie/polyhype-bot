@@ -30,7 +30,7 @@
     "probe:clob-allowance": "npx tsx scripts/probe-clob-allowance.ts",
     "test": "vitest run --reporter=verbose",
     "test:unit": "vitest run --reporter=verbose",
-    "lint": "eslint 'src/**/*.ts'",
+    "lint": "eslint 'src/**/*.ts' 'scripts/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts' 'scripts/**/*.ts'"
   },
   "dependencies": {

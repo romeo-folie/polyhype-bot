@@ -142,7 +142,7 @@ describe('runCopytrade', () => {
     const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
-    const result = await runCopytrade(redis as any, 1000);
+    const result = await runCopytrade(redis, 1000);
 
     expect(result.signals).toHaveLength(0);
   });
@@ -171,7 +171,7 @@ describe('runCopytrade', () => {
     const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
-    const result = await runCopytrade(redis as any, 1000);
+    const result = await runCopytrade(redis, 1000);
 
     // Should be skipped because 100 BPS > 50 BPS (mentions limit)
     expect(result.signals).toHaveLength(0);
@@ -191,7 +191,7 @@ describe('runCopytrade', () => {
     const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
-    const result = await runCopytrade(redis as any, 1000);
+    const result = await runCopytrade(redis, 1000);
 
     expect(result.signals).toHaveLength(0);
   });
@@ -205,7 +205,7 @@ describe('runCopytrade', () => {
     const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
-    const result = await runCopytrade(redis as any, 1000);
+    const result = await runCopytrade(redis, 1000);
 
     expect(result.signals).toHaveLength(1);
     expect(result.signals[0]?.stakeUsd).toBe(25);
@@ -245,7 +245,7 @@ describe('runCopytrade', () => {
     const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
-    const result = await runCopytrade(redis as any, 1000);
+    const result = await runCopytrade(redis, 1000);
 
     expect(result.exits).toBe(1);
     expect(mockExecuteTakeProfit).toHaveBeenCalled();
@@ -260,7 +260,7 @@ describe('runCopytrade', () => {
     const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
-    await runCopytrade(redis as any, 1000);
+    await runCopytrade(redis, 1000);
 
     expect(mockDedup).toHaveBeenCalledWith('copytrade:tx:0xabc:asset-9:1', expect.any(Number));
   });
@@ -280,7 +280,7 @@ describe('runCopytrade', () => {
     const redis = { get: vi.fn(), set: vi.fn() } as any;
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
-    const result = await runCopytrade(redis as any, 1000);
+    const result = await runCopytrade(redis, 1000);
 
     expect(result.signals).toHaveLength(1);
   });
@@ -291,7 +291,7 @@ describe('runCopytrade', () => {
 
     const { runCopytrade } = await import('../index.js');
     const redis = { get: vi.fn(), set: vi.fn() } as any;
-    await runCopytrade(redis as any, 1000);
+    await runCopytrade(redis, 1000);
 
     // Should call fetchWithTimeout for each wallet
     expect(mockFetchWithTimeout).toHaveBeenCalledTimes(3);

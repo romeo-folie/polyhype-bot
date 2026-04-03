@@ -60,13 +60,13 @@ describe('scoreItems', () => {
   beforeEach(() => {
     mockGenerateContent.mockReset();
     mockChatCreate.mockReset();
-    process.env['GEMINI_API_KEY'] = 'test-gemini-key';
-    process.env['OPENAI_API_KEY'] = 'test-openai-key';
+    process.env.GEMINI_API_KEY = 'test-gemini-key';
+    process.env.OPENAI_API_KEY = 'test-openai-key';
   });
 
   afterEach(() => {
-    delete process.env['GEMINI_API_KEY'];
-    delete process.env['OPENAI_API_KEY'];
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
   });
 
   it('returns items with urgencyScore and keywords from LLM', async () => {
@@ -107,7 +107,7 @@ describe('scoreItems', () => {
 
   it('assigns default score 1 when LLM call fails', async () => {
     mockGenerateContent.mockRejectedValue(new Error('API error'));
-    delete process.env['OPENAI_API_KEY'];
+    delete process.env.OPENAI_API_KEY;
 
     const items = [makeItem('Some headline')];
     const result = await scoreItems(items, meta);

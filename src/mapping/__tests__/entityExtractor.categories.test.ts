@@ -50,11 +50,11 @@ const ENTITY_FIXTURES: Record<string, { headline: string; entities: string[] }> 
 describe('entity extraction per category', () => {
   beforeEach(() => {
     mockChatCreate.mockReset();
-    process.env['OPENAI_API_KEY'] = 'test-openai-key';
+    process.env.OPENAI_API_KEY = 'test-openai-key';
   });
 
   afterEach(() => {
-    delete process.env['OPENAI_API_KEY'];
+    delete process.env.OPENAI_API_KEY;
   });
 
   for (const category of CATEGORIES) {

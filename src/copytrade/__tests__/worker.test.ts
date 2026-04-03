@@ -4,10 +4,10 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 let _savedEnv: NodeJS.ProcessEnv;
 beforeEach(() => {
   _savedEnv = { ...process.env };
-  process.env['NODE_ENV'] = 'test';
-  process.env['REDIS_URL'] = 'redis://localhost:6379';
-  process.env['SIMMER_API_KEY'] = 'test-simmer-key';
-  process.env['GEMINI_API_KEY'] = 'test-gemini-key';
+  process.env.NODE_ENV = 'test';
+  process.env.REDIS_URL = 'redis://localhost:6379';
+  process.env.SIMMER_API_KEY = 'test-simmer-key';
+  process.env.GEMINI_API_KEY = 'test-gemini-key';
 });
 afterEach(() => {
   process.env = _savedEnv;
