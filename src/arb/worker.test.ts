@@ -28,15 +28,23 @@ vi.mock('./scanner.js', () => ({
   runArbScan: vi.fn().mockResolvedValue([]),
 }));
 
-// Mock cryptoArbScanner
-const mockScanCryptoArb = vi.fn().mockResolvedValue([]);
-vi.mock('./cryptoArbScanner.js', () => ({
-  scanCryptoArb: (...args: unknown[]) => mockScanCryptoArb(...args),
+vi.mock('../shared/assets.js', () => ({
   BINANCE_SYMBOL_TO_ASSET: {
     btcusdt: 'bitcoin',
     ethusdt: 'ethereum',
     solusdt: 'solana',
   },
+  ASSET_SEARCH_QUERIES: {
+    bitcoin: ['BTC'],
+    ethereum: ['ETH'],
+    solana: ['SOL'],
+  },
+}));
+
+// Mock cryptoArbScanner
+const mockScanCryptoArb = vi.fn().mockResolvedValue([]);
+vi.mock('./cryptoArbScanner.js', () => ({
+  scanCryptoArb: (...args: unknown[]) => mockScanCryptoArb(...args),
 }));
 
 // Mock executor
