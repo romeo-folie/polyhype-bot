@@ -80,15 +80,29 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
       return null;
     }
 
-    const currentYesPrice = parseFloat(prices[0] ?? '0');
+    // Determine correct indices for YES and NO outcomes.
+    // Gamma usually returns ["Yes", "No"] but order is not strictly guaranteed.
+    const outcomes = (market.outcomes || []).map((o) => o.toLowerCase());
+    const yesIndex = outcomes.indexOf('yes');
+    const noIndex = outcomes.indexOf('no');
+
+    // Default to index 0 for YES and index 1 for NO if not found or if this is a binary market
+    // without standard labels (PGA only supports binary YES/NO for now).
+    const resolvedYesIndex = yesIndex !== -1 ? yesIndex : 0;
+    const resolvedNoIndex = noIndex !== -1 ? noIndex : (prices.length > 1 ? 1 : 0);
+
+    const currentYesPrice = parseFloat(prices[resolvedYesIndex] ?? '0');
+    const currentNoPrice = parseFloat(prices[resolvedNoIndex] ?? '0');
+
     if (!isFinite(currentYesPrice)) {
       logger.warn('[price-fetcher] non-finite YES price', { marketId: position.marketId });
       return null;
     }
 
-    // For YES positions: the price we care about is the YES price
-    // For NO positions: we bought NO at (1 - yesPrice), current value = (1 - currentYesPrice)
-    const currentOutcomePrice = pmDirection === 'YES' ? currentYesPrice : 1 - currentYesPrice;
+    // currentOutcomePrice is the price of the side we hold.
+    // If the market is healthy, YES + NO prices should sum to approx 1.0.
+    // We prefer the direct price of the held outcome if available.
+    const currentOutcomePrice = pmDirection === 'YES' ? currentYesPrice : currentNoPrice;
 
     return {
       marketId: position.marketId,

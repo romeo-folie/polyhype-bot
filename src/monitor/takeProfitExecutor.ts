@@ -155,153 +155,112 @@ async function executeSimmerExit(opts: {
 }): Promise<TakeProfitResult> {
   const { position, currentPrice, returnPct, reason, redis, sellSide, sharesToSell } = opts;
 
-  // Resolve the Simmer-internal UUID for this market.
-  // Simmer does NOT accept Polymarket numeric IDs — it requires its own UUID.
-  // The buy path does this via resolveSimmerMarketId(signal.question); we must
-  // do the same here or the sell will always fail with "Market not found".
-  const question = position.question ?? '';
-  const simmerId = await resolveSimmerMarketId(question);
-  if (!simmerId) {
-    const qPreview = question.slice(0, 80);
-    const error = `Simmer market ID not found for question: "${qPreview}"`;
-    logger.warn('[take-profit-executor] cannot resolve Simmer UUID — sell aborted', {
-      marketId: position.marketId,
-      question: qPreview,
-    });
-    return { marketId: position.marketId, success: false, error, returnPct, reason };
-  }
+  let simmerIdResult: string | null = null;
+  let simmerError: string | null = null;
 
-  logger.info('[take-profit-executor] resolved Simmer UUID', {
-    marketId: position.marketId,
-    simmerId,
-  });
-
+  // STEP 1: Attempt sell with the Polymarket marketId (numeric string) first.
+  // Many Simmer environments accept the source market ID directly.
   try {
     const tradeResult = await submitSell({
-      market_id: simmerId,
+      market_id: position.marketId,
       side: sellSide,
       action: 'sell',
       shares: sharesToSell,
-      reasoning: `Take-profit exit: ${reason} — return ${returnPct.toFixed(1)}% at price ${currentPrice.toFixed(3)}`,
+      reasoning: `Direct sell: ${reason} — return ${returnPct.toFixed(1)}%`,
     });
 
     if (tradeResult.success) {
-      await closePositionWithHedge(redis, position.marketId, position.direction);
-      const proceedsUsd = sharesToSell * currentPrice;
-      await creditProceeds(redis, proceedsUsd);
-      await recordPositionOutcome(redis, position, {
-        result: returnPct >= 0 ? 'won' : 'lost',
-        returnPct,
-      });
-      emitExecutionOutcome(redis, position, returnPct, currentPrice, reason);
-      await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
-
-      logger.info('[take-profit-executor] exit successful (simmer)', {
-        marketId: position.marketId,
-        txHash: tradeResult.tx_hash,
-        returnPct: returnPct.toFixed(2),
-      });
-
-      const successResult: TakeProfitResult = {
-        marketId: position.marketId,
-        success: true,
-        returnPct,
-        reason,
-      };
-      if (tradeResult.tx_hash) successResult.txHash = tradeResult.tx_hash;
-      return successResult;
-    } else {
-      const error = tradeResult.error ?? 'unknown error from Simmer';
-      
-      // FALLBACK: Attempt Synthetic Exit on HL if primary venue fails
-      const synthetic = await attemptSyntheticExit({ position, currentPrice, returnPct, reason, redis });
-      if (synthetic.success) return synthetic;
-
-      // Simmer minimum order check — mark pendingSettlement if cost too low
-      const errLower = error.toLowerCase();
-      if (errLower.includes('cost too low') || (errLower.includes('below') && errLower.includes('minimum'))) {
-        logger.warn('[take-profit-executor] Simmer order below minimum — marking pendingSettlement', {
-          marketId: position.marketId,
-          error,
-        });
-        await markPositionPendingSettlement(redis, position.marketId, position.direction);
-        return { marketId: position.marketId, success: false, error, returnPct, reason };
-      }
-
-      // AUTO-RECOVERY: If shares mismatch, fetch actual balance and retry ONCE
-      if (error.toLowerCase().includes('insufficient shares')) {
-        logger.warn('[take-profit-executor] share mismatch detected — sync and retry', {
-          marketId: position.marketId,
-          expected: sharesToSell.toFixed(4),
-          error
-        });
-
-        const livePositions = await getSimmerPositions({ status: 'active' });
-        const liveMatch = livePositions.find(p => p.market_id === simmerId && p.side === sellSide);
-        const actualShares = liveMatch?.shares ?? 0;
-
-        if (!liveMatch || !Number.isFinite(actualShares) || actualShares <= 0) {
-          logger.warn('[take-profit-executor] live balance is zero — marking terminal_no_balance', {
-            marketId: position.marketId,
-            actualShares,
-          });
-          await updatePositionShares(redis, position.marketId, position.direction, 0, 'terminal_no_balance').catch(() => {});
-          await closePositionWithHedge(redis, position.marketId, position.direction);
-          return { marketId: position.marketId, success: false, error: 'terminal_no_balance', returnPct, reason };
-        }
-
-        const cappedShares = Math.min(actualShares, sharesToSell);
-        await updatePositionShares(redis, position.marketId, position.direction, cappedShares, cappedShares < sharesToSell ? 'reconciled_partial_exit' : 'reconciled_actual');
-        const retryShares = Math.floor(cappedShares * 1_000_000) / 1_000_000;
-
-        if (retryShares > 0) {
-          logger.info('[take-profit-executor] retrying with actual balance', {
-            marketId: position.marketId,
-            actualShares: retryShares.toFixed(4)
-          });
-
-          const retryResult = await submitSell({
-            market_id: simmerId,
-            side: sellSide,
-            action: 'sell',
-            shares: retryShares,
-            reasoning: `Recovery exit: ${reason} (Sync from ${sharesToSell.toFixed(4)} to ${retryShares.toFixed(4)})`,
-          });
-
-          if (retryResult.success) {
-            await closePositionWithHedge(redis, position.marketId, position.direction);
-            const freshReturnPct = position.entryPrice > 0 ? ((currentPrice - position.entryPrice) / position.entryPrice) * 100 : 0;
-            await creditProceeds(redis, retryShares * currentPrice);
-            await recordPositionOutcome(redis, position, {
-              result: freshReturnPct >= 0 ? 'won' : 'lost',
-              returnPct: freshReturnPct,
-            });
-            await notifyTakeProfitExecuted({ position, currentPrice, returnPct: freshReturnPct, reason });
-            return { marketId: position.marketId, success: true, returnPct: freshReturnPct, reason, txHash: retryResult.tx_hash };
-          }
-        }
-      }
-
-      logger.warn('[take-profit-executor] sell returned success=false', {
-        marketId: position.marketId,
-        error,
-      });
-      return { marketId: position.marketId, success: false, error, returnPct, reason };
+      return await finalizeSimmerExit(redis, position, tradeResult, currentPrice, returnPct, reason);
     }
+    simmerError = tradeResult.error ?? null;
   } catch (err) {
-    const message =
-      err instanceof SimmerError
-        ? `HTTP ${err.statusCode.toString()}: ${err.message}`
-        : err instanceof Error
-          ? err.message
-          : String(err);
-
-    logger.error('[take-profit-executor] exit trade failed', {
-      marketId: position.marketId,
-      error: message,
-    });
-    return { marketId: position.marketId, success: false, error: message, returnPct, reason };
+    simmerError = err instanceof Error ? err.message : String(err);
   }
+
+  // STEP 2: Fall back to resolution by question if direct sell failed with "Market not found"
+  if (simmerError && (simmerError.toLowerCase().includes('not found') || simmerError.toLowerCase().includes('invalid market'))) {
+    logger.info('[take-profit-executor] direct sell failed with market_not_found — resolving via question', {
+      marketId: position.marketId,
+      error: simmerError,
+    });
+
+    const question = position.question ?? '';
+    simmerIdResult = await resolveSimmerMarketId(question);
+    
+    if (simmerIdResult) {
+      try {
+        const retryResult = await submitSell({
+          market_id: simmerIdResult,
+          side: sellSide,
+          action: 'sell',
+          shares: sharesToSell,
+          reasoning: `Resolved sell: ${reason} — return ${returnPct.toFixed(1)}%`,
+        });
+
+        if (retryResult.success) {
+          return await finalizeSimmerExit(redis, position, retryResult, currentPrice, returnPct, reason);
+        }
+        simmerError = retryResult.error ?? null;
+      } catch (err) {
+        simmerError = err instanceof Error ? err.message : String(err);
+      }
+    } else {
+      logger.warn('[take-profit-executor] cannot resolve Simmer UUID via question — resolution aborted', {
+        marketId: position.marketId,
+        question: question.slice(0, 80),
+      });
+    }
+  }
+
+  // STEP 3: Fallback to CLOB exit if Simmer still failed and we have CLOB enabled/token IDs
+  if (position.clobTokenIds && position.clobTokenIds.length > 0) {
+    logger.info('[take-profit-executor] Simmer exit failed — falling back to CLOB', {
+      marketId: position.marketId,
+      simmerError,
+    });
+    return executeClobExit({ position, currentPrice, returnPct, reason, redis, sharesToSell });
+  }
+
+  // STEP 4: Attempt Synthetic Exit on HL if all else fails
+  const synthetic = await attemptSyntheticExit({ position, currentPrice, returnPct, reason, redis });
+  if (synthetic.success) return synthetic;
+
+  return { marketId: position.marketId, success: false, error: simmerError ?? 'Simmer resolution failed', returnPct, reason };
+}
+
+/** Post-sell cleanup for Simmer: close position, credit proceeds, record outcome, notify. */
+async function finalizeSimmerExit(
+  redis: Redis,
+  position: Position,
+  tradeResult: { tx_hash?: string | null | undefined },
+  currentPrice: number,
+  returnPct: number,
+  reason: ExitReason,
+): Promise<TakeProfitResult> {
+  await closePositionWithHedge(redis, position.marketId, position.direction);
+  const proceedsUsd = (position.sharesHeld ?? (position.stakeUsd / position.entryPrice)) * currentPrice;
+  await creditProceeds(redis, proceedsUsd);
+  await recordPositionOutcome(redis, position, {
+    result: returnPct >= 0 ? 'won' : 'lost',
+    returnPct,
+  });
+  emitExecutionOutcome(redis, position, returnPct, currentPrice, reason);
+  await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
+
+  logger.info('[take-profit-executor] exit successful (simmer)', {
+    marketId: position.marketId,
+    txHash: tradeResult.tx_hash,
+    returnPct: returnPct.toFixed(2),
+  });
+
+  const successResult: TakeProfitResult = {
+    marketId: position.marketId,
+    success: true,
+    returnPct,
+    reason,
+  };
+  if (tradeResult.tx_hash) successResult.txHash = tradeResult.tx_hash;
+  return successResult;
 }
 
 /** Post-sell cleanup: close position, credit proceeds, record outcome, notify. */

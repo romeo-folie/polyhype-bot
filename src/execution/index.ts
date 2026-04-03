@@ -241,12 +241,18 @@ async function processScoredItemsInner(
             const side = signal.direction.toLowerCase() as 'yes' | 'no';
             const match = livePositions.find(p => p.market_id === simmerId && p.side === side);
             if (match?.shares && match.shares > 0 && match.shares !== estimatedShares) {
-              // Update Redis ledger with actual fill
-              await redis.hset(`position:${signal.marketId}:${signal.direction}`, 'sharesHeld', String(match.shares));
-              logger.info('[execution] reconciled sharesHeld with Simmer actual fill', {
+              const actualEntryPrice = signal.stakeUsd / match.shares;
+              // Update Redis ledger with actual fill and actual entry price
+              await redis.hset(`position:${signal.marketId}:${signal.direction}`, 
+                'sharesHeld', String(match.shares),
+                'entryPrice', String(actualEntryPrice.toFixed(6))
+              );
+              logger.info('[execution] reconciled sharesHeld and entryPrice with Simmer actual fill', {
                 marketId: signal.marketId,
                 estimated: estimatedShares,
                 actual: match.shares,
+                oldPrice: result.signal.outcomePrice,
+                newPrice: actualEntryPrice,
               });
             }
           } catch (err) {
