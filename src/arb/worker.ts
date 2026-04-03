@@ -8,6 +8,7 @@ import { recordPosition } from '../execution/positionLedger.js';
 import { deductStake } from '../shared/bankroll.js';
 import { setAgentAutoRedeem } from '../shared/simmer.js';
 import { recordCryptoArbGate, recordCryptoArbEvent, recordCryptoArbMetric } from '../shared/telemetry.js';
+import { ArbMarketWarmer } from './warmer.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { TradeSignal } from '../mapping/index.js';
 
@@ -40,6 +41,7 @@ export class ArbitrageWorker {
   private lastAnyTradeTime = 0;
   private isScanning = false;
   private timer: NodeJS.Timeout | null = null;
+  private warmer: ArbMarketWarmer | null = null;
 
   constructor(options: WorkerOptions = {}) {
     this.baselineIntervalMs = options.baselineIntervalMs ?? 10000; // 10s baseline
@@ -109,6 +111,14 @@ export class ArbitrageWorker {
       cryptoArbMaxTradesPerMin: this.cryptoArbMaxTradesPerMin,
       cryptoArbEnabled: cfg.CRYPTO_ARB_ENABLED,
       simmerAutoRedeem: cfg.SIMMER_AUTO_REDEEM_ENABLED,
+    });
+
+    // 0. Start Market Warmer (Pre-discovery WebSocket warmup)
+    this.warmer = new ArbMarketWarmer();
+    void this.warmer.start().catch((err) => {
+      logger.warn('[arb-worker] warmer failed to start (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
 
     // 1. Subscribe to real-time price updates
@@ -311,6 +321,7 @@ export class ArbitrageWorker {
             sourcedFrom: `crypto-arb:${opp.assetId}`,
             reasoning: `Crypto latency arb: fair=${opp.fairValuePrice.toFixed(3)}, pm=${opp.currentPmPrice.toFixed(3)}, edge=${opp.edge.toFixed(3)}`,
             feesEnabled: opp.feesEnabled,
+            source: 'crypto-arb',
           };
 
           // executor.executeSignal handles execution only — it does NOT record the position
@@ -398,6 +409,10 @@ export class ArbitrageWorker {
     void subscriber.unsubscribe('spot:price_moved').catch((e: unknown) => {
       logger.debug('[arb-worker] unsubscribe failed (non-fatal)', { error: String(e) });
     });
+    if (this.warmer) {
+      this.warmer.stop();
+      this.warmer = null;
+    }
   }
 }
 

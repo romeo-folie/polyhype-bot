@@ -37,7 +37,7 @@ interface GdeltResponse {
  * This is more rate-limit friendly than issuing one request per theme.
  */
 const GDELT_THEME_QUERY =
-  '(theme:CRISISLEX_CRISISLEXREC OR theme:WB_2243_CONFLICT_AND_VIOLENCE OR theme:TERROR OR theme:PROTEST)';
+  '(theme:CRISISLEX_CRISISLEXREC OR theme:WB_2243_CONFLICT_AND_VIOLENCE OR theme:TERROR OR theme:PROTEST OR theme:ELECTION OR theme:REVOLUTION OR theme:DIPLOMACY OR theme:SANCTIONS OR theme:MILITARY OR theme:GEOPOLITICS)';
 
 /**
  * Parse GDELT compact date format: YYYYMMDDTHHMMSSZ → Date.

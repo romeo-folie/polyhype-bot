@@ -46,6 +46,12 @@ export interface TradeSignal {
   symbol?: string;
   /** True when the Gamma market has fees enabled — executor skips CLOB for these */
   feesEnabled?: boolean;
+  /** Origin of the signal, used for execution routing (e.g. bypassing Simmer for arb) */
+  source?: 'osint' | 'crypto-arb' | 'futures';
+  /** Operational metadata for alerts/telemetry */
+  latencyMs?: number | undefined;
+  volatility?: number | undefined;
+  spreadBps?: number | undefined;
 }
 
 /**
@@ -164,6 +170,8 @@ export async function runMapping(
           halfKellyFraction: decision.halfKellyFraction,
           sourcedFrom: item.title,
           reasoning: consensus.reasoning,
+          source: 'osint',
+          latencyMs: item.latencyMs,
         };
         const existing = bestByMarket.get(candidate.marketId);
         if (!existing || decision.edgeMagnitude > existing.edgeMagnitude) {
@@ -222,6 +230,8 @@ export async function mapNewsToFutures(
       leverage: cfg.FUTURES_DEFAULT_LEVERAGE,
       sourcedFrom: `News: ${item.title}`,
       reasoning: `High-urgency news detected for ${symbol} with ${direction} sentiment. Urgency: ${item.urgencyScore}. Executing single-signal HL Perp via rapid LLM classification.`,
+      source: 'futures',
+      latencyMs: item.latencyMs,
     });
     
     // Only one futures signal per news item to prevent over-trading

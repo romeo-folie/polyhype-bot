@@ -41,6 +41,12 @@ const envSchema = z.object({
   // Telegram
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
+  // MTProto Credentials (from my.telegram.org)
+  TELEGRAM_API_ID: z.coerce.number().optional(),
+  TELEGRAM_API_HASH: z.string().optional(),
+  TELEGRAM_MONITOR_ENABLED: z.coerce.boolean().optional().default(false),
+  TELEGRAM_CHANNELS: z.string().optional().default('dbot_alerts,osint_intel'),
+  TELEGRAM_SESSION_STRING: z.string().optional(),
 
   // Wallet / direct CLOB execution
   POLYGON_WALLET_PRIVATE_KEY: z.string().optional(),

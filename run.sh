@@ -11,6 +11,7 @@
 #   ./run.sh npx tsx src/monitor/index.ts
 #   ./run.sh npx tsx src/spot/index.ts
 #   ./run.sh npx tsx src/arb/index.ts
+#   ./run.sh npx tsx src/ingestion/telegramMonitor.ts
 #
 # NOTE: This wrapper is for SHORT-LIVED cron tasks. 
 #       DO NOT use it for persistent workers (e.g. src/copytrade/worker.ts)

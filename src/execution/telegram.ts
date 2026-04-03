@@ -106,9 +106,19 @@ export async function notifyTradeExecuted(
   const consensusPct = ((signal.consensusProbability ?? 0.5) * 100).toFixed(1);
   const outcomePct = (signal.outcomePrice * 100).toFixed(1);
   const venue = opts?.venue ? fmtVenue(opts.venue) : 'Simmer';
+  
   const sharesLine = opts?.sharesFilled != null && opts.sharesFilled > 0
     ? `<b>Shares:</b> ${opts.sharesFilled.toFixed(4)}\n`
     : '';
+
+  let metaLine = '';
+  if (signal.latencyMs != null || signal.volatility != null || signal.spreadBps != null) {
+    const parts = [];
+    if (signal.latencyMs != null) parts.push(`lat: ${Math.round(signal.latencyMs)}ms`);
+    if (signal.volatility != null) parts.push(`vol: ${(signal.volatility * 100).toFixed(1)}%`);
+    if (signal.spreadBps != null) parts.push(`spr: ${Math.round(signal.spreadBps)}bps`);
+    metaLine = `\n<code>[${parts.join(' | ')}]</code>\n`;
+  }
 
   const text =
     `🟢 <b>Trade Executed</b>\n\n` +
@@ -117,6 +127,7 @@ export async function notifyTradeExecuted(
     `<b>Entry price:</b> ${fmtProb(signal.outcomePrice)}\n` +
     `<b>Stake:</b> $${signal.stakeUsd.toFixed(2)} USDC\n` +
     sharesLine +
+    metaLine +
     `\n<b>Edge:</b> ${edgePct}%  |  <b>Our P:</b> ${consensusPct}% vs market ${outcomePct}%\n` +
     `<b>Source:</b> ${escapeHtml(signal.sourcedFrom)}\n` +
     `<b>Reasoning:</b> ${escapeHtml(signal.reasoning)}\n` +

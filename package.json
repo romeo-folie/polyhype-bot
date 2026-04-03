@@ -20,6 +20,8 @@
     "cron:arb": "npx tsx src/arb/index.ts",
     "worker:spot-feed": "npx tsx src/spot/feeds/manager.ts",
     "worker:arb": "npx tsx src/arb/worker.ts",
+    "worker:telegram": "npx tsx src/ingestion/telegramMonitor.ts",
+    "warmer:market": "tsx src/spot/marketWarmer.ts",
     "cron:shortlist": "npx tsx src/copytrade/shortlist.ts",
     "cron:calibrate": "npx tsx src/cron/calibrate.ts",
     "sync-env": "npx tsx scripts/sync-env.ts",
@@ -45,6 +47,7 @@
     "ioredis": "^5.3.2",
     "openai": "^6.32.0",
     "rss-parser": "^3.13.0",
+    "telegram": "2.26.22",
     "ws": "^8.20.0",
     "zod": "^3.23.8"
   },
