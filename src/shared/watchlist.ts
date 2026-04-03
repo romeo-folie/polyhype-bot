@@ -85,6 +85,10 @@ export async function matchesWatchlist(text: string, redis: Redis): Promise<bool
   const tokens = toKeywords(text);
   if (tokens.length === 0) return false;
 
+  // Fail-open Check: if watchlist key is missing or empty, bypass gating to prevent pipeline stalls.
+  const exists = await redis.exists(WATCHLIST_KEY);
+  if (!exists) return true;
+
   // Use Redis SMISMEMBER (or SISMEMBER in loop) to check all tokens at once.
   // SMISMEMBER is supported in Redis 6.2.0+.
   // Fallback to multiple SISMEMBER calls if needed, but modern clusters/insts have it.

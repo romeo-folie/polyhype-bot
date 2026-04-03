@@ -87,8 +87,8 @@ async function fetchGdeltCombined(): Promise<RssItem[]> {
       if (!retryable) throw err;
 
       logger.warn('[scraper] GDELT rate-limited; retrying combined fetch', {
-        attempt: (attempt + 1).toString(),
-        waitMs: retryDelayMs.toString(),
+        attempt: attempt + 1,
+        waitMs: retryDelayMs,
       });
       if (retryDelayMs > 0) await sleep(retryDelayMs);
     }
@@ -142,6 +142,6 @@ export async function scrapeHeadlines(): Promise<RssItem[]> {
     deduped.push(item);
   }
 
-  logger.info('[scraper] GDELT fetch complete', { count: deduped.length.toString() });
+  logger.info('[scraper] GDELT fetch complete', { count: deduped.length });
   return deduped;
 }

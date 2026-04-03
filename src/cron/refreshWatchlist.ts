@@ -7,7 +7,7 @@ async function main() {
   const redis = getRedis();
   try {
     const count = await refreshDynamicWatchlist(redis);
-    logger.info(`[cron:watchlist] successfully refreshed ${count} keywords`);
+    logger.info(`[cron:watchlist] successfully refreshed ${String(count)} keywords`);
     process.exit(0);
   } catch (err) {
     logger.error('[cron:watchlist] fatal error during refresh', {

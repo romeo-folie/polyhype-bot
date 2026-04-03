@@ -307,7 +307,7 @@ function deserialisePosition(raw: Record<string, string>): Position {
   const pos: Position = {
     marketId: raw.marketId ?? '',
     conditionId: raw.conditionId,
-    executionId: raw.executionId ?? undefined,
+    executionId: raw.executionId || undefined,
     clobTokenIds: raw.clobTokenIds ? (JSON.parse(raw.clobTokenIds) as string[]) : [],
     question: raw.question ?? '',
     direction: (raw.direction ?? 'YES') as Position['direction'],
