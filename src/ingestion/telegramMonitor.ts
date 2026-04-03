@@ -48,8 +48,18 @@ export async function startTelegramMonitor(): Promise<void> {
     connectionRetries: 5,
   });
 
-  await client.connect();
-  logger.info('[telegram] connected to MTProto');
+  try {
+    await client.connect();
+    logger.info('[telegram] connected to MTProto');
+  } catch (err: any) {
+    if (err.message?.includes('AUTH_KEY_UNREGISTERED')) {
+      logger.error('[telegram] session invalidated (AUTH_KEY_UNREGISTERED)');
+      logger.info(
+        '[telegram] ACTION REQUIRED: 1. Remove TELEGRAM_SESSION_STRING from your .env. 2. Set TELEGRAM_LOG_SESSION_STRING=true. 3. Restart and re-authenticate.',
+      );
+    }
+    throw err;
+  }
 
   // If no session string was provided, avoid logging the raw credential by default.
   if (!sessionStr) {
