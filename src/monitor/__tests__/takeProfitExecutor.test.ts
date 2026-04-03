@@ -52,7 +52,7 @@ vi.mock('../../execution/telegram.js', () => ({
 }));
 
 vi.mock('../../shared/bankroll.js', () => ({
-  creditProceeds: vi.fn<() => Promise<number>>().mockResolvedValue(100),
+  creditProceeds: vi.fn<any>().mockResolvedValue(100),
 }));
 
 vi.mock('../../shared/outcomeRecorder.js', () => ({
@@ -145,9 +145,10 @@ describe('executeTakeProfit', () => {
 
   it('returns success=false when Simmer UUID cannot be resolved', async () => {
     mockResolveSimmerMarketId.mockResolvedValue(null);
+    mockSell.mockResolvedValue({ success: false, error: 'Market not found in venue' });
 
     const result = await executeTakeProfit({
-      position: makePosition(),
+      position: makePosition({ clobTokenIds: [] }), // Remove CLOB tokens to test resolution exit specifically
       currentPrice: 0.65,
       returnPct: 25,
       reason: 'take_profit_threshold',
@@ -155,8 +156,8 @@ describe('executeTakeProfit', () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('Simmer market ID not found');
-    expect(mockSell).not.toHaveBeenCalled();
+    expect(result.error).toContain('Market not found in venue');
+    expect(mockSell).toHaveBeenCalledTimes(1); // One attempt with Numeric ID after UUID resolution failed
     expect(mockClose).not.toHaveBeenCalled();
   });
 
