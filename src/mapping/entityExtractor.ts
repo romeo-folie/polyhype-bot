@@ -145,7 +145,6 @@ const MIN_LIQUIDITY = 100; // USDC — skip ghost markets
  *   - "match" → matches "match expectations"
  *   - "game" → matches "endgame"
  *   - "wind" → matches "headwinds", "wind down"
- *   - "director" → matches "FBI Director", "CIA Director"
  */
 const DOMAIN_BLOCKLIST_TERMS = [
   // Sports

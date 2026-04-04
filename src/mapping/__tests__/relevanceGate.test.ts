@@ -5,6 +5,8 @@ import { isMarketRelevant } from '../relevanceGate.js';
 vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => ({
     GEMINI_API_KEY: 'test-key',
+    LLM_PROVIDER: 'gemini',
+    GEMINI_MODEL: 'gemini-1.5-flash',
   })),
 }));
 
@@ -28,9 +30,28 @@ vi.mock('@google/generative-ai', () => ({
   })),
 }));
 
+// Mock OpenAI
+const mockChatCreate = vi.fn();
+vi.mock('openai', () => ({
+  default: vi.fn().mockImplementation(() => ({
+    chat: { completions: { create: mockChatCreate } },
+  })),
+}));
+
+// Mock Anthropic
+const mockAnthropicCreate = vi.fn();
+vi.mock('@anthropic-ai/sdk', () => ({
+  default: vi.fn().mockImplementation(() => ({
+    messages: { create: mockAnthropicCreate },
+  })),
+}));
+
+
 describe('isMarketRelevant', () => {
   beforeEach(() => {
     mockGenerateContent.mockReset();
+    mockChatCreate.mockReset();
+    mockAnthropicCreate.mockReset();
     vi.clearAllMocks();
   });
 
@@ -89,13 +110,31 @@ describe('isMarketRelevant', () => {
     expect(result).toBe(true); // Fail-open
   });
 
-  it('fails open (returns true) on timeout', async () => {
-    // Return a promise that never resolves to trigger the race timeout
-    mockGenerateContent.mockReturnValue(new Promise(() => {}));
+  it('falls back to OpenAI when Gemini fails', async () => {
+    const { loadConfig } = await import('../../shared/config.js');
+    (loadConfig as any).mockReturnValue({ 
+      GEMINI_API_KEY: 'gem-key', 
+      OPENAI_API_KEY: 'oa-key', 
+      GEMINI_MODEL: 'flash',
+      OPENAI_MODEL: 'mini' 
+    });
 
-    // We can't easily test the actual 10s timeout in a unit test without 
-    // lowering the timeout for tests or using fake timers. 
-    // For now, we trust the Promise.race logic.
+    // Gemini fails
+    mockGenerateContent.mockRejectedValue(new Error('Gemini down'));
+    // OpenAI succeeds
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: 'YES' } }]
+    });
+
+    const result = await isMarketRelevant({
+      headline: 'Relevant news',
+      question: 'Question',
+      description: null
+    });
+
+    expect(result).toBe(true);
+    expect(mockGenerateContent).toHaveBeenCalled();
+    expect(mockChatCreate).toHaveBeenCalled();
   });
 
   it('fails open if GEMINI_API_KEY is missing', async () => {
