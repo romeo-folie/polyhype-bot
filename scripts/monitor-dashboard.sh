@@ -51,7 +51,7 @@ W3="tail -f '${PM2_LOGS}/pga-futures-out.log'    | sed 's/\(\[[^]]*\]\)/\x1b[35m
 W4="tail -f '${PM2_LOGS}/pga-telegram-out.log'   | sed 's/\(\[[^]]*\]\)/\x1b[92m\1\x1b[0m/g'"
 W5="tail -f /tmp/pga-trade.log                   | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
 W6="tail -f /tmp/pga-monitor.log                 | sed 's/\(\[[^]]*\]\)/\x1b[96m\1\x1b[0m/g'"
-W7="tail -f /tmp/pga-spot.log                    | sed 's/\(\[[^]]*\]\)/\x1b[95m\1\x1b[0m/g'"
+W7="while true; do clear; npx tsx scripts/list-positions.ts; sleep 10; done"
 
 # Partition the window into a deterministic 2x4 grid
 # Start with the first worker (Spot Feed)
