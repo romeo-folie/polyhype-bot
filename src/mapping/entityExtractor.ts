@@ -143,8 +143,10 @@ const MIN_LIQUIDITY = 100; // USDC — skip ghost markets
  *   - "dc" → matches "Washington DC" (US politics)
  *   - "star" → matches "Starlink", "Star Alliance"
  *   - "match" → matches "match expectations"
- *   - "game" → matches "endgame"
  *   - "wind" → matches "headwinds", "wind down"
+ *
+ * Terms kept with word boundaries (e.g. \bgame\b) are safe: they will not
+ * match longer words like "endgame".
  */
 const DOMAIN_BLOCKLIST_TERMS = [
   // Sports

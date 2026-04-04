@@ -129,7 +129,8 @@ export async function isMarketRelevant(opts: {
     try {
       const resultText = await provider.call();
       const raw = resultText.trim().toUpperCase();
-      const relevant = raw.includes('YES');
+      const firstToken = raw.split(/\s+/, 1)[0];
+      const relevant = firstToken === 'YES';
 
       if (!relevant) {
         logger.info('[relevance-gate] market rejected — irrelevant headline', {

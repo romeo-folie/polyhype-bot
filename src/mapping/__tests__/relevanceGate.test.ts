@@ -84,7 +84,7 @@ describe('isMarketRelevant', () => {
     expect(result).toBe(false);
   });
 
-  it('handles lowercase or variations like "RELEVANT: YES"', async () => {
+  it('returns false for verbose responses like "RELEVANT: YES" (strict first-token parsing)', async () => {
     mockGenerateContent.mockResolvedValue({
       response: { text: () => 'relevant: yes' },
     });
@@ -95,7 +95,50 @@ describe('isMarketRelevant', () => {
       description: null,
     });
 
+    // Strict parsing: only the first whitespace-delimited token ("RELEVANT:") is checked.
+    // A verbose or prefixed response is treated as irrelevant.
+    expect(result).toBe(false);
+  });
+
+  it('returns true for YES with surrounding whitespace', async () => {
+    mockGenerateContent.mockResolvedValue({
+      response: { text: () => '  YES  ' },
+    });
+
+    const result = await isMarketRelevant({
+      headline: 'Iran launches missiles at Israel',
+      question: 'Will there be a major escalation between Iran and Israel before June?',
+      description: null,
+    });
+
     expect(result).toBe(true);
+  });
+
+  it('fails open (returns true) on timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      // Return a promise that never resolves so the timeout branch fires.
+      mockGenerateContent.mockReturnValue(new Promise(() => {}));
+
+      const resultPromise = isMarketRelevant({
+        headline: 'Breaking market-moving news',
+        question: 'Will this market resolve YES?',
+        description: null,
+      });
+
+      // Allow microtasks from the async provider chain to run so that the
+      // internal setTimeout is registered before we flush fake timers.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Flush all fake timers (including the 10 s relevance gate timeout).
+      await vi.runAllTimersAsync();
+
+      await expect(resultPromise).resolves.toBe(true); // Fail-open on timeout
+      expect(mockGenerateContent).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('fails open (returns true) on API error', async () => {
