@@ -22,6 +22,8 @@ describe('marketCorrelator Tiered Logic', () => {
     vi.clearAllMocks();
     (loadConfig as any).mockReturnValue({
       TIERED_LOGIC_ENABLED: true,
+      STANDARD_MIN_VOLUME: 5000,
+      STANDARD_MIN_LIQUIDITY: 10000,
       CRYPTO_MIN_LIQUIDITY: 50,
       CRYPTO_MIN_VOLUME: 100,
       SHORT_DURATION_HOURS: 1,

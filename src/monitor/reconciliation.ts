@@ -250,20 +250,22 @@ export async function runReconciliation(
 
     // A. Handle Simmer Orphans
     for (const [_key, simmerPos] of simmerMap.entries()) {
-      const normQ = normalize(simmerPos.question || '');
-      let metadata = questionToMetadata.get(normQ);
-
-      // Check if Simmer's market_id is actually a Polymarket condition ID
-      if (!metadata && simmerPos.market_id) {
-        metadata = (await fetchMarketByConditionId(simmerPos.market_id)) || undefined;
-      }
-
-      // Fallback fuzzy match for orphans
-      if (!metadata && simmerPos.question) {
-        metadata = (await fetchMarketByQuestion(simmerPos.question)) || undefined;
-      }
-
       if (forceFix) {
+        // Only resolve metadata and call Gamma API when we are actually going to fix.
+        // Dry-run passes skip network calls to avoid unnecessary rate-limit exposure.
+        const normQ = normalize(simmerPos.question || '');
+        let metadata = questionToMetadata.get(normQ);
+
+        // Check if Simmer's market_id is actually a Polymarket condition ID
+        if (!metadata && simmerPos.market_id) {
+          metadata = (await fetchMarketByConditionId(simmerPos.market_id)) || undefined;
+        }
+
+        // Fallback fuzzy match for orphans
+        if (!metadata && simmerPos.question) {
+          metadata = (await fetchMarketByQuestion(simmerPos.question)) || undefined;
+        }
+
         const imported = await importSimmerOrphan(redis, simmerPos, clobMap, metadata);
         if (imported) {
           importedCount++;
@@ -429,6 +431,11 @@ async function importSimmerOrphan(
 
     const tokenId = direction === 'YES' ? clobTokenIds[0] : clobTokenIds[1];
     const clobMatch = tokenId ? clobMap.get(tokenId) : null;
+
+    if (clobMatch) {
+      // Remove from clobMap so the CLOB orphan loop doesn't re-import this position.
+      clobMap.delete(tokenId!);
+    }
 
     if (clobMatch && clobMatch.avgPrice > 0) {
       avgPrice = clobMatch.avgPrice;
