@@ -247,17 +247,16 @@ export async function runReconciliation(
 
     // A. Handle Simmer Orphans
     for (const [_key, simmerPos] of simmerMap.entries()) {
+      const normQ = normalize(simmerPos.question || '');
+      let metadata = questionToMetadata.get(normQ);
+
+      // Fallback fuzzy match for orphans
+      if (!metadata && simmerPos.question) {
+        metadata = (await fetchMarketByQuestion(simmerPos.question)) || undefined;
+      }
+
       if (forceFix) {
-        // Use correlation matrix to resolve real IDs if possible
-        const normQ = normalize(simmerPos.question || '');
-        let metadata = questionToMetadata.get(normQ);
-
-        // Fallback fuzzy match for orphans
-        if (!metadata && simmerPos.question) {
-          metadata = await fetchMarketByQuestion(simmerPos.question) || undefined;
-        }
-
-        const imported = await importSimmerOrphan(redis, simmerPos, metadata);
+        const imported = await importSimmerOrphan(redis, simmerPos, clobMap, metadata);
         if (imported) {
           importedCount++;
           details.push({
@@ -329,19 +328,52 @@ export async function runReconciliation(
 /**
  * Reconstruct a ledger entry from a Simmer position.
  */
-async function importSimmerOrphan(redis: Redis, pos: SimmerPosition, metadata?: GammaMarket): Promise<boolean> {
+async function importSimmerOrphan(
+  redis: Redis,
+  pos: SimmerPosition,
+  clobMap: Map<string, PolymarketPosition>,
+  metadata?: GammaMarket,
+): Promise<boolean> {
   try {
+    if (!metadata) {
+      logger.warn('[reconcile] skipping Simmer orphan — no Polymarket metadata (UUID fallback blocked)', {
+        marketId: pos.market_id,
+        question: pos.question,
+      });
+      return false;
+    }
+
     const direction = pos.side.toUpperCase() as 'YES' | 'NO';
     const shares = pos.shares ?? 0;
-    const avgPrice = pos.average_price ?? (pos.value_usdc && shares > 0 ? pos.value_usdc / shares : 0);
-    
     if (shares <= 0) return false;
 
+    // Authoritative Price Derivation:
+    // 1. Try to find the exact fill price from Polymarket Data API (clobMap)
+    // 2. Fall back to Simmer's recorded average_price
+    // 3. Last resort: inferred current price (results in 0% PnL)
+    let avgPrice = 0;
+    const clobTokenIds = Array.isArray(metadata.clobTokenIds)
+      ? metadata.clobTokenIds
+      : JSON.parse(metadata.clobTokenIds as string) as string[];
+
+    const tokenId = direction === 'YES' ? clobTokenIds[0] : clobTokenIds[1];
+    const clobMatch = tokenId ? clobMap.get(tokenId) : null;
+
+    if (clobMatch && clobMatch.avgPrice > 0) {
+      avgPrice = clobMatch.avgPrice;
+      logger.info('[reconcile] used authoritative CLOB price for Simmer orphan', {
+        marketId: metadata.id,
+        price: avgPrice,
+      });
+    } else {
+      avgPrice = pos.average_price ?? (pos.value_usdc && shares > 0 ? pos.value_usdc / shares : 0);
+    }
+
     const newPos: Position = {
-      marketId: metadata?.id || pos.market_id,
-      conditionId: metadata?.conditionId,
-      clobTokenIds: metadata?.clobTokenIds,
-      question: pos.question || metadata?.question || 'Re-imported Position',
+      marketId: metadata.id,
+      conditionId: metadata.conditionId,
+      clobTokenIds: metadata.clobTokenIds,
+      question: pos.question || metadata.question || 'Re-imported Position',
       direction,
       entryPrice: avgPrice,
       stakeUsd: shares * avgPrice,
@@ -350,15 +382,14 @@ async function importSimmerOrphan(redis: Redis, pos: SimmerPosition, metadata?: 
       executionVenue: 'simmer',
       sourcedFrom: 'reconciled:simmer',
       edgeMagnitude: 0,
-      reconciliationStatus: `imported:${new Date().toISOString()}`
+      reconciliationStatus: `imported:${new Date().toISOString()}`,
     };
 
     await recordPosition(redis, newPos);
-    logger.info('[reconcile] imported Simmer orphan', { 
-      marketId: newPos.marketId, 
-      direction, 
+    logger.info('[reconcile] imported Simmer orphan', {
+      marketId: newPos.marketId,
+      direction,
       shares,
-      isResolved: !!metadata 
     });
     return true;
   } catch (err) {

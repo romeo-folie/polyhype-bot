@@ -95,28 +95,93 @@ describe('Position Reconciliation Healer', () => {
     expect(positionLedger.closePosition).toHaveBeenCalledWith(mockRedis, 'ghost-1', 'NO');
   });
 
-  it('automatically re-imports an orphan position from Simmer', async () => {
+  it('automatically re-imports an orphan position from Simmer with metadata resolution', async () => {
     const orphanSimmerPosition = {
-      market_id: 'orphan-1',
+      market_id: 'orphan-uuid-1',
       side: 'yes',
       shares: 500,
       average_price: 0.20,
       question: 'Will it rain?',
     };
 
-    (positionLedger.getOpenPositions as any).mockResolvedValue([]); // Ledger empty
+    const mockGammaMarket = {
+      id: 'numeric-123',
+      question: 'Will it rain?',
+      conditionId: 'cond-123',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
     (simmer.getSimmerPositions as any).mockResolvedValue([orphanSimmerPosition]);
+    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(mockGammaMarket);
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    // Expecting auto-import
+    // Expecting auto-import with RESOLVED numeric ID, not the UUID
     expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
-      marketId: 'orphan-1',
+      marketId: 'numeric-123',
       direction: 'YES',
       entryPrice: 0.20,
       sharesHeld: 500,
-      stakeUsd: 100, // 500 * 0.20
       executionVenue: 'simmer'
+    }));
+  });
+
+  it('skips Simmer orphan import if metadata resolution fails (prevents 422 errors)', async () => {
+    const orphanSimmerPosition = {
+      market_id: 'orphan-uuid-2',
+      side: 'no',
+      shares: 100,
+      question: 'Unknown Question',
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([orphanSimmerPosition]);
+    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(null); // Resolution fails
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Should NOT record any position (would cause 422 later)
+    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
+  });
+
+  it('uses authoritative CLOB price for Simmer orphans when available to avoid 0% PnL bug', async () => {
+    const orphanSimmerPosition = {
+      market_id: 'orphan-uuid-3',
+      side: 'yes',
+      shares: 100,
+      question: 'Will BTC hit 100k?',
+      average_price: 0.50, // This might be current price (0% PnL bug)
+    };
+
+    const mockGammaMarket = {
+      id: 'numeric-btc',
+      question: 'Will BTC hit 100k?',
+      conditionId: 'cond-btc',
+      clobTokenIds: ['tok-btc-yes', 'tok-btc-no'],
+    };
+
+    const clobPositions = [
+      {
+        conditionId: 'cond-btc',
+        asset: 'tok-btc-yes',
+        avgPrice: 0.35, // Authoritative entry price from Data API
+        size: 100,
+      }
+    ];
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([orphanSimmerPosition]);
+    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(mockGammaMarket);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Should use 0.35 from clobPositions instead of 0.50 from Simmer
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-btc',
+      entryPrice: 0.35,
+      stakeUsd: 35, // 100 * 0.35
     }));
   });
 
