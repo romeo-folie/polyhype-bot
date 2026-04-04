@@ -277,9 +277,31 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
         continue;
       }
       try {
-        const redeemResult = await submitRedeem({ market_id: pos.market_id, side });
+        let redeemResult;
+        let throwErr: unknown = null;
+        try {
+          redeemResult = await submitRedeem({ market_id: pos.market_id, side });
+        } catch (e) {
+          throwErr = e;
+        }
 
-        if (redeemResult.success) {
+        if (throwErr instanceof SimmerError && throwErr.statusCode === 400) {
+          logger.warn(
+            '[redeemer] Simmer 400 — position likely already auto-redeemed, mocking success',
+            {
+              marketId: pos.market_id,
+              side,
+              simmerBody: throwErr.body,
+            },
+          );
+          // Auto-redeemed counts as successful hit from Simmer API perspective
+          redeemResult = { success: true };
+          // Note: we can't get tx_hash because it was redeemed externally, leaving it undefined is fine.
+        } else if (throwErr) {
+          throw throwErr instanceof Error ? throwErr : new Error(String(throwErr));
+        }
+
+        if (redeemResult?.success) {
           // Remove from Redis ledger — treat direction as uppercase to match ledger keys
           const direction = side.toUpperCase() as 'YES' | 'NO';
           // Cross-reference ledger BEFORE closing to preserve sourcedFrom.
@@ -365,7 +387,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
           if (redeemResult.tx_hash) r.txHash = redeemResult.tx_hash;
           results.push(r);
         } else {
-          const error = redeemResult.error ?? 'unknown error from Simmer';
+          const error = redeemResult?.error ?? 'unknown error from Simmer';
           logger.warn('[redeemer] redemption returned success=false', {
             marketId: pos.market_id,
             error,
@@ -379,34 +401,13 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
             : err instanceof Error
               ? err.message
               : String(err);
-
-        // HTTP 400 from Simmer = already redeemed externally or not claimable.
-        // Close the ledger entry to stop retrying on every cycle.
-        if (err instanceof SimmerError && err.statusCode === 400) {
-          logger.warn(
-            '[redeemer] Simmer 400 — position likely already redeemed externally, closing ledger',
-            {
-              marketId: pos.market_id,
-              side,
-              simmerBody: err.body, // log Simmer's response body for diagnosis
-            },
-          );
-          const direction = side.toUpperCase() as 'YES' | 'NO';
-          await closePosition(redis, pos.market_id, direction).catch(() => {});
-          results.push({
-            marketId: pos.market_id,
-            side,
-            success: false,
-            error: 'already_redeemed_externally',
-          });
-        } else {
-          logger.error('[redeemer] redemption failed', {
-            marketId: pos.market_id,
-            side,
-            error: message,
-          });
-          results.push({ marketId: pos.market_id, side, success: false, error: message });
-        }
+        
+        logger.error('[redeemer] redemption failed', {
+          marketId: pos.market_id,
+          side,
+          error: message,
+        });
+        results.push({ marketId: pos.market_id, side, success: false, error: message });
       }
     }
   }
@@ -1043,9 +1044,29 @@ async function redeemSimmerLedgerFallback(
         continue;
       }
 
-      const redeemResult = await submitRedeem({ market_id: simmerId, side });
+      let redeemResult;
+      let throwErr: unknown = null;
+      try {
+        redeemResult = await submitRedeem({ market_id: simmerId, side });
+      } catch (e) {
+        throwErr = e;
+      }
 
-      if (redeemResult.success) {
+      if (throwErr instanceof SimmerError && throwErr.statusCode === 400) {
+        logger.warn(
+          '[redeemer] Simmer fallback 400 — position likely already auto-redeemed, mocking success',
+          {
+            marketId: pos.marketId,
+            side,
+            simmerBody: throwErr.body,
+          },
+        );
+        redeemResult = { success: true };
+      } else if (throwErr) {
+        throw throwErr instanceof Error ? throwErr : new Error(String(throwErr));
+      }
+
+      if (redeemResult?.success) {
         alreadyRedeemed.add(pos.marketId);
         alreadyRedeemed.add(conditionId);
         await closePosition(redis, pos.marketId, pos.direction);
@@ -1113,11 +1134,12 @@ async function redeemSimmerLedgerFallback(
           ...(redeemResult.tx_hash ? { txHash: redeemResult.tx_hash } : {}),
         });
       } else {
+        const error = redeemResult?.error ?? 'simmer_redeem_failed';
         logger.warn('[redeemer] Simmer fallback: submitRedeem returned success=false', {
           marketId: pos.marketId,
-          error: redeemResult.error,
+          error,
         });
-        const errLower = (redeemResult.error ?? '').toLowerCase();
+        const errLower = error.toLowerCase();
         if (
           errLower.includes('already redeemed') ||
           errLower.includes('position may already be redeemed') ||
@@ -1126,14 +1148,14 @@ async function redeemSimmerLedgerFallback(
           await markFallbackStale(redis, conditionId, side, cfg);
           logRedeemerSkip('stale_no_balance', conditionId, {
             marketId: pos.marketId,
-            error: redeemResult.error,
+            error,
           });
         }
         results.push({
           marketId: pos.marketId,
           side,
           success: false,
-          error: redeemResult.error ?? 'simmer_redeem_failed',
+          error,
         });
       }
     } catch (err) {
