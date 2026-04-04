@@ -36,3 +36,10 @@ export const BINANCE_SYMBOL_TO_ASSET: Record<string, string> = {
   shibusdt: 'shiba-inu',
   pepeusdt: 'pepe',
 };
+
+/**
+ * Check if an assetId belongs to a crypto asset.
+ */
+export function isCryptoAsset(assetId: string): boolean {
+  return Object.values(BINANCE_SYMBOL_TO_ASSET).includes(assetId);
+}

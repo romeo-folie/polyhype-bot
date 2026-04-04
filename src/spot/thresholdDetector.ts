@@ -10,6 +10,7 @@ import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
 import type { SpotPrice } from './poller.js';
 import { getPriceAtLookback } from './poller.js';
+import { isCryptoAsset } from '../shared/assets.js';
 
 export interface SpotMove {
   assetId: string;
@@ -37,23 +38,27 @@ async function setCooldown(assetId: string, direction: 'up' | 'down'): Promise<v
   const redis = getRedis();
   const cfg = loadConfig();
   const key = `spot:cooldown:${assetId}:${direction}`;
-  await redis.set(key, '1', 'EX', cfg.SPOT_COOLDOWN_MINUTES * 60);
+  
+  const cooldownMinutes = (cfg.TIERED_LOGIC_ENABLED && isCryptoAsset(assetId))
+    ? cfg.CRYPTO_COOLDOWN_MINUTES
+    : cfg.SPOT_COOLDOWN_MINUTES;
+
+  await redis.set(key, '1', 'EX', cooldownMinutes * 60);
 }
 
-/**
- * Detect significant spot moves for a batch of current prices.
- *
- * Returns SpotMove[] for assets that exceed the threshold and aren't in cooldown.
- */
 export async function detectMoves(currentPrices: SpotPrice[]): Promise<SpotMove[]> {
   const cfg = loadConfig();
-  const threshold = cfg.SPOT_MOVE_THRESHOLD;
   const lookbackMinutes = cfg.SPOT_LOOKBACK_MINUTES;
   const lookbackMs = lookbackMinutes * 60 * 1000;
 
   const moves: SpotMove[] = [];
 
   for (const sp of currentPrices) {
+    const isCrypto = isCryptoAsset(sp.assetId);
+    const threshold = (cfg.TIERED_LOGIC_ENABLED && isCrypto)
+      ? cfg.CRYPTO_MOVE_THRESHOLD
+      : cfg.SPOT_MOVE_THRESHOLD;
+
     const referencePrice = await getPriceAtLookback(sp.assetId, lookbackMs);
     if (referencePrice == null || referencePrice === 0) {
       logger.info('[spot-threshold] no reference price yet', { assetId: sp.assetId });
@@ -93,7 +98,9 @@ export async function detectMoves(currentPrices: SpotPrice[]): Promise<SpotMove[
 
     logger.info('[spot-threshold] significant move detected', {
       assetId: sp.assetId,
+      isCrypto,
       changePercent: changePercent.toFixed(2),
+      threshold,
       currentPrice: sp.price,
       referencePrice,
     });

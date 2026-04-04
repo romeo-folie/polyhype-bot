@@ -10,6 +10,7 @@ import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
 import { searchEvents, parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
+import { isCryptoAsset } from '../shared/assets.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import type { SpotMove } from './thresholdDetector.js';
 
@@ -37,14 +38,36 @@ const ASSET_SEARCH_QUERIES: Record<string, string[]> = {
 };
 
 const CORRELATION_CACHE_TTL = 86400; // 24 hours
-const MIN_VOLUME = 10_000;
-const MIN_LIQUIDITY = 5_000;
 
 /**
- * Determine correlation direction via LLM (with Redis cache).
- *
- * "Does {asset} rising make this market more or less likely to resolve YES?"
+ * Check if a market meets liquidity and volume filters, applying tiered logic.
  */
+function meetsLiquidityFilter(market: GammaMarket, assetId: string): boolean {
+  const cfg = loadConfig();
+  const volume = parseFloat(market.volume || '0');
+  const liquidity = parseFloat(market.liquidity || '0');
+
+  // Standard floors (Geopolitical/Macro default)
+  let minVolFloor = 10_000;
+  let minLiqFloor = 5_000;
+
+  if (cfg.TIERED_LOGIC_ENABLED) {
+    const isCrypto = isCryptoAsset(assetId);
+    
+    // Check for short duration: resolution within SHORT_DURATION_HOURS
+    const now = Date.now();
+    const resolutionDate = market.endDate ? new Date(market.endDate).getTime() : 0;
+    const isShortDuration = resolutionDate > 0 && 
+      (resolutionDate - now) < cfg.SHORT_DURATION_HOURS * 60 * 60 * 1000;
+
+    if (isCrypto || isShortDuration) {
+      minVolFloor = isCrypto ? cfg.CRYPTO_MIN_VOLUME : cfg.SHORT_DURATION_MIN_VOLUME;
+      minLiqFloor = isCrypto ? cfg.CRYPTO_MIN_LIQUIDITY : cfg.SHORT_DURATION_MIN_LIQUIDITY;
+    }
+  }
+
+  return volume >= minVolFloor && liquidity >= minLiqFloor;
+}
 async function inferCorrelationDirection(
   assetId: string,
   question: string,
@@ -109,12 +132,6 @@ async function callLlmForCorrelation(
   return 'none';
 }
 
-function meetsLiquidityFilter(market: GammaMarket): boolean {
-  const volume = parseFloat(market.volume || '0');
-  const liquidity = parseFloat(market.liquidity || '0');
-  return volume >= MIN_VOLUME && liquidity >= MIN_LIQUIDITY;
-}
-
 /**
  * Find Polymarket markets correlated to a spot move.
  */
@@ -157,7 +174,7 @@ export async function findCorrelatedMarkets(move: SpotMove): Promise<CorrelatedM
         if (seenMarketIds.has(market.id)) continue;
         seenMarketIds.add(market.id);
 
-        if (!meetsLiquidityFilter(market)) continue;
+        if (!meetsLiquidityFilter(market, move.assetId)) continue;
 
         let currentYesPrice: number;
         try {
