@@ -69,11 +69,10 @@ describe('Position Reconciliation Healer', () => {
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    // Expecting heal: entryPrice 0.50, shares 200
+    // Expecting heal: shares updated to 200, entryPrice preserved at 0.40
     expect(mockRedis.hset).toHaveBeenCalledWith(
       'position:mkt-1:YES',
       'sharesHeld', '200',
-      'entryPrice', '0.500000',
       'reconciliationStatus', expect.stringContaining('healed_mismatch')
     );
   });
@@ -86,8 +85,17 @@ describe('Position Reconciliation Healer', () => {
       sharesHeld: 100,
     };
 
+    // Simmer returns a position for a different market (so the empty-venue guard
+    // doesn't abort), but nothing for ghost-1 — making it a true ghost.
+    const otherSimmerPosition = {
+      market_id: 'other-mkt',
+      side: 'yes',
+      shares: 50,
+      average_price: 0.30,
+    };
+
     (positionLedger.getOpenPositions as any).mockResolvedValue([ghostPosition]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([]); // Venue empty
+    (simmer.getSimmerPositions as any).mockResolvedValue([otherSimmerPosition]);
 
     await runReconciliation(mockRedis, { forceFix: true });
 
@@ -259,11 +267,10 @@ describe('Position Reconciliation Healer', () => {
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    // Expecting healing for the YES token (1250 shares, price 500/1250 = 0.40)
+    // Expecting healing for the YES token (1250 shares, entryPrice preserved at 0.50)
     expect(mockRedis.hset).toHaveBeenCalledWith(
       'position:numeric-99:YES',
       'sharesHeld', '1250',
-      'entryPrice', '0.400000',
       'reconciliationStatus', expect.stringContaining('healed_mismatch')
     );
     
@@ -274,6 +281,28 @@ describe('Position Reconciliation Healer', () => {
       sharesHeld: 250,
       executionVenue: 'clob'
     }));
+  });
+
+  it('aborts reconciliation when both venues return empty but ledger has positions (API outage guard)', async () => {
+    const ledgerPosition = {
+      marketId: 'mkt-1',
+      direction: 'YES',
+      executionVenue: 'simmer',
+      stakeUsd: 100,
+      entryPrice: 0.40,
+      sharesHeld: 250,
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([]); // Empty!
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([]); // Empty!
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Should NOT close any positions (no false ghost cleanup)
+    expect(positionLedger.closePosition).not.toHaveBeenCalled();
+    // Should NOT heal anything
+    expect(mockRedis.hset).not.toHaveBeenCalled();
   });
 
   it('upgrades a legacy Simmer UUID marketId back to a numeric Polymarket ID using the Correlation Matrix', async () => {

@@ -50,6 +50,15 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
     }
     const pmDirection: 'YES' | 'NO' = position.direction;
 
+    // Skip UUID marketIds (legacy Simmer imports) — Gamma returns 422 for UUIDs.
+    // Reconciliation will upgrade these to numeric IDs; no point hitting the API.
+    if (/^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(position.marketId)) {
+      logger.debug('[price-fetcher] skipping UUID marketId (pending upgrade)', {
+        marketId: position.marketId,
+      });
+      return null;
+    }
+
     const redis = getRedis();
     const feed = getPriceFeed(redis);
 

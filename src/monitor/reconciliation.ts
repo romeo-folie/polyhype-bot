@@ -19,18 +19,6 @@ interface ReconciliationDetail {
   reason?: string;
 }
 
-const RECONCILE_COUNTER_KEY = 'reconcile:counter';
-const RECONCILE_INTERVAL = 12; // Run every 12 monitor cycles (hourly at 5-min intervals)
-
-/**
- * Check if reconciliation should run this cycle (every 12 cycles).
- * Increments the counter and returns true if counter % 12 === 0.
- */
-export async function shouldRunReconciliation(redis: Redis): Promise<boolean> {
-  const count = await redis.incr(RECONCILE_COUNTER_KEY);
-  return count % RECONCILE_INTERVAL === 0;
-}
-
 /**
  * Main reconciliation entrypoint.
  * Scans venues vs ledger and heals mismatches.
@@ -48,16 +36,30 @@ export async function runReconciliation(
     const simmerPositions = await getSimmerPositions({ status: 'active' });
     const clobPositions = await fetchPolymarketPositions();
 
+    // Guard: If both venues return zero positions but ledger has entries,
+    // this likely indicates an API outage — abort to prevent false ghost closures.
+    if (activePositions.length > 0 && simmerPositions.length === 0 && clobPositions.length === 0) {
+      logger.warn('[reconcile] both venues returned empty but ledger has positions — aborting to prevent false ghost closures', {
+        ledgerCount: activePositions.length,
+      });
+      return;
+    }
+
     // 2. Build Correlation Matrix (Bridge Simmer questions to Gamma numeric IDs)
     // We use the Data API list as the source-of-truth for conditionIds/IDs.
     const questionToMetadata = new Map<string, GammaMarket>();
     const normalize = (q: string) => q?.toLowerCase().replace(/[^a-z0-9]/g, '') || '';
 
-    for (const cp of clobPositions) {
-      if (cp.conditionId) {
-        const market = await fetchMarketByConditionId(cp.conditionId);
-        if (market) {
-          questionToMetadata.set(normalize(market.question), market);
+    const MATRIX_CONCURRENCY = 5;
+    const conditionEntries = clobPositions.filter(cp => cp.conditionId);
+    for (let i = 0; i < conditionEntries.length; i += MATRIX_CONCURRENCY) {
+      const chunk = conditionEntries.slice(i, i + MATRIX_CONCURRENCY);
+      const results = await Promise.allSettled(
+        chunk.map(cp => fetchMarketByConditionId(cp.conditionId)),
+      );
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value) {
+          questionToMetadata.set(normalize(result.value.question), result.value);
         }
       }
     }
@@ -210,24 +212,18 @@ export async function runReconciliation(
       const relDiff = ledgerShares > 0 ? absDiff / ledgerShares : 0;
 
       if (absDiff > 0.01 && relDiff > 0.01) {
-        const actualEntryPrice = ledgerPos.stakeUsd > 0 && venueShares > 0 
-          ? ledgerPos.stakeUsd / venueShares 
-          : ledgerPos.entryPrice;
-
-        logger.info('[reconcile] mismatch detected — healing cost basis and shares', {
+          logger.info('[reconcile] mismatch detected — healing shares (preserving entryPrice)', {
           marketId: ledgerPos.marketId,
           direction: ledgerPos.direction,
           venue: venueName,
           ledgerShares: ledgerShares.toFixed(4),
           venueShares: venueShares.toFixed(4),
-          oldPrice: ledgerPos.entryPrice.toFixed(4),
-          newPrice: actualEntryPrice.toFixed(4),
+          entryPrice: ledgerPos.entryPrice.toFixed(4),
         });
 
         if (forceFix) {
-          await redis.hset(`position:${ledgerPos.marketId}:${ledgerPos.direction}`, 
+          await redis.hset(`position:${ledgerPos.marketId}:${ledgerPos.direction}`,
             'sharesHeld', String(venueShares),
-            'entryPrice', String(actualEntryPrice.toFixed(6)),
             'reconciliationStatus', `healed_mismatch:${new Date().toISOString()}`
           );
           healedCount++;
@@ -240,7 +236,7 @@ export async function runReconciliation(
           venue: venueName,
           ledgerShares,
           venueShares,
-          reason: `healed mismatch: derived price ${actualEntryPrice.toFixed(4)} from ${venueShares.toFixed(2)} shares`,
+          reason: `healed share mismatch: ${ledgerShares.toFixed(2)} → ${venueShares.toFixed(2)} (entryPrice preserved)`,
         });
       }
     }
@@ -432,7 +428,7 @@ async function importSimmerOrphan(
     const tokenId = direction === 'YES' ? clobTokenIds[0] : clobTokenIds[1];
     const clobMatch = tokenId ? clobMap.get(tokenId) : null;
 
-    if (clobMatch) {
+    if (clobMatch && tokenId) {
       // Remove from clobMap so the CLOB orphan loop doesn't re-import this position.
       clobMap.delete(tokenId);
     }

@@ -22,7 +22,7 @@ import { executeTakeProfit } from './takeProfitExecutor.js';
 import { redeemResolvedPositions } from './resolutionRedeemer.js';
 import { runClobProbe } from '../shared/clobProbe.js';
 import { setAgentAutoRedeem } from '../shared/simmer.js';
-import { shouldRunReconciliation, runReconciliation } from './reconciliation.js';
+import { runReconciliation } from './reconciliation.js';
 
 export async function runMonitor(): Promise<void> {
   const redis = getRedis();
@@ -221,13 +221,6 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
   }
 
   logger.info('[monitor] cycle complete', { exited, held, priceError });
-
-  // Run hourly reconciliation pass (every 12 cycles at 5-min intervals)
-  // Evaluate the condition to maintain the interval clock, but skip applying if heavy cycle just ran it.
-  const shouldReconcile = await shouldRunReconciliation(redis);
-  if (shouldReconcile && !isHeavyCycle) {
-    await runReconciliation(redis);
-  }
 }
 
 // Entrypoint when run directly (npx tsx src/monitor/index.ts)

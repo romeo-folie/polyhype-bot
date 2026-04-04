@@ -14,7 +14,7 @@ export interface GammaMarket {
  * Validates the condition exists and returns the numeric ID and question.
  */
 export async function fetchMarketByConditionId(conditionId: string): Promise<GammaMarket | null> {
-  const url = `https://gamma-api.polymarket.com/v1/markets?condition_id=${conditionId}`;
+  const url = `https://gamma-api.polymarket.com/markets?condition_ids=${conditionId}`;
   
   try {
     const resp = await fetch(url, {
@@ -58,7 +58,7 @@ export async function fetchMarketByConditionId(conditionId: string): Promise<Gam
  * Used as a fallback for Simmer UUID resolution.
  */
 export async function fetchMarketByQuestion(question: string): Promise<GammaMarket | null> {
-  const url = `https://gamma-api.polymarket.com/v1/markets?active=true&closed=false&q=${encodeURIComponent(question)}`;
+  const url = `https://gamma-api.polymarket.com/markets?q=${encodeURIComponent(question)}`;
   
   try {
     const resp = await fetch(url, {
