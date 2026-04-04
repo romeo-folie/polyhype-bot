@@ -197,6 +197,8 @@ const envSchema = z.object({
       const normalized = value.trim().toLowerCase();
       return normalized !== '' && normalized !== '0' && normalized !== 'false';
     }),
+  STANDARD_MIN_VOLUME: z.coerce.number().min(0).optional().default(10000),
+  STANDARD_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(5000),
   CRYPTO_MOVE_THRESHOLD: z.coerce.number().min(0).optional().default(0.5),
   CRYPTO_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(50),
   CRYPTO_MIN_VOLUME: z.coerce.number().min(0).optional().default(100),

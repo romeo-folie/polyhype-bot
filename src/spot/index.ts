@@ -112,6 +112,7 @@ async function runSpotMonitorInner(
           leverage: cfg.FUTURES_DEFAULT_LEVERAGE,
           sourcedFrom: `Spot: ${move.assetId} ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(1)}% in ${move.windowMinutes.toString()}min`,
           reasoning: `Intraday momentum detected on ${move.assetId}. Current price: ${move.currentPrice.toString()}. Scaling into ${hlSymbol} perp.`,
+          assetId: move.assetId,
         });
       }
     }
@@ -200,6 +201,8 @@ async function runSpotMonitorInner(
         halfKellyFraction: decision.halfKellyFraction,
         sourcedFrom,
         reasoning: consensus.reasoning,
+        assetId: move.assetId,
+        endDate: market.endDate ?? undefined,
       });
     }
   }
@@ -330,6 +333,8 @@ async function runSpotMonitorInner(
       consensusStddev: result.signal.consensusStddev,
       edgeMagnitude: result.signal.edgeMagnitude,
       executionVenue: result.executionVenue ?? 'simmer',
+      assetId: result.signal.assetId,
+      endDate: result.signal.endDate,
     });
 
     await deductStake(redis, result.signal.stakeUsd);

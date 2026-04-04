@@ -24,6 +24,7 @@ export interface CorrelatedMarket {
   correlationDirection: 'positive' | 'negative';
   /** True when the Gamma market has fees enabled — skip for CLOB execution */
   feesEnabled: boolean;
+  endDate?: string | null | undefined;
 }
 
 /** Asset-specific search queries for Gamma API. */
@@ -39,8 +40,6 @@ const ASSET_SEARCH_QUERIES: Record<string, string[]> = {
 
 const CORRELATION_CACHE_TTL = 86400; // 24 hours
 
-const STANDARD_MIN_VOLUME = 10_000;
-const STANDARD_MIN_LIQUIDITY = 5_000;
 
 /**
  * Check if a market meets liquidity and volume filters, applying tiered logic.
@@ -51,8 +50,8 @@ function meetsLiquidityFilter(market: GammaMarket, assetId: string): boolean {
   const liquidity = parseFloat(market.liquidity || '0');
 
   // Standard floors (Geopolitical/Macro default)
-  let minVolFloor = STANDARD_MIN_VOLUME;
-  let minLiqFloor = STANDARD_MIN_LIQUIDITY;
+  let minVolFloor = cfg.STANDARD_MIN_VOLUME;
+  let minLiqFloor = cfg.STANDARD_MIN_LIQUIDITY;
 
   if (cfg.TIERED_LOGIC_ENABLED) {
     const isCrypto = isCryptoAsset(assetId);
@@ -207,6 +206,7 @@ export async function findCorrelatedMarkets(move: SpotMove): Promise<CorrelatedM
           currentYesPrice,
           correlationDirection: corrDir,
           feesEnabled: market.feesEnabled === true,
+          endDate: market.endDate,
         });
       }
     }

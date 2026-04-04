@@ -70,7 +70,9 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
   // Light cycle: Just Price Check + SL/TP evaluation (High Speed).
   const nowMs = Date.now();
   const lastHeavyStr = await redis.get('monitor:last_heavy_ms');
-  const lastHeavyMs = lastHeavyStr ? parseInt(lastHeavyStr, 10) : 0;
+  const lastHeavyMs = lastHeavyStr && Number.isFinite(parseInt(lastHeavyStr, 10))
+    ? parseInt(lastHeavyStr, 10)
+    : 0;
   const isHeavyCycle = (nowMs - lastHeavyMs) >= cfg.MONITOR_HEAVY_INTERVAL_MIN * 60 * 1000;
 
   logger.info('[monitor] starting position check', { 
@@ -157,17 +159,24 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
     let slThreshold = cfg.STOP_LOSS_THRESHOLD;
 
     if (cfg.TIERED_LOGIC_ENABLED) {
-      const isCrypto = isCryptoAsset(position.marketId); // Check marketId against symbols
-      // Note: positions store marketId which for crypto corresponds to our symbol map
+      const isCrypto = position.assetId ? isCryptoAsset(position.assetId) : false;
       
-      // Check for short duration
-      // We don't have endDate easily available in the Position ledger, 
-      // but we have sourcedFrom which might contain resolution info.
-      // Usually, resolution is checked by the redeemer.
-      // For now, focus on isCrypto override.
+      // Check for short duration: resolution within SHORT_DURATION_HOURS
+      let isShortDuration = false;
+      if (position.endDate) {
+        const endMs = new Date(position.endDate).getTime();
+        const diffHrs = (endMs - Date.now()) / (1000 * 60 * 60);
+        if (diffHrs > 0 && diffHrs <= cfg.SHORT_DURATION_HOURS) {
+          isShortDuration = true;
+        }
+      }
+
       if (isCrypto) {
         tpThreshold = cfg.CRYPTO_TAKE_PROFIT;
         slThreshold = cfg.CRYPTO_STOP_LOSS;
+      } else if (isShortDuration) {
+        tpThreshold = cfg.SHORT_DURATION_TAKE_PROFIT;
+        slThreshold = cfg.SHORT_DURATION_STOP_LOSS;
       }
     }
 

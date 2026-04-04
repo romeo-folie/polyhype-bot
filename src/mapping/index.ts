@@ -52,6 +52,8 @@ export interface TradeSignal {
   latencyMs?: number | undefined;
   volatility?: number | undefined;
   spreadBps?: number | undefined;
+  assetId?: string | undefined;
+  endDate?: string | undefined;
 }
 
 /**
@@ -179,6 +181,9 @@ export async function runMapping(
           reasoning: consensus.reasoning,
           source: 'osint',
           latencyMs: item.latencyMs,
+          endDate: candidate.endDate ?? undefined,
+          // assetId is not directly known from entity extraction, but usually 
+          // inferred by the monitor or stored if known from spot move.
         };
         const existing = bestByMarket.get(candidate.marketId);
         if (!existing || decision.edgeMagnitude > existing.edgeMagnitude) {
@@ -244,6 +249,7 @@ export async function mapNewsToFutures(
       reasoning: `High-urgency news detected for ${symbol} with ${direction} sentiment. Urgency: ${item.urgencyScore}. Executing single-signal HL Perp via rapid LLM classification.`,
       source: 'futures',
       latencyMs: item.latencyMs,
+      assetId: symbol,
     });
 
     // Only one futures signal per news item to prevent over-trading

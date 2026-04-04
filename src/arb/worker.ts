@@ -330,6 +330,8 @@ export class ArbitrageWorker {
             reasoning: `Crypto latency arb: fair=${opp.fairValuePrice.toFixed(3)}, pm=${opp.currentPmPrice.toFixed(3)}, edge=${opp.edge.toFixed(3)}`,
             feesEnabled: opp.feesEnabled,
             source: 'crypto-arb',
+            assetId: opp.assetId,
+            // endDate usually doesn't apply to HL symbols, but for clarity:
           };
 
           const result = await executeSignal(signal, redis);
@@ -358,7 +360,9 @@ export class ArbitrageWorker {
               edgeMagnitude: result.signal.edgeMagnitude ?? opp.edge,
               openedAt: new Date().toISOString(),
               sourcedFrom: `crypto-arb:${opp.assetId}`,
-              executionVenue: result.executionVenue ?? 'simmer',
+              executionVenue: result.executionVenue || 'simmer',
+              assetId: opp.assetId,
+              endDate: opp.endDate ?? undefined,
             });
 
             await deductStake(redis, executedStake);
