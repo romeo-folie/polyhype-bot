@@ -434,7 +434,7 @@ async function importSimmerOrphan(
 
     if (clobMatch) {
       // Remove from clobMap so the CLOB orphan loop doesn't re-import this position.
-      clobMap.delete(tokenId!);
+      clobMap.delete(tokenId);
     }
 
     if (clobMatch && clobMatch.avgPrice > 0) {
