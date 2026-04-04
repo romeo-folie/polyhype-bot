@@ -4,15 +4,21 @@
  * Listens for new messages in specified channels using GramJS (telegram).
  * Triggers immediate OSINT scoring and execution on arrival.
  *
- * Latency Target: < 500ms from Telegram arrival to execution start.
+ * ARCHITECTURE: Dual-path ingestion
  *
- * IMPORTANT: GramJS has a known issue — its catchUp() method is a TODO stub.
- * When the server sends UpdateChannelTooLong (pts gap), GramJS never calls
- * getChannelDifference() to recover. This module works around that by:
- *   1. Catching UpdateChannelTooLong and manually fetching missed messages.
- *   2. Periodically refreshing dialogs to keep the session's pts state in sync.
- *   3. Periodically calling updates.GetState() to prevent the server from
- *      silently dropping the update stream.
+ *   1. PUSH PATH (event handler) — low latency when it works, but GramJS's
+ *      update system is unreliable. Its catchUp() is a TODO stub, and
+ *      StringSession doesn't persist update state (pts/qts/seq). After any
+ *      connection hiccup, the server stops pushing updates entirely because
+ *      the client never acknowledges the gap.
+ *
+ *   2. POLL PATH (getMessages loop) — guaranteed reliable. Fetches the
+ *      latest messages from each monitored channel every 30s using the
+ *      standard messages.getHistory API. Deduplicates by message ID so
+ *      messages from either path are only processed once.
+ *
+ * The poll path is the **primary** ingestion mechanism. The push path is
+ * a bonus for lower latency when GramJS happens to be working.
  */
 
 import { TelegramClient, Api } from 'telegram';
@@ -28,16 +34,46 @@ import type { NewMessageEvent } from 'telegram/events/NewMessage.js';
 let client: TelegramClient | null = null;
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Dialog refresh interval (ms). GramJS does not track per-channel pts, so a
-// periodic getDialogs() call forces the session layer to re-sync with the
-// server, ensuring the update stream stays open for ALL channels.
+// Configuration constants
 // ──────────────────────────────────────────────────────────────────────────────
-const DIALOG_REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
-// How often to call updates.GetState() to keep the update stream alive.
-// GramJS does this internally every 30 min, but we do it more frequently
-// because long-running user sessions can silently die in between.
-const UPDATE_STATE_REFRESH_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+/** How often to poll each channel for new messages (ms). */
+const POLL_INTERVAL_MS = 30_000; // 30 seconds
+
+/** How many recent messages to fetch per channel per poll cycle. */
+const POLL_MSG_LIMIT = 5;
+
+/** Delay between polling consecutive channels to avoid API bursts (ms). */
+const POLL_STAGGER_MS = 500;
+
+/** Max message age to process on first run (prevents replaying old history). */
+const MAX_INITIAL_AGE_S = 120; // 2 minutes
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Deduplication set — used by BOTH push and poll paths
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** Tracks message IDs we've already started processing. Keyed by `channelId:messageId`. */
+const processedMessages = new Set<string>();
+
+/** Prevent the set from growing unbounded — cap at last N entries */
+const DEDUP_MAX_SIZE = 5_000;
+
+function dedupKey(channelId: string, messageId: number): string {
+  return `${channelId}:${messageId}`;
+}
+
+function markProcessed(key: string): boolean {
+  if (processedMessages.has(key)) return false; // already seen
+  processedMessages.add(key);
+  // Prune oldest entries when we exceed max size
+  if (processedMessages.size > DEDUP_MAX_SIZE) {
+    const iter = processedMessages.values();
+    const oldest = iter.next().value;
+    if (oldest) processedMessages.delete(oldest);
+  }
+  return true; // first time seeing this message
+}
 
 /**
  * Start the Telegram monitor.
@@ -69,7 +105,6 @@ export async function startTelegramMonitor(): Promise<void> {
 
   try {
     await client.connect();
-    // Wake up the update stream and confirm identity
     const me = await client.getMe();
     logger.info('[telegram] connected to MTProto', {
       username: me.username,
@@ -77,16 +112,11 @@ export async function startTelegramMonitor(): Promise<void> {
       firstName: me.firstName,
     });
 
-    // ── Full dialog sync ────────────────────────────────────────────────
-    // getDialogs({}) without a limit defaults to an iterator that returns
-    // ALL dialogs. This is essential: if only the first page is fetched,
-    // GramJS doesn't learn the pts for channels outside that page, and
-    // the server won't send us updates for them.
-    // ────────────────────────────────────────────────────────────────────
+    // Full dialog sync — primes entity cache and update state
     const allDialogs = await client.getDialogs({});
     logger.info('[telegram] dialogs synced', { total: allDialogs.length });
 
-    // Prime the update state so the server knows where we are
+    // Prime update state
     try {
       await client.invoke(new Api.updates.GetState());
       logger.info('[telegram] update state synced');
@@ -103,7 +133,6 @@ export async function startTelegramMonitor(): Promise<void> {
     throw err;
   }
 
-  // If no session string was provided, avoid logging the raw credential by default.
   if (!sessionStr) {
     const newSession = client.session.save() as unknown as string;
     if (process.env.TELEGRAM_LOG_SESSION_STRING === 'true') {
@@ -122,24 +151,30 @@ export async function startTelegramMonitor(): Promise<void> {
     .map((s) => s.trim().replace(/^@/, ''))
     .filter(Boolean);
 
-  // Pre-resolve channel IDs AND keep entity references for gap recovery
-  const resolvedPeerIds: string[] = [];
+  // ── Resolve channel entities ──────────────────────────────────────────
+  // Store both the string ID and the entity itself. The entity is needed
+  // for getMessages() polling; the string ID for dedup and push-path matching.
+  // ────────────────────────────────────────────────────────────────────────
+
+  interface ResolvedChannel {
+    name: string;
+    id: string;
+    entity: Api.TypeEntity;
+  }
+
+  const resolvedChannels: ResolvedChannel[] = [];
   const channelNameMap = new Map<string, string>(); // ID -> Name
-  const channelEntityMap = new Map<string, Api.Channel>(); // ID -> Channel entity (for getChannelDifference)
 
   for (const channelName of channels) {
     try {
       const entity = await client.getEntity(channelName);
-      const id = await client.getPeerId(entity); // Canonical string ID
-      
-      // Determine entity type and membership
+      const id = await client.getPeerId(entity);
+
       let isJoined = false;
       let type = 'unknown';
 
       if (entity instanceof Api.Channel) {
         type = entity.broadcast ? 'channel' : 'megagroup';
-        channelEntityMap.set(id, entity);
-        // If it's a public channel/group we aren't in, try to join it
         if (entity.left) {
           try {
             await client.invoke(new Api.channels.JoinChannel({ channel: entity }));
@@ -159,12 +194,13 @@ export async function startTelegramMonitor(): Promise<void> {
         isJoined = !entity.left;
       } else if (entity instanceof Api.User) {
         type = 'user';
-        isJoined = true; // Direct messages always "joined"
+        isJoined = true;
       }
 
-      resolvedPeerIds.push(id);
-      channelNameMap.set(id, (channelName || 'channel').replace(/^@/, ''));
-      
+      const displayName = (channelName || 'channel').replace(/^@/, '');
+      resolvedChannels.push({ name: displayName, id, entity });
+      channelNameMap.set(id, displayName);
+
       logger.info('[telegram] resolved & monitoring', {
         name: channelName,
         id,
@@ -173,7 +209,7 @@ export async function startTelegramMonitor(): Promise<void> {
       });
 
       if (!isJoined) {
-        logger.warn('[telegram] NOT JOINED to channel — events will not be received', {
+        logger.warn('[telegram] NOT JOINED to channel — messages will not be received', {
           channel: channelName,
         });
       }
@@ -186,217 +222,293 @@ export async function startTelegramMonitor(): Promise<void> {
   }
 
   logger.info('[telegram] monitoring channels', {
-    resolved: Array.from(channelNameMap.values()),
-    count: resolvedPeerIds.length,
+    resolved: resolvedChannels.map((c) => c.name),
+    count: resolvedChannels.length,
   });
 
-  let messageCount = 0;
+  let messageCountPush = 0;
+  let messageCountPoll = 0;
+  let pollCycleCount = 0;
   let updateTypeStats: Record<string, number> = {};
 
-  // ── Heartbeat: log monitor health + update type distribution ─────────
-  setInterval(() => {
-    logger.info('[telegram] heartbeat', {
-      connected: client?.connected,
-      monitoredChannels: resolvedPeerIds.length,
-      messagesProcessed: messageCount,
-      updateTypes: { ...updateTypeStats },
+  // ══════════════════════════════════════════════════════════════════════
+  // SHARED: Message processing (used by both push and poll paths)
+  // ══════════════════════════════════════════════════════════════════════
+
+  async function processMessage(
+    text: string,
+    messageId: number,
+    channelName: string,
+    messageDate: number,
+    source: 'push' | 'poll',
+  ): Promise<void> {
+    const arrivalTs = Date.now();
+    const telegramLatency = arrivalTs - messageDate * 1000;
+
+    logger.info(`[telegram] processing message (${source})`, {
+      from: channelName,
+      id: messageId,
+      text: text.slice(0, 70).replace(/\n/g, ' ') + (text.length > 70 ? '...' : ''),
+      latency: `${telegramLatency}ms`,
     });
-    // Reset counters each heartbeat cycle
-    updateTypeStats = {};
-  }, 60000);
 
-  // ── Periodic dialog refresh ──────────────────────────────────────────
-  // GramJS doesn't track per-channel pts internally. When the server's pts
-  // drifts ahead of the client's, the server stops delivering updates for
-  // those channels. Periodically re-fetching dialogs re-syncs the pts for
-  // all conversations, keeping the update stream open.
-  // ────────────────────────────────────────────────────────────────────────
-  setInterval(() => {
-    if (!client?.connected) return;
-    void (async () => {
-      try {
-        await client!.getDialogs({});
-        logger.debug('[telegram] periodic dialog refresh complete');
-      } catch (err: unknown) {
-        logger.warn('[telegram] periodic dialog refresh failed', { error: String(err) });
-      }
-    })();
-  }, DIALOG_REFRESH_INTERVAL_MS);
+    const redis = getRedis();
+    const cfgInternal = loadConfig();
 
-  // ── Periodic update state refresh ────────────────────────────────────
-  // Calling updates.GetState() serves two purposes:
-  //   1. Tells the server "I'm still alive, keep sending updates"
-  //   2. Returns the current pts/qts/seq — if there's a gap, the server
-  //      will start sending UpdatesTooLong which triggers our recovery.
-  // ────────────────────────────────────────────────────────────────────────
-  setInterval(() => {
-    if (!client?.connected) return;
-    void (async () => {
-      try {
-        await client!.invoke(new Api.updates.GetState());
-        logger.debug('[telegram] periodic GetState complete');
-      } catch (err: unknown) {
-        logger.warn('[telegram] periodic GetState failed', { error: String(err) });
-      }
-    })();
-  }, UPDATE_STATE_REFRESH_INTERVAL_MS);
+    const url = `https://t.me/${channelName}/${messageId}`;
+    const item = {
+      title: text.trim(),
+      url,
+      publishedAt: new Date(),
+      source: `telegram:${channelName}`,
+      latencyMs: telegramLatency,
+    };
+
+    // Watchlist gate
+    if (!(await matchesWatchlist(item.title, redis))) {
+      logger.debug('[telegram] skipping message — no watchlist match', {
+        from: channelName,
+      });
+      return;
+    }
+
+    // Score urgency
+    const scored = await scoreItems([item], {
+      categoryId: 'geopolitical',
+      categoryLabel: 'Geopolitics',
+      entityContext:
+        'Geopolitical entities (locations, leaders, organizations, conflict terms, sanctions, treaties). Skip sports teams or athletes.',
+      redis,
+    });
+
+    const highUrgency = scored.filter((i) => i.urgencyScore >= cfgInternal.URGENCY_THRESHOLD);
+
+    if (highUrgency.length > 0) {
+      logger.info('[telegram] high-urgency message triggering execution', {
+        urgency: highUrgency[0]?.urgencyScore,
+        latencyMs: Date.now() - arrivalTs,
+        source,
+      });
+      await processScoredItems(highUrgency, redis, { wait: true });
+    } else {
+      logger.debug('[telegram] message ignored (low urgency)', {
+        score: scored[0]?.urgencyScore,
+        source,
+      });
+    }
+  }
 
   // ══════════════════════════════════════════════════════════════════════
-  // EVENT HANDLER — raw update dispatcher
+  // PATH 1: PUSH — GramJS raw update handler (bonus low-latency path)
   // ══════════════════════════════════════════════════════════════════════
+
   client.addEventHandler((update: any) => {
-    // ── Track ALL update types for diagnostics ──────────────────────────
     const typeName: string = update?.className || update?.constructor?.name || 'Unknown';
     updateTypeStats[typeName] = (updateTypeStats[typeName] || 0) + 1;
 
-    // ── Handle UpdateChannelTooLong (pts gap recovery) ──────────────────
-    // GramJS's catchUp() is a TODO stub and never calls getChannelDifference.
-    // When the server detects our pts is behind for a channel, it sends this
-    // update instead of real messages. We must manually fetch the difference
-    // to recover the update stream for that channel.
-    // ────────────────────────────────────────────────────────────────────────
+    // We no longer try to recover from UpdateChannelTooLong/UpdatesTooLong
+    // since the poll path handles message delivery reliably. Just log them.
     if (update instanceof Api.UpdateChannelTooLong) {
-      const channelId = update.channelId?.toString();
-      logger.warn('[telegram] UpdateChannelTooLong received — pts gap detected, recovering', {
-        channelId,
-        pts: update.pts,
+      logger.info('[telegram] UpdateChannelTooLong received (poll path covers this)', {
+        channelId: update.channelId?.toString(),
       });
-
-      void (async () => {
-        try {
-          // Re-fetch dialogs to re-sync session state for this channel
-          await client!.getDialogs({});
-          // Also call GetState to tell the server we're caught up
-          await client!.invoke(new Api.updates.GetState());
-          logger.info('[telegram] gap recovery complete (dialogs + GetState refreshed)', {
-            channelId,
-          });
-        } catch (err: unknown) {
-          logger.error('[telegram] gap recovery failed', {
-            channelId,
-            error: String(err),
-          });
-        }
-      })();
       return;
     }
 
-    // ── Handle UpdatesTooLong (global pts gap) ──────────────────────────
-    if (update instanceof Api.UpdatesTooLong) {
-      logger.warn('[telegram] UpdatesTooLong received — global pts gap, re-syncing');
-      void (async () => {
-        try {
-          await client!.getDialogs({});
-          await client!.invoke(new Api.updates.GetState());
-          logger.info('[telegram] global gap recovery complete');
-        } catch (err: unknown) {
-          logger.error('[telegram] global gap recovery failed', { error: String(err) });
-        }
-      })();
-      return;
-    }
-
-    // ── New message handling ────────────────────────────────────────────
     let message: Api.Message | undefined;
     if (update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateNewMessage) {
       message = update.message as Api.Message;
     } else {
-      // Log non-message update types at debug once per type per heartbeat cycle
       return;
     }
 
     if (!message || !message.text || !client) return;
 
-    // Increment count and log arrival IMMEDIATELY (synchronously)
-    messageCount++;
-    const arrivalTs = Date.now();
-
-    // ──────────────────────────────────────────────────────────────────────
-    // CRITICAL: Fire-and-forget the heavy async processing.
-    // GramJS's _dispatchUpdate() `await`s each event handler callback
-    // sequentially. We return synchronously and process in background.
-    // ──────────────────────────────────────────────────────────────────────
     const msgRef = message;
     const clientRef = client;
 
+    // Fire-and-forget — return control to GramJS immediately
     void (async () => {
       try {
-        // Fast-path ID check using canonical peer ID
         const peerId = await clientRef.getPeerId(msgRef.peerId).catch(() => null);
-        const peerName = (peerId && channelNameMap.get(peerId)) || 'unknown';
+        if (!peerId || !channelNameMap.has(peerId)) return;
 
-        // Check if this is a monitored channel
-        if (!peerId || !channelNameMap.has(peerId)) {
-          // Silently skip non-monitored channels
+        const peerName = channelNameMap.get(peerId) || 'unknown';
+        const key = dedupKey(peerId, msgRef.id);
+
+        if (!markProcessed(key)) {
+          // Already handled by poll path (or duplicate push)
           return;
         }
 
-        logger.info('[telegram] message arrived', {
+        messageCountPush++;
+        logger.info('[telegram] push: new message', {
           id: msgRef.id,
           from: peerName,
         });
 
-        const telegramLatency = arrivalTs - msgRef.date * 1000;
-        logger.info('[telegram] processing monitored message', {
-          from: peerName,
-          text: msgRef.text!.slice(0, 70).replace(/\n/g, ' ') + '...',
-          latency: `${telegramLatency.toString()}ms`,
-        });
-
-        const redis = getRedis();
-        const cfgInternal = loadConfig();
-
-        // 1. Build Item
-        const url = `https://t.me/${peerName}/${msgRef.id.toString()}`;
-        const item = {
-          title: msgRef.text!.trim(),
-          url,
-          publishedAt: new Date(),
-          source: `telegram:${peerName}`,
-          latencyMs: telegramLatency,
-        };
-
-        // 1.5 Dynamic Watchlist Gate
-        if (!(await matchesWatchlist(item.title, redis))) {
-          logger.debug('[telegram] skipping message — no watchlist match', {
-            from: peerName,
-          });
-          return;
-        }
-
-        // 2. Score urgency
-        const scored = await scoreItems([item], {
-          categoryId: 'geopolitical',
-          categoryLabel: 'Geopolitics',
-          entityContext:
-            'Geopolitical entities (locations, leaders, organizations, conflict terms, sanctions, treaties). Skip sports teams or athletes.',
-          redis,
-        });
-
-        const highUrgency = scored.filter((i) => i.urgencyScore >= cfgInternal.URGENCY_THRESHOLD);
-
-        if (highUrgency.length > 0) {
-          logger.info('[telegram] high-urgency message triggering execution', {
-            urgency: highUrgency[0]?.urgencyScore,
-            latencyMs: Date.now() - arrivalTs,
-          });
-
-          // 3. Trigger immediate execution
-          await processScoredItems(highUrgency, redis, { wait: true });
-        } else {
-          logger.debug('[telegram] message ignored (low urgency)', {
-            score: scored[0]?.urgencyScore,
-          });
-        }
+        await processMessage(msgRef.text!, msgRef.id, peerName, msgRef.date, 'push');
       } catch (err: unknown) {
-        logger.error('[telegram] error processing message', {
-          error: String(err),
-        });
+        logger.error('[telegram] push path error', { error: String(err) });
       }
     })();
   });
 
-  logger.info('[telegram] raw update handler registered (with gap recovery)');
+  // ══════════════════════════════════════════════════════════════════════
+  // PATH 2: POLL — Reliable getMessages() loop (primary path)
+  // ══════════════════════════════════════════════════════════════════════
+
+  // Track the highest message ID we've seen per channel.
+  // On the first poll, we seed this and only process messages newer than
+  // MAX_INITIAL_AGE_S to avoid replaying old history.
+  const lastSeenId = new Map<string, number>();
+
+  /** Single poll cycle: iterate all channels and fetch recent messages. */
+  async function pollCycle(): Promise<void> {
+    if (!client?.connected) {
+      logger.warn('[telegram] poll: client not connected, skipping cycle');
+      return;
+    }
+
+    pollCycleCount++;
+    let newMessageCount = 0;
+
+    for (const channel of resolvedChannels) {
+      try {
+        const messages = await client!.getMessages(channel.entity, {
+          limit: POLL_MSG_LIMIT,
+        });
+
+        if (!messages || messages.length === 0) continue;
+
+        // Messages come newest-first. Process oldest-first for chronological order.
+        const sorted = [...messages].reverse();
+        const now = Date.now();
+        const isFirstPoll = !lastSeenId.has(channel.id);
+
+        for (const msg of sorted) {
+          if (!msg || !msg.id || !msg.text) continue;
+
+          const key = dedupKey(channel.id, msg.id);
+
+          // On first poll, only process very recent messages (avoid replaying history)
+          if (isFirstPoll) {
+            const ageS = (now - msg.date * 1000) / 1000;
+            if (ageS > MAX_INITIAL_AGE_S) continue;
+          } else {
+            // On subsequent polls, only process messages newer than our high-water mark
+            const highWater = lastSeenId.get(channel.id) || 0;
+            if (msg.id <= highWater) continue;
+          }
+
+          if (!markProcessed(key)) continue; // Already handled by push path
+
+          newMessageCount++;
+          messageCountPoll++;
+
+          // Fire-and-forget each message to avoid blocking the poll loop
+          void processMessage(msg.text, msg.id, channel.name, msg.date, 'poll').catch(
+            (err: unknown) => {
+              logger.error('[telegram] poll: message processing error', {
+                channel: channel.name,
+                messageId: msg.id,
+                error: String(err),
+              });
+            },
+          );
+        }
+
+        // Update high-water mark to the newest message ID we saw
+        const newestId = messages[0]?.id;
+        if (newestId) {
+          const current = lastSeenId.get(channel.id) || 0;
+          if (newestId > current) {
+            lastSeenId.set(channel.id, newestId);
+          }
+        }
+      } catch (err: unknown) {
+        logger.warn('[telegram] poll: error fetching messages', {
+          channel: channel.name,
+          error: String(err),
+        });
+      }
+
+      // Stagger requests to avoid Telegram rate limits
+      if (resolvedChannels.indexOf(channel) < resolvedChannels.length - 1) {
+        await new Promise((r) => setTimeout(r, POLL_STAGGER_MS));
+      }
+    }
+
+    if (newMessageCount > 0) {
+      logger.info('[telegram] poll: cycle complete', {
+        cycle: pollCycleCount,
+        newMessages: newMessageCount,
+      });
+    } else {
+      logger.debug('[telegram] poll: cycle complete (no new messages)', {
+        cycle: pollCycleCount,
+      });
+    }
+  }
+
+  // ── Start poll loop ─────────────────────────────────────────────────────
+  // Run first poll immediately to seed high-water marks, then schedule.
+  // ────────────────────────────────────────────────────────────────────────
+  logger.info('[telegram] starting poll loop', {
+    intervalMs: POLL_INTERVAL_MS,
+    channelCount: resolvedChannels.length,
+    msgsPerChannel: POLL_MSG_LIMIT,
+  });
+
+  // Seed high-water marks (first poll — no processing, just learn IDs)
+  for (const channel of resolvedChannels) {
+    try {
+      const messages = await client.getMessages(channel.entity, { limit: 1 });
+      const latestId = messages?.[0]?.id;
+      if (latestId) {
+        lastSeenId.set(channel.id, latestId);
+        logger.debug('[telegram] poll: seeded high-water mark', {
+          channel: channel.name,
+          latestId,
+        });
+      }
+    } catch (err: unknown) {
+      logger.warn('[telegram] poll: seed failed for channel', {
+        channel: channel.name,
+        error: String(err),
+      });
+    }
+    await new Promise((r) => setTimeout(r, POLL_STAGGER_MS));
+  }
+
+  logger.info('[telegram] poll: high-water marks seeded for all channels', {
+    seeded: lastSeenId.size,
+    total: resolvedChannels.length,
+  });
+
+  // Schedule recurring polls
+  setInterval(() => {
+    void pollCycle().catch((err: unknown) => {
+      logger.error('[telegram] poll: cycle failed', { error: String(err) });
+    });
+  }, POLL_INTERVAL_MS);
+
+  // ══════════════════════════════════════════════════════════════════════
+  // HEARTBEAT — monitor health
+  // ══════════════════════════════════════════════════════════════════════
+  setInterval(() => {
+    logger.info('[telegram] heartbeat', {
+      connected: client?.connected,
+      monitoredChannels: resolvedChannels.length,
+      messagesProcessed: { push: messageCountPush, poll: messageCountPoll },
+      pollCycles: pollCycleCount,
+      dedupSetSize: processedMessages.size,
+      updateTypes: { ...updateTypeStats },
+    });
+    updateTypeStats = {};
+  }, 60_000);
+
+  logger.info('[telegram] monitor started (push + poll dual-path)');
 }
 
 /**

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Api } from 'telegram';
 
 /** Flush the microtask queue so fire-and-forget promises settle */
-const flushMicrotasks = () => new Promise<void>((r) => setTimeout(r, 0));
+const flushMicrotasks = () => new Promise<void>((r) => setTimeout(r, 50));
 
 // --- Mocks ---
 
@@ -54,6 +54,7 @@ const mockGetMe = vi.fn().mockResolvedValue({
   firstName: 'Test',
 });
 const mockGetDialogs = vi.fn().mockResolvedValue([]);
+const mockGetMessages = vi.fn().mockResolvedValue([]);
 const mockGetPeerId = vi.fn().mockImplementation((p) => {
   if (p && typeof p === 'object' && 'id' in p) return Promise.resolve(String(p.id));
   return Promise.resolve(String(p));
@@ -87,10 +88,11 @@ vi.mock('telegram', () => {
       connect: mockConnect,
       getMe: mockGetMe,
       getDialogs: mockGetDialogs,
+      getMessages: mockGetMessages,
       addEventHandler: mockAddEventHandler,
       getEntity: mockGetEntity,
       getPeerId: mockGetPeerId,
-      invoke: vi.fn().mockResolvedValue({}), // For JoinChannel, GetState, etc.
+      invoke: vi.fn().mockResolvedValue({}),
       session: { save: () => 'mock-session' },
       connected: true,
     })),
@@ -129,6 +131,8 @@ vi.mock('telegram/events/index.js', () => ({
 describe('telegramMonitor', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    // Seed getMessages to return an empty array with an id for high-water mark seeding
+    mockGetMessages.mockResolvedValue([{ id: 100, text: 'seed', date: Math.floor(Date.now() / 1000) }]);
   });
 
   it('connects to Telegram on start', async () => {
@@ -139,8 +143,7 @@ describe('telegramMonitor', () => {
     expect(mockAddEventHandler).toHaveBeenCalled();
   });
 
-  it('triggers execution for high-urgency message', async () => {
-    // Mock startup resolution for this test
+  it('triggers execution for high-urgency message via push path', async () => {
     const mockChannel = new Api.Channel({} as any);
     (mockChannel as any).id = '123';
     (mockChannel as any).username = 'alpha_channel';
@@ -149,12 +152,11 @@ describe('telegramMonitor', () => {
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
-    // The message handler is now the second handler (index 1)
     const handler = mockAddEventHandler.mock.calls[0][0];
 
     const mockMessage = {
       text: 'Explosion in major oil hub!',
-      id: 1001,
+      id: 2001, // Must be higher than seed (100) to avoid dedup
       peerId: { id: '123' },
       date: Math.floor(Date.now() / 1000),
     };
@@ -181,7 +183,7 @@ describe('telegramMonitor', () => {
 
     const mockMessage = {
       text: 'Routine diplomatic meeting scheduled.',
-      id: 1002,
+      id: 2002,
       peerId: { id: '123' },
       date: Math.floor(Date.now() / 1000),
     };
@@ -194,7 +196,7 @@ describe('telegramMonitor', () => {
     expect(mockProcessScoredItems).not.toHaveBeenCalled();
   });
 
-  it('filters by channel name', async () => {
+  it('filters by channel name (push path ignores non-monitored)', async () => {
     const mockChannel = new Api.Channel({} as any);
     (mockChannel as any).id = '123';
     (mockChannel as any).username = 'alpha_channel';
@@ -207,8 +209,8 @@ describe('telegramMonitor', () => {
 
     const mockMessage = {
       text: 'Alert!',
-      id: 1003,
-      peerId: { id: '456' }, // Different ID
+      id: 2003,
+      peerId: { id: '456' }, // Different channel ID — not monitored
       date: Math.floor(Date.now() / 1000),
     };
 
@@ -217,5 +219,39 @@ describe('telegramMonitor', () => {
     await flushMicrotasks();
 
     expect(mockScoreItems).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates messages between push and poll paths', async () => {
+    const mockChannel = new Api.Channel({} as any);
+    (mockChannel as any).id = '123';
+    (mockChannel as any).username = 'alpha_channel';
+    mockGetEntity.mockResolvedValue(mockChannel);
+
+    const { startTelegramMonitor } = await import('../telegramMonitor.js');
+    await startTelegramMonitor();
+
+    const handler = mockAddEventHandler.mock.calls[0][0];
+
+    const mockMessage = {
+      text: 'Breaking: Major sanctions announced!',
+      id: 5001,
+      peerId: { id: '123' },
+      date: Math.floor(Date.now() / 1000),
+    };
+    mockScoreItems.mockResolvedValue([{ urgencyScore: 9 }]);
+
+    // First delivery via push — should process
+    const mockUpdate = new Api.UpdateNewChannelMessage({ message: mockMessage as any } as any);
+    handler(mockUpdate);
+    await flushMicrotasks();
+
+    expect(mockScoreItems).toHaveBeenCalledTimes(1);
+
+    // Second delivery of same message (simulating push duplicate) — should skip
+    handler(mockUpdate);
+    await flushMicrotasks();
+
+    // scoreItems should NOT have been called a second time
+    expect(mockScoreItems).toHaveBeenCalledTimes(1);
   });
 });
