@@ -45,6 +45,12 @@ vi.mock('../../execution/index.js', () => ({
 const mockConnect = vi.fn();
 const mockAddEventHandler = vi.fn();
 const mockGetEntity = vi.fn();
+const mockGetMe = vi.fn().mockResolvedValue({
+  username: 'test_user',
+  id: '999',
+  firstName: 'Test',
+});
+const mockGetDialogs = vi.fn().mockResolvedValue([]);
 const mockGetPeerId = vi.fn().mockImplementation((p) => {
   if (p && typeof p === 'object' && 'id' in p) return Promise.resolve(String(p.id));
   return Promise.resolve(String(p));
@@ -53,9 +59,12 @@ const mockGetPeerId = vi.fn().mockImplementation((p) => {
 vi.mock('telegram', () => ({
   TelegramClient: vi.fn().mockImplementation(() => ({
     connect: mockConnect,
+    getMe: mockGetMe,
+    getDialogs: mockGetDialogs,
     addEventHandler: mockAddEventHandler,
     getEntity: mockGetEntity,
     getPeerId: mockGetPeerId,
+    invoke: vi.fn().mockResolvedValue({}), // For JoinChannel
     session: { save: () => 'mock-session' },
     connected: true,
   })),
@@ -63,8 +72,14 @@ vi.mock('telegram', () => ({
     Channel: class {
       username = 'alpha_channel';
       title = 'Alpha Channel';
+      left = false;
+      broadcast = true;
     },
-    Chat: class { id = 'mock-chat-id'; },
+    Chat: class { id = 'mock-chat-id'; left = false; },
+    User: class { id = 'mock-user-id'; },
+    channels: {
+      JoinChannel: vi.fn(),
+    },
   },
 }));
 
@@ -99,7 +114,7 @@ describe('telegramMonitor', () => {
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
-    const handler = mockAddEventHandler.mock.calls[0][0];
+    const handler = mockAddEventHandler.mock.calls[1][0];
 
     // Simulate event payload with a date field (Unix seconds) to exercise latencyMs path
     const mockMessage = {
@@ -125,7 +140,7 @@ describe('telegramMonitor', () => {
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
-    const handler = mockAddEventHandler.mock.calls[0][0];
+    const handler = mockAddEventHandler.mock.calls[1][0];
 
     const mockMessage = {
       text: 'Routine diplomatic meeting scheduled.',
@@ -149,7 +164,7 @@ describe('telegramMonitor', () => {
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
-    const handler = mockAddEventHandler.mock.calls[0][0];
+    const handler = mockAddEventHandler.mock.calls[1][0];
 
     const mockMessage = {
       text: 'Alert!',

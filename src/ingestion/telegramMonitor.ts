@@ -10,6 +10,7 @@
 import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
 import { NewMessage } from 'telegram/events/index.js';
+import { Api } from 'telegram';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
@@ -50,7 +51,17 @@ export async function startTelegramMonitor(): Promise<void> {
 
   try {
     await client.connect();
-    logger.info('[telegram] connected to MTProto');
+    // Wake up the update stream and confirm identity
+    const me = await client.getMe();
+    logger.info('[telegram] connected to MTProto', {
+      username: me.username,
+      id: me.id.toString(),
+      firstName: me.firstName,
+    });
+
+    // Ensure all dialogs (channels/chats) are synced in memory
+    await client.getDialogs({});
+    logger.info('[telegram] dialogs synced');
   } catch (err: any) {
     if (err.message?.includes('AUTH_KEY_UNREGISTERED')) {
       logger.error('[telegram] session invalidated (AUTH_KEY_UNREGISTERED)');
@@ -88,9 +99,51 @@ export async function startTelegramMonitor(): Promise<void> {
     try {
       const entity = await client.getEntity(channelName);
       const id = await client.getPeerId(entity); // Canonical string ID
+      
+      // Determine entity type and membership
+      let isJoined = false;
+      let type = 'unknown';
+
+      if (entity instanceof Api.Channel) {
+        type = entity.broadcast ? 'channel' : 'megagroup';
+        // If it's a public channel/group we aren't in, try to join it
+        if (entity.left) {
+          try {
+            await client.invoke(new Api.channels.JoinChannel({ channel: entity }));
+            isJoined = true;
+            logger.info('[telegram] joined channel', { name: channelName });
+          } catch (joinErr: any) {
+            logger.warn('[telegram] could not auto-join channel', {
+              name: channelName,
+              error: joinErr.message,
+            });
+          }
+        } else {
+          isJoined = true;
+        }
+      } else if (entity instanceof Api.Chat) {
+        type = 'chat';
+        isJoined = !entity.left;
+      } else if (entity instanceof Api.User) {
+        type = 'user';
+        isJoined = true; // Direct messages always "joined"
+      }
+
       resolvedPeerIds.push(id);
       channelNameMap.set(id, (channelName || 'channel').replace(/^@/, ''));
-      logger.debug('[telegram] resolved channel', { name: channelName, id });
+      
+      logger.info('[telegram] resolved & monitoring', {
+        name: channelName,
+        id,
+        type,
+        joined: isJoined,
+      });
+
+      if (!isJoined) {
+        logger.warn('[telegram] NOT JOINED to channel — events will not be received', {
+          channel: channelName,
+        });
+      }
     } catch (err: unknown) {
       logger.warn('[telegram] could not resolve channel entity at startup', {
         channel: channelName,
@@ -104,6 +157,13 @@ export async function startTelegramMonitor(): Promise<void> {
     count: resolvedPeerIds.length,
   });
 
+  // RAW UPDATE LISTENER (Debug only)
+  client.addEventHandler((update: any) => {
+    logger.debug('[telegram] raw update received', {
+      type: update.className,
+    });
+  });
+
   let messageCount = 0;
   // Heartbeat to confirm monitor is still alive
   setInterval(() => {
@@ -115,6 +175,11 @@ export async function startTelegramMonitor(): Promise<void> {
   }, 60000);
 
   // Event handler for new messages
+  const filterOptions: any = {};
+  if (resolvedPeerIds.length > 0) {
+    filterOptions.chats = resolvedPeerIds;
+  }
+
   client.addEventHandler(async (event: NewMessageEvent) => {
     // Increment count and log arrival IMMEDIATELY (synchronously) to prevent swallowing
     // during burst updates or while waiting for peerId resolution.
@@ -138,6 +203,11 @@ export async function startTelegramMonitor(): Promise<void> {
     // Manual filter against our resolved channels (Strict)
     // If the peerId is unknown or doesn't match our watchlist, drop it immediately.
     if (resolvedPeerIds.length > 0 && (!peerId || !channelNameMap.has(peerId))) {
+      logger.debug('[telegram] filtering out message (not in watchlist)', {
+        arrivedId: peerId,
+        availableIds: Array.from(channelNameMap.keys()),
+        rawPeerId: message.peerId?.toString(),
+      });
       return;
     }
 
@@ -201,7 +271,11 @@ export async function startTelegramMonitor(): Promise<void> {
         peer: peerName,
       });
     }
-  }, new NewMessage({}));
+  }, new NewMessage(filterOptions));
+
+  logger.info('[telegram] event handler registered', {
+    usingFilter: resolvedPeerIds.length > 0 ? 'resolvedPeerIds' : 'all',
+  });
 }
 
 /**
