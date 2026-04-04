@@ -116,30 +116,31 @@ export async function startTelegramMonitor(): Promise<void> {
 
   // Event handler for new messages
   client.addEventHandler(async (event: NewMessageEvent) => {
+    // Increment count and log arrival IMMEDIATELY (synchronously) to prevent swallowing
+    // during burst updates or while waiting for peerId resolution.
+    messageCount++;
+    const arrivalTs = Date.now();
+
     const message = event.message;
     if (!message?.text || !client) return;
+
+    // Log EVERY message received at INFO level while troubleshooting silent misses
+    // We use message.peerId.toString() as a temporary label before full resolution.
+    logger.info('[telegram] message arrived', {
+      id: message.id,
+      rawPeerId: message.peerId?.toString(),
+    });
 
     // Fast-path ID check using canonical peer ID
     const peerId = await client.getPeerId(message.peerId).catch(() => null);
     const peerName = (peerId && channelNameMap.get(peerId)) || 'unknown';
-
-    // Log EVERY message received at INFO level while troubleshooting silent misses
-    // This allows the user to see in the dashboard exactly what IDs are arriving.
-    logger.info('[telegram] message arrived', {
-      peerId,
-      peerName,
-      isMonitored: channelNameMap.has(peerId || ''),
-    });
 
     // Manual filter against our resolved channels
     if (resolvedPeerIds.length > 0 && peerId && !channelNameMap.has(peerId)) {
       return;
     }
 
-    messageCount++;
-
-    const startAt = Date.now();
-    const telegramLatency = startAt - message.date * 1000;
+    const telegramLatency = arrivalTs - message.date * 1000;
     logger.info('[telegram] processing monitored message', {
       from: peerName,
       text: message.text.slice(0, 70).replace(/\n/g, ' ') + '...',
@@ -183,11 +184,11 @@ export async function startTelegramMonitor(): Promise<void> {
       if (highUrgency.length > 0) {
         logger.info('[telegram] high-urgency message triggering execution', {
           urgency: highUrgency[0]?.urgencyScore,
-          latencyMs: Date.now() - startAt,
+          latencyMs: Date.now() - arrivalTs,
         });
 
-        // 3. Trigger immediate execution
-        await processScoredItems(highUrgency, redis);
+        // 3. Trigger immediate execution (wait for lock to handle concurrent news bursts)
+        await processScoredItems(highUrgency, redis, { wait: true });
       } else {
         logger.debug('[telegram] message ignored (low urgency)', {
           score: scored[0]?.urgencyScore,

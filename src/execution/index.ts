@@ -72,10 +72,28 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
 export async function processScoredItems(
   highUrgencyItems: ScoredItem[],
   redis: ReturnType<typeof getRedis>,
+  options: { wait?: boolean } = {},
 ): Promise<void> {
-  const lockToken = await acquireLock('execution:lock', 270);
+  const waitMs = options.wait ? 500 : 0;
+  const maxRetries = options.wait ? 20 : 0; // up to 10s wait
+  let retries = 0;
+  let lockToken: string | null = null;
+
+  while (retries <= maxRetries) {
+    lockToken = await acquireLock('execution:lock', 270);
+    if (lockToken) break;
+    if (maxRetries === 0) break;
+
+    retries++;
+    if (retries <= maxRetries) {
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+
   if (!lockToken) {
-    logger.info('[execution] processScoredItems: lock held by another runner, skipping');
+    logger.info('[execution] processScoredItems: lock held by another runner, skipping after retries', {
+      retries,
+    });
     return;
   }
   try {
