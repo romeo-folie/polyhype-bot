@@ -42,16 +42,15 @@ export async function isMarketRelevant(opts: {
     'Is this headline directly relevant to this market?';
 
   // 1. Prioritized list of providers for high-speed gating
-  const providers: Array<{
+  const providers: {
     name: string;
     apiKey: string | undefined;
     call: () => Promise<string>;
-  }> = [
+  }[] = [
     {
       name: 'Gemini',
       apiKey: cfg.GEMINI_API_KEY,
       call: async () => {
-        const { GoogleGenerativeAI } = await import('@google/generative-ai');
         if (!_genai || cfg.GEMINI_API_KEY !== _genaiKey) {
           _genai = new GoogleGenerativeAI(cfg.GEMINI_API_KEY!);
           _genaiKey = cfg.GEMINI_API_KEY!;

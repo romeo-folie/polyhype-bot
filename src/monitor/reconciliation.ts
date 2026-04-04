@@ -4,10 +4,10 @@ import { getOpenPositions, closePosition, recordPosition, type Position } from '
 import { getSimmerPositions, type SimmerPosition } from '../shared/simmer.js';
 import { fetchClobTokenBalance } from '../shared/clob.js';
 import { fetchPolymarketPositions, type PolymarketPosition } from '../shared/polymarketData.js';
-import { fetchMarketByConditionId } from '../shared/polymarketGamma.js';
+import { fetchMarketByConditionId, type GammaMarket } from '../shared/polymarketGamma.js';
 
 interface ReconciliationDetail {
-  type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported';
+  type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded';
   marketId: string;
   direction?: string;
   ledgerShares?: number;
@@ -29,37 +29,41 @@ export async function shouldRunReconciliation(redis: Redis): Promise<boolean> {
 }
 
 /**
- * Run position reconciliation — compare ledger vs venue state and HEAL discrepancies.
+ * Main reconciliation entrypoint.
+ * Scans venues vs ledger and heals mismatches.
  */
-export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean } = {}): Promise<void> {
-  logger.info('[reconcile] starting reconciliation pass', { forceFix: opts.forceFix });
+export async function runReconciliation(
+  redis: Redis,
+  opts: { forceFix?: boolean } = {},
+): Promise<void> {
+  const forceFix = opts.forceFix === true;
+  logger.info('[reconcile] starting reconciliation pass', { forceFix });
 
   try {
-    // 1. Fetch ledger positions
-    const ledgerPositions = await getOpenPositions(redis);
+    // 1. Fetch all data sources
+    const activePositions = await getOpenPositions(redis);
+    const simmerPositions = await getSimmerPositions({ status: 'active' });
+    const clobPositions = await fetchPolymarketPositions();
 
-    // Filter out pendingSettlement positions from reconciliation checks
-    const activePositions = ledgerPositions.filter((p) => !p.pendingSettlement);
+    // 2. Build Correlation Matrix (Bridge Simmer questions to Gamma numeric IDs)
+    // We use the Data API list as the source-of-truth for conditionIds/IDs.
+    const questionToMetadata = new Map<string, GammaMarket>();
+    const normalize = (q: string) => q?.toLowerCase().replace(/[^a-z0-9]/g, '') || '';
 
-    logger.info('[reconcile] loaded positions', {
-      total: ledgerPositions.length,
-      active: activePositions.length,
-      pendingSettlement: ledgerPositions.length - activePositions.length,
-    });
+    for (const cp of clobPositions) {
+      if (cp.conditionId) {
+        const market = await fetchMarketByConditionId(cp.conditionId);
+        if (market) {
+          questionToMetadata.set(normalize(market.question), market);
+        }
+      }
+    }
 
-    // 2. Fetch Simmer & CLOB positions from Ground-Truth APIs
-    const [simmerPositions, clobPositions] = await Promise.all([
-      getSimmerPositions({
-        status: 'active',
-        venue: 'polymarket',
-        source: 'sdk:polymarket-geopolitical-agent',
-      }),
-      fetchPolymarketPositions(),
-    ]);
-
-    logger.info('[reconcile] fetched venue positions', { 
+    logger.info('[reconcile] loaded data', {
+      ledger: activePositions.length,
       simmer: simmerPositions.length,
-      clob: clobPositions.length
+      clob: clobPositions.length,
+      matrixReady: questionToMetadata.size,
     });
 
     // 3. Build lookup maps
@@ -71,8 +75,6 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
 
     const clobMap = new Map<string, PolymarketPosition>();
     for (const pos of clobPositions) {
-      // Data API uses 'asset' as the unique tokenId.
-      // We store by asset to correctly handle multiple outcomes (Yes/No) for the same market.
       clobMap.set(pos.asset, pos);
     }
 
@@ -80,11 +82,53 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
     const details: ReconciliationDetail[] = [];
     let healedCount = 0;
     let ghostsFixed = 0;
+    let upgradesCount = 0;
     let clobCount = 0;
 
     for (const ledgerPos of activePositions) {
+      // 4a. Self-Healing ID Upgrade: Detect UUID marketIds from legacy Simmer imports
+      const isUuid = /^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(ledgerPos.marketId);
+      if (isUuid && ledgerPos.executionVenue === 'simmer') {
+        const metadata = questionToMetadata.get(normalize(ledgerPos.question));
+        if (metadata) {
+          logger.info('[reconcile] upgrading legacy UUID marketId to numeric ID', {
+            uuid: ledgerPos.marketId,
+            numericId: metadata.id,
+          });
+          if (forceFix) {
+            await closePosition(redis, ledgerPos.marketId, ledgerPos.direction);
+            const upgradedPos: Position = {
+              ...ledgerPos,
+              marketId: metadata.id,
+              conditionId: metadata.conditionId,
+              clobTokenIds: metadata.clobTokenIds,
+              reconciliationStatus: `upgraded:${new Date().toISOString()}`
+            };
+            await recordPosition(redis, upgradedPos);
+
+            // Important: Remove from venue maps so the orphan loop doesn't re-import it
+            const sideKey = `${ledgerPos.marketId}:${ledgerPos.direction}`;
+            simmerMap.delete(sideKey);
+            if (metadata.clobTokenIds) {
+              const tokenId = ledgerPos.direction === 'YES' ? metadata.clobTokenIds[0] : metadata.clobTokenIds[1];
+              if (tokenId) clobMap.delete(tokenId);
+            }
+
+            upgradesCount++;
+            details.push({
+              marketId: ledgerPos.marketId,
+              direction: ledgerPos.direction,
+              venue: 'simmer',
+              type: 'upgraded',
+              reason: `upgraded UUID ${ledgerPos.marketId} to numeric ${metadata.id}`
+            });
+            continue; 
+          }
+        }
+      }
+
       // Skip perp positions (LONG/SHORT) or explicit HL execution venues.
-      if (ledgerPos.isFutures || ledgerPos.executionVenue === 'hyperliquid') {
+      if (ledgerPos.direction === 'LONG' || ledgerPos.direction === 'SHORT' || ledgerPos.executionVenue === 'hyperliquid') {
         continue;
       }
 
@@ -99,7 +143,6 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
         if (simmerPos) {
           foundOnVenue = true;
           venueShares = simmerPos.shares ?? 0;
-          // Remove from map so we can find orphans later
           simmerMap.delete(key);
         }
       } else if (ledgerPos.executionVenue === 'clob') {
@@ -110,19 +153,16 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
         const tokenIndex = ledgerPos.direction === 'YES' ? 0 : 1;
         const tokenId = tokenIds[tokenIndex];
 
-        // Use Data API result if available
         const clobMatch = tokenId ? clobMap.get(tokenId) : null;
         if (clobMatch) {
           foundOnVenue = true;
           venueShares = clobMatch.size ?? 0;
-          // Remove from map so we can find orphans later
           clobMap.delete(tokenId!);
         } else if (tokenId) {
-          // Fallback to direct on-chain balance fetch if Data API missed it
           const balanceResult = await fetchClobTokenBalance(tokenId);
           if (balanceResult.ok) {
             venueShares = balanceResult.balance;
-            foundOnVenue = venueShares > 0.0001; // Allow for dust
+            foundOnVenue = venueShares > 0.0001;
           }
         }
       }
@@ -138,7 +178,7 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
           ledgerShares,
         });
         
-        if (opts.forceFix) {
+        if (forceFix) {
           await closePosition(redis, ledgerPos.marketId, ledgerPos.direction);
           ghostsFixed++;
         }
@@ -157,7 +197,6 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
       const absDiff = Math.abs(ledgerShares - venueShares);
       const relDiff = ledgerShares > 0 ? absDiff / ledgerShares : 0;
 
-      // Threshold: 1% mismatch or significant absolute difference
       if (absDiff > 0.01 && relDiff > 0.01) {
         const actualEntryPrice = ledgerPos.stakeUsd > 0 && venueShares > 0 
           ? ledgerPos.stakeUsd / venueShares 
@@ -173,8 +212,7 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
           newPrice: actualEntryPrice.toFixed(4),
         });
 
-        // Write healer: update both shares and entry price in Redis
-        if (opts.forceFix) {
+        if (forceFix) {
           await redis.hset(`position:${ledgerPos.marketId}:${ledgerPos.direction}`, 
             'sharesHeld', String(venueShares),
             'entryPrice', String(actualEntryPrice.toFixed(6)),
@@ -200,13 +238,15 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
 
     // A. Handle Simmer Orphans
     for (const [_key, simmerPos] of simmerMap.entries()) {
-      if (opts.forceFix) {
-        const imported = await importSimmerOrphan(redis, simmerPos);
+      if (forceFix) {
+        // Use correlation matrix to resolve real IDs if possible
+        const metadata = questionToMetadata.get(normalize(simmerPos.question || ''));
+        const imported = await importSimmerOrphan(redis, simmerPos, metadata);
         if (imported) {
           importedCount++;
           details.push({
             type: 'imported',
-            marketId: simmerPos.market_id,
+            marketId: metadata?.id || simmerPos.market_id,
             direction: simmerPos.side.toUpperCase(),
             venue: 'simmer',
             reason: 'RESTORED ORPHAN FROM SIMMER',
@@ -225,14 +265,14 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
     }
 
     // B. Handle CLOB Orphans
-    for (const [_condId, clobPos] of clobMap.entries()) {
-      if (opts.forceFix) {
+    for (const [_tokenId, clobPos] of clobMap.entries()) {
+      if (forceFix) {
         const imported = await importClobOrphan(redis, clobPos);
         if (imported) {
           importedCount++;
           details.push({
             type: 'imported',
-            marketId: clobPos.conditionId, // temporary until resolved
+            marketId: clobPos.conditionId,
             venue: 'clob',
             reason: 'RESTORED ORPHAN FROM CLOB',
           });
@@ -248,15 +288,15 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
       });
     }
 
-    // Summary counts
-    const orphans = details.filter((d) => d.type === 'orphan').length;
+    const orphansRemaining = details.filter((d) => d.type === 'orphan').length;
 
     logger.info('[reconcile] cycle complete', {
       totalInput: activePositions.length,
       healed: healedCount,
       ghostsFixed,
+      upgradedCount: upgradesCount,
       imported: importedCount,
-      orphansRemaining: orphans,
+      orphansRemaining,
       clobChecked: clobCount,
     });
 
@@ -273,7 +313,7 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
 /**
  * Reconstruct a ledger entry from a Simmer position.
  */
-async function importSimmerOrphan(redis: Redis, pos: SimmerPosition): Promise<boolean> {
+async function importSimmerOrphan(redis: Redis, pos: SimmerPosition, metadata?: GammaMarket): Promise<boolean> {
   try {
     const direction = pos.side.toUpperCase() as 'YES' | 'NO';
     const shares = pos.shares ?? 0;
@@ -282,8 +322,10 @@ async function importSimmerOrphan(redis: Redis, pos: SimmerPosition): Promise<bo
     if (shares <= 0) return false;
 
     const newPos: Position = {
-      marketId: pos.market_id,
-      question: pos.question ?? 'Re-imported Position',
+      marketId: metadata?.id || pos.market_id,
+      conditionId: metadata?.conditionId,
+      clobTokenIds: metadata?.clobTokenIds,
+      question: pos.question || metadata?.question || 'Re-imported Position',
       direction,
       entryPrice: avgPrice,
       stakeUsd: shares * avgPrice,
@@ -296,7 +338,12 @@ async function importSimmerOrphan(redis: Redis, pos: SimmerPosition): Promise<bo
     };
 
     await recordPosition(redis, newPos);
-    logger.info('[reconcile] imported Simmer orphan', { marketId: pos.market_id, direction, shares });
+    logger.info('[reconcile] imported Simmer orphan', { 
+      marketId: newPos.marketId, 
+      direction, 
+      shares,
+      isResolved: !!metadata 
+    });
     return true;
   } catch (err) {
     logger.warn('[reconcile] failed to import Simmer orphan', { error: String(err) });
@@ -312,18 +359,12 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
     const shares = pos.size ?? 0;
     if (shares <= 0 || !pos.conditionId) return false;
 
-    // Data API doesn't specify YES/NO directly in a clear way, 
-    // but the token mapping should help.
-    // However, Gamma API can give us the full market details.
     const market = await fetchMarketByConditionId(pos.conditionId);
     if (!market) {
       logger.warn('[reconcile] could not resolve Gamma market for CLOB orphan', { conditionId: pos.conditionId });
       return false;
     }
 
-    // Determine direction by checking which token balance is held. 
-    // Data API usually returns one row per token. 
-    // If 'asset' matches clobTokenIds[0] it's YES, [1] it's NO.
     const direction: 'YES' | 'NO' = pos.asset === market.clobTokenIds[0] ? 'YES' : 'NO';
 
     const newPos: Position = {

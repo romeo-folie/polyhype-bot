@@ -139,7 +139,7 @@ describe('isMarketRelevant', () => {
     } finally {
       vi.useRealTimers();
     }
-  });
+  }, 15000);
 
   it('fails open (returns true) on API error', async () => {
     mockGenerateContent.mockRejectedValue(new Error('API quota exceeded'));

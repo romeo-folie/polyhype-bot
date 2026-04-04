@@ -208,4 +208,62 @@ describe('Position Reconciliation Healer', () => {
       executionVenue: 'clob'
     }));
   });
+
+  it('upgrades a legacy Simmer UUID marketId back to a numeric Polymarket ID using the Correlation Matrix', async () => {
+    const legacyPosition = {
+      marketId: 'cb0e1515-16ba-4f74-858b-cfd2d1988ccf', // REAL UUID
+      question: 'Will it rain?',
+      direction: 'YES',
+      sharesHeld: 100,
+      stakeUsd: 50,
+      entryPrice: 0.50,
+      executionVenue: 'simmer',
+    };
+
+    // Venue state matches exactly, but marketId is different
+    const simmerPositions = [
+      {
+        market_id: 'cb0e1515-16ba-4f74-858b-cfd2d1988ccf',
+        side: 'yes',
+        shares: 100,
+        average_price: 0.50,
+        question: 'Will it rain?',
+      },
+    ];
+
+    // Data API + Gamma matrix provides the bridge
+    const clobPositions = [
+      {
+        conditionId: 'cond-abc',
+        asset: 'tok-yes',
+        size: 1000,
+        avgPrice: 0.5,
+      }
+    ];
+
+    const mockGammaMarket = {
+      id: 'numeric-777', // The correct numeric ID
+      question: 'Will it rain?',
+      conditionId: 'cond-abc',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([legacyPosition]);
+    (simmer.getSimmerPositions as any).mockResolvedValue(simmerPositions);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Expecting legacy entry to be closed
+    expect(positionLedger.closePosition).toHaveBeenCalledWith(mockRedis, 'cb0e1515-16ba-4f74-858b-cfd2d1988ccf', 'YES');
+
+    // Expecting new numeric entry to be recorded
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-777',
+      conditionId: 'cond-abc',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+      reconciliationStatus: expect.stringContaining('upgraded')
+    }));
+  });
 });
