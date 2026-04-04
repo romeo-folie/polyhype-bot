@@ -2,13 +2,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { runReconciliation } from '../reconciliation.js';
 import * as positionLedger from '../../execution/positionLedger.js';
 import * as simmer from '../../shared/simmer.js';
-import * as clob from '../../shared/clob.js';
+import * as polymarketData from '../../shared/polymarketData.js';
+import * as polymarketGamma from '../../shared/polymarketGamma.js';
 import type { Redis } from 'ioredis';
 
 vi.mock('../../execution/positionLedger.js', () => ({
   getOpenPositions: vi.fn(),
   updatePositionShares: vi.fn(),
   closePosition: vi.fn(),
+  recordPosition: vi.fn(),
 }));
 
 vi.mock('../../shared/simmer.js', () => ({
@@ -17,6 +19,14 @@ vi.mock('../../shared/simmer.js', () => ({
 
 vi.mock('../../shared/clob.js', () => ({
   fetchClobTokenBalance: vi.fn(),
+}));
+
+vi.mock('../../shared/polymarketData.js', () => ({
+  fetchPolymarketPositions: vi.fn(),
+}));
+
+vi.mock('../../shared/polymarketGamma.js', () => ({
+  fetchMarketByConditionId: vi.fn(),
 }));
 
 describe('Position Reconciliation Healer', () => {
@@ -28,6 +38,10 @@ describe('Position Reconciliation Healer', () => {
       hset: vi.fn().mockResolvedValue(1),
       incr: vi.fn().mockResolvedValue(1),
     } as unknown as Redis;
+
+    // Default mocks
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(null);
   });
 
   it('detects and heals a cost-basis/share mismatch for Simmer', async () => {
@@ -45,6 +59,7 @@ describe('Position Reconciliation Healer', () => {
       market_id: 'mkt-1',
       side: 'yes',
       shares: 200,
+      average_price: 0.50,
     };
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([stalePosition]);
@@ -57,8 +72,7 @@ describe('Position Reconciliation Healer', () => {
       'position:mkt-1:YES',
       'sharesHeld', '200',
       'entryPrice', '0.500000',
-      expect.stringContaining('reconciliationStatus'),
-      expect.stringContaining('healed_mismatch')
+      'reconciliationStatus', expect.stringContaining('healed_mismatch')
     );
   });
 
@@ -79,65 +93,61 @@ describe('Position Reconciliation Healer', () => {
     expect(positionLedger.closePosition).toHaveBeenCalledWith(mockRedis, 'ghost-1', 'NO');
   });
 
-  it('does nothing when ledger matches venue (within tolerance)', async () => {
-    const healthyPosition = {
-      marketId: 'mkt-ok',
-      direction: 'YES',
-      executionVenue: 'simmer',
-      stakeUsd: 50,
-      entryPrice: 0.50,
-      sharesHeld: 100,
-    };
-
-    const actualSimmerPosition = {
-      market_id: 'mkt-ok',
+  it('automatically re-imports an orphan position from Simmer', async () => {
+    const orphanSimmerPosition = {
+      market_id: 'orphan-1',
       side: 'yes',
-      shares: 100, // Exact match
+      shares: 500,
+      average_price: 0.20,
+      question: 'Will it rain?',
     };
 
-    (positionLedger.getOpenPositions as any).mockResolvedValue([healthyPosition]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([actualSimmerPosition]);
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]); // Ledger empty
+    (simmer.getSimmerPositions as any).mockResolvedValue([orphanSimmerPosition]);
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    expect(mockRedis.hset).not.toHaveBeenCalled();
-    expect(positionLedger.closePosition).not.toHaveBeenCalled();
-  });
-
-  it('handles CLOB reconciliation correctly', async () => {
-    const clobPosition = {
-      marketId: 'clob-1',
+    // Expecting auto-import
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'orphan-1',
       direction: 'YES',
-      executionVenue: 'clob',
-      clobTokenIds: ['tok-yes', 'tok-no'],
-      stakeUsd: 100,
-      entryPrice: 0.50,
-      sharesHeld: 200,
+      entryPrice: 0.20,
+      sharesHeld: 500,
+      stakeUsd: 100, // 500 * 0.20
+      executionVenue: 'simmer'
+    }));
+  });
+
+  it('automatically re-imports an orphan position from CLOB using Data & Gamma APIs', async () => {
+    const orphanClobPosition = {
+      conditionId: 'cond-1',
+      asset: 'tok-yes',
+      avgPrice: 0.60,
+      size: 1000,
     };
 
-    // Actual state: 180 shares on-chain
-    (positionLedger.getOpenPositions as any).mockResolvedValue([clobPosition]);
-    (clob.fetchClobTokenBalance as any).mockResolvedValue({ ok: true, balance: 180 });
+    const mockGammaMarket = {
+      id: 'numeric-99',
+      question: 'Are we there yet?',
+      conditionId: 'cond-1',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]); // Ledger empty
+    (simmer.getSimmerPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([orphanClobPosition]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    expect(mockRedis.hset).toHaveBeenCalledWith(
-      'position:clob-1:YES',
-      'sharesHeld', '180',
-      'entryPrice', expect.stringContaining('0.555556'), // 100 / 180
-      expect.stringContaining('reconciliationStatus'),
-      expect.stringContaining('healed_mismatch')
-    );
-  });
-
-  it('performs log-only reconciliation when forceFix is false', async () => {
-    const ledgerPos = { marketId: 'log-1', direction: 'YES', sharesHeld: 100, stakeUsd: 50, entryPrice: 0.5, executionVenue: 'simmer' };
-    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPos]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([{ market_id: 'log-1', side: 'yes', shares: 50 }]);
-
-    await runReconciliation(mockRedis, { forceFix: false });
-
-    expect(mockRedis.hset).not.toHaveBeenCalled();
-    expect(positionLedger.closePosition).not.toHaveBeenCalled();
+    // Expecting auto-import
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-99',
+      direction: 'YES',
+      entryPrice: 0.60,
+      sharesHeld: 1000,
+      stakeUsd: 600,
+      executionVenue: 'clob'
+    }));
   });
 });

@@ -85,6 +85,7 @@ const SimmerPositionSchema = z.object({
   question: z.string().optional(),
   shares: z.number().optional(),
   value_usdc: z.number().optional(),
+  average_price: z.number().optional(),
 });
 
 function deriveSide(raw: Record<string, unknown>): 'yes' | 'no' | null {
