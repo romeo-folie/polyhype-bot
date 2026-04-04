@@ -198,6 +198,13 @@ const envSchema = z.object({
   SHORT_DURATION_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(50),
   SHORT_DURATION_MIN_VOLUME: z.coerce.number().min(0).optional().default(100),
 
+  // Tiered Exit Logic & Monitor Frequency
+  CRYPTO_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.10),
+  CRYPTO_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.15),
+  SHORT_DURATION_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.10),
+  SHORT_DURATION_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.15),
+  MONITOR_HEAVY_INTERVAL_MIN: z.coerce.number().int().min(1).optional().default(5),
+
   // Phase 9 — Indicator confluence gate
   CONFLUENCE_GATE_ENABLED: z.coerce.boolean().optional().default(true),
   CRYPTO_ARB_MIN_CONFLUENCE_SCORE: z.coerce.number().int().min(0).max(3).optional().default(2),

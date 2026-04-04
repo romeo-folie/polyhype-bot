@@ -13,6 +13,7 @@ import 'dotenv/config';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
+import { isCryptoAsset } from '../shared/assets.js';
 import { getOpenPositions } from '../execution/positionLedger.js';
 import { fetchAllCurrentPrices } from './priceFetcher.js';
 import { getPriceFeed, destroyPriceFeed } from '../shared/feedSingleton.js';
@@ -63,21 +64,35 @@ export async function runMonitor(): Promise<void> {
 
 async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void> {
   const cfg = loadConfig();
-  const takeProfitThreshold = cfg.TAKE_PROFIT_THRESHOLD;
-  const stopLossThreshold = cfg.STOP_LOSS_THRESHOLD;
+  
+  // 0. Determine cycle type (Heavy vs Light)
+  // Heavy cycle: Resolution redemption + Reconciliation + Full Balance Sync.
+  // Light cycle: Just Price Check + SL/TP evaluation (High Speed).
+  const nowMs = Date.now();
+  const lastHeavyStr = await redis.get('monitor:last_heavy_ms');
+  const lastHeavyMs = lastHeavyStr ? parseInt(lastHeavyStr, 10) : 0;
+  const isHeavyCycle = (nowMs - lastHeavyMs) >= cfg.MONITOR_HEAVY_INTERVAL_MIN * 60 * 1000;
 
-  logger.info('[monitor] starting position check', { takeProfitThreshold, stopLossThreshold });
+  logger.info('[monitor] starting position check', { 
+    cycleType: isHeavyCycle ? 'HEAVY' : 'LIGHT',
+    interval: cfg.MONITOR_HEAVY_INTERVAL_MIN
+  });
 
-  // 1. Initial reconciliation pass (self-healing)
-  logger.info('[monitor] running startup reconciliation pass');
-  await runReconciliation(redis, { forceFix: true });
+  if (isHeavyCycle) {
+    // 1. Initial reconciliation pass (self-healing)
+    logger.info('[monitor] running heavy reconciliation pass');
+    await runReconciliation(redis, { forceFix: true });
 
-  // 0. Redeem any resolved winning positions first
-  const redemptions = await redeemResolvedPositions(redis);
-  if (redemptions.length > 0) {
-    const succeeded = redemptions.filter((r) => r.success).length;
-    const failed = redemptions.length - succeeded;
-    logger.info('[monitor] redemption cycle complete', { succeeded, failed });
+    // 2. Redeem any resolved winning positions
+    const redemptions = await redeemResolvedPositions(redis);
+    if (redemptions.length > 0) {
+      const succeeded = redemptions.filter((r) => r.success).length;
+      const failed = redemptions.length - succeeded;
+      logger.info('[monitor] redemption cycle complete', { succeeded, failed });
+    }
+    
+    // Update last heavy timestamp
+    await redis.set('monitor:last_heavy_ms', nowMs.toString());
   }
 
   // 1. Load all open positions
@@ -137,11 +152,30 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
       continue;
     }
 
+    // 3b. Tiered thresholds calculation
+    let tpThreshold = cfg.TAKE_PROFIT_THRESHOLD;
+    let slThreshold = cfg.STOP_LOSS_THRESHOLD;
+
+    if (cfg.TIERED_LOGIC_ENABLED) {
+      const isCrypto = isCryptoAsset(position.marketId); // Check marketId against symbols
+      // Note: positions store marketId which for crypto corresponds to our symbol map
+      
+      // Check for short duration
+      // We don't have endDate easily available in the Position ledger, 
+      // but we have sourcedFrom which might contain resolution info.
+      // Usually, resolution is checked by the redeemer.
+      // For now, focus on isCrypto override.
+      if (isCrypto) {
+        tpThreshold = cfg.CRYPTO_TAKE_PROFIT;
+        slThreshold = cfg.CRYPTO_STOP_LOSS;
+      }
+    }
+
     const decision = evaluateTakeProfit(
       position,
       currentPrice,
-      takeProfitThreshold,
-      stopLossThreshold,
+      tpThreshold,
+      slThreshold,
     );
 
     logger.info('[monitor] position evaluated', {
