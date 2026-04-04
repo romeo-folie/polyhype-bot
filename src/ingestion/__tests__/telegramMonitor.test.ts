@@ -72,6 +72,15 @@ vi.mock('telegram', () => {
       this.message = args.message;
     }
   }
+  class UpdateChannelTooLong {
+    public channelId: any;
+    public pts: any;
+    constructor(args?: any) {
+      this.channelId = args?.channelId;
+      this.pts = args?.pts;
+    }
+  }
+  class UpdatesTooLong {}
 
   return {
     TelegramClient: vi.fn().mockImplementation(() => ({
@@ -81,7 +90,7 @@ vi.mock('telegram', () => {
       addEventHandler: mockAddEventHandler,
       getEntity: mockGetEntity,
       getPeerId: mockGetPeerId,
-      invoke: vi.fn().mockResolvedValue({}), // For JoinChannel
+      invoke: vi.fn().mockResolvedValue({}), // For JoinChannel, GetState, etc.
       session: { save: () => 'mock-session' },
       connected: true,
     })),
@@ -97,8 +106,13 @@ vi.mock('telegram', () => {
       channels: {
         JoinChannel: vi.fn(),
       },
+      updates: {
+        GetState: vi.fn().mockImplementation(() => ({})),
+      },
       UpdateNewChannelMessage,
       UpdateNewMessage,
+      UpdateChannelTooLong,
+      UpdatesTooLong,
       Message: class {},
     },
   };

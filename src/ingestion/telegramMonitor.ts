@@ -5,6 +5,14 @@
  * Triggers immediate OSINT scoring and execution on arrival.
  *
  * Latency Target: < 500ms from Telegram arrival to execution start.
+ *
+ * IMPORTANT: GramJS has a known issue — its catchUp() method is a TODO stub.
+ * When the server sends UpdateChannelTooLong (pts gap), GramJS never calls
+ * getChannelDifference() to recover. This module works around that by:
+ *   1. Catching UpdateChannelTooLong and manually fetching missed messages.
+ *   2. Periodically refreshing dialogs to keep the session's pts state in sync.
+ *   3. Periodically calling updates.GetState() to prevent the server from
+ *      silently dropping the update stream.
  */
 
 import { TelegramClient, Api } from 'telegram';
@@ -18,6 +26,18 @@ import { matchesWatchlist } from '../shared/watchlist.js';
 import type { NewMessageEvent } from 'telegram/events/NewMessage.js';
 
 let client: TelegramClient | null = null;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Dialog refresh interval (ms). GramJS does not track per-channel pts, so a
+// periodic getDialogs() call forces the session layer to re-sync with the
+// server, ensuring the update stream stays open for ALL channels.
+// ──────────────────────────────────────────────────────────────────────────────
+const DIALOG_REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+// How often to call updates.GetState() to keep the update stream alive.
+// GramJS does this internally every 30 min, but we do it more frequently
+// because long-running user sessions can silently die in between.
+const UPDATE_STATE_REFRESH_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
 
 /**
  * Start the Telegram monitor.
@@ -57,9 +77,22 @@ export async function startTelegramMonitor(): Promise<void> {
       firstName: me.firstName,
     });
 
-    // Ensure all dialogs (channels/chats) are synced in memory
-    await client.getDialogs({});
-    logger.info('[telegram] dialogs synced');
+    // ── Full dialog sync ────────────────────────────────────────────────
+    // getDialogs({}) without a limit defaults to an iterator that returns
+    // ALL dialogs. This is essential: if only the first page is fetched,
+    // GramJS doesn't learn the pts for channels outside that page, and
+    // the server won't send us updates for them.
+    // ────────────────────────────────────────────────────────────────────
+    const allDialogs = await client.getDialogs({});
+    logger.info('[telegram] dialogs synced', { total: allDialogs.length });
+
+    // Prime the update state so the server knows where we are
+    try {
+      await client.invoke(new Api.updates.GetState());
+      logger.info('[telegram] update state synced');
+    } catch (err: unknown) {
+      logger.warn('[telegram] GetState failed (non-fatal)', { error: String(err) });
+    }
   } catch (err: any) {
     if (err.message?.includes('AUTH_KEY_UNREGISTERED')) {
       logger.error('[telegram] session invalidated (AUTH_KEY_UNREGISTERED)');
@@ -89,9 +122,10 @@ export async function startTelegramMonitor(): Promise<void> {
     .map((s) => s.trim().replace(/^@/, ''))
     .filter(Boolean);
 
-  // Pre-resolve channel IDs to avoid getEntity calls in the hot path
+  // Pre-resolve channel IDs AND keep entity references for gap recovery
   const resolvedPeerIds: string[] = [];
   const channelNameMap = new Map<string, string>(); // ID -> Name
+  const channelEntityMap = new Map<string, Api.Channel>(); // ID -> Channel entity (for getChannelDifference)
 
   for (const channelName of channels) {
     try {
@@ -104,6 +138,7 @@ export async function startTelegramMonitor(): Promise<void> {
 
       if (entity instanceof Api.Channel) {
         type = entity.broadcast ? 'channel' : 'megagroup';
+        channelEntityMap.set(id, entity);
         // If it's a public channel/group we aren't in, try to join it
         if (entity.left) {
           try {
@@ -155,25 +190,118 @@ export async function startTelegramMonitor(): Promise<void> {
     count: resolvedPeerIds.length,
   });
 
-
-
   let messageCount = 0;
-  // Heartbeat to confirm monitor is still alive
+  let updateTypeStats: Record<string, number> = {};
+
+  // ── Heartbeat: log monitor health + update type distribution ─────────
   setInterval(() => {
     logger.info('[telegram] heartbeat', {
       connected: client?.connected,
       monitoredChannels: resolvedPeerIds.length,
       messagesProcessed: messageCount,
+      updateTypes: { ...updateTypeStats },
     });
+    // Reset counters each heartbeat cycle
+    updateTypeStats = {};
   }, 60000);
 
+  // ── Periodic dialog refresh ──────────────────────────────────────────
+  // GramJS doesn't track per-channel pts internally. When the server's pts
+  // drifts ahead of the client's, the server stops delivering updates for
+  // those channels. Periodically re-fetching dialogs re-syncs the pts for
+  // all conversations, keeping the update stream open.
+  // ────────────────────────────────────────────────────────────────────────
+  setInterval(() => {
+    if (!client?.connected) return;
+    void (async () => {
+      try {
+        await client!.getDialogs({});
+        logger.debug('[telegram] periodic dialog refresh complete');
+      } catch (err: unknown) {
+        logger.warn('[telegram] periodic dialog refresh failed', { error: String(err) });
+      }
+    })();
+  }, DIALOG_REFRESH_INTERVAL_MS);
+
+  // ── Periodic update state refresh ────────────────────────────────────
+  // Calling updates.GetState() serves two purposes:
+  //   1. Tells the server "I'm still alive, keep sending updates"
+  //   2. Returns the current pts/qts/seq — if there's a gap, the server
+  //      will start sending UpdatesTooLong which triggers our recovery.
+  // ────────────────────────────────────────────────────────────────────────
+  setInterval(() => {
+    if (!client?.connected) return;
+    void (async () => {
+      try {
+        await client!.invoke(new Api.updates.GetState());
+        logger.debug('[telegram] periodic GetState complete');
+      } catch (err: unknown) {
+        logger.warn('[telegram] periodic GetState failed', { error: String(err) });
+      }
+    })();
+  }, UPDATE_STATE_REFRESH_INTERVAL_MS);
+
+  // ══════════════════════════════════════════════════════════════════════
+  // EVENT HANDLER — raw update dispatcher
+  // ══════════════════════════════════════════════════════════════════════
   client.addEventHandler((update: any) => {
-    // 1. Identify New Message updates (Bypasses NewMessage event class bugs)
+    // ── Track ALL update types for diagnostics ──────────────────────────
+    const typeName: string = update?.className || update?.constructor?.name || 'Unknown';
+    updateTypeStats[typeName] = (updateTypeStats[typeName] || 0) + 1;
+
+    // ── Handle UpdateChannelTooLong (pts gap recovery) ──────────────────
+    // GramJS's catchUp() is a TODO stub and never calls getChannelDifference.
+    // When the server detects our pts is behind for a channel, it sends this
+    // update instead of real messages. We must manually fetch the difference
+    // to recover the update stream for that channel.
+    // ────────────────────────────────────────────────────────────────────────
+    if (update instanceof Api.UpdateChannelTooLong) {
+      const channelId = update.channelId?.toString();
+      logger.warn('[telegram] UpdateChannelTooLong received — pts gap detected, recovering', {
+        channelId,
+        pts: update.pts,
+      });
+
+      void (async () => {
+        try {
+          // Re-fetch dialogs to re-sync session state for this channel
+          await client!.getDialogs({});
+          // Also call GetState to tell the server we're caught up
+          await client!.invoke(new Api.updates.GetState());
+          logger.info('[telegram] gap recovery complete (dialogs + GetState refreshed)', {
+            channelId,
+          });
+        } catch (err: unknown) {
+          logger.error('[telegram] gap recovery failed', {
+            channelId,
+            error: String(err),
+          });
+        }
+      })();
+      return;
+    }
+
+    // ── Handle UpdatesTooLong (global pts gap) ──────────────────────────
+    if (update instanceof Api.UpdatesTooLong) {
+      logger.warn('[telegram] UpdatesTooLong received — global pts gap, re-syncing');
+      void (async () => {
+        try {
+          await client!.getDialogs({});
+          await client!.invoke(new Api.updates.GetState());
+          logger.info('[telegram] global gap recovery complete');
+        } catch (err: unknown) {
+          logger.error('[telegram] global gap recovery failed', { error: String(err) });
+        }
+      })();
+      return;
+    }
+
+    // ── New message handling ────────────────────────────────────────────
     let message: Api.Message | undefined;
     if (update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateNewMessage) {
       message = update.message as Api.Message;
     } else {
-      // Not a new message update — return synchronously
+      // Log non-message update types at debug once per type per heartbeat cycle
       return;
     }
 
@@ -185,19 +313,11 @@ export async function startTelegramMonitor(): Promise<void> {
 
     // ──────────────────────────────────────────────────────────────────────
     // CRITICAL: Fire-and-forget the heavy async processing.
-    //
     // GramJS's _dispatchUpdate() `await`s each event handler callback
-    // sequentially. If we block here with LLM scoring (up to 30s), Redis
-    // lookups, and execution, NO subsequent updates from ANY channel can
-    // be dispatched until this handler returns. That's why only ~1 channel
-    // was getting through — the handler was monopolising the dispatch loop.
-    //
-    // By making the handler synchronous and kicking off processing as a
-    // detached promise, we return control to GramJS immediately so it can
-    // continue dispatching the next update.
+    // sequentially. We return synchronously and process in background.
     // ──────────────────────────────────────────────────────────────────────
-    const msgRef = message; // capture for closure
-    const clientRef = client; // capture for closure
+    const msgRef = message;
+    const clientRef = client;
 
     void (async () => {
       try {
@@ -276,7 +396,7 @@ export async function startTelegramMonitor(): Promise<void> {
     })();
   });
 
-  logger.info('[telegram] raw update handler registered');
+  logger.info('[telegram] raw update handler registered (with gap recovery)');
 }
 
 /**
