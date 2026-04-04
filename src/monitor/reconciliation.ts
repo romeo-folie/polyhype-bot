@@ -250,6 +250,11 @@ export async function runReconciliation(
       const normQ = normalize(simmerPos.question || '');
       let metadata = questionToMetadata.get(normQ);
 
+      // Check if Simmer's market_id is actually a Polymarket condition ID
+      if (!metadata && simmerPos.market_id) {
+        metadata = (await fetchMarketByConditionId(simmerPos.market_id)) || undefined;
+      }
+
       // Fallback fuzzy match for orphans
       if (!metadata && simmerPos.question) {
         metadata = (await fetchMarketByQuestion(simmerPos.question)) || undefined;
