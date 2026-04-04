@@ -1,0 +1,11 @@
+# Ignore heavy/protected folders during Docker build
+node_modules
+dist
+.git
+.npm
+redis-data
+tdlib-data
+*.log
+npm-debug.log
+.DS_Store
+.env
