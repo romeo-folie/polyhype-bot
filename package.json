@@ -32,7 +32,8 @@
     "test": "vitest run --reporter=verbose",
     "test:unit": "vitest run --reporter=verbose",
     "lint": "eslint 'src/**/*.ts' 'scripts/**/*.ts'",
-    "format": "prettier --write 'src/**/*.ts' 'scripts/**/*.ts'"
+    "format": "prettier --write 'src/**/*.ts' 'scripts/**/*.ts'",
+    "monitor:dashboard": "./scripts/monitor-dashboard.sh"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
