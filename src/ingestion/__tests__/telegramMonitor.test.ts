@@ -45,12 +45,19 @@ vi.mock('../../execution/index.js', () => ({
 const mockConnect = vi.fn();
 const mockAddEventHandler = vi.fn();
 const mockGetEntity = vi.fn();
+const mockGetPeerId = vi.fn().mockImplementation((p) => {
+  if (p && typeof p === 'object' && 'id' in p) return Promise.resolve(String(p.id));
+  return Promise.resolve(String(p));
+});
+
 vi.mock('telegram', () => ({
   TelegramClient: vi.fn().mockImplementation(() => ({
     connect: mockConnect,
     addEventHandler: mockAddEventHandler,
     getEntity: mockGetEntity,
+    getPeerId: mockGetPeerId,
     session: { save: () => 'mock-session' },
+    connected: true,
   })),
   Api: {
     Channel: class {
@@ -83,13 +90,18 @@ describe('telegramMonitor', () => {
   });
 
   it('triggers execution for high-urgency message', async () => {
+    // Mock startup resolution for this test
+    const mockChannel = new Api.Channel({} as any);
+    (mockChannel as any).id = '123';
+    (mockChannel as any).username = 'alpha_channel';
+    mockGetEntity.mockResolvedValue(mockChannel);
+
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
     const handler = mockAddEventHandler.mock.calls[0][0];
 
     // Simulate event payload with a date field (Unix seconds) to exercise latencyMs path
-    const _messageDate = Math.floor((Date.now() - 200) / 1000); // 200ms ago
     const mockMessage = {
       text: 'Explosion in major oil hub!',
       id: 1001,

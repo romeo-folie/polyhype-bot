@@ -114,23 +114,24 @@ export async function startTelegramMonitor(): Promise<void> {
     });
   }, 60000);
 
-  // Event handler for new messages with explicit chat filtering
+  // Event handler for new messages
   client.addEventHandler(async (event: NewMessageEvent) => {
     const message = event.message;
     if (!message?.text || !client) return;
 
     // Fast-path ID check using canonical peer ID
-    const peerId = await client.getPeerId(message.peerId);
+    const peerId = await client.getPeerId(message.peerId).catch(() => null);
     const peerName = (peerId && channelNameMap.get(peerId)) || 'unknown';
 
-    // Log EVERY message received (debug level) to aid troubleshooting
-    logger.debug('[telegram] event received', {
+    // Log EVERY message received at INFO level while troubleshooting silent misses
+    // This allows the user to see in the dashboard exactly what IDs are arriving.
+    logger.info('[telegram] message arrived', {
       peerId,
       peerName,
       isMonitored: channelNameMap.has(peerId || ''),
     });
 
-    // If we have resolved IDs, strictly filter here (though NewMessage filter handles most)
+    // Manual filter against our resolved channels
     if (resolvedPeerIds.length > 0 && peerId && !channelNameMap.has(peerId)) {
       return;
     }
@@ -139,7 +140,7 @@ export async function startTelegramMonitor(): Promise<void> {
 
     const startAt = Date.now();
     const telegramLatency = startAt - message.date * 1000;
-    logger.info('[telegram] new message received', {
+    logger.info('[telegram] processing monitored message', {
       from: peerName,
       text: message.text.slice(0, 70).replace(/\n/g, ' ') + '...',
       latency: `${telegramLatency.toString()}ms`,
@@ -198,7 +199,7 @@ export async function startTelegramMonitor(): Promise<void> {
         peer: peerName,
       });
     }
-  }, new NewMessage(resolvedPeerIds.length > 0 ? { chats: resolvedPeerIds } : {}));
+  }, new NewMessage({}));
 }
 
 /**
