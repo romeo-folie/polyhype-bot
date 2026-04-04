@@ -174,12 +174,6 @@ export async function startTelegramMonitor(): Promise<void> {
     });
   }, 60000);
 
-  // Event handler for new messages
-  const filterOptions: any = {};
-  if (resolvedPeerIds.length > 0) {
-    filterOptions.chats = resolvedPeerIds;
-  }
-
   client.addEventHandler(async (event: NewMessageEvent) => {
     // Increment count and log arrival IMMEDIATELY (synchronously) to prevent swallowing
     // during burst updates or while waiting for peerId resolution.
@@ -189,26 +183,20 @@ export async function startTelegramMonitor(): Promise<void> {
     const message = event.message;
     if (!message?.text || !client) return;
 
-    // Log EVERY message received at INFO level while troubleshooting silent misses
-    // We use message.peerId.toString() as a temporary label before full resolution.
-    logger.info('[telegram] message arrived', {
-      id: message.id,
-      rawPeerId: message.peerId?.toString(),
-    });
-
     // Fast-path ID check using canonical peer ID
     const peerId = await client.getPeerId(message.peerId).catch(() => null);
     const peerName = (peerId && channelNameMap.get(peerId)) || 'unknown';
 
-    // Manual filter against our resolved channels (Strict)
-    // If the peerId is unknown or doesn't match our watchlist, drop it immediately.
-    if (resolvedPeerIds.length > 0 && (!peerId || !channelNameMap.has(peerId))) {
-      logger.debug('[telegram] filtering out message (not in watchlist)', {
-        arrivedId: peerId,
-        availableIds: Array.from(channelNameMap.keys()),
-        rawPeerId: message.peerId?.toString(),
-      });
-      return;
+    // Log EVERY message received from a monitored channel
+    if (peerId && channelNameMap.has(peerId)) {
+        logger.info('[telegram] message arrived', {
+            id: message.id,
+            from: peerName,
+        });
+    } else {
+        // Silently skip non-monitored channels to avoid log spam, 
+        // since we are now in catch-all mode.
+        return;
     }
 
     const telegramLatency = arrivalTs - message.date * 1000;
@@ -271,11 +259,9 @@ export async function startTelegramMonitor(): Promise<void> {
         peer: peerName,
       });
     }
-  }, new NewMessage(filterOptions));
+  }, new NewMessage({}));
 
-  logger.info('[telegram] event handler registered', {
-    usingFilter: resolvedPeerIds.length > 0 ? 'resolvedPeerIds' : 'all',
-  });
+  logger.info('[telegram] event handler registered');
 }
 
 /**
