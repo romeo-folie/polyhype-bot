@@ -52,7 +52,6 @@ const envSchema = z.object({
   TELEGRAM_API_HASH: z.string().optional(),
   TELEGRAM_MONITOR_ENABLED: z.coerce.boolean().optional().default(false),
   TELEGRAM_CHANNELS: z.string().optional().default('dbot_alerts,osint_intel'),
-  TELEGRAM_SESSION_STRING: z.string().optional(),
   TELEGRAM_DB_PATH: z.string().optional().default('./tdlib-data'),
 
   // Wallet / direct CLOB execution

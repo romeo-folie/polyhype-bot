@@ -2,11 +2,12 @@
 import { createClient, configure } from 'tdl';
 import { getTdjson } from 'prebuilt-tdlib';
 import 'dotenv/config';
-import path from 'path';
-
-configure({ tdjson: getTdjson() });
+import path from 'node:path';
 
 async function reauth() {
+  // Configure tdl to use the native binary inside the function
+  configure({ tdjson: getTdjson() });
+
   const apiId = Number(process.env.TELEGRAM_API_ID);
   const apiHash = process.env.TELEGRAM_API_HASH;
   const dbPath = process.env.TELEGRAM_DB_PATH || './tdlib-data';

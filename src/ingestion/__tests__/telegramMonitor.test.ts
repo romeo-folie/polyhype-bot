@@ -66,18 +66,21 @@ vi.mock('prebuilt-tdlib', () => ({
 }));
 
 describe('telegramMonitor (TDLib)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
-  });
+    const { __resetMonitorStateForTest } = await import('../telegramMonitor.js');
+    __resetMonitorStateForTest();
 
-  it('connects to Telegram and opens monitored chats', async () => {
-    mockInvoke.mockImplementation(async (req) => {
+    // Default invoke mocks
+    mockInvoke.mockImplementation(async (req: any) => {
       if (req._ === 'getMe') return { id: 1, first_name: 'Test', username: 'pga_bot' };
       if (req._ === 'searchPublicChat') return { id: 1001, title: 'Alpha Channel' };
       if (req._ === 'openChat') return { _: 'ok' };
       return {};
     });
+  });
 
+  it('connects to Telegram and opens monitored chats', async () => {
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
@@ -93,12 +96,6 @@ describe('telegramMonitor (TDLib)', () => {
       if (event === 'update') onUpdate = cb;
     });
 
-    mockInvoke.mockImplementation(async (req) => {
-      if (req._ === 'getMe') return { id: 1 };
-      if (req._ === 'searchPublicChat') return { id: 1002 };
-      return {};
-    });
-
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
@@ -109,7 +106,7 @@ describe('telegramMonitor (TDLib)', () => {
       _: 'updateNewMessage',
       message: {
         id: 5001,
-        chat_id: 1002,
+        chat_id: 1001,
         date: Math.floor(Date.now() / 1000),
         content: {
           _: 'messageText',
@@ -129,12 +126,6 @@ describe('telegramMonitor (TDLib)', () => {
     let onUpdate: (update: any) => void = () => {};
     mockOn.mockImplementation((event, cb) => {
       if (event === 'update') onUpdate = cb;
-    });
-
-    mockInvoke.mockImplementation(async (req) => {
-      if (req._ === 'getMe') return { id: 1 };
-      if (req._ === 'searchPublicChat') return { id: 1003 };
-      return {};
     });
 
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
@@ -157,5 +148,67 @@ describe('telegramMonitor (TDLib)', () => {
     await flushMicrotasks();
 
     expect(mockScoreItems).not.toHaveBeenCalled();
+  });
+
+  it('skips message if it does not match watchlist', async () => {
+    const { matchesWatchlist } = await import('../../shared/watchlist.js');
+    (matchesWatchlist as any).mockResolvedValueOnce(false);
+
+    let onUpdate: (update: any) => void = () => {};
+    mockOn.mockImplementation((event, cb) => {
+      if (event === 'update') onUpdate = cb;
+    });
+
+    const { startTelegramMonitor } = await import('../telegramMonitor.js');
+    await startTelegramMonitor();
+
+    const mockUpdate = {
+      _: 'updateNewMessage',
+      message: {
+        id: 5003,
+        chat_id: 1001,
+        date: Math.floor(Date.now() / 1000),
+        content: {
+          _: 'messageText',
+          text: { text: 'Some random message' }
+        }
+      }
+    };
+
+    onUpdate(mockUpdate);
+    await flushMicrotasks();
+
+    expect(mockScoreItems).not.toHaveBeenCalled();
+  });
+
+  it('does not trigger execution for low-urgency messages', async () => {
+    mockScoreItems.mockResolvedValueOnce([{ urgencyScore: 5 }]); // Below threshold 8
+
+    let onUpdate: (update: any) => void = () => {};
+    mockOn.mockImplementation((event, cb) => {
+      if (event === 'update') onUpdate = cb;
+    });
+
+    const { startTelegramMonitor } = await import('../telegramMonitor.js');
+    await startTelegramMonitor();
+
+    const mockUpdate = {
+      _: 'updateNewMessage',
+      message: {
+        id: 5004,
+        chat_id: 1001,
+        date: Math.floor(Date.now() / 1000),
+        content: {
+          _: 'messageText',
+          text: { text: 'Low urgency news' }
+        }
+      }
+    };
+
+    onUpdate(mockUpdate);
+    await flushMicrotasks();
+
+    expect(mockScoreItems).toHaveBeenCalled();
+    expect(mockProcessScoredItems).not.toHaveBeenCalled();
   });
 });

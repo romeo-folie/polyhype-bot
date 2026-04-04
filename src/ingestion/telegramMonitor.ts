@@ -21,10 +21,9 @@ import { scoreItems } from './scorer.js';
 import { processScoredItems } from '../execution/index.js';
 import { matchesWatchlist } from '../shared/watchlist.js';
 
-// Configure tdl to use the native binary
-configure({ tdjson: getTdjson() });
-
+// Global state
 let client: Client | null = null;
+let isStarted = false;
 const channelNameMap = new Map<number, string>(); // chat_id -> Name
 const monitoredChannels = new Set<number>();
 let messageCount = 0;
@@ -39,6 +38,15 @@ export async function startTelegramMonitor(): Promise<void> {
     logger.info('[telegram] monitor disabled via config');
     return;
   }
+
+  if (isStarted) {
+    logger.warn('[telegram] monitor already started, skipping');
+    return;
+  }
+
+  // Configure tdl to use the native binary inside the monitor start to avoid
+  // crashing if the binary is missing when monitor is disabled.
+  configure({ tdjson: getTdjson() });
 
   const {
     TELEGRAM_API_ID: apiId,
@@ -118,6 +126,7 @@ export async function startTelegramMonitor(): Promise<void> {
       }
     }
 
+    isStarted = true;
     logger.info('[telegram] monitor started', { count: monitoredChannels.size });
 
     // 5. Heartbeat
@@ -135,6 +144,20 @@ export async function startTelegramMonitor(): Promise<void> {
     logger.error('[telegram] failed to start monitor', { error: String(err) });
     throw err;
   }
+}
+
+/**
+ * Reset internal state (for testing only)
+ */
+export function __resetMonitorStateForTest(): void {
+  isStarted = false;
+  if (client) {
+    client = null;
+  }
+  monitoredChannels.clear();
+  channelNameMap.clear();
+  messageCount = 0;
+  updateTypes = {};
 }
 
 /**
