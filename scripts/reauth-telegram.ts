@@ -1,41 +1,44 @@
 
-import { TelegramClient } from 'telegram';
-import { StringSession } from 'telegram/sessions/index.js';
-import input from 'input'; // GramJS-friendly input helper
+import { createClient, configure } from 'tdl';
+import { getTdjson } from 'prebuilt-tdlib';
 import 'dotenv/config';
+import path from 'path';
+
+configure({ tdjson: getTdjson() });
 
 async function reauth() {
   const apiId = Number(process.env.TELEGRAM_API_ID);
   const apiHash = process.env.TELEGRAM_API_HASH;
+  const dbPath = process.env.TELEGRAM_DB_PATH || './tdlib-data';
 
   if (!apiId || !apiHash) {
     console.error('Missing TELEGRAM_API_ID or TELEGRAM_API_HASH in .env');
     return;
   }
 
-  console.log('\n--- Telegram Re-authentication Utility ---');
-  console.log('This will generate a fresh TELEGRAM_SESSION_STRING for your .env\n');
+  console.log('\n--- Telegram Re-authentication Utility (TDLib) ---');
+  console.log(`Session will be stored in: ${path.resolve(dbPath)}\n`);
 
-  const client = new TelegramClient(new StringSession(''), apiId, apiHash, {
-    connectionRetries: 5,
+  const client = createClient({
+    apiId,
+    apiHash,
+    databaseDirectory: dbPath,
   });
 
-  await client.start({
-    phoneNumber: async () => await input.text('Phone number (with country code): '),
-    password: async () => await input.text('Password (if 2FA enabled): '),
-    phoneCode: async () => await input.text('Code from Telegram: '),
-    onError: (err) => console.error(err),
-  });
+  client.on('error', console.error);
 
-  const sessionString = client.session.save() as unknown as string;
-  
-  console.log('\n✅ Login Successful!');
-  console.log('\nCopy and paste this into your .env as TELEGRAM_SESSION_STRING:');
-  console.log('------------------------------------------------------------');
-  console.log(sessionString);
-  console.log('------------------------------------------------------------\n');
-  
-  await client.disconnect();
+  try {
+    await client.login();
+    console.log('\n✅ Login Successful!');
+    console.log('The session is now persisted in your database directory.');
+    console.log('You can now start the monitor without any session string.\n');
+  } catch (err: unknown) {
+    console.error('\n❌ Login failed:', err);
+  } finally {
+    await client.close();
+  }
 }
 
-reauth().catch(console.error);
+reauth().catch((err: unknown) => {
+  console.error(err);
+});

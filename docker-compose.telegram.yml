@@ -1,0 +1,14 @@
+
+services:
+  pga-telegram:
+    build:
+      context: .
+      dockerfile: Dockerfile.telegram
+    restart: unless-stopped
+    # Interactive mode for initial authentication (first run: run --rm -it)
+    stdin_open: true
+    tty: true
+    env_file: .env
+    volumes:
+      - ./tdlib-data:/app/tdlib-data
+    # Pass along existing Redis if needed, but monitor connects via config
