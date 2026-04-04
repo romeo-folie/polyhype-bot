@@ -167,13 +167,13 @@ export async function startTelegramMonitor(): Promise<void> {
     });
   }, 60000);
 
-  client.addEventHandler(async (update: any) => {
+  client.addEventHandler((update: any) => {
     // 1. Identify New Message updates (Bypasses NewMessage event class bugs)
     let message: Api.Message | undefined;
     if (update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateNewMessage) {
       message = update.message as Api.Message;
     } else {
-      // Not a new message update
+      // Not a new message update — return synchronously
       return;
     }
 
@@ -183,80 +183,97 @@ export async function startTelegramMonitor(): Promise<void> {
     messageCount++;
     const arrivalTs = Date.now();
 
-    // Fast-path ID check using canonical peer ID
-    const peerId = await client.getPeerId(message.peerId).catch(() => null);
-    const peerName = (peerId && channelNameMap.get(peerId)) || 'unknown';
+    // ──────────────────────────────────────────────────────────────────────
+    // CRITICAL: Fire-and-forget the heavy async processing.
+    //
+    // GramJS's _dispatchUpdate() `await`s each event handler callback
+    // sequentially. If we block here with LLM scoring (up to 30s), Redis
+    // lookups, and execution, NO subsequent updates from ANY channel can
+    // be dispatched until this handler returns. That's why only ~1 channel
+    // was getting through — the handler was monopolising the dispatch loop.
+    //
+    // By making the handler synchronous and kicking off processing as a
+    // detached promise, we return control to GramJS immediately so it can
+    // continue dispatching the next update.
+    // ──────────────────────────────────────────────────────────────────────
+    const msgRef = message; // capture for closure
+    const clientRef = client; // capture for closure
 
-    // Log EVERY message received from a monitored channel
-    if (peerId && channelNameMap.has(peerId)) {
-      logger.info('[telegram] message arrived', {
-        id: message.id,
-        from: peerName,
-      });
-    } else {
-      // Silently skip non-monitored channels
-      return;
-    }
+    void (async () => {
+      try {
+        // Fast-path ID check using canonical peer ID
+        const peerId = await clientRef.getPeerId(msgRef.peerId).catch(() => null);
+        const peerName = (peerId && channelNameMap.get(peerId)) || 'unknown';
 
-    const telegramLatency = arrivalTs - message.date * 1000;
-    logger.info('[telegram] processing monitored message', {
-      from: peerName,
-      text: message.text.slice(0, 70).replace(/\n/g, ' ') + '...',
-      latency: `${telegramLatency.toString()}ms`,
-    });
+        // Check if this is a monitored channel
+        if (!peerId || !channelNameMap.has(peerId)) {
+          // Silently skip non-monitored channels
+          return;
+        }
 
-    try {
-      const redis = getRedis();
-      const cfgInternal = loadConfig();
-
-      // 1. Build Item
-      const url = `https://t.me/${peerName}/${message.id.toString()}`;
-      const item = {
-        title: message.text.trim(),
-        url,
-        publishedAt: new Date(),
-        source: `telegram:${peerName}`,
-        latencyMs: telegramLatency,
-      };
-
-      // 1.5 Dynamic Watchlist Gate
-      if (!(await matchesWatchlist(item.title, redis))) {
-        logger.debug('[telegram] skipping message — no watchlist match', {
+        logger.info('[telegram] message arrived', {
+          id: msgRef.id,
           from: peerName,
         });
-        return;
-      }
 
-      // 2. Score urgency
-      const scored = await scoreItems([item], {
-        categoryId: 'geopolitical',
-        categoryLabel: 'Geopolitics',
-        entityContext:
-          'Geopolitical entities (locations, leaders, organizations, conflict terms, sanctions, treaties). Skip sports teams or athletes.',
-        redis,
-      });
-
-      const highUrgency = scored.filter((i) => i.urgencyScore >= cfgInternal.URGENCY_THRESHOLD);
-
-      if (highUrgency.length > 0) {
-        logger.info('[telegram] high-urgency message triggering execution', {
-          urgency: highUrgency[0]?.urgencyScore,
-          latencyMs: Date.now() - arrivalTs,
+        const telegramLatency = arrivalTs - msgRef.date * 1000;
+        logger.info('[telegram] processing monitored message', {
+          from: peerName,
+          text: msgRef.text!.slice(0, 70).replace(/\n/g, ' ') + '...',
+          latency: `${telegramLatency.toString()}ms`,
         });
 
-        // 3. Trigger immediate execution
-        await processScoredItems(highUrgency, redis, { wait: true });
-      } else {
-        logger.debug('[telegram] message ignored (low urgency)', {
-          score: scored[0]?.urgencyScore,
+        const redis = getRedis();
+        const cfgInternal = loadConfig();
+
+        // 1. Build Item
+        const url = `https://t.me/${peerName}/${msgRef.id.toString()}`;
+        const item = {
+          title: msgRef.text!.trim(),
+          url,
+          publishedAt: new Date(),
+          source: `telegram:${peerName}`,
+          latencyMs: telegramLatency,
+        };
+
+        // 1.5 Dynamic Watchlist Gate
+        if (!(await matchesWatchlist(item.title, redis))) {
+          logger.debug('[telegram] skipping message — no watchlist match', {
+            from: peerName,
+          });
+          return;
+        }
+
+        // 2. Score urgency
+        const scored = await scoreItems([item], {
+          categoryId: 'geopolitical',
+          categoryLabel: 'Geopolitics',
+          entityContext:
+            'Geopolitical entities (locations, leaders, organizations, conflict terms, sanctions, treaties). Skip sports teams or athletes.',
+          redis,
+        });
+
+        const highUrgency = scored.filter((i) => i.urgencyScore >= cfgInternal.URGENCY_THRESHOLD);
+
+        if (highUrgency.length > 0) {
+          logger.info('[telegram] high-urgency message triggering execution', {
+            urgency: highUrgency[0]?.urgencyScore,
+            latencyMs: Date.now() - arrivalTs,
+          });
+
+          // 3. Trigger immediate execution
+          await processScoredItems(highUrgency, redis, { wait: true });
+        } else {
+          logger.debug('[telegram] message ignored (low urgency)', {
+            score: scored[0]?.urgencyScore,
+          });
+        }
+      } catch (err: unknown) {
+        logger.error('[telegram] error processing message', {
+          error: String(err),
         });
       }
-    } catch (err: unknown) {
-      logger.error('[telegram] error processing message', {
-        error: String(err),
-        peer: peerName,
-      });
-    }
+    })();
   });
 
   logger.info('[telegram] raw update handler registered');

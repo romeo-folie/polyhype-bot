@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Api } from 'telegram';
 
+/** Flush the microtask queue so fire-and-forget promises settle */
+const flushMicrotasks = () => new Promise<void>((r) => setTimeout(r, 0));
+
 // --- Mocks ---
 
 vi.mock('../../shared/logger.js', () => ({
@@ -144,7 +147,8 @@ describe('telegramMonitor', () => {
     mockScoreItems.mockResolvedValue([{ urgencyScore: 9 }]);
 
     const mockUpdate = new Api.UpdateNewChannelMessage({ message: mockMessage as any } as any);
-    await handler(mockUpdate);
+    handler(mockUpdate);
+    await flushMicrotasks();
 
     expect(mockScoreItems).toHaveBeenCalled();
     expect(mockProcessScoredItems).toHaveBeenCalled();
@@ -170,7 +174,8 @@ describe('telegramMonitor', () => {
     mockScoreItems.mockResolvedValue([{ urgencyScore: 3 }]);
 
     const mockUpdate = new Api.UpdateNewChannelMessage({ message: mockMessage } as any);
-    await handler(mockUpdate);
+    handler(mockUpdate);
+    await flushMicrotasks();
 
     expect(mockProcessScoredItems).not.toHaveBeenCalled();
   });
@@ -194,7 +199,8 @@ describe('telegramMonitor', () => {
     };
 
     const mockUpdate = new Api.UpdateNewChannelMessage({ message: mockMessage } as any);
-    await handler(mockUpdate);
+    handler(mockUpdate);
+    await flushMicrotasks();
 
     expect(mockScoreItems).not.toHaveBeenCalled();
   });
