@@ -1,5 +1,5 @@
+
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Api } from 'telegram';
 
 /** Flush the microtask queue so fire-and-forget promises settle */
 const flushMicrotasks = () => new Promise<void>((r) => setTimeout(r, 50));
@@ -16,6 +16,7 @@ const mockConfig = {
   TELEGRAM_API_HASH: 'hash',
   TELEGRAM_CHANNELS: 'alpha_channel',
   URGENCY_THRESHOLD: 8,
+  TELEGRAM_DB_PATH: './tdlib-data',
 };
 
 vi.mock('../../shared/config.js', () => ({
@@ -44,214 +45,170 @@ vi.mock('../../execution/index.js', () => ({
   processScoredItems: (...args: unknown[]) => mockProcessScoredItems(...args),
 }));
 
-// Mock gramjs/telegram
-const mockConnect = vi.fn();
-const mockAddEventHandler = vi.fn();
-const mockGetEntity = vi.fn();
-const mockGetMe = vi.fn().mockResolvedValue({
-  username: 'test_user',
-  id: '999',
-  firstName: 'Test',
-});
-const mockGetDialogs = vi.fn().mockResolvedValue([]);
-const mockGetMessages = vi.fn().mockResolvedValue([]);
-const mockGetPeerId = vi.fn().mockImplementation((p) => {
-  if (p && typeof p === 'object' && 'id' in p) return Promise.resolve(String(p.id));
-  return Promise.resolve(String(p));
-});
+// Mock tdl
+const mockLogin = vi.fn().mockResolvedValue(undefined);
+const mockInvoke = vi.fn();
+const mockOn = vi.fn();
+const mockClose = vi.fn().mockResolvedValue(undefined);
 
-vi.mock('telegram', () => {
-  class UpdateNewChannelMessage {
-    public message: any;
-    constructor(args: any) {
-      this.message = args.message;
-    }
-  }
-  class UpdateNewMessage {
-    public message: any;
-    constructor(args: any) {
-      this.message = args.message;
-    }
-  }
-  class UpdateChannelTooLong {
-    public channelId: any;
-    public pts: any;
-    constructor(args?: any) {
-      this.channelId = args?.channelId;
-      this.pts = args?.pts;
-    }
-  }
-  class UpdatesTooLong {}
-
-  return {
-    TelegramClient: vi.fn().mockImplementation(() => ({
-      connect: mockConnect,
-      getMe: mockGetMe,
-      getDialogs: mockGetDialogs,
-      getMessages: mockGetMessages,
-      addEventHandler: mockAddEventHandler,
-      getEntity: mockGetEntity,
-      getPeerId: mockGetPeerId,
-      invoke: vi.fn().mockResolvedValue({}),
-      session: { save: () => 'mock-session' },
-      connected: true,
-    })),
-    Api: {
-      Channel: class {
-        username = 'alpha_channel';
-        title = 'Alpha Channel';
-        left = false;
-        broadcast = true;
-      },
-      Chat: class { id = 'mock-chat-id'; left = false; },
-      User: class { id = 'mock-user-id'; },
-      channels: {
-        JoinChannel: vi.fn(),
-      },
-      updates: {
-        GetState: vi.fn().mockImplementation(() => ({})),
-      },
-      UpdateNewChannelMessage,
-      UpdateNewMessage,
-      UpdateChannelTooLong,
-      UpdatesTooLong,
-      Message: class {},
-    },
-  };
-});
-
-vi.mock('telegram/sessions/index.js', () => ({
-  StringSession: vi.fn().mockImplementation(() => ({})),
+vi.mock('tdl', () => ({
+  configure: vi.fn(),
+  createClient: vi.fn().mockImplementation(() => ({
+    login: mockLogin,
+    invoke: mockInvoke,
+    on: mockOn,
+    close: mockClose,
+  })),
 }));
 
-vi.mock('telegram/events/index.js', () => ({
-  NewMessage: vi.fn().mockImplementation(() => ({})),
+vi.mock('prebuilt-tdlib', () => ({
+  getTdjson: () => 'mock-libtdjson.so',
 }));
 
-describe('telegramMonitor', () => {
+describe('telegramMonitor (TDLib)', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
-    // Seed getMessages to return an empty array with an id for high-water mark seeding
-    mockGetMessages.mockResolvedValue([{ id: 100, text: 'seed', date: Math.floor(Date.now() / 1000) }]);
+    const { __resetMonitorStateForTest } = await import('../telegramMonitor.js');
+    __resetMonitorStateForTest();
+
+    // Default invoke mocks
+    mockInvoke.mockImplementation(async (req: any) => {
+      if (req._ === 'getMe') return { id: 1, first_name: 'Test', username: 'pga_bot' };
+      if (req._ === 'searchPublicChat') return { id: 1001, title: 'Alpha Channel' };
+      if (req._ === 'openChat') return { _: 'ok' };
+      return {};
+    });
   });
 
-  it('connects to Telegram on start', async () => {
+  it('connects to Telegram and opens monitored chats', async () => {
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
-    expect(mockConnect).toHaveBeenCalled();
-    expect(mockAddEventHandler).toHaveBeenCalled();
+    expect(mockLogin).toHaveBeenCalled();
+    expect(mockInvoke).toHaveBeenCalledWith({ _: 'searchPublicChat', username: 'alpha_channel' });
+    expect(mockInvoke).toHaveBeenCalledWith({ _: 'openChat', chat_id: 1001 });
   });
 
-  it('triggers execution for high-urgency message via push path', async () => {
-    const mockChannel = new Api.Channel({} as any);
-    (mockChannel as any).id = '123';
-    (mockChannel as any).username = 'alpha_channel';
-    mockGetEntity.mockResolvedValue(mockChannel);
+  it('triggers execution for high-urgency message', async () => {
+    // Setup client.on listener capture
+    let onUpdate: (update: any) => void = () => {};
+    mockOn.mockImplementation((event, cb) => {
+      if (event === 'update') onUpdate = cb;
+    });
 
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
-    const handler = mockAddEventHandler.mock.calls[0][0];
-
-    const mockMessage = {
-      text: 'Explosion in major oil hub!',
-      id: 2001, // Must be higher than seed (100) to avoid dedup
-      peerId: { id: '123' },
-      date: Math.floor(Date.now() / 1000),
-    };
+    // Mock high urgency
     mockScoreItems.mockResolvedValue([{ urgencyScore: 9 }]);
 
-    const mockUpdate = new Api.UpdateNewChannelMessage({ message: mockMessage as any } as any);
-    handler(mockUpdate);
+    const mockUpdate = {
+      _: 'updateNewMessage',
+      message: {
+        id: 5001,
+        chat_id: 1001,
+        date: Math.floor(Date.now() / 1000),
+        content: {
+          _: 'messageText',
+          text: { text: 'BREAKING NEWS: OIL LEAK!' }
+        }
+      }
+    };
+
+    onUpdate(mockUpdate);
     await flushMicrotasks();
 
     expect(mockScoreItems).toHaveBeenCalled();
     expect(mockProcessScoredItems).toHaveBeenCalled();
   });
 
-  it('ignores low-urgency message', async () => {
-    const mockChannel = new Api.Channel({} as any);
-    (mockChannel as any).id = '123';
-    (mockChannel as any).username = 'alpha_channel';
-    mockGetEntity.mockResolvedValue(mockChannel);
+  it('filters out messages from non-monitored chats', async () => {
+    let onUpdate: (update: any) => void = () => {};
+    mockOn.mockImplementation((event, cb) => {
+      if (event === 'update') onUpdate = cb;
+    });
 
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
-    const handler = mockAddEventHandler.mock.calls[0][0];
-
-    const mockMessage = {
-      text: 'Routine diplomatic meeting scheduled.',
-      id: 2002,
-      peerId: { id: '123' },
-      date: Math.floor(Date.now() / 1000),
-    };
-    mockScoreItems.mockResolvedValue([{ urgencyScore: 3 }]);
-
-    const mockUpdate = new Api.UpdateNewChannelMessage({ message: mockMessage } as any);
-    handler(mockUpdate);
-    await flushMicrotasks();
-
-    expect(mockProcessScoredItems).not.toHaveBeenCalled();
-  });
-
-  it('filters by channel name (push path ignores non-monitored)', async () => {
-    const mockChannel = new Api.Channel({} as any);
-    (mockChannel as any).id = '123';
-    (mockChannel as any).username = 'alpha_channel';
-    mockGetEntity.mockResolvedValue(mockChannel);
-
-    const { startTelegramMonitor } = await import('../telegramMonitor.js');
-    await startTelegramMonitor();
-
-    const handler = mockAddEventHandler.mock.calls[0][0];
-
-    const mockMessage = {
-      text: 'Alert!',
-      id: 2003,
-      peerId: { id: '456' }, // Different channel ID — not monitored
-      date: Math.floor(Date.now() / 1000),
+    const mockUpdate = {
+      _: 'updateNewMessage',
+      message: {
+        id: 5002,
+        chat_id: 9999, // Unknown chat ID
+        date: Math.floor(Date.now() / 1000),
+        content: {
+          _: 'messageText',
+          text: { text: 'Unknown source alert!' }
+        }
+      }
     };
 
-    const mockUpdate = new Api.UpdateNewChannelMessage({ message: mockMessage } as any);
-    handler(mockUpdate);
+    onUpdate(mockUpdate);
     await flushMicrotasks();
 
     expect(mockScoreItems).not.toHaveBeenCalled();
   });
 
-  it('deduplicates messages between push and poll paths', async () => {
-    const mockChannel = new Api.Channel({} as any);
-    (mockChannel as any).id = '123';
-    (mockChannel as any).username = 'alpha_channel';
-    mockGetEntity.mockResolvedValue(mockChannel);
+  it('skips message if it does not match watchlist', async () => {
+    const { matchesWatchlist } = await import('../../shared/watchlist.js');
+    (matchesWatchlist as any).mockResolvedValueOnce(false);
+
+    let onUpdate: (update: any) => void = () => {};
+    mockOn.mockImplementation((event, cb) => {
+      if (event === 'update') onUpdate = cb;
+    });
 
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
-    const handler = mockAddEventHandler.mock.calls[0][0];
-
-    const mockMessage = {
-      text: 'Breaking: Major sanctions announced!',
-      id: 5001,
-      peerId: { id: '123' },
-      date: Math.floor(Date.now() / 1000),
+    const mockUpdate = {
+      _: 'updateNewMessage',
+      message: {
+        id: 5003,
+        chat_id: 1001,
+        date: Math.floor(Date.now() / 1000),
+        content: {
+          _: 'messageText',
+          text: { text: 'Some random message' }
+        }
+      }
     };
-    mockScoreItems.mockResolvedValue([{ urgencyScore: 9 }]);
 
-    // First delivery via push — should process
-    const mockUpdate = new Api.UpdateNewChannelMessage({ message: mockMessage as any } as any);
-    handler(mockUpdate);
+    onUpdate(mockUpdate);
     await flushMicrotasks();
 
-    expect(mockScoreItems).toHaveBeenCalledTimes(1);
+    expect(mockScoreItems).not.toHaveBeenCalled();
+  });
 
-    // Second delivery of same message (simulating push duplicate) — should skip
-    handler(mockUpdate);
+  it('does not trigger execution for low-urgency messages', async () => {
+    mockScoreItems.mockResolvedValueOnce([{ urgencyScore: 5 }]); // Below threshold 8
+
+    let onUpdate: (update: any) => void = () => {};
+    mockOn.mockImplementation((event, cb) => {
+      if (event === 'update') onUpdate = cb;
+    });
+
+    const { startTelegramMonitor } = await import('../telegramMonitor.js');
+    await startTelegramMonitor();
+
+    const mockUpdate = {
+      _: 'updateNewMessage',
+      message: {
+        id: 5004,
+        chat_id: 1001,
+        date: Math.floor(Date.now() / 1000),
+        content: {
+          _: 'messageText',
+          text: { text: 'Low urgency news' }
+        }
+      }
+    };
+
+    onUpdate(mockUpdate);
     await flushMicrotasks();
 
-    // scoreItems should NOT have been called a second time
-    expect(mockScoreItems).toHaveBeenCalledTimes(1);
+    expect(mockScoreItems).toHaveBeenCalled();
+    expect(mockProcessScoredItems).not.toHaveBeenCalled();
   });
 });

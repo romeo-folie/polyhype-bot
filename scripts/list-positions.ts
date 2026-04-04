@@ -1,5 +1,5 @@
 import { getRedis } from '../src/shared/redis.js';
-import { getOpenPositions, formatDirection, type Position } from '../src/execution/positionLedger.js';
+import { getOpenPositions, formatDirection } from '../src/execution/positionLedger.js';
 import { fetchAllCurrentPrices, type CurrentPrice } from '../src/monitor/priceFetcher.js';
 
 async function run() {
@@ -69,4 +69,4 @@ async function run() {
   }
 }
 
-run();
+run().catch((err: unknown) => console.error(err));

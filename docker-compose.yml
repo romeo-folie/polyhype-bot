@@ -1,0 +1,71 @@
+
+services:
+  # The central state for the whole agent
+  redis:
+    image: redis:alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redis-data:/data
+    command: redis-server --appendonly yes
+
+  # Telegram Monitor Service
+  pga-telegram:
+    build: .
+    restart: unless-stopped
+    # Interactive mode for initial authentication (run: docker compose run --rm pga-telegram)
+    stdin_open: true
+    tty: true
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./tdlib-data:/app/tdlib-data
+    depends_on:
+      - redis
+    command: npx tsx src/ingestion/telegramMonitor.ts
+
+  # Copytrading Strategy Worker
+  pga-copytrade:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    command: npx tsx src/copytrade/worker.ts
+
+  # Futures Monitoring Strategy
+  pga-futures:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    command: npx tsx src/monitor/futuresMonitor.ts
+
+  # Arbitrage Scanning Engine
+  pga-arb:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    command: npx tsx src/arb/worker.ts
+
+  # Spot Feed Management
+  pga-spot-feed:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    command: npx tsx src/spot/feeds/manager.ts

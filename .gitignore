@@ -15,3 +15,8 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# TDLib session data
+tdlib-data/
+_td_database/
+_td_files/
