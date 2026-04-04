@@ -51,27 +51,20 @@ W3="tail -f '${PM2_LOGS}/pga-futures-out.log'    | sed 's/\(\[[^]]*\]\)/\x1b[35m
 W4="tail -f '${PM2_LOGS}/pga-telegram-out.log'   | sed 's/\(\[[^]]*\]\)/\x1b[92m\1\x1b[0m/g'"
 W5="tail -f /tmp/pga-trade.log                   | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
 W6="tail -f /tmp/pga-monitor.log                 | sed 's/\(\[[^]]*\]\)/\x1b[96m\1\x1b[0m/g'"
-W7="while true; do clear; npx tsx scripts/list-positions.ts; sleep 10; done"
+W7="tail -f /tmp/pga-spot.log                    | sed 's/\(\[[^]]*\]\)/\x1b[95m\1\x1b[0m/g'"
+W8="while true; do npx tsx scripts/list-positions.ts; sleep 10; done"
 
-# Partition the window into a deterministic 2x4 grid
-# Start with the first worker (Spot Feed)
+# Partition the window into a dynamic tiled grid (Responsive to any terminal size)
+# For 9 panes, this will naturally result in a 3x3 layout.
 tmux new-session  -d -s "$SESSION" -n w0 -x 220 -y 60 "sh -c \"$W0\""
 
-# 1. Split vertically for two rows. Top=Workers, Bottom=Logs
-tmux split-window -v -t "${SESSION}:w0.0" "sh -c \"$W4\""
+# Spawn panes 1 through 8 and re-tile after each to ensure availability of split space
+for cmd in "$W1" "$W2" "$W3" "$W4" "$W5" "$W6" "$W7" "$W8"; do
+  tmux split-window -t "${SESSION}:w0" "sh -c \"$cmd\""
+  tmux select-layout -t "${SESSION}:w0" tiled
+done
 
-# 2. Split Top row into 4 columns (W1, W2, W3 joined with W0)
-tmux split-window -h -t "${SESSION}:w0.0" "sh -c \"$W1\""
-tmux split-window -h -t "${SESSION}:w0.0" "sh -c \"$W2\""
-tmux split-window -h -t "${SESSION}:w0.0" "sh -c \"$W3\""
-
-# 3. Split Bottom row into 4 columns (W5, W6, W7 joined with W4)
-tmux split-window -h -t "${SESSION}:w0.1" "sh -c \"$W5\""
-tmux split-window -h -t "${SESSION}:w0.1" "sh -c \"$W6\""
-tmux split-window -h -t "${SESSION}:w0.1" "sh -c \"$W7\""
-
-# Force balance and select primary focus
-tmux select-layout -t "${SESSION}:w0" tiled
+# Select first pane and attach
 tmux set-option  -t "$SESSION" remain-on-exit on
 tmux select-pane -t "${SESSION}:w0.0"
 tmux attach-session -t "$SESSION"
