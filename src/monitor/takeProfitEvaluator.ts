@@ -63,15 +63,17 @@ export function evaluateTakeProfit(
   }
 
   // Condition 2: divergence has closed (market price reached our consensus estimate)
-  // YES position: we expected YES to rise → exit when YES price >= our P(YES) estimate
-  // NO position:  we expected YES to fall → exit when YES price <= our P(YES) estimate
-  const divergenceClosed =
-    direction === 'YES'
-      ? currentYesPrice >= (consensusProbability ?? 0.5)
-      : currentYesPrice <= (consensusProbability ?? 0.5);
+  // Skip this for copytrades — their consensus probability is the entry price,
+  // making divergence closure effectively a tiny-profit exit which we don't want.
+  if (!position.sourcedFrom.startsWith('copytrade:')) {
+    const divergenceClosed =
+      direction === 'YES'
+        ? currentYesPrice >= (consensusProbability ?? 0.5)
+        : currentYesPrice <= (consensusProbability ?? 0.5);
 
-  if (divergenceClosed) {
-    return { shouldExit: true, reason: 'divergence_closed', returnDecimal, returnPct };
+    if (divergenceClosed) {
+      return { shouldExit: true, reason: 'divergence_closed', returnDecimal, returnPct };
+    }
   }
 
   return { shouldExit: false, returnDecimal, returnPct };
