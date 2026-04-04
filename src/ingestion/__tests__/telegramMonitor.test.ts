@@ -56,32 +56,50 @@ const mockGetPeerId = vi.fn().mockImplementation((p) => {
   return Promise.resolve(String(p));
 });
 
-vi.mock('telegram', () => ({
-  TelegramClient: vi.fn().mockImplementation(() => ({
-    connect: mockConnect,
-    getMe: mockGetMe,
-    getDialogs: mockGetDialogs,
-    addEventHandler: mockAddEventHandler,
-    getEntity: mockGetEntity,
-    getPeerId: mockGetPeerId,
-    invoke: vi.fn().mockResolvedValue({}), // For JoinChannel
-    session: { save: () => 'mock-session' },
-    connected: true,
-  })),
-  Api: {
-    Channel: class {
-      username = 'alpha_channel';
-      title = 'Alpha Channel';
-      left = false;
-      broadcast = true;
+vi.mock('telegram', () => {
+  class UpdateNewChannelMessage {
+    public message: any;
+    constructor(args: any) {
+      this.message = args.message;
+    }
+  }
+  class UpdateNewMessage {
+    public message: any;
+    constructor(args: any) {
+      this.message = args.message;
+    }
+  }
+
+  return {
+    TelegramClient: vi.fn().mockImplementation(() => ({
+      connect: mockConnect,
+      getMe: mockGetMe,
+      getDialogs: mockGetDialogs,
+      addEventHandler: mockAddEventHandler,
+      getEntity: mockGetEntity,
+      getPeerId: mockGetPeerId,
+      invoke: vi.fn().mockResolvedValue({}), // For JoinChannel
+      session: { save: () => 'mock-session' },
+      connected: true,
+    })),
+    Api: {
+      Channel: class {
+        username = 'alpha_channel';
+        title = 'Alpha Channel';
+        left = false;
+        broadcast = true;
+      },
+      Chat: class { id = 'mock-chat-id'; left = false; },
+      User: class { id = 'mock-user-id'; },
+      channels: {
+        JoinChannel: vi.fn(),
+      },
+      UpdateNewChannelMessage,
+      UpdateNewMessage,
+      Message: class {},
     },
-    Chat: class { id = 'mock-chat-id'; left = false; },
-    User: class { id = 'mock-user-id'; },
-    channels: {
-      JoinChannel: vi.fn(),
-    },
-  },
-}));
+  };
+});
 
 vi.mock('telegram/sessions/index.js', () => ({
   StringSession: vi.fn().mockImplementation(() => ({})),
@@ -114,18 +132,19 @@ describe('telegramMonitor', () => {
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
-    const handler = mockAddEventHandler.mock.calls[1][0];
+    // The message handler is now the second handler (index 1)
+    const handler = mockAddEventHandler.mock.calls[0][0];
 
-    // Simulate event payload with a date field (Unix seconds) to exercise latencyMs path
     const mockMessage = {
       text: 'Explosion in major oil hub!',
       id: 1001,
-      peerId: '123',
+      peerId: { id: '123' },
       date: Math.floor(Date.now() / 1000),
     };
     mockScoreItems.mockResolvedValue([{ urgencyScore: 9 }]);
 
-    await handler({ message: mockMessage });
+    const mockUpdate = new Api.UpdateNewChannelMessage({ message: mockMessage as any } as any);
+    await handler(mockUpdate);
 
     expect(mockScoreItems).toHaveBeenCalled();
     expect(mockProcessScoredItems).toHaveBeenCalled();
@@ -140,17 +159,18 @@ describe('telegramMonitor', () => {
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
-    const handler = mockAddEventHandler.mock.calls[1][0];
+    const handler = mockAddEventHandler.mock.calls[0][0];
 
     const mockMessage = {
       text: 'Routine diplomatic meeting scheduled.',
       id: 1002,
-      peerId: '123',
+      peerId: { id: '123' },
       date: Math.floor(Date.now() / 1000),
     };
     mockScoreItems.mockResolvedValue([{ urgencyScore: 3 }]);
 
-    await handler({ message: mockMessage });
+    const mockUpdate = new Api.UpdateNewChannelMessage({ message: mockMessage } as any);
+    await handler(mockUpdate);
 
     expect(mockProcessScoredItems).not.toHaveBeenCalled();
   });
@@ -164,16 +184,17 @@ describe('telegramMonitor', () => {
     const { startTelegramMonitor } = await import('../telegramMonitor.js');
     await startTelegramMonitor();
 
-    const handler = mockAddEventHandler.mock.calls[1][0];
+    const handler = mockAddEventHandler.mock.calls[0][0];
 
     const mockMessage = {
       text: 'Alert!',
       id: 1003,
-      peerId: '456', // Different ID
+      peerId: { id: '456' }, // Different ID
       date: Math.floor(Date.now() / 1000),
     };
 
-    await handler({ message: mockMessage });
+    const mockUpdate = new Api.UpdateNewChannelMessage({ message: mockMessage } as any);
+    await handler(mockUpdate);
 
     expect(mockScoreItems).not.toHaveBeenCalled();
   });

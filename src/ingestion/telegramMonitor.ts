@@ -7,10 +7,8 @@
  * Latency Target: < 500ms from Telegram arrival to execution start.
  */
 
-import { TelegramClient } from 'telegram';
+import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
-import { NewMessage } from 'telegram/events/index.js';
-import { Api } from 'telegram';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
@@ -157,12 +155,7 @@ export async function startTelegramMonitor(): Promise<void> {
     count: resolvedPeerIds.length,
   });
 
-  // RAW UPDATE LISTENER (Debug only)
-  client.addEventHandler((update: any) => {
-    logger.debug('[telegram] raw update received', {
-      type: update.className,
-    });
-  });
+
 
   let messageCount = 0;
   // Heartbeat to confirm monitor is still alive
@@ -174,14 +167,21 @@ export async function startTelegramMonitor(): Promise<void> {
     });
   }, 60000);
 
-  client.addEventHandler(async (event: NewMessageEvent) => {
-    // Increment count and log arrival IMMEDIATELY (synchronously) to prevent swallowing
-    // during burst updates or while waiting for peerId resolution.
+  client.addEventHandler(async (update: any) => {
+    // 1. Identify New Message updates (Bypasses NewMessage event class bugs)
+    let message: Api.Message | undefined;
+    if (update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateNewMessage) {
+      message = update.message as Api.Message;
+    } else {
+      // Not a new message update
+      return;
+    }
+
+    if (!message || !message.text || !client) return;
+
+    // Increment count and log arrival IMMEDIATELY (synchronously)
     messageCount++;
     const arrivalTs = Date.now();
-
-    const message = event.message;
-    if (!message?.text || !client) return;
 
     // Fast-path ID check using canonical peer ID
     const peerId = await client.getPeerId(message.peerId).catch(() => null);
@@ -189,14 +189,13 @@ export async function startTelegramMonitor(): Promise<void> {
 
     // Log EVERY message received from a monitored channel
     if (peerId && channelNameMap.has(peerId)) {
-        logger.info('[telegram] message arrived', {
-            id: message.id,
-            from: peerName,
-        });
+      logger.info('[telegram] message arrived', {
+        id: message.id,
+        from: peerName,
+      });
     } else {
-        // Silently skip non-monitored channels to avoid log spam, 
-        // since we are now in catch-all mode.
-        return;
+      // Silently skip non-monitored channels
+      return;
     }
 
     const telegramLatency = arrivalTs - message.date * 1000;
@@ -208,12 +207,10 @@ export async function startTelegramMonitor(): Promise<void> {
 
     try {
       const redis = getRedis();
-      const cfgInternal = loadConfig(); // Refresh for threshold changes
+      const cfgInternal = loadConfig();
 
       // 1. Build Item
-      // Use fallback for URL if username not available
       const url = `https://t.me/${peerName}/${message.id.toString()}`;
-
       const item = {
         title: message.text.trim(),
         url,
@@ -234,7 +231,8 @@ export async function startTelegramMonitor(): Promise<void> {
       const scored = await scoreItems([item], {
         categoryId: 'geopolitical',
         categoryLabel: 'Geopolitics',
-        entityContext: 'Geopolitical entities (locations, leaders, organizations, conflict terms, sanctions, treaties). Skip sports teams or athletes.',
+        entityContext:
+          'Geopolitical entities (locations, leaders, organizations, conflict terms, sanctions, treaties). Skip sports teams or athletes.',
         redis,
       });
 
@@ -246,7 +244,7 @@ export async function startTelegramMonitor(): Promise<void> {
           latencyMs: Date.now() - arrivalTs,
         });
 
-        // 3. Trigger immediate execution (wait for lock to handle concurrent news bursts)
+        // 3. Trigger immediate execution
         await processScoredItems(highUrgency, redis, { wait: true });
       } else {
         logger.debug('[telegram] message ignored (low urgency)', {
@@ -259,9 +257,9 @@ export async function startTelegramMonitor(): Promise<void> {
         peer: peerName,
       });
     }
-  }, new NewMessage({}));
+  });
 
-  logger.info('[telegram] event handler registered');
+  logger.info('[telegram] raw update handler registered');
 }
 
 /**
