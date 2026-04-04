@@ -1,0 +1,29 @@
+
+services:
+  # The Telegram monitor worker
+  pga-telegram:
+    build:
+      context: .
+      dockerfile: Dockerfile.telegram
+    restart: unless-stopped
+    # Interactive mode for initial authentication (first run: run --rm -it)
+    stdin_open: true
+    tty: true
+    env_file: .env
+    environment:
+      # This overrides the .env to use the internal Docker network name
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./tdlib-data:/app/tdlib-data
+    depends_on:
+      - redis
+
+  # Your migrated Redis service, now on the standard port
+  redis:
+    image: redis:alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379" # Standard port
+    volumes:
+      - ./redis-data:/data # Mount folder containing your extracted dump.rdb
+    command: redis-server --appendonly yes
