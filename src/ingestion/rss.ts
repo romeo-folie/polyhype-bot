@@ -17,7 +17,9 @@ export interface RssItem {
   latencyMs?: number;
 }
 
-const FEED_TIMEOUT_MS = 10_000;
+const FEED_TIMEOUT_MS = 20_000;
+const MAX_RETRIES = 1;
+const RETRY_DELAY_MS = 2_000;
 
 function buildDefaultHeaders(userAgent: string): Record<string, string> {
   return {
@@ -49,52 +51,65 @@ export async function fetchRssFeeds(feeds?: FeedConfig[]): Promise<RssItem[]> {
 
   const settled = await Promise.allSettled(
     urls.map(async (feedConfig) => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => {
-        controller.abort();
-      }, FEED_TIMEOUT_MS);
+      let lastError: unknown;
 
-      try {
-        const requestInit: RequestInit = {
-          redirect: 'follow',
-          signal: controller.signal,
-          headers: {
-            ...buildDefaultHeaders(cfg.RSS_USER_AGENT),
-            ...(feedConfig.headers ?? {}),
-          },
-        };
-
-        const response = await fetch(feedConfig.url, requestInit);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status} for ${feedConfig.url}`);
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        if (attempt > 0) {
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
         }
 
-        const xml = await response.text();
-        if (!xml || xml.trim().startsWith('<!DOCTYPE html>')) {
-          throw new Error(`Invalid XML response (likely HTML/WAF block) for ${feedConfig.url}`);
-        }
+        const controller = new AbortController();
+        const timer = setTimeout(() => {
+          controller.abort();
+        }, FEED_TIMEOUT_MS);
 
-        const feed = await parser.parseString(xml);
-        if (!feed || !feed.items) {
-          throw new Error(`Malformed feed data for ${feedConfig.url}`);
-        }
+        try {
+          const requestInit: RequestInit = {
+            redirect: 'follow',
+            signal: controller.signal,
+            headers: {
+              ...buildDefaultHeaders(cfg.RSS_USER_AGENT),
+              ...(feedConfig.headers ?? {}),
+            },
+          };
 
-        const source = feed.title ?? feedConfig.url;
+          const response = await fetch(feedConfig.url, requestInit);
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status} for ${feedConfig.url}`);
+          }
 
-        for (const item of feed.items) {
-          const title = item.title?.trim();
-          const link = item.link?.trim();
-          if (!title || !link) continue;
-          results.push({
-            title,
-            url: link,
-            publishedAt: item.isoDate ? new Date(item.isoDate) : new Date(),
-            source,
-          });
+          const xml = await response.text();
+          if (!xml || xml.trim().startsWith('<!DOCTYPE html>')) {
+            throw new Error(`Invalid XML response (likely HTML/WAF block) for ${feedConfig.url}`);
+          }
+
+          const feed = await parser.parseString(xml);
+          if (!feed || !feed.items) {
+            throw new Error(`Malformed feed data for ${feedConfig.url}`);
+          }
+
+          const source = feed.title ?? feedConfig.url;
+
+          for (const item of feed.items) {
+            const title = item.title?.trim();
+            const link = item.link?.trim();
+            if (!title || !link) continue;
+            results.push({
+              title,
+              url: link,
+              publishedAt: item.isoDate ? new Date(item.isoDate) : new Date(),
+              source,
+            });
+          }
+          return; // success — stop retrying
+        } catch (err) {
+          lastError = err;
+        } finally {
+          clearTimeout(timer);
         }
-      } finally {
-        clearTimeout(timer);
       }
+
+      throw lastError; // all attempts failed
     }),
   );
 

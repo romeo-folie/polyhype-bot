@@ -20,3 +20,6 @@ Thumbs.db
 tdlib-data/
 _td_database/
 _td_files/
+
+# Redis persistence
+redis-data/

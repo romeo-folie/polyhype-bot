@@ -13,10 +13,7 @@ export const cryptoRegulatory: CategoryConfig = {
   label: 'Crypto / Regulatory',
   feeds: [
     { url: 'https://www.coindesk.com/arc/outboundfeeds/rss/' },
-    {
-      url: 'https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&dateb=&owner=include&count=20&output=atom',
-      headers: { 'User-Agent': 'polymarket-geopolitical-agent contact@llmrates.live' },
-    },
+    { url: 'https://cointelegraph.com/rss' },
     { url: 'https://www.theblock.co/rss.xml' },
   ],
   scorerPrompt: CRYPTO_PROMPT,
