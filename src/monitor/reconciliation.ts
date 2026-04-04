@@ -71,9 +71,9 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
 
     const clobMap = new Map<string, PolymarketPosition>();
     for (const pos of clobPositions) {
-      // Data API uses conditionId. We'll need to map this to token/direction later.
-      // For now, we store by conditionId and then resolve side-by-side.
-      clobMap.set(pos.conditionId, pos);
+      // Data API uses 'asset' as the unique tokenId.
+      // We store by asset to correctly handle multiple outcomes (Yes/No) for the same market.
+      clobMap.set(pos.asset, pos);
     }
 
     // 4. Reconciliation and Healing loop
@@ -106,25 +106,23 @@ export async function runReconciliation(redis: Redis, opts: { forceFix?: boolean
         venueName = 'clob';
         clobCount++;
         
+        const tokenIds = ledgerPos.clobTokenIds ?? [];
+        const tokenIndex = ledgerPos.direction === 'YES' ? 0 : 1;
+        const tokenId = tokenIds[tokenIndex];
+
         // Use Data API result if available
-        const clobMatch = ledgerPos.conditionId ? clobMap.get(ledgerPos.conditionId) : null;
+        const clobMatch = tokenId ? clobMap.get(tokenId) : null;
         if (clobMatch) {
           foundOnVenue = true;
           venueShares = clobMatch.size ?? 0;
           // Remove from map so we can find orphans later
-          clobMap.delete(ledgerPos.conditionId!);
-        } else {
-          // Fallback to direct token balance if Data API missed it
-          const tokenIds = ledgerPos.clobTokenIds ?? [];
-          const tokenIndex = ledgerPos.direction === 'YES' ? 0 : 1;
-          const tokenId = tokenIds[tokenIndex];
-
-          if (tokenId) {
-            const balanceResult = await fetchClobTokenBalance(tokenId);
-            if (balanceResult.ok) {
-              venueShares = balanceResult.balance;
-              foundOnVenue = venueShares > 0.0001; // Allow for dust
-            }
+          clobMap.delete(tokenId!);
+        } else if (tokenId) {
+          // Fallback to direct on-chain balance fetch if Data API missed it
+          const balanceResult = await fetchClobTokenBalance(tokenId);
+          if (balanceResult.ok) {
+            venueShares = balanceResult.balance;
+            foundOnVenue = venueShares > 0.0001; // Allow for dust
           }
         }
       }

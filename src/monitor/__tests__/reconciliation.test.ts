@@ -150,4 +150,62 @@ describe('Position Reconciliation Healer', () => {
       executionVenue: 'clob'
     }));
   });
+
+  it('reconciles a CLOB ledger position against the matching outcome token when Data API returns multiple rows for the same conditionId', async () => {
+    const ledgerPosition = {
+      marketId: 'numeric-99',
+      conditionId: 'cond-1',
+      direction: 'YES',
+      sharesHeld: 1000,
+      stakeUsd: 500,
+      entryPrice: 0.50,
+      executionVenue: 'clob',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+    };
+
+    const clobPositions = [
+      {
+        conditionId: 'cond-1',
+        asset: 'tok-no',
+        avgPrice: 0.41,
+        size: 250,
+      },
+      {
+        conditionId: 'cond-1',
+        asset: 'tok-yes',
+        avgPrice: 0.61, // Correct outcome token for YES
+        size: 1250,
+      },
+    ];
+
+    const mockGammaMarket = {
+      id: 'numeric-99',
+      question: 'Are we there yet?',
+      conditionId: 'cond-1',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Expecting healing for the YES token (1250 shares, price 500/1250 = 0.40)
+    expect(mockRedis.hset).toHaveBeenCalledWith(
+      'position:numeric-99:YES',
+      'sharesHeld', '1250',
+      'entryPrice', '0.400000',
+      'reconciliationStatus', expect.stringContaining('healed_mismatch')
+    );
+    
+    // The 'NO' token (which was also on venue but not in ledger) should be imported as an orphan
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-99',
+      direction: 'NO',
+      sharesHeld: 250,
+      executionVenue: 'clob'
+    }));
+  });
 });
