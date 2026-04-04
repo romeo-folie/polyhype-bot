@@ -118,7 +118,6 @@ export async function reEvaluatePositions(
         question: position.question,
         description: null,
         headline: relevantHeadline.title,
-        currentYesPrice: currentPrice.currentYesPrice,
         redis,
       });
     } catch (err) {

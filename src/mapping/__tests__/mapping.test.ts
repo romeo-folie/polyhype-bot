@@ -6,6 +6,11 @@ vi.mock('../entityExtractor.js', () => ({
   findCandidateMarkets: vi.fn(),
 }));
 
+// Mock relevance gate
+vi.mock('../relevanceGate.js', () => ({
+  isMarketRelevant: vi.fn().mockResolvedValue(true),
+}));
+
 // Mock consensus calculator
 vi.mock('../consensusCalculator.js', () => ({
   estimateConsensusProbability: vi.fn(),
@@ -26,8 +31,11 @@ const { findCandidateMarkets } = await import('../entityExtractor.js');
 const { estimateConsensusProbability } = await import('../consensusCalculator.js');
 const { runMapping } = await import('../index.js');
 
+const { isMarketRelevant } = await import('../relevanceGate.js');
+
 const mockFindCandidates = vi.mocked(findCandidateMarkets);
 const mockEstimate = vi.mocked(estimateConsensusProbability);
+const mockIsRelevant = vi.mocked(isMarketRelevant);
 
 function makeScoredItem(overrides: Partial<ScoredItem> = {}): ScoredItem {
   return {
@@ -215,5 +223,16 @@ describe('runMapping', () => {
 
     // Should not throw — divergenceCalculator handles edge cases gracefully
     await expect(runMapping([makeScoredItem()], 100)).resolves.toBeDefined();
+  });
+
+  it('skips consensus estimation if relevance gate returns false (Hard Strictness)', async () => {
+    mockFindCandidates.mockResolvedValue([CANDIDATE]);
+    mockIsRelevant.mockResolvedValue(false);
+
+    const signals = await runMapping([makeScoredItem()], 100);
+
+    expect(signals).toHaveLength(0);
+    expect(mockIsRelevant).toHaveBeenCalled();
+    expect(mockEstimate).not.toHaveBeenCalled(); // Critical check: consensus should be bypassed
   });
 });

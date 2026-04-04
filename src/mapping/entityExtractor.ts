@@ -18,10 +18,14 @@ const TIMEOUT_MS = 20_000;
 
 function buildEntitySystemPrompt(entityContext: string): string {
   return (
-    'You are an analyst. Extract the most important named entities from a ' +
-    'news headline for a Polymarket keyword search. Focus on: ' +
+    'You are a Polymarket search specialist. Extract the 3-5 most specific named entities ' +
+    'from a news headline for a Gamma API keyword search. Focus on: ' +
     `${entityContext}. ` +
-    'Return ONLY a JSON object: {"entities": ["entity1", "entity2"]} — max 5 short keywords, no phrases. ' +
+    'CRITICAL: Return entities as they would appear in MARKET TITLES on Polymarket. ' +
+    'Prefer proper nouns (country names, leader surnames, organization abbreviations). ' +
+    'BAD: "border tensions" (too vague), "the president" (too generic) ' +
+    'GOOD: "Russia", "NATO", "Iran", "Trump", "tariff" ' +
+    'Return ONLY a JSON object: {"entities": ["entity1", "entity2"]} — no phrases, just search keywords. ' +
     'No markdown, no explanation.'
   );
 }
@@ -128,6 +132,43 @@ export interface CandidateMarket {
 const MIN_LIQUIDITY = 100; // USDC — skip ghost markets
 
 /**
+ * Universal Domain Guard — compiled regex with word boundaries.
+ * Blocks sports, entertainment, and weather markets from being mapped.
+ *
+ * Word boundaries (\b) prevent false positives:
+ *   "endgame" ≠ "game", "headwinds" ≠ "wind", "Starlink" ≠ "star",
+ *   "Washington DC" → we removed "dc" entirely (too ambiguous).
+ *
+ * Ambiguous terms that were REMOVED from earlier versions:
+ *   - "dc" → matches "Washington DC" (US politics)
+ *   - "star" → matches "Starlink", "Star Alliance"
+ *   - "match" → matches "match expectations"
+ *   - "wind" → matches "headwinds", "wind down"
+ *
+ * Terms kept with word boundaries (e.g. \bgame\b) are safe: they will not
+ * match longer words like "endgame".
+ */
+const DOMAIN_BLOCKLIST_TERMS = [
+  // Sports
+  '\\bwin\\b', '\\bwins\\b', '\\bgame\\b', '\\bteam\\b', '\\bplayoffs\\b',
+  '\\btournament\\b', '\\bchampionship\\b', '\\bathlete\\b', '\\bplayer\\b',
+  '\\bscored\\b', '\\broster\\b', '\\btouchdown\\b', '\\bgoal\\b',
+  // Leagues
+  '\\bnba\\b', '\\bnfl\\b', '\\bmlb\\b', '\\bnhl\\b', '\\bfifa\\b',
+  'premier league', 'laliga', 'super bowl', 'world cup',
+  // Entertainment
+  '\\boscar\\b', '\\bgrammy\\b', '\\bemmy\\b', '\\btony award',
+  '\\bactor\\b', '\\bactress\\b', '\\bmovie\\b', '\\bfilm\\b',
+  'box office', '\\bcelebrity\\b', 'hollywood', '\\bnetflix\\b',
+  '\\bhbo\\b', '\\bdisney\\b', '\\bmarvel\\b', '\\bbatman\\b',
+  '\\bsuperman\\b', '\\bspiderman\\b',
+  // Weather
+  '\\bcelsius\\b', '\\bfahrenheit\\b', '\\bhurricane\\b', '\\bcyclone\\b',
+  '\\btyphoon\\b', '\\btemperature\\b', '\\bweather\\b', '\\bmeteorologist\\b',
+];
+const DOMAIN_BLOCKLIST_RE = new RegExp(DOMAIN_BLOCKLIST_TERMS.join('|'), 'i');
+
+/**
  * Given a scored item, extract entities and search Polymarket for candidate markets.
  *
  * De-duplicates across multiple query terms (same marketId wins first occurrence).
@@ -179,14 +220,12 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
             if (!mMatch) continue;
           }
 
-          // Domain Guard: If the item is geopolitical, explicitly block common sports/entertainment keywords
-          // to prevent "Paris Olympics" or "Oilers Win" from being mapped to OSINT alerts.
-          if (item.categoryId === 'geopolitical') {
-            const blocklist = ['win', 'match', 'game', 'team', 'playoffs', 'tournament', 'championship', 'nba', 'nfl', 'mlb', 'nhl', 'fifa', 'premier league', 'laliga', 'oscar', 'grammy', 'emmy', 'tony', 'super bowl', 'world cup', 'athlete', 'player', 'scored'];
-            const questionLower = market.question.toLowerCase();
-            if (blocklist.some(word => questionLower.includes(word))) {
-              continue;
-            }
+          // Universal Domain Guard: block sports/entertainment/weather markets.
+          // Uses word-boundary regex (hoisted above) to prevent false positives
+          // like "endgame", "Washington DC", "Starlink", or "headwinds".
+          const questionLower = market.question.toLowerCase();
+          if (DOMAIN_BLOCKLIST_RE.test(questionLower)) {
+            continue;
           }
 
           const liquidity = parseFloat(market.liquidity ?? '0');

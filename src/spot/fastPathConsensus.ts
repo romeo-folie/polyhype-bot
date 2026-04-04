@@ -311,7 +311,6 @@ export async function estimateFastConsensus(
     question: market.question,
     description: market.description,
     headline: `Spot move detected for ${move.assetId}: ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(2)}% in ${move.windowMinutes}min. Current price: ${move.currentPrice}.`,
-    currentYesPrice: market.currentYesPrice,
     redis,
   });
 

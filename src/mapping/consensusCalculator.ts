@@ -50,7 +50,7 @@ function buildSystemPrompt(): string {
     'estimate the true probability (0.00–1.00) that the market resolves YES. ' +
     "Pay close attention to any deadlines in the market question relative to today's date. " +
     'IMPORTANT: If the news headline is totally UNRELATED to the market question, ' +
-    'return the probability EXACTLY EQUAL to the current market price to signal neutral edge. ' +
+    'return the probability EXACTLY 0.50 to signal a neutral estimate without a specific edge. ' +
     'Return ONLY a JSON object: {"probability": 0.72, "reasoning": "one sentence explaining the link or lack thereof"} ' +
     'No markdown, no extra keys.'
   );
@@ -60,12 +60,10 @@ function buildUserPrompt(opts: {
   question: string;
   description: string | null;
   headline: string;
-  currentYesPrice: number;
 }): string {
   return (
     `Market question: ${opts.question}\n` +
     `Market description: ${opts.description ?? 'N/A'}\n` +
-    `Current market YES price: ${(opts.currentYesPrice * 100).toFixed(1)}%\n` +
     `Breaking news: ${opts.headline}`
   );
 }
@@ -79,7 +77,6 @@ async function callOpenAI(
   question: string,
   description: string | null,
   headline: string,
-  currentYesPrice: number,
 ): Promise<ConsensusResult> {
   const { OpenAI } = await import('openai');
   const client = new OpenAI({ apiKey: loadConfig().OPENAI_API_KEY });
@@ -95,7 +92,7 @@ async function callOpenAI(
           { role: 'system', content: buildSystemPrompt() },
           {
             role: 'user',
-            content: buildUserPrompt({ question, description, headline, currentYesPrice }),
+            content: buildUserPrompt({ question, description, headline }),
           },
         ],
         response_format: { type: 'json_object' },
@@ -116,7 +113,6 @@ async function callAnthropic(
   question: string,
   description: string | null,
   headline: string,
-  currentYesPrice: number,
 ): Promise<ConsensusResult> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({ apiKey: loadConfig().ANTHROPIC_API_KEY });
@@ -133,7 +129,7 @@ async function callAnthropic(
         messages: [
           {
             role: 'user',
-            content: buildUserPrompt({ question, description, headline, currentYesPrice }),
+            content: buildUserPrompt({ question, description, headline }),
           },
         ],
         temperature: 0,
@@ -152,7 +148,6 @@ async function callGemini(
   question: string,
   description: string | null,
   headline: string,
-  currentYesPrice: number,
 ): Promise<ConsensusResult> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const genai = new GoogleGenerativeAI(loadConfig().GEMINI_API_KEY ?? '');
@@ -160,7 +155,7 @@ async function callGemini(
 
   const prompt =
     `${buildSystemPrompt()}\n\n` +
-    buildUserPrompt({ question, description, headline, currentYesPrice });
+    buildUserPrompt({ question, description, headline });
 
   const result = await Promise.race([
     model.generateContent(prompt),
@@ -183,7 +178,6 @@ async function callDeepSeek(
   question: string,
   description: string | null,
   headline: string,
-  currentYesPrice: number,
 ): Promise<ConsensusResult> {
   const { default: OpenAI } = await import('openai');
   const client = new OpenAI({
@@ -202,7 +196,7 @@ async function callDeepSeek(
           { role: 'system', content: buildSystemPrompt() },
           {
             role: 'user',
-            content: buildUserPrompt({ question, description, headline, currentYesPrice }),
+            content: buildUserPrompt({ question, description, headline }),
           },
         ],
         response_format: { type: 'json_object' },
@@ -247,7 +241,6 @@ async function _estimateSingle(opts: {
   question: string;
   description: string | null;
   headline: string;
-  currentYesPrice: number;
 }): Promise<ConsensusResult> {
   const cfg = loadConfig();
   const provider = cfg.LLM_PROVIDER;
@@ -256,7 +249,7 @@ async function _estimateSingle(opts: {
 
   if (useGemini) {
     try {
-      return await callGemini(opts.question, opts.description, opts.headline, opts.currentYesPrice);
+      return await callGemini(opts.question, opts.description, opts.headline);
     } catch (err) {
       logger.warn('[consensus-calc] Gemini failed, trying OpenAI', {
         error: err instanceof Error ? err.message : String(err),
@@ -266,7 +259,7 @@ async function _estimateSingle(opts: {
 
   if (useOpenAI) {
     try {
-      return await callOpenAI(opts.question, opts.description, opts.headline, opts.currentYesPrice);
+      return await callOpenAI(opts.question, opts.description, opts.headline);
     } catch (err) {
       logger.warn('[consensus-calc] OpenAI failed', {
         error: err instanceof Error ? err.message : String(err),
@@ -281,7 +274,6 @@ async function _estimateSingle(opts: {
         opts.question,
         opts.description,
         opts.headline,
-        opts.currentYesPrice,
       );
     } catch (err) {
       logger.warn('[consensus-calc] Anthropic failed, trying DeepSeek', {
@@ -296,7 +288,6 @@ async function _estimateSingle(opts: {
         opts.question,
         opts.description,
         opts.headline,
-        opts.currentYesPrice,
       );
     } catch (err) {
       logger.warn('[consensus-calc] DeepSeek failed', {
@@ -318,16 +309,15 @@ async function _estimateSingle(opts: {
  */
 /**
  * Build a stable cache key for a consensus estimate.
- * - Price is bucketed to 0.05 increments to tolerate minor market drift.
- * - Headline is trimmed to remove whitespace variation before slicing.
+ * Price is deliberately excluded — blind consensus means the same
+ * question+headline always produces the same estimate regardless of market price.
+ * Headline is trimmed to remove whitespace variation before slicing.
  */
 function buildConsensusCacheKey(
   question: string,
   headline: string,
-  currentYesPrice: number,
 ): string {
-  const priceBucket = Math.round(currentYesPrice / 0.05) * 0.05;
-  const raw = `${question}|${headline.trim().slice(0, 200)}|${priceBucket.toFixed(2)}`;
+  const raw = `${question}|${headline.trim().slice(0, 200)}`;
   return 'consensus:' + createHash('sha256').update(raw).digest('hex');
 }
 
@@ -335,14 +325,13 @@ export async function estimateConsensusProbability(opts: {
   question: string;
   description: string | null;
   headline: string;
-  currentYesPrice: number;
   redis?: Redis;
 }): Promise<ConsensusEstimate> {
   const cfg = loadConfig();
 
   // Check consensus cache
   if (cfg.CONSENSUS_CACHE_ENABLED && opts.redis) {
-    const cacheKey = buildConsensusCacheKey(opts.question, opts.headline, opts.currentYesPrice);
+    const cacheKey = buildConsensusCacheKey(opts.question, opts.headline);
     try {
       const cached = await opts.redis.get(cacheKey);
       if (cached) {
@@ -383,7 +372,7 @@ export async function estimateConsensusProbability(opts: {
   const useGemini = Boolean(cfg.GEMINI_API_KEY);
   const useAnthropic = Boolean(cfg.ANTHROPIC_API_KEY);
   const useDeepSeek = Boolean(cfg.DEEPSEEK_API_KEY);
-  type ProviderFn = (q: string, d: string | null, h: string, p: number) => Promise<ConsensusResult>;
+  type ProviderFn = (q: string, d: string | null, h: string) => Promise<ConsensusResult>;
   const providers: ProviderFn[] = [
     ...(useOpenAI ? [callOpenAI as ProviderFn] : []),
     ...(useGemini ? [callGemini as ProviderFn] : []),
@@ -397,7 +386,7 @@ export async function estimateConsensusProbability(opts: {
     );
   }
   const calls = providers.map((provider) =>
-    provider(opts.question, opts.description, enrichedHeadline, opts.currentYesPrice),
+    provider(opts.question, opts.description, enrichedHeadline),
   );
 
   const settled = await Promise.allSettled(calls);
@@ -431,7 +420,7 @@ export async function estimateConsensusProbability(opts: {
 
   // Cache the result
   if (cfg.CONSENSUS_CACHE_ENABLED && opts.redis) {
-    const cacheKey = buildConsensusCacheKey(opts.question, opts.headline, opts.currentYesPrice);
+    const cacheKey = buildConsensusCacheKey(opts.question, opts.headline);
     try {
       await opts.redis.set(cacheKey, JSON.stringify(estimate), 'EX', cfg.CONSENSUS_CACHE_TTL_S);
     } catch {

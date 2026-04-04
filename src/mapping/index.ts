@@ -12,6 +12,7 @@
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { findCandidateMarkets } from './entityExtractor.js';
+import { isMarketRelevant } from './relevanceGate.js';
 import { estimateConsensusProbability, estimateSentiment } from './consensusCalculator.js';
 import { computeDivergence } from './divergenceCalculator.js';
 import { resolveYesPrice } from '../shared/priceCache.js';
@@ -103,12 +104,20 @@ export async function runMapping(
     const toEvaluate = candidates.slice(0, 10);
 
     for (const candidate of toEvaluate) {
-      // Subscribe to WS updates for high-urgency items
+      // 1. Hard Relevance Gate: Skip expensive operations if headline is irrelevant
+      const isRelevant = await isMarketRelevant({
+        headline: item.title,
+        question: candidate.question,
+        description: candidate.description,
+      });
+      if (!isRelevant) continue;
+
+      // 2. Subscribe to WS updates for high-urgency items
       if (opts?.feed && item.urgencyScore >= cfg.URGENCY_THRESHOLD) {
         await opts.feed.watch(candidate.marketId, candidate.clobTokenIds);
       }
 
-      // Resolve price: WS cache first, then fall back to Gamma snapshot
+      // 3. Resolve price: WS cache first, then fall back to Gamma snapshot
       let currentYesPrice = candidate.currentYesPrice;
       if (opts?.redis && opts.feed) {
         const wsPrice = await resolveYesPrice(candidate.marketId, opts.redis, opts.feed);
@@ -121,7 +130,6 @@ export async function runMapping(
           question: candidate.question,
           description: candidate.description,
           headline: item.title,
-          currentYesPrice,
           ...(opts?.redis ? { redis: opts.redis } : {}),
         });
       } catch (err) {

@@ -17,8 +17,7 @@ vi.mock('../../shared/config.js', () => ({
   })),
 }));
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGetRecentOutcomes = vi.fn<(...args: any[]) => any>();
+const mockGetRecentOutcomes = vi.fn();
 vi.mock('../../shared/outcomeRecorder.js', () => ({
   getRecentOutcomes: mockGetRecentOutcomes,
   inferCategory: vi.fn(() => 'geopolitical'),
@@ -34,8 +33,7 @@ vi.mock('../../shared/logger.js', () => ({
   },
 }));
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGenerateContent = vi.fn<(...args: any[]) => any>();
+const mockGenerateContent = vi.fn();
 vi.mock('@google/generative-ai', () => ({
   GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
     getGenerativeModel: () => ({
@@ -44,8 +42,7 @@ vi.mock('@google/generative-ai', () => ({
   })),
 }));
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockChatCreate = vi.fn<(...args: any[]) => any>();
+const mockChatCreate = vi.fn();
 const mockOpenAIConstructor = vi.fn().mockImplementation(() => ({
   chat: {
     completions: {
@@ -64,7 +61,6 @@ const BASE_OPTS = {
   question: 'Will Russia invade Ukraine again in 2026?',
   description: 'Resolves YES if a major invasion occurs.',
   headline: 'Russia masses troops on Ukrainian border',
-  currentYesPrice: 0.4,
 };
 
 describe('estimateConsensusProbability', () => {
@@ -239,8 +235,8 @@ describe('estimateConsensusProbability', () => {
     });
 
     const mockRedis = {
-      get: vi.fn<() => Promise<null>>().mockResolvedValue(null),
-      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn().mockResolvedValue('OK'),
       zrevrange: vi.fn(),
       hgetall: vi.fn(),
     };
@@ -273,8 +269,8 @@ describe('estimateConsensusProbability', () => {
     });
 
     const mockRedis = {
-      get: vi.fn<() => Promise<null>>().mockResolvedValue(null),
-      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn().mockResolvedValue('OK'),
       zrevrange: vi.fn(),
       hgetall: vi.fn(),
     };
@@ -335,8 +331,8 @@ describe('estimateConsensusProbability', () => {
     });
 
     const mockRedis = {
-      get: vi.fn<() => Promise<null>>().mockResolvedValue(null),
-      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn().mockResolvedValue('OK'),
       zrevrange: vi.fn(),
       hgetall: vi.fn(),
     };
@@ -408,10 +404,8 @@ describe('estimateConsensusProbability', () => {
     };
 
     const mockRedis = {
-      get: vi
-        .fn<(key: string) => Promise<string | null>>()
-        .mockResolvedValue(JSON.stringify(cachedEstimate)),
-      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      get: vi.fn().mockResolvedValue(JSON.stringify(cachedEstimate)),
+      set: vi.fn().mockResolvedValue('OK'),
     };
 
     const result = await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
@@ -463,8 +457,8 @@ describe('estimateConsensusProbability', () => {
     });
 
     const mockRedis = {
-      get: vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(null),
-      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn().mockResolvedValue('OK'),
     };
 
     const result = await estimateConsensusProbability({ ...BASE_OPTS, redis: mockRedis as any });
@@ -508,8 +502,8 @@ describe('estimateConsensusProbability', () => {
     });
 
     const mockRedis = {
-      get: vi.fn<(key: string) => Promise<string | null>>().mockResolvedValue(null),
-      set: vi.fn<() => Promise<string>>().mockResolvedValue('OK'),
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn().mockResolvedValue('OK'),
     };
 
     // Default config has CONSENSUS_CACHE_ENABLED=false
@@ -526,5 +520,38 @@ describe('estimateConsensusProbability', () => {
       'EX',
       expect.any(Number),
     );
+  });
+
+  it('returns 0.50 when LLM says news is unrelated (Blind Consensus)', async () => {
+    // Mock both models to return 0.50 as instructed by the new blind prompt
+    mockGenerateContent.mockResolvedValue({
+      response: { 
+        text: () => JSON.stringify({ 
+          probability: 0.50, 
+          reasoning: "Headline is unrelated to the market question." 
+        }) 
+      },
+    });
+    mockChatCreate.mockResolvedValue({
+      choices: [
+        { 
+          message: { 
+            content: JSON.stringify({ 
+              probability: 0.50, 
+              reasoning: "Unrelated news." 
+            }) 
+          } 
+        },
+      ],
+    });
+
+    const result = await estimateConsensusProbability({
+      ...BASE_OPTS,
+      headline: "Something completely different",
+    });
+
+    // Blind consensus: LLM returns 0.50 for unrelated news,
+    // regardless of what the market price actually is.
+    expect(result.probability).toBe(0.50);
   });
 });
