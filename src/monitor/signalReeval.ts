@@ -15,6 +15,7 @@ import { estimateConsensusProbability } from '../mapping/consensusCalculator.js'
 import { fetchCurrentPrice } from './priceFetcher.js';
 import { executeTakeProfit } from './takeProfitExecutor.js';
 import { getOpenPositions } from '../execution/positionLedger.js';
+import { inferCategory } from '../shared/outcomeRecorder.js';
 import type { Redis } from 'ioredis';
 import type { ScoredItem } from '../ingestion/scorer.js';
 
@@ -23,55 +24,7 @@ import type { ScoredItem } from '../ingestion/scorer.js';
 // cause nearly every headline to match every position, burning LLM tokens
 // on irrelevant re-evaluations.
 const STOP_WORDS = new Set([
-  'will',
-  'does',
-  'have',
-  'been',
-  'this',
-  'that',
-  'what',
-  'when',
-  'where',
-  'which',
-  'with',
-  'from',
-  'into',
-  'more',
-  'than',
-  'them',
-  'they',
-  'their',
-  'there',
-  'then',
-  'each',
-  'also',
-  'most',
-  'some',
-  'over',
-  'only',
-  'very',
-  'just',
-  'about',
-  'after',
-  'again',
-  'before',
-  'being',
-  'below',
-  'between',
-  'both',
-  'could',
-  'during',
-  'further',
-  'here',
-  'other',
-  'same',
-  'should',
-  'such',
-  'under',
-  'until',
-  'while',
-  'would',
-  'your',
+  'will', 'does', 'have', 'been', 'this', 'that', 'what', 'when', 'where', 'which', 'with', 'from', 'into', 'more', 'than', 'them', 'they', 'their', 'there', 'then', 'each', 'also', 'most', 'some', 'over', 'only', 'very', 'just', 'about', 'after', 'again', 'before', 'being', 'below', 'between', 'both', 'could', 'during', 'further', 'here', 'other', 'same', 'should', 'such', 'under', 'until', 'while', 'would', 'your',
 ]);
 
 /** Extract meaningful keywords from a market question, filtering stop-words. */
@@ -88,10 +41,6 @@ export { STOP_WORDS };
 
 /**
  * Re-evaluate open positions against fresh OSINT items.
- *
- * For each position, if any high-urgency item is topically relevant (keyword
- * overlap after stop-word filtering), re-estimate consensus probability.
- * If the edge has evaporated below REEVAL_EDGE_FLOOR or direction has flipped, exit.
  */
 export async function reEvaluatePositions(
   highUrgencyItems: ScoredItem[],
@@ -115,46 +64,62 @@ export async function reEvaluatePositions(
   let errors = 0;
 
   for (const position of positions) {
-    // Check if any high-urgency item is relevant to this position's market.
-    // Uses extractKeywords to filter stop-words and short tokens.
-    const questionWords = extractKeywords(position.question);
+    // 1. Category Guard: Only re-evaluate positions that belong to the same domain 
+    // as the news items being processed. This prevents Geopolitical news from
+    // accidentally triggering exits on Sports or Entertainment trades (e.g. via copytrading).
+    const positionCategory = inferCategory(position.question);
+    
+    const hasCategoryMatch = highUrgencyItems.some(item => 
+      item.categoryId === positionCategory || 
+      (item.categoryId === 'geopolitical' && positionCategory === 'politics')
+    );
 
-    const hasRelevantNews = highUrgencyItems.some((item) => {
-      const headline = item.title.toLowerCase();
-      return questionWords.some((word) => headline.includes(word));
-    });
-
-    if (!hasRelevantNews) {
+    if (!hasCategoryMatch) {
       held++;
       continue;
     }
 
-    // Fetch current price first — needed for both LLM prompt and edge calculation
+    // 2. Keyword Match Relevance
+    const questionWords = extractKeywords(position.question);
+    const relevantHeadline = highUrgencyItems.find((item) => {
+      // Must be same category to be relevant
+      const categoryMatch = 
+        item.categoryId === positionCategory || 
+        (item.categoryId === 'geopolitical' && positionCategory === 'politics');
+      if (!categoryMatch) return false;
+
+      // Domain Guard: If the item is geopolitical, block common sports keywords 
+      // in the position question to doubly-ensure we aren't re-evaluating sports by accident.
+      if (item.categoryId === 'geopolitical') {
+        const blocklist = ['win', 'match', 'game', 'team', 'playoffs', 'tournament', 'championship', 'nba', 'nfl', 'mlb', 'nhl', 'fifa', 'premier league', 'laliga', 'oscar', 'grammy', 'emmy', 'tony', 'super bowl', 'world cup', 'athlete', 'player', 'scored'];
+        const questionLower = position.question.toLowerCase();
+        if (blocklist.some(word => questionLower.includes(word))) return false;
+      }
+
+      const headline = item.title.toLowerCase();
+      return questionWords.some((word) => headline.includes(word));
+    });
+
+    if (!relevantHeadline) {
+      held++;
+      continue;
+    }
+
+    // 3. Re-evaluate edge
     const currentPrice = await fetchCurrentPrice(position);
     if (!currentPrice) {
       errors++;
       continue;
     }
 
-    // Re-estimate consensus probability using live market price
-    let freshConsensus: { probability: number; reasoning: string };
+    let freshConsensus: { probability: number, reasoning: string };
     try {
-      const relevantHeadline = highUrgencyItems.find((item) => {
-        const headline = item.title.toLowerCase();
-        return questionWords.some((word) => headline.includes(word));
-      });
-
-      // description is null because the position ledger does not store the original
-      // Gamma market description (it was available during Phase 2 mapping but not
-      // persisted). Trade-off: re-eval consensus may be slightly less informed than
-      // the original estimate, but the question text + headline + current price
-      // provide sufficient context for the LLM to produce a useful probability.
-      // To improve: persist description in the position ledger in a future iteration.
       freshConsensus = await estimateConsensusProbability({
         question: position.question,
         description: null,
-        headline: relevantHeadline?.title ?? highUrgencyItems[0]?.title ?? '',
+        headline: relevantHeadline.title,
         currentYesPrice: currentPrice.currentYesPrice,
+        redis,
       });
     } catch (err) {
       logger.warn('[reeval] consensus re-estimation failed', {
@@ -165,7 +130,6 @@ export async function reEvaluatePositions(
       continue;
     }
 
-    // Compute fresh edge
     const freshP = freshConsensus.probability;
     const marketP = currentPrice.currentYesPrice;
     const freshEdge = position.direction === 'YES' ? freshP - marketP : 1 - freshP - (1 - marketP);
@@ -179,16 +143,7 @@ export async function reEvaluatePositions(
       edgeFloor,
     });
 
-    // Exit conditions:
-    // 1. Edge has flipped (negative = wrong direction)
-    // 2. Edge has evaporated below floor
-    const shouldExit = freshEdge < edgeFloor;
-
-    if (shouldExit) {
-      // Note on exit + re-entry race: the ingestion pipeline's idempotency guard
-      // (SHA-256 dedup key with 1h TTL in Redis) prevents the same headline from
-      // opening a new position in the same cycle where we just exited one. A re-entry
-      // can only happen on a genuinely new signal in a subsequent cycle.
+    if (freshEdge < edgeFloor) {
       const returnPct =
         position.entryPrice > 0
           ? ((currentPrice.currentOutcomePrice - position.entryPrice) / position.entryPrice) * 100

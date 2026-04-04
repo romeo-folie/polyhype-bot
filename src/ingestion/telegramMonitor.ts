@@ -135,8 +135,9 @@ export async function startTelegramMonitor(): Promise<void> {
     const peerId = await client.getPeerId(message.peerId).catch(() => null);
     const peerName = (peerId && channelNameMap.get(peerId)) || 'unknown';
 
-    // Manual filter against our resolved channels
-    if (resolvedPeerIds.length > 0 && peerId && !channelNameMap.has(peerId)) {
+    // Manual filter against our resolved channels (Strict)
+    // If the peerId is unknown or doesn't match our watchlist, drop it immediately.
+    if (resolvedPeerIds.length > 0 && (!peerId || !channelNameMap.has(peerId))) {
       return;
     }
 
@@ -175,7 +176,7 @@ export async function startTelegramMonitor(): Promise<void> {
       const scored = await scoreItems([item], {
         categoryId: 'geopolitical',
         categoryLabel: 'Geopolitics',
-        entityContext: 'Real-time breaking news from Telegram alerts.',
+        entityContext: 'Geopolitical entities (locations, leaders, organizations, conflict terms, sanctions, treaties). Skip sports teams or athletes.',
         redis,
       });
 

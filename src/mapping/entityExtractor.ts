@@ -179,6 +179,16 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
             if (!mMatch) continue;
           }
 
+          // Domain Guard: If the item is geopolitical, explicitly block common sports/entertainment keywords
+          // to prevent "Paris Olympics" or "Oilers Win" from being mapped to OSINT alerts.
+          if (item.categoryId === 'geopolitical') {
+            const blocklist = ['win', 'match', 'game', 'team', 'playoffs', 'tournament', 'championship', 'nba', 'nfl', 'mlb', 'nhl', 'fifa', 'premier league', 'laliga', 'oscar', 'grammy', 'emmy', 'tony', 'super bowl', 'world cup', 'athlete', 'player', 'scored'];
+            const questionLower = market.question.toLowerCase();
+            if (blocklist.some(word => questionLower.includes(word))) {
+              continue;
+            }
+          }
+
           const liquidity = parseFloat(market.liquidity ?? '0');
           if (!isFinite(liquidity) || liquidity < MIN_LIQUIDITY) continue;
 
