@@ -36,6 +36,7 @@ export interface CryptoArbOpportunity {
   spreadBps?: number | undefined;
   /** The correlated Hyperliquid asset symbol, if available for hedging */
   hlSymbol?: string | undefined;
+  endDate?: string | null | undefined;
 }
 
 import { ASSET_SEARCH_QUERIES, BINANCE_SYMBOL_TO_ASSET } from '../shared/assets.js';
@@ -383,6 +384,7 @@ export async function scanCryptoArb(move: SpotMove, redis: Redis): Promise<Crypt
         volatility: dynamicAnnualVol,
         spreadBps: spreadBuffer * 10000,
         hlSymbol,
+        endDate: market.endDate,
       });
     } catch (err) {
       logger.warn('[crypto-arb] error processing market', {

@@ -13,6 +13,7 @@ import 'dotenv/config';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
+import { isCryptoAsset } from '../shared/assets.js';
 import { getOpenPositions } from '../execution/positionLedger.js';
 import { fetchAllCurrentPrices } from './priceFetcher.js';
 import { getPriceFeed, destroyPriceFeed } from '../shared/feedSingleton.js';
@@ -63,21 +64,37 @@ export async function runMonitor(): Promise<void> {
 
 async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void> {
   const cfg = loadConfig();
-  const takeProfitThreshold = cfg.TAKE_PROFIT_THRESHOLD;
-  const stopLossThreshold = cfg.STOP_LOSS_THRESHOLD;
+  
+  // 0. Determine cycle type (Heavy vs Light)
+  // Heavy cycle: Resolution redemption + Reconciliation + Full Balance Sync.
+  // Light cycle: Just Price Check + SL/TP evaluation (High Speed).
+  const nowMs = Date.now();
+  const lastHeavyStr = await redis.get('monitor:last_heavy_ms');
+  const lastHeavyMs = lastHeavyStr && Number.isFinite(parseInt(lastHeavyStr, 10))
+    ? parseInt(lastHeavyStr, 10)
+    : 0;
+  const isHeavyCycle = (nowMs - lastHeavyMs) >= cfg.MONITOR_HEAVY_INTERVAL_MIN * 60 * 1000;
 
-  logger.info('[monitor] starting position check', { takeProfitThreshold, stopLossThreshold });
+  logger.info('[monitor] starting position check', { 
+    cycleType: isHeavyCycle ? 'HEAVY' : 'LIGHT',
+    interval: cfg.MONITOR_HEAVY_INTERVAL_MIN
+  });
 
-  // 1. Initial reconciliation pass (self-healing)
-  logger.info('[monitor] running startup reconciliation pass');
-  await runReconciliation(redis, { forceFix: true });
+  if (isHeavyCycle) {
+    // 1. Initial reconciliation pass (self-healing)
+    logger.info('[monitor] running heavy reconciliation pass');
+    await runReconciliation(redis, { forceFix: true });
 
-  // 0. Redeem any resolved winning positions first
-  const redemptions = await redeemResolvedPositions(redis);
-  if (redemptions.length > 0) {
-    const succeeded = redemptions.filter((r) => r.success).length;
-    const failed = redemptions.length - succeeded;
-    logger.info('[monitor] redemption cycle complete', { succeeded, failed });
+    // 2. Redeem any resolved winning positions
+    const redemptions = await redeemResolvedPositions(redis);
+    if (redemptions.length > 0) {
+      const succeeded = redemptions.filter((r) => r.success).length;
+      const failed = redemptions.length - succeeded;
+      logger.info('[monitor] redemption cycle complete', { succeeded, failed });
+    }
+    
+    // Update last heavy timestamp
+    await redis.set('monitor:last_heavy_ms', nowMs.toString());
   }
 
   // 1. Load all open positions
@@ -137,11 +154,37 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
       continue;
     }
 
+    // 3b. Tiered thresholds calculation
+    let tpThreshold = cfg.TAKE_PROFIT_THRESHOLD;
+    let slThreshold = cfg.STOP_LOSS_THRESHOLD;
+
+    if (cfg.TIERED_LOGIC_ENABLED) {
+      const isCrypto = position.assetId ? isCryptoAsset(position.assetId) : false;
+      
+      // Check for short duration: resolution within SHORT_DURATION_HOURS
+      let isShortDuration = false;
+      if (position.endDate) {
+        const endMs = new Date(position.endDate).getTime();
+        const diffHrs = (endMs - Date.now()) / (1000 * 60 * 60);
+        if (diffHrs > 0 && diffHrs <= cfg.SHORT_DURATION_HOURS) {
+          isShortDuration = true;
+        }
+      }
+
+      if (isCrypto) {
+        tpThreshold = cfg.CRYPTO_TAKE_PROFIT;
+        slThreshold = cfg.CRYPTO_STOP_LOSS;
+      } else if (isShortDuration) {
+        tpThreshold = cfg.SHORT_DURATION_TAKE_PROFIT;
+        slThreshold = cfg.SHORT_DURATION_STOP_LOSS;
+      }
+    }
+
     const decision = evaluateTakeProfit(
       position,
       currentPrice,
-      takeProfitThreshold,
-      stopLossThreshold,
+      tpThreshold,
+      slThreshold,
     );
 
     logger.info('[monitor] position evaluated', {
@@ -180,7 +223,9 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
   logger.info('[monitor] cycle complete', { exited, held, priceError });
 
   // Run hourly reconciliation pass (every 12 cycles at 5-min intervals)
-  if (await shouldRunReconciliation(redis)) {
+  // Evaluate the condition to maintain the interval clock, but skip applying if heavy cycle just ran it.
+  const shouldReconcile = await shouldRunReconciliation(redis);
+  if (shouldReconcile && !isHeavyCycle) {
     await runReconciliation(redis);
   }
 }

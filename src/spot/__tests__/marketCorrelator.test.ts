@@ -10,6 +10,8 @@ vi.mock('../../shared/config.js', () => ({
     LLM_PROVIDER: 'gemini',
     OPENAI_MODEL: 'gpt-4o-mini',
     GEMINI_MODEL: 'gemini-2.5-flash',
+    STANDARD_MIN_VOLUME: 1000,
+    STANDARD_MIN_LIQUIDITY: 500,
   }),
 }));
 

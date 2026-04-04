@@ -188,6 +188,32 @@ const envSchema = z.object({
   CRYPTO_ARB_DEDUP_TTL_S: z.coerce.number().int().positive().optional().default(300),
   CRYPTO_ARB_MARKET_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
 
+  // Tiered Market Logic
+  TIERED_LOGIC_ENABLED: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((value) => {
+      const normalized = value.trim().toLowerCase();
+      return normalized !== '' && normalized !== '0' && normalized !== 'false';
+    }),
+  STANDARD_MIN_VOLUME: z.coerce.number().min(0).optional().default(10000),
+  STANDARD_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(5000),
+  CRYPTO_MOVE_THRESHOLD: z.coerce.number().min(0).optional().default(0.5),
+  CRYPTO_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(50),
+  CRYPTO_MIN_VOLUME: z.coerce.number().min(0).optional().default(100),
+  CRYPTO_COOLDOWN_MINUTES: z.coerce.number().int().min(1).optional().default(5),
+  SHORT_DURATION_HOURS: z.coerce.number().min(0).optional().default(6),
+  SHORT_DURATION_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(50),
+  SHORT_DURATION_MIN_VOLUME: z.coerce.number().min(0).optional().default(100),
+
+  // Tiered Exit Logic & Monitor Frequency
+  CRYPTO_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.10),
+  CRYPTO_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.15),
+  SHORT_DURATION_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.10),
+  SHORT_DURATION_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.15),
+  MONITOR_HEAVY_INTERVAL_MIN: z.coerce.number().int().min(1).optional().default(5),
+
   // Phase 9 — Indicator confluence gate
   CONFLUENCE_GATE_ENABLED: z.coerce.boolean().optional().default(true),
   CRYPTO_ARB_MIN_CONFLUENCE_SCORE: z.coerce.number().int().min(0).max(3).optional().default(2),

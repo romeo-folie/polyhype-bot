@@ -6,8 +6,11 @@ import { fetchClobTokenBalance } from '../shared/clob.js';
 import { fetchPolymarketPositions, type PolymarketPosition } from '../shared/polymarketData.js';
 import { fetchMarketByConditionId, fetchMarketByQuestion, type GammaMarket } from '../shared/polymarketGamma.js';
 
+import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
+import { creditProceeds } from '../shared/bankroll.js';
+
 interface ReconciliationDetail {
-  type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded';
+  type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded' | 'recovered_outcome';
   marketId: string;
   direction?: string;
   ledgerShares?: number;
@@ -248,16 +251,22 @@ export async function runReconciliation(
     // A. Handle Simmer Orphans
     for (const [_key, simmerPos] of simmerMap.entries()) {
       if (forceFix) {
-        // Use correlation matrix to resolve real IDs if possible
+        // Only resolve metadata and call Gamma API when we are actually going to fix.
+        // Dry-run passes skip network calls to avoid unnecessary rate-limit exposure.
         const normQ = normalize(simmerPos.question || '');
         let metadata = questionToMetadata.get(normQ);
 
-        // Fallback fuzzy match for orphans
-        if (!metadata && simmerPos.question) {
-          metadata = await fetchMarketByQuestion(simmerPos.question) || undefined;
+        // Check if Simmer's market_id is actually a Polymarket condition ID
+        if (!metadata && simmerPos.market_id) {
+          metadata = (await fetchMarketByConditionId(simmerPos.market_id)) || undefined;
         }
 
-        const imported = await importSimmerOrphan(redis, simmerPos, metadata);
+        // Fallback fuzzy match for orphans
+        if (!metadata && simmerPos.question) {
+          metadata = (await fetchMarketByQuestion(simmerPos.question)) || undefined;
+        }
+
+        const imported = await importSimmerOrphan(redis, simmerPos, clobMap, metadata);
         if (imported) {
           importedCount++;
           details.push({
@@ -304,6 +313,68 @@ export async function runReconciliation(
       });
     }
 
+    // 6. Recover missing historical Simmer wins (Force Fix Only)
+    let recoveredCount = 0;
+    if (forceFix) {
+      try {
+        const closedSimmer = await getSimmerPositions({ status: 'closed' });
+        // Fetch all recent outcomes to avoid double-crediting
+        const existingOutcomes = await redis.zrange('outcomes:all', 0, -1);
+        const existingQuestions = new Set<string>();
+        for (const id of existingOutcomes) {
+          const q = await redis.hget(`outcome:${id}`, 'question');
+          if (q) existingQuestions.add(normalize(q));
+        }
+
+        for (const closedPos of closedSimmer) {
+          // We only backfill if it was a winner AND wasn't recorded
+          if (closedPos.value_usdc && closedPos.value_usdc > 0 && closedPos.shares && closedPos.shares > 0) {
+            const normQ = normalize(closedPos.question || closedPos.market_id);
+            if (!existingQuestions.has(normQ)) {
+              logger.info('[reconcile] recovering dropped Simmer win', {
+                marketId: closedPos.market_id,
+                valueUsdc: closedPos.value_usdc,
+              });
+
+              // Credit Proceeds
+              await creditProceeds(redis, closedPos.value_usdc);
+
+              // Record Outcome
+              const direction = closedPos.side.toUpperCase() as 'YES' | 'NO';
+              const stakeUsd = closedPos.shares * (closedPos.average_price ?? 0);
+              await recordOutcome(redis, {
+                source: 'osint',
+                category: inferCategory(closedPos.question || closedPos.market_id),
+                question: (closedPos.question || closedPos.market_id).slice(0, 200),
+                direction: direction,
+                consensusProbability: 0.5,
+                divergence: 0,
+                result: 'won',
+                returnPct: stakeUsd > 0 ? ((closedPos.value_usdc - stakeUsd) / stakeUsd) * 100 : 0,
+                holdingHours: 0,
+                executionVenue: 'simmer',
+              });
+
+              existingQuestions.add(normQ);
+              recoveredCount++;
+              details.push({
+                type: 'recovered_outcome',
+                marketId: closedPos.market_id,
+                direction,
+                venue: 'simmer',
+                venueShares: closedPos.shares,
+                reason: 'recovered historical auto-redeemed win missing from ledger',
+              });
+            }
+          }
+        }
+      } catch (e) {
+        logger.warn('[reconcile] failed to run recovery phase', {
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
     const orphansRemaining = details.filter((d) => d.type === 'orphan').length;
 
     logger.info('[reconcile] cycle complete', {
@@ -312,6 +383,7 @@ export async function runReconciliation(
       ghostsFixed,
       upgradedCount: upgradesCount,
       imported: importedCount,
+      recovered: recoveredCount,
       orphansRemaining,
       clobChecked: clobCount,
     });
@@ -329,19 +401,57 @@ export async function runReconciliation(
 /**
  * Reconstruct a ledger entry from a Simmer position.
  */
-async function importSimmerOrphan(redis: Redis, pos: SimmerPosition, metadata?: GammaMarket): Promise<boolean> {
+async function importSimmerOrphan(
+  redis: Redis,
+  pos: SimmerPosition,
+  clobMap: Map<string, PolymarketPosition>,
+  metadata?: GammaMarket,
+): Promise<boolean> {
   try {
+    if (!metadata) {
+      logger.warn('[reconcile] skipping Simmer orphan — no Polymarket metadata (UUID fallback blocked)', {
+        marketId: pos.market_id,
+        question: pos.question,
+      });
+      return false;
+    }
+
     const direction = pos.side.toUpperCase() as 'YES' | 'NO';
     const shares = pos.shares ?? 0;
-    const avgPrice = pos.average_price ?? (pos.value_usdc && shares > 0 ? pos.value_usdc / shares : 0);
-    
     if (shares <= 0) return false;
 
+    // Authoritative Price Derivation:
+    // 1. Try to find the exact fill price from Polymarket Data API (clobMap)
+    // 2. Fall back to Simmer's recorded average_price
+    // 3. Last resort: inferred current price (results in 0% PnL)
+    let avgPrice = 0;
+    const clobTokenIds = Array.isArray(metadata.clobTokenIds)
+      ? metadata.clobTokenIds
+      : JSON.parse(metadata.clobTokenIds as string) as string[];
+
+    const tokenId = direction === 'YES' ? clobTokenIds[0] : clobTokenIds[1];
+    const clobMatch = tokenId ? clobMap.get(tokenId) : null;
+
+    if (clobMatch) {
+      // Remove from clobMap so the CLOB orphan loop doesn't re-import this position.
+      clobMap.delete(tokenId);
+    }
+
+    if (clobMatch && clobMatch.avgPrice > 0) {
+      avgPrice = clobMatch.avgPrice;
+      logger.info('[reconcile] used authoritative CLOB price for Simmer orphan', {
+        marketId: metadata.id,
+        price: avgPrice,
+      });
+    } else {
+      avgPrice = pos.average_price ?? (pos.value_usdc && shares > 0 ? pos.value_usdc / shares : 0);
+    }
+
     const newPos: Position = {
-      marketId: metadata?.id || pos.market_id,
-      conditionId: metadata?.conditionId,
-      clobTokenIds: metadata?.clobTokenIds,
-      question: pos.question || metadata?.question || 'Re-imported Position',
+      marketId: metadata.id,
+      conditionId: metadata.conditionId,
+      clobTokenIds: metadata.clobTokenIds,
+      question: pos.question || metadata.question || 'Re-imported Position',
       direction,
       entryPrice: avgPrice,
       stakeUsd: shares * avgPrice,
@@ -350,15 +460,14 @@ async function importSimmerOrphan(redis: Redis, pos: SimmerPosition, metadata?: 
       executionVenue: 'simmer',
       sourcedFrom: 'reconciled:simmer',
       edgeMagnitude: 0,
-      reconciliationStatus: `imported:${new Date().toISOString()}`
+      reconciliationStatus: `imported:${new Date().toISOString()}`,
     };
 
     await recordPosition(redis, newPos);
-    logger.info('[reconcile] imported Simmer orphan', { 
-      marketId: newPos.marketId, 
-      direction, 
+    logger.info('[reconcile] imported Simmer orphan', {
+      marketId: newPos.marketId,
+      direction,
       shares,
-      isResolved: !!metadata 
     });
     return true;
   } catch (err) {

@@ -77,6 +77,10 @@ export interface Position {
   leverage?: number | undefined;
   symbol?: string | undefined;
   side?: 'long' | 'short' | undefined;
+  /** Asset ID (e.g. 'bitcoin') — used for tiered logic */
+  assetId?: string | undefined;
+  /** ISO timestamp for market resolution — used for tiered logic */
+  endDate?: string | undefined;
 }
 
 function positionKey(marketId: string, direction: Position['direction']): string {
@@ -179,6 +183,8 @@ export async function recordPosition(redis: Redis, position: Position): Promise<
     leverage: position.leverage !== undefined ? String(position.leverage) : '',
     symbol: position.symbol ?? '',
     side: position.side ?? '',
+    assetId: position.assetId ?? '',
+    endDate: position.endDate ?? '',
   });
 
   // Add to sorted index (score = openedAt ms for chronological retrieval)
@@ -369,6 +375,8 @@ function deserialisePosition(raw: Record<string, string>): Position {
     if (raw.symbol) pos.symbol = raw.symbol;
     if (raw.side) pos.side = raw.side as 'long' | 'short';
   }
+  if (raw.assetId) pos.assetId = raw.assetId;
+  if (raw.endDate) pos.endDate = raw.endDate;
 
   return pos;
 }
