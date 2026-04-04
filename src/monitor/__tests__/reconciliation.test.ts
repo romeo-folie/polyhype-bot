@@ -27,6 +27,7 @@ vi.mock('../../shared/polymarketData.js', () => ({
 
 vi.mock('../../shared/polymarketGamma.js', () => ({
   fetchMarketByConditionId: vi.fn(),
+  fetchMarketByQuestion: vi.fn(),
 }));
 
 describe('Position Reconciliation Healer', () => {
@@ -42,6 +43,7 @@ describe('Position Reconciliation Healer', () => {
     // Default mocks
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([]);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(null);
+    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(null);
   });
 
   it('detects and heals a cost-basis/share mismatch for Simmer', async () => {
@@ -264,6 +266,50 @@ describe('Position Reconciliation Healer', () => {
       conditionId: 'cond-abc',
       clobTokenIds: ['tok-yes', 'tok-no'],
       reconciliationStatus: expect.stringContaining('upgraded')
+    }));
+  });
+
+  it('upgrades a legacy Simmer UUID marketId via fuzzy question match when Data API matrix is empty', async () => {
+    const legacyPosition = {
+      marketId: 'cb0e1515-16ba-4f74-858b-cfd2d1988ccf',
+      question: 'Will it rain?',
+      direction: 'YES',
+      sharesHeld: 100,
+      stakeUsd: 50,
+      entryPrice: 0.50,
+      executionVenue: 'simmer',
+    };
+
+    const simmerPositions = [
+      {
+        market_id: 'cb0e1515-16ba-4f74-858b-cfd2d1988ccf',
+        side: 'yes',
+        shares: 100,
+        average_price: 0.50,
+        question: 'Will it rain?',
+      },
+    ];
+
+    const mockGammaMarket = {
+      id: 'numeric-888',
+      question: 'Will it rain?',
+      conditionId: 'cond-xyz',
+      clobTokenIds: ['tok-y', 'tok-n'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([legacyPosition]);
+    (simmer.getSimmerPositions as any).mockResolvedValue(simmerPositions);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([]); // Data API is empty!
+    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(mockGammaMarket);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Expecting fuzzy match to have been called
+    expect(polymarketGamma.fetchMarketByQuestion).toHaveBeenCalledWith('Will it rain?');
+
+    // Expecting new numeric entry to be recorded
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-888'
     }));
   });
 });

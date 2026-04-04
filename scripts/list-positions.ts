@@ -8,19 +8,13 @@ async function run() {
   try {
     const positions = await getOpenPositions(redis);
     
-    // Move cursor to top-left (H) and clear from cursor down (J) only after we have data
-    // This prevents the "blinking" caused by clearing the screen while the script is still loading.
-    process.stdout.write('\x1b[H');
-
-    if (positions.length === 0) {
-      console.log('\x1b[33mNo active positions found.\x1b[0m');
-      process.stdout.write('\x1b[J'); // Clear the rest of the old table
-      process.exit(0);
-    }
-
     const prices: Map<string, CurrentPrice> = await fetchAllCurrentPrices(positions);
+    
+    // Clear the screen and reset cursor to top.
+    // console.clear() works better with tmux's scrollback buffer than manual \x1b[H resets.
+    console.clear();
 
-    console.log(`\x1b[1mActive Positions (${positions.length})\x1b[0m`);
+    console.log(`\x1b[1mActive Positions (${positions.length})\x1b[0m   [Scroll: Mouse Wheel or Ctrl+B, []`);
     console.log('='.repeat(100));
     
     // Header

@@ -52,3 +52,53 @@ export async function fetchMarketByConditionId(conditionId: string): Promise<Gam
     return null;
   }
 }
+
+/**
+ * Search for a market by its question text on Gamma.
+ * Used as a fallback for Simmer UUID resolution.
+ */
+export async function fetchMarketByQuestion(question: string): Promise<GammaMarket | null> {
+  const url = `https://gamma-api.polymarket.com/v1/markets?active=true&closed=false&q=${encodeURIComponent(question)}`;
+  
+  try {
+    const resp = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!resp.ok) return null;
+
+    const data = await resp.json();
+    if (!Array.isArray(data) || data.length === 0) return null;
+
+    // Use normalized comparison to ensure it's the right market
+    const normalize = (q: string) => q?.toLowerCase().replace(/[^a-z0-9]/g, '') || '';
+    const target = normalize(question);
+
+    for (const m of data) {
+      if (normalize(m.question) === target) {
+        const market = m as Record<string, unknown>;
+        let clobTokenIds: string[] = [];
+        if (typeof market.clobTokenIds === 'string') {
+          clobTokenIds = JSON.parse(market.clobTokenIds) as string[];
+        } else if (Array.isArray(market.clobTokenIds)) {
+          clobTokenIds = market.clobTokenIds as string[];
+        }
+
+        return {
+          id: String(market.id),
+          question: String(market.question),
+          conditionId: String(market.conditionId),
+          clobTokenIds,
+          active: market.active === true,
+          closed: market.closed === true,
+        };
+      }
+    }
+
+    return null;
+  } catch (err) {
+    logger.error('[polymarket-gamma] search failed', { question, error: String(err) });
+    return null;
+  }
+}

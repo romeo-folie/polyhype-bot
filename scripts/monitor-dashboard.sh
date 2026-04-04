@@ -47,5 +47,6 @@ done
 
 # Select first pane and attach
 tmux set-option -t "$SESSION" remain-on-exit on
+tmux set-option -t "$SESSION" mouse on
 tmux select-pane -t "${SESSION}:w0.0"
 tmux attach-session -t "$SESSION"

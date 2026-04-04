@@ -4,7 +4,7 @@ import { getOpenPositions, closePosition, recordPosition, type Position } from '
 import { getSimmerPositions, type SimmerPosition } from '../shared/simmer.js';
 import { fetchClobTokenBalance } from '../shared/clob.js';
 import { fetchPolymarketPositions, type PolymarketPosition } from '../shared/polymarketData.js';
-import { fetchMarketByConditionId, type GammaMarket } from '../shared/polymarketGamma.js';
+import { fetchMarketByConditionId, fetchMarketByQuestion, type GammaMarket } from '../shared/polymarketGamma.js';
 
 interface ReconciliationDetail {
   type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded';
@@ -89,11 +89,20 @@ export async function runReconciliation(
       // 4a. Self-Healing ID Upgrade: Detect UUID marketIds from legacy Simmer imports
       const isUuid = /^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(ledgerPos.marketId);
       if (isUuid && ledgerPos.executionVenue === 'simmer') {
-        const metadata = questionToMetadata.get(normalize(ledgerPos.question));
+        const normQ = normalize(ledgerPos.question);
+        let metadata = questionToMetadata.get(normQ);
+        
+        // Fallback: If Data API matrix failed (lag), search Gamma directly by question
+        if (!metadata) {
+          logger.info('[reconcile] Data API lag detected, attempting fuzzy question match', { question: ledgerPos.question });
+          metadata = await fetchMarketByQuestion(ledgerPos.question) || undefined;
+        }
+
         if (metadata) {
           logger.info('[reconcile] upgrading legacy UUID marketId to numeric ID', {
             uuid: ledgerPos.marketId,
             numericId: metadata.id,
+            method: questionToMetadata.has(normQ) ? 'matrix' : 'fuzzy-search'
           });
           if (forceFix) {
             await closePosition(redis, ledgerPos.marketId, ledgerPos.direction);
@@ -240,7 +249,14 @@ export async function runReconciliation(
     for (const [_key, simmerPos] of simmerMap.entries()) {
       if (forceFix) {
         // Use correlation matrix to resolve real IDs if possible
-        const metadata = questionToMetadata.get(normalize(simmerPos.question || ''));
+        const normQ = normalize(simmerPos.question || '');
+        let metadata = questionToMetadata.get(normQ);
+
+        // Fallback fuzzy match for orphans
+        if (!metadata && simmerPos.question) {
+          metadata = await fetchMarketByQuestion(simmerPos.question) || undefined;
+        }
+
         const imported = await importSimmerOrphan(redis, simmerPos, metadata);
         if (imported) {
           importedCount++;
