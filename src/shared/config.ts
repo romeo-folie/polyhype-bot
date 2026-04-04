@@ -189,7 +189,14 @@ const envSchema = z.object({
   CRYPTO_ARB_MARKET_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
 
   // Tiered Market Logic
-  TIERED_LOGIC_ENABLED: z.coerce.boolean().optional().default(true),
+  TIERED_LOGIC_ENABLED: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((value) => {
+      const normalized = value.trim().toLowerCase();
+      return normalized !== '' && normalized !== '0' && normalized !== 'false';
+    }),
   CRYPTO_MOVE_THRESHOLD: z.coerce.number().min(0).optional().default(0.5),
   CRYPTO_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(50),
   CRYPTO_MIN_VOLUME: z.coerce.number().min(0).optional().default(100),

@@ -39,6 +39,9 @@ const ASSET_SEARCH_QUERIES: Record<string, string[]> = {
 
 const CORRELATION_CACHE_TTL = 86400; // 24 hours
 
+const STANDARD_MIN_VOLUME = 10_000;
+const STANDARD_MIN_LIQUIDITY = 5_000;
+
 /**
  * Check if a market meets liquidity and volume filters, applying tiered logic.
  */
@@ -48,8 +51,8 @@ function meetsLiquidityFilter(market: GammaMarket, assetId: string): boolean {
   const liquidity = parseFloat(market.liquidity || '0');
 
   // Standard floors (Geopolitical/Macro default)
-  let minVolFloor = 10_000;
-  let minLiqFloor = 5_000;
+  let minVolFloor = STANDARD_MIN_VOLUME;
+  let minLiqFloor = STANDARD_MIN_LIQUIDITY;
 
   if (cfg.TIERED_LOGIC_ENABLED) {
     const isCrypto = isCryptoAsset(assetId);
@@ -57,7 +60,7 @@ function meetsLiquidityFilter(market: GammaMarket, assetId: string): boolean {
     // Check for short duration: resolution within SHORT_DURATION_HOURS
     const now = Date.now();
     const resolutionDate = market.endDate ? new Date(market.endDate).getTime() : 0;
-    const isShortDuration = resolutionDate > 0 && 
+    const isShortDuration = resolutionDate > now && 
       (resolutionDate - now) < cfg.SHORT_DURATION_HOURS * 60 * 60 * 1000;
 
     if (isCrypto || isShortDuration) {

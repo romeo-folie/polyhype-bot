@@ -7,14 +7,7 @@ import { loadConfig } from '../../shared/config.js';
 vi.mock('../../mapping/gamma.js');
 vi.mock('../../shared/assets.js');
 vi.mock('../../shared/config.js');
-// Mocking the entire file to override inferCorrelationDirection
-vi.mock('../marketCorrelator.js', async () => {
-    const actual = await vi.importActual('../marketCorrelator.js');
-    return {
-        ...(actual as any),
-        // We'll mock inferCorrelationDirection below or just let it pass
-    };
-});
+
 
 vi.mock('../../shared/redis.js', () => ({
   getRedis: () => ({
