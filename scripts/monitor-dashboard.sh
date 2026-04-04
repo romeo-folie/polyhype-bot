@@ -15,27 +15,24 @@ done
 
 cd "$PROJECT_DIR" || exit 1
 
-# Optional: ensure stack is running if needed
-# docker compose up -d
-
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   tmux attach-session -t "$SESSION"
   exit 0
 fi
 
-# DOCKER WORKER LOGS (Color coded)
+# DOCKER WORKER LOGS (Standard 1-5 Workers)
 W0="docker compose logs -f --tail 100 pga-spot-feed | sed 's/\(\[[^]]*\]\)/\x1b[36m\1\x1b[0m/g'"
 W1="docker compose logs -f --tail 100 pga-arb       | sed 's/\(\[[^]]*\]\)/\x1b[33m\1\x1b[0m/g'"
 W2="docker compose logs -f --tail 100 pga-copytrade | sed 's/\(\[[^]]*\]\)/\x1b[32m\1\x1b[0m/g'"
-W3="docker compose logs -f --tail 100 pga-telegram  | sed 's/\(\[[^]]*\]\)/\x1b[92m\1\x1b[0m/g'"
+W3="docker compose logs -f --tail 100 pga-futures   | sed 's/\(\[[^]]*\]\)/\x1b[35m\1\x1b[0m/g'"
+W4="docker compose logs -f --tail 100 pga-telegram  | sed 's/\(\[[^]]*\]\)/\x1b[92m\1\x1b[0m/g'"
 
-# CRON LOGS (From /tmp)
-W4="touch /tmp/pga-trade.log && tail -f /tmp/pga-trade.log | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
-W5="touch /tmp/pga-monitor.log && tail -f /tmp/pga-monitor.log | sed 's/\(\[[^]]*\]\)/\x1b[35m\1\x1b[0m/g'"
-W6="touch /tmp/pga-spot.log && tail -f /tmp/pga-spot.log | sed 's/\(\[[^]]*\]\)/\x1b[96m\1\x1b[0m/g'"
-W7="touch /tmp/pga-shortlist.log && tail -f /tmp/pga-shortlist.log | sed 's/\(\[[^]]*\]\)/\x1b[95m\1\x1b[0m/g'"
+# CRON LOGS (6-8 From /tmp)
+W5="touch /tmp/pga-trade.log && tail -f /tmp/pga-trade.log | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
+W6="touch /tmp/pga-monitor.log && tail -f /tmp/pga-monitor.log | sed 's/\(\[[^]]*\]\)/\x1b[96m\1\x1b[0m/g'"
+W7="touch /tmp/pga-spot.log && tail -f /tmp/pga-spot.log | sed 's/\(\[[^]]*\]\)/\x1b[95m\1\x1b[0m/g'"
 
-# LEDGER VIEW
+# POSITION DISPLAY (9)
 W8="while true; do npx tsx scripts/list-positions.ts; sleep 10; done"
 
 # Partition the window into a dynamic tiled grid

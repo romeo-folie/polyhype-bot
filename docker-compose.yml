@@ -37,6 +37,17 @@ services:
       - redis
     command: npx tsx src/copytrade/worker.ts
 
+  # Futures Monitoring Strategy
+  pga-futures:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    command: npx tsx src/monitor/futuresMonitor.ts
+
   # Arbitrage Scanning Engine
   pga-arb:
     build: .
