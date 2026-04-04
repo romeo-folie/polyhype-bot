@@ -178,5 +178,50 @@ describe('Hallucination Guard Regression Tests', () => {
 
       expect(results).toHaveLength(0);
     });
+
+    it('rejects sports/weather markets in any category (Universal Guard)', async () => {
+      // Mock Gamma returning a sports market when query for 'crypto' news
+      mockSearchEvents.mockResolvedValue([
+        {
+          id: 'evt-olympics',
+          title: 'Paris Olympics 2024',
+          slug: 'paris-olympics',
+          active: true,
+          closed: false,
+          markets: [
+            {
+              id: 'mkt-olympics',
+              question: 'Will Paris Olympics win award for best event?',
+              conditionId: 'cond-olympics',
+              outcomes: ['Yes', 'No'],
+              active: true,
+              closed: false,
+              liquidity: '10000',
+              volume: '50000',
+              outcomePrices: '["0.5", "0.5"]',
+              clobTokenIds: '["yes", "no"]',
+              endDate: '2026-12-31',
+              description: 'Sports market',
+            },
+          ],
+        },
+      ]);
+
+      const results = await findCandidateMarkets({
+        title: 'Bitcoin price hits new ATH',
+        url: 'https://test.com',
+        source: 'test',
+        publishedAt: new Date(),
+        keywords: ['bitcoin', 'crypto'],
+        urgencyScore: 9,
+        categoryId: 'crypto', // Non-geopolitical
+        categoryLabel: 'Crypto',
+        entityContext: 'bitcoin',
+        sentiment: 'YES',
+      });
+
+      // Olympics market contains 'win', which is on the universal blocklist
+      expect(results).toHaveLength(0);
+    });
   });
 });

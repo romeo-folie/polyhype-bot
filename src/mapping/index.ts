@@ -12,6 +12,7 @@
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { findCandidateMarkets } from './entityExtractor.js';
+import { isMarketRelevant } from './relevanceGate.js';
 import { estimateConsensusProbability, estimateSentiment } from './consensusCalculator.js';
 import { computeDivergence } from './divergenceCalculator.js';
 import { resolveYesPrice } from '../shared/priceCache.js';
@@ -115,13 +116,20 @@ export async function runMapping(
         if (wsPrice !== null) currentYesPrice = wsPrice;
       }
 
+      // Hard Relevance Gate: Skip expensive consensus if headline is irrelevant
+      const isRelevant = await isMarketRelevant({
+        headline: item.title,
+        question: candidate.question,
+        description: candidate.description,
+      });
+      if (!isRelevant) continue;
+
       let consensus;
       try {
         consensus = await estimateConsensusProbability({
           question: candidate.question,
           description: candidate.description,
           headline: item.title,
-          currentYesPrice,
           ...(opts?.redis ? { redis: opts.redis } : {}),
         });
       } catch (err) {
