@@ -26,6 +26,17 @@ services:
       - redis
     command: npx tsx src/ingestion/telegramMonitor.ts
 
+  # Copytrading Strategy Worker
+  pga-copytrade:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    command: npx tsx src/copytrade/worker.ts
+
   # Arbitrage Scanning Engine
   pga-arb:
     build: .
