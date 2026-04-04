@@ -1,29 +1,49 @@
 
 services:
-  # The Telegram monitor worker
-  pga-telegram:
-    build:
-      context: .
-      dockerfile: Dockerfile.telegram
+  # The central state for the whole agent
+  redis:
+    image: redis:alpine
     restart: unless-stopped
-    # Interactive mode for initial authentication (first run: run --rm -it)
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redis-data:/data
+    command: redis-server --appendonly yes
+
+  # Telegram Monitor Service
+  pga-telegram:
+    build: .
+    restart: unless-stopped
+    # Interactive mode for initial authentication (run: docker compose run --rm pga-telegram)
     stdin_open: true
     tty: true
     env_file: .env
     environment:
-      # This overrides the .env to use the internal Docker network name
       - REDIS_URL=redis://redis:6379
     volumes:
       - ./tdlib-data:/app/tdlib-data
     depends_on:
       - redis
+    command: npx tsx src/ingestion/telegramMonitor.ts
 
-  # Your migrated Redis service, now on the standard port
-  redis:
-    image: redis:alpine
+  # Arbitrage Scanning Engine
+  pga-arb:
+    build: .
     restart: unless-stopped
-    ports:
-      - "6379:6379" # Standard port
-    volumes:
-      - ./redis-data:/data # Mount folder containing your extracted dump.rdb
-    command: redis-server --appendonly yes
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    command: npx tsx src/arb/worker.ts
+
+  # Spot Feed Management
+  pga-spot-feed:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    command: npx tsx src/spot/feeds/manager.ts
