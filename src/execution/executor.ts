@@ -1246,7 +1246,7 @@ export async function executeSignal(
     try {
       const tradeResult = await submitTrade({
         market_id: simmerId,
-        side: (signal.direction === 'YES' || signal.direction === 'UP' ? 'yes' : 'no') as 'yes' | 'no',
+        side: signal.direction === 'YES' || signal.direction === 'UP' ? 'yes' : 'no',
         amount: signal.stakeUsd,
         reasoning: `OSINT signal: "${signal.sourcedFrom}" — consensus P=${signal.consensusProbability?.toFixed(2) ?? 'N/A'}, market P=${signal.outcomePrice.toFixed(2)}, edge=${signal.edgeMagnitude.toFixed(2)}. ${signal.reasoning}`,
       });
