@@ -251,9 +251,13 @@ const envSchema = z.object({
   REDEEMER_FALLBACK_STALE_TTL_S: z.coerce.number().int().min(60).optional().default(21_600),
 
   // LLM rate reduction caches
-  SCORER_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
+  SCORER_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(86400),
   CONSENSUS_CACHE_ENABLED: z.coerce.boolean().optional().default(true),
   CONSENSUS_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(1800),
+  RELEVANCE_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
+  ENTITY_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(7200),
+  SENTIMENT_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
+  DEEPSEEK_PARSE_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(86400),
 
   // Copytrade signals
   COPYTRADE_ENABLED: z.coerce.boolean().optional().default(false),

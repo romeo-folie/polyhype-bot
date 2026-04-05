@@ -6,9 +6,11 @@
  * expensive consensus estimation.
  */
 
+import { createHash } from 'node:crypto';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
+import { getRedis } from '../shared/redis.js';
 
 /** Hard timeout for relevance check — must stay high-speed. */
 const RELEVANCE_TIMEOUT_MS = 10_000;
@@ -40,6 +42,18 @@ export async function isMarketRelevant(opts: {
     `Market Description: "${opts.description ?? 'N/A'}"\n` +
     `News Headline: "${opts.headline}"\n` +
     'Is this headline directly relevant to this market?';
+
+  // 0. Redis cache check
+  const cacheRaw = `${opts.question}|${opts.headline.trim().slice(0, 200)}`;
+  const cacheKey = 'relevance:' + createHash('sha256').update(cacheRaw).digest('hex');
+  try {
+    const cached = await getRedis().get(cacheKey);
+    if (cached !== null) {
+      return cached === '1';
+    }
+  } catch {
+    // cache read failed — fall through to LLM
+  }
 
   // 1. Prioritized list of providers for high-speed gating
   const providers: {
@@ -130,6 +144,13 @@ export async function isMarketRelevant(opts: {
       const raw = resultText.trim().toUpperCase();
       const firstToken = raw.split(/\s+/, 1)[0];
       const relevant = firstToken === 'YES';
+
+      // Cache the result
+      try {
+        await getRedis().set(cacheKey, relevant ? '1' : '0', 'EX', cfg.RELEVANCE_CACHE_TTL_S);
+      } catch {
+        // cache write failed — non-fatal
+      }
 
       if (!relevant) {
         logger.info('[relevance-gate] market rejected — irrelevant headline', {

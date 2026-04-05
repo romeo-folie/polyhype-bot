@@ -6,8 +6,10 @@
  * the Polymarket Gamma API to find relevant active markets.
  */
 
+import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
+import { getRedis } from '../shared/redis.js';
 import { searchEvents, parseOutcomePrices, parseClobTokenIds } from './gamma.js';
 import { importMarket } from '../shared/simmerImport.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
@@ -90,13 +92,29 @@ async function extractEntitiesGemini(headline: string, entityContext: string): P
  * Tries Gemini first (cheaper), falls back to OpenAI on error.
  */
 export async function extractEntities(headline: string, entityContext: string): Promise<string[]> {
-  const provider = loadConfig().LLM_PROVIDER;
+  const cfg = loadConfig();
+
+  // Redis cache check
+  const cacheRaw = `${entityContext}|${headline.trim()}`;
+  const cacheKey = 'entities:' + createHash('sha256').update(cacheRaw).digest('hex');
+  try {
+    const cached = await getRedis().get(cacheKey);
+    if (cached !== null) {
+      return JSON.parse(cached) as string[];
+    }
+  } catch {
+    // cache read failed — fall through to LLM
+  }
+
+  const provider = cfg.LLM_PROVIDER;
   const useGemini = provider === 'gemini' && Boolean(process.env.GEMINI_API_KEY);
   const useOpenAI = Boolean(process.env.OPENAI_API_KEY);
 
+  let entities: string[] | undefined;
+
   if (useGemini) {
     try {
-      return await extractEntitiesGemini(headline, entityContext);
+      entities = await extractEntitiesGemini(headline, entityContext);
     } catch (err: unknown) {
       logger.warn('[entity-extractor] Gemini failed, trying OpenAI', {
         error: err instanceof Error ? err.message : String(err),
@@ -104,11 +122,22 @@ export async function extractEntities(headline: string, entityContext: string): 
     }
   }
 
-  if (useOpenAI) {
-    return await extractEntitiesOpenAI(headline, entityContext);
+  if (!entities && useOpenAI) {
+    entities = await extractEntitiesOpenAI(headline, entityContext);
   }
 
-  throw new Error('No LLM provider configured (OPENAI_API_KEY or GEMINI_API_KEY required)');
+  if (!entities) {
+    throw new Error('No LLM provider configured (OPENAI_API_KEY or GEMINI_API_KEY required)');
+  }
+
+  // Cache the result
+  try {
+    await getRedis().set(cacheKey, JSON.stringify(entities), 'EX', cfg.ENTITY_CACHE_TTL_S);
+  } catch {
+    // cache write failed — non-fatal
+  }
+
+  return entities;
 }
 
 // ─── Market search ────────────────────────────────────────────────────────────

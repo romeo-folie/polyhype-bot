@@ -12,6 +12,7 @@ import type { OpenAI as OpenAIType } from 'openai';
 import type { GoogleGenerativeAI as GoogleGenerativeAIType } from '@google/generative-ai';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
+import { getRedis } from '../shared/redis.js';
 import { getRecentOutcomes, inferCategory } from '../shared/outcomeRecorder.js';
 import type { Redis } from 'ioredis';
 
@@ -326,6 +327,7 @@ export async function estimateConsensusProbability(opts: {
   description: string | null;
   headline: string;
   redis?: Redis;
+  skipContextInjection?: boolean;
 }): Promise<ConsensusEstimate> {
   const cfg = loadConfig();
 
@@ -344,7 +346,7 @@ export async function estimateConsensusProbability(opts: {
 
   // Phase 8a: Context injection — prepend recent outcomes to headline
   let enrichedHeadline = opts.headline;
-  if (cfg.CONTEXT_INJECTION_ENABLED && opts.redis) {
+  if (cfg.CONTEXT_INJECTION_ENABLED && opts.redis && !opts.skipContextInjection) {
     try {
       const category = inferCategory(opts.question);
       const outcomes = await getRecentOutcomes(opts.redis, category, cfg.CONTEXT_INJECTION_LIMIT);
@@ -466,6 +468,18 @@ async function getSentimentGemini(): Promise<GoogleGenerativeAIType> {
  */
 export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHORT' | 'NEUTRAL'> {
   const cfg = loadConfig();
+
+  // Redis cache check
+  const sentimentCacheKey = 'sentiment:' + createHash('sha256').update(headline.trim()).digest('hex');
+  try {
+    const cached = await getRedis().get(sentimentCacheKey);
+    if (cached === 'LONG' || cached === 'SHORT' || cached === 'NEUTRAL') {
+      return cached;
+    }
+  } catch {
+    // cache read failed — fall through to LLM
+  }
+
   const useGemini = cfg.LLM_PROVIDER === 'gemini' && Boolean(cfg.GEMINI_API_KEY);
   const useOpenAI = Boolean(cfg.OPENAI_API_KEY);
 
@@ -519,7 +533,16 @@ export async function estimateSentiment(headline: string): Promise<'LONG' | 'SHO
     clearTimeout(sentimentTimer);
   }
 
-  if (raw.includes('POSITIVE')) return 'LONG';
-  if (raw.includes('NEGATIVE')) return 'SHORT';
-  return 'NEUTRAL';
+  let result: 'LONG' | 'SHORT' | 'NEUTRAL' = 'NEUTRAL';
+  if (raw.includes('POSITIVE')) result = 'LONG';
+  else if (raw.includes('NEGATIVE')) result = 'SHORT';
+
+  // Cache the result
+  try {
+    await getRedis().set(sentimentCacheKey, result, 'EX', cfg.SENTIMENT_CACHE_TTL_S);
+  } catch {
+    // cache write failed — non-fatal
+  }
+
+  return result;
 }

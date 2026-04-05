@@ -10,6 +10,7 @@
  *   injecting the spot move as context.
  */
 
+import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { estimateConsensusProbability } from '../mapping/consensusCalculator.js';
 import { getRedis } from '../shared/redis.js';
@@ -163,6 +164,17 @@ async function deepseekStructuralParse(question: string): Promise<PriceTarget | 
   const cfg = loadConfig();
   if (!cfg.DEEPSEEK_API_KEY) return null;
 
+  // Redis cache check
+  const parseCacheKey = 'deepseek:parse:' + createHash('sha256').update(question.trim()).digest('hex');
+  try {
+    const cached = await getRedis().get(parseCacheKey);
+    if (cached !== null) {
+      return cached === 'null' ? null : JSON.parse(cached) as PriceTarget;
+    }
+  } catch {
+    // cache read failed — fall through to LLM
+  }
+
   try {
     const { default: OpenAI } = await import('openai');
     const client = new OpenAI({
@@ -191,10 +203,16 @@ If not a price-target market, return {"error": "not_price_target"}.`;
     });
 
     const content = response.choices[0]?.message?.content;
-    if (!content) return null;
+    if (!content) {
+      await cacheParseResult(parseCacheKey, null, cfg.DEEPSEEK_PARSE_CACHE_TTL_S);
+      return null;
+    }
 
     const parsed = JSON.parse(content);
-    if (parsed.error) return null;
+    if (parsed.error) {
+      await cacheParseResult(parseCacheKey, null, cfg.DEEPSEEK_PARSE_CACHE_TTL_S);
+      return null;
+    }
 
     const targetPrice = Number(parsed.targetPrice);
     const deadlineMs = Number(parsed.deadlineMs);
@@ -208,18 +226,24 @@ If not a price-target market, return {"error": "not_price_target"}.`;
       !Number.isFinite(deadlineMs) ||
       deadlineMs <= 0
     ) {
+      await cacheParseResult(parseCacheKey, null, cfg.DEEPSEEK_PARSE_CACHE_TTL_S);
       return null;
     }
 
-    return {
-      targetPrice,
-      direction,
-      deadlineMs,
-      method: 'deepseek',
-    };
+    const result: PriceTarget = { targetPrice, direction, deadlineMs, method: 'deepseek' };
+    await cacheParseResult(parseCacheKey, result, cfg.DEEPSEEK_PARSE_CACHE_TTL_S);
+    return result;
   } catch (err) {
     logger.error('[deepseek-parser] failed', { error: String(err) });
     return null;
+  }
+}
+
+async function cacheParseResult(key: string, value: PriceTarget | null, ttl: number): Promise<void> {
+  try {
+    await getRedis().set(key, value === null ? 'null' : JSON.stringify(value), 'EX', ttl);
+  } catch {
+    // cache write failed — non-fatal
   }
 }
 
@@ -312,6 +336,7 @@ export async function estimateFastConsensus(
     description: market.description,
     headline: `Spot move detected for ${move.assetId}: ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(2)}% in ${move.windowMinutes}min. Current price: ${move.currentPrice}.`,
     redis,
+    skipContextInjection: true,
   });
 
   return {
