@@ -89,7 +89,10 @@ export class ArbMarketWarmer {
       // Discover Up/Down crypto markets (ephemeral, tag-based discovery)
       let upDownDiscovered = 0;
       let upDownWatched = 0;
-      try {
+      const warmCfg = loadConfig();
+      if (!warmCfg.UPDOWN_ENABLED) {
+        logger.debug('[warmer] Up/Down discovery skipped (UPDOWN_ENABLED=false)');
+      } else try {
         const cryptoEvents = await listRecentCryptoEvents({ maxHoursToResolution: 1 });
         for (const event of cryptoEvents) {
           for (const market of event.markets) {

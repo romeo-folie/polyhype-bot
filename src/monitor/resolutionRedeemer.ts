@@ -484,7 +484,8 @@ async function redeemClobPositions(
     }
 
     const pmDirection = pos.direction;
-    const side = pmDirection.toLowerCase() as 'yes' | 'no';
+    const isYesSide = pmDirection === 'YES' || pmDirection === 'UP';
+    const side = (isYesSide ? 'yes' : 'no') as 'yes' | 'no';
 
     const tokenId = pickClobTokenId(pos);
     const preBalance = await refreshTokenBalance(tokenId);
@@ -516,7 +517,9 @@ async function redeemClobPositions(
         direction: pos.direction,
       });
 
-      const won = resolved.outcome === pmDirection;
+      // checkMarketResolved() returns YES/NO; map UP→YES, DOWN→NO for comparison
+      const normalizedDirection = isYesSide ? 'YES' : 'NO';
+      const won = resolved.outcome === normalizedDirection;
       if (!won) {
         // Market resolved against us — close ledger entry without redeeming
         logger.info('[redeemer] CLOB position resolved as loss, closing ledger', {
@@ -551,7 +554,7 @@ async function redeemClobPositions(
 
       const redeemResult = await redeemClobOutcome({
         conditionId: conditionId,
-        direction: pmDirection,
+        direction: normalizedDirection,
       });
 
       if (!redeemResult.success) {
@@ -567,7 +570,7 @@ async function redeemClobPositions(
           if (await shouldNotifyManual(redis, conditionId)) {
             void notifyManualRedemptionRequired({
               conditionId: conditionId,
-              direction: pmDirection,
+              direction: normalizedDirection,
               question: resolvedQuestion,
               ...(pos.sharesHeld != null && { estimatedUsdc: pos.sharesHeld }),
             }).catch(() => {});
@@ -885,8 +888,9 @@ async function redeemSimmerLedgerFallback(
       continue;
     }
 
-    const pmDirection = pos.direction as 'YES' | 'NO';
-    const side = pmDirection.toLowerCase() as 'yes' | 'no';
+    const pmDirection = pos.direction as 'YES' | 'NO' | 'UP' | 'DOWN';
+    const isYesSideSimmer = pmDirection === 'YES' || pmDirection === 'UP';
+    const side = (isYesSideSimmer ? 'yes' : 'no') as 'yes' | 'no';
 
     const reportedBalance =
       pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : null);
@@ -907,7 +911,9 @@ async function redeemSimmerLedgerFallback(
           ? pos.question
           : (resolved.question ?? pos.marketId);
 
-      const won = resolved.outcome === pmDirection;
+      // checkMarketResolved() returns YES/NO; map UP→YES, DOWN→NO for comparison
+      const normalizedDirSimmer = isYesSideSimmer ? 'YES' : 'NO';
+      const won = resolved.outcome === normalizedDirSimmer;
       if (!won) {
         // Market resolved against us — close ledger entry without redeeming
         logger.info('[redeemer] Simmer fallback: position resolved as loss, closing ledger', {
@@ -959,7 +965,7 @@ async function redeemSimmerLedgerFallback(
         // This handles old/resolved markets that no longer appear in Simmer search results.
         const onChainResult = await redeemClobOutcome({
           conditionId: conditionId,
-          direction: pmDirection,
+          direction: normalizedDirSimmer,
         });
 
         if (onChainResult.success) {
@@ -1027,7 +1033,7 @@ async function redeemSimmerLedgerFallback(
           if (await shouldNotifyManual(redis, conditionId)) {
             void notifyManualRedemptionRequired({
               conditionId: conditionId,
-              direction: pmDirection,
+              direction: normalizedDirSimmer,
               question: resolvedQuestion,
               ...(pos.sharesHeld != null && { estimatedUsdc: pos.sharesHeld }),
             }).catch(() => {});

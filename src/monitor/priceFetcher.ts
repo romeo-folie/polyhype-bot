@@ -94,14 +94,17 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
       return null;
     }
 
-    // Determine correct indices for YES and NO outcomes.
-    // Gamma usually returns ["Yes", "No"] but order is not strictly guaranteed.
+    // Determine correct indices for YES/UP and NO/DOWN outcomes.
+    // Gamma usually returns ["Yes", "No"] or ["Up", "Down"] but order is not strictly guaranteed.
     const outcomes = parseOutcomes(market.outcomes).map((o) => o.toLowerCase());
-    const yesIndex = outcomes.indexOf('yes');
-    const noIndex = outcomes.indexOf('no');
+    let yesIndex = outcomes.indexOf('yes');
+    let noIndex = outcomes.indexOf('no');
 
-    // Default to index 0 for YES and index 1 for NO if not found or if this is a binary market
-    // without standard labels (PGA only supports binary YES/NO for now).
+    // For Up/Down markets, map UP→YES-side, DOWN→NO-side
+    if (yesIndex === -1) yesIndex = outcomes.indexOf('up');
+    if (noIndex === -1) noIndex = outcomes.indexOf('down');
+
+    // Default to index 0 for YES-side and index 1 for NO-side if not found
     const resolvedYesIndex = yesIndex !== -1 ? yesIndex : 0;
     const resolvedNoIndex = noIndex !== -1 ? noIndex : (prices.length > 1 ? 1 : 0);
 
@@ -117,7 +120,7 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
     // If the market is healthy, YES + NO prices should sum to approx 1.0.
     // We prefer the direct price of the held outcome if available.
     // Validate NO price as well if direction is NO
-    if (pmDirection === 'NO' && !Number.isFinite(currentNoPrice)) {
+    if ((pmDirection === 'NO' || pmDirection === 'DOWN') && !Number.isFinite(currentNoPrice)) {
       logger.warn('[price-fetcher] invalid NO price for outcome', { marketId: position.marketId, outcome: outcomes[resolvedNoIndex] });
       return null;
     }
