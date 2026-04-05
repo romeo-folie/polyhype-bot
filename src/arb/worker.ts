@@ -2,7 +2,7 @@ import { getRedis, getSubscriberRedis, closeRedis } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
 import { runArbScan } from './scanner.js';
 import { loadConfig } from '../shared/config.js';
-import { scanCryptoArb } from './cryptoArbScanner.js';
+import { scanCryptoArb, scanUpDownArb } from './cryptoArbScanner.js';
 import { BINANCE_SYMBOL_TO_ASSET } from '../shared/assets.js';
 import { executeSignal } from '../execution/executor.js';
 import { recordPosition } from '../execution/positionLedger.js';
@@ -291,7 +291,19 @@ export class ArbitrageWorker {
       this.lastCryptoArbTime = now;
 
       await recordCryptoArbMetric(redis, 'crypto_arb_scans').catch(() => {});
-      const opportunities = await scanCryptoArb(move, redis);
+      const cryptoOpportunities = await scanCryptoArb(move, redis);
+
+      // Scan Up/Down Bitcoin markets (independent of price-target arb)
+      let upDownOpps: typeof cryptoOpportunities = [];
+      try {
+        upDownOpps = await scanUpDownArb(move, redis);
+      } catch (err) {
+        logger.warn('[crypto-arb] Up/Down scan failed (non-fatal)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      const opportunities = [...cryptoOpportunities, ...upDownOpps];
       if (opportunities.length > 0) {
         await recordCryptoArbMetric(redis, 'opportunities_found').catch(() => {});
       }

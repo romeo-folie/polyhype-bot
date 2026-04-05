@@ -185,8 +185,8 @@ function logRedeemerSkip(
 
 function pickClobTokenId(position: Position): string | undefined {
   if (!position.clobTokenIds || position.clobTokenIds.length === 0) return undefined;
-  if (position.direction === 'YES') return position.clobTokenIds[0];
-  if (position.direction === 'NO') return position.clobTokenIds[1];
+  if (position.direction === 'YES' || position.direction === 'UP') return position.clobTokenIds[0];
+  if (position.direction === 'NO' || position.direction === 'DOWN') return position.clobTokenIds[1];
   return undefined;
 }
 
@@ -472,8 +472,9 @@ async function redeemClobPositions(
   logger.info('[redeemer] checking CLOB positions for resolution', { count: clobPositions.length });
 
   for (const pos of clobPositions) {
-    // CLOB positions are always YES/NO — LONG/SHORT are HL-only and filtered above
-    if (pos.direction !== 'YES' && pos.direction !== 'NO') continue;
+    // CLOB positions are YES/NO/UP/DOWN — LONG/SHORT are HL-only and filtered above
+    if (pos.direction !== 'YES' && pos.direction !== 'NO'
+        && pos.direction !== 'UP' && pos.direction !== 'DOWN') continue;
     const conditionId = pos.conditionId;
     if (!conditionId) {
       logger.warn('[redeemer] CLOB position missing conditionId — skipping', {
@@ -863,8 +864,8 @@ async function redeemSimmerLedgerFallback(
   const simmerPositions = allPositions.filter(
     (p: Position) =>
       (p.executionVenue === 'simmer' || !p.executionVenue) &&
-      p.direction !== 'LONG' &&
-      p.direction !== 'SHORT',
+      (p.direction === 'YES' || p.direction === 'NO' ||
+       p.direction === 'UP' || p.direction === 'DOWN'),
   );
 
   if (simmerPositions.length === 0) return;

@@ -19,7 +19,7 @@ import type { Position } from '../execution/positionLedger.js';
 
 export interface CurrentPrice {
   marketId: string;
-  direction: 'YES' | 'NO';
+  direction: 'YES' | 'NO' | 'UP' | 'DOWN';
   /** Current price of the outcome we hold (0–1) */
   currentOutcomePrice: number;
   /** Raw YES price from Gamma */
@@ -41,14 +41,15 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
     // priceFetcher only handles Polymarket positions (YES/NO).
     // Futures positions (LONG/SHORT) are managed by futuresMonitor — skip them here
     // rather than silently casting an invalid direction.
-    if (position.direction !== 'YES' && position.direction !== 'NO') {
+    if (position.direction !== 'YES' && position.direction !== 'NO'
+        && position.direction !== 'UP' && position.direction !== 'DOWN') {
       logger.debug('[price-fetcher] skipping non-PM position', {
         marketId: position.marketId,
         direction: position.direction,
       });
       return null;
     }
-    const pmDirection: 'YES' | 'NO' = position.direction;
+    const pmDirection: 'YES' | 'NO' | 'UP' | 'DOWN' = position.direction;
 
     // Skip UUID marketIds (legacy Simmer imports) — Gamma returns 422 for UUIDs.
     // Reconciliation will upgrade these to numeric IDs; no point hitting the API.
@@ -69,7 +70,8 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
         marketId: position.marketId,
         price: cachedPrice,
       });
-      const currentOutcomePrice = pmDirection === 'YES' ? cachedPrice : 1 - cachedPrice;
+      const isYesSide = pmDirection === 'YES' || pmDirection === 'UP';
+      const currentOutcomePrice = isYesSide ? cachedPrice : 1 - cachedPrice;
       return {
         marketId: position.marketId,
         direction: pmDirection,
@@ -120,7 +122,8 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
       return null;
     }
 
-    const currentOutcomePrice = pmDirection === 'YES' ? currentYesPrice : currentNoPrice;
+    const isYesSideRest = pmDirection === 'YES' || pmDirection === 'UP';
+    const currentOutcomePrice = isYesSideRest ? currentYesPrice : currentNoPrice;
 
     return {
       marketId: position.marketId,

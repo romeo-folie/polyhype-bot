@@ -142,6 +142,7 @@ export async function runReconciliation(
       }
 
       // Skip perp positions (LONG/SHORT) or explicit HL execution venues.
+      // Note: UP/DOWN are Polymarket positions and should NOT be skipped here.
       if (ledgerPos.direction === 'LONG' || ledgerPos.direction === 'SHORT' || ledgerPos.executionVenue === 'hyperliquid') {
         continue;
       }
@@ -164,7 +165,7 @@ export async function runReconciliation(
         clobCount++;
         
         const tokenIds = ledgerPos.clobTokenIds ?? [];
-        const tokenIndex = ledgerPos.direction === 'YES' ? 0 : 1;
+        const tokenIndex = (ledgerPos.direction === 'YES' || ledgerPos.direction === 'UP') ? 0 : 1;
         const tokenId = tokenIds[tokenIndex];
 
         const clobMatch = tokenId ? clobMap.get(tokenId) : null;

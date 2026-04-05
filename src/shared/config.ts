@@ -188,6 +188,13 @@ const envSchema = z.object({
   CRYPTO_ARB_DEDUP_TTL_S: z.coerce.number().int().positive().optional().default(300),
   CRYPTO_ARB_MARKET_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
 
+  // Up/Down Bitcoin market trading
+  UPDOWN_ENABLED: z.coerce.boolean().optional().default(false),
+  UPDOWN_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
+  // Minimum edge to allow entry on fee-enabled markets (executor fee gate).
+  // Defaults to 0.04 (4%) — must exceed this to justify the ~2% taker fee.
+  FEE_MARKET_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.04),
+
   // Tiered Market Logic
   TIERED_LOGIC_ENABLED: z
     .string()

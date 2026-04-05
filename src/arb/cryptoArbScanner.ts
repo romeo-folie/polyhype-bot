@@ -15,6 +15,7 @@ import { getBankroll } from '../shared/bankroll.js';
 import { recordCryptoArbGate } from '../shared/telemetry.js';
 import { scoreConfluence } from './confluenceScorer.js';
 import { resolveHlSymbol } from '../shared/hyperliquid.js';
+import { listRecentCryptoEvents, parseClobTokenIds, parseOutcomePrices, parseOutcomes } from '../mapping/gamma.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { Redis } from 'ioredis';
 
@@ -23,7 +24,7 @@ export interface CryptoArbOpportunity {
   conditionId: string;
   clobTokenIds: string[];
   question: string;
-  direction: 'YES' | 'NO';
+  direction: 'YES' | 'NO' | 'UP' | 'DOWN';
   tokenId: string;
   currentPmPrice: number;
   fairValuePrice: number;
@@ -248,15 +249,9 @@ export async function scanCryptoArb(move: SpotMove, redis: Redis): Promise<Crypt
 
   for (const market of markets) {
     try {
-      // 2a. Skip fee markets — fee drag kills arb edge and CLOB rejects them
-      if (market.feesEnabled) {
-        logger.debug('[crypto-arb] skipping fee market', {
-          marketId: market.marketId,
-          question: market.question.slice(0, 80),
-        });
-        await recordCryptoArbGate(redis, 'fees_enabled');
-        continue;
-      }
+      // 2a. Fee markets: the fee rate is already subtracted from netEdge below
+      // via ARB_FEE_RATE, so markets that pass the min edge gate have already
+      // cleared the fee hurdle. No need to skip them unconditionally.
 
       // 2b. Get current PM YES price (WS cache → fallback to struct)
       const wsPrice = await feed.getCachedPrice(market.marketId);
@@ -402,6 +397,202 @@ export async function scanCryptoArb(move: SpotMove, redis: Redis): Promise<Crypt
       assetId: move.assetId,
       count: opportunities.length,
       topEdge: opportunities[0]?.edge.toFixed(4),
+    });
+  }
+
+  return opportunities;
+}
+
+// ── Up/Down Scanner ─────────────────────────────────────────────────────────
+
+const UPDOWN_MARKET_CACHE_KEY = 'crypto:updown:markets';
+const UPDOWN_DEDUP_PREFIX = 'arb:updown:';
+
+/**
+ * Map confluence score (0–3) to a directional probability.
+ * These are conservative: Up/Down markets are ~50/50, so any edge above 0.50 matters.
+ */
+function confluenceScoreToFairValue(score: number): number {
+  if (score >= 3) return 0.65;
+  if (score >= 2) return 0.58;
+  return 0.52;
+}
+
+/**
+ * Scan for Up/Down Bitcoin market opportunities using confluence indicators.
+ *
+ * Unlike the price-target arb scanner (which uses Black-Scholes), this uses
+ * the RSI/MACD/Stochastic confluence scorer to determine directional bias
+ * on 5-min and 15-min "Bitcoin Up or Down" markets.
+ */
+export async function scanUpDownArb(
+  move: SpotMove,
+  redis: Redis,
+): Promise<CryptoArbOpportunity[]> {
+  const cfg = loadConfig();
+
+  if (!cfg.UPDOWN_ENABLED) return [];
+
+  // Only process Bitcoin moves
+  if (move.assetId !== 'bitcoin') return [];
+
+  // Resolve Binance symbol for confluence scoring
+  const symbol = Object.entries(BINANCE_SYMBOL_TO_ASSET).find(([, v]) => v === 'bitcoin')?.[0];
+  if (!symbol) return [];
+
+  // 1. Confluence signal
+  const confluence = await scoreConfluence(symbol, redis);
+  if (confluence.direction === 'NEUTRAL' || confluence.score < 2) {
+    logger.debug('[updown-arb] insufficient confluence for Up/Down', {
+      score: confluence.score,
+      direction: confluence.direction,
+    });
+    return [];
+  }
+
+  // 2. Discover Up/Down markets (cached, short TTL for ephemeral markets)
+  let markets: {
+    marketId: string;
+    conditionId: string;
+    clobTokenIds: string[];
+    question: string;
+    currentUpPrice: number;
+    feesEnabled: boolean;
+    endDate: string | null;
+  }[] = [];
+
+  const cached = await redis.get(UPDOWN_MARKET_CACHE_KEY);
+  if (cached) {
+    try {
+      markets = JSON.parse(cached) as typeof markets;
+    } catch {
+      markets = [];
+    }
+  }
+
+  if (markets.length === 0) {
+    try {
+      const events = await listRecentCryptoEvents({ maxHoursToResolution: 1 });
+      for (const event of events) {
+        for (const market of event.markets) {
+          if (!market.active || market.closed) continue;
+          const outcomes = parseOutcomes(market.outcomes);
+          const hasUpDown = outcomes.some((o) => o.toLowerCase() === 'up') &&
+            outcomes.some((o) => o.toLowerCase() === 'down');
+          if (!hasUpDown) continue;
+          if (!market.question.toLowerCase().includes('bitcoin')) continue;
+
+          const clobTokenIds = parseClobTokenIds(market.clobTokenIds);
+          const prices = parseOutcomePrices(market.outcomePrices);
+          const upPrice = parseFloat(prices[0] ?? '0.5');
+
+          markets.push({
+            marketId: market.id,
+            conditionId: market.conditionId,
+            clobTokenIds,
+            question: market.question,
+            currentUpPrice: isFinite(upPrice) ? upPrice : 0.5,
+            feesEnabled: market.feesEnabled ?? false,
+            endDate: market.endDate,
+          });
+        }
+      }
+      // Cache for 2 minutes (short because these markets are ephemeral)
+      await redis.set(UPDOWN_MARKET_CACHE_KEY, JSON.stringify(markets), 'EX', 120);
+    } catch (err) {
+      logger.warn('[updown-arb] market discovery failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
+
+  if (markets.length === 0) {
+    logger.debug('[updown-arb] no Up/Down markets found');
+    return [];
+  }
+
+  const feeRate = cfg.ARB_FEE_RATE;
+  const minEdge = cfg.UPDOWN_MIN_EDGE;
+  const bankroll = await getBankroll(redis);
+  const feed = getPriceFeed(redis);
+  const opportunities: CryptoArbOpportunity[] = [];
+
+  for (const market of markets) {
+    try {
+      // Get current price from WS if available
+      const wsPrice = await feed.getCachedPrice(market.marketId);
+      const currentUpPrice = wsPrice ?? market.currentUpPrice;
+      if (!isFinite(currentUpPrice) || currentUpPrice <= 0 || currentUpPrice >= 1) continue;
+
+      // Direction: confluence UP → buy UP token, DOWN → buy DOWN token
+      const direction: 'UP' | 'DOWN' = confluence.direction;
+      const currentPmPrice = direction === 'UP' ? currentUpPrice : 1 - currentUpPrice;
+
+      // Fair value from confluence score
+      const fairValue = confluenceScoreToFairValue(confluence.score);
+
+      // Edge calculation
+      const wsSpread = await feed.getCachedSpread(market.marketId);
+      const spreadBuffer = wsSpread ?? 0;
+      const netEdge = Math.abs(fairValue - currentPmPrice) - feeRate - spreadBuffer;
+
+      if (netEdge < minEdge) continue;
+
+      // Check that fair value suggests our direction (fair > current for our token)
+      if (fairValue <= currentPmPrice) continue;
+
+      // Dedup
+      const dedupKey = `${UPDOWN_DEDUP_PREFIX}${market.marketId}:${direction}`;
+      const deduped = await redis.get(dedupKey);
+      if (deduped) continue;
+
+      // Stake sizing (same Kelly-fraction approach as crypto arb)
+      const kellyStake = bankroll * netEdge * cfg.CRYPTO_ARB_MAX_STAKE_FRACTION;
+      const maxStake = cfg.MAX_BET_FRACTION * bankroll;
+      const stakeUsd = Math.min(kellyStake, maxStake);
+      if (stakeUsd < 0.01) continue;
+
+      // Token selection: UP = token[0], DOWN = token[1]
+      const tokenId = direction === 'UP'
+        ? (market.clobTokenIds[0] ?? '')
+        : (market.clobTokenIds[1] ?? '');
+
+      const hlSymbol = resolveHlSymbol(market.question);
+
+      opportunities.push({
+        marketId: market.marketId,
+        conditionId: market.conditionId,
+        clobTokenIds: market.clobTokenIds,
+        question: market.question,
+        direction,
+        tokenId,
+        currentPmPrice,
+        fairValuePrice: fairValue,
+        edge: netEdge,
+        stakeUsd,
+        assetId: 'bitcoin',
+        feesEnabled: market.feesEnabled,
+        spreadBps: spreadBuffer * 10000,
+        hlSymbol,
+        endDate: market.endDate,
+      });
+    } catch (err) {
+      logger.warn('[updown-arb] error processing market', {
+        marketId: market.marketId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  opportunities.sort((a, b) => b.edge - a.edge);
+
+  if (opportunities.length > 0) {
+    logger.info('[updown-arb] opportunities found', {
+      count: opportunities.length,
+      topEdge: opportunities[0]?.edge.toFixed(4),
+      confluenceScore: confluence.score,
+      confluenceDirection: confluence.direction,
     });
   }
 

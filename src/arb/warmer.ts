@@ -1,6 +1,6 @@
 import { getRedis } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
-import { searchEvents, parseClobTokenIds } from '../mapping/gamma.js';
+import { searchEvents, parseClobTokenIds, listRecentCryptoEvents, parseOutcomes } from '../mapping/gamma.js';
 import { getPriceFeed } from '../shared/feedSingleton.js';
 import { ASSET_SEARCH_QUERIES } from '../shared/assets.js';
 import { loadConfig } from '../shared/config.js';
@@ -86,9 +86,45 @@ export class ArbMarketWarmer {
         }
       }
 
+      // Discover Up/Down crypto markets (ephemeral, tag-based discovery)
+      let upDownDiscovered = 0;
+      let upDownWatched = 0;
+      try {
+        const cryptoEvents = await listRecentCryptoEvents({ maxHoursToResolution: 1 });
+        for (const event of cryptoEvents) {
+          for (const market of event.markets) {
+            if (!market.active || market.closed) continue;
+            // Filter to Up/Down markets about Bitcoin
+            try {
+              const outcomes = parseOutcomes(market.outcomes);
+              const hasUpDown = outcomes.some((o) => o.toLowerCase() === 'up') &&
+                outcomes.some((o) => o.toLowerCase() === 'down');
+              if (!hasUpDown) continue;
+              const question = market.question.toLowerCase();
+              if (!question.includes('bitcoin')) continue;
+
+              upDownDiscovered++;
+              const clobTokenIds = parseClobTokenIds(market.clobTokenIds);
+              if (clobTokenIds.length >= 1) {
+                await feed.watch(market.id, clobTokenIds);
+                upDownWatched++;
+              }
+            } catch {
+              // Skip invalid markets
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn('[warmer] Up/Down crypto event discovery failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
       logger.info('[warmer] warmup cycle complete', {
         discoveredCount,
         watchedCount,
+        upDownDiscovered,
+        upDownWatched,
         assetsCount: assets.length,
       });
     } finally {

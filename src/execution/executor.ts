@@ -87,7 +87,7 @@ function idempotencyKey(signal: TradeSignal): string {
 }
 
 function clobTokenForSignal(signal: TradeSignal): string | null {
-  if (signal.direction === 'YES') return signal.clobTokenIds?.[0] ?? null;
+  if (signal.direction === 'YES' || signal.direction === 'UP') return signal.clobTokenIds?.[0] ?? null;
   return signal.clobTokenIds?.[1] ?? null;
 }
 
@@ -1056,7 +1056,9 @@ export async function executeSignal(
   let clobFallbackReason: string | null = null;
   let takerDecisionBenchmarkPromise: Promise<DecisionBenchmark> | null = null;
 
-  if (executionMode !== 'taker' && !signal.isFutures && signal.feesEnabled !== true) {
+  // Maker path: skip for fee markets unless edge justifies the cost (Up/Down markets have fees)
+  const feeMarketAllowed = signal.feesEnabled === true && (signal.edgeMagnitude ?? 0) >= cfg.FEE_MARKET_MIN_EDGE;
+  if (executionMode !== 'taker' && !signal.isFutures && (signal.feesEnabled !== true || feeMarketAllowed)) {
     makerAttempted = true;
     if (!decisionSubmitted) {
       decisionSubmitted = true;
@@ -1233,7 +1235,7 @@ export async function executeSignal(
     try {
       const tradeResult = await submitTrade({
         market_id: simmerId,
-        side: signal.direction.toLowerCase() as 'yes' | 'no',
+        side: (signal.direction === 'YES' || signal.direction === 'UP' ? 'yes' : 'no') as 'yes' | 'no',
         amount: signal.stakeUsd,
         reasoning: `OSINT signal: "${signal.sourcedFrom}" — consensus P=${signal.consensusProbability?.toFixed(2) ?? 'N/A'}, market P=${signal.outcomePrice.toFixed(2)}, edge=${signal.edgeMagnitude.toFixed(2)}. ${signal.reasoning}`,
       });
@@ -1376,12 +1378,13 @@ export async function executeSignal(
     clobFallbackReason = 'simmer_market_missing';
   }
 
-  // 6) Fee gate — skip CLOB if Gamma reports fees enabled on this market.
-  // Simmer has its own fee gate (ctx.market.fee_rate_bps) earlier in the flow.
-  // This gate covers the CLOB-only path (markets not in Simmer catalogue).
-  if (signal.feesEnabled === true) {
-    logger.info('[executor] skipping CLOB — market has fees enabled', {
+  // 6) Fee gate — skip CLOB if Gamma reports fees enabled on this market,
+  // UNLESS the edge is high enough to justify the fee (e.g. Up/Down arb signals).
+  if (signal.feesEnabled === true && (signal.edgeMagnitude ?? 0) < cfg.FEE_MARKET_MIN_EDGE) {
+    logger.info('[executor] skipping CLOB — market has fees enabled and edge too low', {
       marketId: signal.marketId,
+      edgeMagnitude: signal.edgeMagnitude,
+      feeThreshold: cfg.FEE_MARKET_MIN_EDGE,
     });
     return recordSkip('fee_market:clob_path', 'skipped', undefined, 'clob', 'taker');
   }

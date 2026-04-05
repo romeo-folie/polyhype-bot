@@ -26,7 +26,7 @@ export interface Position {
   /** Question or trade reasoning */
   question: string;
   /** Direction: YES/NO for PM, LONG/SHORT for futures */
-  direction: 'YES' | 'NO' | 'LONG' | 'SHORT';
+  direction: 'YES' | 'NO' | 'UP' | 'DOWN' | 'LONG' | 'SHORT';
   /** Entry price of the purchased outcome (0–1 for PM, USD price for futures) */
   entryPrice: number;
   /** Amount staked in USDC (margin for futures) */
@@ -98,6 +98,10 @@ export function formatDirection(direction: Position['direction']): string {
       return 'YES ↑';
     case 'NO':
       return 'NO ↓';
+    case 'UP':
+      return 'UP ↑';
+    case 'DOWN':
+      return 'DOWN ↓';
     case 'LONG':
       return 'LONG ↑';
     case 'SHORT':
