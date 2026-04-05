@@ -219,6 +219,8 @@ const envSchema = z.object({
   CRYPTO_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.15),
   SHORT_DURATION_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.10),
   SHORT_DURATION_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.15),
+  COPYTRADE_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.40),
+  COPYTRADE_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.50),
   MONITOR_HEAVY_INTERVAL_MIN: z.coerce.number().int().min(1).optional().default(5),
 
   // Phase 9 — Indicator confluence gate

@@ -158,9 +158,13 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
     let tpThreshold = cfg.TAKE_PROFIT_THRESHOLD;
     let slThreshold = cfg.STOP_LOSS_THRESHOLD;
 
-    if (cfg.TIERED_LOGIC_ENABLED) {
+    const isCopytrade = position.sourcedFrom?.startsWith('copytrade:');
+    if (isCopytrade) {
+      tpThreshold = cfg.COPYTRADE_TAKE_PROFIT;
+      slThreshold = cfg.COPYTRADE_STOP_LOSS;
+    } else if (cfg.TIERED_LOGIC_ENABLED) {
       const isCrypto = position.assetId ? isCryptoAsset(position.assetId) : false;
-      
+
       // Check for short duration: resolution within SHORT_DURATION_HOURS
       let isShortDuration = false;
       if (position.endDate) {
