@@ -273,11 +273,17 @@ async function processScoredItemsInner(
             const side = signal.direction.toLowerCase() as 'yes' | 'no';
             const match = livePositions.find((p) => p.market_id === simmerId && p.side === side);
             if (match?.shares && match.shares > 0 && match.shares !== estimatedShares) {
-              const actualEntryPrice = signal.stakeUsd / match.shares;
+              // Prefer Simmer's reported average_price (actual fill price) over
+              // computing stakeUsd / shares, which assumes the fill matched the
+              // requested stake ratio and can be wrong when Simmer fills at a
+              // different price due to slippage or partial fills.
+              const actualEntryPrice = (match.average_price && match.average_price > 0)
+                ? match.average_price
+                : signal.stakeUsd / match.shares;
               // Update Redis ledger with actual fill and actual entry price
-              await redis.hset(`position:${signal.marketId}:${signal.direction}`, 
+              await redis.hset(`position:${signal.marketId}:${signal.direction}`,
                 'sharesHeld', String(match.shares),
-                'entryPrice', String(actualEntryPrice.toFixed(6))
+                'entryPrice', String(Number(actualEntryPrice).toFixed(6))
               );
               logger.info('[execution] reconciled sharesHeld and entryPrice with Simmer actual fill', {
                 marketId: signal.marketId,
@@ -285,6 +291,7 @@ async function processScoredItemsInner(
                 actual: match.shares,
                 oldPrice: result.signal.outcomePrice,
                 newPrice: actualEntryPrice,
+                source: (match.average_price && match.average_price > 0) ? 'simmer_avg_price' : 'computed',
               });
             }
           } catch (err) {

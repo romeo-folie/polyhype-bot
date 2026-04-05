@@ -33,17 +33,22 @@ async function run() {
 
     for (const p of positions) {
       const live = prices.get(`${p.marketId}:${p.direction}`);
-      const currentPrice = live ? live.currentOutcomePrice : p.entryPrice;
-      const pnlPct = p.entryPrice > 0 ? ((currentPrice - p.entryPrice) / p.entryPrice) * 100 : 0;
-      
-      const pnlColor = pnlPct >= 0 ? '\x1b[32m' : '\x1b[31m';
+      const currentPrice = live ? live.currentOutcomePrice : null;
+      const hasReliableEntry = p.entryPrice > 0;
+      const pnlPct = hasReliableEntry && currentPrice !== null
+        ? ((currentPrice - p.entryPrice) / p.entryPrice) * 100
+        : null;
+
       const reset = '\x1b[0m';
+      const dim = '\x1b[2m';
 
       const market = (p.question.length > 42 ? p.question.slice(0, 39) + '...' : p.question).padEnd(45);
       const side = formatDirection(p.direction).padEnd(10);
-      const entry = p.entryPrice.toFixed(3).padEnd(10);
-      const livePrice = currentPrice.toFixed(3).padEnd(10);
-      const pnl = `${pnlColor}${pnlPct.toFixed(1)}%${reset}`.padEnd(10 + pnlColor.length + reset.length);
+      const entry = hasReliableEntry ? p.entryPrice.toFixed(3).padEnd(10) : `${dim}N/A${reset}`.padEnd(10 + dim.length + reset.length);
+      const livePrice = currentPrice !== null ? currentPrice.toFixed(3).padEnd(10) : `${dim}---${reset}`.padEnd(10 + dim.length + reset.length);
+      const pnl = pnlPct !== null
+        ? `${pnlPct >= 0 ? '\x1b[32m' : '\x1b[31m'}${pnlPct.toFixed(1)}%${reset}`.padEnd(10 + 5 + reset.length)
+        : `${dim}N/A${reset}`.padEnd(10 + dim.length + reset.length);
       const stake = `$${p.stakeUsd.toFixed(0)}`.padEnd(10);
       const source = p.sourcedFrom.split(':')[0]!.padEnd(10);
 

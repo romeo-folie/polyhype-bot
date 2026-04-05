@@ -160,6 +160,25 @@ function normalisePosition(raw: Record<string, unknown>): Record<string, unknown
     }
   }
 
+  // Simmer API may return avg_cost (documented name) instead of average_price.
+  // Normalise so downstream code can rely on the single `average_price` field.
+  if (!('average_price' in next) || next.average_price == null) {
+    const avgCost = Number(next.avg_cost ?? NaN);
+    if (Number.isFinite(avgCost) && avgCost > 0) {
+      next.average_price = avgCost;
+    }
+  }
+
+  // Simmer also exposes cost_basis (total cost, not per-share).
+  // Derive per-share entry price if average_price is still missing.
+  if (!('average_price' in next) || next.average_price == null) {
+    const costBasis = Number(next.cost_basis ?? NaN);
+    const shares = Number(next.shares ?? NaN);
+    if (Number.isFinite(costBasis) && costBasis > 0 && Number.isFinite(shares) && shares > 0) {
+      next.average_price = costBasis / shares;
+    }
+  }
+
   if (!('value_usdc' in next)) {
     // Simmer sends current_value (not value_usdc) — prefer it over the calculation
     // because current_price is 0 on resolved markets, making price * shares = 0.

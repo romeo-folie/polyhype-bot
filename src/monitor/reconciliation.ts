@@ -519,8 +519,23 @@ async function importSimmerOrphan(
         marketId: metadata.id,
         price: avgPrice,
       });
+    } else if (pos.average_price && pos.average_price > 0) {
+      avgPrice = pos.average_price;
+      logger.info('[reconcile] used Simmer average_price for orphan', {
+        marketId: metadata.id,
+        price: avgPrice,
+      });
     } else {
-      avgPrice = pos.average_price ?? (pos.value_usdc && shares > 0 ? pos.value_usdc / shares : 0);
+      // No reliable entry price available. value_usdc / shares is the CURRENT market
+      // price, not the historical entry price — using it would produce wildly incorrect
+      // P&L figures. Import with entryPrice = 0 and let the dashboard flag it.
+      avgPrice = 0;
+      logger.warn('[reconcile] no reliable entry price for Simmer orphan — importing with entryPrice=0', {
+        marketId: metadata.id,
+        question: pos.question?.slice(0, 80),
+        value_usdc: pos.value_usdc,
+        average_price: pos.average_price,
+      });
     }
 
     const newPos: Position = {
