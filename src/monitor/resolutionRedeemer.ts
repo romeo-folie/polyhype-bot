@@ -515,6 +515,33 @@ async function redeemClobPositions(
         direction: pos.direction,
       });
 
+      const won = resolved.outcome === pmDirection;
+      if (!won) {
+        // Market resolved against us — close ledger entry without redeeming
+        logger.info('[redeemer] CLOB position resolved as loss, closing ledger', {
+          marketId: pos.marketId,
+          direction: pos.direction,
+          outcome: resolved.outcome,
+        });
+        await closePosition(redis, pos.marketId, pos.direction);
+        await recordOutcome(redis, {
+          source: inferSource(pos.sourcedFrom ?? ''),
+          category: inferCategory(resolvedQuestion),
+          question: resolvedQuestion.slice(0, 200),
+          direction: pmDirection,
+          consensusProbability: pos.consensusProbability ?? 0.5,
+          divergence: pos.edgeMagnitude ?? 0,
+          result: 'lost',
+          returnPct: -100,
+          holdingHours: pos.openedAt
+            ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
+            : 0,
+          executionVenue: 'clob',
+        });
+        results.push({ marketId: pos.marketId, side, success: false, error: 'resolved_as_loss' });
+        continue;
+      }
+
       // On-chain redemption for CLOB positions
       logger.info('[redeemer] attempting on-chain CLOB redemption', {
         marketId: pos.marketId,
@@ -576,19 +603,14 @@ async function redeemClobPositions(
       // Close the position in Redis after successful redemption
       await closePosition(redis, pos.marketId, pos.direction);
 
-      // If won: credit shares as USDC (each winning share = $1)
-      const won =
-        (resolved.outcome === 'YES' && pos.direction === 'YES') ||
-        (resolved.outcome === 'NO' && pos.direction === 'NO');
+      // Credit shares as USDC (each winning share = $1) — losses already handled above
       const entryPriceSafe = pos.entryPrice > 0 && Number.isFinite(pos.entryPrice);
       if (!entryPriceSafe && pos.sharesHeld == null) {
         logger.warn('[redeemer] entryPrice is zero/invalid — using 0 proceeds', {
           marketId: pos.marketId,
         });
       }
-      const proceedsUsdc = won
-        ? (pos.sharesHeld ?? (entryPriceSafe ? pos.stakeUsd / pos.entryPrice : 0))
-        : 0;
+      const proceedsUsdc = pos.sharesHeld ?? (entryPriceSafe ? pos.stakeUsd / pos.entryPrice : 0);
 
       if (proceedsUsdc > 0) {
         await creditProceeds(redis, proceedsUsdc);
@@ -1275,6 +1297,31 @@ async function redeemOrphanClobPositions(
           direction,
           outcome: resolved.outcome,
         });
+        // Close matching ledger entry if one exists
+        const openPositions = await getOpenPositions(redis);
+        const ledgerEntry = openPositions.find((p) => p.conditionId === conditionId);
+        if (ledgerEntry) {
+          logger.info('[redeemer] orphan sweep: closing ledger entry for losing position', {
+            conditionId,
+            marketId: ledgerEntry.marketId,
+            direction: ledgerEntry.direction,
+          });
+          await closePosition(redis, ledgerEntry.marketId, ledgerEntry.direction);
+          await recordOutcome(redis, {
+            source: inferSource(ledgerEntry.sourcedFrom ?? ''),
+            category: inferCategory(resolvedQuestion),
+            question: resolvedQuestion.slice(0, 200),
+            direction,
+            consensusProbability: ledgerEntry.consensusProbability ?? 0.5,
+            divergence: ledgerEntry.edgeMagnitude ?? 0,
+            result: 'lost',
+            returnPct: -100,
+            holdingHours: ledgerEntry.openedAt
+              ? (Date.now() - new Date(ledgerEntry.openedAt).getTime()) / 3600000
+              : 0,
+            executionVenue: 'clob',
+          });
+        }
         continue;
       }
 

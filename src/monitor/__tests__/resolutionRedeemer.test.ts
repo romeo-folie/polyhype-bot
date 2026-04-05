@@ -145,4 +145,33 @@ describe('redeemResolvedPositions', () => {
     expect(results).toHaveLength(2);
     expect(results.every((r) => r.success)).toBe(true);
   });
+
+  it('closes CLOB position resolved as loss without redeeming', async () => {
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'clob-loss1',
+        conditionId: 'cond-loss1',
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Will Spurs beat Nuggets?',
+        sharesHeld: 50,
+        entryPrice: 0.6,
+      },
+    ]);
+    // Gamma API returns resolved with outcome NO — our YES position lost
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([{ resolved: true, outcome: 'NO' }]),
+      } as any),
+    );
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(false);
+    expect(results[0].error).toBe('resolved_as_loss');
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'clob-loss1', 'YES');
+    expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
+  });
 });
