@@ -48,6 +48,7 @@ export async function runReconciliation(
     // 2. Build Correlation Matrix (Bridge Simmer questions to Gamma numeric IDs)
     // We use the Data API list as the source-of-truth for conditionIds/IDs.
     const questionToMetadata = new Map<string, GammaMarket>();
+    const conditionToMetadata = new Map<string, GammaMarket>();
     const normalize = (q: string) => q?.toLowerCase().replace(/[^a-z0-9]/g, '') || '';
 
     const MATRIX_CONCURRENCY = 5;
@@ -60,6 +61,7 @@ export async function runReconciliation(
       for (const result of results) {
         if (result.status === 'fulfilled' && result.value) {
           questionToMetadata.set(normalize(result.value.question), result.value);
+          conditionToMetadata.set(result.value.conditionId, result.value);
         }
       }
     }
@@ -72,11 +74,86 @@ export async function runReconciliation(
     });
 
     // 3. Build lookup maps
-    const simmerMap = new Map<string, SimmerPosition>();
+    const rawSimmerMap = new Map<string, SimmerPosition>();
     for (const pos of simmerPositions) {
       const direction = pos.side.toUpperCase();
-      simmerMap.set(`${pos.market_id}:${direction}`, pos);
+      rawSimmerMap.set(`${pos.market_id}:${direction}`, pos);
     }
+
+    // 3b. Re-index simmerMap: Simmer UUID keys → Polymarket numeric ID keys
+    // Simmer's market_id is a Simmer-internal UUID, but the ledger stores Polymarket
+    // numeric IDs. Without this bridge, every Simmer position appears as a ghost.
+    const reindexedSimmerMap = new Map<string, SimmerPosition>();
+    const simmerMetadataMap = new Map<string, GammaMarket>();
+    let bridgeApiCalls = 0;
+    const BRIDGE_API_BUDGET = 10;
+
+    for (const [originalKey, pos] of rawSimmerMap.entries()) {
+      const direction = pos.side.toUpperCase();
+      let metadata: GammaMarket | undefined;
+
+      // Step 1: condition_id → conditionToMetadata (free)
+      if (pos.condition_id) {
+        metadata = conditionToMetadata.get(pos.condition_id);
+      }
+
+      // Step 2: normalized question → questionToMetadata (free)
+      if (!metadata && pos.question) {
+        metadata = questionToMetadata.get(normalize(pos.question));
+      }
+
+      // Step 3: API fallback — fetchMarketByConditionId(condition_id)
+      if (!metadata && pos.condition_id && bridgeApiCalls < BRIDGE_API_BUDGET) {
+        metadata = (await fetchMarketByConditionId(pos.condition_id)) || undefined;
+        bridgeApiCalls++;
+        if (metadata) {
+          conditionToMetadata.set(metadata.conditionId, metadata);
+          questionToMetadata.set(normalize(metadata.question), metadata);
+        }
+      }
+
+      // Step 4: API fallback — market_id might be a Polymarket condition ID
+      if (!metadata && pos.market_id && bridgeApiCalls < BRIDGE_API_BUDGET) {
+        metadata = (await fetchMarketByConditionId(pos.market_id)) || undefined;
+        bridgeApiCalls++;
+        if (metadata) {
+          conditionToMetadata.set(metadata.conditionId, metadata);
+          questionToMetadata.set(normalize(metadata.question), metadata);
+        }
+      }
+
+      // Step 5: API fallback — question search (last resort)
+      if (!metadata && pos.question && bridgeApiCalls < BRIDGE_API_BUDGET) {
+        metadata = (await fetchMarketByQuestion(pos.question)) || undefined;
+        bridgeApiCalls++;
+        if (metadata) {
+          conditionToMetadata.set(metadata.conditionId, metadata);
+          questionToMetadata.set(normalize(metadata.question), metadata);
+        }
+      }
+
+      if (metadata) {
+        const newKey = `${metadata.id}:${direction}`;
+        reindexedSimmerMap.set(newKey, pos);
+        simmerMetadataMap.set(newKey, metadata);
+      } else {
+        // Unresolved — keep original key; will flow to orphan handling
+        logger.warn('[reconcile] could not resolve Simmer UUID to numeric ID — will treat as orphan', {
+          marketId: pos.market_id,
+          question: pos.question?.slice(0, 80),
+        });
+        reindexedSimmerMap.set(originalKey, pos);
+      }
+    }
+
+    const simmerMap = reindexedSimmerMap;
+
+    logger.info('[reconcile] re-indexed simmerMap', {
+      total: rawSimmerMap.size,
+      resolved: simmerMetadataMap.size,
+      unresolved: rawSimmerMap.size - simmerMetadataMap.size,
+      bridgeApiCalls,
+    });
 
     const clobMap = new Map<string, PolymarketPosition>();
     for (const pos of clobPositions) {
@@ -121,8 +198,9 @@ export async function runReconciliation(
             await recordPosition(redis, upgradedPos);
 
             // Important: Remove from venue maps so the orphan loop doesn't re-import it
-            const sideKey = `${ledgerPos.marketId}:${ledgerPos.direction}`;
-            simmerMap.delete(sideKey);
+            // After re-indexing, simmerMap keys are numeric IDs, but try both UUID and numeric
+            simmerMap.delete(`${ledgerPos.marketId}:${ledgerPos.direction}`);
+            simmerMap.delete(`${metadata.id}:${ledgerPos.direction}`);
             if (metadata.clobTokenIds) {
               const tokenId = ledgerPos.direction === 'YES' ? metadata.clobTokenIds[0] : metadata.clobTokenIds[1];
               if (tokenId) clobMap.delete(tokenId);
@@ -154,11 +232,24 @@ export async function runReconciliation(
 
       if (ledgerPos.executionVenue === 'simmer') {
         venueName = 'simmer';
-        const simmerPos = simmerMap.get(key);
+        let simmerPos = simmerMap.get(key);
+        let matchedKey = key;
+
+        // Fallback: if primary key missed, scan by conditionId
+        if (!simmerPos && ledgerPos.conditionId) {
+          for (const [sKey, sPos] of simmerMap.entries()) {
+            if (sPos.condition_id === ledgerPos.conditionId && sPos.side.toUpperCase() === ledgerPos.direction) {
+              simmerPos = sPos;
+              matchedKey = sKey;
+              break;
+            }
+          }
+        }
+
         if (simmerPos) {
           foundOnVenue = true;
           venueShares = simmerPos.shares ?? 0;
-          simmerMap.delete(key);
+          simmerMap.delete(matchedKey);
         }
       } else if (ledgerPos.executionVenue === 'clob') {
         venueName = 'clob';
@@ -246,23 +337,11 @@ export async function runReconciliation(
     let importedCount = 0;
 
     // A. Handle Simmer Orphans
-    for (const [_key, simmerPos] of simmerMap.entries()) {
+    // Metadata was pre-resolved during the re-indexing pass (simmerMetadataMap).
+    // Unresolved positions already exhausted all resolution strategies — no point retrying.
+    for (const [key, simmerPos] of simmerMap.entries()) {
       if (forceFix) {
-        // Only resolve metadata and call Gamma API when we are actually going to fix.
-        // Dry-run passes skip network calls to avoid unnecessary rate-limit exposure.
-        const normQ = normalize(simmerPos.question || '');
-        let metadata = questionToMetadata.get(normQ);
-
-        // Check if Simmer's market_id is actually a Polymarket condition ID
-        if (!metadata && simmerPos.market_id) {
-          metadata = (await fetchMarketByConditionId(simmerPos.market_id)) || undefined;
-        }
-
-        // Fallback fuzzy match for orphans
-        if (!metadata && simmerPos.question) {
-          metadata = (await fetchMarketByQuestion(simmerPos.question)) || undefined;
-        }
-
+        const metadata = simmerMetadataMap.get(key);
         const imported = await importSimmerOrphan(redis, simmerPos, clobMap, metadata);
         if (imported) {
           importedCount++;

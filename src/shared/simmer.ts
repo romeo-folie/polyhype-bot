@@ -87,7 +87,7 @@ const SimmerPositionSchema = z.object({
   value_usdc: z.number().optional(),
   average_price: z.number().optional(),
   /** Which side won — present on resolved positions. */
-  outcome: z.enum(['yes', 'no']).optional(),
+  outcome: z.enum(['yes', 'no']).nullable().optional(),
   /** Polymarket condition ID — useful for dedup and on-chain lookups. */
   condition_id: z.string().optional(),
 });
@@ -161,10 +161,17 @@ function normalisePosition(raw: Record<string, unknown>): Record<string, unknown
   }
 
   if (!('value_usdc' in next)) {
-    const price = Number(next.current_price ?? NaN);
-    const shares = Number(next.shares ?? NaN);
-    if (Number.isFinite(price) && Number.isFinite(shares)) {
-      next.value_usdc = price * shares;
+    // Simmer sends current_value (not value_usdc) — prefer it over the calculation
+    // because current_price is 0 on resolved markets, making price * shares = 0.
+    const currentValue = Number(next.current_value ?? NaN);
+    if (Number.isFinite(currentValue) && currentValue > 0) {
+      next.value_usdc = currentValue;
+    } else {
+      const price = Number(next.current_price ?? NaN);
+      const shares = Number(next.shares ?? NaN);
+      if (Number.isFinite(price) && Number.isFinite(shares)) {
+        next.value_usdc = price * shares;
+      }
     }
   }
 

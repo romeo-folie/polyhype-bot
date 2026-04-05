@@ -363,6 +363,159 @@ describe('Position Reconciliation Healer', () => {
     }));
   });
 
+  it('bridges Simmer UUID to numeric ID via condition_id and matches ledger correctly (no ghost, no orphan)', async () => {
+    // Ledger has numeric ID; Simmer returns a completely different UUID
+    const ledgerPosition = {
+      marketId: 'numeric-500',
+      conditionId: 'cond-bridge',
+      direction: 'YES',
+      sharesHeld: 100,
+      stakeUsd: 50,
+      entryPrice: 0.50,
+      executionVenue: 'simmer',
+      clobTokenIds: ['tok-bridge-yes', 'tok-bridge-no'],
+      question: 'Will the bridge work?',
+    };
+
+    // Simmer returns its own UUID, NOT the numeric ID
+    const simmerPositions = [
+      {
+        market_id: 'simmer-uuid-999',
+        side: 'yes',
+        shares: 120, // Different from ledger (will heal)
+        average_price: 0.50,
+        condition_id: 'cond-bridge',
+        question: 'Will the bridge work?',
+      },
+    ];
+
+    const mockGammaMarket = {
+      id: 'numeric-500',
+      question: 'Will the bridge work?',
+      conditionId: 'cond-bridge',
+      clobTokenIds: ['tok-bridge-yes', 'tok-bridge-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
+    (simmer.getSimmerPositions as any).mockResolvedValue(simmerPositions);
+    // Re-indexing resolves via fetchMarketByConditionId API fallback (step 3)
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Should NOT ghost-delete (position was found on venue after bridging)
+    expect(positionLedger.closePosition).not.toHaveBeenCalled();
+
+    // Should heal the share mismatch (100 → 120)
+    expect(mockRedis.hset).toHaveBeenCalledWith(
+      'position:numeric-500:YES',
+      'sharesHeld', '120',
+      'reconciliationStatus', expect.stringContaining('healed_mismatch')
+    );
+
+    // Should NOT import as orphan
+    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
+  });
+
+  it('bridges Simmer UUID to numeric ID via question when condition_id is missing', async () => {
+    const ledgerPosition = {
+      marketId: 'numeric-600',
+      direction: 'NO',
+      sharesHeld: 50,
+      stakeUsd: 25,
+      entryPrice: 0.50,
+      executionVenue: 'simmer',
+      question: 'Will it snow tomorrow?',
+    };
+
+    // Simmer returns UUID, NO condition_id
+    const simmerPositions = [
+      {
+        market_id: 'simmer-uuid-abc',
+        side: 'no',
+        shares: 50,
+        average_price: 0.50,
+        question: 'Will it snow tomorrow?',
+      },
+    ];
+
+    const mockGammaMarket = {
+      id: 'numeric-600',
+      question: 'Will it snow tomorrow?',
+      conditionId: 'cond-snow',
+      clobTokenIds: ['tok-snow-yes', 'tok-snow-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
+    (simmer.getSimmerPositions as any).mockResolvedValue(simmerPositions);
+    // Re-indexing resolves via fetchMarketByQuestion API fallback (step 5)
+    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(mockGammaMarket);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Should NOT ghost-delete
+    expect(positionLedger.closePosition).not.toHaveBeenCalled();
+    // Should NOT import as orphan (shares match exactly)
+    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
+  });
+
+  it('CLOB reconciliation is unaffected by Simmer re-indexing', async () => {
+    // CLOB position in ledger + matching CLOB Data API + unrelated Simmer position
+    const clobLedgerPosition = {
+      marketId: 'numeric-700',
+      conditionId: 'cond-clob',
+      direction: 'YES',
+      sharesHeld: 200,
+      stakeUsd: 100,
+      entryPrice: 0.50,
+      executionVenue: 'clob',
+      clobTokenIds: ['tok-clob-yes', 'tok-clob-no'],
+    };
+
+    const clobPositions = [
+      {
+        conditionId: 'cond-clob',
+        asset: 'tok-clob-yes',
+        size: 250, // Mismatch — will heal
+        avgPrice: 0.50,
+      },
+    ];
+
+    // Unrelated Simmer position that shouldn't interfere
+    const simmerPositions = [
+      {
+        market_id: 'simmer-unrelated',
+        side: 'yes',
+        shares: 10,
+        average_price: 0.30,
+      },
+    ];
+
+    const mockGammaMarket = {
+      id: 'numeric-700',
+      question: 'CLOB only question',
+      conditionId: 'cond-clob',
+      clobTokenIds: ['tok-clob-yes', 'tok-clob-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([clobLedgerPosition]);
+    (simmer.getSimmerPositions as any).mockResolvedValue(simmerPositions);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // CLOB position should heal shares (200 → 250)
+    expect(mockRedis.hset).toHaveBeenCalledWith(
+      'position:numeric-700:YES',
+      'sharesHeld', '250',
+      'reconciliationStatus', expect.stringContaining('healed_mismatch')
+    );
+
+    // Should NOT ghost-delete the CLOB position
+    expect(positionLedger.closePosition).not.toHaveBeenCalled();
+  });
+
   it('upgrades a legacy Simmer UUID marketId via fuzzy question match when Data API matrix is empty', async () => {
     const legacyPosition = {
       marketId: 'cb0e1515-16ba-4f74-858b-cfd2d1988ccf',
