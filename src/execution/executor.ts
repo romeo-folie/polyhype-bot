@@ -1502,7 +1502,7 @@ export async function executeSignals(
     // not have executed; adding it optimistically would cause false margin-cap rejections.
     // The hedge's margin will appear in the next cycle's live positions from HL.
     if (result.tradeResult?.success && result.executionVenue === 'hyperliquid') {
-      sessionExposureUsd += signal.stakeUsd;
+      sessionExposureUsd += result.signal.stakeUsd;
     }
 
     results.push(result);

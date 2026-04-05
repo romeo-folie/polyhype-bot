@@ -194,7 +194,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
 
           const result = await executeSignal(signal, redis, sessionExposureUsd);
           if (result.tradeResult?.success) {
-            await deductStake(redis, signal.stakeUsd);
+            await deductStake(redis, result.signal.stakeUsd);
             await recordPosition(redis, {
               marketId: signal.marketId,
               executionId: result.signal.executionId,
@@ -202,11 +202,11 @@ export async function runWorker(maxCycles?: number): Promise<void> {
               clobTokenIds: signal.clobTokenIds,
               question: signal.question,
               direction: signal.direction,
-              entryPrice: signal.outcomePrice,
-              stakeUsd: signal.stakeUsd,
+              entryPrice: result.entryPrice ?? signal.outcomePrice,
+              stakeUsd: result.signal.stakeUsd,
               consensusProbability: signal.consensusProbability,
               consensusStddev: signal.consensusStddev,
-              edgeMagnitude: signal.edgeMagnitude,
+              edgeMagnitude: result.signal.edgeMagnitude,
               sourcedFrom: signal.sourcedFrom,
               openedAt: new Date().toISOString(),
               txHash: result.tradeResult.tx_hash,
@@ -218,7 +218,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
             });
             // Accumulate HL margin so subsequent signals in this cycle respect the cap.
             if (result.executionVenue === 'hyperliquid') {
-              sessionExposureUsd += signal.stakeUsd;
+              sessionExposureUsd += result.signal.stakeUsd;
             }
           }
         }
