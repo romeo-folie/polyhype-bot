@@ -141,7 +141,8 @@ export async function executeTakeProfit(opts: {
 }): Promise<TakeProfitResult> {
   const { position, currentPrice, returnPct, reason, redis } = opts;
   // Sell the same side we bought (sell YES shares to exit a YES position)
-  const sellSide = position.direction.toLowerCase() as 'yes' | 'no';
+  // UP maps to 'yes' side (token[0]), DOWN maps to 'no' side (token[1])
+  const sellSide = (position.direction === 'YES' || position.direction === 'UP') ? 'yes' as const : 'no' as const;
 
   // Use tracked shares if available; fall back to estimating from stake/entry price.
   // Truncate to 6 decimal places to avoid rounding overshoot vs actual CLOB balance.
@@ -478,8 +479,8 @@ async function executeClobExit(opts: {
   }
 
   // 2. Extract token ID
-  const tokenId =
-    position.direction === 'YES' ? position.clobTokenIds?.[0] : position.clobTokenIds?.[1];
+  const tokenId = (position.direction === 'YES' || position.direction === 'UP')
+    ? position.clobTokenIds?.[0] : position.clobTokenIds?.[1];
 
   if (!tokenId) {
     const error = 'CLOB exit failed: missing token ID for direction ' + position.direction;

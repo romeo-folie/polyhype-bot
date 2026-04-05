@@ -234,6 +234,69 @@ export async function getActiveMarkets(maxTotal = 1000, pageSize = 500): Promise
   return results;
 }
 
+/**
+ * List recent crypto events from Gamma, sorted by start date descending.
+ *
+ * Unlike `searchEvents` (keyword-based), this uses tag-based listing to
+ * discover ephemeral markets like "Bitcoin Up or Down" that don't appear
+ * in keyword search results.
+ *
+ * Filters to events resolving within `maxHoursToResolution` (default 1 hour).
+ */
+export async function listRecentCryptoEvents(opts?: {
+  maxHoursToResolution?: number;
+  limit?: number;
+}): Promise<GammaEvent[]> {
+  const maxHours = opts?.maxHoursToResolution ?? 1;
+  const limit = opts?.limit ?? 20;
+
+  const params = new URLSearchParams({
+    tag: 'crypto',
+    order: 'startDate',
+    ascending: 'false',
+    active: 'true',
+    closed: 'false',
+    limit: limit.toString(),
+  });
+
+  const url = `${BASE_URL}/events?${params.toString()}`;
+
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+      if (!res.ok) {
+        throw new Error(`Gamma API error: ${res.status.toString()} ${res.statusText} for crypto events`);
+      }
+      const data = (await res.json()) as GammaEvent[];
+      if (!Array.isArray(data)) return [];
+
+      // Filter to events with markets resolving within the time window
+      const now = Date.now();
+      const cutoff = now + maxHours * 60 * 60 * 1000;
+
+      return data
+        .map((event) => ({
+          ...event,
+          markets: event.markets.filter((m) => {
+            if (!m.active || m.closed || !m.endDate) return false;
+            const endMs = new Date(m.endDate).getTime();
+            return endMs > now && endMs <= cutoff;
+          }),
+        }))
+        .filter((event) => event.markets.length > 0);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt === 0) {
+        // Brief pause before retry
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+  }
+
+  throw lastError ?? new Error('listRecentCryptoEvents failed');
+}
+
 export function parseYesPrice(outcomePrices: string | string[]): number {
   const prices = parseOutcomePrices(outcomePrices);
   if (prices.length === 0) {

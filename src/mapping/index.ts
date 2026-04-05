@@ -28,7 +28,7 @@ export interface TradeSignal {
   clobTokenIds?: string[];
   executionId?: string;
   question: string;
-  direction: 'YES' | 'NO' | 'LONG' | 'SHORT';
+  direction: 'YES' | 'NO' | 'UP' | 'DOWN' | 'LONG' | 'SHORT';
   stakeUsd: number;
   edgeMagnitude: number;
   consensusProbability?: number;

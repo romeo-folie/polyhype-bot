@@ -20,7 +20,7 @@ export interface PositionOutcome {
   source: 'osint' | 'copytrade' | 'spot' | 'arb' | 'crypto-arb';
   category: string;
   question: string;
-  direction: 'YES' | 'NO';
+  direction: 'YES' | 'NO' | 'UP' | 'DOWN';
   urgencyScore?: number;
   consensusProbability: number;
   divergence: number;
@@ -183,7 +183,7 @@ export async function getRecentOutcomes(
         source: data.source as PositionOutcome['source'],
         category: data.category ?? '',
         question: data.question ?? '',
-        direction: data.direction as 'YES' | 'NO',
+        direction: data.direction as PositionOutcome['direction'],
         consensusProbability: Number(data.consensusProbability) || 0,
         divergence: Number(data.divergence) || 0,
         result: data.result as 'won' | 'lost' | 'pushed',
