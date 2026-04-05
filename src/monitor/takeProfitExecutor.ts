@@ -244,6 +244,23 @@ async function executeSimmerExit(opts: {
         await markPositionPendingSettlement(redis, position.marketId, position.direction);
         return { marketId: position.marketId, success: false, error: simmerError, returnPct, reason };
       }
+
+      // ORDER TOO SMALL: Simmer rejects sells below 5 shares — fall back to CLOB or mark pendingSettlement
+      if (simmerError?.toLowerCase().includes('order too small')) {
+        if (position.clobTokenIds && position.clobTokenIds.length > 0) {
+          logger.info('[take-profit-executor] Simmer order too small — falling back to CLOB', {
+            marketId: position.marketId,
+            sharesToSell,
+          });
+          return executeClobExit({ position, currentPrice, returnPct, reason, redis, sharesToSell });
+        }
+        logger.warn('[take-profit-executor] Simmer order too small, no CLOB tokens — marking pendingSettlement', {
+          marketId: position.marketId,
+          sharesToSell,
+        });
+        await markPositionPendingSettlement(redis, position.marketId, position.direction);
+        return { marketId: position.marketId, success: false, error: simmerError, returnPct, reason };
+      }
     } catch (err) {
       simmerError = err instanceof Error ? err.message : String(err);
     }
@@ -276,6 +293,23 @@ async function executeSimmerExit(opts: {
       if (simmerError?.toLowerCase().includes('insufficient shares')) {
         const recovery = await attemptSimmerRecovery(redis, position, position.marketId, sellSide, sharesToSell, currentPrice, returnPct, reason);
         if (recovery) return recovery;
+      }
+
+      // ORDER TOO SMALL: Simmer rejects sells below 5 shares — fall back to CLOB or mark pendingSettlement
+      if (simmerError?.toLowerCase().includes('order too small')) {
+        if (position.clobTokenIds && position.clobTokenIds.length > 0) {
+          logger.info('[take-profit-executor] Simmer order too small (direct ID) — falling back to CLOB', {
+            marketId: position.marketId,
+            sharesToSell,
+          });
+          return executeClobExit({ position, currentPrice, returnPct, reason, redis, sharesToSell });
+        }
+        logger.warn('[take-profit-executor] Simmer order too small (direct ID), no CLOB tokens — marking pendingSettlement', {
+          marketId: position.marketId,
+          sharesToSell,
+        });
+        await markPositionPendingSettlement(redis, position.marketId, position.direction);
+        return { marketId: position.marketId, success: false, error: simmerError, returnPct, reason };
       }
     } catch (err) {
       simmerError = err instanceof Error ? err.message : String(err);
