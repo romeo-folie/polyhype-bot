@@ -109,8 +109,7 @@ export async function releaseLock(key: string, token: string): Promise<void> {
   );
 }
 
-// Graceful shutdown — close Redis on process termination signals.
-// NOTE: Does NOT call process.exit() so worker-level handlers (which release
-// locks first) can run before the process terminates.
-process.on('SIGTERM', () => { void closeRedis(); });
-process.on('SIGINT', () => { void closeRedis(); });
+// NOTE: Redis shutdown is handled by each worker's own SIGTERM/SIGINT handler.
+// Workers must: (1) release their lock, (2) call closeRedis(), (3) process.exit().
+// We do NOT register signal handlers here because closeRedis() would race the
+// worker's lock-release Lua eval, closing the connection before the lock is freed.
