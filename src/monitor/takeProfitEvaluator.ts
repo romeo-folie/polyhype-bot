@@ -65,7 +65,12 @@ export function evaluateTakeProfit(
   // Condition 2: divergence has closed (market price reached our consensus estimate)
   // Skip this for copytrades — their consensus probability is the entry price,
   // making divergence closure effectively a tiny-profit exit which we don't want.
-  if (!position.sourcedFrom.startsWith('copytrade:')) {
+  // Skip for reconciled positions — they have no consensus estimate, so the 0.5
+  // default causes either premature exits or stuck positions.
+  if (
+    !position.sourcedFrom.startsWith('copytrade:') &&
+    !position.sourcedFrom.startsWith('reconciled:')
+  ) {
     const divergenceClosed =
       direction === 'YES'
         ? currentYesPrice >= (consensusProbability ?? 0.5)

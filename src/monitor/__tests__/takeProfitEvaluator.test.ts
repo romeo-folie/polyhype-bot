@@ -170,6 +170,70 @@ describe('evaluateTakeProfit', () => {
     });
   });
 
+  describe('reconciled positions — skip divergence_closed', () => {
+    it('does not exit via divergence_closed for reconciled:simmer position', () => {
+      // Reconciled positions have no consensus estimate. Without the fix,
+      // consensusProbability defaults to 0.5 and divergence_closed fires
+      // prematurely when currentYesPrice >= 0.5.
+      // entry=0.40, current=0.44 → return=10% < 25%, no SL triggered
+      // currentYesPrice=0.55 >= 0.5 → would fire divergence_closed WITHOUT fix
+      const result = evaluateTakeProfit(
+        makePosition({
+          entryPrice: 0.4,
+          consensusProbability: undefined,
+          sourcedFrom: 'reconciled:simmer',
+        }),
+        makeCurrentPrice({ currentOutcomePrice: 0.44, currentYesPrice: 0.55 }),
+        THRESHOLD,
+      );
+      expect(result.shouldExit).toBe(false);
+    });
+
+    it('does not exit via divergence_closed for reconciled:clob position', () => {
+      const result = evaluateTakeProfit(
+        makePosition({
+          entryPrice: 0.4,
+          consensusProbability: undefined,
+          sourcedFrom: 'reconciled:clob',
+        }),
+        makeCurrentPrice({ currentOutcomePrice: 0.44, currentYesPrice: 0.55 }),
+        THRESHOLD,
+      );
+      expect(result.shouldExit).toBe(false);
+    });
+
+    it('still exits on stop_loss for reconciled positions', () => {
+      // entry=0.5, current=0.3 → return=-40% < -30%
+      const result = evaluateTakeProfit(
+        makePosition({
+          entryPrice: 0.5,
+          consensusProbability: undefined,
+          sourcedFrom: 'reconciled:simmer',
+        }),
+        makeCurrentPrice({ currentOutcomePrice: 0.3, currentYesPrice: 0.3 }),
+        THRESHOLD,
+        0.3,
+      );
+      expect(result.shouldExit).toBe(true);
+      expect(result.reason).toBe('stop_loss');
+    });
+
+    it('still exits on take_profit_threshold for reconciled positions', () => {
+      // entry=0.4, current=0.6 → return=50% > 25%
+      const result = evaluateTakeProfit(
+        makePosition({
+          entryPrice: 0.4,
+          consensusProbability: undefined,
+          sourcedFrom: 'reconciled:simmer',
+        }),
+        makeCurrentPrice({ currentOutcomePrice: 0.6, currentYesPrice: 0.6 }),
+        THRESHOLD,
+      );
+      expect(result.shouldExit).toBe(true);
+      expect(result.reason).toBe('take_profit_threshold');
+    });
+  });
+
   describe('return calculation', () => {
     it('calculates negative return correctly (loss)', () => {
       // entryPrice=0.5, currentOutcomePrice=0.4 → return = -20%
