@@ -37,7 +37,7 @@ export async function recordPositionOutcome(
     source: inferSource(position.sourcedFrom),
     category: inferCategory(position.question),
     question: position.question.slice(0, 200),
-    direction: position.direction as 'YES' | 'NO',
+    direction: position.direction as 'YES' | 'NO' | 'UP' | 'DOWN',
     consensusProbability: position.consensusProbability ?? 0.5,
     divergence: position.edgeMagnitude,
     result: opts.result,

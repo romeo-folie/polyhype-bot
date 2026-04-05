@@ -105,10 +105,16 @@ export class ArbMarketWarmer {
 
               upDownDiscovered++;
               const clobTokenIds = parseClobTokenIds(market.clobTokenIds);
-              if (clobTokenIds.length >= 1) {
-                await feed.watch(market.id, clobTokenIds);
-                upDownWatched++;
-              }
+              if (clobTokenIds.length !== 2) continue;
+
+              // Normalize ordering: ensure index 0 = UP token, index 1 = DOWN token
+              const upIdx = outcomes.findIndex((o) => o.toLowerCase() === 'up');
+              const downIdx = outcomes.findIndex((o) => o.toLowerCase() === 'down');
+              if (upIdx === -1 || downIdx === -1 || upIdx === downIdx) continue;
+
+              const normalizedClobTokenIds = [clobTokenIds[upIdx]!, clobTokenIds[downIdx]!];
+              await feed.watch(market.id, normalizedClobTokenIds);
+              upDownWatched++;
             } catch {
               // Skip invalid markets
             }

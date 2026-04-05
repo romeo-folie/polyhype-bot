@@ -275,14 +275,16 @@ export async function listRecentCryptoEvents(opts?: {
       const now = Date.now();
       const cutoff = now + maxHours * 60 * 60 * 1000;
 
-      return data.filter((event) => {
-        // Check if any market in the event resolves within the window
-        return event.markets.some((m) => {
-          if (!m.active || m.closed || !m.endDate) return false;
-          const endMs = new Date(m.endDate).getTime();
-          return endMs > now && endMs <= cutoff;
-        });
-      });
+      return data
+        .map((event) => ({
+          ...event,
+          markets: event.markets.filter((m) => {
+            if (!m.active || m.closed || !m.endDate) return false;
+            const endMs = new Date(m.endDate).getTime();
+            return endMs > now && endMs <= cutoff;
+          }),
+        }))
+        .filter((event) => event.markets.length > 0);
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       if (attempt === 0) {

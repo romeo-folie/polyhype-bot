@@ -168,14 +168,35 @@ describe('scanUpDownArb', () => {
       signals: { rsi: 'oversold', macd: 'bullish_cross', stochastic: 'oversold_cross' },
     });
     (listRecentCryptoEvents as any).mockResolvedValue([mockUpDownEvent]);
-    // Simulate dedup key already set
+    // Simulate dedup key already set (worker writes arb:crypto: prefix)
     mockRedis.get.mockImplementation((key: string) => {
-      if (key.startsWith('arb:updown:')) return Promise.resolve('1');
+      if (key.startsWith('arb:crypto:')) return Promise.resolve('1');
       return Promise.resolve(null);
     });
 
     const opps = await scanUpDownArb(baseMove, mockRedis as any);
     expect(opps.length).toBe(0);
+  });
+
+  it('normalizes reversed outcome ordering (Down, Up)', async () => {
+    (scoreConfluence as any).mockResolvedValue({
+      direction: 'UP',
+      score: 3,
+      signals: { rsi: 'oversold', macd: 'bullish_cross', stochastic: 'oversold_cross' },
+    });
+    // Gamma returns outcomes in reversed order: [Down, Up]
+    const event = structuredClone(mockUpDownEvent);
+    event.markets[0].outcomes = ['Down', 'Up'];
+    event.markets[0].outcomePrices = ['0.52', '0.48']; // Down price first, Up price second
+    event.markets[0].clobTokenIds = ['token-down', 'token-up']; // Down token first, Up token second
+    (listRecentCryptoEvents as any).mockResolvedValue([event]);
+
+    const opps = await scanUpDownArb(baseMove, mockRedis as any);
+
+    expect(opps.length).toBe(1);
+    expect(opps[0].direction).toBe('UP');
+    // Should pick the UP token despite it being at index 1 in the raw data
+    expect(opps[0].tokenId).toBe('token-up');
   });
 
   it('skips non-bitcoin moves', async () => {

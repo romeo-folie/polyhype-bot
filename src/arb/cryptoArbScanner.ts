@@ -406,7 +406,8 @@ export async function scanCryptoArb(move: SpotMove, redis: Redis): Promise<Crypt
 // ── Up/Down Scanner ─────────────────────────────────────────────────────────
 
 const UPDOWN_MARKET_CACHE_KEY = 'crypto:updown:markets';
-const UPDOWN_DEDUP_PREFIX = 'arb:updown:';
+// Use the same dedup prefix as the arb worker writes on execution success
+const UPDOWN_DEDUP_PREFIX = 'arb:crypto:';
 
 /**
  * Map confluence score (0–3) to a directional probability.
@@ -482,9 +483,17 @@ export async function scanUpDownArb(
           if (!hasUpDown) continue;
           if (!market.question.toLowerCase().includes('bitcoin')) continue;
 
-          const clobTokenIds = parseClobTokenIds(market.clobTokenIds);
+          const rawClobTokenIds = parseClobTokenIds(market.clobTokenIds);
           const prices = parseOutcomePrices(market.outcomePrices);
-          const upPrice = parseFloat(prices[0] ?? '0.5');
+          if (rawClobTokenIds.length !== 2 || prices.length !== 2) continue;
+
+          // Normalize ordering: ensure index 0 = UP, index 1 = DOWN
+          const upIdx = outcomes.findIndex((o) => o.toLowerCase() === 'up');
+          const downIdx = outcomes.findIndex((o) => o.toLowerCase() === 'down');
+          if (upIdx === -1 || downIdx === -1 || upIdx === downIdx) continue;
+
+          const clobTokenIds = [rawClobTokenIds[upIdx]!, rawClobTokenIds[downIdx]!];
+          const upPrice = parseFloat(prices[upIdx] ?? '0.5');
 
           markets.push({
             marketId: market.id,
@@ -553,10 +562,12 @@ export async function scanUpDownArb(
       const stakeUsd = Math.min(kellyStake, maxStake);
       if (stakeUsd < 0.01) continue;
 
-      // Token selection: UP = token[0], DOWN = token[1]
+      // Token selection: UP = token[0], DOWN = token[1] (normalized at discovery)
+      if (market.clobTokenIds.length !== 2) continue;
       const tokenId = direction === 'UP'
-        ? (market.clobTokenIds[0] ?? '')
-        : (market.clobTokenIds[1] ?? '');
+        ? market.clobTokenIds[0]
+        : market.clobTokenIds[1];
+      if (!tokenId) continue;
 
       const hlSymbol = resolveHlSymbol(market.question);
 

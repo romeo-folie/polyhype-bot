@@ -38,7 +38,7 @@ export async function fetchCurrentPrice(position: Position): Promise<CurrentPric
     // (fetchAllCurrentPrices callers should call feed.watch() before the read loop).
     // Calling watch() on every fetch invocation caused repeated subscription attempts
     // and obscured WS connection logic.
-    // priceFetcher only handles Polymarket positions (YES/NO).
+    // priceFetcher only handles Polymarket positions (YES/NO/UP/DOWN).
     // Futures positions (LONG/SHORT) are managed by futuresMonitor — skip them here
     // rather than silently casting an invalid direction.
     if (position.direction !== 'YES' && position.direction !== 'NO'
