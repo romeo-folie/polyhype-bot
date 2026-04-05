@@ -86,6 +86,10 @@ const SimmerPositionSchema = z.object({
   shares: z.number().optional(),
   value_usdc: z.number().optional(),
   average_price: z.number().optional(),
+  /** Which side won — present on resolved positions. */
+  outcome: z.enum(['yes', 'no']).optional(),
+  /** Polymarket condition ID — useful for dedup and on-chain lookups. */
+  condition_id: z.string().optional(),
 });
 
 function deriveSide(raw: Record<string, unknown>): 'yes' | 'no' | null {
@@ -99,6 +103,11 @@ function deriveSide(raw: Record<string, unknown>): 'yes' | 'no' | null {
 function normalisePosition(raw: Record<string, unknown>): Record<string, unknown> {
   const next: Record<string, unknown> = { ...raw };
 
+  // Normalise outcome to lowercase for Zod enum validation
+  if (typeof next.outcome === 'string' && next.outcome.length > 0) {
+    next.outcome = next.outcome.toLowerCase();
+  }
+
   if (!('side' in next)) {
     const inferred = deriveSide(next);
     if (inferred) {
@@ -107,6 +116,19 @@ function normalisePosition(raw: Record<string, unknown>): Record<string, unknown
         market_id: next.market_id,
         side: inferred,
       });
+    } else if (typeof next.outcome === 'string' && (next.outcome === 'yes' || next.outcome === 'no')) {
+      // Both shares_yes and shares_no are non-zero (ambiguous).
+      // For resolved positions, set side to the winning outcome — only the winning
+      // side's tokens are redeemable. This lets the redeemer pick the correct side.
+      const winSideShares = next.outcome === 'yes' ? Number(next.shares_yes ?? 0) : Number(next.shares_no ?? 0);
+      if (Number.isFinite(winSideShares) && winSideShares > 0) {
+        next.side = next.outcome;
+        logger.info('[simmer] inferred side from outcome (ambiguous shares)', {
+          market_id: next.market_id,
+          side: next.outcome,
+          winSideShares,
+        });
+      }
     }
   }
 

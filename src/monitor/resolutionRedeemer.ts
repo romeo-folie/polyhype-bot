@@ -246,7 +246,30 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
     return results;
   }
 
-  const redeemable = resolvedPositions.filter((p) => p.redeemable);
+  const markedRedeemable = resolvedPositions.filter((p) => p.redeemable);
+
+  // Simmer's `redeemable` flag is unreliable for managed wallets — it may return
+  // false on all resolved positions even when tokens are clearly won. Fall back to
+  // outcome + side matching: if the outcome equals our side and we hold shares, treat
+  // it as redeemable.
+  const markedIds = new Set(markedRedeemable.map((p) => p.market_id));
+  const inferredRedeemable = resolvedPositions.filter((p) => {
+    if (p.redeemable) return false; // already in markedRedeemable
+    if (markedIds.has(p.market_id)) return false;
+    if (!p.outcome || !p.side) return false;
+    if (p.outcome !== p.side) return false; // we lost
+    const shares = p.shares ?? 0;
+    return shares > cfg.REDEEMER_DUST_THRESHOLD_USDC;
+  });
+
+  if (inferredRedeemable.length > 0) {
+    logger.warn('[redeemer] positions won but not marked redeemable by Simmer — attempting redemption', {
+      count: inferredRedeemable.length,
+      markets: inferredRedeemable.map((p) => p.market_id),
+    });
+  }
+
+  const redeemable = [...markedRedeemable, ...inferredRedeemable];
 
   if (redeemable.length === 0) {
     logger.debug('[redeemer] no redeemable positions found');
@@ -257,11 +280,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
       if (results.length > 0) await sleep(REDEEM_DELAY_MS);
       const side = pos.side;
       const reportedBalance = pos.value_usdc ?? pos.shares ?? null;
-      const posAny = pos as Record<string, unknown>;
-      const dedupeConditionId =
-        typeof posAny.condition_id === 'string' && posAny.condition_id.length > 0
-          ? (posAny.condition_id)
-          : pos.market_id;
+      const dedupeConditionId = pos.condition_id ?? pos.market_id;
       const skipReason = await shouldSkipRedeemer(
         redis,
         dedupeConditionId,
@@ -324,8 +343,8 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
           );
 
           // Record outcome (Phase 8).
-          // redeemable === true means Polymarket confirmed our direction won.
-          const simmerWon = pos.redeemable;
+          // Position is won if marked redeemable OR if outcome matches our side.
+          const simmerWon = pos.redeemable || pos.outcome === pos.side;
           const posAny = pos as Record<string, unknown>;
           const stakeUsd =
             ledgerPos?.stakeUsd ??
@@ -485,7 +504,7 @@ async function redeemClobPositions(
 
     const pmDirection = pos.direction;
     const isYesSide = pmDirection === 'YES' || pmDirection === 'UP';
-    const side = (isYesSide ? 'yes' : 'no') as 'yes' | 'no';
+    const side: 'yes' | 'no' = isYesSide ? 'yes' : 'no';
 
     const tokenId = pickClobTokenId(pos);
     const preBalance = await refreshTokenBalance(tokenId);
@@ -498,8 +517,8 @@ async function redeemClobPositions(
     }
 
     try {
-      // Check resolution via Gamma API
-      const resolved = await checkMarketResolved(conditionId);
+      // Check resolution via Gamma API — pass token ID for reliable lookup
+      const resolved = await checkMarketResolved(conditionId, tokenId);
       // Rate limit Gamma calls (200ms inter-call delay)
       await new Promise((r) => setTimeout(r, 200));
 
@@ -684,13 +703,26 @@ async function redeemClobPositions(
 /**
  * Check whether a market has resolved via the Gamma API.
  *
+ * Gamma's `condition_id` query parameter is unreliable (returns unrelated markets),
+ * so we prefer `clob_token_ids` when a token ID is available. Falls back to
+ * on-chain payout checks when Gamma returns no usable data.
+ *
  * Returns null if the market is still active, or the outcome if resolved.
  */
 async function checkMarketResolved(
   conditionId: string,
+  clobTokenId?: string,
 ): Promise<{ outcome: 'YES' | 'NO'; question?: string } | null> {
   try {
-    const url = `https://gamma-api.polymarket.com/markets?condition_id=${encodeURIComponent(conditionId)}`;
+    // Gamma's condition_id query parameter is broken (returns unrelated markets).
+    // Only call Gamma when we have a reliable clob_token_ids lookup.
+    // Otherwise skip straight to the on-chain payout check.
+    if (!clobTokenId) {
+      logger.debug('[redeemer] no clobTokenId — skipping Gamma, checking on-chain', { conditionId });
+      return checkOnChainResolution(conditionId);
+    }
+
+    const url = `https://gamma-api.polymarket.com/markets?clob_token_ids=${encodeURIComponent(clobTokenId)}`;
     const resp = await fetch(url, {
       signal: AbortSignal.timeout(10_000),
     });
@@ -890,7 +922,7 @@ async function redeemSimmerLedgerFallback(
 
     const pmDirection = pos.direction as 'YES' | 'NO' | 'UP' | 'DOWN';
     const isYesSideSimmer = pmDirection === 'YES' || pmDirection === 'UP';
-    const side = (isYesSideSimmer ? 'yes' : 'no') as 'yes' | 'no';
+    const side: 'yes' | 'no' = isYesSideSimmer ? 'yes' : 'no';
 
     const reportedBalance =
       pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : null);
@@ -901,7 +933,8 @@ async function redeemSimmerLedgerFallback(
     }
 
     try {
-      const resolved = await checkMarketResolved(conditionId);
+      const fallbackTokenId = pickClobTokenId(pos);
+      const resolved = await checkMarketResolved(conditionId, fallbackTokenId);
       // Rate limit Gamma calls (200ms inter-call delay)
       await new Promise((r) => setTimeout(r, 200));
       if (!resolved) continue;
@@ -1291,8 +1324,8 @@ async function redeemOrphanClobPositions(
         continue;
       }
 
-      // Check if market resolved and in our favour
-      const resolved = await checkMarketResolved(conditionId);
+      // Check if market resolved and in our favour — pass tokenId for reliable Gamma lookup
+      const resolved = await checkMarketResolved(conditionId, tokenId);
       await sleep(200); // rate-limit Gamma calls
 
       if (!resolved) continue;

@@ -39,6 +39,8 @@ vi.mock('../../shared/config.js', () => ({
 
 vi.mock('../../shared/clob.js', () => ({
   redeemClobOutcome: mockRedeemClobOutcome,
+  fetchClobTokenBalance: vi.fn().mockResolvedValue({ ok: true, balance: 100 }),
+  getClobClient: vi.fn().mockReturnValue(null),
 }));
 
 vi.mock('../../shared/bankroll.js', () => ({
@@ -76,7 +78,7 @@ describe('redeemResolvedPositions', () => {
     global.fetch = vi.fn().mockImplementation(() =>
       Promise.resolve({
         ok: true,
-        json: () => Promise.resolve([{ resolved: true, outcome: 'YES' }]),
+        json: () => Promise.resolve([{ resolved: true, outcomePrices: '["1","0"]' }]),
       } as any),
     );
   });
@@ -108,6 +110,7 @@ describe('redeemResolvedPositions', () => {
       {
         marketId: 'clob1',
         conditionId: 'cond1',
+        clobTokenIds: ['token-yes-1', 'token-no-1'],
         direction: 'YES',
         executionVenue: 'clob',
         question: 'QC1',
@@ -136,7 +139,7 @@ describe('redeemResolvedPositions', () => {
     mockSubmitRedeem.mockResolvedValue({ success: true });
 
     mockGetOpenPositions.mockResolvedValue([
-      { marketId: 'clob1', conditionId: 'cond1', direction: 'YES', executionVenue: 'clob' },
+      { marketId: 'clob1', conditionId: 'cond1', clobTokenIds: ['token-yes-1', 'token-no-1'], direction: 'YES', executionVenue: 'clob' },
     ]);
     mockRedeemClobOutcome.mockResolvedValue({ success: true });
 
@@ -151,6 +154,7 @@ describe('redeemResolvedPositions', () => {
       {
         marketId: 'clob-loss1',
         conditionId: 'cond-loss1',
+        clobTokenIds: ['token-yes-loss', 'token-no-loss'],
         direction: 'YES',
         executionVenue: 'clob',
         question: 'Will Spurs beat Nuggets?',
@@ -162,7 +166,7 @@ describe('redeemResolvedPositions', () => {
     global.fetch = vi.fn().mockImplementation(() =>
       Promise.resolve({
         ok: true,
-        json: () => Promise.resolve([{ resolved: true, outcome: 'NO' }]),
+        json: () => Promise.resolve([{ resolved: true, outcomePrices: '["0","1"]' }]),
       } as any),
     );
 
