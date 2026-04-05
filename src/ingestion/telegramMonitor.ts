@@ -16,7 +16,7 @@ import type { Client } from 'tdl';
 import { getTdjson } from 'prebuilt-tdlib';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
-import { getRedis } from '../shared/redis.js';
+import { getRedis, closeRedis } from '../shared/redis.js';
 import { scoreItems } from './scorer.js';
 import { processScoredItems } from '../execution/index.js';
 import { matchesWatchlist } from '../shared/watchlist.js';
@@ -234,6 +234,19 @@ async function handleNewMessage(message: any) {
  * Main entry point for standalone worker.
  */
 if (process.argv[1]?.endsWith('telegramMonitor.ts')) {
+  const shutdown = () => {
+    logger.info('[telegram] shutting down…');
+    if (client) {
+      void client.close();
+    }
+    void closeRedis().finally(() => {
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+
   startTelegramMonitor().catch((err: unknown) => {
     logger.error('[telegram] fatal error', { error: String(err) });
     process.exit(1);

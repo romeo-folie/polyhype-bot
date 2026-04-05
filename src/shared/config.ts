@@ -86,8 +86,8 @@ const envSchema = z.object({
 
   // Tuning knobs (all optional — defaults apply)
   LLM_PROVIDER: z.enum(['openai', 'gemini']).optional().default('openai'),
-  URGENCY_THRESHOLD: z.coerce.number().int().min(1).max(10).optional().default(8),
-  DIVERGENCE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.1),
+  URGENCY_THRESHOLD: z.coerce.number().int().min(1).max(10).optional().default(7),
+  DIVERGENCE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.08),
   MAX_BET_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.1),
 
   // Execution microstructure controls
@@ -95,7 +95,7 @@ const envSchema = z.object({
   MAKER_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(20_000),
   MAKER_POLL_INTERVAL_MS: z.coerce.number().int().min(50).optional().default(1000),
   MAKER_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(5),
-  TAKER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.1),
+  TAKER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   TAKER_MIN_EDGE_CATEGORIES: z
     .string()
     .optional()
@@ -136,8 +136,8 @@ const envSchema = z.object({
   SPOT_MONITOR_ENABLED: z.coerce.boolean().optional().default(false),
   SPOT_MOVE_THRESHOLD: z.coerce.number().min(0).optional().default(3),
   SPOT_LOOKBACK_MINUTES: z.coerce.number().int().min(1).optional().default(5),
-  SPOT_COOLDOWN_MINUTES: z.coerce.number().int().min(1).optional().default(30),
-  SPOT_DIVERGENCE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.12),
+  SPOT_COOLDOWN_MINUTES: z.coerce.number().int().min(1).optional().default(15),
+  SPOT_DIVERGENCE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.10),
   SPOT_CRYPTO_ASSETS: z
     .string()
     .optional()
@@ -185,7 +185,7 @@ const envSchema = z.object({
   CRYPTO_ARB_MAX_VOLATILITY: z.coerce.number().min(0).optional().default(0.008),
   CRYPTO_ARB_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   CRYPTO_ARB_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.03),
-  CRYPTO_ARB_DEDUP_TTL_S: z.coerce.number().int().positive().optional().default(300),
+  CRYPTO_ARB_DEDUP_TTL_S: z.coerce.number().int().positive().optional().default(180),
   CRYPTO_ARB_MARKET_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
 
   // Up/Down Bitcoin market trading

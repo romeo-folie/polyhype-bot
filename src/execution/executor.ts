@@ -970,14 +970,25 @@ export async function executeSignal(
   }
 
   // 3) Stake floor check (MIN_BET_USD, default $5)
+  //    If Kelly suggests a stake ≥ 60% of the floor, bump up to the floor
+  //    instead of skipping — the edge exists but sizing is just below minimum.
   const minStake = getMinStake();
-  if (signal.stakeUsd < minStake) {
+  const bumpThreshold = minStake * 0.6;
+  if (signal.stakeUsd < bumpThreshold) {
     logger.info('[executor] skipping — stake below floor', {
       marketId: signal.marketId,
       stakeUsd: signal.stakeUsd,
       minBetUsd: minStake,
     });
     return recordSkip('stake_below_floor');
+  }
+  if (signal.stakeUsd < minStake) {
+    logger.info('[executor] bumping stake to floor', {
+      marketId: signal.marketId,
+      originalStake: signal.stakeUsd,
+      minBetUsd: minStake,
+    });
+    signal.stakeUsd = minStake;
   }
 
   // 4) Open position check — don't stack into a market we already hold
