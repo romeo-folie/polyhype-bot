@@ -92,7 +92,7 @@ beforeEach(() => {
   mockDedup.mockResolvedValue(true);
   mockFetchWithTimeout.mockReset();
   mockGetMarketBySlug.mockReset();
-  mockGetOpenPositions.mockReset();
+  mockGetOpenPositions.mockReset().mockResolvedValue([]);
   mockFetchCurrentPrice.mockReset();
   mockExecuteTakeProfit.mockReset();
   mockLogger.info.mockReset();
@@ -212,7 +212,49 @@ describe('runCopytrade', () => {
     expect(result.signals[0]?.stakeUsd).toBe(25);
   });
 
-  it('executes mirror exits only when configured', async () => {
+  it('exits copytrade position when whale sells in rules mode', async () => {
+    configOverride = { ...configOverride, COPYTRADE_EXIT_MODE: 'rules' };
+
+    const trade = makeTrade({ side: 'SELL', outcomeIndex: 0, price: 0.6 });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(makeMarket({ outcomePrices: '["0.6","0.4"]' }));
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'market-1',
+        conditionId: '0xcond',
+        clobTokenIds: ['yes-token', 'no-token'],
+        question: 'Q',
+        direction: 'YES',
+        entryPrice: 0.4,
+        stakeUsd: 10,
+        consensusProbability: 0.5,
+        edgeMagnitude: 0.1,
+        sourcedFrom: 'copytrade:0xabc',
+        openedAt: new Date().toISOString(),
+        executionVenue: 'simmer',
+      },
+    ]);
+    mockFetchCurrentPrice.mockResolvedValue({
+      marketId: 'market-1',
+      direction: 'YES',
+      currentOutcomePrice: 0.6,
+      currentYesPrice: 0.6,
+    });
+    mockExecuteTakeProfit.mockResolvedValue({ success: true });
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
+    expect(result.exits).toBe(1);
+    expect(mockExecuteTakeProfit).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'copytrade_mirror' }),
+    );
+  });
+
+  it('exits copytrade position when whale sells in mirror mode', async () => {
     configOverride = { ...configOverride, COPYTRADE_EXIT_MODE: 'mirror' };
 
     const trade = makeTrade({ side: 'SELL', outcomeIndex: 0, price: 0.6 });
@@ -249,7 +291,9 @@ describe('runCopytrade', () => {
     const result = await runCopytrade(redis, 1000);
 
     expect(result.exits).toBe(1);
-    expect(mockExecuteTakeProfit).toHaveBeenCalled();
+    expect(mockExecuteTakeProfit).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'copytrade_mirror' }),
+    );
   });
 
   it('dedups by tx hash + asset + outcome', async () => {

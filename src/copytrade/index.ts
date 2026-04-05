@@ -278,7 +278,9 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
     return { signals: [], exits: 0 };
   }
 
-  const positions = cfg.COPYTRADE_EXIT_MODE === 'mirror' ? await getOpenPositions(redis) : [];
+  // Build an index of copytrade positions so we can exit when the whale sells.
+  // In both 'mirror' and 'rules' mode, a whale exit is a strong signal to close.
+  const positions = await getOpenPositions(redis);
   const positionIndex = new Map<string, Position[]>();
   for (const position of positions) {
     // Only mirror-close positions that were opened by copytrade.
@@ -468,10 +470,6 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       }
 
       if (trade.side === 'SELL') {
-        if (cfg.COPYTRADE_EXIT_MODE !== 'mirror') {
-          await markDedup();
-          continue;
-        }
         const walletKey = trade.proxyWallet.toLowerCase();
         const positionsToExit =
           positionIndex.get(`${positionKey(market.id, direction)}:${walletKey}`) ?? [];
