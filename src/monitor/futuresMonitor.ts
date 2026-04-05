@@ -11,6 +11,7 @@
  */
 
 import 'dotenv/config';
+import { hostname } from 'node:os';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis, closeRedis } from '../shared/redis.js';
@@ -38,8 +39,23 @@ export async function runFuturesMonitorWorker(): Promise<void> {
     return;
   }
 
-  // Distributed lock — prevents duplicate PM2 instances from issuing conflicting close orders.
-  const lockToken = `${Date.now().toString()}-${Math.random().toString(36).slice(2)}`;
+  // Distributed lock — prevents duplicate instances from issuing conflicting close orders.
+  // Hostname-based stale detection: in Docker, each container gets a unique hostname,
+  // so a mismatch means the old container is gone and the lock is safe to force-delete.
+  const myHostname = hostname();
+  const existingLock = await redis.get(MONITOR_LOCK_KEY);
+  if (existingLock) {
+    const ownerHostname = existingLock.split(':')[0];
+    if (ownerHostname !== myHostname) {
+      logger.warn(
+        '[futures-monitor] stale lock detected — owner hostname differs, force-releasing',
+        { ownerHostname, myHostname },
+      );
+      await redis.del(MONITOR_LOCK_KEY);
+    }
+  }
+
+  const lockToken = `${myHostname}:${Date.now().toString()}-${Math.random().toString(36).slice(2)}`;
   const acquired = await redis.set(MONITOR_LOCK_KEY, lockToken, 'EX', MONITOR_LOCK_TTL_SEC, 'NX');
   if (!acquired) {
     logger.warn('[futures-monitor] another instance is already running — exiting');

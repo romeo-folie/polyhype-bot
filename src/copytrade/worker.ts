@@ -1,4 +1,5 @@
 import { promises as fsPromises } from 'fs';
+import { hostname } from 'node:os';
 import dotenv from 'dotenv';
 // Note: top-level dotenv.config() removed — config.ts loads dotenv via 'import dotenv/config'.
 // The dotenv import is retained for the hot-reload path (~line 148) which uses dotenv.config({ override: true }).
@@ -21,52 +22,35 @@ import { recordCopytradeFilter, recordCopytradeMetric } from '../shared/telemetr
  * @param maxCycles  Optional limit for testing (runs infinitely if undefined)
  */
 const WORKER_LOCK_KEY = 'copytrade:worker:lock';
-const WORKER_LOCK_PID_KEY = 'copytrade:worker:pid';
 const WORKER_LOCK_TTL_SEC = 90; // 90s — safe with 60s refresh; limits stuck window on crash
-
-/**
- * Check if a process with the given PID is still alive on this host.
- * Returns false if the PID is missing, invalid, or belongs to a dead process.
- */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0); // signal 0 = existence check, never kills
-    return true;
-  } catch {
-    return false; // ESRCH = no such process
-  }
-}
 
 export async function runWorker(maxCycles?: number): Promise<void> {
   const redis = getRedis();
   const cfg = loadConfig();
 
   // Duplicate-instance guard: only one worker may run at a time.
-  // On startup, if a lock exists, check if the owning PID is still alive.
-  // If the previous worker crashed without releasing the lock (SIGKILL, OOM, etc.),
-  // the PID will be dead and we force-delete the stale lock rather than waiting for TTL.
+  // On startup, if a lock exists, check if the owning container's hostname matches ours.
+  // In Docker, each container gets a unique hostname (container ID prefix), so a mismatch
+  // means the old container is gone and the lock is stale — safe to force-delete.
+  const myHostname = hostname();
   const existingLock = await redis.get(WORKER_LOCK_KEY);
   if (existingLock) {
-    const ownerPidStr = await redis.get(WORKER_LOCK_PID_KEY);
-    const ownerPid = ownerPidStr ? parseInt(ownerPidStr, 10) : NaN;
-    if (!isNaN(ownerPid) && !isPidAlive(ownerPid)) {
+    const ownerHostname = existingLock.split(':')[0];
+    if (ownerHostname !== myHostname) {
       logger.warn(
-        '[copytrade-worker] stale lock detected — previous owner PID is dead, force-releasing',
-        { ownerPid: ownerPid.toString() },
+        '[copytrade-worker] stale lock detected — owner hostname differs, force-releasing',
+        { ownerHostname, myHostname },
       );
-      await redis.del(WORKER_LOCK_KEY, WORKER_LOCK_PID_KEY);
+      await redis.del(WORKER_LOCK_KEY);
     }
   }
 
-  const lockToken = `${Date.now().toString()}-${Math.random().toString(36).slice(2)}`;
+  const lockToken = `${myHostname}:${Date.now().toString()}-${Math.random().toString(36).slice(2)}`;
   const acquired = await redis.set(WORKER_LOCK_KEY, lockToken, 'EX', WORKER_LOCK_TTL_SEC, 'NX');
   if (!acquired) {
     logger.warn('[copytrade-worker] another instance is already running — exiting');
     return;
   }
-
-  // Store our PID so the next startup can detect if we crashed without releasing.
-  await redis.set(WORKER_LOCK_PID_KEY, String(process.pid), 'EX', WORKER_LOCK_TTL_SEC + 10);
 
   // Refresh lock every 60s while running.
   // Track consecutive refresh failures: after 3 failures (~3 min), abort the worker
@@ -75,13 +59,11 @@ export async function runWorker(maxCycles?: number): Promise<void> {
   const MAX_LOCK_REFRESH_FAILURES = 3;
   let lockLost = false;
   const lockRefresh = setInterval(() => {
-    // Refresh both the lock key and the PID key TTLs atomically.
     redis
       .eval(
-        `if redis.call("get",KEYS[1])==ARGV[1] then redis.call("expire",KEYS[2],ARGV[2]) return redis.call("expire",KEYS[1],ARGV[2]) else return 0 end`,
-        2,
+        `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("expire",KEYS[1],ARGV[2]) else return 0 end`,
+        1,
         WORKER_LOCK_KEY,
-        WORKER_LOCK_PID_KEY,
         lockToken,
         String(WORKER_LOCK_TTL_SEC),
       )
@@ -113,10 +95,9 @@ export async function runWorker(maxCycles?: number): Promise<void> {
     clearInterval(lockRefresh);
     await redis
       .eval(
-        `if redis.call("get",KEYS[1])==ARGV[1] then redis.call("del",KEYS[2]) return redis.call("del",KEYS[1]) else return 0 end`,
-        2,
+        `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) else return 0 end`,
+        1,
         WORKER_LOCK_KEY,
-        WORKER_LOCK_PID_KEY,
         lockToken,
       )
       .catch((e: unknown) => {
