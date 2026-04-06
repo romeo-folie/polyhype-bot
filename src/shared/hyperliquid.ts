@@ -248,12 +248,12 @@ class HyperliquidClient {
       const nonce = nextHlNonce();
       const signature = await this.signAction(action, nonce);
 
-      const payload: Record<string, unknown> = {
+      const payload = {
         action,
         nonce,
         signature,
+        vaultAddress: this.vaultAddress,
       };
-      if (this.vaultAddress) payload.vaultAddress = this.vaultAddress;
 
       const response = await axios.post<HlExchangeResponse>(`${this.baseUrl}/exchange`, payload, {
         timeout: HL_REQUEST_TIMEOUT_MS,
@@ -316,11 +316,9 @@ class HyperliquidClient {
 
       const nonce = nextHlNonce();
       const signature = await this.signAction(action, nonce);
-      const payload: Record<string, unknown> = { action, nonce, signature };
-      if (this.vaultAddress) payload.vaultAddress = this.vaultAddress;
       await axios.post(
         `${this.baseUrl}/exchange`,
-        payload,
+        { action, nonce, signature, vaultAddress: this.vaultAddress },
         { timeout: HL_REQUEST_TIMEOUT_MS },
       );
       return true;
