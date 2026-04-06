@@ -29,6 +29,7 @@ const CATEGORY_MAP: Record<string, string> = {
   sports: 'SPORTS',
   macro: 'ECONOMICS',
   'crypto-regulatory': 'CRYPTO',
+  'ai-tech': 'TECH',
   mentions: 'CULTURE',
 };
 
