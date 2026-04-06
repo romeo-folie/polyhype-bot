@@ -354,6 +354,12 @@ const envSchema = z.object({
     .min(0.01, 'FUTURES_TAKE_PROFIT_PCT must be positive')
     .default(3.0),
   FUTURES_EXIT_ON_SIGNAL_FADE: z.coerce.boolean().optional().default(true),
+  // TA confluence gate for futures entries — requires RSI/MACD/Stochastic agreement before opening a position.
+  FUTURES_CONFLUENCE_GATE_ENABLED: z.coerce.boolean().optional().default(true),
+  FUTURES_MIN_CONFLUENCE_SCORE: z.coerce.number().int().min(0).max(3).optional().default(2),
+  // Post-entry TA re-evaluation interval & minimum position age before re-eval kicks in.
+  FUTURES_REEVAL_INTERVAL_S: z.coerce.number().int().min(10).optional().default(60),
+  FUTURES_REEVAL_MIN_AGE_S: z.coerce.number().int().min(0).optional().default(120),
   // Max slippage fraction for IoC market orders (e.g. 0.02 = 2%). Conservative default.
   FUTURES_IOC_SLIPPAGE: z.coerce.number().min(0.001).max(0.1).optional().default(0.02),
 });

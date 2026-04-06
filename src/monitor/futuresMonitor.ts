@@ -21,6 +21,7 @@ import {
   closePosition as closeLedgerPosition,
   getOpenPositions,
 } from '../execution/positionLedger.js';
+import { scoreConfluence } from '../arb/confluenceScorer.js';
 
 const POLL_INTERVAL_MS = 5000; // 5 seconds — safe for rate limits, fast enough for intraday
 const MONITOR_LOCK_KEY = 'futures-monitor:lock';
@@ -28,6 +29,9 @@ const MONITOR_LOCK_TTL_SEC = 30; // Must be > POLL_INTERVAL_MS; refreshed every 
 
 // Module-level reference to releaseLock so the shutdown handler can call it
 let _releaseLock: (() => Promise<void>) | null = null;
+
+// Per-symbol last re-eval timestamp (process-local, not Redis — scoped to this worker)
+const lastRevalCheck = new Map<string, number>();
 
 export async function runFuturesMonitorWorker(): Promise<void> {
   const cfg = loadConfig();
@@ -171,6 +175,35 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           if (ageHours >= cfg.FUTURES_MAX_HOLD_HOURS) {
             shouldExit = true;
             reason = `Max hold hours reached (${ageHours.toFixed(1).toString()}h >= ${cfg.FUTURES_MAX_HOLD_HOURS.toString()}h)`;
+          }
+
+          // 4. TA re-evaluation — exit if confluence flips against held direction
+          if (!shouldExit && cfg.FUTURES_EXIT_ON_SIGNAL_FADE) {
+            const ageSec = (Date.now() - openedAt) / 1000;
+            const lastCheck = lastRevalCheck.get(symbol) ?? 0;
+            const secSinceCheck = (Date.now() - lastCheck) / 1000;
+
+            if (ageSec >= cfg.FUTURES_REEVAL_MIN_AGE_S && secSinceCheck >= cfg.FUTURES_REEVAL_INTERVAL_S) {
+              lastRevalCheck.set(symbol, Date.now());
+
+              try {
+                const confluence = await scoreConfluence(symbol, redis);
+                const oppositeDir = direction === 'LONG' ? 'DOWN' : 'UP';
+
+                if (confluence.direction === oppositeDir && confluence.score >= cfg.FUTURES_MIN_CONFLUENCE_SCORE) {
+                  shouldExit = true;
+                  const signalDetails = Object.entries(confluence.signals)
+                    .filter(([, v]) => v !== 'neutral')
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join(', ');
+                  reason = `TA reversal (${signalDetails}, score=${confluence.score.toString()})`;
+                }
+              } catch (err) {
+                logger.warn('[futures-monitor] confluence re-eval failed', {
+                  symbol, error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
           }
         }
 

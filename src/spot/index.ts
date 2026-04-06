@@ -24,6 +24,7 @@ import { recordPosition, hasOpenPosition } from '../execution/positionLedger.js'
 import { notifyTradeExecuted, notifyTradeError } from '../execution/telegram.js';
 import { getOpportunities } from '../shared/simmer.js';
 import { HL_SYMBOL_MAP } from '../shared/hyperliquid.js';
+import { scoreConfluence } from '../arb/confluenceScorer.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 /**
@@ -96,6 +97,35 @@ async function runSpotMonitorInner(
       );
 
       if (!alreadyOpen) {
+        const moveDirection = move.changePercent > 0 ? 'LONG' : 'SHORT';
+
+        // TA confluence gate — block if indicators disagree with the move
+        if (cfg.FUTURES_CONFLUENCE_GATE_ENABLED) {
+          const confluence = await scoreConfluence(hlSymbol, redis);
+          const expectedConfluenceDir = moveDirection === 'LONG' ? 'UP' : 'DOWN';
+
+          if (confluence.score < cfg.FUTURES_MIN_CONFLUENCE_SCORE) {
+            logger.info('[spot] futures confluence_block — score too low', {
+              symbol: hlSymbol, moveDirection, score: confluence.score,
+              signals: confluence.signals,
+            });
+            continue;
+          }
+          if (confluence.direction !== expectedConfluenceDir) {
+            logger.info('[spot] futures confluence_block — direction mismatch', {
+              symbol: hlSymbol, moveDirection,
+              confluenceDirection: confluence.direction, score: confluence.score,
+              signals: confluence.signals,
+            });
+            continue;
+          }
+
+          logger.info('[spot] futures confluence_pass', {
+            symbol: hlSymbol, moveDirection, score: confluence.score,
+            signals: confluence.signals,
+          });
+        }
+
         const stakeUsd = Math.min(
           cfg.FUTURES_MAX_PER_TRADE_USD,
           bankrollUsd * cfg.MAX_BET_FRACTION,
@@ -103,8 +133,8 @@ async function runSpotMonitorInner(
 
         signals.push({
           marketId: hlSymbol,
-          question: `Hyperliquid Perp: ${hlSymbol} ${move.changePercent > 0 ? 'LONG' : 'SHORT'}`,
-          direction: move.changePercent > 0 ? 'LONG' : 'SHORT',
+          question: `Hyperliquid Perp: ${hlSymbol} ${moveDirection}`,
+          direction: moveDirection,
           stakeUsd,
           edgeMagnitude: Math.abs(move.changePercent) / 100, // proxy edge by move magnitude
           outcomePrice: move.currentPrice,

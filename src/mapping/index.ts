@@ -17,6 +17,8 @@ import { estimateConsensusProbability, estimateSentiment } from './consensusCalc
 import { computeDivergence } from './divergenceCalculator.js';
 import { resolveYesPrice } from '../shared/priceCache.js';
 import { resolveHlSymbol } from '../shared/hyperliquid.js';
+import { getRedis } from '../shared/redis.js';
+import { scoreConfluence } from '../arb/confluenceScorer.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 import type { Redis } from 'ioredis';
 import type { ClobPriceFeed } from '../shared/clobWebSocket.js';
@@ -230,6 +232,34 @@ export async function mapNewsToFutures(
         title: item.title,
       });
       continue;
+    }
+
+    // TA confluence gate — block if indicators disagree with LLM sentiment
+    if (cfg.FUTURES_CONFLUENCE_GATE_ENABLED) {
+      const redis = getRedis();
+      const confluence = await scoreConfluence(symbol, redis);
+      const expectedDir = direction === 'LONG' ? 'UP' : 'DOWN';
+
+      if (confluence.score < cfg.FUTURES_MIN_CONFLUENCE_SCORE) {
+        logger.info('[mapping] futures confluence_block — score too low', {
+          symbol, direction, score: confluence.score,
+          signals: confluence.signals, title: item.title,
+        });
+        continue;
+      }
+      if (confluence.direction !== expectedDir) {
+        logger.info('[mapping] futures confluence_block — direction mismatch', {
+          symbol, direction,
+          confluenceDirection: confluence.direction, score: confluence.score,
+          signals: confluence.signals, title: item.title,
+        });
+        continue;
+      }
+
+      logger.info('[mapping] futures confluence_pass', {
+        symbol, direction, score: confluence.score,
+        signals: confluence.signals,
+      });
     }
 
     // Scale stakeUsd based on urgency (e.g. 6/10 urgency = 60% of max allowed stake).
