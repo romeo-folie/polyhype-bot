@@ -12,6 +12,9 @@ const TESTNET_API = 'https://api.hyperliquid-testnet.xyz';
 /** Hard timeout for all HL API requests — prevents hung workers. */
 const HL_REQUEST_TIMEOUT_MS = 15_000;
 
+/** Hyperliquid enforces a $10 minimum order value across all perp assets. */
+const HL_MIN_ORDER_USD = 10;
+
 // --- Hyperliquid Asset Mapping ---
 /** Mapping of external asset IDs (CoinGecko/Binance/Yahoo) to HL perp symbols */
 export const HL_SYMBOL_MAP: Record<string, string> = {
@@ -204,6 +207,24 @@ class HyperliquidClient {
     }
 
     try {
+      // 0. Floor bump: stakes >= 60% of HL minimum get bumped up; below that are skipped.
+      //    Mirrors the Polymarket MIN_BET_USD bump logic in executor.ts.
+      if (!opts.reduceOnly && !opts.sizeBase && opts.sizeUsd < HL_MIN_ORDER_USD) {
+        if (opts.sizeUsd >= HL_MIN_ORDER_USD * 0.6) {
+          logger.info('[hyperliquid] bumping stake to HL minimum', {
+            original: opts.sizeUsd.toFixed(2),
+            bumped: HL_MIN_ORDER_USD,
+            symbol: opts.symbol,
+          });
+          opts.sizeUsd = HL_MIN_ORDER_USD;
+        } else {
+          return {
+            success: false,
+            error: `Stake $${opts.sizeUsd.toFixed(2)} too small for HL minimum ($${HL_MIN_ORDER_USD}); skipped`,
+          };
+        }
+      }
+
       // 1. Get asset index for the symbol
       const { index, szDecimals } = await this.getAssetMeta(opts.symbol);
       if (index === -1) throw new Error(`Symbol ${opts.symbol} not found on Hyperliquid`);
@@ -447,13 +468,11 @@ class HyperliquidClient {
   // --- Private Helpers ---
 
   /**
-   * Returns the vault address for vault trading, or null for regular/agent trading.
+   * Vault address for vault trading, or null for regular/agent trading.
    * Agent wallets don't use vaultAddress — HL knows the agent is approved for the
    * main wallet via the on-chain approval. Vault is only for actual vault contracts.
    */
-  private get vaultAddress(): string | null {
-    return null;
-  }
+  private readonly vaultAddress: string | null = null;
 
   private async signAction(
     action: Record<string, unknown>,
