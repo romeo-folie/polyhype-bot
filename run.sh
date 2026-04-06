@@ -18,13 +18,16 @@
 #       Persistent workers should be managed via PM2, systemd, or equivalent.
 #
 # Crontab example (use absolute paths; redirect logs):
-#   */5 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/execution/index.ts >> /tmp/pga-trade.log 2>&1
-#   */5 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/monitor/index.ts >> /tmp/pga-monitor.log 2>&1
-#   * * * * *   /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/spot/index.ts >> /tmp/pga-spot.log 2>&1
-#   */15 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/arb/index.ts >> /tmp/pga-arb.log 2>&1
-#   0 6 * * MON /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/copytrade/shortlist.ts >> /tmp/pga-copytrade-shortlist.log 2>&1
+#   */5 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/execution/index.ts >> ~/logs/pga/trade.log 2>&1
+#   */5 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/monitor/index.ts >> ~/logs/pga/monitor.log 2>&1
+#   * * * * *   /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/spot/index.ts >> ~/logs/pga/spot.log 2>&1
+#   */15 * * * * /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/arb/index.ts >> ~/logs/pga/arb.log 2>&1
+#   0 6 * * MON /home/romeofolie/Projects/polymarket-geopolitical-agent/run.sh npx tsx /home/romeofolie/Projects/polymarket-geopolitical-agent/src/copytrade/shortlist.ts >> ~/logs/pga/copytrade-shortlist.log 2>&1
 
 set -euo pipefail
+
+# Ensure persistent log directory exists
+mkdir -p "$HOME/logs/pga"
 
 ENV_FILE="$(dirname "$0")/.env"
 if [[ ! -f "$ENV_FILE" ]]; then

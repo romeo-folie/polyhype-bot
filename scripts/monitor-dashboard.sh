@@ -28,9 +28,9 @@ W3="docker compose logs -f --tail 100 pga-futures   | sed 's/\(\[[^]]*\]\)/\x1b[
 W4="docker compose logs -f --tail 100 pga-telegram  | sed 's/\(\[[^]]*\]\)/\x1b[92m\1\x1b[0m/g'"
 
 # CRON LOGS (6-8 From /tmp)
-W5="touch /tmp/pga-trade.log && tail -f /tmp/pga-trade.log | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
-W6="touch /tmp/pga-monitor.log && tail -f /tmp/pga-monitor.log | sed 's/\(\[[^]]*\]\)/\x1b[96m\1\x1b[0m/g'"
-W7="touch /tmp/pga-spot.log && tail -f /tmp/pga-spot.log | sed 's/\(\[[^]]*\]\)/\x1b[95m\1\x1b[0m/g'"
+W5="touch ~/logs/pga/trade.log && tail -f ~/logs/pga/trade.log | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
+W6="touch ~/logs/pga/monitor.log && tail -f ~/logs/pga/monitor.log | sed 's/\(\[[^]]*\]\)/\x1b[96m\1\x1b[0m/g'"
+W7="touch ~/logs/pga/spot.log && tail -f ~/logs/pga/spot.log | sed 's/\(\[[^]]*\]\)/\x1b[95m\1\x1b[0m/g'"
 
 # POSITION DISPLAY (9)
 W8="while true; do npx tsx scripts/list-positions.ts; sleep 10; done"
