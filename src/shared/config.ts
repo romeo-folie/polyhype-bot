@@ -26,12 +26,7 @@ const envSchema = z.object({
   REDIS_URL: z.string().url('REDIS_URL must be a valid URL'),
   SIMMER_API_KEY: z.string().min(1, 'SIMMER_API_KEY is required'),
 
-  // Simmer — market import and auto-redeem
-  SIMMER_AUTO_IMPORT_ENABLED: z
-    .string()
-    .optional()
-    .default('false')
-    .transform((v) => !['false', '0', ''].includes(v.trim().toLowerCase())),
+  // Simmer — auto-redeem
   SIMMER_AUTO_REDEEM_ENABLED: z
     .string()
     .optional()

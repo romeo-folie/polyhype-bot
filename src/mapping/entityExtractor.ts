@@ -12,8 +12,6 @@ import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
 import { searchEvents, parseOutcomePrices, parseClobTokenIds } from './gamma.js';
 import { getCachedMarkets } from '../shared/watchlist.js';
-import { importMarket } from '../shared/simmerImport.js';
-import type { GammaMarket } from './gamma.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 
 const TIMEOUT_MS = 20_000;
@@ -199,25 +197,6 @@ const DOMAIN_BLOCKLIST_TERMS = [
 ];
 const DOMAIN_BLOCKLIST_RE = new RegExp(DOMAIN_BLOCKLIST_TERMS.join('|'), 'i');
 
-/**
- * Fire-and-forget Simmer import for a matched market.
- * Uses the market question as a Polymarket URL slug proxy.
- */
-function fireSimmerImport(market: GammaMarket, cfg: ReturnType<typeof loadConfig>): void {
-  if (!cfg.SIMMER_AUTO_IMPORT_ENABLED) return;
-  // Build a best-effort Polymarket URL from the market question slug
-  const slug = market.question
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '');
-  const polymarketUrl = `https://polymarket.com/event/${slug}`;
-  void importMarket(polymarketUrl).catch((err) => {
-    logger.debug('[entity-extractor] simmer import failed (non-blocking)', {
-      marketId: market.id,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  });
-}
 
 /**
  * Fallback: search via broken Gamma API when market cache is unavailable.
@@ -225,10 +204,8 @@ function fireSimmerImport(market: GammaMarket, cfg: ReturnType<typeof loadConfig
 async function searchEventsForCandidates(
   queries: string[],
   seen: Map<string, CandidateMarket>,
-  cfg: ReturnType<typeof loadConfig>,
+  _cfg: ReturnType<typeof loadConfig>,
 ): Promise<void> {
-  const importedSlugs = new Set<string>();
-
   for (const query of queries) {
     try {
       const events = await searchEvents({ query, limit: 5, activeOnly: true });
@@ -291,16 +268,6 @@ async function searchEventsForCandidates(
             matchedQuery: query,
           });
 
-          if (cfg.SIMMER_AUTO_IMPORT_ENABLED && event.slug && !importedSlugs.has(event.slug)) {
-            importedSlugs.add(event.slug);
-            const polymarketUrl = `https://polymarket.com/event/${event.slug}`;
-            void importMarket(polymarketUrl).catch((err) => {
-              logger.debug('[entity-extractor] simmer import failed (non-blocking)', {
-                marketId: market.id,
-                error: err instanceof Error ? err.message : String(err),
-              });
-            });
-          }
         }
       }
     } catch (err: unknown) {
@@ -405,10 +372,6 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
         matchedQuery,
       });
 
-      // Fire-and-forget Simmer import if enabled.
-      if (cfg.SIMMER_AUTO_IMPORT_ENABLED) {
-        fireSimmerImport(market, cfg);
-      }
     }
   } else {
     // Fallback: cache is empty/missing — use broken Gamma search (better than nothing).
