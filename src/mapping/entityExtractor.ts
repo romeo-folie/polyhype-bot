@@ -251,6 +251,12 @@ async function searchEventsForCandidates(
           const questionLower = market.question.toLowerCase();
           if (DOMAIN_BLOCKLIST_RE.test(questionLower)) continue;
 
+          // Skip expired markets
+          if (market.endDate) {
+            const end = new Date(market.endDate).getTime();
+            if (!isNaN(end) && end < Date.now()) continue;
+          }
+
           const liquidity = parseFloat(market.liquidity ?? '0');
           if (!isFinite(liquidity) || liquidity < MIN_LIQUIDITY) continue;
 
@@ -357,6 +363,12 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
 
       // Universal Domain Guard: block sports/entertainment/weather markets.
       if (DOMAIN_BLOCKLIST_RE.test(questionLower)) continue;
+
+      // Skip expired markets — endDate in the past means it's already resolved or pending resolution.
+      if (market.endDate) {
+        const end = new Date(market.endDate).getTime();
+        if (!isNaN(end) && end < Date.now()) continue;
+      }
 
       const liquidity = parseFloat(market.liquidity ?? '0');
       if (!isFinite(liquidity) || liquidity < MIN_LIQUIDITY) continue;
