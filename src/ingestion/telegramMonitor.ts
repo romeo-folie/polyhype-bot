@@ -20,6 +20,7 @@ import { getRedis, closeRedis } from '../shared/redis.js';
 import { scoreItems } from './scorer.js';
 import { processScoredItems } from '../execution/index.js';
 import { matchesWatchlist } from '../shared/watchlist.js';
+import { classifyCategory } from './categoryClassifier.js';
 
 // Global state
 let client: Client | null = null;
@@ -185,7 +186,6 @@ async function handleNewMessage(message: any) {
 
   try {
     const redis = getRedis();
-    const cfg = loadConfig();
 
     // 1. Build OSINT Item
     // Note: TDLib message IDs are different from Bot API, but we keep link format
@@ -204,15 +204,22 @@ async function handleNewMessage(message: any) {
       return;
     }
 
-    // 3. Score Urgency
+    // 3. Classify category & score urgency
+    const category = await classifyCategory(item.title);
+    logger.info('[telegram] classified category', {
+      category: category.id,
+      from: channelName,
+    });
+
     const scored = await scoreItems([item], {
-      categoryId: 'geopolitical',
-      categoryLabel: 'Geopolitics',
-      entityContext: 'Geopolitical entities. Skip sports.',
+      systemPrompt: category.scorerPrompt,
+      categoryId: category.id,
+      categoryLabel: category.label,
+      entityContext: category.entityContext,
       redis,
     });
 
-    const highUrgency = scored.filter(i => i.urgencyScore >= cfg.URGENCY_THRESHOLD);
+    const highUrgency = scored.filter(i => i.urgencyScore >= category.scoreThreshold);
 
     if (highUrgency.length > 0) {
       logger.info('[telegram] high-urgency message triggering execution', {
