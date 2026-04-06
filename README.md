@@ -373,22 +373,25 @@ pm2 start "npm run cron:spot"         --name pga-spot    --cron "* * * * *"
 PATH=/usr/local/bin:/usr/bin:/bin
 
 # OSINT pipeline (every 5 min)
-*/5 * * * * /path/to/pga/run.sh npx tsx src/execution/index.ts >> /tmp/pga-trade.log 2>&1
+*/5 * * * * /path/to/pga/run.sh npx tsx src/execution/index.ts >> ~/logs/pga/trade.log 2>&1
 
 # Position monitor (every 5 min)
-*/5 * * * * /path/to/pga/run.sh npx tsx src/monitor/index.ts >> /tmp/pga-monitor.log 2>&1
+*/5 * * * * /path/to/pga/run.sh npx tsx src/monitor/index.ts >> ~/logs/pga/monitor.log 2>&1
 
 # Spot price monitor (every 1 min)
-* * * * *   /path/to/pga/run.sh npx tsx src/spot/index.ts >> /tmp/pga-spot.log 2>&1
+* * * * *   /path/to/pga/run.sh npx tsx src/spot/index.ts >> ~/logs/pga/spot.log 2>&1
 
-# Copytrade shortlist refresh (Monday 06:00 GMT)
-0 6 * * MON /path/to/pga/run.sh npx tsx src/copytrade/shortlist.ts >> /tmp/pga-shortlist.log 2>&1
+# Copytrade shortlist refresh (daily 06:00 GMT)
+0 6 * * * /path/to/pga/run.sh npx tsx src/copytrade/shortlist.ts >> ~/logs/pga/copytrade-shortlist.log 2>&1
 
 # Calibration stats refresh (Monday 03:00 GMT)
-0 3 * * MON /path/to/pga/run.sh npx tsx src/cron/calibrate.ts >> /tmp/pga-calibrate.log 2>&1
+0 3 * * MON /path/to/pga/run.sh npx tsx src/cron/calibrate.ts >> ~/logs/pga/calibrate.log 2>&1
 
-# Dynamic Watchlist refresh (Every 4 hours)
-0 */4 * * * /path/to/pga/run.sh npx tsx src/cron/refreshWatchlist.ts >> /tmp/pga-watchlist.log 2>&1
+# Dynamic Watchlist refresh (every 4 hours)
+0 */4 * * * /path/to/pga/run.sh npx tsx src/cron/refreshWatchlist.ts >> ~/logs/pga/watchlist.log 2>&1
+
+# Log rotation (daily at 4 AM) — rotates logs > 5MB, keeps 1 backup
+0 4 * * * /path/to/pga/scripts/rotate-logs.sh
 ```
 
 > **Note:** `worker:arb`, `worker:copytrade`, `worker:spot-feed`, and `monitor:futures` are persistent — run them via PM2, not cron.
