@@ -1,8 +1,10 @@
 import { logger } from './logger.js';
 import { getActiveMarkets } from '../mapping/gamma.js';
+import type { GammaMarket } from '../mapping/gamma.js';
 import type { Redis } from 'ioredis';
 
 const WATCHLIST_KEY = 'watchlist:dynamic_keywords';
+const MARKET_CACHE_KEY = 'watchlist:market_cache';
 const WATCHLIST_TTL_SECONDS = 3600 * 6; // 6 hours
 
 /**
@@ -66,7 +68,33 @@ export async function refreshDynamicWatchlist(redis: Redis): Promise<number> {
       await pipeline.exec();
     }
 
-    logger.info('[watchlist] refresh complete', { uniqueKeywords: keywords.size });
+    // Cache full market objects for local keyword matching in entityExtractor.
+    // Only store the fields needed for matching to keep the payload small.
+    try {
+      const slim = markets.map((m) => ({
+        id: m.id,
+        question: m.question,
+        description: m.description,
+        conditionId: m.conditionId,
+        clobTokenIds: m.clobTokenIds,
+        outcomePrices: m.outcomePrices,
+        liquidity: m.liquidity,
+        endDate: m.endDate,
+        volume: m.volume,
+        feesEnabled: m.feesEnabled,
+        feeType: m.feeType,
+      }));
+      await redis.set(MARKET_CACHE_KEY, JSON.stringify(slim), 'EX', WATCHLIST_TTL_SECONDS);
+    } catch (err: unknown) {
+      logger.warn('[watchlist] failed to cache market objects (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    logger.info('[watchlist] refresh complete', {
+      uniqueKeywords: keywords.size,
+      cachedMarkets: markets.length,
+    });
     return keywords.size;
   } catch (err: unknown) {
     logger.error('[watchlist] refresh failed', {
@@ -103,4 +131,20 @@ export async function matchesWatchlist(text: string, redis: Redis): Promise<bool
   }
 
   return false;
+}
+
+/**
+ * Read the cached market list from Redis.
+ *
+ * Returns an empty array if the cache is missing or corrupted.
+ */
+export async function getCachedMarkets(redis: Redis): Promise<GammaMarket[]> {
+  try {
+    const raw = await redis.get(MARKET_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as GammaMarket[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }

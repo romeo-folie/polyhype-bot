@@ -11,7 +11,9 @@ import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
 import { searchEvents, parseOutcomePrices, parseClobTokenIds } from './gamma.js';
+import { getCachedMarkets } from '../shared/watchlist.js';
 import { importMarket } from '../shared/simmerImport.js';
+import type { GammaMarket } from './gamma.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 
 const TIMEOUT_MS = 20_000;
@@ -198,33 +200,33 @@ const DOMAIN_BLOCKLIST_TERMS = [
 const DOMAIN_BLOCKLIST_RE = new RegExp(DOMAIN_BLOCKLIST_TERMS.join('|'), 'i');
 
 /**
- * Given a scored item, extract entities and search Polymarket for candidate markets.
- *
- * De-duplicates across multiple query terms (same marketId wins first occurrence).
- * Filters out markets with liquidity below MIN_LIQUIDITY.
+ * Fire-and-forget Simmer import for a matched market.
+ * Uses the market question as a Polymarket URL slug proxy.
  */
-export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateMarket[]> {
-  // Hoist config read — avoids repeated loadConfig() calls inside the triple-nested market loop below.
-  const cfg = loadConfig();
-
-  // Combine scorer keywords with LLM-extracted entities for richer queries
-  let entities: string[] = [];
-  try {
-    entities = await extractEntities(item.title, item.entityContext);
-  } catch (err: unknown) {
-    logger.warn('[entity-extractor] entity extraction failed, falling back to keywords', {
+function fireSimmerImport(market: GammaMarket, cfg: ReturnType<typeof loadConfig>): void {
+  if (!cfg.SIMMER_AUTO_IMPORT_ENABLED) return;
+  // Build a best-effort Polymarket URL from the market question slug
+  const slug = market.question
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+  const polymarketUrl = `https://polymarket.com/event/${slug}`;
+  void importMarket(polymarketUrl).catch((err) => {
+    logger.debug('[entity-extractor] simmer import failed (non-blocking)', {
+      marketId: market.id,
       error: err instanceof Error ? err.message : String(err),
     });
-    entities = item.keywords.slice(0, 3);
-  }
+  });
+}
 
-  // Deduplicate queries
-  const querySet = new Set<string>([...item.keywords.slice(0, 3), ...entities]);
-  const queries = Array.from(querySet).slice(0, 5); // cap at 5 searches
-
-  const seen = new Map<string, CandidateMarket>();
-  // Track slugs already queued for import to prevent bursting concurrent API calls
-  // when the same event appears across multiple search queries.
+/**
+ * Fallback: search via broken Gamma API when market cache is unavailable.
+ */
+async function searchEventsForCandidates(
+  queries: string[],
+  seen: Map<string, CandidateMarket>,
+  cfg: ReturnType<typeof loadConfig>,
+): Promise<void> {
   const importedSlugs = new Set<string>();
 
   for (const query of queries) {
@@ -233,15 +235,12 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
       const qLower = query.toLowerCase();
 
       for (const event of events) {
-        // Strict keyword matching: Polymarket Gamma API often falls back to trending/liquid
-        // markets if the query has no direct hits. We must verify the result is relevant.
         const titleLower = (event.title || '').toLowerCase();
         const eventMatches = titleLower.includes(qLower);
 
         for (const market of event.markets ?? []) {
           if (seen.has(market.id)) continue;
 
-          // If event title didn't match, check market question/desc
           if (!eventMatches) {
             const mMatch =
               market.question.toLowerCase().includes(qLower) ||
@@ -249,18 +248,12 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
             if (!mMatch) continue;
           }
 
-          // Universal Domain Guard: block sports/entertainment/weather markets.
-          // Uses word-boundary regex (hoisted above) to prevent false positives
-          // like "endgame", "Washington DC", "Starlink", or "headwinds".
           const questionLower = market.question.toLowerCase();
-          if (DOMAIN_BLOCKLIST_RE.test(questionLower)) {
-            continue;
-          }
+          if (DOMAIN_BLOCKLIST_RE.test(questionLower)) continue;
 
           const liquidity = parseFloat(market.liquidity ?? '0');
           if (!isFinite(liquidity) || liquidity < MIN_LIQUIDITY) continue;
 
-          // Parse YES price — normalise from JSON-encoded string or pre-parsed array
           let currentYesPrice: number;
           try {
             const prices = parseOutcomePrices(market.outcomePrices);
@@ -292,9 +285,6 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
             matchedQuery: query,
           });
 
-          // Fire-and-forget Simmer import if enabled.
-          // Deduplicates by event slug — same event won't be re-queued if it appears
-          // in multiple query results, avoiding API burst.
           if (cfg.SIMMER_AUTO_IMPORT_ENABLED && event.slug && !importedSlugs.has(event.slug)) {
             importedSlugs.add(event.slug);
             const polymarketUrl = `https://polymarket.com/event/${event.slug}`;
@@ -313,6 +303,105 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+}
+
+/**
+ * Given a scored item, extract entities and search Polymarket for candidate markets.
+ *
+ * De-duplicates across multiple query terms (same marketId wins first occurrence).
+ * Filters out markets with liquidity below MIN_LIQUIDITY.
+ */
+export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateMarket[]> {
+  // Hoist config read — avoids repeated loadConfig() calls inside the triple-nested market loop below.
+  const cfg = loadConfig();
+
+  // Combine scorer keywords with LLM-extracted entities for richer queries
+  let entities: string[] = [];
+  try {
+    entities = await extractEntities(item.title, item.entityContext);
+  } catch (err: unknown) {
+    logger.warn('[entity-extractor] entity extraction failed, falling back to keywords', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    entities = item.keywords.slice(0, 3);
+  }
+
+  // Deduplicate queries
+  const querySet = new Set<string>([...item.keywords.slice(0, 3), ...entities]);
+  const queries = Array.from(querySet).slice(0, 5); // cap at 5 searches
+
+  const seen = new Map<string, CandidateMarket>();
+
+  // Try local matching against cached market list first (Gamma search endpoint is broken).
+  const cachedMarkets = await getCachedMarkets(getRedis());
+
+  if (cachedMarkets.length > 0) {
+    logger.debug('[entity-extractor] using local market cache', {
+      cacheSize: cachedMarkets.length,
+      queries,
+    });
+
+    for (const market of cachedMarkets) {
+      if (seen.has(market.id)) continue;
+
+      const questionLower = market.question.toLowerCase();
+      const descLower = (market.description || '').toLowerCase();
+
+      // Check if any query term matches question or description
+      const matchedQuery = queries.find((q) => {
+        const qLower = q.toLowerCase();
+        return questionLower.includes(qLower) || descLower.includes(qLower);
+      });
+      if (!matchedQuery) continue;
+
+      // Universal Domain Guard: block sports/entertainment/weather markets.
+      if (DOMAIN_BLOCKLIST_RE.test(questionLower)) continue;
+
+      const liquidity = parseFloat(market.liquidity ?? '0');
+      if (!isFinite(liquidity) || liquidity < MIN_LIQUIDITY) continue;
+
+      // Parse YES price
+      let currentYesPrice: number;
+      try {
+        const prices = parseOutcomePrices(market.outcomePrices);
+        if (prices.length === 0) continue;
+        currentYesPrice = parseFloat(prices[0] ?? '0');
+        if (!isFinite(currentYesPrice) || currentYesPrice < 0 || currentYesPrice > 1) continue;
+      } catch {
+        continue;
+      }
+
+      let clobTokenIds: string[];
+      try {
+        clobTokenIds = parseClobTokenIds(market.clobTokenIds ?? []);
+        if (clobTokenIds.length < 2) continue;
+      } catch {
+        continue;
+      }
+
+      seen.set(market.id, {
+        marketId: market.id,
+        question: market.question,
+        conditionId: market.conditionId,
+        clobTokenIds,
+        currentYesPrice,
+        volume: parseFloat(market.volume ?? '0'),
+        liquidity,
+        endDate: market.endDate ?? null,
+        description: market.description ?? null,
+        matchedQuery,
+      });
+
+      // Fire-and-forget Simmer import if enabled.
+      if (cfg.SIMMER_AUTO_IMPORT_ENABLED) {
+        fireSimmerImport(market, cfg);
+      }
+    }
+  } else {
+    // Fallback: cache is empty/missing — use broken Gamma search (better than nothing).
+    logger.warn('[entity-extractor] market cache empty, falling back to Gamma search');
+    await searchEventsForCandidates(queries, seen, cfg);
   }
 
   const candidates = Array.from(seen.values());
