@@ -70,8 +70,16 @@ export async function refreshDynamicWatchlist(redis: Redis): Promise<number> {
 
     // Cache full market objects for local keyword matching in entityExtractor.
     // Only store the fields needed for matching to keep the payload small.
+    // Filter out expired markets — Gamma returns active=true even past endDate.
+    const now = Date.now();
+    const liveMarkets = markets.filter((m) => {
+      if (!m.endDate) return true;
+      const end = new Date(m.endDate).getTime();
+      return isNaN(end) || end >= now;
+    });
+
     try {
-      const slim = markets.map((m) => ({
+      const slim = liveMarkets.map((m) => ({
         id: m.id,
         question: m.question,
         description: m.description,
@@ -93,7 +101,8 @@ export async function refreshDynamicWatchlist(redis: Redis): Promise<number> {
 
     logger.info('[watchlist] refresh complete', {
       uniqueKeywords: keywords.size,
-      cachedMarkets: markets.length,
+      cachedMarkets: liveMarkets.length,
+      expiredFiltered: markets.length - liveMarkets.length,
     });
     return keywords.size;
   } catch (err: unknown) {
