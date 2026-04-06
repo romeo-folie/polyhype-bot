@@ -535,6 +535,34 @@ class HyperliquidClient {
   }
 
   /**
+   * Fetch mid prices for all assets and return the full map.
+   * Uses the same 30s cache as getMidPrice.
+   */
+  async fetchAllMids(): Promise<Record<string, number>> {
+    if (Object.keys(this.midCache).length > 0 && Date.now() - this.midCacheTime < 30_000) {
+      const result: Record<string, number> = {};
+      for (const [k, v] of Object.entries(this.midCache)) {
+        result[k] = parseFloat(v);
+      }
+      return result;
+    }
+
+    const response = await axios.post<Record<string, string>>(
+      `${this.baseUrl}/info`,
+      { type: 'allMids' },
+      { timeout: HL_REQUEST_TIMEOUT_MS },
+    );
+    this.midCache = response.data ?? {};
+    this.midCacheTime = Date.now();
+
+    const result: Record<string, number> = {};
+    for (const [k, v] of Object.entries(this.midCache)) {
+      result[k] = parseFloat(v);
+    }
+    return result;
+  }
+
+  /**
    * Fetch mid prices for all assets.
    * Note: The cache is updated globally for all symbols when any symbol is fetched.
    * TTL check is also global (all symbols expire together every 30s).
