@@ -11,8 +11,13 @@ async function run() {
 
     const prices: Map<string, CurrentPrice> = await fetchAllCurrentPrices(positions);
 
+    // Detect futures positions by venue or direction (isFutures flag may be missing on older entries)
+    const isFuturesPosition = (p: typeof positions[number]) =>
+      p.isFutures || p.executionVenue === 'hyperliquid' || p.direction === 'LONG' || p.direction === 'SHORT';
+    const hlSymbolFor = (p: typeof positions[number]) => p.symbol || p.marketId;
+
     // Fetch HL mid prices for futures positions
-    const hasFutures = positions.some((p) => p.isFutures && p.symbol);
+    const hasFutures = positions.some(isFuturesPosition);
     let hlMids: Record<string, number> = {};
     if (hasFutures) {
       try {
@@ -47,9 +52,10 @@ async function run() {
     for (const p of positions) {
       let currentPrice: number | null = null;
 
-      if (p.isFutures && p.symbol) {
+      const isFutures = isFuturesPosition(p);
+      if (isFutures) {
         // Use HL mid price for futures positions
-        const mid = hlMids[p.symbol];
+        const mid = hlMids[hlSymbolFor(p)];
         if (mid && isFinite(mid)) currentPrice = mid;
       } else {
         // Use Polymarket price fetcher for PM positions
@@ -72,7 +78,7 @@ async function run() {
       // Format live price: use $ prefix for futures (USD prices), raw decimal for PM (0-1 range)
       let livePrice: string;
       if (currentPrice !== null) {
-        if (p.isFutures) {
+        if (isFutures) {
           livePrice = `$${currentPrice.toFixed(0)}`.padEnd(10);
         } else {
           livePrice = currentPrice.toFixed(3).padEnd(10);
