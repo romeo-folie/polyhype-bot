@@ -144,6 +144,19 @@ export async function runMapping(
         continue;
       }
 
+      // Require at least 2 LLM samples for a trade — a single provider
+      // returning 0.50 ("unrelated") creates phantom edge on extreme-priced
+      // markets when stddev=0 looks artificially confident.
+      if (consensus.sampleCount < 2) {
+        logger.info('[mapping] skipping — insufficient consensus samples', {
+          marketId: candidate.marketId,
+          question: candidate.question.substring(0, 80),
+          sampleCount: consensus.sampleCount,
+          consensusP: consensus.probability.toFixed(3),
+        });
+        continue;
+      }
+
       const { hasTrade, decision, skipReason } = computeDivergence({
         consensusProbability: consensus.probability,
         consensusStddev: consensus.stddev,

@@ -32,9 +32,14 @@ export async function isMarketRelevant(opts: {
 
   const systemPrompt =
     'You are a high-speed relevance classifier for prediction markets. ' +
-    'Identify if the provided news headline is DIRECTLY RELEVANT to the market question. ' +
-    'A headline is relevant if it provides information that would likely change ' +
-    'a rational person\'s probability estimate for that market. ' +
+    'Determine if the news headline provides DIRECT CAUSAL EVIDENCE that would change ' +
+    'a rational person\'s probability estimate for the SPECIFIC OUTCOME in the market question. ' +
+    'CRITICAL: Sharing a named entity (person, country, company) is NOT enough. ' +
+    'The headline must bear on the SPECIFIC OUTCOME the market asks about. ' +
+    'Example: "Trump threatens Iran" is NOT relevant to "Trump out as President?" — ' +
+    'foreign policy actions do not cause a president to leave office. ' +
+    'Example: "Trump impeachment vote scheduled" IS relevant to "Trump out as President?" — ' +
+    'impeachment directly bears on removal from office. ' +
     'Return ONLY the word "YES" or "NO".';
 
   const userPrompt =
