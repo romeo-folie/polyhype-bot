@@ -630,10 +630,17 @@ async function executeHyperliquidSignal(
       };
     }
 
+    // Treat "too small" as a skip (not an error) — don't send noisy notifications
+    // for expected low-stake rejections from Half-Kelly sizing.
+    const errMsg = tradeResult.error || 'Hyperliquid order failed';
+    if (errMsg.includes('too small for HL minimum') || errMsg.includes('minimum value of')) {
+      return { signal, skipped: true, skipReason: 'stake_below_hl_minimum' };
+    }
+
     return {
       signal,
       skipped: false,
-      error: tradeResult.error || 'Hyperliquid order failed',
+      error: errMsg,
       executionVenue: 'hyperliquid',
     };
   } catch (err) {
