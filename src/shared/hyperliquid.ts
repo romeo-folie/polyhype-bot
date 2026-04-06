@@ -225,21 +225,22 @@ class HyperliquidClient {
       }
       const sizeBase = opts.sizeBase ?? opts.sizeUsd / midPrice;
 
-      // 4. Construct the Action
+      // 4. Construct the Action — HL API uses short field names (a/b/p/s/r/t)
+      // and p (price) + s (size) must be strings.
       const action = {
         type: 'order',
         orders: [
           {
-            asset: index,
-            isBuy: opts.isBuy,
-            limitPx: this.roundPrice(
+            a: index,
+            b: opts.isBuy,
+            p: String(this.roundPrice(
               opts.isBuy
                 ? midPrice * (1 + loadConfig().FUTURES_IOC_SLIPPAGE)
                 : midPrice * (1 - loadConfig().FUTURES_IOC_SLIPPAGE),
-            ),
-            sz: this.roundSize(sizeBase, szDecimals),
-            reduceOnly: opts.reduceOnly ?? false,
-            orderType: { limit: { tif: 'Ioc' } }, // Market orders must use Ioc (Immediate or Cancel)
+            )),
+            s: String(this.roundSize(sizeBase, szDecimals)),
+            r: opts.reduceOnly ?? false,
+            t: { limit: { tif: 'Ioc' } },
           },
         ],
         grouping: 'na',
