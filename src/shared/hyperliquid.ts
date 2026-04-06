@@ -129,11 +129,17 @@ interface HlClearinghouseState {
   }[];
 }
 
+interface HlSpotClearinghouseState {
+  balances: { coin: string; token: number; total: string; hold: string }[];
+}
+
 /**
  * Hyperliquid Client Singleton
  */
 class HyperliquidClient {
   private wallet: ethers.Wallet;
+  /** Main wallet address for balance/state queries (may differ from agent wallet). */
+  private mainWalletAddress: string;
   private baseUrl: string;
   private domain: HlDomain;
   private metaCache: HlMeta | null = null;
@@ -152,6 +158,7 @@ class HyperliquidClient {
     // SECURITY: this.wallet stores a live ethers.Wallet with the private key.
     // Never log this.wallet or pass it to error reporters — only log this.wallet.address.
     this.wallet = new ethers.Wallet(cfg.HYPERLIQUID_PRIVATE_KEY);
+    this.mainWalletAddress = cfg.HYPERLIQUID_MAIN_WALLET || this.wallet.address;
     this.baseUrl = cfg.HYPERLIQUID_TESTNET ? TESTNET_API : MAINNET_API;
 
     // Chain ID must be dynamic: HL Testnet = 1337, HL Mainnet = 42161 (Arbitrum)
@@ -163,7 +170,8 @@ class HyperliquidClient {
     };
 
     logger.info('[hyperliquid] client initialised', {
-      address: this.wallet.address,
+      agentAddress: this.wallet.address,
+      mainWallet: this.mainWalletAddress,
       testnet: cfg.HYPERLIQUID_TESTNET,
       chainId: this.domain.chainId.toString(),
     });
@@ -314,17 +322,55 @@ class HyperliquidClient {
 
   /**
    * Fetch current Clearinghouse state (balance/margin).
+   * Queries the main wallet (not the agent) and checks both perps and spot
+   * clearinghouses — unified accounts keep all balances in spot.
    */
   async getClearinghouseState(): Promise<HlClearinghouseState> {
     const response = await axios.post<HlClearinghouseState>(
       `${this.baseUrl}/info`,
       {
         type: 'clearinghouseState',
-        user: this.wallet.address,
+        user: this.mainWalletAddress,
       },
       { timeout: HL_REQUEST_TIMEOUT_MS },
     );
-    return response.data;
+    const state = response.data;
+
+    // Unified/portfolio-margin accounts show $0 in perps clearinghouse —
+    // their balances live in spotClearinghouseState. Fall back to spot USDC
+    // total when perps accountValue is zero.
+    const perpsValue = parseFloat(state?.marginSummary?.accountValue || '0');
+    if (perpsValue === 0) {
+      try {
+        const spotResponse = await axios.post<HlSpotClearinghouseState>(
+          `${this.baseUrl}/info`,
+          {
+            type: 'spotClearinghouseState',
+            user: this.mainWalletAddress,
+          },
+          { timeout: HL_REQUEST_TIMEOUT_MS },
+        );
+        const usdcBalance = spotResponse.data?.balances?.find(b => b.coin === 'USDC');
+        if (usdcBalance) {
+          const spotTotal = parseFloat(usdcBalance.total || '0');
+          if (spotTotal > 0) {
+            state.marginSummary = {
+              ...state.marginSummary,
+              accountValue: spotTotal.toString(),
+            };
+            logger.debug('[hyperliquid] using spot USDC balance (unified account)', {
+              spotTotal: spotTotal.toFixed(2),
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn('[hyperliquid] spotClearinghouseState fallback failed', {
+          error: String(err),
+        });
+      }
+    }
+
+    return state;
   }
 
   /**
