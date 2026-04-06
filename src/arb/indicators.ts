@@ -49,6 +49,61 @@ export function computeEMA(values: number[], period: number): number[] | null {
 }
 
 // ---------------------------------------------------------------------------
+// ATR (Average True Range)
+// ---------------------------------------------------------------------------
+
+export interface ATRResult {
+  atr: number;     // absolute ATR value
+  atrPct: number;  // ATR as percentage of current close
+}
+
+/**
+ * Compute Average True Range from OHLCV candles.
+ * TR = max(high - low, |high - prevClose|, |low - prevClose|), then SMA over `period`.
+ * Returns null if insufficient data.
+ */
+export function computeATRFromCandles(candles: OHLCVCandle[], period: number): ATRResult | null {
+  if (candles.length < period + 1) return null;
+
+  const trValues: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    const curr = candles[i]!;
+    const prev = candles[i - 1]!;
+    const tr = Math.max(
+      curr.high - curr.low,
+      Math.abs(curr.high - prev.close),
+      Math.abs(curr.low - prev.close),
+    );
+    trValues.push(tr);
+  }
+
+  if (trValues.length < period) return null;
+
+  // SMA of last `period` TR values
+  const recentTR = trValues.slice(-period);
+  const atr = recentTR.reduce((sum, v) => sum + v, 0) / period;
+
+  const lastClose = candles[candles.length - 1]!.close;
+  if (lastClose === 0) return null;
+
+  return { atr, atrPct: (atr / lastClose) * 100 };
+}
+
+/**
+ * Compute ATR from Redis candle data for a given symbol.
+ */
+export async function computeATR(
+  symbol: string,
+  redis: Redis,
+  period?: number,
+): Promise<ATRResult | null> {
+  const cfg = loadConfig();
+  const p = period ?? cfg.FUTURES_ATR_PERIOD;
+  const candles = await buildCandles(symbol, redis);
+  return computeATRFromCandles(candles, p);
+}
+
+// ---------------------------------------------------------------------------
 // RSI (Wilder smoothing)
 // ---------------------------------------------------------------------------
 

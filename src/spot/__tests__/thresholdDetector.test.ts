@@ -4,12 +4,16 @@ vi.mock('../../shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
+const mockConfig = {
+  SPOT_MOVE_THRESHOLD: 3,
+  SPOT_LOOKBACK_MINUTES: 5,
+  SPOT_COOLDOWN_MINUTES: 30,
+  SESSION_THRESHOLD_ENABLED: false,
+  SESSION_MULTIPLIERS: '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.3,1.3,1.3,1.3,1.3,1.5,1.5,1.5,1.5,1.2,1.2,1.2,1.2,0.8,0.8,0.8',
+};
+
 vi.mock('../../shared/config.js', () => ({
-  loadConfig: vi.fn().mockReturnValue({
-    SPOT_MOVE_THRESHOLD: 3,
-    SPOT_LOOKBACK_MINUTES: 5,
-    SPOT_COOLDOWN_MINUTES: 30,
-  }),
+  loadConfig: vi.fn().mockReturnValue(mockConfig),
 }));
 
 const mockRedis = {
@@ -127,5 +131,41 @@ describe('detectMoves', () => {
     ]);
 
     expect(moves).toHaveLength(2);
+  });
+
+  it('applies session multiplier when enabled — widens threshold', async () => {
+    // Enable session threshold and set all multipliers to 2.0
+    mockConfig.SESSION_THRESHOLD_ENABLED = true;
+    mockConfig.SESSION_MULTIPLIERS = Array(24).fill('2.0').join(',');
+
+    const now = Date.now();
+    const refTs = now - 310_000;
+    // 3.08% move — above base 3% threshold but below 6% (3% * 2.0)
+    mockRedis.zrangebyscore.mockResolvedValue([`${refTs}:65000`]);
+
+    const moves = await detectMoves([{ assetId: 'bitcoin', price: 67000, timestamp: now }]);
+    expect(moves).toHaveLength(0); // blocked by widened threshold
+
+    // Reset
+    mockConfig.SESSION_THRESHOLD_ENABLED = false;
+    mockConfig.SESSION_MULTIPLIERS = '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.3,1.3,1.3,1.3,1.3,1.5,1.5,1.5,1.5,1.2,1.2,1.2,1.2,0.8,0.8,0.8';
+  });
+
+  it('session multiplier < 1 narrows threshold — lets smaller moves through', async () => {
+    // Set all multipliers to 0.5 — threshold becomes 1.5%
+    mockConfig.SESSION_THRESHOLD_ENABLED = true;
+    mockConfig.SESSION_MULTIPLIERS = Array(24).fill('0.5').join(',');
+
+    const now = Date.now();
+    const refTs = now - 310_000;
+    // 2% move — below base 3% but above 1.5% (3% * 0.5)
+    mockRedis.zrangebyscore.mockResolvedValue([`${refTs}:65000`]);
+
+    const moves = await detectMoves([{ assetId: 'bitcoin', price: 66300, timestamp: now }]);
+    expect(moves).toHaveLength(1);
+
+    // Reset
+    mockConfig.SESSION_THRESHOLD_ENABLED = false;
+    mockConfig.SESSION_MULTIPLIERS = '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.3,1.3,1.3,1.3,1.3,1.5,1.5,1.5,1.5,1.2,1.2,1.2,1.2,0.8,0.8,0.8';
   });
 });

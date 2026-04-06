@@ -283,6 +283,83 @@ describe('getRecentOutcomes', () => {
   });
 });
 
+describe('recordOutcome — futures', () => {
+  it('records a futures outcome with exitReason and LONG direction', async () => {
+    const redis = makeRedis();
+    await recordOutcome(redis as any, {
+      source: 'futures',
+      category: 'crypto-regulatory',
+      question: 'Hyperliquid Perp: BTC LONG',
+      direction: 'LONG',
+      consensusProbability: 0,
+      divergence: 0.02,
+      result: 'won',
+      returnPct: 2.5,
+      holdingHours: 1.2,
+      executionVenue: 'hyperliquid',
+      exitReason: 'Take-Profit triggered (2.50%)',
+    });
+
+    expect(redis.hset).toHaveBeenCalledTimes(1);
+    const storedFields = redis.hset.mock.calls[0]![1] as Record<string, string>;
+    expect(storedFields.source).toBe('futures');
+    expect(storedFields.direction).toBe('LONG');
+    expect(storedFields.exitReason).toBe('Take-Profit triggered (2.50%)');
+    expect(storedFields.executionVenue).toBe('hyperliquid');
+    // outcomes:all, outcomes:crypto-regulatory, outcomes:source:futures
+    expect(redis.zadd).toHaveBeenCalledTimes(3);
+  });
+
+  it('records SHORT futures outcomes correctly', async () => {
+    const redis = makeRedis();
+    await recordOutcome(redis as any, {
+      source: 'futures',
+      category: 'crypto-regulatory',
+      question: 'Hyperliquid Perp: ETH SHORT',
+      direction: 'SHORT',
+      consensusProbability: 0,
+      divergence: 0.01,
+      result: 'lost',
+      returnPct: -1.5,
+      holdingHours: 0.5,
+      executionVenue: 'hyperliquid',
+      exitReason: 'Stop-Loss triggered (-1.50%)',
+    });
+
+    const storedFields = redis.hset.mock.calls[0]![1] as Record<string, string>;
+    expect(storedFields.direction).toBe('SHORT');
+    expect(storedFields.result).toBe('lost');
+  });
+});
+
+describe('getRecentOutcomes — futures exitReason', () => {
+  it('parses exitReason from stored hash', async () => {
+    const redis = makeRedis();
+    redis.zrevrange.mockResolvedValue(['futures-id']);
+    redis.hgetall.mockResolvedValue({
+      id: 'futures-id',
+      closedAt: '2026-04-06T12:00:00Z',
+      source: 'futures',
+      category: 'crypto-regulatory',
+      question: 'Hyperliquid Perp: BTC LONG',
+      direction: 'LONG',
+      consensusProbability: '0',
+      divergence: '0.02',
+      result: 'won',
+      returnPct: '2.5',
+      holdingHours: '1.2',
+      executionVenue: 'hyperliquid',
+      exitReason: 'Take-Profit triggered (2.50%)',
+    });
+
+    const outcomes = await getRecentOutcomes(redis as any, 'crypto-regulatory');
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]!.exitReason).toBe('Take-Profit triggered (2.50%)');
+    expect(outcomes[0]!.direction).toBe('LONG');
+    expect(outcomes[0]!.source).toBe('futures');
+  });
+});
+
 describe('inferCategory', () => {
   it('detects crypto keywords', () => {
     expect(inferCategory('Bitcoin ETF approved by SEC')).toBe('crypto-regulatory');

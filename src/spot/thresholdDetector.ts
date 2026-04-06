@@ -55,9 +55,20 @@ export async function detectMoves(currentPrices: SpotPrice[]): Promise<SpotMove[
 
   for (const sp of currentPrices) {
     const isCrypto = isCryptoAsset(sp.assetId);
-    const threshold = (cfg.TIERED_LOGIC_ENABLED && isCrypto)
+    let threshold = (cfg.TIERED_LOGIC_ENABLED && isCrypto)
       ? cfg.CRYPTO_MOVE_THRESHOLD
       : cfg.SPOT_MOVE_THRESHOLD;
+
+    // Session-aware multiplier: widen threshold during high-vol hours, narrow during quiet hours
+    if (cfg.SESSION_THRESHOLD_ENABLED) {
+      const hour = new Date().getUTCHours();
+      const multipliers = cfg.SESSION_MULTIPLIERS.split(',').map(Number);
+      const multiplier = multipliers[hour] ?? 1.0;
+      threshold *= multiplier;
+      logger.debug('[spot-threshold] session-adjusted threshold', {
+        assetId: sp.assetId, hour, multiplier, threshold: threshold.toFixed(3),
+      });
+    }
 
     const referencePrice = await getPriceAtLookback(sp.assetId, lookbackMs);
     if (referencePrice == null || referencePrice === 0) {

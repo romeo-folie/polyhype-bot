@@ -17,10 +17,10 @@ export interface PositionOutcome {
   id: string;
   closedAt: string;
   executionId?: string;
-  source: 'osint' | 'copytrade' | 'spot' | 'arb' | 'crypto-arb';
+  source: 'osint' | 'copytrade' | 'spot' | 'arb' | 'crypto-arb' | 'futures';
   category: string;
   question: string;
-  direction: 'YES' | 'NO' | 'UP' | 'DOWN';
+  direction: 'YES' | 'NO' | 'UP' | 'DOWN' | 'LONG' | 'SHORT';
   urgencyScore?: number;
   consensusProbability: number;
   divergence: number;
@@ -35,6 +35,7 @@ export interface PositionOutcome {
   decisionSpreadBps?: number;
   makerPriceImprovementBps?: number;
   makerPriceImprovementUsd?: number;
+  exitReason?: string;
 }
 
 /**
@@ -230,6 +231,7 @@ export async function getRecentOutcomes(
         data.makerPriceImprovementUsd !== ''
       )
         parsed.makerPriceImprovementUsd = Number(data.makerPriceImprovementUsd);
+      if (data.exitReason) parsed.exitReason = data.exitReason;
       outcomes.push(parsed);
     }
 

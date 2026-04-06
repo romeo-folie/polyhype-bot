@@ -4,6 +4,7 @@ import {
   computeMACDFromCandles,
   computeStochasticFromCandles,
   computeEMA,
+  computeATRFromCandles,
 } from '../indicators.js';
 import type { OHLCVCandle } from '../candleAggregator.js';
 
@@ -40,6 +41,75 @@ describe('computeEMA', () => {
     expect(result!).toHaveLength(2);
     expect(result![0]).toBeCloseTo(2, 5); // seed at index 0
     expect(result![1]).toBeCloseTo(3, 5); // 4 * 0.5 + 2 * 0.5
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ATR (Average True Range)
+// ---------------------------------------------------------------------------
+describe('computeATRFromCandles', () => {
+  it('returns null when insufficient data (< period + 1 candles)', () => {
+    const candles = closesToCandles([100, 101, 102]);
+    expect(computeATRFromCandles(candles, 14)).toBeNull();
+  });
+
+  it('computes ATR for flat candles (high=low=close → TR=0)', () => {
+    const candles = closesToCandles(Array.from({ length: 20 }, () => 100));
+    const result = computeATRFromCandles(candles, 14);
+    expect(result).not.toBeNull();
+    expect(result!.atr).toBe(0);
+    expect(result!.atrPct).toBe(0);
+  });
+
+  it('computes ATR with distinct high/low values', () => {
+    const candles: OHLCVCandle[] = Array.from({ length: 20 }, (_, i) => ({
+      openTime: i * 60_000,
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100,
+      volume: 1,
+    }));
+    const result = computeATRFromCandles(candles, 14);
+    expect(result).not.toBeNull();
+    expect(result!.atr).toBeCloseTo(2, 5);
+    expect(result!.atrPct).toBeCloseTo(2, 5); // 2/100 * 100 = 2%
+  });
+
+  it('computes atrPct relative to last close', () => {
+    const candles: OHLCVCandle[] = Array.from({ length: 20 }, (_, i) => ({
+      openTime: i * 60_000,
+      open: 50,
+      high: 50.5,
+      low: 49.5,
+      close: 50,
+      volume: 1,
+    }));
+    const result = computeATRFromCandles(candles, 14);
+    expect(result).not.toBeNull();
+    expect(result!.atr).toBeCloseTo(1, 5);
+    expect(result!.atrPct).toBeCloseTo(2, 5); // 1/50 * 100 = 2%
+  });
+
+  it('includes gap contribution in true range', () => {
+    const candles: OHLCVCandle[] = [
+      { openTime: 0, open: 100, high: 101, low: 99, close: 100, volume: 1 },
+      { openTime: 60_000, open: 105, high: 106, low: 104, close: 105, volume: 1 },
+    ];
+    for (let i = 2; i < 20; i++) {
+      candles.push({ openTime: i * 60_000, open: 105, high: 106, low: 104, close: 105, volume: 1 });
+    }
+    const result = computeATRFromCandles(candles, 5);
+    expect(result).not.toBeNull();
+    // Last 5 TRs are all max(106-104, |106-105|, |104-105|) = 2
+    expect(result!.atr).toBeCloseTo(2, 5);
+  });
+
+  it('returns null when last close is 0', () => {
+    const candles: OHLCVCandle[] = Array.from({ length: 20 }, (_, i) => ({
+      openTime: i * 60_000, open: 0, high: 0, low: 0, close: 0, volume: 1,
+    }));
+    expect(computeATRFromCandles(candles, 14)).toBeNull();
   });
 });
 

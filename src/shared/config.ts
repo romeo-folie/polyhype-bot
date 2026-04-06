@@ -234,6 +234,13 @@ const envSchema = z.object({
   STOCHASTIC_K_PERIOD: z.coerce.number().int().min(1).optional().default(14),
   STOCHASTIC_D_PERIOD: z.coerce.number().int().min(1).optional().default(3),
 
+  // Session-aware threshold multipliers (Strategy 6)
+  SESSION_THRESHOLD_ENABLED: z.coerce.boolean().optional().default(false),
+  SESSION_MULTIPLIERS: z
+    .string()
+    .optional()
+    .default('1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.3,1.3,1.3,1.3,1.3,1.5,1.5,1.5,1.5,1.2,1.2,1.2,1.2,0.8,0.8,0.8'),
+
   // Continuous improvement (Phase 8)
   CALIBRATION_ENABLED: z.coerce.boolean().optional().default(true),
   MIN_BET_USD: z.coerce.number().min(0).optional().default(5),
@@ -366,6 +373,11 @@ const envSchema = z.object({
   FUTURES_REEVAL_MIN_AGE_S: z.coerce.number().int().min(0).optional().default(120),
   // Max slippage fraction for IoC market orders (e.g. 0.02 = 2%). Conservative default.
   FUTURES_IOC_SLIPPAGE: z.coerce.number().min(0.001).max(0.1).optional().default(0.02),
+
+  // Volatility-adjusted position sizing (Strategy 3)
+  FUTURES_VOL_SIZING_ENABLED: z.coerce.boolean().optional().default(false),
+  FUTURES_ATR_PERIOD: z.coerce.number().int().min(2).optional().default(14),
+  FUTURES_ATR_BASELINE_PCT: z.coerce.number().min(0.01).optional().default(0.5),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

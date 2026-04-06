@@ -25,6 +25,7 @@ import { notifyTradeExecuted, notifyTradeError } from '../execution/telegram.js'
 import { getOpportunities } from '../shared/simmer.js';
 import { HL_SYMBOL_MAP } from '../shared/hyperliquid.js';
 import { scoreConfluence } from '../arb/confluenceScorer.js';
+import { computeATR } from '../arb/indicators.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 /**
@@ -126,10 +127,24 @@ async function runSpotMonitorInner(
           });
         }
 
-        const stakeUsd = Math.min(
+        let stakeUsd = Math.min(
           cfg.FUTURES_MAX_PER_TRADE_USD,
           bankrollUsd * cfg.MAX_BET_FRACTION,
         );
+
+        // Volatility-adjusted sizing: scale stake inversely with ATR
+        if (cfg.FUTURES_VOL_SIZING_ENABLED) {
+          const atrResult = await computeATR(hlSymbol, redis);
+          if (atrResult && atrResult.atrPct > 0) {
+            const volMultiplier = Math.max(0.3, Math.min(1.5, cfg.FUTURES_ATR_BASELINE_PCT / atrResult.atrPct));
+            stakeUsd *= volMultiplier;
+            logger.info('[spot] vol-adjusted sizing', {
+              symbol: hlSymbol, atrPct: atrResult.atrPct.toFixed(3),
+              baseline: cfg.FUTURES_ATR_BASELINE_PCT, volMultiplier: volMultiplier.toFixed(2),
+              adjustedStake: stakeUsd.toFixed(2),
+            });
+          }
+        }
 
         signals.push({
           marketId: hlSymbol,

@@ -23,6 +23,7 @@ import {
   updateHighWaterMark,
 } from '../execution/positionLedger.js';
 import { scoreConfluence } from '../arb/confluenceScorer.js';
+import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
 
 const POLL_INTERVAL_MS = 5000; // 5 seconds — safe for rate limits, fast enough for intraday
 const MONITOR_LOCK_KEY = 'futures-monitor:lock';
@@ -235,6 +236,26 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           const result = await hl.closePosition(symbol);
           if (result.success) {
             logger.info('[futures-monitor] exit successful', { symbol, txHash: result.txHash });
+
+            // Record futures outcome for analytics
+            const ledgerPos = futuresLedger.find((p) => p.marketId === symbol);
+            if (ledgerPos) {
+              const holdingHours = (Date.now() - new Date(ledgerPos.openedAt).getTime()) / 3600000;
+              await recordOutcome(redis, {
+                source: 'futures',
+                category: inferCategory(ledgerPos.question),
+                question: ledgerPos.question,
+                direction,
+                consensusProbability: ledgerPos.consensusProbability ?? 0,
+                divergence: ledgerPos.edgeMagnitude,
+                result: pnlUsd > 0 ? 'won' : pnlUsd < 0 ? 'lost' : 'pushed',
+                returnPct: priceChangePct,
+                holdingHours,
+                executionVenue: 'hyperliquid',
+                exitReason: reason,
+              }, { sourcedFrom: ledgerPos.sourcedFrom });
+            }
+
             await closeLedgerPosition(redis, symbol, direction);
           } else {
             logger.error('[futures-monitor] exit failed', { symbol, error: result.error });

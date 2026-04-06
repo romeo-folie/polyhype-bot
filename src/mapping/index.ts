@@ -19,6 +19,7 @@ import { resolveYesPrice } from '../shared/priceCache.js';
 import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import { getRedis } from '../shared/redis.js';
 import { scoreConfluence } from '../arb/confluenceScorer.js';
+import { computeATR } from '../arb/indicators.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 import type { Redis } from 'ioredis';
 import type { ClobPriceFeed } from '../shared/clobWebSocket.js';
@@ -277,7 +278,22 @@ export async function mapNewsToFutures(
 
     // Scale stakeUsd based on urgency (e.g. 6/10 urgency = 60% of max allowed stake).
     const maxStake = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
-    const stakeUsd = maxStake * (item.urgencyScore / 10);
+    let stakeUsd = maxStake * (item.urgencyScore / 10);
+
+    // Volatility-adjusted sizing: scale stake inversely with ATR
+    if (cfg.FUTURES_VOL_SIZING_ENABLED) {
+      const redis = getRedis();
+      const atrResult = await computeATR(symbol, redis);
+      if (atrResult && atrResult.atrPct > 0) {
+        const volMultiplier = Math.max(0.3, Math.min(1.5, cfg.FUTURES_ATR_BASELINE_PCT / atrResult.atrPct));
+        stakeUsd *= volMultiplier;
+        logger.info('[mapping] vol-adjusted sizing', {
+          symbol, atrPct: atrResult.atrPct.toFixed(3),
+          baseline: cfg.FUTURES_ATR_BASELINE_PCT, volMultiplier: volMultiplier.toFixed(2),
+          adjustedStake: stakeUsd.toFixed(2),
+        });
+      }
+    }
 
     signals.push({
       marketId: symbol,
