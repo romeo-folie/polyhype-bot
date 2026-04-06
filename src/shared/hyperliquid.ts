@@ -248,11 +248,12 @@ class HyperliquidClient {
       const nonce = nextHlNonce();
       const signature = await this.signAction(action, nonce);
 
-      const payload = {
+      const payload: Record<string, unknown> = {
         action,
         nonce,
         signature,
       };
+      if (this.vaultAddress) payload.vaultAddress = this.vaultAddress;
 
       const response = await axios.post<HlExchangeResponse>(`${this.baseUrl}/exchange`, payload, {
         timeout: HL_REQUEST_TIMEOUT_MS,
@@ -283,9 +284,20 @@ class HyperliquidClient {
       }
 
       return { success: false, error: JSON.stringify(response.data) };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { success: false, error: msg };
+    } catch (err: unknown) {
+      // Capture HL response body on HTTP errors (e.g. 422) for diagnostics
+      const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
+      const responseBody = axiosErr.response?.data
+        ? JSON.stringify(axiosErr.response.data).slice(0, 500)
+        : undefined;
+      const msg = axiosErr.message ?? String(err);
+      if (responseBody) {
+        logger.error('[hyperliquid] order rejected', {
+          status: axiosErr.response?.status,
+          body: responseBody,
+        });
+      }
+      return { success: false, error: responseBody ? `${msg}: ${responseBody}` : msg };
     }
   }
 
@@ -304,9 +316,11 @@ class HyperliquidClient {
 
       const nonce = nextHlNonce();
       const signature = await this.signAction(action, nonce);
+      const payload: Record<string, unknown> = { action, nonce, signature };
+      if (this.vaultAddress) payload.vaultAddress = this.vaultAddress;
       await axios.post(
         `${this.baseUrl}/exchange`,
-        { action, nonce, signature },
+        payload,
         { timeout: HL_REQUEST_TIMEOUT_MS },
       );
       return true;
@@ -429,19 +443,38 @@ class HyperliquidClient {
 
   // --- Private Helpers ---
 
+  /**
+   * Returns the vault address if the agent wallet differs from the main wallet
+   * (i.e. we're trading on behalf of another address), or null otherwise.
+   */
+  private get vaultAddress(): string | null {
+    return this.wallet.address.toLowerCase() !== this.mainWalletAddress.toLowerCase()
+      ? this.mainWalletAddress
+      : null;
+  }
+
   private async signAction(
     action: Record<string, unknown>,
     nonce: number,
   ): Promise<{ r: string; s: string; v: number }> {
     const msgpackBytes = msgpack.encode(action);
 
-    // HL expects: keccak256(msgpack(action) + nonce(8 bytes) + vaultAddress(20 bytes))
+    // Hash format (matches Python SDK action_hash):
+    //   msgpack(action) + nonce(8 bytes BE) + vault_flag
+    // vault_flag: 0x00 if no vault, or 0x01 + address(20 bytes) if trading via agent
     const nonceBuffer = Buffer.alloc(8);
     nonceBuffer.writeBigUInt64BE(BigInt(nonce));
 
-    const vaultBuffer = Buffer.alloc(20); // Default zero address for no vault
+    const parts = [Buffer.from(msgpackBytes), nonceBuffer];
+    const vault = this.vaultAddress;
+    if (vault) {
+      parts.push(Buffer.from([0x01]));
+      parts.push(Buffer.from(vault.replace('0x', ''), 'hex'));
+    } else {
+      parts.push(Buffer.from([0x00]));
+    }
 
-    const dataToHash = Buffer.concat([Buffer.from(msgpackBytes), nonceBuffer, vaultBuffer]);
+    const dataToHash = Buffer.concat(parts);
     const connectionId = ethers.keccak256(dataToHash);
 
     const signature = await this.wallet.signTypedData(this.domain, TYPES, {
