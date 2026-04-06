@@ -3,10 +3,10 @@
  */
 
 export const ASSET_SEARCH_QUERIES: Record<string, string[]> = {
-  bitcoin: ['bitcoin', 'BTC', 'crypto'],
+  bitcoin: ['bitcoin', 'BTC'],
   ethereum: ['ethereum', 'ETH'],
   solana: ['solana', 'SOL'],
-  bittensor: ['TAO', 'bittensor', 'Artificial Intelligence'],
+  bittensor: ['TAO', 'bittensor'],
   ripple: ['XRP', 'ripple'],
   binancecoin: ['BNB', 'binance coin'],
   dogecoin: ['dogecoin', 'DOGE'],
