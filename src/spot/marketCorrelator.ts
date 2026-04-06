@@ -29,7 +29,7 @@ export interface CorrelatedMarket {
 
 /** Asset-specific search queries for Gamma API. */
 const ASSET_SEARCH_QUERIES: Record<string, string[]> = {
-  bitcoin: ['bitcoin', 'BTC', 'crypto'],
+  bitcoin: ['bitcoin', 'BTC'],
   ethereum: ['ethereum', 'ETH'],
   solana: ['solana', 'SOL'],
   bittensor: ['TAO', 'bittensor'],
@@ -95,9 +95,10 @@ async function callLlmForCorrelation(
   const prompt =
     `Asset: ${assetId}\n` +
     `Market question: "${question}"\n\n` +
-    `If the price of ${assetId} rises significantly, does that have a DIRECT or STRONG INDIRECT impact on this market?\n` +
-    'Answer with "positive" (makes YES more likely), "negative" (makes YES less likely), or "none" (no strong link or irrelevant). ' +
-    'Answer ONLY with one of those three words.';
+    `Would a significant change in the PRICE of ${assetId} directly change the probability of this market resolving YES?\n` +
+    'Only answer "positive" or "negative" if the market is specifically about this asset\'s price, trading volume, or market cap. ' +
+    'Corporate events (IPOs, acquisitions), exchange news, regulations, and broader industry trends that do NOT directly track the asset\'s price should be "none".\n' +
+    'Answer ONLY with one of these three words: "positive", "negative", or "none".';
 
   const useGemini = cfg.LLM_PROVIDER === 'gemini' && Boolean(process.env.GEMINI_API_KEY);
 
