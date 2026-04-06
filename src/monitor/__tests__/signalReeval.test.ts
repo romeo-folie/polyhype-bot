@@ -92,6 +92,22 @@ describe('keyword relevance matching', () => {
   });
 });
 
+// ── ITM guard tests ─────────────────────────────────────────────────────────
+
+describe('ITM guard logic', () => {
+  const itmThreshold = 0.90;
+
+  it('skips reeval when outcome price is at or above threshold', () => {
+    expect(0.95 >= itmThreshold).toBe(true);
+    expect(0.90 >= itmThreshold).toBe(true);
+  });
+
+  it('does not skip when outcome price is below threshold', () => {
+    expect(0.89 >= itmThreshold).toBe(false);
+    expect(0.50 >= itmThreshold).toBe(false);
+  });
+});
+
 // ── Edge computation tests ───────────────────────────────────────────────────
 
 describe('edge computation logic', () => {

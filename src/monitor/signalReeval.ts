@@ -112,6 +112,22 @@ export async function reEvaluatePositions(
       continue;
     }
 
+    // 3a. ITM guard: if the position is deeply in-the-money, skip reeval
+    // entirely and let resolution or TP/SL handle the exit. Selling a 90¢+
+    // position just because edge ≈ 0 leaves money on the table — holding to
+    // resolution collects the full $1.
+    const itmThreshold = cfg.REEVAL_ITM_SKIP_THRESHOLD;
+    if (currentPrice.currentOutcomePrice >= itmThreshold) {
+      logger.info('[reeval] skipping — position deeply ITM, holding to resolution', {
+        marketId: position.marketId,
+        direction: position.direction,
+        currentOutcomePrice: currentPrice.currentOutcomePrice.toFixed(3),
+        itmThreshold,
+      });
+      held++;
+      continue;
+    }
+
     let freshConsensus: { probability: number, reasoning: string };
     try {
       freshConsensus = await estimateConsensusProbability({

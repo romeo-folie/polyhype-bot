@@ -128,6 +128,7 @@ const envSchema = z.object({
   STOP_LOSS_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.3),
   REEVAL_ENABLED: z.coerce.boolean().optional().default(true),
   REEVAL_EDGE_FLOOR: z.coerce.number().min(0).max(1).optional().default(0.03),
+  REEVAL_ITM_SKIP_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.90),
 
   // WebSocket price feed
   WS_ENABLED: z.coerce.boolean().optional().default(true),
