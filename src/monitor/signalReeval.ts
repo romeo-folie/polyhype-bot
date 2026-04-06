@@ -69,9 +69,8 @@ export async function reEvaluatePositions(
     // accidentally triggering exits on Sports or Entertainment trades (e.g. via copytrading).
     const positionCategory = inferCategory(position.question);
     
-    const hasCategoryMatch = highUrgencyItems.some(item => 
-      item.categoryId === positionCategory || 
-      (item.categoryId === 'geopolitical' && positionCategory === 'politics')
+    const hasCategoryMatch = highUrgencyItems.some(item =>
+      item.categoryId === positionCategory
     );
 
     if (!hasCategoryMatch) {
@@ -83,10 +82,7 @@ export async function reEvaluatePositions(
     const questionWords = extractKeywords(position.question);
     const relevantHeadline = highUrgencyItems.find((item) => {
       // Must be same category to be relevant
-      const categoryMatch = 
-        item.categoryId === positionCategory || 
-        (item.categoryId === 'geopolitical' && positionCategory === 'politics');
-      if (!categoryMatch) return false;
+      if (item.categoryId !== positionCategory) return false;
 
       // Domain Guard: If the item is geopolitical, block common sports keywords 
       // in the position question to doubly-ensure we aren't re-evaluating sports by accident.

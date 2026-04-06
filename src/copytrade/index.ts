@@ -72,7 +72,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     'blizzard',
     'drought',
   ],
-  geopolitics: [
+  geopolitical: [
     'war',
     'conflict',
     'united nations',
@@ -123,7 +123,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     'nhl',
     'hockey',
   ],
-  crypto: [
+  'crypto-regulatory': [
     'bitcoin',
     'ethereum',
     'doge',

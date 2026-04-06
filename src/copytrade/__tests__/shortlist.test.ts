@@ -174,7 +174,7 @@ describe('copytrade shortlist', () => {
   it('fetches multiple categories and merges results', async () => {
     mockLoadConfig.mockReturnValue({
       COPYTRADE_ENABLED: true,
-      COPYTRADE_MARKET_SCOPE: ['weather', 'geopolitics'],
+      COPYTRADE_MARKET_SCOPE: ['weather', 'geopolitical'],
       COPYTRADE_SHORTLIST_TIME_WINDOW: 'WEEK',
       COPYTRADE_SHORTLIST_TOP_N: 1,
       COPYTRADE_SHORTLIST_MIN_PNL_USD: 1000,

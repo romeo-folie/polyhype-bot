@@ -18,7 +18,7 @@ export interface LeaderboardEntry {
 }
 
 const CATEGORY_MAP: Record<string, string> = {
-  geopolitics: 'POLITICS',
+  geopolitical: 'POLITICS',
   'us-politics': 'POLITICS',
   weather: 'WEATHER',
   'sports-nba': 'SPORTS',
@@ -28,7 +28,7 @@ const CATEGORY_MAP: Record<string, string> = {
   'sports-tennis': 'SPORTS',
   sports: 'SPORTS',
   macro: 'ECONOMICS',
-  crypto: 'CRYPTO',
+  'crypto-regulatory': 'CRYPTO',
   mentions: 'CULTURE',
 };
 

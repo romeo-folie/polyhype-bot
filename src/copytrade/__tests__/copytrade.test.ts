@@ -6,7 +6,7 @@ const mockLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(
 let configOverride = {
   COPYTRADE_ENABLED: true,
   COPYTRADE_WALLETS: '0xabc',
-  COPYTRADE_MARKET_SCOPE: ['weather', 'geopolitics'],
+  COPYTRADE_MARKET_SCOPE: ['weather', 'geopolitical'],
   COPYTRADE_SIZE_SCALE: 0.1,
   COPYTRADE_MAX_STAKE_USD: 25,
   COPYTRADE_MAX_SLIPPAGE_BPS: 200,
@@ -100,7 +100,7 @@ beforeEach(() => {
   configOverride = {
     COPYTRADE_ENABLED: true,
     COPYTRADE_WALLETS: '0xabc',
-    COPYTRADE_MARKET_SCOPE: ['weather', 'geopolitics'],
+    COPYTRADE_MARKET_SCOPE: ['weather', 'geopolitical'],
     COPYTRADE_SIZE_SCALE: 0.1,
     COPYTRADE_MAX_STAKE_USD: 25,
     COPYTRADE_MAX_SLIPPAGE_BPS: 200,
@@ -124,10 +124,10 @@ describe('copytrade helpers', () => {
   it('detects markets by category keywords in title or description', async () => {
     const { matchesCategory } = await import('../index.js');
     expect(matchesCategory('Will it rain in NYC?', null, ['weather'])).toBe(true);
-    expect(matchesCategory('Market Title', 'Military action in Middle East', ['geopolitics'])).toBe(
+    expect(matchesCategory('Market Title', 'Military action in Middle East', ['geopolitical'])).toBe(
       true,
     );
-    expect(matchesCategory('Bitcoin price above $100k?', null, ['crypto'])).toBe(true);
+    expect(matchesCategory('Bitcoin price above $100k?', null, ['crypto-regulatory'])).toBe(true);
     expect(matchesCategory('Anything here', null, ['all'])).toBe(true);
     expect(matchesCategory('Bitcoin price above $100k?', null, ['weather'])).toBe(false);
   });
