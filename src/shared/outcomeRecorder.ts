@@ -98,6 +98,7 @@ export function inferCategory(question: string): string {
 export async function recordOutcome(
   redis: Redis,
   outcome: Omit<PositionOutcome, 'id' | 'closedAt'>,
+  opts?: { sourcedFrom?: string | undefined },
 ): Promise<void> {
   try {
     const cfg = loadConfig();
@@ -107,18 +108,25 @@ export async function recordOutcome(
 
     const full: PositionOutcome = { ...outcome, id, closedAt };
 
-    // Write hash
+    // Reconciliation-imported positions have default consensus values (0.5/0)
+    // that would poison calibration. Store the hash for audit but skip calibration sets.
+    const isReconciled = opts?.sourcedFrom?.startsWith('reconciled:') ?? false;
+
+    // Write hash (always — audit trail)
     const hashKey = `outcome:${id}`;
     const fields: Record<string, string> = {};
     for (const [k, v] of Object.entries(full)) {
       fields[k] = String(v ?? '');
     }
+    if (opts?.sourcedFrom) fields.sourcedFrom = opts.sourcedFrom;
     await redis.hset(hashKey, fields);
     await redis.expire(hashKey, cfg.OUTCOME_HISTORY_DAYS * 86400);
 
-    // Add to sorted sets
+    // Add to sorted sets (skip category set for reconciled outcomes — keeps calibration clean)
     await redis.zadd('outcomes:all', ts, id);
-    await redis.zadd(`outcomes:${outcome.category}`, ts, id);
+    if (!isReconciled) {
+      await redis.zadd(`outcomes:${outcome.category}`, ts, id);
+    }
     await redis.zadd(`outcomes:source:${outcome.source}`, ts, id);
 
     // Prune if category exceeds max.

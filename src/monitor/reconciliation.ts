@@ -8,6 +8,7 @@ import { fetchMarketByConditionId, fetchMarketByQuestion, type GammaMarket } fro
 
 import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
 import { creditProceeds } from '../shared/bankroll.js';
+import { isRecentlyRedeemed } from './resolutionRedeemer.js';
 
 interface ReconciliationDetail {
   type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded' | 'recovered_outcome';
@@ -429,7 +430,7 @@ export async function runReconciliation(
                 returnPct: stakeUsd > 0 ? ((closedPos.value_usdc - stakeUsd) / stakeUsd) * 100 : 0,
                 holdingHours: 0,
                 executionVenue: 'simmer',
-              });
+              }, { sourcedFrom: 'reconciled:simmer' });
 
               existingQuestions.add(normQ);
               recoveredCount++;
@@ -484,6 +485,14 @@ async function importSimmerOrphan(
   metadata?: GammaMarket,
 ): Promise<boolean> {
   try {
+    // Guard: skip positions that were recently redeemed to prevent close→reimport→redeem loops
+    if (await isRecentlyRedeemed(redis, pos.market_id)) {
+      logger.debug('[reconcile] skipping recently-redeemed Simmer orphan', {
+        marketId: pos.market_id,
+      });
+      return false;
+    }
+
     if (!metadata) {
       logger.warn('[reconcile] skipping Simmer orphan — no Polymarket metadata (UUID fallback blocked)', {
         marketId: pos.market_id,

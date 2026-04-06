@@ -60,6 +60,8 @@ const REDEEMER_SUCCESS_PREFIX = 'redeemer:recent-success:';
 const REDEEMER_FALLBACK_STALE_PREFIX = 'redeemer:stale-fallback:';
 const REDEEMER_MANUAL_NOTIFY_KEY = 'redeemer:manual-notified';
 const REDEEMER_MANUAL_NOTIFY_TTL_S = 30 * 24 * 3600;
+const REDEEMER_RECENTLY_CLOSED_KEY = 'redeemer:recently-closed';
+const REDEEMER_RECENTLY_CLOSED_TTL_S = 7 * 24 * 3600; // 7 days
 
 type RedeemerSkipReason = 'skipped_recent_success' | 'skipped_dust' | 'stale_no_balance';
 
@@ -75,6 +77,15 @@ const dedupKey = (conditionId: string, side: RedeemSide) =>
   `${REDEEMER_SUCCESS_PREFIX}${conditionId}:${side}`;
 const staleKey = (conditionId: string, side: RedeemSide) =>
   `${REDEEMER_FALLBACK_STALE_PREFIX}${conditionId}:${side}`;
+
+async function markRecentlyClosed(redis: Redis, simmerMarketId: string): Promise<void> {
+  await redis.sadd(REDEEMER_RECENTLY_CLOSED_KEY, simmerMarketId);
+  await redis.expire(REDEEMER_RECENTLY_CLOSED_KEY, REDEEMER_RECENTLY_CLOSED_TTL_S);
+}
+
+export async function isRecentlyRedeemed(redis: Redis, simmerMarketId: string): Promise<boolean> {
+  return (await redis.sismember(REDEEMER_RECENTLY_CLOSED_KEY, simmerMarketId)) === 1;
+}
 
 function parseNumber(value: string | undefined): number {
   const parsed = Number.parseFloat(value ?? '0');
@@ -304,9 +315,10 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
           throwErr = e;
         }
 
+        let isMockedSuccess = false;
         if (throwErr instanceof SimmerError && throwErr.statusCode === 400) {
           logger.warn(
-            '[redeemer] Simmer 400 — position likely already auto-redeemed, mocking success',
+            '[redeemer] Simmer 400 — closing ledger entry without crediting (auto-redeemed by Simmer)',
             {
               marketId: pos.market_id,
               side,
@@ -315,6 +327,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
           );
           // Auto-redeemed counts as successful hit from Simmer API perspective
           redeemResult = { success: true };
+          isMockedSuccess = true;
           // Note: we can't get tx_hash because it was redeemed externally, leaving it undefined is fine.
         } else if (throwErr) {
           throw throwErr instanceof Error ? throwErr : new Error(String(throwErr));
@@ -328,8 +341,9 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
           await closePosition(redis, pos.market_id, direction);
 
           // Credit face value (resolved = $1/share) to bankroll
+          // Skip crediting for mocked success — Simmer already auto-redeemed these proceeds
           const proceedsUsdc = pos.value_usdc ?? pos.shares ?? 0;
-          if (proceedsUsdc > 0) {
+          if (proceedsUsdc > 0 && !isMockedSuccess) {
             await creditProceeds(redis, proceedsUsdc);
           }
           await markRedeemerSuccess(
@@ -341,6 +355,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
             cfg,
             redeemResult.tx_hash ?? undefined,
           );
+          await markRecentlyClosed(redis, pos.market_id);
 
           // Record outcome (Phase 8).
           // Position is won if marked redeemable OR if outcome matches our side.
@@ -378,17 +393,19 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
             executionVenue:
               ledgerPos?.executionVenue ??
               (typeof posAny.executionVenue === 'string' ? posAny.executionVenue : 'simmer'),
-          });
+          }, { sourcedFrom: ledgerPos?.sourcedFrom });
 
-          // Notify
-          const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
-            marketId: pos.market_id,
-            question: pos.question ?? pos.market_id,
-            side,
-            valueUsdc: proceedsUsdc,
-          };
-          if (redeemResult.tx_hash) notifyOpts.txHash = redeemResult.tx_hash;
-          await notifyRedemptionExecuted(notifyOpts);
+          // Notify (skip for mocked success — no real redemption occurred)
+          if (!isMockedSuccess) {
+            const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
+              marketId: pos.market_id,
+              question: pos.question ?? pos.market_id,
+              side,
+              valueUsdc: proceedsUsdc,
+            };
+            if (redeemResult.tx_hash) notifyOpts.txHash = redeemResult.tx_hash;
+            await notifyRedemptionExecuted(notifyOpts);
+          }
 
           logger.info('[redeemer] redemption successful', {
             marketId: pos.market_id,
@@ -411,6 +428,17 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
             marketId: pos.market_id,
             error,
           });
+          const errLower = error.toLowerCase();
+          if (
+            errLower.includes('balance is 0') ||
+            errLower.includes('already redeemed')
+          ) {
+            await markFallbackStale(redis, dedupeConditionId, side, cfg);
+            logRedeemerSkip('stale_no_balance', dedupeConditionId, {
+              marketId: pos.market_id,
+              error,
+            });
+          }
           results.push({ marketId: pos.market_id, side, success: false, error });
         }
       } catch (err) {
@@ -560,7 +588,7 @@ async function redeemClobPositions(
             ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
             : 0,
           executionVenue: 'clob',
-        });
+        }, { sourcedFrom: pos.sourcedFrom });
         results.push({ marketId: pos.marketId, side, success: false, error: 'resolved_as_loss' });
         continue;
       }
@@ -665,7 +693,7 @@ async function redeemClobPositions(
         returnPct: pos.stakeUsd ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
         holdingHours: pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000 : 0,
         executionVenue: pos.executionVenue ?? 'clob',
-      });
+      }, { sourcedFrom: pos.sourcedFrom });
 
       // Notify
       await notifyRedemptionExecuted({
@@ -968,7 +996,7 @@ async function redeemSimmerLedgerFallback(
             ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
             : 0,
           executionVenue: pos.executionVenue ?? 'simmer',
-        });
+        }, { sourcedFrom: pos.sourcedFrom });
         results.push({ marketId: pos.marketId, side, success: false, error: 'resolved_as_loss' });
         continue;
       }
@@ -1019,6 +1047,7 @@ async function redeemSimmerLedgerFallback(
             cfg,
             onChainResult.tx_hash,
           );
+          await markRecentlyClosed(redis, pos.marketId);
           logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), {
             marketId: pos.marketId,
             postBalance,
@@ -1036,7 +1065,7 @@ async function redeemSimmerLedgerFallback(
               ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
               : 0,
             executionVenue: pos.executionVenue ?? 'simmer',
-          });
+          }, { sourcedFrom: pos.sourcedFrom });
           const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
             marketId: pos.marketId,
             question: resolvedQuestion,
@@ -1114,9 +1143,10 @@ async function redeemSimmerLedgerFallback(
         throwErr = e;
       }
 
+      let isMockedSuccess = false;
       if (throwErr instanceof SimmerError && throwErr.statusCode === 400) {
         logger.warn(
-          '[redeemer] Simmer fallback 400 — position likely already auto-redeemed, mocking success',
+          '[redeemer] Simmer fallback 400 — closing ledger entry without crediting (auto-redeemed by Simmer)',
           {
             marketId: pos.marketId,
             side,
@@ -1124,6 +1154,7 @@ async function redeemSimmerLedgerFallback(
           },
         );
         redeemResult = { success: true };
+        isMockedSuccess = true;
       } else if (throwErr) {
         throw throwErr instanceof Error ? throwErr : new Error(String(throwErr));
       }
@@ -1140,7 +1171,7 @@ async function redeemSimmerLedgerFallback(
           });
         }
         const proceedsUsdc = pos.sharesHeld ?? (entryPriceSafe ? pos.stakeUsd / pos.entryPrice : 0);
-        if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
+        if (proceedsUsdc > 0 && !isMockedSuccess) await creditProceeds(redis, proceedsUsdc);
         const tokenId = pickClobTokenId(pos);
         const postBalance = await refreshTokenBalance(tokenId);
         await markRedeemerSuccess(
@@ -1152,6 +1183,7 @@ async function redeemSimmerLedgerFallback(
           cfg,
           redeemResult.tx_hash ?? undefined,
         );
+        await markRecentlyClosed(redis, pos.marketId);
         logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), {
           marketId: pos.marketId,
           postBalance,
@@ -1170,16 +1202,18 @@ async function redeemSimmerLedgerFallback(
             ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
             : 0,
           executionVenue: pos.executionVenue ?? 'simmer',
-        });
+        }, { sourcedFrom: pos.sourcedFrom });
 
-        const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
-          marketId: pos.marketId,
-          question: resolvedQuestion,
-          side,
-          valueUsdc: proceedsUsdc,
-        };
-        if (redeemResult.tx_hash) notifyOpts.txHash = redeemResult.tx_hash;
-        await notifyRedemptionExecuted(notifyOpts);
+        if (!isMockedSuccess) {
+          const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
+            marketId: pos.marketId,
+            question: resolvedQuestion,
+            side,
+            valueUsdc: proceedsUsdc,
+          };
+          if (redeemResult.tx_hash) notifyOpts.txHash = redeemResult.tx_hash;
+          await notifyRedemptionExecuted(notifyOpts);
+        }
 
         logger.info('[redeemer] Simmer fallback: redemption successful', {
           marketId: pos.marketId,
@@ -1360,7 +1394,7 @@ async function redeemOrphanClobPositions(
               ? (Date.now() - new Date(ledgerEntry.openedAt).getTime()) / 3600000
               : 0,
             executionVenue: 'clob',
-          });
+          }, { sourcedFrom: ledgerEntry.sourcedFrom });
         }
         continue;
       }
