@@ -149,6 +149,7 @@ class HyperliquidClient {
   // needed if individual symbols were fetched independently.
   private midCache: Record<string, string> = {};
   private midCacheTime = 0;
+  private isTestnet: boolean;
 
   constructor() {
     const cfg = loadConfig();
@@ -160,12 +161,14 @@ class HyperliquidClient {
     this.wallet = new ethers.Wallet(cfg.HYPERLIQUID_PRIVATE_KEY);
     this.mainWalletAddress = cfg.HYPERLIQUID_MAIN_WALLET || this.wallet.address;
     this.baseUrl = cfg.HYPERLIQUID_TESTNET ? TESTNET_API : MAINNET_API;
+    this.isTestnet = cfg.HYPERLIQUID_TESTNET;
 
-    // Chain ID must be dynamic: HL Testnet = 1337, HL Mainnet = 42161 (Arbitrum)
+    // HL uses chainId 1337 for both mainnet and testnet EIP-712 signing
+    // (it's HL's own L1 chain ID, not Arbitrum's 42161)
     this.domain = {
       name: 'Exchange',
       version: '1',
-      chainId: cfg.HYPERLIQUID_TESTNET ? 1337 : 42161,
+      chainId: 1337,
       verifyingContract: '0x0000000000000000000000000000000000000000' as `0x${string}`,
     };
 
@@ -476,8 +479,10 @@ class HyperliquidClient {
     const dataToHash = Buffer.concat(parts);
     const connectionId = ethers.keccak256(dataToHash);
 
+    // HL phantom agent source: 'a' for mainnet, 'b' for testnet
+    // (matches Python SDK construct_phantom_agent)
     const signature = await this.wallet.signTypedData(this.domain, TYPES, {
-      source: 'Exchange',
+      source: this.isTestnet ? 'b' : 'a',
       connectionId: connectionId,
     });
 
