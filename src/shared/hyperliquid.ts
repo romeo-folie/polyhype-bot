@@ -240,6 +240,7 @@ class HyperliquidClient {
               opts.isBuy
                 ? midPrice * (1 + loadConfig().FUTURES_IOC_SLIPPAGE)
                 : midPrice * (1 - loadConfig().FUTURES_IOC_SLIPPAGE),
+              szDecimals,
             )),
             s: String(this.roundSize(sizeBase, szDecimals)),
             r: opts.reduceOnly ?? false,
@@ -446,13 +447,12 @@ class HyperliquidClient {
   // --- Private Helpers ---
 
   /**
-   * Returns the vault address if the agent wallet differs from the main wallet
-   * (i.e. we're trading on behalf of another address), or null otherwise.
+   * Returns the vault address for vault trading, or null for regular/agent trading.
+   * Agent wallets don't use vaultAddress — HL knows the agent is approved for the
+   * main wallet via the on-chain approval. Vault is only for actual vault contracts.
    */
   private get vaultAddress(): string | null {
-    return this.wallet.address.toLowerCase() !== this.mainWalletAddress.toLowerCase()
-      ? this.mainWalletAddress
-      : null;
+    return null;
   }
 
   private async signAction(
@@ -539,10 +539,17 @@ class HyperliquidClient {
     return val ? parseFloat(val) : 0;
   }
 
-  private roundPrice(px: number): number {
-    // toPrecision(5) truncates BTC prices (~$95,000) to 5 sig figs, losing sub-dollar precision.
-    // Use 6 significant figures to preserve meaningful price resolution across all traded assets.
-    return parseFloat(px.toPrecision(6));
+  /**
+   * Round price to comply with HL tick size rules:
+   * - Max 5 significant figures (integers always valid)
+   * - Max decimal places = 6 - szDecimals (for perps)
+   */
+  private roundPrice(px: number, szDecimals: number): number {
+    const maxDecimals = Math.max(0, 6 - szDecimals);
+    // First round to 5 significant figures
+    const sigFigRounded = parseFloat(px.toPrecision(5));
+    // Then enforce max decimal places
+    return parseFloat(sigFigRounded.toFixed(maxDecimals));
   }
 
   private roundSize(sz: number, szDecimals: number): number {
