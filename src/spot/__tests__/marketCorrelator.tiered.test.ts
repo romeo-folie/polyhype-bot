@@ -20,6 +20,9 @@ vi.mock('../../shared/redis.js', () => ({
 describe('marketCorrelator Tiered Logic', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    (assets as any).ASSET_SEARCH_QUERIES = {
+      bitcoin: ['bitcoin', 'BTC'],
+    };
     (loadConfig as any).mockReturnValue({
       TIERED_LOGIC_ENABLED: true,
       STANDARD_MIN_VOLUME: 5000,

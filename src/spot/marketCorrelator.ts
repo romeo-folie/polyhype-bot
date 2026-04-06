@@ -10,7 +10,7 @@ import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
 import { searchEvents, parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
-import { isCryptoAsset } from '../shared/assets.js';
+import { ASSET_SEARCH_QUERIES, isCryptoAsset } from '../shared/assets.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import type { SpotMove } from './thresholdDetector.js';
 
@@ -27,16 +27,6 @@ export interface CorrelatedMarket {
   endDate?: string | null | undefined;
 }
 
-/** Asset-specific search queries for Gamma API. */
-const ASSET_SEARCH_QUERIES: Record<string, string[]> = {
-  bitcoin: ['bitcoin', 'BTC'],
-  ethereum: ['ethereum', 'ETH'],
-  solana: ['solana', 'SOL'],
-  bittensor: ['TAO', 'bittensor'],
-  ripple: ['XRP', 'ripple'],
-  'CL=F': ['oil', 'crude', 'OPEC', 'sanctions'],
-  'GC=F': ['gold', 'safe haven', 'precious metals'],
-};
 
 const CORRELATION_CACHE_TTL = 86400; // 24 hours
 

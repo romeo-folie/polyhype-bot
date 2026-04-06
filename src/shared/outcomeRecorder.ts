@@ -58,7 +58,7 @@ export function inferCategory(question: string): string {
   // Short tokens (eth, sol, btc, etc.) are anchored with \b to prevent false matches
   // like "methane" → eth, "absolute" → sol, "protocol" → btc.
   if (
-    /bitcoin|\bbtc\b|\beth\b|ethereum|crypto|\bsolana\b|\bsol\b|\bdoge\b|dogecoin|\bxrp\b|ripple|\bshib\b|shiba|\bpepe\b|binance|coinbase/.test(
+    /bitcoin|\bbtc\b|\beth\b|ethereum|crypto|\bsolana\b|\bsol\b|\bdoge\b|dogecoin|\bxrp\b|ripple|\bshib\b|shiba|\bpepe\b|binance|coinbase|\bcardano\b|\bada\b|\bavax\b|avalanche|\blink\b|chainlink|\bsui\b|\bdot\b|polkadot|\bmatic\b|polygon|\bltc\b|litecoin|uniswap|\buni\b|toncoin|\bton\b|\btrx\b|tron|stellar|\bxlm\b|\bnear\b|aptos|\bapt\b|arbitrum|\barb\b|optimism|\bop\b|render|\brndr\b|injective|\binj\b|bittensor|\btao\b/.test(
       q,
     )
   ) {

@@ -12,19 +12,13 @@ import { logger } from '../shared/logger.js';
 import { getRedis } from '../shared/redis.js';
 import { searchEvents, parseClobTokenIds } from '../mapping/gamma.js';
 import { estimateFastConsensus } from './fastPathConsensus.js';
-import { BINANCE_SYMBOL_TO_ASSET } from '../shared/assets.js';
-
-const ASSET_SEARCH_QUERIES: Record<string, string[]> = {
-  bitcoin: ['bitcoin', 'BTC', 'price'],
-  ethereum: ['ethereum', 'ETH', 'price'],
-  solana: ['solana', 'SOL', 'price'],
-};
+import { BINANCE_SYMBOL_TO_ASSET, getWarmerQueries } from '../shared/assets.js';
 
 /**
  * Warm the cache for a specific asset.
  */
 async function warmAsset(assetId: string, redis: ReturnType<typeof getRedis>): Promise<void> {
-  const queries = ASSET_SEARCH_QUERIES[assetId] || [assetId];
+  const queries = getWarmerQueries(assetId);
   logger.info('[market-warmer] warming asset', { assetId, queries });
 
   for (const query of queries) {
