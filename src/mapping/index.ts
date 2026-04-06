@@ -166,6 +166,8 @@ export async function runMapping(
         divergenceThreshold,
         maxBetFraction,
         bookDepthUsd: candidate.liquidity,
+        minPriceForLlmTrust: cfg.MIN_PRICE_FOR_LLM_TRUST,
+        maxLlmProbAtLowPrice: cfg.MAX_LLM_PROB_AT_LOW_PRICE,
       });
 
       logger.info('[mapping] divergence result', {

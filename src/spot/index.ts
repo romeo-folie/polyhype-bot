@@ -224,6 +224,8 @@ async function runSpotMonitorInner(
         bankrollUsd,
         divergenceThreshold: cfg.SPOT_DIVERGENCE_THRESHOLD,
         maxBetFraction: cfg.MAX_BET_FRACTION,
+        minPriceForLlmTrust: cfg.MIN_PRICE_FOR_LLM_TRUST,
+        maxLlmProbAtLowPrice: cfg.MAX_LLM_PROB_AT_LOW_PRICE,
       });
 
       if (!hasTrade || !decision) continue;

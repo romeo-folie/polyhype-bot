@@ -85,6 +85,13 @@ const envSchema = z.object({
   DIVERGENCE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.08),
   MAX_BET_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.1),
 
+  // Extreme-price LLM-distrust gate. Skips trades where the market is priced
+  // very near 0 or 1 but the LLM consensus disagrees by an implausibly large
+  // margin — protects against the LLM "default to 50% under uncertainty"
+  // failure mode on long-tail / multi-outcome markets.
+  MIN_PRICE_FOR_LLM_TRUST: z.coerce.number().min(0).max(0.5).optional().default(0.02),
+  MAX_LLM_PROB_AT_LOW_PRICE: z.coerce.number().min(0).max(1).optional().default(0.15),
+
   // Execution microstructure controls
   EXECUTION_MODE: z.enum(['hybrid', 'maker', 'taker']).optional().default('hybrid'),
   MAKER_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(20_000),

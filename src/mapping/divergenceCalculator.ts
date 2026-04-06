@@ -40,6 +40,18 @@ export interface DivergenceInput {
   maxBetFraction: number;
   /** Available liquidity in USD at the current price level (optional) */
   bookDepthUsd?: number;
+  /**
+   * Extreme-price LLM-distrust threshold. If the market is priced below this
+   * value (or above 1 - this value) we treat the LLM consensus with suspicion.
+   * Defaults to 0.02 (2¢).
+   */
+  minPriceForLlmTrust?: number;
+  /**
+   * Maximum LLM consensus we will trust when the market is in the extreme-price
+   * zone. If the LLM disagrees by more than this with a near-zero/near-one
+   * market, the trade is skipped. Defaults to 0.15.
+   */
+  maxLlmProbAtLowPrice?: number;
 }
 
 export interface DivergenceResult {
@@ -66,7 +78,28 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
     divergenceThreshold,
     maxBetFraction,
     bookDepthUsd,
+    minPriceForLlmTrust = 0.02,
+    maxLlmProbAtLowPrice = 0.15,
   } = input;
+
+  // Gate 0: Extreme-price LLM-distrust gate.
+  // When the market is priced very near 0 or 1, the LLM's "default to 50%
+  // under uncertainty" failure mode produces phantom edge. Skip these.
+  // Symmetric: low-YES checks the LLM's YES probability; high-YES checks NO.
+  if (currentYesPrice < minPriceForLlmTrust && p > maxLlmProbAtLowPrice) {
+    return {
+      hasTrade: false,
+      decision: null,
+      skipReason: `extreme_price_llm_distrust:price=${currentYesPrice.toFixed(4)},consensus=${p.toFixed(3)}`,
+    };
+  }
+  if (currentYesPrice > 1 - minPriceForLlmTrust && 1 - p > maxLlmProbAtLowPrice) {
+    return {
+      hasTrade: false,
+      decision: null,
+      skipReason: `extreme_price_llm_distrust:price=${currentYesPrice.toFixed(4)},consensus=${p.toFixed(3)}`,
+    };
+  }
 
   // Gate 1: Noisy signal — stddev too high
   if (consensusStddev > NOISE_STDDEV_THRESHOLD) {

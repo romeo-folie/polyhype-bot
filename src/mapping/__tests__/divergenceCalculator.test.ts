@@ -179,3 +179,72 @@ describe('EV gate & noise gate', () => {
     expect(result.hasTrade).toBe(true);
   });
 });
+
+describe('extreme-price LLM-distrust gate', () => {
+  it('rejects when market is < 2¢ but LLM consensus is high (Baidu/Alibaba case)', () => {
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.5, // LLM defaults to ~50% under uncertainty
+      currentYesPrice: 0.0015, // 0.15% — multi-outcome longshot
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('extreme_price_llm_distrust');
+  });
+
+  it('rejects symmetric case: market > 98¢ but LLM consensus is low', () => {
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.5,
+      currentYesPrice: 0.99,
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('extreme_price_llm_distrust');
+  });
+
+  it('allows trade when low-priced market has correspondingly low LLM consensus', () => {
+    // Market at 1¢, LLM agrees it's a longshot (5%) — small but coherent edge
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.05,
+      currentYesPrice: 0.01,
+      divergenceThreshold: 0.01,
+    });
+    expect(result.hasTrade).toBe(true);
+    expect(result.skipReason).toBeUndefined();
+  });
+
+  it('allows trade when high-priced market has correspondingly high LLM consensus', () => {
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.99,
+      currentYesPrice: 0.985,
+      divergenceThreshold: 0.001,
+    });
+    // May still be blocked by other gates but should not hit the distrust gate
+    expect(result.skipReason).not.toContain('extreme_price_llm_distrust');
+  });
+
+  it('respects custom thresholds', () => {
+    // With minPriceForLlmTrust=0.05, a market at 0.03 should now be in the zone
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.4,
+      currentYesPrice: 0.03,
+      minPriceForLlmTrust: 0.05,
+      maxLlmProbAtLowPrice: 0.2,
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('extreme_price_llm_distrust');
+  });
+
+  it('does not gate markets safely above the trust floor', () => {
+    // Market at 5%, LLM at 50% — outside the gate but should still trade
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.5,
+      currentYesPrice: 0.05,
+    });
+    expect(result.hasTrade).toBe(true);
+    expect(result.skipReason).toBeUndefined();
+  });
+});
