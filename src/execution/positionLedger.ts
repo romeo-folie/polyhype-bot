@@ -81,6 +81,8 @@ export interface Position {
   assetId?: string | undefined;
   /** ISO timestamp for market resolution — used for tiered logic */
   endDate?: string | undefined;
+  /** Peak priceChangePct seen since entry — used by trailing stop */
+  highWaterMarkPct?: number | undefined;
 }
 
 function positionKey(marketId: string, direction: Position['direction']): string {
@@ -275,6 +277,16 @@ export async function markPositionPendingSettlement(
   const key = positionKey(marketId, direction);
   await redis.hset(key, { pendingSettlement: 'true' });
   logger.info('[ledger] position marked pendingSettlement', { marketId, direction });
+}
+
+export async function updateHighWaterMark(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+  pct: number,
+): Promise<void> {
+  const key = positionKey(marketId, direction);
+  await redis.hset(key, { highWaterMarkPct: String(pct) });
 }
 
 export async function updatePositionShares(

@@ -20,6 +20,7 @@ import { notifyTradeError } from '../execution/telegram.js';
 import {
   closePosition as closeLedgerPosition,
   getOpenPositions,
+  updateHighWaterMark,
 } from '../execution/positionLedger.js';
 import { scoreConfluence } from '../arb/confluenceScorer.js';
 
@@ -166,7 +167,28 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         } else if (priceChangePct >= cfg.FUTURES_TAKE_PROFIT_PCT) {
           shouldExit = true;
           reason = `Take-Profit triggered (${priceChangePct.toFixed(2).toString()}%)`;
-        } else {
+        }
+
+        // 2b. Trailing stop — lock in gains once position exceeds activation threshold
+        if (!shouldExit && cfg.FUTURES_TRAILING_STOP_ENABLED && priceChangePct >= cfg.FUTURES_TRAILING_ACTIVATION_PCT) {
+          const ledgerPos = futuresLedger.find((p) => p.marketId === symbol);
+          let hwm = ledgerPos?.highWaterMarkPct ?? priceChangePct;
+          if (priceChangePct > hwm) {
+            hwm = priceChangePct;
+            updateHighWaterMark(redis, symbol, direction, hwm).catch(() => {});
+          }
+          const drawdown = hwm - priceChangePct;
+          if (drawdown >= cfg.FUTURES_TRAILING_STOP_PCT) {
+            shouldExit = true;
+            reason = `Trailing stop (peak +${hwm.toFixed(2)}%, now +${priceChangePct.toFixed(2)}%, drawdown ${drawdown.toFixed(2)}%)`;
+          } else {
+            logger.debug('[futures-monitor] trailing active', {
+              symbol, hwm: hwm.toFixed(2), current: priceChangePct.toFixed(2), drawdown: drawdown.toFixed(2),
+            });
+          }
+        }
+
+        if (!shouldExit) {
           // 3. Time-based max-hold exit using ledger 'openedAt'
           const ledgerPos = futuresLedger.find((p) => p.marketId === symbol);
           const openedAt = ledgerPos ? new Date(ledgerPos.openedAt).getTime() : Date.now();
