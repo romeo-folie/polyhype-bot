@@ -7,6 +7,7 @@ const mockRedis = {
   pipeline: vi.fn(() => ({
     zadd: vi.fn().mockReturnThis(),
     zremrangebyscore: vi.fn().mockReturnThis(),
+    zremrangebyrank: vi.fn().mockReturnThis(),
     set: vi.fn().mockReturnThis(),
     expire: vi.fn().mockReturnThis(),
     publish: vi.fn().mockReturnThis(),
@@ -61,11 +62,28 @@ describe('BinanceFeed', () => {
       .mocked(mockWs.on)
       .mock.calls.find((call) => call[0] === 'message')?.[1] as (data: string) => void;
 
-    // Binance ticker format (s: symbol, c: close price, E: event time)
+    // Binance combined-stream kline format
     const rawMessage = JSON.stringify({
-      s: 'BTCUSDT',
-      c: '65000.50',
-      E: Date.now(),
+      stream: 'btcusdt@kline_1m',
+      data: {
+        e: 'kline',
+        E: Date.now(),
+        s: 'BTCUSDT',
+        k: {
+          t: Date.now() - 60_000,
+          T: Date.now(),
+          s: 'BTCUSDT',
+          i: '1m',
+          o: '64900',
+          c: '65000.50',
+          h: '65100',
+          l: '64850',
+          v: '12.345',
+          q: '802345.67',
+          n: 123,
+          x: false,
+        },
+      },
     });
 
     messageHandler(rawMessage);

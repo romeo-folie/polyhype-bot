@@ -390,6 +390,28 @@ const envSchema = z.object({
   FUTURES_VOL_SIZING_ENABLED: z.coerce.boolean().optional().default(false),
   FUTURES_ATR_PERIOD: z.coerce.number().int().min(2).optional().default(14),
   FUTURES_ATR_BASELINE_PCT: z.coerce.number().min(0.01).optional().default(0.5),
+
+  // ── Phase 1: Kline feed (real OHLCV from Binance) ──
+  // Comma-separated list of timeframes to subscribe to. '1m' is required.
+  BINANCE_KLINE_TIMEFRAMES: z.string().optional().default('1m,5m'),
+  KLINE_RETENTION_1M: z.coerce.number().int().min(10).optional().default(240),
+  KLINE_RETENTION_5M: z.coerce.number().int().min(10).optional().default(288),
+
+  // ── Phase 1: ATR-based dynamic SL/TP (default off — ship-then-flip) ──
+  FUTURES_ATR_SLTP_ENABLED: z.coerce.boolean().optional().default(false),
+  FUTURES_ATR_SL_MULT: z.coerce.number().min(0.1).optional().default(1.5),
+  FUTURES_ATR_TP_MULT: z.coerce.number().min(0.1).optional().default(3.0),
+  FUTURES_ATR_SL_MIN_PCT: z.coerce.number().min(0).optional().default(1.0),
+  FUTURES_ATR_SL_MAX_PCT: z.coerce.number().min(0).optional().default(5.0),
+  FUTURES_ATR_TP_MIN_PCT: z.coerce.number().min(0).optional().default(2.0),
+  FUTURES_ATR_TP_MAX_PCT: z.coerce.number().min(0).optional().default(10.0),
+  FUTURES_ATR_TRAIL_ACT_MULT: z.coerce.number().min(0.1).optional().default(2.0),
+  FUTURES_ATR_TRAIL_STOP_MULT: z.coerce.number().min(0.1).optional().default(1.0),
+
+  // ── Phase 1: Z-score spot momentum trigger ──
+  SPOT_TRIGGER_MODE: z.enum(['pct', 'zscore', 'both']).optional().default('pct'),
+  SPOT_ZSCORE_THRESHOLD: z.coerce.number().min(0).optional().default(2.5),
+  SPOT_ZSCORE_LOOKBACK_MIN: z.coerce.number().int().min(10).optional().default(60),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

@@ -1,42 +1,120 @@
 /**
  * Candle aggregator.
  *
- * Resamples raw tick data from the BinanceFeed sorted set into 1-minute OHLCV candles.
- * BinanceFeed stores ticks as: key=spot:prices:<symbol>, members="<timestamp>:<price>", score=timestamp(ms)
+ * Primary source: real OHLCV klines stored by BinanceFeed at
+ *   spot:klines:<symbol>:<timeframe>   (sorted set, score=openTime, member=JSON StoredKline)
+ *
+ * Fallback: when no kline data is available (warmup, non-Binance symbol, etc.),
+ * resamples the legacy tick history at spot:prices:<symbol> into 1m candles.
+ * Volume in the fallback path is the tick count (meaningless), so volume-aware
+ * indicators must guard against it (handled in their own modules).
  */
 
 import type { Redis } from 'ioredis';
+import { logger } from '../shared/logger.js';
 
 export interface OHLCVCandle {
-  openTime: number; // bucket start ms (floor of minute)
+  openTime: number;
   open: number;
   high: number;
   low: number;
   close: number;
-  volume: number; // tick count as volume proxy
+  /** Real base volume from kline source; tick count from fallback. */
+  volume: number;
+  /** Quote volume in USD (kline source only). */
+  quoteVolume?: number;
+  /** Trade count (kline source only). */
+  tradeCount?: number;
 }
 
 const MINUTE_MS = 60_000;
-const DEFAULT_LOOKBACK_MS = 60 * MINUTE_MS; // 60 minutes
+const DEFAULT_LOOKBACK_MS = 60 * MINUTE_MS;
+
+export interface BuildCandlesOpts {
+  timeframe?: '1m' | '5m';
+  lookbackMs?: number;
+}
 
 /**
- * Build 1-minute OHLCV candles from the raw tick sorted set.
- * Returns candles sorted oldest-first.
- * Exported for unit testing.
+ * Build OHLCV candles for a symbol. Reads from the kline store first; if empty,
+ * falls back to tick resampling. Returns candles sorted oldest-first.
  */
 export async function buildCandles(
   symbol: string,
   redis: Redis,
-  lookbackMs: number = DEFAULT_LOOKBACK_MS,
+  optsOrLookback: BuildCandlesOpts | number = {},
 ): Promise<OHLCVCandle[]> {
-  const key = `spot:prices:${symbol}`;
+  // Back-compat: legacy callers pass a bare lookbackMs number.
+  const opts: BuildCandlesOpts =
+    typeof optsOrLookback === 'number' ? { lookbackMs: optsOrLookback } : optsOrLookback;
+  const timeframe = opts.timeframe ?? '1m';
+  const lookbackMs = opts.lookbackMs ?? DEFAULT_LOOKBACK_MS;
+
+  const sym = symbol.toLowerCase();
   const now = Date.now();
   const from = now - lookbackMs;
 
-  const entries = await redis.zrangebyscore(key, from, '+inf');
+  // Primary path: read real klines.
+  const klineKey = `spot:klines:${sym}:${timeframe}`;
+  try {
+    const raw = await redis.zrangebyscore(klineKey, from, '+inf');
+    if (raw.length > 0) {
+      const candles: OHLCVCandle[] = [];
+      for (const entry of raw) {
+        try {
+          const k = JSON.parse(entry) as {
+            t: number;
+            o: number;
+            h: number;
+            l: number;
+            c: number;
+            v: number;
+            q?: number;
+            n?: number;
+          };
+          if (
+            !Number.isFinite(k.t) ||
+            !Number.isFinite(k.o) ||
+            !Number.isFinite(k.c) ||
+            k.c <= 0
+          ) {
+            continue;
+          }
+          const candle: OHLCVCandle = {
+            openTime: k.t,
+            open: k.o,
+            high: k.h,
+            low: k.l,
+            close: k.c,
+            volume: k.v,
+          };
+          if (typeof k.q === 'number') candle.quoteVolume = k.q;
+          if (typeof k.n === 'number') candle.tradeCount = k.n;
+          candles.push(candle);
+        } catch {
+          // skip malformed entry
+        }
+      }
+      if (candles.length > 0) {
+        candles.sort((a, b) => a.openTime - b.openTime);
+        return candles;
+      }
+    }
+  } catch (err) {
+    logger.warn('[candleAggregator] kline read failed, falling back to ticks', {
+      symbol: sym,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Fallback path: resample ticks (only meaningful for 1m).
+  if (timeframe !== '1m') return [];
+  logger.debug('[candleAggregator] kline_fallback to tick resampler', { symbol: sym });
+
+  const pricesKey = `spot:prices:${sym}`;
+  const entries = await redis.zrangebyscore(pricesKey, from, '+inf');
   if (entries.length === 0) return [];
 
-  // Group ticks into 1-minute buckets
   const buckets = new Map<number, number[]>();
   for (const entry of entries) {
     const colonIdx = entry.indexOf(':');
@@ -47,11 +125,8 @@ export async function buildCandles(
 
     const bucket = Math.floor(ts / MINUTE_MS) * MINUTE_MS;
     const existing = buckets.get(bucket);
-    if (existing) {
-      existing.push(price);
-    } else {
-      buckets.set(bucket, [price]);
-    }
+    if (existing) existing.push(price);
+    else buckets.set(bucket, [price]);
   }
 
   if (buckets.size === 0) return [];
@@ -68,7 +143,6 @@ export async function buildCandles(
     });
   }
 
-  // Sort ascending by openTime
   candles.sort((a, b) => a.openTime - b.openTime);
   return candles;
 }
