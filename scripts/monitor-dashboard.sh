@@ -1,5 +1,5 @@
 #!/bin/sh
-# PGA Monitor Dashboard (Docker Integrated) — 9 panes in 3x3 tiled grid
+# PGA Monitor Dashboard (Docker Integrated) — 11 panes in tiled grid (target: 12 for 3x4)
 # Usage: ./scripts/monitor-dashboard.sh
 
 SESSION="pga"
@@ -35,12 +35,15 @@ W7="touch ~/logs/pga/spot.log && tail -f ~/logs/pga/spot.log | sed 's/\(\[[^]]*\
 # POSITION DISPLAY (9)
 W8="while true; do npx tsx scripts/list-positions.ts; sleep 10; done"
 
+# NEW DOCKER WORKERS (10-11)
+W9="docker compose logs -f --tail 100 pga-sports    | sed 's/\(\[[^]]*\]\)/\x1b[91m\1\x1b[0m/g'"
+W10="docker compose logs -f --tail 100 pga-clob-flow | sed 's/\(\[[^]]*\]\)/\x1b[93m\1\x1b[0m/g'"
+
 # Partition the window into a dynamic tiled grid
-# This results in a 3x3 layout.
 tmux new-session -d -s "$SESSION" -n w0 -x 220 -y 60 "sh -c \"$W0\""
 
-# Spawn panes 1 through 8
-for cmd in "$W1" "$W2" "$W3" "$W4" "$W5" "$W6" "$W7" "$W8"; do
+# Spawn panes 1 through 10
+for cmd in "$W1" "$W2" "$W3" "$W4" "$W5" "$W6" "$W7" "$W8" "$W9" "$W10"; do
   tmux split-window -t "${SESSION}:w0" "sh -c \"$cmd\""
   tmux select-layout -t "${SESSION}:w0" tiled
 done
