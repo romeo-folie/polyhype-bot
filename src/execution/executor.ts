@@ -28,6 +28,7 @@ import {
 } from '../shared/clob.js';
 import { hasOpenPosition } from './positionLedger.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
+import { computeATR } from '../arb/indicators.js';
 import { loadConfig } from '../shared/config.js';
 import { getCalibrationStats, applyCalibrationCorrection } from '../shared/calibration.js';
 import { inferCategory } from '../shared/outcomeRecorder.js';
@@ -66,6 +67,9 @@ export interface ExecutionResult {
   fallbackReason?: string;
   /** True if a delta hedge was placed on HL for this trade. */
   hedgeDispatched?: boolean;
+  /** ATR snapshot at futures entry — persisted to ledger for ATR-based SL/TP. */
+  entryAtr?: number;
+  entryAtrPct?: number;
 }
 
 interface DecisionBenchmark {
@@ -618,7 +622,36 @@ async function executeHyperliquidSignal(
           error: String(e),
         });
       }
-      return {
+
+      // Capture ATR snapshot at entry — drives ATR-based SL/TP in futuresMonitor.
+      // Best-effort: if candles aren't available yet, leave undefined and the
+      // monitor will fall back to fixed-percent thresholds for this position.
+      let entryAtr: number | undefined;
+      let entryAtrPct: number | undefined;
+      try {
+        const atr = await computeATR(signal.marketId, redis);
+        if (atr) {
+          entryAtr = atr.atr;
+          entryAtrPct = atr.atrPct;
+          logger.info('[executor] futures entryAtrPct captured', {
+            symbol: signal.marketId,
+            entryAtrPct: entryAtrPct.toFixed(3),
+            wouldBeSlPct: (entryAtrPct * cfg.FUTURES_ATR_SL_MULT).toFixed(3),
+            wouldBeTpPct: (entryAtrPct * cfg.FUTURES_ATR_TP_MULT).toFixed(3),
+          });
+        } else {
+          logger.warn('[executor] ATR unavailable at entry — monitor will use fixed SL/TP', {
+            symbol: signal.marketId,
+          });
+        }
+      } catch (e: unknown) {
+        logger.warn('[executor] ATR computation failed at entry (non-fatal)', {
+          symbol: signal.marketId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+
+      const result: ExecutionResult = {
         signal,
         skipped: false,
         tradeResult: { success: true, tx_hash: tradeResult.txHash, shares_bought: 0 },
@@ -628,6 +661,9 @@ async function executeHyperliquidSignal(
         entryOrderType: 'taker',
         entryPrice: tradeResult.price ?? null,
       };
+      if (entryAtr !== undefined) result.entryAtr = entryAtr;
+      if (entryAtrPct !== undefined) result.entryAtrPct = entryAtrPct;
+      return result;
     }
 
     // Treat "too small" as a skip (not an error) — don't send noisy notifications

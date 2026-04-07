@@ -162,16 +162,48 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         let shouldExit = false;
         let reason = '';
 
-        if (priceChangePct <= cfg.FUTURES_STOP_LOSS_PCT) {
+        // Resolve effective SL/TP/trailing thresholds. ATR mode (when enabled
+        // AND the position has an entryAtrPct snapshot) derives them from the
+        // ATR captured at entry, clamped to min/max bounds. Legacy positions
+        // and positions with missing ATR fall back to fixed-percent thresholds.
+        const ledgerPosForAtr = futuresLedger.find((p) => p.marketId === symbol);
+        let slPct = cfg.FUTURES_STOP_LOSS_PCT; // negative
+        let tpPct = cfg.FUTURES_TAKE_PROFIT_PCT; // positive
+        let trailActPct = cfg.FUTURES_TRAILING_ACTIVATION_PCT;
+        let trailStopPct = cfg.FUTURES_TRAILING_STOP_PCT;
+        let usingAtrMode = false;
+        if (
+          cfg.FUTURES_ATR_SLTP_ENABLED &&
+          ledgerPosForAtr?.entryAtrPct !== undefined &&
+          Number.isFinite(ledgerPosForAtr.entryAtrPct) &&
+          ledgerPosForAtr.entryAtrPct > 0
+        ) {
+          const atrPct = ledgerPosForAtr.entryAtrPct;
+          const slMag = Math.min(
+            Math.max(atrPct * cfg.FUTURES_ATR_SL_MULT, cfg.FUTURES_ATR_SL_MIN_PCT),
+            cfg.FUTURES_ATR_SL_MAX_PCT,
+          );
+          const tpMag = Math.min(
+            Math.max(atrPct * cfg.FUTURES_ATR_TP_MULT, cfg.FUTURES_ATR_TP_MIN_PCT),
+            cfg.FUTURES_ATR_TP_MAX_PCT,
+          );
+          slPct = -slMag;
+          tpPct = tpMag;
+          trailActPct = atrPct * cfg.FUTURES_ATR_TRAIL_ACT_MULT;
+          trailStopPct = atrPct * cfg.FUTURES_ATR_TRAIL_STOP_MULT;
+          usingAtrMode = true;
+        }
+
+        if (priceChangePct <= slPct) {
           shouldExit = true;
-          reason = `Stop-Loss triggered (${priceChangePct.toFixed(2).toString()}%)`;
-        } else if (priceChangePct >= cfg.FUTURES_TAKE_PROFIT_PCT) {
+          reason = `Stop-Loss triggered (${priceChangePct.toFixed(2).toString()}%${usingAtrMode ? ` atr_sl=${slPct.toFixed(2)}` : ''})`;
+        } else if (priceChangePct >= tpPct) {
           shouldExit = true;
-          reason = `Take-Profit triggered (${priceChangePct.toFixed(2).toString()}%)`;
+          reason = `Take-Profit triggered (${priceChangePct.toFixed(2).toString()}%${usingAtrMode ? ` atr_tp=${tpPct.toFixed(2)}` : ''})`;
         }
 
         // 2b. Trailing stop — lock in gains once position exceeds activation threshold
-        if (!shouldExit && cfg.FUTURES_TRAILING_STOP_ENABLED && priceChangePct >= cfg.FUTURES_TRAILING_ACTIVATION_PCT) {
+        if (!shouldExit && cfg.FUTURES_TRAILING_STOP_ENABLED && priceChangePct >= trailActPct) {
           const ledgerPos = futuresLedger.find((p) => p.marketId === symbol);
           let hwm = ledgerPos?.highWaterMarkPct ?? priceChangePct;
           if (priceChangePct > hwm) {
@@ -179,9 +211,9 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             updateHighWaterMark(redis, symbol, direction, hwm).catch(() => {});
           }
           const drawdown = hwm - priceChangePct;
-          if (drawdown >= cfg.FUTURES_TRAILING_STOP_PCT) {
+          if (drawdown >= trailStopPct) {
             shouldExit = true;
-            reason = `Trailing stop (peak +${hwm.toFixed(2)}%, now +${priceChangePct.toFixed(2)}%, drawdown ${drawdown.toFixed(2)}%)`;
+            reason = `Trailing stop (peak +${hwm.toFixed(2)}%, now +${priceChangePct.toFixed(2)}%, drawdown ${drawdown.toFixed(2)}%${usingAtrMode ? ` atr_trail=${trailStopPct.toFixed(2)}` : ''})`;
           } else {
             logger.debug('[futures-monitor] trailing active', {
               symbol, hwm: hwm.toFixed(2), current: priceChangePct.toFixed(2), drawdown: drawdown.toFixed(2),

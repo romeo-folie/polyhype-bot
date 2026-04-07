@@ -260,6 +260,8 @@ async function processScoredItemsInner(
           result.signal.symbol || (result.signal.isFutures ? result.signal.marketId : undefined),
         assetId: result.signal.assetId,
         endDate: result.signal.endDate,
+        entryAtr: result.entryAtr,
+        entryAtrPct: result.entryAtrPct,
       });
 
       // Simmer fill reconciliation: if shares_bought was unavailable and we used an

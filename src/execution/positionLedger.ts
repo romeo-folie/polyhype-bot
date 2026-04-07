@@ -83,6 +83,9 @@ export interface Position {
   endDate?: string | undefined;
   /** Peak priceChangePct seen since entry — used by trailing stop */
   highWaterMarkPct?: number | undefined;
+  /** ATR snapshot at entry (futures only) — drives ATR-based SL/TP */
+  entryAtr?: number | undefined;
+  entryAtrPct?: number | undefined;
 }
 
 function positionKey(marketId: string, direction: Position['direction']): string {
@@ -191,6 +194,8 @@ export async function recordPosition(redis: Redis, position: Position): Promise<
     side: position.side ?? '',
     assetId: position.assetId ?? '',
     endDate: position.endDate ?? '',
+    entryAtr: position.entryAtr !== undefined ? String(position.entryAtr) : '',
+    entryAtrPct: position.entryAtrPct !== undefined ? String(position.entryAtrPct) : '',
   });
 
   // Add to sorted index (score = openedAt ms for chronological retrieval)
@@ -393,6 +398,12 @@ function deserialisePosition(raw: Record<string, string>): Position {
   }
   if (raw.assetId) pos.assetId = raw.assetId;
   if (raw.endDate) pos.endDate = raw.endDate;
+  if (raw.entryAtr !== undefined && raw.entryAtr !== '')
+    pos.entryAtr = parseFloat(raw.entryAtr);
+  if (raw.entryAtrPct !== undefined && raw.entryAtrPct !== '')
+    pos.entryAtrPct = parseFloat(raw.entryAtrPct);
+  if (raw.highWaterMarkPct !== undefined && raw.highWaterMarkPct !== '')
+    pos.highWaterMarkPct = parseFloat(raw.highWaterMarkPct);
 
   return pos;
 }
