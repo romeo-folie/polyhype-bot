@@ -29,6 +29,7 @@ const {
   detectOpportunities,
   extractCutoffPrice,
   impliedYesProb,
+  impliedYesProbClosePrint,
 } = await import('../scanner.js');
 
 const now = Date.now();
@@ -85,6 +86,18 @@ describe('impliedYesProb', () => {
   });
 });
 
+describe('impliedYesProbClosePrint', () => {
+  it('is ~0.5 at the cutoff regardless of horizon', () => {
+    expect(impliedYesProbClosePrint(5800, 5800, 6 * 3600 * 1000)).toBeCloseTo(0.5, 3);
+    expect(impliedYesProbClosePrint(5800, 5800, 30 * 60 * 1000)).toBeCloseTo(0.5, 3);
+  });
+  it('collapses faster as the close approaches (tighter band)', () => {
+    const farProb = impliedYesProbClosePrint(5810, 5800, 6 * 3600 * 1000);  // wide band
+    const nearProb = impliedYesProbClosePrint(5810, 5800, 30 * 60 * 1000);  // tight band
+    expect(nearProb).toBeGreaterThan(farProb);
+  });
+});
+
 describe('detectOpportunities', () => {
   it('skips expired markets', () => {
     const markets = [mkMarket({ id: '1', q: 'Will gold close above $2,650 today?', yesPrice: 0.5, endHours: -1 })];
@@ -120,6 +133,24 @@ describe('detectOpportunities', () => {
     const out = detectOpportunities(markets, spot, { SETTLEMENT_MIN_EDGE: 0.03 }, now);
     expect(out).toHaveLength(1);
     expect(out[0]?.direction).toBe('NO');
+  });
+
+  it('matches S&P / SPX equity index keywords with close-print resolution', () => {
+    const markets = [mkMarket({ id: '1', q: 'Will S&P 500 close above 5800 today?', yesPrice: 0.4 })];
+    const spot = new Map([['ES=F', { price: 5850, timestamp: now }]]);
+    const out = detectOpportunities(markets, spot, { SETTLEMENT_MIN_EDGE: 0.03 }, now);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.direction).toBe('YES');
+    expect(out[0]?.ticker).toBe('ES=F');
+  });
+
+  it('matches Nasdaq equity index keywords', () => {
+    const markets = [mkMarket({ id: '1', q: 'Will Nasdaq close above 20000 today?', yesPrice: 0.7 })];
+    const spot = new Map([['NQ=F', { price: 19500, timestamp: now }]]);
+    const out = detectOpportunities(markets, spot, { SETTLEMENT_MIN_EDGE: 0.03 }, now);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.direction).toBe('NO');
+    expect(out[0]?.ticker).toBe('NQ=F');
   });
 
   it('matches crude/wti/oil keywords', () => {

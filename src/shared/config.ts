@@ -157,7 +157,7 @@ const envSchema = z.object({
     .default(
       'bitcoin,ethereum,solana,ripple,binancecoin,bittensor,dogecoin,cardano,avalanche,chainlink,sui',
     ),
-  SPOT_COMMODITY_ASSETS: z.string().optional().default('CL=F,GC=F,SI=F'),
+  SPOT_COMMODITY_ASSETS: z.string().optional().default('CL=F,GC=F,SI=F,ES=F,NQ=F'),
 
   // ── Phase 1: CME settlement arb ──
   SETTLEMENT_ARB_ENABLED: z.coerce.boolean().optional().default(false),

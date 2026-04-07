@@ -27,15 +27,21 @@ import { parseClobTokenIds } from '../mapping/gamma.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import type { TradeSignal } from '../mapping/index.js';
 
+type ResolutionMode = 'sigmoid' | 'close_print';
+
 interface CommodityKeywordSpec {
-  ticker: string;        // Yahoo symbol stored in spot:last:{ticker}
-  keywords: string[];    // lowercase substrings to look for in market.question
+  ticker: string;            // Yahoo symbol stored in spot:last:{ticker}
+  keywords: string[];        // lowercase substrings to look for in market.question
+  resolutionMode: ResolutionMode;
 }
 
 const COMMODITY_KEYWORDS: CommodityKeywordSpec[] = [
-  { ticker: 'GC=F', keywords: ['gold'] },
-  { ticker: 'SI=F', keywords: ['silver'] },
-  { ticker: 'CL=F', keywords: ['crude', 'oil', 'wti'] },
+  { ticker: 'GC=F', keywords: ['gold'], resolutionMode: 'sigmoid' },
+  { ticker: 'SI=F', keywords: ['silver'], resolutionMode: 'sigmoid' },
+  { ticker: 'CL=F', keywords: ['crude', 'oil', 'wti'], resolutionMode: 'sigmoid' },
+  // Phase 4: equity indices — resolve on single 4pm ET close print, not smoothed fix
+  { ticker: 'ES=F', keywords: ['s&p', 'sp 500', 'spx', 'sp500'], resolutionMode: 'close_print' },
+  { ticker: 'NQ=F', keywords: ['nasdaq', 'ndx'], resolutionMode: 'close_print' },
 ];
 
 const PRICE_REGEX = /\$?\s*([0-9]+(?:[,_][0-9]{3})*(?:\.[0-9]+)?)/g;
@@ -93,6 +99,29 @@ export function impliedYesProb(spot: number, cutoff: number, bandPct = 0.003): n
   return 1 / (1 + Math.exp(-z));
 }
 
+/**
+ * Close-print resolution probability for equity indices.
+ * Equity indices resolve on a single 4pm ET print rather than a smoothed VWAP
+ * window, so the implied probability collapses sharply as the close approaches.
+ * We model this by shrinking the smoothing band as we get closer to expiry:
+ *   - far from close (>4h)  → wide band (1.0%) — lots of vol still possible
+ *   - mid window (1-4h)    → 0.4% band
+ *   - imminent (<1h)       → 0.15% band — almost a step function
+ */
+export function impliedYesProbClosePrint(
+  spot: number,
+  cutoff: number,
+  msToClose: number,
+): number {
+  if (!Number.isFinite(spot) || !Number.isFinite(cutoff) || cutoff <= 0) return 0.5;
+  const hoursToClose = Math.max(0, msToClose) / 3_600_000;
+  let bandPct: number;
+  if (hoursToClose > 4) bandPct = 0.010;
+  else if (hoursToClose > 1) bandPct = 0.004;
+  else bandPct = 0.0015;
+  return impliedYesProb(spot, cutoff, bandPct);
+}
+
 function parseYesPrice(market: GammaMarket): number | null {
   const op = market.outcomePrices;
   if (!op) return null;
@@ -140,7 +169,10 @@ export function detectOpportunities(
     const cutoff = extractCutoffPrice(m.question ?? '');
     if (cutoff === null) continue;
 
-    const impliedYes = impliedYesProb(spot.price, cutoff);
+    const impliedYes =
+      spec.resolutionMode === 'close_print'
+        ? impliedYesProbClosePrint(spot.price, cutoff, end - now)
+        : impliedYesProb(spot.price, cutoff);
     const yesPrice = parseYesPrice(m);
     if (yesPrice === null) continue;
 
