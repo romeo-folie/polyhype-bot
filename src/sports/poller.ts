@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   const lockToken = await acquireLock(LOCK_KEY, LOCK_TTL_S);
   if (!lockToken) {
     logger.warn('[sports-poller] another instance holds the lock; exiting');
-    return;
+    process.exit(1);
   }
 
   let stopped = false;

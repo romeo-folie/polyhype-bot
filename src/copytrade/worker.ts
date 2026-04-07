@@ -49,7 +49,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
   const acquired = await redis.set(WORKER_LOCK_KEY, lockToken, 'EX', WORKER_LOCK_TTL_SEC, 'NX');
   if (!acquired) {
     logger.warn('[copytrade-worker] another instance is already running — exiting');
-    return;
+    process.exit(1);
   }
 
   // Refresh lock every 60s while running.

@@ -9,6 +9,22 @@ services:
     volumes:
       - ./redis-data:/data
     command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  # Bootstrap: clears stale lock:* keys left over from a hard crash / power cut
+  # before any worker starts. Runs once and exits.
+  pga-bootstrap:
+    image: redis:alpine
+    restart: "no"
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "redis-cli -h redis --scan --pattern 'lock:*' | xargs -r redis-cli -h redis DEL && echo '[bootstrap] stale locks cleared'"
 
   # Telegram Monitor Service
   pga-telegram:
@@ -23,7 +39,8 @@ services:
     volumes:
       - ./tdlib-data:/app/tdlib-data
     depends_on:
-      - redis
+      pga-bootstrap:
+        condition: service_completed_successfully
     command: npx tsx src/ingestion/telegramMonitor.ts
 
   # Copytrading Strategy Worker
@@ -34,7 +51,8 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
     depends_on:
-      - redis
+      pga-bootstrap:
+        condition: service_completed_successfully
     command: npx tsx src/copytrade/worker.ts
 
   # Futures Monitoring Strategy
@@ -45,7 +63,8 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
     depends_on:
-      - redis
+      pga-bootstrap:
+        condition: service_completed_successfully
     command: npx tsx src/monitor/futuresMonitor.ts
 
   # Arbitrage Scanning Engine
@@ -56,7 +75,8 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
     depends_on:
-      - redis
+      pga-bootstrap:
+        condition: service_completed_successfully
     command: npx tsx src/arb/worker.ts
 
   # CLOB Flow Monitor — streams Polymarket book/trade tape into Redis
@@ -67,7 +87,8 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
     depends_on:
-      - redis
+      pga-bootstrap:
+        condition: service_completed_successfully
     command: npx tsx src/clob/flowMonitor.ts
 
   # Sports Arb Poller — NBA/NHL in-play edge vs Polymarket
@@ -78,7 +99,8 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
     depends_on:
-      - redis
+      pga-bootstrap:
+        condition: service_completed_successfully
     command: npx tsx src/sports/poller.ts
 
   # Spot Feed Management
@@ -89,5 +111,6 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
     depends_on:
-      - redis
+      pga-bootstrap:
+        condition: service_completed_successfully
     command: npx tsx src/spot/feeds/manager.ts

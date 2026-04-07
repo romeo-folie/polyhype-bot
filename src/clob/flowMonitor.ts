@@ -181,7 +181,7 @@ async function main(): Promise<void> {
   const lockToken = await acquireLock(LOCK_KEY, LOCK_TTL_S);
   if (!lockToken) {
     logger.warn('[clob-flow] another instance holds the lock; exiting');
-    return;
+    process.exit(1);
   }
 
   const feed = new ClobPriceFeed(redis, { enabled: true });
