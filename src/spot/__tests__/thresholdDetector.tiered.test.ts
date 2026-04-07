@@ -5,12 +5,16 @@ import * as assets from '../../shared/assets.js';
 import { loadConfig } from '../../shared/config.js';
 
 vi.mock('../poller.js');
-vi.mock('../../shared/assets.js');
+vi.mock('../../shared/assets.js', () => ({
+  isCryptoAsset: vi.fn(),
+  BINANCE_SYMBOL_TO_ASSET: { btcusdt: 'bitcoin' },
+}));
 vi.mock('../../shared/config.js');
 vi.mock('../../shared/redis.js', () => ({
   getRedis: () => ({
     get: vi.fn().mockResolvedValue(null),
     set: vi.fn().mockResolvedValue('OK'),
+    zrangebyscore: vi.fn().mockResolvedValue([]),
   }),
 }));
 
@@ -24,6 +28,12 @@ describe('thresholdDetector Tiered Logic', () => {
       SPOT_LOOKBACK_MINUTES: 5,
       SPOT_COOLDOWN_MINUTES: 30,
       CRYPTO_COOLDOWN_MINUTES: 5,
+      SESSION_THRESHOLD_ENABLED: false,
+      SESSION_MULTIPLIERS:
+        '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0',
+      SPOT_TRIGGER_MODE: 'pct',
+      SPOT_ZSCORE_THRESHOLD: 2.5,
+      SPOT_ZSCORE_LOOKBACK_MIN: 60,
     });
   });
 

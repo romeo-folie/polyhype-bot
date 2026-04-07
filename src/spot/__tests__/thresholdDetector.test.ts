@@ -10,6 +10,9 @@ const mockConfig = {
   SPOT_COOLDOWN_MINUTES: 30,
   SESSION_THRESHOLD_ENABLED: false,
   SESSION_MULTIPLIERS: '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.3,1.3,1.3,1.3,1.3,1.5,1.5,1.5,1.5,1.2,1.2,1.2,1.2,0.8,0.8,0.8',
+  SPOT_TRIGGER_MODE: 'pct' as 'pct' | 'zscore' | 'both',
+  SPOT_ZSCORE_THRESHOLD: 2.5,
+  SPOT_ZSCORE_LOOKBACK_MIN: 60,
 };
 
 vi.mock('../../shared/config.js', () => ({
@@ -19,7 +22,7 @@ vi.mock('../../shared/config.js', () => ({
 const mockRedis = {
   get: vi.fn<() => Promise<string | null>>().mockResolvedValue(null),
   set: vi.fn<() => Promise<'OK'>>().mockResolvedValue('OK'),
-  zrangebyscore: vi.fn<() => Promise<string[]>>().mockResolvedValue([]),
+  zrangebyscore: vi.fn<(key: string) => Promise<string[]>>().mockResolvedValue([]),
   zrange: vi.fn<() => Promise<string[]>>().mockResolvedValue([]),
 };
 
@@ -120,10 +123,12 @@ describe('detectMoves', () => {
   it('handles multiple assets in one batch', async () => {
     const now = Date.now();
     const refTs = now - 310_000;
-    // Both exceed threshold
-    mockRedis.zrangebyscore
-      .mockResolvedValueOnce([`${refTs}:65000`]) // bitcoin ref
-      .mockResolvedValueOnce([`${refTs}:3000`]); // ethereum ref
+    // Route by key — pct path uses spot:prices:*, shadow zscore uses spot:klines:*
+    mockRedis.zrangebyscore.mockImplementation(async (key: string) => {
+      if (key === 'spot:prices:bitcoin') return [`${refTs}:65000`];
+      if (key === 'spot:prices:ethereum') return [`${refTs}:3000`];
+      return [];
+    });
 
     const moves = await detectMoves([
       { assetId: 'bitcoin', price: 67000, timestamp: now },
@@ -149,6 +154,68 @@ describe('detectMoves', () => {
     // Reset
     mockConfig.SESSION_THRESHOLD_ENABLED = false;
     mockConfig.SESSION_MULTIPLIERS = '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.3,1.3,1.3,1.3,1.3,1.5,1.5,1.5,1.5,1.2,1.2,1.2,1.2,0.8,0.8,0.8';
+  });
+
+  it('zscore mode: triggers on a large spike against a flat baseline', async () => {
+    mockConfig.SPOT_TRIGGER_MODE = 'zscore';
+    const now = Date.now();
+    // 84 perfectly flat closes, then one explosive bar at the end.
+    // Returns over 5-bar window are all 0 except the last 5 which carry the jump,
+    // producing a strong z-score on the latest return.
+    const klines: string[] = [];
+    for (let i = 0; i < 84; i++) {
+      klines.push(JSON.stringify({ t: now - (85 - i) * 60_000, c: 100 }));
+    }
+    klines.push(JSON.stringify({ t: now - 60_000, c: 110 }));
+    mockRedis.zrangebyscore.mockImplementation(async (key: string) => {
+      if (key === 'spot:prices:bitcoin') return [`${now - 310_000}:100`];
+      if (key === 'spot:klines:btcusdt:1m') return klines;
+      return [];
+    });
+
+    const moves = await detectMoves([{ assetId: 'bitcoin', price: 110, timestamp: now }]);
+    expect(moves).toHaveLength(1);
+    expect(moves[0]!.assetId).toBe('bitcoin');
+    mockConfig.SPOT_TRIGGER_MODE = 'pct';
+  });
+
+  it('zscore mode: does not trigger on a flat market', async () => {
+    mockConfig.SPOT_TRIGGER_MODE = 'zscore';
+    const now = Date.now();
+    const klines: string[] = [];
+    for (let i = 0; i < 80; i++) {
+      klines.push(
+        JSON.stringify({ t: now - (80 - i) * 60_000, c: 100 + (i % 2 === 0 ? 0.001 : -0.001) }),
+      );
+    }
+    mockRedis.zrangebyscore.mockImplementation(async (key: string) => {
+      if (key === 'spot:prices:bitcoin') return [`${now - 310_000}:100`];
+      if (key === 'spot:klines:btcusdt:1m') return klines;
+      return [];
+    });
+
+    const moves = await detectMoves([{ assetId: 'bitcoin', price: 100.05, timestamp: now }]);
+    expect(moves).toHaveLength(0);
+    mockConfig.SPOT_TRIGGER_MODE = 'pct';
+  });
+
+  it('both mode: requires pct AND zscore agreement', async () => {
+    mockConfig.SPOT_TRIGGER_MODE = 'both';
+    const now = Date.now();
+    // Flat klines → zscore won't fire even though pct does
+    const klines: string[] = [];
+    for (let i = 0; i < 80; i++) {
+      klines.push(JSON.stringify({ t: now - (80 - i) * 60_000, c: 100 }));
+    }
+    mockRedis.zrangebyscore.mockImplementation(async (key: string) => {
+      if (key === 'spot:prices:bitcoin') return [`${now - 310_000}:65000`];
+      if (key === 'spot:klines:btcusdt:1m') return klines;
+      return [];
+    });
+
+    const moves = await detectMoves([{ assetId: 'bitcoin', price: 67000, timestamp: now }]);
+    expect(moves).toHaveLength(0);
+    mockConfig.SPOT_TRIGGER_MODE = 'pct';
   });
 
   it('session multiplier < 1 narrows threshold — lets smaller moves through', async () => {
