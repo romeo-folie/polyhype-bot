@@ -24,7 +24,13 @@ services:
       redis:
         condition: service_healthy
     command: >
-      sh -c "redis-cli -h redis --scan --pattern 'lock:*' | xargs -r redis-cli -h redis DEL && echo '[bootstrap] stale locks cleared'"
+      sh -c "
+        until [ \"$$(redis-cli -h redis INFO persistence 2>/dev/null | grep -c '^loading:0')\" = '1' ]; do
+          echo '[bootstrap] waiting for redis to finish loading...'; sleep 1;
+        done;
+        redis-cli -h redis --scan --pattern 'lock:*' | xargs -r redis-cli -h redis DEL;
+        echo '[bootstrap] stale locks cleared'
+      "
 
   # Telegram Monitor Service
   pga-telegram:
