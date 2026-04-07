@@ -299,10 +299,51 @@ export async function mapNewsToFutures(
         }
       }
 
+      // Phase 3 — Regime gates (ADX trend + Choppiness range). Independently flagged.
+      const adxVal = confluence.regime?.adx ?? null;
+      if (adxVal !== null) {
+        const adxPassed = adxVal >= cfg.ADX_MIN;
+        if (cfg.ADX_GATE_ENABLED && !adxPassed) {
+          logger.info('[mapping] futures regime_no_trend', {
+            symbol, direction,
+            adx: adxVal.toFixed(2), adxMin: cfg.ADX_MIN, title: item.title,
+          });
+          continue;
+        }
+        if (!cfg.ADX_GATE_ENABLED) {
+          logger.info('[mapping] adx shadow', {
+            symbol, direction,
+            wouldBlock: !adxPassed,
+            adx: adxVal.toFixed(2), adxMin: cfg.ADX_MIN,
+          });
+        }
+      }
+      const chopVal = confluence.regime?.choppiness ?? null;
+      if (chopVal !== null) {
+        const chopPassed = chopVal <= cfg.CHOPPINESS_MAX;
+        if (cfg.CHOPPINESS_GATE_ENABLED && !chopPassed) {
+          logger.info('[mapping] futures regime_chop', {
+            symbol, direction,
+            choppiness: chopVal.toFixed(2), chopMax: cfg.CHOPPINESS_MAX, title: item.title,
+          });
+          continue;
+        }
+        if (!cfg.CHOPPINESS_GATE_ENABLED) {
+          logger.info('[mapping] choppiness shadow', {
+            symbol, direction,
+            wouldBlock: !chopPassed,
+            choppiness: chopVal.toFixed(2), chopMax: cfg.CHOPPINESS_MAX,
+          });
+        }
+      }
+
       logger.info('[mapping] futures confluence_pass', {
         symbol, direction, score: confluence.score,
         signals: confluence.signals,
         volRatio: confluence.volume?.ratio?.toFixed(2),
+        adx: confluence.regime?.adx?.toFixed(2),
+        choppiness: confluence.regime?.choppiness?.toFixed(2),
+        bbRegime: confluence.regime?.bbRegime,
       });
     }
 

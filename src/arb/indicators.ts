@@ -420,3 +420,144 @@ export function computeVolumeSMA(candles: OHLCVCandle[], period = 20): number | 
   for (const c of window) sum += c.volume;
   return sum / period;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Regime indicators (ADX, Choppiness, Bollinger Bands)
+// ---------------------------------------------------------------------------
+
+export interface ADXResult {
+  adx: number;
+  plusDI: number;
+  minusDI: number;
+}
+
+/**
+ * Wilder's ADX / +DI / -DI.
+ * Requires at least `2*period + 1` candles. Returns null otherwise.
+ */
+export function computeADX(candles: OHLCVCandle[], period = 14): ADXResult | null {
+  if (candles.length < period * 2 + 1) return null;
+
+  const trs: number[] = [];
+  const plusDM: number[] = [];
+  const minusDM: number[] = [];
+
+  for (let i = 1; i < candles.length; i++) {
+    const curr = candles[i]!;
+    const prev = candles[i - 1]!;
+    const upMove = curr.high - prev.high;
+    const downMove = prev.low - curr.low;
+    plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
+    trs.push(
+      Math.max(
+        curr.high - curr.low,
+        Math.abs(curr.high - prev.close),
+        Math.abs(curr.low - prev.close),
+      ),
+    );
+  }
+
+  // Wilder smoothing seed: sum of first `period` values.
+  let trS = 0;
+  let plusS = 0;
+  let minusS = 0;
+  for (let i = 0; i < period; i++) {
+    trS += trs[i]!;
+    plusS += plusDM[i]!;
+    minusS += minusDM[i]!;
+  }
+
+  const dxValues: number[] = [];
+  // Compute DX for the first smoothed period.
+  const pushDX = () => {
+    const plusDI = trS === 0 ? 0 : (plusS / trS) * 100;
+    const minusDI = trS === 0 ? 0 : (minusS / trS) * 100;
+    const sum = plusDI + minusDI;
+    const dx = sum === 0 ? 0 : (Math.abs(plusDI - minusDI) / sum) * 100;
+    dxValues.push(dx);
+  };
+  pushDX();
+
+  for (let i = period; i < trs.length; i++) {
+    trS = trS - trS / period + trs[i]!;
+    plusS = plusS - plusS / period + plusDM[i]!;
+    minusS = minusS - minusS / period + minusDM[i]!;
+    pushDX();
+  }
+
+  if (dxValues.length < period) return null;
+
+  // ADX = Wilder smoothing of DX over `period`.
+  let adx = 0;
+  for (let i = 0; i < period; i++) adx += dxValues[i]!;
+  adx /= period;
+  for (let i = period; i < dxValues.length; i++) {
+    adx = (adx * (period - 1) + dxValues[i]!) / period;
+  }
+
+  const plusDI = trS === 0 ? 0 : (plusS / trS) * 100;
+  const minusDI = trS === 0 ? 0 : (minusS / trS) * 100;
+
+  return { adx, plusDI, minusDI };
+}
+
+/**
+ * Choppiness Index — 100 × log10(ΣATR(1) / (maxHigh - minLow)) / log10(period).
+ * Range 0–100. Higher = choppier; ~61.8+ is typically considered ranging.
+ */
+export function computeChoppinessIndex(candles: OHLCVCandle[], period = 14): number | null {
+  if (candles.length < period + 1) return null;
+  const window = candles.slice(-(period + 1));
+  let trSum = 0;
+  let maxHigh = -Infinity;
+  let minLow = Infinity;
+  for (let i = 1; i < window.length; i++) {
+    const curr = window[i]!;
+    const prev = window[i - 1]!;
+    trSum += Math.max(
+      curr.high - curr.low,
+      Math.abs(curr.high - prev.close),
+      Math.abs(curr.low - prev.close),
+    );
+    if (curr.high > maxHigh) maxHigh = curr.high;
+    if (curr.low < minLow) minLow = curr.low;
+  }
+  const range = maxHigh - minLow;
+  if (range <= 0 || trSum <= 0) return null;
+  return (100 * Math.log10(trSum / range)) / Math.log10(period);
+}
+
+export interface BollingerBandsResult {
+  upper: number;
+  mid: number;
+  lower: number;
+  bandwidth: number;
+  percentB: number;
+}
+
+/**
+ * Bollinger Bands (SMA-based) over `period` with `sigma` standard deviations.
+ * Returns null on insufficient data or zero mid.
+ */
+export function computeBollingerBands(
+  candles: OHLCVCandle[],
+  period = 20,
+  sigma = 2,
+): BollingerBandsResult | null {
+  if (candles.length < period) return null;
+  const window = candles.slice(-period);
+  const closes = window.map((c) => c.close);
+  const mid = closes.reduce((s, v) => s + v, 0) / period;
+  let varSum = 0;
+  for (const c of closes) varSum += (c - mid) ** 2;
+  const sd = Math.sqrt(varSum / period);
+  const upper = mid + sigma * sd;
+  const lower = mid - sigma * sd;
+  if (mid === 0) return null;
+  const bandwidth = (upper - lower) / mid;
+  const lastClose = closes[closes.length - 1]!;
+  const span = upper - lower;
+  const percentB = span === 0 ? 0.5 : (lastClose - lower) / span;
+  return { upper, mid, lower, bandwidth, percentB };
+}

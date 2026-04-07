@@ -30,6 +30,9 @@ import {
   computeVWAP,
   computeCMF,
   computeVolumeSMA,
+  computeADX,
+  computeChoppinessIndex,
+  computeBollingerBands,
 } from './indicators.js';
 import { loadConfig } from '../shared/config.js';
 
@@ -50,6 +53,15 @@ export interface ConfluenceScore {
     current: number | null;
     sma: number | null;
     ratio: number | null; // current / sma
+  };
+  /** Phase 3 — Regime data (ADX, Choppiness, Bollinger). All optional. */
+  regime?: {
+    adx: number | null;
+    plusDI: number | null;
+    minusDI: number | null;
+    choppiness: number | null;
+    bbBandwidth: number | null;
+    bbRegime: 'calm' | 'normal' | 'explosive' | null;
   };
 }
 
@@ -74,7 +86,18 @@ export async function scoreConfluence(symbol: string, redis: Redis): Promise<Con
   const lastVol = candles.length > 0 ? candles[candles.length - 1]!.volume : null;
   const volSma = computeVolumeSMA(candles, cfg.VOLUME_SPIKE_PERIOD);
 
-  return scoreFromValues(
+  const adxResult = computeADX(candles, cfg.ADX_PERIOD);
+  const choppiness = computeChoppinessIndex(candles, cfg.CHOPPINESS_PERIOD);
+  const bb = computeBollingerBands(candles, cfg.BB_PERIOD, cfg.BB_SIGMA);
+
+  let bbRegime: 'calm' | 'normal' | 'explosive' | null = null;
+  if (bb !== null) {
+    if (bb.bandwidth < cfg.BB_CALM_BANDWIDTH) bbRegime = 'calm';
+    else if (bb.bandwidth > cfg.BB_EXPLOSIVE_BANDWIDTH) bbRegime = 'explosive';
+    else bbRegime = 'normal';
+  }
+
+  const result = scoreFromValues(
     rsi,
     macd,
     stoch,
@@ -94,6 +117,17 @@ export async function scoreConfluence(symbol: string, redis: Redis): Promise<Con
     },
     { current: lastVol, sma: volSma },
   );
+
+  result.regime = {
+    adx: adxResult?.adx ?? null,
+    plusDI: adxResult?.plusDI ?? null,
+    minusDI: adxResult?.minusDI ?? null,
+    choppiness,
+    bbBandwidth: bb?.bandwidth ?? null,
+    bbRegime,
+  };
+
+  return result;
 }
 
 interface VolumeVoteInput {

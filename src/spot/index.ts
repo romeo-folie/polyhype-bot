@@ -145,10 +145,52 @@ async function runSpotMonitorInner(
             }
           }
 
+          // Phase 3 — Regime gates (ADX trend strength + Choppiness range filter).
+          // Both gates are independently flag-gated; shadow-logged when off.
+          const adxVal = confluence.regime?.adx ?? null;
+          if (adxVal !== null) {
+            const adxPassed = adxVal >= cfg.ADX_MIN;
+            if (cfg.ADX_GATE_ENABLED && !adxPassed) {
+              logger.info('[spot] futures regime_no_trend', {
+                symbol: hlSymbol, moveDirection,
+                adx: adxVal.toFixed(2), adxMin: cfg.ADX_MIN,
+              });
+              continue;
+            }
+            if (!cfg.ADX_GATE_ENABLED) {
+              logger.info('[spot] adx shadow', {
+                symbol: hlSymbol, moveDirection,
+                wouldBlock: !adxPassed,
+                adx: adxVal.toFixed(2), adxMin: cfg.ADX_MIN,
+              });
+            }
+          }
+          const chopVal = confluence.regime?.choppiness ?? null;
+          if (chopVal !== null) {
+            const chopPassed = chopVal <= cfg.CHOPPINESS_MAX;
+            if (cfg.CHOPPINESS_GATE_ENABLED && !chopPassed) {
+              logger.info('[spot] futures regime_chop', {
+                symbol: hlSymbol, moveDirection,
+                choppiness: chopVal.toFixed(2), chopMax: cfg.CHOPPINESS_MAX,
+              });
+              continue;
+            }
+            if (!cfg.CHOPPINESS_GATE_ENABLED) {
+              logger.info('[spot] choppiness shadow', {
+                symbol: hlSymbol, moveDirection,
+                wouldBlock: !chopPassed,
+                choppiness: chopVal.toFixed(2), chopMax: cfg.CHOPPINESS_MAX,
+              });
+            }
+          }
+
           logger.info('[spot] futures confluence_pass', {
             symbol: hlSymbol, moveDirection, score: confluence.score,
             signals: confluence.signals,
             volRatio: confluence.volume?.ratio?.toFixed(2),
+            adx: confluence.regime?.adx?.toFixed(2),
+            choppiness: confluence.regime?.choppiness?.toFixed(2),
+            bbRegime: confluence.regime?.bbRegime,
           });
         }
 

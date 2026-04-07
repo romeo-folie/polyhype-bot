@@ -431,6 +431,25 @@ const envSchema = z.object({
   // CMF voter
   CMF_PERIOD: z.coerce.number().int().min(2).optional().default(20),
   CMF_THRESHOLD: z.coerce.number().min(0).optional().default(0.05),
+
+  // ── Phase 3: Regime gates (default off — ship-then-flip) ──
+  ADX_PERIOD: z.coerce.number().int().min(2).optional().default(14),
+  ADX_MIN: z.coerce.number().min(0).optional().default(20),
+  ADX_GATE_ENABLED: z.coerce.boolean().optional().default(false),
+
+  CHOPPINESS_PERIOD: z.coerce.number().int().min(2).optional().default(14),
+  CHOPPINESS_MAX: z.coerce.number().min(0).optional().default(61.8),
+  CHOPPINESS_GATE_ENABLED: z.coerce.boolean().optional().default(false),
+
+  BB_PERIOD: z.coerce.number().int().min(2).optional().default(20),
+  BB_SIGMA: z.coerce.number().min(0.1).optional().default(2),
+  // Bandwidth thresholds for calm/normal/explosive regime classification.
+  BB_CALM_BANDWIDTH: z.coerce.number().min(0).optional().default(0.01),
+  BB_EXPLOSIVE_BANDWIDTH: z.coerce.number().min(0).optional().default(0.05),
+  BB_REGIME_ADAPT_ENABLED: z.coerce.boolean().optional().default(false),
+  FUTURES_MIN_CONFLUENCE_SCORE_CALM: z.coerce.number().int().min(0).max(7).optional().default(3),
+  FUTURES_MIN_CONFLUENCE_SCORE_NORMAL: z.coerce.number().int().min(0).max(7).optional().default(3),
+  FUTURES_MIN_CONFLUENCE_SCORE_EXPLOSIVE: z.coerce.number().int().min(0).max(7).optional().default(4),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
