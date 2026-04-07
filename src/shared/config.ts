@@ -157,7 +157,13 @@ const envSchema = z.object({
     .default(
       'bitcoin,ethereum,solana,ripple,binancecoin,bittensor,dogecoin,cardano,avalanche,chainlink,sui',
     ),
-  SPOT_COMMODITY_ASSETS: z.string().optional().default('CL=F,GC=F'),
+  SPOT_COMMODITY_ASSETS: z.string().optional().default('CL=F,GC=F,SI=F'),
+
+  // ── Phase 1: CME settlement arb ──
+  SETTLEMENT_ARB_ENABLED: z.coerce.boolean().optional().default(false),
+  SETTLEMENT_PRE_WINDOW_S: z.coerce.number().int().min(0).optional().default(300),
+  SETTLEMENT_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.03),
+  SETTLEMENT_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(10),
 
   // Arbitrage scanner (Phase: arb)
   ARB_ENABLED: z.coerce.boolean().optional().default(true),
