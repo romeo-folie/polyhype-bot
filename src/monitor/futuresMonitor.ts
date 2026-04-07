@@ -194,6 +194,47 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           usingAtrMode = true;
         }
 
+        // Shadow comparison: when ATR mode is OFF but we have an entryAtrPct snapshot,
+        // compute what the ATR-derived thresholds WOULD be and log when their verdict
+        // diverges from the active fixed-pct verdict. Lets us validate ATR sizing
+        // without enabling exits.
+        if (
+          !cfg.FUTURES_ATR_SLTP_ENABLED &&
+          ledgerPosForAtr?.entryAtrPct !== undefined &&
+          Number.isFinite(ledgerPosForAtr.entryAtrPct) &&
+          ledgerPosForAtr.entryAtrPct > 0
+        ) {
+          const atrPct = ledgerPosForAtr.entryAtrPct;
+          const shadowSlMag = Math.min(
+            Math.max(atrPct * cfg.FUTURES_ATR_SL_MULT, cfg.FUTURES_ATR_SL_MIN_PCT),
+            cfg.FUTURES_ATR_SL_MAX_PCT,
+          );
+          const shadowTpMag = Math.min(
+            Math.max(atrPct * cfg.FUTURES_ATR_TP_MULT, cfg.FUTURES_ATR_TP_MIN_PCT),
+            cfg.FUTURES_ATR_TP_MAX_PCT,
+          );
+          const shadowSlPct = -shadowSlMag;
+          const shadowTpPct = shadowTpMag;
+          const fixedSlHit = priceChangePct <= cfg.FUTURES_STOP_LOSS_PCT;
+          const fixedTpHit = priceChangePct >= cfg.FUTURES_TAKE_PROFIT_PCT;
+          const atrSlHit = priceChangePct <= shadowSlPct;
+          const atrTpHit = priceChangePct >= shadowTpPct;
+          if (fixedSlHit !== atrSlHit || fixedTpHit !== atrTpHit) {
+            logger.info('[futures-monitor] atr shadow divergence', {
+              symbol,
+              direction,
+              priceChangePct: priceChangePct.toFixed(2),
+              entryAtrPct: atrPct.toFixed(3),
+              fixedSlPct: cfg.FUTURES_STOP_LOSS_PCT,
+              fixedTpPct: cfg.FUTURES_TAKE_PROFIT_PCT,
+              atrSlPct: shadowSlPct.toFixed(2),
+              atrTpPct: shadowTpPct.toFixed(2),
+              fixedVerdict: fixedSlHit ? 'SL' : fixedTpHit ? 'TP' : 'hold',
+              atrVerdict: atrSlHit ? 'SL' : atrTpHit ? 'TP' : 'hold',
+            });
+          }
+        }
+
         if (priceChangePct <= slPct) {
           shouldExit = true;
           reason = `Stop-Loss triggered (${priceChangePct.toFixed(2).toString()}%${usingAtrMode ? ` atr_sl=${slPct.toFixed(2)}` : ''})`;
