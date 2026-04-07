@@ -225,6 +225,8 @@ async function runSpotMonitorInner(
           sourcedFrom: `Spot: ${move.assetId} ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(1)}% in ${move.windowMinutes.toString()}min`,
           reasoning: `Intraday momentum detected on ${move.assetId}. Current price: ${move.currentPrice.toString()}. Scaling into ${hlSymbol} perp.`,
           assetId: move.assetId,
+          eventTs: move.eventTs,
+          source: 'spot',
         });
       }
     }
@@ -321,6 +323,7 @@ async function runSpotMonitorInner(
         reasoning: consensus.reasoning,
         source: 'spot',
         assetId: move.assetId,
+        eventTs: move.eventTs,
         endDate: market.endDate ?? undefined,
       });
     }

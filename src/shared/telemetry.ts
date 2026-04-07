@@ -56,6 +56,23 @@ export async function recordExecutionTiming(
   await hincrby(redis, `${BASE_KEY}:execution:${metric}`, 'count', 1);
 }
 
+/**
+ * Record a latency sample for the arb pipeline (event-time → submit).
+ * Stores raw samples in a capped Redis list so percentiles can be computed on read.
+ */
+export async function recordArbLatency(
+  redis: Redis,
+  stage: string,
+  latencyMs: number,
+  context: Record<string, unknown> = {},
+): Promise<void> {
+  if (!Number.isFinite(latencyMs) || latencyMs < 0) return;
+  const key = `metrics:arb_latency:${stage}`;
+  const entry = JSON.stringify({ ts: Date.now(), latencyMs: Math.round(latencyMs), ...context });
+  await redis.lpush(key, entry);
+  await redis.ltrim(key, 0, 999);
+}
+
 export async function recordExecutionEvent(
   redis: Redis,
   event: string,

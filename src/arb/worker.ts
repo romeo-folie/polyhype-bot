@@ -258,6 +258,7 @@ export class ArbitrageWorker {
       changePercent,
       windowMinutes: 0,
       detectedAt: new Date(tsMs ?? Date.now()).toISOString(),
+      eventTs: tsMs ?? Date.now(),
     });
   }
 
@@ -343,6 +344,7 @@ export class ArbitrageWorker {
             feesEnabled: opp.feesEnabled,
             source: 'crypto-arb',
             assetId: opp.assetId,
+            eventTs: move.eventTs,
             // endDate usually doesn't apply to HL symbols, but for clarity:
           };
 

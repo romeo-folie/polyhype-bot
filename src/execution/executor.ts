@@ -33,6 +33,7 @@ import { loadConfig } from '../shared/config.js';
 import { getCalibrationStats, applyCalibrationCorrection } from '../shared/calibration.js';
 import { inferCategory } from '../shared/outcomeRecorder.js';
 import {
+  recordArbLatency,
   recordExecutionMetric,
   recordExecutionTiming,
   recordExecutionEvent,
@@ -858,6 +859,24 @@ export async function executeSignal(
     .slice(0, 16);
   signal = { ...signal, executionId };
   const decisionStartedAt = Date.now();
+
+  // Latency instrumentation: log end-to-end (event → executor entry) when origin ts is present.
+  if (signal.eventTs && Number.isFinite(signal.eventTs) && signal.eventTs > 0) {
+    const latencyMs = decisionStartedAt - signal.eventTs;
+    if (latencyMs >= 0) {
+      logger.info('[executor] arb latency entry', {
+        executionId,
+        marketId: signal.marketId,
+        source: signal.source,
+        latencyMs,
+      });
+      void recordArbLatency(redis, 'executor_entry', latencyMs, {
+        executionId,
+        source: signal.source,
+        isFutures: signal.isFutures ?? false,
+      }).catch(() => {});
+    }
+  }
   let makerTelemetry: Record<string, unknown> = {};
   const safeRecordExecutionMetric = (metric: string, label = 'count') => {
     void recordExecutionMetric(redis, metric, label).catch(() => {});

@@ -24,6 +24,8 @@ export interface SpotMove {
   changePercent: number; // signed: +5.2 or -3.1
   windowMinutes: number;
   detectedAt: string; // ISO timestamp
+  /** Origin event timestamp (Binance kline event time / poller fetch time) for latency tracking */
+  eventTs?: number;
 }
 
 /**
@@ -204,6 +206,7 @@ export async function detectMoves(currentPrices: SpotPrice[]): Promise<SpotMove[
       changePercent,
       windowMinutes: lookbackMinutes,
       detectedAt: new Date().toISOString(),
+      eventTs: sp.timestamp,
     };
 
     moves.push(move);

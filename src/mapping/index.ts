@@ -51,6 +51,8 @@ export interface TradeSignal {
   feesEnabled?: boolean;
   /** Origin of the signal, used for execution routing (e.g. bypassing Simmer for arb) */
   source?: 'osint' | 'crypto-arb' | 'futures' | 'copytrade' | 'spot';
+  /** Origin event timestamp (e.g. Binance kline event time) — used for end-to-end latency tracking */
+  eventTs?: number | undefined;
   /** Operational metadata for alerts/telemetry */
   latencyMs?: number | undefined;
   volatility?: number | undefined;
