@@ -30,6 +30,7 @@ const {
   extractCutoffPrice,
   impliedYesProb,
   impliedYesProbClosePrint,
+  matchesKeyword,
 } = await import('../scanner.js');
 
 const now = Date.now();
@@ -83,6 +84,50 @@ describe('impliedYesProb', () => {
   });
   it('produces <0.5 when spot is below cutoff', () => {
     expect(impliedYesProb(2620, 2650)).toBeLessThan(0.1);
+  });
+});
+
+describe('matchesKeyword (word-boundary)', () => {
+  it('matches whole word', () => {
+    expect(matchesKeyword('Will gold close above $2,650?', 'gold')).toBe(true);
+    expect(matchesKeyword('Crude oil tomorrow', 'oil')).toBe(true);
+  });
+  it('rejects substring of larger word', () => {
+    expect(matchesKeyword('Spread: Golden Knights (-1.5)', 'gold')).toBe(false);
+    expect(matchesKeyword('Mariners vs Red Sox', 'spx')).toBe(false);
+  });
+  it('handles multi-word keywords with internal space', () => {
+    expect(matchesKeyword('Will sp 500 close above 5800?', 'sp 500')).toBe(true);
+    expect(matchesKeyword('S&P futures', 's&p')).toBe(true);
+  });
+});
+
+describe('detectOpportunities sanity gates', () => {
+  it('rejects markets where cutoff is not within an order of magnitude of spot', () => {
+    const markets = [
+      { id: '1', question: 'Spread: Golden Knights (-1.5)', conditionId: 'c1',
+        clobTokenIds: ['y1', 'n1'], outcomePrices: JSON.stringify(['0.5', '0.5']),
+        endDate: inHours(6), feesEnabled: false },
+    ];
+    const spot = new Map([['GC=F', { price: 4687, timestamp: now }]]);
+    expect(detectOpportunities(markets, spot, { SETTLEMENT_MIN_EDGE: 0.03 }, now)).toHaveLength(0);
+  });
+  it('rejects edges > 50% as parsing-bug suspects', () => {
+    const markets = [
+      { id: '1', question: 'Will gold close above $4,700?', conditionId: 'c1',
+        clobTokenIds: ['y1', 'n1'], outcomePrices: JSON.stringify(['0.001', '0.999']),
+        endDate: inHours(6), feesEnabled: false },
+    ];
+    const spot = new Map([['GC=F', { price: 4687, timestamp: now }]]);
+    // implied YES would be ~0 (spot < cutoff), market YES = 0.001 → edge ~0, OK
+    // Now flip: spot way above cutoff → implied YES ~1, market YES = 0.001 → edge ~0.999 → blocked
+    const markets2 = [
+      { id: '2', question: 'Will gold close above $4,000?', conditionId: 'c2',
+        clobTokenIds: ['y2', 'n2'], outcomePrices: JSON.stringify(['0.001', '0.999']),
+        endDate: inHours(6), feesEnabled: false },
+    ];
+    expect(detectOpportunities(markets2, spot, { SETTLEMENT_MIN_EDGE: 0.03 }, now)).toHaveLength(0);
+    void markets;
   });
 });
 

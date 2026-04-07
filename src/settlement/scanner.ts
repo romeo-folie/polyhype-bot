@@ -46,6 +46,29 @@ const COMMODITY_KEYWORDS: CommodityKeywordSpec[] = [
 
 const PRICE_REGEX = /\$?\s*([0-9]+(?:[,_][0-9]{3})*(?:\.[0-9]+)?)/g;
 
+/**
+ * Word-boundary keyword match. Plain `String.includes` produces false positives
+ * like "gold" matching "Golden Knights" or "spx" matching "Mariners vs Red Sox".
+ * We require the keyword to appear surrounded by non-word characters (or
+ * start/end of string). For multi-word keywords (e.g. "sp 500") the trailing
+ * boundary is enforced after the final character of the literal.
+ */
+export function matchesKeyword(haystack: string, keyword: string): boolean {
+  const needle = keyword.toLowerCase();
+  const hay = haystack.toLowerCase();
+  let from = 0;
+  while (from <= hay.length) {
+    const idx = hay.indexOf(needle, from);
+    if (idx === -1) return false;
+    const before = idx === 0 ? '' : hay[idx - 1] ?? '';
+    const after = hay[idx + needle.length] ?? '';
+    const isBoundary = (ch: string) => ch === '' || /[^a-z0-9]/.test(ch);
+    if (isBoundary(before) && isBoundary(after)) return true;
+    from = idx + 1;
+  }
+  return false;
+}
+
 interface SpotLast {
   price: number;
   timestamp: number;
@@ -74,7 +97,14 @@ interface MarketImplied {
   direction: 'YES' | 'NO';
 }
 
-/** Extract the first plausible $-denominated number from a question string. */
+/**
+ * Extract the cutoff price from a question string.
+ *
+ * Commodity / equity-index questions follow "Will X close above $Y" where the
+ * cutoff is the *last* number in the sentence. Index names like "S&P 500" or
+ * "Nasdaq 100" appear earlier and would be miscaptured as the cutoff if we
+ * picked the first match. We return the last plausible $-denominated number.
+ */
 export function extractCutoffPrice(question: string): number | null {
   PRICE_REGEX.lastIndex = 0;
   const matches: number[] = [];
@@ -84,7 +114,7 @@ export function extractCutoffPrice(question: string): number | null {
     const n = parseFloat(cleaned);
     if (Number.isFinite(n) && n > 1) matches.push(n);
   }
-  return matches[0] ?? null;
+  return matches[matches.length - 1] ?? null;
 }
 
 /**
@@ -160,7 +190,7 @@ export function detectOpportunities(
     if (end - now > horizonMs) continue; // > 24h out
 
     const q = (m.question ?? '').toLowerCase();
-    const spec = COMMODITY_KEYWORDS.find((c) => c.keywords.some((k) => q.includes(k)));
+    const spec = COMMODITY_KEYWORDS.find((c) => c.keywords.some((k) => matchesKeyword(q, k)));
     if (!spec) continue;
 
     const spot = spotByTicker.get(spec.ticker);
@@ -168,6 +198,12 @@ export function detectOpportunities(
 
     const cutoff = extractCutoffPrice(m.question ?? '');
     if (cutoff === null) continue;
+
+    // Sanity gate: cutoff must be within an order of magnitude of spot.
+    // Catches "Spread (-1.5)" or "O/U 6.5" style markets that match a commodity
+    // keyword but whose numeric is a hockey total, not a commodity price.
+    const ratio = cutoff / spot.price;
+    if (ratio < 0.1 || ratio > 10) continue;
 
     const impliedYes =
       spec.resolutionMode === 'close_print'
@@ -179,6 +215,9 @@ export function detectOpportunities(
     const signedEdge = impliedYes - yesPrice;
     const absEdge = Math.abs(signedEdge);
     if (absEdge < cfg.SETTLEMENT_MIN_EDGE) continue;
+    // Edges > 80% are almost certainly a parsing/keyword bug (e.g. cutoff grabbed
+    // from an unrelated number in the question, or spot off by an order of magnitude).
+    if (absEdge > 0.8) continue;
 
     out.push({
       market: m,

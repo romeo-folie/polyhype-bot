@@ -22,6 +22,23 @@ export const POLYGON_FALLBACK_RPCS = [
   'https://polygon-bor-rpc.publicnode.com',
 ];
 
+/**
+ * Safe boolean coercion from env strings.
+ *
+ * `boolFromEnv` is a footgun: it uses JS truthiness, so the string
+ * `"false"` becomes `true`. This helper accepts the conventional set of
+ * falsy literals ("false", "0", "no", "off", "") as `false`, and any other
+ * non-empty string as `true`. Native booleans pass through unchanged.
+ */
+const boolFromEnv = z
+  .union([z.boolean(), z.string()])
+  .transform((v) => {
+    if (typeof v === 'boolean') return v;
+    const s = v.trim().toLowerCase();
+    if (s === '' || s === 'false' || s === '0' || s === 'no' || s === 'off') return false;
+    return true;
+  });
+
 const envSchema = z.object({
   REDIS_URL: z.string().url('REDIS_URL must be a valid URL'),
   SIMMER_API_KEY: z.string().min(1, 'SIMMER_API_KEY is required'),
@@ -45,7 +62,7 @@ const envSchema = z.object({
   // MTProto Credentials (from my.telegram.org)
   TELEGRAM_API_ID: z.coerce.number().optional(),
   TELEGRAM_API_HASH: z.string().optional(),
-  TELEGRAM_MONITOR_ENABLED: z.coerce.boolean().optional().default(false),
+  TELEGRAM_MONITOR_ENABLED: boolFromEnv.optional().default(false),
   TELEGRAM_CHANNELS: z.string().optional().default('dbot_alerts,osint_intel'),
   TELEGRAM_DB_PATH: z.string().optional().default('./tdlib-data'),
 
@@ -132,21 +149,21 @@ const envSchema = z.object({
       }
     })
     .pipe(z.record(z.string(), z.coerce.number().min(0).max(1))),
-  TAIL_TAKER_BLOCK: z.coerce.boolean().optional().default(true),
+  TAIL_TAKER_BLOCK: boolFromEnv.optional().default(true),
   TAIL_PRICE_THRESHOLD: z.coerce.number().min(0).max(0.5).optional().default(0.2),
   TAIL_TAKER_OVERRIDE_EDGE: z.coerce.number().min(0).max(1).optional().default(0.2),
 
   TAKE_PROFIT_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.25),
   STOP_LOSS_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.3),
-  REEVAL_ENABLED: z.coerce.boolean().optional().default(true),
+  REEVAL_ENABLED: boolFromEnv.optional().default(true),
   REEVAL_EDGE_FLOOR: z.coerce.number().min(0).max(1).optional().default(0.03),
   REEVAL_ITM_SKIP_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.90),
 
   // WebSocket price feed
-  WS_ENABLED: z.coerce.boolean().optional().default(true),
+  WS_ENABLED: boolFromEnv.optional().default(true),
 
   // Spot price monitor (Phase 5)
-  SPOT_MONITOR_ENABLED: z.coerce.boolean().optional().default(false),
+  SPOT_MONITOR_ENABLED: boolFromEnv.optional().default(false),
   SPOT_MOVE_THRESHOLD: z.coerce.number().min(0).optional().default(3),
   SPOT_LOOKBACK_MINUTES: z.coerce.number().int().min(1).optional().default(5),
   SPOT_COOLDOWN_MINUTES: z.coerce.number().int().min(1).optional().default(15),
@@ -160,21 +177,21 @@ const envSchema = z.object({
   SPOT_COMMODITY_ASSETS: z.string().optional().default('CL=F,GC=F,SI=F,ES=F,NQ=F'),
 
   // ── Phase 1: CME settlement arb ──
-  SETTLEMENT_ARB_ENABLED: z.coerce.boolean().optional().default(false),
+  SETTLEMENT_ARB_ENABLED: boolFromEnv.optional().default(false),
   SETTLEMENT_PRE_WINDOW_S: z.coerce.number().int().min(0).optional().default(300),
   SETTLEMENT_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.03),
   SETTLEMENT_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(10),
 
   // ── Phase 2: CLOB flow monitor + tape-based shortlist ──
-  CLOB_FLOW_ENABLED: z.coerce.boolean().optional().default(true),
+  CLOB_FLOW_ENABLED: boolFromEnv.optional().default(true),
   CLOB_FLOW_WHALE_MIN_NOTIONAL: z.coerce.number().min(0).optional().default(10000),
   CLOB_FLOW_IMBALANCE_WINDOW_S: z.coerce.number().int().min(1).optional().default(60),
   CLOB_FLOW_GATE_THRESHOLD: z.coerce.number().min(1).optional().default(1.5),
   COPYTRADE_SHORTLIST_SOURCE: z.enum(['leaderboard', 'tape']).optional().default('leaderboard'),
 
   // Arbitrage scanner (Phase: arb)
-  ARB_ENABLED: z.coerce.boolean().optional().default(true),
-  ARB_WORKER_ENABLED: z.coerce.boolean().optional().default(true),
+  ARB_ENABLED: boolFromEnv.optional().default(true),
+  ARB_WORKER_ENABLED: boolFromEnv.optional().default(true),
   ARB_GLOBAL_MAX_TRADES_PER_MIN: z.coerce.number().int().min(1).optional().default(45),
   ARB_MAX_TRADES_PER_MIN: z.coerce.number().int().min(1).optional().default(30),
   CRYPTO_ARB_MAX_TRADES_PER_MIN: z.coerce.number().int().min(1).optional().default(15),
@@ -192,7 +209,7 @@ const envSchema = z.object({
     .default(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     ),
-  BINANCE_WS_ENABLED: z.coerce.boolean().optional().default(true),
+  BINANCE_WS_ENABLED: boolFromEnv.optional().default(true),
   BINANCE_SYMBOLS: z.string().optional().default('btcusdt,ethusdt,solusdt'),
   HELIUS_API_KEY: z.string().optional(),
   // Minimum NET edge (after ~2% per-leg Polymarket fees) to enter an arb trade.
@@ -203,8 +220,8 @@ const envSchema = z.object({
   ARB_FEE_RATE: z.coerce.number().min(0).max(1).optional().default(0.02),
 
   // Crypto latency arbitrage (Phase 7)
-  CRYPTO_ARB_ENABLED: z.coerce.boolean().optional().default(true),
-  CRYPTO_ARB_VOLATILITY_GATE_ENABLED: z.coerce.boolean().optional().default(true),
+  CRYPTO_ARB_ENABLED: boolFromEnv.optional().default(true),
+  CRYPTO_ARB_VOLATILITY_GATE_ENABLED: boolFromEnv.optional().default(true),
   // Mean absolute % price change per tick. Below floor = flat market, above ceiling = too spiky.
   // Defaults tuned for 1-min BTC ticks: floor 0.0003 (~0.03%), ceiling 0.008 (~0.8%)
   CRYPTO_ARB_MIN_VOLATILITY: z.coerce.number().min(0).optional().default(0.0003),
@@ -215,7 +232,7 @@ const envSchema = z.object({
   CRYPTO_ARB_MARKET_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
 
   // Up/Down Bitcoin market trading
-  UPDOWN_ENABLED: z.coerce.boolean().optional().default(false),
+  UPDOWN_ENABLED: boolFromEnv.optional().default(false),
   UPDOWN_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   // Minimum edge to allow entry on fee-enabled markets (executor fee gate).
   // Defaults to 0.04 (4%) — must exceed this to justify the ~2% taker fee.
@@ -257,7 +274,7 @@ const envSchema = z.object({
   MONITOR_HEAVY_INTERVAL_MIN: z.coerce.number().int().min(1).optional().default(5),
 
   // Phase 9 — Indicator confluence gate
-  CONFLUENCE_GATE_ENABLED: z.coerce.boolean().optional().default(true),
+  CONFLUENCE_GATE_ENABLED: boolFromEnv.optional().default(true),
   CRYPTO_ARB_MIN_CONFLUENCE_SCORE: z.coerce.number().int().min(0).max(3).optional().default(2),
   RSI_PERIOD: z.coerce.number().int().min(2).optional().default(14),
   MACD_FAST: z.coerce.number().int().min(1).optional().default(12),
@@ -267,19 +284,19 @@ const envSchema = z.object({
   STOCHASTIC_D_PERIOD: z.coerce.number().int().min(1).optional().default(3),
 
   // Session-aware threshold multipliers (Strategy 6)
-  SESSION_THRESHOLD_ENABLED: z.coerce.boolean().optional().default(false),
+  SESSION_THRESHOLD_ENABLED: boolFromEnv.optional().default(false),
   SESSION_MULTIPLIERS: z
     .string()
     .optional()
     .default('1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.3,1.3,1.3,1.3,1.3,1.5,1.5,1.5,1.5,1.2,1.2,1.2,1.2,0.8,0.8,0.8'),
 
   // Continuous improvement (Phase 8)
-  CALIBRATION_ENABLED: z.coerce.boolean().optional().default(true),
+  CALIBRATION_ENABLED: boolFromEnv.optional().default(true),
   MIN_BET_USD: z.coerce.number().min(0).optional().default(5),
   CALIBRATION_MIN_SAMPLES: z.coerce.number().int().positive().optional().default(20),
   OUTCOME_HISTORY_DAYS: z.coerce.number().int().positive().optional().default(180),
   OUTCOME_MAX_PER_CATEGORY: z.coerce.number().int().positive().optional().default(500),
-  CONTEXT_INJECTION_ENABLED: z.coerce.boolean().optional().default(true),
+  CONTEXT_INJECTION_ENABLED: boolFromEnv.optional().default(true),
   CONTEXT_INJECTION_LIMIT: z.coerce.number().int().min(1).max(10).optional().default(5),
 
   // Redeemer guardrails
@@ -294,7 +311,7 @@ const envSchema = z.object({
 
   // LLM rate reduction caches
   SCORER_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(86400),
-  CONSENSUS_CACHE_ENABLED: z.coerce.boolean().optional().default(true),
+  CONSENSUS_CACHE_ENABLED: boolFromEnv.optional().default(true),
   CONSENSUS_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(1800),
   RELEVANCE_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
   ENTITY_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(7200),
@@ -302,7 +319,7 @@ const envSchema = z.object({
   DEEPSEEK_PARSE_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(86400),
 
   // Copytrade signals
-  COPYTRADE_ENABLED: z.coerce.boolean().optional().default(false),
+  COPYTRADE_ENABLED: boolFromEnv.optional().default(false),
   COPYTRADE_WALLETS: z.string().optional().default(''),
   // Comma-separated category list. Examples: 'all', 'weather', 'weather,geopolitics'
   COPYTRADE_MARKET_SCOPE: z
@@ -357,21 +374,21 @@ const envSchema = z.object({
   COPYTRADE_SHORTLIST_TOP_N: z.coerce.number().int().min(1).max(50).optional().default(5),
   COPYTRADE_SHORTLIST_MIN_PNL_USD: z.coerce.number().min(0).optional().default(10000),
   COPYTRADE_SHORTLIST_MIN_VOL_USD: z.coerce.number().min(0).optional().default(100000),
-  COPYTRADE_SHORTLIST_AUTO_APPLY: z.coerce.boolean().optional().default(true),
+  COPYTRADE_SHORTLIST_AUTO_APPLY: boolFromEnv.optional().default(true),
   // vol/pnl ratio filter: systematic high-frequency traders have high vol relative to PnL.
   // Default 2.0 = must have traded at least 2x their PnL in volume (filters lucky one-offs).
   // Set to 0 to disable.
   COPYTRADE_SHORTLIST_MIN_VOL_PNL_RATIO: z.coerce.number().min(0).optional().default(2),
 
   // --- CRYPTO FUTURES (Phase: futures) ---
-  FUTURES_ENABLED: z.coerce.boolean().optional().default(false),
+  FUTURES_ENABLED: boolFromEnv.optional().default(false),
   // When true: log HL orders instead of submitting them. Safe validation path.
-  HL_DRY_RUN: z.coerce.boolean().optional().default(false),
+  HL_DRY_RUN: boolFromEnv.optional().default(false),
   // Hyperliquid credentials
   HYPERLIQUID_PRIVATE_KEY: z.string().optional(),
   HYPERLIQUID_AGENT_WALLET: z.string().optional(),
   HYPERLIQUID_MAIN_WALLET: z.string().optional(),
-  HYPERLIQUID_TESTNET: z.coerce.boolean().optional().default(false),
+  HYPERLIQUID_TESTNET: boolFromEnv.optional().default(false),
 
   // Risk & Control
   FUTURES_GLOBAL_MAX_MARGIN_USD: z.coerce.number().min(0).optional().default(200),
@@ -393,12 +410,12 @@ const envSchema = z.object({
     .min(0.01, 'FUTURES_TAKE_PROFIT_PCT must be positive')
     .default(3.0),
   // Trailing stop — activates after position reaches ACTIVATION_PCT, then exits if it drops TRAILING_STOP_PCT from peak.
-  FUTURES_TRAILING_STOP_ENABLED: z.coerce.boolean().optional().default(true),
+  FUTURES_TRAILING_STOP_ENABLED: boolFromEnv.optional().default(true),
   FUTURES_TRAILING_ACTIVATION_PCT: z.coerce.number().min(0.1).optional().default(3.5),
   FUTURES_TRAILING_STOP_PCT: z.coerce.number().min(0.1).optional().default(1.5),
-  FUTURES_EXIT_ON_SIGNAL_FADE: z.coerce.boolean().optional().default(true),
+  FUTURES_EXIT_ON_SIGNAL_FADE: boolFromEnv.optional().default(true),
   // TA confluence gate for futures entries — requires RSI/MACD/Stochastic agreement before opening a position.
-  FUTURES_CONFLUENCE_GATE_ENABLED: z.coerce.boolean().optional().default(true),
+  FUTURES_CONFLUENCE_GATE_ENABLED: boolFromEnv.optional().default(true),
   FUTURES_MIN_CONFLUENCE_SCORE: z.coerce.number().int().min(0).max(7).optional().default(2),
   // Post-entry TA re-evaluation interval & minimum position age before re-eval kicks in.
   FUTURES_REEVAL_INTERVAL_S: z.coerce.number().int().min(10).optional().default(60),
@@ -407,7 +424,7 @@ const envSchema = z.object({
   FUTURES_IOC_SLIPPAGE: z.coerce.number().min(0.001).max(0.1).optional().default(0.02),
 
   // Volatility-adjusted position sizing (Strategy 3)
-  FUTURES_VOL_SIZING_ENABLED: z.coerce.boolean().optional().default(false),
+  FUTURES_VOL_SIZING_ENABLED: boolFromEnv.optional().default(false),
   FUTURES_ATR_PERIOD: z.coerce.number().int().min(2).optional().default(14),
   FUTURES_ATR_BASELINE_PCT: z.coerce.number().min(0.01).optional().default(0.5),
 
@@ -418,7 +435,7 @@ const envSchema = z.object({
   KLINE_RETENTION_5M: z.coerce.number().int().min(10).optional().default(288),
 
   // ── Phase 1: ATR-based dynamic SL/TP (default off — ship-then-flip) ──
-  FUTURES_ATR_SLTP_ENABLED: z.coerce.boolean().optional().default(false),
+  FUTURES_ATR_SLTP_ENABLED: boolFromEnv.optional().default(false),
   FUTURES_ATR_SL_MULT: z.coerce.number().min(0.1).optional().default(1.5),
   FUTURES_ATR_TP_MULT: z.coerce.number().min(0.1).optional().default(3.0),
   FUTURES_ATR_SL_MIN_PCT: z.coerce.number().min(0).optional().default(1.0),
@@ -435,7 +452,7 @@ const envSchema = z.object({
 
   // ── Phase 2: Volume-aware confluence (default off — ship-then-flip) ──
   // Hard volume-spike gate before futures entry (current vol must exceed SMA × MULT).
-  VOLUME_SPIKE_GATE_ENABLED: z.coerce.boolean().optional().default(false),
+  VOLUME_SPIKE_GATE_ENABLED: boolFromEnv.optional().default(false),
   VOLUME_SPIKE_PERIOD: z.coerce.number().int().min(2).optional().default(20),
   VOLUME_SPIKE_MULT: z.coerce.number().min(0.1).optional().default(2.0),
   // OBV slope voter
@@ -455,18 +472,18 @@ const envSchema = z.object({
   // ── Phase 3: Regime gates (default off — ship-then-flip) ──
   ADX_PERIOD: z.coerce.number().int().min(2).optional().default(14),
   ADX_MIN: z.coerce.number().min(0).optional().default(20),
-  ADX_GATE_ENABLED: z.coerce.boolean().optional().default(false),
+  ADX_GATE_ENABLED: boolFromEnv.optional().default(false),
 
   CHOPPINESS_PERIOD: z.coerce.number().int().min(2).optional().default(14),
   CHOPPINESS_MAX: z.coerce.number().min(0).optional().default(61.8),
-  CHOPPINESS_GATE_ENABLED: z.coerce.boolean().optional().default(false),
+  CHOPPINESS_GATE_ENABLED: boolFromEnv.optional().default(false),
 
   BB_PERIOD: z.coerce.number().int().min(2).optional().default(20),
   BB_SIGMA: z.coerce.number().min(0.1).optional().default(2),
   // Bandwidth thresholds for calm/normal/explosive regime classification.
   BB_CALM_BANDWIDTH: z.coerce.number().min(0).optional().default(0.01),
   BB_EXPLOSIVE_BANDWIDTH: z.coerce.number().min(0).optional().default(0.05),
-  BB_REGIME_ADAPT_ENABLED: z.coerce.boolean().optional().default(false),
+  BB_REGIME_ADAPT_ENABLED: boolFromEnv.optional().default(false),
   FUTURES_MIN_CONFLUENCE_SCORE_CALM: z.coerce.number().int().min(0).max(7).optional().default(3),
   FUTURES_MIN_CONFLUENCE_SCORE_NORMAL: z.coerce.number().int().min(0).max(7).optional().default(3),
   FUTURES_MIN_CONFLUENCE_SCORE_EXPLOSIVE: z.coerce.number().int().min(0).max(7).optional().default(4),
