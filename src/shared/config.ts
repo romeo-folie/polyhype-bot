@@ -104,9 +104,9 @@ const envSchema = z.object({
 
   // Execution microstructure controls
   EXECUTION_MODE: z.enum(['hybrid', 'maker', 'taker']).optional().default('hybrid'),
-  MAKER_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(20_000),
+  MAKER_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(45_000),
   MAKER_POLL_INTERVAL_MS: z.coerce.number().int().min(50).optional().default(1000),
-  MAKER_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(5),
+  MAKER_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(20),
   TAKER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   TAKER_MIN_EDGE_CATEGORIES: z
     .string()
@@ -207,6 +207,13 @@ const envSchema = z.object({
   // Minimum edge to allow entry on fee-enabled markets (executor fee gate).
   // Defaults to 0.04 (4%) — must exceed this to justify the ~2% taker fee.
   FEE_MARKET_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.04),
+  // Minimum NET-of-fees edge required to take a TAKER order on a fee-enabled market.
+  // Maker fills bypass fees entirely, so this only gates the taker fallback path.
+  // Default 0.015 (1.5%) — applied as `grossEdge - estimatedFeeBps/10000 >= threshold`.
+  FEE_MARKET_MIN_NET_EDGE: z.coerce.number().min(0).max(1).optional().default(0.015),
+  // Estimated taker fee on fee-enabled markets when actual bps is unknown.
+  // Polymarket Up/Down and similar fee markets typically charge ~2% (200 bps).
+  FEE_MARKET_DEFAULT_BPS: z.coerce.number().min(0).optional().default(200),
 
   // Tiered Market Logic
   TIERED_LOGIC_ENABLED: z

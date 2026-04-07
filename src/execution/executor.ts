@@ -95,6 +95,39 @@ function clobTokenForSignal(signal: TradeSignal): string | null {
   return signal.clobTokenIds?.[1] ?? null;
 }
 
+/**
+ * Maker-eligible signal subset.
+ *
+ * Maker fills bypass fees and improve average entry price, but they take time
+ * (poll up to MAKER_MAX_WAIT_MS) and may not fill at all. We only attempt them
+ * for signals where the alpha doesn't decay in seconds:
+ *
+ *   - 'osint' — news-sentiment trades; edge persists for minutes
+ *
+ * Excluded (latency-sensitive, must fill NOW):
+ *   - 'crypto-arb' — Binance→PM lag arbitrage, edge gone in seconds
+ *   - 'spot'       — spot momentum on PM markets, edge decays with the move
+ *   - 'copytrade'  — whale mirror; resting risks worse price as the signal propagates
+ *   - 'futures'    — bypasses this branch via the isFutures path
+ *   - undefined    — unlabelled; default-deny for safety
+ */
+function isMakerEligible(signal: TradeSignal): boolean {
+  return signal.source === 'osint';
+}
+
+/**
+ * Compute net-of-fees edge for a signal on a fee-enabled market.
+ * Used to gate the TAKER fallback path (maker fills bypass fees and don't need this gate).
+ */
+function netOfFeesEdge(
+  grossEdge: number,
+  feeBps: number | null | undefined,
+  fallbackBps: number,
+): number {
+  const bps = feeBps != null && isFinite(feeBps) && feeBps > 0 ? feeBps : fallbackBps;
+  return grossEdge - bps / 10_000;
+}
+
 function isMarketNotFoundMessage(msg: string | null | undefined): boolean {
   if (!msg) return false;
   return /market\s+not\s+found/i.test(msg);
@@ -1058,6 +1091,12 @@ export async function executeSignal(
   const simmerId =
     signal.source === 'crypto-arb' ? null : await resolveSimmerMarketId(signal.question);
 
+  // Tracks fee-market state across the routing pipeline. Set when Simmer context
+  // reports fees > 0, or inferred from signal.feesEnabled. Used to:
+  //   1) skip the Simmer/CLOB taker submit if net-of-fee edge is below threshold
+  //   2) preserve maker reachability — maker fills bypass fees and SHOULD be tried
+  let feeMarketBpsObserved: number | null = null;
+
   if (simmerId) {
     // Context safeguard check — flip-flop detection, resolution criteria, market status
     const ctx = await getMarketContext(simmerId, signal.consensusProbability ?? 0.5);
@@ -1090,13 +1129,15 @@ export async function executeSignal(
         return recordSkip('flip_flop_severe');
       }
 
-      // Gate 4: market has fees — fee drag erodes edge on geopolitical markets
+      // Gate 4: detect fee market — DO NOT skip here. Maker fills bypass fees,
+      // so we still want to attempt the maker path on fee markets. The fee gate
+      // is now applied later, only against the taker fallback (see below).
       if (ctx.market.fee_rate_bps > 0) {
-        logger.info('[executor] skipping — market has fees', {
+        feeMarketBpsObserved = ctx.market.fee_rate_bps;
+        logger.info('[executor] fee market detected — maker still eligible', {
           marketId: signal.marketId,
           feeRateBps: ctx.market.fee_rate_bps,
         });
-        return recordSkip(`fee_market:${ctx.market.fee_rate_bps.toString()}bps`);
       }
 
       logger.info('[executor] context check passed', {
@@ -1120,15 +1161,34 @@ export async function executeSignal(
   let clobFallbackReason: string | null = null;
   let takerDecisionBenchmarkPromise: Promise<DecisionBenchmark> | null = null;
 
-  // Maker path: skip for fee markets unless edge justifies the cost (Up/Down markets have fees)
-  const feeMarketAllowed = signal.feesEnabled === true && (signal.edgeMagnitude ?? 0) >= cfg.FEE_MARKET_MIN_EDGE;
-  if (executionMode !== 'taker' && !signal.isFutures && (signal.feesEnabled !== true || feeMarketAllowed)) {
+  // Maker eligibility: subset of signals where alpha doesn't decay in seconds.
+  // Fee markets ARE eligible — maker fills bypass fees entirely, so attempting
+  // maker on a fee market is strictly better than the previous behavior of
+  // skipping the trade outright.
+  const makerEligible =
+    executionMode !== 'taker' && !signal.isFutures && isMakerEligible(signal);
+  if (executionMode !== 'taker' && !signal.isFutures && !makerEligible) {
+    logger.info('[executor] maker skipped — signal source not maker-eligible', {
+      marketId: signal.marketId,
+      source: signal.source ?? 'undefined',
+    });
+  }
+  if (makerEligible) {
     makerAttempted = true;
     if (!decisionSubmitted) {
       decisionSubmitted = true;
       safeRecordExecutionTiming('decision_to_submit_ms', Date.now() - decisionStartedAt);
     }
     safeRecordExecutionMetric('maker_attempted');
+    logger.info('[executor] maker attempt', {
+      marketId: signal.marketId,
+      source: signal.source,
+      edgeMagnitude: signal.edgeMagnitude,
+      stakeUsd: signal.stakeUsd,
+      maxWaitMs: cfg.MAKER_MAX_WAIT_MS,
+      priceEdgeBps: cfg.MAKER_PRICE_EDGE_BPS,
+      feeMarket: feeMarketBpsObserved != null || signal.feesEnabled === true,
+    });
     const makerAttempt = await tryExecuteViaClobMaker(signal, cfg);
     safeRecordExecutionTiming('maker_wait_ms', makerAttempt.waitMs);
     const makerBenchmark: DecisionBenchmark = {
@@ -1180,10 +1240,15 @@ export async function executeSignal(
       } else {
         safeRecordExecutionMetric('maker_full_fill');
       }
-      logger.info('[executor] maker order filled on CLOB', {
+      logger.info('[executor] maker fill', {
         marketId: signal.marketId,
         stakeUsd: signal.stakeUsd,
         sharesFilled: makerAttempt.tradeResult.shares_bought,
+        postedPrice: makerAttempt.makerPostedPrice,
+        priceImprovementBps: makerTelemetry.makerPriceImprovementBps ?? null,
+        priceImprovementUsd: makerTelemetry.makerPriceImprovementUsd ?? null,
+        waitMs: makerAttempt.waitMs,
+        fillStatus: makerTelemetry.makerFillStatus,
       });
       void notifyTradeExecuted(signal, undefined, {
         venue: 'clob',
@@ -1234,6 +1299,15 @@ export async function executeSignal(
       safeRecordExecutionMetric('maker_cancel_uncertain');
     }
 
+    if (executionMode === 'hybrid') {
+      logger.info('[executor] maker did not fill — taker fallback', {
+        marketId: signal.marketId,
+        fillStatus: makerAttempt.makerFillStatus ?? 'none',
+        reason: makerAttempt.error ?? 'maker_not_filled',
+        waitMs: makerAttempt.waitMs,
+      });
+    }
+
     if (executionMode === 'maker') {
       logger.info('[executor] maker mode — no taker fallback', {
         marketId: signal.marketId,
@@ -1254,6 +1328,26 @@ export async function executeSignal(
         'clob',
         'maker',
       );
+    }
+  }
+
+  // Net-of-fees gate for the TAKER fallback path. Maker bypasses fees, so this
+  // gate only fires AFTER the maker attempt has been skipped or has failed.
+  // We skip taker entirely if the post-fee edge wouldn't justify the trade.
+  const isFeeMarket = feeMarketBpsObserved != null || signal.feesEnabled === true;
+  if (isFeeMarket && (executionMode === 'hybrid' || executionMode === 'taker')) {
+    const grossEdge = signal.edgeMagnitude ?? 0;
+    const netEdge = netOfFeesEdge(grossEdge, feeMarketBpsObserved, cfg.FEE_MARKET_DEFAULT_BPS);
+    if (netEdge < cfg.FEE_MARKET_MIN_NET_EDGE) {
+      logger.info('[executor] skipping taker on fee market — net edge below threshold', {
+        marketId: signal.marketId,
+        grossEdge,
+        netEdge,
+        feeBps: feeMarketBpsObserved ?? cfg.FEE_MARKET_DEFAULT_BPS,
+        threshold: cfg.FEE_MARKET_MIN_NET_EDGE,
+        makerAttempted,
+      });
+      return recordSkip('fee_market_net_edge_below_threshold');
     }
   }
 
@@ -1442,15 +1536,22 @@ export async function executeSignal(
     clobFallbackReason = 'simmer_market_missing';
   }
 
-  // 6) Fee gate — skip CLOB if Gamma reports fees enabled on this market,
-  // UNLESS the edge is high enough to justify the fee (e.g. Up/Down arb signals).
-  if (signal.feesEnabled === true && (signal.edgeMagnitude ?? 0) < cfg.FEE_MARKET_MIN_EDGE) {
-    logger.info('[executor] skipping CLOB — market has fees enabled and edge too low', {
-      marketId: signal.marketId,
-      edgeMagnitude: signal.edgeMagnitude,
-      feeThreshold: cfg.FEE_MARKET_MIN_EDGE,
-    });
-    return recordSkip('fee_market:clob_path', 'skipped', undefined, 'clob', 'taker');
+  // 6) Fee gate for CLOB fallback — already enforced by the earlier net-edge
+  // gate when feeMarketBpsObserved was set via Simmer context. This check covers
+  // the case where the signal carries `feesEnabled=true` but Simmer context was
+  // unavailable (so feeMarketBpsObserved is null and the earlier gate didn't fire).
+  if (signal.feesEnabled === true && feeMarketBpsObserved == null) {
+    const grossEdge = signal.edgeMagnitude ?? 0;
+    const netEdge = netOfFeesEdge(grossEdge, null, cfg.FEE_MARKET_DEFAULT_BPS);
+    if (netEdge < cfg.FEE_MARKET_MIN_NET_EDGE) {
+      logger.info('[executor] skipping CLOB — fee market net edge below threshold', {
+        marketId: signal.marketId,
+        grossEdge,
+        netEdge,
+        threshold: cfg.FEE_MARKET_MIN_NET_EDGE,
+      });
+      return recordSkip('fee_market_net_edge_below_threshold', 'skipped', undefined, 'clob', 'taker');
+    }
   }
 
   // 7) CLOB fallback

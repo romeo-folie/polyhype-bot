@@ -319,6 +319,7 @@ async function runSpotMonitorInner(
         halfKellyFraction: decision.halfKellyFraction,
         sourcedFrom,
         reasoning: consensus.reasoning,
+        source: 'spot',
         assetId: move.assetId,
         endDate: market.endDate ?? undefined,
       });

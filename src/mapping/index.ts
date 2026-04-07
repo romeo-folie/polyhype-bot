@@ -50,7 +50,7 @@ export interface TradeSignal {
   /** True when the Gamma market has fees enabled — executor skips CLOB for these */
   feesEnabled?: boolean;
   /** Origin of the signal, used for execution routing (e.g. bypassing Simmer for arb) */
-  source?: 'osint' | 'crypto-arb' | 'futures' | 'copytrade';
+  source?: 'osint' | 'crypto-arb' | 'futures' | 'copytrade' | 'spot';
   /** Operational metadata for alerts/telemetry */
   latencyMs?: number | undefined;
   volatility?: number | undefined;
