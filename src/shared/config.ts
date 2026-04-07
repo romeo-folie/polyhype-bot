@@ -165,6 +165,13 @@ const envSchema = z.object({
   SETTLEMENT_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.03),
   SETTLEMENT_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(10),
 
+  // ── Phase 2: CLOB flow monitor + tape-based shortlist ──
+  CLOB_FLOW_ENABLED: z.coerce.boolean().optional().default(true),
+  CLOB_FLOW_WHALE_MIN_NOTIONAL: z.coerce.number().min(0).optional().default(10000),
+  CLOB_FLOW_IMBALANCE_WINDOW_S: z.coerce.number().int().min(1).optional().default(60),
+  CLOB_FLOW_GATE_THRESHOLD: z.coerce.number().min(1).optional().default(1.5),
+  COPYTRADE_SHORTLIST_SOURCE: z.enum(['leaderboard', 'tape']).optional().default('leaderboard'),
+
   // Arbitrage scanner (Phase: arb)
   ARB_ENABLED: z.coerce.boolean().optional().default(true),
   ARB_WORKER_ENABLED: z.coerce.boolean().optional().default(true),

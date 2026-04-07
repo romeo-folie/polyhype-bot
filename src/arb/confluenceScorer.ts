@@ -47,6 +47,7 @@ export interface ConfluenceScore {
     mfi?: 'oversold' | 'overbought' | 'neutral';
     vwap?: 'above' | 'below' | 'neutral';
     cmf?: 'positive' | 'negative' | 'neutral';
+    clob_flow_imbalance?: 'buy_heavy' | 'sell_heavy' | 'neutral';
   };
   /** Volume snapshot used for the optional volume-spike gate. */
   volume?: {
@@ -65,7 +66,11 @@ export interface ConfluenceScore {
   };
 }
 
-export async function scoreConfluence(symbol: string, redis: Redis): Promise<ConfluenceScore> {
+export async function scoreConfluence(
+  symbol: string,
+  redis: Redis,
+  opts?: { marketId?: string },
+): Promise<ConfluenceScore> {
   const cfg = loadConfig();
 
   const candles = await buildCandles(symbol, redis);
@@ -97,6 +102,19 @@ export async function scoreConfluence(symbol: string, redis: Redis): Promise<Con
     else bbRegime = 'normal';
   }
 
+  let clobFlowRatio: number | null = null;
+  if (opts?.marketId) {
+    try {
+      clobFlowRatio = await computeClobFlowImbalance(
+        opts.marketId,
+        redis,
+        cfg.CLOB_FLOW_IMBALANCE_WINDOW_S,
+      );
+    } catch {
+      clobFlowRatio = null;
+    }
+  }
+
   const result = scoreFromValues(
     rsi,
     macd,
@@ -116,6 +134,7 @@ export async function scoreConfluence(symbol: string, redis: Redis): Promise<Con
       },
     },
     { current: lastVol, sma: volSma },
+    { ratio: clobFlowRatio, threshold: cfg.CLOB_FLOW_GATE_THRESHOLD },
   );
 
   result.regime = {
@@ -145,6 +164,45 @@ interface VolumeVoteInput {
   };
 }
 
+export interface ClobFlowVoteInput {
+  /** Buy / sell notional ratio (buy / sell). null when no data. */
+  ratio: number | null;
+  /** Threshold above which buy_heavy fires; below 1/threshold fires sell_heavy. */
+  threshold: number;
+}
+
+/**
+ * Compute buy/sell notional imbalance from a tape window stored in
+ * `clob:tape:{marketId}`. Returns null when there is no usable data.
+ * Used by `scoreFromValues` and the live confluence pipeline.
+ */
+export async function computeClobFlowImbalance(
+  marketId: string,
+  redis: Redis,
+  windowSec: number,
+): Promise<number | null> {
+  const now = Date.now();
+  const min = now - windowSec * 1000;
+  const entries = await redis.zrangebyscore(`clob:tape:${marketId}`, min, now);
+  if (!entries || entries.length === 0) return null;
+  let buy = 0;
+  let sell = 0;
+  for (const raw of entries) {
+    try {
+      const t = JSON.parse(raw) as { price?: number; size?: number; side?: string };
+      const notional = (t.price ?? 0) * (t.size ?? 0);
+      if (!Number.isFinite(notional) || notional <= 0) continue;
+      if (t.side === 'BUY') buy += notional;
+      else if (t.side === 'SELL') sell += notional;
+    } catch {
+      // ignore malformed
+    }
+  }
+  if (buy === 0 && sell === 0) return null;
+  if (sell === 0) return Number.POSITIVE_INFINITY;
+  return buy / sell;
+}
+
 /** Exported for unit testing with pre-computed values. */
 export function scoreFromValues(
   rsi: number | null,
@@ -152,6 +210,7 @@ export function scoreFromValues(
   stoch: { k: number; d: number } | null,
   volumeVotes?: VolumeVoteInput,
   volumeSnapshot?: { current: number | null; sma: number | null },
+  clobFlow?: ClobFlowVoteInput,
 ): ConfluenceScore {
   let upCount = 0;
   let downCount = 0;
@@ -211,6 +270,14 @@ export function scoreFromValues(
       else if (v.cmf < -v.cfg.CMF_THRESHOLD) { signals.cmf = 'negative'; downCount++; }
       else signals.cmf = 'neutral';
     }
+  }
+
+  if (clobFlow && clobFlow.ratio !== null && clobFlow.threshold > 1) {
+    const r = clobFlow.ratio;
+    const inv = 1 / clobFlow.threshold;
+    if (r >= clobFlow.threshold) { signals.clob_flow_imbalance = 'buy_heavy'; upCount++; }
+    else if (r <= inv) { signals.clob_flow_imbalance = 'sell_heavy'; downCount++; }
+    else signals.clob_flow_imbalance = 'neutral';
   }
 
   let direction: 'UP' | 'DOWN' | 'NEUTRAL';

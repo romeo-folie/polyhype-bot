@@ -192,4 +192,49 @@ describe('ClobPriceFeed', () => {
 
     disabledFeed.destroy();
   });
+
+  describe('book/trade dispatch', () => {
+    it('invokes onBook handler for book event', async () => {
+      const onBook = vi.fn().mockResolvedValue(undefined);
+      feed.onBook = onBook;
+      await feed.handleMessage(JSON.stringify({
+        event_type: 'book',
+        asset_id: 'tok-1',
+        bids: [{ price: '0.5', size: '10' }],
+        asks: [{ price: '0.55', size: '5' }],
+      }));
+      expect(onBook).toHaveBeenCalledOnce();
+    });
+
+    it('invokes onTrade handler for last_trade_price event', async () => {
+      const onTrade = vi.fn().mockResolvedValue(undefined);
+      feed.onTrade = onTrade;
+      await feed.handleMessage(JSON.stringify({
+        event_type: 'last_trade_price',
+        asset_id: 'tok-1',
+        price: '0.42',
+        size: '100',
+        side: 'BUY',
+      }));
+      expect(onTrade).toHaveBeenCalledOnce();
+    });
+
+    it('does not affect price_change handling when handlers absent', async () => {
+      // Sanity: price_change still flows when no book/trade handlers set.
+      // Use the existing watched-markets path (need to register a token first).
+      const f = new ClobPriceFeed(redis as never, { enabled: true });
+      // Inject token mapping without opening WS
+      (f as unknown as { tokenToMarket: Map<string, string>; watchedMarkets: Map<string, string[]> })
+        .tokenToMarket.set('tok-yes', 'mkt-1');
+      (f as unknown as { tokenToMarket: Map<string, string>; watchedMarkets: Map<string, string[]> })
+        .watchedMarkets.set('mkt-1', ['tok-yes', 'tok-no']);
+      await f.handleMessage(JSON.stringify({
+        type: 'price_change',
+        asset_id: 'tok-yes',
+        price: '0.42',
+      }));
+      expect(redis._store.get(WS_PRICE_KEY('mkt-1'))?.value).toBe('0.420000');
+      f.destroy();
+    });
+  });
 });

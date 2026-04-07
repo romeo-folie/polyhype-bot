@@ -59,6 +59,17 @@ services:
       - redis
     command: npx tsx src/arb/worker.ts
 
+  # CLOB Flow Monitor — streams Polymarket book/trade tape into Redis
+  pga-clob-flow:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    command: npx tsx src/clob/flowMonitor.ts
+
   # Spot Feed Management
   pga-spot-feed:
     build: .

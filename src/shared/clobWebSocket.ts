@@ -28,6 +28,13 @@ export const WS_YES_PRICE_KEY = (marketId: string): string => `ws:price:yes:${ma
 export const WS_NO_PRICE_KEY = (marketId: string): string => `ws:price:no:${marketId}`;
 export const WS_PRICE_KEY = (marketId: string): string => `ws:price:${marketId}`; // legacy
 
+// ── Phase 2: CLOB flow monitor keys ──
+export const CLOB_BOOK_STATE_KEY = (tokenId: string): string => `clob:book_state:${tokenId}`;
+export const CLOB_TAPE_KEY = (marketId: string): string => `clob:tape:${marketId}`;
+export const CLOB_TAPE_MAX_LEN = 1000;
+export const CLOB_TRADE_CHANNEL = 'clob:trade';
+export const CLOB_BOOK_DELTA_CHANNEL = 'clob:book_delta';
+
 export class ClobPriceFeed {
   private ws: WebSocket | null = null;
   private watchedMarkets = new Map<string, string[]>(); // marketId -> clobTokenIds
@@ -36,12 +43,37 @@ export class ClobPriceFeed {
   private destroyed = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private enabled: boolean;
+  /** Optional handler for `book` events (used by flowMonitor). */
+  public onBook: ((msg: Record<string, unknown>) => void | Promise<void>) | null = null;
+  /** Optional handler for trade prints (used by flowMonitor). */
+  public onTrade: ((msg: Record<string, unknown>) => void | Promise<void>) | null = null;
 
   constructor(
     private readonly redis: Redis,
     opts?: { enabled?: boolean },
   ) {
     this.enabled = opts?.enabled ?? true;
+  }
+
+  /**
+   * Subscribe to a list of token IDs without registering them as YES/NO
+   * cache feeds. Used by `flowMonitor` which only cares about book/trade
+   * dispatch via `onBook` / `onTrade` callbacks.
+   */
+  subscribeBook(tokenIds: string[]): void {
+    if (!this.enabled || tokenIds.length === 0) return;
+    for (const t of tokenIds) {
+      if (!this.tokenToMarket.has(t)) {
+        // Use the token id itself as a sentinel marketId so dispatch works
+        // even when the caller isn't tracking individual market IDs.
+        this.tokenToMarket.set(t, t);
+      }
+    }
+    if (!this.ws) {
+      this.connect();
+    } else if (this.ws.readyState === WebSocket.OPEN) {
+      this.subscribe(tokenIds);
+    }
   }
 
   /** Subscribe to price updates for a market. Idempotent — skips if already watched. */
@@ -172,6 +204,28 @@ export class ClobPriceFeed {
     for (const msg of messages) {
       if (typeof msg !== 'object' || msg === null) continue;
       const m = msg as Record<string, unknown>;
+
+      // Dispatch book / trade events to optional handlers (used by flowMonitor).
+      if (m.event_type === 'book' || m.type === 'book') {
+        if (this.onBook) {
+          try { await this.onBook(m); } catch (err) {
+            logger.warn('[clob-ws] onBook error', { error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        continue;
+      }
+      if (
+        m.event_type === 'last_trade_price' ||
+        m.event_type === 'trade' ||
+        m.type === 'last_trade_price'
+      ) {
+        if (this.onTrade) {
+          try { await this.onTrade(m); } catch (err) {
+            logger.warn('[clob-ws] onTrade error', { error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        continue;
+      }
 
       if (
         m.type === 'price_change' &&

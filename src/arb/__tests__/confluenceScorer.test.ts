@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { scoreFromValues } from '../confluenceScorer.js';
+import { describe, it, expect, vi } from 'vitest';
+import { scoreFromValues, computeClobFlowImbalance } from '../confluenceScorer.js';
 
 const bullishRSI = 25; // < 30 → oversold (+1 UP)
 const bearishRSI = 75; // > 70 → overbought (+1 DOWN)
@@ -141,6 +141,84 @@ describe('scoreFromValues', () => {
         { current: 100, sma: null },
       );
       expect(result.volume?.ratio).toBeNull();
+    });
+  });
+
+  describe('clob_flow_imbalance voter', () => {
+    it('buy-heavy ratio above threshold votes UP', () => {
+      const r = scoreFromValues(null, null, null, undefined, undefined, {
+        ratio: 2.0,
+        threshold: 1.5,
+      });
+      expect(r.signals.clob_flow_imbalance).toBe('buy_heavy');
+      expect(r.direction).toBe('UP');
+      expect(r.score).toBe(1);
+    });
+    it('sell-heavy ratio below 1/threshold votes DOWN', () => {
+      const r = scoreFromValues(null, null, null, undefined, undefined, {
+        ratio: 0.5,
+        threshold: 1.5,
+      });
+      expect(r.signals.clob_flow_imbalance).toBe('sell_heavy');
+      expect(r.direction).toBe('DOWN');
+      expect(r.score).toBe(1);
+    });
+    it('balanced ratio is neutral', () => {
+      const r = scoreFromValues(null, null, null, undefined, undefined, {
+        ratio: 1.0,
+        threshold: 1.5,
+      });
+      expect(r.signals.clob_flow_imbalance).toBe('neutral');
+      expect(r.direction).toBe('NEUTRAL');
+      expect(r.score).toBe(0);
+    });
+    it('null ratio does not vote', () => {
+      const r = scoreFromValues(null, null, null, undefined, undefined, {
+        ratio: null,
+        threshold: 1.5,
+      });
+      expect(r.signals.clob_flow_imbalance).toBeUndefined();
+    });
+    it('combines with bullish RSI for max score = 8', () => {
+      const r = scoreFromValues(
+        25,
+        { macdLine: 1, signalLine: 0.5, histogram: 0.5 },
+        { k: 18, d: 10 },
+        {
+          obvSlope: 1, mfi: 10, vwap: 100, cmf: 0.1, lastClose: 102,
+          cfg: { OBV_SLOPE_EPS: 0, MFI_OVERSOLD: 20, MFI_OVERBOUGHT: 80, VWAP_BAND: 0.001, CMF_THRESHOLD: 0.05 },
+        },
+        undefined,
+        { ratio: 3, threshold: 1.5 },
+      );
+      // 8 voters: rsi+macd+stoch+obv+mfi+vwap+cmf+clob_flow
+      expect(r.score).toBe(8);
+      expect(r.direction).toBe('UP');
+    });
+  });
+
+  describe('computeClobFlowImbalance', () => {
+    it('returns null on empty tape', async () => {
+      const redis = { zrangebyscore: vi.fn().mockResolvedValue([]) };
+      const r = await computeClobFlowImbalance('mkt-1', redis as never, 60);
+      expect(r).toBeNull();
+    });
+
+    it('computes buy/sell ratio from tape entries', async () => {
+      const tape = [
+        JSON.stringify({ price: 0.5, size: 100, side: 'BUY' }),
+        JSON.stringify({ price: 0.5, size: 50, side: 'SELL' }),
+      ];
+      const redis = { zrangebyscore: vi.fn().mockResolvedValue(tape) };
+      const r = await computeClobFlowImbalance('mkt-1', redis as never, 60);
+      expect(r).toBe(2);
+    });
+
+    it('returns Infinity when there is only buy notional', async () => {
+      const tape = [JSON.stringify({ price: 0.5, size: 10, side: 'BUY' })];
+      const redis = { zrangebyscore: vi.fn().mockResolvedValue(tape) };
+      const r = await computeClobFlowImbalance('mkt-1', redis as never, 60);
+      expect(r).toBe(Number.POSITIVE_INFINITY);
     });
   });
 });
