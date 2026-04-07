@@ -73,6 +73,11 @@ const HEADLINES: Record<string, [string, string, string]> = {
     'House committee advances bipartisan tech oversight proposal',
     'Democratic senator calls for investigation into tech company practices',
   ],
+  sports: [
+    'Star quarterback ruled out for championship game with torn ACL',
+    'Trade deadline looms as contending team eyes All-Star acquisition',
+    'Team announces new assistant coach hiring for next season',
+  ],
 };
 
 const SCORES: Record<string, number[]> = {
@@ -81,6 +86,7 @@ const SCORES: Record<string, number[]> = {
   'crypto-regulatory': [9, 8, 2],
   'ai-tech': [9, 7, 2],
   'us-politics': [9, 7, 2],
+  sports: [9, 7, 2],
 };
 
 describe('category scorer prompts', () => {

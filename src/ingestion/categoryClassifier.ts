@@ -33,7 +33,46 @@ const KEYWORD_MAP: Record<string, string[]> = {
     'trump', 'supreme court', 'executive order', 'legislation', 'bill',
     'impeach', 'governor', 'democrat', 'republican', 'doj', 'fbi',
   ],
+  // NBA — team names, league jargon, lineup/availability language.
+  // Explicitly NOT limited to injury keywords.
+  'sports-nba': [
+    'nba', 'lakers', 'warriors', 'celtics', 'bucks', 'heat', 'nuggets',
+    'suns', 'sixers', '76ers', 'knicks', 'nets', 'bulls', 'mavericks', 'mavs',
+    'clippers', 'thunder', 'timberwolves', 'grizzlies', 'pelicans', 'kings',
+    'rockets', 'spurs', 'jazz', 'trail blazers', 'blazers', 'pistons',
+    'cavaliers', 'cavs', 'raptors', 'hawks', 'hornets', 'magic', 'wizards',
+    'pacers', 'lebron', 'curry', 'giannis', 'jokic', 'luka', 'doncic',
+    'tatum', 'embiid', 'durant',
+  ],
+  // NHL — team names and hockey-specific jargon.
+  'sports-nhl': [
+    'nhl', 'bruins', 'rangers', 'maple leafs', 'canadiens', 'canadians',
+    'panthers', 'lightning', 'capitals', 'penguins', 'flyers', 'devils',
+    'islanders', 'red wings', 'blue jackets', 'hurricanes', 'senators',
+    'sabres', 'blackhawks', 'stars', 'wild', 'avalanche', 'blues', 'predators',
+    'jets', 'oilers', 'flames', 'canucks', 'kraken', 'sharks', 'ducks',
+    'kings', 'golden knights', 'coyotes', 'utah hockey', 'mcdavid', 'crosby',
+    'ovechkin', 'matthews', 'power play', 'face-off', 'empty net',
+    'stanley cup',
+  ],
+  // Generic sports catchall — broad betting / line-movement / event language.
+  // Used when the post mentions sports but doesn't name a specific league.
+  'sports': [
+    'playoff', 'playoffs', 'championship', 'game 7', 'game 1', 'tip-off',
+    'tipoff', 'puck drop', 'overtime', 'ot', 'starting lineup', 'questionable',
+    'doubtful', 'out for', 'game-time decision', 'inactive', 'sidelined',
+    'coach fired', 'head coach', 'trade deadline', 'traded to', 'signed with',
+    'buyout', 'waiver', 'roster', 'injury report', 'injured reserve',
+    'line movement', 'sharp money', 'spread', 'moneyline', 'over/under',
+  ],
 };
+
+/**
+ * Sub-category keys in KEYWORD_MAP that all resolve to the single 'sports'
+ * CategoryConfig. This keeps per-league keyword tuning independent from the
+ * pipeline category (all sports posts go through one scorer/mapping path).
+ */
+const SPORTS_ALIASES = new Set(['sports-nba', 'sports-nhl', 'sports']);
 
 /**
  * Count keyword hits for each category against lowercased text.
@@ -134,9 +173,21 @@ export async function classifyCategory(text: string): Promise<CategoryConfig> {
 
     if (winners.length === 1) {
       const catId = winners[0]![0];
-      const cat = CATEGORIES.find(c => c.id === catId);
+      const resolvedId = SPORTS_ALIASES.has(catId) ? 'sports' : catId;
+      const cat = CATEGORIES.find(c => c.id === resolvedId);
       if (cat) {
         logger.debug('[categoryClassifier] keyword match', { category: catId, hits: maxHits });
+        return cat;
+      }
+    }
+
+    // All winners are sports sub-categories → resolve to sports without LLM.
+    if (winners.every(([id]) => SPORTS_ALIASES.has(id))) {
+      const cat = CATEGORIES.find(c => c.id === 'sports');
+      if (cat) {
+        logger.debug('[categoryClassifier] sports sub-category tie', {
+          tied: winners.map(([id, h]) => `${id}:${h}`),
+        });
         return cat;
       }
     }

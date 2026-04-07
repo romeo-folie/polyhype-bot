@@ -70,6 +70,17 @@ services:
       - redis
     command: npx tsx src/clob/flowMonitor.ts
 
+  # Sports Arb Poller — NBA/NHL in-play edge vs Polymarket
+  pga-sports:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    command: npx tsx src/sports/poller.ts
+
   # Spot Feed Management
   pga-spot-feed:
     build: .

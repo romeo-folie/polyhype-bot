@@ -45,6 +45,10 @@ const ENTITY_FIXTURES: Record<string, { headline: string; entities: string[] }> 
     headline: 'Senate passes bipartisan AI regulation bill 67-33',
     entities: ['Senate', 'AI regulation', 'bill'],
   },
+  sports: {
+    headline: 'Star quarterback ruled out for championship game with torn ACL',
+    entities: ['quarterback', 'championship game', 'injury'],
+  },
 };
 
 describe('entity extraction per category', () => {

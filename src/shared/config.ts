@@ -487,6 +487,28 @@ const envSchema = z.object({
   FUTURES_MIN_CONFLUENCE_SCORE_CALM: z.coerce.number().int().min(0).max(7).optional().default(3),
   FUTURES_MIN_CONFLUENCE_SCORE_NORMAL: z.coerce.number().int().min(0).max(7).optional().default(3),
   FUTURES_MIN_CONFLUENCE_SCORE_EXPLOSIVE: z.coerce.number().int().min(0).max(7).optional().default(4),
+
+  // ── Phase 3: Sports arb (NBA + NHL) ──
+  SPORTS_ARB_ENABLED: boolFromEnv.optional().default(true),
+  SPORTS_LEAGUES: z
+    .string()
+    .optional()
+    .default('nba')
+    .transform((v) =>
+      new Set(
+        v
+          .split(',')
+          .map((s) => s.trim().toLowerCase())
+          .filter((s): s is 'nba' | 'nhl' => s === 'nba' || s === 'nhl'),
+      ),
+    ),
+  SPORTS_POLL_INTERVAL_S: z.coerce.number().int().min(1).optional().default(8),
+  SPORTS_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
+  SPORTS_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(5),
+  SPORTS_MARKET_LOOKAHEAD_H: z.coerce.number().int().min(1).optional().default(48),
+  // Purely informational — documents which TELEGRAM_CHANNELS entries are
+  // sports-primary. Used by a future audit script, not by runtime.
+  SPORTS_TELEGRAM_HANDLES: z.string().optional().default(''),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

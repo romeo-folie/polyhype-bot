@@ -3,7 +3,8 @@ import { macro } from './macro.js';
 import { cryptoRegulatory } from './cryptoRegulatory.js';
 import { aiTech } from './aiTech.js';
 import { usPolitics } from './usPolitics.js';
+import { sports } from './sports.js';
 
-export const CATEGORIES = [geopolitical, macro, cryptoRegulatory, aiTech, usPolitics] as const;
+export const CATEGORIES = [geopolitical, macro, cryptoRegulatory, aiTech, usPolitics, sports] as const;
 
-export { geopolitical, macro, cryptoRegulatory, aiTech, usPolitics };
+export { geopolitical, macro, cryptoRegulatory, aiTech, usPolitics, sports };
