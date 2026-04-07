@@ -52,6 +52,44 @@ export interface DivergenceInput {
    * market, the trade is skipped. Defaults to 0.15.
    */
   maxLlmProbAtLowPrice?: number;
+  /** Market resolution date (ISO string). Used by the time-to-resolution gate. */
+  endDate?: string;
+  /** Source of the signal — used for telemetry/debug. */
+  source?: 'osint' | 'spot' | 'copytrade';
+  /** Maximum hours-to-resolution allowed. If undefined, no max gate. */
+  maxHoursToResolution?: number;
+  /** Minimum hours-to-resolution required. If undefined, no min gate. */
+  minHoursToResolution?: number;
+}
+
+/**
+ * Time-to-resolution gate. Returns `{ ok: false, skipReason }` if the market
+ * resolves too far in the future or too soon. No-op when endDate is missing or
+ * neither bound is supplied.
+ */
+export function checkTimeToResolution(
+  endDate: string | undefined,
+  maxHoursToResolution: number | undefined,
+  minHoursToResolution: number | undefined,
+): { ok: boolean; skipReason?: string } {
+  if (!endDate || (!maxHoursToResolution && !minHoursToResolution)) {
+    return { ok: true };
+  }
+  const hours = (new Date(endDate).getTime() - Date.now()) / 3_600_000;
+  if (!Number.isFinite(hours)) return { ok: true };
+  if (maxHoursToResolution && hours > maxHoursToResolution) {
+    return {
+      ok: false,
+      skipReason: `too_long_dated:hours=${hours.toFixed(1)},max=${maxHoursToResolution}`,
+    };
+  }
+  if (minHoursToResolution && hours < minHoursToResolution) {
+    return {
+      ok: false,
+      skipReason: `too_soon_expiring:hours=${hours.toFixed(1)},min=${minHoursToResolution}`,
+    };
+  }
+  return { ok: true };
 }
 
 export interface DivergenceResult {
@@ -80,6 +118,9 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
     bookDepthUsd,
     minPriceForLlmTrust = 0.02,
     maxLlmProbAtLowPrice = 0.15,
+    endDate,
+    maxHoursToResolution,
+    minHoursToResolution,
   } = input;
 
   // Gate 0: Extreme-price LLM-distrust gate.
@@ -99,6 +140,12 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
       decision: null,
       skipReason: `extreme_price_llm_distrust:price=${currentYesPrice.toFixed(4)},consensus=${p.toFixed(3)}`,
     };
+  }
+
+  // Gate 0.5: Time-to-resolution gate.
+  const ttr = checkTimeToResolution(endDate, maxHoursToResolution, minHoursToResolution);
+  if (!ttr.ok) {
+    return { hasTrade: false, decision: null, skipReason: ttr.skipReason ?? 'time_to_resolution' };
   }
 
   // Gate 1: Noisy signal — stddev too high

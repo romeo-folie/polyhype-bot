@@ -168,6 +168,10 @@ export async function runMapping(
         bookDepthUsd: candidate.liquidity,
         minPriceForLlmTrust: cfg.MIN_PRICE_FOR_LLM_TRUST,
         maxLlmProbAtLowPrice: cfg.MAX_LLM_PROB_AT_LOW_PRICE,
+        ...(candidate.endDate ? { endDate: candidate.endDate } : {}),
+        source: 'osint',
+        maxHoursToResolution: cfg.PM_MAX_HOURS_TO_RESOLUTION_OSINT,
+        minHoursToResolution: cfg.PM_MIN_HOURS_TO_RESOLUTION,
       });
 
       logger.info('[mapping] divergence result', {

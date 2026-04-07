@@ -226,6 +226,10 @@ async function runSpotMonitorInner(
         maxBetFraction: cfg.MAX_BET_FRACTION,
         minPriceForLlmTrust: cfg.MIN_PRICE_FOR_LLM_TRUST,
         maxLlmProbAtLowPrice: cfg.MAX_LLM_PROB_AT_LOW_PRICE,
+        ...(market.endDate ? { endDate: market.endDate } : {}),
+        source: 'spot',
+        maxHoursToResolution: cfg.PM_MAX_HOURS_TO_RESOLUTION_SPOT,
+        minHoursToResolution: cfg.PM_MIN_HOURS_TO_RESOLUTION,
       });
 
       if (!hasTrade || !decision) continue;

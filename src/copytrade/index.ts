@@ -13,6 +13,7 @@ import { executeTakeProfit } from '../monitor/takeProfitExecutor.js';
 import { getPriceFeed } from '../shared/feedSingleton.js';
 import { recordCopytradeFilter, recordCopytradeMetric } from '../shared/telemetry.js';
 import { inferCategory } from '../shared/outcomeRecorder.js';
+import { checkTimeToResolution } from '../mapping/divergenceCalculator.js';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
 import type { ExitReason } from '../monitor/takeProfitEvaluator.js';
@@ -414,6 +415,24 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
           await markDedup();
           continue;
         }
+      }
+
+      // Time-to-resolution gate (shared with mapping/spot paths).
+      const ttr = checkTimeToResolution(
+        market.endDate ?? undefined,
+        cfg.PM_MAX_HOURS_TO_RESOLUTION_COPYTRADE,
+        cfg.PM_MIN_HOURS_TO_RESOLUTION,
+      );
+      if (!ttr.ok) {
+        logger.info('[copytrade] skipped by time-to-resolution gate', {
+          marketId: market.id,
+          skipReason: ttr.skipReason,
+        });
+        await recordCopytradeFilter(redis, 'time_to_resolution').catch(() => {
+          /* ignore telemetry errors */
+        });
+        await markDedup();
+        continue;
       }
 
       const liquidity = Number.parseFloat(market.liquidity);

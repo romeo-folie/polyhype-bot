@@ -92,6 +92,16 @@ const envSchema = z.object({
   MIN_PRICE_FOR_LLM_TRUST: z.coerce.number().min(0).max(0.5).optional().default(0.02),
   MAX_LLM_PROB_AT_LOW_PRICE: z.coerce.number().min(0).max(1).optional().default(0.15),
 
+  // Time-to-resolution gate for Polymarket trades. Skips markets that resolve
+  // too far in the future (capital sunk into long-dated markets is dead weight)
+  // or too soon (illiquid resolution-day games). Per-source overrides because
+  // signal alpha decays at different rates: news fastest, copytrade slowest.
+  PM_MAX_HOURS_TO_RESOLUTION_DEFAULT: z.coerce.number().min(0).optional().default(504),
+  PM_MIN_HOURS_TO_RESOLUTION: z.coerce.number().min(0).optional().default(6),
+  PM_MAX_HOURS_TO_RESOLUTION_OSINT: z.coerce.number().min(0).optional().default(504),
+  PM_MAX_HOURS_TO_RESOLUTION_SPOT: z.coerce.number().min(0).optional().default(168),
+  PM_MAX_HOURS_TO_RESOLUTION_COPYTRADE: z.coerce.number().min(0).optional().default(2160),
+
   // Execution microstructure controls
   EXECUTION_MODE: z.enum(['hybrid', 'maker', 'taker']).optional().default('hybrid'),
   MAKER_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(20_000),
