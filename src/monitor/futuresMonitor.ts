@@ -16,7 +16,7 @@ import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis, closeRedis } from '../shared/redis.js';
 import { getHyperliquid } from '../shared/hyperliquid.js';
-import { notifyTradeError } from '../execution/telegram.js';
+import { notifyTradeError, notifyTakeProfitExecuted } from '../execution/telegram.js';
 import {
   closePosition as closeLedgerPosition,
   getOpenPositions,
@@ -239,6 +239,37 @@ export async function runFuturesMonitorWorker(): Promise<void> {
 
             // Record futures outcome for analytics
             const ledgerPos = futuresLedger.find((p) => p.marketId === symbol);
+            const exitPrice = entryPx + pnlUsd / sziRaw;
+            const tpReason = reason.startsWith('Stop-Loss')
+              ? 'futures_sl'
+              : reason.startsWith('Take-Profit')
+                ? 'futures_tp'
+                : reason.startsWith('Trailing')
+                  ? 'futures_tp'
+                  : reason.startsWith('TA reversal')
+                    ? 'signal_reeval'
+                    : 'stop_loss';
+            await notifyTakeProfitExecuted({
+              position: ledgerPos ?? {
+                marketId: symbol,
+                question: `Futures ${symbol}`,
+                direction,
+                entryPrice: entryPx,
+                stakeUsd: positionValue,
+                edgeMagnitude: 0,
+                sourcedFrom: 'futures-monitor',
+                openedAt: new Date().toISOString(),
+                executionVenue: 'hyperliquid',
+                isFutures: true,
+              },
+              currentPrice: exitPrice,
+              returnPct: priceChangePct,
+              reason: tpReason,
+              mechanismDetail: reason,
+            }).catch((e: unknown) => {
+              logger.warn('[futures-monitor] notification failed', { symbol, error: String(e) });
+            });
+
             if (ledgerPos) {
               const holdingHours = (Date.now() - new Date(ledgerPos.openedAt).getTime()) / 3600000;
               await recordOutcome(redis, {
