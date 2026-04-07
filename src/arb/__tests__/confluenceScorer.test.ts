@@ -81,4 +81,66 @@ describe('scoreFromValues', () => {
     expect(result.signals.macd).toBe('neutral');
     expect(result.score).toBe(0);
   });
+
+  describe('Phase 2 volume voters', () => {
+    const volCfg = {
+      OBV_SLOPE_EPS: 0,
+      MFI_OVERSOLD: 20,
+      MFI_OVERBOUGHT: 80,
+      VWAP_BAND: 0.001,
+      CMF_THRESHOLD: 0.05,
+    };
+
+    it('all four volume voters bullish → score 4 UP on top of price voters', () => {
+      const result = scoreFromValues(
+        bullishRSI, bullishMACD, bullishStoch,
+        { obvSlope: 1000, mfi: 10, vwap: 100, cmf: 0.2, lastClose: 101, cfg: volCfg },
+      );
+      expect(result.direction).toBe('UP');
+      expect(result.score).toBe(7); // 3 price + 4 volume, all UP
+      expect(result.signals.obv).toBe('rising');
+      expect(result.signals.mfi).toBe('oversold');
+      expect(result.signals.vwap).toBe('above');
+      expect(result.signals.cmf).toBe('positive');
+    });
+
+    it('all four volume voters bearish → score 4 DOWN', () => {
+      const result = scoreFromValues(
+        null, null, null,
+        { obvSlope: -1000, mfi: 90, vwap: 100, cmf: -0.2, lastClose: 99, cfg: volCfg },
+      );
+      expect(result.direction).toBe('DOWN');
+      expect(result.score).toBe(4);
+      expect(result.signals.obv).toBe('falling');
+      expect(result.signals.cmf).toBe('negative');
+    });
+
+    it('mixed volume voters net out', () => {
+      const result = scoreFromValues(
+        null, null, null,
+        { obvSlope: 1000, mfi: 90, vwap: 100, cmf: 0.0, lastClose: 100, cfg: volCfg },
+      );
+      // OBV up (+1), MFI overbought (+1 down), VWAP at price (neutral), CMF zero (neutral)
+      expect(result.score).toBe(0);
+      expect(result.direction).toBe('NEUTRAL');
+    });
+
+    it('volume snapshot ratio is computed', () => {
+      const result = scoreFromValues(
+        null, null, null,
+        undefined,
+        { current: 250, sma: 100 },
+      );
+      expect(result.volume?.ratio).toBe(2.5);
+    });
+
+    it('volume snapshot null sma → null ratio', () => {
+      const result = scoreFromValues(
+        null, null, null,
+        undefined,
+        { current: 100, sma: null },
+      );
+      expect(result.volume?.ratio).toBeNull();
+    });
+  });
 });

@@ -276,9 +276,33 @@ export async function mapNewsToFutures(
         continue;
       }
 
+      // Volume-spike gate (Phase 2) — hard block / shadow log
+      if (confluence.volume?.ratio !== null && confluence.volume?.ratio !== undefined) {
+        const ratio = confluence.volume.ratio;
+        const passed = ratio >= cfg.VOLUME_SPIKE_MULT;
+        if (cfg.VOLUME_SPIKE_GATE_ENABLED && !passed) {
+          logger.info('[mapping] futures volume_spike_block', {
+            symbol, direction,
+            volRatio: ratio.toFixed(2),
+            volMult: cfg.VOLUME_SPIKE_MULT,
+            title: item.title,
+          });
+          continue;
+        }
+        if (!cfg.VOLUME_SPIKE_GATE_ENABLED) {
+          logger.info('[mapping] volume_spike shadow', {
+            symbol, direction,
+            wouldBlock: !passed,
+            volRatio: ratio.toFixed(2),
+            volMult: cfg.VOLUME_SPIKE_MULT,
+          });
+        }
+      }
+
       logger.info('[mapping] futures confluence_pass', {
         symbol, direction, score: confluence.score,
         signals: confluence.signals,
+        volRatio: confluence.volume?.ratio?.toFixed(2),
       });
     }
 

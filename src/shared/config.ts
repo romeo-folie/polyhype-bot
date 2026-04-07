@@ -379,7 +379,7 @@ const envSchema = z.object({
   FUTURES_EXIT_ON_SIGNAL_FADE: z.coerce.boolean().optional().default(true),
   // TA confluence gate for futures entries — requires RSI/MACD/Stochastic agreement before opening a position.
   FUTURES_CONFLUENCE_GATE_ENABLED: z.coerce.boolean().optional().default(true),
-  FUTURES_MIN_CONFLUENCE_SCORE: z.coerce.number().int().min(0).max(3).optional().default(2),
+  FUTURES_MIN_CONFLUENCE_SCORE: z.coerce.number().int().min(0).max(7).optional().default(2),
   // Post-entry TA re-evaluation interval & minimum position age before re-eval kicks in.
   FUTURES_REEVAL_INTERVAL_S: z.coerce.number().int().min(10).optional().default(60),
   FUTURES_REEVAL_MIN_AGE_S: z.coerce.number().int().min(0).optional().default(120),
@@ -412,6 +412,25 @@ const envSchema = z.object({
   SPOT_TRIGGER_MODE: z.enum(['pct', 'zscore', 'both']).optional().default('pct'),
   SPOT_ZSCORE_THRESHOLD: z.coerce.number().min(0).optional().default(2.5),
   SPOT_ZSCORE_LOOKBACK_MIN: z.coerce.number().int().min(10).optional().default(60),
+
+  // ── Phase 2: Volume-aware confluence (default off — ship-then-flip) ──
+  // Hard volume-spike gate before futures entry (current vol must exceed SMA × MULT).
+  VOLUME_SPIKE_GATE_ENABLED: z.coerce.boolean().optional().default(false),
+  VOLUME_SPIKE_PERIOD: z.coerce.number().int().min(2).optional().default(20),
+  VOLUME_SPIKE_MULT: z.coerce.number().min(0.1).optional().default(2.0),
+  // OBV slope voter
+  OBV_SLOPE_LOOKBACK: z.coerce.number().int().min(2).optional().default(10),
+  OBV_SLOPE_EPS: z.coerce.number().min(0).optional().default(0),
+  // MFI voter
+  MFI_PERIOD: z.coerce.number().int().min(2).optional().default(14),
+  MFI_OVERSOLD: z.coerce.number().min(0).max(100).optional().default(20),
+  MFI_OVERBOUGHT: z.coerce.number().min(0).max(100).optional().default(80),
+  // VWAP voter
+  VWAP_LOOKBACK_MIN: z.coerce.number().int().min(2).optional().default(60),
+  VWAP_BAND: z.coerce.number().min(0).optional().default(0.001),
+  // CMF voter
+  CMF_PERIOD: z.coerce.number().int().min(2).optional().default(20),
+  CMF_THRESHOLD: z.coerce.number().min(0).optional().default(0.05),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

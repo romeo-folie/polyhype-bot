@@ -304,3 +304,119 @@ export function computeStochasticFromCandles(
 
   return { k: lastK, d: lastD };
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Volume-aware indicators
+// ---------------------------------------------------------------------------
+
+/**
+ * On-Balance Volume — running cumulative signed volume.
+ * +volume on up bars, -volume on down bars, 0 on unchanged bars.
+ */
+export function computeOBV(candles: OHLCVCandle[]): number[] {
+  const obv: number[] = [];
+  let running = 0;
+  for (let i = 0; i < candles.length; i++) {
+    const curr = candles[i]!;
+    if (i === 0) {
+      obv.push(0);
+      continue;
+    }
+    const prev = candles[i - 1]!;
+    if (curr.close > prev.close) running += curr.volume;
+    else if (curr.close < prev.close) running -= curr.volume;
+    obv.push(running);
+  }
+  return obv;
+}
+
+/**
+ * Slope of OBV over the last `lookback` bars (simple last - first delta).
+ * Returns null if insufficient data.
+ */
+export function computeOBVSlope(candles: OHLCVCandle[], lookback = 10): number | null {
+  if (candles.length < lookback + 1) return null;
+  const obv = computeOBV(candles);
+  const tail = obv.slice(-lookback - 1);
+  const first = tail[0];
+  const last = tail[tail.length - 1];
+  if (first === undefined || last === undefined) return null;
+  return last - first;
+}
+
+/**
+ * Money Flow Index — volume-weighted RSI on typical price.
+ * Returns null if any bar in the window has zero volume or insufficient data.
+ */
+export function computeMFI(candles: OHLCVCandle[], period = 14): number | null {
+  if (candles.length < period + 1) return null;
+  const window = candles.slice(-(period + 1));
+  let posFlow = 0;
+  let negFlow = 0;
+  for (let i = 1; i < window.length; i++) {
+    const curr = window[i]!;
+    const prev = window[i - 1]!;
+    if (curr.volume <= 0) return null;
+    const tpCurr = (curr.high + curr.low + curr.close) / 3;
+    const tpPrev = (prev.high + prev.low + prev.close) / 3;
+    const flow = tpCurr * curr.volume;
+    if (tpCurr > tpPrev) posFlow += flow;
+    else if (tpCurr < tpPrev) negFlow += flow;
+  }
+  if (posFlow + negFlow === 0) return 50;
+  if (negFlow === 0) return 100;
+  const ratio = posFlow / negFlow;
+  return 100 - 100 / (1 + ratio);
+}
+
+/**
+ * Volume-Weighted Average Price over the last `lookback` bars.
+ * Returns null if zero total volume or insufficient data.
+ */
+export function computeVWAP(candles: OHLCVCandle[], lookback = 60): number | null {
+  if (candles.length === 0) return null;
+  const window = candles.slice(-lookback);
+  let pvSum = 0;
+  let vSum = 0;
+  for (const c of window) {
+    if (c.volume <= 0) continue;
+    const tp = (c.high + c.low + c.close) / 3;
+    pvSum += tp * c.volume;
+    vSum += c.volume;
+  }
+  if (vSum === 0) return null;
+  return pvSum / vSum;
+}
+
+/**
+ * Chaikin Money Flow — Σ(MFV) / Σ(volume) over the period.
+ * MFV = ((close - low) - (high - close)) / (high - low) × volume.
+ * Returns null on insufficient data or zero volume.
+ */
+export function computeCMF(candles: OHLCVCandle[], period = 20): number | null {
+  if (candles.length < period) return null;
+  const window = candles.slice(-period);
+  let mfvSum = 0;
+  let vSum = 0;
+  for (const c of window) {
+    if (c.volume <= 0) continue;
+    const range = c.high - c.low;
+    const mfm = range === 0 ? 0 : ((c.close - c.low) - (c.high - c.close)) / range;
+    mfvSum += mfm * c.volume;
+    vSum += c.volume;
+  }
+  if (vSum === 0) return null;
+  return mfvSum / vSum;
+}
+
+/**
+ * Simple moving average of volume over the last `period` bars.
+ * Returns null on insufficient data.
+ */
+export function computeVolumeSMA(candles: OHLCVCandle[], period = 20): number | null {
+  if (candles.length < period) return null;
+  const window = candles.slice(-period);
+  let sum = 0;
+  for (const c of window) sum += c.volume;
+  return sum / period;
+}
