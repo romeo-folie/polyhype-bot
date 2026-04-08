@@ -67,6 +67,10 @@ const SimmerTradeResultSchema = z.object({
   tx_hash: z.string().optional(),
   shares_bought: z.number().optional(),
   shares_sold: z.number().optional(),
+  /** Requested shares before fill — used for partial fill detection. */
+  shares_requested: z.number().optional(),
+  /** Order fill lifecycle state: 'filled', 'submitted' (GTC/delayed), 'failed', or 'unconfirmed'. */
+  fill_status: z.enum(['filled', 'submitted', 'failed', 'unconfirmed']).optional(),
   cost: z.number().optional(),
   price: z.number().optional(),
   warnings: z.array(z.string()).optional(),

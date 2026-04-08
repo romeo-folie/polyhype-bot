@@ -342,18 +342,44 @@ async function executeSimmerExit(opts: {
   return { marketId: position.marketId, success: false, error: finalError, returnPct, reason };
 }
 
-/** Post-sell cleanup for Simmer: close position, credit proceeds, record outcome, notify. */
+/**
+ * Post-sell cleanup for Simmer: close position, credit proceeds, record outcome, notify.
+ *
+ * Uses the venue-reported actual filled amount (`tradeResult.shares_sold`) when
+ * available — this matters for partial fills where the request and fill differ.
+ * `returnPct` is price-based (not share-based) so it is unaffected, but bankroll
+ * credits and per-share logs must use the true filled amount.
+ */
 async function finalizeSimmerExit(
   redis: Redis,
   position: Position,
-  sharesExited: number,
-  tradeResult: { tx_hash?: string | null | undefined },
+  sharesRequested: number,
+  tradeResult: {
+    tx_hash?: string | null | undefined;
+    shares_sold?: number | undefined;
+    shares_requested?: number | undefined;
+    fill_status?: 'filled' | 'submitted' | 'failed' | 'unconfirmed' | undefined;
+  },
   currentPrice: number,
   returnPct: number,
   reason: ExitReason,
 ): Promise<TakeProfitResult> {
+  const actualSharesSold =
+    typeof tradeResult.shares_sold === 'number' && tradeResult.shares_sold > 0
+      ? tradeResult.shares_sold
+      : sharesRequested;
+
+  if (actualSharesSold < sharesRequested - 1e-6) {
+    logger.warn('[take-profit-executor] simmer partial fill detected', {
+      marketId: position.marketId,
+      requested: sharesRequested,
+      filled: actualSharesSold,
+      fillStatus: tradeResult.fill_status,
+    });
+  }
+
   await closePositionWithHedge(redis, position.marketId, position.direction);
-  const proceedsUsd = sharesExited * currentPrice;
+  const proceedsUsd = actualSharesSold * currentPrice;
   await creditProceeds(redis, proceedsUsd);
   await recordPositionOutcome(redis, position, {
     result: returnPct >= 0 ? 'won' : 'lost',
@@ -365,6 +391,8 @@ async function finalizeSimmerExit(
   logger.info('[take-profit-executor] exit successful (simmer)', {
     marketId: position.marketId,
     txHash: tradeResult.tx_hash,
+    requested: sharesRequested.toFixed(4),
+    filled: actualSharesSold.toFixed(4),
     returnPct: returnPct.toFixed(2),
   });
 
@@ -461,16 +489,31 @@ async function attemptSimmerRecovery(
   return null;
 }
 
-/** Post-sell cleanup: close position, credit proceeds, record outcome, notify. */
+/**
+ * Post-sell cleanup for CLOB: close position, credit proceeds, record outcome, notify.
+ *
+ * Uses the venue-reported actual filled amount (`shares_bought` from the CLOB
+ * response, which maps to `takingAmount` for market sells) when available. A
+ * partial fill on FAK leaves a residual on-chain that Change 2 (sweep) handles.
+ */
 async function finalizeClobExit(
   redis: Redis,
   position: Position,
-  sharesExited: number,
+  sharesRequested: number,
+  actualSharesSold: number,
   currentPrice: number,
   returnPct: number,
   reason: ExitReason,
   txHash?: string | null | undefined,
 ): Promise<TakeProfitResult> {
+  const sharesExited = actualSharesSold > 0 ? actualSharesSold : sharesRequested;
+  if (sharesExited < sharesRequested - 1e-6) {
+    logger.warn('[take-profit-executor] clob partial fill detected', {
+      marketId: position.marketId,
+      requested: sharesRequested,
+      filled: sharesExited,
+    });
+  }
   await closePositionWithHedge(redis, position.marketId, position.direction);
   const proceedsUsd = sharesExited * currentPrice;
   await creditProceeds(redis, proceedsUsd);
@@ -677,6 +720,7 @@ async function executeClobExit(opts: {
         redis,
         position,
         safeShares,
+        clobResult.shares_bought ?? safeShares,
         currentPrice,
         returnPct,
         reason,
@@ -714,6 +758,7 @@ async function executeClobExit(opts: {
               redis,
               position,
               retryShares,
+              retryResult.shares_bought ?? retryShares,
               currentPrice,
               returnPct,
               reason,
