@@ -147,23 +147,23 @@ export async function detectMoves(currentPrices: SpotPrice[]): Promise<SpotMove[
         zscoreTriggered = false;
       }
     } else {
-      // Shadow-log z-score in pct mode for validation
+      // Shadow-log z-score in pct mode for validation. Log on every tick so we
+      // can measure the true agreement rate, not only disagreements.
       const z = await computeMomentumZscore(sp.assetId, cfg.SPOT_ZSCORE_LOOKBACK_MIN).catch(
         () => null,
       );
       if (z) {
         zValue = z.z;
         const wouldTrigger = Math.abs(z.z) >= cfg.SPOT_ZSCORE_THRESHOLD;
-        if (wouldTrigger !== pctTriggered) {
-          logger.info('[spot-threshold] zscore shadow', {
-            assetId: sp.assetId,
-            triggerMode,
-            pctTriggered,
-            wouldTrigger,
-            zscore: z.z.toFixed(2),
-            changePercent: changePercent.toFixed(2),
-          });
-        }
+        logger.info('[spot-threshold] zscore shadow', {
+          assetId: sp.assetId,
+          triggerMode,
+          pctTriggered,
+          wouldTrigger,
+          agrees: pctTriggered === wouldTrigger,
+          zscore: z.z.toFixed(2),
+          changePercent: changePercent.toFixed(2),
+        });
       }
     }
 
@@ -179,6 +179,15 @@ export async function detectMoves(currentPrices: SpotPrice[]): Promise<SpotMove[
         break;
       case 'both':
         triggered = pctTriggered && zscoreTriggered === true;
+        break;
+      case 'or':
+        // Union: fire when either pct OR zscore triggers. When only zscore
+        // triggers (pct is false), fall back to the z sign for direction since
+        // changePercent may be below the pct threshold and thus less reliable.
+        triggered = pctTriggered || zscoreTriggered === true;
+        if (triggered && !pctTriggered && zValue !== null) {
+          directionFromZ = zValue > 0 ? 'up' : 'down';
+        }
         break;
     }
 

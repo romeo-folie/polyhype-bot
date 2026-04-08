@@ -509,7 +509,7 @@ const envSchema = z.object({
   FUTURES_ATR_TRAIL_STOP_MULT: z.coerce.number().min(0.1).optional().default(1.0),
 
   // ── Phase 1: Z-score spot momentum trigger ──
-  SPOT_TRIGGER_MODE: z.enum(['pct', 'zscore', 'both']).optional().default('pct'),
+  SPOT_TRIGGER_MODE: z.enum(['pct', 'zscore', 'both', 'or']).optional().default('pct'),
   SPOT_ZSCORE_THRESHOLD: z.coerce.number().min(0).optional().default(2.5),
   SPOT_ZSCORE_LOOKBACK_MIN: z.coerce.number().int().min(10).optional().default(60),
 
