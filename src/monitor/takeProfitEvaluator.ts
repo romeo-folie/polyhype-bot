@@ -26,7 +26,8 @@ export type ExitReason =
   | 'synthetic'
   | 'futures_sl'
   | 'futures_tp'
-  | 'stale_exit';
+  | 'stale_exit'
+  | 'trailing_stop';
 
 export interface ExitDecision {
   shouldExit: boolean;

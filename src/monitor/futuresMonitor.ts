@@ -169,7 +169,6 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         const ledgerPosForAtr = futuresLedger.find((p) => p.marketId === symbol);
         let slPct = cfg.FUTURES_STOP_LOSS_PCT; // negative
         let tpPct = cfg.FUTURES_TAKE_PROFIT_PCT; // positive
-        let trailActPct = cfg.FUTURES_TRAILING_ACTIVATION_PCT;
         let trailStopPct = cfg.FUTURES_TRAILING_STOP_PCT;
         let usingAtrMode = false;
         if (
@@ -189,7 +188,6 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           );
           slPct = -slMag;
           tpPct = tpMag;
-          trailActPct = atrPct * cfg.FUTURES_ATR_TRAIL_ACT_MULT;
           trailStopPct = atrPct * cfg.FUTURES_ATR_TRAIL_STOP_MULT;
           usingAtrMode = true;
         }
@@ -238,27 +236,38 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         if (priceChangePct <= slPct) {
           shouldExit = true;
           reason = `Stop-Loss triggered (${priceChangePct.toFixed(2).toString()}%${usingAtrMode ? ` atr_sl=${slPct.toFixed(2)}` : ''})`;
-        } else if (priceChangePct >= tpPct) {
+        } else if (!cfg.FUTURES_TRAILING_STOP_ENABLED && priceChangePct >= tpPct) {
+          // Fixed TP only when trailing is disabled. When trailing is on, it
+          // supersedes fixed TP so winners can run beyond the TP line; the
+          // floor is clamped to TP below so the worst case at the TP line is
+          // identical to fixed-TP behavior.
           shouldExit = true;
           reason = `Take-Profit triggered (${priceChangePct.toFixed(2).toString()}%${usingAtrMode ? ` atr_tp=${tpPct.toFixed(2)}` : ''})`;
         }
 
-        // 2b. Trailing stop — lock in gains once position exceeds activation threshold
-        if (!shouldExit && cfg.FUTURES_TRAILING_STOP_ENABLED && priceChangePct >= trailActPct) {
+        // 2b. Trailing stop — supersedes fixed TP when enabled. Arms once the
+        // peak crosses the TP line, then ratchets a floor up with the HWM so
+        // winners keep running until they give back `trailStopPct` from peak.
+        // Floor is clamped to TP so immediate reversal at TP exits at TP.
+        if (!shouldExit && cfg.FUTURES_TRAILING_STOP_ENABLED) {
           const ledgerPos = futuresLedger.find((p) => p.marketId === symbol);
-          let hwm = ledgerPos?.highWaterMarkPct ?? priceChangePct;
+          const priorHwm = ledgerPos?.highWaterMarkPct;
+          let hwm = typeof priorHwm === 'number' && Number.isFinite(priorHwm) ? priorHwm : priceChangePct;
           if (priceChangePct > hwm) {
             hwm = priceChangePct;
             updateHighWaterMark(redis, symbol, direction, hwm).catch(() => {});
           }
-          const drawdown = hwm - priceChangePct;
-          if (drawdown >= trailStopPct) {
-            shouldExit = true;
-            reason = `Trailing stop (peak +${hwm.toFixed(2)}%, now +${priceChangePct.toFixed(2)}%, drawdown ${drawdown.toFixed(2)}%${usingAtrMode ? ` atr_trail=${trailStopPct.toFixed(2)}` : ''})`;
-          } else {
-            logger.debug('[futures-monitor] trailing active', {
-              symbol, hwm: hwm.toFixed(2), current: priceChangePct.toFixed(2), drawdown: drawdown.toFixed(2),
-            });
+          // Activation = TP line. Floor clamped to TP so worst case at TP is identical to fixed-TP.
+          if (hwm >= tpPct) {
+            const floorPct = Math.max(tpPct, hwm - trailStopPct);
+            if (priceChangePct <= floorPct) {
+              shouldExit = true;
+              reason = `Trailing stop (peak +${hwm.toFixed(2)}%, floor +${floorPct.toFixed(2)}%, now +${priceChangePct.toFixed(2)}%${usingAtrMode ? ` atr_trail=${trailStopPct.toFixed(2)}` : ''})`;
+            } else {
+              logger.debug('[futures-monitor] trailing active', {
+                symbol, hwm: hwm.toFixed(2), floor: floorPct.toFixed(2), current: priceChangePct.toFixed(2),
+              });
+            }
           }
         }
 

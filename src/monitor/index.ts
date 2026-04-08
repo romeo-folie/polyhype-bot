@@ -14,7 +14,8 @@ import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { isCryptoAsset } from '../shared/assets.js';
-import { getOpenPositions } from '../execution/positionLedger.js';
+import { getOpenPositions, updateHighWaterMark } from '../execution/positionLedger.js';
+import { evaluateTrailingStop } from './trailingStopExit.js';
 import { fetchAllCurrentPrices } from './priceFetcher.js';
 import { getPriceFeed, destroyPriceFeed } from '../shared/feedSingleton.js';
 import { evaluateTakeProfit } from './takeProfitEvaluator.js';
@@ -207,7 +208,20 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
       reason: decision.reason,
     });
 
-    if (decision.shouldExit && decision.reason) {
+    // Trailing-stop suppression: when enabled, a fixed-TP exit is SUPPRESSED
+    // so the trailing block below can take over. SL and divergence_closed still fire.
+    const isFuturesPosTop =
+      position.isFutures === true || position.executionVenue === 'hyperliquid';
+    const isCopytradePosTop = position.sourcedFrom?.startsWith('copytrade:') ?? false;
+    const trailingActive =
+      cfg.TRAILING_STOP_ENABLED && !isFuturesPosTop && !isCopytradePosTop;
+
+    const suppressTpExit =
+      trailingActive &&
+      decision.shouldExit &&
+      decision.reason === 'take_profit_threshold';
+
+    if (decision.shouldExit && decision.reason && !suppressTpExit) {
       const result = await executeTakeProfit({
         position,
         currentPrice: currentPrice.currentOutcomePrice,
@@ -226,6 +240,62 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
         });
       }
       continue;
+    }
+
+    // Trailing-stop evaluation — runs on every tick when enabled so HWM stays fresh.
+    if (trailingActive) {
+      const trailingDecision = evaluateTrailingStop({
+        position,
+        currentPnlPct: decision.returnPct,
+        currentBid: currentPrice.currentOutcomePrice,
+        cfg,
+      });
+
+      // Persist HWM unconditionally so peak tracking is always up to date.
+      if (
+        !Number.isFinite(position.highWaterMarkPct ?? NaN) ||
+        trailingDecision.newHwmPct > (position.highWaterMarkPct ?? Number.NEGATIVE_INFINITY)
+      ) {
+        await updateHighWaterMark(
+          redis,
+          position.marketId,
+          position.direction,
+          trailingDecision.newHwmPct,
+        ).catch((err: unknown) => {
+          logger.debug('[monitor] updateHighWaterMark failed (non-fatal)', {
+            marketId: position.marketId,
+            error: String(err),
+          });
+        });
+      }
+
+      if (trailingDecision.shouldExit) {
+        logger.info('[monitor] trailing_stop triggered', {
+          marketId: position.marketId,
+          direction: position.direction,
+          peakPct: trailingDecision.peakPct.toFixed(2),
+          floorPct: trailingDecision.floorPct.toFixed(2),
+          currentPnlPct: decision.returnPct.toFixed(2),
+          drawdownPct: trailingDecision.drawdownPct.toFixed(2),
+        });
+        const trailResult = await executeTakeProfit({
+          position,
+          currentPrice: currentPrice.currentOutcomePrice,
+          returnPct: decision.returnPct,
+          reason: 'trailing_stop',
+          redis,
+        });
+        if (trailResult.success) {
+          exited++;
+        } else {
+          logger.warn('[monitor] trailing-stop exit failed — will retry next cycle', {
+            marketId: position.marketId,
+            error: trailResult.error,
+          });
+          held++;
+        }
+        continue;
+      }
     }
 
     // Stale-exit path — only runs when TP/SL/divergence did NOT fire.

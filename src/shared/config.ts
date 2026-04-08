@@ -141,6 +141,26 @@ const envSchema = z.object({
   MAKER_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(45_000),
   MAKER_POLL_INTERVAL_MS: z.coerce.number().int().min(50).optional().default(1000),
   MAKER_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(20),
+  // Maker-exit (PM CLOB-entered positions only). Exits are more time-sensitive
+  // than entries, so MAKER_EXIT_MAX_WAIT_MS defaults shorter than MAKER_MAX_WAIT_MS.
+  // Eligible reasons is a comma-separated list; stop_loss is intentionally NOT eligible.
+  MAKER_EXIT_ENABLED: boolFromEnv.optional().default(false),
+  MAKER_EXIT_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(20_000),
+  MAKER_EXIT_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(20),
+  MAKER_EXIT_ELIGIBLE_REASONS: z
+    .string()
+    .optional()
+    .default('take_profit_threshold,trailing_stop,stale_exit')
+    .transform((v) =>
+      v
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0),
+    ),
+  // Trailing stop for PM positions — activation is TAKE_PROFIT_THRESHOLD (not a new knob).
+  TRAILING_STOP_ENABLED: boolFromEnv.optional().default(false),
+  TRAILING_GIVEBACK_PCT: z.coerce.number().min(0).optional().default(10),
+  TRAILING_MIN_EXIT_BID: z.coerce.number().min(0).max(1).optional().default(0.05),
   TAKER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   TAKER_MIN_EDGE_CATEGORIES: z
     .string()

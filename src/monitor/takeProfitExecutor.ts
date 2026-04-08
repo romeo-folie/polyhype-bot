@@ -19,11 +19,16 @@ import {
 } from '../shared/simmer.js';
 import {
   submitClobSell,
+  submitClobLimitSell,
+  getClobOrderBook,
+  getClobOrder,
+  cancelClobOrder,
   fetchClobTokenBalance,
   parseBalanceFromClobError,
   type ClobBalanceResult,
   CLOB_MIN_ORDER_USD,
 } from '../shared/clob.js';
+import type { TickSize } from '@polymarket/clob-client';
 import {
   closePosition,
   markPositionSynthHedged,
@@ -187,6 +192,29 @@ export async function executeTakeProfit(opts: {
   // Route to the correct venue
   const venue = position.executionVenue ?? 'simmer';
   if (venue === 'clob') {
+    // Maker-exit attempt (CLOB-entered only). Stop-loss is never eligible.
+    // On any failure path falls through to the existing CLOB taker exit below.
+    const cfg = loadConfig();
+    const makerEligible =
+      cfg.MAKER_EXIT_ENABLED &&
+      position.clobTokenIds &&
+      position.clobTokenIds.length > 0 &&
+      cfg.MAKER_EXIT_ELIGIBLE_REASONS.includes(reason);
+    if (makerEligible) {
+      const makerResult = await tryExecuteViaClobMakerExit({
+        position,
+        returnPct,
+        reason,
+        redis,
+        sharesToSell,
+      });
+      if (makerResult.ok) return makerResult.result;
+      logger.info('[exit] maker_exit_fallback_taker', {
+        marketId: position.marketId,
+        reason,
+        fallbackReason: makerResult.fallbackReason,
+      });
+    }
     return executeClobExit({ position, currentPrice, returnPct, reason, redis, sharesToSell });
   }
   return executeSimmerExit({
@@ -748,6 +776,224 @@ async function finalizeClobExit(
   };
   if (txHash) result.txHash = txHash;
   return result;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function roundDownToTick(value: number, tick: number): number {
+  if (!isFinite(value) || !isFinite(tick) || tick <= 0) return value;
+  const rounded = Math.floor(value / tick) * tick;
+  return parseFloat(rounded.toFixed(6));
+}
+
+async function confirmMakerExitCancel(orderId: string): Promise<boolean> {
+  const cancelled = await cancelClobOrder(orderId);
+  if (cancelled) return true;
+  for (const delay of [250, 500, 750]) {
+    await sleep(delay);
+    const order = await getClobOrder(orderId);
+    if (!order) return true;
+    const status = String(order.status ?? '').toLowerCase();
+    if (status && ['cancelled', 'canceled', 'filled'].includes(status)) return true;
+  }
+  return false;
+}
+
+/**
+ * Resolve a resting sell price inside the spread.
+ *
+ * Mirror of `resolveMakerPrice()` in executor.ts but for sells: we want to
+ * rest *below* the best ask by `priceEdgeBps`. Clamped to tick and to a
+ * floor strictly above the best bid so post-only doesn't cross.
+ */
+function resolveMakerExitPrice(
+  book: { bids: { price: string }[]; asks: { price: string }[]; tick_size: string },
+  priceEdgeBps: number,
+): number | null {
+  const tick = parseFloat(book.tick_size);
+  if (!isFinite(tick) || tick <= 0) return null;
+
+  const bestBid = parseFloat(book.bids[0]?.price ?? '0');
+  const bestAsk = parseFloat(book.asks[0]?.price ?? '0');
+  const improvement = priceEdgeBps / 10_000;
+
+  // Rest below the ask by `improvement`, capturing spread vs taker who would hit the bid.
+  let price = bestAsk > 0 ? bestAsk - improvement : 0;
+  if (price <= 0 && bestBid > 0) {
+    price = bestBid + tick;
+  }
+
+  // Post-only safety: must be strictly above best bid so we don't cross as a taker.
+  if (bestBid > 0) {
+    price = Math.max(price, bestBid + tick);
+  }
+
+  price = Math.max(price, tick);
+  price = Math.min(price, 1 - tick);
+  price = roundDownToTick(price, tick);
+
+  if (!isFinite(price) || price <= 0) return null;
+  return price;
+}
+
+/**
+ * Try to exit a CLOB-entered PM position via a post-only maker sell.
+ *
+ * Preconditions (caller should have checked executionVenue === 'clob' + clobTokenIds):
+ *   - MAKER_EXIT_ENABLED=true
+ *   - reason ∈ MAKER_EXIT_ELIGIBLE_REASONS
+ *
+ * Returns `{ ok: true, result }` on a successful finalize (full or partial-with-sweep).
+ * Returns `{ ok: false }` on timeout / rejection / zero-fill so the caller falls
+ * through to the existing taker CLOB exit path unchanged.
+ */
+async function tryExecuteViaClobMakerExit(opts: {
+  position: Position;
+  returnPct: number;
+  reason: ExitReason;
+  redis: Redis;
+  sharesToSell: number;
+}): Promise<{ ok: true; result: TakeProfitResult } | { ok: false; fallbackReason: string }> {
+  const { position, returnPct, reason, redis, sharesToSell } = opts;
+  const cfg = loadConfig();
+
+  const tokenId =
+    position.direction === 'YES' || position.direction === 'UP'
+      ? position.clobTokenIds?.[0]
+      : position.clobTokenIds?.[1];
+  if (!tokenId) return { ok: false, fallbackReason: 'missing_token' };
+
+  void redis.incr('execution:metric:maker_exit_attempted').catch(() => undefined);
+  logger.info('[exit] maker_exit_attempt', {
+    marketId: position.marketId,
+    direction: position.direction,
+    reason,
+    sharesToSell: sharesToSell.toFixed(6),
+  });
+
+  const book = await getClobOrderBook(tokenId);
+  if (!book) {
+    void redis.incr('execution:metric:maker_exit_fallback').catch(() => undefined);
+    return { ok: false, fallbackReason: 'no_orderbook' };
+  }
+
+  const price = resolveMakerExitPrice(book, cfg.MAKER_EXIT_PRICE_EDGE_BPS);
+  if (price === null) {
+    void redis.incr('execution:metric:maker_exit_fallback').catch(() => undefined);
+    return { ok: false, fallbackReason: 'bad_price' };
+  }
+
+  // Pre-flight balance check — cap size at on-chain balance, bail to taker on fetch error.
+  const balRes = await fetchClobTokenBalance(tokenId);
+  if (!balRes.ok) {
+    void redis.incr('execution:metric:maker_exit_fallback').catch(() => undefined);
+    return { ok: false, fallbackReason: 'balance_fetch_failed' };
+  }
+  const safeShares = Math.min(sharesToSell, balRes.balance);
+  if (safeShares <= 0 || safeShares * price < CLOB_MIN_ORDER_USD) {
+    void redis.incr('execution:metric:maker_exit_fallback').catch(() => undefined);
+    return { ok: false, fallbackReason: 'below_min_notional' };
+  }
+  const truncatedShares = Math.floor(safeShares * 1_000_000) / 1_000_000;
+
+  const submitResult = await submitClobLimitSell({
+    tokenId,
+    price,
+    size: truncatedShares,
+    tickSize: book.tick_size as TickSize,
+    negRisk: book.neg_risk,
+    orderType: 'GTC',
+    postOnly: true,
+  });
+
+  if (!submitResult.success || !submitResult.order_id) {
+    void redis.incr('execution:metric:maker_exit_fallback').catch(() => undefined);
+    logger.warn('[exit] maker_exit_fallback_taker', {
+      marketId: position.marketId,
+      reason,
+      error: submitResult.error,
+    });
+    return { ok: false, fallbackReason: submitResult.error ?? 'order_rejected' };
+  }
+
+  const orderId = submitResult.order_id;
+  const deadline = Date.now() + cfg.MAKER_EXIT_MAX_WAIT_MS;
+  let matched = 0;
+  let original = truncatedShares;
+
+  while (Date.now() < deadline) {
+    const order = await getClobOrder(orderId);
+    if (!order) break;
+    matched = parseFloat(order.size_matched ?? '0');
+    original = parseFloat(order.original_size ?? String(truncatedShares));
+    if (matched >= original - 1e-9) break;
+    await sleep(cfg.MAKER_POLL_INTERVAL_MS);
+  }
+
+  const isFull = matched >= original - 1e-9 && matched > 0;
+  const isPartial = matched > 0 && !isFull;
+
+  // Cancel remainder on partial or timeout so on-chain balance is freed for sweep/taker retry.
+  if (!isFull) {
+    const cancelled = await confirmMakerExitCancel(orderId);
+    if (!cancelled) {
+      logger.warn('[exit] maker_exit_cancel_unconfirmed', {
+        marketId: position.marketId,
+        orderId,
+      });
+      // Still fall through — sweep/taker path will resync against on-chain balance.
+    }
+  }
+
+  if (matched <= 0) {
+    void redis.incr('execution:metric:maker_exit_timeout').catch(() => undefined);
+    void redis.incr('execution:metric:maker_exit_fallback').catch(() => undefined);
+    logger.info('[exit] maker_exit_timeout', {
+      marketId: position.marketId,
+      reason,
+      orderId,
+      waitedMs: cfg.MAKER_EXIT_MAX_WAIT_MS,
+    });
+    return { ok: false, fallbackReason: 'timeout_no_fill' };
+  }
+
+  // Full or partial fill — finalize via existing CLOB finalize path.
+  // Partial fills forward the residual to sweepClobResidual inside finalizeClobExit.
+  if (isFull) {
+    void redis.incr('execution:metric:maker_exit_filled').catch(() => undefined);
+    logger.info('[exit] maker_exit_filled', {
+      marketId: position.marketId,
+      reason,
+      price,
+      shares: matched.toFixed(6),
+    });
+  } else {
+    void redis.incr('execution:metric:maker_exit_partial').catch(() => undefined);
+    logger.info('[exit] maker_exit_partial', {
+      marketId: position.marketId,
+      reason,
+      price,
+      matched: matched.toFixed(6),
+      original: original.toFixed(6),
+    });
+  }
+
+  // Use the actual resting price as the realized exit price (not the stale currentPrice).
+  // finalize uses this both for proceeds credit and for the partial-fill sweep ctx.
+  const result = await finalizeClobExit(
+    redis,
+    position,
+    isPartial ? original : matched,
+    matched,
+    price,
+    returnPct,
+    reason,
+    undefined,
+    { tokenId },
+  );
+  return { ok: true, result };
 }
 
 async function executeClobExit(opts: {

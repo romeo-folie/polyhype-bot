@@ -172,7 +172,8 @@ export type TakeProfitReason =
   | 'synthetic'
   | 'futures_sl'
   | 'futures_tp'
-  | 'stale_exit';
+  | 'stale_exit'
+  | 'trailing_stop';
 
 export async function notifyTakeProfitExecuted(opts: {
   position: Position;
@@ -192,6 +193,7 @@ export async function notifyTakeProfitExecuted(opts: {
     futures_sl: '🛑 Futures Stop-Loss triggered',
     futures_tp: '🎯 Futures Take-Profit triggered',
     stale_exit: '⏱️ Stale-exit — position rotated out',
+    trailing_stop: '🪤 Trailing stop — gains locked in',
   };
   let reasonLabel = reasonLabels[reason] ?? reason;
   if (mechanismDetail) reasonLabel = `${reasonLabel} [${mechanismDetail}]`;

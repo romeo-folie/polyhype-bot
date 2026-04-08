@@ -484,6 +484,42 @@ export async function submitClobLimitBuy(input: ClobLimitBuyInput): Promise<Clob
 }
 
 /**
+ * Submit a post-only limit SELL on the CLOB.
+ *
+ * Mirror of submitClobLimitBuy() but with Side.SELL. Used by the maker-exit
+ * path in takeProfitExecutor to rest a sell inside the spread instead of
+ * hitting the bid as a taker.
+ */
+export async function submitClobLimitSell(input: ClobLimitBuyInput): Promise<ClobTradeResult> {
+  const cfg = loadConfig();
+  if (!cfg.CLOB_FALLBACK_ENABLED) {
+    return { success: false, error: 'CLOB fallback disabled (CLOB_FALLBACK_ENABLED=false)' };
+  }
+
+  try {
+    const client = await getClobClient();
+    const raw: unknown = await orderWithTimeout(
+      client.createAndPostOrder(
+        {
+          tokenID: input.tokenId,
+          price: input.price,
+          side: Side.SELL,
+          size: input.size,
+        },
+        { tickSize: input.tickSize, negRisk: input.negRisk },
+        OrderType.GTC,
+        false,
+        input.postOnly ?? false,
+      ),
+    );
+
+    return parseOrderResponse(raw);
+  } catch (err) {
+    return { success: false, error: normaliseError(err) };
+  }
+}
+
+/**
  * Fetch a specific CLOB order by ID.
  */
 export async function getClobOrder(orderId: string): Promise<OpenOrder | null> {
