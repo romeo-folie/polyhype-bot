@@ -5,7 +5,11 @@ import type { Redis } from 'ioredis';
 
 const WATCHLIST_KEY = 'watchlist:dynamic_keywords';
 const MARKET_CACHE_KEY = 'watchlist:market_cache';
-const WATCHLIST_TTL_SECONDS = 3600 * 6; // 6 hours
+// Cache TTL is 3× the 4h cron interval so a single missed refresh run (disk
+// hiccup, network blip, etc.) does not blank the cache and take clob-flow /
+// entityExtractor / sports-scanner dark. Actively stale data (up to ~10% market
+// turnover over 12h) is preferable to no data at all.
+const WATCHLIST_TTL_SECONDS = 3600 * 12; // 12 hours
 
 /**
  * Keywords that are too common and should be ignored to avoid noise.
