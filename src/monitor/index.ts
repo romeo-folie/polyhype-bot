@@ -19,6 +19,12 @@ import { fetchAllCurrentPrices } from './priceFetcher.js';
 import { getPriceFeed, destroyPriceFeed } from '../shared/feedSingleton.js';
 import { evaluateTakeProfit } from './takeProfitEvaluator.js';
 import { executeTakeProfit } from './takeProfitExecutor.js';
+import {
+  evaluateStale,
+  recordStaleSample,
+  computePnlRangePct,
+  markStaleCooldown,
+} from './staleExit.js';
 import { redeemResolvedPositions } from './resolutionRedeemer.js';
 import { runClobProbe } from '../shared/clobProbe.js';
 import { setAgentAutoRedeem } from '../shared/simmer.js';
@@ -219,7 +225,80 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
           error: result.error,
         });
       }
+      continue;
+    }
+
+    // Stale-exit path — only runs when TP/SL/divergence did NOT fire.
+    // Excludes futures (handled by futuresMonitor) and copytrades (own exit logic).
+    const isFuturesPos =
+      position.isFutures === true || position.executionVenue === 'hyperliquid';
+    const isCopytradePos = position.sourcedFrom?.startsWith('copytrade:') ?? false;
+
+    if (!cfg.STALE_EXIT_ENABLED || isFuturesPos || isCopytradePos) {
+      held++;
+      continue;
+    }
+
+    // Update rolling peak PnL + price sample window, then evaluate.
+    const sampleState = await recordStaleSample(redis, position, decision.returnPct).catch(
+      (err: unknown) => {
+        logger.debug('[monitor] recordStaleSample failed (non-fatal)', {
+          marketId: position.marketId,
+          error: String(err),
+        });
+        return { peakPnlPct: decision.returnPct, firstSeenMs: Date.now() };
+      },
+    );
+
+    const windowMs = cfg.STALE_VOL_WINDOW_H * 60 * 60 * 1000;
+    const priceRangePct = await computePnlRangePct(redis, position, windowMs).catch(
+      () => null,
+    );
+
+    const staleDecision = evaluateStale({
+      position,
+      currentPnlPct: decision.returnPct,
+      peakPnlPct: sampleState.peakPnlPct,
+      firstSeenMs: sampleState.firstSeenMs,
+      priceRangePct,
+      cfg,
+    });
+
+    if (!staleDecision.shouldExit) {
+      held++;
+      continue;
+    }
+
+    logger.info('[monitor] stale-exit triggered', {
+      marketId: position.marketId,
+      direction: position.direction,
+      rule: staleDecision.rule,
+      ageH: staleDecision.ageH.toFixed(2),
+      trackedH: staleDecision.trackedH.toFixed(2),
+      categoryAgeH: staleDecision.categoryAgeH,
+      peakPnlPct: staleDecision.peakPnlPct.toFixed(2),
+      currentPnlPct: staleDecision.currentPnlPct.toFixed(2),
+      priceRangePct: staleDecision.priceRangePct?.toFixed(2),
+    });
+
+    const staleResult = await executeTakeProfit({
+      position,
+      currentPrice: currentPrice.currentOutcomePrice,
+      returnPct: decision.returnPct,
+      reason: 'stale_exit',
+      redis,
+    });
+
+    if (staleResult.success) {
+      exited++;
+      await markStaleCooldown(redis, position.marketId).catch(() => {
+        /* non-fatal */
+      });
     } else {
+      logger.warn('[monitor] stale-exit failed — will retry next cycle', {
+        marketId: position.marketId,
+        error: staleResult.error,
+      });
       held++;
     }
   }

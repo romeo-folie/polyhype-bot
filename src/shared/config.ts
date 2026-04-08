@@ -290,6 +290,25 @@ const envSchema = z.object({
   COPYTRADE_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.50),
   MONITOR_HEAVY_INTERVAL_MIN: z.coerce.number().int().min(1).optional().default(5),
 
+  // Stale-position exit — rotate capital out of PM positions that never print profit.
+  // Rule A: if peak PnL never reached STALE_PEAK_PNL_TARGET_PCT by category age threshold → exit.
+  // Rule B: if still underwater + flat (range < STALE_VOL_MAX_PCT over STALE_VOL_WINDOW_H) after
+  //         category threshold + STALE_UNDERWATER_EXTRA_H → exit.
+  // Excludes copytrades and futures. Re-entry blocked for STALE_REENTRY_COOLDOWN_H.
+  STALE_EXIT_ENABLED: boolFromEnv.optional().default(false),
+  STALE_PEAK_PNL_TARGET_PCT: z.coerce.number().min(0).optional().default(3.0),
+  STALE_MIN_AGE_H_DEFAULT: z.coerce.number().min(1).optional().default(12),
+  STALE_MIN_AGE_H_SPORTS: z.coerce.number().min(1).optional().default(6),
+  STALE_MIN_AGE_H_CRYPTO_REGULATORY: z.coerce.number().min(1).optional().default(8),
+  STALE_MIN_AGE_H_AI_TECH: z.coerce.number().min(1).optional().default(12),
+  STALE_MIN_AGE_H_MACRO: z.coerce.number().min(1).optional().default(18),
+  STALE_MIN_AGE_H_US_POLITICS: z.coerce.number().min(1).optional().default(24),
+  STALE_MIN_AGE_H_GEOPOLITICAL: z.coerce.number().min(1).optional().default(24),
+  STALE_UNDERWATER_EXTRA_H: z.coerce.number().min(0).optional().default(12),
+  STALE_VOL_WINDOW_H: z.coerce.number().min(1).optional().default(6),
+  STALE_VOL_MAX_PCT: z.coerce.number().min(0).optional().default(1.5),
+  STALE_REENTRY_COOLDOWN_H: z.coerce.number().min(0).optional().default(24),
+
   // Phase 9 — Indicator confluence gate
   CONFLUENCE_GATE_ENABLED: boolFromEnv.optional().default(true),
   CRYPTO_ARB_MIN_CONFLUENCE_SCORE: z.coerce.number().int().min(0).max(3).optional().default(2),

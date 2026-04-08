@@ -171,7 +171,8 @@ export type TakeProfitReason =
   | 'copytrade_mirror'
   | 'synthetic'
   | 'futures_sl'
-  | 'futures_tp';
+  | 'futures_tp'
+  | 'stale_exit';
 
 export async function notifyTakeProfitExecuted(opts: {
   position: Position;
@@ -190,6 +191,7 @@ export async function notifyTakeProfitExecuted(opts: {
     synthetic: '🛡️ Synthetic exit (Hedged on Hyperliquid)',
     futures_sl: '🛑 Futures Stop-Loss triggered',
     futures_tp: '🎯 Futures Take-Profit triggered',
+    stale_exit: '⏱️ Stale-exit — position rotated out',
   };
   let reasonLabel = reasonLabels[reason] ?? reason;
   if (mechanismDetail) reasonLabel = `${reasonLabel} [${mechanismDetail}]`;

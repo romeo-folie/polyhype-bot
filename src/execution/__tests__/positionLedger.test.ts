@@ -140,7 +140,9 @@ describe('closePosition', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await closePosition(redis as any, 'mkt-1', 'YES');
 
-    expect(redis.del).toHaveBeenCalledTimes(1);
+    // closePosition issues two dels: one for the position hash itself, and a
+    // second batched del for stale-exit tracking keys (peak/samples/firstSeen).
+    expect(redis.del).toHaveBeenCalledTimes(2);
     expect(redis.zrem).toHaveBeenCalledTimes(1);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

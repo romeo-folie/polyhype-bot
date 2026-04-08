@@ -25,7 +25,8 @@ export type ExitReason =
   | 'copytrade_mirror'
   | 'synthetic'
   | 'futures_sl'
-  | 'futures_tp';
+  | 'futures_tp'
+  | 'stale_exit';
 
 export interface ExitDecision {
   shouldExit: boolean;

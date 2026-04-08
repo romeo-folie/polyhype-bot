@@ -27,6 +27,7 @@ import {
   cancelClobOrder,
 } from '../shared/clob.js';
 import { hasOpenPosition } from './positionLedger.js';
+import { isStaleCooldownActive } from '../monitor/staleExit.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { computeATR } from '../arb/indicators.js';
 import { loadConfig } from '../shared/config.js';
@@ -1141,6 +1142,22 @@ export async function executeSignal(
       direction: signal.direction,
     });
     return recordSkip('position_already_open');
+  }
+
+  // 4b) Stale-exit re-entry cooldown — block re-entry into a market we recently
+  // exited for staleness. Prevents immediate round-trip after a stale exit.
+  // Applies to PM-style signals only; futures skip this path.
+  if (!signal.isFutures) {
+    const staleCooldown = await isStaleCooldownActive(redis, signal.marketId).catch(
+      () => false,
+    );
+    if (staleCooldown) {
+      logger.info('[executor] skipping — stale-exit re-entry cooldown active', {
+        marketId: signal.marketId,
+        direction: signal.direction,
+      });
+      return recordSkip('stale_exit_cooldown');
+    }
   }
 
   const executionMode = cfg.EXECUTION_MODE;
