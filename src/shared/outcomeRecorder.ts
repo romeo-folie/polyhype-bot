@@ -36,6 +36,8 @@ export interface PositionOutcome {
   makerPriceImprovementBps?: number;
   makerPriceImprovementUsd?: number;
   exitReason?: string;
+  /** Price-zone classification for the entry outcome price (Change 3 telemetry). */
+  priceZone?: 1 | 2 | 3 | 4 | 5;
 }
 
 /**
@@ -213,6 +215,10 @@ export async function getRecentOutcomes(
           PositionOutcome['entryOrderType']
         >;
       if (data.fallbackReason) parsed.fallbackReason = data.fallbackReason;
+      if (data.priceZone !== undefined && data.priceZone !== null && data.priceZone !== '') {
+        const z = Number(data.priceZone);
+        if (z >= 1 && z <= 5) parsed.priceZone = z as 1 | 2 | 3 | 4 | 5;
+      }
       if (
         data.decisionSpreadBps !== undefined &&
         data.decisionSpreadBps !== null &&

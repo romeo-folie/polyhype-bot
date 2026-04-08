@@ -15,6 +15,7 @@ import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { notifyUnhedgedArbPosition } from '../execution/telegram.js';
 import { recordPosition } from '../execution/positionLedger.js';
+import { priceZoneOf } from '../shared/zones.js';
 import type { Redis } from 'ioredis';
 
 // Max arb trades per scan run (2 trades = 4 orders, well within 60 orders/min limit)
@@ -285,6 +286,7 @@ export async function executeArb(opp: ArbOpportunity, redis: Redis): Promise<Arb
       openedAt: new Date().toISOString(),
       sourcedFrom: 'arb:unhedged-yes',
       executionVenue: 'clob',
+      priceZone: priceZoneOf(opp.yesAsk),
     }).catch((err: unknown) => {
       logger.error('[arb] failed to record unhedged position', { err: String(err) });
     });

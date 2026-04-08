@@ -629,6 +629,42 @@ async function executeHyperliquidSignal(
       return { signal, skipped: true, skipReason: 'global_margin_cap' };
     }
 
+    // 1b. Funding-rate gate (Change 4). Shadow-logs skips when disabled.
+    try {
+      const ctx = await hl.getAssetContext(signal.marketId);
+      const hourlyBps = ctx.fundingRate * 10000;
+      const signedBps = signal.direction === 'LONG' ? hourlyBps : -hourlyBps;
+      if (signedBps > cfg.HL_MAX_ADVERSE_FUNDING_BPS) {
+        if (cfg.HL_FUNDING_GATE_ENABLED) {
+          logger.info('[hl-funding] funding_adverse block', {
+            symbol: signal.marketId,
+            direction: signal.direction,
+            hourlyBps: hourlyBps.toFixed(4),
+            signedBps: signedBps.toFixed(4),
+            max: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
+          });
+          return {
+            signal,
+            skipped: true,
+            skipReason: `funding_adverse:hourlyBps=${hourlyBps.toFixed(4)},dir=${signal.direction}`,
+          };
+        } else {
+          logger.info('[hl-funding] shadow skip', {
+            symbol: signal.marketId,
+            direction: signal.direction,
+            hourlyBps: hourlyBps.toFixed(4),
+            signedBps: signedBps.toFixed(4),
+            max: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
+          });
+        }
+      }
+    } catch (err) {
+      logger.warn('[hl-funding] ctx fetch failed — proceeding without gate', {
+        symbol: signal.marketId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     // 2. Submit Order
     logger.info('[executor] submitting Hyperliquid trade', {
       symbol: signal.marketId,
@@ -904,6 +940,7 @@ export async function executeSignal(
     stakeUsdRequested: signal.stakeUsd,
     feesEnabled: signal.feesEnabled ?? false,
     isFutures: signal.isFutures ?? false,
+    priceZone: signal.priceZone,
     isTailPrice: isTailPrice(signal.outcomePrice, cfg.TAIL_PRICE_THRESHOLD),
     tailThreshold: cfg.TAIL_PRICE_THRESHOLD,
     takerMinEdge: cfg.TAKER_MIN_EDGE,

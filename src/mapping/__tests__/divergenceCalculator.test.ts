@@ -10,6 +10,12 @@ const DEFAULT_INPUT = {
   divergenceThreshold: 0.1,
   maxBetFraction: 0.1,
   consensusStddev: 0.01, // low stddev — passes noise gate
+  // Disable new zone / Kelly gates for pre-existing tests; they are covered by
+  // their own dedicated describe blocks below.
+  zone3FeeBuffer: 0,
+  zone4DirectionalBlock: false,
+  zone5DirectionalBlock: false,
+  kellyRequireSignStable: false,
 };
 
 describe('computeHalfKelly', () => {
@@ -246,5 +252,79 @@ describe('extreme-price LLM-distrust gate', () => {
     });
     expect(result.hasTrade).toBe(true);
     expect(result.skipReason).toBeUndefined();
+  });
+});
+
+describe('price-zone EV gate', () => {
+  it('blocks Zone 4 comfort trap (0.60–0.80) when enabled', () => {
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      zone4DirectionalBlock: true,
+      consensusProbability: 0.9,
+      currentYesPrice: 0.75, // Zone 4
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('zone4_comfort_trap');
+  });
+
+  it('blocks Zone 5 widow maker (0.80–0.98) when enabled', () => {
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      zone5DirectionalBlock: true,
+      consensusProbability: 0.95,
+      currentYesPrice: 0.85, // Zone 5
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('zone5_widow_maker');
+  });
+
+  it('requires extra edge in Zone 3 when fee buffer enabled', () => {
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      zone3FeeBuffer: 0.02,
+      divergenceThreshold: 0.1,
+      consensusProbability: 0.61, // edge=0.11 — passes base threshold but not buffer
+      currentYesPrice: 0.5, // Zone 3
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('zone3_edge_below_fee_buffer');
+  });
+
+  it('tags decisions with priceZone', () => {
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.3,
+      currentYesPrice: 0.15, // Zone 1
+    });
+    expect(result.hasTrade).toBe(true);
+    expect(result.decision?.priceZone).toBe(1);
+  });
+});
+
+describe('Kelly sign-stability gate', () => {
+  it('rejects when Kelly flips non-positive on p perturbation', () => {
+    // p=0.80, price=0.77 → Kelly positive but p-0.05=0.75 → Kelly <= 0
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      kellyRequireSignStable: true,
+      kellyProbeDelta: 0.05,
+      consensusProbability: 0.8,
+      currentYesPrice: 0.77,
+      zone4DirectionalBlock: false,
+      divergenceThreshold: 0.01,
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('kelly_sign_unstable');
+  });
+
+  it('allows stable edges', () => {
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      kellyRequireSignStable: true,
+      kellyProbeDelta: 0.05,
+      consensusProbability: 0.4,
+      currentYesPrice: 0.3,
+    });
+    expect(result.hasTrade).toBe(true);
   });
 });

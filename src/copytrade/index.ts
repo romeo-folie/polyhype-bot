@@ -14,6 +14,7 @@ import { getPriceFeed } from '../shared/feedSingleton.js';
 import { recordCopytradeFilter, recordCopytradeMetric } from '../shared/telemetry.js';
 import { inferCategory } from '../shared/outcomeRecorder.js';
 import { checkTimeToResolution } from '../mapping/divergenceCalculator.js';
+import { priceZoneOf } from '../shared/zones.js';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
 import type { ExitReason } from '../monitor/takeProfitEvaluator.js';
@@ -577,6 +578,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         consensusStddev: 0,
         outcomePrice: currentOutcomePrice,
         halfKellyFraction: 0,
+        priceZone: priceZoneOf(currentOutcomePrice),
         sourcedFrom: `copytrade:${wallet}`,
         reasoning: `Copytrade mirror of ${wallet} ${trade.side} @ ${trade.price.toFixed(4)} (tx ${trade.transactionHash.slice(0, 10)}...)`,
         source: 'copytrade',

@@ -18,6 +18,7 @@ import { computeDivergence } from './divergenceCalculator.js';
 import { resolveYesPrice } from '../shared/priceCache.js';
 import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import { getRedis } from '../shared/redis.js';
+import { priceZoneOf } from '../shared/zones.js';
 import { scoreConfluence } from '../arb/confluenceScorer.js';
 import { computeATR } from '../arb/indicators.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
@@ -59,6 +60,8 @@ export interface TradeSignal {
   spreadBps?: number | undefined;
   assetId?: string | undefined;
   endDate?: string | undefined;
+  /** Price-zone classification for the entry outcome price (Change 3 telemetry). */
+  priceZone?: 1 | 2 | 3 | 4 | 5;
 }
 
 /**
@@ -174,6 +177,11 @@ export async function runMapping(
         source: 'osint',
         maxHoursToResolution: cfg.PM_MAX_HOURS_TO_RESOLUTION_OSINT,
         minHoursToResolution: cfg.PM_MIN_HOURS_TO_RESOLUTION,
+        zone3FeeBuffer: cfg.ZONE3_FEE_BUFFER,
+        zone4DirectionalBlock: cfg.ZONE4_DIRECTIONAL_BLOCK,
+        zone5DirectionalBlock: cfg.ZONE5_DIRECTIONAL_BLOCK,
+        kellyProbeDelta: cfg.KELLY_PROBE_DELTA,
+        kellyRequireSignStable: cfg.KELLY_REQUIRE_SIGN_STABLE,
       });
 
       logger.info('[mapping] divergence result', {
@@ -201,6 +209,7 @@ export async function runMapping(
           consensusStddev: consensus.stddev,
           outcomePrice: decision.outcomePrice,
           halfKellyFraction: decision.halfKellyFraction,
+          priceZone: decision.priceZone,
           sourcedFrom: item.title,
           reasoning: consensus.reasoning,
           source: 'osint',
@@ -383,6 +392,7 @@ export async function mapNewsToFutures(
       outcomePrice: 0, // Market order
       isFutures: true,
       leverage: cfg.FUTURES_DEFAULT_LEVERAGE,
+      priceZone: priceZoneOf(0),
       sourcedFrom: `News: ${item.title}`,
       reasoning: `High-urgency news detected for ${symbol} with ${direction} sentiment. Urgency: ${item.urgencyScore}. Executing single-signal HL Perp via rapid LLM classification.`,
       source: 'futures',

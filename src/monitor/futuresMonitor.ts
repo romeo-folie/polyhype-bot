@@ -357,6 +357,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
                 holdingHours,
                 executionVenue: 'hyperliquid',
                 exitReason: reason,
+                ...(ledgerPos.priceZone !== undefined ? { priceZone: ledgerPos.priceZone } : {}),
               }, { sourcedFrom: ledgerPos.sourcedFrom });
             }
 

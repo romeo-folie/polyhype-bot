@@ -393,6 +393,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
             executionVenue:
               ledgerPos?.executionVenue ??
               (typeof posAny.executionVenue === 'string' ? posAny.executionVenue : 'simmer'),
+            ...(ledgerPos?.priceZone !== undefined ? { priceZone: ledgerPos.priceZone } : {}),
           }, { sourcedFrom: ledgerPos?.sourcedFrom });
 
           // Notify (skip for mocked success — no real redemption occurred)

@@ -535,6 +535,32 @@ class HyperliquidClient {
   }
 
   /**
+   * Fetch asset context (funding rate, mark price, open interest) for a symbol.
+   * Uses HL's `metaAndAssetCtxs` endpoint. `funding` is hourly rate as a decimal
+   * (e.g. 0.0000125 = 0.00125%/hr ≈ 11% annualized).
+   */
+  async getAssetContext(
+    symbol: string,
+  ): Promise<{ fundingRate: number; openInterest: number; markPrice: number }> {
+    const { index } = await this.getAssetMeta(symbol);
+    if (index < 0) throw new Error(`unknown HL symbol: ${symbol}`);
+    const response = await axios.post(
+      `${this.baseUrl}/info`,
+      { type: 'metaAndAssetCtxs' },
+      { timeout: HL_REQUEST_TIMEOUT_MS },
+    );
+    const data = response.data as [unknown, { funding?: string; openInterest?: string; markPx?: string }[]];
+    const ctxs = Array.isArray(data) ? data[1] : undefined;
+    const ctx = ctxs?.[index];
+    if (!ctx) throw new Error(`missing asset ctx for ${symbol}`);
+    return {
+      fundingRate: parseFloat(ctx.funding ?? '0') || 0,
+      openInterest: parseFloat(ctx.openInterest ?? '0') || 0,
+      markPrice: parseFloat(ctx.markPx ?? '0') || 0,
+    };
+  }
+
+  /**
    * Fetch mid prices for all assets and return the full map.
    * Uses the same 30s cache as getMidPrice.
    */

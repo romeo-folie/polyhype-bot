@@ -6,6 +6,7 @@ import { scanCryptoArb, scanUpDownArb } from './cryptoArbScanner.js';
 import { BINANCE_SYMBOL_TO_ASSET } from '../shared/assets.js';
 import { executeSignal } from '../execution/executor.js';
 import { recordPosition } from '../execution/positionLedger.js';
+import { priceZoneOf } from '../shared/zones.js';
 import { deductStake } from '../shared/bankroll.js';
 import { setAgentAutoRedeem } from '../shared/simmer.js';
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
@@ -339,6 +340,7 @@ export class ArbitrageWorker {
             edgeMagnitude: opp.edge,
             consensusProbability: opp.fairValuePrice,
             outcomePrice: opp.currentPmPrice,
+            priceZone: priceZoneOf(opp.currentPmPrice),
             sourcedFrom: `crypto-arb:${opp.assetId}`,
             reasoning: `Crypto latency arb: fair=${opp.fairValuePrice.toFixed(3)}, pm=${opp.currentPmPrice.toFixed(3)}, edge=${opp.edge.toFixed(3)}`,
             feesEnabled: opp.feesEnabled,
@@ -377,6 +379,7 @@ export class ArbitrageWorker {
               executionVenue: result.executionVenue || 'simmer',
               assetId: opp.assetId,
               endDate: opp.endDate ?? undefined,
+              priceZone: result.signal.priceZone,
             });
 
             await deductStake(redis, executedStake);

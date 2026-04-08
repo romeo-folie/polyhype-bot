@@ -13,6 +13,8 @@
  * Direction: if edge > 0 → buy YES; if edge < 0 → buy NO.
  */
 
+import { priceZoneOf, type PriceZone } from '../shared/zones.js';
+
 export interface TradeDecision {
   /** YES or NO */
   direction: 'YES' | 'NO';
@@ -26,6 +28,8 @@ export interface TradeDecision {
   stakeUsd: number;
   /** Half-Kelly fraction before capping */
   halfKellyFraction: number;
+  /** Price-zone classification for the entry outcome price */
+  priceZone: PriceZone;
 }
 
 export interface DivergenceInput {
@@ -60,6 +64,13 @@ export interface DivergenceInput {
   maxHoursToResolution?: number;
   /** Minimum hours-to-resolution required. If undefined, no min gate. */
   minHoursToResolution?: number;
+  /** Zone-gate knobs (optional — defaults mirror cfg). */
+  zone3FeeBuffer?: number;
+  zone4DirectionalBlock?: boolean;
+  zone5DirectionalBlock?: boolean;
+  /** Kelly sign-stability probe. */
+  kellyProbeDelta?: number;
+  kellyRequireSignStable?: boolean;
 }
 
 /**
@@ -121,6 +132,11 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
     endDate,
     maxHoursToResolution,
     minHoursToResolution,
+    zone3FeeBuffer = 0.02,
+    zone4DirectionalBlock = true,
+    zone5DirectionalBlock = true,
+    kellyProbeDelta = 0.05,
+    kellyRequireSignStable = true,
   } = input;
 
   // Gate 0: Extreme-price LLM-distrust gate.
@@ -139,6 +155,37 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
       hasTrade: false,
       decision: null,
       skipReason: `extreme_price_llm_distrust:price=${currentYesPrice.toFixed(4)},consensus=${p.toFixed(3)}`,
+    };
+  }
+
+  // Gate 0.25: Price-zone EV gate. Classify entry into 5 zones; block or
+  // tighten requirements for the high-risk zones 3–5. Applied to whichever
+  // outcome (YES/NO) we would actually enter, not the raw YES price.
+  const provisionalEdgeSign = p - currentYesPrice;
+  const provisionalDirection: 'YES' | 'NO' = provisionalEdgeSign > 0 ? 'YES' : 'NO';
+  const provisionalOutcomePrice =
+    provisionalDirection === 'YES' ? currentYesPrice : 1 - currentYesPrice;
+  const provisionalEdgeMag = Math.abs(provisionalEdgeSign);
+  const entryZone = priceZoneOf(provisionalOutcomePrice);
+  if (entryZone === 3 && provisionalEdgeMag < divergenceThreshold + zone3FeeBuffer) {
+    return {
+      hasTrade: false,
+      decision: null,
+      skipReason: `zone3_edge_below_fee_buffer:price=${provisionalOutcomePrice.toFixed(3)},edge=${provisionalEdgeMag.toFixed(3)}`,
+    };
+  }
+  if (entryZone === 4 && zone4DirectionalBlock) {
+    return {
+      hasTrade: false,
+      decision: null,
+      skipReason: `zone4_comfort_trap:price=${provisionalOutcomePrice.toFixed(3)},edge=${provisionalEdgeMag.toFixed(3)}`,
+    };
+  }
+  if (entryZone === 5 && zone5DirectionalBlock) {
+    return {
+      hasTrade: false,
+      decision: null,
+      skipReason: `zone5_widow_maker:price=${provisionalOutcomePrice.toFixed(3)}`,
     };
   }
 
@@ -189,6 +236,23 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
   const tradeProbability = direction === 'YES' ? p : 1 - p;
 
   const halfKellyFraction = computeHalfKelly(tradeProbability, outcomePrice);
+
+  // Kelly sign-stability check — perturb probability by ±delta; if Kelly
+  // flips to non-positive on either side, the edge is too fragile to bet.
+  if (kellyRequireSignStable && halfKellyFraction > 0) {
+    const pPlus = Math.min(1, tradeProbability + kellyProbeDelta);
+    const pMinus = Math.max(0, tradeProbability - kellyProbeDelta);
+    const kellyPlus = computeHalfKelly(pPlus, outcomePrice);
+    const kellyMinus = computeHalfKelly(pMinus, outcomePrice);
+    if (kellyPlus <= 0 || kellyMinus <= 0) {
+      return {
+        hasTrade: false,
+        decision: null,
+        skipReason: `kelly_sign_unstable:p=${tradeProbability.toFixed(3)},kelly=${halfKellyFraction.toFixed(4)}`,
+      };
+    }
+  }
+
   const cappedFraction = Math.min(halfKellyFraction, maxBetFraction);
   const rawStakeUsd = Math.max(0, cappedFraction * bankrollUsd);
 
@@ -207,6 +271,7 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
       outcomePrice,
       stakeUsd,
       halfKellyFraction,
+      priceZone: priceZoneOf(outcomePrice),
     },
   };
 }

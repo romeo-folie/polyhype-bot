@@ -86,6 +86,8 @@ export interface Position {
   /** ATR snapshot at entry (futures only) — drives ATR-based SL/TP */
   entryAtr?: number | undefined;
   entryAtrPct?: number | undefined;
+  /** Price-zone classification (Change 3 telemetry) */
+  priceZone?: 1 | 2 | 3 | 4 | 5 | undefined;
 }
 
 function positionKey(marketId: string, direction: Position['direction']): string {
@@ -196,6 +198,7 @@ export async function recordPosition(redis: Redis, position: Position): Promise<
     endDate: position.endDate ?? '',
     entryAtr: position.entryAtr !== undefined ? String(position.entryAtr) : '',
     entryAtrPct: position.entryAtrPct !== undefined ? String(position.entryAtrPct) : '',
+    priceZone: position.priceZone !== undefined ? String(position.priceZone) : '',
   });
 
   // Add to sorted index (score = openedAt ms for chronological retrieval)
@@ -404,6 +407,10 @@ function deserialisePosition(raw: Record<string, string>): Position {
     pos.entryAtrPct = parseFloat(raw.entryAtrPct);
   if (raw.highWaterMarkPct !== undefined && raw.highWaterMarkPct !== '')
     pos.highWaterMarkPct = parseFloat(raw.highWaterMarkPct);
+  if (raw.priceZone !== undefined && raw.priceZone !== '') {
+    const z = Number(raw.priceZone);
+    if (z >= 1 && z <= 5) pos.priceZone = z as 1 | 2 | 3 | 4 | 5;
+  }
 
   return pos;
 }

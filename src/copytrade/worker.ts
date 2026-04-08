@@ -212,6 +212,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
               txHash: result.tradeResult.tx_hash,
               sharesHeld: result.tradeResult.shares_bought,
               executionVenue: result.executionVenue ?? 'simmer',
+              priceZone: result.signal.priceZone,
             });
             await recordCopytradeMetric(redis, 'executed').catch(() => {
               /* ignore telemetry errors */

@@ -109,6 +109,23 @@ const envSchema = z.object({
   MIN_PRICE_FOR_LLM_TRUST: z.coerce.number().min(0).max(0.5).optional().default(0.02),
   MAX_LLM_PROB_AT_LOW_PRICE: z.coerce.number().min(0).max(1).optional().default(0.15),
 
+  // Price-zone EV gate (Zones of prediction market risk).
+  // Zone 3 (0.40–0.60) requires extra edge to clear fees; Zones 4/5 are blocked
+  // directionally by default because small probability errors flip Kelly sign.
+  ZONE3_FEE_BUFFER: z.coerce.number().min(0).optional().default(0.02),
+  ZONE4_DIRECTIONAL_BLOCK: boolFromEnv.optional().default(true),
+  ZONE5_DIRECTIONAL_BLOCK: boolFromEnv.optional().default(true),
+
+  // Kelly sign-stability check. Perturb p by ±KELLY_PROBE_DELTA; if Kelly
+  // flips negative on either side, treat as "no bet" (phantom edge).
+  KELLY_PROBE_DELTA: z.coerce.number().min(0).max(0.5).optional().default(0.05),
+  KELLY_REQUIRE_SIGN_STABLE: boolFromEnv.optional().default(true),
+
+  // Hyperliquid funding-rate pre-entry gate. HL `funding` is an hourly decimal.
+  // Default 1 bp/hr (~8.76%/yr drag). Ship as shadow-logs first, flip after 3-5d.
+  HL_FUNDING_GATE_ENABLED: boolFromEnv.optional().default(false),
+  HL_MAX_ADVERSE_FUNDING_BPS: z.coerce.number().optional().default(1),
+
   // Time-to-resolution gate for Polymarket trades. Skips markets that resolve
   // too far in the future (capital sunk into long-dated markets is dead weight)
   // or too soon (illiquid resolution-day games). Per-source overrides because

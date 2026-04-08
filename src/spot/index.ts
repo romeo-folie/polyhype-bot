@@ -24,6 +24,7 @@ import { recordPosition, hasOpenPosition } from '../execution/positionLedger.js'
 import { notifyTradeExecuted, notifyTradeError } from '../execution/telegram.js';
 import { getOpportunities } from '../shared/simmer.js';
 import { HL_SYMBOL_MAP } from '../shared/hyperliquid.js';
+import { priceZoneOf } from '../shared/zones.js';
 import { scoreConfluence } from '../arb/confluenceScorer.js';
 import { computeATR } from '../arb/indicators.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -226,6 +227,7 @@ async function runSpotMonitorInner(
           outcomePrice: move.currentPrice,
           isFutures: true,
           leverage: cfg.FUTURES_DEFAULT_LEVERAGE,
+          priceZone: priceZoneOf(move.currentPrice),
           sourcedFrom: `Spot: ${move.assetId} ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(1)}% in ${move.windowMinutes.toString()}min`,
           reasoning: `Intraday momentum detected on ${move.assetId}. Current price: ${move.currentPrice.toString()}. Scaling into ${hlSymbol} perp.`,
           assetId: move.assetId,
@@ -303,6 +305,11 @@ async function runSpotMonitorInner(
         source: 'spot',
         maxHoursToResolution: cfg.PM_MAX_HOURS_TO_RESOLUTION_SPOT,
         minHoursToResolution: cfg.PM_MIN_HOURS_TO_RESOLUTION,
+        zone3FeeBuffer: cfg.ZONE3_FEE_BUFFER,
+        zone4DirectionalBlock: cfg.ZONE4_DIRECTIONAL_BLOCK,
+        zone5DirectionalBlock: cfg.ZONE5_DIRECTIONAL_BLOCK,
+        kellyProbeDelta: cfg.KELLY_PROBE_DELTA,
+        kellyRequireSignStable: cfg.KELLY_REQUIRE_SIGN_STABLE,
       });
 
       if (!hasTrade || !decision) continue;
@@ -323,6 +330,7 @@ async function runSpotMonitorInner(
         consensusStddev,
         outcomePrice: decision.outcomePrice,
         halfKellyFraction: decision.halfKellyFraction,
+        priceZone: decision.priceZone,
         sourcedFrom,
         reasoning: consensus.reasoning,
         source: 'spot',
@@ -461,6 +469,7 @@ async function runSpotMonitorInner(
       executionVenue: result.executionVenue ?? 'simmer',
       assetId: result.signal.assetId,
       endDate: result.signal.endDate,
+      priceZone: result.signal.priceZone,
     });
 
     await deductStake(redis, result.signal.stakeUsd);

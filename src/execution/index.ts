@@ -262,6 +262,7 @@ async function processScoredItemsInner(
         endDate: result.signal.endDate,
         entryAtr: result.entryAtr,
         entryAtrPct: result.entryAtrPct,
+        priceZone: result.signal.priceZone,
       });
 
       // Simmer fill reconciliation: if shares_bought was unavailable and we used an
