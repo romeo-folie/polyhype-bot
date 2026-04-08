@@ -326,6 +326,11 @@ const envSchema = z.object({
   REDEEMER_DUST_THRESHOLD_USDC: z.coerce.number().min(0).optional().default(0.25),
   /** Minimum notional (shares * avgPrice) for a reconciled Simmer orphan to be imported. Below this, skip as dust. */
   RECONCILE_IMPORT_MIN_USD: z.coerce.number().min(0).optional().default(1),
+  /** Post-exit sweep: after a partial fill, resell the residual up to N times. */
+  RESIDUAL_SWEEP_ENABLED: boolFromEnv.optional().default(true),
+  RESIDUAL_SWEEP_MAX_ATTEMPTS: z.coerce.number().int().min(0).max(5).optional().default(2),
+  /** Residuals below this notional are parked as pendingSettlement instead of resold. */
+  RESIDUAL_SWEEP_MIN_NOTIONAL_USD: z.coerce.number().min(0).optional().default(1),
   REDEEMER_FALLBACK_STALE_TTL_S: z.coerce.number().int().min(60).optional().default(21_600),
 
   // LLM rate reduction caches

@@ -229,7 +229,7 @@ async function executeSimmerExit(opts: {
       });
 
       if (tradeResult.success) {
-        return await finalizeSimmerExit(redis, position, sharesToSell, tradeResult, currentPrice, returnPct, reason);
+        return await finalizeSimmerExit(redis, position, sharesToSell, tradeResult, currentPrice, returnPct, reason, { simmerMarketId: simmerIdResult, sellSide });
       }
       simmerError = tradeResult.error ?? null;
 
@@ -285,7 +285,7 @@ async function executeSimmerExit(opts: {
       });
 
       if (directResult.success) {
-        return await finalizeSimmerExit(redis, position, sharesToSell, directResult, currentPrice, returnPct, reason);
+        return await finalizeSimmerExit(redis, position, sharesToSell, directResult, currentPrice, returnPct, reason, { simmerMarketId: position.marketId, sellSide });
       }
       simmerError = directResult.error ?? null;
 
@@ -343,12 +343,176 @@ async function executeSimmerExit(opts: {
 }
 
 /**
+ * Resell residual shares left on Simmer after a partial fill.
+ *
+ * Loops up to RESIDUAL_SWEEP_MAX_ATTEMPTS, querying live Simmer balance for the
+ * specific market/side and resubmitting a sell for whatever remains. Any
+ * sub-minimum residual is returned so the caller can mark pendingSettlement.
+ */
+async function sweepSimmerResidual(opts: {
+  position: Position;
+  simmerMarketId: string;
+  sellSide: 'yes' | 'no';
+  currentPrice: number;
+  reason: ExitReason;
+}): Promise<{ additionalSharesSold: number; additionalProceedsUsd: number; residualRemainsOnVenue: boolean }> {
+  const { position, simmerMarketId, sellSide, currentPrice, reason } = opts;
+  const cfg = loadConfig();
+  let totalExtraShares = 0;
+  let totalExtraProceeds = 0;
+
+  for (let attempt = 1; attempt <= cfg.RESIDUAL_SWEEP_MAX_ATTEMPTS; attempt++) {
+    try {
+      const livePositions = await getSimmerPositions({ status: 'active' });
+      const match = livePositions.find((p) => p.market_id === simmerMarketId && p.side === sellSide);
+      const residual = match?.shares ?? 0;
+      if (!residual || residual <= 1e-6) {
+        return { additionalSharesSold: totalExtraShares, additionalProceedsUsd: totalExtraProceeds, residualRemainsOnVenue: false };
+      }
+
+      const residualNotional = residual * currentPrice;
+      if (residualNotional < cfg.RESIDUAL_SWEEP_MIN_NOTIONAL_USD) {
+        logger.info('[take-profit-executor] simmer residual below sweep min — leaving for pending settlement', {
+          marketId: position.marketId,
+          residual: residual.toFixed(6),
+          notional: residualNotional.toFixed(4),
+          attempt,
+        });
+        return { additionalSharesSold: totalExtraShares, additionalProceedsUsd: totalExtraProceeds, residualRemainsOnVenue: true };
+      }
+
+      const sellShares = Math.floor(residual * 1_000_000) / 1_000_000;
+      logger.info('[take-profit-executor] sweeping simmer residual', {
+        marketId: position.marketId,
+        residual: sellShares.toFixed(6),
+        attempt,
+      });
+      const result = await submitSell({
+        market_id: simmerMarketId,
+        side: sellSide,
+        action: 'sell',
+        shares: sellShares,
+        reasoning: `Residual sweep attempt ${attempt.toString()}: ${reason}`,
+      });
+
+      if (!result.success) {
+        logger.warn('[take-profit-executor] simmer sweep submit failed', {
+          marketId: position.marketId,
+          attempt,
+          error: result.error,
+        });
+        return { additionalSharesSold: totalExtraShares, additionalProceedsUsd: totalExtraProceeds, residualRemainsOnVenue: true };
+      }
+
+      const fillThisRound =
+        typeof result.shares_sold === 'number' && result.shares_sold > 0 ? result.shares_sold : sellShares;
+      totalExtraShares += fillThisRound;
+      totalExtraProceeds += fillThisRound * currentPrice;
+    } catch (err) {
+      logger.warn('[take-profit-executor] simmer sweep iteration threw', {
+        marketId: position.marketId,
+        attempt,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { additionalSharesSold: totalExtraShares, additionalProceedsUsd: totalExtraProceeds, residualRemainsOnVenue: true };
+    }
+  }
+  // Hit max attempts — assume residual may still exist
+  return { additionalSharesSold: totalExtraShares, additionalProceedsUsd: totalExtraProceeds, residualRemainsOnVenue: true };
+}
+
+/**
+ * Resell residual shares left on CLOB after a partial FAK fill.
+ *
+ * Queries the on-chain ERC-1155 balance directly (ground truth), then submits
+ * follow-up market sells for whatever remains up to RESIDUAL_SWEEP_MAX_ATTEMPTS.
+ */
+async function sweepClobResidual(opts: {
+  position: Position;
+  tokenId: string;
+  currentPrice: number;
+}): Promise<{ additionalSharesSold: number; additionalProceedsUsd: number; residualRemainsOnVenue: boolean }> {
+  const { position, tokenId, currentPrice } = opts;
+  const cfg = loadConfig();
+  let totalExtraShares = 0;
+  let totalExtraProceeds = 0;
+
+  for (let attempt = 1; attempt <= cfg.RESIDUAL_SWEEP_MAX_ATTEMPTS; attempt++) {
+    try {
+      const bal = await fetchClobTokenBalance(tokenId);
+      if (!bal.ok) {
+        logger.warn('[take-profit-executor] clob sweep balance fetch failed', {
+          marketId: position.marketId,
+          attempt,
+          error: bal.error,
+        });
+        return { additionalSharesSold: totalExtraShares, additionalProceedsUsd: totalExtraProceeds, residualRemainsOnVenue: true };
+      }
+      const residual = bal.balance;
+      if (residual <= 1e-6) {
+        return { additionalSharesSold: totalExtraShares, additionalProceedsUsd: totalExtraProceeds, residualRemainsOnVenue: false };
+      }
+
+      const residualNotional = residual * currentPrice;
+      if (residualNotional < Math.max(cfg.RESIDUAL_SWEEP_MIN_NOTIONAL_USD, CLOB_MIN_ORDER_USD)) {
+        logger.info('[take-profit-executor] clob residual below sweep min — leaving for pending settlement', {
+          marketId: position.marketId,
+          residual: residual.toFixed(6),
+          notional: residualNotional.toFixed(4),
+          attempt,
+        });
+        return { additionalSharesSold: totalExtraShares, additionalProceedsUsd: totalExtraProceeds, residualRemainsOnVenue: true };
+      }
+
+      const sellShares = Math.floor(residual * 1_000_000) / 1_000_000;
+      logger.info('[take-profit-executor] sweeping clob residual', {
+        marketId: position.marketId,
+        residual: sellShares.toFixed(6),
+        attempt,
+      });
+      const result = await submitClobSell({
+        tokenId,
+        shares: sellShares,
+        orderType: cfg.CLOB_ORDER_TYPE,
+      });
+
+      if (!result.success) {
+        logger.warn('[take-profit-executor] clob sweep submit failed', {
+          marketId: position.marketId,
+          attempt,
+          error: result.error,
+        });
+        return { additionalSharesSold: totalExtraShares, additionalProceedsUsd: totalExtraProceeds, residualRemainsOnVenue: true };
+      }
+
+      const fillThisRound =
+        typeof result.shares_bought === 'number' && result.shares_bought > 0 ? result.shares_bought : sellShares;
+      totalExtraShares += fillThisRound;
+      totalExtraProceeds += fillThisRound * currentPrice;
+    } catch (err) {
+      logger.warn('[take-profit-executor] clob sweep iteration threw', {
+        marketId: position.marketId,
+        attempt,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { additionalSharesSold: totalExtraShares, additionalProceedsUsd: totalExtraProceeds, residualRemainsOnVenue: true };
+    }
+  }
+  return { additionalSharesSold: totalExtraShares, additionalProceedsUsd: totalExtraProceeds, residualRemainsOnVenue: true };
+}
+
+/**
  * Post-sell cleanup for Simmer: close position, credit proceeds, record outcome, notify.
  *
  * Uses the venue-reported actual filled amount (`tradeResult.shares_sold`) when
  * available — this matters for partial fills where the request and fill differ.
  * `returnPct` is price-based (not share-based) so it is unaffected, but bankroll
  * credits and per-share logs must use the true filled amount.
+ *
+ * On a detected partial fill, runs a residual sweep (see sweepSimmerResidual).
+ * If any residual remains below the minimum notional after sweeping, the
+ * position is marked pendingSettlement instead of closed, so the redeemer will
+ * handle it at market resolution.
  */
 async function finalizeSimmerExit(
   redis: Redis,
@@ -363,24 +527,50 @@ async function finalizeSimmerExit(
   currentPrice: number,
   returnPct: number,
   reason: ExitReason,
+  sweepCtx?: { simmerMarketId: string; sellSide: 'yes' | 'no' },
 ): Promise<TakeProfitResult> {
-  const actualSharesSold =
+  const cfg = loadConfig();
+  const primaryFill =
     typeof tradeResult.shares_sold === 'number' && tradeResult.shares_sold > 0
       ? tradeResult.shares_sold
       : sharesRequested;
 
-  if (actualSharesSold < sharesRequested - 1e-6) {
+  let totalSharesSold = primaryFill;
+  let totalProceedsUsd = primaryFill * currentPrice;
+  let pendingDueToResidual = false;
+
+  const isPartial = primaryFill < sharesRequested - 1e-6;
+  if (isPartial) {
     logger.warn('[take-profit-executor] simmer partial fill detected', {
       marketId: position.marketId,
       requested: sharesRequested,
-      filled: actualSharesSold,
+      filled: primaryFill,
       fillStatus: tradeResult.fill_status,
     });
+    if (cfg.RESIDUAL_SWEEP_ENABLED && sweepCtx) {
+      const sweepResult = await sweepSimmerResidual({
+        position,
+        simmerMarketId: sweepCtx.simmerMarketId,
+        sellSide: sweepCtx.sellSide,
+        currentPrice,
+        reason,
+      });
+      totalSharesSold += sweepResult.additionalSharesSold;
+      totalProceedsUsd += sweepResult.additionalProceedsUsd;
+      pendingDueToResidual = sweepResult.residualRemainsOnVenue;
+    }
   }
 
-  await closePositionWithHedge(redis, position.marketId, position.direction);
-  const proceedsUsd = actualSharesSold * currentPrice;
-  await creditProceeds(redis, proceedsUsd);
+  if (pendingDueToResidual) {
+    await markPositionPendingSettlement(redis, position.marketId, position.direction);
+    logger.info('[take-profit-executor] simmer exit partial — marked pendingSettlement', {
+      marketId: position.marketId,
+      totalSharesSold: totalSharesSold.toFixed(6),
+    });
+  } else {
+    await closePositionWithHedge(redis, position.marketId, position.direction);
+  }
+  await creditProceeds(redis, totalProceedsUsd);
   await recordPositionOutcome(redis, position, {
     result: returnPct >= 0 ? 'won' : 'lost',
     returnPct,
@@ -392,7 +582,9 @@ async function finalizeSimmerExit(
     marketId: position.marketId,
     txHash: tradeResult.tx_hash,
     requested: sharesRequested.toFixed(4),
-    filled: actualSharesSold.toFixed(4),
+    filled: totalSharesSold.toFixed(4),
+    proceedsUsd: totalProceedsUsd.toFixed(4),
+    pendingDueToResidual,
     returnPct: returnPct.toFixed(2),
   });
 
@@ -478,7 +670,7 @@ async function attemptSimmerRecovery(
       });
 
       if (retryResult.success) {
-        return await finalizeSimmerExit(redis, position, retryShares, retryResult, currentPrice, returnPct, reason);
+        return await finalizeSimmerExit(redis, position, retryShares, retryResult, currentPrice, returnPct, reason, { simmerMarketId: simmerId, sellSide });
       }
     }
   } catch (err) {
@@ -505,18 +697,42 @@ async function finalizeClobExit(
   returnPct: number,
   reason: ExitReason,
   txHash?: string | null | undefined,
+  sweepCtx?: { tokenId: string },
 ): Promise<TakeProfitResult> {
-  const sharesExited = actualSharesSold > 0 ? actualSharesSold : sharesRequested;
-  if (sharesExited < sharesRequested - 1e-6) {
+  const cfg = loadConfig();
+  const primaryFill = actualSharesSold > 0 ? actualSharesSold : sharesRequested;
+  let totalSharesSold = primaryFill;
+  let totalProceedsUsd = primaryFill * currentPrice;
+  let pendingDueToResidual = false;
+
+  if (primaryFill < sharesRequested - 1e-6) {
     logger.warn('[take-profit-executor] clob partial fill detected', {
       marketId: position.marketId,
       requested: sharesRequested,
-      filled: sharesExited,
+      filled: primaryFill,
     });
+    if (cfg.RESIDUAL_SWEEP_ENABLED && sweepCtx) {
+      const sweepResult = await sweepClobResidual({
+        position,
+        tokenId: sweepCtx.tokenId,
+        currentPrice,
+      });
+      totalSharesSold += sweepResult.additionalSharesSold;
+      totalProceedsUsd += sweepResult.additionalProceedsUsd;
+      pendingDueToResidual = sweepResult.residualRemainsOnVenue;
+    }
   }
-  await closePositionWithHedge(redis, position.marketId, position.direction);
-  const proceedsUsd = sharesExited * currentPrice;
-  await creditProceeds(redis, proceedsUsd);
+
+  if (pendingDueToResidual) {
+    await markPositionPendingSettlement(redis, position.marketId, position.direction);
+    logger.info('[take-profit-executor] clob exit partial — marked pendingSettlement', {
+      marketId: position.marketId,
+      totalSharesSold: totalSharesSold.toFixed(6),
+    });
+  } else {
+    await closePositionWithHedge(redis, position.marketId, position.direction);
+  }
+  await creditProceeds(redis, totalProceedsUsd);
   await recordPositionOutcome(redis, position, {
     result: returnPct >= 0 ? 'won' : 'lost',
     returnPct,
@@ -725,6 +941,7 @@ async function executeClobExit(opts: {
         returnPct,
         reason,
         clobResult.tx_hash,
+        { tokenId },
       );
     }
 
@@ -763,6 +980,7 @@ async function executeClobExit(opts: {
               returnPct,
               reason,
               retryResult.tx_hash,
+              { tokenId },
             );
           }
         }
