@@ -324,6 +324,8 @@ const envSchema = z.object({
     .optional()
     .default(30 * 24 * 3600),
   REDEEMER_DUST_THRESHOLD_USDC: z.coerce.number().min(0).optional().default(0.25),
+  /** Minimum notional (shares * avgPrice) for a reconciled Simmer orphan to be imported. Below this, skip as dust. */
+  RECONCILE_IMPORT_MIN_USD: z.coerce.number().min(0).optional().default(1),
   REDEEMER_FALLBACK_STALE_TTL_S: z.coerce.number().int().min(60).optional().default(21_600),
 
   // LLM rate reduction caches

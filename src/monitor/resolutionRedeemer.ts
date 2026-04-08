@@ -33,6 +33,10 @@ import {
   fetchClobTokenBalance,
 } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
+import { markRecentlyClosed, isRecentlyClosed } from '../shared/closedGuard.js';
+
+/** @deprecated Use isRecentlyClosed from shared/closedGuard.js. Kept for external callers. */
+export const isRecentlyRedeemed = isRecentlyClosed;
 import { notifyRedemptionExecuted, notifyManualRedemptionRequired } from '../execution/telegram.js';
 import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
 import { Wallet } from 'ethers';
@@ -60,9 +64,6 @@ const REDEEMER_SUCCESS_PREFIX = 'redeemer:recent-success:';
 const REDEEMER_FALLBACK_STALE_PREFIX = 'redeemer:stale-fallback:';
 const REDEEMER_MANUAL_NOTIFY_KEY = 'redeemer:manual-notified';
 const REDEEMER_MANUAL_NOTIFY_TTL_S = 30 * 24 * 3600;
-const REDEEMER_RECENTLY_CLOSED_KEY = 'redeemer:recently-closed';
-const REDEEMER_RECENTLY_CLOSED_TTL_S = 7 * 24 * 3600; // 7 days
-
 type RedeemerSkipReason = 'skipped_recent_success' | 'skipped_dust' | 'stale_no_balance';
 
 interface RedemptionState {
@@ -77,15 +78,6 @@ const dedupKey = (conditionId: string, side: RedeemSide) =>
   `${REDEEMER_SUCCESS_PREFIX}${conditionId}:${side}`;
 const staleKey = (conditionId: string, side: RedeemSide) =>
   `${REDEEMER_FALLBACK_STALE_PREFIX}${conditionId}:${side}`;
-
-async function markRecentlyClosed(redis: Redis, simmerMarketId: string): Promise<void> {
-  await redis.sadd(REDEEMER_RECENTLY_CLOSED_KEY, simmerMarketId);
-  await redis.expire(REDEEMER_RECENTLY_CLOSED_KEY, REDEEMER_RECENTLY_CLOSED_TTL_S);
-}
-
-export async function isRecentlyRedeemed(redis: Redis, simmerMarketId: string): Promise<boolean> {
-  return (await redis.sismember(REDEEMER_RECENTLY_CLOSED_KEY, simmerMarketId)) === 1;
-}
 
 function parseNumber(value: string | undefined): number {
   const parsed = Number.parseFloat(value ?? '0');

@@ -11,6 +11,7 @@
 
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
+import { markRecentlyClosed } from '../shared/closedGuard.js';
 
 const POSITION_KEY_PREFIX = 'position:';
 const POSITIONS_INDEX_KEY = 'positions:index'; // sorted set: score = openedAt ms
@@ -256,6 +257,9 @@ export async function closePosition(
   const key = positionKey(marketId, direction);
   await redis.del(key);
   await redis.zrem(POSITIONS_INDEX_KEY, key);
+  // Guard: prevent reconciler from re-importing dust residuals on Simmer as a
+  // fresh position after an intentional close. See shared/closedGuard.ts.
+  await markRecentlyClosed(redis, marketId);
   logger.info('[ledger] position closed', { marketId, direction });
 }
 

@@ -8,7 +8,8 @@ import { fetchMarketByConditionId, fetchMarketByQuestion, type GammaMarket } fro
 
 import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
 import { creditProceeds } from '../shared/bankroll.js';
-import { isRecentlyRedeemed } from './resolutionRedeemer.js';
+import { isRecentlyClosed } from '../shared/closedGuard.js';
+import { loadConfig } from '../shared/config.js';
 
 interface ReconciliationDetail {
   type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded' | 'recovered_outcome';
@@ -486,8 +487,8 @@ async function importSimmerOrphan(
 ): Promise<boolean> {
   try {
     // Guard: skip positions that were recently redeemed to prevent close→reimport→redeem loops
-    if (await isRecentlyRedeemed(redis, pos.market_id)) {
-      logger.debug('[reconcile] skipping recently-redeemed Simmer orphan', {
+    if (await isRecentlyClosed(redis, pos.market_id)) {
+      logger.info('[reconcile] skipping recently-closed Simmer orphan', {
         marketId: pos.market_id,
       });
       return false;
@@ -545,6 +546,25 @@ async function importSimmerOrphan(
         value_usdc: pos.value_usdc,
         average_price: pos.average_price,
       });
+    }
+
+    // Dust guard: independent of recently-closed guard. Blocks reimport of
+    // residual fractions left behind by partial fills / close rounding.
+    // Uses current market price if no entry price was available, so 0-entry
+    // imports still get evaluated.
+    const notionalForDustCheck =
+      avgPrice > 0
+        ? shares * avgPrice
+        : pos.value_usdc ?? 0;
+    const dustMinUsd = loadConfig().RECONCILE_IMPORT_MIN_USD;
+    if (notionalForDustCheck > 0 && notionalForDustCheck < dustMinUsd) {
+      logger.info('[reconcile] skipping dust Simmer orphan below import threshold', {
+        marketId: pos.market_id,
+        shares,
+        notional: notionalForDustCheck,
+        threshold: dustMinUsd,
+      });
+      return false;
     }
 
     const newPos: Position = {
