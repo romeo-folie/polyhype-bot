@@ -25,6 +25,13 @@ export interface OHLCVCandle {
   quoteVolume?: number;
   /** Trade count (kline source only). */
   tradeCount?: number;
+  /**
+   * True when Binance marked the kline as closed (`x:true`). The live in-progress
+   * candle is continuously upserted until closed, so any consumer that compares
+   * volume against a window of full bars MUST filter on this flag — otherwise it
+   * ends up comparing a fractional-minute volume to full-minute averages.
+   */
+  closed?: boolean;
 }
 
 const MINUTE_MS = 60_000;
@@ -112,6 +119,7 @@ export async function buildCandles(
             v: number;
             q?: number;
             n?: number;
+            closed?: boolean;
           };
           if (
             !Number.isFinite(k.t) ||
@@ -131,6 +139,7 @@ export async function buildCandles(
           };
           if (typeof k.q === 'number') candle.quoteVolume = k.q;
           if (typeof k.n === 'number') candle.tradeCount = k.n;
+          if (typeof k.closed === 'boolean') candle.closed = k.closed;
           candles.push(candle);
         } catch {
           // skip malformed entry

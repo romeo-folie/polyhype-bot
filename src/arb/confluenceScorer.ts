@@ -88,8 +88,17 @@ export async function scoreConfluence(
   const vwap = computeVWAP(candles, cfg.VWAP_LOOKBACK_MIN);
   const cmf = computeCMF(candles, cfg.CMF_PERIOD);
   const lastClose = candles.length > 0 ? candles[candles.length - 1]!.close : null;
-  const lastVol = candles.length > 0 ? candles[candles.length - 1]!.volume : null;
-  const volSma = computeVolumeSMA(candles, cfg.VOLUME_SPIKE_PERIOD);
+  // Volume spike must compare *closed* bars only. The kline feed upserts the
+  // in-progress minute in place, so `candles[last]` is typically a partial bar
+  // whose volume is proportional to how far into the minute we are. Fall back
+  // to the final bar only if no closed bar exists (shouldn't happen in prod).
+  const closedCandles = candles.filter((c) => c.closed !== false);
+  const lastClosed =
+    closedCandles.length > 0
+      ? closedCandles[closedCandles.length - 1]!
+      : (candles[candles.length - 1] ?? null);
+  const lastVol = lastClosed?.volume ?? null;
+  const volSma = computeVolumeSMA(closedCandles, cfg.VOLUME_SPIKE_PERIOD);
 
   const adxResult = computeADX(candles, cfg.ADX_PERIOD);
   const choppiness = computeChoppinessIndex(candles, cfg.CHOPPINESS_PERIOD);
