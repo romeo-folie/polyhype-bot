@@ -67,17 +67,20 @@ export class BinanceFeed {
       'ethusdt',
       'solusdt',
       'xrpusdt',
-      'bnbusdt',
-      'taousdt',
       'dogeusdt',
       'adausdt',
-      'avaxusdt',
       'linkusdt',
+      'dotusdt',
+      'bnbusdt',
+      'avaxusdt',
       'suiusdt',
+      'taousdt',
     ],
   ) {
     // Note: shibusdt/pepeusdt removed from defaults — SHIB/PEPE have no Hyperliquid perp entries
     // in HL_SYMBOL_MAP, so spot moves would never trigger valid arb cycles. Add back if HL lists them.
+    // Default list mirrors the prod BINANCE_SYMBOLS .env value to keep dev/test
+    // and prod in sync (.env override always wins via feeds/manager.ts).
     this.symbols = symbols.map((s) => s.toLowerCase());
     const cfg = loadConfig();
     this.timeframes = cfg.BINANCE_KLINE_TIMEFRAMES.split(',')
