@@ -262,6 +262,44 @@ export async function mapNewsToFutures(
       const confluence = await scoreConfluence(symbol, redis);
       const expectedDir = direction === 'LONG' ? 'UP' : 'DOWN';
 
+      // === Shadow logs (Phase 2/3 validation) ===
+      // Hoisted above the score gate so they accumulate samples on every
+      // confluence evaluation, not just the rare ones that pass.
+      if (confluence.volume?.ratio !== null && confluence.volume?.ratio !== undefined) {
+        if (!cfg.VOLUME_SPIKE_GATE_ENABLED) {
+          const ratio = confluence.volume.ratio;
+          const passed = ratio >= cfg.VOLUME_SPIKE_MULT;
+          logger.info('[mapping] volume_spike shadow', {
+            symbol, direction,
+            wouldBlock: !passed,
+            volRatio: ratio.toFixed(2),
+            volMult: cfg.VOLUME_SPIKE_MULT,
+            confluenceScore: confluence.score,
+          });
+        }
+      }
+      const adxValShadow = confluence.regime?.adx ?? null;
+      if (adxValShadow !== null && !cfg.ADX_GATE_ENABLED) {
+        const adxPassed = adxValShadow >= cfg.ADX_MIN;
+        logger.info('[mapping] adx shadow', {
+          symbol, direction,
+          wouldBlock: !adxPassed,
+          adx: adxValShadow.toFixed(2), adxMin: cfg.ADX_MIN,
+          confluenceScore: confluence.score,
+        });
+      }
+      const chopValShadow = confluence.regime?.choppiness ?? null;
+      if (chopValShadow !== null && !cfg.CHOPPINESS_GATE_ENABLED) {
+        const chopPassed = chopValShadow <= cfg.CHOPPINESS_MAX;
+        logger.info('[mapping] choppiness shadow', {
+          symbol, direction,
+          wouldBlock: !chopPassed,
+          choppiness: chopValShadow.toFixed(2), chopMax: cfg.CHOPPINESS_MAX,
+          confluenceScore: confluence.score,
+        });
+      }
+
+      // === Hard gates ===
       if (confluence.score < cfg.FUTURES_MIN_CONFLUENCE_SCORE) {
         logger.info('[mapping] futures confluence_block — score too low', {
           symbol, direction, score: confluence.score,
@@ -277,66 +315,34 @@ export async function mapNewsToFutures(
         });
         continue;
       }
-
-      // Volume-spike gate (Phase 2) — hard block / shadow log
-      if (confluence.volume?.ratio !== null && confluence.volume?.ratio !== undefined) {
-        const ratio = confluence.volume.ratio;
-        const passed = ratio >= cfg.VOLUME_SPIKE_MULT;
-        if (cfg.VOLUME_SPIKE_GATE_ENABLED && !passed) {
-          logger.info('[mapping] futures volume_spike_block', {
-            symbol, direction,
-            volRatio: ratio.toFixed(2),
-            volMult: cfg.VOLUME_SPIKE_MULT,
-            title: item.title,
-          });
-          continue;
-        }
-        if (!cfg.VOLUME_SPIKE_GATE_ENABLED) {
-          logger.info('[mapping] volume_spike shadow', {
-            symbol, direction,
-            wouldBlock: !passed,
-            volRatio: ratio.toFixed(2),
-            volMult: cfg.VOLUME_SPIKE_MULT,
-          });
-        }
+      if (
+        cfg.VOLUME_SPIKE_GATE_ENABLED &&
+        confluence.volume?.ratio !== null && confluence.volume?.ratio !== undefined &&
+        confluence.volume.ratio < cfg.VOLUME_SPIKE_MULT
+      ) {
+        logger.info('[mapping] futures volume_spike_block', {
+          symbol, direction,
+          volRatio: confluence.volume.ratio.toFixed(2),
+          volMult: cfg.VOLUME_SPIKE_MULT,
+          title: item.title,
+        });
+        continue;
       }
-
-      // Phase 3 — Regime gates (ADX trend + Choppiness range). Independently flagged.
       const adxVal = confluence.regime?.adx ?? null;
-      if (adxVal !== null) {
-        const adxPassed = adxVal >= cfg.ADX_MIN;
-        if (cfg.ADX_GATE_ENABLED && !adxPassed) {
-          logger.info('[mapping] futures regime_no_trend', {
-            symbol, direction,
-            adx: adxVal.toFixed(2), adxMin: cfg.ADX_MIN, title: item.title,
-          });
-          continue;
-        }
-        if (!cfg.ADX_GATE_ENABLED) {
-          logger.info('[mapping] adx shadow', {
-            symbol, direction,
-            wouldBlock: !adxPassed,
-            adx: adxVal.toFixed(2), adxMin: cfg.ADX_MIN,
-          });
-        }
+      if (cfg.ADX_GATE_ENABLED && adxVal !== null && adxVal < cfg.ADX_MIN) {
+        logger.info('[mapping] futures regime_no_trend', {
+          symbol, direction,
+          adx: adxVal.toFixed(2), adxMin: cfg.ADX_MIN, title: item.title,
+        });
+        continue;
       }
       const chopVal = confluence.regime?.choppiness ?? null;
-      if (chopVal !== null) {
-        const chopPassed = chopVal <= cfg.CHOPPINESS_MAX;
-        if (cfg.CHOPPINESS_GATE_ENABLED && !chopPassed) {
-          logger.info('[mapping] futures regime_chop', {
-            symbol, direction,
-            choppiness: chopVal.toFixed(2), chopMax: cfg.CHOPPINESS_MAX, title: item.title,
-          });
-          continue;
-        }
-        if (!cfg.CHOPPINESS_GATE_ENABLED) {
-          logger.info('[mapping] choppiness shadow', {
-            symbol, direction,
-            wouldBlock: !chopPassed,
-            choppiness: chopVal.toFixed(2), chopMax: cfg.CHOPPINESS_MAX,
-          });
-        }
+      if (cfg.CHOPPINESS_GATE_ENABLED && chopVal !== null && chopVal > cfg.CHOPPINESS_MAX) {
+        logger.info('[mapping] futures regime_chop', {
+          symbol, direction,
+          choppiness: chopVal.toFixed(2), chopMax: cfg.CHOPPINESS_MAX, title: item.title,
+        });
+        continue;
       }
 
       logger.info('[mapping] futures confluence_pass', {

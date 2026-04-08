@@ -105,6 +105,45 @@ async function runSpotMonitorInner(
           const confluence = await scoreConfluence(hlSymbol, redis);
           const expectedConfluenceDir = moveDirection === 'LONG' ? 'UP' : 'DOWN';
 
+          // === Shadow logs (Phase 2/3 validation) ===
+          // Hoisted above the score gate so they accumulate samples on every
+          // confluence evaluation, not just the rare ones that pass. Each
+          // shadow only fires when its corresponding hard gate is disabled.
+          if (confluence.volume?.ratio !== null && confluence.volume?.ratio !== undefined) {
+            if (!cfg.VOLUME_SPIKE_GATE_ENABLED) {
+              const ratio = confluence.volume.ratio;
+              const passed = ratio >= cfg.VOLUME_SPIKE_MULT;
+              logger.info('[spot] volume_spike shadow', {
+                symbol: hlSymbol, moveDirection,
+                wouldBlock: !passed,
+                volRatio: ratio.toFixed(2),
+                volMult: cfg.VOLUME_SPIKE_MULT,
+                confluenceScore: confluence.score,
+              });
+            }
+          }
+          const adxValShadow = confluence.regime?.adx ?? null;
+          if (adxValShadow !== null && !cfg.ADX_GATE_ENABLED) {
+            const adxPassed = adxValShadow >= cfg.ADX_MIN;
+            logger.info('[spot] adx shadow', {
+              symbol: hlSymbol, moveDirection,
+              wouldBlock: !adxPassed,
+              adx: adxValShadow.toFixed(2), adxMin: cfg.ADX_MIN,
+              confluenceScore: confluence.score,
+            });
+          }
+          const chopValShadow = confluence.regime?.choppiness ?? null;
+          if (chopValShadow !== null && !cfg.CHOPPINESS_GATE_ENABLED) {
+            const chopPassed = chopValShadow <= cfg.CHOPPINESS_MAX;
+            logger.info('[spot] choppiness shadow', {
+              symbol: hlSymbol, moveDirection,
+              wouldBlock: !chopPassed,
+              choppiness: chopValShadow.toFixed(2), chopMax: cfg.CHOPPINESS_MAX,
+              confluenceScore: confluence.score,
+            });
+          }
+
+          // === Hard gates ===
           if (confluence.score < cfg.FUTURES_MIN_CONFLUENCE_SCORE) {
             logger.info('[spot] futures confluence_block — score too low', {
               symbol: hlSymbol, moveDirection, score: confluence.score,
@@ -120,68 +159,33 @@ async function runSpotMonitorInner(
             });
             continue;
           }
-
-          // Volume-spike gate (Phase 2) — hard block when current bar volume is
-          // below VOLUME_SPIKE_MULT × SMA(vol). Shadow-logged when disabled so
-          // we can validate before flipping. Only fires when ratio is computable.
-          if (confluence.volume?.ratio !== null && confluence.volume?.ratio !== undefined) {
-            const ratio = confluence.volume.ratio;
-            const passed = ratio >= cfg.VOLUME_SPIKE_MULT;
-            if (cfg.VOLUME_SPIKE_GATE_ENABLED && !passed) {
-              logger.info('[spot] futures volume_spike_block', {
-                symbol: hlSymbol, moveDirection,
-                volRatio: ratio.toFixed(2),
-                volMult: cfg.VOLUME_SPIKE_MULT,
-              });
-              continue;
-            }
-            if (!cfg.VOLUME_SPIKE_GATE_ENABLED) {
-              logger.info('[spot] volume_spike shadow', {
-                symbol: hlSymbol, moveDirection,
-                wouldBlock: !passed,
-                volRatio: ratio.toFixed(2),
-                volMult: cfg.VOLUME_SPIKE_MULT,
-              });
-            }
+          if (
+            cfg.VOLUME_SPIKE_GATE_ENABLED &&
+            confluence.volume?.ratio !== null && confluence.volume?.ratio !== undefined &&
+            confluence.volume.ratio < cfg.VOLUME_SPIKE_MULT
+          ) {
+            logger.info('[spot] futures volume_spike_block', {
+              symbol: hlSymbol, moveDirection,
+              volRatio: confluence.volume.ratio.toFixed(2),
+              volMult: cfg.VOLUME_SPIKE_MULT,
+            });
+            continue;
           }
-
-          // Phase 3 — Regime gates (ADX trend strength + Choppiness range filter).
-          // Both gates are independently flag-gated; shadow-logged when off.
           const adxVal = confluence.regime?.adx ?? null;
-          if (adxVal !== null) {
-            const adxPassed = adxVal >= cfg.ADX_MIN;
-            if (cfg.ADX_GATE_ENABLED && !adxPassed) {
-              logger.info('[spot] futures regime_no_trend', {
-                symbol: hlSymbol, moveDirection,
-                adx: adxVal.toFixed(2), adxMin: cfg.ADX_MIN,
-              });
-              continue;
-            }
-            if (!cfg.ADX_GATE_ENABLED) {
-              logger.info('[spot] adx shadow', {
-                symbol: hlSymbol, moveDirection,
-                wouldBlock: !adxPassed,
-                adx: adxVal.toFixed(2), adxMin: cfg.ADX_MIN,
-              });
-            }
+          if (cfg.ADX_GATE_ENABLED && adxVal !== null && adxVal < cfg.ADX_MIN) {
+            logger.info('[spot] futures regime_no_trend', {
+              symbol: hlSymbol, moveDirection,
+              adx: adxVal.toFixed(2), adxMin: cfg.ADX_MIN,
+            });
+            continue;
           }
           const chopVal = confluence.regime?.choppiness ?? null;
-          if (chopVal !== null) {
-            const chopPassed = chopVal <= cfg.CHOPPINESS_MAX;
-            if (cfg.CHOPPINESS_GATE_ENABLED && !chopPassed) {
-              logger.info('[spot] futures regime_chop', {
-                symbol: hlSymbol, moveDirection,
-                choppiness: chopVal.toFixed(2), chopMax: cfg.CHOPPINESS_MAX,
-              });
-              continue;
-            }
-            if (!cfg.CHOPPINESS_GATE_ENABLED) {
-              logger.info('[spot] choppiness shadow', {
-                symbol: hlSymbol, moveDirection,
-                wouldBlock: !chopPassed,
-                choppiness: chopVal.toFixed(2), chopMax: cfg.CHOPPINESS_MAX,
-              });
-            }
+          if (cfg.CHOPPINESS_GATE_ENABLED && chopVal !== null && chopVal > cfg.CHOPPINESS_MAX) {
+            logger.info('[spot] futures regime_chop', {
+              symbol: hlSymbol, moveDirection,
+              choppiness: chopVal.toFixed(2), chopMax: cfg.CHOPPINESS_MAX,
+            });
+            continue;
           }
 
           logger.info('[spot] futures confluence_pass', {
