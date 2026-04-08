@@ -30,6 +30,47 @@ export interface OHLCVCandle {
 const MINUTE_MS = 60_000;
 const DEFAULT_LOOKBACK_MS = 60 * MINUTE_MS;
 
+/**
+ * Map of Hyperliquid perp symbols → Binance spot pair names used as the
+ * kline-store key suffix. Confluence/ATR callers pass HL perp symbols
+ * (`BTC`, `ETH`, ...), but BinanceFeed writes klines under the lowercase
+ * Binance pair (`btcusdt`, `ethusdt`, ...). Without this normalization the
+ * primary kline lookup misses, the tick fallback also misses, and every
+ * indicator returns null — silently disabling the entire confluence pipeline.
+ */
+const HL_TO_BINANCE_PAIR: Record<string, string> = {
+  BTC: 'btcusdt',
+  ETH: 'ethusdt',
+  SOL: 'solusdt',
+  XRP: 'xrpusdt',
+  ADA: 'adausdt',
+  DOGE: 'dogeusdt',
+  LINK: 'linkusdt',
+  DOT: 'dotusdt',
+  BNB: 'bnbusdt',
+  AVAX: 'avaxusdt',
+  SUI: 'suiusdt',
+  TAO: 'taousdt',
+  ARB: 'arbusdt',
+  OP: 'opusdt',
+  POL: 'polusdt',
+  BERA: 'berausdt',
+  JUP: 'jupusdt',
+  PENDLE: 'pendleusdt',
+  ONDO: 'ondousdt',
+};
+
+/**
+ * Normalize a caller-supplied symbol to the kline-store key suffix.
+ * - HL perp symbols (`BTC`, `ETH`, ...) → mapped Binance pair (`btcusdt`, ...)
+ * - Already-normalized pairs (`btcusdt`) → returned lowercased
+ */
+export function normalizeKlineSymbol(symbol: string): string {
+  const upper = symbol.toUpperCase();
+  if (HL_TO_BINANCE_PAIR[upper]) return HL_TO_BINANCE_PAIR[upper];
+  return symbol.toLowerCase();
+}
+
 export interface BuildCandlesOpts {
   timeframe?: '1m' | '5m';
   lookbackMs?: number;
@@ -50,7 +91,7 @@ export async function buildCandles(
   const timeframe = opts.timeframe ?? '1m';
   const lookbackMs = opts.lookbackMs ?? DEFAULT_LOOKBACK_MS;
 
-  const sym = symbol.toLowerCase();
+  const sym = normalizeKlineSymbol(symbol);
   const now = Date.now();
   const from = now - lookbackMs;
 
