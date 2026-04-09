@@ -8,7 +8,7 @@ import { fetchMarketByConditionId, fetchMarketByQuestion, type GammaMarket } fro
 
 import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
 import { creditProceeds } from '../shared/bankroll.js';
-import { isRecentlyClosed, markRecentlyClosed } from '../shared/closedGuard.js';
+import { isRecentlyClosed } from '../shared/closedGuard.js';
 import { loadConfig } from '../shared/config.js';
 
 interface ReconciliationDetail {
