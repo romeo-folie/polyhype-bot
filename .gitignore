@@ -23,3 +23,9 @@ _td_files/
 
 # Redis persistence
 redis-data/
+
+# Postgres data (Epic #142 — durable analytics layer)
+pgdata/
+
+# Compose secrets (e.g. ./secrets/pg_password)
+secrets/

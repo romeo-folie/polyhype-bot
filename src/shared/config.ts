@@ -593,6 +593,25 @@ const envSchema = z.object({
   // Purely informational — documents which TELEGRAM_CHANNELS entries are
   // sports-primary. Used by a future audit script, not by runtime.
   SPORTS_TELEGRAM_HANDLES: z.string().optional().default(''),
+
+  // ── Epic #142 — Durable analytics + retrieval layer ─────────────
+  // Postgres connection. Optional until #147 cutover; the writer is the
+  // only consumer today and fails loud at startup if PG_URL is unset.
+  PG_URL: z.string().optional(),
+  // Writer batch / poll tuning. Defaults are conservative for the CAX11.
+  DB_WRITER_BATCH_SIZE: z.coerce.number().int().min(1).max(2000).optional().default(200),
+  DB_WRITER_POLL_MS: z.coerce.number().int().min(50).max(10_000).optional().default(500),
+  DB_WRITER_BLOCK_MS: z.coerce.number().int().min(100).max(30_000).optional().default(2_000),
+  DB_WRITER_MAX_RETRIES: z.coerce.number().int().min(0).max(50).optional().default(5),
+  DB_WRITER_LOCK_TTL_SEC: z.coerce.number().int().min(30).max(600).optional().default(120),
+  // Stream / consumer-group identifiers. Stream name is intentionally short
+  // and not version-suffixed — Phase 2 schema changes don't change the stream.
+  DB_STREAM_KEY: z.string().optional().default('db:writeq'),
+  DB_STREAM_GROUP: z.string().optional().default('pga-db-writer'),
+  DB_STREAM_CONSUMER: z.string().optional().default('writer-1'),
+  DB_STREAM_MAXLEN: z.coerce.number().int().min(1000).optional().default(200_000),
+  // Phase 1 canary cadence — writer self-emits a health_pings row every N seconds.
+  DB_HEALTH_PING_INTERVAL_MS: z.coerce.number().int().min(1000).max(300_000).optional().default(30_000),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
