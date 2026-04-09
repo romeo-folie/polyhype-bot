@@ -497,7 +497,10 @@ async function runSpotMonitorInner(
     });
 
     await deductStake(redis, result.signal.stakeUsd);
-    await notifyTradeExecuted(result.signal, result.tradeResult.tx_hash);
+    await notifyTradeExecuted(result.signal, result.tradeResult.tx_hash, {
+      ...(result.executionVenue ? { venue: result.executionVenue } : {}),
+      ...(result.sharesFilled != null ? { sharesFilled: result.sharesFilled } : {}),
+    });
 
     logger.info('[spot] trade executed', {
       marketId: result.signal.marketId,
