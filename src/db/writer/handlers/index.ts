@@ -12,9 +12,31 @@
 
 import type { Sql } from 'postgres';
 import { handleHealthPings } from './health_pings.js';
+import { handleSignalDecisions } from './signal_decisions.js';
+import { handleExecutionEvents } from './execution_events.js';
+import { handleShadowObservations } from './shadow_observations.js';
+import { handleOutcomes } from './outcomes.js';
+import { handlePositions } from './positions.js';
+import { handleHedgeEvents } from './hedge_events.js';
+import { handleCalibrationStats } from './calibration_stats.js';
+import { handleTelemetryMetricSnapshots } from './telemetry_metric_snapshots.js';
+import { handleMakerTelemetry } from './maker_telemetry.js';
+import { handleArbLatencySamples } from './arb_latency_samples.js';
+import { handleMarketCatalog } from './market_catalog.js';
 
 export type WriterHandler = (sql: Sql, payloads: unknown[]) => Promise<void>;
 
 export const handlers: Record<string, WriterHandler> = {
-  health_pings: handleHealthPings,
+  health_pings:                handleHealthPings,
+  signal_decisions:            handleSignalDecisions,
+  execution_events:            handleExecutionEvents,
+  shadow_observations:         handleShadowObservations,
+  outcomes:                    handleOutcomes,
+  positions:                   handlePositions,
+  hedge_events:                handleHedgeEvents,
+  calibration_stats:           handleCalibrationStats,
+  telemetry_metric_snapshots:  handleTelemetryMetricSnapshots,
+  maker_telemetry:             handleMakerTelemetry,
+  arb_latency_samples:         handleArbLatencySamples,
+  market_catalog:              handleMarketCatalog,
 };

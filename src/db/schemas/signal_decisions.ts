@@ -1,0 +1,59 @@
+import { z } from 'zod';
+
+const SIGNAL_SOURCE = ['osint', 'copytrade', 'spot', 'arb', 'crypto-arb', 'futures', 'sports', 'clob-flow'] as const;
+const DIRECTION = ['YES', 'NO', 'UP', 'DOWN', 'LONG', 'SHORT'] as const;
+const SKIP_REASON = [
+  'extreme_price_llm_distrust', 'zone3_edge_below_fee_buffer', 'zone4_comfort_trap',
+  'zone5_widow_maker', 'kelly_sign_unstable', 'noisy_signal', 'negative_ev',
+  'too_long_dated', 'too_soon_expiring', 'funding_adverse', 'confluence_block',
+  'volume_spike_block', 'regime_no_trend', 'regime_chop', 'stake_below_floor',
+  'already_executed', 'position_already_open', 'stake_below_hl_minimum',
+  'insufficient_equity', 'global_margin_cap', 'global_governor', 'maker_not_filled',
+  'taker_edge_below_min', 'liquidity_gate', 'other',
+] as const;
+
+export const signalDecisionRowSchema = z.object({
+  decisionId:             z.string().uuid(),
+  createdAt:              z.string().datetime().optional(),
+  source:                 z.enum(SIGNAL_SOURCE),
+  marketId:               z.string(),
+  conditionId:            z.string().optional(),
+  question:               z.string(),
+  category:               z.string(),
+  direction:              z.enum(DIRECTION).optional(),
+  hasTrade:               z.boolean(),
+  skipReason:             z.enum(SKIP_REASON).optional(),
+  skipDetail:             z.string().optional(),
+  consensusProbability:   z.number().optional(),
+  consensusStddev:        z.number().optional(),
+  consensusSampleCount:   z.number().int().optional(),
+  currentYesPrice:        z.number().optional(),
+  divergence:             z.number().optional(),
+  ev:                     z.number().optional(),
+  kellyFraction:          z.number().optional(),
+  kellyFractionCapped:    z.number().optional(),
+  priceZone:              z.number().int().min(1).max(5).optional(),
+  bankrollUsd:            z.number().optional(),
+  stakeAttemptedUsd:      z.number().optional(),
+  stakeFloorBumped:       z.boolean().optional().default(false),
+  bookDepthUsd:           z.number().optional(),
+  decisionBestBid:        z.number().optional(),
+  decisionBestAsk:        z.number().optional(),
+  decisionMidPrice:       z.number().optional(),
+  decisionSpreadBps:      z.number().optional(),
+  modeConfigured:         z.string().optional(),
+  confluenceScore:        z.number().int().optional(),
+  confluenceDirection:    z.string().optional(),
+  regimeAdx:              z.number().optional(),
+  regimeChoppiness:       z.number().optional(),
+  volumeRatio:            z.number().optional(),
+  sourceHeadline:         z.string().optional(),
+  sourceExecutionId:      z.string().optional(),
+  mappingConfidence:      z.number().optional(),
+  relevanceClass:         z.string().optional(),
+  edgeClass:              z.string().optional(),
+  sizingReason:           z.string().optional(),
+  raw:                    z.record(z.unknown()).optional(),
+});
+
+export type SignalDecisionRow = z.infer<typeof signalDecisionRowSchema>;
