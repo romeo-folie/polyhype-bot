@@ -173,7 +173,8 @@ export type TakeProfitReason =
   | 'futures_sl'
   | 'futures_tp'
   | 'stale_exit'
-  | 'trailing_stop';
+  | 'trailing_stop'
+  | 'trend_exit';
 
 export async function notifyTakeProfitExecuted(opts: {
   position: Position;

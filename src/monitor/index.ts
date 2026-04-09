@@ -26,6 +26,7 @@ import {
   computePnlRangePct,
   markStaleCooldown,
 } from './staleExit.js';
+import { evaluateTrend, fetchTrendSamples } from './trendExit.js';
 import { redeemResolvedPositions } from './resolutionRedeemer.js';
 import { runClobProbe } from '../shared/clobProbe.js';
 import { setAgentAutoRedeem } from '../shared/simmer.js';
@@ -304,18 +305,21 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
       }
     }
 
-    // Stale-exit path — only runs when TP/SL/divergence did NOT fire.
+    // Trend-exit and stale-exit paths — only run when TP/SL/divergence did NOT fire.
     // Excludes futures (handled by futuresMonitor) and copytrades (own exit logic).
     const isFuturesPos =
       position.isFutures === true || position.executionVenue === 'hyperliquid';
     const isCopytradePos = position.sourcedFrom?.startsWith('copytrade:') ?? false;
+    const sampleTrackingNeeded =
+      !isFuturesPos && !isCopytradePos &&
+      (cfg.TREND_EXIT_ENABLED || cfg.STALE_EXIT_ENABLED);
 
-    if (!cfg.STALE_EXIT_ENABLED || isFuturesPos || isCopytradePos) {
+    if (!sampleTrackingNeeded) {
       held++;
       continue;
     }
 
-    // Update rolling peak PnL + price sample window, then evaluate.
+    // Update rolling peak PnL + price sample window — shared by both evaluators.
     const sampleState = await recordStaleSample(redis, position, decision.returnPct).catch(
       (err: unknown) => {
         logger.debug('[monitor] recordStaleSample failed (non-fatal)', {
@@ -325,6 +329,74 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
         return { peakPnlPct: decision.returnPct, firstSeenMs: Date.now() };
       },
     );
+
+    // ── Trend-exit evaluation ──────────────────────────────────────────────────
+    // Runs regardless of TREND_EXIT_ENABLED so shadow lines appear while dark.
+    // Re-entry uses the shared stale:cooldown key (markStaleCooldown).
+    {
+      const trendWindowMs = cfg.TREND_EXIT_WINDOW_H * 60 * 60 * 1000;
+      const trendSamples = await fetchTrendSamples(
+        redis,
+        position,
+        trendWindowMs,
+      ).catch(() => [] as { tH: number; pct: number }[]);
+
+      const trendDecision = evaluateTrend({
+        position,
+        currentPnlPct: decision.returnPct,
+        firstSeenMs: sampleState.firstSeenMs,
+        samples: trendSamples,
+        cfg,
+      });
+
+      const trendLogFields = {
+        marketId: position.marketId,
+        direction: position.direction,
+        category: trendDecision.category,
+        slopePerH: trendDecision.slopePerH?.toFixed(3) ?? null,
+        thresholdPerH: trendDecision.thresholdSlopePerH,
+        r2: trendDecision.r2?.toFixed(3) ?? null,
+        samples: trendDecision.sampleCount,
+        currentPnlPct: trendDecision.currentPnlPct.toFixed(2),
+        ageH: trendDecision.ageH.toFixed(2),
+        blockedReason: trendDecision.blockedReason,
+      };
+
+      if (trendDecision.shouldExit) {
+        if (cfg.TREND_EXIT_ENABLED) {
+          logger.info('[monitor] trend_exit triggered', trendLogFields);
+          const trendResult = await executeTakeProfit({
+            position,
+            currentPrice: currentPrice.currentOutcomePrice,
+            returnPct: decision.returnPct,
+            reason: 'trend_exit',
+            redis,
+          });
+          if (trendResult.success) {
+            exited++;
+            await markStaleCooldown(redis, position.marketId).catch(() => {
+              /* non-fatal */
+            });
+          } else {
+            logger.warn('[monitor] trend-exit failed — will retry next cycle', {
+              marketId: position.marketId,
+              error: trendResult.error,
+            });
+            held++;
+          }
+          continue;
+        } else {
+          // Shadow mode: log what would have fired without acting
+          logger.info('[monitor] trend_exit shadow', trendLogFields);
+        }
+      }
+    }
+
+    // ── Stale-exit evaluation ─────────────────────────────────────────────────
+    if (!cfg.STALE_EXIT_ENABLED) {
+      held++;
+      continue;
+    }
 
     const windowMs = cfg.STALE_VOL_WINDOW_H * 60 * 60 * 1000;
     const priceRangePct = await computePnlRangePct(redis, position, windowMs).catch(

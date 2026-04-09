@@ -150,7 +150,7 @@ const envSchema = z.object({
   MAKER_EXIT_ELIGIBLE_REASONS: z
     .string()
     .optional()
-    .default('take_profit_threshold,trailing_stop,stale_exit')
+    .default('take_profit_threshold,trailing_stop,stale_exit,trend_exit')
     .transform((v) =>
       v
         .split(',')
@@ -337,6 +337,30 @@ const envSchema = z.object({
   STALE_VOL_WINDOW_H: z.coerce.number().min(1).optional().default(6),
   STALE_VOL_MAX_PCT: z.coerce.number().min(0).optional().default(1.5),
   STALE_REENTRY_COOLDOWN_H: z.coerce.number().min(0).optional().default(24),
+
+  // Trend exit — exit PM positions on a sustained downward price trend.
+  // Uses linear regression over the rolling PnL% sample window (shared with stale exit).
+  // Exit fires when: position is sufficiently underwater (MIN_PNL_PCT) AND the regression
+  // slope (in %/h) is more negative than the category threshold AND the fit quality (R²)
+  // exceeds MIN_R2 (guards against noisy V-shape swings triggering a false trend signal).
+  // Category slopes: sports/crypto are wider (more volatile), macro/politics narrower.
+  // Ships dark (ENABLED=false). Shadow-log lines appear when criteria are met but flag is off.
+  // Re-entry blocked via shared stale:cooldown key for STALE_REENTRY_COOLDOWN_H hours.
+  TREND_EXIT_ENABLED: boolFromEnv.optional().default(false),
+  TREND_EXIT_WINDOW_H: z.coerce.number().min(1).optional().default(6),
+  TREND_EXIT_MIN_PNL_PCT: z.coerce.number().optional().default(-5),
+  TREND_EXIT_MIN_AGE_H: z.coerce.number().min(0).optional().default(3),
+  TREND_EXIT_MIN_SAMPLES: z.coerce.number().int().min(3).optional().default(10),
+  TREND_EXIT_MIN_R2: z.coerce.number().min(0).max(1).optional().default(0.4),
+  // Slope thresholds in %/h — must be negative. More negative = steeper decline required.
+  // Sports/crypto are volatile so require steeper slope; macro/politics move slowly.
+  TREND_EXIT_SLOPE_DEFAULT: z.coerce.number().optional().default(-0.5),
+  TREND_EXIT_SLOPE_SPORTS: z.coerce.number().optional().default(-0.8),
+  TREND_EXIT_SLOPE_CRYPTO_REGULATORY: z.coerce.number().optional().default(-0.8),
+  TREND_EXIT_SLOPE_AI_TECH: z.coerce.number().optional().default(-0.5),
+  TREND_EXIT_SLOPE_MACRO: z.coerce.number().optional().default(-0.3),
+  TREND_EXIT_SLOPE_US_POLITICS: z.coerce.number().optional().default(-0.3),
+  TREND_EXIT_SLOPE_GEOPOLITICAL: z.coerce.number().optional().default(-0.3),
 
   // Phase 9 — Indicator confluence gate
   CONFLUENCE_GATE_ENABLED: boolFromEnv.optional().default(true),
@@ -612,6 +636,10 @@ const envSchema = z.object({
   DB_STREAM_MAXLEN: z.coerce.number().int().min(1000).optional().default(200_000),
   // Phase 1 canary cadence — writer self-emits a health_pings row every N seconds.
   DB_HEALTH_PING_INTERVAL_MS: z.coerce.number().int().min(1000).max(300_000).optional().default(30_000),
+  // Phase 5: semantic memory retrieval — prepend similar past trade cases to LLM prompt.
+  // Requires PG_URL and OPENAI_API_KEY. Adds one embeddings call per consensus estimate.
+  MEMORY_RETRIEVAL_ENABLED: boolFromEnv.optional().default(false),
+  MEMORY_RETRIEVAL_LIMIT: z.coerce.number().int().min(1).max(10).optional().default(3),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
