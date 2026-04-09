@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { logger } from './logger.js';
-import { getActiveMarkets } from '../mapping/gamma.js';
+import { getActiveMarkets, parseOutcomes } from '../mapping/gamma.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import type { Redis } from 'ioredis';
 
@@ -100,6 +102,24 @@ export async function refreshDynamicWatchlist(redis: Redis): Promise<number> {
     } catch (err: unknown) {
       logger.warn('[watchlist] failed to cache market objects (non-fatal)', {
         error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // Emit market_catalog snapshot to PG analytics layer.
+    const snapshotId = randomUUID();
+    const capturedAt = new Date().toISOString();
+    for (const m of liveMarkets) {
+      void enqueueWrite('market_catalog', {
+        snapshotId,
+        capturedAt,
+        marketId: m.id,
+        conditionId: m.conditionId,
+        question: m.question,
+        endDate: m.endDate ?? undefined,
+        outcomes: (() => { try { return parseOutcomes(m.outcomes); } catch { return undefined; } })(),
+        liquidity: m.liquidity != null ? Number(m.liquidity) : undefined,
+        active: m.active,
+        raw: { volume: m.volume, feesEnabled: m.feesEnabled },
       });
     }
 

@@ -27,6 +27,7 @@ import {
 } from '../execution/positionLedger.js';
 import { scoreConfluence } from '../arb/confluenceScorer.js';
 import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 
 const POLL_INTERVAL_MS = 5000; // 5 seconds — safe for rate limits, fast enough for intraday
 const MONITOR_LOCK_KEY = 'futures-monitor:lock';
@@ -300,6 +301,19 @@ export async function runFuturesMonitorWorker(): Promise<void> {
               atrTpPct: shadowTpPct.toFixed(2),
               fixedVerdict: fixedSlHit ? 'SL' : fixedTpHit ? 'TP' : 'hold',
               atrVerdict: atrSlHit ? 'SL' : atrTpHit ? 'TP' : 'hold',
+            });
+            void enqueueWrite('shadow_observations', {
+              kind: 'atr_shadow', source: 'futures', symbol,
+              direction,
+              wouldBlock: false,
+              metricValue: atrPct,
+              payload: {
+                priceChangePct, fixedSlPct: cfg.FUTURES_STOP_LOSS_PCT,
+                fixedTpPct: cfg.FUTURES_TAKE_PROFIT_PCT,
+                atrSlPct: shadowSlPct, atrTpPct: shadowTpPct,
+                fixedVerdict: fixedSlHit ? 'SL' : fixedTpHit ? 'TP' : 'hold',
+                atrVerdict: atrSlHit ? 'SL' : atrTpHit ? 'TP' : 'hold',
+              },
             });
           }
         }

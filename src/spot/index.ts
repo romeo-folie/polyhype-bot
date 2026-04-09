@@ -8,6 +8,7 @@
  * idempotency layer, and Telegram notifications.
  */
 
+import { randomUUID } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
@@ -27,6 +28,7 @@ import { HL_SYMBOL_MAP } from '../shared/hyperliquid.js';
 import { priceZoneOf } from '../shared/zones.js';
 import { scoreConfluence } from '../arb/confluenceScorer.js';
 import { computeATR } from '../arb/indicators.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 /**
@@ -121,6 +123,11 @@ async function runSpotMonitorInner(
                 volMult: cfg.VOLUME_SPIKE_MULT,
                 confluenceScore: confluence.score,
               });
+              void enqueueWrite('shadow_observations', {
+                kind: 'volume_spike', source: 'spot', symbol: hlSymbol, direction: moveDirection,
+                wouldBlock: !passed, metricValue: ratio, threshold: cfg.VOLUME_SPIKE_MULT,
+                payload: { confluenceScore: confluence.score },
+              });
             }
           }
           const adxValShadow = confluence.regime?.adx ?? null;
@@ -132,6 +139,11 @@ async function runSpotMonitorInner(
               adx: adxValShadow.toFixed(2), adxMin: cfg.ADX_MIN,
               confluenceScore: confluence.score,
             });
+            void enqueueWrite('shadow_observations', {
+              kind: 'adx', source: 'spot', symbol: hlSymbol, direction: moveDirection,
+              wouldBlock: !adxPassed, metricValue: adxValShadow, threshold: cfg.ADX_MIN,
+              payload: { confluenceScore: confluence.score },
+            });
           }
           const chopValShadow = confluence.regime?.choppiness ?? null;
           if (chopValShadow !== null && !cfg.CHOPPINESS_GATE_ENABLED) {
@@ -141,6 +153,11 @@ async function runSpotMonitorInner(
               wouldBlock: !chopPassed,
               choppiness: chopValShadow.toFixed(2), chopMax: cfg.CHOPPINESS_MAX,
               confluenceScore: confluence.score,
+            });
+            void enqueueWrite('shadow_observations', {
+              kind: 'choppiness', source: 'spot', symbol: hlSymbol, direction: moveDirection,
+              wouldBlock: !chopPassed, metricValue: chopValShadow, threshold: cfg.CHOPPINESS_MAX,
+              payload: { confluenceScore: confluence.score },
             });
           }
 
@@ -233,6 +250,7 @@ async function runSpotMonitorInner(
           assetId: move.assetId,
           eventTs: move.eventTs,
           source: 'spot',
+          decisionId: randomUUID(),
         });
       }
     }

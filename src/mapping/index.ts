@@ -9,6 +9,7 @@
  * Returns an array of TradeSignal objects ready for Phase 3 execution.
  */
 
+import { randomUUID } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { findCandidateMarkets } from './entityExtractor.js';
@@ -21,6 +22,8 @@ import { getRedis } from '../shared/redis.js';
 import { priceZoneOf } from '../shared/zones.js';
 import { scoreConfluence } from '../arb/confluenceScorer.js';
 import { computeATR } from '../arb/indicators.js';
+import { enqueueWrite } from '../db/writeQueue.js';
+import { inferCategory } from '../shared/outcomeRecorder.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 import type { Redis } from 'ioredis';
 import type { ClobPriceFeed } from '../shared/clobWebSocket.js';
@@ -31,6 +34,8 @@ export interface TradeSignal {
   conditionId?: string;
   clobTokenIds?: string[];
   executionId?: string;
+  /** UUID minted at signal decision time — links signal_decisions → execution_events → outcomes */
+  decisionId?: string;
   question: string;
   direction: 'YES' | 'NO' | 'UP' | 'DOWN' | 'LONG' | 'SHORT';
   stakeUsd: number;
@@ -163,6 +168,7 @@ export async function runMapping(
         continue;
       }
 
+      const decisionId = randomUUID();
       const { hasTrade, decision, skipReason } = computeDivergence({
         consensusProbability: consensus.probability,
         consensusStddev: consensus.stddev,
@@ -196,6 +202,29 @@ export async function runMapping(
         stakeUsd: decision?.stakeUsd.toFixed(2),
       });
 
+      void enqueueWrite('signal_decisions', {
+        decisionId,
+        source: 'osint',
+        marketId: candidate.marketId,
+        conditionId: candidate.conditionId,
+        question: candidate.question,
+        category: inferCategory(candidate.question),
+        direction: decision?.direction,
+        hasTrade,
+        skipReason: skipReason ?? (hasTrade ? undefined : 'other'),
+        consensusProbability: consensus.probability,
+        consensusStddev: consensus.stddev,
+        consensusSampleCount: consensus.sampleCount,
+        currentYesPrice,
+        divergence: decision?.edgeMagnitude,
+        kellyFraction: decision?.halfKellyFraction,
+        priceZone: decision?.priceZone,
+        bankrollUsd,
+        stakeAttemptedUsd: decision?.stakeUsd,
+        bookDepthUsd: candidate.liquidity != null ? Number(candidate.liquidity) : undefined,
+        sourceHeadline: item.title.slice(0, 200),
+      });
+
       if (hasTrade && decision) {
         const candidate_signal: TradeSignal = {
           marketId: candidate.marketId,
@@ -215,7 +244,8 @@ export async function runMapping(
           source: 'osint',
           latencyMs: item.latencyMs,
           endDate: candidate.endDate ?? undefined,
-          // assetId is not directly known from entity extraction, but usually 
+          decisionId,
+          // assetId is not directly known from entity extraction, but usually
           // inferred by the monitor or stored if known from spot move.
         };
         const existing = bestByMarket.get(candidate.marketId);
@@ -285,6 +315,11 @@ export async function mapNewsToFutures(
             volMult: cfg.VOLUME_SPIKE_MULT,
             confluenceScore: confluence.score,
           });
+          void enqueueWrite('shadow_observations', {
+            kind: 'volume_spike', source: 'futures', symbol, direction,
+            wouldBlock: !passed, metricValue: ratio, threshold: cfg.VOLUME_SPIKE_MULT,
+            payload: { confluenceScore: confluence.score },
+          });
         }
       }
       const adxValShadow = confluence.regime?.adx ?? null;
@@ -296,6 +331,11 @@ export async function mapNewsToFutures(
           adx: adxValShadow.toFixed(2), adxMin: cfg.ADX_MIN,
           confluenceScore: confluence.score,
         });
+        void enqueueWrite('shadow_observations', {
+          kind: 'adx', source: 'futures', symbol, direction,
+          wouldBlock: !adxPassed, metricValue: adxValShadow, threshold: cfg.ADX_MIN,
+          payload: { confluenceScore: confluence.score },
+        });
       }
       const chopValShadow = confluence.regime?.choppiness ?? null;
       if (chopValShadow !== null && !cfg.CHOPPINESS_GATE_ENABLED) {
@@ -305,6 +345,11 @@ export async function mapNewsToFutures(
           wouldBlock: !chopPassed,
           choppiness: chopValShadow.toFixed(2), chopMax: cfg.CHOPPINESS_MAX,
           confluenceScore: confluence.score,
+        });
+        void enqueueWrite('shadow_observations', {
+          kind: 'choppiness', source: 'futures', symbol, direction,
+          wouldBlock: !chopPassed, metricValue: chopValShadow, threshold: cfg.CHOPPINESS_MAX,
+          payload: { confluenceScore: confluence.score },
         });
       }
 

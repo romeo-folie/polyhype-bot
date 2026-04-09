@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import type { Position } from '../execution/positionLedger.js';
 import { recordOutcome, inferCategory, inferSource } from './outcomeRecorder.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 
 /**
  * Record the outcome of a position exit. Centralises field mapping from Position
@@ -26,6 +28,16 @@ export async function recordPositionOutcome(
     | 'decisionSpreadBps'
     | 'makerPriceImprovementBps'
     | 'makerPriceImprovementUsd'
+    | 'marketId'
+    | 'conditionId'
+    | 'entryPrice'
+    | 'stakeUsd'
+    | 'sharesHeld'
+    | 'entryAtr'
+    | 'entryAtrPct'
+    | 'priceZone'
+    | 'synthHedged'
+    | 'pendingSettlement'
   >,
   opts: {
     result: 'won' | 'lost';
@@ -64,5 +76,42 @@ export async function recordPositionOutcome(
     ...(position.makerPriceImprovementUsd !== undefined
       ? { makerPriceImprovementUsd: position.makerPriceImprovementUsd }
       : {}),
+  });
+
+  const holdingHours = position.openedAt
+    ? (Date.now() - new Date(position.openedAt).getTime()) / 3_600_000
+    : 0;
+  void enqueueWrite('outcomes', {
+    outcomeId: randomUUID(),
+    closedAt: new Date().toISOString(),
+    openedAt: position.openedAt,
+    executionId: position.executionId,
+    source: inferSource(position.sourcedFrom),
+    category: inferCategory(position.question),
+    marketId: position.marketId,
+    conditionId: position.conditionId,
+    question: position.question,
+    direction: position.direction,
+    consensusProbability: position.consensusProbability ?? 0.5,
+    divergence: position.edgeMagnitude,
+    result: opts.result,
+    returnPct: opts.returnPct,
+    holdingHours,
+    executionVenue: opts.executionVenueOverride ?? position.executionVenue ?? 'simmer',
+    modeConfigured: position.modeConfigured,
+    entryExecutionPath: position.entryExecutionPath,
+    entryOrderType: position.entryOrderType,
+    fallbackReason: position.fallbackReason,
+    decisionSpreadBps: position.decisionSpreadBps,
+    makerPriceImprovementBps: position.makerPriceImprovementBps,
+    makerPriceImprovementUsd: position.makerPriceImprovementUsd,
+    entryPrice: position.entryPrice,
+    stakeUsd: position.stakeUsd,
+    sharesHeld: position.sharesHeld,
+    entryAtr: position.entryAtr,
+    entryAtrPct: position.entryAtrPct,
+    priceZone: position.priceZone,
+    synthHedged: position.synthHedged ?? false,
+    pendingSettlement: position.pendingSettlement ?? false,
   });
 }

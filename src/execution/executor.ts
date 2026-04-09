@@ -11,8 +11,9 @@
  * - Structured result logging
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { logger } from '../shared/logger.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import {
   submitTrade,
   resolveSimmerMarketId,
@@ -657,6 +658,12 @@ async function executeHyperliquidSignal(
             signedBps: signedBps.toFixed(4),
             max: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
           });
+          void enqueueWrite('shadow_observations', {
+            kind: 'hl_funding', source: 'futures',
+            symbol: signal.marketId, direction: signal.direction,
+            wouldBlock: true, metricValue: Math.abs(signedBps), threshold: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
+            payload: { hourlyBps, signedBps, marketId: signal.marketId },
+          });
         }
       }
     } catch (err) {
@@ -894,6 +901,7 @@ export async function executeSignal(
     .update(`${signal.marketId}:${signal.direction}:${Date.now()}:${Math.random()}`)
     .digest('hex')
     .slice(0, 16);
+  const attemptId = randomUUID();
   signal = { ...signal, executionId };
   const decisionStartedAt = Date.now();
 
@@ -912,6 +920,11 @@ export async function executeSignal(
         source: signal.source,
         isFutures: signal.isFutures ?? false,
       }).catch(() => {});
+      void enqueueWrite('arb_latency_samples', {
+        stage: 'executor_entry',
+        latencyMs: Math.round(latencyMs),
+        context: { executionId, source: signal.source, isFutures: signal.isFutures ?? false },
+      });
     }
   }
   let makerTelemetry: Record<string, unknown> = {};
@@ -983,6 +996,25 @@ export async function executeSignal(
       ...(payload.errorClass ? { errorClass: payload.errorClass } : {}),
       ...(payload.errorMessage ? { errorMessage: payload.errorMessage } : {}),
       ...(payload.extra ?? {}),
+    });
+    void enqueueWrite('execution_events', {
+      attemptId,
+      executionId,
+      decisionId: signal.decisionId,
+      source: signal.source ?? 'osint',
+      marketId: signal.marketId,
+      direction: signal.direction,
+      finalExecutionPath: payload.finalExecutionPath,
+      finalVenue: payload.finalVenue,
+      finalOrderType: payload.finalOrderType,
+      executionSucceeded: payload.executionSucceeded,
+      skipReason: payload.skipReason,
+      errorClass: payload.errorClass,
+      errorMessage: payload.errorMessage,
+      sharesFilled: payload.finalSharesFilled ?? undefined,
+      stakeUsdExecuted: payload.finalStakeUsdExecuted ?? undefined,
+      elapsedMs: Math.round(elapsedMs),
+      ...makerTelemetry,
     });
   };
 

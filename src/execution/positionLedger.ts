@@ -13,6 +13,7 @@ import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 import { markRecentlyClosed } from '../shared/closedGuard.js';
 import { clearStaleState } from '../monitor/staleExit.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 
 const POSITION_KEY_PREFIX = 'position:';
 const POSITIONS_INDEX_KEY = 'positions:index'; // sorted set: score = openedAt ms
@@ -206,6 +207,7 @@ export async function recordPosition(redis: Redis, position: Position): Promise<
   // Add to sorted index (score = openedAt ms for chronological retrieval)
   await redis.zadd(POSITIONS_INDEX_KEY, openedAtMs, key);
 
+  void enqueueWrite('positions', position as unknown as Record<string, unknown>);
   logger.info('[ledger] position recorded', {
     marketId: position.marketId,
     direction: position.direction,
@@ -256,6 +258,8 @@ export async function closePosition(
   direction: Position['direction'],
 ): Promise<void> {
   const key = positionKey(marketId, direction);
+  // Read before delete so we can emit the closed state to PG.
+  const posRecord = await getPosition(redis, marketId, direction);
   await redis.del(key);
   await redis.zrem(POSITIONS_INDEX_KEY, key);
   // Guard: prevent reconciler from re-importing dust residuals on Simmer as a
@@ -263,6 +267,12 @@ export async function closePosition(
   await markRecentlyClosed(redis, marketId);
   // Drop any stale-exit tracking state (peak pnl + price samples) for this position.
   await clearStaleState(redis, marketId, direction);
+  if (posRecord) {
+    void enqueueWrite('positions', {
+      ...(posRecord as unknown as Record<string, unknown>),
+      closedAt: new Date().toISOString(),
+    });
+  }
   logger.info('[ledger] position closed', { marketId, direction });
 }
 
@@ -277,6 +287,8 @@ export async function markPositionSynthHedged(
 ): Promise<void> {
   const key = positionKey(marketId, direction);
   await redis.hset(key, { synthHedged: 'true' });
+  const pos = await getPosition(redis, marketId, direction);
+  if (pos) void enqueueWrite('positions', pos as unknown as Record<string, unknown>);
   logger.info('[ledger] position marked synthHedged', { marketId, direction });
 }
 
@@ -291,6 +303,8 @@ export async function markPositionPendingSettlement(
 ): Promise<void> {
   const key = positionKey(marketId, direction);
   await redis.hset(key, { pendingSettlement: 'true' });
+  const pos = await getPosition(redis, marketId, direction);
+  if (pos) void enqueueWrite('positions', pos as unknown as Record<string, unknown>);
   logger.info('[ledger] position marked pendingSettlement', { marketId, direction });
 }
 
@@ -316,6 +330,8 @@ export async function updatePositionShares(
     sharesHeld: String(sharesHeld),
     ...(reconciliationStatus ? { reconciliationStatus } : {}),
   });
+  const pos = await getPosition(redis, marketId, direction);
+  if (pos) void enqueueWrite('positions', pos as unknown as Record<string, unknown>);
   logger.info('[ledger] position shares reconciled', {
     marketId,
     direction,

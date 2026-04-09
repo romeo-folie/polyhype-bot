@@ -8,6 +8,7 @@
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import type { SpotPrice } from './poller.js';
 import { getPriceAtLookback } from './poller.js';
 import { isCryptoAsset, BINANCE_SYMBOL_TO_ASSET } from '../shared/assets.js';
@@ -163,6 +164,12 @@ export async function detectMoves(currentPrices: SpotPrice[]): Promise<SpotMove[
           agrees: pctTriggered === wouldTrigger,
           zscore: z.z.toFixed(2),
           changePercent: changePercent.toFixed(2),
+        });
+        void enqueueWrite('shadow_observations', {
+          kind: 'zscore', source: 'spot', symbol: sp.assetId,
+          wouldBlock: !wouldTrigger,
+          metricValue: Math.abs(z.z), threshold: cfg.SPOT_ZSCORE_THRESHOLD,
+          payload: { triggerMode, pctTriggered, agrees: pctTriggered === wouldTrigger, changePercent },
         });
       }
     }
