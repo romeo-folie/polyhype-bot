@@ -477,7 +477,7 @@ async function runSpotMonitorInner(
       clobTokenIds: result.signal.clobTokenIds,
       question: result.signal.question,
       direction: result.signal.direction,
-      entryPrice: result.signal.outcomePrice,
+      entryPrice: result.entryPrice ?? result.signal.outcomePrice,
       stakeUsd: result.signal.stakeUsd,
       openedAt: new Date().toISOString(),
       sourcedFrom: result.signal.sourcedFrom,
@@ -488,6 +488,12 @@ async function runSpotMonitorInner(
       assetId: result.signal.assetId,
       endDate: result.signal.endDate,
       priceZone: result.signal.priceZone,
+      isFutures: result.signal.isFutures,
+      leverage: result.signal.leverage,
+      symbol: result.signal.symbol || (result.signal.isFutures ? result.signal.marketId : undefined),
+      sharesHeld: result.sharesFilled ?? undefined,
+      entryAtr: result.entryAtr,
+      entryAtrPct: result.entryAtrPct,
     });
 
     await deductStake(redis, result.signal.stakeUsd);
