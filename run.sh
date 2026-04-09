@@ -45,7 +45,13 @@ set +a
 SCRIPT_NAME=""
 for arg in "$@"; do
   if [[ "$arg" == *.ts ]]; then
-    SCRIPT_NAME="$(basename "${arg%.ts}")"
+    # Combine parent-dir + basename for a globally unique lock per script.
+    # e.g. src/cron/settlement.ts    → cron-settlement    (not shared with refreshWatchlist)
+    #      src/monitor/index.ts      → monitor-index      (not shared with spot/index.ts)
+    #      src/execution/index.ts    → execution-index
+    PARENT="$(basename "$(dirname "$arg")")"
+    BASE="$(basename "${arg%.ts}")"
+    SCRIPT_NAME="${PARENT}-${BASE}"
     break
   fi
 done
