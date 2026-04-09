@@ -531,6 +531,78 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
             continue;
           }
         }
+
+        // Payout ratio gate: skip near-certain entries where upside headroom is too small.
+        // At currentOutcomePrice=0.85, payoutRatio=(1-0.85)/0.85≈0.18 < default 0.20 → skip.
+        const payoutRatio = (1 - currentOutcomePrice) / currentOutcomePrice;
+        if (payoutRatio < cfg.COPYTRADE_MIN_PAYOUT_RATIO) {
+          logger.info('[copytrade] skipped low payout ratio', {
+            marketId: market.id,
+            direction,
+            currentOutcomePrice: currentOutcomePrice.toFixed(4),
+            payoutRatio: payoutRatio.toFixed(3),
+            minPayoutRatio: cfg.COPYTRADE_MIN_PAYOUT_RATIO,
+          });
+          await recordCopytradeFilter(redis, 'low_payout_ratio').catch(() => {
+            /* ignore telemetry errors */
+          });
+          await markDedup();
+          continue;
+        }
+
+        // Minimum edge magnitude gate: skip if market has fully repriced from whale's fill.
+        // earlyEdge = |whale_fill_price - current_price| (direction-normalised to YES side).
+        const whaleYesEquiv = direction === 'YES' ? trade.price : 1 - trade.price;
+        const earlyEdge = Math.abs(whaleYesEquiv - currentYesPrice);
+        if (earlyEdge < cfg.COPYTRADE_MIN_EDGE_MAGNITUDE) {
+          logger.info('[copytrade] skipped low edge magnitude', {
+            marketId: market.id,
+            direction,
+            whalePrice: trade.price.toFixed(4),
+            currentYesPrice: currentYesPrice.toFixed(4),
+            edgeMagnitude: earlyEdge.toFixed(4),
+            minEdgeMagnitude: cfg.COPYTRADE_MIN_EDGE_MAGNITUDE,
+          });
+          await recordCopytradeFilter(redis, 'low_edge_magnitude').catch(() => {
+            /* ignore telemetry errors */
+          });
+          await markDedup();
+          continue;
+        }
+
+        // Category-specialist gate: only copy this whale in categories where they've
+        // historically shown positive edge. Requires COPYTRADE_CATEGORY_MIN_TRADES
+        // resolved trades before the filter engages (cold-start grace).
+        if (cfg.COPYTRADE_CATEGORY_SPECIALIST_ENABLED) {
+          const statsKey = `copytrade:cat_stats:${wallet}`;
+          const [winsRaw, lossesRaw] = await redis.hmget(
+            statsKey,
+            `${category}:wins`,
+            `${category}:losses`,
+          );
+          const wins = parseInt(winsRaw ?? '0', 10);
+          const losses = parseInt(lossesRaw ?? '0', 10);
+          const totalTrades = wins + losses;
+          if (totalTrades >= cfg.COPYTRADE_CATEGORY_MIN_TRADES) {
+            const winRate = wins / totalTrades;
+            if (winRate < cfg.COPYTRADE_CATEGORY_MIN_WIN_RATE) {
+              logger.info('[copytrade] category_specialist_block', {
+                wallet,
+                category,
+                winRate: winRate.toFixed(3),
+                wins,
+                losses,
+                totalTrades,
+                minWinRate: cfg.COPYTRADE_CATEGORY_MIN_WIN_RATE,
+              });
+              await recordCopytradeFilter(redis, 'category_specialist').catch(() => {
+                /* ignore telemetry errors */
+              });
+              await markDedup();
+              continue;
+            }
+          }
+        }
       }
 
       if (trade.side === 'SELL') {

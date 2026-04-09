@@ -488,6 +488,42 @@ const envSchema = z.object({
   // Set to 0 to disable.
   COPYTRADE_SHORTLIST_MIN_VOL_PNL_RATIO: z.coerce.number().min(0).optional().default(2),
 
+  // Payout ratio gate: skip BUY entries where potential upside is too small.
+  // payoutRatio = (1 - currentOutcomePrice) / currentOutcomePrice
+  // Default 0.20 = skip if currentPrice > ~0.83 (only 20% gain headroom).
+  COPYTRADE_MIN_PAYOUT_RATIO: z.coerce.number().min(0).optional().default(0.20),
+  // Minimum edge magnitude: skip if market has fully repriced from whale's fill.
+  // edgeMagnitude = |whale_fill_price - current_price|
+  // Default 0.01 = skip if price has moved to within 1¢ of whale's fill.
+  COPYTRADE_MIN_EDGE_MAGNITUDE: z.coerce.number().min(0).optional().default(0.01),
+
+  // Category-specialist filter: only copy a whale in categories where they perform well.
+  // Stats accumulate in Redis (copytrade:cat_stats:{wallet}) as positions close.
+  // Ship with ENABLED=false and let stats build for ~2 weeks before enabling.
+  COPYTRADE_CATEGORY_SPECIALIST_ENABLED: boolFromEnv.optional().default(false),
+  // Minimum resolved trades in a category before the filter applies (cold-start grace).
+  COPYTRADE_CATEGORY_MIN_TRADES: z.coerce.number().int().min(1).optional().default(10),
+  // Minimum win rate required in the category. Below this → skip.
+  COPYTRADE_CATEGORY_MIN_WIN_RATE: z.coerce.number().min(0).max(1).optional().default(0.50),
+
+  // --- NEAR-ZERO ENTRY SCANNER ---
+  // Scans for markets priced 3–10¢ where LLM consensus >> market price (structural mispricing).
+  // Asymmetry: 5¢ entry → 95¢ exit = 19× payout. Ship dark, shadow-log first.
+  NEAR_ZERO_SCANNER_ENABLED: boolFromEnv.optional().default(false),
+  NEAR_ZERO_MIN_PRICE: z.coerce.number().min(0).max(1).optional().default(0.03),
+  NEAR_ZERO_MAX_PRICE: z.coerce.number().min(0).max(1).optional().default(0.10),
+  // LLM consensus threshold to enter. Requires strong conviction to overcome market price.
+  NEAR_ZERO_MIN_CONSENSUS: z.coerce.number().min(0).max(1).optional().default(0.78),
+  // Conservative stake cap — illiquid tail markets have wide spreads on exit.
+  NEAR_ZERO_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(5),
+  // Max LLM calls per run (cost control). Candidates sorted by price asc (most asymmetric first).
+  NEAR_ZERO_MAX_CANDIDATES_PER_RUN: z.coerce.number().int().min(1).optional().default(5),
+  NEAR_ZERO_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(500),
+  // Minimum hours until resolution — avoid markets resolving before position can compound.
+  NEAR_ZERO_MIN_HOURS: z.coerce.number().min(0).optional().default(24),
+  // TTL for per-market dedup key. Prevents re-evaluating the same market for 6h.
+  NEAR_ZERO_DEDUP_TTL_S: z.coerce.number().int().min(0).optional().default(21600),
+
   // --- CRYPTO FUTURES (Phase: futures) ---
   FUTURES_ENABLED: boolFromEnv.optional().default(false),
   // When true: log HL orders instead of submitting them. Safe validation path.
