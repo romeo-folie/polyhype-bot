@@ -195,21 +195,35 @@ async function runWriter(): Promise<void> {
   const retryCounts = new Map<string, number>();
 
   // ── Main loop ────────────────────────────────────────────────────────
+  // Start with '0' to drain our own PEL (messages that were in-flight during
+  // a previous crash and were never ACK'd). Once PEL is empty, switch to '>'
+  // to receive new messages. This is the standard single-consumer recovery
+  // pattern — no XAUTOCLAIM needed for a single-consumer setup.
+  let streamReadId = '0';
+
   while (running) {
     try {
       // ioredis types xreadgroup as variadic strings; explicit cast keeps tsc happy.
-      const res = (await redis.xreadgroup(
-        'GROUP',
-        cfg.DB_STREAM_GROUP,
-        cfg.DB_STREAM_CONSUMER,
-        'COUNT',
-        cfg.DB_WRITER_BATCH_SIZE,
-        'BLOCK',
-        cfg.DB_WRITER_BLOCK_MS,
-        'STREAMS',
-        cfg.DB_STREAM_KEY,
-        '>',
+      const readArgs: (string | number)[] = [
+        'GROUP', cfg.DB_STREAM_GROUP, cfg.DB_STREAM_CONSUMER,
+        'COUNT', cfg.DB_WRITER_BATCH_SIZE,
+      ];
+      // Only block when reading new messages ('>'); PEL reads must be non-blocking.
+      if (streamReadId === '>') {
+        readArgs.push('BLOCK', cfg.DB_WRITER_BLOCK_MS);
+      }
+      readArgs.push('STREAMS', cfg.DB_STREAM_KEY, streamReadId);
+
+      const res = (await (redis.xreadgroup as (...a: unknown[]) => Promise<unknown>)(
+        ...readArgs,
       )) as [string, [string, string[]][]][] | null;
+
+      // When reading PEL ('0') and nothing comes back, PEL is empty — flip to '>'.
+      if (streamReadId !== '>' && (!res || res[0]?.[1].length === 0)) {
+        logger.info('[writer] PEL drain complete — switching to live stream');
+        streamReadId = '>';
+        continue;
+      }
 
       if (!res || res.length === 0) continue;
       const batch = res[0]?.[1];
@@ -304,9 +318,26 @@ async function runWriter(): Promise<void> {
         inFlight = false;
       }
     } catch (err) {
-      logger.error('[writer] loop error', {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const msg = err instanceof Error ? err.message : String(err);
+      // NOGROUP means the consumer group (or stream) was deleted out from under us —
+      // e.g. a DEBUG RELOAD, external FLUSHDB, or accidental DEL during ops. Recreate
+      // the group idempotently and reset the read cursor to '0' so we drain PEL again
+      // (there won't be a real PEL, but this resets to a clean delivery state). The
+      // stream itself is re-created via MKSTREAM if needed.
+      if (msg.includes('NOGROUP')) {
+        logger.warn('[writer] consumer group missing — recreating and resetting cursor');
+        try {
+          await redis.xgroup('CREATE', cfg.DB_STREAM_KEY, cfg.DB_STREAM_GROUP, '$', 'MKSTREAM');
+        } catch (cgErr) {
+          const cgMsg = cgErr instanceof Error ? cgErr.message : String(cgErr);
+          if (!cgMsg.includes('BUSYGROUP')) {
+            logger.warn('[writer] xgroup recreate failed', { error: cgMsg });
+          }
+        }
+        streamReadId = '0'; // restart PEL drain
+      } else {
+        logger.error('[writer] loop error', { error: msg });
+      }
       // Brief backoff so a hot error doesn't pin a CPU.
       await new Promise((r) => setTimeout(r, 1_000));
     }
