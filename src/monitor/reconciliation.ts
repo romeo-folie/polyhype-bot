@@ -8,7 +8,7 @@ import { fetchMarketByConditionId, fetchMarketByQuestion, type GammaMarket } fro
 
 import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
 import { creditProceeds } from '../shared/bankroll.js';
-import { isRecentlyClosed } from '../shared/closedGuard.js';
+import { isRecentlyClosed, markRecentlyClosed } from '../shared/closedGuard.js';
 import { loadConfig } from '../shared/config.js';
 
 interface ReconciliationDetail {
@@ -88,7 +88,7 @@ export async function runReconciliation(
     const reindexedSimmerMap = new Map<string, SimmerPosition>();
     const simmerMetadataMap = new Map<string, GammaMarket>();
     let bridgeApiCalls = 0;
-    const BRIDGE_API_BUDGET = 10;
+    const BRIDGE_API_BUDGET = 50;
 
     for (const [originalKey, pos] of rawSimmerMap.entries()) {
       const direction = pos.side.toUpperCase();
@@ -486,7 +486,9 @@ async function importSimmerOrphan(
   metadata?: GammaMarket,
 ): Promise<boolean> {
   try {
-    // Guard: skip positions that were recently redeemed to prevent close→reimport→redeem loops
+    // Guard: skip positions that were recently redeemed/ghost-closed.
+    // Check both the Simmer UUID and the resolved numeric ID — ghost-close marks the
+    // numeric ID, but the orphan importer sees the UUID, so one check alone misses it.
     if (await isRecentlyClosed(redis, pos.market_id)) {
       logger.info('[reconcile] skipping recently-closed Simmer orphan', {
         marketId: pos.market_id,
@@ -498,6 +500,16 @@ async function importSimmerOrphan(
       logger.warn('[reconcile] skipping Simmer orphan — no Polymarket metadata (UUID fallback blocked)', {
         marketId: pos.market_id,
         question: pos.question,
+      });
+      return false;
+    }
+
+    // Secondary guard: ghost-close marks the numeric ID; check it too so a ghost→orphan
+    // reimport loop can't occur when the UUID and numeric ID differ.
+    if (await isRecentlyClosed(redis, metadata.id)) {
+      logger.info('[reconcile] skipping recently-closed Simmer orphan (numeric ID match)', {
+        simmerUuid: pos.market_id,
+        numericId: metadata.id,
       });
       return false;
     }

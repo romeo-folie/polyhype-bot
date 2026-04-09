@@ -45,7 +45,7 @@ set +a
 SCRIPT_NAME=""
 for arg in "$@"; do
   if [[ "$arg" == *.ts ]]; then
-    SCRIPT_NAME="$(basename "$(dirname "$arg")")"
+    SCRIPT_NAME="$(basename "${arg%.ts}")"
     break
   fi
 done

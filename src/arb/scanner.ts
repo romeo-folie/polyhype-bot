@@ -9,6 +9,7 @@
  */
 
 import { getActiveMarkets, parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
+import { getCachedMarkets } from '../shared/watchlist.js';
 import { submitClobBuy } from '../shared/clob.js';
 import { getBankroll, deductStake } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
@@ -61,7 +62,11 @@ export interface ArbResult {
 export async function scanForArb(redis: Redis): Promise<ArbOpportunity[]> {
   const cfg = loadConfig();
   const minEdge = cfg.ARB_MIN_EDGE;
-  const markets = await getActiveMarkets(ARB_SCAN_MARKET_COUNT);
+  let markets = await getCachedMarkets(redis);
+  if (markets.length === 0) {
+    logger.warn('[arb] market cache empty — falling back to Gamma API direct call');
+    markets = await getActiveMarkets(ARB_SCAN_MARKET_COUNT);
+  }
   const opportunities: ArbOpportunity[] = [];
 
   for (const market of markets) {
