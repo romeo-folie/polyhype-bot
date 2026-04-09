@@ -31,6 +31,8 @@ const mockRedis = {
 vi.mock('../../shared/redis.js', () => ({
   getRedis: vi.fn().mockReturnValue(mockRedis),
   closeRedis: vi.fn(),
+  refreshLock: vi.fn().mockResolvedValue('refreshed'),
+  reacquireLockAfterExpiry: vi.fn().mockResolvedValue(true),
 }));
 
 // Mock Hyperliquid Client
@@ -46,9 +48,15 @@ vi.mock('../../shared/hyperliquid.js', () => ({
 // Mock Position Ledger
 const mockGetLedgerPositions = vi.fn();
 const mockCloseLedgerPosition = vi.fn();
+const mockHasOpenPosition = vi.fn().mockResolvedValue(true); // default: ledger row exists → no backfill
+const mockRecordPosition = vi.fn().mockResolvedValue(undefined);
+const mockUpdateHighWaterMark = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../execution/positionLedger.js', () => ({
   getOpenPositions: mockGetLedgerPositions,
   closePosition: mockCloseLedgerPosition,
+  hasOpenPosition: mockHasOpenPosition,
+  recordPosition: mockRecordPosition,
+  updateHighWaterMark: mockUpdateHighWaterMark,
 }));
 
 // Mock Telegram

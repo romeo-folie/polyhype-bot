@@ -14,20 +14,28 @@ import 'dotenv/config';
 import { hostname } from 'node:os';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
-import { getRedis, closeRedis } from '../shared/redis.js';
+import { getRedis, closeRedis, refreshLock, reacquireLockAfterExpiry } from '../shared/redis.js';
 import { getHyperliquid } from '../shared/hyperliquid.js';
 import { notifyTradeError, notifyTakeProfitExecuted } from '../execution/telegram.js';
 import {
   closePosition as closeLedgerPosition,
   getOpenPositions,
+  hasOpenPosition,
+  recordPosition,
   updateHighWaterMark,
+  type Position,
 } from '../execution/positionLedger.js';
 import { scoreConfluence } from '../arb/confluenceScorer.js';
 import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
 
 const POLL_INTERVAL_MS = 5000; // 5 seconds — safe for rate limits, fast enough for intraday
 const MONITOR_LOCK_KEY = 'futures-monitor:lock';
-const MONITOR_LOCK_TTL_SEC = 30; // Must be > POLL_INTERVAL_MS; refreshed every cycle.
+// TTL must be comfortably larger than the WORST-CASE single cycle (HL API stalls,
+// LLM calls in recordOutcome, network blips). 120s gives ~24 poll intervals of
+// margin before our own TTL would lapse — far beyond any realistic single-cycle
+// hang — so 'expired' should be vanishingly rare. See Bug A in
+// memory/recurring-worker-deaths.md for the history behind this choice.
+const MONITOR_LOCK_TTL_SEC = 120;
 
 // Module-level reference to releaseLock so the shutdown handler can call it
 let _releaseLock: (() => Promise<void>) | null = null;
@@ -92,23 +100,44 @@ export async function runFuturesMonitorWorker(): Promise<void> {
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    // Refresh lock TTL each cycle to stay alive.
-    const lockRefreshResult = await redis
-      .eval(
-        `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("expire",KEYS[1],ARGV[2]) else return 0 end`,
-        1,
-        MONITOR_LOCK_KEY,
-        lockToken,
-        String(MONITOR_LOCK_TTL_SEC),
-      )
-      .catch((e: unknown) => {
-        logger.warn('[futures-monitor] lock refresh failed', { error: String(e) });
-        return -1; // Treat Redis error as indeterminate — do NOT break, just warn
-      });
+    // Refresh lock TTL each cycle. Tri-state semantics: 'expired' means our
+    // OWN TTL lapsed with no contender present (recoverable — just re-acquire);
+    // 'stolen' means a different token is in the key (true duplicate instance —
+    // fatal). Old code conflated these and killed the worker on every slow cycle.
+    let refreshState: 'refreshed' | 'expired' | 'stolen';
+    try {
+      refreshState = await refreshLock(MONITOR_LOCK_KEY, lockToken, MONITOR_LOCK_TTL_SEC);
+    } catch (e) {
+      // Redis blip — treat as indeterminate, warn and continue. The next tick
+      // will retry. If the blip persists and the lock actually expires, the
+      // recovery path below will catch it.
+      logger.warn('[futures-monitor] lock refresh failed', { error: String(e) });
+      refreshState = 'refreshed';
+    }
 
-    if (lockRefreshResult === 0) {
+    if (refreshState === 'stolen') {
       logger.error('[futures-monitor] lock stolen by another instance — shutting down');
       break;
+    }
+    if (refreshState === 'expired') {
+      logger.warn('[futures-monitor] own lock TTL expired — attempting re-acquire', {
+        ttlSec: MONITOR_LOCK_TTL_SEC,
+      });
+      const reacquired = await reacquireLockAfterExpiry(
+        MONITOR_LOCK_KEY,
+        lockToken,
+        MONITOR_LOCK_TTL_SEC,
+      ).catch((e: unknown) => {
+        logger.warn('[futures-monitor] re-acquire failed', { error: String(e) });
+        return false;
+      });
+      if (!reacquired) {
+        logger.error(
+          '[futures-monitor] lock expired AND re-acquire found another holder — shutting down',
+        );
+        break;
+      }
+      logger.info('[futures-monitor] lock re-acquired after expiry');
     }
 
     try {
@@ -136,8 +165,50 @@ export async function runFuturesMonitorWorker(): Promise<void> {
       }
 
       // Sync HL positions with ledger to get true 'openedAt' timestamps
-      const ledgerPositions = await getOpenPositions(redis);
-      const futuresLedger = ledgerPositions.filter((p) => p.isFutures);
+      let ledgerPositions = await getOpenPositions(redis);
+      let futuresLedger = ledgerPositions.filter((p) => p.isFutures);
+
+      // BACKFILL: if HL holds a position the ledger doesn't know about, write
+      // a ledger row so the trailing-stop HWM can ratchet, stale-exit timers
+      // work, and recordOutcome can produce analytics on close. Without this,
+      // a ledger row lost during a worker restart/crash stays lost forever,
+      // silently disabling trailing stops on real money. See Bug B in
+      // memory/recurring-worker-deaths.md.
+      let backfilled = false;
+      for (const pos of positions) {
+        const size = Math.abs(parseFloat(pos.position.szi));
+        const entryPx = parseFloat(pos.position.entryPx);
+        if (size === 0 || !Number.isFinite(entryPx) || entryPx === 0) continue;
+        const direction: 'LONG' | 'SHORT' = parseFloat(pos.position.szi) > 0 ? 'LONG' : 'SHORT';
+        const alreadyTracked = await hasOpenPosition(redis, pos.symbol, direction);
+        if (alreadyTracked) continue;
+        const backfillPos: Position = {
+          marketId: pos.symbol,
+          direction,
+          entryPrice: entryPx,
+          stakeUsd: size * entryPx,
+          edgeMagnitude: 0,
+          sourcedFrom: 'backfill:futures-monitor',
+          openedAt: new Date().toISOString(),
+          question: `${pos.symbol} perpetual (backfilled)`,
+          executionVenue: 'hyperliquid',
+          isFutures: true,
+          symbol: pos.symbol,
+          sharesHeld: size,
+        };
+        await recordPosition(redis, backfillPos);
+        logger.warn('[futures-monitor] backfilled missing ledger row', {
+          symbol: pos.symbol,
+          direction,
+          entryPrice: entryPx,
+          size,
+        });
+        backfilled = true;
+      }
+      if (backfilled) {
+        ledgerPositions = await getOpenPositions(redis);
+        futuresLedger = ledgerPositions.filter((p) => p.isFutures);
+      }
 
       for (const pos of positions) {
         const symbol = pos.symbol;
@@ -354,7 +425,11 @@ export async function runFuturesMonitorWorker(): Promise<void> {
 
             if (ledgerPos) {
               const holdingHours = (Date.now() - new Date(ledgerPos.openedAt).getTime()) / 3600000;
-              await recordOutcome(redis, {
+              // Fire-and-forget: recordOutcome + inferCategory can trigger LLM
+              // calls with unbounded tail latency. Awaiting them inside the hot
+              // loop used to blow past the lock TTL and trigger the false-steal
+              // shutdown. Errors are logged but never propagate to the loop.
+              void recordOutcome(redis, {
                 source: 'futures',
                 category: inferCategory(ledgerPos.question),
                 question: ledgerPos.question,
@@ -367,7 +442,11 @@ export async function runFuturesMonitorWorker(): Promise<void> {
                 executionVenue: 'hyperliquid',
                 exitReason: reason,
                 ...(ledgerPos.priceZone !== undefined ? { priceZone: ledgerPos.priceZone } : {}),
-              }, { sourcedFrom: ledgerPos.sourcedFrom });
+              }, { sourcedFrom: ledgerPos.sourcedFrom }).catch((e: unknown) => {
+                logger.warn('[futures-monitor] recordOutcome failed (non-fatal)', {
+                  symbol, error: String(e),
+                });
+              });
             }
 
             await closeLedgerPosition(redis, symbol, direction);

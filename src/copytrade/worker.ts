@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 // The dotenv import is retained for the hot-reload path (~line 148) which uses dotenv.config({ override: true }).
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
-import { getRedis } from '../shared/redis.js';
+import { getRedis, refreshLock, reacquireLockAfterExpiry } from '../shared/redis.js';
 import { runCopytrade } from './index.js';
 import { executeSignal } from '../execution/executor.js';
 import { recordPosition } from '../execution/positionLedger.js';
@@ -22,7 +22,12 @@ import { recordCopytradeFilter, recordCopytradeMetric } from '../shared/telemetr
  * @param maxCycles  Optional limit for testing (runs infinitely if undefined)
  */
 const WORKER_LOCK_KEY = 'copytrade:worker:lock';
-const WORKER_LOCK_TTL_SEC = 90; // 90s — safe with 60s refresh; limits stuck window on crash
+// TTL must comfortably exceed the worst-case delay between refresh ticks
+// (setInterval jitter under event-loop pressure, GC pauses on ARM, Redis AOF
+// rewrites, etc.). 300s gives 5x headroom over the 60s refresh interval.
+// See Bug A in memory/recurring-worker-deaths.md for why the old 90s killed
+// the worker during routine slowdowns.
+const WORKER_LOCK_TTL_SEC = 300;
 
 export async function runWorker(maxCycles?: number): Promise<void> {
   const redis = getRedis();
@@ -52,27 +57,44 @@ export async function runWorker(maxCycles?: number): Promise<void> {
     process.exit(1);
   }
 
-  // Refresh lock every 60s while running.
-  // Track consecutive refresh failures: after 3 failures (~3 min), abort the worker
-  // rather than silently running without holding the lock (which allows duplicate instances).
+  // Refresh lock every 60s. Tri-state semantics (see refreshLock in redis.ts):
+  //   'refreshed' — all good
+  //   'expired'   — our own TTL lapsed (event-loop stall / Redis blip); recover
+  //                 by re-acquiring the same token atomically. NOT fatal.
+  //   'stolen'    — a different token is in the key; genuine duplicate instance.
+  //                 Only this case aborts the worker.
+  // Refresh failures (network/Redis errors) still trip the abort after 3 in a
+  // row, to prevent us running without a lock during a persistent Redis outage.
   let lockRefreshFailures = 0;
   const MAX_LOCK_REFRESH_FAILURES = 3;
   let lockLost = false;
   const lockRefresh = setInterval(() => {
-    redis
-      .eval(
-        `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("expire",KEYS[1],ARGV[2]) else return 0 end`,
-        1,
-        WORKER_LOCK_KEY,
-        lockToken,
-        String(WORKER_LOCK_TTL_SEC),
-      )
-      .then((result) => {
+    refreshLock(WORKER_LOCK_KEY, lockToken, WORKER_LOCK_TTL_SEC)
+      .then(async (state) => {
         lockRefreshFailures = 0;
-        if (result === 0) {
-          // Lock was taken by another instance — stop this worker.
-          logger.error('[copytrade-worker] lock lost to another instance — aborting');
+        if (state === 'refreshed') return;
+        if (state === 'stolen') {
+          logger.error('[copytrade-worker] lock stolen by another instance — aborting');
           lockLost = true;
+          return;
+        }
+        // 'expired' — we outran our own TTL. Try to re-acquire with the same
+        // token atomically. If something else got there first, THEN abort.
+        logger.warn('[copytrade-worker] own lock TTL expired — attempting re-acquire', {
+          ttlSec: WORKER_LOCK_TTL_SEC,
+        });
+        const reacquired = await reacquireLockAfterExpiry(
+          WORKER_LOCK_KEY,
+          lockToken,
+          WORKER_LOCK_TTL_SEC,
+        ).catch(() => false);
+        if (!reacquired) {
+          logger.error(
+            '[copytrade-worker] lock expired AND re-acquire found another holder — aborting',
+          );
+          lockLost = true;
+        } else {
+          logger.info('[copytrade-worker] lock re-acquired after expiry');
         }
       })
       .catch((err: unknown) => {

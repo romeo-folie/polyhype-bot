@@ -109,6 +109,59 @@ export async function releaseLock(key: string, token: string): Promise<void> {
   );
 }
 
+/**
+ * Refresh a lock's TTL, distinguishing "key missing" from "stolen by another".
+ *
+ * Returns:
+ *   'refreshed' — our token is still there, TTL bumped. Continue normally.
+ *   'expired'   — the key is gone. Our own TTL lapsed (cycle too slow,
+ *                 network blip, Redis pause, GC stall). Caller should
+ *                 re-acquire the lock with SET NX and continue, not abort.
+ *   'stolen'    — the key holds a DIFFERENT token. Another instance owns
+ *                 this lock. Caller MUST abort to avoid duplicate actions.
+ *
+ * This replaces the old `eval(... return 0 else)` pattern that conflated
+ * "expired" and "stolen" — the conflation caused silent worker deaths
+ * whenever a cycle ran longer than the lock TTL, with no actual second
+ * instance present.
+ */
+export async function refreshLock(
+  key: string,
+  token: string,
+  ttlSec: number,
+): Promise<'refreshed' | 'expired' | 'stolen'> {
+  const redis = getRedis();
+  const result = (await redis.eval(
+    `local v = redis.call("get", KEYS[1])
+     if v == false then return -1 end
+     if v == ARGV[1] then return redis.call("expire", KEYS[1], ARGV[2]) end
+     return 0`,
+    1,
+    key,
+    token,
+    String(ttlSec),
+  )) as number;
+  if (result === -1) return 'expired';
+  if (result === 0) return 'stolen';
+  return 'refreshed';
+}
+
+/**
+ * Re-acquire a lock after our own TTL expired. Uses SET NX so if another
+ * process sneaked in between expiry and re-acquire, we detect it and return
+ * null (caller should then shut down). On success the caller holds the lock
+ * under the SAME token, so existing release/refresh calls keep working.
+ */
+export async function reacquireLockAfterExpiry(
+  key: string,
+  token: string,
+  ttlSec: number,
+): Promise<boolean> {
+  const redis = getRedis();
+  const result = await redis.set(key, token, 'EX', ttlSec, 'NX');
+  return result === 'OK';
+}
+
 // NOTE: Redis shutdown is handled by each worker's own SIGTERM/SIGINT handler.
 // Workers must: (1) release their lock, (2) call closeRedis(), (3) process.exit().
 // We do NOT register signal handlers here because closeRedis() would race the
