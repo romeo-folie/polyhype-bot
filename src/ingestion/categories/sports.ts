@@ -12,8 +12,8 @@ export const sports: CategoryConfig = {
   id: 'sports',
   label: 'Sports (NBA / NHL)',
   feeds: [
-    { url: 'https://www.espn.com/espn/rss/nba/news' },
-    { url: 'https://www.espn.com/espn/rss/nhl/news' },
+    { url: 'https://sports.yahoo.com/nba/rss.xml' },
+    { url: 'https://sports.yahoo.com/nhl/rss.xml' },
   ],
   scorerPrompt: SPORTS_PROMPT,
   scoreThreshold: 7,

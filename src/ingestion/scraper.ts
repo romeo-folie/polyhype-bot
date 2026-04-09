@@ -11,11 +11,18 @@
 import axios from 'axios';
 import { logger } from '../shared/logger.js';
 import type { RssItem } from './rss.js';
+import type { Redis } from 'ioredis';
 
 const GDELT_TIMEOUT_MS = 15_000;
 const GDELT_BASE = 'https://api.gdeltproject.org/api/v2/doc/doc';
 const GDELT_MAX_RETRIES = 1;
 const GDELT_RETRY_DELAY_MS = 6_000;
+
+/** Minimum interval between GDELT calls — avoids 429s on 5-min cron cycles. */
+const GDELT_MIN_INTERVAL_MS = 12 * 60 * 1000; // 12 minutes
+/** Extended backoff after receiving a 429. */
+const GDELT_BACKOFF_429_MS = 30 * 60 * 1000; // 30 minutes
+const GDELT_COOLDOWN_KEY = 'scraper:gdelt:next_allowed';
 
 /** Timespan in hours to look back. Matches the 5-minute cron cycle with overlap. */
 const GDELT_TIMESPAN_HOURS = 1;
@@ -120,18 +127,51 @@ async function fetchGdeltCombined(): Promise<RssItem[]> {
  *
  * Single combined query per cycle (full theme coverage), deduplicated by URL.
  * Failures are logged and return empty array (fail-silent behavior).
+ *
+ * Uses a Redis cooldown key to avoid hammering GDELT on every 5-min cron tick:
+ * - Normal: minimum 12 minutes between calls.
+ * - After 429: 30-minute backoff.
  */
-export async function scrapeHeadlines(): Promise<RssItem[]> {
+export async function scrapeHeadlines(redis: Redis): Promise<RssItem[]> {
+  const now = Date.now();
+  const nextAllowedRaw = await redis.get(GDELT_COOLDOWN_KEY);
+  if (nextAllowedRaw !== null) {
+    const nextAllowed = parseInt(nextAllowedRaw, 10);
+    if (now < nextAllowed) {
+      logger.debug('[scraper] GDELT cooldown active; skipping', {
+        resumesInMs: nextAllowed - now,
+      });
+      return [];
+    }
+  }
+
   const result = await fetchGdeltCombined().then(
     (value) => ({ status: 'fulfilled' as const, value }),
     (reason: unknown) => ({ status: 'rejected' as const, reason }),
   );
 
   if (result.status === 'rejected') {
-    logger.warn('[scraper] GDELT fetch failed', { error: String(result.reason) });
+    const err = result.reason;
+    const is429 =
+      err &&
+      typeof err === 'object' &&
+      (err as { response?: { status?: number } }).response?.status === 429;
+    const backoffMs = is429 ? GDELT_BACKOFF_429_MS : GDELT_MIN_INTERVAL_MS;
+    await redis.set(GDELT_COOLDOWN_KEY, String(now + backoffMs), 'PX', backoffMs);
+    logger.warn('[scraper] GDELT fetch failed', {
+      error: String(err),
+      backoffMs,
+    });
     logger.info('[scraper] GDELT fetch complete', { count: 0 });
     return [];
   }
+
+  await redis.set(
+    GDELT_COOLDOWN_KEY,
+    String(now + GDELT_MIN_INTERVAL_MS),
+    'PX',
+    GDELT_MIN_INTERVAL_MS,
+  );
 
   const seenUrls = new Set<string>();
   const deduped: RssItem[] = [];

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { Redis } from 'ioredis';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mockGet = vi.fn<(...args: any[]) => any>();
@@ -9,10 +10,16 @@ vi.mock('axios', () => ({
 }));
 
 vi.mock('../../shared/logger.js', () => ({
-  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
 const { scrapeHeadlines } = await import('../scraper.js');
+
+/** Minimal Redis stub — cooldown always clear, set is a no-op. */
+const mockRedis = {
+  get: vi.fn().mockResolvedValue(null),
+  set: vi.fn().mockResolvedValue('OK'),
+} as unknown as Redis;
 
 const ARTICLE_1 = {
   url: 'https://example.com/article-1',
@@ -66,7 +73,7 @@ describe('scrapeHeadlines (GDELT)', () => {
   it('returns deduplicated English articles from combined GDELT query', async () => {
     mockGet.mockResolvedValue(MOCK_RESPONSE);
 
-    const items = await scrapeHeadlines();
+    const items = await scrapeHeadlines(mockRedis);
 
     expect(items).toHaveLength(2);
     expect(items[0]?.title).toBe('Iran launches ballistic missiles at Israeli targets');
@@ -94,7 +101,7 @@ describe('scrapeHeadlines (GDELT)', () => {
       },
     });
 
-    const items = await scrapeHeadlines();
+    const items = await scrapeHeadlines(mockRedis);
     expect(items).toHaveLength(1);
     expect(items[0]?.publishedAt).toEqual(new Date('2026-03-19T08:30:45Z'));
     expect(items[0]?.source).toBe('GDELT Combined');
@@ -114,7 +121,7 @@ describe('scrapeHeadlines (GDELT)', () => {
       },
     });
 
-    const items = await scrapeHeadlines();
+    const items = await scrapeHeadlines(mockRedis);
     const after = new Date();
     expect(items).toHaveLength(1);
     expect(items[0]?.publishedAt.getTime()).toBeGreaterThanOrEqual(before.getTime());
@@ -137,7 +144,7 @@ describe('scrapeHeadlines (GDELT)', () => {
       },
     });
 
-    const items = await scrapeHeadlines();
+    const items = await scrapeHeadlines(mockRedis);
     expect(items).toHaveLength(1);
     expect(mockGet).toHaveBeenCalledTimes(2);
   });
@@ -145,21 +152,21 @@ describe('scrapeHeadlines (GDELT)', () => {
   it('returns empty array when combined query fails', async () => {
     mockGet.mockRejectedValue(new Error('network error'));
 
-    const items = await scrapeHeadlines();
+    const items = await scrapeHeadlines(mockRedis);
     expect(items).toHaveLength(0);
   });
 
   it('handles empty articles array from GDELT', async () => {
     mockGet.mockResolvedValue({ data: { articles: [] } });
 
-    const items = await scrapeHeadlines();
+    const items = await scrapeHeadlines(mockRedis);
     expect(items).toHaveLength(0);
   });
 
   it('handles missing articles field in GDELT response', async () => {
     mockGet.mockResolvedValue({ data: {} });
 
-    const items = await scrapeHeadlines();
+    const items = await scrapeHeadlines(mockRedis);
     expect(items).toHaveLength(0);
   });
 });

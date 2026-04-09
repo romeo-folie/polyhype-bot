@@ -22,7 +22,7 @@ import { CATEGORIES } from './categories/index.js';
 async function runCategoryPipeline(category: CategoryConfig, redis: Redis): Promise<ScoredItem[]> {
   const [rssItems, scraped] = await Promise.all([
     fetchRssFeeds(category.feeds),
-    category.id === 'geopolitical' ? scrapeHeadlines() : Promise.resolve([]),
+    category.id === 'geopolitical' ? scrapeHeadlines(redis) : Promise.resolve([]),
   ]);
 
   const all = [...rssItems, ...scraped];
