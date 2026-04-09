@@ -18,6 +18,7 @@ const HL_MIN_ORDER_USD = 10;
 // --- Hyperliquid Asset Mapping ---
 /** Mapping of external asset IDs (CoinGecko/Binance/Yahoo) to HL perp symbols */
 export const HL_SYMBOL_MAP: Record<string, string> = {
+  // --- Majors ---
   bitcoin: 'BTC',
   ethereum: 'ETH',
   solana: 'SOL',
@@ -25,7 +26,7 @@ export const HL_SYMBOL_MAP: Record<string, string> = {
   optimism: 'OP',
   chainlink: 'LINK',
   'avalanche-2': 'AVAX',
-  'polygon-hermez': 'POL', // Updated to POL
+  'polygon-hermez': 'POL',
   cardano: 'ADA',
   ripple: 'XRP',
   dogecoin: 'DOGE',
@@ -36,6 +37,32 @@ export const HL_SYMBOL_MAP: Record<string, string> = {
   'jupiter-exchange-solana': 'JUP',
   pendle: 'PENDLE',
   'ondo-finance': 'ONDO',
+  // --- High-volume alts (already in ASSET_SEARCH_QUERIES, now wired to HL) ---
+  toncoin: 'TON',
+  tron: 'TRX',
+  near: 'NEAR',
+  aptos: 'APT',
+  injective: 'INJ',
+  render: 'RENDER',       // HL: RENDER (rebranded from RNDR); klines from rndrusdt
+  uniswap: 'UNI',
+  cosmos: 'ATOM',
+  stacks: 'STX',
+  // --- Political / meme tokens (high Polymarket correlation) ---
+  'official-trump': 'TRUMP',   // wbSym \btrump\b fires on any political headline
+  melania: 'MELANIA',
+  pepe: 'kPEPE',               // HL uses kPEPE (1000× PEPE unit); klines from pepeusdt
+  dogwifcoin: 'WIF',
+  bonk: 'kBONK',              // HL uses kBONK (1000× BONK unit); klines from bonkusdt
+  pengu: 'PENGU',
+  // --- Narrative: AI / Web3 infra ---
+  'fetch-ai': 'FET',
+  'virtual-protocol': 'VIRTUAL',
+  worldcoin: 'WLD',           // AI biometrics; Polymarket has many WLD/Sam Altman markets
+  // --- DeFi / BTC ecosystem ---
+  'ethena-usde': 'ENA',
+  celestia: 'TIA',
+  'bitcoin-ordinals': 'ORDI', // wbSym \bordi\b + wbId \bbitcoin-ordinals\b
+  thorchain: 'RUNE',
 };
 
 /**

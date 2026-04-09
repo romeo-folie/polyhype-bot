@@ -46,6 +46,7 @@ const DEFAULT_LOOKBACK_MS = 60 * MINUTE_MS;
  * indicator returns null — silently disabling the entire confluence pipeline.
  */
 const HL_TO_BINANCE_PAIR: Record<string, string> = {
+  // --- Majors (subscribed since day 1) ---
   BTC: 'btcusdt',
   ETH: 'ethusdt',
   SOL: 'solusdt',
@@ -58,6 +59,7 @@ const HL_TO_BINANCE_PAIR: Record<string, string> = {
   AVAX: 'avaxusdt',
   SUI: 'suiusdt',
   TAO: 'taousdt',
+  // --- In HL_SYMBOL_MAP but missing from BINANCE_SYMBOLS (TA was dead) ---
   ARB: 'arbusdt',
   OP: 'opusdt',
   POL: 'polusdt',
@@ -65,6 +67,31 @@ const HL_TO_BINANCE_PAIR: Record<string, string> = {
   JUP: 'jupusdt',
   PENDLE: 'pendleusdt',
   ONDO: 'ondousdt',
+  // --- New high-volume alts ---
+  TON: 'tonusdt',
+  TRX: 'trxusdt',
+  NEAR: 'nearusdt',
+  APT: 'aptusdt',
+  INJ: 'injusdt',
+  RENDER: 'rndrusdt',    // Binance still lists under old RNDR ticker
+  UNI: 'uniusdt',
+  ATOM: 'atomusdt',
+  STX: 'stxusdt',
+  // --- Political / meme ---
+  TRUMP: 'trumpusdt',
+  MELANIA: 'melaniausdt',
+  kPEPE: 'pepeusdt',      // HL 1000× unit; same price direction as Binance PEPEUSDT
+  WIF: 'wifusdt',
+  kBONK: 'bonkusdt',      // HL 1000× unit; same price direction as Binance BONKUSDT
+  PENGU: 'penguusdt',
+  // --- Narrative ---
+  FET: 'fetusdt',
+  VIRTUAL: 'virtualusdt',
+  WLD: 'wldusdt',
+  ENA: 'enausdt',
+  TIA: 'tiausdt',
+  ORDI: 'ordiusdt',
+  RUNE: 'runeusdt',
 };
 
 /**
