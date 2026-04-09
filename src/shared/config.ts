@@ -309,6 +309,15 @@ const envSchema = z.object({
   COPYTRADE_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.40),
   COPYTRADE_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.50),
   MONITOR_HEAVY_INTERVAL_MIN: z.coerce.number().int().min(1).optional().default(5),
+  // Zone-aware stop-loss floor. For positions entered in the price tails
+  // (entryPrice ≤ EXTREME_LOW or ≥ EXTREME_HIGH), a flat % stop is dominated
+  // by spread noise (e.g. -15% on a 3¢ outcome = 0.45¢ = one tick). Require
+  // BOTH the % threshold AND an absolute price move of at least this many
+  // cents before firing stop_loss. Applies to all sources.
+  ZONE_AWARE_SL_ENABLED: boolFromEnv.optional().default(true),
+  ZONE_AWARE_SL_EXTREME_LOW: z.coerce.number().min(0).max(1).optional().default(0.1),
+  ZONE_AWARE_SL_EXTREME_HIGH: z.coerce.number().min(0).max(1).optional().default(0.9),
+  ZONE_AWARE_SL_MIN_ABS_MOVE: z.coerce.number().min(0).max(1).optional().default(0.02),
 
   // Stale-position exit — rotate capital out of PM positions that never print profit.
   // Rule A: if peak PnL never reached STALE_PEAK_PNL_TARGET_PCT by category age threshold → exit.
@@ -426,6 +435,18 @@ const envSchema = z.object({
     .pipe(z.record(z.string(), z.coerce.number().min(0).max(10000))),
   COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS: z.coerce.number().min(0).optional().default(6),
   COPYTRADE_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(1000),
+  // Extreme-price gate: skip entries where the outcome price is in the tails.
+  // At ≤0.08 or ≥0.92, stop-loss % is dominated by spread noise and R/R is asymmetric
+  // (e.g. buying NO at 0.95 = 5¢ upside vs 95¢ downside). Measured against the price
+  // we'd actually pay (currentOutcomePrice), not the whale's fill.
+  COPYTRADE_MIN_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.08),
+  COPYTRADE_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.92),
+  // Directional slippage gate: reject only ADVERSE drift vs. whale fill.
+  // Symmetric COPYTRADE_MAX_SLIPPAGE_BPS treats a favorable move (better fill for us)
+  // identically to an adverse move (already underwater at entry). This caps adverse
+  // drift tightly while leaving favorable drift unrestricted.
+  // Example: 0.08 = skip if currentOutcomePrice is >8% worse than trade.price.
+  COPYTRADE_MAX_ADVERSE_DRIFT_PCT: z.coerce.number().min(0).max(1).optional().default(0.08),
   COPYTRADE_EXIT_MODE: z.enum(['mirror', 'rules']).optional().default('rules'),
   COPYTRADE_POLL_INTERVAL_MS: z.coerce.number().int().min(500).optional().default(2000),
 

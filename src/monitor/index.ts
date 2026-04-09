@@ -196,6 +196,12 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
       currentPrice,
       tpThreshold,
       slThreshold,
+      {
+        enabled: cfg.ZONE_AWARE_SL_ENABLED,
+        extremeLow: cfg.ZONE_AWARE_SL_EXTREME_LOW,
+        extremeHigh: cfg.ZONE_AWARE_SL_EXTREME_HIGH,
+        minAbsoluteMove: cfg.ZONE_AWARE_SL_MIN_ABS_MOVE,
+      },
     );
 
     logger.info('[monitor] position evaluated', {

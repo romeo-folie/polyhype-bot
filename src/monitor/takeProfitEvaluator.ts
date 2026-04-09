@@ -41,11 +41,19 @@ export interface ExitDecision {
 /**
  * Evaluate whether a position should be exited.
  */
+export interface ZoneAwareStopLossConfig {
+  enabled: boolean;
+  extremeLow: number;
+  extremeHigh: number;
+  minAbsoluteMove: number;
+}
+
 export function evaluateTakeProfit(
   position: Position,
   currentPrice: CurrentPrice,
   takeProfitThreshold: number,
   stopLossThreshold = 0.3,
+  zoneAwareSl?: ZoneAwareStopLossConfig,
 ): ExitDecision {
   const { entryPrice, consensusProbability, direction } = position;
   const { currentOutcomePrice, currentYesPrice } = currentPrice;
@@ -54,9 +62,17 @@ export function evaluateTakeProfit(
   const returnDecimal = entryPrice > 0 ? (currentOutcomePrice - entryPrice) / entryPrice : 0;
   const returnPct = returnDecimal * 100;
 
-  // Condition 1: stop-loss — exit immediately if loss exceeds threshold
+  // Condition 1: stop-loss — exit immediately if loss exceeds threshold.
+  // Zone-aware override: for positions entered in the price tails, also require
+  // an absolute price move to avoid spread-noise stop-outs on tiny-priced outcomes.
   if (returnDecimal <= -stopLossThreshold) {
-    return { shouldExit: true, reason: 'stop_loss', returnDecimal, returnPct };
+    const inExtremeZone =
+      zoneAwareSl?.enabled &&
+      (entryPrice <= zoneAwareSl.extremeLow || entryPrice >= zoneAwareSl.extremeHigh);
+    const absMove = Math.abs(entryPrice - currentOutcomePrice);
+    if (!inExtremeZone || absMove >= (zoneAwareSl?.minAbsoluteMove ?? 0)) {
+      return { shouldExit: true, reason: 'stop_loss', returnDecimal, returnPct };
+    }
   }
 
   // Condition 2: take-profit threshold reached

@@ -489,6 +489,50 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         continue;
       }
 
+      // Extreme-price gate (BUY entries only — exits/mirror-sells bypass).
+      // Long-tail / near-certain markets have asymmetric R/R and their stop-loss %
+      // is dominated by spread noise.
+      if (trade.side === 'BUY') {
+        if (
+          currentOutcomePrice < cfg.COPYTRADE_MIN_ENTRY_PRICE ||
+          currentOutcomePrice > cfg.COPYTRADE_MAX_ENTRY_PRICE
+        ) {
+          logger.info('[copytrade] skipped extreme price', {
+            marketId: market.id,
+            direction,
+            currentOutcomePrice: currentOutcomePrice.toFixed(4),
+            minEntry: cfg.COPYTRADE_MIN_ENTRY_PRICE,
+            maxEntry: cfg.COPYTRADE_MAX_ENTRY_PRICE,
+          });
+          await recordCopytradeFilter(redis, 'extreme_price').catch(() => {
+            /* ignore telemetry errors */
+          });
+          await markDedup();
+          continue;
+        }
+
+        // Directional slippage gate: reject only ADVERSE drift vs whale's fill.
+        // Favorable drift (better fill for us) is allowed regardless of magnitude.
+        if (trade.price > 0) {
+          const adverseDriftPct = (trade.price - currentOutcomePrice) / trade.price;
+          if (adverseDriftPct > cfg.COPYTRADE_MAX_ADVERSE_DRIFT_PCT) {
+            logger.info('[copytrade] skipped adverse drift', {
+              marketId: market.id,
+              direction,
+              whalePrice: trade.price.toFixed(4),
+              currentOutcomePrice: currentOutcomePrice.toFixed(4),
+              adverseDriftPct: (adverseDriftPct * 100).toFixed(2),
+              maxAdverseDriftPct: (cfg.COPYTRADE_MAX_ADVERSE_DRIFT_PCT * 100).toFixed(2),
+            });
+            await recordCopytradeFilter(redis, 'adverse_drift').catch(() => {
+              /* ignore telemetry errors */
+            });
+            await markDedup();
+            continue;
+          }
+        }
+      }
+
       if (trade.side === 'SELL') {
         const walletKey = trade.proxyWallet.toLowerCase();
         const positionsToExit =
