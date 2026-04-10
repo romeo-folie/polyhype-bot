@@ -362,33 +362,34 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
         blockedReason: trendDecision.blockedReason,
       };
 
-      if (trendDecision.shouldExit) {
-        if (cfg.TREND_EXIT_ENABLED) {
-          logger.info('[monitor] trend_exit triggered', trendLogFields);
-          const trendResult = await executeTakeProfit({
-            position,
-            currentPrice: currentPrice.currentOutcomePrice,
-            returnPct: decision.returnPct,
-            reason: 'trend_exit',
-            redis,
+      if (trendDecision.shouldExit && cfg.TREND_EXIT_ENABLED) {
+        logger.info('[monitor] trend_exit triggered', trendLogFields);
+        const trendResult = await executeTakeProfit({
+          position,
+          currentPrice: currentPrice.currentOutcomePrice,
+          returnPct: decision.returnPct,
+          reason: 'trend_exit',
+          redis,
+        });
+        if (trendResult.success) {
+          exited++;
+          await markStaleCooldown(redis, position.marketId).catch(() => {
+            /* non-fatal */
           });
-          if (trendResult.success) {
-            exited++;
-            await markStaleCooldown(redis, position.marketId).catch(() => {
-              /* non-fatal */
-            });
-          } else {
-            logger.warn('[monitor] trend-exit failed — will retry next cycle', {
-              marketId: position.marketId,
-              error: trendResult.error,
-            });
-            held++;
-          }
-          continue;
         } else {
-          // Shadow mode: log what would have fired without acting
-          logger.info('[monitor] trend_exit shadow', trendLogFields);
+          logger.warn('[monitor] trend-exit failed — will retry next cycle', {
+            marketId: position.marketId,
+            error: trendResult.error,
+          });
+          held++;
         }
+        continue;
+      } else if (!cfg.TREND_EXIT_ENABLED) {
+        // Shadow mode: log every evaluation so we can see what gates are blocking
+        logger.info('[monitor] trend_exit shadow', {
+          ...trendLogFields,
+          wouldExit: trendDecision.shouldExit,
+        });
       }
     }
 
