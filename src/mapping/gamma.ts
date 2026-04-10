@@ -7,12 +7,15 @@
  * Docs: https://gamma-api.polymarket.com (OpenAPI)
  */
 
+import { logger } from '../shared/logger.js';
+
 const BASE_URL = 'https://gamma-api.polymarket.com';
 const REQUEST_TIMEOUT_MS = 15_000;
 
 // Process-local 429 circuit breaker — backs off for 5 minutes after any rate-limit response.
 // Prevents tight retry loops from compounding rate limits across scan cycles.
 let gammaRateLimitedUntilMs = 0;
+let gammaRateLimitLogged = false;
 const GAMMA_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 
 export interface GammaEvent {
@@ -222,8 +225,15 @@ export async function getActiveMarkets(maxTotal = 1000, pageSize = 500): Promise
     });
 
     if (Date.now() < gammaRateLimitedUntilMs) {
-      throw new Error('Gamma API rate-limited — circuit breaker open, backing off');
+      if (!gammaRateLimitLogged) {
+        logger.warn('[gamma] circuit breaker open — returning empty until backoff expires', {
+          remainingMs: gammaRateLimitedUntilMs - Date.now(),
+        });
+        gammaRateLimitLogged = true;
+      }
+      return [];
     }
+    gammaRateLimitLogged = false;
 
     const url = `${BASE_URL}/markets?${params.toString()}`;
     const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
