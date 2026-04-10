@@ -668,12 +668,13 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       const maxStake = Math.min(cfg.COPYTRADE_MAX_STAKE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
       let stakeUsd = Math.max(0, Math.min(scaledStake, maxStake));
 
-      // Apply stake floor bump: if the scaled stake is non-zero but below
-      // MIN_BET_USD, bump it up to the floor. Whale conviction is the edge
-      // signal — don't discard valid signals just because the proportional
-      // sizing lands below the venue minimum.
+      // Apply the same stake floor bump the executor uses: stakes >= 60%
+      // of MIN_BET_USD get bumped up to the floor; below that get skipped.
+      // This mirrors executor.ts line 1153-1173 so copytrade signals don't
+      // arrive only to be rejected there.
       const minStake = cfg.MIN_BET_USD;
-      if (stakeUsd > 0 && stakeUsd < minStake) {
+      const bumpThreshold = minStake * 0.6;
+      if (stakeUsd >= bumpThreshold && stakeUsd < minStake) {
         logger.info('[copytrade] bumping stake to floor', {
           marketId: market.id,
           originalStake: stakeUsd,
@@ -682,11 +683,12 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         stakeUsd = minStake;
       }
 
-      if (stakeUsd <= 0) {
-        logger.info('[copytrade] skipped zero stake after scaling', {
+      if (stakeUsd < bumpThreshold) {
+        logger.info('[copytrade] skipped stake below bump threshold', {
           marketId: market.id,
           scaledStake,
-          maxStake,
+          bumpThreshold,
+          minBetUsd: minStake,
         });
         await recordCopytradeFilter(redis, 'stake_floor').catch(() => {
           /* ignore telemetry errors */
