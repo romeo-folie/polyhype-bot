@@ -81,6 +81,9 @@ export async function runFuturesMonitorWorker(): Promise<void> {
     pollInterval: `${POLL_INTERVAL_MS.toString()}ms`,
     stopLoss: `${cfg.FUTURES_STOP_LOSS_PCT.toString()}%`,
     takeProfit: `${cfg.FUTURES_TAKE_PROFIT_PCT.toString()}%`,
+    revalMinAgeSec: cfg.FUTURES_REEVAL_MIN_AGE_S,
+    exitConfluenceScore: cfg.FUTURES_EXIT_CONFLUENCE_SCORE,
+    atrSltpEnabled: cfg.FUTURES_ATR_SLTP_ENABLED,
   });
 
   const releaseLock = async () => {
@@ -380,7 +383,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
                 const confluence = await scoreConfluence(symbol, redis);
                 const oppositeDir = direction === 'LONG' ? 'DOWN' : 'UP';
 
-                if (confluence.direction === oppositeDir && confluence.score >= cfg.FUTURES_MIN_CONFLUENCE_SCORE) {
+                if (confluence.direction === oppositeDir && confluence.score >= cfg.FUTURES_EXIT_CONFLUENCE_SCORE) {
                   shouldExit = true;
                   const signalDetails = Object.entries(confluence.signals)
                     .filter(([, v]) => v !== 'neutral')
@@ -464,6 +467,14 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             }
 
             await closeLedgerPosition(redis, symbol, direction);
+
+            // Set a per-symbol cooldown on losses so the entry path can't immediately
+            // re-enter the same symbol and create a cascade of small losing trades.
+            if (pnlUsd < 0) {
+              const cooldownKey = `futures:loss-cooldown:${symbol}`;
+              await redis.setex(cooldownKey, 1800, '1');
+              logger.info('[futures-monitor] loss cooldown set', { symbol, ttlSec: 1800 });
+            }
           } else {
             logger.error('[futures-monitor] exit failed', { symbol, error: result.error });
             await notifyTradeError(

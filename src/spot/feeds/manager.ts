@@ -27,6 +27,9 @@ async function main() {
     const symbols = cfg.BINANCE_SYMBOLS.split(',').filter(Boolean);
     const binance = new BinanceFeed(symbols);
     binance.onKline = noteKline;
+    // Pre-seed kline history from REST before WS subscription so indicators
+    // (MACD/RSI/Stochastic) are computable from the first moment of operation.
+    await binance.seedKlineHistory();
     binance.start();
     feeds.push(binance);
   }

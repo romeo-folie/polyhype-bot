@@ -66,16 +66,42 @@ export const HL_SYMBOL_MAP: Record<string, string> = {
 };
 
 /**
+ * Per-symbol pattern overrides for resolveHlSymbol.
+ *
+ * Some map keys / symbols are common English words that produce false positives
+ * in natural-language headlines. Override both wbId and wbSym for those entries
+ * to require explicit protocol context before firing a futures signal.
+ *
+ * - 'near'  → NEAR: The preposition "near" appears in every geopolitical headline
+ *             ("near Britain", "near term", etc.). Require "near protocol" compound.
+ * - 'cosmos' → ATOM: Matches "NVIDIA Cosmos", "Cosmos SDK" (used by 50+ non-ATOM chains),
+ *             cosmetics, etc. Require "cosmos hub" or explicit ATOM token context.
+ */
+const STRICT_PATTERNS = new Map<string, { wbId: RegExp; wbSym: RegExp }>([
+  ['near', {
+    wbId: /\bnear[\s-]protocol\b|\bnearprotocol\b|\bnear\s+(?:token|blockchain|network)\b/i,
+    wbSym: /\bnear[\s-]protocol\b|\bnearprotocol\b/i,
+  }],
+  ['cosmos', {
+    wbId: /\bcosmos[\s-]hub\b|\bcosmos\s+atom\b|\batom\s+(?:staking|token|coin|chain)\b/i,
+    wbSym: /\bcosmos[\s-]hub\b|\bcosmos\s+atom\b/i,
+  }],
+]);
+
+/**
  * Pre-compiled regex patterns for resolveHlSymbol.
  * Created once at module load time to avoid re-allocating RegExp objects on every call.
  */
 const HL_SYMBOL_PATTERNS: { id: string; symbol: string; wbId: RegExp; wbSym: RegExp }[] =
-  Object.entries(HL_SYMBOL_MAP).map(([id, symbol]) => ({
-    id,
-    symbol,
-    wbId: new RegExp(`\\b${id}\\b`, 'i'),
-    wbSym: new RegExp(`\\b${symbol.toLowerCase()}\\b`, 'i'),
-  }));
+  Object.entries(HL_SYMBOL_MAP).map(([id, symbol]) => {
+    const override = STRICT_PATTERNS.get(id);
+    return {
+      id,
+      symbol,
+      wbId: override?.wbId ?? new RegExp(`\\b${id}\\b`, 'i'),
+      wbSym: override?.wbSym ?? new RegExp(`\\b${symbol.toLowerCase()}\\b`, 'i'),
+    };
+  });
 
 /**
  * Resolves a text string (headline or question) to a Hyperliquid asset symbol.

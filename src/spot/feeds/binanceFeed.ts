@@ -91,6 +91,85 @@ export class BinanceFeed {
     if (!this.timeframes.includes('1m')) this.timeframes.unshift('1m');
   }
 
+  /**
+   * Pre-seed kline history from Binance REST API before the WebSocket starts.
+   *
+   * Without this, indicators like MACD (needs 26 bars) and RSI (needs 14 bars)
+   * are null for the first 26+ minutes after every deploy, killing the news-
+   * sentiment futures path and making confluence scores silently 0.
+   *
+   * Fetches the last `retention` closed 1m and 5m candles for every subscribed
+   * symbol via the public klines endpoint (no auth required, 82 requests total).
+   * Writes into the same Redis sorted-set format as handleKline so buildCandles()
+   * sees a continuous history immediately on startup.
+   */
+  public async seedKlineHistory(): Promise<void> {
+    const cfg = loadConfig();
+    const redis = getRedis();
+    const BINANCE_REST = 'https://api.binance.com/api/v3/klines';
+
+    logger.info('[binance] seeding kline history from REST API', {
+      symbols: this.symbols.length,
+      timeframes: this.timeframes,
+    });
+
+    let seeded = 0;
+    let failed = 0;
+
+    for (const sym of this.symbols) {
+      for (const tf of this.timeframes) {
+        try {
+          const retentionKey = TF_RETENTION_KEYS[tf as keyof typeof TF_RETENTION_KEYS];
+          const retention = retentionKey ? cfg[retentionKey] : 240;
+          const url = `${BINANCE_REST}?symbol=${sym.toUpperCase()}&interval=${tf}&limit=${retention.toString()}`;
+
+          const res = await fetch(url);
+          if (!res.ok) {
+            logger.warn('[binance] kline seed HTTP error', { symbol: sym, tf, status: res.status });
+            failed++;
+            continue;
+          }
+
+          // Binance klines response: array of arrays
+          // [openTime, open, high, low, close, volume, closeTime, quoteVolume, trades, ...]
+          const rows = await res.json() as [number, string, string, string, string, string, number, string, number, ...unknown[]][];
+
+          const klineKey = `spot:klines:${sym}:${tf}`;
+          const pipeline = redis.pipeline();
+
+          for (const row of rows) {
+            const [openTime, open, high, low, close, volume, , quoteVolume, tradeCount] = row;
+            const stored: StoredKline = {
+              t: openTime,
+              o: parseFloat(open),
+              h: parseFloat(high),
+              l: parseFloat(low),
+              c: parseFloat(close),
+              v: parseFloat(volume),
+              q: parseFloat(quoteVolume),
+              n: tradeCount,
+              closed: true,
+            };
+            // Upsert each candle — same approach as handleKline
+            pipeline.zremrangebyscore(klineKey, openTime, openTime);
+            pipeline.zadd(klineKey, openTime, JSON.stringify(stored));
+          }
+
+          // Trim and set TTL matching the live feed
+          pipeline.zremrangebyrank(klineKey, 0, -1 - retention);
+          pipeline.expire(klineKey, 86400);
+          await pipeline.exec();
+          seeded++;
+        } catch (err) {
+          logger.warn('[binance] kline seed error', { symbol: sym, tf, error: String(err) });
+          failed++;
+        }
+      }
+    }
+
+    logger.info('[binance] kline seed complete', { seeded, failed });
+  }
+
   public start(): void {
     // Combined-stream URL: /stream?streams=btcusdt@kline_1m/btcusdt@kline_5m/...
     const streams: string[] = [];

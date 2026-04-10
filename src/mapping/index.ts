@@ -285,7 +285,15 @@ export async function mapNewsToFutures(
     const symbol = resolveHlSymbol(item.title);
     if (!symbol) continue;
 
-    // 2. Perform zero-shot LLM sentiment analysis
+    // 2. Loss cooldown gate — skip if we just lost a trade on this symbol
+    const cooldownKey = `futures:loss-cooldown:${symbol}`;
+    const onCooldown = await getRedis().exists(cooldownKey);
+    if (onCooldown) {
+      logger.info('[mapping] futures skipped — loss cooldown active', { symbol, title: item.title });
+      continue;
+    }
+
+    // 3. Perform zero-shot LLM sentiment analysis
     const direction = await estimateSentiment(item.title);
     if (direction === 'NEUTRAL') {
       logger.info('[mapping] skipping HL signal — neutral sentiment', {

@@ -103,6 +103,14 @@ async function runSpotMonitorInner(
       if (!alreadyOpen) {
         const moveDirection = move.changePercent > 0 ? 'LONG' : 'SHORT';
 
+        // Loss cooldown gate — skip if we just lost a trade on this symbol
+        const cooldownKey = `futures:loss-cooldown:${hlSymbol}`;
+        const onCooldown = await redis.exists(cooldownKey);
+        if (onCooldown) {
+          logger.info('[spot] futures skipped — loss cooldown active', { symbol: hlSymbol, moveDirection });
+          continue;
+        }
+
         // TA confluence gate — block if indicators disagree with the move
         if (cfg.FUTURES_CONFLUENCE_GATE_ENABLED) {
           const confluence = await scoreConfluence(hlSymbol, redis);
