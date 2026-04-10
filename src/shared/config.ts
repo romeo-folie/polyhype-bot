@@ -555,7 +555,6 @@ const envSchema = z.object({
     .default(3.0),
   // Trailing stop — activates after position reaches ACTIVATION_PCT, then exits if it drops TRAILING_STOP_PCT from peak.
   FUTURES_TRAILING_STOP_ENABLED: boolFromEnv.optional().default(true),
-  FUTURES_TRAILING_ACTIVATION_PCT: z.coerce.number().min(0.1).optional().default(3.5),
   FUTURES_TRAILING_STOP_PCT: z.coerce.number().min(0.1).optional().default(1.5),
   FUTURES_EXIT_ON_SIGNAL_FADE: boolFromEnv.optional().default(true),
   // TA confluence gate for futures entries — requires RSI/MACD/Stochastic agreement before opening a position.
