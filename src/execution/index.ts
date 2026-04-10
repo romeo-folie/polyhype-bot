@@ -18,7 +18,7 @@ import { runMapping, mapNewsToFutures } from '../mapping/index.js';
 import { executeSignal } from './executor.js';
 import { recordPosition } from './positionLedger.js';
 import { resolveSimmerMarketId, getSimmerPositions } from '../shared/simmer.js';
-import { notifyTradeExecuted, notifyTradeError } from './telegram.js';
+import { notifyTradeError } from './telegram.js';
 import { reEvaluatePositions } from '../monitor/signalReeval.js';
 import { getBankroll, deductStake } from '../shared/bankroll.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
@@ -311,8 +311,6 @@ async function processScoredItemsInner(
       if (result.executionVenue === 'hyperliquid') {
         sessionExposureUsd += signal.stakeUsd;
       }
-
-      await notifyTradeExecuted(result.signal, result.tradeResult.tx_hash);
     } else if (result.tradeResult && !result.tradeResult.success) {
       failed++;
       await notifyTradeError(result.signal, result.tradeResult.error ?? 'unknown error');
