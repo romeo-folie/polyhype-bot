@@ -666,7 +666,22 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
 
       const scaledStake = trade.usdcSize * cfg.COPYTRADE_SIZE_SCALE;
       const maxStake = Math.min(cfg.COPYTRADE_MAX_STAKE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
-      const stakeUsd = Math.max(0, Math.min(scaledStake, maxStake));
+      let stakeUsd = Math.max(0, Math.min(scaledStake, maxStake));
+
+      // Apply stake floor bump: if the scaled stake is non-zero but below
+      // MIN_BET_USD, bump it up to the floor. Whale conviction is the edge
+      // signal — don't discard valid signals just because the proportional
+      // sizing lands below the venue minimum.
+      const minStake = cfg.MIN_BET_USD;
+      if (stakeUsd > 0 && stakeUsd < minStake) {
+        logger.info('[copytrade] bumping stake to floor', {
+          marketId: market.id,
+          originalStake: stakeUsd,
+          minBetUsd: minStake,
+        });
+        stakeUsd = minStake;
+      }
+
       if (stakeUsd <= 0) {
         logger.info('[copytrade] skipped zero stake after scaling', {
           marketId: market.id,
