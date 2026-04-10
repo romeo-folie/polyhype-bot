@@ -373,6 +373,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         await recordCopytradeFilter(redis, 'market_lookup_failed').catch(() => {
           /* ignore telemetry errors */
         });
+        await markDedup();
         continue;
       }
 

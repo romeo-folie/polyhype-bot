@@ -120,6 +120,20 @@ services:
       pga-bootstrap:
         condition: service_completed_successfully
     command: npx tsx src/spot/feeds/manager.ts
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    healthcheck:
+      # Passes if the spot-feed heartbeat was written within the last 120s.
+      test:
+        - "CMD-SHELL"
+        - >
+          node -e "const{Redis}=require('ioredis');const r=new Redis('redis://redis:6379');r.get('heartbeat:spot-feed').then(v=>{const age=Math.floor(Date.now()/1000)-Number(v||0);process.exit(age<120?0:1)}).catch(()=>process.exit(1)).finally(()=>r.disconnect());"
+      interval: 60s
+      timeout: 5s
+      retries: 2
+      start_period: 60s
 
   # ─────────────────────────────────────────────────────────────────────────
   # Epic #142 — Durable analytics + retrieval layer
@@ -259,6 +273,79 @@ services:
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
+
+  # ── Phase 4/5 analytics crons ─────────────────────────────────────────────
+  #
+  # pga-cron   — nightly loop: embed trade memory + snapshot telemetry counters
+  #              + refresh outcomes_daily materialized view.
+  # pga-db-backup — nightly pg_dump → ./backups/ with 7-day retention.
+
+  pga-cron:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      PG_URL_NOPASS: postgres://pga@pga-db:5432/pga?sslmode=disable
+    depends_on:
+      pga-bootstrap:
+        condition: service_completed_successfully
+      pga-db-migrate:
+        condition: service_completed_successfully
+    secrets:
+      - pg_password
+    command:
+      - sh
+      - -c
+      - |
+        PGPASS=$$(cat /run/secrets/pg_password) && \
+        export PG_URL="postgres://pga:$${PGPASS}@pga-db:5432/pga?sslmode=disable" && \
+        while true; do
+          echo '[pga-cron] running embedTradeMemory' && \
+          npx tsx src/cron/embedTradeMemory.ts 2>&1 || true
+          echo '[pga-cron] running snapshotTelemetry' && \
+          npx tsx src/cron/snapshotTelemetry.ts 2>&1 || true
+          echo '[pga-cron] sleeping 24h'
+          sleep 86400
+        done
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "2" }
+
+  pga-db-backup:
+    image: timescale/timescaledb-ha:pg16
+    restart: unless-stopped
+    depends_on:
+      pga-db:
+        condition: service_healthy
+    secrets:
+      - pg_password
+    volumes:
+      - ./backups:/backups
+    command: >
+      sh -c "
+        while true; do
+          PGPASSWORD=$$(cat /run/secrets/pg_password) \
+          pg_dump -h pga-db -U pga -d pga -F c -Z 9 \
+            -f /backups/pga_$$(date +%Y%m%d_%H%M%S).dump && \
+          echo '[backup] dump complete' || \
+          echo '[backup] dump FAILED';
+          find /backups -name '*.dump' -mtime +7 -delete;
+          echo '[backup] pruned old dumps';
+          sleep 86400;
+        done
+      "
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "2" }
 
 secrets:
   pg_password:

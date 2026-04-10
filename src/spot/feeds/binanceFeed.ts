@@ -60,6 +60,8 @@ export class BinanceFeed {
   private timeframes: string[];
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectCount = 0;
+  /** Optional callback fired on every kline received — used by manager watchdog. */
+  public onKline: (() => void) | null = null;
 
   constructor(
     symbols: string[] = [
@@ -120,6 +122,7 @@ export class BinanceFeed {
         const msg = JSON.parse(data.toString()) as KlineMessage;
         const k = msg.data?.k;
         if (k && typeof k.s === 'string' && typeof k.c === 'string') {
+          this.onKline?.();
           void this.handleKline(k);
         }
       } catch (err) {
