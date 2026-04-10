@@ -473,7 +473,7 @@ export async function scanUpDownArb(
 
   if (markets.length === 0) {
     try {
-      const events = await listRecentCryptoEvents({ maxHoursToResolution: 1 });
+      const events = await listRecentCryptoEvents({ maxHoursToResolution: cfg.UPDOWN_MAX_HOURS_TO_RESOLUTION });
       for (const event of events) {
         for (const market of event.markets) {
           if (!market.active || market.closed) continue;

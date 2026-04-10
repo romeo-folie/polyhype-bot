@@ -271,6 +271,7 @@ const envSchema = z.object({
   // Up/Down Bitcoin market trading
   UPDOWN_ENABLED: boolFromEnv.optional().default(false),
   UPDOWN_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
+  UPDOWN_MAX_HOURS_TO_RESOLUTION: z.coerce.number().min(1).optional().default(25),
   // Minimum edge to allow entry on fee-enabled markets (executor fee gate).
   // Defaults to 0.04 (4%) — must exceed this to justify the ~2% taker fee.
   FEE_MARKET_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.04),
@@ -653,7 +654,8 @@ const envSchema = z.object({
   SPORTS_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(5),
   SPORTS_MARKET_LOOKAHEAD_H: z.coerce.number().int().min(1).optional().default(48),
   // Purely informational — documents which TELEGRAM_CHANNELS entries are
-  // sports-primary. Used by a future audit script, not by runtime.
+  // sports-primary. Not used by runtime; channels are added directly to
+  // TELEGRAM_CHANNELS and auto-classified by the category classifier.
   SPORTS_TELEGRAM_HANDLES: z.string().optional().default(''),
 
   // ── Epic #142 — Durable analytics + retrieval layer ─────────────

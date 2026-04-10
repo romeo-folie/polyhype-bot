@@ -93,7 +93,7 @@ export class ArbMarketWarmer {
       if (!warmCfg.UPDOWN_ENABLED) {
         logger.debug('[warmer] Up/Down discovery skipped (UPDOWN_ENABLED=false)');
       } else try {
-        const cryptoEvents = await listRecentCryptoEvents({ maxHoursToResolution: 1 });
+        const cryptoEvents = await listRecentCryptoEvents({ maxHoursToResolution: warmCfg.UPDOWN_MAX_HOURS_TO_RESOLUTION });
         for (const event of cryptoEvents) {
           for (const market of event.markets) {
             if (!market.active || market.closed) continue;
