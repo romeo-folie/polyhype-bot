@@ -9,8 +9,21 @@ const SKIP_REASON = [
   'volume_spike_block', 'regime_no_trend', 'regime_chop', 'stake_below_floor',
   'already_executed', 'position_already_open', 'stake_below_hl_minimum',
   'insufficient_equity', 'global_margin_cap', 'global_governor', 'maker_not_filled',
-  'taker_edge_below_min', 'liquidity_gate', 'other',
+  'taker_edge_below_min', 'liquidity_gate', 'simmer_position_exists', 'market_resolved',
+  'other',
 ] as const;
+
+const skipReasonSet: ReadonlySet<string> = new Set(SKIP_REASON);
+
+/** Split compound skipReason like `extreme_price_llm_distrust:price=0.001` into enum + detail */
+export function normalizeSkipReason(raw: string | undefined): { skipReason: string; skipDetail: string } {
+  if (!raw) return { skipReason: 'other', skipDetail: '' };
+  const colonIdx = raw.indexOf(':');
+  if (colonIdx === -1) return { skipReason: skipReasonSet.has(raw) ? raw : 'other', skipDetail: skipReasonSet.has(raw) ? '' : raw };
+  const base = raw.slice(0, colonIdx);
+  const detail = raw.slice(colonIdx + 1);
+  return { skipReason: skipReasonSet.has(base) ? base : 'other', skipDetail: detail };
+}
 
 export const signalDecisionRowSchema = z.object({
   decisionId:             z.string().uuid(),

@@ -11,7 +11,8 @@ const SKIP_REASON = [
   'volume_spike_block', 'regime_no_trend', 'regime_chop', 'stake_below_floor',
   'already_executed', 'position_already_open', 'stake_below_hl_minimum',
   'insufficient_equity', 'global_margin_cap', 'global_governor', 'maker_not_filled',
-  'taker_edge_below_min', 'liquidity_gate', 'other',
+  'taker_edge_below_min', 'liquidity_gate', 'simmer_position_exists', 'market_resolved',
+  'other',
 ] as const;
 
 export const executionEventRowSchema = z.object({

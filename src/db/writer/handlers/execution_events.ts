@@ -1,10 +1,17 @@
 import type { Sql } from 'postgres';
 import { logger } from '../../../shared/logger.js';
 import { executionEventRowSchema } from '../../schemas/execution_events.js';
+import { normalizeSkipReason } from '../../schemas/signal_decisions.js';
 
 export async function handleExecutionEvents(sql: Sql, payloads: unknown[]): Promise<void> {
   const rows: Record<string, unknown>[] = [];
   for (const p of payloads) {
+    // Split compound skipReason into enum + detail (reuse normalizeSkipReason)
+    const rec = p as Record<string, unknown> | null;
+    if (rec && typeof rec.skipReason === 'string') {
+      const { skipReason } = normalizeSkipReason(rec.skipReason);
+      rec.skipReason = skipReason;
+    }
     const parsed = executionEventRowSchema.safeParse(p);
     if (!parsed.success) {
       logger.warn('[writer] execution_events payload rejected', {
@@ -59,6 +66,6 @@ export async function handleExecutionEvents(sql: Sql, payloads: unknown[]): Prom
       'maker_price_improvement_bps', 'maker_price_improvement_usd',
       'fallback_reason', 'tx_hash', 'raw'
     )}
-    ON CONFLICT (attempt_id) DO NOTHING
+    ON CONFLICT DO NOTHING
   `;
 }

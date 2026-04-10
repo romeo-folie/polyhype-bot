@@ -1,10 +1,17 @@
 import type { Sql } from 'postgres';
 import { logger } from '../../../shared/logger.js';
-import { signalDecisionRowSchema } from '../../schemas/signal_decisions.js';
+import { signalDecisionRowSchema, normalizeSkipReason } from '../../schemas/signal_decisions.js';
 
 export async function handleSignalDecisions(sql: Sql, payloads: unknown[]): Promise<void> {
   const rows: Record<string, unknown>[] = [];
   for (const p of payloads) {
+    // Split compound skipReason (e.g. "extreme_price_llm_distrust:price=0.001") into enum + detail
+    const rec = p as Record<string, unknown> | null;
+    if (rec && typeof rec.skipReason === 'string' && rec.skipReason.includes(':')) {
+      const { skipReason, skipDetail } = normalizeSkipReason(rec.skipReason);
+      rec.skipReason = skipReason;
+      if (!rec.skipDetail && skipDetail) rec.skipDetail = skipDetail;
+    }
     const parsed = signalDecisionRowSchema.safeParse(p);
     if (!parsed.success) {
       logger.warn('[writer] signal_decisions payload rejected', {
@@ -70,6 +77,6 @@ export async function handleSignalDecisions(sql: Sql, payloads: unknown[]): Prom
       'regime_choppiness', 'volume_ratio', 'source_headline', 'source_execution_id',
       'mapping_confidence', 'relevance_class', 'edge_class', 'sizing_reason', 'raw'
     )}
-    ON CONFLICT (decision_id) DO NOTHING
+    ON CONFLICT DO NOTHING
   `;
 }
