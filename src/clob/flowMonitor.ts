@@ -17,7 +17,7 @@ import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { getCachedMarkets } from '../shared/watchlist.js';
-import { parseClobTokenIds } from '../mapping/gamma.js';
+import { parseClobTokenIds, getActiveMarkets } from '../mapping/gamma.js';
 import {
   ClobPriceFeed,
   CLOB_BOOK_STATE_KEY,
@@ -157,7 +157,19 @@ export async function persistTradePrint(redis: Redis, msg: Record<string, unknow
 }
 
 async function loadAllTokenIds(redis: Redis): Promise<{ tokenIds: string[]; markets: number }> {
-  const markets = await getCachedMarkets(redis);
+  let markets = await getCachedMarkets(redis);
+  if (markets.length === 0) {
+    // Cache is empty — fall back to Gamma API directly so the CLOB feed stays
+    // live even during a cron outage or after a Redis restart wipes the cache.
+    logger.warn('[clob-flow] market cache empty — falling back to Gamma API');
+    try {
+      markets = await getActiveMarkets(2000);
+    } catch (err: unknown) {
+      logger.warn('[clob-flow] Gamma API fallback failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
   const ids = new Set<string>();
   for (const m of markets) {
     if (!m.clobTokenIds) continue;

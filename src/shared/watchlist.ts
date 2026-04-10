@@ -84,25 +84,35 @@ export async function refreshDynamicWatchlist(redis: Redis): Promise<number> {
       return isNaN(end) || end >= now;
     });
 
-    try {
-      const slim = liveMarkets.map((m) => ({
-        id: m.id,
-        question: m.question,
-        description: m.description,
-        conditionId: m.conditionId,
-        clobTokenIds: m.clobTokenIds,
-        outcomePrices: m.outcomePrices,
-        liquidity: m.liquidity,
-        endDate: m.endDate,
-        volume: m.volume,
-        feesEnabled: m.feesEnabled,
-        feeType: m.feeType,
-      }));
-      await redis.set(MARKET_CACHE_KEY, JSON.stringify(slim), 'EX', WATCHLIST_TTL_SECONDS);
-    } catch (err: unknown) {
-      logger.warn('[watchlist] failed to cache market objects (non-fatal)', {
-        error: err instanceof Error ? err.message : String(err),
+    if (liveMarkets.length === 0) {
+      // Do NOT overwrite the existing cache with an empty array. This happens
+      // when Gamma returns stale data or all fetched markets have past endDates.
+      // Preserving the existing cache (even if slightly stale) is far better
+      // than blanking it and taking the CLOB flow dark.
+      logger.error('[watchlist] all fetched markets filtered as expired — preserving existing cache', {
+        totalFetched: markets.length,
       });
+    } else {
+      try {
+        const slim = liveMarkets.map((m) => ({
+          id: m.id,
+          question: m.question,
+          description: m.description,
+          conditionId: m.conditionId,
+          clobTokenIds: m.clobTokenIds,
+          outcomePrices: m.outcomePrices,
+          liquidity: m.liquidity,
+          endDate: m.endDate,
+          volume: m.volume,
+          feesEnabled: m.feesEnabled,
+          feeType: m.feeType,
+        }));
+        await redis.set(MARKET_CACHE_KEY, JSON.stringify(slim), 'EX', WATCHLIST_TTL_SECONDS);
+      } catch (err: unknown) {
+        logger.warn('[watchlist] failed to cache market objects (non-fatal)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     // Emit market_catalog snapshot to PG analytics layer.
