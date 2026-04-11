@@ -58,5 +58,9 @@ CREATE INDEX idx_tmc_embedding ON trade_memory_cases
 CREATE INDEX idx_tmc_category  ON trade_memory_cases (category, created_at DESC);
 CREATE INDEX idx_tmc_case_type ON trade_memory_cases (case_type, created_at DESC);
 CREATE INDEX idx_tmc_market_id ON trade_memory_cases (market_id);
-CREATE INDEX idx_tmc_outcome_id ON trade_memory_cases (outcome_id)
+-- UNIQUE partial index so ON CONFLICT DO NOTHING can dedupe by outcome_id.
+-- Without UNIQUE, the only constraint is the BIGSERIAL `id` PK (always unique),
+-- so retries of the embed cron or the writer handler would silently create
+-- duplicate memory rows for the same closed outcome.
+CREATE UNIQUE INDEX idx_tmc_outcome_id ON trade_memory_cases (outcome_id)
   WHERE outcome_id IS NOT NULL;
