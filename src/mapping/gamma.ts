@@ -581,3 +581,181 @@ export async function listUpDownMarkets(
 
   return results;
 }
+
+/**
+ * Cadence (in seconds) of each Up/Down market lifetime. Slug timestamps are
+ * aligned to multiples of this value — e.g. `btc-updown-15m-1775928600` means
+ * the 15-minute observation window starting at epoch 1775928600 seconds,
+ * resolving `900s` later.
+ */
+const LIFETIME_CADENCE_SEC: Record<UpDownLifetime, number> = {
+  '5m': 300,
+  '15m': 900,
+};
+
+/** Single-slug fetcher injectable by tests. */
+export type UpDownSlugFetcher = (slug: string) => Promise<GammaEventWithTags | null>;
+
+/**
+ * Default slug fetcher: hits `/events?slug=<slug>` and returns the first
+ * event or null. Returns null on any non-ok or fetch error — callers treat a
+ * missing event as "this window doesn't exist yet".
+ */
+export async function fetchUpDownEventBySlug(
+  slug: string,
+): Promise<GammaEventWithTags | null> {
+  const params = new URLSearchParams({ slug });
+  const url = `${BASE_URL}/events?${params.toString()}`;
+  try {
+    const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+    if (!res.ok) {
+      logger.warn('[gamma] fetchUpDownEventBySlug non-ok response', {
+        slug,
+        status: res.status,
+        statusText: res.statusText,
+      });
+      return null;
+    }
+    const data = (await res.json()) as GammaEventWithTags[];
+    if (!Array.isArray(data) || data.length === 0) return null;
+    return data[0] ?? null;
+  } catch (err) {
+    logger.warn('[gamma] fetchUpDownEventBySlug failed', {
+      slug,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+export interface DiscoverUpDownMarketsBySlugOptions {
+  asset: UpDownAsset;
+  lifetime: UpDownLifetime;
+  /**
+   * How many future windows to probe beyond the currently-open one. Defaults
+   * to 2. With `lifetime='15m'` and `windowsAhead=2` we fetch 3 slugs:
+   * current window, +15min, +30min.
+   */
+  windowsAhead?: number;
+  /** Injectable current time for deterministic tests. */
+  now?: Date;
+  /** Injectable fetcher for deterministic tests. */
+  fetcher?: UpDownSlugFetcher;
+}
+
+/**
+ * Discover active Up/Down markets by **predicting their slugs**.
+ *
+ * Why this exists: Gamma's `/events?tag=crypto` endpoint only orders by
+ * `startDate`, not `endDate`. Up/Down markets are created ~24h before their
+ * resolution window opens, so "about to resolve" markets are buried >500
+ * entries deep — past Gamma's hard response cap. The only reliable discovery
+ * path is slug prediction, which is trivially deterministic: every
+ * `<asset>-updown-<lifetime>-<timestamp>` slug has `timestamp` aligned to a
+ * multiple of the lifetime cadence in seconds (`5m` → 300, `15m` → 900), and
+ * `endDate = timestamp + cadenceSec`.
+ *
+ * Fetches the current window plus `windowsAhead` future windows concurrently
+ * via `/events?slug=<slug>` and parses each into an `UpDownMarket`. Missing
+ * slugs are silently skipped — not every expected window will exist on
+ * Polymarket yet (new series can be lagged).
+ */
+export async function discoverUpDownMarketsBySlug(
+  opts: DiscoverUpDownMarketsBySlugOptions,
+): Promise<UpDownMarket[]> {
+  const { asset, lifetime } = opts;
+  const windowsAhead = opts.windowsAhead ?? 2;
+  const now = opts.now ?? new Date();
+  const fetcher: UpDownSlugFetcher = opts.fetcher ?? fetchUpDownEventBySlug;
+
+  const slugPrefix = UPDOWN_ASSET_SLUG_PREFIX[asset];
+  if (!slugPrefix) {
+    logger.warn('[gamma] discoverUpDownMarketsBySlug: unknown asset', { asset });
+    return [];
+  }
+
+  const cadenceSec = LIFETIME_CADENCE_SEC[lifetime];
+  const nowSec = Math.floor(now.getTime() / 1000);
+  // Current boundary = start of the window containing `now`. resolves at
+  // currentBoundary + cadenceSec.
+  const currentBoundary = Math.floor(nowSec / cadenceSec) * cadenceSec;
+
+  const slugs: string[] = [];
+  for (let i = 0; i <= windowsAhead; i++) {
+    const ts = currentBoundary + i * cadenceSec;
+    slugs.push(`${slugPrefix}-updown-${lifetime}-${ts.toString()}`);
+  }
+
+  const events = await Promise.all(slugs.map((s) => fetcher(s)));
+
+  const lifetimeTag = lifetime.toUpperCase(); // '15M' | '5M'
+  const slugRe = new RegExp(`^${slugPrefix}-updown-${lifetime}-\\d+$`);
+  const results: UpDownMarket[] = [];
+
+  for (const event of events) {
+    if (!event) continue;
+    const tagMatch = (event.tags ?? []).some((t) => t?.slug === lifetimeTag);
+    if (!tagMatch) continue;
+
+    for (const m of event.markets ?? []) {
+      if (!m.slug || !slugRe.test(m.slug)) continue;
+      if (m.closed) continue;
+      if (!m.endDate) continue;
+
+      const endMs = new Date(m.endDate).getTime();
+      if (!isFinite(endMs)) continue;
+
+      const ttr = endMs - now.getTime();
+      if (ttr <= 0) continue;
+
+      let pricesArr: string[];
+      let tokensArr: string[];
+      try {
+        pricesArr = parseOutcomePrices(m.outcomePrices);
+        tokensArr = parseClobTokenIds(m.clobTokenIds);
+      } catch (err) {
+        logger.warn('[gamma] discoverUpDownMarketsBySlug: failed to parse prices/tokens', {
+          marketId: m.id,
+          slug: m.slug,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+
+      if (pricesArr.length < 2 || tokensArr.length < 2) continue;
+
+      const upPriceRaw = pricesArr[0];
+      const downPriceRaw = pricesArr[1];
+      const upToken = tokensArr[0];
+      const downToken = tokensArr[1];
+      if (
+        upPriceRaw === undefined ||
+        downPriceRaw === undefined ||
+        upToken === undefined ||
+        downToken === undefined
+      ) {
+        continue;
+      }
+
+      const upPrice = parseFloat(upPriceRaw);
+      const downPrice = parseFloat(downPriceRaw);
+      if (!isFinite(upPrice) || !isFinite(downPrice)) continue;
+
+      results.push({
+        marketId: m.id,
+        slug: m.slug,
+        question: m.question,
+        endDate: new Date(endMs),
+        timeToResolutionMs: ttr,
+        lifetime,
+        asset,
+        outcomePrices: [upPrice, downPrice],
+        clobTokenIds: [upToken, downToken],
+        yesTokenId: upToken,
+        noTokenId: downToken,
+      });
+    }
+  }
+
+  return results;
+}

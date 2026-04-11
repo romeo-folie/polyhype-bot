@@ -38,7 +38,7 @@ import {
   lockUpDownMarket,
   recordUpDownTrade,
 } from '../shared/updownThrottle.js';
-import { listUpDownMarkets, type UpDownMarket } from '../mapping/gamma.js';
+import { discoverUpDownMarketsBySlug, type UpDownMarket } from '../mapping/gamma.js';
 import { executeSignal } from '../execution/executor.js';
 import { recordPosition } from '../execution/positionLedger.js';
 import { deductStake } from '../shared/bankroll.js';
@@ -317,18 +317,15 @@ export class OracleLagScanner {
     this.lastMarketRefreshMs = now;
     this.marketRefreshInFlight = true;
     try {
-      const cfg = this.loadCfg();
-      const markets = await listUpDownMarkets({
+      // Slug-based discovery: Gamma's `/events?tag=crypto` endpoint orders by
+      // startDate only, and Up/Down markets are listed ~24h before resolution,
+      // so the about-to-resolve window sits >500 entries deep (past Gamma's
+      // response cap). We predict the deterministic slugs instead — current
+      // window + 2 future windows — and fetch them directly.
+      const markets = await discoverUpDownMarketsBySlug({
         asset: 'bitcoin',
         lifetime: '15m',
-        // Discovery cap — we filter below against the per-entry floor
-        // (`ORACLE_LAG_MIN_TIME_LEFT_MIN`) so this is just an outer bound.
-        maxTimeToResolutionMin: Math.max(cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN, 15),
-        // Gamma orders `/events?tag=crypto` by startDate DESC. 5m markets roll
-        // every 5min and crowd out 15m at the default limit=50 — BTC 15m falls
-        // outside the top 50 entirely. Raise the window to 200 so 15m markets
-        // reliably appear in the response.
-        limit: 200,
+        windowsAhead: 2,
       });
       this.cachedMarkets = markets;
       logger.debug('[oracle-lag] market refresh', { count: markets.length });
