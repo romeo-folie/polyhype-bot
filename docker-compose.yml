@@ -84,6 +84,9 @@ services:
       pga-bootstrap:
         condition: service_completed_successfully
     command: npx tsx src/arb/worker.ts
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "2" }
 
   # CLOB Flow Monitor — streams Polymarket book/trade tape into Redis
   pga-clob-flow:
