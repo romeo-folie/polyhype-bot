@@ -538,18 +538,27 @@ export async function scanUpDownArb(
       const direction: 'UP' | 'DOWN' = confluence.direction;
       const currentPmPrice = direction === 'UP' ? currentUpPrice : 1 - currentUpPrice;
 
-      // Fair value from confluence score
-      const fairValue = confluenceScoreToFairValue(confluence.score);
+      // Fair value from confluence score — P(our side wins)
+      const fairValueOurSide = confluenceScoreToFairValue(confluence.score);
 
-      // Edge calculation
+      // Edge calculation — both numbers are in "our token" frame, so the raw
+      // distance is the expected edge on the token we're buying.
       const wsSpread = await feed.getCachedSpread(market.marketId);
       const spreadBuffer = wsSpread ?? 0;
-      const netEdge = Math.abs(fairValue - currentPmPrice) - feeRate - spreadBuffer;
+      const netEdge = Math.abs(fairValueOurSide - currentPmPrice) - feeRate - spreadBuffer;
 
       if (netEdge < minEdge) continue;
 
       // Check that fair value suggests our direction (fair > current for our token)
-      if (fairValue <= currentPmPrice) continue;
+      if (fairValueOurSide <= currentPmPrice) continue;
+
+      // Translate to true P(YES) for the monitor. The evaluator always treats
+      // `consensusProbability` as P(YES), regardless of which side we hold.
+      // UP = YES-side, so P(YES) = fairValueOurSide. DOWN = NO-side, so
+      // P(YES) = 1 - fairValueOurSide. Without this, DOWN positions exit
+      // instantly via divergence_closed because the monitor reads 0.65 as
+      // "P(YES)=65%" and the current YES price already sits below that.
+      const fairPYes = direction === 'UP' ? fairValueOurSide : 1 - fairValueOurSide;
 
       // Dedup
       const dedupKey = `${UPDOWN_DEDUP_PREFIX}${market.marketId}:${direction}`;
@@ -579,7 +588,7 @@ export async function scanUpDownArb(
         direction,
         tokenId,
         currentPmPrice,
-        fairValuePrice: fairValue,
+        fairValuePrice: fairPYes,
         edge: netEdge,
         stakeUsd,
         assetId: 'bitcoin',

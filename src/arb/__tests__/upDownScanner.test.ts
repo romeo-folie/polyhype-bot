@@ -146,6 +146,53 @@ describe('scanUpDownArb', () => {
     expect(opps[0].tokenId).toBe('token-down');
   });
 
+  it('stores fairValuePrice as true P(YES) so the monitor does not exit DOWN positions instantly', async () => {
+    // Regression: scanner used to store fairValuePrice as "fair value of our
+    // token" (e.g. 0.65 for a DOWN bet = P(DOWN wins)). Worker then wired it
+    // into signal.consensusProbability, which the evaluator always reads as
+    // P(YES). For DOWN positions the else branch fired `currentYesPrice <=
+    // consensusProbability` → 0.52 <= 0.65 → instant divergence_closed exit.
+    // Fix: P(YES) = 1 - fairValueOurSide for DOWN, = fairValueOurSide for UP.
+    (scoreConfluence as any).mockResolvedValue({
+      direction: 'DOWN',
+      score: 3, // confluenceScoreToFairValue(3) = 0.65
+      signals: { rsi: 'overbought', macd: 'bearish_cross', stochastic: 'overbought_cross' },
+    });
+    const event = structuredClone(mockUpDownEvent);
+    event.markets[0].outcomePrices = ['0.52', '0.48'];
+    (listRecentCryptoEvents as any).mockResolvedValue([event]);
+
+    const opps = await scanUpDownArb(baseMove, mockRedis as any);
+
+    expect(opps.length).toBe(1);
+    expect(opps[0].direction).toBe('DOWN');
+    // DOWN bet, fair=0.65 for the DOWN token → P(YES=UP wins) = 0.35
+    expect(opps[0].fairValuePrice).toBeCloseTo(0.35, 5);
+    // Invariant: for DOWN, currentYesPrice (= 0.52) > fairValuePrice (= 0.35),
+    // so evaluator's `currentYesPrice <= consensus` check is FALSE → hold.
+    const currentYesPrice = 0.52;
+    expect(currentYesPrice <= opps[0].fairValuePrice).toBe(false);
+  });
+
+  it('stores fairValuePrice as fair value directly for UP direction', async () => {
+    (scoreConfluence as any).mockResolvedValue({
+      direction: 'UP',
+      score: 3, // confluenceScoreToFairValue(3) = 0.65
+      signals: { rsi: 'oversold', macd: 'bullish_cross', stochastic: 'oversold_cross' },
+    });
+    // UP cheap at 0.48
+    const event = structuredClone(mockUpDownEvent);
+    event.markets[0].outcomePrices = ['0.48', '0.52'];
+    (listRecentCryptoEvents as any).mockResolvedValue([event]);
+
+    const opps = await scanUpDownArb(baseMove, mockRedis as any);
+
+    expect(opps.length).toBe(1);
+    expect(opps[0].direction).toBe('UP');
+    // UP = YES-side, so P(YES) = fair value directly
+    expect(opps[0].fairValuePrice).toBeCloseTo(0.65, 5);
+  });
+
   it('respects min edge gate', async () => {
     (scoreConfluence as any).mockResolvedValue({
       direction: 'UP',
