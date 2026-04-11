@@ -56,7 +56,7 @@ export interface TradeSignal {
   /** True when the Gamma market has fees enabled — executor skips CLOB for these */
   feesEnabled?: boolean;
   /** Origin of the signal, used for execution routing (e.g. bypassing Simmer for arb) */
-  source?: 'osint' | 'crypto-arb' | 'futures' | 'copytrade' | 'spot' | 'near-zero-arb';
+  source?: 'osint' | 'crypto-arb' | 'futures' | 'copytrade' | 'spot' | 'near-zero-arb' | 'oracle-lag';
   /** Origin event timestamp (e.g. Binance kline event time) — used for end-to-end latency tracking */
   eventTs?: number | undefined;
   /** Operational metadata for alerts/telemetry */

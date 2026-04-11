@@ -29,6 +29,8 @@ export interface GammaEvent {
 
 export interface GammaMarket {
   id: string;
+  /** Market slug, e.g. `btc-updown-15m-1776005100`. Present on most Gamma responses. */
+  slug?: string;
   question: string;
   conditionId: string;
   /**
@@ -336,4 +338,246 @@ export function parseYesPrice(outcomePrices: string | string[]): number {
     throw new Error(`Cannot parse YES price from outcomePrices[0]="${raw}"`);
   }
   return price;
+}
+
+// ============================================================================
+// Up/Down 15m market discovery (oracle-lag-15m epic, task 002)
+// ============================================================================
+
+/**
+ * Gamma event tag. Gamma returns a list of tag objects on each event with
+ * fields like `{id, label, slug}`. We only need `slug` (e.g. "15M", "5M")
+ * for the lifetime filter.
+ */
+export interface GammaEventTag {
+  id?: string;
+  label?: string;
+  slug?: string;
+}
+
+/**
+ * Variant of `GammaEvent` that exposes the `tags` array. The base `GammaEvent`
+ * interface omits `tags` because most call sites don't need it — we widen it
+ * locally here for Up/Down market discovery.
+ */
+export interface GammaEventWithTags extends GammaEvent {
+  tags?: GammaEventTag[];
+}
+
+/**
+ * Slug prefix map: which Polymarket slug prefix to look for given an asset.
+ * Example: bitcoin → "btc" → matches slugs like "btc-updown-15m-1776005100".
+ */
+export const UPDOWN_ASSET_SLUG_PREFIX: Record<string, string> = {
+  bitcoin: 'btc',
+  ethereum: 'eth',
+  solana: 'sol',
+  xrp: 'xrp',
+  dogecoin: 'doge',
+  bnb: 'bnb',
+  hyperliquid: 'hype',
+};
+
+/**
+ * Asset identifier for Up/Down market discovery. Values matching keys of
+ * `UPDOWN_ASSET_SLUG_PREFIX` are recognised; unknown assets return `[]` with
+ * a warn log.
+ */
+export type UpDownAsset = string;
+export type UpDownLifetime = '5m' | '15m';
+
+/**
+ * A Polymarket Up/Down market normalised for the oracle-lag scanner.
+ *
+ * `clobTokenIds` is always `[UP_token, DOWN_token]` for Up/Down markets.
+ * UP resolves YES when the asset closes above the strike, so:
+ *   yesTokenId = clobTokenIds[0] (UP)
+ *   noTokenId  = clobTokenIds[1] (DOWN)
+ */
+export interface UpDownMarket {
+  marketId: string;
+  slug: string;
+  question: string;
+  endDate: Date;
+  timeToResolutionMs: number;
+  lifetime: UpDownLifetime;
+  asset: string;
+  outcomePrices: [number, number];
+  clobTokenIds: [string, string];
+  yesTokenId: string;
+  noTokenId: string;
+}
+
+export interface ListUpDownMarketsOptions {
+  asset: UpDownAsset;
+  lifetime: UpDownLifetime;
+  /** Cap on remaining time-to-resolution. Markets with `endDate - now > maxTimeToResolutionMin*60_000` are filtered out. */
+  maxTimeToResolutionMin: number;
+  /** Optional override of the events fetch limit. Defaults to 50. */
+  limit?: number;
+}
+
+/**
+ * Fetcher signature for `listUpDownMarkets`. Accepts the events `limit` the
+ * scanner wants and returns raw Gamma events (with `tags` preserved). This
+ * indirection exists so unit tests can inject canned responses without
+ * stubbing `global.fetch`.
+ */
+export type UpDownMarketsFetcher = (limit: number) => Promise<GammaEventWithTags[]>;
+
+/**
+ * Default fetcher: hits the Gamma `/events?tag=crypto&...` endpoint using the
+ * same query-param shape as `listRecentCryptoEvents`. Kept local to
+ * `listUpDownMarkets` so task 001's logic is untouched.
+ *
+ * Returns `[]` on any fetch error (logs structured) — the scanner treats a
+ * missing response as "no active markets this tick" rather than crashing.
+ */
+export async function fetchRecentCryptoEventsRaw(limit: number): Promise<GammaEventWithTags[]> {
+  const params = new URLSearchParams({
+    tag: 'crypto',
+    order: 'startDate',
+    ascending: 'false',
+    active: 'true',
+    closed: 'false',
+    limit: limit.toString(),
+  });
+
+  const url = `${BASE_URL}/events?${params.toString()}`;
+
+  try {
+    const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+    if (!res.ok) {
+      logger.warn('[gamma] fetchRecentCryptoEventsRaw non-ok response', {
+        status: res.status,
+        statusText: res.statusText,
+      });
+      return [];
+    }
+    const data = (await res.json()) as GammaEventWithTags[];
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    logger.warn('[gamma] fetchRecentCryptoEventsRaw failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+}
+
+/**
+ * List active Polymarket Up/Down markets matching the requested asset +
+ * lifetime + max-time-to-resolution profile.
+ *
+ * Filter predicate (all must hold, evaluated client-side on the Gamma
+ * events response):
+ *   1. Market slug matches `^<assetPrefix>-updown-<lifetime>-\d+$`
+ *      (e.g. `btc-updown-15m-1776005100`)
+ *   2. Parent event's `tags` array contains an entry whose `slug` equals the
+ *      uppercase lifetime tag ("15M" or "5M")
+ *   3. `market.closed === false` and `market.endDate > now`
+ *   4. `endDate - now ≤ maxTimeToResolutionMin * 60_000`
+ *
+ * `fetcher` is injectable for testing. Pass a canned fetcher in unit tests;
+ * omit it in production to use the live Gamma API via
+ * `fetchRecentCryptoEventsRaw`.
+ */
+export async function listUpDownMarkets(
+  opts: ListUpDownMarketsOptions,
+  fetcher: UpDownMarketsFetcher = fetchRecentCryptoEventsRaw,
+): Promise<UpDownMarket[]> {
+  const { asset, lifetime, maxTimeToResolutionMin } = opts;
+  const limit = opts.limit ?? 50;
+
+  const slugPrefix = UPDOWN_ASSET_SLUG_PREFIX[asset];
+  if (!slugPrefix) {
+    logger.warn('[gamma] listUpDownMarkets: unknown asset — no slug prefix', { asset });
+    return [];
+  }
+
+  let events: GammaEventWithTags[];
+  try {
+    events = await fetcher(limit);
+  } catch (err) {
+    logger.warn('[gamma] listUpDownMarkets fetcher threw', {
+      asset,
+      lifetime,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+
+  if (!Array.isArray(events) || events.length === 0) return [];
+
+  const slugRe = new RegExp(`^${slugPrefix}-updown-${lifetime}-\\d+$`);
+  const lifetimeTag = lifetime.toUpperCase(); // '15M' | '5M'
+  const maxMs = maxTimeToResolutionMin * 60_000;
+  const now = Date.now();
+
+  const results: UpDownMarket[] = [];
+
+  for (const event of events) {
+    const tagMatch = (event.tags ?? []).some((t) => t?.slug === lifetimeTag);
+    if (!tagMatch) continue;
+
+    for (const m of event.markets ?? []) {
+      if (!m.slug || !slugRe.test(m.slug)) continue;
+      if (m.closed) continue;
+      if (!m.endDate) continue;
+
+      const endMs = new Date(m.endDate).getTime();
+      if (!isFinite(endMs)) continue;
+
+      const ttr = endMs - now;
+      if (ttr <= 0 || ttr > maxMs) continue;
+
+      let pricesArr: string[];
+      let tokensArr: string[];
+      try {
+        pricesArr = parseOutcomePrices(m.outcomePrices);
+        tokensArr = parseClobTokenIds(m.clobTokenIds);
+      } catch (err) {
+        logger.warn('[gamma] listUpDownMarkets: failed to parse prices/tokens', {
+          marketId: m.id,
+          slug: m.slug,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+
+      if (pricesArr.length < 2 || tokensArr.length < 2) continue;
+
+      const upPriceRaw = pricesArr[0];
+      const downPriceRaw = pricesArr[1];
+      const upToken = tokensArr[0];
+      const downToken = tokensArr[1];
+      if (
+        upPriceRaw === undefined ||
+        downPriceRaw === undefined ||
+        upToken === undefined ||
+        downToken === undefined
+      ) {
+        continue;
+      }
+
+      const upPrice = parseFloat(upPriceRaw);
+      const downPrice = parseFloat(downPriceRaw);
+      if (!isFinite(upPrice) || !isFinite(downPrice)) continue;
+
+      results.push({
+        marketId: m.id,
+        slug: m.slug,
+        question: m.question,
+        endDate: new Date(endMs),
+        timeToResolutionMs: ttr,
+        lifetime,
+        asset,
+        outcomePrices: [upPrice, downPrice],
+        clobTokenIds: [upToken, downToken],
+        yesTokenId: upToken,
+        noTokenId: downToken,
+      });
+    }
+  }
+
+  return results;
 }

@@ -22,6 +22,8 @@ import {
   recordCryptoArbMetric,
 } from '../shared/telemetry.js';
 import { ArbMarketWarmer } from './warmer.js';
+import { OracleLagScanner } from './oracleLagScanner.js';
+import { ChainlinkFeed } from '../spot/feeds/chainlinkFeed.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { TradeSignal } from '../mapping/index.js';
 
@@ -52,6 +54,8 @@ export class ArbitrageWorker {
   private isCryptoArbRunning = false;
   private timer: NodeJS.Timeout | null = null;
   private warmer: ArbMarketWarmer | null = null;
+  private chainlinkFeed: ChainlinkFeed | null = null;
+  private oracleLagScanner: OracleLagScanner | null = null;
 
   constructor(options: WorkerOptions = {}) {
     this.baselineIntervalMs = options.baselineIntervalMs ?? 10000; // 10s baseline
@@ -136,6 +140,22 @@ export class ArbitrageWorker {
         error: err instanceof Error ? err.message : String(err),
       });
     });
+
+    // 0b. Start Chainlink feed + oracle-lag scanner (oracle-lag-15m epic).
+    // The scanner manages its own Redis lock (`lock:oracle-lag-scanner`) via
+    // the tri-state refreshLock pattern — worker.ts does not own it. On
+    // SIGTERM we await scanner.stop() before closing Redis so the scanner
+    // can release its lock.
+    try {
+      this.chainlinkFeed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+      this.chainlinkFeed.start();
+      this.oracleLagScanner = new OracleLagScanner({ redis: getRedis() });
+      await this.oracleLagScanner.start(this.chainlinkFeed);
+    } catch (err) {
+      logger.warn('[arb-worker] oracle-lag scanner failed to start (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     // 1. Subscribe to real-time price updates
     const subscriber = getSubscriberRedis();
@@ -478,18 +498,71 @@ export class ArbitrageWorker {
       this.warmer = null;
     }
   }
+
+  /**
+   * Async shutdown for components that must release external resources
+   * (Redis locks, WebSockets) before the process exits. Called from
+   * `main()`'s SIGTERM handler BEFORE `closeRedis()` so the oracle-lag
+   * scanner can release its own `lock:oracle-lag-scanner` key while the
+   * connection is still open. Kept separate from `stop()` so tests that
+   * call `stop()` synchronously are unaffected.
+   */
+  public async stopAsyncDeps(): Promise<void> {
+    // Tear down oracle-lag first so the scanner releases its own Redis lock
+    // before the caller closes the connection.
+    if (this.oracleLagScanner) {
+      try {
+        await this.oracleLagScanner.stop();
+      } catch (err) {
+        logger.warn('[arb-worker] oracle-lag scanner stop failed (non-fatal)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      this.oracleLagScanner = null;
+    }
+    if (this.chainlinkFeed) {
+      try {
+        this.chainlinkFeed.stop();
+      } catch (err) {
+        logger.warn('[arb-worker] chainlink feed stop failed (non-fatal)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      this.chainlinkFeed = null;
+    }
+  }
 }
 
 async function main() {
   const worker = new ArbitrageWorker();
   const shutdown = async () => {
     logger.info('[arb-worker] shutting down...');
-    worker.stop();
+    // Order matters:
+    //   1. stopAsyncDeps() — oracle-lag scanner releases `lock:oracle-lag-scanner`
+    //      and the Chainlink WS shuts down while Redis is still open.
+    //   2. stop() — sync teardown of timers, warmer, pub/sub subscriber.
+    //   3. closeRedis() — close connections after every lock-holder has
+    //      released.
+    //   4. process.exit(0) — only the worker entrypoint calls exit.
+    try {
+      await worker.stopAsyncDeps();
+    } catch (err) {
+      logger.warn('[arb-worker] stopAsyncDeps threw (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    try {
+      worker.stop();
+    } catch (err) {
+      logger.warn('[arb-worker] worker.stop() threw (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     await closeRedis();
     process.exit(0);
   };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => void shutdown());
+  process.on('SIGINT', () => void shutdown());
   await worker.start();
 }
 

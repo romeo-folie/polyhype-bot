@@ -284,6 +284,23 @@ const envSchema = z.object({
   UPDOWN_PNL_MIN_WIN_RATE: z.coerce.number().min(0).max(1).optional().default(0.4),
   UPDOWN_PNL_COOLDOWN_MIN: z.coerce.number().int().min(1).optional().default(30),
   UPDOWN_PNL_MIN_SAMPLES: z.coerce.number().int().min(1).optional().default(3),
+
+  // Oracle-Lag Scanner (BTC Up/Down 15m, Chainlink oracle-lag sniper).
+  // Ships dark — flip ORACLE_LAG_ENABLED to true only after shadow-log review.
+  ORACLE_LAG_ENABLED: boolFromEnv.optional().default(false),
+  // Minimum Chainlink BTC move % over the lookback window to consider entry (0.07 = 7 bps).
+  ORACLE_LAG_MIN_MOVE_PCT: z.coerce.number().min(0).optional().default(0.07),
+  // Lookback window in seconds for the Chainlink move computation.
+  ORACLE_LAG_MOVE_WINDOW_SEC: z.coerce.number().int().min(1).optional().default(5),
+  // Skip entry if time to market resolution is below this many minutes.
+  ORACLE_LAG_MIN_TIME_LEFT_MIN: z.coerce.number().min(0).optional().default(5),
+  // Skip entry if market price on the signal side exceeds this (fee math breaks above ~0.62).
+  ORACLE_LAG_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.62),
+  // Fixed per-entry stake — bypasses Half-Kelly (edge is timing, not probability).
+  ORACLE_LAG_STAKE_USD: z.coerce.number().min(0).optional().default(5),
+  // Hard cap on live entries per hour.
+  ORACLE_LAG_MAX_TRADES_PER_HOUR: z.coerce.number().int().min(1).optional().default(10),
+
   // Minimum edge to allow entry on fee-enabled markets (executor fee gate).
   // Defaults to 0.04 (4%) — must exceed this to justify the ~2% taker fee.
   FEE_MARKET_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.04),
