@@ -1,12 +1,16 @@
 /**
  * Trailing-stop exit for PM positions.
  *
- * Layered on top of the fixed TAKE_PROFIT_THRESHOLD: activation = TP line.
+ * Layered on top of the fixed take-profit line: activation = TP line.
  * Floor is clamped to never fall below TP, so the first crossing degenerates
  * to today's fixed-TP behavior on an immediate reversal. Above TP, the floor
  * ratchets up with the peak so we protect real gains instead of round-tripping.
  *
- * Only evaluated for PM positions (not futures, not copytrades) and only when
+ * The activation threshold is passed in by the caller so trailing always
+ * matches the *effective* TP the position would otherwise exit at
+ * (e.g. COPYTRADE_TAKE_PROFIT for copytrades, TAKE_PROFIT_THRESHOLD for OSINT).
+ *
+ * Only evaluated for PM positions (not futures) and only when
  * TRAILING_STOP_ENABLED=true. The monitor loop suppresses the fixed-TP exit
  * when trailing is enabled so trailing takes over. SL is never suppressed.
  *
@@ -32,7 +36,7 @@ export interface TrailingStopDecision {
  * Caller is responsible for:
  *   - persisting `newHwmPct` via updateHighWaterMark() every tick
  *   - short-circuiting when the feature flag is off
- *   - excluding futures/copytrade/pendingSettlement positions
+ *   - excluding futures/pendingSettlement positions
  *
  * Returns `shouldExit=true` with a human-readable `reason` when the current
  * PnL has pulled back past the trailing floor.
@@ -41,12 +45,15 @@ export function evaluateTrailingStop(opts: {
   position: Position;
   currentPnlPct: number;
   currentBid: number | null | undefined;
+  /**
+   * Activation threshold in percent (e.g. 20 for +20%). Must equal the
+   * effective fixed-TP line the caller applied, so trailing takes over at
+   * exactly the point fixed-TP would have exited.
+   */
+  activationPct: number;
   cfg: AppConfig;
 }): TrailingStopDecision {
-  const { position, currentPnlPct, currentBid, cfg } = opts;
-
-  // Activation threshold mirrors the fixed TP line (TAKE_PROFIT_THRESHOLD is a decimal).
-  const activationPct = cfg.TAKE_PROFIT_THRESHOLD * 100;
+  const { position, currentPnlPct, currentBid, activationPct, cfg } = opts;
 
   // HWM is monotonic: max of prior hwm and current PnL.
   const priorHwm = position.highWaterMarkPct;

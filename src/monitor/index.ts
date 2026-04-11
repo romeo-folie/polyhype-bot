@@ -219,9 +219,7 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
     // so the trailing block below can take over. SL and divergence_closed still fire.
     const isFuturesPosTop =
       position.isFutures === true || position.executionVenue === 'hyperliquid';
-    const isCopytradePosTop = position.sourcedFrom?.startsWith('copytrade:') ?? false;
-    const trailingActive =
-      cfg.TRAILING_STOP_ENABLED && !isFuturesPosTop && !isCopytradePosTop;
+    const trailingActive = cfg.TRAILING_STOP_ENABLED && !isFuturesPosTop;
 
     const suppressTpExit =
       trailingActive &&
@@ -255,6 +253,10 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
         position,
         currentPnlPct: decision.returnPct,
         currentBid: currentPrice.currentOutcomePrice,
+        // Activation must match the effective TP the fixed-TP path would have
+        // used (COPYTRADE_TAKE_PROFIT for copytrades, TAKE_PROFIT_THRESHOLD
+        // otherwise) so trailing takes over at exactly the suppressed-TP line.
+        activationPct: tpThreshold * 100,
         cfg,
       });
 
