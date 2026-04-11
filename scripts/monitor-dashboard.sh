@@ -39,8 +39,8 @@ W8="while true; do npx tsx scripts/list-positions.ts; sleep 10; done"
 W9="docker compose logs -f --tail 100 pga-sports    | sed 's/\(\[[^]]*\]\)/\x1b[91m\1\x1b[0m/g'"
 W10="docker compose logs -f --tail 100 pga-clob-flow | sed 's/\(\[[^]]*\]\)/\x1b[93m\1\x1b[0m/g'"
 
-# MAKER-EXIT + TRAILING-STOP focus pane (12)
-W11="touch ~/logs/pga/monitor.log && tail -f ~/logs/pga/monitor.log | grep --line-buffered -E 'maker_exit_|trailing_stop|stale-exit triggered' | sed 's/\(\[[^]]*\]\)/\x1b[94m\1\x1b[0m/g'"
+# ORACLE-LAG scanner focus pane (12)
+W11="docker compose logs -f --tail 200 pga-arb | grep --line-buffered -E '\[oracle-lag\]|chainlink_feed_' | sed 's/\(\[[^]]*\]\)/\x1b[94m\1\x1b[0m/g'"
 
 # Partition the window into a dynamic tiled grid
 tmux new-session -d -s "$SESSION" -n w0 -x 220 -y 60 "sh -c \"$W0\""
