@@ -1,12 +1,25 @@
 import { randomUUID } from 'node:crypto';
 import { logger } from './logger.js';
-import { getActiveMarkets, parseOutcomes } from '../mapping/gamma.js';
+import { getActiveMarkets, parseOutcomes, parseOutcomePrices } from '../mapping/gamma.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import type { Redis } from 'ioredis';
 
 const WATCHLIST_KEY = 'watchlist:dynamic_keywords';
 const MARKET_CACHE_KEY = 'watchlist:market_cache';
+
+// Price history for near-zero scanner reprice filter. Each refresh writes the
+// cheaper side (YES or NO) of every market that sits below PRICE_HIST_TRACK_MAX
+// to a per-market-per-direction ZSET, keyed `near_zero:price_hist:{id}:{dir}`.
+// Score = wall-clock ms; member = "{ms}:{price}" (unique even when the same
+// price appears twice). TTL refreshed on every write — stale markets drop out
+// after 14 days naturally.
+const PRICE_HIST_KEY_PREFIX = 'near_zero:price_hist:';
+const PRICE_HIST_TTL_SECONDS = 14 * 24 * 3600;
+// Only track markets whose cheaper side is below this threshold. Catches
+// candidates currently in the near-zero zone plus markets close enough to drop
+// into it within one lookback window. Above this, tracking is wasted writes.
+const PRICE_HIST_TRACK_MAX = 0.35;
 // Cache TTL is 3× the 4h cron interval so a single missed refresh run (disk
 // hiccup, network blip, etc.) does not blank the cache and take clob-flow /
 // entityExtractor / sports-scanner dark. Actively stale data (up to ~10% market
@@ -133,10 +146,17 @@ export async function refreshDynamicWatchlist(redis: Redis): Promise<number> {
       });
     }
 
+    // Capture a snapshot of current prices for markets near either extreme,
+    // so the near-zero scanner can later distinguish recently-repriced markets
+    // from perennial dead horses. Fire-and-forget — never fail the refresh on
+    // price history write errors.
+    const tracked = await recordNearZeroPriceHistory(redis, liveMarkets);
+
     logger.info('[watchlist] refresh complete', {
       uniqueKeywords: keywords.size,
       cachedMarkets: liveMarkets.length,
       expiredFiltered: markets.length - liveMarkets.length,
+      priceHistoryTracked: tracked,
     });
     return keywords.size;
   } catch (err: unknown) {
@@ -190,4 +210,83 @@ export async function getCachedMarkets(redis: Redis): Promise<GammaMarket[]> {
   } catch {
     return [];
   }
+}
+
+/**
+ * Append one price sample per market to the near-zero price-history ZSETs.
+ * Tracks only the cheaper side (YES or NO) and only when it's below
+ * PRICE_HIST_TRACK_MAX — a market 90¢-YES has no chance of appearing in the
+ * 3–10¢ scan zone from either direction, so tracking it is wasted writes.
+ *
+ * Writes are pipelined. Called from `refreshDynamicWatchlist` after the market
+ * cache is updated, so we reuse the same Gamma fetch.
+ */
+export async function recordNearZeroPriceHistory(
+  redis: Redis,
+  markets: GammaMarket[],
+  nowMs: number = Date.now(),
+): Promise<number> {
+  const pipeline = redis.pipeline();
+  let tracked = 0;
+  for (const m of markets) {
+    try {
+      const prices = parseOutcomePrices(m.outcomePrices);
+      const yes = parseFloat(prices[0] ?? '');
+      const no = parseFloat(prices[1] ?? '');
+      if (!Number.isFinite(yes) || !Number.isFinite(no)) continue;
+
+      // Track the cheaper side only — that's the one the near-zero scanner evaluates.
+      const yesCheaper = yes <= no;
+      const side: 'YES' | 'NO' = yesCheaper ? 'YES' : 'NO';
+      const price = yesCheaper ? yes : no;
+      if (price >= PRICE_HIST_TRACK_MAX) continue;
+
+      const key = `${PRICE_HIST_KEY_PREFIX}${m.id}:${side}`;
+      const member = `${nowMs}:${price}`;
+      pipeline.zadd(key, nowMs, member);
+      pipeline.expire(key, PRICE_HIST_TTL_SECONDS);
+      tracked++;
+    } catch {
+      // malformed prices → skip
+    }
+  }
+  if (tracked > 0) {
+    try {
+      await pipeline.exec();
+    } catch (err: unknown) {
+      logger.warn('[watchlist] price history write failed (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return tracked;
+}
+
+/**
+ * Read the peak price observed for a market+direction over the last N days.
+ * Used by the near-zero scanner's dead-horse filter: markets that have always
+ * been cheap are efficient, real mispricings drop INTO the zone from higher.
+ *
+ * Returns null when no history exists (first sighting — caller should grandfather
+ * in rather than block).
+ */
+export async function getNearZeroPeakPrice(
+  redis: Redis,
+  marketId: string,
+  direction: 'YES' | 'NO',
+  lookbackDays: number,
+  nowMs: number = Date.now(),
+): Promise<number | null> {
+  const key = `${PRICE_HIST_KEY_PREFIX}${marketId}:${direction}`;
+  const cutoffMs = nowMs - lookbackDays * 24 * 3600 * 1000;
+  const members = await redis.zrangebyscore(key, cutoffMs, '+inf');
+  if (members.length === 0) return null;
+  let max = 0;
+  for (const m of members) {
+    const colonIdx = m.indexOf(':');
+    if (colonIdx === -1) continue;
+    const p = parseFloat(m.slice(colonIdx + 1));
+    if (Number.isFinite(p) && p > max) max = p;
+  }
+  return max > 0 ? max : null;
 }

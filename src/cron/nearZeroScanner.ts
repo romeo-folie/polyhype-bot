@@ -21,7 +21,7 @@ import { getRedis, closeRedis } from '../shared/redis.js';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { getBankroll } from '../shared/bankroll.js';
-import { getCachedMarkets } from '../shared/watchlist.js';
+import { getCachedMarkets, getNearZeroPeakPrice } from '../shared/watchlist.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import { estimateConsensusProbability } from '../mapping/consensusCalculator.js';
 import { checkTimeToResolution } from '../mapping/divergenceCalculator.js';
@@ -30,6 +30,19 @@ import { priceZoneOf } from '../shared/zones.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 const DEDUP_KEY_PREFIX = 'near_zero:dedup:';
+
+function parseKeywordList(raw: string): string[] {
+  return raw
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length > 0);
+}
+
+function isExcludedByKeyword(question: string, excludes: string[]): boolean {
+  if (excludes.length === 0) return false;
+  const q = question.toLowerCase();
+  return excludes.some((kw) => q.includes(kw));
+}
 
 async function main() {
   const redis = getRedis();
@@ -72,7 +85,9 @@ async function main() {
       if (!exists) fresh.push(c);
     }
 
-    // Apply liquidity and time-to-resolution gates.
+    // Apply liquidity, time-to-resolution, and keyword-exclusion gates.
+    const keywordExcludes = parseKeywordList(cfg.NEAR_ZERO_EXCLUDE_KEYWORDS);
+    let keywordFiltered = 0;
     const valid = fresh.filter((c) => {
       const liquidity = parseFloat(c.market.liquidity ?? '0');
       if (!isFinite(liquidity) || liquidity < cfg.NEAR_ZERO_MIN_LIQUIDITY) return false;
@@ -81,19 +96,63 @@ async function main() {
         undefined,
         cfg.NEAR_ZERO_MIN_HOURS,
       );
-      return ttr.ok;
+      if (!ttr.ok) return false;
+      if (isExcludedByKeyword(c.market.question, keywordExcludes)) {
+        keywordFiltered++;
+        return false;
+      }
+      return true;
     });
 
+    // Dead-horse filter: require the market to have been above REPRICE_MIN_PEAK
+    // at some point in the last REPRICE_LOOKBACK_DAYS. Markets with no history
+    // yet are grandfathered in (first sighting — scanner gets a free look).
+    let deadHorseFiltered = 0;
+    const qualified: typeof valid = [];
+    for (const c of valid) {
+      if (!cfg.NEAR_ZERO_REQUIRE_REPRICE) {
+        qualified.push(c);
+        continue;
+      }
+      const peak = await getNearZeroPeakPrice(
+        redis,
+        c.market.id,
+        c.direction,
+        cfg.NEAR_ZERO_REPRICE_LOOKBACK_DAYS,
+      );
+      if (peak === null) {
+        // No history yet — grandfather in.
+        qualified.push(c);
+        continue;
+      }
+      if (peak < cfg.NEAR_ZERO_REPRICE_MIN_PEAK) {
+        deadHorseFiltered++;
+        logger.debug('[near-zero] dead-horse filtered (no recent reprice)', {
+          marketId: c.market.id,
+          direction: c.direction,
+          currentPrice: c.price.toFixed(4),
+          peakDays: cfg.NEAR_ZERO_REPRICE_LOOKBACK_DAYS,
+          peakPrice: peak.toFixed(4),
+          threshold: cfg.NEAR_ZERO_REPRICE_MIN_PEAK,
+        });
+        continue;
+      }
+      qualified.push(c);
+    }
+
     // Sort ascending by price — cheapest = most asymmetric = highest potential payout.
-    valid.sort((a, b) => a.price - b.price);
+    qualified.sort((a, b) => a.price - b.price);
 
     // Cap to LLM budget per run.
-    const toEvaluate = valid.slice(0, cfg.NEAR_ZERO_MAX_CANDIDATES_PER_RUN);
+    const toEvaluate = qualified.slice(0, cfg.NEAR_ZERO_MAX_CANDIDATES_PER_RUN);
 
     logger.info('[near-zero] scan summary', {
       total: candidates.length,
       fresh: fresh.length,
-      valid: valid.length,
+      validAfterLiquidityAndKeyword: valid.length,
+      keywordFiltered,
+      deadHorseFiltered,
+      qualified: qualified.length,
       evaluating: toEvaluate.length,
       enabled: cfg.NEAR_ZERO_SCANNER_ENABLED,
     });

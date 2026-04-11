@@ -524,6 +524,25 @@ const envSchema = z.object({
   NEAR_ZERO_MIN_HOURS: z.coerce.number().min(0).optional().default(24),
   // TTL for per-market dedup key. Prevents re-evaluating the same market for 6h.
   NEAR_ZERO_DEDUP_TTL_S: z.coerce.number().int().min(0).optional().default(21600),
+  // Dead-horse filter: a real mispricing drops INTO the near-zero zone. Markets
+  // that have always been cheap (long-tail championship futures, binary polls with
+  // many competitors) are efficient at those prices and burn LLM budget for nothing.
+  // When enabled, the scanner requires the market to have been ≥ REPRICE_MIN_PEAK at
+  // some point in the last REPRICE_LOOKBACK_DAYS days. Markets with no history yet
+  // are grandfathered in (first sighting). Price history is captured by the watchlist
+  // refresh cron into `near_zero:price_hist:{marketId}:{direction}` ZSETs.
+  NEAR_ZERO_REQUIRE_REPRICE: boolFromEnv.optional().default(true),
+  NEAR_ZERO_REPRICE_LOOKBACK_DAYS: z.coerce.number().int().min(1).optional().default(7),
+  NEAR_ZERO_REPRICE_MIN_PEAK: z.coerce.number().min(0).max(1).optional().default(0.15),
+  // Comma-separated question substrings to skip outright (case-insensitive). Catches
+  // structurally-efficient long-tail markets where LLM cannot reliably outguess the
+  // crowd (a 30-team championship futures market is correctly priced at ~1/30 each).
+  // Scoped to the near-zero scanner only — does NOT affect sports-arb worker, OSINT
+  // entity matching, or any other path.
+  NEAR_ZERO_EXCLUDE_KEYWORDS: z
+    .string()
+    .optional()
+    .default("championship,super bowl,world series,stanley cup,nba finals,mvp,heisman,ballon d'or"),
 
   // --- CRYPTO FUTURES (Phase: futures) ---
   FUTURES_ENABLED: boolFromEnv.optional().default(false),
