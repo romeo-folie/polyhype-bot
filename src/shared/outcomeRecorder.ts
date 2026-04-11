@@ -58,6 +58,19 @@ export function inferSource(sourcedFrom: string): PositionOutcome['source'] {
 export function inferCategory(question: string): string {
   const q = question.toLowerCase();
 
+  // Short-resolution crypto price binaries (e.g. "Bitcoin Up or Down - April 12,
+  // 8:55AM-9:00AM ET"). Must be matched BEFORE the general crypto bucket so
+  // stale-exit uses the long age window reserved for this shape — these markets
+  // sit flat near 0.5 until minutes before the oracle snapshot, then resolve in
+  // a thin CLOB book, so the crypto-regulatory 8h window would dump them mid-
+  // cycle straight into the empty-book partial-fill trap.
+  if (
+    /\bup or down\b/.test(q) &&
+    /bitcoin|\bbtc\b|\beth\b|ethereum|\bsolana\b|\bsol\b/.test(q)
+  ) {
+    return 'crypto-updown';
+  }
+
   // Short tokens (eth, sol, btc, etc.) are anchored with \b to prevent false matches
   // like "methane" → eth, "absolute" → sol, "protocol" → btc.
   if (

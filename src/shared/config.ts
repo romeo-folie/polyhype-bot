@@ -359,6 +359,10 @@ const envSchema = z.object({
   STALE_MIN_AGE_H_DEFAULT: z.coerce.number().min(1).optional().default(12),
   STALE_MIN_AGE_H_SPORTS: z.coerce.number().min(1).optional().default(6),
   STALE_MIN_AGE_H_CRYPTO_REGULATORY: z.coerce.number().min(1).optional().default(8),
+  // Short-resolution crypto binaries (BTC/ETH Up or Down 5m/15m). Held ~24h until
+  // the oracle snapshot, flat near 0.5 for most of it. Age is set well past any
+  // realistic holding period so Rule A never fires on these; they hold to resolution.
+  STALE_MIN_AGE_H_CRYPTO_UPDOWN: z.coerce.number().min(1).optional().default(72),
   STALE_MIN_AGE_H_AI_TECH: z.coerce.number().min(1).optional().default(12),
   STALE_MIN_AGE_H_MACRO: z.coerce.number().min(1).optional().default(18),
   STALE_MIN_AGE_H_US_POLITICS: z.coerce.number().min(1).optional().default(24),

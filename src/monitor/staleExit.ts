@@ -80,6 +80,7 @@ export function normalizeCategory(rawCategory: string): string {
   if (rawCategory.startsWith('sports')) return 'sports';
   const canonical = new Set([
     'crypto-regulatory',
+    'crypto-updown',
     'ai-tech',
     'macro',
     'us-politics',
@@ -98,6 +99,8 @@ export function getCategoryAgeH(category: string, cfg: AppConfig): number {
       return cfg.STALE_MIN_AGE_H_SPORTS;
     case 'crypto-regulatory':
       return cfg.STALE_MIN_AGE_H_CRYPTO_REGULATORY;
+    case 'crypto-updown':
+      return cfg.STALE_MIN_AGE_H_CRYPTO_UPDOWN;
     case 'ai-tech':
       return cfg.STALE_MIN_AGE_H_AI_TECH;
     case 'macro':

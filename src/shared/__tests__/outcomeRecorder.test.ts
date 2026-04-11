@@ -367,6 +367,22 @@ describe('inferCategory', () => {
     expect(inferCategory('Solana network upgrade')).toBe('crypto-regulatory');
   });
 
+  it('classifies short-resolution crypto Up/Down binaries separately', () => {
+    expect(inferCategory('Bitcoin Up or Down - April 12, 8:55AM-9:00AM ET')).toBe(
+      'crypto-updown',
+    );
+    expect(inferCategory('Bitcoin Up or Down - April 12, 9:45AM-10:00AM ET')).toBe(
+      'crypto-updown',
+    );
+    expect(inferCategory('Ethereum Up or Down - April 12, 9:00AM-9:15AM ET')).toBe(
+      'crypto-updown',
+    );
+    // "Up or Down" without a crypto token must NOT land in this bucket.
+    expect(inferCategory('Senate Up or Down vote on bill')).not.toBe('crypto-updown');
+    // "Bitcoin" without "Up or Down" stays on the general crypto bucket.
+    expect(inferCategory('Bitcoin ETF approved by SEC')).toBe('crypto-regulatory');
+  });
+
   it('detects macro keywords', () => {
     expect(inferCategory('Fed raises rate to 5.5%')).toBe('macro');
     expect(inferCategory('GDP growth exceeds expectations')).toBe('macro');
