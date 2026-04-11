@@ -90,10 +90,12 @@ export function evaluateTakeProfit(
     !position.sourcedFrom.startsWith('copytrade:') &&
     !position.sourcedFrom.startsWith('reconciled:')
   ) {
-    const divergenceClosed =
-      direction === 'YES'
-        ? currentYesPrice >= (consensusProbability ?? 0.5)
-        : currentYesPrice <= (consensusProbability ?? 0.5);
+    // UP (BTC Up/Down) is a YES-side direction — its token IS the YES-token.
+    // Must be treated as 'YES' here or the else branch inverts the check.
+    const isYesSide = direction === 'YES' || direction === 'UP';
+    const divergenceClosed = isYesSide
+      ? currentYesPrice >= (consensusProbability ?? 0.5)
+      : currentYesPrice <= (consensusProbability ?? 0.5);
 
     if (divergenceClosed) {
       return { shouldExit: true, reason: 'divergence_closed', returnDecimal, returnPct };

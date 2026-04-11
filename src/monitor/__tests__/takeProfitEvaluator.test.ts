@@ -170,6 +170,96 @@ describe('evaluateTakeProfit', () => {
     });
   });
 
+  describe('divergence closed — BTC Up/Down positions', () => {
+    // Regression: evaluator used to do `direction === 'YES' ? ... : ...` which
+    // routed UP to the else branch and inverted the check: a fresh UP position
+    // at entry=0.505 with consensus P(YES)=0.65 would fire divergence_closed
+    // instantly (0.505 <= 0.65 → true). Fix: treat UP as a YES-side direction.
+    it('holds UP position when currentYesPrice is still below consensus', () => {
+      // entry 0.505, current 0.505, consensus P(YES) = 0.65
+      // return = 0% (no SL, no TP) → only divergence_closed could fire
+      // With fix: isYesSide → 0.505 >= 0.65 → false → HOLD
+      const position = makePosition({
+        direction: 'UP',
+        entryPrice: 0.505,
+        consensusProbability: 0.65,
+      });
+      const result = evaluateTakeProfit(
+        position,
+        makeCurrentPrice({
+          direction: 'UP',
+          currentOutcomePrice: 0.505,
+          currentYesPrice: 0.505,
+        }),
+        THRESHOLD,
+      );
+      expect(result.shouldExit).toBe(false);
+    });
+
+    it('exits UP position with divergence_closed when currentYesPrice reaches consensus', () => {
+      // entry 0.50, current 0.63, consensus 0.62 → UP token has rallied past fair
+      // return = 26% > 25% would take_profit — keep return below threshold
+      const position = makePosition({
+        direction: 'UP',
+        entryPrice: 0.55,
+        consensusProbability: 0.62,
+      });
+      const result = evaluateTakeProfit(
+        position,
+        makeCurrentPrice({
+          direction: 'UP',
+          currentOutcomePrice: 0.63,
+          currentYesPrice: 0.63,
+        }),
+        THRESHOLD,
+      );
+      expect(result.shouldExit).toBe(true);
+      expect(result.reason).toBe('divergence_closed');
+    });
+
+    it('holds DOWN position when currentYesPrice is still above P(YES)', () => {
+      // DOWN side: scanner stores consensus as P(YES=UP wins) = 1 - fair_for_down
+      // entry DOWN = 0.495, current DOWN = 0.495, consensus P(YES) = 0.35
+      // currentYesPrice = 1 - 0.495 = 0.505 > 0.35 → HOLD
+      const position = makePosition({
+        direction: 'DOWN',
+        entryPrice: 0.495,
+        consensusProbability: 0.35,
+      });
+      const result = evaluateTakeProfit(
+        position,
+        makeCurrentPrice({
+          direction: 'DOWN',
+          currentOutcomePrice: 0.495,
+          currentYesPrice: 0.505,
+        }),
+        THRESHOLD,
+      );
+      expect(result.shouldExit).toBe(false);
+    });
+
+    it('exits DOWN position with divergence_closed when currentYesPrice falls to consensus', () => {
+      // DOWN token has rallied to 0.68 → currentYesPrice = 0.32 <= 0.35 consensus
+      // return = (0.68-0.55)/0.55 ≈ 23.6% < 25% → not take_profit
+      const position = makePosition({
+        direction: 'DOWN',
+        entryPrice: 0.55,
+        consensusProbability: 0.35,
+      });
+      const result = evaluateTakeProfit(
+        position,
+        makeCurrentPrice({
+          direction: 'DOWN',
+          currentOutcomePrice: 0.68,
+          currentYesPrice: 0.32,
+        }),
+        THRESHOLD,
+      );
+      expect(result.shouldExit).toBe(true);
+      expect(result.reason).toBe('divergence_closed');
+    });
+  });
+
   describe('reconciled positions — skip divergence_closed', () => {
     it('does not exit via divergence_closed for reconciled:simmer position', () => {
       // Reconciled positions have no consensus estimate. Without the fix,
