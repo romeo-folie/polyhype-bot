@@ -308,9 +308,13 @@ export class OracleLagScanner {
   private async refreshMarketsIfStale(): Promise<void> {
     if (this.marketRefreshInFlight) return;
     const now = Date.now();
-    if (now - this.lastMarketRefreshMs < MARKET_REFRESH_MS && this.cachedMarkets.length > 0) {
+    if (now - this.lastMarketRefreshMs < MARKET_REFRESH_MS) {
       return;
     }
+    // Stamp the refresh time BEFORE the fetch so that failures and empty
+    // results still back off to the 30s cadence — otherwise an empty cache
+    // would retry every 1s tick and hammer Gamma.
+    this.lastMarketRefreshMs = now;
     this.marketRefreshInFlight = true;
     try {
       const cfg = this.loadCfg();
@@ -322,7 +326,6 @@ export class OracleLagScanner {
         maxTimeToResolutionMin: Math.max(cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN, 15),
       });
       this.cachedMarkets = markets;
-      this.lastMarketRefreshMs = now;
       logger.debug('[oracle-lag] market refresh', { count: markets.length });
     } catch (err) {
       logger.warn('[oracle-lag] market refresh failed — keeping stale cache', {
@@ -406,7 +409,12 @@ export class OracleLagScanner {
 
     const blockReason = evaluation.blockReason ?? runtimeBlockReason;
     const blocked = !evaluation.shouldEnter || !!runtimeBlockReason;
-    const wouldTrade = cfg.ORACLE_LAG_ENABLED && !blocked;
+    // `wouldTrade` reflects "passed all gates" regardless of whether the
+    // ORACLE_LAG_ENABLED flag is set. Task 010's shadow analysis counts
+    // wouldTrade=true events to measure expected fire rate — so we must
+    // compute it as if the flag were on. The flag itself is logged as
+    // `enabled` and gates the actual fire() below.
+    const wouldTrade = !blocked;
 
     // Shadow log — always emitted (task 009/010 parse these).
     logger.info('[oracle-lag] shadow candidate', {
@@ -426,9 +434,12 @@ export class OracleLagScanner {
           : null,
       wouldTrade,
       blockReason,
+      enabled: cfg.ORACLE_LAG_ENABLED,
     });
 
     if (!wouldTrade) return;
+    // Shadow mode — logged but never fires until ORACLE_LAG_ENABLED flips.
+    if (!cfg.ORACLE_LAG_ENABLED) return;
     if (
       !evaluation.side ||
       evaluation.entryPrice === undefined ||
