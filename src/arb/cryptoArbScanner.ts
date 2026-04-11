@@ -253,10 +253,12 @@ export async function scanCryptoArb(move: SpotMove, redis: Redis): Promise<Crypt
       // via ARB_FEE_RATE, so markets that pass the min edge gate have already
       // cleared the fee hurdle. No need to skip them unconditionally.
 
-      // 2b. Get current PM YES price (WS cache → fallback to struct)
+      // 2b. Get current PM YES price (WS cache → fallback to struct). Direction
+      // logic and edge calc work in the YES frame; the price of the token we
+      // actually buy (`ourTokenPrice`) is derived once `direction` is known.
       const wsPrice = await feed.getCachedPrice(market.marketId);
-      const currentPmPrice = wsPrice ?? market.currentYesPrice;
-      if (!isFinite(currentPmPrice) || currentPmPrice <= 0 || currentPmPrice >= 1) {
+      const marketPYes = wsPrice ?? market.currentYesPrice;
+      if (!isFinite(marketPYes) || marketPYes <= 0 || marketPYes >= 1) {
         await recordCryptoArbGate(redis, 'invalid_price');
         continue;
       }
@@ -277,10 +279,10 @@ export async function scanCryptoArb(move: SpotMove, redis: Redis): Promise<Crypt
         continue;
       }
 
-      const fairValue = consensus.probability;
+      const fairValue = consensus.probability; // P(YES)
 
-      // 4. Compute edge and direction
-      const rawEdge = Math.abs(fairValue - currentPmPrice);
+      // 4. Compute edge and direction (all in YES frame)
+      const rawEdge = Math.abs(fairValue - marketPYes);
 
       // Dynamic spread buffer: account for current bid-ask spread from WS.
       // Helps avoid entering trades where the "edge" is just the market spread.
@@ -306,13 +308,19 @@ export async function scanCryptoArb(move: SpotMove, redis: Redis): Promise<Crypt
       }
 
       let direction: 'YES' | 'NO';
-      if (fairValue > currentPmPrice + feeRate) {
+      if (fairValue > marketPYes + feeRate) {
         direction = 'YES';
-      } else if (fairValue < currentPmPrice - feeRate) {
+      } else if (fairValue < marketPYes - feeRate) {
         direction = 'NO';
       } else {
         continue;
       }
+
+      // Price of the token we're actually buying. For YES this is marketPYes;
+      // for NO it's 1 - marketPYes. This becomes `signal.outcomePrice` →
+      // `position.entryPrice`, so it must reflect what we paid for the token
+      // we hold or the monitor's return calculation will be nonsense.
+      const ourTokenPrice = direction === 'YES' ? marketPYes : 1 - marketPYes;
 
       // Direction alignment with confluence.
       // For positive correlation (BTC up → YES more likely): confluence UP → expect YES.
@@ -370,7 +378,7 @@ export async function scanCryptoArb(move: SpotMove, redis: Redis): Promise<Crypt
         question: market.question,
         direction,
         tokenId,
-        currentPmPrice,
+        currentPmPrice: ourTokenPrice,
         fairValuePrice: fairValue,
         edge: netEdge,
         stakeUsd,

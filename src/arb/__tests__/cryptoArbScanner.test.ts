@@ -116,6 +116,35 @@ describe('cryptoArbScanner', () => {
     // edge = |0.30 - 0.45| - 0.02 = 0.13
     expect(opps[0]!.edge).toBeCloseTo(0.13, 2);
     expect(opps[0]!.tokenId).toBe('no-tok');
+    // Regression: currentPmPrice must be the price of the token we buy
+    // (NO-token price = 1 - marketPYes), NOT the YES price. Feeding the
+    // YES price in here would get stored as position.entryPrice and the
+    // monitor's return calculation would be nonsense (comparing a live NO
+    // price against a historical YES price).
+    expect(opps[0]!.currentPmPrice).toBeCloseTo(1 - 0.45, 5); // 0.55
+    // fairValuePrice stays as P(YES) — the monitor reads this as
+    // `consensusProbability` and treats it as P(YES) regardless of side.
+    expect(opps[0]!.fairValuePrice).toBeCloseTo(0.3, 5);
+  });
+
+  it('stores YES-token price for YES direction', async () => {
+    const { scanCryptoArb } = await import('../cryptoArbScanner.js');
+
+    mockFindCorrelatedMarkets.mockResolvedValue([makeMarket({ currentYesPrice: 0.60 })]);
+    mockEstimateFastConsensus.mockResolvedValue({
+      probability: 0.75,
+      reasoning: 'formula',
+      method: 'formula',
+      stddev: 0,
+    });
+
+    const opps = await scanCryptoArb(makeMove(), mockRedis as never);
+
+    expect(opps).toHaveLength(1);
+    expect(opps[0]!.direction).toBe('YES');
+    // For YES trades currentPmPrice stays equal to marketPYes.
+    expect(opps[0]!.currentPmPrice).toBeCloseTo(0.60, 5);
+    expect(opps[0]!.fairValuePrice).toBeCloseTo(0.75, 5);
   });
 
   it('returns empty when edge below threshold', async () => {
