@@ -29,7 +29,9 @@ W4="docker compose logs -f --tail 100 pga-telegram  | sed 's/\(\[[^]]*\]\)/\x1b[
 
 # CRON LOGS (6-8 From /tmp)
 W5="touch ~/logs/pga/trade.log && tail -f ~/logs/pga/trade.log | sed 's/\(\[[^]]*\]\)/\x1b[34m\1\x1b[0m/g'"
-W6="touch ~/logs/pga/monitor.log && tail -f ~/logs/pga/monitor.log | sed 's/\(\[[^]]*\]\)/\x1b[96m\1\x1b[0m/g'"
+# pga-monitor was cut over from cron to a persistent container in eb8b6f5 —
+# stream the container logs directly instead of tailing the now-frozen monitor.log.
+W6="docker compose logs -f --tail 100 pga-monitor   | sed 's/\(\[[^]]*\]\)/\x1b[96m\1\x1b[0m/g'"
 W7="touch ~/logs/pga/spot.log && tail -f ~/logs/pga/spot.log | sed 's/\(\[[^]]*\]\)/\x1b[95m\1\x1b[0m/g'"
 
 # POSITION DISPLAY (9)
