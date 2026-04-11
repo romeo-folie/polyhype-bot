@@ -853,6 +853,12 @@ async function triggerDeltaHedge(
 
   if (result.success) {
     logger.info('[executor] delta hedge successful', { hlSymbol, txHash: result.txHash });
+    void enqueueWrite('hedge_events', {
+      hedgeAction: 'opened',
+      hlSymbol,
+      hlSize: hedgeStakeUsd,
+      raw: { pmMarketId: pmSignal.marketId, txHash: result.txHash ?? null },
+    });
     // Link the hedge in Redis for tracking
     await redis.set(`hedge:link:${pmSignal.marketId}`, hlSymbol, 'EX', 7 * 24 * 3600);
     return true;
@@ -1369,6 +1375,27 @@ export async function executeSignal(
         });
       });
 
+      void enqueueWrite('maker_telemetry', {
+        attemptId,
+        executionId,
+        marketId: signal.marketId,
+        direction: signal.direction,
+        side: 'entry',
+        makerAttempted: true,
+        makerOrderId: makerTelemetry.makerOrderId ?? null,
+        makerPostedPrice: makerTelemetry.makerPostedPrice ?? null,
+        makerPostedSize: makerTelemetry.makerPostedSize ?? null,
+        makerWaitMs: makerTelemetry.makerWaitMs,
+        makerFillStatus: makerTelemetry.makerFillStatus,
+        makerCancelConfirmed: makerTelemetry.makerCancelConfirmed ?? null,
+        makerPriceImprovementBps: makerTelemetry.makerPriceImprovementBps ?? null,
+        makerPriceImprovementUsd: makerTelemetry.makerPriceImprovementUsd ?? null,
+        raw: {
+          makerSharesFilled: makerTelemetry.makerSharesFilled ?? null,
+          makerFilledStakeUsd: makerTelemetry.makerFilledStakeUsd ?? null,
+        },
+      });
+
       finalizeAttempt({
         executionPath: 'maker_fill',
         finalExecutionPath:
@@ -1395,6 +1422,25 @@ export async function executeSignal(
         hedgeDispatched: true,
       };
     }
+
+    // Maker did not fill — emit telemetry for the failed attempt
+    void enqueueWrite('maker_telemetry', {
+      attemptId,
+      executionId,
+      marketId: signal.marketId,
+      direction: signal.direction,
+      side: 'entry',
+      makerAttempted: true,
+      makerOrderId: makerTelemetry.makerOrderId ?? null,
+      makerPostedPrice: makerTelemetry.makerPostedPrice ?? null,
+      makerPostedSize: makerTelemetry.makerPostedSize ?? null,
+      makerWaitMs: makerTelemetry.makerWaitMs,
+      makerFillStatus: makerTelemetry.makerFillStatus,
+      makerCancelConfirmed: makerTelemetry.makerCancelConfirmed ?? null,
+      makerPriceImprovementBps: null,
+      makerPriceImprovementUsd: null,
+      raw: { makerSharesFilled: null, makerFilledStakeUsd: null },
+    });
 
     if (makerAttempt.makerFillStatus === 'timeout') {
       safeRecordExecutionMetric('maker_timeout');
