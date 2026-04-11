@@ -3,8 +3,12 @@
  *
  * Reads all `telemetry:*` Redis hashes (populated by hincrby() calls in
  * src/shared/telemetry.ts) and writes a snapshot row to telemetry_metric_snapshots
- * for each field. This closes the unbounded-growth loop on Redis telemetry keys
- * that have no TTL — Postgres becomes the long-term store, Redis stays hot cache.
+ * for each field. Postgres becomes the long-term reporting store so dashboards
+ * don't have to query live Redis hashes.
+ *
+ * This job is snapshot-only: it does NOT prune or expire the source Redis keys.
+ * Bounding Redis memory for `telemetry:*` is a separate concern (handled by
+ * TTL or maxmemory policy at the Redis level).
  *
  * Schedule: nightly (see docker-compose.yml pga-cron service, INTERVAL 24h).
  *

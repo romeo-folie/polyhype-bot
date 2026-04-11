@@ -136,40 +136,41 @@ async function main(): Promise<void> {
       const reasoningText = texts[j]!;
       const embStr = `[${embedding.join(',')}]`;
 
-      await sql`
-        INSERT INTO trade_memory_cases (
-          outcome_id, decision_id, market_id, condition_id, question, category,
-          direction, price_zone, case_type, result, return_pct, holding_hours,
-          consensus_probability, reasoning_text, embedding, model_version, is_reconciled
-        ) VALUES (
-          ${row.outcome_id}::uuid,
-          ${row.decision_id ?? null}::uuid,
-          ${row.market_id},
-          ${row.condition_id ?? null},
-          ${row.question},
-          ${row.category},
-          ${row.direction}::direction_t,
-          ${row.price_zone ?? null},
-          ${caseType}::memory_case_type_t,
-          ${row.result}::outcome_result_t,
-          ${row.return_pct},
-          ${row.holding_hours},
-          ${row.consensus_probability},
-          ${reasoningText},
-          ${embStr}::vector,
-          ${EMBED_MODEL},
-          false
-        )
-        ON CONFLICT DO NOTHING
-      `.catch((err: unknown) => {
+      try {
+        await sql`
+          INSERT INTO trade_memory_cases (
+            outcome_id, decision_id, market_id, condition_id, question, category,
+            direction, price_zone, case_type, result, return_pct, holding_hours,
+            consensus_probability, reasoning_text, embedding, model_version, is_reconciled
+          ) VALUES (
+            ${row.outcome_id}::uuid,
+            ${row.decision_id ?? null}::uuid,
+            ${row.market_id},
+            ${row.condition_id ?? null},
+            ${row.question},
+            ${row.category},
+            ${row.direction}::direction_t,
+            ${row.price_zone ?? null},
+            ${caseType}::memory_case_type_t,
+            ${row.result}::outcome_result_t,
+            ${row.return_pct},
+            ${row.holding_hours},
+            ${row.consensus_probability},
+            ${reasoningText},
+            ${embStr}::vector,
+            ${EMBED_MODEL},
+            false
+          )
+          ON CONFLICT DO NOTHING
+        `;
+        embedded++;
+      } catch (err) {
         logger.warn('[embed-cron] insert failed', {
           error: err instanceof Error ? err.message : String(err),
           outcomeId: row.outcome_id,
         });
         failed++;
-      });
-
-      embedded++;
+      }
     }
 
     logger.debug('[embed-cron] batch done', {

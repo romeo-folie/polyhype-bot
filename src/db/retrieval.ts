@@ -139,14 +139,14 @@ export function formatMemoryContext(cases: SimilarCase[]): string {
         ? `${c.returnPct >= 0 ? '+' : ''}${c.returnPct.toFixed(1)}%`
         : 'N/A';
     const holdStr = c.holdingHours != null ? `${c.holdingHours.toFixed(1)}h` : 'N/A';
-    const probStr =
+    const probSegment =
       c.consensusProbability != null
-        ? `${(c.consensusProbability * 100).toFixed(0)}% conf`
+        ? ` [${(c.consensusProbability * 100).toFixed(0)}% conf]`
         : '';
     const tag = c.caseType === 'success' ? '✓' : c.caseType === 'cautionary_traded' ? '✗' : '⊘';
     return (
-      `${tag} ${c.direction} on "${c.question.slice(0, 100)}" ` +
-      `[${probStr}] → ${c.result?.toUpperCase() ?? 'SKIP'} | ${returnStr} in ${holdStr}`
+      `${tag} ${c.direction} on "${c.question.slice(0, 100)}"` +
+      `${probSegment} → ${c.result?.toUpperCase() ?? 'SKIP'} | ${returnStr} in ${holdStr}`
     );
   });
 
