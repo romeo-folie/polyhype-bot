@@ -5,9 +5,12 @@ import {
   recordUpDownTrade,
   recordUpDownOutcome,
   evaluateUpDownPnlGate,
+  isUpDownMarketLocked,
+  lockUpDownMarket,
   UPDOWN_TRADES_KEY,
   UPDOWN_OUTCOMES_KEY,
   UPDOWN_PNL_COOLDOWN_KEY,
+  UPDOWN_MARKET_LOCK_PREFIX,
 } from '../updownThrottle.js';
 
 function makeRedis() {
@@ -61,6 +64,51 @@ describe('recordUpDownOutcome', () => {
     expect(redis.lpush).toHaveBeenCalledWith(UPDOWN_OUTCOMES_KEY, 'W');
     expect(redis.ltrim).toHaveBeenCalledWith(UPDOWN_OUTCOMES_KEY, 0, 4);
     expect(redis.expire).toHaveBeenCalledWith(UPDOWN_OUTCOMES_KEY, 7 * 24 * 3600);
+  });
+});
+
+describe('isUpDownMarketLocked / lockUpDownMarket', () => {
+  it('returns false when the lock key is missing', async () => {
+    const redis = makeRedis();
+    const locked = await isUpDownMarketLocked(redis, 'mkt-42');
+    expect(locked).toBe(false);
+    expect(redis.get).toHaveBeenCalledWith(`${UPDOWN_MARKET_LOCK_PREFIX}mkt-42`);
+  });
+
+  it('returns true when a lock exists', async () => {
+    const redis = makeRedis();
+    (redis.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce('1');
+    const locked = await isUpDownMarketLocked(redis, 'mkt-42');
+    expect(locked).toBe(true);
+  });
+
+  it('locks with endDate-derived TTL when endDate is provided', async () => {
+    const redis = makeRedis();
+    const endDate = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 min out
+    await lockUpDownMarket(redis, 'mkt-42', endDate);
+    const call = (redis.set as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(call[0]).toBe(`${UPDOWN_MARKET_LOCK_PREFIX}mkt-42`);
+    expect(call[1]).toBe('1');
+    expect(call[2]).toBe('EX');
+    // ~10min + 60s pad = ~660s, allow small drift from Date.now()
+    const ttl = call[3] as number;
+    expect(ttl).toBeGreaterThan(600);
+    expect(ttl).toBeLessThan(700);
+  });
+
+  it('falls back to 1h TTL when endDate is null', async () => {
+    const redis = makeRedis();
+    await lockUpDownMarket(redis, 'mkt-42', null);
+    const call = (redis.set as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(call[3]).toBe(3600);
+  });
+
+  it('clamps to 60s minimum when endDate is already in the past', async () => {
+    const redis = makeRedis();
+    const endDate = new Date(Date.now() - 60_000).toISOString();
+    await lockUpDownMarket(redis, 'mkt-42', endDate);
+    const call = (redis.set as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(call[3]).toBe(60);
   });
 });
 

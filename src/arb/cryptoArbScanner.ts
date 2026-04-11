@@ -16,7 +16,11 @@ import { recordCryptoArbGate } from '../shared/telemetry.js';
 import { scoreConfluence } from './confluenceScorer.js';
 import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import { listRecentCryptoEvents, parseClobTokenIds, parseOutcomePrices, parseOutcomes } from '../mapping/gamma.js';
-import { countRecentUpDownTrades, evaluateUpDownPnlGate } from '../shared/updownThrottle.js';
+import {
+  countRecentUpDownTrades,
+  evaluateUpDownPnlGate,
+  isUpDownMarketLocked,
+} from '../shared/updownThrottle.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { Redis } from 'ioredis';
 
@@ -603,6 +607,15 @@ export async function scanUpDownArb(
       // instantly via divergence_closed because the monitor reads 0.65 as
       // "P(YES)=65%" and the current YES price already sits below that.
       const fairPYes = direction === 'UP' ? fairValueOurSide : 1 - fairValueOurSide;
+
+      // Per-market lockout — blocks any second entry on a marketId within its
+      // lifetime regardless of direction. Prevents whipsaw where confluence
+      // flips UP→DOWN within a 5-min market's life and we end up holding both
+      // sides of the same binary.
+      if (await isUpDownMarketLocked(redis, market.marketId)) {
+        void recordCryptoArbGate(redis, 'updown_market_locked').catch(() => {});
+        continue;
+      }
 
       // Dedup
       const dedupKey = `${UPDOWN_DEDUP_PREFIX}${market.marketId}:${direction}`;

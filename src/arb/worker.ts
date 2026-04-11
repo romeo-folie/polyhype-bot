@@ -10,7 +10,12 @@ import { priceZoneOf } from '../shared/zones.js';
 import { deductStake } from '../shared/bankroll.js';
 import { setAgentAutoRedeem } from '../shared/simmer.js';
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
-import { countRecentUpDownTrades, recordUpDownTrade } from '../shared/updownThrottle.js';
+import {
+  countRecentUpDownTrades,
+  isUpDownMarketLocked,
+  lockUpDownMarket,
+  recordUpDownTrade,
+} from '../shared/updownThrottle.js';
 import {
   recordCryptoArbGate,
   recordCryptoArbEvent,
@@ -345,6 +350,18 @@ export class ArbitrageWorker {
             void recordCryptoArbGate(redis, 'updown_rate_cap').catch(() => {});
             continue;
           }
+          // Per-market lockout re-check — the scanner already filters, but a
+          // single scan can return multiple opps on the same market and the
+          // lock from the first one only lands after successful execution.
+          // We pessimistically lock locally so the second opp in the same
+          // scan short-circuits.
+          if (await isUpDownMarketLocked(redis, opp.marketId)) {
+            logger.debug('[crypto-arb] updown market locked (pre-exec)', {
+              marketId: opp.marketId,
+            });
+            void recordCryptoArbGate(redis, 'updown_market_locked').catch(() => {});
+            continue;
+          }
         }
 
         try {
@@ -413,6 +430,7 @@ export class ArbitrageWorker {
                 opp.marketId,
                 opp.direction as 'UP' | 'DOWN',
               );
+              await lockUpDownMarket(redis, opp.marketId, opp.endDate ?? null);
             }
           } else if (result.skipped) {
             logger.debug('[crypto-arb] signal skipped', {

@@ -41,7 +41,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
     UPDOWN_ENABLED: true,
     UPDOWN_MIN_EDGE: 0.08,
-    UPDOWN_MAX_TRADES_PER_HOUR: 3,
+    UPDOWN_MAX_TRADES_PER_HOUR: 2,
     UPDOWN_PNL_GATE_ENABLED: true,
     UPDOWN_PNL_WINDOW_SIZE: 5,
     UPDOWN_PNL_MIN_WIN_RATE: 0.4,
@@ -266,12 +266,31 @@ describe('scanUpDownArb', () => {
       signals: { rsi: 'oversold', macd: 'bullish_cross', stochastic: 'oversold_cross' },
     });
     (listRecentCryptoEvents as any).mockResolvedValue([mockUpDownEvent]);
-    // Simulate 3 trades in the last hour (cap = 3)
-    mockRedis.zcard.mockResolvedValueOnce(3);
+    // Simulate 2 trades in the last hour (cap = 2)
+    mockRedis.zcard.mockResolvedValueOnce(2);
 
     const opps = await scanUpDownArb(baseMove, mockRedis as any);
     expect(opps.length).toBe(0);
     expect(listRecentCryptoEvents).not.toHaveBeenCalled();
+  });
+
+  it('skips market when per-market lockout key is present', async () => {
+    (scoreConfluence as any).mockResolvedValue({
+      direction: 'UP',
+      score: 3,
+      signals: { rsi: 'oversold', macd: 'bullish_cross', stochastic: 'oversold_cross' },
+    });
+    (listRecentCryptoEvents as any).mockResolvedValue([mockUpDownEvent]);
+    mockRedis.zcard.mockResolvedValueOnce(0);
+    // Scanner iterates markets and checks updown:market_locked:{marketId}
+    // before dedup. The mocked market has id 'm1'.
+    mockRedis.get.mockImplementation((key: string) => {
+      if (key === 'updown:market_locked:m1') return Promise.resolve('1');
+      return Promise.resolve(null);
+    });
+
+    const opps = await scanUpDownArb(baseMove, mockRedis as any);
+    expect(opps.length).toBe(0);
   });
 
   it('blocks scan when pnl cooldown key is active', async () => {
