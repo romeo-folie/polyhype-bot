@@ -70,7 +70,7 @@ export async function runMonitor(): Promise<void> {
   }
 }
 
-async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void> {
+export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void> {
   const cfg = loadConfig();
   
   // 0. Determine cycle type (Heavy vs Light)

@@ -61,6 +61,24 @@ services:
         condition: service_completed_successfully
     command: npx tsx src/copytrade/worker.ts
 
+  # Position Monitor — persistent worker (replaces the 1-min cron entrypoint).
+  # Shares the `monitor:lock` Redis key with the cron, so during cutover the
+  # cron will simply skip. Wraps runMonitorInner in a tight loop and keeps the
+  # ClobPriceFeed WS cache warm between cycles.
+  pga-monitor:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      pga-bootstrap:
+        condition: service_completed_successfully
+    command: npx tsx src/monitor/worker.ts
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
   # Futures Monitoring Strategy
   pga-futures:
     build: .

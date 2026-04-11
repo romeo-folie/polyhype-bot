@@ -339,6 +339,10 @@ const envSchema = z.object({
   COPYTRADE_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.40),
   COPYTRADE_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.50),
   MONITOR_HEAVY_INTERVAL_MIN: z.coerce.number().int().min(1).optional().default(5),
+  // Persistent monitor worker sleep between cycles (ms). Only consumed by
+  // `src/monitor/worker.ts` — the cron entrypoint still runs on its own schedule.
+  // Default 5s gives ~12×/min position checks with ample Gamma rate-limit headroom.
+  MONITOR_LOOP_INTERVAL_MS: z.coerce.number().int().min(1000).optional().default(5000),
   // Zone-aware stop-loss floor. For positions entered in the price tails
   // (entryPrice ≤ EXTREME_LOW or ≥ EXTREME_HIGH), a flat % stop is dominated
   // by spread noise (e.g. -15% on a 3¢ outcome = 0.45¢ = one tick). Require
