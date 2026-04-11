@@ -27,6 +27,17 @@ export async function enqueueWrite(
   try {
     const cfg = loadConfig();
     const redis = getRedis();
+    // Stamp createdAt at enqueue time so retries (writer crash-replay from
+    // the stream PEL) are deterministic. Without a stable createdAt, hypertable
+    // tables partitioned by created_at (signal_decisions, execution_events)
+    // can't be deduped by ON CONFLICT — the handler fallback `?? new Date()`
+    // would mint a fresh timestamp on every replay, bypassing the composite
+    // PK dedup that Phase 4 Timescale conversion relies on. Handlers for tables
+    // that don't use createdAt strip the extra key via Zod's default .strip().
+    const stampedPayload: Record<string, unknown> =
+      'createdAt' in payload
+        ? payload
+        : { ...payload, createdAt: new Date().toISOString() };
     await redis.xadd(
       cfg.DB_STREAM_KEY,
       'MAXLEN',
@@ -36,7 +47,7 @@ export async function enqueueWrite(
       'table',
       table,
       'payload',
-      JSON.stringify(payload),
+      JSON.stringify(stampedPayload),
       'enqueuedAt',
       new Date().toISOString(),
     );
