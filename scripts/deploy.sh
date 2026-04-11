@@ -12,8 +12,12 @@ git pull origin main
 # Docker Compose will only restart services whose code has changed.
 docker compose up -d --build
 
-# 3. Cleanup old images to prevent SD card bloat
+# 3. Cleanup old images and stale build cache to prevent disk bloat.
+# Build cache from `docker compose up --build` accumulates faster than dangling
+# images and was the dominant disk eater (~6 GB after a few days). The 24h
+# filter keeps recent incremental cache for fast rebuilds while bounding growth.
 docker image prune -f
+docker builder prune -f --filter "until=24h"
 
 echo ""
 echo "✅ Deployment Complete! Your agent workers are running in the background."
