@@ -215,10 +215,13 @@ export class ChainlinkFeed {
     ws.on('message', (data: RawData) => {
       const tick = parseChainlinkMessage(data as Buffer | string);
       if (!tick) {
-        // Could be a control frame (ack, heartbeat, or sibling topic) — only
-        // log when JSON parsing itself failed. parseChainlinkMessage returns
-        // null for both "not mine" and "malformed", but a cheap string check
-        // keeps parse_error noise down.
+        // parseChainlinkMessage filters on topic/type, so control frames,
+        // heartbeats, and sibling `crypto_prices` (Binance) topic messages
+        // all return null here — same as genuine JSON parse failures. We
+        // silently drop both: an attempt to distinguish them turned into
+        // noise on control frames vs near-zero real parse errors, so the
+        // log marker was dropped. `chainlink_feed_error` + reconnect covers
+        // the failure modes we actually care about.
         return;
       }
       if (!this.symbols.includes(tick.symbol)) return;
@@ -247,10 +250,12 @@ export class ChainlinkFeed {
   private scheduleReconnect(): void {
     if (this.stopped) return;
     if (this.reconnectTimer) return;
-    if (this.reconnectCount >= this.MAX_RECONNECTS) {
-      // Keep retrying indefinitely at the cap — the worker supervises the
-      // process, we just stop incrementing past the ceiling. Per the spec,
-      // we log `chainlink_feed_fatal` once at the ceiling and keep going.
+    // Cap reconnectCount at MAX_RECONNECTS so backoff/log attempt stop
+    // growing once we reach the ceiling. The worker supervises the process,
+    // so we keep retrying indefinitely at the cap — we just log
+    // `chainlink_feed_fatal` once on the transition to the ceiling.
+    if (this.reconnectCount < this.MAX_RECONNECTS) {
+      this.reconnectCount++;
       if (this.reconnectCount === this.MAX_RECONNECTS) {
         logger.error('chainlink_feed_fatal', {
           attempts: this.reconnectCount,
@@ -258,7 +263,6 @@ export class ChainlinkFeed {
         });
       }
     }
-    this.reconnectCount++;
     const expBackoff =
       this.MIN_BACKOFF_MS * Math.pow(2, Math.min(this.reconnectCount - 1, 10));
     const delay = Math.min(expBackoff, this.MAX_BACKOFF_MS);
