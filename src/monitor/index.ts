@@ -205,6 +205,36 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
       },
     );
 
+    // Trailing-stop suppression: when enabled, a fixed-TP exit is SUPPRESSED
+    // so the trailing block below can take over. SL and divergence_closed still fire.
+    //
+    // Dead-zone guard: only suppress when the peak has ratcheted far enough above
+    // activation for trailing's floor to sit *above* the fixed-TP line. Inside the
+    // dead zone `[activation, activation + giveback]` the trailing floor clamps to
+    // activation, so suppressing fixed-TP there is a strict regression — on a gap
+    // move the next tick can jump past activation without trailing ever firing.
+    // Burned once on 1877577:YES 2026-04-11 (peak +12.42% held 5 ticks then gapped
+    // to -41% in one monitor cycle).
+    const isFuturesPosTop =
+      position.isFutures === true || position.executionVenue === 'hyperliquid';
+    const trailingActive = cfg.TRAILING_STOP_ENABLED && !isFuturesPosTop;
+
+    const priorHwmPct = position.highWaterMarkPct;
+    const effectiveHwmPct = Math.max(
+      typeof priorHwmPct === 'number' && Number.isFinite(priorHwmPct)
+        ? priorHwmPct
+        : decision.returnPct,
+      decision.returnPct,
+    );
+    const trailingHasRealFloor =
+      effectiveHwmPct >= tpThreshold * 100 + cfg.TRAILING_GIVEBACK_PCT;
+
+    const suppressTpExit =
+      trailingActive &&
+      decision.shouldExit &&
+      decision.reason === 'take_profit_threshold' &&
+      trailingHasRealFloor;
+
     logger.info('[monitor] position evaluated', {
       marketId: position.marketId,
       direction: position.direction,
@@ -213,18 +243,8 @@ async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promise<void
       returnPct: decision.returnPct.toFixed(2),
       shouldExit: decision.shouldExit,
       reason: decision.reason,
+      ...(suppressTpExit ? { suppressedByTrailing: true } : {}),
     });
-
-    // Trailing-stop suppression: when enabled, a fixed-TP exit is SUPPRESSED
-    // so the trailing block below can take over. SL and divergence_closed still fire.
-    const isFuturesPosTop =
-      position.isFutures === true || position.executionVenue === 'hyperliquid';
-    const trailingActive = cfg.TRAILING_STOP_ENABLED && !isFuturesPosTop;
-
-    const suppressTpExit =
-      trailingActive &&
-      decision.shouldExit &&
-      decision.reason === 'take_profit_threshold';
 
     if (decision.shouldExit && decision.reason && !suppressTpExit) {
       const result = await executeTakeProfit({
