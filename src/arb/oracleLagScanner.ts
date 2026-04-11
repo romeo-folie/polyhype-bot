@@ -324,6 +324,11 @@ export class OracleLagScanner {
         // Discovery cap — we filter below against the per-entry floor
         // (`ORACLE_LAG_MIN_TIME_LEFT_MIN`) so this is just an outer bound.
         maxTimeToResolutionMin: Math.max(cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN, 15),
+        // Gamma orders `/events?tag=crypto` by startDate DESC. 5m markets roll
+        // every 5min and crowd out 15m at the default limit=50 — BTC 15m falls
+        // outside the top 50 entirely. Raise the window to 200 so 15m markets
+        // reliably appear in the response.
+        limit: 200,
       });
       this.cachedMarkets = markets;
       logger.debug('[oracle-lag] market refresh', { count: markets.length });
