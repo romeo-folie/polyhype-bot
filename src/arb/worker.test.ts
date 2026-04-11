@@ -107,6 +107,26 @@ vi.mock('../shared/redis.js', () => ({
   releaseLock: vi.fn(),
 }));
 
+// Mock Chainlink feed + oracle-lag scanner — worker.start() constructs both
+// unconditionally. Without these mocks, the feed would try to open a real
+// WebSocket to wss://ws-live-data.polymarket.com and the scanner would hit
+// Gamma, making the tests flaky/network-bound.
+vi.mock('../spot/feeds/chainlinkFeed.js', () => ({
+  ChainlinkFeed: vi.fn().mockImplementation(() => ({
+    start: vi.fn(),
+    stop: vi.fn(),
+    getLatest: vi.fn().mockReturnValue(null),
+    getMoveSince: vi.fn().mockReturnValue(null),
+  })),
+}));
+
+vi.mock('./oracleLagScanner.js', () => ({
+  OracleLagScanner: vi.fn().mockImplementation(() => ({
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
+
 describe('ArbitrageWorker', () => {
   beforeEach(() => {
     vi.clearAllMocks();
