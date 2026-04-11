@@ -23,6 +23,7 @@ import { handleTelemetryMetricSnapshots } from './telemetry_metric_snapshots.js'
 import { handleMakerTelemetry } from './maker_telemetry.js';
 import { handleArbLatencySamples } from './arb_latency_samples.js';
 import { handleMarketCatalog } from './market_catalog.js';
+import { handleTradeMemory } from './trade_memory.js';
 
 export type WriterHandler = (sql: Sql, payloads: unknown[]) => Promise<void>;
 
@@ -39,4 +40,5 @@ export const handlers: Record<string, WriterHandler> = {
   maker_telemetry:             handleMakerTelemetry,
   arb_latency_samples:         handleArbLatencySamples,
   market_catalog:              handleMarketCatalog,
+  trade_memory:                handleTradeMemory,
 };

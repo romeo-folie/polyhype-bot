@@ -14,6 +14,7 @@ import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
 import { getRecentOutcomes, inferCategory } from '../shared/outcomeRecorder.js';
+import { findSimilarCases, formatMemoryContext } from '../db/retrieval.js';
 import type { Redis } from 'ioredis';
 
 const TIMEOUT_MS = 25_000;
@@ -364,6 +365,24 @@ export async function estimateConsensusProbability(opts: {
       }
     } catch (err) {
       logger.warn('[consensus-calc] context injection failed (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Phase 5: Memory retrieval — prepend similar past trade cases to the LLM prompt.
+  // Requires MEMORY_RETRIEVAL_ENABLED=true, PG_URL, and OPENAI_API_KEY.
+  // Runs after Phase 8a context injection so outcome history + memory both appear.
+  if (cfg.MEMORY_RETRIEVAL_ENABLED && !opts.skipContextInjection) {
+    try {
+      const category = inferCategory(opts.question);
+      const cases = await findSimilarCases(opts.question, category, cfg.MEMORY_RETRIEVAL_LIMIT);
+      const memBlock = formatMemoryContext(cases);
+      if (memBlock) {
+        enrichedHeadline = memBlock + enrichedHeadline;
+      }
+    } catch (err) {
+      logger.warn('[consensus-calc] memory retrieval failed (non-fatal)', {
         error: err instanceof Error ? err.message : String(err),
       });
     }
