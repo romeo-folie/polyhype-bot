@@ -16,6 +16,7 @@ import { recordCryptoArbGate } from '../shared/telemetry.js';
 import { scoreConfluence } from './confluenceScorer.js';
 import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import { listRecentCryptoEvents, parseClobTokenIds, parseOutcomePrices, parseOutcomes } from '../mapping/gamma.js';
+import { countRecentUpDownTrades, evaluateUpDownPnlGate } from '../shared/updownThrottle.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { Redis } from 'ioredis';
 
@@ -457,6 +458,41 @@ export async function scanUpDownArb(
       direction: confluence.direction,
     });
     return [];
+  }
+
+  // 1a. Hourly rate cap — hard ceiling on Up/Down entries per rolling hour.
+  // Independent of the crypto-arb governor (which is too loose for this path).
+  const recentCount = await countRecentUpDownTrades(redis);
+  if (recentCount >= cfg.UPDOWN_MAX_TRADES_PER_HOUR) {
+    logger.debug('[updown-arb] hourly rate cap reached', {
+      recentCount,
+      cap: cfg.UPDOWN_MAX_TRADES_PER_HOUR,
+    });
+    void recordCryptoArbGate(redis, 'updown_rate_cap').catch(() => {});
+    return [];
+  }
+
+  // 1b. PnL-gated cooldown — pause entries if recent win rate tanks.
+  if (cfg.UPDOWN_PNL_GATE_ENABLED) {
+    const gate = await evaluateUpDownPnlGate(redis, {
+      windowSize: cfg.UPDOWN_PNL_WINDOW_SIZE,
+      minWinRate: cfg.UPDOWN_PNL_MIN_WIN_RATE,
+      minSamples: cfg.UPDOWN_PNL_MIN_SAMPLES,
+      cooldownMin: cfg.UPDOWN_PNL_COOLDOWN_MIN,
+    });
+    if (gate.blocked) {
+      if (gate.reason === 'cooldown_triggered') {
+        logger.warn('[updown-arb] pnl cooldown triggered', {
+          winRate: gate.winRate?.toFixed(2),
+          samples: gate.samples,
+          cooldownMin: cfg.UPDOWN_PNL_COOLDOWN_MIN,
+        });
+      } else {
+        logger.debug('[updown-arb] pnl cooldown active');
+      }
+      void recordCryptoArbGate(redis, `updown_pnl_${gate.reason}`).catch(() => {});
+      return [];
+    }
   }
 
   // 2. Discover Up/Down markets (cached, short TTL for ephemeral markets)

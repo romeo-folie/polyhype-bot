@@ -43,6 +43,13 @@ const mockRedis = {
   set: vi.fn().mockResolvedValue('OK'),
   hincrby: vi.fn().mockResolvedValue(1),
   zrange: vi.fn().mockResolvedValue([]),
+  zremrangebyscore: vi.fn().mockResolvedValue(0),
+  zcard: vi.fn().mockResolvedValue(0),
+  zadd: vi.fn().mockResolvedValue(1),
+  expire: vi.fn().mockResolvedValue(1),
+  lrange: vi.fn().mockResolvedValue([]),
+  lpush: vi.fn().mockResolvedValue(1),
+  ltrim: vi.fn().mockResolvedValue('OK'),
 };
 
 function makeMove(overrides: Partial<SpotMove> = {}): SpotMove {

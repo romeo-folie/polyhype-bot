@@ -10,6 +10,7 @@ import { priceZoneOf } from '../shared/zones.js';
 import { deductStake } from '../shared/bankroll.js';
 import { setAgentAutoRedeem } from '../shared/simmer.js';
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
+import { countRecentUpDownTrades, recordUpDownTrade } from '../shared/updownThrottle.js';
 import {
   recordCryptoArbGate,
   recordCryptoArbEvent,
@@ -329,6 +330,23 @@ export class ArbitrageWorker {
           break;
         }
 
+        // Per-opp Up/Down rate-cap re-check — defends against one scan
+        // returning multiple Up/Down opps (5-min + 15-min variants) that
+        // collectively exceed the hourly cap.
+        const isUpDown = opp.direction === 'UP' || opp.direction === 'DOWN';
+        if (isUpDown) {
+          const recent = await countRecentUpDownTrades(redis);
+          if (recent >= cfg.UPDOWN_MAX_TRADES_PER_HOUR) {
+            logger.debug('[crypto-arb] updown rate cap reached (pre-exec)', {
+              marketId: opp.marketId,
+              recent,
+              cap: cfg.UPDOWN_MAX_TRADES_PER_HOUR,
+            });
+            void recordCryptoArbGate(redis, 'updown_rate_cap').catch(() => {});
+            continue;
+          }
+        }
+
         try {
           const signal: TradeSignal = {
             marketId: opp.marketId,
@@ -388,6 +406,14 @@ export class ArbitrageWorker {
 
             const dedupKey = `arb:crypto:${opp.marketId}:${opp.direction}`;
             await redis.set(dedupKey, '1', 'EX', cfg.CRYPTO_ARB_DEDUP_TTL_S);
+
+            if (isUpDown) {
+              await recordUpDownTrade(
+                redis,
+                opp.marketId,
+                opp.direction as 'UP' | 'DOWN',
+              );
+            }
           } else if (result.skipped) {
             logger.debug('[crypto-arb] signal skipped', {
               marketId: opp.marketId,

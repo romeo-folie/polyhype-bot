@@ -272,6 +272,18 @@ const envSchema = z.object({
   UPDOWN_ENABLED: boolFromEnv.optional().default(false),
   UPDOWN_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   UPDOWN_MAX_HOURS_TO_RESOLUTION: z.coerce.number().min(1).optional().default(25),
+  // Hard cap on Up/Down entries in a rolling 1h window. Independent of the
+  // global crypto-arb governor — prevents runaway entries when confluence
+  // stays directional across many 5-min market rollovers.
+  UPDOWN_MAX_TRADES_PER_HOUR: z.coerce.number().int().min(1).optional().default(3),
+  // PnL-gated cooldown: pause Up/Down entries when recent win rate drops.
+  // Self-correcting kill-switch for volatility regimes the fair-value table
+  // doesn't fit. Acts on closed-position outcomes only.
+  UPDOWN_PNL_GATE_ENABLED: boolFromEnv.optional().default(true),
+  UPDOWN_PNL_WINDOW_SIZE: z.coerce.number().int().min(1).optional().default(5),
+  UPDOWN_PNL_MIN_WIN_RATE: z.coerce.number().min(0).max(1).optional().default(0.4),
+  UPDOWN_PNL_COOLDOWN_MIN: z.coerce.number().int().min(1).optional().default(30),
+  UPDOWN_PNL_MIN_SAMPLES: z.coerce.number().int().min(1).optional().default(3),
   // Minimum edge to allow entry on fee-enabled markets (executor fee gate).
   // Defaults to 0.04 (4%) — must exceed this to justify the ~2% taker fee.
   FEE_MARKET_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.04),

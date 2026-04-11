@@ -21,6 +21,13 @@ const mockRedis = {
   get: vi.fn(),
   set: vi.fn(),
   zrange: vi.fn().mockResolvedValue([]),
+  zremrangebyscore: vi.fn().mockResolvedValue(0),
+  zcard: vi.fn().mockResolvedValue(0),
+  zadd: vi.fn().mockResolvedValue(1),
+  expire: vi.fn().mockResolvedValue(1),
+  lrange: vi.fn().mockResolvedValue([]),
+  lpush: vi.fn().mockResolvedValue(1),
+  ltrim: vi.fn().mockResolvedValue('OK'),
   del: vi.fn(),
 };
 
@@ -34,6 +41,12 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
     UPDOWN_ENABLED: true,
     UPDOWN_MIN_EDGE: 0.08,
+    UPDOWN_MAX_TRADES_PER_HOUR: 3,
+    UPDOWN_PNL_GATE_ENABLED: true,
+    UPDOWN_PNL_WINDOW_SIZE: 5,
+    UPDOWN_PNL_MIN_WIN_RATE: 0.4,
+    UPDOWN_PNL_COOLDOWN_MIN: 30,
+    UPDOWN_PNL_MIN_SAMPLES: 3,
     CRYPTO_ARB_ENABLED: true,
     CRYPTO_ARB_MIN_EDGE: 0.08,
     ARB_FEE_RATE: 0.02,
@@ -244,6 +257,96 @@ describe('scanUpDownArb', () => {
     expect(opps[0].direction).toBe('UP');
     // Should pick the UP token despite it being at index 1 in the raw data
     expect(opps[0].tokenId).toBe('token-up');
+  });
+
+  it('blocks scan when hourly rate cap reached', async () => {
+    (scoreConfluence as any).mockResolvedValue({
+      direction: 'UP',
+      score: 3,
+      signals: { rsi: 'oversold', macd: 'bullish_cross', stochastic: 'oversold_cross' },
+    });
+    (listRecentCryptoEvents as any).mockResolvedValue([mockUpDownEvent]);
+    // Simulate 3 trades in the last hour (cap = 3)
+    mockRedis.zcard.mockResolvedValueOnce(3);
+
+    const opps = await scanUpDownArb(baseMove, mockRedis as any);
+    expect(opps.length).toBe(0);
+    expect(listRecentCryptoEvents).not.toHaveBeenCalled();
+  });
+
+  it('blocks scan when pnl cooldown key is active', async () => {
+    (scoreConfluence as any).mockResolvedValue({
+      direction: 'UP',
+      score: 3,
+      signals: { rsi: 'oversold', macd: 'bullish_cross', stochastic: 'oversold_cross' },
+    });
+    (listRecentCryptoEvents as any).mockResolvedValue([mockUpDownEvent]);
+    mockRedis.zcard.mockResolvedValueOnce(0);
+    mockRedis.get.mockImplementation((key: string) => {
+      if (key === 'updown:pnl_cooldown') return Promise.resolve('1');
+      return Promise.resolve(null);
+    });
+
+    const opps = await scanUpDownArb(baseMove, mockRedis as any);
+    expect(opps.length).toBe(0);
+    expect(listRecentCryptoEvents).not.toHaveBeenCalled();
+  });
+
+  it('triggers pnl cooldown when win rate below threshold', async () => {
+    (scoreConfluence as any).mockResolvedValue({
+      direction: 'UP',
+      score: 3,
+      signals: { rsi: 'oversold', macd: 'bullish_cross', stochastic: 'oversold_cross' },
+    });
+    (listRecentCryptoEvents as any).mockResolvedValue([mockUpDownEvent]);
+    mockRedis.zcard.mockResolvedValueOnce(0);
+    // 1 win, 4 losses → 20% win rate, below 40% threshold
+    mockRedis.lrange.mockResolvedValueOnce(['L', 'L', 'L', 'W', 'L']);
+
+    const opps = await scanUpDownArb(baseMove, mockRedis as any);
+    expect(opps.length).toBe(0);
+    // Cooldown key should have been set
+    expect(mockRedis.set).toHaveBeenCalledWith(
+      'updown:pnl_cooldown',
+      '1',
+      'EX',
+      30 * 60,
+    );
+    expect(listRecentCryptoEvents).not.toHaveBeenCalled();
+  });
+
+  it('passes pnl gate when win rate meets threshold', async () => {
+    (scoreConfluence as any).mockResolvedValue({
+      direction: 'UP',
+      score: 3,
+      signals: { rsi: 'oversold', macd: 'bullish_cross', stochastic: 'oversold_cross' },
+    });
+    (listRecentCryptoEvents as any).mockResolvedValue([mockUpDownEvent]);
+    mockRedis.zcard.mockResolvedValueOnce(0);
+    // 3 wins, 2 losses → 60% win rate, above 40% threshold
+    mockRedis.lrange.mockResolvedValueOnce(['W', 'W', 'W', 'L', 'L']);
+
+    const opps = await scanUpDownArb(baseMove, mockRedis as any);
+    expect(opps.length).toBe(1);
+  });
+
+  it('no-ops pnl gate when disabled', async () => {
+    (loadConfig as any).mockReturnValue(makeConfig({ UPDOWN_PNL_GATE_ENABLED: false }));
+    (scoreConfluence as any).mockResolvedValue({
+      direction: 'UP',
+      score: 3,
+      signals: { rsi: 'oversold', macd: 'bullish_cross', stochastic: 'oversold_cross' },
+    });
+    (listRecentCryptoEvents as any).mockResolvedValue([mockUpDownEvent]);
+    mockRedis.zcard.mockResolvedValueOnce(0);
+    // Active cooldown key — ignored when gate disabled
+    mockRedis.get.mockImplementation((key: string) => {
+      if (key === 'updown:pnl_cooldown') return Promise.resolve('1');
+      return Promise.resolve(null);
+    });
+
+    const opps = await scanUpDownArb(baseMove, mockRedis as any);
+    expect(opps.length).toBe(1);
   });
 
   it('skips non-bitcoin moves', async () => {

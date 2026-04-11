@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import type { Position } from '../execution/positionLedger.js';
 import { recordOutcome, inferCategory, inferSource } from './outcomeRecorder.js';
+import { recordUpDownOutcome } from './updownThrottle.js';
+import { loadConfig } from './config.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 
 /**
@@ -59,6 +61,15 @@ export async function recordPositionOutcome(
       : 0,
     executionVenue: opts.executionVenueOverride ?? position.executionVenue ?? 'simmer',
   } as const;
+
+  if (position.direction === 'UP' || position.direction === 'DOWN') {
+    const cfg = loadConfig();
+    await recordUpDownOutcome(
+      redis,
+      opts.result === 'won' ? 'W' : 'L',
+      cfg.UPDOWN_PNL_WINDOW_SIZE,
+    );
+  }
 
   await recordOutcome(redis, {
     ...outcome,
