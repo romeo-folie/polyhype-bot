@@ -111,6 +111,18 @@ async function runSpotMonitorInner(
           continue;
         }
 
+        // Minimum move gate — z-score can fire on noise-level wiggles during quiet
+        // periods (e.g. 0.05%). A leveraged perp needs a real price move behind it.
+        const absMovePct = Math.abs(move.changePercent);
+        if (absMovePct < cfg.FUTURES_MIN_SPOT_MOVE_PCT) {
+          logger.info('[spot] futures skipped — move too small for entry', {
+            symbol: hlSymbol, moveDirection,
+            absMovePct: absMovePct.toFixed(2),
+            minRequired: cfg.FUTURES_MIN_SPOT_MOVE_PCT,
+          });
+          continue;
+        }
+
         // TA confluence gate — block if indicators disagree with the move
         if (cfg.FUTURES_CONFLUENCE_GATE_ENABLED) {
           const confluence = await scoreConfluence(hlSymbol, redis);
