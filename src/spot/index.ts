@@ -22,7 +22,7 @@ import { estimateFastConsensus } from './fastPathConsensus.js';
 import { computeDivergence } from '../mapping/divergenceCalculator.js';
 import { executeSignals } from '../execution/executor.js';
 import { recordPosition, hasOpenPosition } from '../execution/positionLedger.js';
-import { notifyTradeExecuted, notifyTradeError } from '../execution/telegram.js';
+import { notifyTradeError } from '../execution/telegram.js';
 import { getOpportunities } from '../shared/simmer.js';
 import { HL_SYMBOL_MAP } from '../shared/hyperliquid.js';
 import { priceZoneOf } from '../shared/zones.js';
@@ -517,10 +517,7 @@ async function runSpotMonitorInner(
     });
 
     await deductStake(redis, result.signal.stakeUsd);
-    await notifyTradeExecuted(result.signal, result.tradeResult.tx_hash, {
-      ...(result.executionVenue ? { venue: result.executionVenue } : {}),
-      ...(result.sharesFilled != null ? { sharesFilled: result.sharesFilled } : {}),
-    });
+    // Notification is handled by executor — no duplicate needed here.
 
     logger.info('[spot] trade executed', {
       marketId: result.signal.marketId,

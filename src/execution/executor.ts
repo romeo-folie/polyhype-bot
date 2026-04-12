@@ -741,6 +741,9 @@ async function executeHyperliquidSignal(
       };
       if (entryAtr !== undefined) result.entryAtr = entryAtr;
       if (entryAtrPct !== undefined) result.entryAtrPct = entryAtrPct;
+
+      void notifyTradeExecuted(signal, tradeResult.txHash, { venue: 'hyperliquid' }).catch(() => {});
+
       return result;
     }
 
