@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import fs from 'fs/promises';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { fetchWithTimeout } from '../mapping/gamma.js';
@@ -82,7 +83,8 @@ export function formatWallets(wallets: string[]): string {
 }
 
 export async function updateEnvWallets(wallets: string[]): Promise<void> {
-  const envPath = path.resolve(process.cwd(), '.env');
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const envPath = path.resolve(__dirname, '../../.env');
   const envDir = path.dirname(envPath);
   const tempPath = path.join(envDir, '.env.tmp');
   const content = await fs.readFile(envPath, 'utf8');
