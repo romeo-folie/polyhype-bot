@@ -117,7 +117,7 @@ async function runSpotMonitorInner(
         if (absMovePct < cfg.FUTURES_MIN_SPOT_MOVE_PCT) {
           logger.info('[spot] futures skipped — move too small for entry', {
             symbol: hlSymbol, moveDirection,
-            absMovePct: absMovePct.toFixed(2),
+            absMovePct,
             minRequired: cfg.FUTURES_MIN_SPOT_MOVE_PCT,
           });
           continue;
