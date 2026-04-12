@@ -683,7 +683,38 @@ async function redeemClobPositions(
       // Rate limit Gamma calls (200ms inter-call delay)
       await new Promise((r) => setTimeout(r, 200));
 
-      if (!resolved) continue;
+      if (!resolved) {
+        // Gamma can't find some markets (e.g. Up/Down binaries).
+        // For dust positions whose endDate has passed, close them anyway —
+        // the fill was negligible and the market is over.
+        if (isDust && pos.endDate && new Date(pos.endDate).getTime() < Date.now()) {
+          logger.info('[redeemer] closing expired dust CLOB position (Gamma unresolvable)', {
+            marketId: pos.marketId,
+            direction: pos.direction,
+            endDate: pos.endDate,
+            dustBalance: reportedBalance,
+          });
+          await closePosition(redis, pos.marketId, pos.direction);
+          await markRecentlyClosed(redis, pos.marketId);
+          const q = pos.question || pos.marketId;
+          await recordOutcome(redis, {
+            source: inferSource(pos.sourcedFrom ?? ''),
+            category: inferCategory(q),
+            question: q.slice(0, 200),
+            direction: pmDirection,
+            consensusProbability: pos.consensusProbability ?? 0.5,
+            divergence: pos.edgeMagnitude ?? 0,
+            result: 'lost',
+            returnPct: -100,
+            holdingHours: pos.openedAt
+              ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
+              : 0,
+            executionVenue: 'clob',
+          }, { sourcedFrom: pos.sourcedFrom });
+          results.push({ marketId: pos.marketId, side, success: false, error: 'expired_dust_closed' });
+        }
+        continue;
+      }
 
       const resolvedQuestion =
         pos.question && pos.question.trim().length > 0
