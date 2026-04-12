@@ -282,6 +282,17 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
     for (const pos of redeemable) {
       if (results.length > 0) await sleep(REDEEM_DELAY_MS);
       const side = pos.side;
+
+      // Fast guard: if this market was already closed (by any path), skip entirely.
+      // The recently-closed set persists 7 days and survives container restarts,
+      // unlike the condition-id dedup keys which have a shorter TTL.
+      if (await isRecentlyClosed(redis, pos.market_id)) {
+        logger.debug('[redeemer] skipping — market already in recently-closed set', {
+          marketId: pos.market_id,
+        });
+        continue;
+      }
+
       const reportedBalance = pos.value_usdc ?? pos.shares ?? null;
       const dedupeConditionId = pos.condition_id ?? pos.market_id;
       const skipReason = await shouldSkipRedeemer(
@@ -629,6 +640,14 @@ async function redeemClobPositions(
     // CLOB positions are YES/NO/UP/DOWN — LONG/SHORT are HL-only and filtered above
     if (pos.direction !== 'YES' && pos.direction !== 'NO'
         && pos.direction !== 'UP' && pos.direction !== 'DOWN') continue;
+
+    if (await isRecentlyClosed(redis, pos.marketId)) {
+      logger.debug('[redeemer] skipping CLOB position — market already in recently-closed set', {
+        marketId: pos.marketId,
+      });
+      continue;
+    }
+
     const conditionId = pos.conditionId;
     if (!conditionId) {
       logger.warn('[redeemer] CLOB position missing conditionId — skipping', {
@@ -1048,6 +1067,14 @@ async function redeemSimmerLedgerFallback(
     const conditionId = pos.conditionId;
     if (alreadyRedeemed.has(pos.marketId) || (conditionId && alreadyRedeemed.has(conditionId)))
       continue;
+
+    if (await isRecentlyClosed(redis, pos.marketId)) {
+      logger.debug('[redeemer] Simmer fallback: skipping — market already in recently-closed set', {
+        marketId: pos.marketId,
+      });
+      continue;
+    }
+
     if (!conditionId) {
       logger.debug('[redeemer] Simmer fallback: skipping position without conditionId', {
         marketId: pos.marketId,
