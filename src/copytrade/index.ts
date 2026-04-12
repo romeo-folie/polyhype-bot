@@ -627,6 +627,26 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
               continue;
             }
 
+            // Near-resolution guard: at near-ceiling prices on our side, a
+            // market sell captures less than redemption. Skip the mirror and
+            // let resolutionRedeemer handle payout.
+            const ourSidePrice =
+              pos.direction === 'YES'
+                ? currentPrice.currentOutcomePrice
+                : 1 - currentPrice.currentOutcomePrice;
+            if (ourSidePrice >= cfg.COPYTRADE_MIRROR_EXIT_MAX_PRICE) {
+              logger.info('[copytrade] mirror exit skipped — near resolution', {
+                marketId: pos.marketId,
+                direction: pos.direction,
+                ourSidePrice: ourSidePrice.toFixed(4),
+                ceiling: cfg.COPYTRADE_MIRROR_EXIT_MAX_PRICE,
+              });
+              await recordCopytradeFilter(redis, 'mirror_near_resolution').catch(() => {
+                /* ignore telemetry errors */
+              });
+              continue;
+            }
+
             const returnPct =
               pos.entryPrice > 0
                 ? ((currentPrice.currentOutcomePrice - pos.entryPrice) / pos.entryPrice) * 100

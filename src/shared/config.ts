@@ -535,6 +535,15 @@ const envSchema = z.object({
   // Default 0.01 = skip if price has moved to within 1¢ of whale's fill.
   COPYTRADE_MIN_EDGE_MAGNITUDE: z.coerce.number().min(0).optional().default(0.01),
 
+  // Mirror-exit near-resolution guard: skip whale-mirror SELLs when our side
+  // of the position is already priced above this ceiling. At near-ceiling
+  // prices, the bid book is thin or empty — a market sell eats heavy slippage
+  // or fails, while `redeemResolvedPositions()` pays out exactly $1/share with
+  // zero book interaction. Checked against `currentPrice` for YES holds and
+  // `1 - currentPrice` for NO holds, so the semantic is "our claim is ≥ N¢."
+  // Default 0.95 = skip mirror if our side is priced at ≥95¢.
+  COPYTRADE_MIRROR_EXIT_MAX_PRICE: z.coerce.number().min(0).max(1).optional().default(0.95),
+
   // Category-specialist filter: only copy a whale in categories where they perform well.
   // Stats accumulate in Redis (copytrade:cat_stats:{wallet}) as positions close.
   // Ship with ENABLED=false and let stats build for ~2 weeks before enabling.
