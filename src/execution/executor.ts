@@ -824,7 +824,11 @@ async function triggerDeltaHedge(
     return false;
   }
 
-  // 3. Execute 1:1 Delta Hedge (Short)
+  // 3. Execute 1:1 Delta Hedge — direction opposes the PM position's market exposure.
+  //    PM YES on a bullish market → hedge SHORT (protect against drop).
+  //    PM NO  on a bullish market → hedge LONG  (protect against rip).
+  const isBuyHedge = pmSignal.direction === 'NO';
+  const hedgeDirection: 'LONG' | 'SHORT' = isBuyHedge ? 'LONG' : 'SHORT';
   const hedgeStakeUsd = pmSignal.stakeUsd;
 
   // HL rejects orders below ~$10 notional with HTTP 422. Skip hedge if stake is too small
@@ -841,18 +845,18 @@ async function triggerDeltaHedge(
   logger.info('[executor] opening delta hedge on Hyperliquid', {
     pmMarketId: pmSignal.marketId,
     hlSymbol,
+    hedgeDirection,
     stakeUsd: hedgeStakeUsd,
   });
 
   const result = await hl.placeMarketOrder({
     symbol: hlSymbol,
-    isBuy: false, // SHORT to hedge a PM YES/LONG
+    isBuy: isBuyHedge,
     sizeUsd: hedgeStakeUsd,
     leverage: 1, // Hedge positions use 1x leverage to maximize safety
   });
 
   if (result.success) {
-    const hedgeDirection: 'LONG' | 'SHORT' = 'SHORT';
     logger.info('[executor] delta hedge successful', { hlSymbol, hedgeDirection, txHash: result.txHash });
     void enqueueWrite('hedge_events', {
       hedgeAction: 'opened',
