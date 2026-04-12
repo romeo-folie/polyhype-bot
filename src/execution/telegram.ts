@@ -255,6 +255,47 @@ export async function notifyUnhedgedArbPosition(opts: {
 }
 
 /**
+ * Notify when a market resolves — covers both wins and losses.
+ * For wins this supplements the existing notifyRedemptionExecuted (which fires
+ * only on successful on-chain redemptions). For losses this is the only
+ * notification the user gets.
+ */
+export async function notifyMarketResolved(opts: {
+  question: string;
+  direction: string;
+  result: 'won' | 'lost';
+  stakeUsd?: number;
+  proceedsUsdc?: number;
+  reason?: string;
+}): Promise<void> {
+  const { question, direction, result, stakeUsd, proceedsUsdc, reason } = opts;
+  const isWin = result === 'won';
+  const emoji = isWin ? '✅' : '❌';
+  const header = isWin ? 'Market Resolved — Won' : 'Market Resolved — Lost';
+
+  let stakeLine = '';
+  if (stakeUsd != null && stakeUsd > 0) {
+    if (isWin && proceedsUsdc != null && proceedsUsdc > 0) {
+      const profit = proceedsUsdc - stakeUsd;
+      stakeLine = `\n<b>Stake:</b> $${stakeUsd.toFixed(2)} → <b>$${proceedsUsdc.toFixed(2)}</b> (+$${profit.toFixed(2)})`;
+    } else {
+      stakeLine = `\n<b>Stake lost:</b> $${stakeUsd.toFixed(2)}`;
+    }
+  }
+
+  const reasonLine = reason ? `\n<b>Detail:</b> ${escapeHtml(reason)}` : '';
+
+  const text =
+    `${emoji} <b>${header}</b>\n\n` +
+    `<b>Market:</b> ${escapeHtml(question)}\n` +
+    `<b>Side:</b> ${escapeHtml(direction)}` +
+    stakeLine +
+    reasonLine;
+
+  await notify(text);
+}
+
+/**
  * Notify on a resolved position redemption.
  */
 export async function notifyRedemptionExecuted(opts: {

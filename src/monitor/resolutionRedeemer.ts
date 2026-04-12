@@ -37,7 +37,7 @@ import { markRecentlyClosed, isRecentlyClosed } from '../shared/closedGuard.js';
 
 /** @deprecated Use isRecentlyClosed from shared/closedGuard.js. Kept for external callers. */
 export const isRecentlyRedeemed = isRecentlyClosed;
-import { notifyRedemptionExecuted, notifyManualRedemptionRequired } from '../execution/telegram.js';
+import { notifyRedemptionExecuted, notifyManualRedemptionRequired, notifyMarketResolved } from '../execution/telegram.js';
 import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
 import { Wallet } from 'ethers';
 import {
@@ -399,7 +399,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
             ...(ledgerPos?.priceZone !== undefined ? { priceZone: ledgerPos.priceZone } : {}),
           }, { sourcedFrom: ledgerPos?.sourcedFrom });
 
-          // Notify (skip for mocked success — no real redemption occurred)
+          // Notify (skip detailed redemption for mocked success — but still send resolution alert)
           if (!isMockedSuccess) {
             const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
               marketId: pos.market_id,
@@ -409,6 +409,19 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
             };
             if (redeemResult.tx_hash) notifyOpts.txHash = redeemResult.tx_hash;
             await notifyRedemptionExecuted(notifyOpts);
+          } else {
+            // Simmer auto-redeemed — still notify the user the market resolved in their favor
+            const mockedStake =
+              ledgerPos?.stakeUsd ??
+              (typeof posAny.stakeUsd === 'number' ? posAny.stakeUsd : 0);
+            void notifyMarketResolved({
+              question: pos.question ?? pos.market_id,
+              direction: side.toUpperCase(),
+              result: 'won',
+              ...(mockedStake > 0 && { stakeUsd: mockedStake }),
+              ...(proceedsUsdc > 0 && { proceedsUsdc }),
+              reason: 'auto-redeemed by Simmer',
+            }).catch(() => {});
           }
 
           logger.info('[redeemer] redemption successful', {
@@ -664,6 +677,13 @@ async function redeemClobPositions(
           : 0,
         executionVenue: 'clob',
       }, { sourcedFrom: pos.sourcedFrom });
+      void notifyMarketResolved({
+        question: q,
+        direction: pos.direction,
+        result: 'lost',
+        stakeUsd: pos.stakeUsd,
+        reason: 'sibling position already resolved',
+      }).catch(() => {});
       continue;
     }
 
@@ -732,6 +752,13 @@ async function redeemClobPositions(
               : 0,
             executionVenue: 'clob',
           }, { sourcedFrom: pos.sourcedFrom });
+          void notifyMarketResolved({
+            question: q,
+            direction: pos.direction,
+            result: 'lost',
+            stakeUsd: pos.stakeUsd,
+            reason: isDust ? 'expired dust position' : 'expired (Gamma unresolvable)',
+          }).catch(() => {});
           results.push({ marketId: pos.marketId, side, success: false, error: errorCode });
         }
         continue;
@@ -779,6 +806,13 @@ async function redeemClobPositions(
             : 0,
           executionVenue: 'clob',
         }, { sourcedFrom: pos.sourcedFrom });
+        void notifyMarketResolved({
+          question: resolvedQuestion,
+          direction: pos.direction,
+          result: won ? 'won' : 'lost',
+          stakeUsd: pos.stakeUsd,
+          reason: 'dust position closed on resolution',
+        }).catch(() => {});
         results.push({ marketId: pos.marketId, side, success: false, error: 'resolved_dust_closed' });
         continue;
       }
@@ -805,6 +839,12 @@ async function redeemClobPositions(
             : 0,
           executionVenue: 'clob',
         }, { sourcedFrom: pos.sourcedFrom });
+        void notifyMarketResolved({
+          question: resolvedQuestion,
+          direction: pos.direction,
+          result: 'lost',
+          stakeUsd: pos.stakeUsd,
+        }).catch(() => {});
         results.push({ marketId: pos.marketId, side, success: false, error: 'resolved_as_loss' });
         continue;
       }
@@ -1221,6 +1261,12 @@ async function redeemSimmerLedgerFallback(
             : 0,
           executionVenue: pos.executionVenue ?? 'simmer',
         }, { sourcedFrom: pos.sourcedFrom });
+        void notifyMarketResolved({
+          question: resolvedQuestion,
+          direction: pos.direction,
+          result: 'lost',
+          stakeUsd: pos.stakeUsd,
+        }).catch(() => {});
         results.push({ marketId: pos.marketId, side, success: false, error: 'resolved_as_loss' });
         continue;
       }
@@ -1437,6 +1483,15 @@ async function redeemSimmerLedgerFallback(
           };
           if (redeemResult.tx_hash) notifyOpts.txHash = redeemResult.tx_hash;
           await notifyRedemptionExecuted(notifyOpts);
+        } else {
+          void notifyMarketResolved({
+            question: resolvedQuestion,
+            direction: pos.direction,
+            result: 'won',
+            ...(pos.stakeUsd > 0 && { stakeUsd: pos.stakeUsd }),
+            ...(proceedsUsdc > 0 && { proceedsUsdc }),
+            reason: 'auto-redeemed by Simmer',
+          }).catch(() => {});
         }
 
         logger.info('[redeemer] Simmer fallback: redemption successful', {

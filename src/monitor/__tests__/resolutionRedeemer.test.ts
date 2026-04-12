@@ -49,6 +49,8 @@ vi.mock('../../shared/bankroll.js', () => ({
 
 vi.mock('../../execution/telegram.js', () => ({
   notifyRedemptionExecuted: mockNotifyRedemptionExecuted,
+  notifyManualRedemptionRequired: vi.fn().mockResolvedValue(undefined),
+  notifyMarketResolved: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../../shared/logger.js', () => ({
