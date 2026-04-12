@@ -426,6 +426,120 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
             errLower.includes('balance is 0') ||
             errLower.includes('already redeemed')
           ) {
+            // Simmer says no balance — try CLOB on-chain redemption as fallback.
+            // The position may exist on-chain even when Simmer can't see it.
+            if (pos.condition_id) {
+              const normalizedDir = side.toUpperCase() as 'YES' | 'NO';
+              logger.info('[redeemer] Simmer balance-zero — attempting CLOB on-chain fallback', {
+                marketId: pos.market_id,
+                conditionId: pos.condition_id,
+                direction: normalizedDir,
+              });
+              try {
+                const clobResult = await redeemClobOutcome({
+                  conditionId: pos.condition_id,
+                  direction: normalizedDir,
+                });
+                if (clobResult.success) {
+                  const direction = normalizedDir;
+                  const ledgerPos = await getPosition(redis, pos.market_id, direction);
+                  await closePosition(redis, pos.market_id, direction);
+                  // Prefer ledger sharesHeld (on-chain truth) over Simmer's
+                  // value_usdc/shares which may be stale when Simmer says "balance is 0".
+                  const proceedsUsdc =
+                    (ledgerPos?.sharesHeld != null && ledgerPos.sharesHeld > 0)
+                      ? ledgerPos.sharesHeld
+                      : pos.value_usdc ?? pos.shares ?? 0;
+                  if (proceedsUsdc > 0) {
+                    await creditProceeds(redis, proceedsUsdc);
+                  }
+                  await markRedeemerSuccess(
+                    redis,
+                    dedupeConditionId,
+                    side,
+                    proceedsUsdc,
+                    reportedBalance ?? proceedsUsdc ?? 0,
+                    cfg,
+                    clobResult.tx_hash ?? undefined,
+                  );
+                  await markRecentlyClosed(redis, pos.market_id);
+                  const question = pos.question ?? pos.market_id;
+                  await recordOutcome(redis, {
+                    source: inferSource(ledgerPos?.sourcedFrom ?? ''),
+                    category: inferCategory(question),
+                    question: question.slice(0, 200),
+                    direction,
+                    consensusProbability: ledgerPos?.consensusProbability ?? 0.5,
+                    divergence: ledgerPos?.edgeMagnitude ?? 0,
+                    result: 'won',
+                    returnPct:
+                      proceedsUsdc > 0 && ledgerPos?.stakeUsd
+                        ? ((proceedsUsdc - ledgerPos.stakeUsd) / ledgerPos.stakeUsd) * 100
+                        : 0,
+                    holdingHours: ledgerPos?.openedAt
+                      ? (Date.now() - new Date(ledgerPos.openedAt).getTime()) / 3600000
+                      : 0,
+                    executionVenue: ledgerPos?.executionVenue ?? 'simmer',
+                  }, { sourcedFrom: ledgerPos?.sourcedFrom });
+                  await notifyRedemptionExecuted({
+                    marketId: pos.market_id,
+                    question: pos.question ?? pos.market_id,
+                    side,
+                    valueUsdc: proceedsUsdc,
+                    ...(clobResult.tx_hash ? { txHash: clobResult.tx_hash } : {}),
+                  });
+                  logger.info('[redeemer] CLOB on-chain fallback succeeded', {
+                    marketId: pos.market_id,
+                    conditionId: pos.condition_id,
+                    txHash: clobResult.tx_hash,
+                    valueUsdc: proceedsUsdc,
+                  });
+                  const fallbackResult: RedemptionResult = {
+                    marketId: pos.market_id,
+                    side,
+                    success: true,
+                    valueUsdc: proceedsUsdc,
+                  };
+                  if (clobResult.tx_hash) fallbackResult.txHash = clobResult.tx_hash;
+                  results.push(fallbackResult);
+                  continue;
+                }
+                // CLOB fallback also failed
+                if (clobResult.error === 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED') {
+                  logger.warn(
+                    '[redeemer] sigType=1: Simmer fallback requires manual redemption on polymarket.com',
+                    { marketId: pos.market_id, conditionId: pos.condition_id },
+                  );
+                  if (await shouldNotifyManual(redis, pos.condition_id)) {
+                    void notifyManualRedemptionRequired({
+                      conditionId: pos.condition_id,
+                      direction: normalizedDir,
+                      question: pos.question ?? pos.market_id,
+                    }).catch(() => {});
+                  }
+                  // Close ledger so we don't re-alert or stale-loop every cycle
+                  await closePosition(redis, pos.market_id, normalizedDir);
+                  results.push({
+                    marketId: pos.market_id,
+                    side,
+                    success: false,
+                    error: 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED',
+                  });
+                  continue;
+                } else {
+                  logger.warn('[redeemer] CLOB on-chain fallback also failed', {
+                    marketId: pos.market_id,
+                    clobError: clobResult.error,
+                  });
+                }
+              } catch (clobErr: unknown) {
+                logger.warn('[redeemer] CLOB on-chain fallback threw', {
+                  marketId: pos.market_id,
+                  error: clobErr instanceof Error ? clobErr.message : String(clobErr),
+                });
+              }
+            }
+            // Both Simmer and CLOB failed (or no condition_id) — mark stale
             await markFallbackStale(redis, dedupeConditionId, side, cfg);
             logRedeemerSkip('stale_no_balance', dedupeConditionId, {
               marketId: pos.market_id,
