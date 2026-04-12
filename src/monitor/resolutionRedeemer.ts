@@ -642,9 +642,28 @@ async function redeemClobPositions(
         && pos.direction !== 'UP' && pos.direction !== 'DOWN') continue;
 
     if (await isRecentlyClosed(redis, pos.marketId)) {
-      logger.debug('[redeemer] skipping CLOB position — market already in recently-closed set', {
+      // Market was already resolved/closed (e.g. another side of the same market).
+      // Close this position too instead of leaving it as a zombie.
+      logger.info('[redeemer] closing CLOB position — market already in recently-closed set', {
         marketId: pos.marketId,
+        direction: pos.direction,
       });
+      await closePosition(redis, pos.marketId, pos.direction);
+      const q = pos.question || pos.marketId;
+      await recordOutcome(redis, {
+        source: inferSource(pos.sourcedFrom ?? ''),
+        category: inferCategory(q),
+        question: q.slice(0, 200),
+        direction: pos.direction,
+        consensusProbability: pos.consensusProbability ?? 0.5,
+        divergence: pos.edgeMagnitude ?? 0,
+        result: 'lost',
+        returnPct: -100,
+        holdingHours: pos.openedAt
+          ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
+          : 0,
+        executionVenue: 'clob',
+      }, { sourcedFrom: pos.sourcedFrom });
       continue;
     }
 
@@ -685,14 +704,16 @@ async function redeemClobPositions(
 
       if (!resolved) {
         // Gamma can't find some markets (e.g. Up/Down binaries).
-        // For dust positions whose endDate has passed, close them anyway —
-        // the fill was negligible and the market is over.
-        if (isDust && pos.endDate && new Date(pos.endDate).getTime() < Date.now()) {
-          logger.info('[redeemer] closing expired dust CLOB position (Gamma unresolvable)', {
+        // For positions whose endDate has passed, close them —
+        // the market is definitively over and Gamma will never resolve it.
+        if (pos.endDate && new Date(pos.endDate).getTime() < Date.now()) {
+          const errorCode = isDust ? 'expired_dust_closed' : 'expired_unresolvable_closed';
+          logger.info('[redeemer] closing expired CLOB position (Gamma unresolvable)', {
             marketId: pos.marketId,
             direction: pos.direction,
             endDate: pos.endDate,
-            dustBalance: reportedBalance,
+            isDust,
+            reportedBalance,
           });
           await closePosition(redis, pos.marketId, pos.direction);
           await markRecentlyClosed(redis, pos.marketId);
@@ -711,7 +732,7 @@ async function redeemClobPositions(
               : 0,
             executionVenue: 'clob',
           }, { sourcedFrom: pos.sourcedFrom });
-          results.push({ marketId: pos.marketId, side, success: false, error: 'expired_dust_closed' });
+          results.push({ marketId: pos.marketId, side, success: false, error: errorCode });
         }
         continue;
       }
