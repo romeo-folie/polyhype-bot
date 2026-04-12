@@ -638,6 +638,9 @@ const envSchema = z.object({
   // TA confluence gate for futures entries — requires RSI/MACD/Stochastic agreement before opening a position.
   FUTURES_CONFLUENCE_GATE_ENABLED: boolFromEnv.optional().default(true),
   FUTURES_MIN_CONFLUENCE_SCORE: z.coerce.number().int().min(0).max(7).optional().default(2),
+  // Minimum absolute spot move (%) to open a futures position. Prevents z-score-only triggers
+  // from entering on noise-level wiggles (e.g. 0.05%) that have no directional edge.
+  FUTURES_MIN_SPOT_MOVE_PCT: z.coerce.number().min(0).optional().default(0.3),
   // Exit requires stronger reversal evidence than entry — prevents symmetric whipsaw.
   // Default 5 means 5/7 indicators must agree on the opposite direction before exiting.
   FUTURES_EXIT_CONFLUENCE_SCORE: z.coerce.number().int().min(0).max(7).optional().default(5),
