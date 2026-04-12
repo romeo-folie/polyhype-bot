@@ -665,9 +665,16 @@ async function redeemClobPositions(
     const reportedBalance =
       preBalance ?? pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : null);
     const skipReason = await shouldSkipRedeemer(redis, conditionId, side, reportedBalance, cfg);
-    if (skipReason) {
+    if (skipReason && skipReason !== 'skipped_dust') {
       logRedeemerSkip(skipReason, conditionId, { marketId: pos.marketId, reportedBalance });
       continue;
+    }
+
+    // Dust positions: skip on-chain redemption but still check resolution
+    // to close zombie ledger entries and record outcomes.
+    const isDust = skipReason === 'skipped_dust';
+    if (isDust) {
+      logRedeemerSkip(skipReason, conditionId, { marketId: pos.marketId, reportedBalance });
     }
 
     try {
@@ -693,6 +700,37 @@ async function redeemClobPositions(
       // checkMarketResolved() returns YES/NO; map UP→YES, DOWN→NO for comparison
       const normalizedDirection = isYesSide ? 'YES' : 'NO';
       const won = resolved.outcome === normalizedDirection;
+
+      // Dust positions: close the zombie ledger entry without on-chain redemption.
+      // The fill was negligible (sub-$0.25) so there's nothing to redeem.
+      if (isDust) {
+        logger.info('[redeemer] closing dust CLOB position after resolution', {
+          marketId: pos.marketId,
+          direction: pos.direction,
+          outcome: resolved.outcome,
+          won,
+          dustBalance: reportedBalance,
+        });
+        await closePosition(redis, pos.marketId, pos.direction);
+        await markRecentlyClosed(redis, pos.marketId);
+        await recordOutcome(redis, {
+          source: inferSource(pos.sourcedFrom ?? ''),
+          category: inferCategory(resolvedQuestion),
+          question: resolvedQuestion.slice(0, 200),
+          direction: pmDirection,
+          consensusProbability: pos.consensusProbability ?? 0.5,
+          divergence: pos.edgeMagnitude ?? 0,
+          result: won ? 'won' : 'lost',
+          returnPct: -100, // dust fill ≈ total loss regardless of outcome
+          holdingHours: pos.openedAt
+            ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
+            : 0,
+          executionVenue: 'clob',
+        }, { sourcedFrom: pos.sourcedFrom });
+        results.push({ marketId: pos.marketId, side, success: false, error: 'resolved_dust_closed' });
+        continue;
+      }
+
       if (!won) {
         // Market resolved against us — close ledger entry without redeeming
         logger.info('[redeemer] CLOB position resolved as loss, closing ledger', {
