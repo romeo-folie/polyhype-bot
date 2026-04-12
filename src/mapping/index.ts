@@ -28,6 +28,8 @@ import type { ScoredItem } from '../ingestion/scorer.js';
 import type { Redis } from 'ioredis';
 import type { ClobPriceFeed } from '../shared/clobWebSocket.js';
 
+const NEAR_ZERO_OSINT_KEY = 'near_zero:osint_signals';
+
 export interface TradeSignal {
   /** Gamma market ID or Hyperliquid symbol */
   marketId: string;
@@ -137,6 +139,15 @@ export async function runMapping(
       if (opts?.redis && opts.feed) {
         const wsPrice = await resolveYesPrice(candidate.marketId, opts.redis, opts.feed);
         if (wsPrice !== null) currentYesPrice = wsPrice;
+      }
+
+      // 3b. Near-zero OSINT signal: if this relevant market has a side in the
+      // near-zero range, write a signal for the near-zero scanner to pick up.
+      const noPrice = 1 - currentYesPrice;
+      if (currentYesPrice >= cfg.NEAR_ZERO_MIN_PRICE && currentYesPrice <= cfg.NEAR_ZERO_MAX_PRICE) {
+        void writeNearZeroOsintSignal(candidate.marketId, 'YES', currentYesPrice, item, cfg);
+      } else if (noPrice >= cfg.NEAR_ZERO_MIN_PRICE && noPrice <= cfg.NEAR_ZERO_MAX_PRICE) {
+        void writeNearZeroOsintSignal(candidate.marketId, 'NO', noPrice, item, cfg);
       }
 
       let consensus;
@@ -264,6 +275,38 @@ export async function runMapping(
   });
 
   return signals;
+}
+
+/**
+ * Write an OSINT signal for the near-zero scanner when a mapping candidate
+ * happens to have a side in the near-zero price range. Fire-and-forget.
+ */
+async function writeNearZeroOsintSignal(
+  marketId: string,
+  direction: 'YES' | 'NO',
+  price: number,
+  item: ScoredItem,
+  cfg: ReturnType<typeof loadConfig>,
+): Promise<void> {
+  try {
+    const redis = getRedis();
+    const member = JSON.stringify({
+      marketId,
+      direction,
+      price,
+      headline: item.title.slice(0, 300),
+      urgencyScore: item.urgencyScore,
+    });
+    const nowS = Math.floor(Date.now() / 1000);
+    await redis.zadd(NEAR_ZERO_OSINT_KEY, nowS, member);
+    // Prune entries older than TTL
+    const cutoff = nowS - cfg.NEAR_ZERO_OSINT_SIGNAL_TTL_S;
+    await redis.zremrangebyscore(NEAR_ZERO_OSINT_KEY, '-inf', cutoff);
+  } catch (err) {
+    logger.warn('[mapping] near-zero OSINT signal write failed (non-fatal)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**

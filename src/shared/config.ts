@@ -559,11 +559,13 @@ const envSchema = z.object({
   NEAR_ZERO_SCANNER_ENABLED: boolFromEnv.optional().default(false),
   NEAR_ZERO_MIN_PRICE: z.coerce.number().min(0).max(1).optional().default(0.03),
   NEAR_ZERO_MAX_PRICE: z.coerce.number().min(0).max(1).optional().default(0.10),
-  // LLM consensus threshold to enter. Requires strong conviction to overcome market price.
-  NEAR_ZERO_MIN_CONSENSUS: z.coerce.number().min(0).max(1).optional().default(0.78),
+  // LLM consensus threshold to enter. At 3-10¢ entry, even 65% true probability
+  // represents massive edge (6.5x-21x payout). Lower than normal-price threshold.
+  NEAR_ZERO_MIN_CONSENSUS: z.coerce.number().min(0).max(1).optional().default(0.65),
   // Conservative stake cap — illiquid tail markets have wide spreads on exit.
   NEAR_ZERO_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(5),
-  // Max LLM calls per run (cost control). Candidates sorted by price asc (most asymmetric first).
+  // Max LLM calls per run (cost control). OSINT-matched candidates first (by urgency desc),
+  // then remaining candidates by price desc (higher near-zero = more likely genuine mispricing).
   NEAR_ZERO_MAX_CANDIDATES_PER_RUN: z.coerce.number().int().min(1).optional().default(5),
   NEAR_ZERO_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(500),
   // Minimum hours until resolution — avoid markets resolving before position can compound.
@@ -589,6 +591,16 @@ const envSchema = z.object({
     .string()
     .optional()
     .default("championship,super bowl,world series,stanley cup,nba finals,mvp,heisman,ballon d'or"),
+  // Minimum edge (consensus - marketPrice) to trade. At near-zero prices, even 65%
+  // consensus is massive edge — but require at least 50pp gap to filter noise.
+  NEAR_ZERO_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.50),
+  // TTL for OSINT signal entries written by the mapping pipeline when a matched
+  // market happens to be in the near-zero price range.
+  NEAR_ZERO_OSINT_SIGNAL_TTL_S: z.coerce.number().int().min(0).optional().default(172800),
+  // Velocity-aware dead-horse filter: minimum peak-to-current price drop as a
+  // fraction of peak. Markets that have always been flat near zero are dead horses.
+  // A market that peaked at 20¢ and is now 5¢ has a 75% drop — good candidate.
+  NEAR_ZERO_MIN_PRICE_DROP_PCT: z.coerce.number().min(0).max(1).optional().default(0.10),
 
   // --- CRYPTO FUTURES (Phase: futures) ---
   FUTURES_ENABLED: boolFromEnv.optional().default(false),

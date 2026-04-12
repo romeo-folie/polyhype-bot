@@ -43,8 +43,25 @@ function sanitiseError(err: unknown): string {
   return String(err);
 }
 
-function buildSystemPrompt(): string {
+function buildSystemPrompt(mode?: 'near-zero', marketPrice?: number): string {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+  if (mode === 'near-zero') {
+    const pricePct = marketPrice != null ? `${(marketPrice * 100).toFixed(1)}¢` : 'very low';
+    return (
+      'You are a probabilistic analyst specialising in prediction markets. ' +
+      `Today's date is ${today}. ` +
+      'Given a prediction market question and context, estimate the true probability ' +
+      '(0.00–1.00) that this market resolves YES. ' +
+      `The market is currently priced at ${pricePct}, suggesting the market sees this as ` +
+      'very unlikely. Assess whether fundamentals support a higher probability. ' +
+      "Pay close attention to any deadlines in the market question relative to today's date. " +
+      'Focus on: deadline proximity, structural factors, known information. ' +
+      'Return ONLY a JSON object: {"probability": 0.72, "reasoning": "one sentence"} ' +
+      'No markdown, no extra keys.'
+    );
+  }
+
   return (
     'You are a probabilistic analyst specialising in prediction markets. ' +
     `Today's date is ${today}. ` +
@@ -79,6 +96,8 @@ async function callOpenAI(
   question: string,
   description: string | null,
   headline: string,
+  promptMode?: 'near-zero',
+  marketPrice?: number,
 ): Promise<ConsensusResult> {
   const { OpenAI } = await import('openai');
   const client = new OpenAI({ apiKey: loadConfig().OPENAI_API_KEY });
@@ -91,7 +110,7 @@ async function callOpenAI(
       {
         model: loadConfig().OPENAI_MODEL,
         messages: [
-          { role: 'system', content: buildSystemPrompt() },
+          { role: 'system', content: buildSystemPrompt(promptMode, marketPrice) },
           {
             role: 'user',
             content: buildUserPrompt({ question, description, headline }),
@@ -115,6 +134,8 @@ async function callAnthropic(
   question: string,
   description: string | null,
   headline: string,
+  promptMode?: 'near-zero',
+  marketPrice?: number,
 ): Promise<ConsensusResult> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({ apiKey: loadConfig().ANTHROPIC_API_KEY });
@@ -127,7 +148,7 @@ async function callAnthropic(
       {
         model: loadConfig().ANTHROPIC_MODEL,
         max_tokens: 200,
-        system: buildSystemPrompt(),
+        system: buildSystemPrompt(promptMode, marketPrice),
         messages: [
           {
             role: 'user',
@@ -150,13 +171,15 @@ async function callGemini(
   question: string,
   description: string | null,
   headline: string,
+  promptMode?: 'near-zero',
+  marketPrice?: number,
 ): Promise<ConsensusResult> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const genai = new GoogleGenerativeAI(loadConfig().GEMINI_API_KEY ?? '');
   const model = genai.getGenerativeModel({ model: loadConfig().GEMINI_MODEL });
 
   const prompt =
-    `${buildSystemPrompt()}\n\n` +
+    `${buildSystemPrompt(promptMode, marketPrice)}\n\n` +
     buildUserPrompt({ question, description, headline });
 
   const result = await Promise.race([
@@ -180,6 +203,8 @@ async function callDeepSeek(
   question: string,
   description: string | null,
   headline: string,
+  promptMode?: 'near-zero',
+  marketPrice?: number,
 ): Promise<ConsensusResult> {
   const { default: OpenAI } = await import('openai');
   const client = new OpenAI({
@@ -195,7 +220,7 @@ async function callDeepSeek(
       {
         model: loadConfig().DEEPSEEK_MODEL,
         messages: [
-          { role: 'system', content: buildSystemPrompt() },
+          { role: 'system', content: buildSystemPrompt(promptMode, marketPrice) },
           {
             role: 'user',
             content: buildUserPrompt({ question, description, headline }),
@@ -243,6 +268,8 @@ async function _estimateSingle(opts: {
   question: string;
   description: string | null;
   headline: string;
+  mode?: 'near-zero';
+  marketPrice?: number;
 }): Promise<ConsensusResult> {
   const cfg = loadConfig();
   const provider = cfg.LLM_PROVIDER;
@@ -251,7 +278,7 @@ async function _estimateSingle(opts: {
 
   if (useGemini) {
     try {
-      return await callGemini(opts.question, opts.description, opts.headline);
+      return await callGemini(opts.question, opts.description, opts.headline, opts.mode, opts.marketPrice);
     } catch (err) {
       logger.warn('[consensus-calc] Gemini failed, trying OpenAI', {
         error: err instanceof Error ? err.message : String(err),
@@ -261,7 +288,7 @@ async function _estimateSingle(opts: {
 
   if (useOpenAI) {
     try {
-      return await callOpenAI(opts.question, opts.description, opts.headline);
+      return await callOpenAI(opts.question, opts.description, opts.headline, opts.mode, opts.marketPrice);
     } catch (err) {
       logger.warn('[consensus-calc] OpenAI failed', {
         error: err instanceof Error ? err.message : String(err),
@@ -276,6 +303,8 @@ async function _estimateSingle(opts: {
         opts.question,
         opts.description,
         opts.headline,
+        opts.mode,
+        opts.marketPrice,
       );
     } catch (err) {
       logger.warn('[consensus-calc] Anthropic failed, trying DeepSeek', {
@@ -290,6 +319,8 @@ async function _estimateSingle(opts: {
         opts.question,
         opts.description,
         opts.headline,
+        opts.mode,
+        opts.marketPrice,
       );
     } catch (err) {
       logger.warn('[consensus-calc] DeepSeek failed', {
@@ -329,6 +360,8 @@ export async function estimateConsensusProbability(opts: {
   headline: string;
   redis?: Redis;
   skipContextInjection?: boolean;
+  mode?: 'near-zero';
+  marketPrice?: number;
 }): Promise<ConsensusEstimate> {
   const cfg = loadConfig();
 
@@ -393,7 +426,7 @@ export async function estimateConsensusProbability(opts: {
   const useGemini = Boolean(cfg.GEMINI_API_KEY);
   const useAnthropic = Boolean(cfg.ANTHROPIC_API_KEY);
   const useDeepSeek = Boolean(cfg.DEEPSEEK_API_KEY);
-  type ProviderFn = (q: string, d: string | null, h: string) => Promise<ConsensusResult>;
+  type ProviderFn = (q: string, d: string | null, h: string, m?: 'near-zero', p?: number) => Promise<ConsensusResult>;
   const providers: ProviderFn[] = [
     ...(useOpenAI ? [callOpenAI as ProviderFn] : []),
     ...(useGemini ? [callGemini as ProviderFn] : []),
@@ -407,7 +440,7 @@ export async function estimateConsensusProbability(opts: {
     );
   }
   const calls = providers.map((provider) =>
-    provider(opts.question, opts.description, enrichedHeadline),
+    provider(opts.question, opts.description, enrichedHeadline, opts.mode, opts.marketPrice),
   );
 
   const settled = await Promise.allSettled(calls);

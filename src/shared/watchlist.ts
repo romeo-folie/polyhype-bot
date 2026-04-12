@@ -114,6 +114,7 @@ export async function refreshDynamicWatchlist(redis: Redis): Promise<number> {
           conditionId: m.conditionId,
           clobTokenIds: m.clobTokenIds,
           outcomePrices: m.outcomePrices,
+          outcomes: m.outcomes,
           liquidity: m.liquidity,
           endDate: m.endDate,
           volume: m.volume,
@@ -262,6 +263,11 @@ export async function recordNearZeroPriceHistory(
   return tracked;
 }
 
+export interface PeakPriceResult {
+  peak: number;
+  peakMs: number;
+}
+
 /**
  * Read the peak price observed for a market+direction over the last N days.
  * Used by the near-zero scanner's dead-horse filter: markets that have always
@@ -277,16 +283,36 @@ export async function getNearZeroPeakPrice(
   lookbackDays: number,
   nowMs: number = Date.now(),
 ): Promise<number | null> {
+  const result = await getNearZeroPeakPriceDetailed(redis, marketId, direction, lookbackDays, nowMs);
+  return result ? result.peak : null;
+}
+
+/**
+ * Extended version that also returns the timestamp of the peak price.
+ * Used by the velocity-aware dead-horse filter in the near-zero scanner.
+ */
+export async function getNearZeroPeakPriceDetailed(
+  redis: Redis,
+  marketId: string,
+  direction: 'YES' | 'NO',
+  lookbackDays: number,
+  nowMs: number = Date.now(),
+): Promise<PeakPriceResult | null> {
   const key = `${PRICE_HIST_KEY_PREFIX}${marketId}:${direction}`;
   const cutoffMs = nowMs - lookbackDays * 24 * 3600 * 1000;
   const members = await redis.zrangebyscore(key, cutoffMs, '+inf');
   if (members.length === 0) return null;
   let max = 0;
+  let maxMs = 0;
   for (const m of members) {
     const colonIdx = m.indexOf(':');
     if (colonIdx === -1) continue;
+    const ts = parseFloat(m.slice(0, colonIdx));
     const p = parseFloat(m.slice(colonIdx + 1));
-    if (Number.isFinite(p) && p > max) max = p;
+    if (Number.isFinite(p) && p > max) {
+      max = p;
+      maxMs = Number.isFinite(ts) ? ts : 0;
+    }
   }
-  return max > 0 ? max : null;
+  return max > 0 ? { peak: max, peakMs: maxMs } : null;
 }
