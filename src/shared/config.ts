@@ -334,6 +334,8 @@ const envSchema = z.object({
   // Tiered Exit Logic & Monitor Frequency
   CRYPTO_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.10),
   CRYPTO_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.15),
+  CRYPTO_UPDOWN_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.10),
+  CRYPTO_UPDOWN_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.03),
   SHORT_DURATION_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.10),
   SHORT_DURATION_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.15),
   COPYTRADE_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.40),

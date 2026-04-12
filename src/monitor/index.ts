@@ -14,6 +14,7 @@ import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { isCryptoAsset } from '../shared/assets.js';
+import { inferCategory } from '../shared/outcomeRecorder.js';
 import { getOpenPositions, updateHighWaterMark } from '../execution/positionLedger.js';
 import { evaluateTrailingStop } from './trailingStopExit.js';
 import { fetchAllCurrentPrices } from './priceFetcher.js';
@@ -183,7 +184,12 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
         }
       }
 
-      if (isCrypto) {
+      const isCryptoUpdown = inferCategory(position.question) === 'crypto-updown';
+
+      if (isCryptoUpdown) {
+        tpThreshold = cfg.CRYPTO_UPDOWN_TAKE_PROFIT;
+        slThreshold = cfg.CRYPTO_UPDOWN_STOP_LOSS;
+      } else if (isCrypto) {
         tpThreshold = cfg.CRYPTO_TAKE_PROFIT;
         slThreshold = cfg.CRYPTO_STOP_LOSS;
       } else if (isShortDuration) {
