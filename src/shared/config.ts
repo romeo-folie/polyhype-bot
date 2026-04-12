@@ -564,7 +564,8 @@ const envSchema = z.object({
   NEAR_ZERO_MIN_CONSENSUS: z.coerce.number().min(0).max(1).optional().default(0.65),
   // Conservative stake cap — illiquid tail markets have wide spreads on exit.
   NEAR_ZERO_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(5),
-  // Max LLM calls per run (cost control). Candidates sorted by price asc (most asymmetric first).
+  // Max LLM calls per run (cost control). OSINT-matched candidates first (by urgency desc),
+  // then remaining candidates by price desc (higher near-zero = more likely genuine mispricing).
   NEAR_ZERO_MAX_CANDIDATES_PER_RUN: z.coerce.number().int().min(1).optional().default(5),
   NEAR_ZERO_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(500),
   // Minimum hours until resolution — avoid markets resolving before position can compound.

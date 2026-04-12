@@ -307,13 +307,17 @@ async function main() {
         continue;
       }
 
-      // Phase 3b: Minimum edge gate — require consensus - price >= NEAR_ZERO_MIN_EDGE
-      const edge = estimate.probability - candidate.price;
+      // Phase 3b: Direction-aware edge gate.
+      // estimateConsensusProbability() returns P(YES) — the consensusProbability
+      // invariant (see MEMORY.md). For NO candidates we need P(NO) = 1 - P(YES).
+      const pYes = estimate.probability;
+      const pOurSide = candidate.direction === 'YES' ? pYes : 1 - pYes;
+      const edge = pOurSide - candidate.price;
       const meetsEdge = edge >= cfg.NEAR_ZERO_MIN_EDGE;
 
       const wouldTrade =
         cfg.NEAR_ZERO_SCANNER_ENABLED &&
-        estimate.probability >= cfg.NEAR_ZERO_MIN_CONSENSUS &&
+        pOurSide >= cfg.NEAR_ZERO_MIN_CONSENSUS &&
         meetsEdge;
 
       logger.info('[near-zero] candidate evaluated', {
@@ -321,7 +325,8 @@ async function main() {
         question: candidate.market.question.slice(0, 100),
         direction: candidate.direction,
         marketPrice: candidate.price.toFixed(4),
-        consensus: estimate.probability.toFixed(3),
+        consensusPYes: pYes.toFixed(3),
+        pOurSide: pOurSide.toFixed(3),
         stddev: estimate.stddev.toFixed(3),
         edge: edge.toFixed(3),
         minEdge: cfg.NEAR_ZERO_MIN_EDGE,
@@ -345,7 +350,8 @@ async function main() {
         direction: candidate.direction,
         stakeUsd,
         edgeMagnitude: Math.abs(edge),
-        consensusProbability: estimate.probability,
+        // consensusProbability is always P(YES) per project invariant
+        consensusProbability: pYes,
         consensusStddev: estimate.stddev,
         outcomePrice: candidate.price,
         halfKellyFraction: 0,
@@ -355,7 +361,7 @@ async function main() {
           : 'near-zero-arb',
         reasoning:
           `Near-zero scanner: market=${candidate.price.toFixed(3)}, ` +
-          `consensus=${estimate.probability.toFixed(3)}, ` +
+          `P(${candidate.direction})=${pOurSide.toFixed(3)}, ` +
           `edge=${edge.toFixed(3)}, ` +
           `payout=${((1 - candidate.price) / candidate.price).toFixed(1)}x. ` +
           estimate.reasoning,
