@@ -1,12 +1,12 @@
 # Polymarket Geopolitical Trading Agent
 
-Autonomous multi-signal trading agent for Polymarket prediction markets. Combines OSINT pipelines, whale wallet mirroring, real-time spot price arbitrage, crypto latency arbitrage, Hyperliquid futures hedging, and continuous self-improvement (outcome tracking, context injection, calibration) into a single risk-managed system.
+Autonomous multi-signal trading agent for Polymarket prediction markets. Combines OSINT pipelines, whale wallet mirroring, real-time spot price arbitrage, crypto latency arbitrage, sports in-play arbitrage, Hyperliquid futures hedging, and continuous self-improvement (outcome tracking, context injection, calibration) into a single risk-managed system.
 
 ---
 
 ## Architecture Overview
 
-The system runs as **seven concurrent processes** — two persistent workers plus five periodic pipelines — each independently signalling trades through a shared execution layer, with a continuous improvement feedback loop that records outcomes, injects historical context into LLM prompts, and applies calibration corrections.
+The system runs as **13 Docker Compose services** — eight persistent workers, one bootstrap container, and four infrastructure services (Redis, Postgres/TimescaleDB, DB migrator, DB writer) — plus host-level cron jobs for periodic pipelines. All signals route through a shared execution layer with a continuous improvement feedback loop.
 
 ```mermaid
 graph TD
@@ -29,6 +29,15 @@ graph TD
         CF --> EXEC
     end
 
+    subgraph "Sports Arb Poller (Persistent)"
+        ESPN[ESPN Live Feed] --> SP_SCAN[Win-Prob Scanner]
+        SP_SCAN --> EXEC
+    end
+
+    subgraph "CLOB Flow Monitor (Persistent)"
+        CLF[Polymarket WS\nbook + trade tape] --> RC
+    end
+
     subgraph "OSINT Pipeline (5min cron)"
         RSS[RSS + GDELT\nIngestion] --> US[LLM Urgency\nScorer]
         US --> TW[Timing Window\nMultiplier]
@@ -39,7 +48,7 @@ graph TD
     end
 
     subgraph "Spot Monitor (1min cron)"
-        SP[Spot Poller\nCoinGecko/Binance] --> TD[Threshold\nDetector]
+        SPM[Spot Poller\nCoinGecko/Binance] --> TD[Threshold\nDetector]
         TD --> MC[Market\nCorrelator]
         MC --> FC[Fast Consensus\nBS formula / LLM]
         FC --> EXEC
@@ -54,16 +63,21 @@ graph TD
         CLOB --> PL
     end
 
-    subgraph "Position Monitor (5min cron)"
+    subgraph "Position Monitor (Persistent Worker)"
         PL --> PM[Monitor\nPrice resolver]
-        PM --> SL_TP[Stop-Loss /\nTake-Profit\nEvaluator]
+        PM --> SL_TP[SL / TP / Trailing\n/ Stale / Trend Exit]
         SL_TP -->|exit| EXEC
         SL_TP --> RR[Resolution\nRedeemer]
     end
 
     subgraph "Futures Monitor (Persistent, 5s loop)"
-        FM[HL Position\nPoll] --> FT[Threshold\nCheck SL/TP/TTL]
+        FM[HL Position\nPoll] --> FT[SL / TP / Trailing\n/ TA Re-eval / TTL]
         FT -->|close| HL[Hyperliquid\nPerps API]
+    end
+
+    subgraph "Durable DB Layer"
+        PL -.->|db:writeq stream| DBW[DB Writer\nXREADGROUP]
+        DBW --> PG[(Postgres\nTimescaleDB)]
     end
 
     subgraph "Bankroll"
@@ -75,19 +89,57 @@ graph TD
 
 ---
 
-## Processes
+## Deployment
 
-| Process | Script | Interval | Purpose |
-|---------|--------|----------|---------|
-| **Spot Feed Worker** | `worker:spot-feed` | Persistent | Binance WS + Helius Solana feeds → Redis hot-price cache → publish `spot:price_moved` |
-| **Arbitrage Worker** | `worker:arb` | Persistent (sub + 10s) | Two arb paths: (1) YES+NO combined < $1 sweep on 10s baseline; (2) crypto latency arb on every `spot:price_moved` event — BS fair value vs stale PM price, no LLM, sub-500ms |
-| **Copytrade Worker** | `worker:copytrade` | Persistent (2s loop) | Mirror expert whale wallets with category/liquidity/slippage guardrails |
-| **Futures Monitor** | `monitor:futures` | Persistent (5s poll) | HL perp SL/TP/max-hold enforcement for delta hedges and synthetic exits |
-| **Telegram Monitor** | `worker:telegram` | Persistent | MTProto listener for `dbot_alerts` / `osint_intel` → immediate scoring → execution |
-| **OSINT Pipeline** | `cron:trade` | 5 min | RSS + GDELT ingest → LLM score → Gamma mapping → divergence → execute |
-| **Position Monitor** | `cron:monitor` | 5 min | PM price resolution → SL/TP/divergence exits → auto-redeem resolved positions |
-| **Spot Monitor** | `cron:spot` | 1 min | Spot price move detection → correlated Polymarket market search → fast consensus → execute |
-| **Watchlist Refresh** | `cron:watchlist` | 4 hours | Syncs active Polymarket market keywords with Redis for the Dynamic Watchlist gate |
+Everything runs via **Docker Compose** on a Hetzner CAX11 ARM box. No PM2.
+
+```bash
+# Deploy / redeploy
+docker compose up -d --build
+
+# Verify
+docker compose ps
+redis-cli KEYS '*lock*'   # should be empty or only active worker locks
+```
+
+Periodic pipelines run via host crontab (not Docker). See [Crontab](#crontab) below.
+
+---
+
+## Services (Docker Compose)
+
+| Container | Command | Type | Purpose |
+|-----------|---------|------|---------|
+| **redis** | `redis-server --appendonly yes` | Infrastructure | Central state store |
+| **pga-bootstrap** | Lua lock cleanup | Init (run-once) | Clears stale `lock:*` keys before workers start |
+| **pga-spot-feed** | `src/spot/feeds/manager.ts` | Persistent worker | Binance WS + Helius Solana feeds → Redis hot-price cache → publish `spot:price_moved` |
+| **pga-arb** | `src/arb/worker.ts` | Persistent worker | YES+NO arb sweep (10s baseline) + crypto latency arb (BS formula on every `spot:price_moved`) |
+| **pga-copytrade** | `src/copytrade/worker.ts` | Persistent worker | Mirror expert whale wallets with category/liquidity/slippage guardrails (2s poll loop) |
+| **pga-monitor** | `src/monitor/worker.ts` | Persistent worker | PM position monitoring: SL/TP, trailing stop, stale exit, trend exit, signal re-eval, divergence close, resolution redemption |
+| **pga-futures** | `src/monitor/futuresMonitor.ts` | Persistent worker | HL perp monitoring: SL/TP, trailing stop, max-hold, TA re-eval (5s poll) |
+| **pga-telegram** | `src/ingestion/telegramMonitor.ts` | Persistent worker | MTProto listener for OSINT channels → immediate scoring → execution |
+| **pga-clob-flow** | `src/clob/flowMonitor.ts` | Persistent worker | Streams Polymarket book/trade tape into Redis |
+| **pga-sports** | `src/sports/poller.ts` | Persistent worker | NBA/NHL in-play win-probability edge vs Polymarket |
+| **pga-db** | TimescaleDB (pg16) | Infrastructure | Durable analytics database (TimescaleDB + pgvector) |
+| **pga-db-migrate** | `node-pg-migrate up` | Init (run-once) | Applies schema migrations on deploy |
+| **pga-db-writer** | `src/db/writer/index.ts` | Persistent worker | XREADGROUP consumer draining `db:writeq` Redis stream into Postgres |
+| **pga-cron** | `embedTradeMemory` + `snapshotTelemetry` | Persistent (24h loop) | Nightly analytics: trade memory embeddings + telemetry snapshots |
+| **pga-db-backup** | `pg_dump` | Persistent (24h loop) | Nightly compressed Postgres backup with 7-day retention |
+
+## Crontab (host-level)
+
+| Schedule | Job | Log |
+|----------|-----|-----|
+| `*/5 * * * *` | OSINT trade pipeline (`src/execution/index.ts`) | `~/logs/pga/trade.log` |
+| `* * * * *` | Spot price monitor (`src/spot/index.ts`) | `~/logs/pga/spot.log` |
+| `*/30 * * * *` | Watchlist refresh (`src/cron/refreshWatchlist.ts`) | `~/logs/pga/watchlist.log` |
+| `*/30 * * * *` | Near-zero entry scanner (`src/cron/nearZeroScanner.ts`) | `~/logs/pga/near-zero.log` |
+| `* * * * *` | Settlement arb scanner (`src/cron/settlement.ts`) | `~/logs/pga/settlement.log` |
+| `*/30 * * * *` | Residual sweep (`scripts/sweep-residuals.ts`) | `~/logs/pga/sweep-residuals.log` |
+| `0 */6 * * *` | Health check (`scripts/health-check.ts`) | `~/logs/pga/health-check.log` |
+| `0 6 * * *` | Copytrade shortlist refresh (`src/copytrade/shortlist.ts`) | `~/logs/pga/copytrade-shortlist.log` |
+| `0 3 * * MON` | Calibration stats (`src/cron/calibrate.ts`) | `~/logs/pga/calibrate.log` |
+| `0 4 * * *` | Log rotation (`scripts/rotate-logs.sh`) | — |
 
 ---
 
@@ -130,6 +182,8 @@ Polymarket leaderboard API (weekly shortlist refresh)
   → COPYTRADE_WALLETS list
   → 2s poll loop: fetch recent trades per wallet
   → Category keyword filter (geopolitics, crypto, macro, etc.)
+  → Minimum payout ratio gate (COPYTRADE_MIN_PAYOUT_RATIO)
+  → Minimum edge magnitude gate (COPYTRADE_MIN_EDGE_MAGNITUDE)
   → Liquidity / slippage / time-to-resolve guards
   → Stake scaling (COPYTRADE_SIZE_SCALE × observed whale size, capped at COPYTRADE_MAX_STAKE_USD)
   → Execution Router
@@ -153,7 +207,7 @@ ArbitrageWorker — two independent arb paths run on every event:
     → Scan 1,000 active markets: yesAsk + noAsk < $1.00 - fees
     → Execute both legs sequentially (YES first, NO only if YES fills)
 
-  Path B — Crypto latency arbitrage (fast-path only, Phase 7):
+  Path B — Crypto latency arbitrage (fast-path only):
     spot:price_moved → map symbol to asset → find correlated PM price-target markets
     → Redis market cache (1h TTL, fallback to Gamma search)
     → Fetch current PM price from WS cache (sub-second)
@@ -166,27 +220,11 @@ ArbitrageWorker — two independent arb paths run on every event:
   → Execution Router
 ```
 
-**Tracked assets (Path B):**
-
-| Binance symbol | Asset ID | Search terms |
-|---|---|---|
-| btcusdt | bitcoin | bitcoin, BTC |
-| ethusdt | ethereum | ethereum, ETH |
-| solusdt | solana | solana, SOL |
-| xrpusdt | ripple | XRP, ripple |
-| bnbusdt | binancecoin | BNB, binance coin |
-| taousdt | bittensor | TAO, bittensor |
-| dogeusdt | dogecoin | dogecoin, DOGE |
-| adausdt | cardano | cardano, ADA |
-| avaxusdt | avalanche | avalanche, AVAX |
-| linkusdt | chainlink | chainlink, LINK |
-| suiusdt | sui | SUI |
-
 ### 4. Spot Monitor (`cron:spot`)
 
 ```
 Spot Poller (CoinGecko REST, configurable assets + lookback window)
-  → Threshold Detector (% move vs rolling window, per-asset cooldown via Redis)
+  → Threshold Detector (% move OR z-score trigger, per-asset cooldown via Redis)
   → Market Correlator (Gamma search + LLM correlation direction, cached 24h)
   → Fast Consensus Estimator:
       price-target markets → Black-Scholes binary formula (<1ms, no API)
@@ -194,7 +232,28 @@ Spot Poller (CoinGecko REST, configurable assets + lookback window)
   → Divergence Calculator → Execution Router
 ```
 
-### 5. Execution Layer (shared)
+### 5. Sports Arb Poller (`pga-sports`)
+
+```
+ESPN live game feed (NBA/NHL)
+  → Win-probability scanner (real-time game state)
+  → Compare vs Polymarket odds
+  → Edge detection → Execution Router
+```
+
+### 6. Near-Zero Entry Scanner (`cron:nearZeroScanner`)
+
+```
+Active Polymarket markets with prices near zero (<5¢)
+  → Multi-outcome gate + heuristic regex filter
+  → OSINT prioritization (recent headlines for the market topic)
+  → Near-zero-specific LLM consensus prompt
+  → Direction-aware edge calculation
+  → Velocity dead-horse filter (blocks markets trending toward zero)
+  → Execution Router
+```
+
+### 7. Execution Layer (shared)
 
 All signals from every pipeline route through `executor.ts`:
 
@@ -211,6 +270,7 @@ Venue routing:
 
 Post-trade:
   - Record position in Redis ledger (marketId, venue, direction, entry price, stake, txHash)
+  - Emit to db:writeq Redis stream → Postgres analytics
   - Deduct stake from in-process bankroll cache
   - If YES buy + FUTURES_ENABLED: open delta hedge on Hyperliquid (1:1 SHORT)
   - Unified rate limit check (Polymarket only; Hyperliquid exempt)
@@ -233,52 +293,72 @@ CLOB signature modes:
 | `1` POLY_PROXY | Magic / Google OAuth wallet | Required |
 | `2` POLY_GNOSIS_SAFE | Gnosis Safe multisig | Required |
 
-### 6. Hyperliquid Futures & Delta Hedging
+### 8. Hyperliquid Futures & Delta Hedging
 
 After a successful Polymarket YES fill, the executor optionally opens an offsetting SHORT on Hyperliquid Perpetuals:
 
 - **Delta hedge**: 1:1 SHORT at entry, sized to match PM stake. Neutralises directional exposure while retaining the geopolitical headline alpha.
 - **Synthetic exit**: If PM liquidity is too thin to exit, `takeProfitExecutor` opens an equal-and-opposite HL position to freeze P&L. PM side closes in the Redis ledger; HL side is managed independently by the futures monitor.
-- **Latency arb**: ArbitrageWorker detects spot moves on Binance/Helius and front-runs Polymarket order book adjustments via HL perps. The scanner automatically prioritizes markets with correlated HL counterparts for delta-neutral arbitrage.
 - **Risk limits**: Global margin cap (`FUTURES_GLOBAL_MAX_MARGIN_USD`, default $200) and per-trade cap (`FUTURES_MAX_PER_TRADE_USD`, default $10).
 - **Urgency gating**: Futures signals from news (OSINT) only fire if urgency > `FUTURES_URGENCY_THRESHOLD` (default 6).
+- **Confluence gate**: Pre-entry TA gate (RSI/MACD/Stochastic/OBV/MFI/VWAP/CMF + ADX/Choppiness) blocks trades below `FUTURES_MIN_CONFLUENCE_SCORE`.
 
-**Futures Monitor** (`monitor:futures`, 5s poll):
+**Futures Monitor** (`pga-futures`, 5s poll):
 - Tracks all open HL perp positions
-- Enforces `FUTURES_STOP_LOSS_PCT` and `FUTURES_TAKE_PROFIT_PCT` thresholds
+- Fixed SL/TP thresholds (`FUTURES_STOP_LOSS_PCT`, `FUTURES_TAKE_PROFIT_PCT`)
+- **Trailing stop** (`FUTURES_TRAILING_STOP_ENABLED`): arms at TP line, ratchets floor up with HWM, exits on `FUTURES_TRAILING_STOP_PCT` giveback from peak
+- **ATR-based SL/TP** (`FUTURES_ATR_SLTP_ENABLED`): derives thresholds from entry-time ATR snapshot, clamped to min/max bounds (shadow-logged when disabled)
+- **TA re-evaluation** (`FUTURES_EXIT_ON_SIGNAL_FADE`): periodic confluence re-check, exits on full directional reversal
 - Max hold time enforced (`FUTURES_MAX_HOLD_HOURS`)
 - Heartbeat logging (every 2 minutes) for health monitoring
-- Executes HL market close + Telegram notification on trigger
 
-### 7. Position Monitor (`cron:monitor`)
+### 9. Position Monitor (`pga-monitor`, persistent worker)
 
 ```
-Redis position ledger → all open positions
+Redis position ledger → all open PM positions
   → Price resolution:
       1. CLOB WebSocket cache (Redis, 30s TTL) — sub-second freshness
       2. Gamma REST fallback
-  → Evaluators (per position):
-      Stop-loss (default 30% down)     → exit
-      Take-profit (default 25% up)     → exit
-      Signal re-eval (LLM edge check)  → exit if edge < floor
-      Divergence closed (market consensus reached) → exit
+  → Evaluators (per position, in priority order):
+      Stop-loss (tiered: general/crypto/short-duration/copytrade)  → exit
+      Take-profit (tiered, same categories)                        → exit
+      Trailing stop (suppresses fixed TP, ratchets floor with HWM) → exit
+      Stale exit (age + peak-decline based, per-category timers)   → exit
+      Trend exit (OLS regression on price samples, R² gated)       → exit
+      Signal re-eval (LLM edge check against fresh headlines)      → exit
+      Divergence closed (market reached consensus)                 → exit
+  → Maker exit (post-only limit order with taker fallback)
   → Resolution Redeemer:
       Simmer: check resolved status → POST /redeem (rate-limited, 9/min)
       CLOB: check Gamma API resolution → on-chain redemption → credit bankroll
 ```
 
-**Exit priority:**
+**Take-profit tiers:**
 
-| Priority | Trigger | Where |
+| Category | TP Threshold | SL Threshold |
 |---|---|---|
-| 1 | Futures stop-loss ≥ configured % | Futures Monitor |
-| 2 | Futures take-profit ≥ configured % | Futures Monitor |
-| 3 | Polymarket stop-loss ≥ 30% | Position Monitor |
-| 4 | Polymarket take-profit ≥ 25% | Position Monitor |
-| 5 | Signal re-eval — edge evaporated | Position Monitor |
-| 6 | Divergence closed | Position Monitor |
+| General (OSINT) | `TAKE_PROFIT_THRESHOLD` | `STOP_LOSS_THRESHOLD` |
+| Crypto | `CRYPTO_TAKE_PROFIT` | `CRYPTO_STOP_LOSS` |
+| Short-duration | `SHORT_DURATION_TAKE_PROFIT` | `SHORT_DURATION_STOP_LOSS` |
+| Copytrade | `COPYTRADE_TAKE_PROFIT` | `COPYTRADE_STOP_LOSS` |
 
-### 8. Bankroll
+All tiers share the same trailing stop mechanism (`TRAILING_STOP_ENABLED`, `TRAILING_GIVEBACK_PCT`). Trailing activation = the tier's TP threshold.
+
+### 10. Durable DB Layer (Epic #142)
+
+Analytics data flows from workers to Postgres via a Redis stream:
+
+```
+Workers → enqueueWrite('table', payload) → Redis stream db:writeq
+  → pga-db-writer (XREADGROUP consumer) → Postgres/TimescaleDB
+```
+
+- 11 analytics tables wired to emit sites
+- TimescaleDB for time-series queries, pgvector for trade memory embeddings
+- Nightly crons: trade memory embedding, telemetry snapshots
+- Nightly pg_dump backup with 7-day retention
+
+### 11. Bankroll
 
 `bankroll.ts` maintains an in-process cache of the live Simmer portfolio balance (15s TTL):
 
@@ -293,9 +373,9 @@ Redis position ledger → all open positions
 | Layer | Applies to | Mechanism |
 |---|---|---|
 | `flock` in `run.sh` | All cron pipelines | OS file lock per script — blocks second cron tick if prior OS process still running |
-| Redis overlap lock | `cron:trade`, `cron:monitor`, `cron:spot` | Token-based `SET NX EX` + Lua compare-and-delete release — safe across long LLM cycles |
-| `ARB_ENABLED` flag | `worker:arb` | Exits immediately if disabled — no lock needed (cycles are short) |
-| `WS_ENABLED=false` | All | Disables CLOB WebSocket subscriptions — REST-only mode for test environments |
+| Redis overlap lock | `cron:trade`, `cron:spot`, workers | Token-based `SET NX EX` + Lua compare-and-delete release — safe across long LLM cycles |
+| Distributed lock | `pga-monitor`, `pga-futures`, `pga-copytrade`, `pga-arb` | Hostname-based stale detection + tri-state refresh (refreshed/expired/stolen) |
+| `ARB_ENABLED` flag | `worker:arb` | Exits immediately if disabled |
 
 ---
 
@@ -303,98 +383,50 @@ Redis position ledger → all open positions
 
 | Module | Description |
 |---|---|
-| `src/ingestion/` | RSS + GDELT scraping, Redis dedup, LLM urgency scoring, timing window |
+| `src/ingestion/` | RSS + GDELT scraping, Telegram MTProto monitor, Redis dedup, LLM urgency scoring, timing window, category classifier |
 | `src/ingestion/categories/` | `CategoryConfig` registry — per-category feeds, scorer prompts, thresholds |
 | `src/mapping/` | Gamma API client, entity extraction, consensus probability, Half-Kelly sizing, divergence |
-| `src/spot/` | Spot poller, threshold detector, market correlator, fast consensus estimator |
+| `src/spot/` | Spot poller, threshold detector (% + z-score), market correlator, fast consensus estimator |
 | `src/spot/feeds/` | BinanceFeed (WebSocket), HeliusFeed (Helius/Pyth), FeedManager |
-| `src/arb/` | ArbitrageWorker (pub/sub + baseline), YES+NO arb scanner, crypto latency arb scanner (Phase 7) |
-| `src/arb/cryptoArbScanner.ts` | Crypto latency arb — BS fair value computation, asset→market mapping, Redis market cache, dedup |
-| `src/copytrade/` | Whale wallet worker, leaderboard shortlist refresh |
-| `src/execution/` | Executor (venue router, pre-trade context check), position ledger, Telegram notifications |
-| `src/monitor/` | Price resolver (WS + REST), SL/TP/divergence evaluator, resolution redeemer |
+| `src/arb/` | ArbitrageWorker (pub/sub + baseline), YES+NO arb scanner, crypto latency arb scanner, confluence scorer (RSI/MACD/Stoch/OBV/MFI/VWAP/CMF/ADX/Choppiness/BB) |
+| `src/copytrade/` | Whale wallet worker, leaderboard shortlist refresh, payout ratio + edge magnitude gates |
+| `src/sports/` | ESPN live feed, win-probability scanner, sports arb poller |
+| `src/clob/` | CLOB flow monitor — streams Polymarket book/trade tape into Redis |
+| `src/cron/` | Scheduled jobs: OSINT pipeline, near-zero scanner, settlement arb, watchlist refresh, calibration, trade memory embedding, telemetry snapshots |
+| `src/execution/` | Executor (venue router, pre-trade context check, maker exit), position ledger, Telegram notifications |
+| `src/monitor/` | Position monitor worker, price resolver (WS + REST), tiered SL/TP evaluator, trailing stop, stale exit, trend exit, signal re-eval, resolution redeemer, futures monitor |
+| `src/db/` | Write queue (Redis stream producer), DB writer (XREADGROUP consumer), migrations, retrieval layer |
+| `src/shared/` | Redis singleton (tri-state lock refresh), config (Zod), bankroll, logger, governor, ledger, outcome recorder, calibration, assets |
 | `src/shared/hyperliquid.ts` | Hyperliquid perps client — order placement, position queries, mid-price cache |
-| `src/shared/bankroll.ts` | Live bankroll tracker (Simmer portfolio), in-process cache |
 | `src/shared/clob.ts` | Polymarket CLOB client — order signing, balance, on-chain redemption |
 | `src/shared/simmer.ts` | Simmer SDK wrapper — opportunities, context, portfolio, redeem |
-| `src/shared/redis.ts` | Redis client, pub/sub, distributed lock (token-based) |
-| `src/shared/outcomeRecorder.ts` | Outcome recorder — records every closed position for context injection and calibration |
-| `src/shared/calibration.ts` | Calibration tracker — weekly win-rate analysis, edge correction factors per category |
-| `src/cron/calibrate.ts` | Weekly calibration cron entrypoint — recomputes stats, sends Telegram summary |
-| `src/shared/feedSingleton.ts` | Shared `ClobPriceFeed` singleton — WS order book subscriptions for watched markets |
 
 ---
 
 ## Setup
 
 ```bash
-# 1. Start Redis
-docker run -d --name pga-redis --restart unless-stopped -p 6379:6379 redis:alpine
-
-# 2. Install dependencies
-npm install
-
-# 3. Configure environment
+# 1. Configure environment
 cp .env.example .env
 # Fill in required values (see .env.example for full docs)
 
-# Safely sync new keys from .env.example if upgrading:
-npm run sync-env
+# 2. Create Postgres password secret
+mkdir -p secrets
+echo 'your-pg-password' > secrets/pg_password
 
-# 4. Verify build
-npm run build
+# 3. Deploy
+docker compose up -d --build
 
-# 5. Probe Simmer connectivity
-npm run probe:simmer
+# 4. Verify
+docker compose ps             # all services Up/Healthy
+redis-cli KEYS '*lock*'       # no stale locks
+
+# 5. Set up host crontab (see Crontab section above)
+crontab -e
 
 # 6. Initialize copytrade shortlist
 npm run cron:shortlist
 ```
-
-### Running with PM2 (recommended)
-
-```bash
-# Persistent workers
-pm2 start "npm run worker:copytrade"  --name pga-copytrade
-pm2 start "npm run worker:arb"        --name pga-arb
-pm2 start "npm run worker:spot-feed"  --name pga-spot-feed
-pm2 start "npm run monitor:futures"   --name pga-futures
-pm2 start "npm run worker:telegram"   --name pga-telegram
-
-# Periodic pipelines (or use the crontab below)
-pm2 start "npm run cron:trade"        --name pga-trade   --cron "*/5 * * * *"
-pm2 start "npm run cron:monitor"      --name pga-monitor --cron "*/5 * * * *"
-pm2 start "npm run cron:spot"         --name pga-spot    --cron "* * * * *"
-```
-
-### Crontab (alternative to PM2 for periodic jobs)
-
-```cron
-PATH=/usr/local/bin:/usr/bin:/bin
-
-# OSINT pipeline (every 5 min)
-*/5 * * * * /path/to/pga/run.sh npx tsx src/execution/index.ts >> ~/logs/pga/trade.log 2>&1
-
-# Position monitor (every 5 min)
-*/5 * * * * /path/to/pga/run.sh npx tsx src/monitor/index.ts >> ~/logs/pga/monitor.log 2>&1
-
-# Spot price monitor (every 1 min)
-* * * * *   /path/to/pga/run.sh npx tsx src/spot/index.ts >> ~/logs/pga/spot.log 2>&1
-
-# Copytrade shortlist refresh (daily 06:00 GMT)
-0 6 * * * /path/to/pga/run.sh npx tsx src/copytrade/shortlist.ts >> ~/logs/pga/copytrade-shortlist.log 2>&1
-
-# Calibration stats refresh (Monday 03:00 GMT)
-0 3 * * MON /path/to/pga/run.sh npx tsx src/cron/calibrate.ts >> ~/logs/pga/calibrate.log 2>&1
-
-# Dynamic Watchlist refresh (every 4 hours)
-0 */4 * * * /path/to/pga/run.sh npx tsx src/cron/refreshWatchlist.ts >> ~/logs/pga/watchlist.log 2>&1
-
-# Log rotation (daily at 4 AM) — rotates logs > 5MB, keeps 1 backup
-0 4 * * * /path/to/pga/scripts/rotate-logs.sh
-```
-
-> **Note:** `worker:arb`, `worker:copytrade`, `worker:spot-feed`, and `monitor:futures` are persistent — run them via PM2, not cron.
 
 ---
 
@@ -417,8 +449,12 @@ PATH=/usr/local/bin:/usr/bin:/bin
 | `npm run worker:telegram` | Start persistent Telegram MTProto monitor |
 | `npm run cron:shortlist` | Refresh copytrade wallet shortlist from leaderboard |
 | `npm run cron:calibrate` | Recompute calibration stats per category (weekly) |
-| `npm run cron:watchlist` | Refresh dynamic watchlist from active markets (every 4h recommended) |
+| `npm run cron:watchlist` | Refresh dynamic watchlist from active markets |
 | `npm run sync-env` | Append missing keys from `.env.example` to `.env` |
+| `scripts/deploy.sh` | Pull from main, `docker compose up -d --build`, prune images |
+| `scripts/diagnose.sh` | System health diagnostic |
+| `scripts/monitor-dashboard.sh` | tmux-based log dashboard |
+| `scripts/rotate-logs.sh` | Rotate logs > 5MB (keeps 1 backup) |
 
 ---
 
@@ -428,34 +464,22 @@ See `.env.example` for full documentation. Highlights:
 
 | Variable | Required | Description |
 |---|---|---|
-| `REDIS_URL` | ✅ | Redis connection string |
-| `SIMMER_API_KEY` | ✅ | Primary execution venue |
-| `OPENAI_API_KEY` / `GEMINI_API_KEY` | ✅ (one) | LLM for scoring/mapping/consensus |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | ✅ | Trade notifications |
-| `POLYGON_WALLET_PRIVATE_KEY` | ✅ | CLOB fallback signing |
+| `REDIS_URL` | Yes | Redis connection string |
+| `SIMMER_API_KEY` | Yes | Primary execution venue |
+| `OPENAI_API_KEY` / `GEMINI_API_KEY` | Yes (one) | LLM for scoring/mapping/consensus |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Yes | Trade notifications |
+| `POLYGON_WALLET_PRIVATE_KEY` | Yes | CLOB fallback signing |
 | `HYPERLIQUID_PRIVATE_KEY` | For futures | HL order signing |
-| `POLYMARKET_FUNDER_ADDRESS` | Sig types 1+2 | Proxy/Safe funder address |
 | `FUTURES_ENABLED` | — | Master switch for delta hedging + futures monitor |
 | `COPYTRADE_ENABLED` | — | Master switch for copytrade worker |
 | `ARB_ENABLED` | — | Master switch for arbitrage worker |
 | `SPOT_MONITOR_ENABLED` | — | Master switch for spot monitor |
-| `BINANCE_WS_ENABLED` | — | Enable Binance WebSocket feed |
-| `HELIUS_API_KEY` | — | **Unused** — Pyth Hermes endpoint is public; no key required |
-| `CRYPTO_ARB_ENABLED` | — | Master switch for crypto latency arb (Phase 7, default true) |
-| `CRYPTO_ARB_MIN_EDGE` | — | Minimum net edge after fees to enter crypto arb (default 0.08 = 8%) |
-| `CRYPTO_ARB_MAX_STAKE_FRACTION` | — | Max fraction of bankroll per crypto arb trade (default 0.03 = 3%) |
-| `CRYPTO_ARB_DEDUP_TTL_S` | — | Dedup window per market/direction in seconds (default 300 = 5 min) |
-| `CRYPTO_ARB_MARKET_CACHE_TTL_S` | — | Cache TTL for Gamma market search results (default 3600 = 1h) |
-| `CALIBRATION_ENABLED` | — | Master switch for calibration correction (default true) |
-| `CALIBRATION_MIN_SAMPLES` | — | Minimum outcomes before correction applies (default 20) |
-| `OUTCOME_HISTORY_DAYS` | — | TTL for outcome records in days (default 180) |
-| `OUTCOME_MAX_PER_CATEGORY` | — | Max outcomes per category before pruning (default 500) |
-| `CONTEXT_INJECTION_ENABLED` | — | Inject historical outcomes into LLM prompts (default true) |
-| `CONTEXT_INJECTION_LIMIT` | — | Number of outcomes injected per prompt (default 5) |
-| `SCORER_CACHE_TTL_S` | — | Cache LLM urgency scores per article URL in seconds (default 3600 = 1h) |
-| `CONSENSUS_CACHE_ENABLED` | — | Enable Redis cache for consensus estimates (default true) |
-| `CONSENSUS_CACHE_TTL_S` | — | Cache TTL for consensus estimates in seconds (default 1800 = 30 min) |
-| `CONSENSUS_SAMPLES` | — | LLM samples per consensus estimate (default 2, max 5) |
+| `TRAILING_STOP_ENABLED` | — | PM trailing stop (activation = TP threshold) |
+| `STALE_EXIT_ENABLED` | — | Age + peak-decline exit for stuck positions |
+| `TREND_EXIT_ENABLED` | — | OLS regression trend-reversal exit |
+| `MAKER_EXIT_ENABLED` | — | Post-only limit order exits with taker fallback |
+| `NEAR_ZERO_SCANNER_ENABLED` | — | Near-zero market entry scanner |
+| `CALIBRATION_ENABLED` | — | Calibration correction (default true) |
 
 ---
 
