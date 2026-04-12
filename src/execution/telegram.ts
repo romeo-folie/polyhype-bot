@@ -320,6 +320,28 @@ export async function notifyCalibrationUpdate(lines: string[]): Promise<void> {
   await notify(text);
 }
 
+/**
+ * Notify when a delta hedge is opened on Hyperliquid alongside a PM position.
+ */
+export async function notifyHedgeOpened(opts: {
+  pmMarketId: string;
+  pmQuestion: string;
+  hlSymbol: string;
+  direction: 'LONG' | 'SHORT';
+  stakeUsd: number;
+  txHash?: string;
+}): Promise<void> {
+  const text =
+    `🔗 <b>Delta Hedge Opened</b>\n\n` +
+    `<b>HL Symbol:</b> ${escapeHtml(opts.hlSymbol)} ${opts.direction}\n` +
+    `<b>Stake:</b> $${opts.stakeUsd.toFixed(2)} USDC  |  <b>Leverage:</b> 1x\n` +
+    `<b>Hedging:</b> ${escapeHtml(opts.pmQuestion)}\n` +
+    `<b>PM Market:</b> ${opts.pmMarketId}\n` +
+    (opts.txHash ? `<b>Tx:</b> <code>${escapeHtml(opts.txHash)}</code>` : '');
+
+  await notify(text);
+}
+
 // ── Utility ─────────────────────────────────────────────────────────────────
 
 function escapeHtml(str: string): string {

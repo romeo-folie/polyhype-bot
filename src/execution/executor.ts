@@ -27,7 +27,7 @@ import {
   getClobOrder,
   cancelClobOrder,
 } from '../shared/clob.js';
-import { hasOpenPosition } from './positionLedger.js';
+import { hasOpenPosition, recordPosition } from './positionLedger.js';
 import { isStaleCooldownActive } from '../monitor/staleExit.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { computeATR } from '../arb/indicators.js';
@@ -40,7 +40,7 @@ import {
   recordExecutionTiming,
   recordExecutionEvent,
 } from '../shared/telemetry.js';
-import { notifyTradeError, notifyTradeExecuted } from './telegram.js';
+import { notifyTradeError, notifyTradeExecuted, notifyHedgeOpened } from './telegram.js';
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
 import { getRedis } from '../shared/redis.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
@@ -852,13 +852,42 @@ async function triggerDeltaHedge(
   });
 
   if (result.success) {
-    logger.info('[executor] delta hedge successful', { hlSymbol, txHash: result.txHash });
+    const hedgeDirection: 'LONG' | 'SHORT' = 'SHORT';
+    logger.info('[executor] delta hedge successful', { hlSymbol, hedgeDirection, txHash: result.txHash });
     void enqueueWrite('hedge_events', {
       hedgeAction: 'opened',
       hlSymbol,
       hlSize: hedgeStakeUsd,
       raw: { pmMarketId: pmSignal.marketId, txHash: result.txHash ?? null },
     });
+
+    // Record in position ledger so the futures monitor doesn't need to backfill
+    await recordPosition(redis, {
+      marketId: hlSymbol,
+      question: `${hlSymbol} hedge for PM:${pmSignal.marketId}`,
+      direction: hedgeDirection,
+      entryPrice: result.price ?? 0,
+      stakeUsd: hedgeStakeUsd,
+      edgeMagnitude: 0,
+      sourcedFrom: `hedge:pm:${pmSignal.marketId}`,
+      openedAt: new Date().toISOString(),
+      txHash: result.txHash,
+      executionVenue: 'hyperliquid',
+      isFutures: true,
+      symbol: hlSymbol,
+      synthHedged: true,
+    });
+
+    // Notify so the hedge entry is visible alongside the PM trade notification
+    void notifyHedgeOpened({
+      pmMarketId: pmSignal.marketId,
+      pmQuestion: pmSignal.question,
+      hlSymbol,
+      direction: hedgeDirection,
+      stakeUsd: hedgeStakeUsd,
+      ...(result.txHash ? { txHash: result.txHash } : {}),
+    }).catch(() => { /* best-effort */ });
+
     // Link the hedge in Redis for tracking
     await redis.set(`hedge:link:${pmSignal.marketId}`, hlSymbol, 'EX', 7 * 24 * 3600);
     return true;
