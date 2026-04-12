@@ -340,6 +340,7 @@ const envSchema = z.object({
   SHORT_DURATION_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.15),
   COPYTRADE_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.40),
   COPYTRADE_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.50),
+  COPYTRADE_SPORTS_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.15),
   MONITOR_HEAVY_INTERVAL_MIN: z.coerce.number().int().min(1).optional().default(5),
   // Persistent monitor worker sleep between cycles (ms). Only consumed by
   // `src/monitor/worker.ts` — the cron entrypoint still runs on its own schedule.

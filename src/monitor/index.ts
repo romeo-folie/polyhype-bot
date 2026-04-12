@@ -171,6 +171,12 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     if (isCopytrade) {
       tpThreshold = cfg.COPYTRADE_TAKE_PROFIT;
       slThreshold = cfg.COPYTRADE_STOP_LOSS;
+      // Sports copytrades get a tighter SL — fast-resolving binaries where
+      // losses are catastrophic (-41% to -57% observed over 2 weeks).
+      const cat = inferCategory(position.question);
+      if (cat === 'sports') {
+        slThreshold = cfg.COPYTRADE_SPORTS_STOP_LOSS;
+      }
     } else if (cfg.TIERED_LOGIC_ENABLED) {
       const isCrypto = position.assetId ? isCryptoAsset(position.assetId) : false;
 
