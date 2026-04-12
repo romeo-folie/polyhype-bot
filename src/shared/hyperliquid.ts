@@ -427,38 +427,37 @@ class HyperliquidClient {
     );
     const state = response.data;
 
-    // Unified/portfolio-margin accounts show $0 in perps clearinghouse —
-    // their balances live in spotClearinghouseState. Fall back to spot USDC
-    // total when perps accountValue is zero.
+    // Unified/portfolio-margin accounts keep real balances in spot clearinghouse.
+    // Perps accountValue only reflects margin allocated to open positions, which
+    // can be far below the true equity. Always check spot and use the larger value.
     const perpsValue = parseFloat(state?.marginSummary?.accountValue || '0');
-    if (perpsValue === 0) {
-      try {
-        const spotResponse = await axios.post<HlSpotClearinghouseState>(
-          `${this.baseUrl}/info`,
-          {
-            type: 'spotClearinghouseState',
-            user: this.mainWalletAddress,
-          },
-          { timeout: HL_REQUEST_TIMEOUT_MS },
-        );
-        const usdcBalance = spotResponse.data?.balances?.find(b => b.coin === 'USDC');
-        if (usdcBalance) {
-          const spotTotal = parseFloat(usdcBalance.total || '0');
-          if (spotTotal > 0) {
-            state.marginSummary = {
-              ...state.marginSummary,
-              accountValue: spotTotal.toString(),
-            };
-            logger.debug('[hyperliquid] using spot USDC balance (unified account)', {
-              spotTotal: spotTotal.toFixed(2),
-            });
-          }
+    try {
+      const spotResponse = await axios.post<HlSpotClearinghouseState>(
+        `${this.baseUrl}/info`,
+        {
+          type: 'spotClearinghouseState',
+          user: this.mainWalletAddress,
+        },
+        { timeout: HL_REQUEST_TIMEOUT_MS },
+      );
+      const usdcBalance = spotResponse.data?.balances?.find(b => b.coin === 'USDC');
+      if (usdcBalance) {
+        const spotTotal = parseFloat(usdcBalance.total || '0');
+        if (spotTotal > perpsValue) {
+          state.marginSummary = {
+            ...state.marginSummary,
+            accountValue: spotTotal.toString(),
+          };
+          logger.debug('[hyperliquid] using spot USDC balance (unified account)', {
+            perpsValue: perpsValue.toFixed(2),
+            spotTotal: spotTotal.toFixed(2),
+          });
         }
-      } catch (err) {
-        logger.warn('[hyperliquid] spotClearinghouseState fallback failed', {
-          error: String(err),
-        });
       }
+    } catch (err) {
+      logger.warn('[hyperliquid] spotClearinghouseState fallback failed', {
+        error: String(err),
+      });
     }
 
     return state;
