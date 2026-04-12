@@ -444,7 +444,12 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
                   const direction = normalizedDir;
                   const ledgerPos = await getPosition(redis, pos.market_id, direction);
                   await closePosition(redis, pos.market_id, direction);
-                  const proceedsUsdc = pos.value_usdc ?? pos.shares ?? 0;
+                  // Prefer ledger sharesHeld (on-chain truth) over Simmer's
+                  // value_usdc/shares which may be stale when Simmer says "balance is 0".
+                  const proceedsUsdc =
+                    (ledgerPos?.sharesHeld != null && ledgerPos.sharesHeld > 0)
+                      ? ledgerPos.sharesHeld
+                      : pos.value_usdc ?? pos.shares ?? 0;
                   if (proceedsUsdc > 0) {
                     await creditProceeds(redis, proceedsUsdc);
                   }
@@ -489,12 +494,14 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
                     txHash: clobResult.tx_hash,
                     valueUsdc: proceedsUsdc,
                   });
-                  results.push({
+                  const fallbackResult: RedemptionResult = {
                     marketId: pos.market_id,
                     side,
                     success: true,
                     valueUsdc: proceedsUsdc,
-                  });
+                  };
+                  if (clobResult.tx_hash) fallbackResult.txHash = clobResult.tx_hash;
+                  results.push(fallbackResult);
                   continue;
                 }
                 // CLOB fallback also failed
@@ -510,6 +517,15 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
                       question: pos.question ?? pos.market_id,
                     }).catch(() => {});
                   }
+                  // Close ledger so we don't re-alert or stale-loop every cycle
+                  await closePosition(redis, pos.market_id, normalizedDir);
+                  results.push({
+                    marketId: pos.market_id,
+                    side,
+                    success: false,
+                    error: 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED',
+                  });
+                  continue;
                 } else {
                   logger.warn('[redeemer] CLOB on-chain fallback also failed', {
                     marketId: pos.market_id,
