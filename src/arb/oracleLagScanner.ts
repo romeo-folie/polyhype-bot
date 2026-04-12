@@ -26,6 +26,7 @@ import type { Redis } from 'ioredis';
 
 import { loadConfig, type AppConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import {
   acquireLock,
   refreshLock,
@@ -438,6 +439,31 @@ export class OracleLagScanner {
       blockReason,
       enabled: cfg.ORACLE_LAG_ENABLED,
     });
+
+    // Persist to DB — only events that passed the move threshold (interesting
+    // for review). Sub-threshold ticks fire every second and would spam the table.
+    if (blockReason !== 'move_below_threshold' && blockReason !== 'no_move_data') {
+      void enqueueWrite('shadow_observations', {
+        kind: 'oracle_lag',
+        source: 'arb',
+        symbol: 'BTC',
+        marketId: market.marketId,
+        direction: evaluation.side ?? (move && move.pctMove > 0 ? 'UP' : 'DOWN'),
+        wouldBlock: !wouldTrade,
+        metricValue: move ? move.pctMove : 0,
+        threshold: cfg.ORACLE_LAG_MIN_MOVE_PCT,
+        payload: {
+          slug: market.slug,
+          blockReason,
+          entryPrice: evaluation.entryPrice,
+          timeLeftMin: evaluation.timeLeftMin,
+          consensusProbability: evaluation.consensusProbability,
+          oldPrice: move?.oldPrice,
+          newPrice: move?.newPrice,
+          wouldTrade,
+        },
+      });
+    }
 
     if (!wouldTrade) return;
     // Shadow mode — logged but never fires until ORACLE_LAG_ENABLED flips.
