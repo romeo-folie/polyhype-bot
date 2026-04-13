@@ -37,6 +37,7 @@ export interface ConstraintEdge {
 export interface MarketPrice {
   marketId: string;
   yesPrice: number;
+  noPrice: number;
   clobTokenIds: string[];
   conditionId: string;
   question: string;

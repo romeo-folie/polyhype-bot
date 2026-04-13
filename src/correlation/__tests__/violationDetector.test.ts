@@ -22,6 +22,7 @@ function makePrice(overrides: Partial<MarketPrice> = {}): MarketPrice {
   return {
     marketId: 'mkt-a',
     yesPrice: 0.50,
+    noPrice: 0.50,
     clobTokenIds: ['yes-token', 'no-token'],
     conditionId: 'cond-1',
     question: 'Some market',

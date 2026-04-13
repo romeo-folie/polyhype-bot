@@ -107,12 +107,13 @@ function parseClassification(raw: string): ClassificationResult {
 // ── Cache key ────────────────────────────────────────────────────────────────
 
 /**
- * Deterministic cache key. Questions are sorted lexicographically so
- * (A, B) and (B, A) share the same cache entry.
+ * Deterministic cache key. Order is preserved because the cached
+ * `direction` field is defined relative to the caller's A/B ordering,
+ * so (A, B) and (B, A) must not share the same cache entry.
  */
 function cacheKey(questionA: string, questionB: string): string {
-  const sorted = [questionA, questionB].sort().join('|');
-  const hash = createHash('sha256').update(sorted).digest('hex').slice(0, 16);
+  const ordered = `${questionA}|${questionB}`;
+  const hash = createHash('sha256').update(ordered).digest('hex').slice(0, 16);
   return `${CACHE_PREFIX}${hash}`;
 }
 

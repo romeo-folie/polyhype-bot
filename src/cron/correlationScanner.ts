@@ -36,9 +36,22 @@ async function buildPriceMap(redis: Redis): Promise<Map<string, MarketPrice>> {
 
   for (const market of rawMarkets) {
     try {
+      // Binary-only gate.
+      if (market.outcomes) {
+        const outcomes = typeof market.outcomes === 'string'
+          ? (JSON.parse(market.outcomes) as unknown[])
+          : market.outcomes;
+        if (Array.isArray(outcomes) && outcomes.length > 2) continue;
+      }
+
+      // Skip expired markets.
+      if (market.endDate && new Date(market.endDate).getTime() <= Date.now()) continue;
+
       const prices = parseOutcomePrices(market.outcomePrices);
       const yesPrice = parseFloat(prices[0] ?? '0');
       if (!isFinite(yesPrice)) continue;
+
+      const noPrice = parseFloat(prices[1] ?? '0');
 
       const clobTokenIds = parseClobTokenIds(market.clobTokenIds);
       if (clobTokenIds.length < 2) continue;
@@ -48,6 +61,7 @@ async function buildPriceMap(redis: Redis): Promise<Map<string, MarketPrice>> {
       map.set(market.id, {
         marketId: market.id,
         yesPrice,
+        noPrice: isFinite(noPrice) ? noPrice : 1 - yesPrice,
         clobTokenIds,
         conditionId: market.conditionId,
         question: market.question,
@@ -78,8 +92,8 @@ function buildSignal(
     direction: violation.direction,
     stakeUsd,
     edgeMagnitude: violation.edge,
-    outcomePrice: violation.direction === 'YES' ? target.yesPrice : 1 - target.yesPrice,
-    priceZone: priceZoneOf(violation.direction === 'YES' ? target.yesPrice : 1 - target.yesPrice),
+    outcomePrice: violation.direction === 'YES' ? target.yesPrice : target.noPrice,
+    priceZone: priceZoneOf(violation.direction === 'YES' ? target.yesPrice : target.noPrice),
     sourcedFrom: `correlation-arb (${violation.constraint.type}: ${other.question.slice(0, 60)})`,
     source: 'correlation-arb',
     reasoning:

@@ -98,16 +98,22 @@ describe('relationshipClassifier', () => {
   });
 
   describe('cacheKey', () => {
-    it('produces the same key regardless of question order', () => {
+    it('produces different keys for swapped question order', () => {
       const k1 = cacheKey('Question A', 'Question B');
       const k2 = cacheKey('Question B', 'Question A');
-      expect(k1).toBe(k2);
+      expect(k1).not.toBe(k2);
     });
 
     it('produces different keys for different pairs', () => {
       const k1 = cacheKey('Question A', 'Question B');
       const k2 = cacheKey('Question A', 'Question C');
       expect(k1).not.toBe(k2);
+    });
+
+    it('produces the same key for identical order', () => {
+      const k1 = cacheKey('Question A', 'Question B');
+      const k2 = cacheKey('Question A', 'Question B');
+      expect(k1).toBe(k2);
     });
   });
 

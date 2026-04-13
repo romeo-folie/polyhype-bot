@@ -60,6 +60,8 @@ function toMarketPrice(market: {
     const yesPrice = parseFloat(prices[0] ?? '0');
     if (!isFinite(yesPrice)) return null;
 
+    const noPrice = parseFloat(prices[1] ?? '0');
+
     const clobTokenIds = parseClobTokenIds(market.clobTokenIds);
     if (clobTokenIds.length < 2) return null;
 
@@ -69,6 +71,7 @@ function toMarketPrice(market: {
     return {
       marketId: market.id,
       yesPrice,
+      noPrice: isFinite(noPrice) ? noPrice : 1 - yesPrice,
       clobTokenIds,
       conditionId: market.conditionId,
       question: market.question,
