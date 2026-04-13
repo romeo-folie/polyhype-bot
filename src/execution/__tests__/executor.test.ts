@@ -580,11 +580,11 @@ describe('execution mode', () => {
     });
     mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-eligible-test' });
 
-    // copytrade and spot route through Simmer; crypto-arb bypasses Simmer
-    // entirely (resolver returns null) and goes straight to CLOB taker.
-    // None of them should ever submit a maker limit order.
-    const cases: { source: 'copytrade' | 'spot' | 'crypto-arb'; venue: 'simmer' | 'clob' }[] = [
-      { source: 'copytrade', venue: 'simmer' },
+    // spot routes through Simmer; crypto-arb bypasses Simmer entirely
+    // (resolver returns null) and goes straight to CLOB taker.
+    // These latency-sensitive sources should never submit a maker limit order.
+    // Note: copytrade is now maker-eligible (persistent alpha) — tested separately.
+    const cases: { source: 'spot' | 'crypto-arb'; venue: 'simmer' | 'clob' }[] = [
       { source: 'spot', venue: 'simmer' },
       { source: 'crypto-arb', venue: 'clob' },
     ];

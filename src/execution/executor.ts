@@ -105,17 +105,20 @@ function clobTokenForSignal(signal: TradeSignal): string | null {
  * (poll up to MAKER_MAX_WAIT_MS) and may not fill at all. We only attempt them
  * for signals where the alpha doesn't decay in seconds:
  *
- *   - 'osint' — news-sentiment trades; edge persists for minutes
+ *   - 'osint'         — news-sentiment trades; edge persists for minutes
+ *   - 'copytrade'     — whale conviction persists; our fill isn't time-critical
+ *   - 'near-zero-arb' — illiquid markets at 3-10¢ don't reprice fast
  *
  * Excluded (latency-sensitive, must fill NOW):
  *   - 'crypto-arb' — Binance→PM lag arbitrage, edge gone in seconds
  *   - 'spot'       — spot momentum on PM markets, edge decays with the move
- *   - 'copytrade'  — whale mirror; resting risks worse price as the signal propagates
  *   - 'futures'    — bypasses this branch via the isFutures path
  *   - undefined    — unlabelled; default-deny for safety
  */
+const MAKER_ELIGIBLE_SOURCES = new Set(['osint', 'copytrade', 'near-zero-arb']);
+
 function isMakerEligible(signal: TradeSignal): boolean {
-  return signal.source === 'osint';
+  return MAKER_ELIGIBLE_SOURCES.has(signal.source ?? '');
 }
 
 /**
