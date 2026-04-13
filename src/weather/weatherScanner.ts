@@ -473,3 +473,28 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     });
   }
 }
+
+// ── Standalone entrypoint (cron) ──────────────────────────────────────────
+
+async function main() {
+  const { getRedis, closeRedis } = await import('../shared/redis.js');
+  const redis = getRedis();
+  try {
+    await runWeatherScan(redis);
+  } finally {
+    await closeRedis();
+  }
+}
+
+const isMainModule =
+  import.meta.url === `file://${process.argv[1]}` ||
+  process.argv[1]?.endsWith('/weatherScanner.js') === true;
+
+if (isMainModule) {
+  void main().catch((err: unknown) => {
+    logger.error('[weather] fatal error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    process.exit(1);
+  });
+}

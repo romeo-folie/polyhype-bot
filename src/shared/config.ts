@@ -605,9 +605,9 @@ const envSchema = z.object({
   NEAR_ZERO_SCANNER_ENABLED: boolFromEnv.optional().default(false),
   NEAR_ZERO_MIN_PRICE: z.coerce.number().min(0).max(1).optional().default(0.03),
   NEAR_ZERO_MAX_PRICE: z.coerce.number().min(0).max(1).optional().default(0.10),
-  // LLM consensus threshold to enter. At 3-10¢ entry, even 65% true probability
-  // represents massive edge (6.5x-21x payout). Lower than normal-price threshold.
-  NEAR_ZERO_MIN_CONSENSUS: z.coerce.number().min(0).max(1).optional().default(0.65),
+  // LLM consensus threshold to enter. At 3-10¢ entry, even 60% true probability
+  // represents massive edge (6x-19x payout). Lower than normal-price threshold.
+  NEAR_ZERO_MIN_CONSENSUS: z.coerce.number().min(0).max(1).optional().default(0.60),
   // Conservative stake cap — illiquid tail markets have wide spreads on exit.
   NEAR_ZERO_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(5),
   // Max LLM calls per run (cost control). OSINT-matched candidates first (by urgency desc),
