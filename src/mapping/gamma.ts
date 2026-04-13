@@ -25,6 +25,8 @@ export interface GammaEvent {
   active: boolean;
   closed: boolean;
   markets: GammaMarket[];
+  /** True for NegRisk events (multi-outcome, exactly one resolves YES at $1.00). */
+  negRisk?: boolean;
 }
 
 export interface GammaMarket {
@@ -259,6 +261,70 @@ export async function getActiveMarkets(maxTotal = 1000, pageSize = 500): Promise
   }
 
   return results;
+}
+
+/**
+ * Fetch active NegRisk events from Gamma API, sorted by liquidity descending.
+ *
+ * NegRisk events have N mutually exclusive outcomes — exactly one resolves YES
+ * at $1.00. Each outcome is a separate market with its own CLOB order book.
+ *
+ * Gamma API does not support a `neg_risk` query parameter (returns 422),
+ * so we fetch top events by liquidity and filter client-side.
+ * The `limit` here controls the Gamma fetch window; the returned array
+ * will be smaller (only NegRisk events).
+ */
+export async function getNegRiskEvents(opts?: {
+  limit?: number;
+}): Promise<GammaEvent[]> {
+  const maxResults = opts?.limit ?? 50;
+  // Over-fetch from Gamma since we filter client-side; NegRisk events
+  // are a subset of all events. Capped at 500 (Gamma API per-request max).
+  const fetchLimit = Math.min(Math.max(maxResults * 4, 200), 500);
+
+  if (Date.now() < gammaRateLimitedUntilMs) {
+    if (!gammaRateLimitLogged) {
+      logger.warn('[gamma] circuit breaker open — returning empty for NegRisk', {
+        remainingMs: gammaRateLimitedUntilMs - Date.now(),
+      });
+      gammaRateLimitLogged = true;
+    }
+    return [];
+  }
+  gammaRateLimitLogged = false;
+
+  // Note: `neg_risk` query param is NOT supported by Gamma (returns 422).
+  // We fetch all top-liquidity events and filter client-side.
+  // Events endpoint uses `liquidity` (not `liquidityNum` like /markets).
+  const params = new URLSearchParams({
+    active: 'true',
+    closed: 'false',
+    limit: fetchLimit.toString(),
+    order: 'liquidity',
+    ascending: 'false',
+  });
+
+  const url = `${BASE_URL}/events?${params.toString()}`;
+
+  try {
+    const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+    if (!res.ok) {
+      if (res.status === 429) {
+        gammaRateLimitedUntilMs = Date.now() + GAMMA_RATE_LIMIT_BACKOFF_MS;
+        throw new Error('Gamma API rate-limited (429) — circuit breaker open for 5 minutes');
+      }
+      throw new Error(`Gamma events error: ${res.status.toString()} ${res.statusText}`);
+    }
+    const data = (await res.json()) as GammaEvent[];
+    if (!Array.isArray(data)) return [];
+    // Client-side filter: only NegRisk events, capped at requested limit
+    return data.filter((e) => e.negRisk === true).slice(0, maxResults);
+  } catch (err) {
+    logger.warn('[gamma] getNegRiskEvents failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
 }
 
 /**

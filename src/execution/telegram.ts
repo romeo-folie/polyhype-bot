@@ -255,6 +255,36 @@ export async function notifyUnhedgedArbPosition(opts: {
 }
 
 /**
+ * CRITICAL: Notify that a NegRisk multi-leg arb partially filled, leaving
+ * unhedged YES positions on the filled legs.
+ */
+export async function notifyUnhedgedNegRiskPosition(opts: {
+  eventId: string;
+  eventTitle: string;
+  filledLegs: number;
+  totalLegs: number;
+  totalCostUsd: number;
+  failedLegMarketId: string;
+  failedLegError?: string;
+}): Promise<void> {
+  const text =
+    `🚨 <b>CRITICAL: Unhedged NegRisk Arb</b>\n\n` +
+    `<b>Event:</b> ${escapeHtml(opts.eventTitle)}\n` +
+    `<b>Event ID:</b> <code>${escapeHtml(opts.eventId)}</code>\n` +
+    `<b>Filled:</b> ${opts.filledLegs.toString()}/${opts.totalLegs.toString()} legs\n` +
+    `<b>Total spent:</b> $${opts.totalCostUsd.toFixed(2)} USDC — ` +
+    `<b>${(opts.totalLegs - opts.filledLegs).toString()} legs UNFILLED</b>\n` +
+    `<b>Failed at:</b> <code>${escapeHtml(opts.failedLegMarketId)}</code>\n` +
+    (opts.failedLegError
+      ? `<b>Error:</b> ${escapeHtml(opts.failedLegError)}\n`
+      : '') +
+    `\n⚠️ <b>Action: ${opts.filledLegs.toString()} unhedged YES positions recorded in ledger. ` +
+    `Manual intervention may be required.</b>`;
+
+  await notify(text);
+}
+
+/**
  * Notify when a market resolves — covers both wins and losses.
  * For wins this supplements the existing notifyRedemptionExecuted (which fires
  * only on successful on-chain redemptions). For losses this is the only

@@ -1,6 +1,7 @@
 import { getRedis, getSubscriberRedis, closeRedis } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
 import { runArbScan } from './scanner.js';
+import { runNegRiskArbScan } from './negRiskScanner.js';
 import { loadConfig } from '../shared/config.js';
 import { scanCryptoArb, scanUpDownArb } from './cryptoArbScanner.js';
 import { BINANCE_SYMBOL_TO_ASSET } from '../shared/assets.js';
@@ -52,7 +53,10 @@ export class ArbitrageWorker {
   private lastCryptoArbTradeTime = 0;
   private isScanning = false;
   private isCryptoArbRunning = false;
+  private isNegRiskArbRunning = false;
   private timer: NodeJS.Timeout | null = null;
+  private negRiskTimer: NodeJS.Timeout | null = null;
+  private negRiskScanIntervalMs = 30000;
   private warmer: ArbMarketWarmer | null = null;
   private chainlinkFeed: ChainlinkFeed | null = null;
   private oracleLagScanner: OracleLagScanner | null = null;
@@ -70,6 +74,7 @@ export class ArbitrageWorker {
     this.globalMaxTradesPerMin = cfg.ARB_GLOBAL_MAX_TRADES_PER_MIN;
     this.arbMaxTradesPerMin = cfg.ARB_MAX_TRADES_PER_MIN;
     this.cryptoArbMaxTradesPerMin = cfg.CRYPTO_ARB_MAX_TRADES_PER_MIN;
+    this.negRiskScanIntervalMs = cfg.NEGRISK_ARB_SCAN_INTERVAL_MS;
     if (!cfg.ARB_ENABLED) {
       logger.info('[arb-worker] arbitrage disabled in config, exiting');
       return;
@@ -193,6 +198,13 @@ export class ArbitrageWorker {
 
     // 2. Start baseline polling loop
     this.scheduleBaseline();
+
+    // 3. Start NegRisk multi-outcome arb scan (separate slower cadence)
+    this.scheduleNegRiskScan();
+    logger.info('[arb-worker] NegRisk arb scanner scheduled', {
+      intervalMs: this.negRiskScanIntervalMs,
+      enabled: cfg.NEGRISK_ARB_ENABLED,
+    });
   }
 
   private scheduleBaseline(): void {
@@ -200,6 +212,24 @@ export class ArbitrageWorker {
       await this.triggerScan('baseline');
       this.scheduleBaseline();
     }, this.baselineIntervalMs);
+  }
+
+  private scheduleNegRiskScan(): void {
+    this.negRiskTimer = setTimeout(async () => {
+      if (!this.isNegRiskArbRunning) {
+        this.isNegRiskArbRunning = true;
+        try {
+          await runNegRiskArbScan(getRedis());
+        } catch (err) {
+          logger.error('[negrisk-arb] scan failed in worker', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          this.isNegRiskArbRunning = false;
+        }
+      }
+      this.scheduleNegRiskScan();
+    }, this.negRiskScanIntervalMs);
   }
 
   /**
@@ -488,6 +518,10 @@ export class ArbitrageWorker {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
+    }
+    if (this.negRiskTimer) {
+      clearTimeout(this.negRiskTimer);
+      this.negRiskTimer = null;
     }
     const subscriber = getSubscriberRedis();
     void subscriber.unsubscribe('spot:price_moved').catch((e: unknown) => {

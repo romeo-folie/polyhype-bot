@@ -263,6 +263,29 @@ const envSchema = z.object({
   // Polymarket taker fee rate per trade (~2% default). Configurable for fee tier changes.
   ARB_FEE_RATE: z.coerce.number().min(0).max(1).optional().default(0.02),
 
+  // ── NegRisk Multi-Outcome Arbitrage ──
+  // Buys YES on every outcome in a NegRisk event when sum(asks) < 1.0 - fees.
+  // Ships dark (NEGRISK_ARB_ENABLED=false). Flip after shadow-log review.
+  NEGRISK_ARB_ENABLED: boolFromEnv.optional().default(false),
+  // Minimum net edge (after fees) to trigger execution.
+  NEGRISK_ARB_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.01),
+  // Bankroll fraction risked per NegRisk arb (lower than binary arb — multi-leg risk).
+  NEGRISK_ARB_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.03),
+  // Per-leg fee rate. Most NegRisk events are currently fee-free.
+  NEGRISK_ARB_FEE_RATE: z.coerce.number().min(0).max(1).optional().default(0.0),
+  // Minimum fraction of outcomes with active orderbooks to consider arb-able.
+  NEGRISK_ARB_MIN_COVERAGE: z.coerce.number().min(0).max(1).optional().default(0.90),
+  // Skip events with more outcomes than this (execution time grows linearly).
+  NEGRISK_ARB_MAX_OUTCOMES: z.coerce.number().int().min(2).optional().default(30),
+  // Dedup TTL — don't re-scan same event within this window.
+  NEGRISK_ARB_DEDUP_TTL_S: z.coerce.number().int().positive().optional().default(600),
+  // Max NegRisk events to fetch from Gamma per scan.
+  NEGRISK_ARB_MAX_EVENTS: z.coerce.number().int().min(1).optional().default(50),
+  // Max arb executions per scan cycle.
+  NEGRISK_ARB_MAX_PER_RUN: z.coerce.number().int().min(1).optional().default(1),
+  // Scan interval in ms (separate from binary arb's 10s baseline).
+  NEGRISK_ARB_SCAN_INTERVAL_MS: z.coerce.number().int().min(5000).optional().default(30000),
+
   // Crypto latency arbitrage (Phase 7)
   CRYPTO_ARB_ENABLED: boolFromEnv.optional().default(true),
   CRYPTO_ARB_VOLATILITY_GATE_ENABLED: boolFromEnv.optional().default(true),
