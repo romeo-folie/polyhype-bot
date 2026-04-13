@@ -450,6 +450,19 @@ const envSchema = z.object({
     .optional()
     .default('1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.3,1.3,1.3,1.3,1.3,1.5,1.5,1.5,1.5,1.2,1.2,1.2,1.2,0.8,0.8,0.8'),
 
+  // ── Phase 3: Calibration bias exploitation (Le 2026 recalibration) ──
+  // Adjusts market prices by domain-specific θ before edge calculation.
+  // p* = p^θ / [p^θ + (1-p)^θ] — corrects systematic over/underconfidence.
+  // Ships dark (ENABLED=false). Shadow-logs adjusted prices; flip after review.
+  CALIBRATION_BIAS_ENABLED: boolFromEnv.optional().default(false),
+  CALIBRATION_BIAS_THETA_POLITICS: z.coerce.number().min(0.1).max(5).optional().default(1.83),
+  CALIBRATION_BIAS_THETA_SPORTS_LONG: z.coerce.number().min(0.1).max(5).optional().default(1.74),
+  CALIBRATION_BIAS_THETA_SPORTS_SHORT: z.coerce.number().min(0.1).max(5).optional().default(1.20),
+  CALIBRATION_BIAS_THETA_WEATHER: z.coerce.number().min(0.1).max(5).optional().default(0.69),
+  CALIBRATION_BIAS_THETA_CRYPTO: z.coerce.number().min(0.1).max(5).optional().default(1.0),
+  CALIBRATION_BIAS_THETA_ENTERTAINMENT: z.coerce.number().min(0.1).max(5).optional().default(1.50),
+  CALIBRATION_BIAS_THETA_DEFAULT: z.coerce.number().min(0.1).max(5).optional().default(1.0),
+
   // Continuous improvement (Phase 8)
   CALIBRATION_ENABLED: boolFromEnv.optional().default(true),
   MIN_BET_USD: z.coerce.number().min(0).optional().default(5),
