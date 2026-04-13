@@ -1,9 +1,31 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   computeDivergence,
   computeHalfKelly,
   NOISE_STDDEV_THRESHOLD,
 } from '../divergenceCalculator.js';
+
+// Mock config for calibration bias tests — returns known theta values
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: () => ({
+    CALIBRATION_BIAS_THETA_POLITICS: 1.83,
+    CALIBRATION_BIAS_THETA_SPORTS_LONG: 1.74,
+    CALIBRATION_BIAS_THETA_SPORTS_SHORT: 1.20,
+    CALIBRATION_BIAS_THETA_WEATHER: 0.69,
+    CALIBRATION_BIAS_THETA_CRYPTO: 1.0,
+    CALIBRATION_BIAS_THETA_ENTERTAINMENT: 1.50,
+    CALIBRATION_BIAS_THETA_DEFAULT: 1.0,
+  }),
+}));
+
+vi.mock('../../shared/logger.js', () => ({
+  logger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
+}));
 
 const DEFAULT_INPUT = {
   bankrollUsd: 100,
@@ -332,5 +354,91 @@ describe('Kelly sign-stability gate', () => {
       currentYesPrice: 0.3,
     });
     expect(result.hasTrade).toBe(true);
+  });
+});
+
+describe('Calibration bias integration', () => {
+  const BIAS_INPUT = {
+    ...DEFAULT_INPUT,
+    divergenceThreshold: 0.05,
+  };
+
+  it('increases edge magnitude when enabled for politics (theta=1.83)', () => {
+    // Market at 0.65, consensus at 0.45. Without bias: edge = |0.45-0.65| = 0.20 (buy NO).
+    // With politics theta=1.83: recalibrated 0.65 → ~0.793 → edge = |0.45-0.793| = 0.343 (bigger).
+    const withBias = computeDivergence({
+      ...BIAS_INPUT,
+      consensusProbability: 0.45,
+      currentYesPrice: 0.65,
+      category: 'us-politics',
+      calibrationBiasEnabled: true,
+    });
+    const withoutBias = computeDivergence({
+      ...BIAS_INPUT,
+      consensusProbability: 0.45,
+      currentYesPrice: 0.65,
+      category: 'us-politics',
+      calibrationBiasEnabled: false,
+    });
+    expect(withBias.hasTrade).toBe(true);
+    expect(withoutBias.hasTrade).toBe(true);
+    expect(withBias.decision!.direction).toBe('NO');
+    expect(withoutBias.decision!.direction).toBe('NO');
+    // Bias-corrected edge should be larger
+    expect(withBias.decision!.edgeMagnitude).toBeGreaterThan(withoutBias.decision!.edgeMagnitude);
+  });
+
+  it('does not adjust price when disabled (shadow-only)', () => {
+    const disabled = computeDivergence({
+      ...BIAS_INPUT,
+      consensusProbability: 0.45,
+      currentYesPrice: 0.65,
+      category: 'us-politics',
+      calibrationBiasEnabled: false,
+    });
+    const noCategory = computeDivergence({
+      ...BIAS_INPUT,
+      consensusProbability: 0.45,
+      currentYesPrice: 0.65,
+    });
+    expect(disabled.hasTrade).toBe(true);
+    expect(noCategory.hasTrade).toBe(true);
+    expect(disabled.decision!.edgeMagnitude).toBe(noCategory.decision!.edgeMagnitude);
+    expect(disabled.decision!.direction).toBe(noCategory.decision!.direction);
+  });
+
+  it('EV gate blocks bias-only direction flips (raw price still negative EV)', () => {
+    // Market at 0.42, consensus at 0.40. Bias recalibrates 0.42 → ~0.354.
+    // Bias flips direction to YES, but EV gate uses raw price: payout = 1/0.42 = 2.38,
+    // EV = 0.39*2.38 - 1 = -0.07 → negative. Correctly blocked.
+    const result = computeDivergence({
+      ...BIAS_INPUT,
+      divergenceThreshold: 0.03,
+      consensusProbability: 0.40,
+      currentYesPrice: 0.42,
+      category: 'us-politics',
+      calibrationBiasEnabled: true,
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('negative_ev');
+  });
+
+  it('no adjustment for crypto category (theta=1.0)', () => {
+    const withCrypto = computeDivergence({
+      ...BIAS_INPUT,
+      consensusProbability: 0.60,
+      currentYesPrice: 0.40,
+      category: 'crypto-regulatory',
+      calibrationBiasEnabled: true,
+    });
+    const noCategory = computeDivergence({
+      ...BIAS_INPUT,
+      consensusProbability: 0.60,
+      currentYesPrice: 0.40,
+    });
+    // Crypto theta=1.0 → no adjustment → identical results
+    expect(withCrypto.hasTrade).toBe(true);
+    expect(noCategory.hasTrade).toBe(true);
+    expect(withCrypto.decision!.edgeMagnitude).toBe(noCategory.decision!.edgeMagnitude);
   });
 });

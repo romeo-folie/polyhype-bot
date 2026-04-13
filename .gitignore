@@ -29,3 +29,4 @@ pgdata/
 
 # Compose secrets (e.g. ./secrets/pg_password)
 secrets/
+.claude/worktrees/

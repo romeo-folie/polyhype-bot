@@ -203,6 +203,7 @@ export async function runMapping(
         noiseStddevThreshold: cfg.NOISE_STDDEV_THRESHOLD,
         kellyProbeDelta: cfg.KELLY_PROBE_DELTA,
         kellyRequireSignStable: cfg.KELLY_REQUIRE_SIGN_STABLE,
+        calibrationBiasEnabled: cfg.CALIBRATION_BIAS_ENABLED,
       });
 
       logger.info('[mapping] divergence result', {
