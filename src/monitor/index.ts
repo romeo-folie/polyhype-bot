@@ -167,8 +167,12 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     let tpThreshold = cfg.TAKE_PROFIT_THRESHOLD;
     let slThreshold = cfg.STOP_LOSS_THRESHOLD;
 
+    const isRebateFarming = position.sourcedFrom === 'rebate-farming';
     const isCopytrade = position.sourcedFrom?.startsWith('copytrade:');
-    if (isCopytrade) {
+    if (isRebateFarming) {
+      tpThreshold = cfg.REBATE_TAKE_PROFIT_PCT / 100;
+      slThreshold = cfg.REBATE_STOP_LOSS_PCT / 100;
+    } else if (isCopytrade) {
       tpThreshold = cfg.COPYTRADE_TAKE_PROFIT;
       slThreshold = cfg.COPYTRADE_STOP_LOSS;
       // Sports copytrades get a tighter SL — fast-resolving binaries where

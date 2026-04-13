@@ -580,11 +580,11 @@ describe('execution mode', () => {
     });
     mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-eligible-test' });
 
-    // copytrade and spot route through Simmer; crypto-arb bypasses Simmer
-    // entirely (resolver returns null) and goes straight to CLOB taker.
-    // None of them should ever submit a maker limit order.
-    const cases: { source: 'copytrade' | 'spot' | 'crypto-arb'; venue: 'simmer' | 'clob' }[] = [
-      { source: 'copytrade', venue: 'simmer' },
+    // spot routes through Simmer; crypto-arb bypasses Simmer entirely
+    // (resolver returns null) and goes straight to CLOB taker.
+    // These latency-sensitive sources should never submit a maker limit order.
+    // Note: copytrade is now maker-eligible (persistent alpha) — tested separately.
+    const cases: { source: 'spot' | 'crypto-arb'; venue: 'simmer' | 'clob' }[] = [
       { source: 'spot', venue: 'simmer' },
       { source: 'crypto-arb', venue: 'clob' },
     ];
@@ -598,6 +598,98 @@ describe('execution mode', () => {
       expect(result.entryOrderType).toBe('taker');
       expect(mockSubmitLimit).not.toHaveBeenCalled();
     }
+  });
+
+  it('attempts maker for copytrade signals in hybrid mode', async () => {
+    mockConfig.EXECUTION_MODE = 'hybrid';
+    mockConfig.MAKER_MAX_WAIT_MS = 10;
+    mockResolve.mockResolvedValue('simmer-uuid-123');
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.49', size: '100' }],
+      asks: [{ price: '0.51', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+    mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-copytrade' });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-copytrade',
+      status: 'filled',
+      owner: '0x1',
+      maker_address: '0x1',
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      side: 'BUY',
+      original_size: '10',
+      size_matched: '10',
+      price: '0.49',
+      associate_trades: [],
+      outcome: 'YES',
+      created_at: Date.now(),
+      expiration: '',
+      order_type: 'GTC',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'copytrade' }), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('clob');
+    expect(result.entryOrderType).toBe('maker');
+    expect(mockSubmitLimit).toHaveBeenCalled();
+    expect(mockSubmit).not.toHaveBeenCalled();
+  });
+
+  it('attempts maker for near-zero-arb signals in hybrid mode', async () => {
+    mockConfig.EXECUTION_MODE = 'hybrid';
+    mockConfig.MAKER_MAX_WAIT_MS = 10;
+    mockResolve.mockResolvedValue('simmer-uuid-123');
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.49', size: '100' }],
+      asks: [{ price: '0.51', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+    mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-nza' });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-nza',
+      status: 'filled',
+      owner: '0x1',
+      maker_address: '0x1',
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      side: 'BUY',
+      original_size: '10',
+      size_matched: '10',
+      price: '0.49',
+      associate_trades: [],
+      outcome: 'YES',
+      created_at: Date.now(),
+      expiration: '',
+      order_type: 'GTC',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'near-zero-arb' }), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('clob');
+    expect(result.entryOrderType).toBe('maker');
+    expect(mockSubmitLimit).toHaveBeenCalled();
+    expect(mockSubmit).not.toHaveBeenCalled();
   });
 
   it('attempts maker for osint signals in hybrid mode', async () => {

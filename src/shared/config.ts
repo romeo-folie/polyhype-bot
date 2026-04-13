@@ -147,13 +147,13 @@ const envSchema = z.object({
   EXECUTION_MODE: z.enum(['hybrid', 'maker', 'taker']).optional().default('hybrid'),
   MAKER_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(45_000),
   MAKER_POLL_INTERVAL_MS: z.coerce.number().int().min(50).optional().default(1000),
-  MAKER_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(20),
+  MAKER_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(40),
   // Maker-exit (PM CLOB-entered positions only). Exits are more time-sensitive
   // than entries, so MAKER_EXIT_MAX_WAIT_MS defaults shorter than MAKER_MAX_WAIT_MS.
   // Eligible reasons is a comma-separated list; stop_loss is intentionally NOT eligible.
   MAKER_EXIT_ENABLED: boolFromEnv.optional().default(false),
-  MAKER_EXIT_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(20_000),
-  MAKER_EXIT_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(20),
+  MAKER_EXIT_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(30_000),
+  MAKER_EXIT_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(40),
   MAKER_EXIT_ELIGIBLE_REASONS: z
     .string()
     .optional()
@@ -611,6 +611,36 @@ const envSchema = z.object({
   // fraction of peak. Markets that have always been flat near zero are dead horses.
   // A market that peaked at 20¢ and is now 5¢ has a 75% drop — good candidate.
   NEAR_ZERO_MIN_PRICE_DROP_PCT: z.coerce.number().min(0).max(1).optional().default(0.10),
+
+  // --- REBATE FARMING (passive maker liquidity provision) ---
+  // Places resting GTC post-only limit orders on high-volume tight-spread markets
+  // to earn maker rebates (Polymarket distributes 100% of taker fees to makers).
+  // Filled orders become positions tracked by the monitor with tight TP/SL.
+  REBATE_FARMING_ENABLED: boolFromEnv.optional().default(false),
+  // Maximum fraction of bankroll deployed to resting rebate orders.
+  REBATE_MAX_BANKROLL_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.10),
+  // Hard cap on total USD in resting rebate orders.
+  REBATE_MAX_TOTAL_USD: z.coerce.number().min(0).optional().default(50),
+  // USD per individual resting order.
+  REBATE_ORDER_SIZE_USD: z.coerce.number().min(1).optional().default(5),
+  // Maximum number of markets to have resting orders on simultaneously.
+  REBATE_MAX_MARKETS: z.coerce.number().int().min(1).optional().default(10),
+  // Maximum USD exposure per market (prevents doubling up).
+  REBATE_MAX_PER_MARKET_USD: z.coerce.number().min(1).optional().default(10),
+  // TTL for resting orders before cancel + refresh at new prices (seconds).
+  REBATE_ORDER_TTL_S: z.coerce.number().int().min(60).optional().default(300),
+  // Minimum spread in basis points — below this, no room to profitably rest as maker.
+  REBATE_MIN_SPREAD_BPS: z.coerce.number().min(0).optional().default(50),
+  // Minimum 24h volume (USD) for market selection.
+  REBATE_MIN_VOLUME: z.coerce.number().min(0).optional().default(50_000),
+  // Minimum liquidity (USD) for market selection.
+  REBATE_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(10_000),
+  // Skip fee-enabled markets (rebate economics differ on fee markets).
+  REBATE_SKIP_FEE_MARKETS: boolFromEnv.optional().default(true),
+  // Take-profit threshold for rebate-farmed positions (lower than directional trades).
+  REBATE_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(3),
+  // Stop-loss threshold for rebate-farmed positions (tight since no directional conviction).
+  REBATE_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(5),
 
   // --- CRYPTO FUTURES (Phase: futures) ---
   FUTURES_ENABLED: boolFromEnv.optional().default(false),
