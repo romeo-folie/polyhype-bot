@@ -671,6 +671,39 @@ const envSchema = z.object({
   // Comma-separated category IDs exempt from the bias (well-calibrated domains).
   LONGSHOT_EXEMPT_CATEGORIES: z.string().optional().default('crypto-regulatory,macro'),
 
+  // --- CORRELATION ARBITRAGE SCANNER ---
+  // Discovers logical constraints between markets (implication, mutual-exclusion)
+  // and trades the underpriced side when constraints are violated.
+  // Discovery runs every 6h; violation scan runs every 15min.
+  // Ships dark — shadow-log first, review logs, then enable.
+  CORRELATION_SCANNER_ENABLED: boolFromEnv.optional().default(false),
+  // Minimum shared entity tokens for two markets to be paired for LLM analysis.
+  CORRELATION_MIN_SHARED_ENTITIES: z.coerce.number().int().min(1).optional().default(2),
+  // Maximum pairs to classify per discovery run (LLM cost control).
+  CORRELATION_MAX_PAIRS_PER_DISCOVERY: z.coerce.number().int().min(1).optional().default(100),
+  // Delay between LLM classification calls (ms) to avoid rate limits.
+  CORRELATION_CLASSIFY_DELAY_MS: z.coerce.number().int().min(0).optional().default(200),
+  // How long to keep discovered constraints in Redis before re-discovery (seconds).
+  CORRELATION_GRAPH_TTL_S: z.coerce.number().int().positive().optional().default(7 * 24 * 3600),
+  // Pair-seen dedup TTL — prevents re-classifying the same pair within one discovery cycle.
+  CORRELATION_PAIR_DEDUP_TTL_S: z.coerce.number().int().positive().optional().default(86400),
+  // LLM classification result cache TTL (seconds).
+  CORRELATION_CLASSIFY_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(172800),
+  // Minimum constraint violation edge to trigger a trade signal.
+  CORRELATION_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.05),
+  // Minimum market liquidity (USD) for markets included in the graph.
+  CORRELATION_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(1000),
+  // Dedup TTL for executed trades — prevents re-entry on the same violation.
+  CORRELATION_DEDUP_TTL_S: z.coerce.number().int().positive().optional().default(3600),
+  // Maximum trades per scanner run.
+  CORRELATION_MAX_TRADES_PER_RUN: z.coerce.number().int().min(1).optional().default(3),
+  // Maximum USD stake per correlation-arb trade.
+  CORRELATION_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(10),
+  // Bankroll fraction for correlation-arb trades.
+  CORRELATION_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.02),
+  // Maximum markets to consider in the discovery pairing step (liquidity-ranked).
+  CORRELATION_MAX_MARKETS_FOR_DISCOVERY: z.coerce.number().int().min(1).optional().default(500),
+
   // --- REBATE FARMING (passive maker liquidity provision) ---
   // Places resting GTC post-only limit orders on high-volume tight-spread markets
   // to earn maker rebates (Polymarket distributes 100% of taker fees to makers).
