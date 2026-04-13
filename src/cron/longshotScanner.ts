@@ -3,7 +3,7 @@
  *
  * Exploits the favorite-longshot bias documented by Whelan's study of 300K
  * Polymarket contracts: YES contracts priced 3-15 cents are systematically overpriced
- * due to retail optimism. The scanner buys NO (85-97 cents) to bet against the bias.
+ * due to retail optimism. The scanner buys NO to bet against the bias.
  *
  * Category-specific optimism gaps (from academic research):
  *   - Entertainment/media: ~5 percentage points overpriced
@@ -40,8 +40,6 @@ const DEDUP_KEY_PREFIX = 'longshot:attempted:';
 const CATEGORY_OPTIMISM_GAP: Record<string, number> = {
   'entertainment': 0.05,
   'sports': 0.02,
-  'sports-nba': 0.02,
-  'sports-nhl': 0.02,
   'us-politics': 0.03,
   'geopolitical': 0.03,
   'ai-tech': 0.03,
@@ -160,7 +158,6 @@ export async function scanForLongshotBias(redis: Redis): Promise<LongshotOpportu
   let multiOutcomeFiltered = 0;
   let exemptFiltered = 0;
   let priceFiltered = 0;
-  let dedupFiltered = 0;
   let edgeFiltered = 0;
   let liquidityFiltered = 0;
 
@@ -199,15 +196,7 @@ export async function scanForLongshotBias(redis: Redis): Promise<LongshotOpportu
         continue;
       }
 
-      // Gate 4: Dedup -- skip markets we already evaluated recently.
-      const dedupKey = `${DEDUP_KEY_PREFIX}${market.id}`;
-      const exists = await redis.get(dedupKey);
-      if (exists) {
-        dedupFiltered++;
-        continue;
-      }
-
-      // Gate 5: Compute optimism gap and edge.
+      // Gate 4: Compute optimism gap and edge.
       const optimismGap = CATEGORY_OPTIMISM_GAP[category] ?? CATEGORY_OPTIMISM_GAP.default!;
       // The edge from buying NO: the structural bias means yesPrice is ~optimismGap
       // too high. The "true" NO price should be (1 - (yesPrice - optimismGap)), but
@@ -272,7 +261,6 @@ export async function scanForLongshotBias(redis: Redis): Promise<LongshotOpportu
     multiOutcomeFiltered,
     exemptFiltered,
     priceFiltered,
-    dedupFiltered,
     edgeFiltered,
     liquidityFiltered,
     qualified: opportunities.length,
@@ -308,7 +296,7 @@ export async function runLongshotScan(redis: Redis): Promise<void> {
 
     const stakeUsd = Math.min(
       bankrollUsd * cfg.LONGSHOT_MAX_STAKE_FRACTION,
-      cfg.LONGSHOT_MIN_LIQUIDITY * 0.01, // never take more than 1% of stated liquidity
+      opp.liquidity * 0.01, // never take more than 1% of actual market liquidity
     );
 
     const wouldExecute = cfg.LONGSHOT_SCANNER_ENABLED && stakeUsd > 0;

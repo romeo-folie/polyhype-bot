@@ -292,9 +292,11 @@ describe('longshotScanner', () => {
 
   // ── Dedup behavior ────────────────────────────────────────────────────
 
-  it('skips already-deduped markets', async () => {
-    const mockGet = vi.fn().mockResolvedValue('1'); // dedup key exists
-    const redis = makeRedis({ get: mockGet });
+  it('skips already-deduped markets via NX-claim in runLongshotScan', async () => {
+    // Dedup is done at execution time via NX-claim, not at scan time.
+    // Simulate NX returning null (key already exists) — should skip execution.
+    const mockSet = vi.fn().mockResolvedValue(null); // NX claim fails
+    const redis = makeRedis({ set: mockSet });
     mockGetCachedMarkets.mockResolvedValue([
       makeMarket({
         id: 'deduped-mkt',
@@ -303,9 +305,11 @@ describe('longshotScanner', () => {
         liquidity: '3000',
       }),
     ]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, LONGSHOT_SCANNER_ENABLED: true });
 
-    const opps = await scanForLongshotBias(redis);
-    expect(opps).toHaveLength(0);
+    await runLongshotScan(redis);
+    // Should NOT call executeSignal since NX-claim failed
+    expect(mockExecuteSignal).not.toHaveBeenCalled();
   });
 
   it('claims dedup key with NX during runLongshotScan', async () => {
