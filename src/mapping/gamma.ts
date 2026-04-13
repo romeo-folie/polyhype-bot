@@ -269,13 +269,18 @@ export async function getActiveMarkets(maxTotal = 1000, pageSize = 500): Promise
  * NegRisk events have N mutually exclusive outcomes — exactly one resolves YES
  * at $1.00. Each outcome is a separate market with its own CLOB order book.
  *
- * Client-side filters `negRisk === true` as a safety net (the Gamma
- * `neg_risk` query parameter may not filter server-side reliably).
+ * Gamma API does not support a `neg_risk` query parameter (returns 422),
+ * so we fetch top events by liquidity and filter client-side.
+ * The `limit` here controls the Gamma fetch window; the returned array
+ * will be smaller (only NegRisk events).
  */
 export async function getNegRiskEvents(opts?: {
   limit?: number;
 }): Promise<GammaEvent[]> {
-  const limit = opts?.limit ?? 50;
+  const maxResults = opts?.limit ?? 50;
+  // Over-fetch from Gamma since we filter client-side; NegRisk events
+  // are a subset of all events. 200 covers well beyond any reasonable max.
+  const fetchLimit = Math.max(maxResults * 4, 200);
 
   if (Date.now() < gammaRateLimitedUntilMs) {
     if (!gammaRateLimitLogged) {
@@ -288,11 +293,12 @@ export async function getNegRiskEvents(opts?: {
   }
   gammaRateLimitLogged = false;
 
+  // Note: `neg_risk` query param is NOT supported by Gamma (returns 422).
+  // We fetch all top-liquidity events and filter client-side.
   const params = new URLSearchParams({
     active: 'true',
     closed: 'false',
-    neg_risk: 'true',
-    limit: limit.toString(),
+    limit: fetchLimit.toString(),
     order: 'liquidityNum',
     ascending: 'false',
   });
@@ -310,8 +316,8 @@ export async function getNegRiskEvents(opts?: {
     }
     const data = (await res.json()) as GammaEvent[];
     if (!Array.isArray(data)) return [];
-    // Client-side safety filter — the query param may not filter server-side
-    return data.filter((e) => e.negRisk === true);
+    // Client-side filter: only NegRisk events, capped at requested limit
+    return data.filter((e) => e.negRisk === true).slice(0, maxResults);
   } catch (err) {
     logger.warn('[gamma] getNegRiskEvents failed', {
       error: err instanceof Error ? err.message : String(err),
