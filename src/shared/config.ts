@@ -835,7 +835,7 @@ const envSchema = z.object({
   // uncertainty grows with horizon and model error is correlated across markets.
   WEATHER_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.02),
   // Dedup TTL — weather markets reprice slowly, so 1h is sufficient.
-  WEATHER_DEDUP_TTL_S: z.coerce.number().int().min(0).optional().default(3600),
+  WEATHER_DEDUP_TTL_S: z.coerce.number().int().min(1).optional().default(3600),
   // Maximum weather markets to evaluate per scan cycle.
   WEATHER_MAX_MARKETS: z.coerce.number().int().min(1).optional().default(20),
 });

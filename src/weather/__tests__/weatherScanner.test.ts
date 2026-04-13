@@ -468,7 +468,7 @@ describe('scanWeatherMarkets', () => {
     );
   });
 
-  it('filters opportunities below minimum edge', async () => {
+  it('includes opportunities above minimum edge', async () => {
     mockSearchEvents.mockResolvedValue([
       {
         id: 'event-1',
@@ -514,7 +514,7 @@ describe('scanWeatherMarkets', () => {
 
     // With forecast of 81 and threshold of 80 at 4+ days out (stddev=6):
     // z = (80-81)/6 = -0.167, P(X>80) ~ 0.566
-    // edge = 0.566 - 0.50 = 0.066 > 0.05 min edge -- passes
+    // edge = 0.566 - 0.50 = 0.066 > 0.05 min edge -- included in results
     expect(results.length).toBe(1);
     expect(results[0]!.edge).toBeCloseTo(0.066, 1);
   });

@@ -22,7 +22,7 @@
 import type { Redis } from 'ioredis';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
-import { searchEvents, parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
+import { searchEvents, parseOutcomePrices, parseClobTokenIds, parseOutcomes } from '../mapping/gamma.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import {
   lookupCity,
@@ -130,9 +130,10 @@ export function parseWeatherQuestion(question: string): ParsedWeatherQuestion | 
   }
   if (tempThresholdF === null) return null;
 
-  // Detect direction
+  // Detect direction — return null when ambiguous (neither keyword set)
   const hasOver = OVER_KEYWORDS.test(q);
   const hasUnder = UNDER_KEYWORDS.test(q);
+  if (!hasOver && !hasUnder) return null;
   const direction: 'over' | 'under' = hasUnder && !hasOver ? 'under' : 'over';
 
   // Detect metric (high vs low temperature)
@@ -160,7 +161,14 @@ export function parseWeatherQuestion(question: string): ParsedWeatherQuestion | 
     if (match[1] && match[2]) {
       const monthNum = MONTH_MAP[match[1].toLowerCase()];
       if (monthNum) {
-        const year = match[3] ? parseInt(match[3], 10) : new Date().getFullYear();
+        let year = match[3] ? parseInt(match[3], 10) : new Date().getFullYear();
+        // When year is omitted and the date is already past, assume next year
+        if (!match[3]) {
+          const candidate = new Date(`${year}-${monthNum.toString().padStart(2, '0')}-${match[2].padStart(2, '0')}T12:00:00Z`);
+          if (candidate.getTime() < Date.now()) {
+            year += 1;
+          }
+        }
         targetDate = `${year.toString()}-${monthNum.toString().padStart(2, '0')}-${match[2].padStart(2, '0')}`;
         break;
       }
@@ -186,7 +194,7 @@ export interface WeatherOpportunity {
   outcomePrice: number;
   /** Our forecast probability of the YES outcome. */
   forecastProbability: number;
-  /** Edge magnitude (always positive). */
+  /** Edge magnitude (absolute value — meetsEdge gate filters negatives). */
   edge: number;
   /** Which side to trade: YES (buy YES) or NO (buy NO). */
   tradeSide: 'YES' | 'NO';
@@ -282,6 +290,16 @@ export async function scanWeatherMarkets(
       continue;
     }
 
+    // Binary market guard — weather markets must be Yes/No (exactly 2 outcomes)
+    if (market.outcomes) {
+      try {
+        const outcomeList = parseOutcomes(market.outcomes);
+        if (outcomeList.length !== 2) continue;
+      } catch {
+        continue;
+      }
+    }
+
     // Parse CLOB token IDs early — skip unparseable markets before any API calls
     let clobTokenIds: string[];
     try {
@@ -354,10 +372,10 @@ export async function scanWeatherMarkets(
     let edge: number;
     if (edgeYes >= edgeNo) {
       tradeSide = 'YES';
-      edge = edgeYes;
+      edge = Math.abs(edgeYes);
     } else {
       tradeSide = 'NO';
-      edge = edgeNo;
+      edge = Math.abs(edgeNo);
     }
 
     const opp: WeatherOpportunity = {
