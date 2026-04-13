@@ -104,11 +104,14 @@ const MONTH_MAP: Record<string, number> = {
 export function parseWeatherQuestion(question: string): ParsedWeatherQuestion | null {
   const q = question.trim();
 
-  // Extract city
+  // Extract city — use word-boundary matching to avoid false matches
+  // (e.g. "la" matching inside "Dallas" or "Atlanta").
   const qLower = q.toLowerCase();
   let city: string | null = null;
   for (const c of KNOWN_CITIES) {
-    if (qLower.includes(c)) {
+    const escaped = c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`\\b${escaped}\\b`, 'i');
+    if (re.test(qLower)) {
       city = c;
       break;
     }
@@ -176,10 +179,14 @@ export interface WeatherOpportunity {
   question: string;
   clobTokenIds: string[];
   /** Market YES price. */
-  marketPrice: number;
+  yesPrice: number;
+  /** Market NO price. */
+  noPrice: number;
+  /** Price of the outcome we would actually trade (yesPrice or noPrice). */
+  outcomePrice: number;
   /** Our forecast probability of the YES outcome. */
   forecastProbability: number;
-  /** Edge = forecastProbability - marketPrice (positive = market underpriced). */
+  /** Edge magnitude (always positive). */
   edge: number;
   /** Which side to trade: YES (buy YES) or NO (buy NO). */
   tradeSide: 'YES' | 'NO';
@@ -298,10 +305,10 @@ export async function scanWeatherMarkets(
       continue;
     }
 
-    // Step 5: Dedup check (after parsing, before expensive API calls)
+    // Step 5: Atomic dedup claim (after parsing, before expensive API calls)
     const dedupKey = `${DEDUP_KEY_PREFIX}${market.id}`;
-    const exists = await redis.get(dedupKey);
-    if (exists) {
+    const claimed = await redis.set(dedupKey, '1', 'EX', cfg.WEATHER_DEDUP_TTL_S, 'NX');
+    if (!claimed) {
       dedupSkipped++;
       continue;
     }
@@ -353,15 +360,14 @@ export async function scanWeatherMarkets(
       edge = edgeNo;
     }
 
-    // Mark dedup after successful parsing + forecast fetch
-    await redis.set(dedupKey, '1', 'EX', cfg.WEATHER_DEDUP_TTL_S);
-
     const opp: WeatherOpportunity = {
       marketId: market.id,
       conditionId: market.conditionId,
       question: market.question,
       clobTokenIds,
-      marketPrice: yesPrice,
+      yesPrice,
+      noPrice,
+      outcomePrice: tradeSide === 'YES' ? yesPrice : noPrice,
       forecastProbability: forecastPYes,
       edge,
       tradeSide,
@@ -387,6 +393,8 @@ export async function scanWeatherMarkets(
       forecastTemp: relevantTemp,
       forecastPYes: forecastPYes.toFixed(3),
       marketYesPrice: yesPrice.toFixed(3),
+      marketNoPrice: noPrice.toFixed(3),
+      outcomePrice: opp.outcomePrice.toFixed(3),
       edge: edge.toFixed(3),
       tradeSide,
       meetsEdge,
@@ -441,7 +449,7 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       tradeSide: opp.tradeSide,
       edge: opp.edge.toFixed(3),
       forecastProbability: opp.forecastProbability.toFixed(3),
-      marketPrice: opp.marketPrice.toFixed(3),
+      outcomePrice: opp.outcomePrice.toFixed(3),
       city: opp.parsed.city,
       daysOut: opp.daysOut,
     });

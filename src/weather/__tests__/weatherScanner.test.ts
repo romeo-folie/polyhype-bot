@@ -59,12 +59,13 @@ const { estimateExceedanceProbability, normalCdf, lookupCity } = await import(
 );
 const { logger } = await import('../../shared/logger.js');
 
-// Minimal Redis mock
+// Minimal Redis mock — supports SET NX EX pattern
 function createRedisMock() {
   const store = new Map<string, string>();
   return {
     get: vi.fn((key: string) => Promise.resolve(store.get(key) ?? null)),
-    set: vi.fn((key: string, value: string, _ex?: string, _ttl?: number) => {
+    set: vi.fn((key: string, value: string, _ex?: string, _ttl?: number, nx?: string) => {
+      if (nx === 'NX' && store.has(key)) return Promise.resolve(null);
       store.set(key, value);
       return Promise.resolve('OK');
     }),
@@ -89,15 +90,15 @@ describe('parseWeatherQuestion', () => {
     expect(result!.targetDate).toMatch(/^\d{4}-04-15$/);
   });
 
-  it('parses "Will the high temperature in Chicago exceed 90°F on July 4, 2026?"', () => {
+  it('parses "Will the high temperature in Chicago exceed 90°F on July 4, 2030?"', () => {
     const result = parseWeatherQuestion(
-      'Will the high temperature in Chicago exceed 90\u00b0F on July 4, 2026?',
+      'Will the high temperature in Chicago exceed 90\u00b0F on July 4, 2030?',
     );
     expect(result).not.toBeNull();
     expect(result!.city).toBe('chicago');
     expect(result!.tempThresholdF).toBe(90);
     expect(result!.direction).toBe('over');
-    expect(result!.targetDate).toBe('2026-07-04');
+    expect(result!.targetDate).toBe('2030-07-04');
   });
 
   it('parses "Will the temperature in Miami drop below 32°F on January 10?"', () => {
@@ -157,6 +158,22 @@ describe('parseWeatherQuestion', () => {
       'Will the temperature in NYC exceed 80\u00b0F?',
     );
     expect(result).toBeNull();
+  });
+
+  it('does not false-match "la" inside "Dallas"', () => {
+    const result = parseWeatherQuestion(
+      'Will the high temperature in Dallas exceed 100\u00b0F on July 4, 2030?',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.city).toBe('dallas');
+  });
+
+  it('does not false-match "la" inside "Atlanta"', () => {
+    const result = parseWeatherQuestion(
+      'Will the high temperature in Atlanta exceed 95\u00b0F on August 1, 2030?',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.city).toBe('atlanta');
   });
 
   it('parses ISO date format', () => {
@@ -332,7 +349,7 @@ describe('scanWeatherMarkets', () => {
         markets: [
           {
             id: 'market-1',
-            question: 'Will the high temperature in NYC exceed 80\u00b0F on April 20, 2026?',
+            question: 'Will the high temperature in NYC exceed 80\u00b0F on July 15, 2030?',
             conditionId: 'cond-1',
             clobTokenIds: '["token-yes","token-no"]',
             outcomePrices: '["0.50","0.50"]',
@@ -341,7 +358,7 @@ describe('scanWeatherMarkets', () => {
             closed: false,
             volume: '10000',
             liquidity: '5000',
-            endDate: '2026-04-20T23:59:59Z',
+            endDate: '2030-07-15T23:59:59Z',
             description: null,
           },
         ],
@@ -353,7 +370,7 @@ describe('scanWeatherMarkets', () => {
       highF: 88,
       lowF: 65,
       precipProbability: 10,
-      forecastDate: '2026-04-20',
+      forecastDate: '2030-07-15',
       shortForecast: 'Mostly Sunny',
     });
 
@@ -388,7 +405,7 @@ describe('scanWeatherMarkets', () => {
         markets: [
           {
             id: 'market-dedup',
-            question: 'Will the high temperature in NYC exceed 80\u00b0F on April 20, 2026?',
+            question: 'Will the high temperature in NYC exceed 80\u00b0F on July 15, 2030?',
             conditionId: 'cond-1',
             clobTokenIds: '["token-yes","token-no"]',
             outcomePrices: '["0.50","0.50"]',
@@ -397,7 +414,7 @@ describe('scanWeatherMarkets', () => {
             closed: false,
             volume: '10000',
             liquidity: '5000',
-            endDate: '2026-04-20T23:59:59Z',
+            endDate: '2030-07-15T23:59:59Z',
             description: null,
           },
         ],
@@ -425,7 +442,7 @@ describe('scanWeatherMarkets', () => {
         markets: [
           {
             id: 'market-london',
-            question: 'Will the high temperature in London exceed 30\u00b0F on April 20, 2026?',
+            question: 'Will the high temperature in London exceed 30\u00b0F on July 15, 2030?',
             conditionId: 'cond-1',
             clobTokenIds: '["token-yes","token-no"]',
             outcomePrices: '["0.50","0.50"]',
@@ -434,7 +451,7 @@ describe('scanWeatherMarkets', () => {
             closed: false,
             volume: '10000',
             liquidity: '5000',
-            endDate: '2026-04-20T23:59:59Z',
+            endDate: '2030-07-15T23:59:59Z',
             description: null,
           },
         ],
@@ -462,7 +479,7 @@ describe('scanWeatherMarkets', () => {
         markets: [
           {
             id: 'market-low-edge',
-            question: 'Will the high temperature in NYC exceed 80\u00b0F on April 20, 2026?',
+            question: 'Will the high temperature in NYC exceed 80\u00b0F on July 15, 2030?',
             conditionId: 'cond-1',
             clobTokenIds: '["token-yes","token-no"]',
             outcomePrices: '["0.50","0.50"]',
@@ -471,7 +488,7 @@ describe('scanWeatherMarkets', () => {
             closed: false,
             volume: '10000',
             liquidity: '5000',
-            endDate: '2026-04-20T23:59:59Z',
+            endDate: '2030-07-15T23:59:59Z',
             description: null,
           },
         ],
@@ -483,7 +500,7 @@ describe('scanWeatherMarkets', () => {
       highF: 81,
       lowF: 65,
       precipProbability: 10,
-      forecastDate: '2026-04-20',
+      forecastDate: '2030-07-15',
       shortForecast: 'Partly Cloudy',
     });
 
@@ -495,7 +512,7 @@ describe('scanWeatherMarkets', () => {
       expect.objectContaining({ marketId: 'market-low-edge' }),
     );
 
-    // With forecast of 81 and threshold of 80 at ~7 days out (stddev=6):
+    // With forecast of 81 and threshold of 80 at 4+ days out (stddev=6):
     // z = (80-81)/6 = -0.167, P(X>80) ~ 0.566
     // edge = 0.566 - 0.50 = 0.066 > 0.05 min edge -- passes
     expect(results.length).toBe(1);
@@ -517,7 +534,7 @@ describe('scanWeatherMarkets', () => {
   it('deduplicates markets from both search queries', async () => {
     const sharedMarket = {
       id: 'market-shared',
-      question: 'Will the high temperature in Chicago exceed 95\u00b0F on July 4, 2026?',
+      question: 'Will the high temperature in Chicago exceed 95\u00b0F on July 4, 2030?',
       conditionId: 'cond-1',
       clobTokenIds: '["token-yes","token-no"]',
       outcomePrices: '["0.40","0.60"]',
@@ -526,7 +543,7 @@ describe('scanWeatherMarkets', () => {
       closed: false,
       volume: '10000',
       liquidity: '5000',
-      endDate: '2026-07-04T23:59:59Z',
+      endDate: '2030-07-04T23:59:59Z',
       description: null,
     };
 
@@ -546,7 +563,7 @@ describe('scanWeatherMarkets', () => {
       highF: 98,
       lowF: 75,
       precipProbability: 5,
-      forecastDate: '2026-07-04',
+      forecastDate: '2030-07-04',
       shortForecast: 'Hot',
     });
 
