@@ -279,8 +279,8 @@ export async function getNegRiskEvents(opts?: {
 }): Promise<GammaEvent[]> {
   const maxResults = opts?.limit ?? 50;
   // Over-fetch from Gamma since we filter client-side; NegRisk events
-  // are a subset of all events. 200 covers well beyond any reasonable max.
-  const fetchLimit = Math.max(maxResults * 4, 200);
+  // are a subset of all events. Capped at 500 (Gamma API per-request max).
+  const fetchLimit = Math.min(Math.max(maxResults * 4, 200), 500);
 
   if (Date.now() < gammaRateLimitedUntilMs) {
     if (!gammaRateLimitLogged) {

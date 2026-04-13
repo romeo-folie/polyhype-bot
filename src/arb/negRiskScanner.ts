@@ -148,7 +148,7 @@ async function fetchOrderbooks(
  * Scan NegRisk events for multi-outcome arb opportunities.
  *
  * Two-stage filter:
- *   1. Quick-reject on Gamma mid-prices (sum >= 1.0 → no arb possible)
+ *   1. Quick-reject on Gamma outcomePrices (best-bid) when sum >= 1.0
  *   2. Fetch CLOB orderbooks for surviving candidates and compute executable edge
  */
 export async function scanNegRiskArb(redis: Redis): Promise<NegRiskArbOpportunity[]> {
@@ -174,11 +174,18 @@ export async function scanNegRiskArb(redis: Redis): Promise<NegRiskArbOpportunit
       continue;
     }
 
-    // Dedup check
-    const deduped = await redis.get(dedupKey(event.id));
-    if (deduped) continue;
+    // Dedup check/claim — set key even during shadow-logging to avoid
+    // re-fetching orderbooks for the same event every scan cycle
+    const dedupClaimed = await redis.set(
+      dedupKey(event.id),
+      '1',
+      'EX',
+      cfg.NEGRISK_ARB_DEDUP_TTL_S,
+      'NX',
+    );
+    if (dedupClaimed !== 'OK') continue;
 
-    // ── Stage 1: Quick-reject on Gamma mid-prices ──────────────────────
+    // ── Stage 1: Quick-reject on Gamma outcomePrices ───────────────────
     let gammaMidSum = 0;
     let parseable = true;
     const marketMeta: {
@@ -203,7 +210,7 @@ export async function scanNegRiskArb(redis: Redis): Promise<NegRiskArbOpportunit
     }
 
     if (!parseable) continue;
-    // If sum of Gamma mid-prices >= 1.0, no arb even on optimistic pricing
+    // If sum of Gamma outcomePrices >= 1.0, no arb even on optimistic pricing
     if (gammaMidSum >= 1.0) continue;
 
     // ── Stage 2: Fetch CLOB orderbooks for executable pricing ──────────
@@ -323,27 +330,9 @@ export async function executeNegRiskArb(
     }
   }
 
-  // Dedup claim
-  const claimed = await redis.set(
-    dedupKey(opp.eventId),
-    '1',
-    'EX',
-    cfg.NEGRISK_ARB_DEDUP_TTL_S,
-    'NX',
-  );
-  if (!claimed) {
-    return {
-      eventId: opp.eventId,
-      success: false,
-      lastFilledLegIndex: -1,
-      totalLegs: opp.legs.length,
-      totalCostUsd: 0,
-      numShares: 0,
-      edge: opp.edge,
-      error: 'dedup_concurrent',
-      legResults: [],
-    };
-  }
+  // Record global trade activity BEFORE execution so the governor reflects
+  // submitted orders even if execution partially fails
+  await recordGlobalTrade(redis, 'polymarket');
 
   logger.info('[negrisk-arb] executing multi-leg arb', {
     eventId: opp.eventId,
@@ -405,19 +394,20 @@ export async function executeNegRiskArb(
 
   // All legs filled → success
   if (lastFilledLegIndex === opp.legs.length - 1) {
-    const feeAdjustedCost = totalCostUsd * (1 + cfg.NEGRISK_ARB_FEE_RATE);
+    // Use same per-leg fee model as scanner: fee = p*(1-p)*feeRate per leg
+    const feeAdjustedCost = totalCostUsd + opp.totalFees * shares;
     await deductStake(redis, feeAdjustedCost);
-    await recordGlobalTrade(redis, 'polymarket');
 
     logger.info('[negrisk-arb] all legs filled — success', {
       eventId: opp.eventId,
       title: opp.eventTitle,
       legs: opp.legs.length,
       totalCostUsd: totalCostUsd.toFixed(4),
+      feeAdjustedCost: feeAdjustedCost.toFixed(4),
       shares: shares.toFixed(4),
       edge: opp.edge.toFixed(4),
       guaranteedReturn: shares.toFixed(4),
-      projectedProfit: (shares - totalCostUsd).toFixed(4),
+      projectedProfit: (shares - feeAdjustedCost).toFixed(4),
     });
 
     return {
@@ -432,7 +422,7 @@ export async function executeNegRiskArb(
     };
   }
 
-  // First leg failed → clean abort, clear dedup so we can retry
+  // First leg failed → clean abort, clear dedup so scanner can re-evaluate
   if (lastFilledLegIndex === -1) {
     await redis.del(dedupKey(opp.eventId)).catch(() => {});
     return {
@@ -481,7 +471,15 @@ export async function executeNegRiskArb(
     });
   }
 
-  await deductStake(redis, totalCostUsd * (1 + cfg.NEGRISK_ARB_FEE_RATE));
+  // Compute fees for filled legs only
+  const filledLegFees = opp.legs
+    .slice(0, lastFilledLegIndex + 1)
+    .reduce(
+      (acc, l) =>
+        acc + (l.feesEnabled ? l.bestAsk * (1 - l.bestAsk) * cfg.NEGRISK_ARB_FEE_RATE : 0),
+      0,
+    );
+  await deductStake(redis, totalCostUsd + filledLegFees * shares);
 
   // Telegram alert
   const failedLeg = opp.legs[lastFilledLegIndex + 1];
