@@ -25,7 +25,6 @@ export const ASSET_SEARCH_QUERIES: Record<string, string[]> = {
   pengu: ['PENGU', 'Pudgy Penguins', 'pudgy'],
   // --- Political meme tokens (Polymarket-correlated) ---
   'official-trump': ['TRUMP', 'official trump', 'trump coin'],
-  melania: ['MELANIA', 'melania trump', 'melania coin'],
   // --- Layer 2 / DeFi ---
   polkadot: ['polkadot', 'DOT'],
   polygon: ['polygon', 'MATIC', 'POL'],
@@ -96,7 +95,6 @@ export const BINANCE_SYMBOL_TO_ASSET: Record<string, string> = {
   atomusdt: 'cosmos',
   stxusdt: 'stacks',
   trumpusdt: 'official-trump',
-  melaniausdt: 'melania',
   wifusdt: 'dogwifcoin',
   bonkusdt: 'bonk',
   penguusdt: 'pengu',
