@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type * as GammaModule from '../../mapping/gamma.js';
 import type * as NoaaModule from '../noaaClient.js';
 
@@ -69,7 +69,6 @@ const {
   findMispricedBrackets,
   scanWeatherMarkets,
   daysUntil,
-  fetchWeatherEvents: _fetchWeatherEvents,
 } = await import('../weatherScanner.js');
 
 const {
@@ -78,6 +77,8 @@ const {
   getDefaultStdDev,
   lookupCity,
 } = await import('../noaaClient.js');
+
+const { logger } = await import('../../shared/logger.js');
 
 // Minimal Redis mock
 function createRedisMock() {
@@ -575,29 +576,128 @@ describe('findMispricedBrackets', () => {
 
 describe('scanWeatherMarkets', () => {
   let redisMock: ReturnType<typeof createRedisMock>;
+  let originalFetch: typeof globalThis.fetch;
+
+  function makeMockGammaEvent() {
+    return {
+      id: 'event-1',
+      title: 'Highest temperature in Chicago on April 14?',
+      slug: 'highest-temperature-in-chicago-on-april-14-2026',
+      active: true,
+      closed: false,
+      negRisk: true,
+      endDate: '2026-04-14T12:00:00Z',
+      markets: Array.from({ length: 11 }, (_, i) => {
+        const labels = [
+          '39°F or below', '40-41°F', '42-43°F', '44-45°F', '46-47°F',
+          '48-49°F', '50-51°F', '52-53°F', '54-55°F', '56-57°F', '58°F or higher',
+        ];
+        const yesPrices = [0.01, 0.03, 0.05, 0.10, 0.15, 0.20, 0.18, 0.12, 0.08, 0.05, 0.03];
+        return {
+          id: `m${i}`,
+          question: `Will the highest temperature in Chicago be ${labels[i]} on April 14?`,
+          conditionId: `cond-${i}`,
+          clobTokenIds: `["t${i}y","t${i}n"]`,
+          outcomePrices: `["${(yesPrices[i] ?? 0).toFixed(2)}","${(1 - (yesPrices[i] ?? 0)).toFixed(2)}"]`,
+          outcomes: '["Yes","No"]',
+          active: true,
+          closed: false,
+          volume: '10000',
+          liquidity: '5000',
+          endDate: '2026-04-14T12:00:00Z',
+          description: null,
+          groupItemTitle: labels[i],
+          groupItemThreshold: i.toString(),
+        };
+      }),
+    };
+  }
 
   beforeEach(() => {
     vi.clearAllMocks();
     redisMock = createRedisMock();
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
   });
 
   it('returns empty when no weather events found', async () => {
-    // The real fetchWeatherEvents is not mocked at module level,
-    // but scanWeatherMarkets uses it internally. We need to mock at
-    // the gamma.fetchWithTimeout level. Instead, test the scanner
-    // with an event that has no parseable markets.
-    // For now, verify the scanner doesn't crash with empty Redis
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([]),
+    }) as unknown as typeof fetch;
+
     const results = await scanWeatherMarkets(redisMock as never);
-    // fetchWeatherEvents will make a real HTTP call and likely fail
-    // in test env → returns empty
-    expect(Array.isArray(results)).toBe(true);
+    expect(results).toEqual([]);
   });
 
-  it('shadow-logs event evaluations', async () => {
-    // This is an integration boundary — the full pipeline test would
-    // require mocking the Gamma API HTTP call. The unit tests above
-    // cover the individual components thoroughly.
+  it('discovers and evaluates bracket events', async () => {
+    const gammaEvent = makeMockGammaEvent();
+
+    // Mock global.fetch for Gamma API (fetchWeatherEvents uses fetch directly)
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([gammaEvent]),
+    }) as unknown as typeof fetch;
+
+    // Mock the module-level forecast functions
+    mockFetchNwsForecast.mockResolvedValue({
+      highF: 52,
+      lowF: 38,
+      precipProbability: 10,
+      forecastDate: '2026-04-14',
+      shortForecast: 'Mostly Cloudy',
+    });
+    mockFetchOpenMeteo.mockResolvedValue({
+      highTemp: 52,
+      lowTemp: 38,
+      precipProbability: 10,
+      forecastDate: '2026-04-14',
+    });
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52,
+      stddevHigh: 3.2,
+      meanLow: 38,
+      stddevLow: 2.8,
+      memberCount: 31,
+      forecastDate: '2026-04-14',
+    });
+
     const results = await scanWeatherMarkets(redisMock as never);
+
     expect(Array.isArray(results)).toBe(true);
+    // Should have evaluated the event and logged it
+    expect(logger.info).toHaveBeenCalledWith(
+      '[weather] event evaluated',
+      expect.objectContaining({
+        city: 'chicago',
+        targetDate: '2026-04-14',
+      }),
+    );
+  });
+
+  it('skips deduped events', async () => {
+    const gammaEvent = makeMockGammaEvent();
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([gammaEvent]),
+    }) as unknown as typeof fetch;
+
+    // Pre-set the dedup key
+    redisMock._store.set('weather:event:highest-temperature-in-chicago-on-april-14-2026', '1');
+
+    const results = await scanWeatherMarkets(redisMock as never);
+    expect(results).toEqual([]);
+
+    // NOAA/Open-Meteo should never have been called (dedup skipped the event)
+    expect(mockFetchNwsForecast).not.toHaveBeenCalled();
+    expect(mockFetchOpenMeteo).not.toHaveBeenCalled();
+    expect(mockFetchEnsemble).not.toHaveBeenCalled();
   });
 });

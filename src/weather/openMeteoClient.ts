@@ -21,7 +21,8 @@ const FORECAST_BASE = 'https://api.open-meteo.com/v1/forecast';
 const ENSEMBLE_BASE = 'https://ensemble-api.open-meteo.com/v1/ensemble';
 const REQUEST_TIMEOUT_MS = 10_000;
 
-// Rate limiter: max ~1 req/sec to be a good citizen
+// Rate limiter: ~2 req/sec to stay well within fair-use limits.
+// Serializes requests via a promise chain so concurrent calls queue.
 let requestQueue: Promise<void> = Promise.resolve();
 
 function rateLimitWait(): Promise<void> {

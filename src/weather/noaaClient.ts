@@ -323,15 +323,15 @@ export async function fetchNwsForecast(
 // ── Probability model ──────────────────────────────────────────────────────
 
 /**
- * Get the default forecast standard deviation (in degrees) for a given
- * forecast horizon. Calibrated from NWS MOS verification studies.
+ * Get the default forecast standard deviation for a given forecast horizon.
+ * Calibrated from NWS MOS verification studies.
  *
- * Values are in the same unit as the forecast temperature (°F or °C).
- * For Celsius markets, multiply the returned value by 5/9.
+ * Returned values are calibrated in degrees Fahrenheit (°F).
+ * For Celsius markets, convert the returned value by multiplying by 5/9.
  *
  * @param daysOut - Number of days until the target date (0 = today)
  * @param month - Optional month (1-12) for seasonal adjustment
- * @returns Standard deviation in degrees
+ * @returns Standard deviation in °F
  */
 export function getDefaultStdDev(daysOut: number, month?: number): number {
   let base: number;

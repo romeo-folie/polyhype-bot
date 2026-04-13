@@ -23,7 +23,6 @@
 import type { Redis } from 'ioredis';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
-import { fetchWithTimeout } from '../mapping/gamma.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import {
@@ -36,7 +35,12 @@ import type { CityCoordinates, FetchFn } from './noaaClient.js';
 import { fetchOpenMeteoForecast, fetchEnsembleForecast } from './openMeteoClient.js';
 
 const GAMMA_BASE = 'https://gamma-api.polymarket.com';
+const GAMMA_TIMEOUT_MS = 15_000;
 const DEDUP_KEY_PREFIX = 'weather:event:';
+
+// ── Gamma 429 circuit breaker (mirrors gamma.ts pattern) ─────────────────
+let rateLimitedUntilMs = 0;
+const RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 
 // ── Gamma event types (weather-specific fields) ──────────────────────────
 
@@ -204,22 +208,42 @@ export function parseBracketLabel(
 
 /**
  * Fetch active weather events from Gamma API using tag_slug=temperature.
+ * Orders by liquidity descending so we evaluate the most-traded events first.
+ * Includes a 429 circuit breaker to avoid compounding rate limits.
  */
 export async function fetchWeatherEvents(
   limit: number,
-  _fetchFn?: FetchFn,
 ): Promise<WeatherGammaEvent[]> {
+  // Circuit breaker: skip if rate-limited recently
+  if (Date.now() < rateLimitedUntilMs) {
+    logger.debug('[weather] Gamma rate-limit backoff active, skipping fetch');
+    return [];
+  }
+
   const params = new URLSearchParams({
     tag_slug: 'temperature',
     limit: limit.toString(),
     active: 'true',
     closed: 'false',
+    order: 'liquidity',
+    ascending: 'false',
   });
 
   const url = `${GAMMA_BASE}/events?${params.toString()}`;
 
   try {
-    const res = await fetchWithTimeout(url, 15_000);
+    const controller = new AbortController();
+    const timer = setTimeout(() => { controller.abort(); }, GAMMA_TIMEOUT_MS);
+    const res = await fetch(url, { signal: controller.signal }).finally(() => {
+      clearTimeout(timer);
+    });
+
+    if (res.status === 429) {
+      rateLimitedUntilMs = Date.now() + RATE_LIMIT_BACKOFF_MS;
+      logger.warn('[weather] Gamma 429 rate-limited, backing off 5 min');
+      return [];
+    }
+
     if (!res.ok) {
       logger.warn('[weather] Gamma temperature events API error', {
         status: res.status,
@@ -262,6 +286,7 @@ export function parseWeatherEvent(event: WeatherGammaEvent): ParsedWeatherEvent 
 
     const parsed = parseBracketLabel(label);
     if (!parsed) continue;
+    if (parsed.unit !== coords.unit) continue;
 
     let clobTokenIds: string[];
     try {
@@ -274,15 +299,25 @@ export function parseWeatherEvent(event: WeatherGammaEvent): ParsedWeatherEvent 
     let noPrice: number;
     try {
       const prices = parseOutcomePrices(market.outcomePrices);
-      yesPrice = parseFloat(prices[0] ?? '0');
-      noPrice = parseFloat(prices[1] ?? '0');
-      if (!isFinite(yesPrice) || !isFinite(noPrice)) continue;
+      const rawYes = prices[0];
+      const rawNo = prices[1];
+      if (rawYes === undefined || rawNo === undefined) continue;
+      yesPrice = parseFloat(rawYes);
+      noPrice = parseFloat(rawNo);
+      if (
+        !isFinite(yesPrice) || !isFinite(noPrice) ||
+        yesPrice < 0 || yesPrice > 1 ||
+        noPrice < 0 || noPrice > 1
+      ) continue;
     } catch {
       continue;
     }
 
-    const thresholdIdx = market.groupItemThreshold
+    const parsedThreshold = market.groupItemThreshold
       ? parseInt(market.groupItemThreshold, 10)
+      : NaN;
+    const thresholdIdx = Number.isFinite(parsedThreshold)
+      ? parsedThreshold
       : brackets.length;
 
     brackets.push({
@@ -487,10 +522,11 @@ export function findMispricedBrackets(
     });
   }
 
-  // Compute overround: sum of all market YES prices
+  // Compute overround (diagnostic): sum of all market YES prices.
+  // Used for logging, not for edge computation — edges use actual bid prices.
   const overround = event.brackets.reduce((s, b) => s + b.yesPrice, 0);
 
-  // Vig-adjust market prices: normalize so they sum to 1.0
+  // Vig-adjusted probabilities (diagnostic only — logged for analysis)
   const adjustedMarketProbs = event.brackets.map((b) =>
     overround > 0 ? b.yesPrice / overround : 0,
   );
@@ -500,21 +536,23 @@ export function findMispricedBrackets(
     const modelProb = modelProbs[i]!;
     const adjustedMarketProb = adjustedMarketProbs[i]!;
 
-    // Edge: how much our model disagrees with the vig-adjusted market price
-    // edgeYes = modelProb - adjustedMarketProb; edgeNo = -edgeYes
-    const edgeYes = modelProb - adjustedMarketProb;
+    // Edge per side using actual bid prices (not vig-adjusted event-level probs).
+    // YES edge: model says bracket is more likely than yesPrice implies
+    // NO edge: model says bracket is less likely than (1 - noPrice) implies
+    const edgeYes = modelProb - bracket.yesPrice;
+    const edgeNo = (1 - modelProb) - bracket.noPrice;
 
-    // Only trade if the edge is positive and above threshold
-    // For bracket markets, we can buy YES if underpriced or buy NO if overpriced
     let tradeSide: 'YES' | 'NO';
     let edge: number;
 
-    if (edgeYes > 0) {
+    if (edgeYes >= edgeNo && edgeYes > 0) {
       tradeSide = 'YES';
       edge = edgeYes;
-    } else {
+    } else if (edgeNo > 0) {
       tradeSide = 'NO';
-      edge = -edgeYes; // = edgeNo magnitude
+      edge = edgeNo;
+    } else {
+      continue; // No positive edge on either side
     }
 
     if (edge < minEdge) continue;
@@ -573,7 +611,7 @@ export async function scanWeatherMarkets(
   const allOpportunities: WeatherBracketOpportunity[] = [];
 
   // Step 1: Discover weather events
-  const rawEvents = await fetchWeatherEvents(cfg.WEATHER_MAX_EVENTS, fetchFn);
+  const rawEvents = await fetchWeatherEvents(cfg.WEATHER_MAX_EVENTS);
 
   if (rawEvents.length === 0) {
     logger.debug('[weather] no temperature events found on Gamma');
