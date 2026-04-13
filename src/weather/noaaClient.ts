@@ -1,5 +1,5 @@
 /**
- * NOAA / NWS Forecast Client
+ * NWS Forecast Client
  *
  * Fetches weather forecasts from the National Weather Service public API.
  * Two-step process:
@@ -16,18 +16,18 @@ import { logger } from '../shared/logger.js';
 
 const NWS_BASE = 'https://api.weather.gov';
 const REQUEST_TIMEOUT_MS = 10_000;
-const USER_AGENT = 'polymarket-weather-scanner/1.0 (contact: agent@example.com)';
+const DEFAULT_USER_AGENT = `polymarket-weather-scanner/1.0 (contact: ${process.env.WEATHER_CONTACT_EMAIL ?? 'ops@polymarket-agent.local'})`;
 
 // ── Rate limiter: max 1 request/sec to NOAA ────────────────────────────────
-let lastRequestMs = 0;
+// Serializes requests via a promise chain so concurrent calls queue instead
+// of racing past the elapsed check.
+let requestQueue: Promise<void> = Promise.resolve();
 
-async function rateLimitWait(): Promise<void> {
-  const now = Date.now();
-  const elapsed = now - lastRequestMs;
-  if (elapsed < 1000) {
-    await new Promise((r) => setTimeout(r, 1000 - elapsed));
-  }
-  lastRequestMs = Date.now();
+function rateLimitWait(): Promise<void> {
+  requestQueue = requestQueue.then(
+    () => new Promise((r) => setTimeout(r, 1000)),
+  );
+  return requestQueue;
 }
 
 // ── City coordinates for common Polymarket weather markets ─────────────────
@@ -91,7 +91,7 @@ export function lookupCity(cityName: string): CityCoordinates | null {
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-export interface GfsForecast {
+export interface NwsForecast {
   /** Forecast high temperature in Fahrenheit. */
   highF: number;
   /** Forecast low temperature in Fahrenheit. */
@@ -141,7 +141,7 @@ function fetchWithTimeout(url: string, fetchFn: FetchFn = fetch): Promise<Respon
   }, REQUEST_TIMEOUT_MS);
   return fetchFn(url, {
     signal: controller.signal,
-    headers: { 'User-Agent': USER_AGENT, Accept: 'application/geo+json' },
+    headers: { 'User-Agent': DEFAULT_USER_AGENT, Accept: 'application/geo+json' },
   }).finally(() => {
     clearTimeout(timer);
   });
@@ -152,11 +152,17 @@ function celsiusToFahrenheit(c: number): number {
 }
 
 /**
- * Parse a date string into YYYY-MM-DD, normalising timezone-aware ISO strings.
+ * Extract the local calendar date (YYYY-MM-DD) from an ISO 8601 string.
+ * NWS period timestamps include a local offset (e.g. "2026-04-15T18:00:00-04:00").
+ * We match on the local date portion to avoid UTC conversion shifting the calendar day.
  */
-function toDateStr(isoString: string): string {
+function toLocalDateStr(isoString: string): string {
+  // ISO strings from NWS are formatted as "YYYY-MM-DDThh:mm:ss±hh:mm"
+  // The first 10 characters are the local date.
+  const dateOnly = isoString.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) return dateOnly;
+  // Fallback: parse and use UTC (shouldn't happen with NWS data)
   const d = new Date(isoString);
-  // Use UTC components for consistent date matching
   return `${d.getUTCFullYear().toString()}-${(d.getUTCMonth() + 1).toString().padStart(2, '0')}-${d.getUTCDate().toString().padStart(2, '0')}`;
 }
 
@@ -171,12 +177,12 @@ function toDateStr(isoString: string): string {
  *
  * Returns null on any error (network, non-US coverage, missing data).
  */
-export async function fetchGfsEnsembleForecast(
+export async function fetchNwsForecast(
   lat: number,
   lon: number,
   targetDate: string,
   fetchFn: FetchFn = fetch,
-): Promise<GfsForecast | null> {
+): Promise<NwsForecast | null> {
   try {
     // Step 1: Resolve grid point
     await rateLimitWait();
@@ -218,10 +224,10 @@ export async function fetchGfsEnsembleForecast(
       return null;
     }
 
-    // Match periods to the target date
+    // Match periods to the target date using local date portion
     const targetDateStr = targetDate.trim().slice(0, 10); // YYYY-MM-DD
     const matchingPeriods = periods.filter(
-      (p) => p.startTime && toDateStr(p.startTime) === targetDateStr,
+      (p) => p.startTime && toLocalDateStr(p.startTime) === targetDateStr,
     );
 
     if (matchingPeriods.length === 0) {
@@ -229,7 +235,7 @@ export async function fetchGfsEnsembleForecast(
         targetDate: targetDateStr,
         availableDates: periods
           .filter((p) => p.startTime)
-          .map((p) => toDateStr(p.startTime!))
+          .map((p) => toLocalDateStr(p.startTime!))
           .filter((v, i, a) => a.indexOf(v) === i)
           .slice(0, 7),
       });
@@ -286,7 +292,7 @@ export async function fetchGfsEnsembleForecast(
       shortForecast,
     };
   } catch (err) {
-    logger.warn('[weather] fetchGfsEnsembleForecast failed', {
+    logger.warn('[weather] fetchNwsForecast failed', {
       error: err instanceof Error ? err.message : String(err),
       lat,
       lon,
@@ -308,7 +314,7 @@ export async function fetchGfsEnsembleForecast(
  *   - 3-day horizon: ~5°F
  *   - 4+ day horizon: ~6°F
  *
- * These are conservative estimates based on GFS ensemble spread studies.
+ * These are conservative estimates based on NWS forecast error studies.
  *
  * @param forecastTemp - Point forecast temperature (°F)
  * @param threshold - Market threshold temperature (°F)

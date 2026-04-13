@@ -825,13 +825,10 @@ const envSchema = z.object({
   MEMORY_RETRIEVAL_LIMIT: z.coerce.number().int().min(1).max(10).optional().default(3),
 
   // --- WEATHER MARKET SCANNER ---
-  // Compares NOAA/GFS ensemble forecasts against Polymarket weather markets for edge.
+  // Compares NOAA/NWS forecasts against Polymarket weather markets for edge.
   // Weather markets are typically "Will temperature in [city] exceed X°F on [date]?"
   // Ships dark (WEATHER_SCANNER_ENABLED=false). Shadow-log first, review, then enable.
   WEATHER_SCANNER_ENABLED: boolFromEnv.optional().default(false),
-  // Scan interval — faster than other scanners because weather markets reprice slowly
-  // and NOAA forecasts update every 6h (catching stale prices is the edge).
-  WEATHER_SCAN_INTERVAL_MS: z.coerce.number().int().min(10_000).optional().default(120_000),
   // Minimum edge (forecast probability - market price) to consider a trade.
   WEATHER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.05),
   // Maximum bankroll fraction per weather trade — conservative because forecast

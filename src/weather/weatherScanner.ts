@@ -6,9 +6,8 @@
  *
  * Weather markets are typically structured as:
  *   "Will the high temperature in [city] exceed X°F on [date]?"
- *   "Will it rain in [city] on [date]?"
  *
- * Edge source: NOAA/GFS ensemble forecasts updated every 6h vs Polymarket
+ * Edge source: NOAA/NWS forecasts updated every 6h vs Polymarket
  * prices that reprice slowly. Research shows weather markets are overconfident
  * at short horizons (theta=0.69) — the sell side is structurally favoured for
  * <48h markets.
@@ -27,7 +26,7 @@ import { searchEvents, parseOutcomePrices, parseClobTokenIds } from '../mapping/
 import type { GammaMarket } from '../mapping/gamma.js';
 import {
   lookupCity,
-  fetchGfsEnsembleForecast,
+  fetchNwsForecast,
   estimateExceedanceProbability,
 } from './noaaClient.js';
 import type { FetchFn } from './noaaClient.js';
@@ -200,7 +199,7 @@ export function daysUntil(targetDate: string, now?: Date): number {
   const target = new Date(targetDate + 'T12:00:00Z');
   const current = now ?? new Date();
   const diffMs = target.getTime() - current.getTime();
-  return Math.max(0, Math.round(diffMs / (24 * 60 * 60 * 1000)));
+  return Math.max(0, Math.ceil(diffMs / (24 * 60 * 60 * 1000)));
 }
 
 // ── Scanner ────────────────────────────────────────────────────────────────
@@ -276,7 +275,30 @@ export async function scanWeatherMarkets(
       continue;
     }
 
-    // Step 5: Dedup check
+    // Parse CLOB token IDs early — skip unparseable markets before any API calls
+    let clobTokenIds: string[];
+    try {
+      clobTokenIds = parseClobTokenIds(market.clobTokenIds);
+    } catch {
+      continue;
+    }
+
+    // Parse both YES and NO prices
+    let yesPrice: number;
+    let noPrice: number;
+    try {
+      const prices = parseOutcomePrices(market.outcomePrices);
+      const rawYes = prices[0];
+      const rawNo = prices[1];
+      if (rawYes === undefined || rawNo === undefined) continue;
+      yesPrice = parseFloat(rawYes);
+      noPrice = parseFloat(rawNo);
+      if (!isFinite(yesPrice) || !isFinite(noPrice)) continue;
+    } catch {
+      continue;
+    }
+
+    // Step 5: Dedup check (after parsing, before expensive API calls)
     const dedupKey = `${DEDUP_KEY_PREFIX}${market.id}`;
     const exists = await redis.get(dedupKey);
     if (exists) {
@@ -285,7 +307,7 @@ export async function scanWeatherMarkets(
     }
 
     // Step 3: Fetch NOAA forecast
-    const forecast = await fetchGfsEnsembleForecast(
+    const forecast = await fetchNwsForecast(
       coords.lat,
       coords.lon,
       question.targetDate,
@@ -308,18 +330,6 @@ export async function scanWeatherMarkets(
       daysOut,
     );
 
-    // Market price
-    let yesPrice: number;
-    try {
-      const prices = parseOutcomePrices(market.outcomePrices);
-      const raw = prices[0];
-      if (raw === undefined) continue;
-      yesPrice = parseFloat(raw);
-      if (!isFinite(yesPrice)) continue;
-    } catch {
-      continue;
-    }
-
     // If market asks "over", YES = temperature exceeds threshold
     // If market asks "under", YES = temperature stays below threshold
     let forecastPYes: number;
@@ -329,29 +339,22 @@ export async function scanWeatherMarkets(
       forecastPYes = 1 - pExceed;
     }
 
-    // Determine which side has edge
-    // edgeYes = forecastPYes - yesPrice, edgeNo = -(edgeYes)
+    // Determine which side has edge using both YES and NO prices
     const edgeYes = forecastPYes - yesPrice;
+    const edgeNo = (1 - forecastPYes) - noPrice;
 
     let tradeSide: 'YES' | 'NO';
     let edge: number;
-    if (edgeYes >= 0) {
+    if (edgeYes >= edgeNo) {
       tradeSide = 'YES';
       edge = edgeYes;
     } else {
       tradeSide = 'NO';
-      edge = -edgeYes;
+      edge = edgeNo;
     }
 
-    // Mark dedup before logging
+    // Mark dedup after successful parsing + forecast fetch
     await redis.set(dedupKey, '1', 'EX', cfg.WEATHER_DEDUP_TTL_S);
-
-    let clobTokenIds: string[];
-    try {
-      clobTokenIds = parseClobTokenIds(market.clobTokenIds);
-    } catch {
-      continue;
-    }
 
     const opp: WeatherOpportunity = {
       marketId: market.id,

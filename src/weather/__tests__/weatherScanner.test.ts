@@ -9,7 +9,6 @@ import type * as NoaaModule from '../noaaClient.js';
 vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => ({
     WEATHER_SCANNER_ENABLED: false,
-    WEATHER_SCAN_INTERVAL_MS: 120_000,
     WEATHER_MIN_EDGE: 0.05,
     WEATHER_MAX_STAKE_FRACTION: 0.02,
     WEATHER_DEDUP_TTL_S: 3600,
@@ -43,7 +42,7 @@ vi.mock('../noaaClient.js', async () => {
   const actual =
     await vi.importActual<typeof NoaaModule>('../noaaClient.js');
   return {
-    fetchGfsEnsembleForecast: mockFetchForecast,
+    fetchNwsForecast: mockFetchForecast,
     lookupCity: actual.lookupCity,
     estimateExceedanceProbability: actual.estimateExceedanceProbability,
     normalCdf: actual.normalCdf,
@@ -273,18 +272,26 @@ describe('lookupCity', () => {
 // ---------------------------------------------------------------------------
 
 describe('daysUntil', () => {
-  it('returns 0 for today', () => {
-    const now = new Date('2026-04-13T10:00:00Z');
+  it('returns 0 for same-day when now is past noon target', () => {
+    // target noon UTC, now 14:00 UTC → diff negative → clamped to 0
+    const now = new Date('2026-04-13T14:00:00Z');
     expect(daysUntil('2026-04-13', now)).toBe(0);
   });
 
-  it('returns 1 for tomorrow', () => {
+  it('returns 1 for same-day when now is before noon target (ceil rounds up)', () => {
+    // target 2026-04-13T12:00:00Z, now 10:00 → 2h remaining → ceil(2/24) = 1
     const now = new Date('2026-04-13T10:00:00Z');
+    expect(daysUntil('2026-04-13', now)).toBe(1);
+  });
+
+  it('returns 1 for tomorrow at exactly noon', () => {
+    // target 2026-04-14T12:00:00Z, now 2026-04-13T12:00:00Z → exactly 1 day
+    const now = new Date('2026-04-13T12:00:00Z');
     expect(daysUntil('2026-04-14', now)).toBe(1);
   });
 
-  it('returns 7 for a week out', () => {
-    const now = new Date('2026-04-13T10:00:00Z');
+  it('returns 7 for a week out at exactly noon', () => {
+    const now = new Date('2026-04-13T12:00:00Z');
     expect(daysUntil('2026-04-20', now)).toBe(7);
   });
 
@@ -488,11 +495,11 @@ describe('scanWeatherMarkets', () => {
       expect.objectContaining({ marketId: 'market-low-edge' }),
     );
 
-    // With forecast of 81 and threshold of 80, even at stddev=6 (7-day):
+    // With forecast of 81 and threshold of 80 at ~7 days out (stddev=6):
     // z = (80-81)/6 = -0.167, P(X>80) ~ 0.566
-    // edge = 0.566 - 0.50 = 0.066 > 0.05 min edge -- still passes
-    // So this should be included
-    expect(results.length).toBeGreaterThanOrEqual(0);
+    // edge = 0.566 - 0.50 = 0.066 > 0.05 min edge -- passes
+    expect(results.length).toBe(1);
+    expect(results[0]!.edge).toBeCloseTo(0.066, 1);
   });
 
   it('handles Gamma API errors gracefully', async () => {
