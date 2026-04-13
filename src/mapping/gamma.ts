@@ -25,6 +25,8 @@ export interface GammaEvent {
   active: boolean;
   closed: boolean;
   markets: GammaMarket[];
+  /** True for NegRisk events (multi-outcome, exactly one resolves YES at $1.00). */
+  negRisk?: boolean;
 }
 
 export interface GammaMarket {
@@ -259,6 +261,63 @@ export async function getActiveMarkets(maxTotal = 1000, pageSize = 500): Promise
   }
 
   return results;
+}
+
+/**
+ * Fetch active NegRisk events from Gamma API, sorted by liquidity descending.
+ *
+ * NegRisk events have N mutually exclusive outcomes — exactly one resolves YES
+ * at $1.00. Each outcome is a separate market with its own CLOB order book.
+ *
+ * Client-side filters `negRisk === true` as a safety net (the Gamma
+ * `neg_risk` query parameter may not filter server-side reliably).
+ */
+export async function getNegRiskEvents(opts?: {
+  limit?: number;
+}): Promise<GammaEvent[]> {
+  const limit = opts?.limit ?? 50;
+
+  if (Date.now() < gammaRateLimitedUntilMs) {
+    if (!gammaRateLimitLogged) {
+      logger.warn('[gamma] circuit breaker open — returning empty for NegRisk', {
+        remainingMs: gammaRateLimitedUntilMs - Date.now(),
+      });
+      gammaRateLimitLogged = true;
+    }
+    return [];
+  }
+  gammaRateLimitLogged = false;
+
+  const params = new URLSearchParams({
+    active: 'true',
+    closed: 'false',
+    neg_risk: 'true',
+    limit: limit.toString(),
+    order: 'liquidityNum',
+    ascending: 'false',
+  });
+
+  const url = `${BASE_URL}/events?${params.toString()}`;
+
+  try {
+    const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+    if (!res.ok) {
+      if (res.status === 429) {
+        gammaRateLimitedUntilMs = Date.now() + GAMMA_RATE_LIMIT_BACKOFF_MS;
+        throw new Error('Gamma API rate-limited (429) — circuit breaker open for 5 minutes');
+      }
+      throw new Error(`Gamma events error: ${res.status.toString()} ${res.statusText}`);
+    }
+    const data = (await res.json()) as GammaEvent[];
+    if (!Array.isArray(data)) return [];
+    // Client-side safety filter — the query param may not filter server-side
+    return data.filter((e) => e.negRisk === true);
+  } catch (err) {
+    logger.warn('[gamma] getNegRiskEvents failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
 }
 
 /**
