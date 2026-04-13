@@ -295,11 +295,12 @@ export async function getNegRiskEvents(opts?: {
 
   // Note: `neg_risk` query param is NOT supported by Gamma (returns 422).
   // We fetch all top-liquidity events and filter client-side.
+  // Events endpoint uses `liquidity` (not `liquidityNum` like /markets).
   const params = new URLSearchParams({
     active: 'true',
     closed: 'false',
     limit: fetchLimit.toString(),
-    order: 'liquidityNum',
+    order: 'liquidity',
     ascending: 'false',
   });
 
