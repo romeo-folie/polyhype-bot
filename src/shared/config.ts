@@ -749,6 +749,12 @@ const envSchema = z.object({
   FUTURES_MAX_PER_TRADE_USD: z.coerce.number().min(0).optional().default(10),
   FUTURES_DEFAULT_LEVERAGE: z.coerce.number().int().min(1).max(50).optional().default(5),
   FUTURES_MAX_HOLD_HOURS: z.coerce.number().int().min(1).optional().default(4),
+  // When true, suppress the time-based max-hold exit on positions that are
+  // winning AND still trend-aligned: trailing stop armed (HWM crossed TP) AND
+  // TA confluence does not signal a reversal. Zombies (trailing not armed)
+  // still exit at MAX_HOLD_HOURS. Protects runners without sacrificing the
+  // zombie-cleanup purpose of the time cap.
+  FUTURES_MAX_HOLD_BYPASS_ON_WINNER: boolFromEnv.optional().default(false),
   // Minimum urgency score (1-10) for news items to trigger a futures signal.
   // Lowered from 8 to 6 to increase signal frequency; combined with stake scaling.
   FUTURES_URGENCY_THRESHOLD: z.coerce.number().int().min(1).max(10).optional().default(6),
