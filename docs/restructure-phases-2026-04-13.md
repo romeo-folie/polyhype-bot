@@ -29,7 +29,7 @@ Our pipeline produces **1 trade per log rotation**. The research explains exactl
 | **5** | Longshot Bias / NO-Side Scanner | Academic (300K contracts) | Yes — structural edge | Medium |
 | **6** | Cross-Market Correlation Arb | Academic (IBM+Columbia) | Yes — 70-80% WR | Large |
 | **7** | OSINT Pipeline Overhaul | LiveTradeBench + KalshiBench | No — fixes existing | Large |
-| **8** | Copytrade Hardening | On-chain analysis | No — improves existing | Small |
+| **8** | Copytrade Hardening | On-chain + copy trading article | No — improves existing | Medium |
 | **9** | Infrastructure & CLOB v2 | Platform announcement | Defensive | Medium |
 
 ---
@@ -260,25 +260,52 @@ Implement `p* = p^θ / [p^θ + (1-p)^θ]` where θ varies by domain:
 
 ## Phase 8: Copytrade Hardening
 
-**Goal**: Improve copytrade against documented counter-measures.
+**Goal**: Improve copytrade execution quality and filter signal from noise. Article analysis shows the execution quality gap between whale fill and copier fill is where most edge evaporates — copying bots = becoming exit liquidity. Only manual directional traders with large edge (tens of percent) are suitable targets.
 
-### 8.1 Enable category specialist gate
+### 8.1 Bot vs. human trade classification
+- A whale's activity may be 80% automated market-making and 20% directional conviction bets — only the latter is worth copying
+- Classify by: order size relative to book depth, time-of-day patterns, market category (bot activity concentrates on high-volume liquid markets), fill pattern (bots fill many small orders rapidly, humans place fewer large orders)
+- Skip signals that look like market-making or automated activity
+- This is the highest-impact filter — without it, we're copying noise trades and providing exit liquidity to faster bots
+
+### 8.2 Proportional sizing (portfolio mirror)
+- Current system uses fixed `COPYTRADE_STAKE_USD` regardless of whale conviction
+- Ratio-style approach: size proportionally to whale's portfolio allocation (`whaleStakeUsd / whaleEstimatedBankroll`)
+- If a whale puts 5% of their portfolio into a market, we put 5% of ours — conviction signal embedded in sizing
+- Need a bankroll estimator per tracked wallet (sum of open positions + recent closes)
+
+### 8.3 Execution quality protection
+- **Slippage guard**: compare current best ask against whale fill price, abort if drift exceeds threshold (e.g., 2-3%)
+- **Per-market exposure cap**: prevent stacking multiple whale copies into the same market
+- **Same-market dedup**: if we already have a copytrade position in a market, skip new signals for it
+- **Fill-quality tracking**: log `(ourFillPrice - whaleFillPrice) / whaleFillPrice` to measure execution gap over time
+
+### 8.4 Enable category specialist gate
 - Already built and dark (`COPYTRADE_CATEGORY_SPECIALIST_ENABLED=false`)
 - Stats tracking accumulating since 2026-04-09
 - Check data sufficiency (need 10+ resolved trades per category per wallet), then flip
 
-### 8.2 Multi-wallet consensus
+### 8.5 Multi-wallet consensus
 - Don't mirror single whale
 - Wait for 2+ tracked wallets to take same side before entering
 - Reduces decoy trade risk
 
-### 8.3 Execution timing jitter
+### 8.6 Execution timing jitter
 - Add random 30-120s delay between whale detection and entry
 - Prevents pattern detection by adversarial whales
 
-### 8.4 Whale quality scoring
-- Beyond leaderboard: track Sharpe ratio, max drawdown, category hit rates
+### 8.7 Wallet selection heuristics (shortlist rework)
+- Current shortlist over-indexes on leaderboard rank and total PnL — $900K case study shows the best copy targets are NOT the biggest whales
+- **Low trade count** (<100 total bets): signals conviction-based trading, naturally excludes bots and market-makers. High trade count = automation or scalping = uncopyable.
+- **High win rate in a specific category** (80%+ with 10+ resolved trades): niche specialists, not generalists. A trader who understands every MicroStrategy move or every Fed decision is worth more than a whale with 60% win rate across all categories.
+- **Moderate position sizes** ($10K-$50K avg): the $40-50K range produces better copy targets than $1M+ whales. Big money ≠ edge — many large whales are market-making or taking high-profile bets with poor risk/reward.
+- **Single-niche focus**: wallets concentrated in 1-2 categories are stronger signals than diversified portfolios. Our category specialist gate (8.4) already captures this — the shortlist should pre-filter for it.
+- **Gradual trust ramp**: start copying new wallets at minimum size, increase allocation only after pattern confirmation (3-5 winning trades observed). Maps to a per-wallet trust score that scales `COPYTRADE_STAKE_USD`.
+
+### 8.8 Whale quality scoring
+- Beyond leaderboard: track Sharpe ratio, max drawdown, category hit rates per wallet
 - Weight mirror sizing by whale quality
+- Deprioritize wallets whose copies consistently show large execution gaps (they may be bots whose edge is latency-dependent and uncopyable)
 
 ---
 
@@ -338,3 +365,5 @@ Phases 3, 4, and 5 can run in parallel since they're independent scanners. Phase
 6. **LiveTradeBench** — 21 LLMs trading 50 days (arXiv 2511.03628)
 7. **IBM+Columbia** — Cross-market correlation (70-80% win rate)
 8. **Kelly Criterion** — Application to Prediction Markets (arXiv 2412.14144)
+9. **Copy Trading Article** — Execution quality gap analysis, bot vs. human classification, portfolio mirror sizing (Ratio app), slippage protection systems
+10. **$900K Copytrade Case Study** (@cryptosymbiiote) — Niche specialist wallet selection (<100 trades, 80%+ WR, $40-50K avg size, single category focus), gradual trust ramp, confirms bots/scalpers/insiders are uncopyable
