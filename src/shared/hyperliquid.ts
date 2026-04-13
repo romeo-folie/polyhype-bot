@@ -48,7 +48,9 @@ export const HL_SYMBOL_MAP: Record<string, string> = {
   cosmos: 'ATOM',
   stacks: 'STX',
   // --- Political / meme tokens (high Polymarket correlation) ---
-  'official-trump': 'TRUMP',   // wbSym \btrump\b fires on any political headline
+  // 'official-trump' REMOVED: \btrump\b fires on every geopolitical headline about
+  // President Trump, generating false SHORT signals on the memecoin.  Spot momentum
+  // via Binance WS still covers legitimate $TRUMP price moves.
   melania: 'MELANIA',
   pepe: 'kPEPE',               // HL uses kPEPE (1000× PEPE unit); klines from pepeusdt
   dogwifcoin: 'WIF',

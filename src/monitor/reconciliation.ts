@@ -622,6 +622,14 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
       return false;
     }
 
+    if (await isRecentlyClosed(redis, market.id)) {
+      logger.debug('[reconcile] skipping recently-closed CLOB orphan', {
+        marketId: market.id,
+        conditionId: pos.conditionId,
+      });
+      return false;
+    }
+
     const direction: 'YES' | 'NO' = pos.asset === market.clobTokenIds[0] ? 'YES' : 'NO';
 
     const newPos: Position = {
