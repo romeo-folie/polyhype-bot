@@ -353,7 +353,8 @@ describe('longshotScanner', () => {
   // ── Shadow-log when disabled ──────────────────────────────────────────
 
   it('shadow-logs but does not execute when disabled', async () => {
-    const redis = makeRedis();
+    const mockSet = vi.fn().mockResolvedValue('OK');
+    const redis = makeRedis({ set: mockSet });
     mockGetCachedMarkets.mockResolvedValue([
       makeMarket({
         id: 'shadow-mkt',
@@ -368,6 +369,14 @@ describe('longshotScanner', () => {
 
     // Should NOT call executeSignal when disabled
     expect(mockExecuteSignal).not.toHaveBeenCalled();
+    // Shadow dedup uses a separate short-lived key to avoid blocking real execution
+    const shadowCalls = mockSet.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('shadow'),
+    );
+    expect(shadowCalls.length).toBeGreaterThan(0);
+    expect(shadowCalls[0]![0]).toBe('longshot:attempted:shadow:shadow-mkt');
+    // Short TTL (5min) instead of full LONGSHOT_DEDUP_TTL_S
+    expect(shadowCalls[0]![3]).toBe(300);
   });
 
   it('executes trades when enabled', async () => {

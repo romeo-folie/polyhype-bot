@@ -2,8 +2,10 @@
  * Longshot Bias / NO-Side Scanner
  *
  * Exploits the favorite-longshot bias documented by Whelan's study of 300K
- * Polymarket contracts: YES contracts priced 3-15 cents are systematically overpriced
- * due to retail optimism. The scanner buys NO to bet against the bias.
+ * Polymarket contracts: YES contracts priced 3-15 cents are systematically
+ * overpriced due to retail optimism. The scanner buys NO to bet against the
+ * bias. A spread gate ensures the observed NO price is within 5¢ of the
+ * expected complement (1 - yesPrice) so we only trade tight books.
  *
  * Category-specific optimism gaps (from academic research):
  *   - Entertainment/media: ~5 percentage points overpriced
@@ -50,40 +52,61 @@ const CATEGORY_OPTIMISM_GAP: Record<string, number> = {
 // ── Lightweight keyword classifier for market questions ────────────────────
 // Mirrors the keyword categories from categoryClassifier.ts but avoids LLM
 // calls since we process many markets per scan. Returns the category ID.
-const CATEGORY_KEYWORDS: Record<string, string[]> = {
-  'crypto-regulatory': [
-    'bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'token', 'stablecoin',
-    'defi', 'nft', 'blockchain', 'solana', 'ripple', 'xrp', 'binance',
-    'coinbase',
-  ],
-  'macro': [
-    'fed', 'federal reserve', 'rate cut', 'rate hike', 'inflation', 'cpi',
-    'gdp', 'central bank', 'treasury', 'yield', 'recession', 'ecb',
-    'interest rate', 'monetary policy', 'tariff',
-  ],
-  'ai-tech': [
-    'ai', 'artificial intelligence', 'gpt', 'openai', 'deepmind',
-    'frontier model', 'agi', 'llm', 'nvidia', 'semiconductor',
-  ],
-  'us-politics': [
-    'congress', 'senate', 'president', 'biden', 'trump', 'supreme court',
-    'executive order', 'governor', 'democrat', 'republican',
-  ],
-  'sports': [
-    'nba', 'nhl', 'playoff', 'championship', 'game 7', 'stanley cup',
-    'super bowl', 'world series', 'lakers', 'warriors', 'celtics',
-    'yankees', 'dodgers', 'mvp',
-  ],
-  'entertainment': [
-    'oscar', 'emmy', 'grammy', 'netflix', 'movie', 'film', 'album',
-    'box office', 'award', 'celebrity', 'reality tv', 'bachelor',
-    'bachelorette', 'survivor', 'american idol',
-  ],
-  'geopolitical': [
-    'war', 'nato', 'ukraine', 'russia', 'china', 'taiwan', 'iran',
-    'sanctions', 'ceasefire', 'military', 'invasion',
-  ],
-};
+// Matchers are precompiled once at module init to avoid RegExp churn across
+// ~2000 markets per scan cycle.
+
+type KeywordMatcher = (text: string) => boolean;
+interface CategoryEntry { catId: string; matchers: KeywordMatcher[] }
+
+function buildCategoryMatchers(): CategoryEntry[] {
+  const raw: Record<string, string[]> = {
+    'crypto-regulatory': [
+      'bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'token', 'stablecoin',
+      'defi', 'nft', 'blockchain', 'solana', 'ripple', 'xrp', 'binance',
+      'coinbase',
+    ],
+    'macro': [
+      'fed', 'federal reserve', 'rate cut', 'rate hike', 'inflation', 'cpi',
+      'gdp', 'central bank', 'treasury', 'yield', 'recession', 'ecb',
+      'interest rate', 'monetary policy', 'tariff',
+    ],
+    'ai-tech': [
+      'ai', 'artificial intelligence', 'gpt', 'openai', 'deepmind',
+      'frontier model', 'agi', 'llm', 'nvidia', 'semiconductor',
+    ],
+    'us-politics': [
+      'congress', 'senate', 'president', 'biden', 'trump', 'supreme court',
+      'executive order', 'governor', 'democrat', 'republican',
+    ],
+    'sports': [
+      'nba', 'nhl', 'playoff', 'championship', 'game 7', 'stanley cup',
+      'super bowl', 'world series', 'lakers', 'warriors', 'celtics',
+      'yankees', 'dodgers', 'mvp',
+    ],
+    'entertainment': [
+      'oscar', 'emmy', 'grammy', 'netflix', 'movie', 'film', 'album',
+      'box office', 'award', 'celebrity', 'reality tv', 'bachelor',
+      'bachelorette', 'survivor', 'american idol',
+    ],
+    'geopolitical': [
+      'war', 'nato', 'ukraine', 'russia', 'china', 'taiwan', 'iran',
+      'sanctions', 'ceasefire', 'military', 'invasion',
+    ],
+  };
+
+  return Object.entries(raw).map(([catId, keywords]) => ({
+    catId,
+    matchers: keywords.map((kw): KeywordMatcher => {
+      if (kw.includes(' ')) {
+        return (text) => text.includes(kw);
+      }
+      const re = new RegExp(`\\b${kw}\\b`, 'i');
+      return (text) => re.test(text);
+    }),
+  }));
+}
+
+const CATEGORY_ENTRIES: CategoryEntry[] = buildCategoryMatchers();
 
 /**
  * Classify a market question into a category using keyword matching.
@@ -94,15 +117,10 @@ export function classifyMarketCategory(question: string): string {
   let bestCat = 'default';
   let bestHits = 0;
 
-  for (const [catId, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+  for (const { catId, matchers } of CATEGORY_ENTRIES) {
     let hits = 0;
-    for (const kw of keywords) {
-      if (kw.includes(' ')) {
-        if (lower.includes(kw)) hits++;
-      } else {
-        const re = new RegExp(`\\b${kw}\\b`, 'i');
-        if (re.test(lower)) hits++;
-      }
+    for (const match of matchers) {
+      if (match(lower)) hits++;
     }
     if (hits > bestHits) {
       bestHits = hits;
@@ -212,7 +230,7 @@ export async function scanForLongshotBias(redis: Redis): Promise<LongshotOpportu
       // so edge = trueNoProb - noPrice = (1 - yesPrice + optimismGap) - noPrice.
       // When noPrice ≈ 1 - yesPrice this simplifies to ~optimismGap, but using
       // the observed quote accounts for bid/ask spread drift.
-      const trueNoProb = 1 - yesPrice + optimismGap;
+      const trueNoProb = Math.min(1, 1 - yesPrice + optimismGap);
       const edge = trueNoProb - noPrice;
       if (edge < cfg.LONGSHOT_MIN_EDGE) {
         edgeFiltered++;
@@ -297,20 +315,42 @@ export async function runLongshotScan(redis: Redis): Promise<void> {
   for (const opp of opportunities) {
     const dedupKey = `${DEDUP_KEY_PREFIX}${opp.marketId}`;
 
-    // Claim dedup key before potential execution to prevent concurrent runs
-    // re-evaluating the same market.
-    const claimed = await redis.set(dedupKey, '1', 'EX', cfg.LONGSHOT_DEDUP_TTL_S, 'NX');
-    if (!claimed) {
-      logger.debug('[longshot] dedup race -- skipping', { marketId: opp.marketId });
-      continue;
-    }
-
     const stakeUsd = Math.min(
       bankrollUsd * cfg.LONGSHOT_MAX_STAKE_FRACTION,
       opp.liquidity * 0.01, // never take more than 1% of actual market liquidity
     );
 
     const wouldExecute = cfg.LONGSHOT_SCANNER_ENABLED && stakeUsd > 0;
+
+    // Shadow mode: short-lived dedup (5min) to avoid log spam without
+    // blocking real execution when the scanner is later enabled.
+    if (!wouldExecute) {
+      const shadowKey = `${DEDUP_KEY_PREFIX}shadow:${opp.marketId}`;
+      const shadowClaimed = await redis.set(shadowKey, '1', 'EX', 300, 'NX');
+      if (!shadowClaimed) continue;
+
+      logger.info('[longshot] opportunity found', {
+        marketId: opp.marketId,
+        question: opp.question.slice(0, 120),
+        yesPrice: opp.yesPrice.toFixed(4),
+        noPrice: opp.noPrice.toFixed(4),
+        category: opp.category,
+        optimismGap: opp.optimismGap.toFixed(3),
+        edge: opp.edge.toFixed(3),
+        liquidity: opp.liquidity.toFixed(0),
+        stakeUsd: stakeUsd.toFixed(2),
+        wouldExecute: false,
+        shadow: true,
+      });
+      continue;
+    }
+
+    // Real execution: claim full-TTL dedup key to prevent re-entry.
+    const claimed = await redis.set(dedupKey, '1', 'EX', cfg.LONGSHOT_DEDUP_TTL_S, 'NX');
+    if (!claimed) {
+      logger.debug('[longshot] dedup race -- skipping', { marketId: opp.marketId });
+      continue;
+    }
 
     logger.info('[longshot] opportunity found', {
       marketId: opp.marketId,
@@ -322,11 +362,9 @@ export async function runLongshotScan(redis: Redis): Promise<void> {
       edge: opp.edge.toFixed(3),
       liquidity: opp.liquidity.toFixed(0),
       stakeUsd: stakeUsd.toFixed(2),
-      wouldExecute,
-      shadow: !cfg.LONGSHOT_SCANNER_ENABLED,
+      wouldExecute: true,
+      shadow: false,
     });
-
-    if (!wouldExecute) continue;
 
     const signal: TradeSignal = {
       marketId: opp.marketId,
@@ -380,9 +418,17 @@ async function main() {
   }
 }
 
-void main().catch((err: unknown) => {
-  logger.error('[longshot] fatal error', {
-    error: err instanceof Error ? err.message : String(err),
+// Only auto-run when executed as the direct entrypoint, not when imported
+// by tests or other modules.
+const isMainModule =
+  import.meta.url === `file://${process.argv[1]}` ||
+  process.argv[1]?.endsWith('/longshotScanner.js') === true;
+
+if (isMainModule) {
+  void main().catch((err: unknown) => {
+    logger.error('[longshot] fatal error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    process.exit(1);
   });
-  process.exit(1);
-});
+}
