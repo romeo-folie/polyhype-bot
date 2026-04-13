@@ -115,7 +115,7 @@ function clobTokenForSignal(signal: TradeSignal): string | null {
  *   - 'futures'    — bypasses this branch via the isFutures path
  *   - undefined    — unlabelled; default-deny for safety
  */
-const MAKER_ELIGIBLE_SOURCES = new Set(['osint', 'copytrade', 'near-zero-arb']);
+const MAKER_ELIGIBLE_SOURCES = new Set(['osint', 'copytrade', 'near-zero-arb', 'correlation-arb']);
 
 function isMakerEligible(signal: TradeSignal): boolean {
   return MAKER_ELIGIBLE_SOURCES.has(signal.source ?? '');
