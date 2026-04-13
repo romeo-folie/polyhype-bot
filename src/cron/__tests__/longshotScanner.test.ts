@@ -37,7 +37,6 @@ vi.mock('../../shared/logger.js', () => ({
 // Default config -- tests override via mockLoadConfig return value
 const DEFAULT_CONFIG = {
   LONGSHOT_SCANNER_ENABLED: false,
-  LONGSHOT_SCAN_INTERVAL_MS: 300_000,
   LONGSHOT_MIN_EDGE: 0.03,
   LONGSHOT_MAX_STAKE_FRACTION: 0.02,
   LONGSHOT_YES_PRICE_MIN: 0.03,
@@ -159,6 +158,22 @@ describe('longshotScanner', () => {
     expect(opps).toHaveLength(0);
   });
 
+  it('filters markets with wide YES/NO price spread (non-complementary)', async () => {
+    const redis = makeRedis();
+    // YES=0.08 but NO=0.80 (expected ~0.92) — spread too wide
+    mockGetCachedMarkets.mockResolvedValue([
+      makeMarket({
+        id: 'wide-spread',
+        question: 'Will this movie win the Oscar?',
+        outcomePrices: JSON.stringify(['0.08', '0.80']),
+        liquidity: '3000',
+      }),
+    ]);
+
+    const opps = await scanForLongshotBias(redis);
+    expect(opps).toHaveLength(0);
+  });
+
   // ── Category exemption ────────────────────────────────────────────────
 
   it('skips exempt categories (crypto-regulatory)', async () => {
@@ -270,7 +285,7 @@ describe('longshotScanner', () => {
 
     const opps = await scanForLongshotBias(redis);
     expect(opps).toHaveLength(1);
-    expect(opps[0]!.edge).toBe(0.05);
+    expect(opps[0]!.edge).toBeCloseTo(0.05, 10);
   });
 
   // ── Liquidity gate ────────────────────────────────────────────────────

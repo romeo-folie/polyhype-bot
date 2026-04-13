@@ -22,6 +22,7 @@
  * Dedup key:  longshot:attempted:{marketId}  (TTL: LONGSHOT_DEDUP_TTL_S)
  */
 
+import 'dotenv/config';
 import type { Redis } from 'ioredis';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
@@ -196,13 +197,23 @@ export async function scanForLongshotBias(redis: Redis): Promise<LongshotOpportu
         continue;
       }
 
-      // Gate 4: Compute optimism gap and edge.
+      // Gate 4: Validate NO price is in expected range (complement of YES price).
+      // outcomePrices are best-bid snapshots and may not sum to 1; if the observed
+      // NO price is far from expected, skip — the book is too wide for edge.
+      const expectedNoPrice = 1 - yesPrice;
+      if (noPrice < expectedNoPrice - 0.05 || noPrice > expectedNoPrice + 0.05) {
+        priceFiltered++;
+        continue;
+      }
+
+      // Gate 5: Compute optimism gap and edge against observed NO price.
       const optimismGap = CATEGORY_OPTIMISM_GAP[category] ?? CATEGORY_OPTIMISM_GAP.default!;
-      // The edge from buying NO: the structural bias means yesPrice is ~optimismGap
-      // too high. The "true" NO price should be (1 - (yesPrice - optimismGap)), but
-      // the market shows noPrice ~= 1 - yesPrice. So our edge is the optimism gap
-      // itself (the amount by which NO is underpriced).
-      const edge = optimismGap;
+      // The true probability of NO is approximately (1 - yesPrice + optimismGap),
+      // so edge = trueNoProb - noPrice = (1 - yesPrice + optimismGap) - noPrice.
+      // When noPrice ≈ 1 - yesPrice this simplifies to ~optimismGap, but using
+      // the observed quote accounts for bid/ask spread drift.
+      const trueNoProb = 1 - yesPrice + optimismGap;
+      const edge = trueNoProb - noPrice;
       if (edge < cfg.LONGSHOT_MIN_EDGE) {
         edgeFiltered++;
         continue;

@@ -642,7 +642,6 @@ const envSchema = z.object({
   //   entertainment/media: ~5pp, sports: ~2pp, politics: ~3pp, finance/crypto: exempt.
   // Ships dark — shadow-log first, review opportunities, then enable.
   LONGSHOT_SCANNER_ENABLED: boolFromEnv.optional().default(false),
-  LONGSHOT_SCAN_INTERVAL_MS: z.coerce.number().int().min(10_000).optional().default(300_000),
   // Minimum edge (optimism gap) to trade. Lower than OSINT because this is structural.
   LONGSHOT_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.03),
   // Maximum fraction of bankroll per longshot trade (conservative — high NO price = low payout).
