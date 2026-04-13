@@ -823,6 +823,24 @@ const envSchema = z.object({
   // Requires PG_URL and OPENAI_API_KEY. Adds one embeddings call per consensus estimate.
   MEMORY_RETRIEVAL_ENABLED: boolFromEnv.optional().default(false),
   MEMORY_RETRIEVAL_LIMIT: z.coerce.number().int().min(1).max(10).optional().default(3),
+
+  // --- WEATHER MARKET SCANNER ---
+  // Compares NOAA/GFS ensemble forecasts against Polymarket weather markets for edge.
+  // Weather markets are typically "Will temperature in [city] exceed X°F on [date]?"
+  // Ships dark (WEATHER_SCANNER_ENABLED=false). Shadow-log first, review, then enable.
+  WEATHER_SCANNER_ENABLED: boolFromEnv.optional().default(false),
+  // Scan interval — faster than other scanners because weather markets reprice slowly
+  // and NOAA forecasts update every 6h (catching stale prices is the edge).
+  WEATHER_SCAN_INTERVAL_MS: z.coerce.number().int().min(10_000).optional().default(120_000),
+  // Minimum edge (forecast probability - market price) to consider a trade.
+  WEATHER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.05),
+  // Maximum bankroll fraction per weather trade — conservative because forecast
+  // uncertainty grows with horizon and model error is correlated across markets.
+  WEATHER_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.02),
+  // Dedup TTL — weather markets reprice slowly, so 1h is sufficient.
+  WEATHER_DEDUP_TTL_S: z.coerce.number().int().min(0).optional().default(3600),
+  // Maximum weather markets to evaluate per scan cycle.
+  WEATHER_MAX_MARKETS: z.coerce.number().int().min(1).optional().default(20),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
