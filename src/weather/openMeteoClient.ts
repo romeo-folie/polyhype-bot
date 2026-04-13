@@ -23,11 +23,13 @@ const REQUEST_TIMEOUT_MS = 10_000;
 
 // Rate limiter: ~2 req/sec to stay well within fair-use limits.
 // Serializes requests via a promise chain so concurrent calls queue.
+// Skipped when a custom fetchFn is injected (test / DI path).
+const RATE_LIMIT_DELAY_MS = 500;
 let requestQueue: Promise<void> = Promise.resolve();
 
 function rateLimitWait(): Promise<void> {
   requestQueue = requestQueue.then(
-    () => new Promise((r) => setTimeout(r, 500)),
+    () => new Promise((r) => setTimeout(r, RATE_LIMIT_DELAY_MS)),
   );
   return requestQueue;
 }
@@ -105,10 +107,12 @@ export async function fetchOpenMeteoForecast(
   lon: number,
   targetDate: string,
   unit: 'fahrenheit' | 'celsius' = 'fahrenheit',
-  fetchFn: FetchFn = fetch,
+  fetchFn?: FetchFn,
 ): Promise<OpenMeteoForecast | null> {
+  const isInjected = fetchFn !== undefined;
+  const doFetch = fetchFn ?? fetch;
   try {
-    await rateLimitWait();
+    if (!isInjected) await rateLimitWait();
 
     const params = new URLSearchParams({
       latitude: lat.toFixed(4),
@@ -121,7 +125,7 @@ export async function fetchOpenMeteoForecast(
     });
 
     const url = `${FORECAST_BASE}?${params.toString()}`;
-    const res = await fetchWithTimeout(url, fetchFn);
+    const res = await fetchWithTimeout(url, doFetch);
 
     if (!res.ok) {
       logger.warn('[weather] Open-Meteo forecast API error', {
@@ -187,10 +191,12 @@ export async function fetchEnsembleForecast(
   lon: number,
   targetDate: string,
   unit: 'fahrenheit' | 'celsius' = 'fahrenheit',
-  fetchFn: FetchFn = fetch,
+  fetchFn?: FetchFn,
 ): Promise<EnsembleForecast | null> {
+  const isInjected = fetchFn !== undefined;
+  const doFetch = fetchFn ?? fetch;
   try {
-    await rateLimitWait();
+    if (!isInjected) await rateLimitWait();
 
     const params = new URLSearchParams({
       latitude: lat.toFixed(4),
@@ -204,7 +210,7 @@ export async function fetchEnsembleForecast(
     });
 
     const url = `${ENSEMBLE_BASE}?${params.toString()}`;
-    const res = await fetchWithTimeout(url, fetchFn);
+    const res = await fetchWithTimeout(url, doFetch);
 
     if (!res.ok) {
       logger.warn('[weather] Open-Meteo ensemble API error', {

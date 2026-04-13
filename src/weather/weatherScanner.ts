@@ -461,7 +461,7 @@ export interface WeatherBracketOpportunity {
   modelProbability: number;
   /** Vig-adjusted market implied probability. */
   adjustedMarketProb: number;
-  /** Raw edge: model probability - adjusted market probability. */
+  /** Raw edge versus the selected trade side's quoted price: YES uses modelProbability - yesPrice; NO uses (1 - modelProbability) - noPrice. */
   edge: number;
   /** Which side to trade. */
   tradeSide: 'YES' | 'NO';
@@ -691,7 +691,7 @@ export async function scanWeatherMarkets(
         bracket: opp.bracketLabel,
         tradeSide: opp.tradeSide,
         modelProb: opp.modelProbability.toFixed(3),
-        marketPrice: opp.yesPrice.toFixed(3),
+        marketPrice: opp.outcomePrice.toFixed(3),
         adjustedMarketProb: opp.adjustedMarketProb.toFixed(3),
         edge: opp.edge.toFixed(3),
         outcomePrice: opp.outcomePrice.toFixed(3),

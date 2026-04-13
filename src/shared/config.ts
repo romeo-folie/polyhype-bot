@@ -899,7 +899,8 @@ const envSchema = z.object({
   // events with ~11 brackets each (e.g. "40-41°F", "42-43°F", ...).
   // Ships dark (WEATHER_SCANNER_ENABLED=false). Shadow-log first, review, then enable.
   WEATHER_SCANNER_ENABLED: boolFromEnv.optional().default(false),
-  // Minimum edge (vig-adjusted model probability - market price) to consider a trade.
+  // Minimum edge (model probability - market bid price) to consider a trade.
+  // Compares modelProb vs yesPrice for YES, (1-modelProb) vs noPrice for NO.
   // Higher than binary markets because bracket model uncertainty is larger (8-10¢ recommended).
   WEATHER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   // Maximum bankroll fraction per weather trade — conservative because forecast
