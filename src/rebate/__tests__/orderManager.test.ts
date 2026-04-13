@@ -175,7 +175,7 @@ describe('orderManager', () => {
       expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-stale');
     });
 
-    it('handles missing CLOB orders gracefully', async () => {
+    it('skips recently-placed orders when CLOB returns null (transient error)', async () => {
       const redis = makeRedis();
       const order = {
         orderId: 'order-gone',
@@ -187,7 +187,7 @@ describe('orderManager', () => {
         price: 0.51,
         size: 10,
         sizeUsd: 5.1,
-        placedAt: new Date().toISOString(),
+        placedAt: new Date().toISOString(), // fresh — within 2×TTL
         tickSize: '0.01',
         negRisk: false,
         question: 'Will X?',
@@ -198,8 +198,37 @@ describe('orderManager', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await reconcileOrders(redis as any);
 
+      // Treated as transient — not removed, counted as error.
+      expect(result.cancelled).toHaveLength(0);
+      expect(result.errors).toBe(1);
+      expect(redis.hdel).not.toHaveBeenCalledWith('rebate:orders', 'order-gone');
+    });
+
+    it('removes order when CLOB returns null and order is well past TTL', async () => {
+      const redis = makeRedis();
+      const order = {
+        orderId: 'order-ancient',
+        marketId: 'mkt-1',
+        conditionId: 'cond-1',
+        tokenId: 'tok-yes',
+        clobTokenIds: ['tok-yes', 'tok-no'],
+        direction: 'YES',
+        price: 0.51,
+        size: 10,
+        sizeUsd: 5.1,
+        placedAt: new Date(Date.now() - 700_000).toISOString(), // 11.7 min ago (> 2×300s TTL)
+        tickSize: '0.01',
+        negRisk: false,
+        question: 'Will X?',
+      };
+      redis.hgetall.mockResolvedValue({ 'order-ancient': JSON.stringify(order) });
+      mockGetOrder.mockResolvedValue(null);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await reconcileOrders(redis as any);
+
       expect(result.cancelled).toHaveLength(1);
-      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-gone');
+      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-ancient');
     });
   });
 

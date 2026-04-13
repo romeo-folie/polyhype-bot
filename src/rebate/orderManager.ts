@@ -30,17 +30,38 @@ const STATS_KEY = 'rebate:stats';
 export async function loadRestingOrders(redis: Redis): Promise<Map<string, RestingOrder>> {
   const raw = await redis.hgetall(ORDERS_HASH_KEY);
   const orders = new Map<string, RestingOrder>();
+  let hadCorruption = false;
   for (const [orderId, json] of Object.entries(raw)) {
     try {
       const parsed = JSON.parse(json) as RestingOrder;
       orders.set(orderId, parsed);
     } catch {
-      // Corrupt entry — remove from hash. Also try to clean the by-market set
-      // by scanning for the orderId across known sets (best-effort).
       await redis.hdel(ORDERS_HASH_KEY, orderId).catch(() => {});
       logger.warn('[rebate] removed corrupt order entry from tracking', { orderId });
+      hadCorruption = true;
     }
   }
+
+  // Rebuild by-market sets from valid entries to prevent orphaned set members
+  // from blocking future placements. Only runs when corruption was detected.
+  if (hadCorruption) {
+    const marketToOrderIds = new Map<string, string[]>();
+    for (const [orderId, order] of orders) {
+      const ids = marketToOrderIds.get(order.marketId);
+      if (ids) ids.push(orderId);
+      else marketToOrderIds.set(order.marketId, [orderId]);
+    }
+    // Scan for existing by-market keys and delete+rebuild in a pipeline.
+    const existingKeys = await redis.keys(`${MARKET_SET_PREFIX}*`).catch(() => [] as string[]);
+    const pipeline = redis.multi();
+    for (const key of existingKeys) pipeline.del(key);
+    for (const [marketId, orderIds] of marketToOrderIds) {
+      pipeline.sadd(`${MARKET_SET_PREFIX}${marketId}`, ...orderIds);
+    }
+    await pipeline.exec().catch(() => {});
+    logger.info('[rebate] rebuilt by-market sets after corruption cleanup');
+  }
+
   return orders;
 }
 
@@ -107,9 +128,19 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
       const clobOrder = await getClobOrder(orderId);
 
       if (!clobOrder) {
-        // Order gone from CLOB — likely cancelled externally or expired.
-        await removeRestingOrder(redis, orderId, order.marketId);
-        result.cancelled.push(order);
+        // getClobOrder returns null for both "not found" and "fetch error".
+        // Don't remove tracking on what might be a transient API failure —
+        // skip this cycle. If the order is truly gone, staleness TTL will
+        // clean it up eventually.
+        const ageMs = Date.now() - new Date(order.placedAt).getTime();
+        if (ageMs > cfg.REBATE_ORDER_TTL_S * 2 * 1000) {
+          // Well past TTL — safe to assume the order is genuinely gone.
+          await removeRestingOrder(redis, orderId, order.marketId);
+          result.cancelled.push(order);
+        } else {
+          logger.debug('[rebate] getClobOrder returned null, skipping (may be transient)', { orderId });
+          result.errors++;
+        }
         continue;
       }
 
@@ -133,8 +164,13 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
         if (!cancelled) {
           // Cancel failed — re-check status before removing from tracking.
           const recheck = await getClobOrder(orderId);
-          const recheckStatus = String(recheck?.status ?? '').toLowerCase();
-          if (recheck && !['cancelled', 'canceled', 'expired', 'matched'].includes(recheckStatus)) {
+          if (!recheck) {
+            // Recheck also failed (transient?) — retry next cycle.
+            logger.warn('[rebate] partial fill cancel + recheck failed, will retry', { orderId });
+            continue;
+          }
+          const recheckStatus = String(recheck.status ?? '').toLowerCase();
+          if (!['cancelled', 'canceled', 'expired', 'matched'].includes(recheckStatus)) {
             // Still live and cancel failed — skip this cycle, retry next time.
             logger.warn('[rebate] partial fill cancel failed, will retry', { orderId });
             continue;
@@ -160,8 +196,13 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
         const cancelled = await cancelClobOrder(orderId);
         if (!cancelled) {
           const recheck = await getClobOrder(orderId);
-          const recheckStatus = String(recheck?.status ?? '').toLowerCase();
-          if (recheck && !['cancelled', 'canceled', 'expired', 'matched'].includes(recheckStatus)) {
+          if (!recheck) {
+            // Recheck also failed (transient?) — retry next cycle.
+            logger.warn('[rebate] stale cancel + recheck failed, will retry', { orderId });
+            continue;
+          }
+          const recheckStatus = String(recheck.status ?? '').toLowerCase();
+          if (!['cancelled', 'canceled', 'expired', 'matched'].includes(recheckStatus)) {
             logger.warn('[rebate] stale cancel failed, will retry', { orderId });
             continue;
           }
