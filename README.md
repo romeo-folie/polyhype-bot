@@ -1,6 +1,6 @@
 # Polymarket Geopolitical Trading Agent
 
-Autonomous multi-signal trading agent for Polymarket prediction markets. Combines OSINT pipelines, whale wallet mirroring, real-time spot price arbitrage, crypto latency arbitrage, sports in-play arbitrage, Hyperliquid futures hedging, and continuous self-improvement (outcome tracking, context injection, calibration) into a single risk-managed system.
+Autonomous multi-signal trading agent for Polymarket prediction markets. Combines OSINT pipelines, whale wallet mirroring, real-time spot price arbitrage, crypto latency arbitrage, sports in-play arbitrage, CME settlement arb, longshot bias exploitation, NOAA weather arb, cross-market correlation arb, Hyperliquid futures hedging, and continuous self-improvement (outcome tracking, context injection, calibration) into a single risk-managed system.
 
 ---
 
@@ -135,6 +135,9 @@ Periodic pipelines run via host crontab (not Docker). See [Crontab](#crontab) be
 | `*/30 * * * *` | Watchlist refresh (`src/cron/refreshWatchlist.ts`) | `~/logs/pga/watchlist.log` |
 | `*/30 * * * *` | Near-zero entry scanner (`src/cron/nearZeroScanner.ts`) | `~/logs/pga/near-zero.log` |
 | `* * * * *` | Settlement arb scanner (`src/cron/settlement.ts`) | `~/logs/pga/settlement.log` |
+| `0 */2 * * *` | Longshot bias scanner (`src/cron/longshotScanner.ts`) | `~/logs/pga/longshot.log` |
+| `30 */6 * * *` | Weather scanner (`src/weather/weatherScanner.ts`) | `~/logs/pga/weather.log` |
+| `*/5 * * * *` | Rebate farmer (`src/cron/rebateFarmer.ts`) | `~/logs/pga/rebate.log` |
 | `*/30 * * * *` | Residual sweep (`scripts/sweep-residuals.ts`) | `~/logs/pga/sweep-residuals.log` |
 | `0 */6 * * *` | Health check (`scripts/health-check.ts`) | `~/logs/pga/health-check.log` |
 | `0 6 * * *` | Copytrade shortlist refresh (`src/copytrade/shortlist.ts`) | `~/logs/pga/copytrade-shortlist.log` |
@@ -253,7 +256,88 @@ Active Polymarket markets with prices near zero (<5¢)
   → Execution Router
 ```
 
-### 7. Execution Layer (shared)
+### 7. Settlement Arb Scanner (`cron:settlement`)
+
+```
+CME commodity futures (Yahoo: GC=F, SI=F, CL=F, ES=F, NQ=F)
+  → Match Polymarket binary markets by keyword ("Gold above $X on date?")
+  → Extract strike price from question text
+  → Compute implied probability: sigmoid((spot - cutoff) / smoothing_band)
+  → Compare implied vs market price → edge detection
+  → Fires in the ~5min window before CME settlement print
+  → Execution Router
+```
+
+Designed for the moment when the front-month future is the best proxy for settlement outcome. Currently log-only (`SETTLEMENT_ARB_ENABLED=false`).
+
+### 8. Longshot Bias Scanner (`cron:longshotScanner`)
+
+```
+Active Polymarket markets with YES price 3-15¢
+  → Category-specific optimism gap (entertainment ~5pp, sports ~2pp, political ~3pp)
+  → Exempt well-calibrated domains (crypto, macro)
+  → Spread gate: NO price within 5¢ of expected complement (tight books only)
+  → Buy NO (bet against retail optimism)
+  → Execution Router
+```
+
+Exploits the favorite-longshot bias from Whelan's study of 300K contracts: cheap YES is systematically overpriced by retail. The opposite strategy to the near-zero scanner.
+
+### 9. Weather Scanner (`weather/weatherScanner`)
+
+```
+Gamma API search for weather markets ("High temp in [city] above X°F on date?")
+  → Parse city, date, threshold from question text
+  → Fetch NOAA/NWS forecast for that city+date
+  → Compute exceedance probability from forecast distribution
+  → Compare forecast probability vs market price
+  → Research-backed theta=0.69 overconfidence adjustment for <48h markets
+  → Execution Router
+```
+
+Edge source: NOAA forecasts update every 6h while Polymarket weather prices reprice slowly.
+
+### 10. Calibration Bias Adjustment (inline in divergence calculator)
+
+```
+LLM consensus probability estimate
+  → Look up per-category calibration theta (from weekly recalibration stats)
+  → Apply power-law correction: adjusted = P^theta
+  → Categories where theta > 1 are overconfident → corrected downward
+  → Feeds into Half-Kelly sizing with bias-adjusted probability
+```
+
+Not a standalone scanner. Runs inline during every OSINT trade evaluation when `CALIBRATION_BIAS_ENABLED=true`.
+
+### 11. Cross-Market Correlation Arb (`cron:correlationDiscovery` + `cron:correlationScanner`)
+
+```
+Discovery (every 6h):
+  Cached markets → entity extraction (keyword tokenization)
+    → Reverse-index pair finder (shared token overlap, O(N×E))
+    → LLM relationship classifier (implication or mutual-exclusion)
+    → Persist constraint edges in Redis graph (7-day TTL)
+
+Violation scanner (every 15min):
+  Load constraint graph + current market prices
+    → Detect violations:
+        Implication A→B:      P(A) > P(B) + minEdge → buy B YES
+        Mutual exclusion:     P(A)+P(B) > 1+minEdge → buy NO on overpriced side
+    → Liquidity filter on both sides
+    → Single-leg execution via Execution Router
+```
+
+### 12. Rebate Farmer (`cron:rebateFarmer`)
+
+```
+High-volume tight-spread markets
+  → Place resting GTC post-only limit orders
+  → Earn maker rebates (Polymarket distributes 100% of taker fees to makers)
+```
+
+Currently disabled (`REBATE_FARMING_ENABLED=false`).
+
+### 13. Execution Layer (shared)
 
 All signals from every pipeline route through `executor.ts`:
 
@@ -293,7 +377,7 @@ CLOB signature modes:
 | `1` POLY_PROXY | Magic / Google OAuth wallet | Required |
 | `2` POLY_GNOSIS_SAFE | Gnosis Safe multisig | Required |
 
-### 8. Hyperliquid Futures & Delta Hedging
+### 14. Hyperliquid Futures & Delta Hedging
 
 After a successful Polymarket YES fill, the executor optionally opens an offsetting SHORT on Hyperliquid Perpetuals:
 
@@ -312,7 +396,7 @@ After a successful Polymarket YES fill, the executor optionally opens an offsett
 - Max hold time enforced (`FUTURES_MAX_HOLD_HOURS`)
 - Heartbeat logging (every 2 minutes) for health monitoring
 
-### 9. Position Monitor (`pga-monitor`, persistent worker)
+### 15. Position Monitor (`pga-monitor`, persistent worker)
 
 ```
 Redis position ledger → all open PM positions
@@ -344,7 +428,7 @@ Redis position ledger → all open PM positions
 
 All tiers share the same trailing stop mechanism (`TRAILING_STOP_ENABLED`, `TRAILING_GIVEBACK_PCT`). Trailing activation = the tier's TP threshold.
 
-### 10. Durable DB Layer (Epic #142)
+### 16. Durable DB Layer (Epic #142)
 
 Analytics data flows from workers to Postgres via a Redis stream:
 
@@ -358,7 +442,7 @@ Workers → enqueueWrite('table', payload) → Redis stream db:writeq
 - Nightly crons: trade memory embedding, telemetry snapshots
 - Nightly pg_dump backup with 7-day retention
 
-### 11. Bankroll
+### 17. Bankroll
 
 `bankroll.ts` maintains an in-process cache of the live Simmer portfolio balance (15s TTL):
 
@@ -392,7 +476,10 @@ Workers → enqueueWrite('table', payload) → Redis stream db:writeq
 | `src/copytrade/` | Whale wallet worker, leaderboard shortlist refresh, payout ratio + edge magnitude gates |
 | `src/sports/` | ESPN live feed, win-probability scanner, sports arb poller |
 | `src/clob/` | CLOB flow monitor — streams Polymarket book/trade tape into Redis |
-| `src/cron/` | Scheduled jobs: OSINT pipeline, near-zero scanner, settlement arb, watchlist refresh, calibration, trade memory embedding, telemetry snapshots |
+| `src/cron/` | Scheduled jobs: OSINT pipeline, near-zero scanner, longshot bias scanner, settlement arb, correlation discovery + scanner, rebate farmer, watchlist refresh, calibration |
+| `src/correlation/` | Cross-market correlation arb: entity extractor, pair finder, LLM relationship classifier, constraint graph (Redis), violation detector |
+| `src/weather/` | Weather scanner: NOAA forecast fetch, city lookup, exceedance probability, weather market matching |
+| `src/settlement/` | CME settlement arb: commodity keyword matching, strike extraction, sigmoid implied probability |
 | `src/execution/` | Executor (venue router, pre-trade context check, maker exit), position ledger, Telegram notifications |
 | `src/monitor/` | Position monitor worker, price resolver (WS + REST), tiered SL/TP evaluator, trailing stop, stale exit, trend exit, signal re-eval, resolution redeemer, futures monitor |
 | `src/db/` | Write queue (Redis stream producer), DB writer (XREADGROUP consumer), migrations, retrieval layer |
@@ -479,7 +566,13 @@ See `.env.example` for full documentation. Highlights:
 | `TREND_EXIT_ENABLED` | — | OLS regression trend-reversal exit |
 | `MAKER_EXIT_ENABLED` | — | Post-only limit order exits with taker fallback |
 | `NEAR_ZERO_SCANNER_ENABLED` | — | Near-zero market entry scanner |
+| `LONGSHOT_SCANNER_ENABLED` | — | Longshot bias NO-side scanner |
+| `WEATHER_SCANNER_ENABLED` | — | NOAA weather arb scanner |
+| `SETTLEMENT_ARB_ENABLED` | — | CME settlement arb scanner |
+| `CORRELATION_SCANNER_ENABLED` | — | Cross-market correlation arb scanner |
+| `REBATE_FARMING_ENABLED` | — | Maker rebate farming |
 | `CALIBRATION_ENABLED` | — | Calibration correction (default true) |
+| `CALIBRATION_BIAS_ENABLED` | — | Per-category calibration bias adjustment |
 
 ---
 
