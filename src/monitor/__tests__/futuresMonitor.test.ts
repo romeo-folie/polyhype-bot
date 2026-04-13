@@ -87,7 +87,7 @@ describe('futuresMonitor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     loadConfigMock.mockReturnValue(baseCfg);
-    mockScoreConfluence.mockResolvedValue({ direction: 'neutral', score: 0, signals: {} });
+    mockScoreConfluence.mockResolvedValue({ direction: 'NEUTRAL', score: 0, signals: {} });
     // Break the while(true) loop after one tick.
     // We throw WITHOUT calling fn() so the Promise constructor rejects (uncaught resolve
     // would swallow the throw). The rejection propagates past the inner try/catch
@@ -291,6 +291,17 @@ describe('futuresMonitor', () => {
       await runTick();
 
       expect(mockClosePosition).toHaveBeenCalledWith('DOGE');
+    });
+
+    it('fails open when TA check throws — infra blip should not force-exit a winner', async () => {
+      loadConfigMock.mockReturnValue(winnerCfg);
+      mockGetOpenPositions.mockResolvedValue([makeWinningPosition('AVAX')]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerWinner('AVAX')]);
+      mockScoreConfluence.mockRejectedValue(new Error('redis blip'));
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
     });
   });
 });

@@ -393,23 +393,29 @@ export async function runFuturesMonitorWorker(): Promise<void> {
                     taAgrees = false;
                   }
                 } catch (err) {
-                  logger.warn('[futures-monitor] max_hold bypass TA check failed', {
+                  // Fail open on infra errors (redis/candle fetch blip). Forcing
+                  // a winner to exit because the TA pipeline hiccuped would defeat
+                  // the whole point of the bypass. The next tick past the cadence
+                  // gate will retry; real reversals will still be caught then.
+                  logger.warn('[futures-monitor] max_hold bypass TA check failed; skipping TA gate', {
                     symbol, error: err instanceof Error ? err.message : String(err),
                   });
-                  taAgrees = false;
                 }
               }
               if (taAgrees) {
                 bypassed = true;
-                logger.info('[futures-monitor] max_hold bypassed on winner', {
-                  symbol,
-                  direction,
-                  ageHours: ageHours.toFixed(1),
-                  priceChangePct: priceChangePct.toFixed(2),
-                  hwm: hwm?.toFixed(2),
-                  tpPct,
-                  taChecked,
-                });
+                // Only log when TA was actually re-checked this tick — otherwise
+                // this would fire every 5s poll for hours once past the time cap.
+                if (taChecked) {
+                  logger.info('[futures-monitor] max_hold bypassed on winner', {
+                    symbol,
+                    direction,
+                    ageHours: ageHours.toFixed(1),
+                    priceChangePct: priceChangePct.toFixed(2),
+                    hwm: hwm?.toFixed(2),
+                    tpPct,
+                  });
+                }
               }
             }
             if (!bypassed) {
