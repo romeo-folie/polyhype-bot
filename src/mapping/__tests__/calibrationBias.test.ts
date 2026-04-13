@@ -55,16 +55,13 @@ describe('recalibratePrice', () => {
     expect(adjusted).toBeLessThan(0.80);
   });
 
-  it('adjusts longshot upward with theta>1 (underconfident)', () => {
-    // p=0.20, theta=1.83 => longshots should also be adjusted
-    // But for p < 0.5 with theta > 1, p* < p (longshots move toward 0.5)
+  it('adjusts longshot downward with theta>1 (underconfident)', () => {
+    // p=0.20, theta=1.83 => for p < 0.5 and theta > 1, p* < p
+    // because underconfident markets are recalibrated away from 0.5.
     const adjusted = recalibratePrice(0.20, 1.83);
     // 0.20^1.83 / (0.20^1.83 + 0.80^1.83)
     // 0.20^1.83 ~ 0.0516, 0.80^1.83 ~ 0.6580 => 0.0516 / 0.7096 ~ 0.0727
-    // Wait, that's LESS than 0.20 - this is correct: theta>1 pushes probabilities
-    // AWAY from 0.5, so longshots get more extreme, favourites get more extreme.
-    // Actually rechecking: theta>1 means market is underconfident, so true probs
-    // are MORE extreme. A 20% longshot is really even less likely.
+    // So a 20% longshot becomes even less likely after recalibration.
     expect(adjusted).toBeLessThan(0.20);
   });
 
@@ -114,8 +111,15 @@ describe('getThetaForCategory', () => {
     expect(getThetaForCategory('sports')).toBe(1.20);
   });
 
-  it('returns weather theta', () => {
+  it('returns weather theta for short-horizon (<=48h)', () => {
     expect(getThetaForCategory('weather')).toBe(0.69);
+    expect(getThetaForCategory('weather', 24)).toBe(0.69);
+    expect(getThetaForCategory('weather', 48)).toBe(0.69);
+  });
+
+  it('returns default theta for long-horizon weather (>48h)', () => {
+    expect(getThetaForCategory('weather', 49)).toBe(1.0);
+    expect(getThetaForCategory('weather', 720)).toBe(1.0);
   });
 
   it('returns crypto theta for crypto-regulatory', () => {

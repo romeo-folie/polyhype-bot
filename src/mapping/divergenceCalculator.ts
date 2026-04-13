@@ -189,22 +189,23 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
       hoursToResolution !== undefined && Number.isFinite(hoursToResolution)
         ? hoursToResolution
         : undefined,
+      cfg,
     );
     if (bias.theta !== 1) {
       if (cfg.CALIBRATION_BIAS_ENABLED) {
         effectiveYesPrice = bias.adjustedPrice;
+      } else {
+        logger.info('[divergence] calibration_bias shadow', {
+          category,
+          theta: bias.theta,
+          rawPrice: bias.rawPrice.toFixed(4),
+          adjustedPrice: bias.adjustedPrice.toFixed(4),
+          delta: (bias.adjustedPrice - bias.rawPrice).toFixed(4),
+          consensus: p.toFixed(3),
+          rawEdge: (p - currentYesPrice).toFixed(4),
+          adjustedEdge: (p - bias.adjustedPrice).toFixed(4),
+        });
       }
-      logger.info('[divergence] calibration_bias shadow', {
-        category,
-        theta: bias.theta,
-        rawPrice: bias.rawPrice.toFixed(4),
-        adjustedPrice: bias.adjustedPrice.toFixed(4),
-        delta: (bias.adjustedPrice - bias.rawPrice).toFixed(4),
-        consensus: p.toFixed(3),
-        rawEdge: (p - currentYesPrice).toFixed(4),
-        adjustedEdge: (p - bias.adjustedPrice).toFixed(4),
-        enabled: cfg.CALIBRATION_BIAS_ENABLED,
-      });
     }
   }
 
@@ -265,12 +266,12 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
   // Gate 2: EV gate — use pessimistic confidence bound, not point estimate
   // YES trade: pessimistic p(YES) = p - stddev (event less likely than estimated)
   // NO trade:  pessimistic p(NO)  = 1 - (p + stddev) (event more likely than estimated)
-  // Note: EV gate uses effectiveYesPrice (bias-corrected when enabled) because edge
-  // is measured against the "true" probability, not the raw market price.
+  // Direction uses effectiveYesPrice (bias-corrected) to decide which side to trade,
+  // but payout/EV uses the raw market price because that's the actual cost of entry.
   const p_lower = Math.max(0, p - consensusStddev);
   const p_upper = Math.min(1, p + consensusStddev);
   const direction_for_ev: 'YES' | 'NO' = p - effectiveYesPrice > 0 ? 'YES' : 'NO';
-  const outcomePrice_for_ev = direction_for_ev === 'YES' ? effectiveYesPrice : 1 - effectiveYesPrice;
+  const outcomePrice_for_ev = direction_for_ev === 'YES' ? currentYesPrice : 1 - currentYesPrice;
   const p_for_ev = direction_for_ev === 'YES' ? p_lower : 1 - p_upper;
   const payout_for_ev = outcomePrice_for_ev > 0 ? 1 / outcomePrice_for_ev : 0;
   const ev = payout_for_ev > 0 ? p_for_ev * payout_for_ev - 1 : -1;

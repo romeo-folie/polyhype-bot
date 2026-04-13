@@ -15,7 +15,7 @@
  * When theta = 1, p* = p (identity — no correction).
  */
 
-import { loadConfig } from '../shared/config.js';
+import { loadConfig, type AppConfig } from '../shared/config.js';
 
 export interface CalibrationBiasResult {
   /** Recalibrated price — the "true" probability implied by the biased market. */
@@ -51,51 +51,62 @@ export function recalibratePrice(marketPrice: number, theta: number): number {
   return pTheta / denominator;
 }
 
+/** Max hours for weather overconfidence bias to apply (48h). */
+const WEATHER_BIAS_MAX_HOURS = 48;
+
 /**
  * Resolve the recalibration theta for a given market category.
  *
  * @param category - Market category (e.g. 'us-politics', 'sports').
  * @param timeToResolutionHours - Optional hours until market resolves.
- *   Used to distinguish short-term sports (<=720h / 1mo) from long-term.
+ *   Used to distinguish short-term sports (<=720h / 1mo) from long-term,
+ *   and to gate weather bias to <48h markets only.
+ * @param cfg - Optional pre-loaded config to avoid redundant loadConfig() calls.
  * @returns Domain-specific theta value from config.
  */
 export function getThetaForCategory(
   category: string,
   timeToResolutionHours?: number,
+  cfg?: AppConfig,
 ): number {
-  const cfg = loadConfig();
+  const c = cfg ?? loadConfig();
 
   switch (category) {
     case 'us-politics':
     case 'geopolitical':
-      return cfg.CALIBRATION_BIAS_THETA_POLITICS;
+      return c.CALIBRATION_BIAS_THETA_POLITICS;
 
     case 'sports': {
       // Sports short-term (<=1 month / 720h) vs long-term (>1 month).
       // If timeToResolutionHours is unknown, default to short-term (conservative).
       const isLongTerm = timeToResolutionHours !== undefined && timeToResolutionHours > 720;
       return isLongTerm
-        ? cfg.CALIBRATION_BIAS_THETA_SPORTS_LONG
-        : cfg.CALIBRATION_BIAS_THETA_SPORTS_SHORT;
+        ? c.CALIBRATION_BIAS_THETA_SPORTS_LONG
+        : c.CALIBRATION_BIAS_THETA_SPORTS_SHORT;
     }
 
     case 'weather':
-      return cfg.CALIBRATION_BIAS_THETA_WEATHER;
+      // Weather overconfidence bias only applies to short-horizon (<48h) markets.
+      // Longer-horizon weather markets are closer to well-calibrated.
+      if (timeToResolutionHours !== undefined && timeToResolutionHours > WEATHER_BIAS_MAX_HOURS) {
+        return c.CALIBRATION_BIAS_THETA_DEFAULT;
+      }
+      return c.CALIBRATION_BIAS_THETA_WEATHER;
 
     case 'crypto-regulatory':
     case 'crypto-updown':
-      return cfg.CALIBRATION_BIAS_THETA_CRYPTO;
+      return c.CALIBRATION_BIAS_THETA_CRYPTO;
 
     case 'ai-tech':
     case 'entertainment':
-      return cfg.CALIBRATION_BIAS_THETA_ENTERTAINMENT;
+      return c.CALIBRATION_BIAS_THETA_ENTERTAINMENT;
 
     case 'macro':
       // Macro is closer to politics in terms of calibration bias.
-      return cfg.CALIBRATION_BIAS_THETA_POLITICS;
+      return c.CALIBRATION_BIAS_THETA_POLITICS;
 
     default:
-      return cfg.CALIBRATION_BIAS_THETA_DEFAULT;
+      return c.CALIBRATION_BIAS_THETA_DEFAULT;
   }
 }
 
@@ -106,13 +117,15 @@ export function getThetaForCategory(
  * @param marketPrice - Raw market YES price (0-1).
  * @param category - Market category string.
  * @param timeToResolutionHours - Optional hours until resolution.
+ * @param cfg - Optional pre-loaded config to avoid redundant loadConfig() calls.
  */
 export function applyCategoryBias(
   marketPrice: number,
   category: string,
   timeToResolutionHours?: number,
+  cfg?: AppConfig,
 ): CalibrationBiasResult {
-  const theta = getThetaForCategory(category, timeToResolutionHours);
+  const theta = getThetaForCategory(category, timeToResolutionHours, cfg);
   const adjustedPrice = recalibratePrice(marketPrice, theta);
   return { adjustedPrice, theta, rawPrice: marketPrice };
 }
