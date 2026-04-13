@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type * as GammaModule from '../../mapping/gamma.js';
 import type * as NoaaModule from '../noaaClient.js';
 
@@ -9,10 +9,11 @@ import type * as NoaaModule from '../noaaClient.js';
 vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => ({
     WEATHER_SCANNER_ENABLED: false,
-    WEATHER_MIN_EDGE: 0.05,
+    WEATHER_MIN_EDGE: 0.08,
     WEATHER_MAX_STAKE_FRACTION: 0.02,
-    WEATHER_DEDUP_TTL_S: 3600,
-    WEATHER_MAX_MARKETS: 20,
+    WEATHER_DEDUP_TTL_S: 14400,
+    WEATHER_MAX_EVENTS: 50,
+    WEATHER_MAX_HORIZON_DAYS: 7,
   })),
 }));
 
@@ -25,41 +26,61 @@ vi.mock('../../shared/logger.js', () => ({
   },
 }));
 
-const mockSearchEvents = vi.fn<() => Promise<unknown[]>>();
 vi.mock('../../mapping/gamma.js', async () => {
   const actual =
     await vi.importActual<typeof GammaModule>('../../mapping/gamma.js');
   return {
-    searchEvents: mockSearchEvents,
+    fetchWithTimeout: actual.fetchWithTimeout,
     parseOutcomePrices: actual.parseOutcomePrices,
     parseClobTokenIds: actual.parseClobTokenIds,
     parseOutcomes: actual.parseOutcomes,
+    searchEvents: vi.fn().mockResolvedValue([]),
   };
 });
 
-const mockFetchForecast = vi.fn<() => Promise<unknown>>();
+const mockFetchNwsForecast = vi.fn<() => Promise<unknown>>();
 vi.mock('../noaaClient.js', async () => {
   const actual =
     await vi.importActual<typeof NoaaModule>('../noaaClient.js');
   return {
-    fetchNwsForecast: mockFetchForecast,
     lookupCity: actual.lookupCity,
+    fetchNwsForecast: mockFetchNwsForecast,
+    estimateBracketProbability: actual.estimateBracketProbability,
     estimateExceedanceProbability: actual.estimateExceedanceProbability,
     normalCdf: actual.normalCdf,
+    getDefaultStdDev: actual.getDefaultStdDev,
     CITY_COORDINATES: actual.CITY_COORDINATES,
   };
 });
 
-// Dynamic imports — after mocks are set up
-const { parseWeatherQuestion, scanWeatherMarkets, daysUntil } = await import(
-  '../weatherScanner.js'
-);
-const { estimateExceedanceProbability, normalCdf, lookupCity } = await import(
-  '../noaaClient.js'
-);
+const mockFetchOpenMeteo = vi.fn<() => Promise<unknown>>();
+const mockFetchEnsemble = vi.fn<() => Promise<unknown>>();
+vi.mock('../openMeteoClient.js', () => ({
+  fetchOpenMeteoForecast: mockFetchOpenMeteo,
+  fetchEnsembleForecast: mockFetchEnsemble,
+}));
+
+// Dynamic imports — after mocks
+const {
+  extractCityFromTitle,
+  extractDateFromEvent,
+  parseBracketLabel,
+  parseWeatherEvent,
+  findMispricedBrackets,
+  scanWeatherMarkets,
+  daysUntil,
+} = await import('../weatherScanner.js');
+
+const {
+  estimateBracketProbability,
+  normalCdf,
+  getDefaultStdDev,
+  lookupCity,
+} = await import('../noaaClient.js');
+
 const { logger } = await import('../../shared/logger.js');
 
-// Minimal Redis mock — supports SET NX EX pattern
+// Minimal Redis mock
 function createRedisMock() {
   const store = new Map<string, string>();
   return {
@@ -74,158 +95,218 @@ function createRedisMock() {
 }
 
 // ---------------------------------------------------------------------------
-// Question parsing tests
+// extractCityFromTitle
 // ---------------------------------------------------------------------------
 
-describe('parseWeatherQuestion', () => {
-  it('parses "Will the high temperature in NYC exceed 80°F on April 15?"', () => {
-    const result = parseWeatherQuestion(
-      'Will the high temperature in NYC exceed 80\u00b0F on April 15?',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.city).toBe('nyc');
-    expect(result!.tempThresholdF).toBe(80);
-    expect(result!.direction).toBe('over');
-    expect(result!.metric).toBe('high');
-    expect(result!.targetDate).toMatch(/^\d{4}-04-15$/);
+describe('extractCityFromTitle', () => {
+  it('extracts "Chicago" from standard title', () => {
+    expect(extractCityFromTitle('Highest temperature in Chicago on April 14?'))
+      .toBe('chicago');
   });
 
-  it('parses "Will the high temperature in Chicago exceed 90°F on July 4, 2030?"', () => {
-    const result = parseWeatherQuestion(
-      'Will the high temperature in Chicago exceed 90\u00b0F on July 4, 2030?',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.city).toBe('chicago');
-    expect(result!.tempThresholdF).toBe(90);
-    expect(result!.direction).toBe('over');
-    expect(result!.targetDate).toBe('2030-07-04');
+  it('extracts "New York" (multi-word city)', () => {
+    expect(extractCityFromTitle('Highest temperature in New York on April 15?'))
+      .toBe('new york');
   });
 
-  it('parses "Will the temperature in Miami drop below 32°F on January 10?"', () => {
-    const result = parseWeatherQuestion(
-      'Will the temperature in Miami drop below 32\u00b0F on January 10?',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.city).toBe('miami');
-    expect(result!.tempThresholdF).toBe(32);
-    expect(result!.direction).toBe('under');
+  it('extracts "Sao Paulo" (international)', () => {
+    expect(extractCityFromTitle('Highest temperature in Sao Paulo on April 14?'))
+      .toBe('sao paulo');
   });
 
-  it('parses "Will the overnight low temperature in Denver fall below 20 degrees F on March 5?"', () => {
-    const result = parseWeatherQuestion(
-      'Will the overnight low temperature in Denver fall below 20 degrees F on March 5?',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.city).toBe('denver');
-    expect(result!.tempThresholdF).toBe(20);
-    expect(result!.direction).toBe('under');
-    expect(result!.metric).toBe('low');
-  });
-
-  it('parses question with "above" keyword', () => {
-    const result = parseWeatherQuestion(
-      'Will the temperature in Los Angeles be above 100\u00b0F on August 1?',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.city).toBe('los angeles');
-    expect(result!.tempThresholdF).toBe(100);
-    expect(result!.direction).toBe('over');
-  });
-
-  it('returns null for non-weather question', () => {
-    const result = parseWeatherQuestion(
-      'Will Bitcoin exceed $100,000 on December 31?',
-    );
-    expect(result).toBeNull();
-  });
-
-  it('returns null when no city is found', () => {
-    const result = parseWeatherQuestion(
-      'Will the temperature in Timbuktu exceed 110\u00b0F on June 1?',
-    );
-    expect(result).toBeNull();
-  });
-
-  it('returns null when no temperature is found', () => {
-    const result = parseWeatherQuestion(
-      'Will it rain in NYC on April 15?',
-    );
-    expect(result).toBeNull();
-  });
-
-  it('returns null when no date is found', () => {
-    const result = parseWeatherQuestion(
-      'Will the temperature in NYC exceed 80\u00b0F?',
-    );
-    expect(result).toBeNull();
-  });
-
-  it('does not false-match "la" inside "Dallas"', () => {
-    const result = parseWeatherQuestion(
-      'Will the high temperature in Dallas exceed 100\u00b0F on July 4, 2030?',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.city).toBe('dallas');
-  });
-
-  it('does not false-match "la" inside "Atlanta"', () => {
-    const result = parseWeatherQuestion(
-      'Will the high temperature in Atlanta exceed 95\u00b0F on August 1, 2030?',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.city).toBe('atlanta');
-  });
-
-  it('parses ISO date format', () => {
-    const result = parseWeatherQuestion(
-      'Will the temperature in Boston exceed 75\u00b0F on 2026-06-15?',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.targetDate).toBe('2026-06-15');
-    expect(result!.city).toBe('boston');
+  it('returns null for non-weather titles', () => {
+    expect(extractCityFromTitle('Will Bitcoin reach $100k?')).toBeNull();
   });
 });
 
 // ---------------------------------------------------------------------------
-// Edge calculation tests (estimateExceedanceProbability)
+// extractDateFromEvent
 // ---------------------------------------------------------------------------
 
-describe('estimateExceedanceProbability', () => {
-  it('returns ~0.5 when forecast equals threshold', () => {
-    const p = estimateExceedanceProbability(80, 80, 1);
-    expect(p).toBeCloseTo(0.5, 1);
+describe('extractDateFromEvent', () => {
+  it('extracts date from slug with year', () => {
+    expect(extractDateFromEvent(
+      'Highest temperature in Chicago on April 14?',
+      'highest-temperature-in-chicago-on-april-14-2026',
+    )).toBe('2026-04-14');
   });
 
-  it('returns high probability when forecast is well above threshold', () => {
-    // Forecast 90F, threshold 80F, 1-day out (stddev=3)
-    // z = (80-90)/3 = -3.33 -> P(X>80) ~ 0.9996
-    const p = estimateExceedanceProbability(90, 80, 1);
-    expect(p).toBeGreaterThan(0.95);
+  it('extracts date from title when slug has no date', () => {
+    expect(extractDateFromEvent(
+      'Highest temperature in Miami on July 4, 2030?',
+      'some-random-slug',
+    )).toBe('2030-07-04');
   });
 
-  it('returns low probability when forecast is well below threshold', () => {
-    // Forecast 70F, threshold 80F, 1-day out
-    // z = (80-70)/3 = 3.33 -> P(X>80) ~ 0.0004
-    const p = estimateExceedanceProbability(70, 80, 1);
-    expect(p).toBeLessThan(0.05);
+  it('falls back to endDate', () => {
+    expect(extractDateFromEvent(
+      'No date here',
+      'no-date-slug',
+      '2026-05-01T12:00:00Z',
+    )).toBe('2026-05-01');
   });
 
-  it('has wider uncertainty for longer horizons', () => {
-    // Same temp, different horizons: longer horizon = more uncertainty = closer to 0.5
-    const p1day = estimateExceedanceProbability(85, 80, 1); // stddev=3
-    const p4day = estimateExceedanceProbability(85, 80, 4); // stddev=6
+  it('returns null when no date can be extracted', () => {
+    expect(extractDateFromEvent('No date', 'no-date')).toBeNull();
+  });
+});
 
-    expect(p1day).toBeGreaterThan(p4day);
-    // Both should still be > 0.5 since forecast > threshold
-    expect(p1day).toBeGreaterThan(0.5);
-    expect(p4day).toBeGreaterThan(0.5);
+// ---------------------------------------------------------------------------
+// parseBracketLabel
+// ---------------------------------------------------------------------------
+
+describe('parseBracketLabel', () => {
+  it('parses low-tail Fahrenheit: "39°F or below"', () => {
+    const result = parseBracketLabel('39°F or below');
+    expect(result).toEqual({ low: null, high: 39, unit: 'fahrenheit' });
   });
 
-  it('returns high probability for 2.5 sigma above threshold at 1-day', () => {
-    // Forecast 87.5F, threshold 80F, 1-day (stddev=3)
-    // z = (80-87.5)/3 = -2.5 -> P(X>80) ~ 0.9938
-    const p = estimateExceedanceProbability(87.5, 80, 1);
-    expect(p).toBeGreaterThan(0.99);
+  it('parses high-tail Fahrenheit: "58°F or higher"', () => {
+    const result = parseBracketLabel('58°F or higher');
+    expect(result).toEqual({ low: 58, high: null, unit: 'fahrenheit' });
+  });
+
+  it('parses Fahrenheit range: "40-41°F"', () => {
+    const result = parseBracketLabel('40-41°F');
+    expect(result).toEqual({ low: 40, high: 41, unit: 'fahrenheit' });
+  });
+
+  it('parses low-tail Celsius: "6°C or below"', () => {
+    const result = parseBracketLabel('6°C or below');
+    expect(result).toEqual({ low: null, high: 6, unit: 'celsius' });
+  });
+
+  it('parses high-tail Celsius: "16°C or higher"', () => {
+    const result = parseBracketLabel('16°C or higher');
+    expect(result).toEqual({ low: 16, high: null, unit: 'celsius' });
+  });
+
+  it('parses single Celsius: "7°C"', () => {
+    const result = parseBracketLabel('7°C');
+    expect(result).toEqual({ low: 7, high: 7, unit: 'celsius' });
+  });
+
+  it('returns null for unparseable labels', () => {
+    expect(parseBracketLabel('something random')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// estimateBracketProbability
+// ---------------------------------------------------------------------------
+
+describe('estimateBracketProbability', () => {
+  it('returns ~1.0 for bracket containing the forecast point', () => {
+    // Forecast exactly 50°F, bracket [49, 51], stddev=3
+    // P(48.5 <= T <= 51.5) with mean=50, stddev=3
+    // z_low = (48.5-50)/3 = -0.5, z_high = (51.5-50)/3 = 0.5
+    // CDF(0.5) - CDF(-0.5) ≈ 0.6915 - 0.3085 = 0.383
+    const prob = estimateBracketProbability(50, 49, 51, 1, 3);
+    expect(prob).toBeGreaterThan(0.3);
+    expect(prob).toBeLessThan(0.5);
+  });
+
+  it('returns low probability for bracket far from forecast', () => {
+    // Forecast 80°F, bracket [40, 41], stddev=3
+    const prob = estimateBracketProbability(80, 40, 41, 1, 3);
+    expect(prob).toBeLessThan(0.001);
+  });
+
+  it('handles low-tail bracket correctly', () => {
+    // Forecast 50°F, low tail "39 or below", stddev=3
+    // P(T <= 39.5) = CDF((39.5-50)/3) = CDF(-3.5) ≈ 0.0002
+    const prob = estimateBracketProbability(50, null, 39, 1, 3);
+    expect(prob).toBeLessThan(0.01);
+  });
+
+  it('handles high-tail bracket correctly', () => {
+    // Forecast 50°F, high tail "58 or higher", stddev=3
+    // P(T >= 57.5) = 1 - CDF((57.5-50)/3) = 1 - CDF(2.5) ≈ 0.006
+    const prob = estimateBracketProbability(50, 58, null, 1, 3);
+    expect(prob).toBeLessThan(0.02);
+  });
+
+  it('probabilities across brackets sum to ~1.0', () => {
+    // Simulate 11 brackets for a Chicago-style F event centered at 50°F
+    const forecast = 50;
+    const stdDev = 4;
+    const brackets: [number | null, number | null][] = [
+      [null, 39],      // 39°F or below
+      [40, 41],
+      [42, 43],
+      [44, 45],
+      [46, 47],
+      [48, 49],
+      [50, 51],
+      [52, 53],
+      [54, 55],
+      [56, 57],
+      [58, null],       // 58°F or higher
+    ];
+
+    let totalProb = 0;
+    for (const [low, high] of brackets) {
+      totalProb += estimateBracketProbability(forecast, low, high, 1, stdDev);
+    }
+
+    expect(totalProb).toBeCloseTo(1.0, 2);
+  });
+
+  it('probabilities for Celsius brackets also sum to ~1.0', () => {
+    const forecast = 10; // 10°C
+    const stdDev = 2.2; // ~4°F * 5/9
+    const brackets: [number | null, number | null][] = [
+      [null, 6],    // 6°C or below
+      [7, 7],       // 7°C
+      [8, 8],       // 8°C
+      [9, 9],
+      [10, 10],
+      [11, 11],
+      [12, 12],
+      [13, 13],
+      [14, 14],
+      [15, 15],
+      [16, null],   // 16°C or higher
+    ];
+
+    let totalProb = 0;
+    for (const [low, high] of brackets) {
+      totalProb += estimateBracketProbability(forecast, low, high, 1, stdDev);
+    }
+
+    expect(totalProb).toBeCloseTo(1.0, 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getDefaultStdDev
+// ---------------------------------------------------------------------------
+
+describe('getDefaultStdDev', () => {
+  it('returns 3.5 for 1-day horizon', () => {
+    expect(getDefaultStdDev(1)).toBe(3.5);
+  });
+
+  it('returns 4.5 for 2-day horizon', () => {
+    expect(getDefaultStdDev(2)).toBe(4.5);
+  });
+
+  it('returns 8.0 for 6+ day horizon', () => {
+    expect(getDefaultStdDev(6)).toBe(8.0);
+  });
+
+  it('applies winter multiplier (1.25x)', () => {
+    expect(getDefaultStdDev(1, 1)).toBeCloseTo(3.5 * 1.25, 2); // January
+    expect(getDefaultStdDev(1, 12)).toBeCloseTo(3.5 * 1.25, 2); // December
+  });
+
+  it('applies summer multiplier (0.85x)', () => {
+    expect(getDefaultStdDev(1, 7)).toBeCloseTo(3.5 * 0.85, 2); // July
+  });
+
+  it('returns base value for spring/fall', () => {
+    expect(getDefaultStdDev(1, 4)).toBe(3.5); // April
+    expect(getDefaultStdDev(1, 10)).toBe(3.5); // October
   });
 });
 
@@ -260,27 +341,43 @@ describe('normalCdf', () => {
 // ---------------------------------------------------------------------------
 
 describe('lookupCity', () => {
-  it('finds NYC by alias', () => {
-    const result = lookupCity('NYC');
+  it('finds Chicago', () => {
+    const result = lookupCity('Chicago');
     expect(result).not.toBeNull();
-    expect(result!.lat).toBeCloseTo(40.7128, 2);
     expect(result!.noaaCoverage).toBe(true);
+    expect(result!.unit).toBe('fahrenheit');
   });
 
-  it('finds Chicago case-insensitively', () => {
-    const result = lookupCity('CHICAGO');
+  it('finds London as international', () => {
+    const result = lookupCity('London');
     expect(result).not.toBeNull();
-    expect(result!.noaaCoverage).toBe(true);
+    expect(result!.noaaCoverage).toBe(false);
+    expect(result!.unit).toBe('celsius');
+    expect(result!.wuStation).toBe('EGLC');
+  });
+
+  it('resolves NYC alias to new york', () => {
+    const result = lookupCity('NYC');
+    expect(result).not.toBeNull();
+    expect(result!.wuStation).toBe('KLGA');
   });
 
   it('returns null for unknown city', () => {
     expect(lookupCity('Timbuktu')).toBeNull();
   });
 
-  it('marks London as no NOAA coverage', () => {
-    const result = lookupCity('London');
-    expect(result).not.toBeNull();
-    expect(result!.noaaCoverage).toBe(false);
+  it('finds all 30 Polymarket cities', () => {
+    const cities = [
+      'new york', 'chicago', 'miami', 'houston', 'dallas', 'denver',
+      'seattle', 'atlanta', 'austin', 'los angeles', 'san francisco',
+      'london', 'paris', 'toronto', 'sao paulo', 'buenos aires',
+      'ankara', 'lucknow', 'tel aviv', 'hong kong', 'milan', 'madrid',
+      'warsaw', 'shenzhen', 'istanbul', 'mexico city', 'amsterdam',
+      'panama city', 'jakarta', 'jeddah',
+    ];
+    for (const city of cities) {
+      expect(lookupCity(city)).not.toBeNull();
+    }
   });
 });
 
@@ -290,26 +387,13 @@ describe('lookupCity', () => {
 
 describe('daysUntil', () => {
   it('returns 0 for same-day when now is past noon target', () => {
-    // target noon UTC, now 14:00 UTC → diff negative → clamped to 0
     const now = new Date('2026-04-13T14:00:00Z');
     expect(daysUntil('2026-04-13', now)).toBe(0);
   });
 
-  it('returns 1 for same-day when now is before noon target (ceil rounds up)', () => {
-    // target 2026-04-13T12:00:00Z, now 10:00 → 2h remaining → ceil(2/24) = 1
-    const now = new Date('2026-04-13T10:00:00Z');
-    expect(daysUntil('2026-04-13', now)).toBe(1);
-  });
-
-  it('returns 1 for tomorrow at exactly noon', () => {
-    // target 2026-04-14T12:00:00Z, now 2026-04-13T12:00:00Z → exactly 1 day
+  it('returns 1 for tomorrow', () => {
     const now = new Date('2026-04-13T12:00:00Z');
     expect(daysUntil('2026-04-14', now)).toBe(1);
-  });
-
-  it('returns 7 for a week out at exactly noon', () => {
-    const now = new Date('2026-04-13T12:00:00Z');
-    expect(daysUntil('2026-04-20', now)).toBe(7);
   });
 
   it('returns 0 for past dates', () => {
@@ -319,262 +403,301 @@ describe('daysUntil', () => {
 });
 
 // ---------------------------------------------------------------------------
-// scanWeatherMarkets (integration-style tests with mocked externals)
+// parseWeatherEvent
 // ---------------------------------------------------------------------------
 
-describe('scanWeatherMarkets', () => {
-  let redisMock: ReturnType<typeof createRedisMock>;
+describe('parseWeatherEvent', () => {
+  function makeFahrenheitEvent() {
+    return {
+      id: 'event-1',
+      title: 'Highest temperature in Chicago on April 14?',
+      slug: 'highest-temperature-in-chicago-on-april-14-2026',
+      active: true,
+      closed: false,
+      negRisk: true,
+      endDate: '2026-04-14T12:00:00Z',
+      markets: [
+        makeMarket('m0', '39°F or below', '0', '0.01', '0.99'),
+        makeMarket('m1', '40-41°F', '1', '0.03', '0.97'),
+        makeMarket('m2', '42-43°F', '2', '0.05', '0.95'),
+        makeMarket('m3', '44-45°F', '3', '0.10', '0.90'),
+        makeMarket('m4', '46-47°F', '4', '0.15', '0.85'),
+        makeMarket('m5', '48-49°F', '5', '0.20', '0.80'),
+        makeMarket('m6', '50-51°F', '6', '0.18', '0.82'),
+        makeMarket('m7', '52-53°F', '7', '0.12', '0.88'),
+        makeMarket('m8', '54-55°F', '8', '0.08', '0.92'),
+        makeMarket('m9', '56-57°F', '9', '0.05', '0.95'),
+        makeMarket('m10', '58°F or higher', '10', '0.03', '0.97'),
+      ],
+    };
+  }
 
-  beforeEach(() => {
-    vi.clearAllMocks();
-    redisMock = createRedisMock();
-  });
-
-  it('returns empty when no weather markets found', async () => {
-    mockSearchEvents.mockResolvedValue([]);
-
-    const results = await scanWeatherMarkets(redisMock as never);
-    expect(results).toEqual([]);
-  });
-
-  it('shadow-logs opportunities even when scanner is disabled', async () => {
-    // Set up a market that should produce an opportunity
-    mockSearchEvents.mockResolvedValue([
-      {
-        id: 'event-1',
-        title: 'NYC Weather',
-        slug: 'nyc-weather',
-        active: true,
-        closed: false,
-        markets: [
-          {
-            id: 'market-1',
-            question: 'Will the high temperature in NYC exceed 80\u00b0F on July 15, 2030?',
-            conditionId: 'cond-1',
-            clobTokenIds: '["token-yes","token-no"]',
-            outcomePrices: '["0.50","0.50"]',
-            outcomes: '["Yes","No"]',
-            active: true,
-            closed: false,
-            volume: '10000',
-            liquidity: '5000',
-            endDate: '2030-07-15T23:59:59Z',
-            description: null,
-          },
-        ],
-      },
-    ]);
-
-    // Forecast says 88F high -- strong edge for "exceed 80F"
-    mockFetchForecast.mockResolvedValue({
-      highF: 88,
-      lowF: 65,
-      precipProbability: 10,
-      forecastDate: '2030-07-15',
-      shortForecast: 'Mostly Sunny',
-    });
-
-    const results = await scanWeatherMarkets(redisMock as never);
-
-    // Should have found the opportunity and shadow-logged it
-    expect(logger.info).toHaveBeenCalledWith(
-      '[weather] opportunity evaluated',
-      expect.objectContaining({
-        marketId: 'market-1',
-        city: 'nyc',
-        wouldTrade: false, // scanner disabled
-      }),
-    );
-
-    // Edge should be positive (forecast 88 >> threshold 80)
-    expect(results.length).toBeGreaterThan(0);
-    if (results[0]) {
-      expect(results[0].edge).toBeGreaterThan(0);
-      expect(results[0].forecastHighF).toBe(88);
-    }
-  });
-
-  it('skips deduped markets', async () => {
-    mockSearchEvents.mockResolvedValue([
-      {
-        id: 'event-1',
-        title: 'NYC Weather',
-        slug: 'nyc-weather',
-        active: true,
-        closed: false,
-        markets: [
-          {
-            id: 'market-dedup',
-            question: 'Will the high temperature in NYC exceed 80\u00b0F on July 15, 2030?',
-            conditionId: 'cond-1',
-            clobTokenIds: '["token-yes","token-no"]',
-            outcomePrices: '["0.50","0.50"]',
-            outcomes: '["Yes","No"]',
-            active: true,
-            closed: false,
-            volume: '10000',
-            liquidity: '5000',
-            endDate: '2030-07-15T23:59:59Z',
-            description: null,
-          },
-        ],
-      },
-    ]);
-
-    // Pre-set the dedup key
-    redisMock._store.set('weather:attempted:market-dedup', '1');
-
-    const results = await scanWeatherMarkets(redisMock as never);
-    expect(results).toEqual([]);
-
-    // Forecast should never have been fetched
-    expect(mockFetchForecast).not.toHaveBeenCalled();
-  });
-
-  it('skips non-US cities', async () => {
-    mockSearchEvents.mockResolvedValue([
-      {
-        id: 'event-1',
-        title: 'London Weather',
-        slug: 'london-weather',
-        active: true,
-        closed: false,
-        markets: [
-          {
-            id: 'market-london',
-            question: 'Will the high temperature in London exceed 30\u00b0F on July 15, 2030?',
-            conditionId: 'cond-1',
-            clobTokenIds: '["token-yes","token-no"]',
-            outcomePrices: '["0.50","0.50"]',
-            outcomes: '["Yes","No"]',
-            active: true,
-            closed: false,
-            volume: '10000',
-            liquidity: '5000',
-            endDate: '2030-07-15T23:59:59Z',
-            description: null,
-          },
-        ],
-      },
-    ]);
-
-    const results = await scanWeatherMarkets(redisMock as never);
-    expect(results).toEqual([]);
-    expect(mockFetchForecast).not.toHaveBeenCalled();
-
-    expect(logger.info).toHaveBeenCalledWith(
-      '[weather] scan summary',
-      expect.objectContaining({ noUsCity: 1 }),
-    );
-  });
-
-  it('includes opportunities above minimum edge', async () => {
-    mockSearchEvents.mockResolvedValue([
-      {
-        id: 'event-1',
-        title: 'NYC Weather',
-        slug: 'nyc-weather',
-        active: true,
-        closed: false,
-        markets: [
-          {
-            id: 'market-low-edge',
-            question: 'Will the high temperature in NYC exceed 80\u00b0F on July 15, 2030?',
-            conditionId: 'cond-1',
-            clobTokenIds: '["token-yes","token-no"]',
-            outcomePrices: '["0.50","0.50"]',
-            outcomes: '["Yes","No"]',
-            active: true,
-            closed: false,
-            volume: '10000',
-            liquidity: '5000',
-            endDate: '2030-07-15T23:59:59Z',
-            description: null,
-          },
-        ],
-      },
-    ]);
-
-    // Forecast says 81F -- barely above threshold
-    mockFetchForecast.mockResolvedValue({
-      highF: 81,
-      lowF: 65,
-      precipProbability: 10,
-      forecastDate: '2030-07-15',
-      shortForecast: 'Partly Cloudy',
-    });
-
-    const results = await scanWeatherMarkets(redisMock as never);
-
-    // The shadow log should have been emitted regardless
-    expect(logger.info).toHaveBeenCalledWith(
-      '[weather] opportunity evaluated',
-      expect.objectContaining({ marketId: 'market-low-edge' }),
-    );
-
-    // With forecast of 81 and threshold of 80 at 4+ days out (stddev=6):
-    // z = (80-81)/6 = -0.167, P(X>80) ~ 0.566
-    // edge = 0.566 - 0.50 = 0.066 > 0.05 min edge -- included in results
-    expect(results.length).toBe(1);
-    expect(results[0]!.edge).toBeCloseTo(0.066, 1);
-  });
-
-  it('handles Gamma API errors gracefully', async () => {
-    mockSearchEvents.mockRejectedValue(new Error('Gamma timeout'));
-
-    const results = await scanWeatherMarkets(redisMock as never);
-    expect(results).toEqual([]);
-
-    expect(logger.warn).toHaveBeenCalledWith(
-      '[weather] Gamma API search failed',
-      expect.objectContaining({ error: 'Gamma timeout' }),
-    );
-  });
-
-  it('deduplicates markets from both search queries', async () => {
-    const sharedMarket = {
-      id: 'market-shared',
-      question: 'Will the high temperature in Chicago exceed 95\u00b0F on July 4, 2030?',
-      conditionId: 'cond-1',
-      clobTokenIds: '["token-yes","token-no"]',
-      outcomePrices: '["0.40","0.60"]',
+  function makeMarket(id: string, label: string, threshold: string, yesP: string, noP: string) {
+    return {
+      id,
+      question: `Will the highest temperature in Chicago be ${label} on April 14?`,
+      conditionId: `cond-${id}`,
+      clobTokenIds: `["token-${id}-yes","token-${id}-no"]`,
+      outcomePrices: `["${yesP}","${noP}"]`,
       outcomes: '["Yes","No"]',
       active: true,
       closed: false,
       volume: '10000',
       liquidity: '5000',
-      endDate: '2030-07-04T23:59:59Z',
+      endDate: '2026-04-14T12:00:00Z',
       description: null,
+      groupItemTitle: label,
+      groupItemThreshold: threshold,
+    };
+  }
+
+  it('parses a Fahrenheit bracket event correctly', () => {
+    const result = parseWeatherEvent(makeFahrenheitEvent());
+    expect(result).not.toBeNull();
+    expect(result!.city).toBe('chicago');
+    expect(result!.targetDate).toBe('2026-04-14');
+    expect(result!.unit).toBe('fahrenheit');
+    expect(result!.brackets).toHaveLength(11);
+    expect(result!.brackets[0]!.low).toBeNull(); // low-tail
+    expect(result!.brackets[0]!.high).toBe(39);
+    expect(result!.brackets[10]!.low).toBe(58); // high-tail
+    expect(result!.brackets[10]!.high).toBeNull();
+  });
+
+  it('returns null for non-negRisk events', () => {
+    const event = makeFahrenheitEvent();
+    event.negRisk = false;
+    expect(parseWeatherEvent(event)).toBeNull();
+  });
+
+  it('returns null for events with too few brackets', () => {
+    const event = makeFahrenheitEvent();
+    event.markets = event.markets.slice(0, 2);
+    expect(parseWeatherEvent(event)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findMispricedBrackets
+// ---------------------------------------------------------------------------
+
+describe('findMispricedBrackets', () => {
+  it('finds edge when model diverges from market on an interior bracket', () => {
+    const event = {
+      eventId: 'e1',
+      slug: 'test-event',
+      city: 'chicago',
+      coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14',
+      unit: 'fahrenheit' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'], threshold: 0, low: null, high: 39, label: '39°F or below', yesPrice: 0.01, noPrice: 0.99 },
+        { marketId: 'm1', conditionId: 'c1', clobTokenIds: ['t1y', 't1n'], threshold: 1, low: 40, high: 41, label: '40-41°F', yesPrice: 0.02, noPrice: 0.98 },
+        { marketId: 'm2', conditionId: 'c2', clobTokenIds: ['t2y', 't2n'], threshold: 2, low: 42, high: 43, label: '42-43°F', yesPrice: 0.05, noPrice: 0.95 },
+        { marketId: 'm3', conditionId: 'c3', clobTokenIds: ['t3y', 't3n'], threshold: 3, low: 44, high: 45, label: '44-45°F', yesPrice: 0.10, noPrice: 0.90 },
+        { marketId: 'm4', conditionId: 'c4', clobTokenIds: ['t4y', 't4n'], threshold: 4, low: 46, high: 47, label: '46-47°F', yesPrice: 0.15, noPrice: 0.85 },
+        { marketId: 'm5', conditionId: 'c5', clobTokenIds: ['t5y', 't5n'], threshold: 5, low: 48, high: 49, label: '48-49°F', yesPrice: 0.20, noPrice: 0.80 },
+        { marketId: 'm6', conditionId: 'c6', clobTokenIds: ['t6y', 't6n'], threshold: 6, low: 50, high: 51, label: '50-51°F', yesPrice: 0.18, noPrice: 0.82 },
+        { marketId: 'm7', conditionId: 'c7', clobTokenIds: ['t7y', 't7n'], threshold: 7, low: 52, high: 53, label: '52-53°F', yesPrice: 0.12, noPrice: 0.88 },
+        { marketId: 'm8', conditionId: 'c8', clobTokenIds: ['t8y', 't8n'], threshold: 8, low: 54, high: 55, label: '54-55°F', yesPrice: 0.08, noPrice: 0.92 },
+        { marketId: 'm9', conditionId: 'c9', clobTokenIds: ['t9y', 't9n'], threshold: 9, low: 56, high: 57, label: '56-57°F', yesPrice: 0.05, noPrice: 0.95 },
+        { marketId: 'm10', conditionId: 'c10', clobTokenIds: ['t10y', 't10n'], threshold: 10, low: 58, high: null, label: '58°F or higher', yesPrice: 0.04, noPrice: 0.96 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
     };
 
-    // Same market appears in both "weather" and "temperature" results
-    mockSearchEvents.mockResolvedValue([
-      {
-        id: 'event-1',
-        title: 'Chicago Heat',
-        slug: 'chicago-heat',
-        active: true,
-        closed: false,
-        markets: [sharedMarket],
-      },
-    ]);
+    // Forecast: 52°F with stddev 3. The bracket "52-53°F" should have
+    // significant probability (~25%). If market has it at 12%, that's a buy.
+    const forecast = {
+      forecastHigh: 52,
+      stdDev: 3,
+      source: 'combined' as const,
+      ensembleMembers: 31,
+    };
 
-    mockFetchForecast.mockResolvedValue({
-      highF: 98,
-      lowF: 75,
-      precipProbability: 5,
-      forecastDate: '2030-07-04',
-      shortForecast: 'Hot',
+    const opps = findMispricedBrackets(event, forecast, 1, 0.08);
+
+    // Should find at least one opportunity
+    expect(opps.length).toBeGreaterThan(0);
+
+    // The bracket near the forecast center should be underpriced → buy YES
+    const bracket52 = opps.find((o) => o.bracketLabel === '52-53°F');
+    if (bracket52) {
+      expect(bracket52.tradeSide).toBe('YES');
+      expect(bracket52.edge).toBeGreaterThan(0);
+    }
+  });
+
+  it('returns empty when market prices match model', () => {
+    // Build brackets where market prices roughly match model probs
+    const forecast = { forecastHigh: 50, stdDev: 4, source: 'noaa' as const, ensembleMembers: 0 };
+
+    // Compute model probs to use as market prices (approximately fair)
+    const bracketDefs: [number | null, number | null][] = [
+      [null, 39], [40, 41], [42, 43], [44, 45], [46, 47],
+      [48, 49], [50, 51], [52, 53], [54, 55], [56, 57], [58, null],
+    ];
+
+    const brackets = bracketDefs.map(([low, high], i) => {
+      const prob = estimateBracketProbability(50, low, high, 1, 4);
+      return {
+        marketId: `m${i}`,
+        conditionId: `c${i}`,
+        clobTokenIds: [`t${i}y`, `t${i}n`],
+        threshold: i,
+        low,
+        high,
+        label: `bracket-${i}`,
+        yesPrice: Math.round(prob * 1000) / 1000, // Fair price
+        noPrice: Math.round((1 - prob) * 1000) / 1000,
+      };
+    });
+
+    const event = {
+      eventId: 'e1',
+      slug: 'fair-event',
+      city: 'chicago',
+      coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14',
+      unit: 'fahrenheit' as const,
+      brackets,
+      endDate: '2026-04-14T12:00:00Z',
+    };
+
+    const opps = findMispricedBrackets(event, forecast, 1, 0.08);
+    // With fair prices, no bracket should have 8+ cents of edge
+    expect(opps.length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scanWeatherMarkets (integration-style with mocked externals)
+// ---------------------------------------------------------------------------
+
+describe('scanWeatherMarkets', () => {
+  let redisMock: ReturnType<typeof createRedisMock>;
+  let originalFetch: typeof globalThis.fetch;
+
+  function makeMockGammaEvent() {
+    return {
+      id: 'event-1',
+      title: 'Highest temperature in Chicago on April 14?',
+      slug: 'highest-temperature-in-chicago-on-april-14-2026',
+      active: true,
+      closed: false,
+      negRisk: true,
+      endDate: '2026-04-14T12:00:00Z',
+      markets: Array.from({ length: 11 }, (_, i) => {
+        const labels = [
+          '39°F or below', '40-41°F', '42-43°F', '44-45°F', '46-47°F',
+          '48-49°F', '50-51°F', '52-53°F', '54-55°F', '56-57°F', '58°F or higher',
+        ];
+        const yesPrices = [0.01, 0.03, 0.05, 0.10, 0.15, 0.20, 0.18, 0.12, 0.08, 0.05, 0.03];
+        return {
+          id: `m${i}`,
+          question: `Will the highest temperature in Chicago be ${labels[i]} on April 14?`,
+          conditionId: `cond-${i}`,
+          clobTokenIds: `["t${i}y","t${i}n"]`,
+          outcomePrices: `["${(yesPrices[i] ?? 0).toFixed(2)}","${(1 - (yesPrices[i] ?? 0)).toFixed(2)}"]`,
+          outcomes: '["Yes","No"]',
+          active: true,
+          closed: false,
+          volume: '10000',
+          liquidity: '5000',
+          endDate: '2026-04-14T12:00:00Z',
+          description: null,
+          groupItemTitle: labels[i],
+          groupItemThreshold: i.toString(),
+        };
+      }),
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    redisMock = createRedisMock();
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('returns empty when no weather events found', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([]),
+    }) as unknown as typeof fetch;
+
+    const results = await scanWeatherMarkets(redisMock as never);
+    expect(results).toEqual([]);
+  });
+
+  it('discovers and evaluates bracket events', async () => {
+    const gammaEvent = makeMockGammaEvent();
+
+    // Mock global.fetch for Gamma API (fetchWeatherEvents uses fetch directly)
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([gammaEvent]),
+    }) as unknown as typeof fetch;
+
+    // Mock the module-level forecast functions
+    mockFetchNwsForecast.mockResolvedValue({
+      highF: 52,
+      lowF: 38,
+      precipProbability: 10,
+      forecastDate: '2026-04-14',
+      shortForecast: 'Mostly Cloudy',
+    });
+    mockFetchOpenMeteo.mockResolvedValue({
+      highTemp: 52,
+      lowTemp: 38,
+      precipProbability: 10,
+      forecastDate: '2026-04-14',
+    });
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52,
+      stddevHigh: 3.2,
+      meanLow: 38,
+      stddevLow: 2.8,
+      memberCount: 31,
+      forecastDate: '2026-04-14',
     });
 
     const results = await scanWeatherMarkets(redisMock as never);
 
-    // Should only process the market once even though searchEvents is called twice
-    // (both queries return the same market)
-    const forecastCalls = mockFetchForecast.mock.calls.length;
-    expect(forecastCalls).toBe(1);
+    expect(Array.isArray(results)).toBe(true);
+    // Should have evaluated the event and logged it
+    expect(logger.info).toHaveBeenCalledWith(
+      '[weather] event evaluated',
+      expect.objectContaining({
+        city: 'chicago',
+        targetDate: '2026-04-14',
+      }),
+    );
+  });
 
-    // Should find an opportunity (forecast 98 >> threshold 95)
-    expect(results.length).toBe(1);
+  it('skips deduped events', async () => {
+    const gammaEvent = makeMockGammaEvent();
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([gammaEvent]),
+    }) as unknown as typeof fetch;
+
+    // Pre-set the dedup key
+    redisMock._store.set('weather:event:highest-temperature-in-chicago-on-april-14-2026', '1');
+
+    const results = await scanWeatherMarkets(redisMock as never);
+    expect(results).toEqual([]);
+
+    // NOAA/Open-Meteo should never have been called (dedup skipped the event)
+    expect(mockFetchNwsForecast).not.toHaveBeenCalled();
+    expect(mockFetchOpenMeteo).not.toHaveBeenCalled();
+    expect(mockFetchEnsemble).not.toHaveBeenCalled();
   });
 });

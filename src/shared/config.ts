@@ -894,19 +894,25 @@ const envSchema = z.object({
   MEMORY_RETRIEVAL_LIMIT: z.coerce.number().int().min(1).max(10).optional().default(3),
 
   // --- WEATHER MARKET SCANNER ---
-  // Compares NOAA/NWS forecasts against Polymarket weather markets for edge.
-  // Weather markets are typically "Will temperature in [city] exceed X°F on [date]?"
+  // Compares NOAA (US) + Open-Meteo (global) forecasts against Polymarket
+  // negRisk bracket weather markets. Markets are "highest temperature in [city]"
+  // events with ~11 brackets each (e.g. "40-41°F", "42-43°F", ...).
   // Ships dark (WEATHER_SCANNER_ENABLED=false). Shadow-log first, review, then enable.
   WEATHER_SCANNER_ENABLED: boolFromEnv.optional().default(false),
-  // Minimum edge (forecast probability - market price) to consider a trade.
-  WEATHER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.05),
+  // Minimum edge (model probability - market bid price) to consider a trade.
+  // Compares modelProb vs yesPrice for YES, (1-modelProb) vs noPrice for NO.
+  // Higher than binary markets because bracket model uncertainty is larger (8-10¢ recommended).
+  WEATHER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   // Maximum bankroll fraction per weather trade — conservative because forecast
-  // uncertainty grows with horizon and model error is correlated across markets.
+  // uncertainty grows with horizon and model error is correlated across brackets.
   WEATHER_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.02),
-  // Dedup TTL — weather markets reprice slowly, so 1h is sufficient.
-  WEATHER_DEDUP_TTL_S: z.coerce.number().int().min(1).optional().default(3600),
-  // Maximum weather markets to evaluate per scan cycle.
-  WEATHER_MAX_MARKETS: z.coerce.number().int().min(1).optional().default(20),
+  // Dedup TTL — one evaluation per event per scan cycle. 4h between re-evaluations
+  // to allow for forecast updates.
+  WEATHER_DEDUP_TTL_S: z.coerce.number().int().min(1).optional().default(14400),
+  // Maximum weather events (not individual brackets) to evaluate per scan cycle.
+  WEATHER_MAX_EVENTS: z.coerce.number().int().min(1).optional().default(50),
+  // Maximum forecast horizon in days — skip events further out (too uncertain).
+  WEATHER_MAX_HORIZON_DAYS: z.coerce.number().int().min(1).optional().default(7),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
