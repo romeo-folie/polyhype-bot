@@ -635,6 +635,30 @@ const envSchema = z.object({
   // A market that peaked at 20¢ and is now 5¢ has a 75% drop — good candidate.
   NEAR_ZERO_MIN_PRICE_DROP_PCT: z.coerce.number().min(0).max(1).optional().default(0.10),
 
+  // --- LONGSHOT BIAS / NO-SIDE SCANNER ---
+  // Exploits the favorite-longshot bias documented by Whelan (300K contracts):
+  // YES contracts priced 3–15¢ are systematically overpriced due to retail optimism.
+  // Buy NO (85–97¢) to bet against the bias. Category-specific optimism gaps:
+  //   entertainment/media: ~5pp, sports: ~2pp, politics: ~3pp, finance/crypto: exempt.
+  // Ships dark — shadow-log first, review opportunities, then enable.
+  LONGSHOT_SCANNER_ENABLED: boolFromEnv.optional().default(false),
+  LONGSHOT_SCAN_INTERVAL_MS: z.coerce.number().int().min(10_000).optional().default(300_000),
+  // Minimum edge (optimism gap) to trade. Lower than OSINT because this is structural.
+  LONGSHOT_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.03),
+  // Maximum fraction of bankroll per longshot trade (conservative — high NO price = low payout).
+  LONGSHOT_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.02),
+  // YES price range that exhibits longshot bias (below 3¢ is noise, above 15¢ bias weakens).
+  LONGSHOT_YES_PRICE_MIN: z.coerce.number().min(0).max(1).optional().default(0.03),
+  LONGSHOT_YES_PRICE_MAX: z.coerce.number().min(0).max(1).optional().default(0.15),
+  // Minimum market liquidity (USD) to ensure executable depth for NO orders.
+  LONGSHOT_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(1000),
+  // Dedup TTL — these markets are slower-moving than OSINT signals.
+  LONGSHOT_DEDUP_TTL_S: z.coerce.number().int().min(0).optional().default(7200),
+  // Maximum markets to evaluate per scan run.
+  LONGSHOT_MAX_MARKETS: z.coerce.number().int().min(1).optional().default(30),
+  // Comma-separated category IDs exempt from the bias (well-calibrated domains).
+  LONGSHOT_EXEMPT_CATEGORIES: z.string().optional().default('crypto-regulatory,macro'),
+
   // --- REBATE FARMING (passive maker liquidity provision) ---
   // Places resting GTC post-only limit orders on high-volume tight-spread markets
   // to earn maker rebates (Polymarket distributes 100% of taker fees to makers).
