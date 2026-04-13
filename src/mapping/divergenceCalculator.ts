@@ -15,7 +15,6 @@
 
 import { priceZoneOf, type PriceZone } from '../shared/zones.js';
 import { applyCategoryBias } from './calibrationBias.js';
-import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 
 export interface TradeDecision {
@@ -82,6 +81,9 @@ export interface DivergenceInput {
   /** Kelly sign-stability probe. */
   kellyProbeDelta?: number;
   kellyRequireSignStable?: boolean;
+  /** Whether calibration bias correction is enabled. Callers should pass this
+   *  from their already-loaded config to avoid loadConfig() inside computeDivergence. */
+  calibrationBiasEnabled?: boolean;
 }
 
 /**
@@ -152,6 +154,7 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
     noiseStddevThreshold = 0.10,
     kellyProbeDelta = 0.05,
     kellyRequireSignStable = true,
+    calibrationBiasEnabled = false,
   } = input;
 
   // Gate 0: Extreme-price LLM-distrust gate.
@@ -179,7 +182,6 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
   // uses the raw price for the actual edge calc.
   let effectiveYesPrice = currentYesPrice;
   if (category) {
-    const cfg = loadConfig();
     const hoursToResolution = endDate
       ? (new Date(endDate).getTime() - Date.now()) / 3_600_000
       : undefined;
@@ -189,21 +191,17 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
       hoursToResolution !== undefined && Number.isFinite(hoursToResolution)
         ? hoursToResolution
         : undefined,
-      cfg,
     );
     if (bias.theta !== 1) {
-      if (cfg.CALIBRATION_BIAS_ENABLED) {
+      if (calibrationBiasEnabled) {
         effectiveYesPrice = bias.adjustedPrice;
       } else {
-        logger.info('[divergence] calibration_bias shadow', {
+        logger.debug('[divergence] calibration_bias shadow', {
           category,
           theta: bias.theta,
           rawPrice: bias.rawPrice.toFixed(4),
           adjustedPrice: bias.adjustedPrice.toFixed(4),
           delta: (bias.adjustedPrice - bias.rawPrice).toFixed(4),
-          consensus: p.toFixed(3),
-          rawEdge: (p - currentYesPrice).toFixed(4),
-          adjustedEdge: (p - bias.adjustedPrice).toFixed(4),
         });
       }
     }

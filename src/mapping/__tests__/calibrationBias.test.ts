@@ -111,6 +111,23 @@ describe('getThetaForCategory', () => {
     expect(getThetaForCategory('sports')).toBe(1.20);
   });
 
+  it('returns sports theta for sports-nba sub-category', () => {
+    expect(getThetaForCategory('sports-nba', 48)).toBe(1.20);
+    expect(getThetaForCategory('sports-nba', 800)).toBe(1.74);
+  });
+
+  it('returns sports theta for sports-nfl sub-category', () => {
+    expect(getThetaForCategory('sports-nfl')).toBe(1.20);
+  });
+
+  it('returns sports theta for sports-soccer sub-category', () => {
+    expect(getThetaForCategory('sports-soccer')).toBe(1.20);
+  });
+
+  it('returns sports theta for sports-mlb sub-category', () => {
+    expect(getThetaForCategory('sports-mlb')).toBe(1.20);
+  });
+
   it('returns weather theta for short-horizon (<=48h)', () => {
     expect(getThetaForCategory('weather')).toBe(0.69);
     expect(getThetaForCategory('weather', 24)).toBe(0.69);

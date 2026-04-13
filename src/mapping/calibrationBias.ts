@@ -4,7 +4,7 @@
  * Prediction markets are systematically biased by domain:
  *   - Politics: underconfident (favourites underpriced) => theta > 1
  *   - Sports >1mo: underconfident => theta > 1
- *   - Weather <48h: overconfident (favourites overpriced) => theta < 1
+ *   - Weather ≤48h: overconfident (favourites overpriced) => theta < 1
  *   - Crypto: well-calibrated => theta ~ 1
  *
  * Formula:  p* = p^theta / [p^theta + (1-p)^theta]
@@ -76,7 +76,11 @@ export function getThetaForCategory(
     case 'geopolitical':
       return c.CALIBRATION_BIAS_THETA_POLITICS;
 
-    case 'sports': {
+    case 'sports':
+    case 'sports-nba':
+    case 'sports-nfl':
+    case 'sports-soccer':
+    case 'sports-mlb': {
       // Sports short-term (<=1 month / 720h) vs long-term (>1 month).
       // If timeToResolutionHours is unknown, default to short-term (conservative).
       const isLongTerm = timeToResolutionHours !== undefined && timeToResolutionHours > 720;
@@ -86,7 +90,7 @@ export function getThetaForCategory(
     }
 
     case 'weather':
-      // Weather overconfidence bias only applies to short-horizon (<48h) markets.
+      // Weather overconfidence bias only applies to short-horizon (≤48h) markets.
       // Longer-horizon weather markets are closer to well-calibrated.
       if (timeToResolutionHours !== undefined && timeToResolutionHours > WEATHER_BIAS_MAX_HOURS) {
         return c.CALIBRATION_BIAS_THETA_DEFAULT;
