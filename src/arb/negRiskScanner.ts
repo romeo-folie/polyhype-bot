@@ -32,6 +32,11 @@ import type { Redis } from 'ioredis';
 const DEDUP_PREFIX = 'arb:negrisk:attempted:';
 /** Max concurrent CLOB orderbook fetches per event (respect API rate limits). */
 const ORDERBOOK_CONCURRENCY = 5;
+/** Delay between sequential leg submissions to pace CLOB order rate. */
+const INTER_LEG_DELAY_MS = 200;
+
+const delay = (ms: number): Promise<void> =>
+  new Promise((resolve) => { setTimeout(resolve, ms); });
 
 // ---------------------------------------------------------------------------
 // Interfaces
@@ -55,13 +60,13 @@ export interface NegRiskArbOpportunity {
   eventId: string;
   eventTitle: string;
   legs: NegRiskLeg[];
-  /** Sum of all best asks across legs. */
+  /** Sum of all best asks across legs, per share. */
   sumAsks: number;
-  /** Estimated total fees across all legs. */
-  totalFees: number;
-  /** Net edge = 1.0 − sumAsks − totalFees. */
+  /** Estimated fee sum across all legs, per share (multiply by shares for total USD fees). */
+  totalFeesPerShare: number;
+  /** Net edge per share = 1.0 − sumAsks − totalFeesPerShare. */
   edge: number;
-  /** Gross edge = 1.0 − sumAsks (before fees). */
+  /** Gross edge per share = 1.0 − sumAsks (before fees). */
   grossEdge: number;
   /** Fraction of event outcomes that have usable orderbooks. */
   coverageRatio: number;
@@ -186,12 +191,11 @@ export async function scanNegRiskArb(redis: Redis): Promise<NegRiskArbOpportunit
     if (dedupClaimed !== 'OK') continue;
 
     // ── Stage 1: Quick-reject on Gamma outcomePrices ───────────────────
-    let gammaMidSum = 0;
+    let gammaAskSum = 0;
     let parseable = true;
     const marketMeta: {
       market: GammaMarket;
       yesTokenId: string;
-      gammaMidPrice: number;
     }[] = [];
 
     for (const m of markets) {
@@ -201,8 +205,8 @@ export async function scanNegRiskArb(redis: Redis): Promise<NegRiskArbOpportunit
         if (prices.length < 1 || tokens.length < 1) { parseable = false; break; }
         const yesPrice = parseFloat(prices[0]!);
         if (!isFinite(yesPrice)) { parseable = false; break; }
-        gammaMidSum += yesPrice;
-        marketMeta.push({ market: m, yesTokenId: tokens[0]!, gammaMidPrice: yesPrice });
+        gammaAskSum += yesPrice;
+        marketMeta.push({ market: m, yesTokenId: tokens[0]! });
       } catch {
         parseable = false;
         break;
@@ -211,7 +215,7 @@ export async function scanNegRiskArb(redis: Redis): Promise<NegRiskArbOpportunit
 
     if (!parseable) continue;
     // If sum of Gamma outcomePrices >= 1.0, no arb even on optimistic pricing
-    if (gammaMidSum >= 1.0) continue;
+    if (gammaAskSum >= 1.0) continue;
 
     // ── Stage 2: Fetch CLOB orderbooks for executable pricing ──────────
     const tokenIds = marketMeta.map((mm) => mm.yesTokenId);
@@ -248,13 +252,13 @@ export async function scanNegRiskArb(redis: Redis): Promise<NegRiskArbOpportunit
     // Compute edge using executable ask prices
     const sumAsks = legs.reduce((acc, l) => acc + l.bestAsk, 0);
     const feeRate = cfg.NEGRISK_ARB_FEE_RATE;
-    const totalFees = legs.reduce(
+    const totalFeesPerShare = legs.reduce(
       (acc, l) =>
         acc + (l.feesEnabled ? l.bestAsk * (1 - l.bestAsk) * feeRate : 0),
       0,
     );
     const grossEdge = 1.0 - sumAsks;
-    const edge = grossEdge - totalFees;
+    const edge = grossEdge - totalFeesPerShare;
 
     if (edge < cfg.NEGRISK_ARB_MIN_EDGE) continue;
 
@@ -265,7 +269,7 @@ export async function scanNegRiskArb(redis: Redis): Promise<NegRiskArbOpportunit
       eventTitle: event.title,
       legs,
       sumAsks,
-      totalFees,
+      totalFeesPerShare,
       edge,
       grossEdge,
       coverageRatio,
@@ -353,6 +357,9 @@ export async function executeNegRiskArb(
     const leg = opp.legs[i]!;
     const legCostUsd = shares * leg.bestAsk;
 
+    // Pace between legs to avoid CLOB order rate limits on multi-leg events
+    if (i > 0) await delay(INTER_LEG_DELAY_MS);
+
     const result = await withTimeout(
       submitClobBuy({
         tokenId: leg.yesTokenId,
@@ -395,7 +402,7 @@ export async function executeNegRiskArb(
   // All legs filled → success
   if (lastFilledLegIndex === opp.legs.length - 1) {
     // Use same per-leg fee model as scanner: fee = p*(1-p)*feeRate per leg
-    const feeAdjustedCost = totalCostUsd + opp.totalFees * shares;
+    const feeAdjustedCost = totalCostUsd + opp.totalFeesPerShare * shares;
     await deductStake(redis, feeAdjustedCost);
 
     logger.info('[negrisk-arb] all legs filled — success', {
@@ -458,6 +465,7 @@ export async function executeNegRiskArb(
       direction: 'YES',
       entryPrice: leg.bestAsk,
       stakeUsd: legCostUsd,
+      sharesHeld: shares,
       edgeMagnitude: opp.edge,
       openedAt: new Date().toISOString(),
       sourcedFrom: `negrisk-arb:unhedged:${opp.eventId}`,
@@ -522,7 +530,7 @@ export async function executeNegRiskArb(
  */
 export async function runNegRiskArbScan(redis: Redis): Promise<void> {
   const cfg = loadConfig();
-  if (!cfg.CLOB_FALLBACK_ENABLED) return;
+  if (!cfg.ARB_ENABLED || !cfg.CLOB_FALLBACK_ENABLED) return;
 
   try {
     const opportunities = await scanNegRiskArb(redis);
@@ -544,7 +552,7 @@ export async function runNegRiskArbScan(redis: Redis): Promise<void> {
           legs: opp.legs.length,
           sumAsks: opp.sumAsks.toFixed(4),
           grossEdge: opp.grossEdge.toFixed(4),
-          totalFees: opp.totalFees.toFixed(4),
+          totalFeesPerShare: opp.totalFeesPerShare.toFixed(4),
           edge: opp.edge.toFixed(4),
           coverage: opp.coverageRatio.toFixed(2),
           minDepthShares: opp.minDepthShares.toFixed(2),
