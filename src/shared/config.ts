@@ -116,10 +116,17 @@ const envSchema = z.object({
   ZONE4_DIRECTIONAL_BLOCK: boolFromEnv.optional().default(true),
   ZONE5_DIRECTIONAL_BLOCK: boolFromEnv.optional().default(true),
 
+  // Kelly fraction multiplier. Community consensus: quarter-Kelly (0.25) balances
+  // growth rate vs ruin probability better than half-Kelly (0.50).
+  KELLY_FRACTION: z.coerce.number().min(0.05).max(1).optional().default(0.25),
+
   // Kelly sign-stability check. Perturb p by ±KELLY_PROBE_DELTA; if Kelly
   // flips negative on either side, treat as "no bet" (phantom edge).
   KELLY_PROBE_DELTA: z.coerce.number().min(0).max(0.5).optional().default(0.05),
   KELLY_REQUIRE_SIGN_STABLE: boolFromEnv.optional().default(true),
+
+  // Noise gate — skip signals where LLM consensus stddev exceeds this threshold.
+  NOISE_STDDEV_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.10),
 
   // Hyperliquid funding-rate pre-entry gate. HL `funding` is an hourly decimal.
   // Default 1 bp/hr (~8.76%/yr drag). Ship as shadow-logs first, flip after 3-5d.

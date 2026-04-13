@@ -20,6 +20,6 @@ export const aiTech: CategoryConfig = {
     { url: 'https://about.fb.com/feed/' },
   ],
   scorerPrompt: AI_TECH_PROMPT,
-  scoreThreshold: 7,
+  scoreThreshold: 5,
   entityContext: 'AI company, technology company, AI model, tech product',
 };

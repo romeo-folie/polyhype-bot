@@ -346,6 +346,8 @@ async function runSpotMonitorInner(
         zone3FeeBuffer: cfg.ZONE3_FEE_BUFFER,
         zone4DirectionalBlock: cfg.ZONE4_DIRECTIONAL_BLOCK,
         zone5DirectionalBlock: cfg.ZONE5_DIRECTIONAL_BLOCK,
+        kellyFraction: cfg.KELLY_FRACTION,
+        noiseStddevThreshold: cfg.NOISE_STDDEV_THRESHOLD,
         kellyProbeDelta: cfg.KELLY_PROBE_DELTA,
         kellyRequireSignStable: cfg.KELLY_REQUIRE_SIGN_STABLE,
       });

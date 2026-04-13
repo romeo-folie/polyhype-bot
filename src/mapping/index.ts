@@ -180,6 +180,7 @@ export async function runMapping(
       }
 
       const decisionId = randomUUID();
+      const marketCategory = inferCategory(candidate.question);
       const { hasTrade, decision, skipReason } = computeDivergence({
         consensusProbability: consensus.probability,
         consensusStddev: consensus.stddev,
@@ -197,6 +198,9 @@ export async function runMapping(
         zone3FeeBuffer: cfg.ZONE3_FEE_BUFFER,
         zone4DirectionalBlock: cfg.ZONE4_DIRECTIONAL_BLOCK,
         zone5DirectionalBlock: cfg.ZONE5_DIRECTIONAL_BLOCK,
+        category: marketCategory,
+        kellyFraction: cfg.KELLY_FRACTION,
+        noiseStddevThreshold: cfg.NOISE_STDDEV_THRESHOLD,
         kellyProbeDelta: cfg.KELLY_PROBE_DELTA,
         kellyRequireSignStable: cfg.KELLY_REQUIRE_SIGN_STABLE,
       });
@@ -219,7 +223,7 @@ export async function runMapping(
         marketId: candidate.marketId,
         conditionId: candidate.conditionId,
         question: candidate.question,
-        category: inferCategory(candidate.question),
+        category: marketCategory,
         direction: decision?.direction,
         hasTrade,
         skipReason: skipReason ?? (hasTrade ? undefined : 'other'),

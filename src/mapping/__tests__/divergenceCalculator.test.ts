@@ -34,8 +34,14 @@ describe('computeHalfKelly', () => {
   });
 
   it('returns positive fraction when there is edge', () => {
-    // p=0.7, price=0.5 → b=1, kelly=(1*0.7-0.3)/1=0.4, half=0.2
+    // p=0.7, price=0.5 → b=1, kelly=(1*0.7-0.3)/1=0.4, quarter=0.1
     const result = computeHalfKelly(0.7, 0.5);
+    expect(result).toBeCloseTo(0.1, 4);
+  });
+
+  it('respects custom fraction parameter', () => {
+    // p=0.7, price=0.5 → b=1, kelly=0.4, half=0.2
+    const result = computeHalfKelly(0.7, 0.5, 0.5);
     expect(result).toBeCloseTo(0.2, 4);
   });
 
@@ -131,14 +137,14 @@ describe('computeDivergence', () => {
 
 describe('EV gate & noise gate', () => {
   it('exports NOISE_STDDEV_THRESHOLD constant', () => {
-    expect(NOISE_STDDEV_THRESHOLD).toBe(0.08);
+    expect(NOISE_STDDEV_THRESHOLD).toBe(0.10);
   });
 
   it('rejects noisy signal when stddev > threshold', () => {
     const result = computeDivergence({
       ...DEFAULT_INPUT,
       consensusProbability: 0.7,
-      consensusStddev: 0.09, // above 0.08 threshold
+      consensusStddev: 0.11, // above 0.10 threshold
       currentYesPrice: 0.5,
     });
     expect(result.hasTrade).toBe(false);

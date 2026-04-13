@@ -17,6 +17,6 @@ export const cryptoRegulatory: CategoryConfig = {
     { url: 'https://www.theblock.co/rss.xml' },
   ],
   scorerPrompt: CRYPTO_PROMPT,
-  scoreThreshold: 8,
+  scoreThreshold: 6,
   entityContext: 'cryptocurrency, regulatory body, financial regulator',
 };

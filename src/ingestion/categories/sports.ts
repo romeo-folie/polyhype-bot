@@ -16,6 +16,6 @@ export const sports: CategoryConfig = {
     { url: 'https://sports.yahoo.com/nhl/rss.xml' },
   ],
   scorerPrompt: SPORTS_PROMPT,
-  scoreThreshold: 7,
+  scoreThreshold: 5,
   entityContext: 'sports team, player, league (NBA/NHL), game, playoff series',
 };

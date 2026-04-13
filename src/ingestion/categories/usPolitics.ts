@@ -17,6 +17,6 @@ export const usPolitics: CategoryConfig = {
     { url: 'https://feeds.npr.org/1014/rss.xml' },
   ],
   scorerPrompt: US_POLITICS_PROMPT,
-  scoreThreshold: 7,
+  scoreThreshold: 5,
   entityContext: 'US politician, government agency, legislation, court',
 };

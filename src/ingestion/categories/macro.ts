@@ -17,6 +17,6 @@ export const macro: CategoryConfig = {
     { url: 'https://feeds.content.dowjones.io/public/rss/mw_topstories' },
   ],
   scorerPrompt: MACRO_PROMPT,
-  scoreThreshold: 8,
+  scoreThreshold: 6,
   entityContext: 'financial institution, central bank, economic indicator',
 };

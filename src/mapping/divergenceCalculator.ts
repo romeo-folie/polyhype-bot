@@ -1,14 +1,14 @@
 /**
- * Divergence calculator & Half-Kelly position sizer.
+ * Divergence calculator & fractional-Kelly position sizer.
  *
  * Edge formula:
  *   edge = consensusProbability - marketPrice
  *   (positive = market underpricing YES; negative = market overpricing YES / buy NO)
  *
- * Half-Kelly stake:
+ * Fractional-Kelly stake:
  *   Kelly fraction = (b*p - q) / b,  where b = (1/price - 1), p = consensusP, q = 1-p
- *   We use half-Kelly (multiply by 0.5) for risk management.
- *   Stake = halfKellyFraction * bankroll, capped at maxBetFraction * bankroll.
+ *   We use quarter-Kelly by default (multiply by KELLY_FRACTION=0.25) for risk management.
+ *   Stake = kellyFraction * bankroll, capped at maxBetFraction * bankroll.
  *
  * Direction: if edge > 0 → buy YES; if edge < 0 → buy NO.
  */
@@ -68,6 +68,14 @@ export interface DivergenceInput {
   zone3FeeBuffer?: number;
   zone4DirectionalBlock?: boolean;
   zone5DirectionalBlock?: boolean;
+  /** Category of the market (e.g. 'us-politics', 'geopolitical'). Used for
+   *  category-aware zone unblocking — research shows political favorites at
+   *  70-90¢ are systematically underpriced. */
+  category?: string;
+  /** Kelly fraction multiplier (default 0.25 = quarter-Kelly). */
+  kellyFraction?: number;
+  /** Noise gate — stddev threshold (default 0.10). */
+  noiseStddevThreshold?: number;
   /** Kelly sign-stability probe. */
   kellyProbeDelta?: number;
   kellyRequireSignStable?: boolean;
@@ -109,8 +117,9 @@ export interface DivergenceResult {
   skipReason?: string;
 }
 
-/** Skip if consensus stddev exceeds this threshold (noisy signal). */
-export const NOISE_STDDEV_THRESHOLD = 0.08;
+/** Legacy constant — callers should use the configurable `noiseStddevThreshold`
+ *  input field instead. Kept for backward-compat with tests that import it. */
+export const NOISE_STDDEV_THRESHOLD = 0.10;
 
 /**
  * Compute edge and position size.
@@ -135,6 +144,9 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
     zone3FeeBuffer = 0.02,
     zone4DirectionalBlock = true,
     zone5DirectionalBlock = true,
+    category,
+    kellyFraction = 0.25,
+    noiseStddevThreshold = 0.10,
     kellyProbeDelta = 0.05,
     kellyRequireSignStable = true,
   } = input;
@@ -174,14 +186,21 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
       skipReason: `zone3_edge_below_fee_buffer:price=${provisionalOutcomePrice.toFixed(3)},edge=${provisionalEdgeMag.toFixed(3)}`,
     };
   }
-  if (entryZone === 4 && zone4DirectionalBlock) {
+  // Category-aware zone unblocking: research (Le 2026, θ=1.83 for politics)
+  // shows political/macro favorites at 60-90¢ are systematically underpriced.
+  const ZONE4_BYPASS_CATEGORIES = new Set(['us-politics', 'geopolitical', 'macro']);
+  const ZONE5_BYPASS_CATEGORIES = new Set(['us-politics', 'geopolitical']);
+  const zone4Blocked = zone4DirectionalBlock && !(category && ZONE4_BYPASS_CATEGORIES.has(category));
+  const zone5Blocked = zone5DirectionalBlock && !(category && ZONE5_BYPASS_CATEGORIES.has(category));
+
+  if (entryZone === 4 && zone4Blocked) {
     return {
       hasTrade: false,
       decision: null,
       skipReason: `zone4_comfort_trap:price=${provisionalOutcomePrice.toFixed(3)},edge=${provisionalEdgeMag.toFixed(3)}`,
     };
   }
-  if (entryZone === 5 && zone5DirectionalBlock) {
+  if (entryZone === 5 && zone5Blocked) {
     return {
       hasTrade: false,
       decision: null,
@@ -196,7 +215,7 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
   }
 
   // Gate 1: Noisy signal — stddev too high
-  if (consensusStddev > NOISE_STDDEV_THRESHOLD) {
+  if (consensusStddev > noiseStddevThreshold) {
     return {
       hasTrade: false,
       decision: null,
@@ -235,15 +254,15 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
   const outcomePrice = direction === 'YES' ? currentYesPrice : 1 - currentYesPrice;
   const tradeProbability = direction === 'YES' ? p : 1 - p;
 
-  const halfKellyFraction = computeHalfKelly(tradeProbability, outcomePrice);
+  const halfKellyFraction = computeHalfKelly(tradeProbability, outcomePrice, kellyFraction);
 
   // Kelly sign-stability check — perturb probability by ±delta; if Kelly
   // flips to non-positive on either side, the edge is too fragile to bet.
   if (kellyRequireSignStable && halfKellyFraction > 0) {
     const pPlus = Math.min(1, tradeProbability + kellyProbeDelta);
     const pMinus = Math.max(0, tradeProbability - kellyProbeDelta);
-    const kellyPlus = computeHalfKelly(pPlus, outcomePrice);
-    const kellyMinus = computeHalfKelly(pMinus, outcomePrice);
+    const kellyPlus = computeHalfKelly(pPlus, outcomePrice, kellyFraction);
+    const kellyMinus = computeHalfKelly(pMinus, outcomePrice, kellyFraction);
     if (kellyPlus <= 0 || kellyMinus <= 0) {
       return {
         hasTrade: false,
@@ -277,18 +296,19 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
 }
 
 /**
- * Compute the half-Kelly fraction for a binary outcome.
+ * Compute the fractional-Kelly fraction for a binary outcome.
  *
  * @param p - True probability of the outcome winning (0–1)
  * @param price - Market price of the outcome (0–1)
- * @returns Half-Kelly fraction (0–1). Returns 0 if Kelly is non-positive.
+ * @param fraction - Kelly multiplier (default 0.25 = quarter-Kelly)
+ * @returns Fractional-Kelly fraction (0–1). Returns 0 if Kelly is non-positive.
  */
-export function computeHalfKelly(p: number, price: number): number {
+export function computeHalfKelly(p: number, price: number, fraction: number = 0.25): number {
   if (price <= 0 || price >= 1) return 0;
   // Net odds: b = (1 - price) / price  (winning $1-price for every $price staked)
   const b = (1 - price) / price;
   const q = 1 - p;
   const kelly = (b * p - q) / b;
   if (kelly <= 0) return 0;
-  return kelly * 0.5;
+  return kelly * fraction;
 }

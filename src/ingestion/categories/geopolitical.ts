@@ -15,6 +15,6 @@ export const geopolitical: CategoryConfig = {
     { url: 'https://feeds.skynews.com/feeds/rss/world.xml' },
   ],
   scorerPrompt: GEOPOLITICAL_PROMPT,
-  scoreThreshold: 8,
+  scoreThreshold: 6,
   entityContext: 'country, leader, military organization, conflict, international body',
 };

@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
-import { searchEvents, parseOutcomePrices, parseClobTokenIds } from './gamma.js';
+import { searchEvents, parseOutcomePrices, parseOutcomes, parseClobTokenIds } from './gamma.js';
 import { getCachedMarkets } from '../shared/watchlist.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 
@@ -228,6 +228,16 @@ async function searchEventsForCandidates(
           const questionLower = market.question.toLowerCase();
           if (DOMAIN_BLOCKLIST_RE.test(questionLower)) continue;
 
+          // Binary-only gate (Gamma fallback path)
+          if (market.outcomes) {
+            try {
+              const outcomeList = parseOutcomes(market.outcomes);
+              if (outcomeList.length !== 2) continue;
+            } catch {
+              continue;
+            }
+          }
+
           // Skip expired markets
           if (market.endDate) {
             const end = new Date(market.endDate).getTime();
@@ -246,6 +256,9 @@ async function searchEventsForCandidates(
           } catch {
             continue;
           }
+
+          // Minimum price gate (Gamma fallback path)
+          if (currentYesPrice < 0.05 || currentYesPrice > 0.95) continue;
 
           let clobTokenIds: string[];
           try {
@@ -331,6 +344,19 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
       // Universal Domain Guard: block sports/entertainment/weather markets.
       if (DOMAIN_BLOCKLIST_RE.test(questionLower)) continue;
 
+      // Binary-only gate: skip multi-outcome markets (3+ outcomes). These produce
+      // extreme-priced outcomes (2-5¢) that trigger phantom LLM edge. The near-zero
+      // scanner and future NegRisk arb scanner handle multi-outcome markets separately.
+      if (market.outcomes) {
+        try {
+          const outcomeList = parseOutcomes(market.outcomes);
+          if (outcomeList.length !== 2) continue;
+        } catch {
+          // Can't parse outcomes — skip to be safe
+          continue;
+        }
+      }
+
       // Skip expired markets — endDate in the past means it's already resolved or pending resolution.
       if (market.endDate) {
         const end = new Date(market.endDate).getTime();
@@ -350,6 +376,10 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
       } catch {
         continue;
       }
+
+      // Minimum price gate: skip extreme longshots where LLM consensus is unreliable.
+      // Markets below 5¢ on either side are structurally overpriced per favorite-longshot bias research.
+      if (currentYesPrice < 0.05 || currentYesPrice > 0.95) continue;
 
       let clobTokenIds: string[];
       try {
