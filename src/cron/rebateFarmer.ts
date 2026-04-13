@@ -31,6 +31,7 @@ import { selectRebateMarkets } from '../rebate/marketSelector.js';
 import {
   reconcileOrders,
   getDeployedUsd,
+  getDeployedUsdForMarket,
   hasRestingOrderForMarket,
   placeRestingOrder,
 } from '../rebate/orderManager.js';
@@ -83,6 +84,10 @@ async function main(): Promise<void> {
 
       // Skip markets where we already have an open position.
       if (await hasOpenPosition(redis, candidate.marketId, candidate.direction)) continue;
+
+      // Enforce per-market exposure cap.
+      const marketDeployed = await getDeployedUsdForMarket(redis, candidate.marketId);
+      if (marketDeployed >= cfg.REBATE_MAX_PER_MARKET_USD) continue;
 
       // Respect global rate limits.
       const gov = await checkGlobalGovernor(redis, 'polymarket');

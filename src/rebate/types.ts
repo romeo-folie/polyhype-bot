@@ -7,6 +7,7 @@ export interface RestingOrder {
   marketId: string;
   conditionId: string;
   tokenId: string;
+  clobTokenIds: [string, string]; // [yesTokenId, noTokenId]
   direction: 'YES' | 'NO';
   price: number;
   size: number;

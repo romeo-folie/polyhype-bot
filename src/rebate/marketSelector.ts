@@ -114,8 +114,8 @@ export async function selectRebateMarkets(
   const candidates: RebateMarketCandidate[] = [];
 
   for (const m of toFetch) {
-    // Choose direction: bid on the side closer to 0.50 — that side has more
-    // natural taker flow (buyers pushing toward the consensus center).
+    // Choose direction: bid YES when yesPrice >= 0.50 (majority side), NO otherwise.
+    // Majority side has more natural taker flow and tighter spreads.
     const direction: 'YES' | 'NO' = m.yesPrice >= 0.50 ? 'YES' : 'NO';
     const tokenId = direction === 'YES' ? m.clobTokenIds[0]! : m.clobTokenIds[1]!;
 

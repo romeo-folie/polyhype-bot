@@ -32,10 +32,13 @@ export async function loadRestingOrders(redis: Redis): Promise<Map<string, Resti
   const orders = new Map<string, RestingOrder>();
   for (const [orderId, json] of Object.entries(raw)) {
     try {
-      orders.set(orderId, JSON.parse(json) as RestingOrder);
+      const parsed = JSON.parse(json) as RestingOrder;
+      orders.set(orderId, parsed);
     } catch {
-      // Corrupt entry — remove it.
+      // Corrupt entry — remove from hash. Also try to clean the by-market set
+      // by scanning for the orderId across known sets (best-effort).
       await redis.hdel(ORDERS_HASH_KEY, orderId).catch(() => {});
+      logger.warn('[rebate] removed corrupt order entry from tracking', { orderId });
     }
   }
   return orders;
@@ -61,6 +64,15 @@ export async function getDeployedUsd(redis: Redis): Promise<number> {
   let total = 0;
   for (const order of orders.values()) {
     total += order.sizeUsd;
+  }
+  return total;
+}
+
+export async function getDeployedUsdForMarket(redis: Redis, marketId: string): Promise<number> {
+  const orders = await loadRestingOrders(redis);
+  let total = 0;
+  for (const order of orders.values()) {
+    if (order.marketId === marketId) total += order.sizeUsd;
   }
   return total;
 }
@@ -117,7 +129,17 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
       // Check if partially filled.
       if (matched > 0) {
         // Cancel remainder, record partial fill as position.
-        await cancelClobOrder(orderId);
+        const cancelled = await cancelClobOrder(orderId);
+        if (!cancelled) {
+          // Cancel failed — re-check status before removing from tracking.
+          const recheck = await getClobOrder(orderId);
+          const recheckStatus = String(recheck?.status ?? '').toLowerCase();
+          if (recheck && !['cancelled', 'canceled', 'expired', 'matched'].includes(recheckStatus)) {
+            // Still live and cancel failed — skip this cycle, retry next time.
+            logger.warn('[rebate] partial fill cancel failed, will retry', { orderId });
+            continue;
+          }
+        }
         await recordFilledOrder(redis, order, matched);
         await removeRestingOrder(redis, orderId, order.marketId);
         result.partialFills.push(order);
@@ -135,7 +157,15 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
       // Check staleness — cancel orders older than TTL.
       const ageMs = Date.now() - new Date(order.placedAt).getTime();
       if (ageMs > cfg.REBATE_ORDER_TTL_S * 1000) {
-        await cancelClobOrder(orderId);
+        const cancelled = await cancelClobOrder(orderId);
+        if (!cancelled) {
+          const recheck = await getClobOrder(orderId);
+          const recheckStatus = String(recheck?.status ?? '').toLowerCase();
+          if (recheck && !['cancelled', 'canceled', 'expired', 'matched'].includes(recheckStatus)) {
+            logger.warn('[rebate] stale cancel failed, will retry', { orderId });
+            continue;
+          }
+        }
         await removeRestingOrder(redis, orderId, order.marketId);
         result.stale.push(order);
         await redis.hincrby(STATS_KEY, 'stale_cancels', 1).catch(() => {});
@@ -184,7 +214,7 @@ async function recordFilledOrder(
   await recordPosition(redis, {
     marketId: order.marketId,
     conditionId: order.conditionId,
-    clobTokenIds: [order.tokenId, ''], // Only the traded token matters.
+    clobTokenIds: order.clobTokenIds,
     question: order.question,
     direction: order.direction,
     entryPrice: order.price,
@@ -267,6 +297,7 @@ export async function placeRestingOrder(
     marketId: candidate.marketId,
     conditionId: candidate.conditionId,
     tokenId: candidate.tokenId,
+    clobTokenIds: [candidate.clobTokenIds[0]!, candidate.clobTokenIds[1]!],
     direction: candidate.direction,
     price,
     size,
