@@ -44,6 +44,7 @@ export async function loadRestingOrders(redis: Redis): Promise<Map<string, Resti
 
   // Rebuild by-market sets from valid entries to prevent orphaned set members
   // from blocking future placements. Only runs when corruption was detected.
+  // Avoids KEYS (O(N) blocking) — rebuilds only sets for known valid marketIds.
   if (hadCorruption) {
     const marketToOrderIds = new Map<string, string[]>();
     for (const [orderId, order] of orders) {
@@ -51,11 +52,10 @@ export async function loadRestingOrders(redis: Redis): Promise<Map<string, Resti
       if (ids) ids.push(orderId);
       else marketToOrderIds.set(order.marketId, [orderId]);
     }
-    // Scan for existing by-market keys and delete+rebuild in a pipeline.
-    const existingKeys = await redis.keys(`${MARKET_SET_PREFIX}*`).catch(() => [] as string[]);
     const pipeline = redis.multi();
-    for (const key of existingKeys) pipeline.del(key);
+    // Delete and rebuild each known market's set from valid orders.
     for (const [marketId, orderIds] of marketToOrderIds) {
+      pipeline.del(`${MARKET_SET_PREFIX}${marketId}`);
       pipeline.sadd(`${MARKET_SET_PREFIX}${marketId}`, ...orderIds);
     }
     await pipeline.exec().catch(() => {});
@@ -296,6 +296,7 @@ export async function placeRestingOrder(
   // Rest at bestBid + 1 tick — improves on passive bids, stays below ask.
   let price = candidate.bestBid + tick;
   price = Math.min(price, candidate.bestAsk - tick); // Never cross.
+  price = Math.max(price, candidate.bestBid); // Never go below best bid (tight spread guard).
   price = Math.max(price, tick);
   price = Math.min(price, 1 - tick);
   price = roundDownToTick(price, tick);

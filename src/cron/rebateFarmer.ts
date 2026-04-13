@@ -116,7 +116,7 @@ async function main(): Promise<void> {
       externalCancelled: reconciled.cancelled.length,
       newOrdersPlaced: placed,
       budgetRemaining: remaining.toFixed(2),
-      totalDeployed: (currentlyDeployed + placed * cfg.REBATE_ORDER_SIZE_USD).toFixed(2),
+      totalDeployed: (maxDeploy - remaining).toFixed(2),
     });
   } finally {
     await closeRedis();
