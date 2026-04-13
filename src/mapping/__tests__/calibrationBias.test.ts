@@ -129,7 +129,6 @@ describe('getThetaForCategory', () => {
   });
 
   it('returns weather theta for short-horizon (<=48h)', () => {
-    expect(getThetaForCategory('weather')).toBe(0.69);
     expect(getThetaForCategory('weather', 24)).toBe(0.69);
     expect(getThetaForCategory('weather', 48)).toBe(0.69);
   });
@@ -137,6 +136,11 @@ describe('getThetaForCategory', () => {
   it('returns default theta for long-horizon weather (>48h)', () => {
     expect(getThetaForCategory('weather', 49)).toBe(1.0);
     expect(getThetaForCategory('weather', 720)).toBe(1.0);
+  });
+
+  it('returns default theta for weather with unknown horizon', () => {
+    // When timeToResolutionHours is undefined, can't confirm it's short-horizon
+    expect(getThetaForCategory('weather')).toBe(1.0);
   });
 
   it('returns crypto theta for crypto-regulatory', () => {

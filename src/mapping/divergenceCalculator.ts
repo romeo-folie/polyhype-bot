@@ -15,6 +15,7 @@
 
 import { priceZoneOf, type PriceZone } from '../shared/zones.js';
 import { applyCategoryBias } from './calibrationBias.js';
+import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 
 export interface TradeDecision {
@@ -81,8 +82,7 @@ export interface DivergenceInput {
   /** Kelly sign-stability probe. */
   kellyProbeDelta?: number;
   kellyRequireSignStable?: boolean;
-  /** Whether calibration bias correction is enabled. Callers should pass this
-   *  from their already-loaded config to avoid loadConfig() inside computeDivergence. */
+  /** Whether calibration bias correction is enabled. */
   calibrationBiasEnabled?: boolean;
 }
 
@@ -182,6 +182,7 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
   // uses the raw price for the actual edge calc.
   let effectiveYesPrice = currentYesPrice;
   if (category) {
+    const biasConfig = loadConfig();
     const hoursToResolution = endDate
       ? (new Date(endDate).getTime() - Date.now()) / 3_600_000
       : undefined;
@@ -191,6 +192,7 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
       hoursToResolution !== undefined && Number.isFinite(hoursToResolution)
         ? hoursToResolution
         : undefined,
+      biasConfig,
     );
     if (bias.theta !== 1) {
       if (calibrationBiasEnabled) {

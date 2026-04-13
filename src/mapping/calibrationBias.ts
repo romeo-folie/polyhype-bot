@@ -92,7 +92,8 @@ export function getThetaForCategory(
     case 'weather':
       // Weather overconfidence bias only applies to short-horizon (≤48h) markets.
       // Longer-horizon weather markets are closer to well-calibrated.
-      if (timeToResolutionHours !== undefined && timeToResolutionHours > WEATHER_BIAS_MAX_HOURS) {
+      // When horizon is unknown, default conservatively (no bias correction).
+      if (timeToResolutionHours === undefined || timeToResolutionHours > WEATHER_BIAS_MAX_HOURS) {
         return c.CALIBRATION_BIAS_THETA_DEFAULT;
       }
       return c.CALIBRATION_BIAS_THETA_WEATHER;
