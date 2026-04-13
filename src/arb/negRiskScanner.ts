@@ -526,13 +526,6 @@ export async function runNegRiskArbScan(redis: Redis): Promise<void> {
   const cfg = loadConfig();
   if (!cfg.CLOB_FALLBACK_ENABLED) return;
 
-  // Global governor check
-  const gov = await checkGlobalGovernor(redis, 'polymarket');
-  if (!gov.ok) {
-    logger.debug('[negrisk-arb] global governor throttle, skipping');
-    return;
-  }
-
   try {
     const opportunities = await scanNegRiskArb(redis);
 
@@ -563,6 +556,13 @@ export async function runNegRiskArbScan(redis: Redis): Promise<void> {
     }
 
     if (!cfg.NEGRISK_ARB_ENABLED) return;
+
+    // Global governor check — only gate execution, not scanning/shadow-logging
+    const gov = await checkGlobalGovernor(redis, 'polymarket');
+    if (!gov.ok) {
+      logger.debug('[negrisk-arb] global governor throttle, skipping execution');
+      return;
+    }
 
     const toExecute = opportunities.slice(0, cfg.NEGRISK_ARB_MAX_PER_RUN);
     for (const opp of toExecute) {
