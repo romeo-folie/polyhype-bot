@@ -65,6 +65,7 @@ const mockConfig = {
   TAIL_TAKER_BLOCK: false,
   TAIL_PRICE_THRESHOLD: 0.2,
   TAIL_TAKER_OVERRIDE_EDGE: 0.2,
+  MAX_ENTRY_SPREAD_BPS: 0,
   CLOB_FALLBACK_ENABLED: true,
 };
 
@@ -168,6 +169,7 @@ describe('executeSignal', () => {
     mockConfig.TAIL_TAKER_BLOCK = false;
     mockConfig.TAIL_PRICE_THRESHOLD = 0.2;
     mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
 
     // Default: available in Simmer, Simmer succeeds, no open position
     mockResolve.mockResolvedValue('simmer-uuid-123');
@@ -355,6 +357,180 @@ describe('executeSignal', () => {
 
     expect(mockSubmitClob).toHaveBeenCalledWith(expect.objectContaining({ tokenId: 'tok-no' }));
   });
+
+  it('skips when entry spread exceeds MAX_ENTRY_SPREAD_BPS', async () => {
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500; // 5%
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.01', size: '100' }],
+      asks: [{ price: '0.99', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('spread_too_wide');
+    expect(mockSubmit).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+  });
+
+  it('executes when entry spread is within MAX_ENTRY_SPREAD_BPS', async () => {
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500; // 5%
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.49', size: '100' }],
+      asks: [{ price: '0.51', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('simmer');
+  });
+
+  it('skips when CLOB book is one-sided (missing bid side)', async () => {
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [],
+      asks: [{ price: '0.51', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('one_sided_book');
+    expect(mockSubmit).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+  });
+
+  it('skips when CLOB book is one-sided (missing ask side)', async () => {
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.49', size: '100' }],
+      asks: [],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('one_sided_book');
+  });
+
+  it('does not trigger spread gate when book fetch returns null', async () => {
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockGetOrderBook.mockResolvedValue(null);
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('simmer');
+  });
+
+  it('bypasses entry spread gate for copytrade signals', async () => {
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.01', size: '100' }],
+      asks: [{ price: '0.99', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'copytrade' }), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('simmer');
+  });
+
+  it('reuses prefetched CLOB book for maker path (no double-fetch)', async () => {
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockConfig.EXECUTION_MODE = 'maker';
+    mockConfig.MAKER_MAX_WAIT_MS = 10;
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.49', size: '100' }],
+      asks: [{ price: '0.51', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+    mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-1' });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-1',
+      status: 'filled',
+      owner: '0x1',
+      maker_address: '0x1',
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      side: 'BUY',
+      original_size: '10',
+      size_matched: '10',
+      price: '0.49',
+      associate_trades: [],
+      outcome: 'YES',
+      created_at: Date.now(),
+      expiration: '',
+      order_type: 'GTC',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+
+    // Gate fetches once; maker reuses, so total call count stays at 1.
+    expect(mockGetOrderBook).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('calibration correction', () => {
@@ -364,6 +540,9 @@ describe('calibration correction', () => {
     mockSubmitClob.mockReset();
     mockHasPosition.mockReset();
     mockGetCalibrationStats.mockReset();
+
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
+    mockGetOrderBook.mockResolvedValue(null);
 
     mockResolve.mockResolvedValue('simmer-uuid-123');
     mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
@@ -430,6 +609,7 @@ describe('execution mode', () => {
     mockConfig.TAIL_TAKER_BLOCK = false;
     mockConfig.TAIL_PRICE_THRESHOLD = 0.2;
     mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
 
     mockResolve.mockResolvedValue('simmer-uuid-123');
     mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
@@ -861,6 +1041,7 @@ describe('executeSignals', () => {
     mockConfig.TAIL_TAKER_BLOCK = false;
     mockConfig.TAIL_PRICE_THRESHOLD = 0.2;
     mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
 
     mockResolve.mockResolvedValue('simmer-uuid-123');
     mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });

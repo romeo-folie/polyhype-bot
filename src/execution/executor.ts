@@ -44,7 +44,7 @@ import { notifyTradeError, notifyTradeExecuted, notifyHedgeOpened } from './tele
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
 import { getRedis } from '../shared/redis.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
-import type { TickSize } from '@polymarket/clob-client';
+import type { OrderBookSummary, TickSize } from '@polymarket/clob-client';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
 
@@ -199,6 +199,22 @@ async function captureDecisionBenchmark(signal: TradeSignal): Promise<DecisionBe
   }
 }
 
+/** Returns both the raw book and the derived benchmark so downstream callers
+ * (the maker path) can reuse the single fetch instead of hitting CLOB twice. */
+async function fetchBookAndBenchmark(
+  signal: TradeSignal,
+): Promise<{ book: OrderBookSummary | null; benchmark: DecisionBenchmark }> {
+  const tokenId = clobTokenForSignal(signal);
+  if (!tokenId) return { book: null, benchmark: {} };
+  try {
+    const book = await getClobOrderBook(tokenId);
+    if (!book) return { book: null, benchmark: {} };
+    return { book, benchmark: buildDecisionBenchmark(signal, book) };
+  } catch {
+    return { book: null, benchmark: {} };
+  }
+}
+
 function calculateMakerPriceImprovement(
   takerPrice: number | null | undefined,
   makerPrice: number | null | undefined,
@@ -303,6 +319,7 @@ function resolveMakerPrice(
 async function tryExecuteViaClobMaker(
   signal: TradeSignal,
   cfg: ReturnType<typeof loadConfig>,
+  prefetchedBook?: OrderBookSummary | null,
 ): Promise<{
   ok: boolean;
   tradeResult?: SimmerTradeResult;
@@ -333,7 +350,7 @@ async function tryExecuteViaClobMaker(
     };
   }
 
-  const book = await getClobOrderBook(tokenId);
+  const book = prefetchedBook ?? (await getClobOrderBook(tokenId));
   if (!book) {
     return { ok: false, error: 'maker_no_orderbook', waitMs: Date.now() - startedAt };
   }
@@ -1310,6 +1327,58 @@ export async function executeSignal(
   let decisionSubmitted = false;
   let clobFallbackReason: string | null = null;
   let takerDecisionBenchmarkPromise: Promise<DecisionBenchmark> | null = null;
+  // Prefetched CLOB book: populated by the entry spread guardrail below when
+  // active, then handed to the maker path so we don't double-fetch the book.
+  let prefetchedClobBook: OrderBookSummary | null = null;
+
+  // Entry spread guardrail. Catches degenerate books where "edge" is an artifact
+  // of thin liquidity rather than a real mispricing — both wide two-sided books
+  // (e.g. $0.01 bid / $0.99 ask → 19600 bps) and one-sided books (missing the
+  // bid or ask side, making spread unknowable but execution still dangerous).
+  // Runs pre-maker so it short-circuits the maker path too. Copytrade bypasses
+  // because the whale already priced the degenerate book.
+  if (cfg.MAX_ENTRY_SPREAD_BPS > 0 && signal.source !== 'copytrade') {
+    const { book, benchmark } = await fetchBookAndBenchmark(signal);
+    prefetchedClobBook = book;
+    takerDecisionBenchmarkPromise = Promise.resolve(benchmark);
+    const spreadBps = benchmark.decisionSpreadBps;
+    // `=== null` distinguishes "book fetched, side missing" (null) from "book
+    // not fetched at all" (undefined — e.g. no CLOB token); only the former
+    // should trigger the gate.
+    const oneSidedBook =
+      benchmark.decisionBestBid === null || benchmark.decisionBestAsk === null;
+    const spreadTooWide = spreadBps != null && spreadBps > cfg.MAX_ENTRY_SPREAD_BPS;
+    const guardrailDiagnostic = {
+      spreadBps: spreadBps != null ? Math.round(spreadBps) : null,
+      threshold: cfg.MAX_ENTRY_SPREAD_BPS,
+      bestBid: benchmark.decisionBestBid,
+      bestAsk: benchmark.decisionBestAsk,
+    };
+    // Benchmark fields (decisionBest*) are schema columns in signal_decisions
+    // but not in execution_events, where Zod would strip them. Guardrail
+    // diagnostic fields have no schema column at all, so they go under `raw`
+    // — the catch-all z.record(z.unknown()) column that survives validation.
+    const existingRaw =
+      (makerTelemetry.raw as Record<string, unknown> | undefined) ?? {};
+    makerTelemetry = {
+      ...makerTelemetry,
+      ...benchmark,
+      raw: { ...existingRaw, entrySpreadGuardrail: guardrailDiagnostic },
+    };
+    if (oneSidedBook || spreadTooWide) {
+      const skipReason = oneSidedBook ? 'one_sided_book' : 'spread_too_wide';
+      logger.info(
+        oneSidedBook
+          ? '[executor] skipping — entry spread unknown due to one-sided book'
+          : '[executor] skipping — entry spread too wide',
+        {
+          marketId: signal.marketId,
+          ...guardrailDiagnostic,
+        },
+      );
+      return recordSkip(skipReason, 'skipped', guardrailDiagnostic);
+    }
+  }
 
   // Maker eligibility: subset of signals where alpha doesn't decay in seconds.
   // Fee markets ARE eligible — maker fills bypass fees entirely, so attempting
@@ -1339,7 +1408,7 @@ export async function executeSignal(
       priceEdgeBps: cfg.MAKER_PRICE_EDGE_BPS,
       feeMarket: feeMarketBpsObserved != null || signal.feesEnabled === true,
     });
-    const makerAttempt = await tryExecuteViaClobMaker(signal, cfg);
+    const makerAttempt = await tryExecuteViaClobMaker(signal, cfg, prefetchedClobBook);
     safeRecordExecutionTiming('maker_wait_ms', makerAttempt.waitMs);
     const makerBenchmark: DecisionBenchmark = {
       decisionBestBid: makerAttempt.makerBestBid ?? null,
