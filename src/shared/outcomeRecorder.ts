@@ -145,18 +145,6 @@ export async function recordOutcome(
     }
     await redis.zadd(`outcomes:source:${outcome.source}`, ts, id);
 
-    // Track per-wallet category win/loss stats for the category-specialist copytrade filter.
-    // Key: copytrade:cat_stats:{walletAddress} — hash with fields "{category}:wins" / "{category}:losses".
-    if (opts?.sourcedFrom?.startsWith('copytrade:')) {
-      const walletAddress = opts.sourcedFrom.slice('copytrade:'.length);
-      if (walletAddress && (outcome.result === 'won' || outcome.result === 'lost')) {
-        const statsKey = `copytrade:cat_stats:${walletAddress}`;
-        const field = `${outcome.category}:${outcome.result === 'won' ? 'wins' : 'losses'}`;
-        await redis.hincrby(statsKey, field, 1);
-        await redis.expire(statsKey, 90 * 86400); // 90-day rolling window
-      }
-    }
-
     // Prune if category exceeds max.
     // Remove pruned IDs from all index sets to avoid orphaned references.
     const count = await redis.zcard(`outcomes:${outcome.category}`);

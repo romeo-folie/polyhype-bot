@@ -57,7 +57,7 @@ describe('recordPositionOutcome', () => {
     );
   });
 
-  it('forwards copytrade sourcedFrom so cat_stats writes are credited', async () => {
+  it('forwards copytrade sourcedFrom to the outcome recorder', async () => {
     const redis = {} as any;
 
     await recordPositionOutcome(

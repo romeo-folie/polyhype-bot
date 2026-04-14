@@ -636,14 +636,25 @@ const envSchema = z.object({
   // Default 0.95 = skip mirror if our side is priced at ≥95¢.
   COPYTRADE_MIRROR_EXIT_MAX_PRICE: z.coerce.number().min(0).max(1).optional().default(0.95),
 
-  // Category-specialist filter: only copy a whale in categories where they perform well.
-  // Stats accumulate in Redis (copytrade:cat_stats:{wallet}) as positions close.
-  // Ship with ENABLED=false and let stats build for ~2 weeks before enabling.
-  COPYTRADE_CATEGORY_SPECIALIST_ENABLED: boolFromEnv.optional().default(false),
-  // Minimum resolved trades in a category before the filter applies (cold-start grace).
-  COPYTRADE_CATEGORY_MIN_TRADES: z.coerce.number().int().min(1).optional().default(10),
-  // Minimum win rate required in the category. Below this → skip.
-  COPYTRADE_CATEGORY_MIN_WIN_RATE: z.coerce.number().min(0).max(1).optional().default(0.50),
+  // Wallet-quality shortlist (Phase 8 Step 1). When enabled the shortlist
+  // cron re-ranks leaderboard candidates by a composite quality score derived
+  // from the whale's own Polymarket trade history (trade count, avg size,
+  // category concentration, round-trip Sharpe, optional WR tiebreaker) and
+  // filters anything below `COPYTRADE_WALLET_MIN_SCORE`. Supersedes the old
+  // Redis `copytrade:cat_stats:*` specialist gate.
+  COPYTRADE_QUALITY_SHORTLIST_ENABLED: boolFromEnv.optional().default(false),
+  COPYTRADE_WALLET_MAX_TRADES: z.coerce.number().int().min(1).optional().default(100),
+  COPYTRADE_WALLET_MIN_AVG_SIZE_USD: z.coerce.number().min(0).optional().default(10_000),
+  COPYTRADE_WALLET_MAX_AVG_SIZE_USD: z.coerce.number().min(0).optional().default(50_000),
+  COPYTRADE_WALLET_MIN_CATEGORY_CONCENTRATION: z.coerce.number().min(0).max(1).optional().default(0.5),
+  COPYTRADE_WALLET_MIN_SCORE: z.coerce.number().min(0).max(1).optional().default(0.5),
+  COPYTRADE_QUALITY_WEIGHT_TRADE_COUNT: z.coerce.number().min(0).optional().default(0.30),
+  COPYTRADE_QUALITY_WEIGHT_AVG_SIZE: z.coerce.number().min(0).optional().default(0.20),
+  COPYTRADE_QUALITY_WEIGHT_CATEGORY_FOCUS: z.coerce.number().min(0).optional().default(0.30),
+  COPYTRADE_QUALITY_WEIGHT_SHARPE: z.coerce.number().min(0).optional().default(0.20),
+  COPYTRADE_WIN_RATE_BONUS_MULT: z.coerce.number().min(0).optional().default(1.2),
+  COPYTRADE_WIN_RATE_PENALTY_MULT: z.coerce.number().min(0).optional().default(0.8),
+  COPYTRADE_WIN_RATE_MIN_RESOLVED: z.coerce.number().int().min(1).optional().default(10),
 
   // --- NEAR-ZERO ENTRY SCANNER ---
   // Scans for markets priced 3–10¢ where LLM consensus >> market price (structural mispricing).
