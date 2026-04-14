@@ -5,6 +5,14 @@ import { fileURLToPath } from 'url';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { fetchWithTimeout } from '../mapping/gamma.js';
+import { enqueueWrite } from '../db/writeQueue.js';
+import { getRedis, closeRedis } from '../shared/redis.js';
+import {
+  fetchAndScoreWallet,
+  type QualityConfig,
+  type QualityScoreResult,
+  type WalletStats,
+} from './walletQuality.js';
 
 const DATA_API_BASE = 'https://data-api.polymarket.com';
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -16,6 +24,13 @@ export interface LeaderboardEntry {
   userName: string;
   vol: number;
   pnl: number;
+}
+
+export interface ScoredEntry {
+  entry: LeaderboardEntry;
+  category: string;
+  stats: WalletStats;
+  score: QualityScoreResult;
 }
 
 const CATEGORY_MAP: Record<string, string> = {
@@ -137,6 +152,83 @@ export function selectWallets(
   return { selected, backfilled };
 }
 
+function buildQualityConfig(cfg: ReturnType<typeof loadConfig>): QualityConfig {
+  return {
+    maxTrades: cfg.COPYTRADE_WALLET_MAX_TRADES,
+    minAvgSizeUsd: cfg.COPYTRADE_WALLET_MIN_AVG_SIZE_USD,
+    maxAvgSizeUsd: cfg.COPYTRADE_WALLET_MAX_AVG_SIZE_USD,
+    minCategoryHhi: cfg.COPYTRADE_WALLET_MIN_CATEGORY_CONCENTRATION,
+    winRateMinResolved: cfg.COPYTRADE_WIN_RATE_MIN_RESOLVED,
+    winRateBonusMult: cfg.COPYTRADE_WIN_RATE_BONUS_MULT,
+    winRatePenaltyMult: cfg.COPYTRADE_WIN_RATE_PENALTY_MULT,
+    weights: {
+      tradeCount: cfg.COPYTRADE_QUALITY_WEIGHT_TRADE_COUNT,
+      avgSize: cfg.COPYTRADE_QUALITY_WEIGHT_AVG_SIZE,
+      categoryFocus: cfg.COPYTRADE_QUALITY_WEIGHT_CATEGORY_FOCUS,
+      sharpe: cfg.COPYTRADE_QUALITY_WEIGHT_SHARPE,
+    },
+  };
+}
+
+async function persistScore(
+  wallet: string,
+  category: string,
+  stats: WalletStats,
+  score: QualityScoreResult,
+  minScore: number,
+  enabled: boolean,
+): Promise<void> {
+  try {
+    const redis = getRedis();
+    const key = `copytrade:wallet_quality:${wallet}`;
+    const payload: Record<string, string> = {
+      wallet,
+      category,
+      score: score.score.toFixed(4),
+      tradeCount: String(stats.tradeCount),
+      avgTradeSizeUsd: stats.avgTradeSizeUsd.toFixed(2),
+      totalVolumeUsd: stats.totalVolumeUsd.toFixed(2),
+      categoryHhi: stats.categoryHhi.toFixed(4),
+      overallResolvedTrades: String(stats.overallResolvedTrades),
+      overallWinRate: stats.overallWinRate === null ? '' : stats.overallWinRate.toFixed(4),
+      sharpe: stats.sharpe === null ? '' : stats.sharpe.toFixed(4),
+      factorTradeCount: score.factors.tradeCount.toFixed(4),
+      factorAvgSize: score.factors.avgSize.toFixed(4),
+      factorCategoryFocus: score.factors.categoryFocus.toFixed(4),
+      factorSharpe: score.factors.sharpe.toFixed(4),
+      winRateMultiplier: score.factors.winRateMultiplier.toFixed(4),
+      updatedAt: new Date().toISOString(),
+    };
+    await redis.hset(key, payload);
+    await redis.expire(key, 14 * 86400);
+  } catch (err) {
+    logger.warn('[copytrade-shortlist] redis persist failed', {
+      wallet,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  void enqueueWrite('shadow_observations', {
+    kind: 'copytrade_wallet_quality',
+    source: 'copytrade',
+    wouldBlock: score.score < minScore,
+    metricValue: score.score,
+    threshold: minScore,
+    payload: {
+      wallet,
+      category,
+      enabled,
+      tradeCount: stats.tradeCount,
+      avgTradeSizeUsd: stats.avgTradeSizeUsd,
+      categoryHhi: stats.categoryHhi,
+      overallResolvedTrades: stats.overallResolvedTrades,
+      overallWinRate: stats.overallWinRate,
+      sharpe: stats.sharpe,
+      factors: score.factors,
+    },
+  });
+}
+
 export async function run(): Promise<void> {
   const cfg = loadConfig();
   if (!cfg.COPYTRADE_ENABLED) {
@@ -150,9 +242,17 @@ export async function run(): Promise<void> {
   const minPnl = cfg.COPYTRADE_SHORTLIST_MIN_PNL_USD;
   const minVol = cfg.COPYTRADE_SHORTLIST_MIN_VOL_USD;
   const minVolPnlRatio = cfg.COPYTRADE_SHORTLIST_MIN_VOL_PNL_RATIO;
+  const qualityEnabled = cfg.COPYTRADE_QUALITY_SHORTLIST_ENABLED;
+  const qualityCfg = buildQualityConfig(cfg);
+  const minScore = cfg.COPYTRADE_WALLET_MIN_SCORE;
 
   const combinedWallets = new Set<string>();
   const stats: Record<string, number> = {};
+  const qualityStats: Record<
+    string,
+    { kept: number; filtered: number; scored: number }
+  > = {};
+  const scoredCache = new Map<string, { stats: WalletStats; result: QualityScoreResult }>();
 
   for (const category of apiCategories) {
     try {
@@ -173,15 +273,115 @@ export async function run(): Promise<void> {
         topN,
         minVolPnlRatio,
       );
-      const results = [...selected, ...backfilled];
+      const baseResults = [...selected, ...backfilled];
+
+      // Score every leaderboard candidate (not just base results) so shadow-log
+      // coverage reflects the whole pool we'd consider under the new heuristic.
+      // Skip duplicates across categories via `scoredCache`.
+      const toScore = leaderboard.filter((e) => {
+        const w = normaliseWallet(e.proxyWallet);
+        return w !== null && !scoredCache.has(w);
+      });
+      const scoredThisCategory = await Promise.all(
+        toScore.map(async (entry) => {
+          const w = normaliseWallet(entry.proxyWallet);
+          if (w === null) return null;
+          const result = await fetchAndScoreWallet(w, qualityCfg);
+          if (!result) return null;
+          scoredCache.set(w, result);
+          return { wallet: w, entry, ...result };
+        }),
+      );
+
+      let kept = 0;
+      let filtered = 0;
+      for (const scored of scoredThisCategory) {
+        if (!scored) continue;
+        await persistScore(
+          scored.wallet,
+          category,
+          scored.stats,
+          scored.result,
+          minScore,
+          qualityEnabled,
+        );
+        if (scored.result.score < minScore) filtered++;
+        else kept++;
+      }
+
+      let results: LeaderboardEntry[];
+      let unscoredIncluded = 0;
+      if (qualityEnabled) {
+        // Rank strategy:
+        //  - scored wallets: rank by `score` desc (highest quality first)
+        //  - unscored wallets (transient API failure): treat as neutral and
+        //    retain at their original leaderboard order behind the scored set.
+        //    Dropping them would make the shortlist brittle to Data API
+        //    outages and could leave categories empty.
+        //  - explicitly filtered wallets (score < minScore): dropped.
+        const ranked: { entry: LeaderboardEntry; score: number; rank: number }[] = [];
+        for (const [rank, entry] of baseResults.entries()) {
+          const w = normaliseWallet(entry.proxyWallet);
+          if (w === null) continue;
+          const cached = scoredCache.get(w);
+          if (!cached) {
+            ranked.push({ entry, score: Number.NaN, rank });
+            unscoredIncluded++;
+            continue;
+          }
+          if (cached.result.score < minScore) continue;
+          ranked.push({ entry, score: cached.result.score, rank });
+        }
+        // Scored first (desc by score), then unscored in original leaderboard order.
+        ranked.sort((a, b) => {
+          const aScored = Number.isFinite(a.score);
+          const bScored = Number.isFinite(b.score);
+          if (aScored && bScored) return b.score - a.score;
+          if (aScored) return -1;
+          if (bScored) return 1;
+          return a.rank - b.rank;
+        });
+        results = ranked.map((r) => r.entry);
+
+        // If we dropped below topN, backfill from lower-ranked-but-qualifying
+        // leaderboard candidates (also accepting unscored wallets as a last
+        // resort, so a total API outage doesn't zero out the shortlist).
+        if (results.length < topN) {
+          const already = new Set(results.map((r) => r.proxyWallet));
+          for (const entry of leaderboard) {
+            if (results.length >= topN) break;
+            if (already.has(entry.proxyWallet)) continue;
+            const w = normaliseWallet(entry.proxyWallet);
+            if (w === null) continue;
+            const cached = scoredCache.get(w);
+            if (cached && cached.result.score < minScore) continue;
+            if (!cached) unscoredIncluded++;
+            results.push(entry);
+            already.add(entry.proxyWallet);
+          }
+        }
+      } else {
+        results = baseResults;
+      }
 
       results.forEach((entry) => combinedWallets.add(entry.proxyWallet));
       stats[category] = results.length;
+      qualityStats[category] = {
+        kept,
+        filtered,
+        scored: scoredThisCategory.filter((s) => s !== null).length,
+      };
 
       logger.info('[copytrade-shortlist] category processed', {
         category,
         selectedCount: selected.length,
         backfillCount: backfilled.length,
+        qualityEnabled,
+        scored: qualityStats[category].scored,
+        kept,
+        filtered,
+        unscoredIncluded,
+        finalCount: results.length,
       });
     } catch (err) {
       logger.error('[copytrade-shortlist] category fetch failed', {
@@ -200,6 +400,8 @@ export async function run(): Promise<void> {
   logger.info('[copytrade-shortlist] final shortlist computed', {
     apiCategories,
     stats,
+    qualityEnabled,
+    qualityStats,
     totalUniqueWallets: wallets.length,
   });
 
@@ -213,10 +415,14 @@ export async function run(): Promise<void> {
 }
 
 if (process.env.NODE_ENV !== 'test') {
-  run().catch((err) => {
-    logger.error('[copytrade-shortlist] failed', {
-      error: err instanceof Error ? err.message : String(err),
+  run()
+    .catch((err: unknown) => {
+      logger.error('[copytrade-shortlist] failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      process.exitCode = 1;
+    })
+    .finally(() => {
+      void closeRedis();
     });
-    process.exitCode = 1;
-  });
 }

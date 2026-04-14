@@ -571,39 +571,6 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
           continue;
         }
 
-        // Category-specialist gate: only copy this whale in categories where they've
-        // historically shown positive edge. Requires COPYTRADE_CATEGORY_MIN_TRADES
-        // resolved trades before the filter engages (cold-start grace).
-        if (cfg.COPYTRADE_CATEGORY_SPECIALIST_ENABLED) {
-          const statsKey = `copytrade:cat_stats:${wallet}`;
-          const [winsRaw, lossesRaw] = await redis.hmget(
-            statsKey,
-            `${category}:wins`,
-            `${category}:losses`,
-          );
-          const wins = parseInt(winsRaw ?? '0', 10);
-          const losses = parseInt(lossesRaw ?? '0', 10);
-          const totalTrades = wins + losses;
-          if (totalTrades >= cfg.COPYTRADE_CATEGORY_MIN_TRADES) {
-            const winRate = wins / totalTrades;
-            if (winRate < cfg.COPYTRADE_CATEGORY_MIN_WIN_RATE) {
-              logger.info('[copytrade] category_specialist_block', {
-                wallet,
-                category,
-                winRate: winRate.toFixed(3),
-                wins,
-                losses,
-                totalTrades,
-                minWinRate: cfg.COPYTRADE_CATEGORY_MIN_WIN_RATE,
-              });
-              await recordCopytradeFilter(redis, 'category_specialist').catch(() => {
-                /* ignore telemetry errors */
-              });
-              await markDedup();
-              continue;
-            }
-          }
-        }
       }
 
       if (trade.side === 'SELL') {
