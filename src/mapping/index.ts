@@ -227,16 +227,39 @@ export async function runMapping(
       }
     }
 
+    const agree =
+      cascadeFirstTradedMarketId !== null &&
+      cascadeFirstTradedMarketId === topFit.candidate.marketId;
+    // wouldBlock captures the Kharg-Island failure mode specifically: cascade
+    // traded some market AND strict top-fit would have picked a different one
+    // (or dropped). Pure "nothing traded" isn't a block event for this kind.
+    const wouldBlock =
+      cascadeFirstTradedMarketId !== null &&
+      cascadeFirstTradedMarketId !== topFit.candidate.marketId;
+
     logger.info('[mapping] top_fit_shadow', {
       title: item.title,
       topFitMarketId: topFit.candidate.marketId,
       topFitScore: topFit.fitScore.toFixed(3),
       cascadeTradedMarketId: cascadeFirstTradedMarketId,
       cascadeTradedFit: cascadeFirstTradedFit?.toFixed(3) ?? null,
-      agree:
-        cascadeFirstTradedMarketId !== null &&
-        cascadeFirstTradedMarketId === topFit.candidate.marketId,
-      fitQualified: fitRanked.length,
+      agree,
+      wouldBlock,
+      fitQualifiedCount: fitRanked.length,
+    });
+    void enqueueWrite('shadow_observations', {
+      kind: 'top_fit',
+      source: 'osint',
+      marketId: topFit.candidate.marketId,
+      wouldBlock,
+      metricValue: topFit.fitScore,
+      threshold: cfg.RELEVANCE_MIN_FIT_SCORE,
+      payload: {
+        cascadeTradedMarketId: cascadeFirstTradedMarketId,
+        cascadeTradedFit: cascadeFirstTradedFit,
+        fitQualifiedCount: fitRanked.length,
+        headline: item.title.slice(0, 200),
+      },
     });
   }
 
