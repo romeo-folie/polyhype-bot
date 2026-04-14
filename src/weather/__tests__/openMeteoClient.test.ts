@@ -9,7 +9,7 @@ vi.mock('../../shared/logger.js', () => ({
   },
 }));
 
-const { fetchOpenMeteoForecast, fetchEnsembleForecast } = await import(
+const { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHistoricalHigh } = await import(
   '../openMeteoClient.js'
 );
 
@@ -134,6 +134,75 @@ describe('fetchEnsembleForecast', () => {
       },
     });
     const result = await fetchEnsembleForecast(41.88, -87.63, '2026-04-14', 'fahrenheit', fetchFn);
+    expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchHistoricalHigh (archive API — ground-truth reconciler)
+// ---------------------------------------------------------------------------
+
+describe('fetchHistoricalHigh', () => {
+  it('returns observed high for a valid archive response', async () => {
+    const fetchFn = mockFetch({
+      daily: {
+        time: ['2026-04-10'],
+        temperature_2m_max: [71.4],
+      },
+    });
+
+    const result = await fetchHistoricalHigh(
+      40.7128, -74.006, '2026-04-10', 'fahrenheit', fetchFn,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.observedHigh).toBeCloseTo(71.4, 1);
+    expect(result!.targetDate).toBe('2026-04-10');
+    expect(result!.unit).toBe('fahrenheit');
+  });
+
+  it('hits the archive endpoint', async () => {
+    const fetchFn = mockFetch({
+      daily: { time: ['2026-04-10'], temperature_2m_max: [22.5] },
+    });
+    await fetchHistoricalHigh(51.51, -0.13, '2026-04-10', 'celsius', fetchFn);
+    const calledUrl = fetchFn.mock.calls[0]?.[0] as string;
+    expect(calledUrl).toContain('archive-api.open-meteo.com');
+    expect(calledUrl).toContain('temperature_unit=celsius');
+    expect(calledUrl).toContain('start_date=2026-04-10');
+  });
+
+  it('returns null on API error', async () => {
+    const fetchFn = mockFetch({}, 500);
+    const result = await fetchHistoricalHigh(
+      40.7128, -74.006, '2026-04-10', 'fahrenheit', fetchFn,
+    );
+    expect(result).toBeNull();
+  });
+
+  it('returns null when the target date is missing from the response', async () => {
+    const fetchFn = mockFetch({
+      daily: {
+        time: ['2026-04-11'],
+        temperature_2m_max: [72.0],
+      },
+    });
+    const result = await fetchHistoricalHigh(
+      40.7128, -74.006, '2026-04-10', 'fahrenheit', fetchFn,
+    );
+    expect(result).toBeNull();
+  });
+
+  it('returns null when temperature_2m_max value is non-finite', async () => {
+    const fetchFn = mockFetch({
+      daily: {
+        time: ['2026-04-10'],
+        temperature_2m_max: [null as unknown as number],
+      },
+    });
+    const result = await fetchHistoricalHigh(
+      40.7128, -74.006, '2026-04-10', 'fahrenheit', fetchFn,
+    );
     expect(result).toBeNull();
   });
 });

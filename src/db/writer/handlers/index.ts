@@ -24,6 +24,7 @@ import { handleMakerTelemetry } from './maker_telemetry.js';
 import { handleArbLatencySamples } from './arb_latency_samples.js';
 import { handleMarketCatalog } from './market_catalog.js';
 import { handleTradeMemory } from './trade_memory.js';
+import { handleWeatherGroundTruth } from './weather_ground_truth.js';
 
 export type WriterHandler = (sql: Sql, payloads: unknown[]) => Promise<void>;
 
@@ -41,4 +42,5 @@ export const handlers: Record<string, WriterHandler> = {
   arb_latency_samples:         handleArbLatencySamples,
   market_catalog:              handleMarketCatalog,
   trade_memory:                handleTradeMemory,
+  weather_ground_truth:        handleWeatherGroundTruth,
 };
