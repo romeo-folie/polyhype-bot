@@ -118,30 +118,34 @@ export async function runMapping(
     // to avoid runaway LLM calls
     const toEvaluate = candidates.slice(0, 10);
 
-    // Score all candidates in parallel. Replaces the per-candidate boolean
-    // isMarketRelevant() call with a 0..1 fit score we can rank by.
-    const scored = await Promise.all(
-      toEvaluate.map(async (c) => ({
-        candidate: c,
-        fitScore: (await scoreMarketRelevance({
-          headline: item.title,
-          question: c.question,
-          description: c.description,
-        })).fitScore,
-      })),
-    );
+    // Score candidates sequentially. The relevance cache makes repeat calls
+    // cheap, and serial scoring avoids a 10x concurrent-LLM burst per headline
+    // (matches the old cascade's serial cost profile).
+    const scored: { candidate: CandidateMarket; fitScore: number }[] = [];
+    for (const c of toEvaluate) {
+      const { fitScore } = await scoreMarketRelevance({
+        headline: item.title,
+        question: c.question,
+        description: c.description,
+      });
+      scored.push({ candidate: c, fitScore });
+    }
     const scoreByMarket = new Map(scored.map((s) => [s.candidate.marketId, s.fitScore]));
 
     // Near-zero OSINT signal: fire for every fit-qualified candidate (observability
-    // for the near-zero scanner, independent of trade selection).
+    // for the near-zero scanner, independent of trade selection). Resolve WS
+    // price inline — Gamma snapshot can be seconds-to-minutes stale and near-zero
+    // bands are 1–5 cents wide, so even small drift flips a signal on/off.
     for (const { candidate, fitScore } of scored) {
       if (fitScore < cfg.RELEVANCE_MIN_FIT_SCORE) continue;
-      const noPrice = 1 - candidate.currentYesPrice;
-      if (
-        candidate.currentYesPrice >= cfg.NEAR_ZERO_MIN_PRICE &&
-        candidate.currentYesPrice <= cfg.NEAR_ZERO_MAX_PRICE
-      ) {
-        void writeNearZeroOsintSignal(candidate.marketId, 'YES', candidate.currentYesPrice, item, cfg);
+      let yesPrice = candidate.currentYesPrice;
+      if (opts?.redis && opts.feed) {
+        const wsPrice = await resolveYesPrice(candidate.marketId, opts.redis, opts.feed);
+        if (wsPrice !== null) yesPrice = wsPrice;
+      }
+      const noPrice = 1 - yesPrice;
+      if (yesPrice >= cfg.NEAR_ZERO_MIN_PRICE && yesPrice <= cfg.NEAR_ZERO_MAX_PRICE) {
+        void writeNearZeroOsintSignal(candidate.marketId, 'YES', yesPrice, item, cfg);
       } else if (noPrice >= cfg.NEAR_ZERO_MIN_PRICE && noPrice <= cfg.NEAR_ZERO_MAX_PRICE) {
         void writeNearZeroOsintSignal(candidate.marketId, 'NO', noPrice, item, cfg);
       }

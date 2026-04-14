@@ -181,10 +181,14 @@ export async function scoreMarketRelevance(opts: {
         });
       }
 
-      try {
-        await getRedis().set(cacheKey, fitScore.toFixed(3), 'EX', cfg.RELEVANCE_CACHE_TTL_S);
-      } catch {
-        // cache write failed — non-fatal
+      // Only cache parsed LLM scores — don't persist the parse-fallback fallback
+      // value, or a transient provider hiccup would poison the cache for an hour.
+      if (parsed !== null) {
+        try {
+          await getRedis().set(cacheKey, fitScore.toFixed(3), 'EX', cfg.RELEVANCE_CACHE_TTL_S);
+        } catch {
+          // cache write failed — non-fatal
+        }
       }
 
       if (fitScore < cfg.RELEVANCE_MIN_FIT_SCORE) {
@@ -207,14 +211,19 @@ export async function scoreMarketRelevance(opts: {
   }
 
   // Fail-open if all configured providers fail or none are configured.
-  // Matches prior boolean fail-open (returned true) so behavior stays permissive.
+  // Scoring callers (strict top-fit) look at `reason === 'fail_open'` explicitly
+  // if they need the old permissive behavior; the isMarketRelevant() boolean
+  // wrapper already short-circuits on this reason to preserve prior semantics
+  // regardless of the configured RELEVANCE_MIN_FIT_SCORE threshold.
   logger.warn('[relevance-gate] all providers failed or none configured, failing open');
   return { fitScore: FIT_SCORE_FAIL_OPEN, reason: 'fail_open' };
 }
 
 /**
  * Thin boolean wrapper for callers that just need a yes/no relevance decision.
- * Applies RELEVANCE_MIN_FIT_SCORE threshold to the underlying fit score.
+ * Applies RELEVANCE_MIN_FIT_SCORE threshold to the underlying fit score, but
+ * explicitly fails open (returns true) when every provider was unreachable —
+ * matching the prior boolean implementation regardless of threshold value.
  */
 export async function isMarketRelevant(opts: {
   headline: string;
@@ -222,6 +231,7 @@ export async function isMarketRelevant(opts: {
   description: string | null;
 }): Promise<boolean> {
   const cfg = loadConfig();
-  const { fitScore } = await scoreMarketRelevance(opts);
+  const { fitScore, reason } = await scoreMarketRelevance(opts);
+  if (reason === 'fail_open') return true;
   return fitScore >= cfg.RELEVANCE_MIN_FIT_SCORE;
 }
