@@ -197,6 +197,12 @@ const envSchema = z.object({
   TAIL_PRICE_THRESHOLD: z.coerce.number().min(0).max(0.5).optional().default(0.2),
   TAIL_TAKER_OVERRIDE_EDGE: z.coerce.number().min(0).max(1).optional().default(0.2),
 
+  // Entry spread guardrail: skip trades when the CLOB book spread exceeds this
+  // width in basis points of mid. Catches degenerate markets (e.g. $0.01 bid /
+  // $0.99 ask → 19600 bps) where the "edge" is an artifact of a one-sided book
+  // rather than a real mispricing.
+  MAX_ENTRY_SPREAD_BPS: z.coerce.number().min(0).optional().default(500),
+
   TAKE_PROFIT_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.25),
   STOP_LOSS_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.3),
   REEVAL_ENABLED: boolFromEnv.optional().default(true),

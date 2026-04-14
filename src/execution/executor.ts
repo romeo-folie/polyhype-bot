@@ -1311,6 +1311,32 @@ export async function executeSignal(
   let clobFallbackReason: string | null = null;
   let takerDecisionBenchmarkPromise: Promise<DecisionBenchmark> | null = null;
 
+  // Entry spread guardrail. Catches degenerate one-sided books (e.g. $0.01 bid /
+  // $0.99 ask → 19600 bps) where "edge" is an artifact of thin liquidity rather
+  // than a real mispricing. Runs pre-maker so it also short-circuits the maker
+  // path. Copytrade bypasses (the whale already priced the degenerate book) and
+  // tail overrides bypass (extreme-price markets structurally have wide spreads
+  // but can still offer real edge when LLM and whale conviction agree).
+  if (cfg.MAX_ENTRY_SPREAD_BPS > 0 && signal.source !== 'copytrade') {
+    const benchmark = await captureDecisionBenchmark(signal);
+    takerDecisionBenchmarkPromise = Promise.resolve(benchmark);
+    makerTelemetry = { ...makerTelemetry, ...benchmark };
+    const spreadBps = benchmark.decisionSpreadBps;
+    if (spreadBps != null && spreadBps > cfg.MAX_ENTRY_SPREAD_BPS) {
+      logger.info('[executor] skipping — entry spread too wide', {
+        marketId: signal.marketId,
+        spreadBps: Math.round(spreadBps),
+        threshold: cfg.MAX_ENTRY_SPREAD_BPS,
+        bestBid: benchmark.decisionBestBid,
+        bestAsk: benchmark.decisionBestAsk,
+      });
+      return recordSkip('spread_too_wide', 'skipped', {
+        spreadBps: Math.round(spreadBps),
+        threshold: cfg.MAX_ENTRY_SPREAD_BPS,
+      });
+    }
+  }
+
   // Maker eligibility: subset of signals where alpha doesn't decay in seconds.
   // Fee markets ARE eligible — maker fills bypass fees entirely, so attempting
   // maker on a fee market is strictly better than the previous behavior of
