@@ -96,6 +96,16 @@ interface EnsembleDailyResponse {
   };
 }
 
+/** Minimal shape of the archive endpoint response — kept separate from
+ *  DailyForecastResponse so the two endpoints can diverge without silent
+ *  misparsing. The archive API only returns `temperature_2m_max` for our use. */
+interface ArchiveDailyResponse {
+  daily?: {
+    time?: string[];
+    temperature_2m_max?: number[];
+  };
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /**
@@ -350,7 +360,7 @@ export async function fetchHistoricalHigh(
       return null;
     }
 
-    const data = (await res.json()) as DailyForecastResponse;
+    const data = (await res.json()) as ArchiveDailyResponse;
     const daily = data.daily;
     if (!daily?.time?.length || !daily.temperature_2m_max?.length) {
       logger.warn('[weather] Open-Meteo archive returned no daily data', {

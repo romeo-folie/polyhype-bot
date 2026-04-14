@@ -34,8 +34,8 @@ describe('reconcileTargets', () => {
 
     const summary = await reconcileTargets(
       [
-        { city: 'new york', targetDate: '2026-04-10', unit: 'fahrenheit' },
-        { city: 'london',   targetDate: '2026-04-10', unit: 'celsius' },
+        { city: 'new york', targetDate: '2026-04-10' },
+        { city: 'london',   targetDate: '2026-04-10' },
       ],
       fetcher,
     );
@@ -53,13 +53,47 @@ describe('reconcileTargets', () => {
       expect(parsed.data.targetDate).toBe('2026-04-10');
       expect(parsed.data.source).toBe('open-meteo-archive');
       expect(parsed.data.observedHigh).toBe(72.5);
+      // observedAt is stamped at fetch time — ISO 8601 with timezone.
+      expect(parsed.data.observedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     }
+  });
+
+  it('canonicalizes aliased city names to the CITY_COORDINATES key', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      observedHigh: 70.0,
+      targetDate: '2026-04-10',
+      unit: 'fahrenheit',
+    });
+    await reconcileTargets(
+      [{ city: 'NYC', targetDate: '2026-04-10' }],
+      fetcher,
+    );
+    expect(enqueueWriteMock).toHaveBeenCalledTimes(1);
+    const [, payload] = enqueueWriteMock.mock.calls[0]!;
+    // 'NYC' alias should collapse to 'new york' canonical key on the persisted row.
+    expect((payload as { city: string }).city).toBe('new york');
+  });
+
+  it('derives unit from city coords regardless of input', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      observedHigh: 15.1,
+      targetDate: '2026-04-10',
+      unit: 'celsius',
+    });
+    await reconcileTargets(
+      [{ city: 'london', targetDate: '2026-04-10' }],
+      fetcher,
+    );
+    // London is international → celsius, pulled from CITY_COORDINATES not the caller.
+    expect(fetcher).toHaveBeenCalledWith(51.5074, -0.1278, '2026-04-10', 'celsius');
+    const [, payload] = enqueueWriteMock.mock.calls[0]!;
+    expect((payload as { unit: string }).unit).toBe('celsius');
   });
 
   it('skips unknown cities and counts them separately', async () => {
     const fetcher = vi.fn();
     const summary = await reconcileTargets(
-      [{ city: 'atlantis', targetDate: '2026-04-10', unit: 'fahrenheit' }],
+      [{ city: 'atlantis', targetDate: '2026-04-10' }],
       fetcher,
     );
     expect(summary).toEqual({ resolved: 0, unknownCity: 1, noData: 0 });
@@ -70,25 +104,11 @@ describe('reconcileTargets', () => {
   it('counts archive misses as noData without throwing', async () => {
     const fetcher = vi.fn().mockResolvedValue(null);
     const summary = await reconcileTargets(
-      [{ city: 'chicago', targetDate: '2026-04-10', unit: 'fahrenheit' }],
+      [{ city: 'chicago', targetDate: '2026-04-10' }],
       fetcher,
     );
     expect(summary).toEqual({ resolved: 0, unknownCity: 0, noData: 1 });
     expect(enqueueWriteMock).not.toHaveBeenCalled();
-  });
-
-  it('passes city coordinates and correct unit to the fetcher', async () => {
-    const fetcher = vi.fn().mockResolvedValue({
-      observedHigh: 15.1,
-      targetDate: '2026-04-10',
-      unit: 'celsius',
-    });
-    await reconcileTargets(
-      [{ city: 'london', targetDate: '2026-04-10', unit: 'celsius' }],
-      fetcher,
-    );
-    // London coords from CITY_COORDINATES: 51.5074, -0.1278
-    expect(fetcher).toHaveBeenCalledWith(51.5074, -0.1278, '2026-04-10', 'celsius');
   });
 });
 

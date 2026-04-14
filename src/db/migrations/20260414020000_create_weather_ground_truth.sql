@@ -11,7 +11,7 @@ CREATE TABLE weather_ground_truth (
   observed_at    TIMESTAMPTZ      NOT NULL DEFAULT now(), -- when we fetched it
   city           TEXT             NOT NULL,                -- canonical from CITY_COORDINATES
   target_date    DATE             NOT NULL,                -- market resolution day
-  unit           TEXT             NOT NULL,                -- 'fahrenheit' | 'celsius'
+  unit           TEXT             NOT NULL CHECK (unit IN ('fahrenheit', 'celsius')),
   observed_high  DOUBLE PRECISION NOT NULL,                -- daily high in `unit`
   source         TEXT             NOT NULL DEFAULT 'open-meteo-archive',
   UNIQUE (city, target_date)
