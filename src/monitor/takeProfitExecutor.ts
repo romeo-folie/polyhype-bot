@@ -218,23 +218,12 @@ export async function executeTakeProfit(opts: {
     return executeClobExit({ position, currentPrice, returnPct, reason, redis, sharesToSell });
   }
 
-  // Simmer venue: when SIMMER_VENUE_ENABLED=false, route Simmer-entered exits
-  // through CLOB when CLOB tokens are available (shares live on our wallet).
-  // Positions without clobTokenIds fall through to Simmer as a last resort.
-  const cfgRoute = loadConfig();
-  if (
-    !cfgRoute.SIMMER_VENUE_ENABLED &&
-    position.clobTokenIds &&
-    position.clobTokenIds.length > 0
-  ) {
-    logger.info('[take-profit-executor] SIMMER_VENUE_ENABLED=false — routing Simmer exit through CLOB', {
-      marketId: position.marketId,
-      direction: position.direction,
-      sharesToSell,
-    });
-    return executeClobExit({ position, currentPrice, returnPct, reason, redis, sharesToSell });
-  }
-
+  // Simmer-entered positions MUST exit via Simmer regardless of SIMMER_VENUE_ENABLED:
+  // Simmer-held shares live in the Magic Proxy, not the agent's main wallet, so
+  // routing exits through CLOB submitClobSell sees zero balance and deletes the
+  // position as terminal_no_balance (or marks pendingSettlement on dust). The
+  // venue gate only blocks NEW entries; existing Simmer positions ride out via
+  // Simmer's submitSell or auto-redeem on resolution.
   return executeSimmerExit({
     position,
     currentPrice,

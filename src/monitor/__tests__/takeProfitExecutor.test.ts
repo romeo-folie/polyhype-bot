@@ -382,7 +382,11 @@ describe('executeTakeProfit', () => {
     expect(mockClose).not.toHaveBeenCalled();
   });
 
-  it('routes Simmer-venue position through CLOB when SIMMER_VENUE_ENABLED=false', async () => {
+  it('Simmer-entered positions stay on Simmer for exit even when SIMMER_VENUE_ENABLED=false', async () => {
+    // Regression: a previous gate routed Simmer-entered exits through CLOB when
+    // the venue flag was off. That deleted real positions because Simmer-held
+    // shares live in the Magic Proxy, not the agent's main CLOB wallet —
+    // CLOB sees zero balance and marks terminal_no_balance.
     const { loadConfig } = await import('../../shared/config.js');
     const mockCfg = vi.mocked(loadConfig);
     mockCfg.mockReturnValueOnce({
@@ -390,8 +394,7 @@ describe('executeTakeProfit', () => {
       SIMMER_VENUE_ENABLED: false,
     } as any);
 
-    mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 15.0 });
-    mockClobSell.mockResolvedValue({ success: true, tx_hash: '0xsimmerviaclob' });
+    mockSell.mockResolvedValue({ success: true, tx_hash: '0xsimmerexit' });
 
     const result = await executeTakeProfit({
       position: makePosition({ executionVenue: 'simmer', direction: 'YES' }),
@@ -402,11 +405,9 @@ describe('executeTakeProfit', () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.txHash).toBe('0xsimmerviaclob');
-    expect(mockClobSell).toHaveBeenCalledWith(
-      expect.objectContaining({ tokenId: 'tok-yes' }),
-    );
-    expect(mockSell).not.toHaveBeenCalled();
+    expect(result.txHash).toBe('0xsimmerexit');
+    expect(mockSell).toHaveBeenCalled();
+    expect(mockClobSell).not.toHaveBeenCalled();
   });
 
   it('caps CLOB sell at actual on-chain balance when it is less than Redis-tracked shares', async () => {
