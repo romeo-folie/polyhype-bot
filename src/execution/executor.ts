@@ -1256,7 +1256,9 @@ export async function executeSignal(
 
   const executionMode = cfg.EXECUTION_MODE;
   const simmerId =
-    signal.source === 'crypto-arb' ? null : await resolveSimmerMarketId(signal.question);
+    signal.source === 'crypto-arb' || !cfg.SIMMER_VENUE_ENABLED
+      ? null
+      : await resolveSimmerMarketId(signal.question);
 
   // Tracks fee-market state across the routing pipeline. Set when Simmer context
   // reports fees > 0, or inferred from signal.feesEnabled. Used to:
@@ -1621,16 +1623,10 @@ export async function executeSignal(
     }
   }
 
-  // 5) Try Simmer first (gated by SIMMER_VENUE_ENABLED — when off, skip to CLOB)
+  // 5) Try Simmer first (gated by SIMMER_VENUE_ENABLED — when off, simmerId is
+  // null upstream so we route directly to CLOB below)
 
-  if (simmerId && !cfg.SIMMER_VENUE_ENABLED) {
-    logger.info('[executor] SIMMER_VENUE_ENABLED=false; skipping Simmer, attempting CLOB', {
-      marketId: signal.marketId,
-      simmerId,
-    });
-    safeRecordExecutionMetric('venue_skipped', 'simmer_disabled');
-    clobFallbackReason = 'simmer_disabled';
-  } else if (simmerId) {
+  if (simmerId) {
     takerPath =
       executionMode === 'taker'
         ? 'taker_direct'
@@ -1794,6 +1790,12 @@ export async function executeSignal(
         ? 'simmer_market_not_found'
         : 'simmer_order_too_small';
     }
+  } else if (!cfg.SIMMER_VENUE_ENABLED && signal.source !== 'crypto-arb') {
+    logger.info('[executor] SIMMER_VENUE_ENABLED=false; routing direct to CLOB', {
+      marketId: signal.marketId,
+    });
+    safeRecordExecutionMetric('venue_skipped', 'simmer_disabled');
+    clobFallbackReason = 'simmer_disabled';
   } else {
     logger.info('[executor] market not in Simmer catalogue; attempting CLOB fallback', {
       marketId: signal.marketId,
