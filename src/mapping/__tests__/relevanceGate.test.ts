@@ -1,16 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { isMarketRelevant } from '../relevanceGate.js';
+import { isMarketRelevant, scoreMarketRelevance, parseFitScore } from '../relevanceGate.js';
 
-// Mock loadConfig to ensure keys / model are present
+const mockConfig = {
+  GEMINI_API_KEY: 'test-key' as string | undefined,
+  OPENAI_API_KEY: undefined as string | undefined,
+  DEEPSEEK_API_KEY: undefined as string | undefined,
+  ANTHROPIC_API_KEY: undefined as string | undefined,
+  LLM_PROVIDER: 'gemini',
+  GEMINI_MODEL: 'gemini-1.5-flash',
+  OPENAI_MODEL: 'gpt-4o-mini',
+  DEEPSEEK_MODEL: 'deepseek-chat',
+  ANTHROPIC_MODEL: 'claude-3-haiku',
+  RELEVANCE_CACHE_TTL_S: 3600,
+  RELEVANCE_MIN_FIT_SCORE: 0.5,
+};
+
 vi.mock('../../shared/config.js', () => ({
-  loadConfig: vi.fn(() => ({
-    GEMINI_API_KEY: 'test-key',
-    LLM_PROVIDER: 'gemini',
-    GEMINI_MODEL: 'gemini-1.5-flash',
-  })),
+  loadConfig: vi.fn(() => mockConfig),
 }));
 
-// Mock logger
 vi.mock('../../shared/logger.js', () => ({
   logger: {
     info: vi.fn(),
@@ -20,7 +28,15 @@ vi.mock('../../shared/logger.js', () => ({
   },
 }));
 
-// Mock GoogleGenerativeAI
+const mockRedisGet = vi.fn();
+const mockRedisSet = vi.fn();
+vi.mock('../../shared/redis.js', () => ({
+  getRedis: vi.fn(() => ({
+    get: mockRedisGet,
+    set: mockRedisSet,
+  })),
+}));
+
 const mockGenerateContent = vi.fn();
 vi.mock('@google/generative-ai', () => ({
   GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
@@ -30,7 +46,6 @@ vi.mock('@google/generative-ai', () => ({
   })),
 }));
 
-// Mock OpenAI
 const mockChatCreate = vi.fn();
 vi.mock('openai', () => ({
   default: vi.fn().mockImplementation(() => ({
@@ -38,7 +53,6 @@ vi.mock('openai', () => ({
   })),
 }));
 
-// Mock Anthropic
 const mockAnthropicCreate = vi.fn();
 vi.mock('@anthropic-ai/sdk', () => ({
   default: vi.fn().mockImplementation(() => ({
@@ -46,150 +60,209 @@ vi.mock('@anthropic-ai/sdk', () => ({
   })),
 }));
 
+function resetMocks() {
+  mockGenerateContent.mockReset();
+  mockChatCreate.mockReset();
+  mockAnthropicCreate.mockReset();
+  mockRedisGet.mockReset();
+  mockRedisSet.mockReset();
+  mockRedisGet.mockResolvedValue(null);
+  mockRedisSet.mockResolvedValue('OK');
+  mockConfig.GEMINI_API_KEY = 'test-key';
+  mockConfig.OPENAI_API_KEY = undefined;
+  mockConfig.DEEPSEEK_API_KEY = undefined;
+  mockConfig.ANTHROPIC_API_KEY = undefined;
+  mockConfig.RELEVANCE_MIN_FIT_SCORE = 0.5;
+  vi.clearAllMocks();
+  mockRedisGet.mockResolvedValue(null);
+  mockRedisSet.mockResolvedValue('OK');
+}
 
-describe('isMarketRelevant', () => {
-  beforeEach(() => {
-    mockGenerateContent.mockReset();
-    mockChatCreate.mockReset();
-    mockAnthropicCreate.mockReset();
-    vi.clearAllMocks();
+describe('parseFitScore', () => {
+  it('parses a clean float', () => {
+    expect(parseFitScore('0.8')).toBe(0.8);
   });
 
-  it('returns true when model returns YES', async () => {
-    mockGenerateContent.mockResolvedValue({
-      response: { text: () => 'YES' },
-    });
+  it('parses a float from noisy prefix', () => {
+    expect(parseFitScore('Score: 0.35')).toBe(0.35);
+  });
 
-    const result = await isMarketRelevant({
+  it('clamps values > 1 to 1', () => {
+    expect(parseFitScore('1.4')).toBe(1);
+  });
+
+  it('clamps negative values to 0', () => {
+    expect(parseFitScore('-0.2')).toBe(0);
+  });
+
+  it('returns null for non-numeric input', () => {
+    expect(parseFitScore('YES')).toBeNull();
+  });
+
+  it('parses integers', () => {
+    expect(parseFitScore('0')).toBe(0);
+    expect(parseFitScore('1')).toBe(1);
+  });
+});
+
+describe('scoreMarketRelevance', () => {
+  beforeEach(resetMocks);
+
+  it('returns the parsed fit score from Gemini', async () => {
+    mockGenerateContent.mockResolvedValue({ response: { text: () => '0.87' } });
+
+    const result = await scoreMarketRelevance({
       headline: 'Iran launches missiles at Israel',
       question: 'Will there be a major escalation between Iran and Israel before June?',
       description: 'Resolves YES if military action occurs.',
     });
 
-    expect(result).toBe(true);
-    expect(mockGenerateContent).toHaveBeenCalled();
+    expect(result.fitScore).toBe(0.87);
+    expect(result.reason).toBe('llm');
+    expect(result.provider).toBe('Gemini');
+    expect(mockRedisSet).toHaveBeenCalledWith(
+      expect.stringContaining('relevance:v2:'),
+      '0.870',
+      'EX',
+      3600,
+    );
   });
 
-  it('returns false when model returns NO', async () => {
-    mockGenerateContent.mockResolvedValue({
-      response: { text: () => 'NO' },
-    });
+  it('falls back to 0.5 when provider returns unparseable output', async () => {
+    mockGenerateContent.mockResolvedValue({ response: { text: () => 'maybe' } });
 
-    const result = await isMarketRelevant({
-      headline: 'Taylor Swift wins another Grammy',
-      question: 'Will there be a major escalation between Iran and Israel before June?',
-      description: 'Resolves YES if military action occurs.',
-    });
-
-    expect(result).toBe(false);
-  });
-
-  it('returns false for verbose responses like "RELEVANT: YES" (strict first-token parsing)', async () => {
-    mockGenerateContent.mockResolvedValue({
-      response: { text: () => 'relevant: yes' },
-    });
-
-    const result = await isMarketRelevant({
-      headline: 'Something relevant',
+    const result = await scoreMarketRelevance({
+      headline: 'Something',
       question: 'Something else',
       description: null,
     });
 
-    // Strict parsing: only the first whitespace-delimited token ("RELEVANT:") is checked.
-    // A verbose or prefixed response is treated as irrelevant.
-    expect(result).toBe(false);
+    expect(result.fitScore).toBe(0.5);
+    expect(result.reason).toBe('parse_fallback');
   });
 
-  it('returns true for YES with surrounding whitespace', async () => {
-    mockGenerateContent.mockResolvedValue({
-      response: { text: () => '  YES  ' },
-    });
+  it('clamps scores above 1 to 1', async () => {
+    mockGenerateContent.mockResolvedValue({ response: { text: () => '1.4' } });
 
-    const result = await isMarketRelevant({
-      headline: 'Iran launches missiles at Israel',
-      question: 'Will there be a major escalation between Iran and Israel before June?',
-      description: null,
-    });
-
-    expect(result).toBe(true);
-  });
-
-  it('fails open (returns true) on timeout', async () => {
-    vi.useFakeTimers();
-    try {
-      // Return a promise that never resolves so the timeout branch fires.
-      mockGenerateContent.mockReturnValue(new Promise(() => {}));
-
-      const resultPromise = isMarketRelevant({
-        headline: 'Breaking market-moving news',
-        question: 'Will this market resolve YES?',
-        description: null,
-      });
-
-      // Allow microtasks from the async provider chain to run so that the
-      // internal setTimeout is registered before we flush fake timers.
-      await Promise.resolve();
-      await Promise.resolve();
-
-      // Flush all fake timers (including the 10 s relevance gate timeout).
-      await vi.runAllTimersAsync();
-
-      await expect(resultPromise).resolves.toBe(true); // Fail-open on timeout
-      expect(mockGenerateContent).toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
-  }, 15000);
-
-  it('fails open (returns true) on API error', async () => {
-    mockGenerateContent.mockRejectedValue(new Error('API quota exceeded'));
-
-    const result = await isMarketRelevant({
-      headline: 'Critically important news',
-      question: 'Critical market',
-      description: null,
-    });
-
-    expect(result).toBe(true); // Fail-open
-  });
-
-  it('falls back to OpenAI when Gemini fails', async () => {
-    const { loadConfig } = await import('../../shared/config.js');
-    (loadConfig as any).mockReturnValue({ 
-      GEMINI_API_KEY: 'gem-key', 
-      OPENAI_API_KEY: 'oa-key', 
-      GEMINI_MODEL: 'flash',
-      OPENAI_MODEL: 'mini' 
-    });
-
-    // Gemini fails
-    mockGenerateContent.mockRejectedValue(new Error('Gemini down'));
-    // OpenAI succeeds
-    mockChatCreate.mockResolvedValue({
-      choices: [{ message: { content: 'YES' } }]
-    });
-
-    const result = await isMarketRelevant({
-      headline: 'Relevant news',
-      question: 'Question',
-      description: null
-    });
-
-    expect(result).toBe(true);
-    expect(mockGenerateContent).toHaveBeenCalled();
-    expect(mockChatCreate).toHaveBeenCalled();
-  });
-
-  it('fails open if GEMINI_API_KEY is missing', async () => {
-    const { loadConfig } = await import('../../shared/config.js');
-    (loadConfig as any).mockReturnValue({ GEMINI_API_KEY: undefined });
-
-    const result = await isMarketRelevant({
+    const result = await scoreMarketRelevance({
       headline: 'News',
       question: 'Market',
       description: null,
     });
 
-    expect(result).toBe(true); // Fail-open when unconfigured
+    expect(result.fitScore).toBe(1);
+  });
+
+  it('returns cached score without calling the LLM', async () => {
+    mockRedisGet.mockResolvedValueOnce('0.62');
+
+    const result = await scoreMarketRelevance({
+      headline: 'Cached headline',
+      question: 'Cached market',
+      description: null,
+    });
+
+    expect(result.fitScore).toBeCloseTo(0.62, 3);
+    expect(result.reason).toBe('cache');
+    expect(mockGenerateContent).not.toHaveBeenCalled();
+  });
+
+  it('falls back to OpenAI when Gemini fails', async () => {
+    mockConfig.OPENAI_API_KEY = 'openai-key';
+    mockGenerateContent.mockRejectedValue(new Error('Gemini down'));
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: '0.72' } }],
+    });
+
+    const result = await scoreMarketRelevance({
+      headline: 'News',
+      question: 'Question',
+      description: null,
+    });
+
+    expect(result.fitScore).toBe(0.72);
+    expect(result.provider).toBe('OpenAI');
+    expect(mockGenerateContent).toHaveBeenCalled();
+    expect(mockChatCreate).toHaveBeenCalled();
+  });
+
+  it('fails open to 0.5 when all providers unavailable', async () => {
+    mockConfig.GEMINI_API_KEY = undefined;
+
+    const result = await scoreMarketRelevance({
+      headline: 'News',
+      question: 'Market',
+      description: null,
+    });
+
+    expect(result.fitScore).toBe(0.5);
+    expect(result.reason).toBe('fail_open');
+  });
+
+  it('fails open to 0.5 on API error', async () => {
+    mockGenerateContent.mockRejectedValue(new Error('API quota exceeded'));
+
+    const result = await scoreMarketRelevance({
+      headline: 'Critically important news',
+      question: 'Critical market',
+      description: null,
+    });
+
+    expect(result.fitScore).toBe(0.5);
+    expect(result.reason).toBe('fail_open');
+  });
+});
+
+describe('isMarketRelevant (wrapper)', () => {
+  beforeEach(resetMocks);
+
+  it('returns true when score >= threshold', async () => {
+    mockGenerateContent.mockResolvedValue({ response: { text: () => '0.75' } });
+
+    const relevant = await isMarketRelevant({
+      headline: 'Relevant news',
+      question: 'Market question',
+      description: null,
+    });
+
+    expect(relevant).toBe(true);
+  });
+
+  it('returns false when score below threshold', async () => {
+    mockGenerateContent.mockResolvedValue({ response: { text: () => '0.30' } });
+
+    const relevant = await isMarketRelevant({
+      headline: 'Unrelated news',
+      question: 'Market question',
+      description: null,
+    });
+
+    expect(relevant).toBe(false);
+  });
+
+  it('respects configured RELEVANCE_MIN_FIT_SCORE', async () => {
+    mockConfig.RELEVANCE_MIN_FIT_SCORE = 0.8;
+    mockGenerateContent.mockResolvedValue({ response: { text: () => '0.60' } });
+
+    const relevant = await isMarketRelevant({
+      headline: 'News',
+      question: 'Market',
+      description: null,
+    });
+
+    expect(relevant).toBe(false);
+  });
+
+  it('fails open to fit=0.5 which passes default threshold of 0.5', async () => {
+    mockConfig.GEMINI_API_KEY = undefined;
+
+    const relevant = await isMarketRelevant({
+      headline: 'News',
+      question: 'Market',
+      description: null,
+    });
+
+    // fail_open returns 0.5; default threshold is 0.5 so >= passes.
+    expect(relevant).toBe(true);
   });
 });

@@ -500,6 +500,14 @@ const envSchema = z.object({
   CONSENSUS_CACHE_ENABLED: boolFromEnv.optional().default(true),
   CONSENSUS_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(1800),
   RELEVANCE_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
+  // Strict top-fit candidate selection: evaluate only the highest fit-score
+  // candidate per headline and drop the headline if it's gated — no cascade
+  // to weaker fits. Default false: shadow-log only, keep the current
+  // liquidity-cascade behavior as the live path.
+  STRICT_TOP_FIT_ENABLED: boolFromEnv.optional().default(false),
+  // Minimum LLM fit score (0..1) for a candidate to be trade-eligible.
+  // Also used by the boolean isMarketRelevant() wrapper.
+  RELEVANCE_MIN_FIT_SCORE: z.coerce.number().min(0).max(1).optional().default(0.5),
   ENTITY_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(7200),
   SENTIMENT_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
   DEEPSEEK_PARSE_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(86400),

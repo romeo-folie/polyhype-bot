@@ -12,8 +12,8 @@
 import { randomUUID } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
-import { findCandidateMarkets } from './entityExtractor.js';
-import { isMarketRelevant } from './relevanceGate.js';
+import { findCandidateMarkets, type CandidateMarket } from './entityExtractor.js';
+import { scoreMarketRelevance } from './relevanceGate.js';
 import { estimateConsensusProbability, estimateSentiment } from './consensusCalculator.js';
 import { computeDivergence } from './divergenceCalculator.js';
 import { resolveYesPrice } from '../shared/priceCache.js';
@@ -84,8 +84,6 @@ export async function runMapping(
   opts?: { redis?: Redis; feed?: ClobPriceFeed },
 ): Promise<TradeSignal[]> {
   const cfg = loadConfig();
-  const divergenceThreshold = cfg.DIVERGENCE_THRESHOLD;
-  const maxBetFraction = cfg.MAX_BET_FRACTION;
 
   // Per-market deduplication: tracks the highest-edge signal seen for each market.
   // Multiple headlines in one cycle can match the same market; emitting duplicate
@@ -120,156 +118,113 @@ export async function runMapping(
     // to avoid runaway LLM calls
     const toEvaluate = candidates.slice(0, 10);
 
-    for (const candidate of toEvaluate) {
-      // 1. Hard Relevance Gate: Skip expensive operations if headline is irrelevant
-      const isRelevant = await isMarketRelevant({
-        headline: item.title,
-        question: candidate.question,
-        description: candidate.description,
-      });
-      if (!isRelevant) continue;
+    // Score all candidates in parallel. Replaces the per-candidate boolean
+    // isMarketRelevant() call with a 0..1 fit score we can rank by.
+    const scored = await Promise.all(
+      toEvaluate.map(async (c) => ({
+        candidate: c,
+        fitScore: (await scoreMarketRelevance({
+          headline: item.title,
+          question: c.question,
+          description: c.description,
+        })).fitScore,
+      })),
+    );
+    const scoreByMarket = new Map(scored.map((s) => [s.candidate.marketId, s.fitScore]));
 
-      // 2. Subscribe to WS updates for high-urgency items
-      if (opts?.feed && item.urgencyScore >= cfg.URGENCY_THRESHOLD) {
-        await opts.feed.watch(candidate.marketId, candidate.clobTokenIds);
-      }
-
-      // 3. Resolve price: WS cache first, then fall back to Gamma snapshot
-      let currentYesPrice = candidate.currentYesPrice;
-      if (opts?.redis && opts.feed) {
-        const wsPrice = await resolveYesPrice(candidate.marketId, opts.redis, opts.feed);
-        if (wsPrice !== null) currentYesPrice = wsPrice;
-      }
-
-      // 3b. Near-zero OSINT signal: if this relevant market has a side in the
-      // near-zero range, write a signal for the near-zero scanner to pick up.
-      const noPrice = 1 - currentYesPrice;
-      if (currentYesPrice >= cfg.NEAR_ZERO_MIN_PRICE && currentYesPrice <= cfg.NEAR_ZERO_MAX_PRICE) {
-        void writeNearZeroOsintSignal(candidate.marketId, 'YES', currentYesPrice, item, cfg);
+    // Near-zero OSINT signal: fire for every fit-qualified candidate (observability
+    // for the near-zero scanner, independent of trade selection).
+    for (const { candidate, fitScore } of scored) {
+      if (fitScore < cfg.RELEVANCE_MIN_FIT_SCORE) continue;
+      const noPrice = 1 - candidate.currentYesPrice;
+      if (
+        candidate.currentYesPrice >= cfg.NEAR_ZERO_MIN_PRICE &&
+        candidate.currentYesPrice <= cfg.NEAR_ZERO_MAX_PRICE
+      ) {
+        void writeNearZeroOsintSignal(candidate.marketId, 'YES', candidate.currentYesPrice, item, cfg);
       } else if (noPrice >= cfg.NEAR_ZERO_MIN_PRICE && noPrice <= cfg.NEAR_ZERO_MAX_PRICE) {
         void writeNearZeroOsintSignal(candidate.marketId, 'NO', noPrice, item, cfg);
       }
+    }
 
-      let consensus;
-      try {
-        consensus = await estimateConsensusProbability({
-          question: candidate.question,
-          description: candidate.description,
-          headline: item.title,
-          ...(opts?.redis ? { redis: opts.redis } : {}),
-        });
-      } catch (err) {
-        logger.warn('[mapping] consensus estimation failed', {
-          marketId: candidate.marketId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        continue;
-      }
+    // Rank by fitScore desc; sort is stable so liquidity order (from
+    // findCandidateMarkets) is preserved as tiebreak.
+    const fitRanked = scored
+      .filter((s) => s.fitScore >= cfg.RELEVANCE_MIN_FIT_SCORE)
+      .sort((a, b) => b.fitScore - a.fitScore);
 
-      // Require at least 2 LLM samples for a trade — a single provider
-      // returning 0.50 ("unrelated") creates phantom edge on extreme-priced
-      // markets when stddev=0 looks artificially confident.
-      if (consensus.sampleCount < 2) {
-        logger.info('[mapping] skipping — insufficient consensus samples', {
-          marketId: candidate.marketId,
-          question: candidate.question.substring(0, 80),
-          sampleCount: consensus.sampleCount,
-          consensusP: consensus.probability.toFixed(3),
-        });
-        continue;
-      }
+    if (fitRanked.length === 0) {
+      logger.info('[mapping] no fit-qualified candidate', {
+        title: item.title,
+        candidatesScored: scored.length,
+        threshold: cfg.RELEVANCE_MIN_FIT_SCORE,
+      });
+      continue;
+    }
 
-      const decisionId = randomUUID();
-      const marketCategory = inferCategory(candidate.question);
-      const { hasTrade, decision, skipReason } = computeDivergence({
-        consensusProbability: consensus.probability,
-        consensusStddev: consensus.stddev,
-        currentYesPrice,
+    const topFit = fitRanked[0]!;
+
+    if (cfg.STRICT_TOP_FIT_ENABLED) {
+      // LIVE strict mode: evaluate only the highest-fit candidate. If it's
+      // gated, drop the headline — no cascade to weaker-fit markets.
+      const result = await evaluateOsintCandidate({
+        candidate: topFit.candidate,
+        fitScore: topFit.fitScore,
+        item,
         bankrollUsd,
-        divergenceThreshold,
-        maxBetFraction,
-        bookDepthUsd: candidate.liquidity,
-        minPriceForLlmTrust: cfg.MIN_PRICE_FOR_LLM_TRUST,
-        maxLlmProbAtLowPrice: cfg.MAX_LLM_PROB_AT_LOW_PRICE,
-        ...(candidate.endDate ? { endDate: candidate.endDate } : {}),
-        source: 'osint',
-        maxHoursToResolution: cfg.PM_MAX_HOURS_TO_RESOLUTION_OSINT,
-        minHoursToResolution: cfg.PM_MIN_HOURS_TO_RESOLUTION,
-        zone3FeeBuffer: cfg.ZONE3_FEE_BUFFER,
-        zone4DirectionalBlock: cfg.ZONE4_DIRECTIONAL_BLOCK,
-        zone5DirectionalBlock: cfg.ZONE5_DIRECTIONAL_BLOCK,
-        category: marketCategory,
-        kellyFraction: cfg.KELLY_FRACTION,
-        noiseStddevThreshold: cfg.NOISE_STDDEV_THRESHOLD,
-        kellyProbeDelta: cfg.KELLY_PROBE_DELTA,
-        kellyRequireSignStable: cfg.KELLY_REQUIRE_SIGN_STABLE,
-        calibrationBiasEnabled: cfg.CALIBRATION_BIAS_ENABLED,
+        cfg,
+        opts,
       });
+      if (result.signal) {
+        registerSignal(bestByMarket, result.signal);
+      } else {
+        logger.info('[mapping] dropping headline — top-fit gated (strict mode)', {
+          title: item.title,
+          marketId: topFit.candidate.marketId,
+          fitScore: topFit.fitScore.toFixed(3),
+          skipReason: result.skipReason,
+        });
+      }
+      continue;
+    }
 
-      logger.info('[mapping] divergence result', {
-        marketId: candidate.marketId,
-        question: candidate.question.substring(0, 80),
-        consensusP: consensus.probability.toFixed(3),
-        consensusStddev: consensus.stddev.toFixed(3),
-        marketP: currentYesPrice.toFixed(3),
-        hasTrade,
-        skipReason,
-        direction: decision?.direction,
-        stakeUsd: decision?.stakeUsd.toFixed(2),
-      });
-
-      void enqueueWrite('signal_decisions', {
-        decisionId,
-        source: 'osint',
-        marketId: candidate.marketId,
-        conditionId: candidate.conditionId,
-        question: candidate.question,
-        category: marketCategory,
-        direction: decision?.direction,
-        hasTrade,
-        skipReason: skipReason ?? (hasTrade ? undefined : 'other'),
-        consensusProbability: consensus.probability,
-        consensusStddev: consensus.stddev,
-        consensusSampleCount: consensus.sampleCount,
-        currentYesPrice,
-        divergence: decision?.edgeMagnitude,
-        kellyFraction: decision?.halfKellyFraction,
-        priceZone: decision?.priceZone,
+    // SHADOW mode: keep current cascade behavior (evaluate all fit-qualified
+    // candidates in liquidity order, highest-edge wins per market via
+    // bestByMarket dedup) BUT log what strict top-1 would have done so we can
+    // review divergence before flipping STRICT_TOP_FIT_ENABLED=true.
+    let cascadeFirstTradedMarketId: string | null = null;
+    let cascadeFirstTradedFit: number | null = null;
+    for (const candidate of toEvaluate) {
+      const fitScore = scoreByMarket.get(candidate.marketId) ?? 0;
+      if (fitScore < cfg.RELEVANCE_MIN_FIT_SCORE) continue;
+      const result = await evaluateOsintCandidate({
+        candidate,
+        fitScore,
+        item,
         bankrollUsd,
-        stakeAttemptedUsd: decision?.stakeUsd,
-        bookDepthUsd: candidate.liquidity != null ? Number(candidate.liquidity) : undefined,
-        sourceHeadline: item.title.slice(0, 200),
+        cfg,
+        opts,
       });
-
-      if (hasTrade && decision) {
-        const candidate_signal: TradeSignal = {
-          marketId: candidate.marketId,
-          conditionId: candidate.conditionId,
-          clobTokenIds: candidate.clobTokenIds,
-          question: candidate.question,
-          direction: decision.direction,
-          stakeUsd: decision.stakeUsd,
-          edgeMagnitude: decision.edgeMagnitude,
-          consensusProbability: decision.consensusProbability,
-          consensusStddev: consensus.stddev,
-          outcomePrice: decision.outcomePrice,
-          halfKellyFraction: decision.halfKellyFraction,
-          priceZone: decision.priceZone,
-          sourcedFrom: item.title,
-          reasoning: consensus.reasoning,
-          source: 'osint',
-          latencyMs: item.latencyMs,
-          endDate: candidate.endDate ?? undefined,
-          decisionId,
-          // assetId is not directly known from entity extraction, but usually
-          // inferred by the monitor or stored if known from spot move.
-        };
-        const existing = bestByMarket.get(candidate.marketId);
-        if (!existing || decision.edgeMagnitude > existing.edgeMagnitude) {
-          bestByMarket.set(candidate.marketId, candidate_signal);
+      if (result.signal) {
+        registerSignal(bestByMarket, result.signal);
+        if (cascadeFirstTradedMarketId === null) {
+          cascadeFirstTradedMarketId = candidate.marketId;
+          cascadeFirstTradedFit = fitScore;
         }
       }
     }
+
+    logger.info('[mapping] top_fit_shadow', {
+      title: item.title,
+      topFitMarketId: topFit.candidate.marketId,
+      topFitScore: topFit.fitScore.toFixed(3),
+      cascadeTradedMarketId: cascadeFirstTradedMarketId,
+      cascadeTradedFit: cascadeFirstTradedFit?.toFixed(3) ?? null,
+      agree:
+        cascadeFirstTradedMarketId !== null &&
+        cascadeFirstTradedMarketId === topFit.candidate.marketId,
+      fitQualified: fitRanked.length,
+    });
   }
 
   const signals = Array.from(bestByMarket.values());
@@ -280,6 +235,170 @@ export async function runMapping(
   });
 
   return signals;
+}
+
+interface EvaluateCandidateArgs {
+  candidate: CandidateMarket;
+  fitScore: number;
+  item: ScoredItem;
+  bankrollUsd: number;
+  cfg: ReturnType<typeof loadConfig>;
+  opts?: { redis?: Redis; feed?: ClobPriceFeed } | undefined;
+}
+
+interface EvaluateCandidateResult {
+  signal: TradeSignal | null;
+  skipReason: string | undefined;
+}
+
+/**
+ * Run the full per-candidate mapping step: WS subscribe, resolve price,
+ * consensus estimation, divergence + gates, enqueue signal_decisions, and
+ * produce a TradeSignal if every gate passes. Returned signal is null when
+ * any stage fails.
+ */
+async function evaluateOsintCandidate(args: EvaluateCandidateArgs): Promise<EvaluateCandidateResult> {
+  const { candidate, item, bankrollUsd, cfg, opts } = args;
+
+  // Subscribe to WS updates for high-urgency items
+  if (opts?.feed && item.urgencyScore >= cfg.URGENCY_THRESHOLD) {
+    await opts.feed.watch(candidate.marketId, candidate.clobTokenIds);
+  }
+
+  // Resolve price: WS cache first, then fall back to Gamma snapshot
+  let currentYesPrice = candidate.currentYesPrice;
+  if (opts?.redis && opts.feed) {
+    const wsPrice = await resolveYesPrice(candidate.marketId, opts.redis, opts.feed);
+    if (wsPrice !== null) currentYesPrice = wsPrice;
+  }
+
+  let consensus;
+  try {
+    consensus = await estimateConsensusProbability({
+      question: candidate.question,
+      description: candidate.description,
+      headline: item.title,
+      ...(opts?.redis ? { redis: opts.redis } : {}),
+    });
+  } catch (err) {
+    logger.warn('[mapping] consensus estimation failed', {
+      marketId: candidate.marketId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { signal: null, skipReason: 'consensus_failed' };
+  }
+
+  // Require at least 2 LLM samples for a trade — a single provider returning
+  // 0.50 ("unrelated") creates phantom edge on extreme-priced markets when
+  // stddev=0 looks artificially confident.
+  if (consensus.sampleCount < 2) {
+    logger.info('[mapping] skipping — insufficient consensus samples', {
+      marketId: candidate.marketId,
+      question: candidate.question.substring(0, 80),
+      sampleCount: consensus.sampleCount,
+      consensusP: consensus.probability.toFixed(3),
+    });
+    return { signal: null, skipReason: 'noisy_signal' };
+  }
+
+  const decisionId = randomUUID();
+  const marketCategory = inferCategory(candidate.question);
+  const { hasTrade, decision, skipReason } = computeDivergence({
+    consensusProbability: consensus.probability,
+    consensusStddev: consensus.stddev,
+    currentYesPrice,
+    bankrollUsd,
+    divergenceThreshold: cfg.DIVERGENCE_THRESHOLD,
+    maxBetFraction: cfg.MAX_BET_FRACTION,
+    bookDepthUsd: candidate.liquidity,
+    minPriceForLlmTrust: cfg.MIN_PRICE_FOR_LLM_TRUST,
+    maxLlmProbAtLowPrice: cfg.MAX_LLM_PROB_AT_LOW_PRICE,
+    ...(candidate.endDate ? { endDate: candidate.endDate } : {}),
+    source: 'osint',
+    maxHoursToResolution: cfg.PM_MAX_HOURS_TO_RESOLUTION_OSINT,
+    minHoursToResolution: cfg.PM_MIN_HOURS_TO_RESOLUTION,
+    zone3FeeBuffer: cfg.ZONE3_FEE_BUFFER,
+    zone4DirectionalBlock: cfg.ZONE4_DIRECTIONAL_BLOCK,
+    zone5DirectionalBlock: cfg.ZONE5_DIRECTIONAL_BLOCK,
+    category: marketCategory,
+    kellyFraction: cfg.KELLY_FRACTION,
+    noiseStddevThreshold: cfg.NOISE_STDDEV_THRESHOLD,
+    kellyProbeDelta: cfg.KELLY_PROBE_DELTA,
+    kellyRequireSignStable: cfg.KELLY_REQUIRE_SIGN_STABLE,
+    calibrationBiasEnabled: cfg.CALIBRATION_BIAS_ENABLED,
+  });
+
+  logger.info('[mapping] divergence result', {
+    marketId: candidate.marketId,
+    question: candidate.question.substring(0, 80),
+    fitScore: args.fitScore.toFixed(3),
+    consensusP: consensus.probability.toFixed(3),
+    consensusStddev: consensus.stddev.toFixed(3),
+    marketP: currentYesPrice.toFixed(3),
+    hasTrade,
+    skipReason,
+    direction: decision?.direction,
+    stakeUsd: decision?.stakeUsd.toFixed(2),
+  });
+
+  void enqueueWrite('signal_decisions', {
+    decisionId,
+    source: 'osint',
+    marketId: candidate.marketId,
+    conditionId: candidate.conditionId,
+    question: candidate.question,
+    category: marketCategory,
+    direction: decision?.direction,
+    hasTrade,
+    skipReason: skipReason ?? (hasTrade ? undefined : 'other'),
+    consensusProbability: consensus.probability,
+    consensusStddev: consensus.stddev,
+    consensusSampleCount: consensus.sampleCount,
+    currentYesPrice,
+    divergence: decision?.edgeMagnitude,
+    kellyFraction: decision?.halfKellyFraction,
+    priceZone: decision?.priceZone,
+    bankrollUsd,
+    stakeAttemptedUsd: decision?.stakeUsd,
+    bookDepthUsd: candidate.liquidity != null ? Number(candidate.liquidity) : undefined,
+    sourceHeadline: item.title.slice(0, 200),
+  });
+
+  if (!hasTrade || !decision) {
+    return { signal: null, skipReason };
+  }
+
+  const signal: TradeSignal = {
+    marketId: candidate.marketId,
+    conditionId: candidate.conditionId,
+    clobTokenIds: candidate.clobTokenIds,
+    question: candidate.question,
+    direction: decision.direction,
+    stakeUsd: decision.stakeUsd,
+    edgeMagnitude: decision.edgeMagnitude,
+    consensusProbability: decision.consensusProbability,
+    consensusStddev: consensus.stddev,
+    outcomePrice: decision.outcomePrice,
+    halfKellyFraction: decision.halfKellyFraction,
+    priceZone: decision.priceZone,
+    sourcedFrom: item.title,
+    reasoning: consensus.reasoning,
+    source: 'osint',
+    latencyMs: item.latencyMs,
+    endDate: candidate.endDate ?? undefined,
+    decisionId,
+    // assetId is not directly known from entity extraction, but usually
+    // inferred by the monitor or stored if known from spot move.
+  };
+  return { signal, skipReason: undefined };
+}
+
+/** Per-market dedup: keep the signal with the highest edge. */
+function registerSignal(bestByMarket: Map<string, TradeSignal>, signal: TradeSignal): void {
+  const existing = bestByMarket.get(signal.marketId);
+  if (!existing || signal.edgeMagnitude > existing.edgeMagnitude) {
+    bestByMarket.set(signal.marketId, signal);
+  }
 }
 
 /**
