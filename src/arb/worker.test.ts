@@ -127,6 +127,14 @@ vi.mock('./oracleLagScanner.js', () => ({
   })),
 }));
 
+vi.mock('./oracleLagExitMonitor.js', () => ({
+  OracleLagExitMonitor: vi.fn().mockImplementation(() => ({
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+  })),
+  writeOracleLagExitState: vi.fn().mockResolvedValue(undefined),
+}));
+
 describe('ArbitrageWorker', () => {
   beforeEach(() => {
     vi.clearAllMocks();

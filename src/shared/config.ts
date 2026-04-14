@@ -337,6 +337,29 @@ const envSchema = z.object({
   // Hard cap on live entries per hour.
   ORACLE_LAG_MAX_TRADES_PER_HOUR: z.coerce.number().int().min(1).optional().default(10),
 
+  // Oracle-Lag gap-compression exit monitor (colocated in arb worker with the
+  // scanner). Ships dark: when ORACLE_LAG_EXIT_ENABLED=false the monitor still
+  // runs every tick and records a shadow_observations row on the first trigger
+  // per position, but does NOT call executeTakeProfit — inherited TP/SL/stale
+  // continue to decide exits. Flip to true only after shadow review proves the
+  // early-exit beats hold-to-resolution on return.
+  ORACLE_LAG_EXIT_ENABLED: boolFromEnv.optional().default(false),
+  // Fraction of the entry PM↔fair gap that must close before firing a
+  // compression exit. compressionPct = 1 - currentGap/entryGap; exit when
+  // compressionPct >= this value.
+  ORACLE_LAG_EXIT_COMPRESSION_PCT: z.coerce.number().min(0).max(1).optional().default(0.7),
+  // Adverse Chainlink move (bps) past which we exit immediately — the
+  // oracle-lag thesis is directional, so a reversal kills the edge.
+  ORACLE_LAG_EXIT_REVERSAL_BPS: z.coerce.number().min(0).optional().default(5),
+  // Hard timeout — drop the position after this many seconds regardless of
+  // compression progress, since the convergence window is ~55s.
+  // Upper-bounded at 1500s to stay safely inside the 30-minute exit-state
+  // Redis TTL (see EXIT_STATE_TTL_SEC in oracleLagExitMonitor.ts) — otherwise
+  // the key could expire before the timeout trigger fires.
+  ORACLE_LAG_EXIT_MAX_HOLD_SEC: z.coerce.number().int().min(30).max(1500).optional().default(180),
+  // Exit-monitor tick cadence.
+  ORACLE_LAG_EXIT_TICK_MS: z.coerce.number().int().min(500).optional().default(2000),
+
   // Minimum edge to allow entry on fee-enabled markets (executor fee gate).
   // Defaults to 0.04 (4%) — must exceed this to justify the ~2% taker fee.
   FEE_MARKET_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.04),

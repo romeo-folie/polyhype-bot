@@ -46,6 +46,7 @@ import { deductStake } from '../shared/bankroll.js';
 import { priceZoneOf } from '../shared/zones.js';
 import type { ChainlinkFeed, ChainlinkMove } from '../spot/feeds/chainlinkFeed.js';
 import type { TradeSignal } from '../mapping/index.js';
+import { writeOracleLagExitState } from './oracleLagExitMonitor.js';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -584,6 +585,30 @@ export class OracleLagScanner {
           await deductStake(this.redis, executedStake);
         } catch (err) {
           logger.warn('[oracle-lag] deductStake failed (non-fatal)', {
+            marketId: market.marketId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+
+        // Stamp exit-state for the gap-compression exit monitor. One HSET +
+        // EXPIRE in a pipeline — TTL generously larger than
+        // ORACLE_LAG_EXIT_MAX_HOLD_SEC so the monitor always has context while
+        // the position is live, and the key self-cleans for positions the
+        // monitor never gets to trigger on (e.g. inherited TP fires first).
+        // Stored fields use strings (HSET requirement) — monitor parses.
+        try {
+          await writeOracleLagExitState(this.redis, {
+            marketId: market.marketId,
+            direction,
+            entryPmYesPrice: market.outcomePrices[0],
+            entryPmNoPrice: market.outcomePrices[1],
+            entryChainlinkPrice:
+              this.feed?.getLatest(CHAINLINK_SYMBOL)?.value ?? move.newPrice,
+            entryChainlinkMovePct: move.pctMove,
+            entryTsMs: Date.now(),
+          });
+        } catch (err) {
+          logger.warn('[oracle-lag] exit-state stamp failed (non-fatal)', {
             marketId: market.marketId,
             error: err instanceof Error ? err.message : String(err),
           });
