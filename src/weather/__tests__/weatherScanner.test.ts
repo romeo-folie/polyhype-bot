@@ -578,15 +578,32 @@ describe('scanWeatherMarkets', () => {
   let redisMock: ReturnType<typeof createRedisMock>;
   let originalFetch: typeof globalThis.fetch;
 
+  // Target a date two days in the future so the scanner's same-day skip
+  // (daysOut === 0) and max-horizon skip (daysOut > 7) both pass regardless
+  // of when the test runs.
+  const MONTH_NAMES = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  const targetDate = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+  const targetYear = targetDate.getUTCFullYear();
+  const targetMonth = targetDate.getUTCMonth() + 1;
+  const targetDay = targetDate.getUTCDate();
+  const targetIso = `${targetYear.toString()}-${targetMonth.toString().padStart(2, '0')}-${targetDay.toString().padStart(2, '0')}`;
+  const monthName = MONTH_NAMES[targetMonth - 1] ?? 'April';
+  const titleDate = `${monthName} ${targetDay.toString()}`;
+  const slugDate = `${monthName.toLowerCase()}-${targetDay.toString()}-${targetYear.toString()}`;
+  const endDateIso = `${targetIso}T12:00:00Z`;
+
   function makeMockGammaEvent() {
     return {
       id: 'event-1',
-      title: 'Highest temperature in Chicago on April 14?',
-      slug: 'highest-temperature-in-chicago-on-april-14-2026',
+      title: `Highest temperature in Chicago on ${titleDate}?`,
+      slug: `highest-temperature-in-chicago-on-${slugDate}`,
       active: true,
       closed: false,
       negRisk: true,
-      endDate: '2026-04-14T12:00:00Z',
+      endDate: endDateIso,
       markets: Array.from({ length: 11 }, (_, i) => {
         const labels = [
           '39°F or below', '40-41°F', '42-43°F', '44-45°F', '46-47°F',
@@ -595,7 +612,7 @@ describe('scanWeatherMarkets', () => {
         const yesPrices = [0.01, 0.03, 0.05, 0.10, 0.15, 0.20, 0.18, 0.12, 0.08, 0.05, 0.03];
         return {
           id: `m${i}`,
-          question: `Will the highest temperature in Chicago be ${labels[i]} on April 14?`,
+          question: `Will the highest temperature in Chicago be ${labels[i]} on ${titleDate}?`,
           conditionId: `cond-${i}`,
           clobTokenIds: `["t${i}y","t${i}n"]`,
           outcomePrices: `["${(yesPrices[i] ?? 0).toFixed(2)}","${(1 - (yesPrices[i] ?? 0)).toFixed(2)}"]`,
@@ -604,7 +621,7 @@ describe('scanWeatherMarkets', () => {
           closed: false,
           volume: '10000',
           liquidity: '5000',
-          endDate: '2026-04-14T12:00:00Z',
+          endDate: endDateIso,
           description: null,
           groupItemTitle: labels[i],
           groupItemThreshold: i.toString(),
@@ -649,14 +666,14 @@ describe('scanWeatherMarkets', () => {
       highF: 52,
       lowF: 38,
       precipProbability: 10,
-      forecastDate: '2026-04-14',
+      forecastDate: targetIso,
       shortForecast: 'Mostly Cloudy',
     });
     mockFetchOpenMeteo.mockResolvedValue({
       highTemp: 52,
       lowTemp: 38,
       precipProbability: 10,
-      forecastDate: '2026-04-14',
+      forecastDate: targetIso,
     });
     mockFetchEnsemble.mockResolvedValue({
       meanHigh: 52,
@@ -664,7 +681,7 @@ describe('scanWeatherMarkets', () => {
       meanLow: 38,
       stddevLow: 2.8,
       memberCount: 31,
-      forecastDate: '2026-04-14',
+      forecastDate: targetIso,
     });
 
     const results = await scanWeatherMarkets(redisMock as never);
@@ -675,7 +692,7 @@ describe('scanWeatherMarkets', () => {
       '[weather] event evaluated',
       expect.objectContaining({
         city: 'chicago',
-        targetDate: '2026-04-14',
+        targetDate: targetIso,
       }),
     );
   });
@@ -690,7 +707,7 @@ describe('scanWeatherMarkets', () => {
     }) as unknown as typeof fetch;
 
     // Pre-set the dedup key
-    redisMock._store.set('weather:event:highest-temperature-in-chicago-on-april-14-2026', '1');
+    redisMock._store.set(`weather:event:highest-temperature-in-chicago-on-${slugDate}`, '1');
 
     const results = await scanWeatherMarkets(redisMock as never);
     expect(results).toEqual([]);
