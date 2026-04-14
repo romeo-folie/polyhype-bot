@@ -683,7 +683,10 @@ export async function scanWeatherMarkets(
     void enqueueWrite('shadow_observations', {
       kind: 'weather_event',
       source: 'arb',
-      wouldBlock: opportunities.length === 0,
+      // Block when either the feature is disabled OR no opportunities exist —
+      // matches weather_bracket semantics and lets analytics count disabled
+      // runs as blocks.
+      wouldBlock: !cfg.WEATHER_SCANNER_ENABLED || opportunities.length === 0,
       metricValue: bestEdge,
       threshold: cfg.WEATHER_MIN_EDGE,
       payload: {
@@ -700,7 +703,7 @@ export async function scanWeatherMarkets(
         ensembleMembers: forecast.ensembleMembers,
         overround,
         opportunitiesFound: opportunities.length,
-        enabled: cfg.WEATHER_SCANNER_ENABLED,
+        scannerEnabled: cfg.WEATHER_SCANNER_ENABLED,
       },
     });
 

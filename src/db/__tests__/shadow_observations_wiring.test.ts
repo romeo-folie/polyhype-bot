@@ -76,7 +76,7 @@ describe('shadow_observations wiring', () => {
         ensembleMembers: 10,
         overround: 1.04,
         opportunitiesFound: 1,
-        enabled: false,
+        scannerEnabled: false,
       },
     });
     expect(parsed.success).toBe(true);
@@ -187,7 +187,7 @@ describe('shadow_observations wiring', () => {
     const parsed = shadowObservationRowSchema.safeParse({
       kind: 'calibration_bias',
       source: 'osint',
-      wouldBlock: true,
+      wouldBlock: false,
       metricValue: 0.03,
       threshold: 0,
       payload: {

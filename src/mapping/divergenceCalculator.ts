@@ -209,7 +209,10 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
         void enqueueWrite('shadow_observations', {
           kind: 'calibration_bias',
           source: input.source ?? 'osint',
-          wouldBlock: true,
+          // Bias is shadow-observing only: the trade proceeds with the raw
+          // price, so this feature is not blocking anything. Use the payload's
+          // delta to judge whether enabling the bias would change the decision.
+          wouldBlock: false,
           metricValue: bias.adjustedPrice - bias.rawPrice,
           threshold: 0,
           payload: {
