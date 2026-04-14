@@ -326,6 +326,8 @@ services:
           npx tsx src/cron/embedTradeMemory.ts 2>&1 || true
           echo '[pga-cron] running snapshotTelemetry' && \
           npx tsx src/cron/snapshotTelemetry.ts 2>&1 || true
+          echo '[pga-cron] running weatherReconciler' && \
+          npx tsx src/weather/weatherReconciler.ts 2>&1 || true
           echo '[pga-cron] sleeping 24h'
           sleep 86400
         done
