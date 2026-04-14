@@ -28,7 +28,10 @@ export type ExitReason =
   | 'futures_tp'
   | 'stale_exit'
   | 'trailing_stop'
-  | 'trend_exit';
+  | 'trend_exit'
+  | 'oracle_lag_compressed'
+  | 'oracle_lag_reversed'
+  | 'oracle_lag_timeout';
 
 export interface ExitDecision {
   shouldExit: boolean;

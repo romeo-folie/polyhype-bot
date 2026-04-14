@@ -24,6 +24,7 @@ import {
 } from '../shared/telemetry.js';
 import { ArbMarketWarmer } from './warmer.js';
 import { OracleLagScanner } from './oracleLagScanner.js';
+import { OracleLagExitMonitor } from './oracleLagExitMonitor.js';
 import { ChainlinkFeed } from '../spot/feeds/chainlinkFeed.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -60,6 +61,7 @@ export class ArbitrageWorker {
   private warmer: ArbMarketWarmer | null = null;
   private chainlinkFeed: ChainlinkFeed | null = null;
   private oracleLagScanner: OracleLagScanner | null = null;
+  private oracleLagExitMonitor: OracleLagExitMonitor | null = null;
 
   constructor(options: WorkerOptions = {}) {
     this.baselineIntervalMs = options.baselineIntervalMs ?? 10000; // 10s baseline
@@ -160,6 +162,24 @@ export class ArbitrageWorker {
       logger.warn('[arb-worker] oracle-lag scanner failed to start (non-fatal)', {
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+
+    // 0c. Start oracle-lag exit monitor. Shares ChainlinkFeed with the scanner
+    // (one WS, two consumers). Holds its own Redis lock
+    // (`lock:oracle-lag-exit-monitor`) so only one monitor runs across
+    // containers, independent of the scanner's lock.
+    if (this.chainlinkFeed) {
+      try {
+        this.oracleLagExitMonitor = new OracleLagExitMonitor({
+          redis: getRedis(),
+          chainlinkFeed: this.chainlinkFeed,
+        });
+        await this.oracleLagExitMonitor.start();
+      } catch (err) {
+        logger.warn('[arb-worker] oracle-lag exit monitor failed to start (non-fatal)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     // 1. Subscribe to real-time price updates
@@ -542,7 +562,19 @@ export class ArbitrageWorker {
    * call `stop()` synchronously are unaffected.
    */
   public async stopAsyncDeps(): Promise<void> {
-    // Tear down oracle-lag first so the scanner releases its own Redis lock
+    // Tear down exit monitor first so it releases its own lock before the
+    // scanner (which shares the same ChainlinkFeed) goes down.
+    if (this.oracleLagExitMonitor) {
+      try {
+        await this.oracleLagExitMonitor.stop();
+      } catch (err) {
+        logger.warn('[arb-worker] oracle-lag exit monitor stop failed (non-fatal)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      this.oracleLagExitMonitor = null;
+    }
+    // Tear down oracle-lag scanner so it releases its own Redis lock
     // before the caller closes the connection.
     if (this.oracleLagScanner) {
       try {

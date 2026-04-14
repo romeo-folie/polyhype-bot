@@ -174,7 +174,10 @@ export type TakeProfitReason =
   | 'futures_tp'
   | 'stale_exit'
   | 'trailing_stop'
-  | 'trend_exit';
+  | 'trend_exit'
+  | 'oracle_lag_compressed'
+  | 'oracle_lag_reversed'
+  | 'oracle_lag_timeout';
 
 export async function notifyTakeProfitExecuted(opts: {
   position: Position;
@@ -195,6 +198,10 @@ export async function notifyTakeProfitExecuted(opts: {
     futures_tp: '🎯 Futures Take-Profit triggered',
     stale_exit: '⏱️ Stale-exit — position rotated out',
     trailing_stop: '🪤 Trailing stop — gains locked in',
+    trend_exit: '📉 Trend exit — adverse drift',
+    oracle_lag_compressed: '🎯 Oracle-lag — gap compressed',
+    oracle_lag_reversed: '↩️ Oracle-lag — Chainlink reversed',
+    oracle_lag_timeout: '⏱️ Oracle-lag — max hold reached',
   };
   let reasonLabel = reasonLabels[reason] ?? reason;
   if (mechanismDetail) reasonLabel = `${reasonLabel} [${mechanismDetail}]`;
