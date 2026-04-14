@@ -1311,28 +1311,41 @@ export async function executeSignal(
   let clobFallbackReason: string | null = null;
   let takerDecisionBenchmarkPromise: Promise<DecisionBenchmark> | null = null;
 
-  // Entry spread guardrail. Catches degenerate one-sided books (e.g. $0.01 bid /
-  // $0.99 ask → 19600 bps) where "edge" is an artifact of thin liquidity rather
-  // than a real mispricing. Runs pre-maker so it also short-circuits the maker
-  // path. Copytrade bypasses (the whale already priced the degenerate book) and
-  // tail overrides bypass (extreme-price markets structurally have wide spreads
-  // but can still offer real edge when LLM and whale conviction agree).
+  // Entry spread guardrail. Catches degenerate books where "edge" is an artifact
+  // of thin liquidity rather than a real mispricing — both wide two-sided books
+  // (e.g. $0.01 bid / $0.99 ask → 19600 bps) and one-sided books (missing the
+  // bid or ask side, making spread unknowable but execution still dangerous).
+  // Runs pre-maker so it short-circuits the maker path too. Copytrade bypasses
+  // because the whale already priced the degenerate book.
   if (cfg.MAX_ENTRY_SPREAD_BPS > 0 && signal.source !== 'copytrade') {
     const benchmark = await captureDecisionBenchmark(signal);
     takerDecisionBenchmarkPromise = Promise.resolve(benchmark);
     makerTelemetry = { ...makerTelemetry, ...benchmark };
     const spreadBps = benchmark.decisionSpreadBps;
-    if (spreadBps != null && spreadBps > cfg.MAX_ENTRY_SPREAD_BPS) {
-      logger.info('[executor] skipping — entry spread too wide', {
-        marketId: signal.marketId,
-        spreadBps: Math.round(spreadBps),
+    // `=== null` distinguishes "book fetched, side missing" (null) from "book
+    // not fetched at all" (undefined — e.g. no CLOB token); only the former
+    // should trigger the gate.
+    const oneSidedBook =
+      benchmark.decisionBestBid === null || benchmark.decisionBestAsk === null;
+    const spreadTooWide = spreadBps != null && spreadBps > cfg.MAX_ENTRY_SPREAD_BPS;
+    if (oneSidedBook || spreadTooWide) {
+      logger.info(
+        oneSidedBook
+          ? '[executor] skipping — entry spread unknown due to one-sided book'
+          : '[executor] skipping — entry spread too wide',
+        {
+          marketId: signal.marketId,
+          spreadBps: spreadBps != null ? Math.round(spreadBps) : null,
+          threshold: cfg.MAX_ENTRY_SPREAD_BPS,
+          bestBid: benchmark.decisionBestBid,
+          bestAsk: benchmark.decisionBestAsk,
+        },
+      );
+      return recordSkip('spread_too_wide', 'skipped', {
+        spreadBps: spreadBps != null ? Math.round(spreadBps) : null,
         threshold: cfg.MAX_ENTRY_SPREAD_BPS,
         bestBid: benchmark.decisionBestBid,
         bestAsk: benchmark.decisionBestAsk,
-      });
-      return recordSkip('spread_too_wide', 'skipped', {
-        spreadBps: Math.round(spreadBps),
-        threshold: cfg.MAX_ENTRY_SPREAD_BPS,
       });
     }
   }

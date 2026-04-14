@@ -406,6 +406,66 @@ describe('executeSignal', () => {
     expect(result.executionVenue).toBe('simmer');
   });
 
+  it('skips when CLOB book is one-sided (missing bid side)', async () => {
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [],
+      asks: [{ price: '0.51', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('spread_too_wide');
+    expect(mockSubmit).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+  });
+
+  it('skips when CLOB book is one-sided (missing ask side)', async () => {
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.49', size: '100' }],
+      asks: [],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('spread_too_wide');
+  });
+
+  it('does not trigger spread gate when book fetch returns null', async () => {
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockGetOrderBook.mockResolvedValue(null);
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('simmer');
+  });
+
   it('bypasses entry spread gate for copytrade signals', async () => {
     mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
     mockGetOrderBook.mockResolvedValue({
