@@ -113,6 +113,7 @@ function buildProviders(cfg: ReturnType<typeof loadConfig>, userPrompt: string) 
             { role: 'system', content: SYSTEM_PROMPT },
             { role: 'user', content: userPrompt },
           ],
+          temperature: 0,
           max_tokens: 10,
         }, { timeout: RELEVANCE_TIMEOUT_MS });
         return completion.choices[0]?.message.content ?? '';

@@ -16,7 +16,7 @@ import { findCandidateMarkets, type CandidateMarket } from './entityExtractor.js
 import { scoreMarketRelevance } from './relevanceGate.js';
 import { estimateConsensusProbability, estimateSentiment } from './consensusCalculator.js';
 import { computeDivergence } from './divergenceCalculator.js';
-import { resolveYesPrice } from '../shared/priceCache.js';
+import { resolveYesPrice, resolveNoPrice } from '../shared/priceCache.js';
 import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import { getRedis } from '../shared/redis.js';
 import { priceZoneOf } from '../shared/zones.js';
@@ -133,20 +133,29 @@ export async function runMapping(
     const scoreByMarket = new Map(scored.map((s) => [s.candidate.marketId, s.fitScore]));
 
     // Near-zero OSINT signal: fire for every fit-qualified candidate (observability
-    // for the near-zero scanner, independent of trade selection). Resolve WS
-    // price inline — Gamma snapshot can be seconds-to-minutes stale and near-zero
-    // bands are 1–5 cents wide, so even small drift flips a signal on/off.
+    // for the near-zero scanner, independent of trade selection). Resolve YES
+    // and NO prices independently — Polymarket quotes per outcome, so 1 - YES
+    // ≠ NO by a few cents of spread/overround. At 1–5¢ bands, that spread
+    // flips near-zero signals on/off, so we must read each side directly.
     for (const { candidate, fitScore } of scored) {
       if (fitScore < cfg.RELEVANCE_MIN_FIT_SCORE) continue;
       let yesPrice = candidate.currentYesPrice;
+      let noPrice: number | null = null;
       if (opts?.redis && opts.feed) {
-        const wsPrice = await resolveYesPrice(candidate.marketId, opts.redis, opts.feed);
-        if (wsPrice !== null) yesPrice = wsPrice;
+        const [wsYes, wsNo] = await Promise.all([
+          resolveYesPrice(candidate.marketId, opts.redis, opts.feed),
+          resolveNoPrice(candidate.marketId, opts.redis),
+        ]);
+        if (wsYes !== null) yesPrice = wsYes;
+        if (wsNo !== null) noPrice = wsNo;
       }
-      const noPrice = 1 - yesPrice;
       if (yesPrice >= cfg.NEAR_ZERO_MIN_PRICE && yesPrice <= cfg.NEAR_ZERO_MAX_PRICE) {
         void writeNearZeroOsintSignal(candidate.marketId, 'YES', yesPrice, item, cfg);
-      } else if (noPrice >= cfg.NEAR_ZERO_MIN_PRICE && noPrice <= cfg.NEAR_ZERO_MAX_PRICE) {
+      } else if (
+        noPrice !== null &&
+        noPrice >= cfg.NEAR_ZERO_MIN_PRICE &&
+        noPrice <= cfg.NEAR_ZERO_MAX_PRICE
+      ) {
         void writeNearZeroOsintSignal(candidate.marketId, 'NO', noPrice, item, cfg);
       }
     }
