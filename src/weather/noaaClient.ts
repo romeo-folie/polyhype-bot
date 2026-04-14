@@ -107,6 +107,18 @@ export function lookupCity(cityName: string): CityCoordinates | null {
   return CITY_COORDINATES[resolved] ?? null;
 }
 
+/**
+ * Resolve a city name (possibly aliased) to the canonical key used by
+ * `CITY_COORDINATES`. Returns null if the city is unknown. Callers that
+ * persist city as an identifier (e.g. weather_ground_truth.city) must use
+ * this to avoid alias-duplicated rows.
+ */
+export function canonicalCityKey(cityName: string): string | null {
+  const key = cityName.trim().toLowerCase();
+  const resolved = CITY_ALIASES[key] ?? key;
+  return CITY_COORDINATES[resolved] ? resolved : null;
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface NwsForecast {

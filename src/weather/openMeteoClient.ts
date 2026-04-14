@@ -19,6 +19,7 @@ import { logger } from '../shared/logger.js';
 
 const FORECAST_BASE = 'https://api.open-meteo.com/v1/forecast';
 const ENSEMBLE_BASE = 'https://ensemble-api.open-meteo.com/v1/ensemble';
+const ARCHIVE_BASE = 'https://archive-api.open-meteo.com/v1/archive';
 const REQUEST_TIMEOUT_MS = 10_000;
 
 // Rate limiter: ~2 req/sec to stay well within fair-use limits.
@@ -92,6 +93,16 @@ interface EnsembleDailyResponse {
   daily?: {
     time?: string[];
     temperature_2m_max?: number[][];
+  };
+}
+
+/** Minimal shape of the archive endpoint response — kept separate from
+ *  DailyForecastResponse so the two endpoints can diverge without silent
+ *  misparsing. The archive API only returns `temperature_2m_max` for our use. */
+interface ArchiveDailyResponse {
+  daily?: {
+    time?: string[];
+    temperature_2m_max?: number[];
   };
 }
 
@@ -289,6 +300,101 @@ function parseEnsembleFlat(
 
   if (members.length < 2) return null;
   return computeEnsembleStats(members, targetDate);
+}
+
+// ── Historical archive (ground-truth reconciliation) ──────────────────────
+
+export interface HistoricalHigh {
+  /** Observed daily high temperature in the requested unit. */
+  observedHigh: number;
+  /** The date this reading applies to (YYYY-MM-DD). */
+  targetDate: string;
+  /** Unit of the reading. */
+  unit: 'fahrenheit' | 'celsius';
+}
+
+/**
+ * Fetch the observed daily high for a past date from the Open-Meteo archive.
+ * Used by the weather reconciler to validate shadow-scan predictions against
+ * ground truth (what the forecast actually verified as).
+ *
+ * Archive data lags real time by a few days — callers should only request dates
+ * at least 1 full UTC day in the past, and be prepared for null when the archive
+ * hasn't caught up yet.
+ *
+ * @param unit - match the market's unit so comparisons are apples-to-apples
+ */
+export async function fetchHistoricalHigh(
+  lat: number,
+  lon: number,
+  targetDate: string,
+  unit: 'fahrenheit' | 'celsius' = 'fahrenheit',
+  fetchFn?: FetchFn,
+): Promise<HistoricalHigh | null> {
+  const isInjected = fetchFn !== undefined;
+  const doFetch = fetchFn ?? fetch;
+  const targetStr = targetDate.slice(0, 10);
+  try {
+    if (!isInjected) await rateLimitWait();
+
+    const params = new URLSearchParams({
+      latitude: lat.toFixed(4),
+      longitude: lon.toFixed(4),
+      daily: 'temperature_2m_max',
+      temperature_unit: unit,
+      timezone: 'auto',
+      start_date: targetStr,
+      end_date: targetStr,
+    });
+
+    const url = `${ARCHIVE_BASE}?${params.toString()}`;
+    const res = await fetchWithTimeout(url, doFetch);
+
+    if (!res.ok) {
+      logger.warn('[weather] Open-Meteo archive API error', {
+        status: res.status,
+        lat,
+        lon,
+        targetDate: targetStr,
+      });
+      return null;
+    }
+
+    const data = (await res.json()) as ArchiveDailyResponse;
+    const daily = data.daily;
+    if (!daily?.time?.length || !daily.temperature_2m_max?.length) {
+      logger.warn('[weather] Open-Meteo archive returned no daily data', {
+        lat, lon, targetDate: targetStr,
+      });
+      return null;
+    }
+
+    const idx = daily.time.indexOf(targetStr);
+    if (idx === -1) {
+      logger.debug('[weather] Open-Meteo archive target date missing', {
+        targetDate: targetStr,
+        availableDates: daily.time,
+      });
+      return null;
+    }
+
+    const observedHigh = daily.temperature_2m_max[idx];
+    if (observedHigh === undefined || !Number.isFinite(observedHigh)) return null;
+
+    return {
+      observedHigh: Math.round(observedHigh * 10) / 10,
+      targetDate: targetStr,
+      unit,
+    };
+  } catch (err) {
+    logger.warn('[weather] fetchHistoricalHigh failed', {
+      error: err instanceof Error ? err.message : String(err),
+      lat,
+      lon,
+      targetDate: targetStr,
+    });
+    return null;
+  }
 }
 
 function computeEnsembleStats(members: number[], forecastDate: string): EnsembleForecast {

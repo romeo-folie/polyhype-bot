@@ -965,6 +965,18 @@ const envSchema = z.object({
   WEATHER_MAX_EVENTS: z.coerce.number().int().min(1).optional().default(50),
   // Maximum forecast horizon in days — skip events further out (too uncertain).
   WEATHER_MAX_HORIZON_DAYS: z.coerce.number().int().min(1).optional().default(7),
+  // --- WEATHER GROUND-TRUTH RECONCILER ---
+  // Fills `weather_ground_truth` with observed daily highs for past events, so
+  // shadow-scan predictions in `shadow_observations` can be validated against
+  // reality. Read-only with respect to trading — always safe to run.
+  // Days after target_date to wait before querying the archive. 1 = wait a full
+  // UTC day so the archive has the reading. Bump higher if gaps appear.
+  WEATHER_RECONCILER_LAG_DAYS: z.coerce.number().int().min(1).optional().default(1),
+  // How far back to scan shadow_observations for unresolved events each run.
+  // Keeps the query bounded; 30 days is comfortably longer than the daily cron.
+  WEATHER_RECONCILER_LOOKBACK_DAYS: z.coerce.number().int().min(1).optional().default(30),
+  // Cap archive API calls per run to stay within Open-Meteo fair-use limits.
+  WEATHER_RECONCILER_MAX_PER_RUN: z.coerce.number().int().min(1).optional().default(50),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
