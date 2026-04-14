@@ -87,7 +87,7 @@ export async function recordPositionOutcome(
     ...(position.makerPriceImprovementUsd !== undefined
       ? { makerPriceImprovementUsd: position.makerPriceImprovementUsd }
       : {}),
-  });
+  }, { sourcedFrom: position.sourcedFrom });
 
   const holdingHours = position.openedAt
     ? (Date.now() - new Date(position.openedAt).getTime()) / 3_600_000

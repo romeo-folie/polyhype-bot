@@ -53,6 +53,32 @@ describe('recordPositionOutcome', () => {
         result: 'won',
         returnPct: 15,
       }),
+      { sourcedFrom: 'headline' },
+    );
+  });
+
+  it('forwards copytrade sourcedFrom so cat_stats writes are credited', async () => {
+    const redis = {} as any;
+
+    await recordPositionOutcome(
+      redis,
+      {
+        executionId: 'exec-456',
+        sourcedFrom: 'copytrade:0xabc',
+        question: 'Whale mirror',
+        direction: 'YES',
+        consensusProbability: 0.6,
+        edgeMagnitude: 0.05,
+        openedAt: '2026-04-14T12:00:00Z',
+        executionVenue: 'clob',
+      },
+      { result: 'lost', returnPct: -12 },
+    );
+
+    expect(recordOutcome).toHaveBeenLastCalledWith(
+      redis,
+      expect.any(Object),
+      { sourcedFrom: 'copytrade:0xabc' },
     );
   });
 });
