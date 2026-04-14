@@ -245,7 +245,7 @@ export async function runMapping(
       cascadeTradedFit: cascadeFirstTradedFit?.toFixed(3) ?? null,
       agree,
       wouldBlock,
-      fitQualified: fitRanked.length,
+      fitQualifiedCount: fitRanked.length,
     });
     void enqueueWrite('shadow_observations', {
       kind: 'top_fit',
@@ -257,7 +257,7 @@ export async function runMapping(
       payload: {
         cascadeTradedMarketId: cascadeFirstTradedMarketId,
         cascadeTradedFit: cascadeFirstTradedFit,
-        fitQualified: fitRanked.length,
+        fitQualifiedCount: fitRanked.length,
         headline: item.title.slice(0, 200),
       },
     });
