@@ -127,9 +127,14 @@ export async function readOracleLagExitState(
   if (
     !Number.isFinite(entryTsMs) ||
     !Number.isFinite(entryPmYesPrice) ||
+    !Number.isFinite(entryPmNoPrice) ||
     !Number.isFinite(entryChainlinkPrice) ||
+    entryChainlinkPrice <= 0 ||
+    !Number.isFinite(entryChainlinkMovePct) ||
     !Number.isFinite(entryFairPyes)
   ) {
+    // Corrupt or partially-written hash — DEL so future ticks are a no-op.
+    await redis.del(key).catch(() => {});
     return null;
   }
   return {
@@ -506,8 +511,28 @@ export class OracleLagExitMonitor {
       return;
     }
     const currentYesPrice = priceResult.currentYesPrice;
-    const currentNoPrice =
-      direction === 'DOWN' ? priceResult.currentOutcomePrice : 1 - currentYesPrice;
+
+    // Polymarket best-bid quotes for YES/NO are NOT guaranteed to sum to 1 —
+    // they are independent sides of the order book. Deriving `currentNoPrice`
+    // as `1 - currentYesPrice` would skew DOWN-side returnPct (and, live, the
+    // price handed to executeTakeProfit). For DOWN we therefore read the
+    // explicit WS NO quote when present, only falling back to the REST-path
+    // `priceResult.currentOutcomePrice` (which is an explicit NO on the Gamma
+    // branch but a 1-YES approximation when the WS cache hit).
+    let currentNoPrice: number;
+    if (direction === 'DOWN') {
+      const wsNoRaw = await this.redis
+        .get(`ws:price:no:${marketId}`)
+        .catch(() => null);
+      const wsNoPrice = wsNoRaw != null ? Number(wsNoRaw) : Number.NaN;
+      currentNoPrice = Number.isFinite(wsNoPrice)
+        ? wsNoPrice
+        : priceResult.currentOutcomePrice;
+    } else {
+      // UP positions don't use currentNoPrice downstream (evaluator reads NO
+      // only for DOWN returnPct); the value is inert for UP.
+      currentNoPrice = 1 - currentYesPrice;
+    }
 
     // Chainlink feed staleness check (skip reversal if stale, not the whole tick).
     const latestTick = this.feed.getLatest(CHAINLINK_SYMBOL);
@@ -531,20 +556,32 @@ export class OracleLagExitMonitor {
     if (!decision) return;
 
     if (cfg.ORACLE_LAG_EXIT_ENABLED) {
-      await this.fireLive(position, priceResult.currentOutcomePrice, decision);
+      // Only DEL on a successful live exit. If executeTakeProfit fails or
+      // throws, retain the exit-state so the next tick retries — otherwise a
+      // transient venue error would leave the position open with no further
+      // oracle-lag exit attempts (inherited TP/SL would eventually pick it up,
+      // but the oracle-lag thesis has a ~180s window).
+      const success = await this.fireLive(
+        position,
+        priceResult.currentOutcomePrice,
+        decision,
+      );
+      if (success) {
+        await this.redis.del(key).catch(() => {});
+      }
     } else {
       this.writeShadow(position, state, decision);
+      // Shadow stays one-shot — we want one observation per position, not a
+      // stream of triggers as the gap continues compressing.
+      await this.redis.del(key).catch(() => {});
     }
-
-    // One decision per position — drop the exit-state so future ticks are no-ops.
-    await this.redis.del(key).catch(() => {});
   }
 
   private async fireLive(
     position: Position,
     currentOutcomePrice: number,
     decision: OracleLagExitDecision,
-  ): Promise<void> {
+  ): Promise<boolean> {
     logger.info('[oracle-lag-exit] firing live exit', {
       marketId: position.marketId,
       direction: position.direction,
@@ -567,12 +604,15 @@ export class OracleLagExitMonitor {
           marketId: position.marketId,
           error: result.error,
         });
+        return false;
       }
+      return true;
     } catch (err) {
       logger.error('[oracle-lag-exit] executeTakeProfit threw', {
         marketId: position.marketId,
         error: err instanceof Error ? err.message : String(err),
       });
+      return false;
     }
   }
 

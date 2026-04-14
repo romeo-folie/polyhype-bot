@@ -353,7 +353,10 @@ const envSchema = z.object({
   ORACLE_LAG_EXIT_REVERSAL_BPS: z.coerce.number().min(0).optional().default(5),
   // Hard timeout — drop the position after this many seconds regardless of
   // compression progress, since the convergence window is ~55s.
-  ORACLE_LAG_EXIT_MAX_HOLD_SEC: z.coerce.number().int().min(30).optional().default(180),
+  // Upper-bounded at 1500s to stay safely inside the 30-minute exit-state
+  // Redis TTL (see EXIT_STATE_TTL_SEC in oracleLagExitMonitor.ts) — otherwise
+  // the key could expire before the timeout trigger fires.
+  ORACLE_LAG_EXIT_MAX_HOLD_SEC: z.coerce.number().int().min(30).max(1500).optional().default(180),
   // Exit-monitor tick cadence.
   ORACLE_LAG_EXIT_TICK_MS: z.coerce.number().int().min(500).optional().default(2000),
 
