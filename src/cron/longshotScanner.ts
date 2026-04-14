@@ -33,6 +33,7 @@ import { getCachedMarkets } from '../shared/watchlist.js';
 import { parseOutcomePrices, parseClobTokenIds, parseOutcomes } from '../mapping/gamma.js';
 import { executeSignal } from '../execution/executor.js';
 import { priceZoneOf } from '../shared/zones.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 const DEDUP_KEY_PREFIX = 'longshot:attempted:';
@@ -342,6 +343,27 @@ export async function runLongshotScan(redis: Redis): Promise<void> {
         wouldExecute: false,
         shadow: true,
       });
+      void enqueueWrite('shadow_observations', {
+        kind: 'longshot',
+        source: 'arb',
+        marketId: opp.marketId,
+        direction: 'NO',
+        wouldBlock: true,
+        metricValue: opp.edge,
+        threshold: cfg.LONGSHOT_MIN_EDGE,
+        payload: {
+          question: opp.question.slice(0, 200),
+          yesPrice: opp.yesPrice,
+          noPrice: opp.noPrice,
+          category: opp.category,
+          optimismGap: opp.optimismGap,
+          liquidity: opp.liquidity,
+          stakeUsd,
+          wouldExecute: false,
+          shadow: true,
+          scannerEnabled: cfg.LONGSHOT_SCANNER_ENABLED,
+        },
+      });
       continue;
     }
 
@@ -364,6 +386,27 @@ export async function runLongshotScan(redis: Redis): Promise<void> {
       stakeUsd: stakeUsd.toFixed(2),
       wouldExecute: true,
       shadow: false,
+    });
+    void enqueueWrite('shadow_observations', {
+      kind: 'longshot',
+      source: 'arb',
+      marketId: opp.marketId,
+      direction: 'NO',
+      wouldBlock: false,
+      metricValue: opp.edge,
+      threshold: cfg.LONGSHOT_MIN_EDGE,
+      payload: {
+        question: opp.question.slice(0, 200),
+        yesPrice: opp.yesPrice,
+        noPrice: opp.noPrice,
+        category: opp.category,
+        optimismGap: opp.optimismGap,
+        liquidity: opp.liquidity,
+        stakeUsd,
+        wouldExecute: true,
+        shadow: false,
+        scannerEnabled: cfg.LONGSHOT_SCANNER_ENABLED,
+      },
     });
 
     const signal: TradeSignal = {

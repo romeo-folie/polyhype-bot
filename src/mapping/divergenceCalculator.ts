@@ -17,6 +17,7 @@ import { priceZoneOf, type PriceZone } from '../shared/zones.js';
 import { applyCategoryBias } from './calibrationBias.js';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 
 export interface TradeDecision {
   /** YES or NO */
@@ -204,6 +205,24 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
           rawPrice: bias.rawPrice.toFixed(4),
           adjustedPrice: bias.adjustedPrice.toFixed(4),
           delta: (bias.adjustedPrice - bias.rawPrice).toFixed(4),
+        });
+        void enqueueWrite('shadow_observations', {
+          kind: 'calibration_bias',
+          source: input.source ?? 'osint',
+          // Bias is shadow-observing only: the trade proceeds with the raw
+          // price, so this feature is not blocking anything. Use the payload's
+          // delta to judge whether enabling the bias would change the decision.
+          wouldBlock: false,
+          metricValue: bias.adjustedPrice - bias.rawPrice,
+          threshold: 0,
+          payload: {
+            category,
+            theta: bias.theta,
+            rawPrice: bias.rawPrice,
+            adjustedPrice: bias.adjustedPrice,
+            hoursToResolution,
+            consensusProbability: p,
+          },
         });
       }
     }

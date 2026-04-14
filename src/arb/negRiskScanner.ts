@@ -23,6 +23,7 @@ import { notifyUnhedgedNegRiskPosition } from '../execution/telegram.js';
 import { recordPosition } from '../execution/positionLedger.js';
 import { priceZoneOf } from '../shared/zones.js';
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import type { Redis } from 'ioredis';
 
 // ---------------------------------------------------------------------------
@@ -559,6 +560,25 @@ export async function runNegRiskArbScan(redis: Redis): Promise<void> {
           wouldExecute: cfg.NEGRISK_ARB_ENABLED,
         },
       );
+      void enqueueWrite('shadow_observations', {
+        kind: 'negrisk_arb',
+        source: 'arb',
+        wouldBlock: !cfg.NEGRISK_ARB_ENABLED,
+        metricValue: opp.edge,
+        threshold: cfg.NEGRISK_ARB_MIN_EDGE,
+        payload: {
+          eventId: opp.eventId,
+          title: opp.eventTitle,
+          legs: opp.legs.length,
+          sumAsks: opp.sumAsks,
+          grossEdge: opp.grossEdge,
+          totalFeesPerShare: opp.totalFeesPerShare,
+          coverage: opp.coverageRatio,
+          minDepthShares: opp.minDepthShares,
+          wouldExecute: cfg.NEGRISK_ARB_ENABLED,
+          scannerEnabled: cfg.NEGRISK_ARB_ENABLED,
+        },
+      });
     }
 
     if (!cfg.NEGRISK_ARB_ENABLED) return;
