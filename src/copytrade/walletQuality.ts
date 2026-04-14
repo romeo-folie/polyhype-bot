@@ -113,10 +113,12 @@ export async function fetchWalletActivity(
  * Reconstruct round-trip PnL from activity by walking trades chronologically
  * and matching SELLs against the average-cost inventory per asset.
  *
- * Only fully-closed round-trips (SELL size ≤ BUY inventory) count. Positions
- * still open at the end of the window don't contribute wins/losses — we can't
- * tell from activity alone whether the whale is holding to redemption or will
- * dump at a loss.
+ * Each SELL emits one realized-PnL record for the closed portion (FIFO-avg
+ * cost basis). Partial closes count — if a whale unwinds half a position at a
+ * profit, that half is a realized win even while the other half remains open.
+ * Inventory that's still open at the end of the window contributes no record,
+ * since we can't tell from activity alone whether the whale will hold to
+ * redemption or dump at a loss.
  */
 function matchRoundTrips(trades: ActivityTrade[]): {
   asset: string;

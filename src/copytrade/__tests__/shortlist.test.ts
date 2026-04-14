@@ -333,6 +333,75 @@ describe('copytrade shortlist', () => {
     expect(envContent).not.toContain('0x2222222222222222222222222222222222222222');
   });
 
+  it('enabled=true + scoring outage: retains leaderboard candidates rather than emptying the shortlist', async () => {
+    mockLoadConfig.mockReturnValue(
+      baseConfig({
+        COPYTRADE_QUALITY_SHORTLIST_ENABLED: true,
+        COPYTRADE_WALLET_MIN_SCORE: 0.6,
+        COPYTRADE_SHORTLIST_TOP_N: 3,
+      }),
+    );
+    mockFetchWithTimeout.mockResolvedValue({
+      ok: true,
+      json: async () => [
+        { proxyWallet: '0x1111111111111111111111111111111111111111', vol: 500000, pnl: 100000 },
+        { proxyWallet: '0x2222222222222222222222222222222222222222', vol: 500000, pnl: 100000 },
+      ],
+    } as Response);
+    // Scoring fails for every wallet (e.g. Data API outage) → all unscored.
+    mockFetchAndScoreWallet.mockResolvedValue(null);
+    mockReadFile.mockResolvedValue('COPYTRADE_WALLETS=old\n');
+
+    const { run } = await import('../shortlist.js');
+    await run();
+
+    expect(mockWriteFile).toHaveBeenCalled();
+    const writeArgs = mockWriteFile.mock.calls[0] ?? [];
+    const envContent = String(writeArgs[1]);
+    expect(envContent).toContain('0x1111111111111111111111111111111111111111');
+    expect(envContent).toContain('0x2222222222222222222222222222222222222222');
+  });
+
+  it('enabled=true + mixed: scored-passing ranked ahead of unscored, explicitly-filtered dropped', async () => {
+    mockLoadConfig.mockReturnValue(
+      baseConfig({
+        COPYTRADE_QUALITY_SHORTLIST_ENABLED: true,
+        COPYTRADE_WALLET_MIN_SCORE: 0.6,
+        COPYTRADE_SHORTLIST_TOP_N: 5,
+      }),
+    );
+    mockFetchWithTimeout.mockResolvedValue({
+      ok: true,
+      json: async () => [
+        { proxyWallet: '0x1111111111111111111111111111111111111111', vol: 500000, pnl: 100000 },
+        { proxyWallet: '0x2222222222222222222222222222222222222222', vol: 500000, pnl: 100000 },
+        { proxyWallet: '0x3333333333333333333333333333333333333333', vol: 500000, pnl: 100000 },
+      ],
+    } as Response);
+    mockFetchAndScoreWallet.mockImplementation(async (wallet: string) => {
+      if (wallet === '0x1111111111111111111111111111111111111111') return makeScore(0.9); // pass
+      if (wallet === '0x2222222222222222222222222222222222222222') return makeScore(0.3); // filtered
+      if (wallet === '0x3333333333333333333333333333333333333333') return null; // unscored
+      return null;
+    });
+    mockReadFile.mockResolvedValue('COPYTRADE_WALLETS=old\n');
+
+    const { run } = await import('../shortlist.js');
+    await run();
+
+    const writeArgs = mockWriteFile.mock.calls[0] ?? [];
+    const envContent = String(writeArgs[1]);
+    // Scored-passing retained; scored-filtered dropped; unscored retained.
+    expect(envContent).toContain('0x1111111111111111111111111111111111111111');
+    expect(envContent).not.toContain('0x2222222222222222222222222222222222222222');
+    expect(envContent).toContain('0x3333333333333333333333333333333333333333');
+    // Ordering in the .env line: scored-passing wallet should come before the unscored one.
+    const idx1 = envContent.indexOf('0x1111111111111111111111111111111111111111');
+    const idx3 = envContent.indexOf('0x3333333333333333333333333333333333333333');
+    expect(idx1).toBeGreaterThan(-1);
+    expect(idx3).toBeGreaterThan(idx1);
+  });
+
   it('shadow mode (enabled=false) keeps the leaderboard shortlist regardless of scores', async () => {
     mockLoadConfig.mockReturnValue(
       baseConfig({

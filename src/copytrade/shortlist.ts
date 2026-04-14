@@ -310,22 +310,42 @@ export async function run(): Promise<void> {
       }
 
       let results: LeaderboardEntry[];
+      let unscoredIncluded = 0;
       if (qualityEnabled) {
-        const enriched: { entry: LeaderboardEntry; score: number }[] = [];
-        for (const entry of baseResults) {
+        // Rank strategy:
+        //  - scored wallets: rank by `score` desc (highest quality first)
+        //  - unscored wallets (transient API failure): treat as neutral and
+        //    retain at their original leaderboard order behind the scored set.
+        //    Dropping them would make the shortlist brittle to Data API
+        //    outages and could leave categories empty.
+        //  - explicitly filtered wallets (score < minScore): dropped.
+        const ranked: { entry: LeaderboardEntry; score: number; rank: number }[] = [];
+        for (const [rank, entry] of baseResults.entries()) {
           const w = normaliseWallet(entry.proxyWallet);
           if (w === null) continue;
           const cached = scoredCache.get(w);
-          if (!cached) continue; // fetch failed earlier — drop rather than trust leaderboard alone
+          if (!cached) {
+            ranked.push({ entry, score: Number.NaN, rank });
+            unscoredIncluded++;
+            continue;
+          }
           if (cached.result.score < minScore) continue;
-          enriched.push({ entry, score: cached.result.score });
+          ranked.push({ entry, score: cached.result.score, rank });
         }
-        // Rank within-category by quality score (desc).
-        enriched.sort((a, b) => b.score - a.score);
-        results = enriched.map((r) => r.entry);
+        // Scored first (desc by score), then unscored in original leaderboard order.
+        ranked.sort((a, b) => {
+          const aScored = Number.isFinite(a.score);
+          const bScored = Number.isFinite(b.score);
+          if (aScored && bScored) return b.score - a.score;
+          if (aScored) return -1;
+          if (bScored) return 1;
+          return a.rank - b.rank;
+        });
+        results = ranked.map((r) => r.entry);
 
         // If we dropped below topN, backfill from lower-ranked-but-qualifying
-        // leaderboard candidates.
+        // leaderboard candidates (also accepting unscored wallets as a last
+        // resort, so a total API outage doesn't zero out the shortlist).
         if (results.length < topN) {
           const already = new Set(results.map((r) => r.proxyWallet));
           for (const entry of leaderboard) {
@@ -334,8 +354,8 @@ export async function run(): Promise<void> {
             const w = normaliseWallet(entry.proxyWallet);
             if (w === null) continue;
             const cached = scoredCache.get(w);
-            if (!cached) continue;
-            if (cached.result.score < minScore) continue;
+            if (cached && cached.result.score < minScore) continue;
+            if (!cached) unscoredIncluded++;
             results.push(entry);
             already.add(entry.proxyWallet);
           }
@@ -360,6 +380,7 @@ export async function run(): Promise<void> {
         scored: qualityStats[category].scored,
         kept,
         filtered,
+        unscoredIncluded,
         finalCount: results.length,
       });
     } catch (err) {
