@@ -152,6 +152,11 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       continue;
     }
 
+    if (position.isFutures === true || position.executionVenue === 'hyperliquid') {
+      held++;
+      continue;
+    }
+
     const currentPrice = priceMap.get(`${position.marketId}:${position.direction}`);
 
     if (!currentPrice) {
@@ -231,9 +236,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     // move the next tick can jump past activation without trailing ever firing.
     // Burned once on 1877577:YES 2026-04-11 (peak +12.42% held 5 ticks then gapped
     // to -41% in one monitor cycle).
-    const isFuturesPosTop =
-      position.isFutures === true || position.executionVenue === 'hyperliquid';
-    const trailingActive = cfg.TRAILING_STOP_ENABLED && !isFuturesPosTop;
+    const trailingActive = cfg.TRAILING_STOP_ENABLED;
 
     const priorHwmPct = position.highWaterMarkPct;
     const effectiveHwmPct = Math.max(
@@ -344,13 +347,11 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     }
 
     // Trend-exit and stale-exit paths — only run when TP/SL/divergence did NOT fire.
-    // Excludes futures (handled by futuresMonitor) and copytrades (own exit logic).
-    const isFuturesPos =
-      position.isFutures === true || position.executionVenue === 'hyperliquid';
+    // Futures are skipped earlier in the loop (handled by futuresMonitor).
+    // Copytrades have their own exit logic.
     const isCopytradePos = position.sourcedFrom?.startsWith('copytrade:') ?? false;
     const sampleTrackingNeeded =
-      !isFuturesPos && !isCopytradePos &&
-      (cfg.TREND_EXIT_ENABLED || cfg.STALE_EXIT_ENABLED);
+      !isCopytradePos && (cfg.TREND_EXIT_ENABLED || cfg.STALE_EXIT_ENABLED);
 
     if (!sampleTrackingNeeded) {
       held++;
