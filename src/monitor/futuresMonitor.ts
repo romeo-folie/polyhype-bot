@@ -381,10 +381,13 @@ export async function runFuturesMonitorWorker(): Promise<void> {
               let taAgrees = true;
               let taChecked = false;
               if (secSinceCheck >= cfg.FUTURES_REEVAL_INTERVAL_S) {
-                lastRevalCheck.set(symbol, Date.now());
-                taChecked = true;
                 try {
                   const confluence = await scoreConfluence(symbol, redis);
+                  // Only advance the cadence on success so that failures don't
+                  // silently suppress retries for the full REEVAL_INTERVAL_S.
+                  // The next 5s tick can retry after an infra blip.
+                  lastRevalCheck.set(symbol, Date.now());
+                  taChecked = true;
                   const oppositeDir = direction === 'LONG' ? 'DOWN' : 'UP';
                   if (
                     confluence.direction === oppositeDir &&
@@ -395,8 +398,8 @@ export async function runFuturesMonitorWorker(): Promise<void> {
                 } catch (err) {
                   // Fail open on infra errors (redis/candle fetch blip). Forcing
                   // a winner to exit because the TA pipeline hiccuped would defeat
-                  // the whole point of the bypass. The next tick past the cadence
-                  // gate will retry; real reversals will still be caught then.
+                  // the whole point of the bypass. Cadence was not advanced, so
+                  // the next poll tick will retry immediately.
                   logger.warn('[futures-monitor] max_hold bypass TA check failed; skipping TA gate', {
                     symbol, error: err instanceof Error ? err.message : String(err),
                   });
