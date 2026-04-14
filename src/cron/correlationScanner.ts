@@ -22,6 +22,7 @@ import { executeSignal } from '../execution/executor.js';
 import { priceZoneOf } from '../shared/zones.js';
 import { loadAllConstraints } from '../correlation/constraintGraph.js';
 import { detectViolations } from '../correlation/violationDetector.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import type { MarketPrice, ConstraintViolation } from '../correlation/types.js';
 import type { TradeSignal } from '../mapping/index.js';
 
@@ -201,6 +202,28 @@ export async function runCorrelationScan(redis: Redis): Promise<void> {
         wouldExecute: false,
         shadow: true,
       });
+      void enqueueWrite('shadow_observations', {
+        kind: 'correlation',
+        source: 'arb',
+        marketId: target.marketId,
+        direction: violation.direction,
+        wouldBlock: true,
+        metricValue: violation.edge,
+        threshold: cfg.CORRELATION_MIN_EDGE,
+        payload: {
+          constraintType: violation.constraint.type,
+          constraintId: violation.constraint.id,
+          targetQuestion: target.question.slice(0, 200),
+          otherMarketId: other.marketId,
+          otherQuestion: other.question.slice(0, 200),
+          priceA: violation.priceA,
+          priceB: violation.priceB,
+          stakeUsd,
+          wouldExecute: false,
+          shadow: true,
+          scannerEnabled: cfg.CORRELATION_SCANNER_ENABLED,
+        },
+      });
       continue;
     }
 
@@ -225,6 +248,28 @@ export async function runCorrelationScan(redis: Redis): Promise<void> {
       stakeUsd: stakeUsd.toFixed(2),
       wouldExecute: true,
       shadow: false,
+    });
+    void enqueueWrite('shadow_observations', {
+      kind: 'correlation',
+      source: 'arb',
+      marketId: target.marketId,
+      direction: violation.direction,
+      wouldBlock: false,
+      metricValue: violation.edge,
+      threshold: cfg.CORRELATION_MIN_EDGE,
+      payload: {
+        constraintType: violation.constraint.type,
+        constraintId: violation.constraint.id,
+        targetQuestion: target.question.slice(0, 200),
+        otherMarketId: other.marketId,
+        otherQuestion: other.question.slice(0, 200),
+        priceA: violation.priceA,
+        priceB: violation.priceB,
+        stakeUsd,
+        wouldExecute: true,
+        shadow: false,
+        scannerEnabled: cfg.CORRELATION_SCANNER_ENABLED,
+      },
     });
 
     const signal = buildSignal(violation, target, other, stakeUsd);

@@ -36,6 +36,7 @@ import { estimateConsensusProbability } from '../mapping/consensusCalculator.js'
 import { checkTimeToResolution } from '../mapping/divergenceCalculator.js';
 import { executeSignal } from '../execution/executor.js';
 import { priceZoneOf } from '../shared/zones.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 const DEDUP_KEY_PREFIX = 'near_zero:dedup:';
@@ -335,6 +336,28 @@ async function main() {
         threshold: cfg.NEAR_ZERO_MIN_CONSENSUS,
         hasOsint: !!osintSignal,
         wouldTrade,
+      });
+      void enqueueWrite('shadow_observations', {
+        kind: 'near_zero',
+        source: 'osint',
+        marketId: candidate.market.id,
+        direction: candidate.direction,
+        wouldBlock: !wouldTrade,
+        metricValue: edge,
+        threshold: cfg.NEAR_ZERO_MIN_EDGE,
+        payload: {
+          question: candidate.market.question.slice(0, 200),
+          marketPrice: candidate.price,
+          consensusPYes: pYes,
+          pOurSide,
+          stddev: estimate.stddev,
+          meetsEdge,
+          payoutRatio: (1 - candidate.price) / candidate.price,
+          minConsensus: cfg.NEAR_ZERO_MIN_CONSENSUS,
+          hasOsint: !!osintSignal,
+          wouldTrade,
+          scannerEnabled: cfg.NEAR_ZERO_SCANNER_ENABLED,
+        },
       });
 
       if (!wouldTrade) continue;

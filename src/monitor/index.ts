@@ -14,7 +14,8 @@ import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { isCryptoAsset } from '../shared/assets.js';
-import { inferCategory } from '../shared/outcomeRecorder.js';
+import { inferCategory, inferSource } from '../shared/outcomeRecorder.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import { getOpenPositions, updateHighWaterMark } from '../execution/positionLedger.js';
 import { evaluateTrailingStop } from './trailingStopExit.js';
 import { fetchAllCurrentPrices } from './priceFetcher.js';
@@ -428,6 +429,24 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
         logger.info('[monitor] trend_exit shadow', {
           ...trendLogFields,
           wouldExit: trendDecision.shouldExit,
+        });
+        void enqueueWrite('shadow_observations', {
+          kind: 'trend_exit',
+          source: inferSource(position.sourcedFrom ?? ''),
+          marketId: position.marketId,
+          direction: position.direction,
+          wouldBlock: !trendDecision.shouldExit,
+          metricValue: trendDecision.slopePerH ?? undefined,
+          threshold: trendDecision.thresholdSlopePerH,
+          payload: {
+            category: trendDecision.category,
+            r2: trendDecision.r2,
+            samples: trendDecision.sampleCount,
+            currentPnlPct: trendDecision.currentPnlPct,
+            ageH: trendDecision.ageH,
+            blockedReason: trendDecision.blockedReason,
+            wouldExit: trendDecision.shouldExit,
+          },
         });
       }
     }

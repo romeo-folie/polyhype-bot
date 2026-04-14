@@ -23,6 +23,7 @@
 import type { Redis } from 'ioredis';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import {
@@ -679,6 +680,29 @@ export async function scanWeatherMarkets(
       bestEdge: bestEdge.toFixed(3),
       enabled: cfg.WEATHER_SCANNER_ENABLED,
     });
+    void enqueueWrite('shadow_observations', {
+      kind: 'weather_event',
+      source: 'arb',
+      wouldBlock: opportunities.length === 0,
+      metricValue: bestEdge,
+      threshold: cfg.WEATHER_MIN_EDGE,
+      payload: {
+        eventId: event.eventId,
+        slug: event.slug,
+        city: event.city,
+        targetDate: event.targetDate,
+        daysOut,
+        unit: event.unit,
+        brackets: event.brackets.length,
+        forecastHigh: forecast.forecastHigh,
+        forecastStdDev: forecast.stdDev,
+        forecastSource: forecast.source,
+        ensembleMembers: forecast.ensembleMembers,
+        overround,
+        opportunitiesFound: opportunities.length,
+        enabled: cfg.WEATHER_SCANNER_ENABLED,
+      },
+    });
 
     // Log each opportunity individually for shadow analysis
     for (const opp of opportunities) {
@@ -698,6 +722,29 @@ export async function scanWeatherMarkets(
         forecastHigh: opp.forecastHigh.toFixed(1),
         daysOut: opp.daysOut,
         wouldTrade,
+      });
+      void enqueueWrite('shadow_observations', {
+        kind: 'weather_bracket',
+        source: 'arb',
+        marketId: opp.marketId,
+        direction: opp.tradeSide,
+        wouldBlock: !wouldTrade,
+        metricValue: opp.edge,
+        threshold: cfg.WEATHER_MIN_EDGE,
+        payload: {
+          eventSlug: opp.eventSlug,
+          city: opp.city,
+          targetDate: opp.targetDate,
+          bracket: opp.bracketLabel,
+          tradeSide: opp.tradeSide,
+          modelProb: opp.modelProbability,
+          marketPrice: opp.outcomePrice,
+          adjustedMarketProb: opp.adjustedMarketProb,
+          outcomePrice: opp.outcomePrice,
+          forecastHigh: opp.forecastHigh,
+          daysOut: opp.daysOut,
+          wouldTrade,
+        },
       });
     }
 
