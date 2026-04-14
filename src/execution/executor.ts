@@ -1348,17 +1348,23 @@ export async function executeSignal(
     const oneSidedBook =
       benchmark.decisionBestBid === null || benchmark.decisionBestAsk === null;
     const spreadTooWide = spreadBps != null && spreadBps > cfg.MAX_ENTRY_SPREAD_BPS;
-    const skipTelemetry = {
-      ...benchmark,
+    const guardrailDiagnostic = {
       spreadBps: spreadBps != null ? Math.round(spreadBps) : null,
       threshold: cfg.MAX_ENTRY_SPREAD_BPS,
       bestBid: benchmark.decisionBestBid,
       bestAsk: benchmark.decisionBestAsk,
     };
-    // Merge benchmark + gate-specific fields into makerTelemetry so they are
-    // persisted into execution_events (finalizeAttempt spreads makerTelemetry
-    // into the DB payload; recordSkip's extra arg is Redis-only).
-    makerTelemetry = { ...makerTelemetry, ...skipTelemetry };
+    // Benchmark fields (decisionBest*) are schema columns in signal_decisions
+    // but not in execution_events, where Zod would strip them. Guardrail
+    // diagnostic fields have no schema column at all, so they go under `raw`
+    // — the catch-all z.record(z.unknown()) column that survives validation.
+    const existingRaw =
+      (makerTelemetry.raw as Record<string, unknown> | undefined) ?? {};
+    makerTelemetry = {
+      ...makerTelemetry,
+      ...benchmark,
+      raw: { ...existingRaw, entrySpreadGuardrail: guardrailDiagnostic },
+    };
     if (oneSidedBook || spreadTooWide) {
       const skipReason = oneSidedBook ? 'one_sided_book' : 'spread_too_wide';
       logger.info(
@@ -1367,10 +1373,10 @@ export async function executeSignal(
           : '[executor] skipping — entry spread too wide',
         {
           marketId: signal.marketId,
-          ...skipTelemetry,
+          ...guardrailDiagnostic,
         },
       );
-      return recordSkip(skipReason, 'skipped', skipTelemetry);
+      return recordSkip(skipReason, 'skipped', guardrailDiagnostic);
     }
   }
 
