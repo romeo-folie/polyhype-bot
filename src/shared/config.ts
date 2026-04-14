@@ -531,6 +531,15 @@ const envSchema = z.object({
   SCORER_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(86400),
   CONSENSUS_CACHE_ENABLED: boolFromEnv.optional().default(true),
   CONSENSUS_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(1800),
+  // Per-provider circuit breaker for consensus LLM calls. After
+  // CONSENSUS_BREAKER_FAILURE_THRESHOLD failures inside CONSENSUS_BREAKER_WINDOW_S,
+  // that provider is skipped for CONSENSUS_BREAKER_COOLDOWN_S. Cooldown acts as
+  // the auto-retry interval: when it expires, the next estimate will probe the
+  // provider again. Tops-ups / recoveries are picked up automatically.
+  CONSENSUS_BREAKER_ENABLED: boolFromEnv.optional().default(true),
+  CONSENSUS_BREAKER_FAILURE_THRESHOLD: z.coerce.number().int().positive().optional().default(5),
+  CONSENSUS_BREAKER_WINDOW_S: z.coerce.number().int().positive().optional().default(120),
+  CONSENSUS_BREAKER_COOLDOWN_S: z.coerce.number().int().positive().optional().default(600),
   RELEVANCE_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
   // Strict top-fit candidate selection: evaluate only the highest fit-score
   // candidate per headline and drop the headline if it's gated — no cascade

@@ -15,6 +15,12 @@ import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
 import { getRecentOutcomes, inferCategory } from '../shared/outcomeRecorder.js';
 import { findSimilarCases, formatMemoryContext } from '../db/retrieval.js';
+import {
+  isProviderOpen,
+  recordProviderFailure,
+  recordProviderSuccess,
+  type ProviderName,
+} from './consensusBreaker.js';
 import type { Redis } from 'ioredis';
 
 const TIMEOUT_MS = 25_000;
@@ -427,35 +433,59 @@ export async function estimateConsensusProbability(opts: {
   const useAnthropic = Boolean(cfg.ANTHROPIC_API_KEY);
   const useDeepSeek = Boolean(cfg.DEEPSEEK_API_KEY);
   type ProviderFn = (q: string, d: string | null, h: string, m?: 'near-zero', p?: number) => Promise<ConsensusResult>;
-  const providers: ProviderFn[] = [
-    ...(useOpenAI ? [callOpenAI as ProviderFn] : []),
-    ...(useGemini ? [callGemini as ProviderFn] : []),
-    ...(useAnthropic ? [callAnthropic as ProviderFn] : []),
-    ...(useDeepSeek ? [callDeepSeek as ProviderFn] : []),
+  interface ProviderEntry { name: ProviderName; fn: ProviderFn }
+  const allEntries: ProviderEntry[] = [
+    ...(useOpenAI ? [{ name: 'openai' as const, fn: callOpenAI as ProviderFn }] : []),
+    ...(useGemini ? [{ name: 'gemini' as const, fn: callGemini as ProviderFn }] : []),
+    ...(useAnthropic ? [{ name: 'anthropic' as const, fn: callAnthropic as ProviderFn }] : []),
+    ...(useDeepSeek ? [{ name: 'deepseek' as const, fn: callDeepSeek as ProviderFn }] : []),
   ];
 
-  if (providers.length === 0) {
+  if (allEntries.length === 0) {
     throw new Error(
       'No LLM providers configured — set OPENAI_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, or DEEPSEEK_API_KEY',
     );
   }
-  const calls = providers.map((provider) =>
-    provider(opts.question, opts.description, enrichedHeadline, opts.mode, opts.marketPrice),
-  );
 
-  const settled = await Promise.allSettled(calls);
+  // Skip providers whose circuit is currently open. On Redis error, isProviderOpen
+  // returns false (fail-open) so we never silently drop all providers.
+  const breakerRedis = getRedis();
+  const entries: ProviderEntry[] = [];
+  for (const entry of allEntries) {
+    if (await isProviderOpen(breakerRedis, entry.name)) {
+      logger.debug('[consensus-calc] provider circuit open, skipping', { provider: entry.name });
+      continue;
+    }
+    entries.push(entry);
+  }
+
+  if (entries.length === 0) {
+    throw new Error('All consensus provider circuits are open');
+  }
+
+  const settled = await Promise.allSettled(
+    entries.map((entry) =>
+      entry.fn(opts.question, opts.description, enrichedHeadline, opts.mode, opts.marketPrice),
+    ),
+  );
 
   const results: number[] = [];
   let reasoning = '';
 
-  for (const outcome of settled) {
+  for (let i = 0; i < settled.length; i++) {
+    const outcome = settled[i];
+    const entry = entries[i];
+    if (!outcome || !entry) continue;
     if (outcome.status === 'fulfilled') {
       results.push(outcome.value.probability);
       if (reasoning === '') reasoning = outcome.value.reasoning;
+      void recordProviderSuccess(breakerRedis, entry.name);
     } else {
       logger.warn('[consensus-calc] sample failed', {
+        provider: entry.name,
         error: sanitiseError(outcome.reason),
       });
+      void recordProviderFailure(breakerRedis, entry.name);
     }
   }
 

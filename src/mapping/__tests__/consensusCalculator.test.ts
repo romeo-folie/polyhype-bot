@@ -33,6 +33,20 @@ vi.mock('../../shared/logger.js', () => ({
   },
 }));
 
+// Stub getRedis — consensus calculator now calls it to check breaker state.
+// Returns a no-op Redis-like object; breaker fails open on errors, so nothing
+// is skipped.
+vi.mock('../../shared/redis.js', () => ({
+  getRedis: vi.fn(() => ({
+    exists: vi.fn().mockResolvedValue(0),
+    incr: vi.fn().mockResolvedValue(1),
+    expire: vi.fn().mockResolvedValue(1),
+    set: vi.fn().mockResolvedValue('OK'),
+    del: vi.fn().mockResolvedValue(1),
+    get: vi.fn().mockResolvedValue(null),
+  })),
+}));
+
 const mockGenerateContent = vi.fn();
 vi.mock('@google/generative-ai', () => ({
   GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
