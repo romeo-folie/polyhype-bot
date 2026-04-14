@@ -104,6 +104,34 @@ describe('getSimmerPositions', () => {
   });
 });
 
+describe('submitSell response validation', () => {
+  it('accepts fill_status=null (Simmer sometimes sends explicit null on HTTP 200)', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        tx_hash: '0xabc',
+        shares_sold: 10,
+        fill_status: null,
+      }),
+    });
+
+    const { submitSell } = await import('../simmer.js');
+    const result = await submitSell({
+      market_id: 'm1',
+      side: 'yes',
+      action: 'sell',
+      shares: 10,
+      reasoning: 'test',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.fill_status).toBeNull();
+    expect(result.shares_sold).toBe(10);
+  });
+});
+
 describe('setAgentAutoRedeem', () => {
   it('sends PATCH request with auto_redeem_enabled=true', async () => {
     mockFetch.mockResolvedValue({

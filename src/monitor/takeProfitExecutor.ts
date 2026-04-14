@@ -557,7 +557,7 @@ async function finalizeSimmerExit(
     tx_hash?: string | null | undefined;
     shares_sold?: number | undefined;
     shares_requested?: number | undefined;
-    fill_status?: 'filled' | 'submitted' | 'failed' | 'unconfirmed' | undefined;
+    fill_status?: 'filled' | 'submitted' | 'failed' | 'unconfirmed' | null | undefined;
   },
   currentPrice: number,
   returnPct: number,

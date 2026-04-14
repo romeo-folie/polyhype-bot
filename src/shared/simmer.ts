@@ -69,8 +69,11 @@ const SimmerTradeResultSchema = z.object({
   shares_sold: z.number().optional(),
   /** Requested shares before fill — used for partial fill detection. */
   shares_requested: z.number().optional(),
-  /** Order fill lifecycle state: 'filled', 'submitted' (GTC/delayed), 'failed', or 'unconfirmed'. */
-  fill_status: z.enum(['filled', 'submitted', 'failed', 'unconfirmed']).optional(),
+  /** Order fill lifecycle state: 'filled', 'submitted' (GTC/delayed), 'failed', or 'unconfirmed'.
+   *  `.nullish()` because Simmer occasionally returns explicit `null` on HTTP 200 responses —
+   *  same quirk as the `error` field below. Downstream callers already treat absent as
+   *  "unknown" (fall back to sharesRequested for primaryFill), so `null` is semantically fine. */
+  fill_status: z.enum(['filled', 'submitted', 'failed', 'unconfirmed']).nullish(),
   cost: z.number().optional(),
   price: z.number().optional(),
   warnings: z.array(z.string()).optional(),
