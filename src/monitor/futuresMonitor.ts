@@ -337,16 +337,20 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         // peak crosses the TP line, then ratchets a floor up with the HWM so
         // winners keep running until they give back `trailStopPct` from peak.
         // Floor is clamped to TP so immediate reversal at TP exits at TP.
-        if (!shouldExit && cfg.FUTURES_TRAILING_STOP_ENABLED) {
+        // `hwm` and `trailingArmed` are lifted out of the trailing block so
+        // the max-hold bypass below can consult them.
+        let hwm: number | undefined;
+        let trailingArmed = false;
+        if (cfg.FUTURES_TRAILING_STOP_ENABLED) {
           const ledgerPos = futuresLedger.find((p) => p.marketId === symbol);
           const priorHwm = ledgerPos?.highWaterMarkPct;
-          let hwm = typeof priorHwm === 'number' && Number.isFinite(priorHwm) ? priorHwm : priceChangePct;
+          hwm = typeof priorHwm === 'number' && Number.isFinite(priorHwm) ? priorHwm : priceChangePct;
           if (priceChangePct > hwm) {
             hwm = priceChangePct;
             updateHighWaterMark(redis, symbol, direction, hwm).catch(() => {});
           }
-          // Activation = TP line. Floor clamped to TP so worst case at TP is identical to fixed-TP.
-          if (hwm >= tpPct) {
+          trailingArmed = hwm >= tpPct;
+          if (!shouldExit && trailingArmed) {
             const floorPct = Math.max(tpPct, hwm - trailStopPct);
             if (priceChangePct <= floorPct) {
               shouldExit = true;
@@ -366,8 +370,61 @@ export async function runFuturesMonitorWorker(): Promise<void> {
 
           const ageHours = (Date.now() - openedAt) / (1000 * 3600);
           if (ageHours >= cfg.FUTURES_MAX_HOLD_HOURS) {
-            shouldExit = true;
-            reason = `Max hold hours reached (${ageHours.toFixed(1).toString()}h >= ${cfg.FUTURES_MAX_HOLD_HOURS.toString()}h)`;
+            let bypassed = false;
+            // Bypass gate: winning runners with still-aligned TA escape the
+            // time cap. Zombies (trailing not armed) always exit here.
+            // Shares `lastRevalCheck` cadence with the TA-fade block below
+            // so we don't double-call scoreConfluence on the same tick.
+            if (cfg.FUTURES_MAX_HOLD_BYPASS_ON_WINNER && trailingArmed) {
+              const lastCheck = lastRevalCheck.get(symbol) ?? 0;
+              const secSinceCheck = (Date.now() - lastCheck) / 1000;
+              let taAgrees = true;
+              let taChecked = false;
+              if (secSinceCheck >= cfg.FUTURES_REEVAL_INTERVAL_S) {
+                try {
+                  const confluence = await scoreConfluence(symbol, redis);
+                  // Only advance the cadence on success so that failures don't
+                  // silently suppress retries for the full REEVAL_INTERVAL_S.
+                  // The next 5s tick can retry after an infra blip.
+                  lastRevalCheck.set(symbol, Date.now());
+                  taChecked = true;
+                  const oppositeDir = direction === 'LONG' ? 'DOWN' : 'UP';
+                  if (
+                    confluence.direction === oppositeDir &&
+                    confluence.score >= cfg.FUTURES_EXIT_CONFLUENCE_SCORE
+                  ) {
+                    taAgrees = false;
+                  }
+                } catch (err) {
+                  // Fail open on infra errors (redis/candle fetch blip). Forcing
+                  // a winner to exit because the TA pipeline hiccuped would defeat
+                  // the whole point of the bypass. Cadence was not advanced, so
+                  // the next poll tick will retry immediately.
+                  logger.warn('[futures-monitor] max_hold bypass TA check failed; skipping TA gate', {
+                    symbol, error: err instanceof Error ? err.message : String(err),
+                  });
+                }
+              }
+              if (taAgrees) {
+                bypassed = true;
+                // Only log when TA was actually re-checked this tick — otherwise
+                // this would fire every 5s poll for hours once past the time cap.
+                if (taChecked) {
+                  logger.info('[futures-monitor] max_hold bypassed on winner', {
+                    symbol,
+                    direction,
+                    ageHours: ageHours.toFixed(1),
+                    priceChangePct: priceChangePct.toFixed(2),
+                    hwm: hwm?.toFixed(2),
+                    tpPct,
+                  });
+                }
+              }
+            }
+            if (!bypassed) {
+              shouldExit = true;
+              reason = `Max hold hours reached (${ageHours.toFixed(1).toString()}h >= ${cfg.FUTURES_MAX_HOLD_HOURS.toString()}h)`;
+            }
           }
 
           // 4. TA re-evaluation — exit if confluence flips against held direction

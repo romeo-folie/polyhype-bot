@@ -1,13 +1,29 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // Mock Config
+const baseCfg = {
+  FUTURES_ENABLED: true,
+  FUTURES_STOP_LOSS_PCT: -1.5,
+  FUTURES_TAKE_PROFIT_PCT: 3.0,
+  FUTURES_MAX_HOLD_HOURS: 24,
+  FUTURES_MAX_HOLD_BYPASS_ON_WINNER: false,
+  FUTURES_TRAILING_STOP_ENABLED: false,
+  FUTURES_TRAILING_STOP_PCT: 1.5,
+  FUTURES_EXIT_ON_SIGNAL_FADE: false,
+  FUTURES_REEVAL_INTERVAL_S: 60,
+  FUTURES_REEVAL_MIN_AGE_S: 600,
+  FUTURES_EXIT_CONFLUENCE_SCORE: 5,
+  FUTURES_ATR_SLTP_ENABLED: false,
+};
+const loadConfigMock = vi.fn().mockReturnValue(baseCfg);
 vi.mock('../../shared/config.js', () => ({
-  loadConfig: vi.fn().mockReturnValue({
-    FUTURES_ENABLED: true,
-    FUTURES_STOP_LOSS_PCT: -1.5,
-    FUTURES_TAKE_PROFIT_PCT: 3.0,
-    FUTURES_MAX_HOLD_HOURS: 24,
-  }),
+  loadConfig: loadConfigMock,
+}));
+
+// Mock confluence scorer (used by max-hold bypass TA check)
+const mockScoreConfluence = vi.fn();
+vi.mock('../../arb/confluenceScorer.js', () => ({
+  scoreConfluence: mockScoreConfluence,
 }));
 
 // Mock Logger
@@ -70,6 +86,8 @@ const { runFuturesMonitorWorker } = await import('../futuresMonitor.js');
 describe('futuresMonitor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    loadConfigMock.mockReturnValue(baseCfg);
+    mockScoreConfluence.mockResolvedValue({ direction: 'NEUTRAL', score: 0, signals: {} });
     // Break the while(true) loop after one tick.
     // We throw WITHOUT calling fn() so the Promise constructor rejects (uncaught resolve
     // would swallow the throw). The rejection propagates past the inner try/catch
@@ -178,5 +196,112 @@ describe('futuresMonitor', () => {
     await runTick();
 
     expect(mockClosePosition).toHaveBeenCalledWith(symbol);
+  });
+
+  describe('max-hold bypass on winner', () => {
+    const longAgo = () => new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+
+    // Each test uses a distinct symbol to avoid collisions in the module-level
+    // `lastRevalCheck` Map (persists across tests within this file). With
+    // FUTURES_REEVAL_INTERVAL_S=60, a prior test setting the cache would make
+    // the next test skip its TA re-check and silently drift to the default.
+    const makeWinningPosition = (symbol: string) => ({
+      symbol,
+      position: {
+        szi: '0.1',
+        entryPx: '50000',
+        unrealizedPnl: '250', // +5.0% (above 3% TP line → trailing armed)
+        marginUsed: '1000',
+      },
+    });
+
+    const makeLedgerWinner = (symbol: string) => ({
+      marketId: symbol,
+      openedAt: longAgo(),
+      isFutures: true,
+      direction: 'LONG' as const,
+      question: `News Futures: ${symbol} LONG`,
+      entryPrice: 50000,
+      stakeUsd: 10,
+      highWaterMarkPct: 5.0, // has breached TP line → trailingArmed = true
+    });
+
+    const winnerCfg = {
+      ...baseCfg,
+      FUTURES_MAX_HOLD_BYPASS_ON_WINNER: true,
+      FUTURES_TRAILING_STOP_ENABLED: true,
+    };
+
+    it('bypasses max-hold when trailing is armed and TA still agrees', async () => {
+      loadConfigMock.mockReturnValue(winnerCfg);
+      mockGetOpenPositions.mockResolvedValue([makeWinningPosition('BTC')]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerWinner('BTC')]);
+      // TA neutral → not a reversal → bypass
+      mockScoreConfluence.mockResolvedValue({ direction: 'UP', score: 3, signals: {} });
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+
+    it('does NOT bypass when TA signals reversal above exit threshold', async () => {
+      loadConfigMock.mockReturnValue(winnerCfg);
+      mockGetOpenPositions.mockResolvedValue([makeWinningPosition('ETH')]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerWinner('ETH')]);
+      // Opposite direction + score >= EXIT_CONFLUENCE_SCORE (5)
+      mockScoreConfluence.mockResolvedValue({ direction: 'DOWN', score: 5, signals: {} });
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('ETH');
+    });
+
+    it('does NOT bypass when trailing is not armed (zombie)', async () => {
+      loadConfigMock.mockReturnValue(winnerCfg);
+      // Sideways drifter: +0.5% PnL, nowhere near TP → trailing not armed
+      mockGetOpenPositions.mockResolvedValue([
+        {
+          symbol: 'SOL',
+          position: {
+            szi: '0.1',
+            entryPx: '50000',
+            unrealizedPnl: '25', // +0.5%
+            marginUsed: '1000',
+          },
+        },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([
+        { ...makeLedgerWinner('SOL'), highWaterMarkPct: 0.5 },
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('SOL');
+    });
+
+    it('does NOT bypass when the flag is disabled even if winning', async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseCfg,
+        FUTURES_MAX_HOLD_BYPASS_ON_WINNER: false,
+        FUTURES_TRAILING_STOP_ENABLED: true,
+      });
+      mockGetOpenPositions.mockResolvedValue([makeWinningPosition('DOGE')]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerWinner('DOGE')]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('DOGE');
+    });
+
+    it('fails open when TA check throws — infra blip should not force-exit a winner', async () => {
+      loadConfigMock.mockReturnValue(winnerCfg);
+      mockGetOpenPositions.mockResolvedValue([makeWinningPosition('AVAX')]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerWinner('AVAX')]);
+      mockScoreConfluence.mockRejectedValue(new Error('redis blip'));
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
   });
 });
