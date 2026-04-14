@@ -1621,9 +1621,16 @@ export async function executeSignal(
     }
   }
 
-  // 5) Try Simmer first
+  // 5) Try Simmer first (gated by SIMMER_VENUE_ENABLED — when off, skip to CLOB)
 
-  if (simmerId) {
+  if (simmerId && !cfg.SIMMER_VENUE_ENABLED) {
+    logger.info('[executor] SIMMER_VENUE_ENABLED=false; skipping Simmer, attempting CLOB', {
+      marketId: signal.marketId,
+      simmerId,
+    });
+    safeRecordExecutionMetric('venue_skipped', 'simmer_disabled');
+    clobFallbackReason = 'simmer_disabled';
+  } else if (simmerId) {
     takerPath =
       executionMode === 'taker'
         ? 'taker_direct'

@@ -194,6 +194,38 @@ describe('Position Reconciliation Healer', () => {
     }));
   });
 
+  it('imports a sub-$1 Simmer orphan (dust guard was removed — small positions are legitimate)', async () => {
+    const subDollarOrphan = {
+      market_id: 'orphan-tiny',
+      side: 'yes',
+      shares: 0.77,
+      average_price: 0.45,
+      value_usdc: 0.35,
+      question: 'Will something small happen?',
+    };
+
+    const mockGammaMarket = {
+      id: 'numeric-tiny',
+      question: 'Will something small happen?',
+      conditionId: 'cond-tiny',
+      clobTokenIds: ['tok-tiny-yes', 'tok-tiny-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([subDollarOrphan]);
+    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(mockGammaMarket);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Before the dust-guard removal this would have been silently skipped (shares*avgPrice = 0.35 < $1).
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-tiny',
+      direction: 'YES',
+      entryPrice: 0.45,
+      sharesHeld: 0.77,
+    }));
+  });
+
   it('automatically re-imports an orphan position from CLOB using Data & Gamma APIs', async () => {
     const orphanClobPosition = {
       conditionId: 'cond-1',

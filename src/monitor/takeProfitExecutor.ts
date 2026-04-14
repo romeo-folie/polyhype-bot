@@ -217,6 +217,24 @@ export async function executeTakeProfit(opts: {
     }
     return executeClobExit({ position, currentPrice, returnPct, reason, redis, sharesToSell });
   }
+
+  // Simmer venue: when SIMMER_VENUE_ENABLED=false, route Simmer-entered exits
+  // through CLOB when CLOB tokens are available (shares live on our wallet).
+  // Positions without clobTokenIds fall through to Simmer as a last resort.
+  const cfgRoute = loadConfig();
+  if (
+    !cfgRoute.SIMMER_VENUE_ENABLED &&
+    position.clobTokenIds &&
+    position.clobTokenIds.length > 0
+  ) {
+    logger.info('[take-profit-executor] SIMMER_VENUE_ENABLED=false — routing Simmer exit through CLOB', {
+      marketId: position.marketId,
+      direction: position.direction,
+      sharesToSell,
+    });
+    return executeClobExit({ position, currentPrice, returnPct, reason, redis, sharesToSell });
+  }
+
   return executeSimmerExit({
     position,
     currentPrice,

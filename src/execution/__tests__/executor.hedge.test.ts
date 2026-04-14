@@ -18,6 +18,7 @@ vi.mock('../../shared/config.js', () => ({
     TAIL_TAKER_OVERRIDE_EDGE: 0.2,
     TAKER_MIN_EDGE_CATEGORIES: {},
     CLOB_FALLBACK_ENABLED: false,
+    SIMMER_VENUE_ENABLED: true,
   }),
 }));
 

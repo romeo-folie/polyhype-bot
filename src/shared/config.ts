@@ -50,6 +50,15 @@ const envSchema = z.object({
     .default('true')
     .transform((v) => !['false', '0', ''].includes(v.trim().toLowerCase())),
 
+  // Simmer — venue gate. When false, new entries skip Simmer and go straight
+  // to CLOB; exits on Simmer-entered positions route through CLOB submitClobSell.
+  // Redemption + orphan reconciliation continue to use Simmer APIs.
+  SIMMER_VENUE_ENABLED: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => !['false', '0', ''].includes(v.trim().toLowerCase())),
+
   // LLM — at least one must be set (validated below)
   OPENAI_API_KEY: z.string().optional(),
   GEMINI_API_KEY: z.string().optional(),

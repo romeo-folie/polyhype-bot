@@ -44,6 +44,36 @@ describe('getSimmerPositions', () => {
     );
   });
 
+  it('splits ambiguous position (both yes+no, no explicit side) into two per-side records', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => [
+        {
+          market_id: 'm-ambiguous',
+          question: 'Market with both sides held',
+          shares_yes: 0.77,
+          shares_no: 0.27,
+          avg_cost: 0.45,
+          current_price: 0.2,
+          condition_id: '0xabc',
+        },
+      ],
+    });
+
+    const { getSimmerPositions } = await import('../simmer.js');
+    const positions = await getSimmerPositions({ status: 'active', venue: 'polymarket' });
+
+    expect(positions).toHaveLength(2);
+    const yesPos = positions.find((p) => p.side === 'yes');
+    const noPos = positions.find((p) => p.side === 'no');
+    expect(yesPos).toBeDefined();
+    expect(noPos).toBeDefined();
+    expect(yesPos?.shares).toBeCloseTo(0.77);
+    expect(noPos?.shares).toBeCloseTo(0.27);
+    expect(yesPos?.average_price).toBeCloseTo(0.45);
+    expect(noPos?.average_price).toBeCloseTo(0.45);
+  });
+
   it('does not override shares when both yes/no are present and side is known', async () => {
     mockFetch.mockResolvedValue({
       ok: true,

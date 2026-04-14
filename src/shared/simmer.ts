@@ -104,6 +104,27 @@ function deriveSide(raw: Record<string, unknown>): 'yes' | 'no' | null {
   return null;
 }
 
+/**
+ * When a raw Simmer position has both shares_yes > 0 AND shares_no > 0 and no
+ * explicit `side`, split it into two per-side records so each side surfaces to
+ * downstream consumers (previously both sides were silently dropped by Zod).
+ * The original raw record is returned unchanged in all other cases.
+ */
+function splitPositionIfAmbiguous(raw: Record<string, unknown>): Record<string, unknown>[] {
+  if ('side' in raw) return [raw];
+  const yes = Number(raw.shares_yes ?? 0);
+  const no = Number(raw.shares_no ?? 0);
+  const yesValid = Number.isFinite(yes) && yes > 0;
+  const noValid = Number.isFinite(no) && no > 0;
+  if (yesValid && noValid) {
+    return [
+      { ...raw, side: 'yes', shares_no: 0 },
+      { ...raw, side: 'no', shares_yes: 0 },
+    ];
+  }
+  return [raw];
+}
+
 function normalisePosition(raw: Record<string, unknown>): Record<string, unknown> {
   const next: Record<string, unknown> = { ...raw };
 
@@ -415,7 +436,6 @@ export async function getSimmerPositions(
   for (const item of arr as unknown[]) {
     const rawRecord =
       typeof item === 'object' && item !== null ? (item as Record<string, unknown>) : null;
-    const candidate = rawRecord ? normalisePosition(rawRecord) : item;
 
     if (rawRecord) {
       const inferredSide = !('side' in rawRecord) ? deriveSide(rawRecord) : null;
@@ -427,20 +447,28 @@ export async function getSimmerPositions(
       if (Number.isFinite(yes) && Number.isFinite(no) && yes > 0 && no > 0) {
         await recordMalformed('ambiguous_shares');
       }
-      if (!('side' in rawRecord) && inferredSide == null) {
+      if (!('side' in rawRecord) && inferredSide == null && !(yes > 0 && no > 0)) {
         await recordMalformed('missing_side');
       }
     }
 
-    const parsed = SimmerPositionSchema.safeParse(candidate);
-    if (parsed.success) {
-      positions.push(parsed.data);
-    } else {
-      await recordMalformed('invalid_payload');
-      logger.warn('[simmer] skipping malformed position entry', {
-        error: parsed.error.message,
-        raw: JSON.stringify(item).slice(0, 200),
-      });
+    // Split ambiguous (both yes+no) into per-side records so downstream sees both.
+    const splits = rawRecord ? splitPositionIfAmbiguous(rawRecord) : [item];
+    for (const splitRaw of splits) {
+      const candidate =
+        typeof splitRaw === 'object' && splitRaw !== null
+          ? normalisePosition(splitRaw as Record<string, unknown>)
+          : splitRaw;
+      const parsed = SimmerPositionSchema.safeParse(candidate);
+      if (parsed.success) {
+        positions.push(parsed.data);
+      } else {
+        await recordMalformed('invalid_payload');
+        logger.warn('[simmer] skipping malformed position entry', {
+          error: parsed.error.message,
+          raw: JSON.stringify(splitRaw).slice(0, 200),
+        });
+      }
     }
   }
   return positions;

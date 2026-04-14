@@ -67,6 +67,7 @@ const mockConfig = {
   TAIL_TAKER_OVERRIDE_EDGE: 0.2,
   MAX_ENTRY_SPREAD_BPS: 0,
   CLOB_FALLBACK_ENABLED: true,
+  SIMMER_VENUE_ENABLED: true,
 };
 
 const mockLoadConfig = vi.fn(() => mockConfig);

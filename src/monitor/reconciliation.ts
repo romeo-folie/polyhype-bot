@@ -9,7 +9,6 @@ import { fetchMarketByConditionId, fetchMarketByQuestion, type GammaMarket } fro
 import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { isRecentlyClosed } from '../shared/closedGuard.js';
-import { loadConfig } from '../shared/config.js';
 
 interface ReconciliationDetail {
   type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded' | 'recovered_outcome';
@@ -560,24 +559,12 @@ async function importSimmerOrphan(
       });
     }
 
-    // Dust guard: independent of recently-closed guard. Blocks reimport of
-    // residual fractions left behind by partial fills / close rounding.
-    // Uses current market price if no entry price was available, so 0-entry
-    // imports still get evaluated.
-    const notionalForDustCheck =
-      avgPrice > 0
-        ? shares * avgPrice
-        : pos.value_usdc ?? 0;
-    const dustMinUsd = loadConfig().RECONCILE_IMPORT_MIN_USD;
-    if (notionalForDustCheck > 0 && notionalForDustCheck < dustMinUsd) {
-      logger.info('[reconcile] skipping dust Simmer orphan below import threshold', {
-        marketId: pos.market_id,
-        shares,
-        notional: notionalForDustCheck,
-        threshold: dustMinUsd,
-      });
-      return false;
-    }
+    // Dust guard removed: the isRecentlyClosed checks above already block
+    // reimport of residuals from recently-closed positions. Applying a notional
+    // floor to first-time orphans silently dropped legitimate small positions
+    // (most sub-$1 positions are genuine holds, not dust). If residual-fraction
+    // reimport becomes an issue after a recently-closed TTL expires, extend
+    // closedGuard's TTL rather than re-adding a universal notional floor.
 
     const newPos: Position = {
       marketId: metadata.id,

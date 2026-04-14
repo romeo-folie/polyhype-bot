@@ -8,6 +8,7 @@ vi.mock('../../shared/logger.js', () => ({
 vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => ({
     CLOB_ORDER_TYPE: 'FAK',
+    SIMMER_VENUE_ENABLED: true,
   })),
 }));
 
@@ -379,6 +380,33 @@ describe('executeTakeProfit', () => {
     expect(result.success).toBe(false);
     expect(result.error).toBe('CLOB order rejected');
     expect(mockClose).not.toHaveBeenCalled();
+  });
+
+  it('routes Simmer-venue position through CLOB when SIMMER_VENUE_ENABLED=false', async () => {
+    const { loadConfig } = await import('../../shared/config.js');
+    const mockCfg = vi.mocked(loadConfig);
+    mockCfg.mockReturnValueOnce({
+      CLOB_ORDER_TYPE: 'FAK',
+      SIMMER_VENUE_ENABLED: false,
+    } as any);
+
+    mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 15.0 });
+    mockClobSell.mockResolvedValue({ success: true, tx_hash: '0xsimmerviaclob' });
+
+    const result = await executeTakeProfit({
+      position: makePosition({ executionVenue: 'simmer', direction: 'YES' }),
+      currentPrice: 0.65,
+      returnPct: 25,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.txHash).toBe('0xsimmerviaclob');
+    expect(mockClobSell).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-yes' }),
+    );
+    expect(mockSell).not.toHaveBeenCalled();
   });
 
   it('caps CLOB sell at actual on-chain balance when it is less than Redis-tracked shares', async () => {
