@@ -80,6 +80,18 @@ export interface DivergenceInput {
   kellyFraction?: number;
   /** Noise gate — stddev threshold (default 0.10). */
   noiseStddevThreshold?: number;
+  /**
+   * Number of LLM providers that returned for this estimate. When less than
+   * `consensusTargetSamples`, the noise threshold is scaled down by
+   * sqrt((n-1)/(target-1)) to compensate for the fewer-outlier-chances effect
+   * (fewer providers → systematically lower observed stddev). If undefined,
+   * no scaling is applied (back-compat for callers that don't thread it yet).
+   */
+  consensusSampleCount?: number;
+  /** Baseline sample count the noise threshold was tuned against. Default 4. */
+  consensusTargetSamples?: number;
+  /** Hard floor — skip if fewer than this many providers returned. Default 3. */
+  consensusMinSamples?: number;
   /** Kelly sign-stability probe. */
   kellyProbeDelta?: number;
   kellyRequireSignStable?: boolean;
@@ -153,10 +165,38 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
     category,
     kellyFraction = 0.25,
     noiseStddevThreshold = 0.10,
+    consensusSampleCount,
+    consensusTargetSamples = 4,
+    consensusMinSamples = 3,
     kellyProbeDelta = 0.05,
     kellyRequireSignStable = true,
     calibrationBiasEnabled = false,
   } = input;
+
+  // Gate -1: Insufficient consensus samples. Enforced here (rather than in
+  // individual callers) so spot, OSINT, copytrade, and near-zero all share
+  // one floor. The circuit breaker may drop providers; this gate caps how
+  // degraded we're willing to trade from.
+  if (consensusSampleCount !== undefined && consensusSampleCount < consensusMinSamples) {
+    return {
+      hasTrade: false,
+      decision: null,
+      skipReason: `insufficient_samples:n=${consensusSampleCount.toString()},min=${consensusMinSamples.toString()}`,
+    };
+  }
+
+  // Sample-count-aware noise threshold. With fewer providers, observed stddev
+  // is systematically smaller — not because the signal is less noisy but
+  // because with n points the chance of catching a dissenter is lower. We
+  // scale the threshold by sqrt((n-1)/(target-1)) so the gate's effective
+  // strictness is invariant to how many providers returned.
+  const effectiveNoiseThreshold =
+    consensusSampleCount !== undefined && consensusSampleCount < consensusTargetSamples
+      ? noiseStddevThreshold *
+        Math.sqrt(
+          Math.max(1, consensusSampleCount - 1) / Math.max(1, consensusTargetSamples - 1),
+        )
+      : noiseStddevThreshold;
 
   // Gate 0: Extreme-price LLM-distrust gate.
   // When the market is priced very near 0 or 1, the LLM's "default to 50%
@@ -273,12 +313,12 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
     return { hasTrade: false, decision: null, skipReason: ttr.skipReason ?? 'time_to_resolution' };
   }
 
-  // Gate 1: Noisy signal — stddev too high
-  if (consensusStddev > noiseStddevThreshold) {
+  // Gate 1: Noisy signal — stddev too high. Threshold scales with sample count.
+  if (consensusStddev > effectiveNoiseThreshold) {
     return {
       hasTrade: false,
       decision: null,
-      skipReason: `noisy_signal:stddev=${consensusStddev.toFixed(3)}`,
+      skipReason: `noisy_signal:stddev=${consensusStddev.toFixed(3)},threshold=${effectiveNoiseThreshold.toFixed(3)}`,
     };
   }
 

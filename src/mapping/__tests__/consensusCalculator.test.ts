@@ -138,7 +138,8 @@ describe('estimateConsensusProbability', () => {
     const result = await estimateConsensusProbability(BASE_OPTS);
     expect(result.probability).toBeCloseTo(0.65);
     expect(result.sampleCount).toBe(1);
-    expect(result.stddev).toBe(0);
+    // n=1 → no dispersion measurable → Infinity so downstream noise gates trip.
+    expect(result.stddev).toBe(Infinity);
     expect(mockGenerateContent).toHaveBeenCalledTimes(1);
     expect(mockChatCreate).toHaveBeenCalledTimes(1);
   });

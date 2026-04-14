@@ -137,6 +137,18 @@ const envSchema = z.object({
   // Noise gate — skip signals where LLM consensus stddev exceeds this threshold.
   NOISE_STDDEV_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.10),
 
+  // Target number of consensus samples per estimate. Used to scale the noise
+  // threshold when running in degraded regime: with fewer providers, observed
+  // stddev is systematically smaller (fewer chances for an outlier voice), so
+  // the effective threshold tightens by sqrt((n-1)/(target-1)).
+  // Also gates the [consensus-calc] degraded log and the insufficient-samples
+  // skip inside computeDivergence.
+  CONSENSUS_TARGET_SAMPLES: z.coerce.number().int().min(2).max(10).optional().default(4),
+  // Minimum samples required to trade. Raised from the previous implicit 2 to
+  // 3 — with only 2 providers and a sample-variance denominator of n-1=1, a
+  // single dissenter can dominate, and the stddev floor isn't meaningful.
+  CONSENSUS_MIN_SAMPLES: z.coerce.number().int().min(1).max(10).optional().default(3),
+
   // Hyperliquid funding-rate pre-entry gate. HL `funding` is an hourly decimal.
   // Default 1 bp/hr (~8.76%/yr drag). Ship as shadow-logs first, flip after 3-5d.
   HL_FUNDING_GATE_ENABLED: boolFromEnv.optional().default(false),

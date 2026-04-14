@@ -151,7 +151,7 @@ describe('correlationScanner', () => {
     // Shadow dedup key should have been claimed.
     expect(redis.set).toHaveBeenCalled();
     const setCall = (redis.set as ReturnType<typeof vi.fn>).mock.calls.find(
-      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('shadow'),
+      (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('shadow'),
     );
     expect(setCall).toBeDefined();
   });

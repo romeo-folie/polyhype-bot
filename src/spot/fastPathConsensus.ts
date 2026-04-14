@@ -27,6 +27,9 @@ export interface FastConsensusResult {
    *  0 for formula-based estimates (deterministic).
    *  Real stddev for LLM-based estimates (multi-sample). */
   stddev: number;
+  /** Number of LLM samples that contributed to the estimate. Undefined for
+   *  the formula path (deterministic, so sample-count gates don't apply). */
+  sampleCount?: number;
 }
 
 /** Default annualised volatility estimates by asset class. */
@@ -339,10 +342,13 @@ export async function estimateFastConsensus(
     skipContextInjection: true,
   });
 
+  const consensusStddev = (consensus as { stddev?: number }).stddev ?? 0;
+  const consensusSampleCount = (consensus as { sampleCount?: number }).sampleCount;
   return {
     probability: consensus.probability,
     reasoning: consensus.reasoning,
     method: 'llm',
-    stddev: (consensus as any).stddev || 0,
+    stddev: consensusStddev,
+    ...(consensusSampleCount !== undefined ? { sampleCount: consensusSampleCount } : {}),
   };
 }

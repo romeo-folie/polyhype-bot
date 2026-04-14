@@ -324,19 +324,6 @@ async function evaluateOsintCandidate(args: EvaluateCandidateArgs): Promise<Eval
     return { signal: null, skipReason: 'consensus_failed' };
   }
 
-  // Require at least 2 LLM samples for a trade — a single provider returning
-  // 0.50 ("unrelated") creates phantom edge on extreme-priced markets when
-  // stddev=0 looks artificially confident.
-  if (consensus.sampleCount < 2) {
-    logger.info('[mapping] skipping — insufficient consensus samples', {
-      marketId: candidate.marketId,
-      question: candidate.question.substring(0, 80),
-      sampleCount: consensus.sampleCount,
-      consensusP: consensus.probability.toFixed(3),
-    });
-    return { signal: null, skipReason: 'noisy_signal' };
-  }
-
   const decisionId = randomUUID();
   const marketCategory = inferCategory(candidate.question);
   const { hasTrade, decision, skipReason } = computeDivergence({
@@ -359,6 +346,9 @@ async function evaluateOsintCandidate(args: EvaluateCandidateArgs): Promise<Eval
     category: marketCategory,
     kellyFraction: cfg.KELLY_FRACTION,
     noiseStddevThreshold: cfg.NOISE_STDDEV_THRESHOLD,
+    consensusSampleCount: consensus.sampleCount,
+    consensusTargetSamples: cfg.CONSENSUS_TARGET_SAMPLES,
+    consensusMinSamples: cfg.CONSENSUS_MIN_SAMPLES,
     kellyProbeDelta: cfg.KELLY_PROBE_DELTA,
     kellyRequireSignStable: cfg.KELLY_REQUIRE_SIGN_STABLE,
     calibrationBiasEnabled: cfg.CALIBRATION_BIAS_ENABLED,

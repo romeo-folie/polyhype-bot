@@ -348,6 +348,13 @@ async function runSpotMonitorInner(
         zone5DirectionalBlock: cfg.ZONE5_DIRECTIONAL_BLOCK,
         kellyFraction: cfg.KELLY_FRACTION,
         noiseStddevThreshold: cfg.NOISE_STDDEV_THRESHOLD,
+        // Formula-path (deterministic) leaves sampleCount undefined so the
+        // insufficient-samples gate is skipped; LLM fallback propagates n.
+        ...(consensus.sampleCount !== undefined
+          ? { consensusSampleCount: consensus.sampleCount }
+          : {}),
+        consensusTargetSamples: cfg.CONSENSUS_TARGET_SAMPLES,
+        consensusMinSamples: cfg.CONSENSUS_MIN_SAMPLES,
         kellyProbeDelta: cfg.KELLY_PROBE_DELTA,
         kellyRequireSignStable: cfg.KELLY_REQUIRE_SIGN_STABLE,
       });

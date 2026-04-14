@@ -492,8 +492,27 @@ export async function estimateConsensusProbability(opts: {
   if (results.length === 0) throw new Error('All consensus samples failed');
 
   const mean = results.reduce((a, b) => a + b, 0) / results.length;
-  const variance = results.reduce((s, x) => s + (x - mean) ** 2, 0) / results.length;
-  const stddev = Math.sqrt(variance);
+  // Unbiased sample variance (Bessel-corrected: divide by n-1). With n=1 we
+  // can't measure dispersion — return Infinity so downstream stddev-based
+  // gates (noise gate, pessimistic EV) treat it as maximally uncertain.
+  const stddev =
+    results.length < 2
+      ? Infinity
+      : Math.sqrt(
+          results.reduce((s, x) => s + (x - mean) ** 2, 0) / (results.length - 1),
+        );
+
+  // Log when we're running in degraded regime — fewer providers returning than
+  // the configured target means stddev-based gates behave differently than when
+  // tuned. Surfaces silent provider degradation.
+  const targetSamples = cfg.CONSENSUS_TARGET_SAMPLES;
+  if (results.length < targetSamples) {
+    logger.warn('[consensus-calc] degraded regime', {
+      sampleCount: results.length,
+      targetSamples,
+      stddev: Number.isFinite(stddev) ? stddev.toFixed(4) : 'inf',
+    });
+  }
 
   const estimate: ConsensusEstimate = {
     probability: mean,
