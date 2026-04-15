@@ -135,15 +135,19 @@ const envSchema = z.object({
   KELLY_REQUIRE_SIGN_STABLE: boolFromEnv.optional().default(true),
 
   // Noise gate — skip signals where LLM consensus stddev exceeds this threshold.
-  NOISE_STDDEV_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.10),
+  // Calibrated for n=3 providers with Bessel-corrected sample variance (which
+  // inflates stddev by ~22% vs the old population formula). Previous 0.10 was
+  // tuned against population variance at n=4 and silently over-tightened once
+  // the variance formula switched.
+  NOISE_STDDEV_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.13),
 
-  // Target number of consensus samples per estimate. Used to scale the noise
-  // threshold when running in degraded regime: with fewer providers, observed
-  // stddev is systematically smaller (fewer chances for an outlier voice), so
-  // the effective threshold tightens by sqrt((n-1)/(target-1)).
-  // Also gates the [consensus-calc] degraded log and the insufficient-samples
-  // skip inside computeDivergence.
-  CONSENSUS_TARGET_SAMPLES: z.coerce.number().int().min(2).max(10).optional().default(4),
+  // Target number of consensus samples per estimate. n=3 is the design baseline
+  // (OpenAI / Gemini / DeepSeek); n=4 is a bonus when Anthropic is available.
+  // When n<target, the noise threshold tightens by sqrt((n-1)/(target-1)) to
+  // compensate for the systematically-smaller observed stddev with fewer
+  // providers. Also gates the [consensus-calc] degraded log and the
+  // insufficient-samples skip inside computeDivergence.
+  CONSENSUS_TARGET_SAMPLES: z.coerce.number().int().min(2).max(10).optional().default(3),
   // Minimum samples required to trade. Raised from the previous implicit 2 to
   // 3 — with only 2 providers and a sample-variance denominator of n-1=1, a
   // single dissenter can dominate, and the stddev floor isn't meaningful.

@@ -159,14 +159,14 @@ describe('computeDivergence', () => {
 
 describe('EV gate & noise gate', () => {
   it('exports NOISE_STDDEV_THRESHOLD constant', () => {
-    expect(NOISE_STDDEV_THRESHOLD).toBe(0.10);
+    expect(NOISE_STDDEV_THRESHOLD).toBe(0.13);
   });
 
   it('rejects noisy signal when stddev > threshold', () => {
     const result = computeDivergence({
       ...DEFAULT_INPUT,
       consensusProbability: 0.7,
-      consensusStddev: 0.11, // above 0.10 threshold
+      consensusStddev: 0.14, // above 0.13 threshold
       currentYesPrice: 0.5,
     });
     expect(result.hasTrade).toBe(false);
