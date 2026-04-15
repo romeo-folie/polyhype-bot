@@ -26,6 +26,16 @@ import type { Redis } from 'ioredis';
 const TIMEOUT_MS = 25_000;
 
 /**
+ * Tolerance for detecting the explicit 0.50 abstention anchor. The system
+ * prompt instructs providers to return EXACTLY 0.50 when the headline is
+ * unrelated to the market. A legitimate "genuinely 50/50" estimate is
+ * indistinguishable from abstention at this tolerance — we accept that
+ * tradeoff because the prompt contract makes exact 0.5 mean "I don't know",
+ * and a real 50/50 market has no edge to trade anyway.
+ */
+const ABSTENTION_EPSILON = 0.001;
+
+/**
  * Extract a safe error message from any thrown value.
  * Axios errors include the full request config (headers, auth keys) in String(err).
  * We only log err.message — never the full object — to prevent credential leaks.
@@ -515,24 +525,55 @@ export async function estimateConsensusProbability(opts: {
 
   if (results.length === 0) throw new Error('All consensus samples failed');
 
-  const mean = results.reduce((a, b) => a + b, 0) / results.length;
+  // Abstention filter: the system prompt instructs providers to return EXACTLY
+  // 0.50 when the headline is unrelated to the market question. Treating that
+  // anchor as a regular vote biases the mean toward 0.5 and synthetically
+  // inflates stddev — producing quantized (mean, stddev) pairs that repeat
+  // across unrelated questions (e.g. {0.5, 0.85, 0.85} → 0.733 ± 0.202 lands
+  // on three different markets that share the pattern). Filter abstentions
+  // before aggregating; downstream `consensusMinSamples` naturally catches
+  // the case where too few real votes remain.
+  const realVotes = results.filter((p) => Math.abs(p - 0.5) > ABSTENTION_EPSILON);
+  const abstentionCount = results.length - realVotes.length;
+  if (abstentionCount > 0) {
+    logger.info('[consensus-calc] abstentions filtered', {
+      totalProviders: results.length,
+      abstentions: abstentionCount,
+      realVotes: realVotes.length,
+    });
+  }
+
+  // All providers abstained → unrelated headline. Return 0.5 with
+  // sampleCount=0 so downstream insufficient_samples / anchor_collapse gates
+  // reject cleanly instead of the panel pretending it has a signal.
+  if (realVotes.length === 0) {
+    const estimate: ConsensusEstimate = {
+      probability: 0.5,
+      reasoning: reasoning || 'All providers abstained (unrelated headline).',
+      stddev: 0,
+      sampleCount: 0,
+    };
+    return estimate;
+  }
+
+  const mean = realVotes.reduce((a, b) => a + b, 0) / realVotes.length;
   // Unbiased sample variance (Bessel-corrected: divide by n-1). With n=1 we
   // can't measure dispersion — return Infinity so downstream stddev-based
   // gates (noise gate, pessimistic EV) treat it as maximally uncertain.
   const stddev =
-    results.length < 2
+    realVotes.length < 2
       ? Infinity
       : Math.sqrt(
-          results.reduce((s, x) => s + (x - mean) ** 2, 0) / (results.length - 1),
+          realVotes.reduce((s, x) => s + (x - mean) ** 2, 0) / (realVotes.length - 1),
         );
 
   // Log when we're running in degraded regime — fewer providers returning than
   // the configured target means stddev-based gates behave differently than when
   // tuned. Surfaces silent provider degradation.
   const targetSamples = cfg.CONSENSUS_TARGET_SAMPLES;
-  if (results.length < targetSamples) {
+  if (realVotes.length < targetSamples) {
     logger.warn('[consensus-calc] degraded regime', {
-      sampleCount: results.length,
+      sampleCount: realVotes.length,
       targetSamples,
       stddev: Number.isFinite(stddev) ? stddev.toFixed(4) : 'inf',
     });
@@ -542,7 +583,7 @@ export async function estimateConsensusProbability(opts: {
     probability: mean,
     reasoning,
     stddev,
-    sampleCount: results.length,
+    sampleCount: realVotes.length,
   };
 
   // Cache the result

@@ -190,19 +190,21 @@ describe('estimateConsensusProbability', () => {
   });
 
   it('handles null description gracefully', async () => {
+    // Use 0.62 / 0.68 (not the 0.5 anchor) so the null-description path is
+    // tested without tripping the abstention filter.
     mockGenerateContent.mockResolvedValue({
       response: {
-        text: () => JSON.stringify({ probability: 0.5, reasoning: 'Uncertain' }),
+        text: () => JSON.stringify({ probability: 0.62, reasoning: 'Uncertain' }),
       },
     });
     mockChatCreate.mockResolvedValue({
       choices: [
-        { message: { content: JSON.stringify({ probability: 0.5, reasoning: 'OA Uncertain' }) } },
+        { message: { content: JSON.stringify({ probability: 0.68, reasoning: 'OA Uncertain' }) } },
       ],
     });
 
     const result = await estimateConsensusProbability({ ...BASE_OPTS, description: null });
-    expect(result.probability).toBeCloseTo(0.5);
+    expect(result.probability).toBeCloseTo(0.65);
     expect(result.sampleCount).toBe(2);
   });
 
@@ -537,37 +539,92 @@ describe('estimateConsensusProbability', () => {
     );
   });
 
-  it('returns 0.50 when LLM says news is unrelated (Blind Consensus)', async () => {
-    // Mock both models to return 0.50 as instructed by the new blind prompt
+  it('returns 0.50 with sampleCount=0 when all providers abstain (unrelated headline)', async () => {
+    // System prompt tells providers to return EXACTLY 0.50 when the headline
+    // is unrelated to the market. The aggregator filters those abstentions
+    // before computing mean/stddev. When every provider abstains, return
+    // probability=0.5 but sampleCount=0 so the downstream insufficient_samples
+    // gate catches the no-signal case instead of the panel pretending to have
+    // an edge worth trading on.
     mockGenerateContent.mockResolvedValue({
-      response: { 
-        text: () => JSON.stringify({ 
-          probability: 0.50, 
-          reasoning: "Headline is unrelated to the market question." 
-        }) 
+      response: {
+        text: () =>
+          JSON.stringify({
+            probability: 0.5,
+            reasoning: 'Headline is unrelated to the market question.',
+          }),
       },
     });
     mockChatCreate.mockResolvedValue({
       choices: [
-        { 
-          message: { 
-            content: JSON.stringify({ 
-              probability: 0.50, 
-              reasoning: "Unrelated news." 
-            }) 
-          } 
+        {
+          message: {
+            content: JSON.stringify({ probability: 0.5, reasoning: 'Unrelated news.' }),
+          },
         },
       ],
     });
 
     const result = await estimateConsensusProbability({
       ...BASE_OPTS,
-      headline: "Something completely different",
+      headline: 'Something completely different',
     });
 
-    // Blind consensus: LLM returns 0.50 for unrelated news,
-    // regardless of what the market price actually is.
-    expect(result.probability).toBe(0.50);
+    expect(result.probability).toBe(0.5);
+    expect(result.sampleCount).toBe(0);
+    expect(result.stddev).toBe(0);
+  });
+
+  it('filters exact-0.5 abstentions before computing mean and stddev', async () => {
+    // One provider abstains (returns exactly 0.5), the other returns 0.85.
+    // Without filtering: mean=0.675, stddev=0.247 (inflated by the anchor).
+    // With filtering:    mean=0.85, stddev=Infinity (n=1 after filter).
+    mockGenerateContent.mockResolvedValue({
+      response: {
+        text: () =>
+          JSON.stringify({ probability: 0.5, reasoning: 'Abstention — unrelated.' }),
+      },
+    });
+    mockChatCreate.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({ probability: 0.85, reasoning: 'Real estimate.' }),
+          },
+        },
+      ],
+    });
+
+    const result = await estimateConsensusProbability(BASE_OPTS);
+
+    expect(result.probability).toBeCloseTo(0.85, 4);
+    expect(result.sampleCount).toBe(1);
+    expect(result.stddev).toBe(Infinity);
+  });
+
+  it('accepts probabilities near-but-not-at 0.5 as real votes', async () => {
+    // 0.501 is a legitimate "just-above-50/50" estimate, not the 0.500
+    // abstention anchor. Both providers return just above 0.5 — should
+    // aggregate normally without filtering anything out.
+    mockGenerateContent.mockResolvedValue({
+      response: {
+        text: () => JSON.stringify({ probability: 0.501, reasoning: 'slight yes' }),
+      },
+    });
+    mockChatCreate.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({ probability: 0.503, reasoning: 'slight yes' }),
+          },
+        },
+      ],
+    });
+
+    const result = await estimateConsensusProbability(BASE_OPTS);
+    expect(result.probability).toBeCloseTo(0.502, 4);
+    expect(result.sampleCount).toBe(2);
+    expect(result.stddev).toBeGreaterThan(0);
   });
 });
 

@@ -135,11 +135,15 @@ const envSchema = z.object({
   KELLY_REQUIRE_SIGN_STABLE: boolFromEnv.optional().default(true),
 
   // Noise gate — skip signals where LLM consensus stddev exceeds this threshold.
-  // Calibrated for n=3 providers with Bessel-corrected sample variance (which
-  // inflates stddev by ~22% vs the old population formula). Previous 0.10 was
-  // tuned against population variance at n=4 and silently over-tightened once
-  // the variance formula switched.
-  NOISE_STDDEV_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.13),
+  // Retuned 2026-04-15 (0.13 → 0.22) after the deadline-surfacing fix (2e94071):
+  // providers now legitimately disagree more on date-variant questions (7-day
+  // vs 77-day horizon), so post-fix stddev distributions shifted upward. Paired
+  // with the abstention filter in consensusCalculator (filters exact-0.5
+  // anchor returns before mean/stddev), so remaining stddev reflects real
+  // disagreement on real votes. The pessimistic-EV gate (p ± stddev) is the
+  // primary defense against noisy edges; this threshold is a fast-fail for
+  // pathologically wide panels.
+  NOISE_STDDEV_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.22),
 
   // Target number of consensus samples per estimate. n=3 is the design baseline
   // (OpenAI / Gemini / DeepSeek); n=4 is a bonus when Anthropic is available.

@@ -78,7 +78,8 @@ export interface DivergenceInput {
   category?: string;
   /** Kelly fraction multiplier (default 0.25 = quarter-Kelly). */
   kellyFraction?: number;
-  /** Noise gate — stddev threshold (default 0.13, calibrated for n=3 Bessel). */
+  /** Noise gate — stddev threshold (default 0.22, calibrated for n=3 Bessel
+   *  post the 2026-04-15 deadline-surfacing fix). */
   noiseStddevThreshold?: number;
   /**
    * Number of LLM providers that returned for this estimate. When less than
@@ -145,7 +146,7 @@ export interface DivergenceResult {
 
 /** Legacy constant — callers should use the configurable `noiseStddevThreshold`
  *  input field instead. Kept for backward-compat with tests that import it. */
-export const NOISE_STDDEV_THRESHOLD = 0.13;
+export const NOISE_STDDEV_THRESHOLD = 0.22;
 
 /**
  * Compute edge and position size.
@@ -172,7 +173,7 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
     zone5DirectionalBlock = true,
     category,
     kellyFraction = 0.25,
-    noiseStddevThreshold = 0.13,
+    noiseStddevThreshold = 0.22,
     consensusSampleCount,
     consensusTargetSamples = 3,
     consensusMinSamples = 3,
