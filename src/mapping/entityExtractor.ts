@@ -162,7 +162,13 @@ export interface CandidateMarket {
   liquidity: number;
   endDate: string | null;
   description: string | null;
-  /** Search query that surfaced this market */
+  /**
+   * Query most associated with this market's relevance. For word-boundary
+   * hits, this is the query whose tokens contributed the most matches (the
+   * "best responsible query"), not necessarily the query that retrieved the
+   * market. For search-only sentinel hits (score = 0.5), this is the literal
+   * /public-search query that returned it. Used for logs/telemetry only.
+   */
   matchedQuery: string;
   /**
    * Relevance score for ranking candidate markets. For word-boundary query
@@ -177,6 +183,11 @@ export interface CandidateMarket {
 }
 
 const MIN_LIQUIDITY = 100; // USDC — skip ghost markets
+
+// Shadow-mode budget for the background /public-search comparison. Generous
+// enough for a typical Gamma round-trip (~300-800ms × up to 5 queries) but
+// short enough that a stalled endpoint never leaks a long-lived timer.
+const SHADOW_PUBLIC_SEARCH_TIMEOUT_MS = 5000;
 
 /**
  * Extract word-tokens from a search query. Lowercases, strips punctuation,
@@ -598,32 +609,45 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
     return rankCandidates(Array.from(merged.values()));
   }
 
-  // mode === 'shadow' — run both, return legacy, log diff.
+  // mode === 'shadow' — return legacy synchronously; fire /public-search in
+  // the background so Gamma latency never stretches the live mapping path.
+  // Bounded by SHADOW_PUBLIC_SEARCH_TIMEOUT_MS; errors/timeouts are swallowed.
   const legacy = cachedMarkets.length > 0
     ? retrieveFromCache(queries, cachedMarkets)
     : await retrieveFromGammaEvents(queries);
   const legacyRanked = rankCandidates(Array.from(legacy.values()));
 
-  try {
-    const publicHits = await retrieveFromPublicSearch(
-      queries,
-      cachedMarkets,
-      cfg.PUBLIC_SEARCH_LIMIT_PER_ENTITY,
+  let shadowTimeout: NodeJS.Timeout | undefined;
+  const publicPromise = retrieveFromPublicSearch(
+    queries,
+    cachedMarkets,
+    cfg.PUBLIC_SEARCH_LIMIT_PER_ENTITY,
+  );
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    shadowTimeout = setTimeout(
+      () => { reject(new Error('shadow timeout')); },
+      SHADOW_PUBLIC_SEARCH_TIMEOUT_MS,
     );
-    const publicRanked = rankCandidates(Array.from(publicHits.values()));
-    logRetrievalShadow({
-      headline: item.title,
-      queries,
-      legacyTop: legacyRanked,
-      publicTop: publicRanked,
-      topN: cfg.RELEVANCE_CANDIDATE_CAP,
+  });
+  void Promise.race([publicPromise, timeoutPromise])
+    .then((publicHits) => {
+      const publicRanked = rankCandidates(Array.from(publicHits.values()));
+      logRetrievalShadow({
+        headline: item.title,
+        queries,
+        legacyTop: legacyRanked,
+        publicTop: publicRanked,
+        topN: cfg.RELEVANCE_CANDIDATE_CAP,
+      });
+    })
+    .catch((err: unknown) => {
+      logger.warn('[entity-extractor] retrieval shadow failed (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    })
+    .finally(() => {
+      if (shadowTimeout) clearTimeout(shadowTimeout);
     });
-  } catch (err) {
-    // Never let shadow logging break the live path.
-    logger.warn('[entity-extractor] retrieval shadow failed (non-fatal)', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
 
   return legacyRanked;
 }
