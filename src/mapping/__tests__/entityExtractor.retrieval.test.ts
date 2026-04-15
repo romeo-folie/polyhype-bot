@@ -215,6 +215,63 @@ describe('rankCandidates — match-strength first, liquidity tiebreaker', () => 
     const ranked = rankCandidates([lower_liq, higher_liq]);
     expect(ranked[0]?.marketId).toBe('b');
   });
+
+  it('tiebreaks 0.5 sentinel search-only hits by searchRank (not liquidity)', () => {
+    // Two /public-search sentinel hits (no word-boundary match): the
+    // high-liquidity sports market vs. the low-liquidity political market.
+    // Without the searchRank tiebreak, liquidity would surface the sports
+    // market — the exact pathology the fix targets.
+    const sports_high_liq_later = buildCandidate(
+      makeMarket({ id: 'sports', question: 'Will Arsenal vs Liverpool end in a draw?', liquidity: '50000' }),
+      'crypto',
+      0.5,
+      3, // inserted 4th by /public-search
+    )!;
+    const political_low_liq_earlier = buildCandidate(
+      makeMarket({ id: 'mica', question: 'Will MiCA 2 pass in the EU by December?', liquidity: '500' }),
+      'crypto',
+      0.5,
+      0, // inserted 1st by /public-search (top topical hit)
+    )!;
+    const ranked = rankCandidates([sports_high_liq_later, political_low_liq_earlier]);
+    expect(ranked[0]?.marketId).toBe('mica');
+    expect(ranked[1]?.marketId).toBe('sports');
+  });
+
+  it('still uses liquidity tiebreak when both candidates are word-boundary cache hits', () => {
+    // Cache hits have no searchRank → fall through to the liquidity tiebreak,
+    // preserving existing behavior for the cache-only retrieval path.
+    const a = buildCandidate(
+      makeMarket({ id: 'a', liquidity: '500' }),
+      'iran',
+      2,
+    )!;
+    const b = buildCandidate(
+      makeMarket({ id: 'b', liquidity: '50000' }),
+      'iran',
+      2,
+    )!;
+    expect(a.searchRank).toBeUndefined();
+    expect(b.searchRank).toBeUndefined();
+    const ranked = rankCandidates([a, b]);
+    expect(ranked[0]?.marketId).toBe('b');
+  });
+
+  it('word-boundary match outranks a 0.5 sentinel regardless of searchRank', () => {
+    const sentinel_top_rank = buildCandidate(
+      makeMarket({ id: 'sentinel', liquidity: '100000' }),
+      'iran',
+      0.5,
+      0,
+    )!;
+    const word_boundary = buildCandidate(
+      makeMarket({ id: 'wb', liquidity: '100' }),
+      'iran',
+      1,
+    )!;
+    const ranked = rankCandidates([sentinel_top_rank, word_boundary]);
+    expect(ranked[0]?.marketId).toBe('wb');
+  });
 });
 
 describe('retrieveFromCache — word-boundary + match-strength integration', () => {

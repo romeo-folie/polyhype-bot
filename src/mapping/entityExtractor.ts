@@ -180,6 +180,16 @@ export interface CandidateMarket {
    * tiebreaker.
    */
   matchScore?: number;
+  /**
+   * Insertion rank among `/public-search` hits (lower = earlier in the
+   * endpoint's topical ordering). Only set for search-only candidates
+   * (word-boundary cache hits leave this undefined). Used as tiebreak for
+   * the 0.5 sentinel tier — preserves `/public-search`'s topical rank
+   * instead of falling back to liquidity, which otherwise floats
+   * high-liquidity sports markets above genuine political hits when a
+   * broad query returns many tangential results.
+   */
+  searchRank?: number;
 }
 
 const MIN_LIQUIDITY = 100; // USDC — skip ghost markets
@@ -274,6 +284,7 @@ function buildCandidate(
   market: GammaMarket,
   matchedQuery: string,
   matchScore: number,
+  searchRank?: number,
 ): CandidateMarket | null {
   const questionLower = market.question.toLowerCase();
   if (DOMAIN_BLOCKLIST_RE.test(questionLower)) return null;
@@ -331,6 +342,7 @@ function buildCandidate(
     description: market.description ?? null,
     matchedQuery,
     matchScore,
+    ...(searchRank !== undefined ? { searchRank } : {}),
   };
 }
 
@@ -412,6 +424,7 @@ async function retrieveFromPublicSearch(
 ): Promise<Map<string, CandidateMarket>> {
   const out = new Map<string, CandidateMarket>();
   const cacheById = new Map(cachedMarkets.map((m) => [m.id, m]));
+  let searchRank = 0;
 
   for (const query of queries) {
     let events: Awaited<ReturnType<typeof publicSearch>> = [];
@@ -435,11 +448,17 @@ async function retrieveFromPublicSearch(
         // Trust the search endpoint's topical ranking even when our
         // word-boundary token match score is 0 — it uses richer signals than
         // token matching alone. Use 0.5 as a sentinel "search-only hit"
-        // score so genuine word-boundary matches still outrank it.
+        // score so genuine word-boundary matches still outrank it. For
+        // sentinel hits, stamp the insertion index so rankCandidates can
+        // preserve /public-search's own ordering within the 0.5 tier.
         const finalScore = score > 0 ? score : 0.5;
         const finalQuery = score > 0 ? matchedQuery : query;
-        const cand = buildCandidate(source, finalQuery, finalScore);
-        if (cand) out.set(market.id, cand);
+        const stampedRank = score > 0 ? undefined : searchRank;
+        const cand = buildCandidate(source, finalQuery, finalScore, stampedRank);
+        if (cand) {
+          out.set(market.id, cand);
+          if (score === 0) searchRank++;
+        }
       }
     }
   }
@@ -447,13 +466,20 @@ async function retrieveFromPublicSearch(
 }
 
 /**
- * Rank candidates: match-strength first, liquidity as tiebreaker.
+ * Rank candidates: match-strength first, then liquidity — except when both
+ * candidates are `/public-search` sentinel hits (matchScore = 0.5 tier), in
+ * which case we preserve the endpoint's topical order via `searchRank`.
+ * Liquidity-tiebreak on the sentinel tier floated high-liquidity sports
+ * markets above political hits when broad queries flooded the pool.
  * Mutates and returns the input array.
  */
 function rankCandidates(candidates: CandidateMarket[]): CandidateMarket[] {
   candidates.sort((a, b) => {
     const scoreDiff = (b.matchScore ?? 0) - (a.matchScore ?? 0);
     if (scoreDiff !== 0) return scoreDiff;
+    if (a.searchRank !== undefined && b.searchRank !== undefined) {
+      return a.searchRank - b.searchRank;
+    }
     return b.liquidity - a.liquidity;
   });
   return candidates;
