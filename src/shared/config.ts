@@ -571,8 +571,10 @@ const envSchema = z.object({
   // Also used by the boolean isMarketRelevant() wrapper.
   RELEVANCE_MIN_FIT_SCORE: z.coerce.number().min(0).max(1).optional().default(0.5),
   // Retrieval layer mode for OSINT → candidate-market matching.
-  //   legacy        — local cache, substring match, liquidity-sorted (pre-2026-04-15 behavior)
-  //   shadow        — run both legacy and public_search; return legacy but log diff (default)
+  //   legacy        — local cache only, word-boundary token match, ranked by
+  //                   (matchScore desc, liquidity desc)
+  //   shadow        — run both legacy and public_search; return the legacy/cache
+  //                   result but log the diff (default)
   //   public_search — merge /public-search hits with local cache by id, rank by
   //                   (token_match_count desc, liquidity desc)
   // Default is shadow so we can compare candidate sets for 24–48h before flipping

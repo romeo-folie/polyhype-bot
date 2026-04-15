@@ -165,9 +165,13 @@ export interface CandidateMarket {
   /** Search query that surfaced this market */
   matchedQuery: string;
   /**
-   * Count of distinct query tokens that matched this market's question or
-   * description under word-boundary matching. Higher = better topical fit.
-   * Used as the primary sort key; liquidity is the tiebreaker.
+   * Relevance score for ranking candidate markets. For word-boundary query
+   * matching, this is the count of distinct query tokens (union across all
+   * queries) that appear in the market's question or description. Fallback
+   * retrieval paths may assign a fractional sentinel (e.g. 0.5) to mark a
+   * lower-confidence search-only hit that still outranks nothing. Higher =
+   * better topical fit. Used as the primary sort key; liquidity is the
+   * tiebreaker.
    */
   matchScore?: number;
 }
@@ -399,7 +403,7 @@ async function retrieveFromPublicSearch(
   const cacheById = new Map(cachedMarkets.map((m) => [m.id, m]));
 
   for (const query of queries) {
-    let events;
+    let events: Awaited<ReturnType<typeof publicSearch>> = [];
     try {
       events = await publicSearch({ query, limit: limitPerEntity, activeOnly: true });
     } catch (err) {
@@ -418,8 +422,8 @@ async function retrieveFromPublicSearch(
         const source = cacheById.get(market.id) ?? market;
         const { score, matchedQuery } = scoreMarketAgainstQueries(source, queries);
         // Trust the search endpoint's topical ranking even when our
-        // substring-based match score is 0 — it uses richer signals than
-        // whole-word token matches. Use 0.5 as a sentinel "search-only hit"
+        // word-boundary token match score is 0 — it uses richer signals than
+        // token matching alone. Use 0.5 as a sentinel "search-only hit"
         // score so genuine word-boundary matches still outrank it.
         const finalScore = score > 0 ? score : 0.5;
         const finalQuery = score > 0 ? matchedQuery : query;
@@ -494,6 +498,11 @@ function logRetrievalShadow(params: {
   const overlap = Array.from(legacyIds).filter((id) => publicIds.has(id)).length;
   const onlyInPublic = Array.from(publicIds).filter((id) => !legacyIds.has(id));
   const onlyInLegacy = Array.from(legacyIds).filter((id) => !publicIds.has(id));
+  // Effective N: when either side has fewer than topN candidates, comparing
+  // overlap against topN over-reports diffs (overlap is capped by the smaller
+  // set). Use the smaller of the three for both wouldBlock and the persisted
+  // threshold so the shadow metric reflects a real disagreement.
+  const effectiveN = Math.min(topN, legacyIds.size, publicIds.size);
 
   logger.info('[entity-extractor] retrieval_shadow', {
     headline: headline.slice(0, 120),
@@ -501,6 +510,7 @@ function logRetrievalShadow(params: {
     legacyCount: legacyTop.length,
     publicCount: publicTop.length,
     topN,
+    effectiveN,
     overlap,
     onlyInPublicCount: onlyInPublic.length,
     onlyInLegacyCount: onlyInLegacy.length,
@@ -510,14 +520,16 @@ function logRetrievalShadow(params: {
   void enqueueWrite('shadow_observations', {
     kind: 'market_retrieval',
     source: 'osint',
-    wouldBlock: overlap < topN,
+    wouldBlock: effectiveN > 0 && overlap < effectiveN,
     metricValue: overlap,
-    threshold: topN,
+    threshold: effectiveN,
     payload: {
       headline: headline.slice(0, 200),
       queries,
       legacyCount: legacyTop.length,
       publicCount: publicTop.length,
+      topN,
+      effectiveN,
       onlyInPublicCount: onlyInPublic.length,
       onlyInLegacyCount: onlyInLegacy.length,
       legacyTopIds: Array.from(legacyIds).slice(0, 10),
@@ -530,13 +542,15 @@ function logRetrievalShadow(params: {
  * Given a scored item, extract entities and find candidate Polymarket markets.
  *
  * Retrieval strategy is controlled by `MARKET_RETRIEVAL_MODE`:
- *   - legacy        — local cache word-boundary match (post-2026-04-15 default was: substring + liquidity sort)
+ *   - legacy        — local cache, word-boundary token match
  *   - public_search — merge /public-search results with local cache lookups
  *   - shadow        — run both, return legacy, log the diff
  *
  * Results are ranked by `(matchScore desc, liquidity desc)` in all modes.
- * `matchScore` = distinct query tokens that appear in the market's question
- * or description under word-boundary matching, max over all queries.
+ * `matchScore` = count of distinct query tokens (taken from the union of all
+ * queries) that appear in the market's question or description under
+ * word-boundary matching. Search-only hits without a literal match get a
+ * 0.5 sentinel so they rank below any word-boundary match but above nothing.
  */
 export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateMarket[]> {
   const cfg = loadConfig();

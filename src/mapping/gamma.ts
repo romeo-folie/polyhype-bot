@@ -113,7 +113,7 @@ export async function searchEvents(opts: SearchEventsOptions): Promise<GammaEven
  * the `events` field — profiles/tags are not used.
  */
 export interface PublicSearchResponse {
-  events: GammaEvent[];
+  events?: GammaEvent[];
   pagination?: { hasMore?: boolean; totalResults?: number };
 }
 
