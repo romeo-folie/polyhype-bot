@@ -102,6 +102,61 @@ export interface OracleLagEvalConfig {
   maxEntryPrice: number;
 }
 
+/**
+ * Outcome of an attempted `fire()` call against the executor. Used to drive
+ * shadow_observations(kind='oracle_lag_executor') so we can explain the gap
+ * between wouldTrade=true shadow rows and actual executed trades.
+ */
+export type OracleLagExecutorOutcome = 'success' | 'skipped' | 'error';
+
+export interface OracleLagExecutorShadowInput {
+  outcome: OracleLagExecutorOutcome;
+  skipReason?: string | undefined;
+  error?: string | undefined;
+  venue?: string | undefined;
+  stakeUsd?: number | undefined;
+  entryPrice?: number | undefined;
+  shadowEntryPrice?: number | undefined;
+  timeLeftMin?: number | undefined;
+  consensusProbability?: number | undefined;
+  move: OracleLagMove;
+  market: Pick<UpDownMarket, 'marketId' | 'slug'>;
+  side: 'UP' | 'DOWN';
+  threshold: number;
+}
+
+/**
+ * Pure row builder — keeps fire()'s enqueueWrite call testable without Redis/
+ * executor mocks.
+ */
+export function buildOracleLagExecutorShadowRow(
+  input: OracleLagExecutorShadowInput,
+) {
+  return {
+    kind: 'oracle_lag_executor' as const,
+    source: 'arb' as const,
+    symbol: 'BTC',
+    marketId: input.market.marketId,
+    direction: input.side,
+    wouldBlock: input.outcome !== 'success',
+    metricValue: input.move.pctMove,
+    threshold: input.threshold,
+    payload: {
+      slug: input.market.slug,
+      outcome: input.outcome,
+      skipReason: input.skipReason,
+      error: input.error,
+      venue: input.venue,
+      stakeUsd: input.stakeUsd,
+      entryPrice: input.entryPrice,
+      shadowEntryPrice: input.shadowEntryPrice,
+      timeLeftMin: input.timeLeftMin,
+      consensusProbability: input.consensusProbability,
+      movePct: input.move.pctMove,
+    },
+  };
+}
+
 // ── Pure entry-rule evaluator ───────────────────────────────────────────────
 
 /**
@@ -535,6 +590,13 @@ export class OracleLagScanner {
       endDate: market.endDate.toISOString(),
     };
 
+    let outcome: 'success' | 'skipped' | 'error' = 'error';
+    let executorSkipReason: string | undefined;
+    let executorError: string | undefined;
+    let executorVenue: string | undefined;
+    let executorStakeUsd: number | undefined;
+    let executorEntryPrice: number | undefined;
+
     try {
       const result = await executeSignal(signal, this.redis);
 
@@ -544,6 +606,10 @@ export class OracleLagScanner {
         // documented footgun from CLAUDE.md lessons learned.
         const executedStake = result.signal.stakeUsd;
         const executedEntryPrice = result.entryPrice ?? entryPrice;
+        outcome = 'success';
+        executorStakeUsd = executedStake;
+        executorEntryPrice = executedEntryPrice;
+        executorVenue = result.executionVenue;
 
         logger.info('[oracle-lag] entry', {
           marketId: market.marketId,
@@ -631,7 +697,11 @@ export class OracleLagScanner {
           tokenId,
         });
       } else if (result.skipped) {
-        logger.debug('[oracle-lag] executor skipped', {
+        outcome = 'skipped';
+        executorSkipReason = result.skipReason;
+        // Bumped to info so prod logs surface this without DEBUG. Cross-referenced
+        // with shadow_observations(kind='oracle_lag_executor') for durable history.
+        logger.info('[oracle-lag] executor skipped', {
           marketId: market.marketId,
           reason: result.skipReason,
         });
@@ -639,6 +709,8 @@ export class OracleLagScanner {
         // global-governor skip).
         await this.redis.del(dedupKey).catch(() => {});
       } else if (result.error) {
+        outcome = 'error';
+        executorError = result.error;
         logger.warn('[oracle-lag] executor error', {
           marketId: market.marketId,
           error: result.error,
@@ -646,11 +718,35 @@ export class OracleLagScanner {
         await this.redis.del(dedupKey).catch(() => {});
       }
     } catch (err) {
+      outcome = 'error';
+      executorError = err instanceof Error ? err.message : String(err);
       logger.error('[oracle-lag] fire threw', {
         marketId: market.marketId,
-        error: err instanceof Error ? err.message : String(err),
+        error: executorError,
       });
       await this.redis.del(dedupKey).catch(() => {});
     }
+
+    // Persist the executor outcome so the 83-wouldTrade-zero-execution gap can
+    // be explained: every fire() attempt lands one row in
+    // shadow_observations(kind='oracle_lag_executor') with outcome + skipReason.
+    void enqueueWrite(
+      'shadow_observations',
+      buildOracleLagExecutorShadowRow({
+        outcome,
+        skipReason: executorSkipReason,
+        error: executorError,
+        venue: executorVenue,
+        stakeUsd: executorStakeUsd,
+        entryPrice: executorEntryPrice,
+        shadowEntryPrice: evaluation.entryPrice,
+        timeLeftMin: evaluation.timeLeftMin,
+        consensusProbability: evaluation.consensusProbability,
+        move,
+        market,
+        side: direction,
+        threshold: cfg.ORACLE_LAG_MIN_MOVE_PCT,
+      }),
+    );
   }
 }

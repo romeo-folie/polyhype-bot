@@ -16,6 +16,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import {
+  buildOracleLagExecutorShadowRow,
   evaluateOracleLagEntry,
   type OracleLagEvalConfig,
   type OracleLagMove,
@@ -264,6 +265,93 @@ describe('evaluateOracleLagEntry', () => {
       // buggy formula collide on the same number. Still assert it to lock in
       // the stored-as-P(YES) invariant symmetrically.
       expect(result.consensusProbability).toBeCloseTo(0.5008, 4);
+    });
+  });
+
+  describe('buildOracleLagExecutorShadowRow', () => {
+    const baseMove = makeMove(-0.12);
+    const baseMarket = { marketId: 'm-btc', slug: 'btc-updown-15m-1776' };
+
+    it('encodes a successful execution as wouldBlock=false with venue + stake', () => {
+      const row = buildOracleLagExecutorShadowRow({
+        outcome: 'success',
+        venue: 'clob',
+        stakeUsd: 5,
+        entryPrice: 0.495,
+        shadowEntryPrice: 0.495,
+        timeLeftMin: 10,
+        consensusProbability: 0.4988,
+        move: baseMove,
+        market: baseMarket,
+        side: 'DOWN',
+        threshold: 0.12,
+      });
+
+      expect(row.kind).toBe('oracle_lag_executor');
+      expect(row.source).toBe('arb');
+      expect(row.wouldBlock).toBe(false);
+      expect(row.direction).toBe('DOWN');
+      expect(row.metricValue).toBe(-0.12);
+      expect(row.threshold).toBe(0.12);
+      expect(row.payload.outcome).toBe('success');
+      expect(row.payload.venue).toBe('clob');
+      expect(row.payload.stakeUsd).toBe(5);
+      expect(row.payload.skipReason).toBeUndefined();
+      expect(row.payload.error).toBeUndefined();
+    });
+
+    it('encodes a skip with skipReason and wouldBlock=true', () => {
+      const row = buildOracleLagExecutorShadowRow({
+        outcome: 'skipped',
+        skipReason: 'global_governor',
+        shadowEntryPrice: 0.495,
+        timeLeftMin: 10,
+        consensusProbability: 0.4988,
+        move: baseMove,
+        market: baseMarket,
+        side: 'DOWN',
+        threshold: 0.12,
+      });
+
+      expect(row.wouldBlock).toBe(true);
+      expect(row.payload.outcome).toBe('skipped');
+      expect(row.payload.skipReason).toBe('global_governor');
+      expect(row.payload.venue).toBeUndefined();
+      expect(row.payload.stakeUsd).toBeUndefined();
+    });
+
+    it('encodes an error with error message and wouldBlock=true', () => {
+      const row = buildOracleLagExecutorShadowRow({
+        outcome: 'error',
+        error: 'CLOB 500 internal server error',
+        shadowEntryPrice: 0.495,
+        timeLeftMin: 10,
+        consensusProbability: 0.4988,
+        move: baseMove,
+        market: baseMarket,
+        side: 'DOWN',
+        threshold: 0.12,
+      });
+
+      expect(row.wouldBlock).toBe(true);
+      expect(row.payload.outcome).toBe('error');
+      expect(row.payload.error).toBe('CLOB 500 internal server error');
+      expect(row.payload.skipReason).toBeUndefined();
+    });
+
+    it('includes slug + movePct in payload so analytics can bucket by market cohort', () => {
+      const row = buildOracleLagExecutorShadowRow({
+        outcome: 'skipped',
+        skipReason: 'spread_too_wide',
+        shadowEntryPrice: 0.495,
+        move: baseMove,
+        market: baseMarket,
+        side: 'DOWN',
+        threshold: 0.12,
+      });
+
+      expect(row.payload.slug).toBe('btc-updown-15m-1776');
+      expect(row.payload.movePct).toBe(-0.12);
     });
   });
 
