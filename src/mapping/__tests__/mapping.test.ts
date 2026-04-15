@@ -25,6 +25,7 @@ const mockConfig = {
   TAKE_PROFIT_THRESHOLD: 0.25,
   STRICT_TOP_FIT_ENABLED: false,
   RELEVANCE_MIN_FIT_SCORE: 0.5,
+  RELEVANCE_CANDIDATE_CAP: 30,
   NEAR_ZERO_MIN_PRICE: 0.01,
   NEAR_ZERO_MAX_PRICE: 0.05,
   NEAR_ZERO_OSINT_SIGNAL_TTL_S: 1800,
@@ -148,8 +149,8 @@ describe('runMapping', () => {
     expect(signals).toHaveLength(0);
   });
 
-  it('caps evaluation at 10 candidates per item', async () => {
-    const manyCandidates = Array.from({ length: 15 }, (_, i) => ({
+  it('caps evaluation at RELEVANCE_CANDIDATE_CAP candidates per item', async () => {
+    const manyCandidates = Array.from({ length: 45 }, (_, i) => ({
       ...CANDIDATE,
       marketId: `mkt-${i}`,
     }));
@@ -163,7 +164,7 @@ describe('runMapping', () => {
 
     await runMapping([makeScoredItem()], 100);
 
-    expect(mockEstimate).toHaveBeenCalledTimes(10);
+    expect(mockEstimate).toHaveBeenCalledTimes(30);
   });
 
   it('produces NO direction signal when consensus < market price', async () => {

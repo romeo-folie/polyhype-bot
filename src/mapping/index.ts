@@ -114,9 +114,13 @@ export async function runMapping(
       count: candidates.length,
     });
 
-    // Evaluate markets in liquidity order (highest first) but cap at 10 per item
-    // to avoid runaway LLM calls
-    const toEvaluate = candidates.slice(0, 10);
+    // Evaluate the highest-ranked candidates (match-strength desc, liquidity desc),
+    // capped at RELEVANCE_CANDIDATE_CAP to control LLM spend per headline.
+    // Widened from the historical hard-coded 10 once match-strength ranking
+    // was introduced — relevance-gate caching makes the extra scores cheap,
+    // and the wider funnel surfaces correct-but-low-liquidity political
+    // markets that the old liquidity-only top-10 was evicting.
+    const toEvaluate = candidates.slice(0, cfg.RELEVANCE_CANDIDATE_CAP);
 
     // Score candidates sequentially. The relevance cache makes repeat calls
     // cheap, and serial scoring avoids a 10x concurrent-LLM burst per headline
