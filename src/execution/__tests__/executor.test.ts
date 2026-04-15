@@ -67,7 +67,6 @@ const mockConfig = {
   MAKER_POLL_INTERVAL_MS: 10,
   MAKER_PRICE_EDGE_BPS: 0,
   MAKER_EMPTY_BOOK_MAX_WAIT_MS: 900_000,
-  MAKER_EMPTY_BOOK_POLL_INTERVAL_MS: 30_000,
   MAKER_EMPTY_BOOK_EDGE_BPS: 150,
   EMPTY_BOOK_BID_THRESHOLD: 0.04,
   EMPTY_BOOK_ASK_THRESHOLD: 0.96,
@@ -189,7 +188,7 @@ describe('executeSignal', () => {
     mockConfig.MAKER_POLL_INTERVAL_MS = 10;
     mockConfig.MAKER_PRICE_EDGE_BPS = 0;
     mockConfig.MAKER_EMPTY_BOOK_MAX_WAIT_MS = 900_000;
-    mockConfig.MAKER_EMPTY_BOOK_POLL_INTERVAL_MS = 30_000;
+
     mockConfig.MAKER_EMPTY_BOOK_EDGE_BPS = 150;
     mockConfig.EMPTY_BOOK_BID_THRESHOLD = 0.04;
     mockConfig.EMPTY_BOOK_ASK_THRESHOLD = 0.96;
@@ -1203,7 +1202,7 @@ describe('empty-book maker route', () => {
     mockConfig.MAKER_POLL_INTERVAL_MS = 10;
     mockConfig.MAKER_PRICE_EDGE_BPS = 0;
     mockConfig.MAKER_EMPTY_BOOK_MAX_WAIT_MS = 900_000;
-    mockConfig.MAKER_EMPTY_BOOK_POLL_INTERVAL_MS = 30_000;
+
     mockConfig.MAKER_EMPTY_BOOK_EDGE_BPS = 150;
     mockConfig.EMPTY_BOOK_BID_THRESHOLD = 0.04;
     mockConfig.EMPTY_BOOK_ASK_THRESHOLD = 0.96;
@@ -1361,6 +1360,50 @@ describe('empty-book maker route', () => {
     expect(mockDeletePendingOrder).toHaveBeenCalled();
     // No re-post
     expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
+  it('partial fill on resume cancels residual open size before returning', async () => {
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'order-partial',
+      tokenId: 'tok-yes',
+      price: 0.63,
+      size: 7.94,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 600_000,
+      consensusP: 0.65,
+      direction: 'YES',
+    });
+    // Only half filled
+    mockGetOrder.mockResolvedValue({
+      id: 'order-partial',
+      status: 'open',
+      owner: '0x1',
+      maker_address: '0x1',
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      side: 'BUY',
+      original_size: '7.94',
+      size_matched: '3.97', // partial fill
+      price: '0.63',
+      associate_trades: [],
+      outcome: 'YES',
+      created_at: Date.now() - 60_000,
+      expiration: '',
+      order_type: 'GTC',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.tradeResult?.success).toBe(true);
+    // Residual open size should be cancelled
+    expect(mockCancelOrder).toHaveBeenCalledWith('order-partial');
+    // Pending record cleaned up
+    expect(mockDeletePendingOrder).toHaveBeenCalled();
+    // Idempotency key set (partial fill counts as a real fill)
+    expect(redis.set).toHaveBeenCalled();
   });
 
   it('cycle-start cleanup cancels expired pending order and re-posts new order', async () => {

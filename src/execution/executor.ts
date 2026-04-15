@@ -364,6 +364,18 @@ async function tryExecuteViaClobMaker(
           const matched = parseFloat(order.size_matched ?? '0');
           const original = parseFloat(order.original_size ?? '0');
           if (matched > 0) {
+            const isPartial = matched + 1e-9 < original;
+            if (isPartial) {
+              // Partial fill — cancel the residual open size so it doesn't
+              // continue filling untracked on the next cron cycle.
+              logger.info('[executor] partial fill on empty-book order — cancelling residual', {
+                marketId: signal.marketId,
+                orderId: pending.orderId,
+                matched,
+                original,
+              });
+              await confirmMakerCancel(pending.orderId);
+            }
             await deletePendingOrder(redis, signal.marketId);
             const filledStakeUsd = matched * pending.price;
             return {
@@ -374,7 +386,7 @@ async function tryExecuteViaClobMaker(
               makerOrderId: pending.orderId,
               makerPostedPrice: pending.price,
               makerPostedSize: pending.size,
-              makerFillStatus: matched + 1e-9 < original ? 'partial' : 'full',
+              makerFillStatus: isPartial ? 'partial' : 'full',
               makerSharesFilled: matched,
             };
           }

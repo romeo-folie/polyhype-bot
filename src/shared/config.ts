@@ -198,7 +198,6 @@ const envSchema = z.object({
   // (bid≈0.01/ask≈0.99). Instead of skipping, post a limit order at fair value and
   // resume polling across cron cycles (non-blocking). Fills may take minutes to hours.
   MAKER_EMPTY_BOOK_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(900_000),
-  MAKER_EMPTY_BOOK_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).optional().default(30_000),
   MAKER_EMPTY_BOOK_EDGE_BPS: z.coerce.number().min(0).optional().default(150),
   // Thresholds for detecting an empty/ghost book. bid < BID_THRESHOLD and
   // ask > ASK_THRESHOLD means no real market maker is resting on the book.
