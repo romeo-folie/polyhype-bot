@@ -167,12 +167,12 @@ describe('scoreMarketRelevance', () => {
     expect(mockGenerateContent).not.toHaveBeenCalled();
   });
 
-  it('falls back to OpenAI when Gemini fails', async () => {
+  it('falls back to Gemini when OpenAI fails', async () => {
+    // OpenAI is primary since 2026-04-15 (Gemini observed scoring too
+    // conservatively). This test exercises the fallback path.
     mockConfig.OPENAI_API_KEY = 'openai-key';
-    mockGenerateContent.mockRejectedValue(new Error('Gemini down'));
-    mockChatCreate.mockResolvedValue({
-      choices: [{ message: { content: '0.72' } }],
-    });
+    mockChatCreate.mockRejectedValue(new Error('OpenAI down'));
+    mockGenerateContent.mockResolvedValue({ response: { text: () => '0.72' } });
 
     const result = await scoreMarketRelevance({
       headline: 'News',
@@ -181,9 +181,9 @@ describe('scoreMarketRelevance', () => {
     });
 
     expect(result.fitScore).toBe(0.72);
-    expect(result.provider).toBe('OpenAI');
-    expect(mockGenerateContent).toHaveBeenCalled();
+    expect(result.provider).toBe('Gemini');
     expect(mockChatCreate).toHaveBeenCalled();
+    expect(mockGenerateContent).toHaveBeenCalled();
   });
 
   it('fails open to 0.5 when all providers unavailable', async () => {

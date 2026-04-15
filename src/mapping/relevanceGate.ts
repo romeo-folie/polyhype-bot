@@ -61,25 +61,12 @@ export function parseFitScore(raw: string): number | null {
 }
 
 function buildProviders(cfg: ReturnType<typeof loadConfig>, userPrompt: string) {
+  // Order matters: first provider with an apiKey is used; the rest are
+  // fallbacks only. OpenAI is primary because Gemini 2.5-flash has been
+  // observed scoring genuinely-relevant headline↔market pairs conservatively
+  // (median 0.00, max 0.30 on Iran war news vs. Iran regime markets over a
+  // 6.5h sample on 2026-04-15), which stalled the pipeline at the fit gate.
   return [
-    {
-      name: 'Gemini',
-      apiKey: cfg.GEMINI_API_KEY,
-      call: async () => {
-        if (!_genai || cfg.GEMINI_API_KEY !== _genaiKey) {
-          _genai = new GoogleGenerativeAI(cfg.GEMINI_API_KEY!);
-          _genaiKey = cfg.GEMINI_API_KEY!;
-        }
-        const model = _genai.getGenerativeModel({ model: cfg.GEMINI_MODEL });
-        const result = await Promise.race([
-          model.generateContent(`${SYSTEM_PROMPT}\n\n${userPrompt}`),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('Gemini timeout')), RELEVANCE_TIMEOUT_MS)
-          ),
-        ]);
-        return result.response.text();
-      },
-    },
     {
       name: 'OpenAI',
       apiKey: cfg.OPENAI_API_KEY,
@@ -96,6 +83,24 @@ function buildProviders(cfg: ReturnType<typeof loadConfig>, userPrompt: string) 
           max_tokens: 10,
         }, { timeout: RELEVANCE_TIMEOUT_MS });
         return completion.choices[0]?.message.content ?? '';
+      },
+    },
+    {
+      name: 'Gemini',
+      apiKey: cfg.GEMINI_API_KEY,
+      call: async () => {
+        if (!_genai || cfg.GEMINI_API_KEY !== _genaiKey) {
+          _genai = new GoogleGenerativeAI(cfg.GEMINI_API_KEY!);
+          _genaiKey = cfg.GEMINI_API_KEY!;
+        }
+        const model = _genai.getGenerativeModel({ model: cfg.GEMINI_MODEL });
+        const result = await Promise.race([
+          model.generateContent(`${SYSTEM_PROMPT}\n\n${userPrompt}`),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Gemini timeout')), RELEVANCE_TIMEOUT_MS)
+          ),
+        ]);
+        return result.response.text();
       },
     },
     {
