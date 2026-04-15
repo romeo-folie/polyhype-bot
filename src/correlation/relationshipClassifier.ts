@@ -135,7 +135,7 @@ async function callOpenAI(systemPrompt: string, userPrompt: string): Promise<str
           { role: 'user', content: userPrompt },
         ],
         response_format: { type: 'json_object' },
-        max_tokens: 200,
+        max_completion_tokens: 200,
         temperature: 0,
       },
       { signal: abortCtrl.signal },

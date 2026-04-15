@@ -56,7 +56,7 @@ async function extractEntitiesOpenAI(headline: string, entityContext: string): P
           { role: 'user', content: headline },
         ],
         response_format: { type: 'json_object' },
-        max_tokens: 150,
+        max_completion_tokens: 150,
         temperature: 0,
       },
       { signal: abortCtrl.signal },

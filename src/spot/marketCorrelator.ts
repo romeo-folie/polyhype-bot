@@ -113,7 +113,7 @@ async function callLlmForCorrelation(
     const completion = await client.chat.completions.create({
       model: loadConfig().OPENAI_MODEL,
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: 10,
+      max_completion_tokens: 10,
       temperature: 0,
     });
     const text = (completion.choices[0]?.message?.content ?? '').toLowerCase().trim();

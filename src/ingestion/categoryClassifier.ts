@@ -137,7 +137,7 @@ async function classifyWithLlm(text: string): Promise<string | null> {
         body: JSON.stringify({
           model: 'gpt-4o-mini',
           messages: [{ role: 'user', content: prompt }],
-          max_tokens: 20,
+          max_completion_tokens: 20,
         }),
         signal: AbortSignal.timeout(10_000),
       });
