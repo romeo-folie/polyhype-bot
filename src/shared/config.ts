@@ -570,6 +570,25 @@ const envSchema = z.object({
   // Minimum LLM fit score (0..1) for a candidate to be trade-eligible.
   // Also used by the boolean isMarketRelevant() wrapper.
   RELEVANCE_MIN_FIT_SCORE: z.coerce.number().min(0).max(1).optional().default(0.5),
+  // Retrieval layer mode for OSINT → candidate-market matching.
+  //   legacy        — local cache, substring match, liquidity-sorted (pre-2026-04-15 behavior)
+  //   shadow        — run both legacy and public_search; return legacy but log diff (default)
+  //   public_search — merge /public-search hits with local cache by id, rank by
+  //                   (token_match_count desc, liquidity desc)
+  // Default is shadow so we can compare candidate sets for 24–48h before flipping
+  // the live path.
+  MARKET_RETRIEVAL_MODE: z
+    .enum(['legacy', 'shadow', 'public_search'])
+    .optional()
+    .default('shadow'),
+  // Max candidates forwarded from the retriever to the relevance-gate reranker.
+  // Raised from the historical hard-coded 10 because production RAG pipelines
+  // rerank 30–100 candidates, and the prior cap was evicting correct markets
+  // when sports markets dominated the liquidity-sorted top-10 for political
+  // headlines (Iran "war" → Warriors substring collisions, 2026-04-15).
+  RELEVANCE_CANDIDATE_CAP: z.coerce.number().int().positive().optional().default(30),
+  // Per-entity result limit for /public-search. Capped at 50 by Polymarket.
+  PUBLIC_SEARCH_LIMIT_PER_ENTITY: z.coerce.number().int().positive().max(50).optional().default(20),
   ENTITY_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(7200),
   SENTIMENT_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
   DEEPSEEK_PARSE_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(86400),

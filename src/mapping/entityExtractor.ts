@@ -10,8 +10,16 @@ import { createHash } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis } from '../shared/redis.js';
-import { searchEvents, parseOutcomePrices, parseOutcomes, parseClobTokenIds } from './gamma.js';
+import {
+  searchEvents,
+  publicSearch,
+  parseOutcomePrices,
+  parseOutcomes,
+  parseClobTokenIds,
+  type GammaMarket,
+} from './gamma.js';
 import { getCachedMarkets } from '../shared/watchlist.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 
 const TIMEOUT_MS = 20_000;
@@ -156,9 +164,52 @@ export interface CandidateMarket {
   description: string | null;
   /** Search query that surfaced this market */
   matchedQuery: string;
+  /**
+   * Count of distinct query tokens that matched this market's question or
+   * description under word-boundary matching. Higher = better topical fit.
+   * Used as the primary sort key; liquidity is the tiebreaker.
+   */
+  matchScore?: number;
 }
 
 const MIN_LIQUIDITY = 100; // USDC — skip ghost markets
+
+/**
+ * Extract word-tokens from a search query. Lowercases, strips punctuation,
+ * drops tokens shorter than 3 chars (too noisy — "us" matches "various",
+ * "usage"; "ai" matches "said", "against"). The caller de-duplicates.
+ *
+ * Short entities that MUST match as tokens (e.g. country codes, stock
+ * tickers) would need special-casing — none are currently required for
+ * geopolitical news mapping.
+ */
+function tokenizeQuery(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3);
+}
+
+/**
+ * Count how many of `tokens` appear in `text` as whole words (word-boundary
+ * match). Used for match-strength ranking — multi-token queries that hit
+ * more of the question/description outrank single-token matches.
+ *
+ * Word boundaries prevent the "war" → "Warriors" false-positive class that
+ * polluted the prior liquidity-sort retriever on political headlines.
+ */
+function countMatchingTokens(text: string, tokens: string[]): number {
+  if (tokens.length === 0) return 0;
+  const lower = text.toLowerCase();
+  let hits = 0;
+  for (const t of tokens) {
+    // Escape regex metachars defensively; tokens are [a-z0-9] but future
+    // callers could pass anything.
+    const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`\\b${escaped}\\b`).test(lower)) hits++;
+  }
+  return hits;
+}
 
 /**
  * Universal Domain Guard — compiled regex with word boundaries.
@@ -199,110 +250,297 @@ const DOMAIN_BLOCKLIST_RE = new RegExp(DOMAIN_BLOCKLIST_TERMS.join('|'), 'i');
 
 
 /**
- * Fallback: search via broken Gamma API when market cache is unavailable.
+ * Validate + normalise a `GammaMarket` into a `CandidateMarket` given a
+ * primary query string and a pre-computed match score. Returns null when
+ * the market fails any gate (domain blocklist, binary-only, expired, low
+ * liquidity, extreme price, unparseable token IDs).
  */
-async function searchEventsForCandidates(
+function buildCandidate(
+  market: GammaMarket,
+  matchedQuery: string,
+  matchScore: number,
+): CandidateMarket | null {
+  const questionLower = market.question.toLowerCase();
+  if (DOMAIN_BLOCKLIST_RE.test(questionLower)) return null;
+
+  // Binary-only gate: multi-outcome markets produce extreme-priced outcomes
+  // (2-5¢) that trigger phantom LLM edge. The near-zero scanner handles those.
+  if (market.outcomes) {
+    try {
+      const outcomeList = parseOutcomes(market.outcomes);
+      if (outcomeList.length !== 2) return null;
+    } catch {
+      return null;
+    }
+  }
+
+  if (market.endDate) {
+    const end = new Date(market.endDate).getTime();
+    if (!isNaN(end) && end < Date.now()) return null;
+  }
+
+  const liquidity = parseFloat(market.liquidity ?? '0');
+  if (!isFinite(liquidity) || liquidity < MIN_LIQUIDITY) return null;
+
+  let currentYesPrice: number;
+  try {
+    const prices = parseOutcomePrices(market.outcomePrices);
+    if (prices.length === 0) return null;
+    currentYesPrice = parseFloat(prices[0] ?? '0');
+    if (!isFinite(currentYesPrice) || currentYesPrice < 0 || currentYesPrice > 1) return null;
+  } catch {
+    return null;
+  }
+
+  // Minimum price gate: longshot structural overpricing is handled by the
+  // near-zero scanner; mapping pipeline skips anything outside 5¢–95¢.
+  if (currentYesPrice < 0.05 || currentYesPrice > 0.95) return null;
+
+  let clobTokenIds: string[];
+  try {
+    clobTokenIds = parseClobTokenIds(market.clobTokenIds ?? []);
+    if (clobTokenIds.length < 2) return null;
+  } catch {
+    return null;
+  }
+
+  return {
+    marketId: market.id,
+    question: market.question,
+    conditionId: market.conditionId,
+    clobTokenIds,
+    currentYesPrice,
+    volume: parseFloat(market.volume ?? '0'),
+    liquidity,
+    endDate: market.endDate ?? null,
+    description: market.description ?? null,
+    matchedQuery,
+    matchScore,
+  };
+}
+
+/**
+ * Compute the match score for a market against a set of queries: count of
+ * distinct query tokens (unioned across ALL queries) that appear in
+ * question ∪ description under word-boundary match.
+ *
+ * Returns `{ score, matchedQuery }`. `score === 0` means no token matched.
+ * `matchedQuery` is the single query that contributed the most matching
+ * tokens on its own (ties broken by query order) — used for logging to
+ * identify which entity string surfaced the candidate.
+ */
+function scoreMarketAgainstQueries(
+  market: GammaMarket,
   queries: string[],
-  seen: Map<string, CandidateMarket>,
-  _cfg: ReturnType<typeof loadConfig>,
-): Promise<void> {
+): { score: number; matchedQuery: string } {
+  const haystack = `${market.question} ${market.description ?? ''}`;
+  const tokenSet = new Set<string>();
+  for (const q of queries) {
+    for (const t of tokenizeQuery(q)) tokenSet.add(t);
+  }
+  const score = countMatchingTokens(haystack, Array.from(tokenSet));
+
+  // Pick the single query that matched the most of its own tokens — this is
+  // the "best responsible query" for debug/logging, independent of the
+  // unioned score.
+  let bestQuery = queries[0] ?? '';
+  let bestQueryScore = 0;
+  for (const q of queries) {
+    const s = countMatchingTokens(haystack, tokenizeQuery(q));
+    if (s > bestQueryScore) {
+      bestQueryScore = s;
+      bestQuery = q;
+    }
+  }
+  return { score, matchedQuery: bestQuery };
+}
+
+/**
+ * Local-cache retriever: word-boundary match against each cached market,
+ * rank by (matchScore desc, liquidity desc).
+ *
+ * Replaces the pre-2026-04-15 substring + liquidity-sort path. Word-boundary
+ * matching stops "war" from matching "Warriors" (sports markets) and the
+ * match-score sort stops high-liquidity irrelevant markets from crowding out
+ * correct low-liquidity political markets.
+ */
+function retrieveFromCache(
+  queries: string[],
+  cachedMarkets: GammaMarket[],
+): Map<string, CandidateMarket> {
+  const out = new Map<string, CandidateMarket>();
+  for (const market of cachedMarkets) {
+    if (out.has(market.id)) continue;
+    const { score, matchedQuery } = scoreMarketAgainstQueries(market, queries);
+    if (score === 0) continue;
+    const cand = buildCandidate(market, matchedQuery, score);
+    if (cand) out.set(market.id, cand);
+  }
+  return out;
+}
+
+/**
+ * Public-search retriever: call Polymarket's `/public-search` once per
+ * query, look each returned market up in the local cache (we need the full
+ * cached record for prices/tokens/descriptions the search payload also
+ * provides, but resolving via cache keeps the downstream shape identical
+ * to the legacy path), then rank by (matchScore desc, liquidity desc).
+ *
+ * Markets returned by `/public-search` that aren't in our local cache are
+ * still usable — we fall back to the search payload directly. This keeps
+ * us resilient to cache-refresh lag.
+ */
+async function retrieveFromPublicSearch(
+  queries: string[],
+  cachedMarkets: GammaMarket[],
+  limitPerEntity: number,
+): Promise<Map<string, CandidateMarket>> {
+  const out = new Map<string, CandidateMarket>();
+  const cacheById = new Map(cachedMarkets.map((m) => [m.id, m]));
+
+  for (const query of queries) {
+    let events;
+    try {
+      events = await publicSearch({ query, limit: limitPerEntity, activeOnly: true });
+    } catch (err) {
+      logger.warn('[entity-extractor] public-search failed for query', {
+        query,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+
+    for (const event of events) {
+      for (const market of event.markets ?? []) {
+        if (out.has(market.id)) continue;
+        // Prefer the cached record (authoritative for downstream price/token fields).
+        // Fall back to the search payload when the market isn't in cache yet.
+        const source = cacheById.get(market.id) ?? market;
+        const { score, matchedQuery } = scoreMarketAgainstQueries(source, queries);
+        // Trust the search endpoint's topical ranking even when our
+        // substring-based match score is 0 — it uses richer signals than
+        // whole-word token matches. Use 0.5 as a sentinel "search-only hit"
+        // score so genuine word-boundary matches still outrank it.
+        const finalScore = score > 0 ? score : 0.5;
+        const finalQuery = score > 0 ? matchedQuery : query;
+        const cand = buildCandidate(source, finalQuery, finalScore);
+        if (cand) out.set(market.id, cand);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Rank candidates: match-strength first, liquidity as tiebreaker.
+ * Mutates and returns the input array.
+ */
+function rankCandidates(candidates: CandidateMarket[]): CandidateMarket[] {
+  candidates.sort((a, b) => {
+    const scoreDiff = (b.matchScore ?? 0) - (a.matchScore ?? 0);
+    if (scoreDiff !== 0) return scoreDiff;
+    return b.liquidity - a.liquidity;
+  });
+  return candidates;
+}
+
+/**
+ * Gamma `/events` fallback used only when the market cache is empty AND
+ * public-search is off. Kept for graceful degradation — historically the
+ * `/events?query=` endpoint has been unreliable, which is why we added
+ * local caching in the first place.
+ */
+async function retrieveFromGammaEvents(
+  queries: string[],
+): Promise<Map<string, CandidateMarket>> {
+  const out = new Map<string, CandidateMarket>();
   for (const query of queries) {
     try {
       const events = await searchEvents({ query, limit: 5, activeOnly: true });
-      const qLower = query.toLowerCase();
-
       for (const event of events) {
-        const titleLower = (event.title || '').toLowerCase();
-        const eventMatches = titleLower.includes(qLower);
-
         for (const market of event.markets ?? []) {
-          if (seen.has(market.id)) continue;
-
-          if (!eventMatches) {
-            const mMatch =
-              market.question.toLowerCase().includes(qLower) ||
-              (market.description || '').toLowerCase().includes(qLower);
-            if (!mMatch) continue;
-          }
-
-          const questionLower = market.question.toLowerCase();
-          if (DOMAIN_BLOCKLIST_RE.test(questionLower)) continue;
-
-          // Binary-only gate (Gamma fallback path)
-          if (market.outcomes) {
-            try {
-              const outcomeList = parseOutcomes(market.outcomes);
-              if (outcomeList.length !== 2) continue;
-            } catch {
-              continue;
-            }
-          }
-
-          // Skip expired markets
-          if (market.endDate) {
-            const end = new Date(market.endDate).getTime();
-            if (!isNaN(end) && end < Date.now()) continue;
-          }
-
-          const liquidity = parseFloat(market.liquidity ?? '0');
-          if (!isFinite(liquidity) || liquidity < MIN_LIQUIDITY) continue;
-
-          let currentYesPrice: number;
-          try {
-            const prices = parseOutcomePrices(market.outcomePrices);
-            if (prices.length === 0) continue;
-            currentYesPrice = parseFloat(prices[0] ?? '0');
-            if (!isFinite(currentYesPrice) || currentYesPrice < 0 || currentYesPrice > 1) continue;
-          } catch {
-            continue;
-          }
-
-          // Minimum price gate (Gamma fallback path)
-          if (currentYesPrice < 0.05 || currentYesPrice > 0.95) continue;
-
-          let clobTokenIds: string[];
-          try {
-            clobTokenIds = parseClobTokenIds(market.clobTokenIds ?? []);
-            if (clobTokenIds.length < 2) continue;
-          } catch {
-            continue;
-          }
-
-          seen.set(market.id, {
-            marketId: market.id,
-            question: market.question,
-            conditionId: market.conditionId,
-            clobTokenIds,
-            currentYesPrice,
-            volume: parseFloat(market.volume ?? '0'),
-            liquidity,
-            endDate: market.endDate ?? null,
-            description: market.description ?? null,
-            matchedQuery: query,
-          });
-
+          if (out.has(market.id)) continue;
+          const { score, matchedQuery } = scoreMarketAgainstQueries(market, queries);
+          if (score === 0) continue;
+          const cand = buildCandidate(market, matchedQuery, score);
+          if (cand) out.set(market.id, cand);
         }
       }
     } catch (err: unknown) {
-      logger.warn('[entity-extractor] gamma search failed for query', {
+      logger.warn('[entity-extractor] gamma /events search failed for query', {
         query,
         error: err instanceof Error ? err.message : String(err),
       });
     }
   }
+  return out;
 }
 
 /**
- * Given a scored item, extract entities and search Polymarket for candidate markets.
+ * Shadow-mode diff: emits how the legacy and public-search retrievers
+ * differ on the top-N candidate set, so we can evaluate the switch before
+ * flipping MARKET_RETRIEVAL_MODE=public_search in production.
+ */
+function logRetrievalShadow(params: {
+  headline: string;
+  queries: string[];
+  legacyTop: CandidateMarket[];
+  publicTop: CandidateMarket[];
+  topN: number;
+}): void {
+  const { headline, queries, legacyTop, publicTop, topN } = params;
+  const legacyIds = new Set(legacyTop.slice(0, topN).map((c) => c.marketId));
+  const publicIds = new Set(publicTop.slice(0, topN).map((c) => c.marketId));
+  const overlap = Array.from(legacyIds).filter((id) => publicIds.has(id)).length;
+  const onlyInPublic = Array.from(publicIds).filter((id) => !legacyIds.has(id));
+  const onlyInLegacy = Array.from(legacyIds).filter((id) => !publicIds.has(id));
+
+  logger.info('[entity-extractor] retrieval_shadow', {
+    headline: headline.slice(0, 120),
+    queries,
+    legacyCount: legacyTop.length,
+    publicCount: publicTop.length,
+    topN,
+    overlap,
+    onlyInPublicCount: onlyInPublic.length,
+    onlyInLegacyCount: onlyInLegacy.length,
+    legacyTopQuestions: legacyTop.slice(0, 5).map((c) => c.question.slice(0, 80)),
+    publicTopQuestions: publicTop.slice(0, 5).map((c) => c.question.slice(0, 80)),
+  });
+  void enqueueWrite('shadow_observations', {
+    kind: 'market_retrieval',
+    source: 'osint',
+    wouldBlock: overlap < topN,
+    metricValue: overlap,
+    threshold: topN,
+    payload: {
+      headline: headline.slice(0, 200),
+      queries,
+      legacyCount: legacyTop.length,
+      publicCount: publicTop.length,
+      onlyInPublicCount: onlyInPublic.length,
+      onlyInLegacyCount: onlyInLegacy.length,
+      legacyTopIds: Array.from(legacyIds).slice(0, 10),
+      publicTopIds: Array.from(publicIds).slice(0, 10),
+    },
+  });
+}
+
+/**
+ * Given a scored item, extract entities and find candidate Polymarket markets.
  *
- * De-duplicates across multiple query terms (same marketId wins first occurrence).
- * Filters out markets with liquidity below MIN_LIQUIDITY.
+ * Retrieval strategy is controlled by `MARKET_RETRIEVAL_MODE`:
+ *   - legacy        — local cache word-boundary match (post-2026-04-15 default was: substring + liquidity sort)
+ *   - public_search — merge /public-search results with local cache lookups
+ *   - shadow        — run both, return legacy, log the diff
+ *
+ * Results are ranked by `(matchScore desc, liquidity desc)` in all modes.
+ * `matchScore` = distinct query tokens that appear in the market's question
+ * or description under word-boundary matching, max over all queries.
  */
 export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateMarket[]> {
-  // Hoist config read — avoids repeated loadConfig() calls inside the triple-nested market loop below.
   const cfg = loadConfig();
 
-  // Combine scorer keywords with LLM-extracted entities for richer queries
   let entities: string[] = [];
   try {
     entities = await extractEntities(item.title, item.entityContext);
@@ -313,104 +551,78 @@ export async function findCandidateMarkets(item: ScoredItem): Promise<CandidateM
     entities = item.keywords.slice(0, 3);
   }
 
-  // Deduplicate queries
   const querySet = new Set<string>([...item.keywords.slice(0, 3), ...entities]);
-  const queries = Array.from(querySet).slice(0, 5); // cap at 5 searches
+  const queries = Array.from(querySet).slice(0, 5);
 
-  const seen = new Map<string, CandidateMarket>();
-
-  // Try local matching against cached market list first (Gamma search endpoint is broken).
   const cachedMarkets = await getCachedMarkets(getRedis());
 
-  if (cachedMarkets.length > 0) {
-    logger.debug('[entity-extractor] using local market cache', {
-      cacheSize: cachedMarkets.length,
-      queries,
-    });
+  // Retrieval mode dispatch. In shadow mode we run both retrievers and log
+  // the diff; the returned candidates are the legacy path's so behavior is
+  // byte-identical to pre-rollout until we flip to public_search.
+  const mode = cfg.MARKET_RETRIEVAL_MODE;
 
-    for (const market of cachedMarkets) {
-      if (seen.has(market.id)) continue;
-
-      const questionLower = market.question.toLowerCase();
-      const descLower = (market.description || '').toLowerCase();
-
-      // Check if any query term matches question or description
-      const matchedQuery = queries.find((q) => {
-        const qLower = q.toLowerCase();
-        return questionLower.includes(qLower) || descLower.includes(qLower);
-      });
-      if (!matchedQuery) continue;
-
-      // Universal Domain Guard: block sports/entertainment/weather markets.
-      if (DOMAIN_BLOCKLIST_RE.test(questionLower)) continue;
-
-      // Binary-only gate: skip multi-outcome markets (3+ outcomes). These produce
-      // extreme-priced outcomes (2-5¢) that trigger phantom LLM edge. The near-zero
-      // scanner and future NegRisk arb scanner handle multi-outcome markets separately.
-      if (market.outcomes) {
-        try {
-          const outcomeList = parseOutcomes(market.outcomes);
-          if (outcomeList.length !== 2) continue;
-        } catch {
-          // Can't parse outcomes — skip to be safe
-          continue;
-        }
-      }
-
-      // Skip expired markets — endDate in the past means it's already resolved or pending resolution.
-      if (market.endDate) {
-        const end = new Date(market.endDate).getTime();
-        if (!isNaN(end) && end < Date.now()) continue;
-      }
-
-      const liquidity = parseFloat(market.liquidity ?? '0');
-      if (!isFinite(liquidity) || liquidity < MIN_LIQUIDITY) continue;
-
-      // Parse YES price
-      let currentYesPrice: number;
-      try {
-        const prices = parseOutcomePrices(market.outcomePrices);
-        if (prices.length === 0) continue;
-        currentYesPrice = parseFloat(prices[0] ?? '0');
-        if (!isFinite(currentYesPrice) || currentYesPrice < 0 || currentYesPrice > 1) continue;
-      } catch {
-        continue;
-      }
-
-      // Minimum price gate: skip extreme longshots where LLM consensus is unreliable.
-      // Markets below 5¢ on either side are structurally overpriced per favorite-longshot bias research.
-      if (currentYesPrice < 0.05 || currentYesPrice > 0.95) continue;
-
-      let clobTokenIds: string[];
-      try {
-        clobTokenIds = parseClobTokenIds(market.clobTokenIds ?? []);
-        if (clobTokenIds.length < 2) continue;
-      } catch {
-        continue;
-      }
-
-      seen.set(market.id, {
-        marketId: market.id,
-        question: market.question,
-        conditionId: market.conditionId,
-        clobTokenIds,
-        currentYesPrice,
-        volume: parseFloat(market.volume ?? '0'),
-        liquidity,
-        endDate: market.endDate ?? null,
-        description: market.description ?? null,
-        matchedQuery,
-      });
-
-    }
-  } else {
-    // Fallback: cache is empty/missing — use broken Gamma search (better than nothing).
-    logger.warn('[entity-extractor] market cache empty, falling back to Gamma search');
-    await searchEventsForCandidates(queries, seen, cfg);
+  if (mode === 'legacy') {
+    const legacy = cachedMarkets.length > 0
+      ? retrieveFromCache(queries, cachedMarkets)
+      : await retrieveFromGammaEvents(queries);
+    return rankCandidates(Array.from(legacy.values()));
   }
 
-  const candidates = Array.from(seen.values());
-  // Sort by liquidity descending — highest liquidity markets first
-  candidates.sort((a, b) => b.liquidity - a.liquidity);
-  return candidates;
+  if (mode === 'public_search') {
+    const cacheHits = cachedMarkets.length > 0
+      ? retrieveFromCache(queries, cachedMarkets)
+      : new Map<string, CandidateMarket>();
+    const publicHits = await retrieveFromPublicSearch(
+      queries,
+      cachedMarkets,
+      cfg.PUBLIC_SEARCH_LIMIT_PER_ENTITY,
+    );
+    // Merge: public-search results take precedence (fresher, better-ranked),
+    // but local-cache hits that public-search missed are still included.
+    const merged = new Map<string, CandidateMarket>(cacheHits);
+    for (const [id, cand] of publicHits) merged.set(id, cand);
+    return rankCandidates(Array.from(merged.values()));
+  }
+
+  // mode === 'shadow' — run both, return legacy, log diff.
+  const legacy = cachedMarkets.length > 0
+    ? retrieveFromCache(queries, cachedMarkets)
+    : await retrieveFromGammaEvents(queries);
+  const legacyRanked = rankCandidates(Array.from(legacy.values()));
+
+  try {
+    const publicHits = await retrieveFromPublicSearch(
+      queries,
+      cachedMarkets,
+      cfg.PUBLIC_SEARCH_LIMIT_PER_ENTITY,
+    );
+    const publicRanked = rankCandidates(Array.from(publicHits.values()));
+    logRetrievalShadow({
+      headline: item.title,
+      queries,
+      legacyTop: legacyRanked,
+      publicTop: publicRanked,
+      topN: cfg.RELEVANCE_CANDIDATE_CAP,
+    });
+  } catch (err) {
+    // Never let shadow logging break the live path.
+    logger.warn('[entity-extractor] retrieval shadow failed (non-fatal)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  return legacyRanked;
 }
+
+/**
+ * Exported for tests. Ranking is a pure function of the candidate list.
+ */
+export const __testing = {
+  tokenizeQuery,
+  countMatchingTokens,
+  scoreMarketAgainstQueries,
+  buildCandidate,
+  retrieveFromCache,
+  retrieveFromPublicSearch,
+  rankCandidates,
+};

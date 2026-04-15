@@ -106,6 +106,56 @@ export async function searchEvents(opts: SearchEventsOptions): Promise<GammaEven
 }
 
 /**
+ * Shape of the Gamma `/public-search` response.
+ *
+ * Unlike `/events`, this endpoint returns a wrapper object with pagination
+ * metadata. `limit_per_type` caps events at 50 per request. We only consume
+ * the `events` field — profiles/tags are not used.
+ */
+export interface PublicSearchResponse {
+  events: GammaEvent[];
+  pagination?: { hasMore?: boolean; totalResults?: number };
+}
+
+export interface PublicSearchOptions {
+  query: string;
+  /** Max events per page. Polymarket caps this at 50. Defaults to 20. */
+  limit?: number;
+  /** When true, passes `events_status=active` to exclude closed events. Defaults to true. */
+  activeOnly?: boolean;
+}
+
+/**
+ * Full-text search over Polymarket markets via the Gamma `/public-search`
+ * endpoint. Ranks results topically (far better than our local substring +
+ * liquidity-sort retriever on political queries where sports markets
+ * otherwise dominate liquidity rankings).
+ *
+ * Filter note: `events_status=active` is required to exclude closed 2023-era
+ * markets that still dominate raw substring matches (they share vocabulary
+ * like "war" with active Iran markets).
+ */
+export async function publicSearch(opts: PublicSearchOptions): Promise<GammaEvent[]> {
+  const { query, limit = 20, activeOnly = true } = opts;
+  const params = new URLSearchParams({
+    q: query,
+    limit_per_type: Math.min(limit, 50).toString(),
+    ...(activeOnly ? { events_status: 'active' } : {}),
+  });
+  const url = `${BASE_URL}/public-search?${params.toString()}`;
+  const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+
+  if (!res.ok) {
+    throw new Error(
+      `Gamma public-search error: ${res.status.toString()} ${res.statusText} for query="${query}"`,
+    );
+  }
+
+  const data = (await res.json()) as PublicSearchResponse;
+  return Array.isArray(data.events) ? data.events : [];
+}
+
+/**
  * Fetch a single market by its Gamma market ID.
  *
  * Used to refresh current prices before execution.
