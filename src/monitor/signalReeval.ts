@@ -131,6 +131,7 @@ export async function reEvaluatePositions(
         description: null,
         headline: relevantHeadline.title,
         redis,
+        ...(position.endDate ? { endDateIso: position.endDate } : {}),
       });
     } catch (err) {
       logger.warn('[reeval] consensus re-estimation failed', {

@@ -570,3 +570,86 @@ describe('estimateConsensusProbability', () => {
     expect(result.probability).toBe(0.50);
   });
 });
+
+describe('time-to-deadline prompt injection', () => {
+  beforeEach(() => {
+    mockGenerateContent.mockReset();
+    mockChatCreate.mockReset();
+    mockGetRecentOutcomes.mockReset();
+    mockGetRecentOutcomes.mockResolvedValue([]);
+    process.env.GEMINI_API_KEY = 'test-gemini-key';
+    process.env.OPENAI_API_KEY = 'test-openai-key';
+    mockGenerateContent.mockResolvedValue({
+      response: { text: () => JSON.stringify({ probability: 0.6, reasoning: 'ok' }) },
+    });
+    mockChatCreate.mockResolvedValue({
+      choices: [{ message: { content: JSON.stringify({ probability: 0.6, reasoning: 'ok' }) } }],
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  it('appends days-to-deadline and resolution date when endDateIso is provided', async () => {
+    const future = new Date(Date.now() + 30 * 86_400_000).toISOString();
+
+    await estimateConsensusProbability({
+      ...BASE_OPTS,
+      endDateIso: future,
+    });
+
+    const geminiPrompt = mockGenerateContent.mock.calls[0]?.[0] as string;
+    expect(geminiPrompt).toMatch(/Time to deadline: 30 days/);
+    expect(geminiPrompt).toContain(future.slice(0, 10));
+  });
+
+  it('uses singular "day" when exactly 1 day to deadline', async () => {
+    const future = new Date(Date.now() + 1 * 86_400_000).toISOString();
+
+    await estimateConsensusProbability({ ...BASE_OPTS, endDateIso: future });
+
+    const geminiPrompt = mockGenerateContent.mock.calls[0]?.[0] as string;
+    expect(geminiPrompt).toMatch(/Time to deadline: 1 day \(/);
+  });
+
+  it('clamps days-to-deadline to 0 for past endDates', async () => {
+    const past = new Date(Date.now() - 5 * 86_400_000).toISOString();
+
+    await estimateConsensusProbability({ ...BASE_OPTS, endDateIso: past });
+
+    const geminiPrompt = mockGenerateContent.mock.calls[0]?.[0] as string;
+    expect(geminiPrompt).toMatch(/Time to deadline: 0 days/);
+  });
+
+  it('omits the deadline line when endDateIso is missing', async () => {
+    await estimateConsensusProbability(BASE_OPTS);
+
+    const geminiPrompt = mockGenerateContent.mock.calls[0]?.[0] as string;
+    expect(geminiPrompt).not.toContain('Time to deadline');
+  });
+
+  it('produces different prompts for date-variant markets (regression guard)', async () => {
+    // The Iran-conflict failure mode: three variants of the same question with
+    // different deadlines should emit three DIFFERENT prompts. If this test
+    // fails, the LLM is seeing identical inputs for Apr 30 / May 15 / Jun 30.
+    const apr30 = new Date(Date.now() + 15 * 86_400_000).toISOString();
+    const may15 = new Date(Date.now() + 30 * 86_400_000).toISOString();
+    const jun30 = new Date(Date.now() + 76 * 86_400_000).toISOString();
+
+    await estimateConsensusProbability({ ...BASE_OPTS, endDateIso: apr30 });
+    await estimateConsensusProbability({ ...BASE_OPTS, endDateIso: may15 });
+    await estimateConsensusProbability({ ...BASE_OPTS, endDateIso: jun30 });
+
+    const p1 = mockGenerateContent.mock.calls[0]?.[0] as string;
+    const p2 = mockGenerateContent.mock.calls[1]?.[0] as string;
+    const p3 = mockGenerateContent.mock.calls[2]?.[0] as string;
+
+    expect(p1).toMatch(/Time to deadline: 15 days/);
+    expect(p2).toMatch(/Time to deadline: 30 days/);
+    expect(p3).toMatch(/Time to deadline: 76 days/);
+    expect(p1).not.toBe(p2);
+    expect(p2).not.toBe(p3);
+  });
+});

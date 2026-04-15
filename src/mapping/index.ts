@@ -345,6 +345,7 @@ async function evaluateOsintCandidate(args: EvaluateCandidateArgs): Promise<Eval
       description: candidate.description,
       headline: item.title,
       ...(opts?.redis ? { redis: opts.redis } : {}),
+      ...(candidate.endDate ? { endDateIso: candidate.endDate } : {}),
     });
   } catch (err) {
     logger.warn('[mapping] consensus estimation failed', {

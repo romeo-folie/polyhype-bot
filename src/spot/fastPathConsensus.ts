@@ -340,6 +340,7 @@ export async function estimateFastConsensus(
     headline: `Spot move detected for ${move.assetId}: ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(2)}% in ${move.windowMinutes}min. Current price: ${move.currentPrice}.`,
     redis,
     skipContextInjection: true,
+    ...(market.endDate ? { endDateIso: market.endDate } : {}),
   });
 
   const consensusStddev = (consensus as { stddev?: number }).stddev ?? 0;

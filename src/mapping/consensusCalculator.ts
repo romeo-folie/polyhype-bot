@@ -85,10 +85,24 @@ function buildUserPrompt(opts: {
   question: string;
   description: string | null;
   headline: string;
+  endDateIso?: string | null | undefined;
 }): string {
+  // Surface days-to-deadline explicitly so the LLM can't miss the time horizon.
+  // Fixes the "date-invariance" failure mode where the same Iran-conflict question
+  // with April 30 / May 15 / June 30 variants all came back at ~0.48 regardless.
+  let timeLine = '';
+  if (opts.endDateIso) {
+    const endMs = new Date(opts.endDateIso).getTime();
+    if (isFinite(endMs)) {
+      const days = Math.max(0, Math.round((endMs - Date.now()) / 86_400_000));
+      const resolves = opts.endDateIso.slice(0, 10);
+      timeLine = `Time to deadline: ${days.toString()} day${days === 1 ? '' : 's'} (resolves ${resolves}).\n`;
+    }
+  }
   return (
     `Market question: ${opts.question}\n` +
     `Market description: ${opts.description ?? 'N/A'}\n` +
+    timeLine +
     `Breaking news: ${opts.headline}`
   );
 }
@@ -104,6 +118,7 @@ async function callOpenAI(
   headline: string,
   promptMode?: 'near-zero',
   marketPrice?: number,
+  endDateIso?: string | null,
 ): Promise<ConsensusResult> {
   const { OpenAI } = await import('openai');
   const client = new OpenAI({ apiKey: loadConfig().OPENAI_API_KEY });
@@ -119,7 +134,7 @@ async function callOpenAI(
           { role: 'system', content: buildSystemPrompt(promptMode, marketPrice) },
           {
             role: 'user',
-            content: buildUserPrompt({ question, description, headline }),
+            content: buildUserPrompt({ question, description, headline, endDateIso }),
           },
         ],
         response_format: { type: 'json_object' },
@@ -142,6 +157,7 @@ async function callAnthropic(
   headline: string,
   promptMode?: 'near-zero',
   marketPrice?: number,
+  endDateIso?: string | null,
 ): Promise<ConsensusResult> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({ apiKey: loadConfig().ANTHROPIC_API_KEY });
@@ -158,7 +174,7 @@ async function callAnthropic(
         messages: [
           {
             role: 'user',
-            content: buildUserPrompt({ question, description, headline }),
+            content: buildUserPrompt({ question, description, headline, endDateIso }),
           },
         ],
         temperature: 0,
@@ -179,6 +195,7 @@ async function callGemini(
   headline: string,
   promptMode?: 'near-zero',
   marketPrice?: number,
+  endDateIso?: string | null,
 ): Promise<ConsensusResult> {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const genai = new GoogleGenerativeAI(loadConfig().GEMINI_API_KEY ?? '');
@@ -186,7 +203,7 @@ async function callGemini(
 
   const prompt =
     `${buildSystemPrompt(promptMode, marketPrice)}\n\n` +
-    buildUserPrompt({ question, description, headline });
+    buildUserPrompt({ question, description, headline, endDateIso });
 
   const result = await Promise.race([
     model.generateContent(prompt),
@@ -211,6 +228,7 @@ async function callDeepSeek(
   headline: string,
   promptMode?: 'near-zero',
   marketPrice?: number,
+  endDateIso?: string | null,
 ): Promise<ConsensusResult> {
   const { default: OpenAI } = await import('openai');
   const client = new OpenAI({
@@ -229,7 +247,7 @@ async function callDeepSeek(
           { role: 'system', content: buildSystemPrompt(promptMode, marketPrice) },
           {
             role: 'user',
-            content: buildUserPrompt({ question, description, headline }),
+            content: buildUserPrompt({ question, description, headline, endDateIso }),
           },
         ],
         response_format: { type: 'json_object' },
@@ -276,6 +294,7 @@ async function _estimateSingle(opts: {
   headline: string;
   mode?: 'near-zero';
   marketPrice?: number;
+  endDateIso?: string | null;
 }): Promise<ConsensusResult> {
   const cfg = loadConfig();
   const provider = cfg.LLM_PROVIDER;
@@ -284,7 +303,7 @@ async function _estimateSingle(opts: {
 
   if (useGemini) {
     try {
-      return await callGemini(opts.question, opts.description, opts.headline, opts.mode, opts.marketPrice);
+      return await callGemini(opts.question, opts.description, opts.headline, opts.mode, opts.marketPrice, opts.endDateIso);
     } catch (err) {
       logger.warn('[consensus-calc] Gemini failed, trying OpenAI', {
         error: err instanceof Error ? err.message : String(err),
@@ -294,7 +313,7 @@ async function _estimateSingle(opts: {
 
   if (useOpenAI) {
     try {
-      return await callOpenAI(opts.question, opts.description, opts.headline, opts.mode, opts.marketPrice);
+      return await callOpenAI(opts.question, opts.description, opts.headline, opts.mode, opts.marketPrice, opts.endDateIso);
     } catch (err) {
       logger.warn('[consensus-calc] OpenAI failed', {
         error: err instanceof Error ? err.message : String(err),
@@ -311,6 +330,7 @@ async function _estimateSingle(opts: {
         opts.headline,
         opts.mode,
         opts.marketPrice,
+        opts.endDateIso,
       );
     } catch (err) {
       logger.warn('[consensus-calc] Anthropic failed, trying DeepSeek', {
@@ -327,6 +347,7 @@ async function _estimateSingle(opts: {
         opts.headline,
         opts.mode,
         opts.marketPrice,
+        opts.endDateIso,
       );
     } catch (err) {
       logger.warn('[consensus-calc] DeepSeek failed', {
@@ -368,6 +389,9 @@ export async function estimateConsensusProbability(opts: {
   skipContextInjection?: boolean;
   mode?: 'near-zero';
   marketPrice?: number;
+  /** ISO-8601 market resolution date. When provided, days-to-deadline is
+   *  appended to the user prompt so the LLM can't miss the time horizon. */
+  endDateIso?: string | null;
 }): Promise<ConsensusEstimate> {
   const cfg = loadConfig();
 
@@ -432,7 +456,7 @@ export async function estimateConsensusProbability(opts: {
   const useGemini = Boolean(cfg.GEMINI_API_KEY);
   const useAnthropic = Boolean(cfg.ANTHROPIC_API_KEY);
   const useDeepSeek = Boolean(cfg.DEEPSEEK_API_KEY);
-  type ProviderFn = (q: string, d: string | null, h: string, m?: 'near-zero', p?: number) => Promise<ConsensusResult>;
+  type ProviderFn = (q: string, d: string | null, h: string, m?: 'near-zero', p?: number, e?: string | null) => Promise<ConsensusResult>;
   interface ProviderEntry { name: ProviderName; fn: ProviderFn }
   const allEntries: ProviderEntry[] = [
     ...(useOpenAI ? [{ name: 'openai' as const, fn: callOpenAI as ProviderFn }] : []),
@@ -465,7 +489,7 @@ export async function estimateConsensusProbability(opts: {
 
   const settled = await Promise.allSettled(
     entries.map((entry) =>
-      entry.fn(opts.question, opts.description, enrichedHeadline, opts.mode, opts.marketPrice),
+      entry.fn(opts.question, opts.description, enrichedHeadline, opts.mode, opts.marketPrice, opts.endDateIso),
     ),
   );
 

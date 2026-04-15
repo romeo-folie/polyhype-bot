@@ -299,6 +299,7 @@ async function main() {
           redis,
           mode: 'near-zero',
           marketPrice: candidate.price,
+          ...(candidate.market.endDate ? { endDateIso: candidate.market.endDate } : {}),
         });
       } catch (err) {
         logger.warn('[near-zero] consensus estimation failed', {
