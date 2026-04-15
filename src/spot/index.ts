@@ -357,6 +357,8 @@ async function runSpotMonitorInner(
         consensusMinSamples: cfg.CONSENSUS_MIN_SAMPLES,
         kellyProbeDelta: cfg.KELLY_PROBE_DELTA,
         kellyRequireSignStable: cfg.KELLY_REQUIRE_SIGN_STABLE,
+        anchorCollapsePDelta: cfg.ANCHOR_COLLAPSE_P_DELTA,
+        anchorCollapseStddevEpsilon: cfg.ANCHOR_COLLAPSE_STDDEV_EPSILON,
       });
 
       if (!hasTrade || !decision) continue;

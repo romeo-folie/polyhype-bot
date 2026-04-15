@@ -153,6 +153,18 @@ const envSchema = z.object({
   // single dissenter can dominate, and the stddev floor isn't meaningful.
   CONSENSUS_MIN_SAMPLES: z.coerce.number().int().min(1).max(10).optional().default(3),
 
+  // Anchor-collapse gate. consensusCalculator's prompt instructs providers to
+  // return EXACTLY 0.50 under uncertainty. When every provider hits that
+  // anchor, we get consensusP≈0.5 with stddev≈0 — a phantom "agreement" that
+  // is actually the LLM default, not real signal. A genuine 50/50 market
+  // would still show small provider disagreement. Burned 2026-04-15 on three
+  // Virginia referendum bracket markets (all three fired YES at p=0.500,
+  // stddev=0.000 — mutually exclusive brackets so 2 of 3 were guaranteed
+  // losses). ±0.05 around 0.5 and stddev<0.01 captures the anchor signature
+  // without rejecting legitimate near-50% consensus.
+  ANCHOR_COLLAPSE_P_DELTA: z.coerce.number().min(0).max(0.5).optional().default(0.05),
+  ANCHOR_COLLAPSE_STDDEV_EPSILON: z.coerce.number().min(0).max(0.5).optional().default(0.01),
+
   // Hyperliquid funding-rate pre-entry gate. HL `funding` is an hourly decimal.
   // Default 1 bp/hr (~8.76%/yr drag). Ship as shadow-logs first, flip after 3-5d.
   HL_FUNDING_GATE_ENABLED: boolFromEnv.optional().default(false),

@@ -214,6 +214,75 @@ describe('EV gate & noise gate', () => {
   });
 });
 
+describe('anchor-collapse gate', () => {
+  // Virginia referendum bracket class: providers all default to the explicit
+  // 0.50 anchor under uncertainty, producing p=0.500, stddev=0.000 that
+  // synthesizes phantom edge against any non-50¢ market price.
+  it('rejects p=0.5, stddev=0 against a low-priced bracket', () => {
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.5,
+      consensusStddev: 0,
+      currentYesPrice: 0.03, // "3–6%" bracket
+      divergenceThreshold: 0.05,
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('anchor_collapse');
+  });
+
+  it('rejects p=0.5, stddev=0 against a mid-priced bracket', () => {
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.5,
+      consensusStddev: 0,
+      currentYesPrice: 0.15, // "15%+" bracket
+      divergenceThreshold: 0.05,
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('anchor_collapse');
+  });
+
+  it('allows near-50% consensus that has real provider disagreement', () => {
+    // stddev=0.05 > anchor epsilon (0.01) → real signal, not anchor default
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.52,
+      consensusStddev: 0.05,
+      currentYesPrice: 0.40,
+      divergenceThreshold: 0.1,
+    });
+    expect(result.skipReason ?? '').not.toContain('anchor_collapse');
+  });
+
+  it('allows clear directional consensus with stddev=0 (formula path)', () => {
+    // p=0.7 is far enough from 0.5 that the anchor gate does not fire, even
+    // with stddev=0 (e.g. deterministic formula-based estimators).
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.7,
+      consensusStddev: 0,
+      currentYesPrice: 0.5,
+    });
+    expect(result.hasTrade).toBe(true);
+    expect(result.skipReason).toBeUndefined();
+  });
+
+  it('respects custom thresholds', () => {
+    // Widen pDelta to 0.1: now p=0.55 triggers the gate at stddev=0.
+    const result = computeDivergence({
+      ...DEFAULT_INPUT,
+      consensusProbability: 0.55,
+      consensusStddev: 0,
+      currentYesPrice: 0.30,
+      divergenceThreshold: 0.1,
+      anchorCollapsePDelta: 0.1,
+      anchorCollapseStddevEpsilon: 0.01,
+    });
+    expect(result.hasTrade).toBe(false);
+    expect(result.skipReason).toContain('anchor_collapse');
+  });
+});
+
 describe('extreme-price LLM-distrust gate', () => {
   it('rejects when market is < 2¢ but LLM consensus is high (Baidu/Alibaba case)', () => {
     const result = computeDivergence({

@@ -97,6 +97,14 @@ export interface DivergenceInput {
   kellyRequireSignStable?: boolean;
   /** Whether calibration bias correction is enabled. */
   calibrationBiasEnabled?: boolean;
+  /**
+   * Anchor-collapse gate. When every provider defaults to the explicit 0.50
+   * "I don't know" anchor in consensusCalculator's prompt, we see p≈0.5 with
+   * stddev≈0 — fake agreement that's actually the LLM default, not signal.
+   * Reject when |p − 0.5| < pDelta AND stddev < stddevEpsilon.
+   */
+  anchorCollapsePDelta?: number;
+  anchorCollapseStddevEpsilon?: number;
 }
 
 /**
@@ -171,6 +179,8 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
     kellyProbeDelta = 0.05,
     kellyRequireSignStable = true,
     calibrationBiasEnabled = false,
+    anchorCollapsePDelta = 0.05,
+    anchorCollapseStddevEpsilon = 0.01,
   } = input;
 
   // Gate -1: Insufficient consensus samples. Enforced here (rather than in
@@ -319,6 +329,24 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
       hasTrade: false,
       decision: null,
       skipReason: `noisy_signal:stddev=${consensusStddev.toFixed(3)},threshold=${effectiveNoiseThreshold.toFixed(3)}`,
+    };
+  }
+
+  // Gate 1.5: Anchor-collapse — every provider returned ~0.5 with ~zero
+  // disagreement. consensusCalculator's prompt instructs providers to return
+  // EXACTLY 0.50 when they don't have an edge; when they all hit that anchor
+  // we get phantom agreement. A legitimate 50/50 would show some
+  // provider-to-provider disagreement; stddev≈0 at p≈0.5 is the default's
+  // signature. Treat as no-signal rather than letting it slip through and
+  // synthesize an edge against the market.
+  if (
+    Math.abs(p - 0.5) < anchorCollapsePDelta &&
+    consensusStddev < anchorCollapseStddevEpsilon
+  ) {
+    return {
+      hasTrade: false,
+      decision: null,
+      skipReason: `anchor_collapse:p=${p.toFixed(3)},stddev=${consensusStddev.toFixed(4)}`,
     };
   }
 

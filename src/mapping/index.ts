@@ -382,6 +382,8 @@ async function evaluateOsintCandidate(args: EvaluateCandidateArgs): Promise<Eval
     kellyProbeDelta: cfg.KELLY_PROBE_DELTA,
     kellyRequireSignStable: cfg.KELLY_REQUIRE_SIGN_STABLE,
     calibrationBiasEnabled: cfg.CALIBRATION_BIAS_ENABLED,
+    anchorCollapsePDelta: cfg.ANCHOR_COLLAPSE_P_DELTA,
+    anchorCollapseStddevEpsilon: cfg.ANCHOR_COLLAPSE_STDDEV_EPSILON,
   });
 
   logger.info('[mapping] divergence result', {
