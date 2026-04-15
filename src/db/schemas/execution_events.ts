@@ -12,7 +12,7 @@ const SKIP_REASON = [
   'already_executed', 'position_already_open', 'stake_below_hl_minimum',
   'insufficient_equity', 'global_margin_cap', 'global_governor', 'maker_not_filled',
   'taker_edge_below_min', 'liquidity_gate', 'simmer_position_exists', 'market_resolved',
-  'spread_too_wide', 'one_sided_book',
+  'spread_too_wide', 'one_sided_book', 'no_clob_book',
   'other',
 ] as const;
 

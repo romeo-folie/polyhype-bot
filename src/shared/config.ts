@@ -194,6 +194,15 @@ const envSchema = z.object({
   MAKER_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(45_000),
   MAKER_POLL_INTERVAL_MS: z.coerce.number().int().min(50).optional().default(1000),
   MAKER_PRICE_EDGE_BPS: z.coerce.number().min(0).optional().default(40),
+  // Empty-book maker: geopolitical/niche markets where the CLOB has no resting orders
+  // (bid≈0.01/ask≈0.99). Instead of skipping, post a limit order at fair value and
+  // resume polling across cron cycles (non-blocking). Fills may take minutes to hours.
+  MAKER_EMPTY_BOOK_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(900_000),
+  MAKER_EMPTY_BOOK_EDGE_BPS: z.coerce.number().min(0).optional().default(150),
+  // Thresholds for detecting an empty/ghost book. bid < BID_THRESHOLD and
+  // ask > ASK_THRESHOLD means no real market maker is resting on the book.
+  EMPTY_BOOK_BID_THRESHOLD: z.coerce.number().min(0).max(0.5).optional().default(0.04),
+  EMPTY_BOOK_ASK_THRESHOLD: z.coerce.number().min(0.5).max(1).optional().default(0.96),
   // Maker-exit (PM CLOB-entered positions only). Exits are more time-sensitive
   // than entries, so MAKER_EXIT_MAX_WAIT_MS defaults shorter than MAKER_MAX_WAIT_MS.
   // Eligible reasons is a comma-separated list; stop_loss is intentionally NOT eligible.

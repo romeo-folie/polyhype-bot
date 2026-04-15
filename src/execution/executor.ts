@@ -47,6 +47,7 @@ import type { SimmerTradeResult } from '../shared/simmer.js';
 import type { OrderBookSummary, TickSize } from '@polymarket/clob-client';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
+import { getPendingOrder, setPendingOrder, deletePendingOrder } from './pendingMakerOrders.js';
 
 const IDEMPOTENCY_TTL_SECONDS = 3600; // 1 hour
 // MIN_STAKE_USD is loaded from config (MIN_BET_USD, default $5).
@@ -291,17 +292,25 @@ async function confirmMakerCancel(orderId: string): Promise<boolean> {
 function resolveMakerPrice(
   book: { bids: { price: string }[]; asks: { price: string }[]; tick_size: string },
   priceEdgeBps: number,
+  fairValueOverride?: number | null,
 ): number | null {
   const tick = parseFloat(book.tick_size);
   if (!isFinite(tick) || tick <= 0) return null;
 
-  const bestBid = parseFloat(book.bids[0]?.price ?? '0');
   const bestAsk = parseFloat(book.asks[0]?.price ?? '0');
   const improvement = priceEdgeBps / 10_000;
 
-  let price = bestBid > 0 ? bestBid + improvement : 0;
-  if (price <= 0 && bestAsk > 0) {
-    price = bestAsk - tick;
+  // When a fair-value anchor is provided (empty-book mode), use it instead
+  // of the CLOB best-bid, which is meaningless on a ghost book.
+  let price: number;
+  if (fairValueOverride != null && isFinite(fairValueOverride)) {
+    price = fairValueOverride - improvement;
+  } else {
+    const bestBid = parseFloat(book.bids[0]?.price ?? '0');
+    price = bestBid > 0 ? bestBid + improvement : 0;
+    if (price <= 0 && bestAsk > 0) {
+      price = bestAsk - tick;
+    }
   }
 
   if (bestAsk > 0) {
@@ -320,6 +329,8 @@ async function tryExecuteViaClobMaker(
   signal: TradeSignal,
   cfg: ReturnType<typeof loadConfig>,
   prefetchedBook?: OrderBookSummary | null,
+  emptyBookMode?: boolean,
+  redis?: Redis,
 ): Promise<{
   ok: boolean;
   tradeResult?: SimmerTradeResult;
@@ -333,12 +344,73 @@ async function tryExecuteViaClobMaker(
   makerBestAsk?: number;
   makerMidPrice?: number;
   makerSpreadBps?: number;
-  makerFillStatus?: 'none' | 'partial' | 'full' | 'timeout' | 'rejected' | 'cancel_unconfirmed';
+  makerFillStatus?: 'none' | 'partial' | 'full' | 'timeout' | 'rejected' | 'cancel_unconfirmed' | 'pending';
   makerSharesFilled?: number;
 }> {
   const startedAt = Date.now();
   if (!cfg.CLOB_FALLBACK_ENABLED) {
     return { ok: false, error: 'clob_disabled', waitMs: Date.now() - startedAt };
+  }
+
+  // --- Empty-book pending order handling ---
+  // On each cron cycle, resume polling an existing open order rather than re-posting.
+  if (emptyBookMode && redis) {
+    const pending = await getPendingOrder(redis, signal.marketId);
+    if (pending) {
+      if (Date.now() < pending.expiresAt) {
+        // Active order from a previous cycle — poll it once and return.
+        const order = await getClobOrder(pending.orderId);
+        if (order) {
+          const matched = parseFloat(order.size_matched ?? '0');
+          const original = parseFloat(order.original_size ?? '0');
+          if (matched > 0) {
+            const isPartial = matched + 1e-9 < original;
+            if (isPartial) {
+              // Partial fill — cancel the residual open size so it doesn't
+              // continue filling untracked on the next cron cycle.
+              logger.info('[executor] partial fill on empty-book order — cancelling residual', {
+                marketId: signal.marketId,
+                orderId: pending.orderId,
+                matched,
+                original,
+              });
+              await confirmMakerCancel(pending.orderId);
+            }
+            await deletePendingOrder(redis, signal.marketId);
+            const filledStakeUsd = matched * pending.price;
+            return {
+              ok: true,
+              tradeResult: { success: true, shares_bought: matched },
+              filledStakeUsd,
+              waitMs: Date.now() - startedAt,
+              makerOrderId: pending.orderId,
+              makerPostedPrice: pending.price,
+              makerPostedSize: pending.size,
+              makerFillStatus: isPartial ? 'partial' : 'full',
+              makerSharesFilled: matched,
+            };
+          }
+        }
+        // Still open — not filled yet on this cycle
+        return {
+          ok: false,
+          error: 'maker_not_filled',
+          waitMs: Date.now() - startedAt,
+          makerOrderId: pending.orderId,
+          makerPostedPrice: pending.price,
+          makerPostedSize: pending.size,
+          makerFillStatus: 'pending',
+        };
+      } else {
+        // Expired — cancel and fall through to re-post
+        logger.info('[executor] empty-book maker order expired — cancelling before re-post', {
+          marketId: signal.marketId,
+          orderId: pending.orderId,
+        });
+        await confirmMakerCancel(pending.orderId);
+        await deletePendingOrder(redis, signal.marketId);
+      }
+    }
   }
 
   const tokenId = clobTokenForSignal(signal);
@@ -360,7 +432,14 @@ async function tryExecuteViaClobMaker(
   const mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : null;
   const spreadBps = bestBid > 0 && bestAsk > 0 && mid ? ((bestAsk - bestBid) / mid) * 10000 : null;
 
-  const price = resolveMakerPrice(book, cfg.MAKER_PRICE_EDGE_BPS);
+  const edgeBps = emptyBookMode ? cfg.MAKER_EMPTY_BOOK_EDGE_BPS : cfg.MAKER_PRICE_EDGE_BPS;
+  const fairValue =
+    emptyBookMode && signal.consensusProbability != null
+      ? signal.direction === 'YES' || signal.direction === 'UP'
+        ? signal.consensusProbability
+        : 1 - signal.consensusProbability
+      : null;
+  const price = resolveMakerPrice(book, edgeBps, fairValue);
   if (price === null) {
     return {
       ok: false,
@@ -426,7 +505,50 @@ async function tryExecuteViaClobMaker(
   // Record trade in governor immediately upon order acceptance (limit orders consume budget)
   await recordGlobalTrade(getRedis(), 'polymarket');
 
-  if (cfg.MAKER_MAX_WAIT_MS <= 0) {
+  // In empty-book mode: persist the order and return immediately (non-blocking).
+  // The next cron cycle resumes via the idempotency check at the top of this function.
+  if (emptyBookMode && redis) {
+    const expiresAt = startedAt + cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS;
+    await setPendingOrder(
+      redis,
+      signal.marketId,
+      {
+        orderId: result.order_id,
+        tokenId,
+        price,
+        size,
+        postedAt: startedAt,
+        expiresAt,
+        consensusP: signal.consensusProbability ?? 0.5,
+        direction: signal.direction,
+      },
+      Math.ceil(cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS / 1000) + 300,
+    );
+    logger.info('[executor] empty-book maker order posted — returning pending', {
+      marketId: signal.marketId,
+      orderId: result.order_id,
+      price,
+      expiresAt: new Date(expiresAt).toISOString(),
+    });
+    return {
+      ok: false,
+      error: 'maker_not_filled',
+      waitMs: Date.now() - startedAt,
+      makerOrderId: result.order_id,
+      makerPostedPrice: price,
+      makerPostedSize: size,
+      makerBestBid: bestBid,
+      makerBestAsk: bestAsk,
+      ...(mid ? { makerMidPrice: mid } : {}),
+      ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
+      makerFillStatus: 'pending',
+    };
+  }
+
+  const maxWaitMs = cfg.MAKER_MAX_WAIT_MS;
+  const pollIntervalMs = cfg.MAKER_POLL_INTERVAL_MS;
+
+  if (maxWaitMs <= 0) {
     const cancelled = await confirmMakerCancel(result.order_id);
     if (!cancelled) {
       return {
@@ -458,7 +580,7 @@ async function tryExecuteViaClobMaker(
     };
   }
 
-  const deadline = Date.now() + cfg.MAKER_MAX_WAIT_MS;
+  const deadline = Date.now() + maxWaitMs;
   while (Date.now() < deadline) {
     const order = await getClobOrder(result.order_id);
     if (!order) break;
@@ -485,6 +607,7 @@ async function tryExecuteViaClobMaker(
         }
       }
 
+      if (emptyBookMode && redis) await deletePendingOrder(redis, signal.marketId);
       const filledStakeUsd = matched * price;
       const tradeResult: SimmerTradeResult = {
         success: true,
@@ -507,9 +630,10 @@ async function tryExecuteViaClobMaker(
       };
     }
 
-    await sleep(cfg.MAKER_POLL_INTERVAL_MS);
+    await sleep(pollIntervalMs);
   }
 
+  if (emptyBookMode && redis) await deletePendingOrder(redis, signal.marketId);
   const cancelled = await confirmMakerCancel(result.order_id);
   if (!cancelled) {
     return {
@@ -1254,6 +1378,27 @@ export async function executeSignal(
     }
   }
 
+  // 4c) Clean up any expired empty-book pending maker orders for this market.
+  // Must run before the spread gate so we don't accidentally try to resume
+  // an order whose expiresAt window has already passed.
+  {
+    const expiredPending = await getPendingOrder(redis, signal.marketId);
+    if (expiredPending && Date.now() >= expiredPending.expiresAt) {
+      logger.info('[executor] cleaning up expired empty-book maker order before cycle', {
+        marketId: signal.marketId,
+        orderId: expiredPending.orderId,
+        postedAt: expiredPending.postedAt,
+        expiresAt: expiredPending.expiresAt,
+      });
+      try {
+        await confirmMakerCancel(expiredPending.orderId);
+      } catch {
+        // Non-fatal — order may already be cancelled or filled
+      }
+      await deletePendingOrder(redis, signal.marketId);
+    }
+  }
+
   const executionMode = cfg.EXECUTION_MODE;
   const simmerId =
     signal.source === 'crypto-arb' || !cfg.SIMMER_VENUE_ENABLED
@@ -1332,6 +1477,7 @@ export async function executeSignal(
   // Prefetched CLOB book: populated by the entry spread guardrail below when
   // active, then handed to the maker path so we don't double-fetch the book.
   let prefetchedClobBook: OrderBookSummary | null = null;
+  let emptyBookMakerRoute = false;
 
   // Entry spread guardrail. Catches degenerate books where "edge" is an artifact
   // of thin liquidity rather than a real mispricing — both wide two-sided books
@@ -1372,18 +1518,49 @@ export async function executeSignal(
       ...benchmark,
       raw: { ...existingRaw, entrySpreadGuardrail: guardrailDiagnostic },
     };
-    if (oneSidedBook || spreadTooWide) {
-      const skipReason = oneSidedBook ? 'one_sided_book' : 'spread_too_wide';
-      logger.info(
-        oneSidedBook
-          ? '[executor] skipping — entry spread unknown due to one-sided book'
-          : '[executor] skipping — entry spread too wide',
-        {
-          marketId: signal.marketId,
-          ...guardrailDiagnostic,
-        },
-      );
-      return recordSkip(skipReason, 'skipped', guardrailDiagnostic);
+    // Detect ghost books: both sides technically present but at wall prices.
+    // bid ≈ 0.01 / ask ≈ 0.99 means no real market maker is resting on the book.
+    const emptyBook =
+      !oneSidedBook &&
+      (benchmark.decisionBestBid ?? 1) < cfg.EMPTY_BOOK_BID_THRESHOLD &&
+      (benchmark.decisionBestAsk ?? 0) > cfg.EMPTY_BOOK_ASK_THRESHOLD;
+
+    const canEmptyBookMaker =
+      emptyBook &&
+      executionMode !== 'taker' &&
+      !signal.isFutures &&
+      isMakerEligible(signal);
+
+    if (oneSidedBook) {
+      logger.info('[executor] skipping — entry spread unknown due to one-sided book', {
+        marketId: signal.marketId,
+        ...guardrailDiagnostic,
+      });
+      return recordSkip('one_sided_book', 'skipped', guardrailDiagnostic);
+    }
+    if (emptyBook && !canEmptyBookMaker) {
+      // Ghost book but can't use maker (taker mode or ineligible source)
+      logger.info('[executor] skipping — empty CLOB book, cannot route to maker', {
+        marketId: signal.marketId,
+        ...guardrailDiagnostic,
+      });
+      return recordSkip('no_clob_book', 'skipped', guardrailDiagnostic);
+    }
+    if (!emptyBook && spreadTooWide) {
+      logger.info('[executor] skipping — entry spread too wide', {
+        marketId: signal.marketId,
+        ...guardrailDiagnostic,
+      });
+      return recordSkip('spread_too_wide', 'skipped', guardrailDiagnostic);
+    }
+    if (canEmptyBookMaker) {
+      emptyBookMakerRoute = true;
+      logger.info('[executor] empty book — routing to fair-value maker', {
+        marketId: signal.marketId,
+        consensusP: signal.consensusProbability,
+        direction: signal.direction,
+        ...guardrailDiagnostic,
+      });
     }
   }
 
@@ -1392,7 +1569,8 @@ export async function executeSignal(
   // maker on a fee market is strictly better than the previous behavior of
   // skipping the trade outright.
   const makerEligible =
-    executionMode !== 'taker' && !signal.isFutures && isMakerEligible(signal);
+    (executionMode !== 'taker' && !signal.isFutures && isMakerEligible(signal))
+    || emptyBookMakerRoute;
   if (executionMode !== 'taker' && !signal.isFutures && !makerEligible) {
     logger.info('[executor] maker skipped — signal source not maker-eligible', {
       marketId: signal.marketId,
@@ -1411,11 +1589,19 @@ export async function executeSignal(
       source: signal.source,
       edgeMagnitude: signal.edgeMagnitude,
       stakeUsd: signal.stakeUsd,
-      maxWaitMs: cfg.MAKER_MAX_WAIT_MS,
-      priceEdgeBps: cfg.MAKER_PRICE_EDGE_BPS,
+      emptyBook: emptyBookMakerRoute,
+      ...(emptyBookMakerRoute
+        ? { maxWaitMs: cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS, edgeBps: cfg.MAKER_EMPTY_BOOK_EDGE_BPS }
+        : { maxWaitMs: cfg.MAKER_MAX_WAIT_MS, priceEdgeBps: cfg.MAKER_PRICE_EDGE_BPS }),
       feeMarket: feeMarketBpsObserved != null || signal.feesEnabled === true,
     });
-    const makerAttempt = await tryExecuteViaClobMaker(signal, cfg, prefetchedClobBook);
+    const makerAttempt = await tryExecuteViaClobMaker(
+      signal,
+      cfg,
+      prefetchedClobBook,
+      emptyBookMakerRoute,
+      redis,
+    );
     safeRecordExecutionTiming('maker_wait_ms', makerAttempt.waitMs);
     const makerBenchmark: DecisionBenchmark = {
       decisionBestBid: makerAttempt.makerBestBid ?? null,
@@ -1441,6 +1627,38 @@ export async function executeSignal(
       makerCancelConfirmed: makerAttempt.makerFillStatus === 'cancel_unconfirmed' ? false : null,
       ...makerBenchmark,
     };
+    // Empty-book order posted — not filled yet. Return non-skip so the idempotency
+    // key is NOT set (we want to resume on the next cron cycle).
+    if (makerAttempt.makerFillStatus === 'pending') {
+      logger.info('[executor] empty-book maker order pending — will resume on next cycle', {
+        marketId: signal.marketId,
+        orderId: makerAttempt.makerOrderId,
+        postedPrice: makerAttempt.makerPostedPrice,
+      });
+      finalizeAttempt({
+        executionPath: 'maker_pending',
+        finalExecutionPath: 'maker_pending',
+        finalVenue: 'clob',
+        finalOrderType: 'maker',
+        finalSharesFilled: null,
+        finalStakeUsdExecuted: null,
+        executionSucceeded: false,
+        hedgeTriggered: false,
+      });
+      return {
+        signal,
+        skipped: false,
+        executionVenue: 'clob',
+        modeConfigured: cfg.EXECUTION_MODE,
+        entryExecutionPath: 'maker_pending',
+        entryOrderType: 'maker',
+        entryPrice: makerAttempt.makerPostedPrice ?? null,
+        sharesFilled: null,
+        decisionBenchmark: makerTelemetry as DecisionBenchmark,
+        hedgeDispatched: false,
+      };
+    }
+
     if (makerAttempt.ok && makerAttempt.tradeResult?.success) {
       if (
         makerAttempt.filledStakeUsd &&
@@ -1563,6 +1781,15 @@ export async function executeSignal(
       safeRecordExecutionMetric('maker_rejected');
     } else if (makerAttempt.makerFillStatus === 'cancel_unconfirmed') {
       safeRecordExecutionMetric('maker_cancel_uncertain');
+    }
+
+    // Empty-book orders that timeout have no taker path — the book is still empty.
+    if (emptyBookMakerRoute) {
+      logger.info('[executor] empty-book maker timed out — no taker fallback (book still empty)', {
+        marketId: signal.marketId,
+        fillStatus: makerAttempt.makerFillStatus,
+      });
+      return recordSkip('no_clob_book', 'maker_timeout', makerTelemetry, 'clob', 'maker');
     }
 
     if (executionMode === 'hybrid') {
