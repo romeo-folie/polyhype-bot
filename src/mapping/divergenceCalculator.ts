@@ -176,7 +176,7 @@ export function computeDivergence(input: DivergenceInput): DivergenceResult {
     noiseStddevThreshold = 0.22,
     consensusSampleCount,
     consensusTargetSamples = 3,
-    consensusMinSamples = 3,
+    consensusMinSamples = 2,
     kellyProbeDelta = 0.05,
     kellyRequireSignStable = true,
     calibrationBiasEnabled = false,

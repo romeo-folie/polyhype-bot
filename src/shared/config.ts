@@ -152,10 +152,15 @@ const envSchema = z.object({
   // providers. Also gates the [consensus-calc] degraded log and the
   // insufficient-samples skip inside computeDivergence.
   CONSENSUS_TARGET_SAMPLES: z.coerce.number().int().min(2).max(10).optional().default(3),
-  // Minimum samples required to trade. Raised from the previous implicit 2 to
-  // 3 — with only 2 providers and a sample-variance denominator of n-1=1, a
-  // single dissenter can dominate, and the stddev floor isn't meaningful.
-  CONSENSUS_MIN_SAMPLES: z.coerce.number().int().min(1).max(10).optional().default(3),
+  // Minimum real-vote samples required to trade. Counts NON-abstention votes
+  // only (consensusCalculator filters exact-0.5 abstentions before passing
+  // sampleCount through). Lowered 2026-04-15 from 3 → 2: the abstention
+  // filter routinely leaves n=2 when one provider anchor-abstains, and
+  // blocking those wastes tight-consensus signals. The n=2 single-dissenter
+  // concern is handled by the noise gate (0.22 threshold) and the
+  // pessimistic-EV gate (p ± stddev); both would reject a high-variance
+  // 2-vote panel independently.
+  CONSENSUS_MIN_SAMPLES: z.coerce.number().int().min(1).max(10).optional().default(2),
 
   // Anchor-collapse gate. consensusCalculator's prompt instructs providers to
   // return EXACTLY 0.50 under uncertainty. When every provider hits that
