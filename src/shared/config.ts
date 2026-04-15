@@ -552,9 +552,14 @@ const envSchema = z.object({
   // that provider is skipped for CONSENSUS_BREAKER_COOLDOWN_S. Cooldown acts as
   // the auto-retry interval: when it expires, the next estimate will probe the
   // provider again. Tops-ups / recoveries are picked up automatically.
+  //
+  // Defaults retuned 2026-04-15 for dead-provider (not burst-failure) regime:
+  // billing-expired providers fail at ~2–3/hour, which never accumulated 5
+  // failures in a 120s window under the old defaults and so never tripped. 3
+  // failures in a 1h window opens the circuit on a steadily-dead provider.
   CONSENSUS_BREAKER_ENABLED: boolFromEnv.optional().default(true),
-  CONSENSUS_BREAKER_FAILURE_THRESHOLD: z.coerce.number().int().positive().optional().default(5),
-  CONSENSUS_BREAKER_WINDOW_S: z.coerce.number().int().positive().optional().default(120),
+  CONSENSUS_BREAKER_FAILURE_THRESHOLD: z.coerce.number().int().positive().optional().default(3),
+  CONSENSUS_BREAKER_WINDOW_S: z.coerce.number().int().positive().optional().default(3600),
   CONSENSUS_BREAKER_COOLDOWN_S: z.coerce.number().int().positive().optional().default(600),
   RELEVANCE_CACHE_TTL_S: z.coerce.number().int().positive().optional().default(3600),
   // Strict top-fit candidate selection: evaluate only the highest fit-score
