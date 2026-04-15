@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { isMarketRelevant, scoreMarketRelevance, parseFitScore } from '../relevanceGate.js';
+import { isMarketRelevant, scoreMarketRelevance, parseFitScore, SYSTEM_PROMPT } from '../relevanceGate.js';
 
 const mockConfig = {
   GEMINI_API_KEY: 'test-key' as string | undefined,
@@ -77,6 +77,21 @@ function resetMocks() {
   mockRedisGet.mockResolvedValue(null);
   mockRedisSet.mockResolvedValue('OK');
 }
+
+describe('SYSTEM_PROMPT anchors', () => {
+  // The 0.30 / 0.70 bimodal gap was observed pushing genuine-but-indirect
+  // matches (e.g. Iran war-action headlines vs. Iran war markets) below the
+  // 0.5 threshold. The 0.50 anchor gives the LLM a landing zone for on-topic,
+  // plausible-chain cases.
+  it('includes the 0.50 anchor so on-topic plausible-chain cases are not floored to 0.30', () => {
+    expect(SYSTEM_PROMPT).toMatch(/0\.50\s*=.*plausible causal chain/);
+  });
+
+  it('preserves the 0.30 and 0.70 anchors', () => {
+    expect(SYSTEM_PROMPT).toMatch(/0\.30\s*=.*shares an entity/);
+    expect(SYSTEM_PROMPT).toMatch(/0\.70\s*=.*clear causal chain/);
+  });
+});
 
 describe('parseFitScore', () => {
   it('parses a clean float', () => {

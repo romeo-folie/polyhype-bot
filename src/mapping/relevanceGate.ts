@@ -29,7 +29,7 @@ export interface MarketRelevanceScore {
   provider?: string;
 }
 
-const SYSTEM_PROMPT =
+export const SYSTEM_PROMPT =
   'You are a relevance scorer for prediction markets. ' +
   'Rate how directly the news headline bears on the SPECIFIC OUTCOME asked about ' +
   'in the market question. Sharing a named entity (person, country, company) is NOT enough — ' +
@@ -37,6 +37,7 @@ const SYSTEM_PROMPT =
   'Return ONLY a single number between 0.00 and 1.00 with no commentary. Anchors: ' +
   '0.00 = unrelated. ' +
   '0.30 = shares an entity but doesn\'t affect the specific outcome (e.g. "Trump threatens Iran" for "Trump out as President?"). ' +
+  '0.50 = on-topic and within the outcome\'s domain, plausible causal chain but many independent factors determine it (e.g. "Trump threatens to blockade Iran" for "Will the U.S. invade Iran?"). ' +
   '0.70 = clear causal chain but indirect (e.g. "Supreme Court sides with DOJ in Trump case" for "Trump out as President?"). ' +
   '1.00 = direct material bearing on the outcome (e.g. "Senate votes to remove Trump" for "Trump out as President?").';
 
