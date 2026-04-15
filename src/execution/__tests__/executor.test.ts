@@ -43,6 +43,12 @@ vi.mock('../positionLedger.js', () => ({
   hasOpenPosition: vi.fn(),
 }));
 
+vi.mock('../pendingMakerOrders.js', () => ({
+  getPendingOrder: vi.fn(),
+  setPendingOrder: vi.fn(),
+  deletePendingOrder: vi.fn(),
+}));
+
 vi.mock('../../shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
@@ -60,6 +66,11 @@ const mockConfig = {
   MAKER_MAX_WAIT_MS: 0,
   MAKER_POLL_INTERVAL_MS: 10,
   MAKER_PRICE_EDGE_BPS: 0,
+  MAKER_EMPTY_BOOK_MAX_WAIT_MS: 900_000,
+  MAKER_EMPTY_BOOK_POLL_INTERVAL_MS: 30_000,
+  MAKER_EMPTY_BOOK_EDGE_BPS: 150,
+  EMPTY_BOOK_BID_THRESHOLD: 0.04,
+  EMPTY_BOOK_ASK_THRESHOLD: 0.96,
   TAKER_MIN_EDGE: 0,
   TAKER_MIN_EDGE_CATEGORIES: {},
   TAIL_TAKER_BLOCK: false,
@@ -103,6 +114,8 @@ const { submitClobBuy, getClobOrderBook, submitClobLimitBuy, getClobOrder, cance
 const { hasOpenPosition } = await import('../positionLedger.js');
 const { recordExecutionMetric, recordExecutionTiming, recordExecutionEvent } =
   await import('../../shared/telemetry.js');
+const { getPendingOrder, setPendingOrder, deletePendingOrder } =
+  await import('../pendingMakerOrders.js');
 const { executeSignal, executeSignals } = await import('../executor.js');
 
 const mockSubmit = vi.mocked(submitTrade);
@@ -116,6 +129,9 @@ const mockHasPosition = vi.mocked(hasOpenPosition);
 const mockRecordExecutionMetric = vi.mocked(recordExecutionMetric);
 const mockRecordExecutionTiming = vi.mocked(recordExecutionTiming);
 const mockRecordExecutionEvent = vi.mocked(recordExecutionEvent);
+const mockGetPendingOrder = vi.mocked(getPendingOrder);
+const mockSetPendingOrder = vi.mocked(setPendingOrder);
+const mockDeletePendingOrder = vi.mocked(deletePendingOrder);
 
 function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
   return {
@@ -157,21 +173,33 @@ describe('executeSignal', () => {
     mockRecordExecutionMetric.mockReset();
     mockRecordExecutionTiming.mockReset();
     mockRecordExecutionEvent.mockReset();
+    mockGetPendingOrder.mockReset();
+    mockSetPendingOrder.mockReset();
+    mockDeletePendingOrder.mockReset();
     mockRecordExecutionMetric.mockResolvedValue(undefined);
     mockRecordExecutionTiming.mockResolvedValue(undefined);
     mockRecordExecutionEvent.mockResolvedValue(undefined);
     mockGetCalibrationStats.mockResolvedValue(null);
+    mockGetPendingOrder.mockResolvedValue(null);
+    mockSetPendingOrder.mockResolvedValue(undefined);
+    mockDeletePendingOrder.mockResolvedValue(undefined);
 
     mockConfig.EXECUTION_MODE = 'taker';
     mockConfig.MAKER_MAX_WAIT_MS = 0;
     mockConfig.MAKER_POLL_INTERVAL_MS = 10;
     mockConfig.MAKER_PRICE_EDGE_BPS = 0;
+    mockConfig.MAKER_EMPTY_BOOK_MAX_WAIT_MS = 900_000;
+    mockConfig.MAKER_EMPTY_BOOK_POLL_INTERVAL_MS = 30_000;
+    mockConfig.MAKER_EMPTY_BOOK_EDGE_BPS = 150;
+    mockConfig.EMPTY_BOOK_BID_THRESHOLD = 0.04;
+    mockConfig.EMPTY_BOOK_ASK_THRESHOLD = 0.96;
     mockConfig.TAKER_MIN_EDGE = 0;
     mockConfig.TAKER_MIN_EDGE_CATEGORIES = {};
     mockConfig.TAIL_TAKER_BLOCK = false;
     mockConfig.TAIL_PRICE_THRESHOLD = 0.2;
     mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
     mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
+    mockConfig.SIMMER_VENUE_ENABLED = true;
 
     // Default: available in Simmer, Simmer succeeds, no open position
     mockResolve.mockResolvedValue('simmer-uuid-123');
@@ -362,12 +390,14 @@ describe('executeSignal', () => {
 
   it('skips when entry spread exceeds MAX_ENTRY_SPREAD_BPS', async () => {
     mockConfig.MAX_ENTRY_SPREAD_BPS = 500; // 5%
+    // Use a wide but non-ghost book: bid=0.30 > EMPTY_BOOK_BID_THRESHOLD(0.04)
+    // so it is NOT classified as a ghost book, just a wide real book.
     mockGetOrderBook.mockResolvedValue({
       market: 'mkt-test',
       asset_id: 'tok-yes',
       timestamp: new Date().toISOString(),
-      bids: [{ price: '0.01', size: '100' }],
-      asks: [{ price: '0.99', size: '100' }],
+      bids: [{ price: '0.30', size: '100' }],
+      asks: [{ price: '0.70', size: '100' }], // ~5714 bps spread > 500 ceiling
       min_order_size: '1',
       tick_size: '0.01',
       neg_risk: false,
@@ -438,12 +468,13 @@ describe('executeSignal', () => {
   it('oracle-lag falls back to global MAX_ENTRY_SPREAD_BPS when override is -1', async () => {
     mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
     mockConfig.ORACLE_LAG_MAX_ENTRY_SPREAD_BPS = -1; // disabled → use global
+    // Wide but non-ghost book: bid=0.30 > EMPTY_BOOK_BID_THRESHOLD(0.04)
     mockGetOrderBook.mockResolvedValue({
       market: 'mkt-test',
       asset_id: 'tok-yes',
       timestamp: new Date().toISOString(),
-      bids: [{ price: '0.01', size: '100' }],
-      asks: [{ price: '0.99', size: '100' }], // 19600 bps — exceeds global 500 bps
+      bids: [{ price: '0.30', size: '100' }],
+      asks: [{ price: '0.70', size: '100' }], // ~5714 bps — exceeds global 500 bps
       min_order_size: '1',
       tick_size: '0.01',
       neg_risk: false,
@@ -1123,5 +1154,280 @@ describe('executeSignals', () => {
     const results = await executeSignals([], redis as any);
     expect(results).toHaveLength(0);
     expect(mockSubmit).not.toHaveBeenCalled();
+  });
+});
+
+describe('empty-book maker route', () => {
+  function makeGhostBook() {
+    return {
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.01', size: '100' }],
+      asks: [{ price: '0.99', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    };
+  }
+
+  beforeEach(() => {
+    mockSubmit.mockReset();
+    mockResolve.mockReset();
+    mockSubmitClob.mockReset();
+    mockGetOrderBook.mockReset();
+    mockSubmitLimit.mockReset();
+    mockGetOrder.mockReset();
+    mockCancelOrder.mockReset();
+    mockHasPosition.mockReset();
+    mockGetCalibrationStats.mockReset();
+    mockRecordExecutionMetric.mockReset();
+    mockRecordExecutionTiming.mockReset();
+    mockRecordExecutionEvent.mockReset();
+    mockGetPendingOrder.mockReset();
+    mockSetPendingOrder.mockReset();
+    mockDeletePendingOrder.mockReset();
+
+    mockRecordExecutionMetric.mockResolvedValue(undefined);
+    mockRecordExecutionTiming.mockResolvedValue(undefined);
+    mockRecordExecutionEvent.mockResolvedValue(undefined);
+    mockGetCalibrationStats.mockResolvedValue(null);
+    mockGetPendingOrder.mockResolvedValue(null);
+    mockSetPendingOrder.mockResolvedValue(undefined);
+    mockDeletePendingOrder.mockResolvedValue(undefined);
+
+    mockConfig.EXECUTION_MODE = 'hybrid';
+    mockConfig.MAKER_MAX_WAIT_MS = 0;
+    mockConfig.MAKER_POLL_INTERVAL_MS = 10;
+    mockConfig.MAKER_PRICE_EDGE_BPS = 0;
+    mockConfig.MAKER_EMPTY_BOOK_MAX_WAIT_MS = 900_000;
+    mockConfig.MAKER_EMPTY_BOOK_POLL_INTERVAL_MS = 30_000;
+    mockConfig.MAKER_EMPTY_BOOK_EDGE_BPS = 150;
+    mockConfig.EMPTY_BOOK_BID_THRESHOLD = 0.04;
+    mockConfig.EMPTY_BOOK_ASK_THRESHOLD = 0.96;
+    mockConfig.TAKER_MIN_EDGE = 0;
+    mockConfig.TAKER_MIN_EDGE_CATEGORIES = {};
+    mockConfig.TAIL_TAKER_BLOCK = false;
+    mockConfig.TAIL_PRICE_THRESHOLD = 0.2;
+    mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockConfig.SIMMER_VENUE_ENABLED = false; // skip Simmer so spread gate always fires
+
+    mockGetOrderBook.mockResolvedValue(makeGhostBook());
+    mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-eb' });
+    mockGetOrder.mockResolvedValue(null);
+    mockCancelOrder.mockResolvedValue(true);
+    mockHasPosition.mockResolvedValue(false);
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
+  });
+
+  it('skips with no_clob_book in taker mode (empty-book maker not reachable)', async () => {
+    mockConfig.EXECUTION_MODE = 'taker';
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('no_clob_book');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+  });
+
+  it('skips with no_clob_book for non-maker-eligible source on ghost book', async () => {
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'spot' }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('no_clob_book');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
+  it('routes to fair-value maker and returns pending on ghost book (YES direction)', async () => {
+    const redis = makeRedis();
+    const result = await executeSignal(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSignal({ source: 'osint', consensusProbability: 0.65, direction: 'YES' }),
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(false);
+    expect(result.entryExecutionPath).toBe('maker_pending');
+    expect(result.entryOrderType).toBe('maker');
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+    // Fair-value: 0.65 - 150bps (0.015) = 0.635 → roundDown to tick 0.01 → 0.63
+    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.63 }));
+    expect(mockSetPendingOrder).toHaveBeenCalledOnce();
+    // No taker fallback — ghost book has no market makers
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+    // Idempotency key NOT set — will resume on next cron cycle
+    expect(redis.set).not.toHaveBeenCalled();
+  });
+
+  it('uses inverted fair-value price for NO direction on ghost book', async () => {
+    const redis = makeRedis();
+    await executeSignal(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSignal({ source: 'osint', consensusProbability: 0.65, direction: 'NO' }),
+      redis as any,
+    );
+
+    // Fair-value for NO: 1 - 0.65 = 0.35; minus edge 0.015 → 0.335 → roundDown → 0.33
+    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.33 }));
+  });
+
+  it('resumes active pending order that is not yet filled — returns pending again', async () => {
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'order-resume',
+      tokenId: 'tok-yes',
+      price: 0.63,
+      size: 7.94,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 600_000,
+      consensusP: 0.65,
+      direction: 'YES',
+    });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-resume',
+      status: 'open',
+      owner: '0x1',
+      maker_address: '0x1',
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      side: 'BUY',
+      original_size: '7.94',
+      size_matched: '0',
+      price: '0.63',
+      associate_trades: [],
+      outcome: 'YES',
+      created_at: Date.now() - 60_000,
+      expiration: '',
+      order_type: 'GTC',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.entryExecutionPath).toBe('maker_pending');
+    // Resumed existing order — no re-post
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+    // Idempotency key NOT set (must resume on next cycle too)
+    expect(redis.set).not.toHaveBeenCalled();
+  });
+
+  it('resumes pending order that has since filled — returns success and sets idempotency', async () => {
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'order-filled',
+      tokenId: 'tok-yes',
+      price: 0.63,
+      size: 7.94,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 600_000,
+      consensusP: 0.65,
+      direction: 'YES',
+    });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-filled',
+      status: 'filled',
+      owner: '0x1',
+      maker_address: '0x1',
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      side: 'BUY',
+      original_size: '7.94',
+      size_matched: '7.94',
+      price: '0.63',
+      associate_trades: [],
+      outcome: 'YES',
+      created_at: Date.now() - 60_000,
+      expiration: '',
+      order_type: 'GTC',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.tradeResult?.success).toBe(true);
+    expect(result.entryOrderType).toBe('maker');
+    // Idempotency key set on fill
+    expect(redis.set).toHaveBeenCalled();
+    // Pending order record cleaned up after fill
+    expect(mockDeletePendingOrder).toHaveBeenCalled();
+    // No re-post
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
+  it('cycle-start cleanup cancels expired pending order and re-posts new order', async () => {
+    const expiredOrder = {
+      orderId: 'order-expired',
+      tokenId: 'tok-yes',
+      price: 0.63,
+      size: 7.94,
+      postedAt: Date.now() - 1_200_000,
+      expiresAt: Date.now() - 300_000, // expired 5 min ago
+      consensusP: 0.65,
+      direction: 'YES',
+    };
+    // Cycle-start cleanup sees expired order; tryExecuteViaClobMaker sees null after cleanup
+    mockGetPendingOrder
+      .mockResolvedValueOnce(expiredOrder)
+      .mockResolvedValueOnce(null);
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+
+    // Expired order was cancelled
+    expect(mockCancelOrder).toHaveBeenCalledWith('order-expired');
+    // Redis key deleted
+    expect(mockDeletePendingOrder).toHaveBeenCalled();
+    // New order posted for this cycle
+    expect(mockSubmitLimit).toHaveBeenCalled();
+    expect(mockSetPendingOrder).toHaveBeenCalled();
+    expect(result.skipped).toBe(false);
+    expect(result.entryExecutionPath).toBe('maker_pending');
+  });
+
+  it('returns no_clob_book when empty-book order is rejected — no taker fallback in hybrid mode', async () => {
+    mockSubmitLimit.mockResolvedValue({ success: false, error: 'post_only_would_cross' });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('no_clob_book');
+    // Ghost book — taker fallback is suppressed even in hybrid mode
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+  });
+
+  it('spread_too_wide still fires for non-ghost wide books (regression)', async () => {
+    // Real market maker present but spread is wide — NOT a ghost book (bid > 0.04 threshold)
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.40', size: '100' }],
+      asks: [{ price: '0.65', size: '100' }], // ~4615 bps > 500 ceiling
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('spread_too_wide');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
   });
 });
