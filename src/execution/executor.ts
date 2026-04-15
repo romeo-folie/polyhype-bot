@@ -501,6 +501,12 @@ async function tryExecuteViaClobMaker(
     stakeUsd: signal.stakeUsd,
   });
 
+  // In empty-book mode drop postOnly so the order can fill immediately if the
+  // real book has a resting ask at or below our limit price (the REST-API book
+  // is stale and doesn't reflect the matching-engine state; post-only rejects
+  // every order that crosses the real book even though the stale API hides it).
+  // A non-postOnly GTC at our fair-value limit is safe: worst case it fills as
+  // a taker at a price ≤ our limit, best case it rests and earns a maker rebate.
   const result = await submitClobLimitBuy({
     tokenId,
     price,
@@ -508,7 +514,7 @@ async function tryExecuteViaClobMaker(
     tickSize: book.tick_size as TickSize,
     negRisk: book.neg_risk,
     orderType: 'GTC',
-    postOnly: true,
+    postOnly: !emptyBookMode,
   });
 
   if (!result.success || !result.order_id) {
