@@ -237,6 +237,39 @@ describe('runMapping', () => {
     await expect(runMapping([makeScoredItem()], 100)).resolves.toBeDefined();
   });
 
+  it('rejects non-political items (e.g. sports) before candidate retrieval', async () => {
+    // Regression: a sports-nba item ("Warriors vs Clippers Play-In preview")
+    // reached runMapping, matched high-liquidity NBA markets, and nearly
+    // executed a $12.90 trade on 2026-04-15 — blocked only by a coincidental
+    // governor throttle. Category allowlist is the structural guard.
+    const signals = await runMapping(
+      [makeScoredItem({ categoryId: 'sports', title: 'Warriors vs Clippers Play-In preview' })],
+      100,
+    );
+
+    expect(signals).toHaveLength(0);
+    expect(mockFindCandidates).not.toHaveBeenCalled();
+    expect(mockScoreRelevance).not.toHaveBeenCalled();
+    expect(mockEstimate).not.toHaveBeenCalled();
+  });
+
+  it('processes items in all allowed political categories', async () => {
+    mockFindCandidates.mockResolvedValue([CANDIDATE]);
+    mockEstimate.mockResolvedValue({
+      probability: 0.72,
+      reasoning: 'High tension',
+      stddev: 0.01,
+      sampleCount: 3,
+    });
+
+    const allowedCategories = ['geopolitical', 'crypto-regulatory', 'us-politics', 'macro', 'ai-tech'];
+    for (const categoryId of allowedCategories) {
+      mockFindCandidates.mockClear();
+      await runMapping([makeScoredItem({ categoryId })], 100);
+      expect(mockFindCandidates).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it('skips consensus estimation if fit score is below the threshold', async () => {
     mockFindCandidates.mockResolvedValue([CANDIDATE]);
     mockScoreRelevance.mockResolvedValue({ fitScore: 0.2, reason: 'llm' });

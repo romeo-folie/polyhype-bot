@@ -30,6 +30,24 @@ import type { ClobPriceFeed } from '../shared/clobWebSocket.js';
 
 const NEAR_ZERO_OSINT_KEY = 'near_zero:osint_signals';
 
+/**
+ * OSINT→Polymarket mapping is strictly for political/macro/tech binary markets.
+ * Sports items (e.g. "Warriors vs Clippers Play-In preview") surface high-
+ * liquidity NBA markets via /public-search, the LLM scores team-match as a
+ * causal chain (~0.5-0.7), and the divergence gate was only blocked by a
+ * coincidental governor throttle on 2026-04-15. Reject non-political items
+ * at the pipeline entry so they never reach candidate retrieval.
+ */
+const OSINT_MAPPING_ALLOWED_CATEGORIES = new Set<string>([
+  'geopolitical',
+  'crypto-regulatory',
+  'us-politics',
+  'macro',
+  'ai-tech',
+]);
+
+export { OSINT_MAPPING_ALLOWED_CATEGORIES };
+
 export interface TradeSignal {
   /** Gamma market ID or Hyperliquid symbol */
   marketId: string;
@@ -91,6 +109,14 @@ export async function runMapping(
   const bestByMarket = new Map<string, TradeSignal>();
 
   for (const item of items) {
+    if (!OSINT_MAPPING_ALLOWED_CATEGORIES.has(item.categoryId)) {
+      logger.info('[mapping] skipping item — category not eligible for Polymarket mapping', {
+        title: item.title,
+        categoryId: item.categoryId,
+      });
+      continue;
+    }
+
     logger.info('[mapping] processing item', { title: item.title, urgency: item.urgencyScore });
 
     let candidates;
