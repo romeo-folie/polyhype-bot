@@ -248,6 +248,11 @@ const envSchema = z.object({
   // $0.99 ask → 19600 bps) where the "edge" is an artifact of a one-sided book
   // rather than a real mispricing.
   MAX_ENTRY_SPREAD_BPS: z.coerce.number().min(0).optional().default(500),
+  // Per-source spread override for oracle-lag signals. -1 = use global MAX_ENTRY_SPREAD_BPS.
+  // BTC 15m Up/Down books near 50¢ have wide spreads that the 500 bps global ceiling was not
+  // calibrated for — oracle-lag needs a looser ceiling because the oracle move IS the edge
+  // signal, not a spread artefact. Set to e.g. 2000 once instrumentation confirms spread_too_wide.
+  ORACLE_LAG_MAX_ENTRY_SPREAD_BPS: z.coerce.number().min(-1).optional().default(-1),
 
   TAKE_PROFIT_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.25),
   STOP_LOSS_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.3),

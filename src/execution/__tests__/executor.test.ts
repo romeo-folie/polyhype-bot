@@ -66,6 +66,7 @@ const mockConfig = {
   TAIL_PRICE_THRESHOLD: 0.2,
   TAIL_TAKER_OVERRIDE_EDGE: 0.2,
   MAX_ENTRY_SPREAD_BPS: 0,
+  ORACLE_LAG_MAX_ENTRY_SPREAD_BPS: -1,
   CLOB_FALLBACK_ENABLED: true,
   SIMMER_VENUE_ENABLED: true,
 };
@@ -405,6 +406,57 @@ describe('executeSignal', () => {
 
     expect(result.skipped).toBe(false);
     expect(result.executionVenue).toBe('simmer');
+  });
+
+  it('oracle-lag uses ORACLE_LAG_MAX_ENTRY_SPREAD_BPS override when >= 0', async () => {
+    // Global threshold is 500 bps; override is 2000 bps — wide book should pass for oracle-lag
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockConfig.ORACLE_LAG_MAX_ENTRY_SPREAD_BPS = 2000;
+    mockConfig.SIMMER_VENUE_ENABLED = false;
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.46', size: '100' }],
+      asks: [{ price: '0.54', size: '100' }], // 1600 bps — blocked by global (500), passes override (2000)
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
+
+    expect(result.skipped).toBe(false);
+    mockConfig.SIMMER_VENUE_ENABLED = true;
+    mockConfig.ORACLE_LAG_MAX_ENTRY_SPREAD_BPS = -1;
+  });
+
+  it('oracle-lag falls back to global MAX_ENTRY_SPREAD_BPS when override is -1', async () => {
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockConfig.ORACLE_LAG_MAX_ENTRY_SPREAD_BPS = -1; // disabled → use global
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.01', size: '100' }],
+      asks: [{ price: '0.99', size: '100' }], // 19600 bps — exceeds global 500 bps
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('spread_too_wide');
   });
 
   it('skips when CLOB book is one-sided (missing bid side)', async () => {

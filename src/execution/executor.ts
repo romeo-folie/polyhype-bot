@@ -1339,7 +1339,12 @@ export async function executeSignal(
   // bid or ask side, making spread unknowable but execution still dangerous).
   // Runs pre-maker so it short-circuits the maker path too. Copytrade bypasses
   // because the whale already priced the degenerate book.
-  if (cfg.MAX_ENTRY_SPREAD_BPS > 0 && signal.source !== 'copytrade') {
+  // oracle-lag can override via ORACLE_LAG_MAX_ENTRY_SPREAD_BPS (-1 = use global).
+  const effectiveSpreadCeiling =
+    signal.source === 'oracle-lag' && cfg.ORACLE_LAG_MAX_ENTRY_SPREAD_BPS >= 0
+      ? cfg.ORACLE_LAG_MAX_ENTRY_SPREAD_BPS
+      : cfg.MAX_ENTRY_SPREAD_BPS;
+  if (effectiveSpreadCeiling > 0 && signal.source !== 'copytrade') {
     const { book, benchmark } = await fetchBookAndBenchmark(signal);
     prefetchedClobBook = book;
     takerDecisionBenchmarkPromise = Promise.resolve(benchmark);
@@ -1349,10 +1354,10 @@ export async function executeSignal(
     // should trigger the gate.
     const oneSidedBook =
       benchmark.decisionBestBid === null || benchmark.decisionBestAsk === null;
-    const spreadTooWide = spreadBps != null && spreadBps > cfg.MAX_ENTRY_SPREAD_BPS;
+    const spreadTooWide = spreadBps != null && spreadBps > effectiveSpreadCeiling;
     const guardrailDiagnostic = {
       spreadBps: spreadBps != null ? Math.round(spreadBps) : null,
-      threshold: cfg.MAX_ENTRY_SPREAD_BPS,
+      threshold: effectiveSpreadCeiling,
       bestBid: benchmark.decisionBestBid,
       bestAsk: benchmark.decisionBestAsk,
     };
