@@ -285,7 +285,14 @@ export class ArbitrageWorker {
     this.isScanning = true;
     this.lastScanTime = now;
     this.lastArbTradeTime = now;
-    await recordGlobalTrade(redis, 'polymarket');
+
+    // Intentionally do NOT call recordGlobalTrade() here. The key is named
+    // last_trade_at — a scan start is not a trade. Previous behaviour bumped
+    // the shared governor on every Binance-tick-triggered scan, starving
+    // mapping/copytrade/monitor-exit of the 45-trades/min budget even on
+    // ticks that produced zero orders. Pure-arb trades now record inside
+    // executeArb() after a CLOB leg is actually filled; crypto-arb records
+    // inside the per-opportunity loop below.
 
     try {
       logger.info(`[arb-worker] scan started (${source})`);

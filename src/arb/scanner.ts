@@ -17,6 +17,7 @@ import { logger } from '../shared/logger.js';
 import { notifyUnhedgedArbPosition } from '../execution/telegram.js';
 import { recordPosition } from '../execution/positionLedger.js';
 import { priceZoneOf } from '../shared/zones.js';
+import { recordGlobalTrade } from '../shared/governor.js';
 import type { Redis } from 'ioredis';
 
 // Max arb trades per scan run (2 trades = 4 orders, well within 60 orders/min limit)
@@ -258,6 +259,10 @@ export async function executeArb(opp: ArbOpportunity, redis: Redis): Promise<Arb
       error: 'yes_leg_failed',
     };
   }
+
+  // YES leg accepted — a real order has consumed Polymarket rate-limit budget,
+  // so stamp the shared governor even before the NO leg is attempted.
+  await recordGlobalTrade(redis, 'polymarket');
 
   // YES succeeded, now attempt NO
   const noResult = await withTimeout(
