@@ -422,7 +422,16 @@ async function tryExecuteViaClobMaker(
     };
   }
 
-  const book = prefetchedBook ?? (await getClobOrderBook(tokenId));
+  // In empty-book mode always fetch a fresh YES-token book.
+  // The ghost book (bid=0.01/ask=0.99) returned by the prefetched read is stale;
+  // the matching engine may have real resting orders. For NO-direction signals the
+  // CLOB internally converts BUY NO @ P → SELL YES @ (1-P), so crossing is checked
+  // against the YES book regardless of which token we submit on.  Using the YES book
+  // as pricing ground truth prevents "order crosses book" post-only rejections.
+  const yesTokenId = emptyBookMode ? (signal.clobTokenIds?.[0] ?? tokenId) : tokenId;
+  const book = emptyBookMode
+    ? (await getClobOrderBook(yesTokenId))
+    : (prefetchedBook ?? (await getClobOrderBook(tokenId)));
   if (!book) {
     return { ok: false, error: 'maker_no_orderbook', waitMs: Date.now() - startedAt };
   }
@@ -433,12 +442,28 @@ async function tryExecuteViaClobMaker(
   const spreadBps = bestBid > 0 && bestAsk > 0 && mid ? ((bestAsk - bestBid) / mid) * 10000 : null;
 
   const edgeBps = emptyBookMode ? cfg.MAKER_EMPTY_BOOK_EDGE_BPS : cfg.MAKER_PRICE_EDGE_BPS;
-  const fairValue =
+  let fairValue: number | null =
     emptyBookMode && signal.consensusProbability != null
       ? signal.direction === 'YES' || signal.direction === 'UP'
         ? signal.consensusProbability
         : 1 - signal.consensusProbability
       : null;
+
+  // Cap fair value so the submitted price can never cross resting YES-book orders.
+  // For YES direction: we BUY YES, price must stay below bestAsk.
+  // For NO direction: we BUY NO @ P → SELL YES @ (1-P); (1-P) must stay below
+  //   bestBid (the best price someone will BUY YES, i.e., best available YES bid).
+  //   Rearranged: P must stay above (1 - bestBid).  We cap from above using
+  //   (1 - bestBid - tick) so the complement is just below the YES best bid.
+  if (emptyBookMode && fairValue != null) {
+    const tick = parseFloat(book.tick_size ?? '0.01');
+    if (signal.direction === 'YES' || signal.direction === 'UP') {
+      if (bestAsk > 0) fairValue = Math.min(fairValue, bestAsk - tick);
+    } else {
+      if (bestBid > 0) fairValue = Math.min(fairValue, 1 - bestBid - tick);
+    }
+  }
+
   const price = resolveMakerPrice(book, edgeBps, fairValue);
   if (price === null) {
     return {
