@@ -273,7 +273,8 @@ export async function runCorrelationScan(redis: Redis): Promise<void> {
     });
 
     const signal = buildSignal(violation, target, other, stakeUsd);
-    const result = await executeAndRecordSignal(signal, redis, stakeUsd);
+    // 3rd arg is knownSessionExposureUsd (HL margin accounting), NOT stake.
+    const result = await executeAndRecordSignal(signal, redis);
 
     if (!result.skipped) {
       logger.info('[corr-scan] trade executed', {

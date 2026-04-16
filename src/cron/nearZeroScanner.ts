@@ -393,7 +393,9 @@ async function main() {
         endDate: candidate.market.endDate ?? undefined,
       };
 
-      const result = await executeAndRecordSignal(signal, redis, stakeUsd);
+      // 3rd arg is knownSessionExposureUsd (HL margin accounting), NOT stake.
+      // This scanner doesn't accumulate session exposure across signals, so 0.
+      const result = await executeAndRecordSignal(signal, redis);
       if (!result.skipped) {
         logger.info('[near-zero] trade executed', {
           marketId: candidate.market.id,

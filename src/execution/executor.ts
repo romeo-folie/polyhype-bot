@@ -2323,13 +2323,21 @@ async function finalizeSuccessfulExecution(
   await deductStake(redis, result.signal.stakeUsd);
 
   // Compute sharesHeld — prefer actual fill from venue, fall back to estimate.
+  // Treat non-positive shares_bought as missing: Hyperliquid populates 0 on
+  // futures success, and recordPosition treats 0 as invalid (noisy warning).
+  // For HL futures, outcomePrice is a USD price (not a 0-1 prob), so the
+  // stakeUsd/outcomePrice estimate would be meaningless — leave sharesHeld
+  // undefined for futures and let the HL monitor reconcile from venue state.
   let estimatedShares: number | undefined;
   let sharesHeld: number | undefined;
-  if (result.sharesFilled != null) {
+  if (result.sharesFilled != null && result.sharesFilled > 0) {
     sharesHeld = result.sharesFilled;
-  } else if (result.tradeResult?.shares_bought != null) {
+  } else if (
+    result.tradeResult?.shares_bought != null &&
+    result.tradeResult.shares_bought > 0
+  ) {
     sharesHeld = result.tradeResult.shares_bought;
-  } else if (result.signal.outcomePrice > 0) {
+  } else if (!result.signal.isFutures && result.signal.outcomePrice > 0) {
     estimatedShares = result.signal.stakeUsd / result.signal.outcomePrice;
     sharesHeld = estimatedShares;
     logger.warn(

@@ -431,7 +431,8 @@ export async function runLongshotScan(redis: Redis): Promise<void> {
       endDate: opp.endDate ?? undefined,
     };
 
-    const result = await executeAndRecordSignal(signal, redis, stakeUsd);
+    // 3rd arg is knownSessionExposureUsd (HL margin accounting), NOT stake.
+    const result = await executeAndRecordSignal(signal, redis);
     if (!result.skipped) {
       logger.info('[longshot] trade executed', {
         marketId: opp.marketId,
