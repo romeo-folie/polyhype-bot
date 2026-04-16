@@ -248,8 +248,11 @@ async function processScoredItemsInner(
       // Track HL margin consumed for accurate margin cap checks in subsequent signals.
       // Only count confirmed HL executions — hedgeDispatched is fire-and-forget and may
       // never actually open a position; counting it would overstate session exposure.
+      // Use result.signal.stakeUsd (executed stake after executor bumps/calibration)
+      // rather than the loop variable, which can undercount margin and let
+      // follow-on signals bypass the margin cap.
       if (result.executionVenue === 'hyperliquid') {
-        sessionExposureUsd += signal.stakeUsd;
+        sessionExposureUsd += result.signal.stakeUsd;
       }
     } else if (result.tradeResult && !result.tradeResult.success) {
       failed++;
