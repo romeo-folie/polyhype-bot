@@ -1087,6 +1087,12 @@ const envSchema = z.object({
   WEATHER_MAX_EVENTS: z.coerce.number().int().min(1).optional().default(50),
   // Maximum forecast horizon in days — skip events further out (too uncertain).
   WEATHER_MAX_HORIZON_DAYS: z.coerce.number().int().min(1).optional().default(7),
+  // Multiplier applied to forecastStdDev before bracket-probability calc. 1.0 is no-op.
+  // Set >1 to widen the model's distribution (lower central-bracket confidence, raise
+  // adjacent brackets) when calibration analysis shows modelProb is too tight to forecast
+  // point. Set <1 to tighten. Adjusted stddev is what enters estimateBracketProbability;
+  // raw forecastStdDev is still logged on the shadow row for comparison.
+  WEATHER_STDDEV_MULTIPLIER: z.coerce.number().min(0.1).max(5).optional().default(1.0),
   // --- WEATHER GROUND-TRUTH RECONCILER ---
   // Fills `weather_ground_truth` with observed daily highs for past events, so
   // shadow-scan predictions in `shadow_observations` can be validated against
