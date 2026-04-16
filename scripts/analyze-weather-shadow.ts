@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { getSql, closeSql } from '../src/db/client.js';
 import { logger } from '../src/shared/logger.js';
+import { canonicalCityKey } from '../src/weather/noaaClient.js';
 
 interface BracketOpp {
   city: string;
@@ -57,16 +58,28 @@ function parseArgs(): Args {
   return out;
 }
 
-/** Parse Polymarket bracket labels into half-open ranges. */
+/**
+ * Parse Polymarket bracket labels into half-open ranges using half-integer
+ * boundaries that match the scanner's probability model — Polymarket rounds
+ * observed temperatures to whole degrees, so "40-41°F" effectively covers
+ * `[39.5, 41.5)`. See `estimateBracketProbability` in noaaClient.ts:
+ *   "39°F or below"  → T <= 39  → (-∞, 39.5)
+ *   "40-41°F"        → 40 <= T <= 41 → [39.5, 41.5)
+ *   "58°F or higher" → T >= 58 → [57.5, ∞)
+ *   "28°C"           → T = 28 → [27.5, 28.5)
+ * Mismatching this against the scanner's model would misclassify near-edge
+ * outcomes (e.g. 41.4°F observed would land in "40-41" per the model but
+ * "42-43" under naive integer bounds).
+ */
 export function parseBracket(label: string): { lo: number; hi: number } | null {
   const upper = /^(-?\d+(?:\.\d+)?)\s*°[FC]\s*or\s*higher$/i.exec(label);
-  if (upper) return { lo: parseFloat(upper[1]!), hi: Infinity };
+  if (upper) return { lo: parseFloat(upper[1]!) - 0.5, hi: Infinity };
   const lower = /^(-?\d+(?:\.\d+)?)\s*°[FC]\s*or\s*lower$/i.exec(label);
-  if (lower) return { lo: -Infinity, hi: parseFloat(lower[1]!) + 1 };
+  if (lower) return { lo: -Infinity, hi: parseFloat(lower[1]!) + 0.5 };
   const range = /^(-?\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\s*°[FC]$/.exec(label);
-  if (range) return { lo: parseFloat(range[1]!), hi: parseFloat(range[2]!) + 1 };
+  if (range) return { lo: parseFloat(range[1]!) - 0.5, hi: parseFloat(range[2]!) + 0.5 };
   const single = /^(-?\d+(?:\.\d+)?)\s*°[FC]$/.exec(label);
-  if (single) return { lo: parseFloat(single[1]!), hi: parseFloat(single[1]!) + 1 };
+  if (single) return { lo: parseFloat(single[1]!) - 0.5, hi: parseFloat(single[1]!) + 0.5 };
   return null;
 }
 
@@ -88,8 +101,14 @@ function loadFromLogs(dir: string): BracketOpp[] {
       if (!line.includes('"[weather] bracket opportunity"')) continue;
       try {
         const r = JSON.parse(line);
+        // Canonicalize city before storing — ground truth is keyed on canonical
+        // city names ("new york"), but scanner emits raw event titles which can
+        // be aliases ("nyc"). Drop rows whose city we don't recognize so they
+        // don't pollute per-city stats with phantom keys.
+        const canonical = canonicalCityKey(r.city);
+        if (!canonical) continue;
         out.push({
-          city: r.city,
+          city: canonical,
           targetDate: r.targetDate.slice(0, 10),
           bracket: r.bracket,
           modelProb: parseFloat(r.modelProb),
@@ -115,8 +134,12 @@ async function loadFromDb(): Promise<BracketOpp[]> {
     const tradeSide = p.tradeSide === 'NO' ? 'NO' : 'YES';
     const targetDate = typeof p.targetDate === 'string' ? p.targetDate.slice(0, 10) : '';
     if (!targetDate || typeof p.city !== 'string' || typeof p.bracket !== 'string') continue;
+    // See loadFromLogs: canonicalize so joins against weather_ground_truth
+    // (which stores canonical keys) succeed for aliased city names.
+    const canonical = canonicalCityKey(p.city);
+    if (!canonical) continue;
     out.push({
-      city: p.city,
+      city: canonical,
       targetDate,
       bracket: p.bracket,
       modelProb: Number(p.modelProb),
@@ -134,10 +157,10 @@ async function main(): Promise<void> {
   const logOpps = args.useLogs ? loadFromLogs(args.logsDir) : [];
 
   // De-dupe by (city, targetDate, bracket, tradeSide) — both sources may emit
-  // the same opp on rescans. Last writer wins (DB rows preferred — they come
-  // first in the array).
+  // the same opp on rescans. Last writer wins, so process logs first and DB
+  // rows last to prefer DB when both sources contain the same opportunity.
   const seen = new Map<string, BracketOpp>();
-  for (const o of [...dbOpps, ...logOpps]) {
+  for (const o of [...logOpps, ...dbOpps]) {
     seen.set(`${o.city}|${o.targetDate}|${o.bracket}|${o.tradeSide}`, o);
   }
   const opps = Array.from(seen.values());

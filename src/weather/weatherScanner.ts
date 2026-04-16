@@ -692,6 +692,8 @@ export async function scanWeatherMarkets(
       brackets: event.brackets.length,
       forecastHigh: forecast.forecastHigh.toFixed(1),
       forecastStdDev: forecast.stdDev.toFixed(2),
+      effectiveStdDev: (forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER).toFixed(2),
+      stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
       forecastSource: forecast.source,
       ensembleMembers: forecast.ensembleMembers,
       overround: overround.toFixed(3),
