@@ -202,6 +202,11 @@ async function processScoredItemsInner(
 
       // Simmer fill reconciliation: if shares_bought was unavailable and we used an
       // estimate, query Simmer after a short delay to get the confirmed fill amount.
+      // Capture result.signal.stakeUsd BEFORE the setTimeout — the executor may have
+      // bumped the stake internally (floor bump, calibration scaling), so the loop
+      // variable `signal.stakeUsd` is stale. Use the executed stake when falling
+      // back to `stakeUsd / shares` for entry price.
+      const executedStakeUsd = result.signal.stakeUsd;
       if (!result.tradeResult.shares_bought && result.executionVenue === 'simmer') {
         setTimeout(async () => {
           try {
@@ -217,7 +222,7 @@ async function processScoredItemsInner(
               // different price due to slippage or partial fills.
               const actualEntryPrice = (match.average_price && match.average_price > 0)
                 ? match.average_price
-                : signal.stakeUsd / match.shares;
+                : executedStakeUsd / match.shares;
               // Update Redis ledger with actual fill and actual entry price
               await redis.hset(`position:${signal.marketId}:${signal.direction}`,
                 'sharesHeld', String(match.shares),

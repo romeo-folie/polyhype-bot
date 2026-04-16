@@ -1877,12 +1877,21 @@ export async function executeSignal(
     }
 
     // Empty-book orders that timeout have no taker path — the book is still empty.
+    // Distinguish submit-time post-only rejection (matching engine refused because
+    // our limit would cross a hidden resting order) from timeout/cancel: they mean
+    // different things operationally (rejection = book isn't really empty; timeout
+    // = still empty). Both land on skipReason='no_clob_book' to avoid a migration,
+    // but finalExecutionPath disambiguates for telemetry.
     if (emptyBookMakerRoute) {
-      logger.info('[executor] empty-book maker timed out — no taker fallback (book still empty)', {
-        marketId: signal.marketId,
-        fillStatus: makerAttempt.makerFillStatus,
-      });
-      return recordSkip('no_clob_book', 'maker_timeout', makerTelemetry, 'clob', 'maker');
+      const isRejected = makerAttempt.makerFillStatus === 'rejected';
+      const finalExecutionPath = isRejected ? 'maker_rejected' : 'maker_timeout';
+      logger.info(
+        isRejected
+          ? '[executor] empty-book maker rejected at submit — book not actually empty'
+          : '[executor] empty-book maker timed out — no taker fallback (book still empty)',
+        { marketId: signal.marketId, fillStatus: makerAttempt.makerFillStatus },
+      );
+      return recordSkip('no_clob_book', finalExecutionPath, makerTelemetry, 'clob', 'maker');
     }
 
     if (executionMode === 'hybrid') {
