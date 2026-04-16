@@ -40,7 +40,7 @@ import {
   recordExecutionTiming,
   recordExecutionEvent,
 } from '../shared/telemetry.js';
-import { notifyTradeError, notifyTradeExecuted, notifyHedgeOpened } from './telegram.js';
+import { notifyTradeError, notifyTradeExecuted, notifyHedgeOpened, notifyMakerOrderPosted } from './telegram.js';
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
 import { getRedis } from '../shared/redis.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
@@ -1666,6 +1666,10 @@ export async function executeSignal(
         orderId: makerAttempt.makerOrderId,
         postedPrice: makerAttempt.makerPostedPrice,
       });
+      void notifyMakerOrderPosted(signal, {
+        postedPrice: makerAttempt.makerPostedPrice ?? signal.outcomePrice,
+        ...(makerAttempt.makerOrderId != null && { orderId: makerAttempt.makerOrderId }),
+      }).catch(() => {});
       finalizeAttempt({
         executionPath: 'maker_pending',
         finalExecutionPath: 'maker_pending',
