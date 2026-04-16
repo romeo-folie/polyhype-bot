@@ -40,7 +40,7 @@ import {
   recordExecutionTiming,
   recordExecutionEvent,
 } from '../shared/telemetry.js';
-import { notifyTradeError, notifyTradeExecuted, notifyHedgeOpened } from './telegram.js';
+import { notifyTradeError, notifyTradeExecuted, notifyHedgeOpened, notifyMakerOrderPosted } from './telegram.js';
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
 import { getRedis } from '../shared/redis.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
@@ -313,7 +313,13 @@ function resolveMakerPrice(
     }
   }
 
-  if (bestAsk > 0) {
+  // Only apply the bestAsk cap when using the CLOB book as pricing anchor
+  // (non-empty-book path). In empty-book / fair-value mode the caller has
+  // already applied the correct directional cap before calling this function:
+  // YES→ min(fairValue, bestAsk-tick), NO→ min(fairValue, 1-bestBid-tick).
+  // Applying the YES-book bestAsk cap here for NO trades would incorrectly
+  // clamp a NO price of e.g. 0.80 down to 0.20 when YES ask ≈ 0.21.
+  if (fairValueOverride == null && bestAsk > 0) {
     price = Math.min(price, bestAsk - tick);
   }
 
@@ -422,7 +428,17 @@ async function tryExecuteViaClobMaker(
     };
   }
 
-  const book = prefetchedBook ?? (await getClobOrderBook(tokenId));
+  // In empty-book mode always fetch a fresh YES-token book.
+  // The ghost book (bid=0.01/ask=0.99) returned by the prefetched read is stale;
+  // the matching engine may have real resting orders. For NO-direction signals the
+  // CLOB internally converts BUY NO @ P → SELL YES @ (1-P), so the matching engine
+  // checks crossing against the YES book regardless of which token we submit on.
+  // Using the YES book as pricing ground truth lets us cap the submitted price
+  // so it never crosses a resting YES order (which would cause an unexpected taker fill).
+  const yesTokenId = emptyBookMode ? (signal.clobTokenIds?.[0] ?? tokenId) : tokenId;
+  const book = emptyBookMode
+    ? (await getClobOrderBook(yesTokenId))
+    : (prefetchedBook ?? (await getClobOrderBook(tokenId)));
   if (!book) {
     return { ok: false, error: 'maker_no_orderbook', waitMs: Date.now() - startedAt };
   }
@@ -433,12 +449,28 @@ async function tryExecuteViaClobMaker(
   const spreadBps = bestBid > 0 && bestAsk > 0 && mid ? ((bestAsk - bestBid) / mid) * 10000 : null;
 
   const edgeBps = emptyBookMode ? cfg.MAKER_EMPTY_BOOK_EDGE_BPS : cfg.MAKER_PRICE_EDGE_BPS;
-  const fairValue =
+  let fairValue: number | null =
     emptyBookMode && signal.consensusProbability != null
       ? signal.direction === 'YES' || signal.direction === 'UP'
         ? signal.consensusProbability
         : 1 - signal.consensusProbability
       : null;
+
+  // Cap fair value so the submitted price can never cross resting YES-book orders.
+  // For YES direction: we BUY YES → price must stay below YES bestAsk.
+  // For NO direction: we BUY NO @ P → SELL YES @ (1-P); to avoid crossing a
+  //   resting YES bid, (1-P) must stay BELOW bestBid, i.e. P must stay BELOW
+  //   (1 - bestBid).  We cap from above at (1 - bestBid - tick) so the complement
+  //   (1-P) lands just below the best resting YES bid.
+  if (emptyBookMode && fairValue != null) {
+    const tick = parseFloat(book.tick_size ?? '0.01');
+    if (signal.direction === 'YES' || signal.direction === 'UP') {
+      if (bestAsk > 0) fairValue = Math.min(fairValue, bestAsk - tick);
+    } else {
+      if (bestBid > 0) fairValue = Math.min(fairValue, 1 - bestBid - tick);
+    }
+  }
+
   const price = resolveMakerPrice(book, edgeBps, fairValue);
   if (price === null) {
     return {
@@ -476,6 +508,12 @@ async function tryExecuteViaClobMaker(
     stakeUsd: signal.stakeUsd,
   });
 
+  // In empty-book mode drop postOnly so the order can fill immediately if the
+  // real book has a resting ask at or below our limit price (the REST-API book
+  // is stale and doesn't reflect the matching-engine state; post-only rejects
+  // every order that crosses the real book even though the stale API hides it).
+  // A non-postOnly GTC at our fair-value limit is safe: worst case it fills as
+  // a taker at a price ≤ our limit, best case it rests and earns a maker rebate.
   const result = await submitClobLimitBuy({
     tokenId,
     price,
@@ -483,7 +521,7 @@ async function tryExecuteViaClobMaker(
     tickSize: book.tick_size as TickSize,
     negRisk: book.neg_risk,
     orderType: 'GTC',
-    postOnly: true,
+    postOnly: !emptyBookMode,
   });
 
   if (!result.success || !result.order_id) {
@@ -521,6 +559,10 @@ async function tryExecuteViaClobMaker(
         expiresAt,
         consensusP: signal.consensusProbability ?? 0.5,
         direction: signal.direction,
+        edgeMagnitude: signal.edgeMagnitude,
+        ...(bestAsk > 0 && { bestAskAtPosting: bestAsk }),
+        intendedStakeUsd: signal.stakeUsd,
+        sourcedFrom: signal.sourcedFrom,
       },
       Math.ceil(cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS / 1000) + 300,
     );
@@ -1554,6 +1596,34 @@ export async function executeSignal(
       return recordSkip('spread_too_wide', 'skipped', guardrailDiagnostic);
     }
     if (canEmptyBookMaker) {
+      const consensusP = signal.consensusProbability ?? 0.5;
+      const minStrength = cfg.MAKER_EMPTY_BOOK_MIN_CONSENSUS;
+      if (consensusP > (1 - minStrength) && consensusP < minStrength) {
+        logger.info('[executor] skipping empty-book maker — consensus too weak', {
+          marketId: signal.marketId,
+          consensusP,
+          minStrength,
+        });
+        return recordSkip('empty_book_weak_consensus', 'skipped', guardrailDiagnostic);
+      }
+      const edgeMag = signal.edgeMagnitude ?? 0;
+      if (edgeMag < cfg.MAKER_EMPTY_BOOK_MIN_EDGE) {
+        logger.info('[executor] skipping empty-book maker — edge too small', {
+          marketId: signal.marketId,
+          edgeMagnitude: edgeMag,
+          minEdge: cfg.MAKER_EMPTY_BOOK_MIN_EDGE,
+        });
+        return recordSkip('empty_book_low_edge', 'skipped', guardrailDiagnostic);
+      }
+      const stddev = signal.consensusStddev ?? 0;
+      if (stddev > cfg.MAKER_EMPTY_BOOK_MAX_STDDEV) {
+        logger.info('[executor] skipping empty-book maker — consensus too noisy', {
+          marketId: signal.marketId,
+          consensusStddev: stddev,
+          maxStddev: cfg.MAKER_EMPTY_BOOK_MAX_STDDEV,
+        });
+        return recordSkip('empty_book_noisy_signal', 'skipped', guardrailDiagnostic);
+      }
       emptyBookMakerRoute = true;
       logger.info('[executor] empty book — routing to fair-value maker', {
         marketId: signal.marketId,
@@ -1635,6 +1705,10 @@ export async function executeSignal(
         orderId: makerAttempt.makerOrderId,
         postedPrice: makerAttempt.makerPostedPrice,
       });
+      void notifyMakerOrderPosted(signal, {
+        postedPrice: makerAttempt.makerPostedPrice ?? signal.outcomePrice,
+        ...(makerAttempt.makerOrderId != null && { orderId: makerAttempt.makerOrderId }),
+      }).catch(() => {});
       finalizeAttempt({
         executionPath: 'maker_pending',
         finalExecutionPath: 'maker_pending',

@@ -138,6 +138,32 @@ export async function notifyTradeExecuted(
 }
 
 /**
+ * Notify when an empty-book maker order is posted but not yet filled.
+ * Fires immediately so the user knows the bot acted, even though fill is async.
+ */
+export async function notifyMakerOrderPosted(
+  signal: TradeSignal,
+  opts: { postedPrice: number; orderId?: string },
+): Promise<void> {
+  const edgePct = (signal.edgeMagnitude * 100).toFixed(1);
+  const consensusPct = ((signal.consensusProbability ?? 0.5) * 100).toFixed(1);
+  const outcomePct = (signal.outcomePrice * 100).toFixed(1);
+
+  const text =
+    `🟡 <b>Maker Order Posted (awaiting fill)</b>\n\n` +
+    `<b>Market:</b> ${escapeHtml(signal.question)}\n` +
+    `<b>Direction:</b> ${signal.direction}  |  <b>Venue:</b> CLOB\n` +
+    `<b>Posted price:</b> ${fmtProb(opts.postedPrice)}\n` +
+    `<b>Intended stake:</b> $${signal.stakeUsd.toFixed(2)} USDC\n` +
+    (opts.orderId ? `<b>Order ID:</b> <code>${escapeHtml(opts.orderId)}</code>\n` : '') +
+    `\n<b>Edge:</b> ${edgePct}%  |  <b>Our P:</b> ${consensusPct}% vs market ${outcomePct}%\n` +
+    `<b>Source:</b> ${escapeHtml(signal.sourcedFrom)}\n` +
+    `<b>Reasoning:</b> ${escapeHtml(signal.reasoning)}`;
+
+  await notify(text);
+}
+
+/**
  * Notify on a failed trade execution.
  */
 export async function notifyTradeError(

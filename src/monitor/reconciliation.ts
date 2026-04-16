@@ -9,6 +9,7 @@ import { fetchMarketByConditionId, fetchMarketByQuestion, type GammaMarket } fro
 import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { isRecentlyClosed } from '../shared/closedGuard.js';
+import { getPendingOrder, deletePendingOrder } from '../execution/pendingMakerOrders.js';
 
 interface ReconciliationDetail {
   type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded' | 'recovered_outcome';
@@ -619,6 +620,33 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
 
     const direction: 'YES' | 'NO' = pos.asset === market.clobTokenIds[0] ? 'YES' : 'NO';
 
+    // Check whether this fill came from a bot-posted GTC maker order.
+    // Validate tokenId and direction before enriching to avoid false attribution
+    // from a stale key or a concurrent fill in a different direction on the same
+    // market. Key is deleted AFTER recordPosition() succeeds so a transient write
+    // failure can't permanently lose the benchmark metadata.
+    const rawPending = await getPendingOrder(redis, market.id);
+    const pendingOrder =
+      rawPending?.tokenId === pos.asset && rawPending?.direction === direction
+        ? rawPending
+        : null;
+    if (rawPending && !pendingOrder) {
+      logger.warn('[reconcile] pending maker order token/direction mismatch — not enriching', {
+        marketId: market.id,
+        pendingTokenId: rawPending.tokenId,
+        pendingDirection: rawPending.direction,
+        fillTokenId: pos.asset,
+        fillDirection: direction,
+      });
+    }
+    if (pendingOrder) {
+      logger.info('[reconcile] linked CLOB orphan to pending maker order', {
+        marketId: market.id,
+        orderId: pendingOrder.orderId,
+        sourcedFrom: pendingOrder.sourcedFrom,
+      });
+    }
+
     const newPos: Position = {
       marketId: market.id,
       conditionId: market.conditionId,
@@ -630,13 +658,26 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
       sharesHeld: shares,
       openedAt: new Date().toISOString(),
       executionVenue: 'clob',
-      sourcedFrom: 'reconciled:clob',
-      edgeMagnitude: 0,
+      sourcedFrom: pendingOrder?.sourcedFrom ?? 'reconciled:clob',
+      edgeMagnitude: pendingOrder?.edgeMagnitude ?? 0,
+      ...(pendingOrder?.consensusP != null && { consensusProbability: pendingOrder.consensusP }),
+      ...(pendingOrder != null && {
+        entryExecutionPath: 'maker_fill',
+        entryOrderType: 'maker' as const,
+        // bestAskAtPosting is the live taker price at the moment the GTC order was
+        // placed — the correct counterfactual for "what would an immediate taker fill
+        // have cost?" (consistent with buildDecisionBenchmark() in executor.ts).
+        counterfactualImmediateTakerPrice: pendingOrder.bestAskAtPosting,
+      }),
       reconciliationStatus: `imported:${new Date().toISOString()}`
     };
 
     await recordPosition(redis, newPos);
-    logger.info('[reconcile] imported CLOB orphan', { marketId: market.id, direction, shares });
+    // Delete the pending order key only after the position is durably recorded.
+    if (pendingOrder) {
+      await deletePendingOrder(redis, market.id);
+    }
+    logger.info('[reconcile] imported CLOB orphan', { marketId: market.id, direction, shares, linkedMakerOrder: pendingOrder != null });
     return true;
   } catch (err) {
     logger.warn('[reconcile] failed to import CLOB orphan', { error: String(err) });

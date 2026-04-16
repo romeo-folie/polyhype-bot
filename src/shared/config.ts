@@ -199,6 +199,19 @@ const envSchema = z.object({
   // resume polling across cron cycles (non-blocking). Fills may take minutes to hours.
   MAKER_EMPTY_BOOK_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(900_000),
   MAKER_EMPTY_BOOK_EDGE_BPS: z.coerce.number().min(0).optional().default(150),
+  // Minimum LLM consensus strength for empty-book entries. Consensus must be
+  // >= this value or <= (1 - this value). Rejects borderline "I don't know"
+  // signals (e.g. 0.53) against a ghost-book price that may be months stale.
+  // Must be >= 0.5; values below 0.5 invert the skip band and disable the gate.
+  MAKER_EMPTY_BOOK_MIN_CONSENSUS: z.coerce.number().min(0.5).max(1).optional().default(0.65),
+  // Minimum LLM edge magnitude required for an empty-book maker entry. Signals
+  // with small edge in a ghost book often reflect stale/noisy consensus rather than
+  // real alpha; the adverse-selection risk in illiquid markets demands higher conviction.
+  MAKER_EMPTY_BOOK_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.20),
+  // Maximum consensus stddev allowed for empty-book maker entries. High stddev means
+  // the LLM samples disagree — a poor basis for a GTC order in a market with no
+  // real price discovery.
+  MAKER_EMPTY_BOOK_MAX_STDDEV: z.coerce.number().min(0).max(1).optional().default(0.12),
   // Thresholds for detecting an empty/ghost book. bid < BID_THRESHOLD and
   // ask > ASK_THRESHOLD means no real market maker is resting on the book.
   EMPTY_BOOK_BID_THRESHOLD: z.coerce.number().min(0).max(0.5).optional().default(0.04),

@@ -69,12 +69,20 @@ export function evaluateTakeProfit(
   // Condition 1: stop-loss — exit immediately if loss exceeds threshold.
   // Zone-aware override: for positions entered in the price tails, also require
   // an absolute price move to avoid spread-noise stop-outs on tiny-priced outcomes.
+  // Cap the minimum absolute-move requirement at entryPrice * stopLossThreshold so
+  // it can never exceed what the percentage stop itself implies. Without this cap,
+  // low-priced entries (e.g. 0.06) are incorrectly protected: at -25% the absolute
+  // move (0.015) is less than the flat minAbsoluteMove (0.02), causing no stop-out.
   if (returnDecimal <= -stopLossThreshold) {
     const inExtremeZone =
       zoneAwareSl?.enabled &&
       (entryPrice <= zoneAwareSl.extremeLow || entryPrice >= zoneAwareSl.extremeHigh);
     const absMove = Math.abs(entryPrice - currentOutcomePrice);
-    if (!inExtremeZone || absMove >= (zoneAwareSl?.minAbsoluteMove ?? 0)) {
+    const effectiveMinAbs = Math.min(
+      zoneAwareSl?.minAbsoluteMove ?? 0,
+      entryPrice * stopLossThreshold,
+    );
+    if (!inExtremeZone || absMove >= effectiveMinAbs) {
       return { shouldExit: true, reason: 'stop_loss', returnDecimal, returnPct };
     }
   }

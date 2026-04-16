@@ -322,6 +322,74 @@ describe('evaluateTakeProfit', () => {
       expect(result.shouldExit).toBe(true);
       expect(result.reason).toBe('take_profit_threshold');
     });
+  })
+
+  describe('zone-aware stop-loss', () => {
+    const zoneAwareSl = {
+      enabled: true,
+      extremeLow: 0.1,
+      extremeHigh: 0.9,
+      minAbsoluteMove: 0.02,
+    };
+
+    it('suppresses stop when entry is in extreme zone and absolute move is tiny (spread noise)', () => {
+      // entry=0.06 (extreme zone), current=0.055 → return=-8.3% > -16% threshold → no stop anyway
+      // entry=0.06, current=0.052 → return=-13.3%, absMove=0.008 < effectiveMinAbs=min(0.02,0.06*0.16)=0.0096
+      const result = evaluateTakeProfit(
+        makePosition({ entryPrice: 0.06 }),
+        makeCurrentPrice({ currentOutcomePrice: 0.052, currentYesPrice: 0.052 }),
+        THRESHOLD,
+        0.16,
+        zoneAwareSl,
+      );
+      // -13.3% < -16% threshold → stop condition not met yet
+      expect(result.shouldExit).toBe(false);
+    });
+
+    it('fires stop on low-priced entry when absolute move exceeds effectiveMinAbs', () => {
+      // entry=0.06 (extreme zone), current=0.045 → return=-25%, absMove=0.015
+      // effectiveMinAbs = min(0.02, 0.06*0.16) = min(0.02, 0.0096) = 0.0096
+      // absMove 0.015 >= 0.0096 → stop fires
+      const result = evaluateTakeProfit(
+        makePosition({ entryPrice: 0.06 }),
+        makeCurrentPrice({ currentOutcomePrice: 0.045, currentYesPrice: 0.045 }),
+        THRESHOLD,
+        0.16,
+        zoneAwareSl,
+      );
+      expect(result.shouldExit).toBe(true);
+      expect(result.reason).toBe('stop_loss');
+    });
+
+    it('still suppresses spread noise at higher entry prices', () => {
+      // entry=0.20 (extreme zone ≤0.1 → NOT in extreme zone, so normal stop fires)
+      // entry=0.08 (extreme zone), current=0.066 → return=-17.5%, absMove=0.014
+      // effectiveMinAbs = min(0.02, 0.08*0.16) = min(0.02, 0.0128) = 0.0128
+      // absMove 0.014 >= 0.0128 → stop fires
+      const result = evaluateTakeProfit(
+        makePosition({ entryPrice: 0.08 }),
+        makeCurrentPrice({ currentOutcomePrice: 0.066, currentYesPrice: 0.066 }),
+        THRESHOLD,
+        0.16,
+        zoneAwareSl,
+      );
+      expect(result.shouldExit).toBe(true);
+      expect(result.reason).toBe('stop_loss');
+    });
+
+    it('fires stop normally for non-extreme-zone entries (no suppression)', () => {
+      // entry=0.40, slThreshold=0.16 → effectiveMinAbs=min(0.02,0.40*0.16)=min(0.02,0.064)=0.02
+      // Not in extreme zone (0.10 < 0.40 < 0.90) → inExtremeZone=false → stop fires
+      const result = evaluateTakeProfit(
+        makePosition({ entryPrice: 0.4 }),
+        makeCurrentPrice({ currentOutcomePrice: 0.33, currentYesPrice: 0.33 }),
+        THRESHOLD,
+        0.16,
+        zoneAwareSl,
+      );
+      expect(result.shouldExit).toBe(true);
+      expect(result.reason).toBe('stop_loss');
+    });
   });
 
   describe('return calculation', () => {
