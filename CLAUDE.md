@@ -53,6 +53,7 @@ redis-cli KEYS '*lock*'       # verify no stale locks after restart
 
 ## Conventions
 - Commit messages: imperative mood, prefixed with `feat:`, `fix:`, `chore:`, etc.
-- Direct push to main is acceptable (branch protection is bypassed).
+- **Always create a PR. Never push directly to main unless the user explicitly asks.**
+  Branch naming: `feat/<slug>`, `fix/<slug>`, `chore/<slug>`. Open PR, wait for merge.
 - Prefer editing existing files over creating new ones.
 - `MIN_BET_USD=5` is the preferred minimum bet amount.
