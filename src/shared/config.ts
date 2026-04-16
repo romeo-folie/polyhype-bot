@@ -422,11 +422,15 @@ const envSchema = z.object({
   // Empty-book maker edge for oracle-lag signals only. The shared
   // MAKER_EMPTY_BOOK_EDGE_BPS (150 default) is designed for 24h+ LLM-consensus
   // markets where a wide margin compounds edge over many fills. Oracle-lag
-  // trades 15m binaries with fair values near 0.50 and no real book depth;
-  // 150 bps rounds down two ticks, posting at 0.48 vs a 0.495 indicative, and
-  // never fills before resolution. 50 bps posts one tick below fair (0.49 vs
-  // 0.50), which is inside the indicative and still safe on post-only.
-  ORACLE_LAG_MAKER_EDGE_BPS: z.coerce.number().min(0).optional().default(50),
+  // trades 15m binaries with fair values near 0.50 and ghost books; 150 bps
+  // rounds down two ticks, posting at 0.48 vs a 0.495 indicative, and never
+  // fills before resolution. 50 bps (prior) posted at 0.49 — filled 1 of 5
+  // times. 10 bps rounds to the same tick as 0 bps at near-0.5 fair values
+  // (0.5012 − 0.001 = 0.5002 → 0.50), posting effectively at fair — maximally
+  // attractive to arriving takers while still post-only (never crosses).
+  // Fee-free on maker fills means 10 bps dominates any taker path as long as
+  // ghost books remain the norm for these markets.
+  ORACLE_LAG_MAKER_EDGE_BPS: z.coerce.number().min(0).optional().default(10),
 
   // Oracle-Lag gap-compression exit monitor (colocated in arb worker with the
   // scanner). Ships dark: when ORACLE_LAG_EXIT_ENABLED=false the monitor still
