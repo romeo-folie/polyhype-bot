@@ -1615,33 +1615,43 @@ export async function executeSignal(
         });
         return recordSkip('empty_book_source_blocked', 'skipped', guardrailDiagnostic);
       }
-      const consensusP = signal.consensusProbability ?? 0.5;
-      const minStrength = cfg.MAKER_EMPTY_BOOK_MIN_CONSENSUS;
-      if (consensusP > (1 - minStrength) && consensusP < minStrength) {
-        logger.info('[executor] skipping empty-book maker — consensus too weak', {
-          marketId: signal.marketId,
-          consensusP,
-          minStrength,
-        });
-        return recordSkip('empty_book_weak_consensus', 'skipped', guardrailDiagnostic);
-      }
-      const edgeMag = signal.edgeMagnitude ?? 0;
-      if (edgeMag < cfg.MAKER_EMPTY_BOOK_MIN_EDGE) {
-        logger.info('[executor] skipping empty-book maker — edge too small', {
-          marketId: signal.marketId,
-          edgeMagnitude: edgeMag,
-          minEdge: cfg.MAKER_EMPTY_BOOK_MIN_EDGE,
-        });
-        return recordSkip('empty_book_low_edge', 'skipped', guardrailDiagnostic);
-      }
-      const stddev = signal.consensusStddev ?? 0;
-      if (stddev > cfg.MAKER_EMPTY_BOOK_MAX_STDDEV) {
-        logger.info('[executor] skipping empty-book maker — consensus too noisy', {
-          marketId: signal.marketId,
-          consensusStddev: stddev,
-          maxStddev: cfg.MAKER_EMPTY_BOOK_MAX_STDDEV,
-        });
-        return recordSkip('empty_book_noisy_signal', 'skipped', guardrailDiagnostic);
+      // Oracle-lag's edge is structural timing (Chainlink RTDS front-runs
+      // Polymarket's reprice), not LLM conviction. Its consensusProbability is
+      // ~0.5 + pctMove/100 (≈0.5012 for a 12 bps move), and its edgeMagnitude
+      // encodes the raw % move (≈0.0015), both of which are the correct
+      // encoding of the signal — not a weak one. The three gates below reject
+      // exactly the shape of a valid oracle-lag signal. The source whitelist
+      // is the contract for structural-edge sources.
+      const hasStructuralEdge = signalSource === 'oracle-lag';
+      if (!hasStructuralEdge) {
+        const consensusP = signal.consensusProbability ?? 0.5;
+        const minStrength = cfg.MAKER_EMPTY_BOOK_MIN_CONSENSUS;
+        if (consensusP > (1 - minStrength) && consensusP < minStrength) {
+          logger.info('[executor] skipping empty-book maker — consensus too weak', {
+            marketId: signal.marketId,
+            consensusP,
+            minStrength,
+          });
+          return recordSkip('empty_book_weak_consensus', 'skipped', guardrailDiagnostic);
+        }
+        const edgeMag = signal.edgeMagnitude ?? 0;
+        if (edgeMag < cfg.MAKER_EMPTY_BOOK_MIN_EDGE) {
+          logger.info('[executor] skipping empty-book maker — edge too small', {
+            marketId: signal.marketId,
+            edgeMagnitude: edgeMag,
+            minEdge: cfg.MAKER_EMPTY_BOOK_MIN_EDGE,
+          });
+          return recordSkip('empty_book_low_edge', 'skipped', guardrailDiagnostic);
+        }
+        const stddev = signal.consensusStddev ?? 0;
+        if (stddev > cfg.MAKER_EMPTY_BOOK_MAX_STDDEV) {
+          logger.info('[executor] skipping empty-book maker — consensus too noisy', {
+            marketId: signal.marketId,
+            consensusStddev: stddev,
+            maxStddev: cfg.MAKER_EMPTY_BOOK_MAX_STDDEV,
+          });
+          return recordSkip('empty_book_noisy_signal', 'skipped', guardrailDiagnostic);
+        }
       }
       emptyBookMakerRoute = true;
       logger.info('[executor] empty book — routing to fair-value maker', {

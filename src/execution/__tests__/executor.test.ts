@@ -1342,6 +1342,47 @@ describe('empty-book maker route', () => {
     expect(mockSubmitLimit).not.toHaveBeenCalled();
   });
 
+  it('oracle-lag bypasses consensus/edge/stddev gates (structural-edge source)', async () => {
+    // Oracle-lag's real scanner emits consensusProbability ≈ 0.5012 and
+    // edgeMagnitude ≈ 0.0015 — neither clears the LLM-conviction gates. The
+    // source whitelist is the contract; timing edge replaces conviction.
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeSignal({
+        source: 'oracle-lag',
+        consensusProbability: 0.5012,
+        edgeMagnitude: 0.0015,
+        consensusStddev: 0.5, // would normally trip MAX_STDDEV=0.12
+        direction: 'UP',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(false);
+    expect(result.entryExecutionPath).toBe('maker_pending');
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+  });
+
+  it('near-zero-arb still subject to consensus/edge/stddev gates (non-structural source)', async () => {
+    // Narrow-source bypass — only oracle-lag gets the structural-edge pass.
+    // near-zero-arb is LLM-driven and keeps the conviction guards.
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeSignal({
+        source: 'near-zero-arb',
+        consensusProbability: 0.5012,
+        direction: 'YES',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('empty_book_weak_consensus');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
   it('routes to fair-value maker and returns pending on ghost book (YES direction)', async () => {
     const redis = makeRedis();
     const result = await executeSignal(
