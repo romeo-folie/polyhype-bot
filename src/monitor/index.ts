@@ -247,30 +247,29 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     // Trailing-stop suppression: when enabled, a fixed-TP exit is SUPPRESSED
     // so the trailing block below can take over. SL and divergence_closed still fire.
     //
-    // Dead-zone guard: only suppress when the peak has ratcheted far enough above
-    // activation for trailing's floor to sit *above* the fixed-TP line. Inside the
-    // dead zone `[activation, activation + giveback]` the trailing floor clamps to
-    // activation, so suppressing fixed-TP there is a strict regression — on a gap
-    // move the next tick can jump past activation without trailing ever firing.
-    // Burned once on 1877577:YES 2026-04-11 (peak +12.42% held 5 ticks then gapped
-    // to -41% in one monitor cycle).
+    // Design (2026-04-16): TP threshold is the ACTIVATION level for trailing,
+    // not a fire level. Once price crosses TP, trailing fully owns the exit
+    // decision — its floor is `max(TP, HWM − giveback)` so worst-case exit in
+    // a slow reversal ≈ TP (identical outcome to fixed-TP), but sustained runs
+    // capture more of the upside.
+    //
+    // Prior dead-zone guard (removed) required `HWM >= TP + TRAILING_GIVEBACK_PCT`
+    // before suppressing fixed-TP, to protect against the 2026-04-11 1877577:YES
+    // burn (+12.42% peak → −41% in one tick). In practice the 5s monitor tick
+    // fires fixed-TP the moment price crosses TP in slow-moving markets, so the
+    // guard almost always triggered and capped every slow winner at TP.
+    // Structural tax on every slow winner outweighed one-off gap-move protection.
+    // See memory/feedback_trailing_dead_zone_removed.md.
+    //
+    // If gap-down losses become a concern again, the right mitigation is
+    // additive (a HARD_TAKE_PROFIT_THRESHOLD ceiling), not re-enabling the
+    // dead zone.
     const trailingActive = cfg.TRAILING_STOP_ENABLED;
-
-    const priorHwmPct = position.highWaterMarkPct;
-    const effectiveHwmPct = Math.max(
-      typeof priorHwmPct === 'number' && Number.isFinite(priorHwmPct)
-        ? priorHwmPct
-        : decision.returnPct,
-      decision.returnPct,
-    );
-    const trailingHasRealFloor =
-      effectiveHwmPct >= tpThreshold * 100 + cfg.TRAILING_GIVEBACK_PCT;
 
     const suppressTpExit =
       trailingActive &&
       decision.shouldExit &&
-      decision.reason === 'take_profit_threshold' &&
-      trailingHasRealFloor;
+      decision.reason === 'take_profit_threshold';
 
     logger.info('[monitor] position evaluated', {
       marketId: position.marketId,
