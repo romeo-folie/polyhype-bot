@@ -17,7 +17,19 @@ export interface PositionOutcome {
   id: string;
   closedAt: string;
   executionId?: string;
-  source: 'osint' | 'copytrade' | 'spot' | 'arb' | 'crypto-arb' | 'futures';
+  source:
+    | 'osint'
+    | 'copytrade'
+    | 'spot'
+    | 'arb'
+    | 'crypto-arb'
+    | 'futures'
+    | 'sports'
+    | 'clob-flow'
+    | 'oracle-lag'
+    | 'near-zero-arb'
+    | 'longshot-bias'
+    | 'correlation-arb';
   category: string;
   question: string;
   direction: 'YES' | 'NO' | 'UP' | 'DOWN' | 'LONG' | 'SHORT';
@@ -49,6 +61,21 @@ export function inferSource(sourcedFrom: string): PositionOutcome['source'] {
   if (s.startsWith('crypto-arb:')) return 'crypto-arb';
   if (s.startsWith('spot:') || s.startsWith('spot ')) return 'spot';
   if (s.startsWith('arb:') || s.startsWith('market arb')) return 'arb';
+  if (s.startsWith('sports:')) return 'sports';
+  if (s.startsWith('oracle-lag:')) return 'oracle-lag';
+  if (s.startsWith('near-zero-arb')) return 'near-zero-arb';
+  if (s.startsWith('longshot-bias')) return 'longshot-bias';
+  if (s.startsWith('correlation-arb')) return 'correlation-arb';
+  // Futures origin markers (monitor-driven, backfill, and HL hedges) — these
+  // are futures decisions, not OSINT. OSINT-triggered futures trades still
+  // label 'osint' by design: the decision source was news, HL is only the venue.
+  if (
+    s.startsWith('futures-monitor') ||
+    s.startsWith('backfill:futures-monitor') ||
+    s.startsWith('hedge:pm:')
+  ) {
+    return 'futures';
+  }
   return 'osint'; // default: OSINT news pipeline
 }
 

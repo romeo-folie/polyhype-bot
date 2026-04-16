@@ -49,17 +49,7 @@ vi.mock('./cryptoArbScanner.js', () => ({
 // Mock executor
 const mockExecuteSignal = vi.fn().mockResolvedValue({ skipped: true, skipReason: 'test' });
 vi.mock('../execution/executor.js', () => ({
-  executeSignal: (...args: unknown[]) => mockExecuteSignal(...args),
-}));
-
-// Mock positionLedger
-vi.mock('../execution/positionLedger.js', () => ({
-  recordPosition: vi.fn().mockResolvedValue(undefined),
-}));
-
-// Mock bankroll
-vi.mock('../shared/bankroll.js', () => ({
-  deductStake: vi.fn().mockResolvedValue(undefined),
+  executeAndRecordSignal: (...args: unknown[]) => mockExecuteSignal(...args),
 }));
 
 // Mock telemetry (all no-ops)

@@ -129,7 +129,14 @@ export async function recordPosition(redis: Redis, position: Position): Promise<
   const openedAtMs = new Date(position.openedAt).getTime();
 
   // Validate sharesHeld — warn if 0 or undefined (indicates missing shares_bought from venue).
-  if (position.sharesHeld === undefined || position.sharesHeld === 0) {
+  // Futures positions legitimately track via HL position state (symbol + USD margin)
+  // instead of "shares", so undefined sharesHeld is expected there — don't warn.
+  const isFuturesPosition =
+    position.isFutures === true || position.executionVenue === 'hyperliquid';
+  if (
+    !isFuturesPosition &&
+    (position.sharesHeld === undefined || position.sharesHeld === 0)
+  ) {
     logger.warn(
       '[ledger] position recorded with zero or undefined sharesHeld — exit may require fallback calculation',
       {

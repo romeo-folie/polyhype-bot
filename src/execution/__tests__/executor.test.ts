@@ -41,6 +41,11 @@ vi.mock('../../shared/redis.js', () => ({
 
 vi.mock('../positionLedger.js', () => ({
   hasOpenPosition: vi.fn(),
+  recordPosition: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../../shared/bankroll.js', () => ({
+  deductStake: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../pendingMakerOrders.js', () => ({
@@ -119,7 +124,9 @@ const { recordExecutionMetric, recordExecutionTiming, recordExecutionEvent } =
   await import('../../shared/telemetry.js');
 const { getPendingOrder, setPendingOrder, deletePendingOrder } =
   await import('../pendingMakerOrders.js');
-const { executeSignal, executeSignals } = await import('../executor.js');
+const { executeSignal, executeSignals, executeAndRecordSignal } = await import('../executor.js');
+const positionLedgerMocks = await import('../positionLedger.js');
+const bankrollMocks = await import('../../shared/bankroll.js');
 
 const mockSubmit = vi.mocked(submitTrade);
 const mockResolve = vi.mocked(resolveSimmerMarketId);
@@ -1157,6 +1164,83 @@ describe('executeSignals', () => {
     const results = await executeSignals([], redis as any);
     expect(results).toHaveLength(0);
     expect(mockSubmit).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeAndRecordSignal', () => {
+  const mockRecordPosition = vi.mocked(positionLedgerMocks.recordPosition);
+  const mockDeductStake = vi.mocked(bankrollMocks.deductStake);
+
+  beforeEach(() => {
+    mockSubmit.mockReset();
+    mockResolve.mockReset();
+    mockHasPosition.mockReset();
+    mockGetCalibrationStats.mockReset();
+    mockGetCalibrationStats.mockResolvedValue(null);
+    mockRecordPosition.mockReset();
+    mockDeductStake.mockReset();
+    mockRecordPosition.mockResolvedValue(undefined);
+    mockDeductStake.mockResolvedValue(undefined);
+
+    mockConfig.EXECUTION_MODE = 'taker';
+    mockConfig.TAKER_MIN_EDGE = 0;
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
+    mockConfig.SIMMER_VENUE_ENABLED = true;
+
+    mockResolve.mockResolvedValue('simmer-uuid-123');
+    mockHasPosition.mockResolvedValue(false);
+  });
+
+  it('on success: calls deductStake and recordPosition exactly once each', async () => {
+    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc', shares_bought: 10 });
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeSignal(), redis as any);
+
+    expect(result.tradeResult?.success).toBe(true);
+    expect(mockDeductStake).toHaveBeenCalledTimes(1);
+    expect(mockRecordPosition).toHaveBeenCalledTimes(1);
+  });
+
+  it('on skip: does not call deductStake or recordPosition', async () => {
+    mockHasPosition.mockResolvedValue(true); // force position_already_open skip
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(mockDeductStake).not.toHaveBeenCalled();
+    expect(mockRecordPosition).not.toHaveBeenCalled();
+  });
+
+  it('on venue failure: does not call deductStake or recordPosition', async () => {
+    mockSubmit.mockResolvedValue({ success: false, error: 'simmer rejected' });
+    mockSubmitClob.mockResolvedValue({ success: false, error: 'clob rejected' });
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeSignal(), redis as any);
+
+    expect(result.tradeResult?.success).not.toBe(true);
+    expect(mockDeductStake).not.toHaveBeenCalled();
+    expect(mockRecordPosition).not.toHaveBeenCalled();
+  });
+
+  it('swallows recordPosition throw so a successful fill still returns success', async () => {
+    // Invariant: the trade is already live on the venue and idempotency is set.
+    // Propagating a ledger-write throw would mask the fill AND block retry.
+    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc', shares_bought: 10 });
+    mockRecordPosition.mockRejectedValue(new Error('redis unreachable'));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeSignal(), redis as any);
+
+    expect(result.tradeResult?.success).toBe(true);
+    // deductStake still ran first before recordPosition threw.
+    expect(mockDeductStake).toHaveBeenCalledTimes(1);
   });
 });
 

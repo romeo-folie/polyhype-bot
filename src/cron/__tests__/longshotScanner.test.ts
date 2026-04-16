@@ -18,7 +18,7 @@ vi.mock('../../shared/watchlist.js', () => ({
 
 const mockExecuteSignal = vi.fn();
 vi.mock('../../execution/executor.js', () => ({
-  executeSignal: mockExecuteSignal,
+  executeAndRecordSignal: mockExecuteSignal,
 }));
 
 vi.mock('../../shared/zones.js', () => ({

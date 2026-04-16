@@ -7,9 +7,8 @@ import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { getRedis, refreshLock, reacquireLockAfterExpiry } from '../shared/redis.js';
 import { runCopytrade } from './index.js';
-import { executeSignal } from '../execution/executor.js';
-import { recordPosition } from '../execution/positionLedger.js';
-import { deductStake, getBankroll } from '../shared/bankroll.js';
+import { executeAndRecordSignal } from '../execution/executor.js';
+import { getBankroll } from '../shared/bankroll.js';
 import { SimmerError } from '../shared/simmer.js';
 import { recordCopytradeFilter, recordCopytradeMetric } from '../shared/telemetry.js';
 
@@ -214,28 +213,9 @@ export async function runWorker(maxCycles?: number): Promise<void> {
             continue;
           }
 
-          const result = await executeSignal(signal, redis, sessionExposureUsd);
+          // executeAndRecordSignal handles deductStake + recordPosition on success.
+          const result = await executeAndRecordSignal(signal, redis, sessionExposureUsd);
           if (result.tradeResult?.success) {
-            await deductStake(redis, result.signal.stakeUsd);
-            await recordPosition(redis, {
-              marketId: signal.marketId,
-              executionId: result.signal.executionId,
-              conditionId: signal.conditionId,
-              clobTokenIds: signal.clobTokenIds,
-              question: signal.question,
-              direction: signal.direction,
-              entryPrice: result.entryPrice ?? signal.outcomePrice,
-              stakeUsd: result.signal.stakeUsd,
-              consensusProbability: signal.consensusProbability,
-              consensusStddev: signal.consensusStddev,
-              edgeMagnitude: result.signal.edgeMagnitude,
-              sourcedFrom: signal.sourcedFrom,
-              openedAt: new Date().toISOString(),
-              txHash: result.tradeResult.tx_hash,
-              sharesHeld: result.tradeResult.shares_bought,
-              executionVenue: result.executionVenue ?? 'simmer',
-              priceZone: result.signal.priceZone,
-            });
             await recordCopytradeMetric(redis, 'executed').catch(() => {
               /* ignore telemetry errors */
             });

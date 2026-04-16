@@ -1,6 +1,9 @@
 import { z } from 'zod';
 
-const SIGNAL_SOURCE = ['osint', 'copytrade', 'spot', 'arb', 'crypto-arb', 'futures', 'sports', 'clob-flow'] as const;
+const SIGNAL_SOURCE = [
+  'osint', 'copytrade', 'spot', 'arb', 'crypto-arb', 'futures', 'sports', 'clob-flow',
+  'oracle-lag', 'near-zero-arb', 'longshot-bias', 'correlation-arb',
+] as const;
 const DIRECTION = ['YES', 'NO', 'UP', 'DOWN', 'LONG', 'SHORT'] as const;
 const SKIP_REASON = [
   'extreme_price_llm_distrust', 'zone3_edge_below_fee_buffer', 'zone4_comfort_trap',

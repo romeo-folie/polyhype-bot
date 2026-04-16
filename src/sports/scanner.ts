@@ -100,7 +100,7 @@ interface ScanDeps {
  * Scan once: fetch live games for enabled leagues, match against cached PM
  * markets, and return any candidates whose edge exceeds `SPORTS_MIN_EDGE`.
  *
- * Returns `{ candidates, signals }` — signals are ready for `executeSignal()`.
+ * Returns `{ candidates, signals }` — signals are ready for `executeAndRecordSignal()`.
  * Does NOT execute; the caller (poller) hands signals to the executor.
  */
 export async function scanLiveSportsArb(
@@ -216,7 +216,7 @@ export async function scanLiveSportsArb(
         `${c.game.awayScore}-${c.game.homeScore} Q${c.game.period} ` +
         `${c.game.secondsRemaining}s left; model YES=${modelYesProb.toFixed(3)} vs price ${c.yesPrice.toFixed(3)}.`,
       isFutures: false,
-      source: 'osint',
+      source: 'sports',
       endDate: c.market.endDate ?? undefined,
       feesEnabled: c.market.feesEnabled ?? false,
     };

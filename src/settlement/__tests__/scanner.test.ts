@@ -19,9 +19,9 @@ vi.mock('../../shared/watchlist.js', () => ({
   getCachedMarkets: (...args: unknown[]) => cachedMarketsMock(...args),
 }));
 
-const executeSignalMock = vi.fn().mockResolvedValue({ skipped: false });
+const executeAndRecordSignalMock = vi.fn().mockResolvedValue({ skipped: false });
 vi.mock('../../execution/executor.js', () => ({
-  executeSignal: (...args: unknown[]) => executeSignalMock(...args),
+  executeAndRecordSignal: (...args: unknown[]) => executeAndRecordSignalMock(...args),
 }));
 
 const {
@@ -218,7 +218,7 @@ describe('scanSettlementArb', () => {
     expect(result.opportunities).toBe(1);
     expect(result.emitted).toBe(0);
     expect(result.loggedOnly).toBe(true);
-    expect(executeSignalMock).not.toHaveBeenCalled();
+    expect(executeAndRecordSignalMock).not.toHaveBeenCalled();
   });
 
   it('emits a signal when enabled and edge clears the gate', async () => {
@@ -233,8 +233,8 @@ describe('scanSettlementArb', () => {
     const result = await scanSettlementArb(fakeRedis);
     expect(result.opportunities).toBe(1);
     expect(result.emitted).toBe(1);
-    expect(executeSignalMock).toHaveBeenCalledOnce();
-    const signal = executeSignalMock.mock.calls[0]?.[0] as { direction: string; marketId: string; stakeUsd: number; source: string };
+    expect(executeAndRecordSignalMock).toHaveBeenCalledOnce();
+    const signal = executeAndRecordSignalMock.mock.calls[0]?.[0] as { direction: string; marketId: string; stakeUsd: number; source: string };
     expect(signal.direction).toBe('YES');
     expect(signal.marketId).toBe('42');
     expect(signal.stakeUsd).toBe(10);
