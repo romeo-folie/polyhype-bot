@@ -245,25 +245,28 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     );
 
     // Trailing-stop suppression: when enabled, a fixed-TP exit is SUPPRESSED
-    // so the trailing block below can take over. SL and divergence_closed still fire.
+    // so the trailing block below can take over. SL and divergence_closed still
+    // fire. Trend-exit and stale-exit also still run on later ticks as
+    // additional safeties (bleed detection, peak-PnL-plus-age) — trailing is
+    // the primary post-TP exit mechanism, not the exclusive one.
     //
     // Design (2026-04-16): TP threshold is the ACTIVATION level for trailing,
-    // not a fire level. Once price crosses TP, trailing fully owns the exit
-    // decision — its floor is `max(TP, HWM − giveback)` so worst-case exit in
-    // a slow reversal ≈ TP (identical outcome to fixed-TP), but sustained runs
-    // capture more of the upside.
+    // not a fire level. Once price crosses TP, trailing takes over. Its floor
+    // is clamped at `max(TP, HWM − giveback)` which keeps the trigger level
+    // from drifting below TP after activation; realized exit prices can still
+    // land below TP because checks happen on discrete 5s ticks and fills are
+    // at the then-current bid (same granularity/slippage story as fixed-TP).
+    // The upside is sustained runs capture much more before trailing fires.
     //
     // Prior dead-zone guard (removed) required `HWM >= TP + TRAILING_GIVEBACK_PCT`
     // before suppressing fixed-TP, to protect against the 2026-04-11 1877577:YES
     // burn (+12.42% peak → −41% in one tick). In practice the 5s monitor tick
     // fires fixed-TP the moment price crosses TP in slow-moving markets, so the
-    // guard almost always triggered and capped every slow winner at TP.
-    // Structural tax on every slow winner outweighed one-off gap-move protection.
-    // See memory/feedback_trailing_dead_zone_removed.md.
-    //
-    // If gap-down losses become a concern again, the right mitigation is
-    // additive (a HARD_TAKE_PROFIT_THRESHOLD ceiling), not re-enabling the
-    // dead zone.
+    // guard almost always PREVENTED suppression and capped every slow winner
+    // at TP. Structural tax on every slow winner outweighed one-off gap-move
+    // protection. If gap-down losses become a concern again, the right
+    // mitigation is additive (a HARD_TAKE_PROFIT_THRESHOLD ceiling), not
+    // re-enabling the dead zone.
     const trailingActive = cfg.TRAILING_STOP_ENABLED;
 
     const suppressTpExit =
