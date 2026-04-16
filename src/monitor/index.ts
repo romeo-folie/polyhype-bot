@@ -158,6 +158,18 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       continue;
     }
 
+    // Oracle-lag positions are governed by the dedicated exit monitor in
+    // pga-arb (src/arb/oracleLagExitMonitor.ts) — gap-compression + reversal
+    // + max-hold. The generic take-profit evaluator uses the crypto-updown
+    // category's 3% TP, which fires on the first tick after fill and caps
+    // what should be a structural-edge trade. Skip here so the dedicated
+    // monitor owns the exit decision. Requires ORACLE_LAG_EXIT_ENABLED=true
+    // for live exits; in shadow the position rides to resolution.
+    if (position.sourcedFrom?.startsWith('oracle-lag:')) {
+      held++;
+      continue;
+    }
+
     const currentPrice = priceMap.get(`${position.marketId}:${position.direction}`);
 
     if (!currentPrice) {
