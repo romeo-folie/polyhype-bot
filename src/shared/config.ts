@@ -202,7 +202,8 @@ const envSchema = z.object({
   // Minimum LLM consensus strength for empty-book entries. Consensus must be
   // >= this value or <= (1 - this value). Rejects borderline "I don't know"
   // signals (e.g. 0.53) against a ghost-book price that may be months stale.
-  MAKER_EMPTY_BOOK_MIN_CONSENSUS: z.coerce.number().min(0).max(1).optional().default(0.65),
+  // Must be >= 0.5; values below 0.5 invert the skip band and disable the gate.
+  MAKER_EMPTY_BOOK_MIN_CONSENSUS: z.coerce.number().min(0.5).max(1).optional().default(0.65),
   // Thresholds for detecting an empty/ghost book. bid < BID_THRESHOLD and
   // ask > ASK_THRESHOLD means no real market maker is resting on the book.
   EMPTY_BOOK_BID_THRESHOLD: z.coerce.number().min(0).max(0.5).optional().default(0.04),

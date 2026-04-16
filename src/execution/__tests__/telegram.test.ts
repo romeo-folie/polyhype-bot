@@ -21,7 +21,7 @@ vi.mock('../../shared/config.js', () => ({
 const mockFetch = vi.fn<typeof fetch>();
 (global as unknown as { fetch: typeof mockFetch }).fetch = mockFetch;
 
-const { notifyTradeExecuted, notifyTradeError, notifyTakeProfitExecuted } =
+const { notifyTradeExecuted, notifyTradeError, notifyTakeProfitExecuted, notifyMakerOrderPosted } =
   await import('../telegram.js');
 
 function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
@@ -103,6 +103,41 @@ describe('Telegram notifications', () => {
       } as Response);
 
       await expect(notifyTradeExecuted(makeSignal(), undefined)).resolves.not.toThrow();
+    });
+  });
+
+  describe('notifyMakerOrderPosted', () => {
+    it('sends a 🟡 pending message with posted price and order ID', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+      await notifyMakerOrderPosted(makeSignal(), { postedPrice: 0.61, orderId: '0xabc123' });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(url).toContain('test-token');
+      expect(url).toContain('sendMessage');
+      const body = JSON.parse(opts.body as string) as { chat_id: string; text: string };
+      expect(body.chat_id).toBe('test-chat');
+      expect(body.text).toContain('Maker Order Posted');
+      expect(body.text).toContain('0.610');
+      expect(body.text).toContain('0xabc123');
+      expect(body.text).toContain('Will war escalate?');
+    });
+
+    it('omits order ID line when not provided', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+      await notifyMakerOrderPosted(makeSignal(), { postedPrice: 0.5 });
+
+      const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(opts.body as string) as { text: string };
+      expect(body.text).not.toContain('Order ID');
+    });
+
+    it('no-ops when bot token is missing', async () => {
+      delete process.env.TELEGRAM_BOT_TOKEN;
+      await notifyMakerOrderPosted(makeSignal(), { postedPrice: 0.5 });
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 

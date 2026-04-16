@@ -623,9 +623,10 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
     // Check whether this fill came from a bot-posted GTC maker order.
     // If so, enrich the position with the signal's benchmark data and use the
     // real sourcedFrom rather than the generic 'reconciled:clob' label.
+    // Key is deleted AFTER recordPosition() succeeds so a transient write
+    // failure doesn't permanently lose the benchmark metadata.
     const pendingOrder = await getPendingOrder(redis, market.id);
     if (pendingOrder) {
-      await deletePendingOrder(redis, market.id);
       logger.info('[reconcile] linked CLOB orphan to pending maker order', {
         marketId: market.id,
         orderId: pendingOrder.orderId,
@@ -656,6 +657,10 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
     };
 
     await recordPosition(redis, newPos);
+    // Delete the pending order key only after the position is durably recorded.
+    if (pendingOrder) {
+      await deletePendingOrder(redis, market.id);
+    }
     logger.info('[reconcile] imported CLOB orphan', { marketId: market.id, direction, shares, linkedMakerOrder: pendingOrder != null });
     return true;
   } catch (err) {

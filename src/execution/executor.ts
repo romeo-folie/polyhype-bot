@@ -313,7 +313,13 @@ function resolveMakerPrice(
     }
   }
 
-  if (bestAsk > 0) {
+  // Only apply the bestAsk cap when using the CLOB book as pricing anchor
+  // (non-empty-book path). In empty-book / fair-value mode the caller has
+  // already applied the correct directional cap before calling this function:
+  // YES→ min(fairValue, bestAsk-tick), NO→ min(fairValue, 1-bestBid-tick).
+  // Applying the YES-book bestAsk cap here for NO trades would incorrectly
+  // clamp a NO price of e.g. 0.80 down to 0.20 when YES ask ≈ 0.21.
+  if (fairValueOverride == null && bestAsk > 0) {
     price = Math.min(price, bestAsk - tick);
   }
 

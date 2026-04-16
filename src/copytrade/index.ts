@@ -251,8 +251,6 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     // Broader economic terms
     'economics',
     'jobs',
-    'gdp',
-    'recession',
     'rate',
     'percentage',
   ],
