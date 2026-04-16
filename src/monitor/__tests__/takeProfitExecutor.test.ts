@@ -38,6 +38,7 @@ vi.mock('../../shared/clob.js', () => ({
 
 vi.mock('../../execution/positionLedger.js', () => ({
   closePosition: vi.fn(),
+  getPosition: vi.fn().mockResolvedValue(null),
   getOpenPositions: vi.fn(),
   recordPosition: vi.fn(),
   hasOpenPosition: vi.fn(),

@@ -42,6 +42,11 @@ import { checkTimeToResolution } from '../mapping/divergenceCalculator.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
 import { priceZoneOf } from '../shared/zones.js';
 import { enqueueWrite } from '../db/writeQueue.js';
+import {
+  extractTheme,
+  addNearZeroPosition,
+  countOpenNearZeroPositions,
+} from '../shared/themeExtractor.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 const DEDUP_KEY_PREFIX = 'near_zero:dedup:';
@@ -300,6 +305,32 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
       continue;
     }
 
+    // Theme concentration guard — skip LLM entirely when the theme cap is
+    // already reached so we don't burn budget on a trade we cannot place.
+    const candidateTheme = extractTheme(candidate.market.question);
+    if (candidateTheme) {
+      const openInTheme = await redis.scard(`near_zero:theme_open:${candidateTheme}`);
+      if (openInTheme >= cfg.NEAR_ZERO_MAX_PER_THEME) {
+        logger.info('[near-zero] skipped — theme cap reached', {
+          marketId: candidate.market.id,
+          theme: candidateTheme,
+          openInTheme,
+          cap: cfg.NEAR_ZERO_MAX_PER_THEME,
+        });
+        continue;
+      }
+    }
+    // Global position cap — belt-and-suspenders across all themes.
+    const totalOpen = await countOpenNearZeroPositions(redis);
+    if (totalOpen >= cfg.NEAR_ZERO_MAX_OPEN_POSITIONS) {
+      logger.info('[near-zero] skipped — global position cap reached', {
+        marketId: candidate.market.id,
+        totalOpen,
+        cap: cfg.NEAR_ZERO_MAX_OPEN_POSITIONS,
+      });
+      continue;
+    }
+
     // Phase 2c: Use real OSINT headline when available, generic prompt otherwise.
     const osintKey = `${candidate.market.id}:${candidate.direction}`;
     const osintSignal = osintMap.get(osintKey);
@@ -464,6 +495,15 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
         venue: result.executionVenue,
         entryPrice: result.entryPrice,
       });
+      // Register in theme + global open sets so the cap is enforced on the
+      // next scanner run. Non-fatal — the periodic reconciler will heal any
+      // drift if this write fails.
+      await addNearZeroPosition(
+        redis,
+        candidateTheme,
+        candidate.market.id,
+        candidate.direction,
+      );
     } else {
       logger.info('[near-zero] trade skipped by executor', {
         marketId: candidate.market.id,

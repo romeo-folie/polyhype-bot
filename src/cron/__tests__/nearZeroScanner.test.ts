@@ -58,6 +58,15 @@ vi.mock('../../shared/redis.js', () => ({
   closeRedis: vi.fn(),
 }));
 
+const mockExtractTheme = vi.fn<(q: string) => string | null>(() => null);
+const mockAddNearZeroPosition = vi.fn().mockResolvedValue(undefined);
+const mockCountOpenNearZeroPositions = vi.fn<() => Promise<number>>().mockResolvedValue(0);
+vi.mock('../../shared/themeExtractor.js', () => ({
+  extractTheme: (...args: unknown[]) => mockExtractTheme(args[0] as string),
+  addNearZeroPosition: (...args: unknown[]) => mockAddNearZeroPosition(...args),
+  countOpenNearZeroPositions: () => mockCountOpenNearZeroPositions(),
+}));
+
 // Real gamma parsers — they're pure helpers and trivial.
 vi.mock('../../mapping/gamma.js', async () => {
   const actual = await vi.importActual<typeof GammaModule>('../../mapping/gamma.js');
@@ -87,6 +96,8 @@ const DEFAULT_CONFIG = {
   NEAR_ZERO_MAX_STDDEV: 0.20,
   NEAR_ZERO_OSINT_SIGNAL_TTL_S: 172_800,
   NEAR_ZERO_MIN_PRICE_DROP_PCT: 0.10,
+  NEAR_ZERO_MAX_PER_THEME: 1,
+  NEAR_ZERO_MAX_OPEN_POSITIONS: 4,
 };
 
 const mockLoadConfig = vi.fn(() => ({ ...DEFAULT_CONFIG }));
@@ -127,6 +138,7 @@ interface FakeRedisState {
   setCalls: { key: string; value: string; ttl?: number; mode?: string }[];
   zrangeMembers: string[];
   nxRejectKeys: Set<string>;
+  scardMap: Map<string, number>;
 }
 
 function makeRedis(initial: Partial<FakeRedisState> = {}): { redis: Redis; state: FakeRedisState } {
@@ -135,10 +147,12 @@ function makeRedis(initial: Partial<FakeRedisState> = {}): { redis: Redis; state
     setCalls: initial.setCalls ?? [],
     zrangeMembers: initial.zrangeMembers ?? [],
     nxRejectKeys: initial.nxRejectKeys ?? new Set(),
+    scardMap: initial.scardMap ?? new Map(),
   };
 
   const redis = {
     get: vi.fn(async (key: string) => state.getMap.get(key) ?? null),
+    scard: vi.fn(async (key: string) => state.scardMap.get(key) ?? 0),
     set: vi.fn(async (...args: unknown[]) => {
       const key = args[0] as string;
       const value = args[1] as string;
@@ -243,6 +257,9 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
       executionVenue: 'clob',
       entryPrice: 0.07,
     });
+    mockExtractTheme.mockReturnValue(null);
+    mockCountOpenNearZeroPositions.mockResolvedValue(0);
+    mockAddNearZeroPosition.mockResolvedValue(undefined);
   });
 
   it('wouldTradeIfEnabled is true when all gates pass but scanner is disabled', async () => {
@@ -431,5 +448,74 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     // No inflight claim either — we bail out before the eval loop.
     const inflightSets = state.setCalls.filter((c) => c.key.startsWith('near_zero:inflight:'));
     expect(inflightSets).toHaveLength(0);
+  });
+
+  // ── Theme cap (PR 2) ──────────────────────────────────────────────────────
+
+  it('skips LLM when theme cap is already reached', async () => {
+    const { redis } = makeRedis({
+      scardMap: new Map([['near_zero:theme_open:iran-israel-conflict', 1]]),
+    });
+    mockGetCachedMarkets.mockResolvedValue([
+      makeMarket({ id: 'mkt-iran-new', question: 'Will Iran and Israel declare a ceasefire?' }),
+    ]);
+    mockExtractTheme.mockReturnValue('iran-israel-conflict');
+
+    await runNearZeroScan(redis);
+
+    expect(mockEstimateConsensusProbability).not.toHaveBeenCalled();
+    expect(mockExecuteSignal).not.toHaveBeenCalled();
+  });
+
+  it('skips LLM when global position cap is reached', async () => {
+    const { redis } = makeRedis(); // state unused — scard via mockCountOpenNearZeroPositions
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-over-cap' })]);
+    mockExtractTheme.mockReturnValue(null);
+    mockCountOpenNearZeroPositions.mockResolvedValue(4); // at cap
+
+    await runNearZeroScan(redis);
+
+    expect(mockEstimateConsensusProbability).not.toHaveBeenCalled();
+  });
+
+  it('calls addNearZeroPosition after a successful execution', async () => {
+    const { redis } = makeRedis();
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-new-trade' })]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_SCANNER_ENABLED: true });
+    mockExtractTheme.mockReturnValue('inflation');
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    expect(mockExecuteSignal).toHaveBeenCalledTimes(1);
+    expect(mockAddNearZeroPosition).toHaveBeenCalledWith(
+      redis,
+      'inflation',
+      'mkt-new-trade',
+      'YES',
+    );
+  });
+
+  it('does NOT call addNearZeroPosition when executor skips the trade', async () => {
+    const { redis } = makeRedis();
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-skipped' })]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_SCANNER_ENABLED: true });
+    mockExtractTheme.mockReturnValue('btc-price-target');
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+    mockExecuteSignal.mockResolvedValue({ skipped: true, skipReason: 'already_open' });
+
+    await runNearZeroScan(redis);
+
+    expect(mockAddNearZeroPosition).not.toHaveBeenCalled();
   });
 });

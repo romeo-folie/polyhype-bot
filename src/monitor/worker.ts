@@ -43,6 +43,7 @@ import { destroyPriceFeed } from '../shared/feedSingleton.js';
 import { runClobProbe } from '../shared/clobProbe.js';
 import { setAgentAutoRedeem } from '../shared/simmer.js';
 import { runMonitorInner } from './index.js';
+import { rebuildNearZeroThemeSets } from '../shared/themeExtractor.js';
 
 const MONITOR_LOCK_KEY = 'monitor:lock';
 // TTL must be comfortably larger than the worst-case cycle (Simmer latency,
@@ -140,6 +141,7 @@ export async function runMonitorWorker(): Promise<void> {
   });
 
   let lastHeartbeat = 0;
+  let lastNearZeroReconcile = 0;
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -189,6 +191,18 @@ export async function runMonitorWorker(): Promise<void> {
     if (nowMs - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
       logger.info('[monitor-worker] heartbeat');
       lastHeartbeat = nowMs;
+    }
+
+    // Periodically rebuild near-zero-arb theme open sets from the live ledger
+    // to heal any drift caused by missed SREM calls (e.g. worker crash on exit).
+    if (nowMs - lastNearZeroReconcile >= cfg.NEAR_ZERO_THEME_RECONCILE_INTERVAL_MS) {
+      rebuildNearZeroThemeSets(redis).then(() => {
+        lastNearZeroReconcile = Date.now();
+      }).catch((err: unknown) => {
+        logger.warn('[monitor-worker] near-zero theme reconcile failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
     }
 
     await new Promise((resolve) => setTimeout(resolve, cfg.MONITOR_LOOP_INTERVAL_MS));
