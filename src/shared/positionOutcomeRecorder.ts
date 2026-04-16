@@ -5,6 +5,7 @@ import { recordOutcome, inferCategory, inferSource } from './outcomeRecorder.js'
 import { recordUpDownOutcome } from './updownThrottle.js';
 import { loadConfig } from './config.js';
 import { enqueueWrite } from '../db/writeQueue.js';
+import { logger } from './logger.js';
 
 /**
  * Record the outcome of a position exit. Centralises field mapping from Position
@@ -134,4 +135,112 @@ export async function recordPositionOutcome(
     synthHedged: position.synthHedged ?? false,
     pendingSettlement: position.pendingSettlement ?? false,
   });
+}
+
+/**
+ * Redemption/resolution-path helper.
+ *
+ * `resolutionRedeemer` works with a raw Simmer/CLOB API response (`raw`)
+ * plus an optionally looked-up ledger `Position` — sometimes one, sometimes
+ * the other, sometimes both. Callers also need per-site overrides for
+ * direction / question / venue because the redeemer renames these as it
+ * figures out the PM-side semantics.
+ *
+ * This helper merges ledger state + raw response + overrides into a Position
+ * shape suitable for `recordPositionOutcome`. Delegation means outcomes land
+ * in both Redis (calibration context) and Postgres (analytics join), fixing
+ * the "resolutions never reach DB" gap.
+ */
+export interface RedemptionOutcomeOverrides {
+  marketId: string;
+  direction: Position['direction'];
+  question: string;
+  result: 'won' | 'lost' | 'pushed';
+  returnPct: number;
+  executionVenue?: 'simmer' | 'clob' | 'hyperliquid';
+  exitReason?: string;
+  /** Force a sourcedFrom value (e.g. 'reconciled:simmer'). Falls back to
+   * ledgerPos.sourcedFrom or 'reconciled:redemption'. */
+  sourcedFromOverride?: string;
+}
+
+export async function recordRedemptionOutcome(
+  redis: Redis,
+  ledgerPos: Position | null | undefined,
+  raw: Record<string, unknown> | null | undefined,
+  overrides: RedemptionOutcomeOverrides,
+): Promise<void> {
+  const rawGet = <T,>(key: string, guard: (v: unknown) => v is T): T | undefined => {
+    const v = raw?.[key];
+    return guard(v) ? v : undefined;
+  };
+  const isString = (v: unknown): v is string => typeof v === 'string';
+  const isNumber = (v: unknown): v is number => typeof v === 'number' && isFinite(v);
+
+  const sourcedFrom =
+    overrides.sourcedFromOverride ??
+    ledgerPos?.sourcedFrom ??
+    rawGet('sourcedFrom', isString) ??
+    'reconciled:redemption';
+
+  const merged: Parameters<typeof recordPositionOutcome>[1] = {
+    marketId: overrides.marketId,
+    direction: overrides.direction,
+    question: overrides.question.slice(0, 200),
+    sourcedFrom,
+    executionId: ledgerPos?.executionId,
+    consensusProbability:
+      ledgerPos?.consensusProbability ?? rawGet('consensusProbability', isNumber) ?? 0.5,
+    edgeMagnitude: ledgerPos?.edgeMagnitude ?? rawGet('edgeMagnitude', isNumber) ?? 0,
+    openedAt: ledgerPos?.openedAt ?? rawGet('openedAt', isString) ?? new Date().toISOString(),
+    executionVenue:
+      ledgerPos?.executionVenue ??
+      (rawGet('executionVenue', isString) as Position['executionVenue'] | undefined) ??
+      overrides.executionVenue ??
+      'clob',
+    stakeUsd: ledgerPos?.stakeUsd ?? rawGet('stakeUsd', isNumber) ?? 0,
+    entryPrice: ledgerPos?.entryPrice ?? rawGet('entryPrice', isNumber) ?? 0,
+    ...(ledgerPos?.conditionId ? { conditionId: ledgerPos.conditionId } : {}),
+    ...(ledgerPos?.modeConfigured ? { modeConfigured: ledgerPos.modeConfigured } : {}),
+    ...(ledgerPos?.entryExecutionPath
+      ? { entryExecutionPath: ledgerPos.entryExecutionPath }
+      : {}),
+    ...(ledgerPos?.entryOrderType ? { entryOrderType: ledgerPos.entryOrderType } : {}),
+    ...(ledgerPos?.fallbackReason ? { fallbackReason: ledgerPos.fallbackReason } : {}),
+    ...(ledgerPos?.decisionSpreadBps !== undefined
+      ? { decisionSpreadBps: ledgerPos.decisionSpreadBps }
+      : {}),
+    ...(ledgerPos?.makerPriceImprovementBps !== undefined
+      ? { makerPriceImprovementBps: ledgerPos.makerPriceImprovementBps }
+      : {}),
+    ...(ledgerPos?.makerPriceImprovementUsd !== undefined
+      ? { makerPriceImprovementUsd: ledgerPos.makerPriceImprovementUsd }
+      : {}),
+    ...(ledgerPos?.sharesHeld !== undefined ? { sharesHeld: ledgerPos.sharesHeld } : {}),
+    ...(ledgerPos?.entryAtr !== undefined ? { entryAtr: ledgerPos.entryAtr } : {}),
+    ...(ledgerPos?.entryAtrPct !== undefined ? { entryAtrPct: ledgerPos.entryAtrPct } : {}),
+    ...(ledgerPos?.priceZone !== undefined ? { priceZone: ledgerPos.priceZone } : {}),
+    ...(ledgerPos?.synthHedged !== undefined ? { synthHedged: ledgerPos.synthHedged } : {}),
+    ...(ledgerPos?.pendingSettlement !== undefined
+      ? { pendingSettlement: ledgerPos.pendingSettlement }
+      : {}),
+  };
+
+  try {
+    await recordPositionOutcome(redis, merged, {
+      result: overrides.result,
+      returnPct: overrides.returnPct,
+      ...(overrides.executionVenue
+        ? { executionVenueOverride: overrides.executionVenue }
+        : {}),
+      ...(overrides.exitReason ? { exitReason: overrides.exitReason } : {}),
+    });
+  } catch (err) {
+    // Don't let outcome recording break the redemption flow — it's
+    // fire-and-forget analytics. Log and move on.
+    logger.warn('[redemption-outcome] record failed (non-fatal)', {
+      marketId: overrides.marketId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }

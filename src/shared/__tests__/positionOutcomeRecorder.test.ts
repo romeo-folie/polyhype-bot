@@ -7,7 +7,9 @@ vi.mock('../outcomeRecorder.js', () => ({
 }));
 
 const { recordOutcome } = await import('../outcomeRecorder.js');
-const { recordPositionOutcome } = await import('../positionOutcomeRecorder.js');
+const { recordPositionOutcome, recordRedemptionOutcome } = await import(
+  '../positionOutcomeRecorder.js'
+);
 
 describe('recordPositionOutcome', () => {
   it('maps execution attribution fields into the persisted outcome', async () => {
@@ -151,6 +153,93 @@ describe('recordPositionOutcome', () => {
       redis,
       expect.objectContaining({ result: 'pushed', exitReason: 'flat_exit' }),
       expect.any(Object),
+    );
+  });
+});
+
+describe('recordRedemptionOutcome', () => {
+  it('merges ledger position + overrides for the resolution-redeemer path', async () => {
+    const redis = {} as any;
+
+    await recordRedemptionOutcome(
+      redis,
+      {
+        executionId: 'exec-redeem-1',
+        sourcedFrom: 'Breaking headline',
+        question: 'ledger-original-question',
+        direction: 'YES',
+        consensusProbability: 0.72,
+        edgeMagnitude: 0.14,
+        openedAt: '2026-04-05T12:00:00Z',
+        executionVenue: 'clob',
+        marketId: 'mkt-123',
+        entryPrice: 0.55,
+        stakeUsd: 20,
+      } as any,
+      null,
+      {
+        marketId: 'mkt-123',
+        direction: 'YES',
+        // Caller wants to override question with resolved Gamma question
+        question: 'Resolved: Will X happen? (full title)',
+        result: 'won',
+        returnPct: 80,
+        executionVenue: 'clob',
+        exitReason: 'clob_on_chain_redeemed',
+      },
+    );
+
+    // Helper should land a DB-writing call with the merged position, overridden
+    // question, and exitReason — so execution_events↔outcomes can join.
+    expect(recordOutcome).toHaveBeenLastCalledWith(
+      redis,
+      expect.objectContaining({
+        executionId: 'exec-redeem-1',
+        exitReason: 'clob_on_chain_redeemed',
+        result: 'won',
+        returnPct: 80,
+      }),
+      { sourcedFrom: 'Breaking headline' },
+    );
+  });
+
+  it('falls back to raw API response when ledger position is missing (Simmer recovery)', async () => {
+    const redis = {} as any;
+
+    // reconciliation.ts case: no ledger row, Simmer closedPos snake-case fields.
+    await recordRedemptionOutcome(
+      redis,
+      null,
+      {
+        market_id: 'mkt-sim-1',
+        side: 'yes',
+        shares: 10,
+        value_usdc: 8,
+        average_price: 0.5,
+        question: 'Resolved question',
+      },
+      {
+        marketId: 'mkt-sim-1',
+        direction: 'YES',
+        question: 'Resolved question',
+        result: 'won',
+        returnPct: 60,
+        executionVenue: 'simmer',
+        exitReason: 'recovered_auto_redeemed',
+        sourcedFromOverride: 'reconciled:simmer',
+      },
+    );
+
+    // With no ledger data, defaults land (consensusProbability=0.5, divergence=0)
+    // and sourcedFrom override flows through.
+    expect(recordOutcome).toHaveBeenLastCalledWith(
+      redis,
+      expect.objectContaining({
+        result: 'won',
+        exitReason: 'recovered_auto_redeemed',
+        executionVenue: 'simmer',
+      }),
+      { sourcedFrom: 'reconciled:simmer' },
     );
   });
 });

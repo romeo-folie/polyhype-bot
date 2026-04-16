@@ -6,7 +6,7 @@ import { fetchClobTokenBalance } from '../shared/clob.js';
 import { fetchPolymarketPositions, type PolymarketPosition } from '../shared/polymarketData.js';
 import { fetchMarketByConditionId, fetchMarketByQuestion, type GammaMarket } from '../shared/polymarketGamma.js';
 
-import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
+import { recordRedemptionOutcome } from '../shared/positionOutcomeRecorder.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { isRecentlyClosed } from '../shared/closedGuard.js';
 import { getPendingOrder, deletePendingOrder } from '../execution/pendingMakerOrders.js';
@@ -420,18 +420,16 @@ export async function runReconciliation(
               // Record Outcome
               const direction = closedPos.side.toUpperCase() as 'YES' | 'NO';
               const stakeUsd = closedPos.shares * (closedPos.average_price ?? 0);
-              await recordOutcome(redis, {
-                source: 'osint',
-                category: inferCategory(closedPos.question || closedPos.market_id),
-                question: (closedPos.question || closedPos.market_id).slice(0, 200),
-                direction: direction,
-                consensusProbability: 0.5,
-                divergence: 0,
+              await recordRedemptionOutcome(redis, null, closedPos as unknown as Record<string, unknown>, {
+                marketId: closedPos.market_id,
+                direction,
+                question: closedPos.question || closedPos.market_id,
                 result: 'won',
                 returnPct: stakeUsd > 0 ? ((closedPos.value_usdc - stakeUsd) / stakeUsd) * 100 : 0,
-                holdingHours: 0,
                 executionVenue: 'simmer',
-              }, { sourcedFrom: 'reconciled:simmer' });
+                exitReason: 'recovered_auto_redeemed',
+                sourcedFromOverride: 'reconciled:simmer',
+              });
 
               existingQuestions.add(normQ);
               recoveredCount++;
