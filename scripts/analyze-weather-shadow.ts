@@ -30,6 +30,7 @@ import { homedir } from 'node:os';
 import { getSql, closeSql } from '../src/db/client.js';
 import { logger } from '../src/shared/logger.js';
 import { canonicalCityKey } from '../src/weather/noaaClient.js';
+import { parseBracketLabel } from '../src/weather/weatherScanner.js';
 
 interface BracketOpp {
   city: string;
@@ -59,27 +60,25 @@ function parseArgs(): Args {
 }
 
 /**
- * Parse Polymarket bracket labels into half-open ranges using half-integer
- * boundaries that match the scanner's probability model — Polymarket rounds
+ * Parse a bracket label into a half-open range using half-integer boundaries
+ * that match `estimateBracketProbability` (noaaClient.ts) — Polymarket rounds
  * observed temperatures to whole degrees, so "40-41°F" effectively covers
- * `[39.5, 41.5)`. See `estimateBracketProbability` in noaaClient.ts:
- *   "39°F or below"  → T <= 39  → (-∞, 39.5)
- *   "40-41°F"        → 40 <= T <= 41 → [39.5, 41.5)
- *   "58°F or higher" → T >= 58 → [57.5, ∞)
- *   "28°C"           → T = 28 → [27.5, 28.5)
- * Mismatching this against the scanner's model would misclassify near-edge
- * outcomes (e.g. 41.4°F observed would land in "40-41" per the model but
- * "42-43" under naive integer bounds).
+ * `[39.5, 41.5)`. Without ±0.5 alignment, an observed 41.4°F would be
+ * credited to "42-43" instead of "40-41".
+ *
+ * Delegates label tokenization to the scanner's `parseBracketLabel` so we
+ * accept the same whitespace/casing variants the scanner does — keeps the
+ * regexes single-source-of-truth and prevents this analyzer from silently
+ * dropping rows the scanner happily processes.
  */
 export function parseBracket(label: string): { lo: number; hi: number } | null {
-  const upper = /^(-?\d+(?:\.\d+)?)\s*°[FC]\s*or\s*higher$/i.exec(label);
-  if (upper) return { lo: parseFloat(upper[1]!) - 0.5, hi: Infinity };
-  const lower = /^(-?\d+(?:\.\d+)?)\s*°[FC]\s*or\s*lower$/i.exec(label);
-  if (lower) return { lo: -Infinity, hi: parseFloat(lower[1]!) + 0.5 };
-  const range = /^(-?\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\s*°[FC]$/.exec(label);
-  if (range) return { lo: parseFloat(range[1]!) - 0.5, hi: parseFloat(range[2]!) + 0.5 };
-  const single = /^(-?\d+(?:\.\d+)?)\s*°[FC]$/.exec(label);
-  if (single) return { lo: parseFloat(single[1]!) - 0.5, hi: parseFloat(single[1]!) + 0.5 };
+  const r = parseBracketLabel(label);
+  if (!r) return null;
+  // low=null → "or below" (low tail);  high=null → "or higher" (high tail).
+  // Single-Celsius ("28°C") returns low===high; treat as a 1° interior bracket.
+  if (r.low === null && r.high !== null) return { lo: -Infinity, hi: r.high + 0.5 };
+  if (r.high === null && r.low !== null) return { lo: r.low - 0.5, hi: Infinity };
+  if (r.low !== null && r.high !== null) return { lo: r.low - 0.5, hi: r.high + 0.5 };
   return null;
 }
 

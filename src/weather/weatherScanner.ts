@@ -771,10 +771,12 @@ export async function scanWeatherMarkets(
           adjustedMarketProb: opp.adjustedMarketProb,
           outcomePrice: opp.outcomePrice,
           forecastHigh: opp.forecastHigh,
-          // Effective stddev applied to this bracket's prob (raw × multiplier).
-          // Recorded so post-hoc calibration sweeps can re-derive what modelProb
-          // *would have been* under different multipliers using normalCdf alone.
+          // Both raw and effective stddev are stored explicitly so downstream
+          // analyzers can read either without recomputing. Effective is what
+          // entered estimateBracketProbability; raw lets calibration sweeps
+          // try alternative multipliers post-hoc via normalCdf.
           forecastStdDev: opp.forecastStdDev,
+          effectiveStdDev: opp.forecastStdDev * cfg.WEATHER_STDDEV_MULTIPLIER,
           stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
           daysOut: opp.daysOut,
           wouldTrade,
