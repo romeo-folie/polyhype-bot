@@ -88,6 +88,7 @@ const mockConfig = {
   MAKER_EMPTY_BOOK_MIN_EDGE: 0.20,
   MAKER_EMPTY_BOOK_MAX_STDDEV: 0.12,
   MAKER_EMPTY_BOOK_ALLOWED_SOURCES: ['oracle-lag', 'near-zero-arb'],
+  ORACLE_LAG_MAKER_EDGE_BPS: 50,
 };
 
 const mockLoadConfig = vi.fn(() => mockConfig);
@@ -1342,6 +1343,42 @@ describe('empty-book maker route', () => {
     expect(mockSubmitLimit).not.toHaveBeenCalled();
   });
 
+  it('oracle-lag uses ORACLE_LAG_MAKER_EDGE_BPS (50), posting 1 tick below fair (0.49)', async () => {
+    // The shared MAKER_EMPTY_BOOK_EDGE_BPS=150 rounds oracle-lag's 0.5012 fair
+    // value down to 0.48 — out of reach on 15m binaries that resolve in
+    // ~11 min. The per-source override posts at 0.49 (1 tick below fair),
+    // inside the indicative and still safe under post-only.
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'oracle-lag',
+        consensusProbability: 0.5012,
+        direction: 'UP',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    // fair 0.5012 − 50 bps (0.005) = 0.4962 → roundDown to tick 0.01 → 0.49.
+    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.49 }));
+  });
+
+  it('near-zero-arb still uses MAKER_EMPTY_BOOK_EDGE_BPS (150) — oracle-lag knob is source-scoped', async () => {
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'near-zero-arb',
+        consensusProbability: 0.70,
+        direction: 'YES',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    // fair 0.70 − 150 bps (0.015) = 0.685 → roundDown to tick 0.01 → 0.68.
+    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.68 }));
+  });
+
   it('oracle-lag bypasses consensus/edge/stddev gates (structural-edge source)', async () => {
     // Oracle-lag's real scanner emits consensusProbability ≈ 0.5012 and
     // edgeMagnitude ≈ 0.0015 — neither clears the LLM-conviction gates. The
@@ -1395,8 +1432,10 @@ describe('empty-book maker route', () => {
     expect(result.entryExecutionPath).toBe('maker_pending');
     expect(result.entryOrderType).toBe('maker');
     expect(mockSubmitLimit).toHaveBeenCalledOnce();
-    // Fair-value: 0.65 - 150bps (0.015) = 0.635 → roundDown to tick 0.01 → 0.63
-    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.63 }));
+    // Fair-value: 0.65 - 50bps (0.005) = 0.645 → roundDown to tick 0.01 → 0.64
+    // (oracle-lag uses ORACLE_LAG_MAKER_EDGE_BPS; see per-source rationale in
+    // config.ts. Other sources still use MAKER_EMPTY_BOOK_EDGE_BPS=150.)
+    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.64 }));
     expect(mockSetPendingOrder).toHaveBeenCalledOnce();
     // No taker fallback — ghost book has no market makers
     expect(mockSubmitClob).not.toHaveBeenCalled();
@@ -1412,8 +1451,8 @@ describe('empty-book maker route', () => {
       redis as any,
     );
 
-    // Fair-value for NO: 1 - 0.65 = 0.35; minus edge 0.015 → 0.335 → roundDown → 0.33
-    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.33 }));
+    // Fair-value for NO: 1 - 0.65 = 0.35; minus 50 bps (0.005) = 0.345 → roundDown → 0.34
+    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.34 }));
   });
 
   it('resumes active pending order that is not yet filled — returns pending again', async () => {

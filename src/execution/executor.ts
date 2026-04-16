@@ -449,7 +449,13 @@ async function tryExecuteViaClobMaker(
   const mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : null;
   const spreadBps = bestBid > 0 && bestAsk > 0 && mid ? ((bestAsk - bestBid) / mid) * 10000 : null;
 
-  const edgeBps = emptyBookMode ? cfg.MAKER_EMPTY_BOOK_EDGE_BPS : cfg.MAKER_PRICE_EDGE_BPS;
+  // Oracle-lag needs a narrower empty-book edge than the shared default. See
+  // ORACLE_LAG_MAKER_EDGE_BPS comment in config.ts for the fill-rate math.
+  const emptyBookEdgeBps =
+    signal.source === 'oracle-lag'
+      ? cfg.ORACLE_LAG_MAKER_EDGE_BPS
+      : cfg.MAKER_EMPTY_BOOK_EDGE_BPS;
+  const edgeBps = emptyBookMode ? emptyBookEdgeBps : cfg.MAKER_PRICE_EDGE_BPS;
   let fairValue: number | null =
     emptyBookMode && signal.consensusProbability != null
       ? signal.direction === 'YES' || signal.direction === 'UP'
@@ -1690,7 +1696,13 @@ export async function executeSignal(
       stakeUsd: signal.stakeUsd,
       emptyBook: emptyBookMakerRoute,
       ...(emptyBookMakerRoute
-        ? { maxWaitMs: cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS, edgeBps: cfg.MAKER_EMPTY_BOOK_EDGE_BPS }
+        ? {
+            maxWaitMs: cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS,
+            edgeBps:
+              signal.source === 'oracle-lag'
+                ? cfg.ORACLE_LAG_MAKER_EDGE_BPS
+                : cfg.MAKER_EMPTY_BOOK_EDGE_BPS,
+          }
         : { maxWaitMs: cfg.MAKER_MAX_WAIT_MS, priceEdgeBps: cfg.MAKER_PRICE_EDGE_BPS }),
       feeMarket: feeMarketBpsObserved != null || signal.feesEnabled === true,
     });

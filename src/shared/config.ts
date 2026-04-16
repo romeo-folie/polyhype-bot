@@ -419,6 +419,14 @@ const envSchema = z.object({
   ORACLE_LAG_STAKE_USD: z.coerce.number().min(0).optional().default(5),
   // Hard cap on live entries per hour.
   ORACLE_LAG_MAX_TRADES_PER_HOUR: z.coerce.number().int().min(1).optional().default(10),
+  // Empty-book maker edge for oracle-lag signals only. The shared
+  // MAKER_EMPTY_BOOK_EDGE_BPS (150 default) is designed for 24h+ LLM-consensus
+  // markets where a wide margin compounds edge over many fills. Oracle-lag
+  // trades 15m binaries with fair values near 0.50 and no real book depth;
+  // 150 bps rounds down two ticks, posting at 0.48 vs a 0.495 indicative, and
+  // never fills before resolution. 50 bps posts one tick below fair (0.49 vs
+  // 0.50), which is inside the indicative and still safe on post-only.
+  ORACLE_LAG_MAKER_EDGE_BPS: z.coerce.number().min(0).optional().default(50),
 
   // Oracle-Lag gap-compression exit monitor (colocated in arb worker with the
   // scanner). Ships dark: when ORACLE_LAG_EXIT_ENABLED=false the monitor still

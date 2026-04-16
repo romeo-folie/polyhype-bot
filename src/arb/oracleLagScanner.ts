@@ -104,8 +104,14 @@ export interface OracleLagEvalConfig {
  * Outcome of an attempted `fire()` call against the executor. Used to drive
  * shadow_observations(kind='oracle_lag_executor') so we can explain the gap
  * between wouldTrade=true shadow rows and actual executed trades.
+ *
+ * 'pending' — the empty-book maker path posted a post-only GTC that is live
+ * on the CLOB but unfilled at the time fire() returned. Distinct from 'error'
+ * (which should be reserved for actual failures) and from 'success' (which
+ * implies a filled position). Pending orders resume on the next fire() on the
+ * same market or self-clean when their TTL expires.
  */
-export type OracleLagExecutorOutcome = 'success' | 'skipped' | 'error';
+export type OracleLagExecutorOutcome = 'success' | 'skipped' | 'error' | 'pending';
 
 export interface OracleLagExecutorShadowInput {
   outcome: OracleLagExecutorOutcome;
@@ -588,7 +594,11 @@ export class OracleLagScanner {
       endDate: market.endDate.toISOString(),
     };
 
-    let outcome: 'success' | 'skipped' | 'error' = 'error';
+    // Default to 'pending' so the empty-book maker path (which returns
+    // `{ skipped: false, tradeResult: undefined, entryExecutionPath:
+    // 'maker_pending' }` — no branch below fires) doesn't get mislabelled
+    // as 'error'. The catch block below overrides to 'error' on throw.
+    let outcome: OracleLagExecutorOutcome = 'pending';
     let executorSkipReason: string | undefined;
     let executorError: string | undefined;
     let executorVenue: string | undefined;
@@ -681,6 +691,24 @@ export class OracleLagScanner {
           error: result.error,
         });
         await this.redis.del(dedupKey).catch(() => {});
+      } else if (result.entryExecutionPath === 'maker_pending') {
+        // Empty-book maker posted a post-only GTC; no fill yet. Keep the
+        // dedup key so the next tick doesn't stack a second order — the
+        // executor's pending-order-resume path picks it up once dedup
+        // expires. Venue + posted price are captured so the DB row
+        // distinguishes pending from error.
+        outcome = 'pending';
+        executorVenue = result.executionVenue;
+        executorEntryPrice = result.entryPrice ?? entryPrice;
+        executorStakeUsd = result.signal.stakeUsd;
+        logger.info('[oracle-lag] maker pending', {
+          marketId: market.marketId,
+          slug: market.slug,
+          direction,
+          postedPrice: executorEntryPrice,
+          stakeUsd: executorStakeUsd,
+          movePct: +move.pctMove.toFixed(4),
+        });
       }
     } catch (err) {
       outcome = 'error';

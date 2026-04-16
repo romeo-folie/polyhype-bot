@@ -320,6 +320,33 @@ describe('evaluateOracleLagEntry', () => {
       expect(row.payload.stakeUsd).toBeUndefined();
     });
 
+    it('encodes a pending maker post with venue + posted price and wouldBlock=true', () => {
+      // Empty-book maker submitted a post-only GTC that is live but unfilled.
+      // Distinct from 'error' (genuine failure) and 'success' (filled). The
+      // row must capture venue + posted price so analytics can separate
+      // "posted but never filled" from "never posted".
+      const row = buildOracleLagExecutorShadowRow({
+        outcome: 'pending',
+        venue: 'clob',
+        stakeUsd: 5,
+        entryPrice: 0.49,
+        shadowEntryPrice: 0.495,
+        timeLeftMin: 10,
+        consensusProbability: 0.4988,
+        move: baseMove,
+        market: baseMarket,
+        side: 'DOWN',
+        threshold: 0.12,
+      });
+
+      expect(row.wouldBlock).toBe(true);
+      expect(row.payload.outcome).toBe('pending');
+      expect(row.payload.venue).toBe('clob');
+      expect(row.payload.entryPrice).toBe(0.49);
+      expect(row.payload.skipReason).toBeUndefined();
+      expect(row.payload.error).toBeUndefined();
+    });
+
     it('encodes an error with error message and wouldBlock=true', () => {
       const row = buildOracleLagExecutorShadowRow({
         outcome: 'error',
