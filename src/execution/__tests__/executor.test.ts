@@ -79,6 +79,10 @@ const mockConfig = {
   ORACLE_LAG_MAX_ENTRY_SPREAD_BPS: -1,
   CLOB_FALLBACK_ENABLED: true,
   SIMMER_VENUE_ENABLED: true,
+  MAKER_EMPTY_BOOK_MIN_CONSENSUS: 0.65,
+  MAKER_EMPTY_BOOK_MIN_EDGE: 0.20,
+  MAKER_EMPTY_BOOK_MAX_STDDEV: 0.12,
+  MAKER_EMPTY_BOOK_ALLOWED_SOURCES: ['oracle-lag', 'near-zero-arb'],
 };
 
 const mockLoadConfig = vi.fn(() => mockConfig);
@@ -1244,11 +1248,21 @@ describe('empty-book maker route', () => {
     expect(mockSubmitLimit).not.toHaveBeenCalled();
   });
 
+  it('skips with empty_book_source_blocked for osint source on ghost book', async () => {
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('empty_book_source_blocked');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
   it('routes to fair-value maker and returns pending on ghost book (YES direction)', async () => {
     const redis = makeRedis();
     const result = await executeSignal(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      makeSignal({ source: 'osint', consensusProbability: 0.65, direction: 'YES' }),
+      makeSignal({ source: 'oracle-lag', consensusProbability: 0.65, direction: 'YES' }),
       redis as any,
     );
 
@@ -1269,7 +1283,7 @@ describe('empty-book maker route', () => {
     const redis = makeRedis();
     await executeSignal(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      makeSignal({ source: 'osint', consensusProbability: 0.65, direction: 'NO' }),
+      makeSignal({ source: 'oracle-lag', consensusProbability: 0.65, direction: 'NO' }),
       redis as any,
     );
 
@@ -1308,7 +1322,7 @@ describe('empty-book maker route', () => {
 
     const redis = makeRedis();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+    const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
 
     expect(result.skipped).toBe(false);
     expect(result.entryExecutionPath).toBe('maker_pending');
@@ -1349,7 +1363,7 @@ describe('empty-book maker route', () => {
 
     const redis = makeRedis();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+    const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
 
     expect(result.skipped).toBe(false);
     expect(result.tradeResult?.success).toBe(true);
@@ -1394,7 +1408,7 @@ describe('empty-book maker route', () => {
 
     const redis = makeRedis();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+    const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
 
     expect(result.skipped).toBe(false);
     expect(result.tradeResult?.success).toBe(true);
@@ -1424,7 +1438,7 @@ describe('empty-book maker route', () => {
 
     const redis = makeRedis();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+    const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
 
     // Expired order was cancelled
     expect(mockCancelOrder).toHaveBeenCalledWith('order-expired');
@@ -1442,7 +1456,7 @@ describe('empty-book maker route', () => {
 
     const redis = makeRedis();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await executeSignal(makeSignal({ source: 'osint' }), redis as any);
+    const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
 
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('no_clob_book');

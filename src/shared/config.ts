@@ -212,6 +212,16 @@ const envSchema = z.object({
   // the LLM samples disagree — a poor basis for a GTC order in a market with no
   // real price discovery.
   MAKER_EMPTY_BOOK_MAX_STDDEV: z.coerce.number().min(0).max(1).optional().default(0.12),
+  // Comma-separated whitelist of signal sources that may use the empty-book maker
+  // path. Only sources with structural timing/informational edge belong here.
+  // osint is excluded from the default whitelist and is discouraged: LLM opinion on
+  // news is not a valid basis for a GTC order in a market with no real price
+  // discovery or adverse-selection protection.
+  MAKER_EMPTY_BOOK_ALLOWED_SOURCES: z
+    .string()
+    .optional()
+    .default('oracle-lag,near-zero-arb')
+    .transform((s) => s.split(',').map((x) => x.trim()).filter(Boolean)),
   // Thresholds for detecting an empty/ghost book. bid < BID_THRESHOLD and
   // ask > ASK_THRESHOLD means no real market maker is resting on the book.
   EMPTY_BOOK_BID_THRESHOLD: z.coerce.number().min(0).max(0.5).optional().default(0.04),

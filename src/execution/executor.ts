@@ -1567,11 +1567,20 @@ export async function executeSignal(
       (benchmark.decisionBestBid ?? 1) < cfg.EMPTY_BOOK_BID_THRESHOLD &&
       (benchmark.decisionBestAsk ?? 0) > cfg.EMPTY_BOOK_ASK_THRESHOLD;
 
+    // canEmptyBookMaker uses a two-step source check for empty books: a signal is a
+    // candidate if it is generally maker-eligible OR explicitly listed in the
+    // empty-book-specific whitelist. The whitelist lets sources like oracle-lag
+    // (which should not use the maker path for real books — alpha decays too fast)
+    // still post GTC orders when no real price discovery exists. Sources that are
+    // neither generally maker-eligible nor on the empty-book whitelist (e.g. spot)
+    // fall through to the no_clob_book skip below. Sources that are maker-eligible
+    // but not whitelisted (e.g. osint) enter the block and are gated by the explicit
+    // source check inside, which emits a specific empty_book_source_blocked skip reason.
     const canEmptyBookMaker =
       emptyBook &&
       executionMode !== 'taker' &&
       !signal.isFutures &&
-      isMakerEligible(signal);
+      (isMakerEligible(signal) || cfg.MAKER_EMPTY_BOOK_ALLOWED_SOURCES.includes(signal.source ?? ''));
 
     if (oneSidedBook) {
       logger.info('[executor] skipping — entry spread unknown due to one-sided book', {
@@ -1596,6 +1605,15 @@ export async function executeSignal(
       return recordSkip('spread_too_wide', 'skipped', guardrailDiagnostic);
     }
     if (canEmptyBookMaker) {
+      const signalSource = signal.source ?? '';
+      if (!cfg.MAKER_EMPTY_BOOK_ALLOWED_SOURCES.includes(signalSource)) {
+        logger.info('[executor] skipping empty-book maker — source not whitelisted', {
+          marketId: signal.marketId,
+          source: signalSource,
+          allowed: cfg.MAKER_EMPTY_BOOK_ALLOWED_SOURCES,
+        });
+        return recordSkip('empty_book_source_blocked', 'skipped', guardrailDiagnostic);
+      }
       const consensusP = signal.consensusProbability ?? 0.5;
       const minStrength = cfg.MAKER_EMPTY_BOOK_MIN_CONSENSUS;
       if (consensusP > (1 - minStrength) && consensusP < minStrength) {
