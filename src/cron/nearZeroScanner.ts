@@ -349,6 +349,25 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
       pOurSide >= cfg.NEAR_ZERO_MIN_CONSENSUS && meetsEdge && lowStddev;
     const wouldExecute = wouldTradeIfEnabled && cfg.NEAR_ZERO_SCANNER_ENABLED;
 
+    // Identify the first failing gate so metricValue/threshold in shadow_observations
+    // always describe the blocking condition (not just edge, which may not be why it blocked).
+    let blockedReason: string | null = null;
+    let shadowMetricValue = edge;
+    let shadowThreshold = cfg.NEAR_ZERO_MIN_EDGE;
+    if (!wouldTradeIfEnabled) {
+      if (pOurSide < cfg.NEAR_ZERO_MIN_CONSENSUS) {
+        blockedReason = 'consensus_below_threshold';
+        shadowMetricValue = pOurSide;
+        shadowThreshold = cfg.NEAR_ZERO_MIN_CONSENSUS;
+      } else if (!meetsEdge) {
+        blockedReason = 'edge_below_minimum';
+      } else {
+        blockedReason = 'stddev_too_high';
+        shadowMetricValue = estimate.stddev;
+        shadowThreshold = cfg.NEAR_ZERO_MAX_STDDEV;
+      }
+    }
+
     logger.info('[near-zero] candidate evaluated', {
       marketId: candidate.market.id,
       question: candidate.market.question.slice(0, 100),
@@ -367,15 +386,16 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
       hasOsint: hasOsintSignal,
       wouldTradeIfEnabled,
       wouldExecute,
+      blockedReason,
     });
     void enqueueWrite('shadow_observations', {
       kind: 'near_zero',
-      source: 'osint',
+      source: 'near-zero-arb',
       marketId: candidate.market.id,
       direction: candidate.direction,
       wouldBlock: !wouldTradeIfEnabled,
-      metricValue: edge,
-      threshold: cfg.NEAR_ZERO_MIN_EDGE,
+      metricValue: shadowMetricValue,
+      threshold: shadowThreshold,
       payload: {
         question: candidate.market.question.slice(0, 200),
         marketPrice: candidate.price,
@@ -390,6 +410,7 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
         hasOsint: hasOsintSignal,
         wouldTradeIfEnabled,
         wouldExecute,
+        blockedReason,
         scannerEnabled: cfg.NEAR_ZERO_SCANNER_ENABLED,
       },
     });
