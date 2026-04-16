@@ -266,20 +266,22 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     const enqueueMock = vi.mocked(enqueueWrite);
     expect(enqueueMock).toHaveBeenCalledTimes(1);
     const [, payload] = enqueueMock.mock.calls[0]!;
+    expect(payload.source).toBe('near-zero-arb');
     expect(payload.wouldBlock).toBe(false);
     const inner = payload.payload as Record<string, unknown>;
     expect(inner.wouldTradeIfEnabled).toBe(true);
     expect(inner.wouldExecute).toBe(false);
     expect(inner.scannerEnabled).toBe(false);
+    expect(inner.blockedReason).toBeNull();
   });
 
-  it('wouldBlock is true when stddev gate rejects the candidate', async () => {
+  it('wouldBlock=true and blockedReason=stddev_too_high when only stddev gate fails', async () => {
     const { redis } = makeRedis();
     mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
     mockEstimateConsensusProbability.mockResolvedValue({
       probability: 0.80,
       reasoning: 'noisy providers',
-      stddev: 0.40, // > NEAR_ZERO_MAX_STDDEV (0.20)
+      stddev: 0.40, // > NEAR_ZERO_MAX_STDDEV (0.20); pOurSide and edge both pass
       sampleCount: 3,
     });
 
@@ -289,7 +291,30 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     const enqueueMock = vi.mocked(enqueueWrite);
     const [, payload] = enqueueMock.mock.calls[0]!;
     expect(payload.wouldBlock).toBe(true);
-    expect((payload.payload as Record<string, unknown>).wouldTradeIfEnabled).toBe(false);
+    expect(payload.metricValue).toBeCloseTo(0.40);
+    expect(payload.threshold).toBe(DEFAULT_CONFIG.NEAR_ZERO_MAX_STDDEV);
+    expect((payload.payload as Record<string, unknown>).blockedReason).toBe('stddev_too_high');
+  });
+
+  it('blockedReason=consensus_below_threshold when consensus gate is first to fail', async () => {
+    const { redis } = makeRedis();
+    mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.50, // pOurSide=0.50 < MIN_CONSENSUS=0.60
+      reasoning: 'uncertain',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    const enqueueMock = vi.mocked(enqueueWrite);
+    const [, payload] = enqueueMock.mock.calls[0]!;
+    expect(payload.wouldBlock).toBe(true);
+    expect(payload.metricValue).toBeCloseTo(0.50);
+    expect(payload.threshold).toBe(DEFAULT_CONFIG.NEAR_ZERO_MIN_CONSENSUS);
+    expect((payload.payload as Record<string, unknown>).blockedReason).toBe('consensus_below_threshold');
   });
 
   it('dedup key is NOT set when the LLM call throws', async () => {
