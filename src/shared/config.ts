@@ -214,8 +214,9 @@ const envSchema = z.object({
   MAKER_EMPTY_BOOK_MAX_STDDEV: z.coerce.number().min(0).max(1).optional().default(0.12),
   // Comma-separated whitelist of signal sources that may use the empty-book maker
   // path. Only sources with structural timing/informational edge belong here.
-  // osint is intentionally excluded — LLM opinion on news is not a valid basis for
-  // a GTC order in a market with no real price discovery or adverse-selection protection.
+  // osint is excluded from the default whitelist and is discouraged: LLM opinion on
+  // news is not a valid basis for a GTC order in a market with no real price
+  // discovery or adverse-selection protection.
   MAKER_EMPTY_BOOK_ALLOWED_SOURCES: z
     .string()
     .optional()
