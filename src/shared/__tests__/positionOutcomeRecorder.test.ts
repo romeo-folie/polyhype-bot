@@ -6,7 +6,12 @@ vi.mock('../outcomeRecorder.js', () => ({
   inferSource: vi.fn().mockReturnValue('osint'),
 }));
 
+vi.mock('../../db/writeQueue.js', () => ({
+  enqueueWrite: vi.fn().mockResolvedValue(undefined),
+}));
+
 const { recordOutcome } = await import('../outcomeRecorder.js');
+const { enqueueWrite } = await import('../../db/writeQueue.js');
 const { recordPositionOutcome, recordRedemptionOutcome } = await import(
   '../positionOutcomeRecorder.js'
 );
@@ -207,6 +212,8 @@ describe('recordRedemptionOutcome', () => {
     const redis = {} as any;
 
     // reconciliation.ts case: no ledger row, Simmer closedPos snake-case fields.
+    // value_usdc is the PROCEEDS (what Simmer paid out), not the stake. The
+    // stake comes from shares × average_price.
     await recordRedemptionOutcome(
       redis,
       null,
@@ -217,6 +224,7 @@ describe('recordRedemptionOutcome', () => {
         value_usdc: 8,
         average_price: 0.5,
         question: 'Resolved question',
+        condition_id: 'cond-xyz',
       },
       {
         marketId: 'mkt-sim-1',
@@ -230,16 +238,81 @@ describe('recordRedemptionOutcome', () => {
       },
     );
 
-    // With no ledger data, defaults land (consensusProbability=0.5, divergence=0)
-    // and sourcedFrom override flows through.
-    expect(recordOutcome).toHaveBeenLastCalledWith(
-      redis,
+    // Snake-case raw mapping must land the derived attribution on the
+    // Postgres write path — without it, DB rows would carry stake=0 /
+    // entry=0 / no conditionId and the execution-events join would be
+    // meaningless. Assert via the enqueueWrite mock (DB-writing side) since
+    // recordOutcome (Redis side) doesn't carry stakeUsd/entryPrice/conditionId.
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'outcomes',
       expect.objectContaining({
+        stakeUsd: 5, // derived: shares (10) × average_price (0.5)
+        entryPrice: 0.5, // from average_price
+        conditionId: 'cond-xyz', // from condition_id
+        executionVenue: 'simmer',
         result: 'won',
         exitReason: 'recovered_auto_redeemed',
-        executionVenue: 'simmer',
       }),
-      { sourcedFrom: 'reconciled:simmer' },
     );
+  });
+
+  it('does not fabricate openedAt when neither ledger nor raw provides it', async () => {
+    const redis = {} as any;
+
+    await recordRedemptionOutcome(
+      redis,
+      null,
+      { market_id: 'mkt-noopen' },
+      {
+        marketId: 'mkt-noopen',
+        direction: 'YES',
+        question: 'No open time known',
+        result: 'lost',
+        returnPct: -100,
+        exitReason: 'resolved_unknown_open',
+      },
+    );
+
+    // The fabricated-openedAt default would have landed a synthetic ISO
+    // timestamp, making holdingHours ≈ 0 but making "unknown hold time"
+    // indistinguishable from a fast exit. Now: openedAt absent from the DB
+    // write entirely so analytics can filter "unknown" rows out.
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'outcomes',
+      expect.objectContaining({
+        openedAt: undefined,
+        holdingHours: 0,
+      }),
+    );
+  });
+
+  it('preserves full question text (does not truncate to 200 chars)', async () => {
+    const redis = {} as any;
+    const longQuestion = 'Q'.repeat(400); // > 200 chars
+
+    await recordRedemptionOutcome(
+      redis,
+      null,
+      null,
+      {
+        marketId: 'mkt-long',
+        direction: 'YES',
+        question: longQuestion,
+        result: 'won',
+        returnPct: 50,
+        exitReason: 'resolved',
+      },
+    );
+
+    // recordPositionOutcome truncates to 200 chars for Redis but passes full
+    // text to the DB enqueueWrite. If the helper pre-truncates, the DB loses
+    // the full resolved question/title — analytics regression.
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'outcomes',
+      expect.objectContaining({ question: longQuestion }),
+    );
+    // Redis side still gets sliced inside recordPositionOutcome.
+    const redisCall = (recordOutcome as any).mock.calls.at(-1)?.[1];
+    expect(redisCall.question.length).toBe(200);
   });
 });

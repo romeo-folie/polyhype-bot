@@ -14,34 +14,44 @@ import { logger } from './logger.js';
  */
 export async function recordPositionOutcome(
   redis: Redis,
-  position: Pick<
-    Position,
-    | 'executionId'
-    | 'sourcedFrom'
-    | 'question'
-    | 'direction'
-    | 'consensusProbability'
-    | 'edgeMagnitude'
-    | 'openedAt'
-    | 'executionVenue'
-    | 'modeConfigured'
-    | 'entryExecutionPath'
-    | 'entryOrderType'
-    | 'fallbackReason'
-    | 'decisionSpreadBps'
-    | 'makerPriceImprovementBps'
-    | 'makerPriceImprovementUsd'
-    | 'marketId'
-    | 'conditionId'
-    | 'entryPrice'
-    | 'stakeUsd'
-    | 'sharesHeld'
-    | 'entryAtr'
-    | 'entryAtrPct'
-    | 'priceZone'
-    | 'synthHedged'
-    | 'pendingSettlement'
-  >,
+  position: Omit<
+    Pick<
+      Position,
+      | 'executionId'
+      | 'sourcedFrom'
+      | 'question'
+      | 'direction'
+      | 'consensusProbability'
+      | 'edgeMagnitude'
+      | 'openedAt'
+      | 'executionVenue'
+      | 'modeConfigured'
+      | 'entryExecutionPath'
+      | 'entryOrderType'
+      | 'fallbackReason'
+      | 'decisionSpreadBps'
+      | 'makerPriceImprovementBps'
+      | 'makerPriceImprovementUsd'
+      | 'marketId'
+      | 'conditionId'
+      | 'entryPrice'
+      | 'stakeUsd'
+      | 'sharesHeld'
+      | 'entryAtr'
+      | 'entryAtrPct'
+      | 'priceZone'
+      | 'synthHedged'
+      | 'pendingSettlement'
+    >,
+    'openedAt'
+  > & {
+    // `openedAt` is optional so the redeemer helper can pass undefined when
+    // neither the ledger nor the raw API response carries a real timestamp.
+    // Fabricating `new Date().toISOString()` would make holdingHours ≈ 0 and
+    // silently skew analytics by making "unknown hold time" indistinguishable
+    // from "fast exit". Downstream holdingHours calc already handles undefined.
+    openedAt?: string;
+  },
   opts: {
     result: 'won' | 'lost' | 'pushed';
     returnPct: number;
@@ -177,30 +187,64 @@ export async function recordRedemptionOutcome(
   const isString = (v: unknown): v is string => typeof v === 'string';
   const isNumber = (v: unknown): v is number => typeof v === 'number' && isFinite(v);
 
+  // Read both camelCase (Position-shaped) and snake_case (Simmer/CLOB API
+  // response) keys. The reconciliation path passes raw `closedPos` with
+  // `average_price`, `value_usdc`, `shares`, `market_id`, etc. — without
+  // snake_case support, every numeric field here would fall to 0 and DB rows
+  // would carry no stake/entry/condition attribution.
+  const rawConsensusProbability =
+    rawGet('consensusProbability', isNumber) ?? rawGet('consensus_probability', isNumber);
+  const rawEdgeMagnitude =
+    rawGet('edgeMagnitude', isNumber) ?? rawGet('edge_magnitude', isNumber);
+  const rawOpenedAt = rawGet('openedAt', isString) ?? rawGet('opened_at', isString);
+  const rawExecutionVenue = (rawGet('executionVenue', isString) ??
+    rawGet('execution_venue', isString) ??
+    rawGet('venue', isString)) as Position['executionVenue'] | undefined;
+  const rawEntryPrice =
+    rawGet('entryPrice', isNumber) ?? rawGet('average_price', isNumber);
+  // Simmer's `value_usdc` is the PROCEEDS of a closed position, not the
+  // stake — don't conflate them. Stake is shares × average_price.
+  const rawShares = rawGet('shares', isNumber) ?? rawGet('sharesHeld', isNumber);
+  const rawDerivedStakeUsd =
+    rawShares !== undefined && rawEntryPrice !== undefined
+      ? rawShares * rawEntryPrice
+      : undefined;
+  const rawStakeUsd = rawGet('stakeUsd', isNumber) ?? rawDerivedStakeUsd;
+  const rawConditionId =
+    rawGet('conditionId', isString) ?? rawGet('condition_id', isString);
+
   const sourcedFrom =
     overrides.sourcedFromOverride ??
     ledgerPos?.sourcedFrom ??
     rawGet('sourcedFrom', isString) ??
+    rawGet('sourced_from', isString) ??
     'reconciled:redemption';
+
+  const openedAt = ledgerPos?.openedAt ?? rawOpenedAt;
+  const conditionId = ledgerPos?.conditionId ?? rawConditionId;
 
   const merged: Parameters<typeof recordPositionOutcome>[1] = {
     marketId: overrides.marketId,
     direction: overrides.direction,
-    question: overrides.question.slice(0, 200),
+    // Full question preserved for Postgres analytics; recordPositionOutcome
+    // truncates to 200 chars internally for the Redis-side outcome hash.
+    question: overrides.question,
     sourcedFrom,
     executionId: ledgerPos?.executionId,
     consensusProbability:
-      ledgerPos?.consensusProbability ?? rawGet('consensusProbability', isNumber) ?? 0.5,
-    edgeMagnitude: ledgerPos?.edgeMagnitude ?? rawGet('edgeMagnitude', isNumber) ?? 0,
-    openedAt: ledgerPos?.openedAt ?? rawGet('openedAt', isString) ?? new Date().toISOString(),
+      ledgerPos?.consensusProbability ?? rawConsensusProbability ?? 0.5,
+    edgeMagnitude: ledgerPos?.edgeMagnitude ?? rawEdgeMagnitude ?? 0,
+    // openedAt intentionally undefined when unknown — don't fabricate a
+    // timestamp that would make holdingHours ≈ 0 and look like a fast exit.
+    ...(openedAt !== undefined ? { openedAt } : {}),
     executionVenue:
       ledgerPos?.executionVenue ??
-      (rawGet('executionVenue', isString) as Position['executionVenue'] | undefined) ??
+      rawExecutionVenue ??
       overrides.executionVenue ??
       'clob',
-    stakeUsd: ledgerPos?.stakeUsd ?? rawGet('stakeUsd', isNumber) ?? 0,
-    entryPrice: ledgerPos?.entryPrice ?? rawGet('entryPrice', isNumber) ?? 0,
-    ...(ledgerPos?.conditionId ? { conditionId: ledgerPos.conditionId } : {}),
+    stakeUsd: ledgerPos?.stakeUsd ?? rawStakeUsd ?? 0,
+    entryPrice: ledgerPos?.entryPrice ?? rawEntryPrice ?? 0,
+    ...(conditionId ? { conditionId } : {}),
     ...(ledgerPos?.modeConfigured ? { modeConfigured: ledgerPos.modeConfigured } : {}),
     ...(ledgerPos?.entryExecutionPath
       ? { entryExecutionPath: ledgerPos.entryExecutionPath }
