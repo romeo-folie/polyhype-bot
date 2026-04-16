@@ -12,9 +12,9 @@ vi.mock('../../shared/redis.js', () => ({
   closeRedis: vi.fn().mockResolvedValue(undefined),
 }));
 
-const executeSignalMock = vi.fn().mockResolvedValue({ skipped: false });
+const executeAndRecordSignalMock = vi.fn().mockResolvedValue({ skipped: false });
 vi.mock('../../execution/executor.js', () => ({
-  executeAndRecordSignal: executeSignalMock,
+  executeAndRecordSignal: executeAndRecordSignalMock,
 }));
 
 const scanMock = vi.fn();
@@ -43,19 +43,19 @@ beforeEach(() => {
 });
 
 describe('sportsPollerTick', () => {
-  it('executes emitted signals through executeSignal', async () => {
+  it('executes emitted signals through executeAndRecordSignal', async () => {
     scanMock.mockResolvedValueOnce({
       candidates: [],
       signals: [{ marketId: 'm1', direction: 'YES', stakeUsd: 5 }],
     });
     await sportsPollerTick();
-    expect(executeSignalMock).toHaveBeenCalledTimes(1);
+    expect(executeAndRecordSignalMock).toHaveBeenCalledTimes(1);
   });
 
   it('no-ops when scanner returns no signals', async () => {
     scanMock.mockResolvedValueOnce({ candidates: [], signals: [] });
     await sportsPollerTick();
-    expect(executeSignalMock).not.toHaveBeenCalled();
+    expect(executeAndRecordSignalMock).not.toHaveBeenCalled();
   });
 
   it('skips execution when SPORTS_ARB_ENABLED=false (log-only)', async () => {
@@ -63,17 +63,17 @@ describe('sportsPollerTick', () => {
     scanMock.mockResolvedValueOnce({ candidates: [], signals: [] });
     await sportsPollerTick();
     expect(scanMock).toHaveBeenCalledTimes(1);
-    expect(executeSignalMock).not.toHaveBeenCalled();
+    expect(executeAndRecordSignalMock).not.toHaveBeenCalled();
   });
 
-  it('swallows executeSignal failures without throwing', async () => {
+  it('swallows executeAndRecordSignal failures without throwing', async () => {
     scanMock.mockResolvedValueOnce({
       candidates: [],
       signals: [{ marketId: 'm1' }, { marketId: 'm2' }],
     });
-    executeSignalMock.mockRejectedValueOnce(new Error('boom'));
-    executeSignalMock.mockResolvedValueOnce({ skipped: false });
+    executeAndRecordSignalMock.mockRejectedValueOnce(new Error('boom'));
+    executeAndRecordSignalMock.mockResolvedValueOnce({ skipped: false });
     await expect(sportsPollerTick()).resolves.toBeUndefined();
-    expect(executeSignalMock).toHaveBeenCalledTimes(2);
+    expect(executeAndRecordSignalMock).toHaveBeenCalledTimes(2);
   });
 });

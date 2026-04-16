@@ -61,6 +61,11 @@ export function inferSource(sourcedFrom: string): PositionOutcome['source'] {
   if (s.startsWith('crypto-arb:')) return 'crypto-arb';
   if (s.startsWith('spot:') || s.startsWith('spot ')) return 'spot';
   if (s.startsWith('arb:') || s.startsWith('market arb')) return 'arb';
+  if (s.startsWith('sports:')) return 'sports';
+  if (s.startsWith('oracle-lag:')) return 'oracle-lag';
+  if (s.startsWith('near-zero-arb')) return 'near-zero-arb';
+  if (s.startsWith('longshot-bias')) return 'longshot-bias';
+  if (s.startsWith('correlation-arb')) return 'correlation-arb';
   return 'osint'; // default: OSINT news pipeline
 }
 

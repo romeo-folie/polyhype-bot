@@ -30,3 +30,7 @@ pgdata/
 # Compose secrets (e.g. ./secrets/pg_password)
 secrets/
 .claude/worktrees/
+
+# Dead-letter forensic archives (local-only — contain tx hashes, execution IDs,
+# OSINT headlines; never commit).
+scripts/dead-letter-archive/

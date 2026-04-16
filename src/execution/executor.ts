@@ -2278,7 +2278,39 @@ export async function executeAndRecordSignal(
 ): Promise<ExecutionResult> {
   const result = await executeSignal(signal, redis, knownSessionExposureUsd);
   if (result.tradeResult?.success) {
-    await finalizeSuccessfulExecution(redis, result);
+    // Ledger-write failures must NOT propagate out. The trade is already live
+    // on the venue and the idempotency key is set, so throwing here would
+    // turn a successful fill into an apparent caller error — and the
+    // idempotency guard blocks retrying it. Swallow, log at error level,
+    // and emit a telemetry event loud enough to alert on; the monitor's
+    // position reconciler can pick up the orphan from venue state.
+    try {
+      await finalizeSuccessfulExecution(redis, result);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logger.error(
+        '[executor] CRITICAL — finalize failed after successful fill; position live but unrecorded',
+        {
+          marketId: result.signal.marketId,
+          executionId: result.signal.executionId,
+          direction: result.signal.direction,
+          stakeUsd: result.signal.stakeUsd,
+          executionVenue: result.executionVenue,
+          txHash: result.tradeResult?.tx_hash,
+          error: errorMessage,
+        },
+      );
+      void recordExecutionMetric(redis, 'errors', 'finalize_failed_orphan').catch(() => {});
+      void recordExecutionEvent(redis, 'execution_attempt', {
+        executionId: result.signal.executionId,
+        marketId: result.signal.marketId,
+        direction: result.signal.direction,
+        finalExecutionPath: 'finalize_failed_orphan',
+        errorClass: 'finalize_failed',
+        errorMessage,
+        timestamp: new Date().toISOString(),
+      }).catch(() => {});
+    }
   }
   return result;
 }
