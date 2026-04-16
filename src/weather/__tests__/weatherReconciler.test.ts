@@ -15,11 +15,29 @@ vi.mock('../../db/writeQueue.js', () => ({
   enqueueWrite: enqueueWriteMock,
 }));
 
-const { reconcileTargets } = await import('../weatherReconciler.js');
+// Spy on the SQL tagged template so we can assert query shape without a live DB.
+interface SqlCall { strings: TemplateStringsArray; values: unknown[]; result: unknown }
+const sqlCalls: SqlCall[] = [];
+let sqlNextResult: unknown = [];
+const sqlMock = vi.fn(
+  (strings: TemplateStringsArray, ...values: unknown[]) => {
+    sqlCalls.push({ strings, values, result: sqlNextResult });
+    return Promise.resolve(sqlNextResult);
+  },
+);
+vi.mock('../../db/client.js', () => ({
+  getSql: () => sqlMock,
+  closeSql: vi.fn(),
+}));
+
+const { reconcileTargets, fetchTargetsToReconcile } = await import('../weatherReconciler.js');
 const { weatherGroundTruthRowSchema } = await import('../../db/schemas/weather_ground_truth.js');
 
 beforeEach(() => {
   enqueueWriteMock.mockClear();
+  sqlMock.mockClear();
+  sqlCalls.length = 0;
+  sqlNextResult = [];
 });
 
 describe('reconcileTargets', () => {
@@ -109,6 +127,36 @@ describe('reconcileTargets', () => {
     );
     expect(summary).toEqual({ resolved: 0, unknownCity: 0, noData: 1 });
     expect(enqueueWriteMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('fetchTargetsToReconcile', () => {
+  it('passes the canonical city list and date-range bounds to SQL', async () => {
+    sqlNextResult = [
+      { city: 'new york', target_date: '2026-04-15' },
+      { city: 'london',   target_date: '2026-04-15' },
+    ];
+    const targets = await fetchTargetsToReconcile(1, 30, 50);
+    expect(targets).toEqual([
+      { city: 'new york', targetDate: '2026-04-15' },
+      { city: 'london',   targetDate: '2026-04-15' },
+    ]);
+    expect(sqlCalls).toHaveLength(1);
+    const call = sqlCalls[0]!;
+    // Values bound to the template: lookbackDays, lagDays, cities array, limit.
+    expect(call.values[0]).toBe(30); // lookbackDays
+    expect(call.values[1]).toBe(1);  // lagDays
+    expect(Array.isArray(call.values[2])).toBe(true);
+    expect((call.values[2] as string[]).length).toBeGreaterThan(20); // 30 cities
+    expect((call.values[2] as string[])).toContain('new york');
+    expect((call.values[2] as string[])).toContain('london');
+    expect(call.values[3]).toBe(50); // limit
+  });
+
+  it('returns empty when no rows match', async () => {
+    sqlNextResult = [];
+    const targets = await fetchTargetsToReconcile(1, 30, 50);
+    expect(targets).toEqual([]);
   });
 });
 

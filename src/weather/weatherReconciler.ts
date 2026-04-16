@@ -1,15 +1,19 @@
 /**
  * Weather ground-truth reconciler.
  *
- * Scans `shadow_observations` (kind=`weather_event`) for events whose
- * target_date has passed, looks up the observed daily high via the Open-Meteo
- * archive API, and writes a row to `weather_ground_truth`. This gives us a
- * persistent oracle to validate whatever the weather scanner predicted — the
- * scanner currently produces 18-27% edges that we cannot tell apart from bugs
- * until we can see whether the winning bracket actually won in reality.
+ * For every city in `CITY_COORDINATES` and every past target_date in the
+ * lookback window, look up the observed daily high via the Open-Meteo archive
+ * API and write a row to `weather_ground_truth`. This gives us a persistent
+ * oracle to validate whatever the weather scanner predicted — the scanner
+ * currently produces 18-27% edges that we cannot tell apart from bugs until we
+ * can see whether the winning bracket actually won in reality.
  *
- * (One ground-truth row per (city, target_date) covers every `weather_bracket`
- * row under the same event, so we only scan `weather_event`.)
+ * Discovery is intentionally NOT driven from `shadow_observations`: that path
+ * left us empty when the writer wasn't wired yet (2026-04-13/14) and would
+ * silently miss any future writer downtime. Iterating cities × dates makes the
+ * reconciler self-healing regardless of upstream emit gaps. Already-reconciled
+ * (city, target_date) pairs are filtered via LEFT JOIN against
+ * `weather_ground_truth` so each pair is fetched at most once ever.
  *
  * Read-only with respect to trading: no signals, no positions. Safe to run
  * unconditionally; no *_ENABLED flag.
@@ -20,16 +24,16 @@ import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { getSql } from '../db/client.js';
-import { canonicalCityKey, lookupCity } from './noaaClient.js';
+import { CITY_COORDINATES, canonicalCityKey, lookupCity } from './noaaClient.js';
 import {
   fetchHistoricalHigh,
   type FetchFn,
   type HistoricalHigh,
 } from './openMeteoClient.js';
 
-/** One unresolved (city, target_date) tuple from shadow_observations. */
+/** One unresolved (city, target_date) tuple to reconcile. */
 export interface UnresolvedTarget {
-  /** Raw city name from the shadow payload; not yet canonicalized. */
+  /** City name; may be aliased (e.g. "nyc") — canonicalized at reconcile time. */
   city: string;
   targetDate: string; // YYYY-MM-DD
 }
@@ -42,38 +46,44 @@ type ArchiveFetcher = (
 ) => Promise<HistoricalHigh | null>;
 
 /**
- * Find (city, target_date) tuples with weather_event shadow rows whose
- * target_date falls in [now - lookbackDays, now - lagDays], AND for which no
- * row yet exists in weather_ground_truth.
+ * Generate (city, target_date) tuples for every canonical city in
+ * `CITY_COORDINATES` crossed with every past date in
+ * [now - lookbackDays, now - lagDays] that doesn't yet have a ground-truth row.
  *
  * Returns at most `limit` rows, ordered by target_date descending (prefer
- * newest unresolved first — the scanner is actively producing data there).
+ * newest unresolved first — most useful for current scanner validation).
  *
- * `unit` is intentionally NOT read from the payload — it is derived from the
- * canonical city's coords at reconcile time (see reconcileTargets), since
- * unit is a property of the location, not the shadow row.
+ * Decoupled from `shadow_observations` deliberately: the scanner only emits
+ * shadow rows for events 1-2 days in the future, and any writer downtime would
+ * leave permanent gaps. Iterating cities × dates costs at most ~30 archive
+ * fetches/day after the initial backfill, well under Open-Meteo's quota.
  */
-export async function fetchUnresolvedTargets(
+export async function fetchTargetsToReconcile(
   lagDays: number,
   lookbackDays: number,
   limit: number,
 ): Promise<UnresolvedTarget[]> {
   const sql = getSql();
+  const cities = Object.keys(CITY_COORDINATES);
   const rows = await sql<{ city: string; target_date: string }[]>`
-    SELECT DISTINCT
-      so.payload->>'city'        AS city,
-      so.payload->>'targetDate'  AS target_date
-    FROM shadow_observations so
+    WITH date_range AS (
+      SELECT generate_series(
+        (CURRENT_DATE - ${lookbackDays}::int)::date,
+        (CURRENT_DATE - ${lagDays}::int)::date,
+        '1 day'::interval
+      )::date AS target_date
+    ),
+    city_list AS (
+      SELECT unnest(${cities}::text[]) AS city
+    )
+    SELECT cl.city AS city, dr.target_date::text AS target_date
+    FROM city_list cl
+    CROSS JOIN date_range dr
     LEFT JOIN weather_ground_truth gt
-      ON gt.city = so.payload->>'city'
-     AND gt.target_date = (so.payload->>'targetDate')::date
-    WHERE so.kind = 'weather_event'
-      AND so.payload ? 'city'
-      AND so.payload ? 'targetDate'
-      AND (so.payload->>'targetDate')::date <= (CURRENT_DATE - ${lagDays}::int)
-      AND (so.payload->>'targetDate')::date >= (CURRENT_DATE - ${lookbackDays}::int)
-      AND gt.id IS NULL
-    ORDER BY target_date DESC
+      ON gt.city = cl.city
+     AND gt.target_date = dr.target_date
+    WHERE gt.id IS NULL
+    ORDER BY dr.target_date DESC, cl.city ASC
     LIMIT ${limit}
   `;
 
@@ -117,6 +127,10 @@ export async function reconcileTargets(
 
     const result = await fetcher(coords.lat, coords.lon, t.targetDate, coords.unit);
     if (!result) {
+      logger.debug('[weather-reconciler] archive returned no data (will retry next run)', {
+        city: canonical,
+        targetDate: t.targetDate,
+      });
       noData++;
       continue;
     }
@@ -151,7 +165,7 @@ export async function reconcileTargets(
  */
 export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
   const cfg = loadConfig();
-  const targets = await fetchUnresolvedTargets(
+  const targets = await fetchTargetsToReconcile(
     cfg.WEATHER_RECONCILER_LAG_DAYS,
     cfg.WEATHER_RECONCILER_LOOKBACK_DAYS,
     cfg.WEATHER_RECONCILER_MAX_PER_RUN,
