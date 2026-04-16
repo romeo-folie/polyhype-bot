@@ -609,6 +609,7 @@ async function finalizeSimmerExit(
   await recordPositionOutcome(redis, position, {
     result: returnPct >= 0 ? 'won' : 'lost',
     returnPct,
+    exitReason: reason,
   });
   emitExecutionOutcome(redis, position, returnPct, currentPrice, reason);
   await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
@@ -772,6 +773,7 @@ async function finalizeClobExit(
     result: returnPct >= 0 ? 'won' : 'lost',
     returnPct,
     executionVenueOverride: 'clob',
+    exitReason: reason,
   });
   await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
 

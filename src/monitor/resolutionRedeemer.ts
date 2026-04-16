@@ -38,7 +38,10 @@ import { markRecentlyClosed, isRecentlyClosed } from '../shared/closedGuard.js';
 /** @deprecated Use isRecentlyClosed from shared/closedGuard.js. Kept for external callers. */
 export const isRecentlyRedeemed = isRecentlyClosed;
 import { notifyRedemptionExecuted, notifyManualRedemptionRequired, notifyMarketResolved } from '../execution/telegram.js';
-import { recordOutcome, inferCategory, inferSource } from '../shared/outcomeRecorder.js';
+import {
+  recordPositionOutcome,
+  recordRedemptionOutcome,
+} from '../shared/positionOutcomeRecorder.js';
 import { Wallet } from 'ethers';
 import {
   loadConfig,
@@ -367,37 +370,22 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
           const stakeUsd =
             ledgerPos?.stakeUsd ??
             (typeof posAny.stakeUsd === 'number' ? posAny.stakeUsd : null);
-          const openedAt =
-            ledgerPos?.openedAt ??
-            (typeof posAny.openedAt === 'string' ? posAny.openedAt : null);
           if (!stakeUsd) {
             logger.warn('[redeemer] Simmer position missing stakeUsd for outcome calibration', {
               market_id: pos.market_id,
             });
           }
           const question = pos.question ?? pos.market_id;
-          await recordOutcome(redis, {
-            source: inferSource(ledgerPos?.sourcedFrom ?? ''),
-            category: inferCategory(question),
-            question: question.slice(0, 200),
-            direction: direction,
-            consensusProbability:
-              ledgerPos?.consensusProbability ??
-              (typeof posAny.consensusProbability === 'number'
-                ? posAny.consensusProbability
-                : 0.5),
-            divergence:
-              ledgerPos?.edgeMagnitude ??
-              (typeof posAny.edgeMagnitude === 'number' ? posAny.edgeMagnitude : 0),
+          await recordRedemptionOutcome(redis, ledgerPos, posAny, {
+            marketId: pos.market_id,
+            direction,
+            question,
             result: simmerWon ? 'won' : 'lost',
             returnPct:
               proceedsUsdc > 0 && stakeUsd ? ((proceedsUsdc - stakeUsd) / stakeUsd) * 100 : 0,
-            holdingHours: openedAt ? (Date.now() - new Date(openedAt).getTime()) / 3600000 : 0,
-            executionVenue:
-              ledgerPos?.executionVenue ??
-              (typeof posAny.executionVenue === 'string' ? posAny.executionVenue : 'simmer'),
-            ...(ledgerPos?.priceZone !== undefined ? { priceZone: ledgerPos.priceZone } : {}),
-          }, { sourcedFrom: ledgerPos?.sourcedFrom });
+            executionVenue: 'simmer',
+            exitReason: 'resolution_redeemed',
+          });
 
           // Notify (skip detailed redemption for mocked success — but still send resolution alert)
           if (!isMockedSuccess) {
@@ -488,23 +476,18 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
                   );
                   await markRecentlyClosed(redis, pos.market_id);
                   const question = pos.question ?? pos.market_id;
-                  await recordOutcome(redis, {
-                    source: inferSource(ledgerPos?.sourcedFrom ?? ''),
-                    category: inferCategory(question),
-                    question: question.slice(0, 200),
+                  await recordRedemptionOutcome(redis, ledgerPos, null, {
+                    marketId: pos.market_id,
                     direction,
-                    consensusProbability: ledgerPos?.consensusProbability ?? 0.5,
-                    divergence: ledgerPos?.edgeMagnitude ?? 0,
+                    question,
                     result: 'won',
                     returnPct:
                       proceedsUsdc > 0 && ledgerPos?.stakeUsd
                         ? ((proceedsUsdc - ledgerPos.stakeUsd) / ledgerPos.stakeUsd) * 100
                         : 0,
-                    holdingHours: ledgerPos?.openedAt
-                      ? (Date.now() - new Date(ledgerPos.openedAt).getTime()) / 3600000
-                      : 0,
-                    executionVenue: ledgerPos?.executionVenue ?? 'simmer',
-                  }, { sourcedFrom: ledgerPos?.sourcedFrom });
+                    executionVenue: 'simmer',
+                    exitReason: 'clob_fallback_redeemed',
+                  });
                   await notifyRedemptionExecuted({
                     marketId: pos.market_id,
                     question: pos.question ?? pos.market_id,
@@ -663,20 +646,16 @@ async function redeemClobPositions(
       });
       await closePosition(redis, pos.marketId, pos.direction);
       const q = pos.question || pos.marketId;
-      await recordOutcome(redis, {
-        source: inferSource(pos.sourcedFrom ?? ''),
-        category: inferCategory(q),
-        question: q.slice(0, 200),
-        direction: pos.direction,
-        consensusProbability: pos.consensusProbability ?? 0.5,
-        divergence: pos.edgeMagnitude ?? 0,
-        result: 'lost',
-        returnPct: -100,
-        holdingHours: pos.openedAt
-          ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
-          : 0,
-        executionVenue: 'clob',
-      }, { sourcedFrom: pos.sourcedFrom });
+      await recordPositionOutcome(
+        redis,
+        { ...pos, question: q },
+        {
+          result: 'lost',
+          returnPct: -100,
+          executionVenueOverride: 'clob',
+          exitReason: 'sibling_resolved',
+        },
+      );
       void notifyMarketResolved({
         question: q,
         direction: pos.direction,
@@ -738,20 +717,16 @@ async function redeemClobPositions(
           await closePosition(redis, pos.marketId, pos.direction);
           await markRecentlyClosed(redis, pos.marketId);
           const q = pos.question || pos.marketId;
-          await recordOutcome(redis, {
-            source: inferSource(pos.sourcedFrom ?? ''),
-            category: inferCategory(q),
-            question: q.slice(0, 200),
-            direction: pmDirection,
-            consensusProbability: pos.consensusProbability ?? 0.5,
-            divergence: pos.edgeMagnitude ?? 0,
-            result: 'lost',
-            returnPct: -100,
-            holdingHours: pos.openedAt
-              ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
-              : 0,
-            executionVenue: 'clob',
-          }, { sourcedFrom: pos.sourcedFrom });
+          await recordPositionOutcome(
+            redis,
+            { ...pos, question: q, direction: pmDirection },
+            {
+              result: 'lost',
+              returnPct: -100,
+              executionVenueOverride: 'clob',
+              exitReason: isDust ? 'expired_dust' : 'expired_unresolvable',
+            },
+          );
           void notifyMarketResolved({
             question: q,
             direction: pos.direction,
@@ -792,20 +767,17 @@ async function redeemClobPositions(
         });
         await closePosition(redis, pos.marketId, pos.direction);
         await markRecentlyClosed(redis, pos.marketId);
-        await recordOutcome(redis, {
-          source: inferSource(pos.sourcedFrom ?? ''),
-          category: inferCategory(resolvedQuestion),
-          question: resolvedQuestion.slice(0, 200),
-          direction: pmDirection,
-          consensusProbability: pos.consensusProbability ?? 0.5,
-          divergence: pos.edgeMagnitude ?? 0,
-          result: won ? 'won' : 'lost',
-          returnPct: -100, // dust fill ≈ total loss regardless of outcome
-          holdingHours: pos.openedAt
-            ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
-            : 0,
-          executionVenue: 'clob',
-        }, { sourcedFrom: pos.sourcedFrom });
+        await recordPositionOutcome(
+          redis,
+          { ...pos, question: resolvedQuestion, direction: pmDirection },
+          {
+            result: won ? 'won' : 'lost',
+            // dust fill ≈ total loss regardless of outcome
+            returnPct: -100,
+            executionVenueOverride: 'clob',
+            exitReason: 'resolved_dust_closed',
+          },
+        );
         void notifyMarketResolved({
           question: resolvedQuestion,
           direction: pos.direction,
@@ -825,20 +797,16 @@ async function redeemClobPositions(
           outcome: resolved.outcome,
         });
         await closePosition(redis, pos.marketId, pos.direction);
-        await recordOutcome(redis, {
-          source: inferSource(pos.sourcedFrom ?? ''),
-          category: inferCategory(resolvedQuestion),
-          question: resolvedQuestion.slice(0, 200),
-          direction: pmDirection,
-          consensusProbability: pos.consensusProbability ?? 0.5,
-          divergence: pos.edgeMagnitude ?? 0,
-          result: 'lost',
-          returnPct: -100,
-          holdingHours: pos.openedAt
-            ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
-            : 0,
-          executionVenue: 'clob',
-        }, { sourcedFrom: pos.sourcedFrom });
+        await recordPositionOutcome(
+          redis,
+          { ...pos, question: resolvedQuestion, direction: pmDirection },
+          {
+            result: 'lost',
+            returnPct: -100,
+            executionVenueOverride: 'clob',
+            exitReason: 'resolved_as_loss',
+          },
+        );
         void notifyMarketResolved({
           question: resolvedQuestion,
           direction: pos.direction,
@@ -938,18 +906,16 @@ async function redeemClobPositions(
       });
 
       // Record outcome (Phase 8)
-      await recordOutcome(redis, {
-        source: inferSource(pos.sourcedFrom ?? ''),
-        category: inferCategory(resolvedQuestion),
-        question: resolvedQuestion.slice(0, 200),
-        direction: pos.direction,
-        consensusProbability: pos.consensusProbability ?? 0.5,
-        divergence: pos.edgeMagnitude ?? 0,
-        result: won ? 'won' : 'lost',
-        returnPct: pos.stakeUsd ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
-        holdingHours: pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000 : 0,
-        executionVenue: pos.executionVenue ?? 'clob',
-      }, { sourcedFrom: pos.sourcedFrom });
+      await recordPositionOutcome(
+        redis,
+        { ...pos, question: resolvedQuestion },
+        {
+          result: won ? 'won' : 'lost',
+          returnPct: pos.stakeUsd ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
+          executionVenueOverride: pos.executionVenue ?? 'clob',
+          exitReason: 'clob_on_chain_redeemed',
+        },
+      );
 
       // Notify
       await notifyRedemptionExecuted({
@@ -1247,20 +1213,16 @@ async function redeemSimmerLedgerFallback(
           outcome: resolved.outcome,
         });
         await closePosition(redis, pos.marketId, pos.direction);
-        await recordOutcome(redis, {
-          source: inferSource(pos.sourcedFrom ?? ''),
-          category: inferCategory(resolvedQuestion),
-          question: resolvedQuestion.slice(0, 200),
-          direction: pmDirection,
-          consensusProbability: pos.consensusProbability ?? 0.5,
-          divergence: pos.edgeMagnitude ?? 0,
-          result: 'lost',
-          returnPct: -100,
-          holdingHours: pos.openedAt
-            ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
-            : 0,
-          executionVenue: pos.executionVenue ?? 'simmer',
-        }, { sourcedFrom: pos.sourcedFrom });
+        await recordPositionOutcome(
+          redis,
+          { ...pos, question: resolvedQuestion, direction: pmDirection },
+          {
+            result: 'lost',
+            returnPct: -100,
+            executionVenueOverride: pos.executionVenue ?? 'simmer',
+            exitReason: 'resolved_as_loss_simmer',
+          },
+        );
         void notifyMarketResolved({
           question: resolvedQuestion,
           direction: pos.direction,
@@ -1322,20 +1284,16 @@ async function redeemSimmerLedgerFallback(
             marketId: pos.marketId,
             postBalance,
           });
-          await recordOutcome(redis, {
-            source: inferSource(pos.sourcedFrom ?? ''),
-            category: inferCategory(resolvedQuestion),
-            question: resolvedQuestion.slice(0, 200),
-            direction: pmDirection,
-            consensusProbability: pos.consensusProbability ?? 0.5,
-            divergence: pos.edgeMagnitude ?? 0,
-            result: 'won',
-            returnPct: pos.stakeUsd > 0 ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
-            holdingHours: pos.openedAt
-              ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
-              : 0,
-            executionVenue: pos.executionVenue ?? 'simmer',
-          }, { sourcedFrom: pos.sourcedFrom });
+          await recordPositionOutcome(
+            redis,
+            { ...pos, question: resolvedQuestion, direction: pmDirection },
+            {
+              result: 'won',
+              returnPct: pos.stakeUsd > 0 ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
+              executionVenueOverride: pos.executionVenue ?? 'simmer',
+              exitReason: 'simmer_fallback_redeemed',
+            },
+          );
           const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
             marketId: pos.marketId,
             question: resolvedQuestion,
@@ -1459,20 +1417,16 @@ async function redeemSimmerLedgerFallback(
           postBalance,
         });
 
-        await recordOutcome(redis, {
-          source: inferSource(pos.sourcedFrom ?? ''),
-          category: inferCategory(resolvedQuestion),
-          question: resolvedQuestion.slice(0, 200),
-          direction: pmDirection,
-          consensusProbability: pos.consensusProbability ?? 0.5,
-          divergence: pos.edgeMagnitude ?? 0,
-          result: 'won',
-          returnPct: pos.stakeUsd > 0 ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
-          holdingHours: pos.openedAt
-            ? (Date.now() - new Date(pos.openedAt).getTime()) / 3600000
-            : 0,
-          executionVenue: pos.executionVenue ?? 'simmer',
-        }, { sourcedFrom: pos.sourcedFrom });
+        await recordPositionOutcome(
+          redis,
+          { ...pos, question: resolvedQuestion, direction: pmDirection },
+          {
+            result: 'won',
+            returnPct: pos.stakeUsd > 0 ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
+            executionVenueOverride: pos.executionVenue ?? 'simmer',
+            exitReason: 'simmer_redeemed',
+          },
+        );
 
         if (!isMockedSuccess) {
           const notifyOpts: Parameters<typeof notifyRedemptionExecuted>[0] = {
@@ -1660,20 +1614,16 @@ async function redeemOrphanClobPositions(
             direction: ledgerEntry.direction,
           });
           await closePosition(redis, ledgerEntry.marketId, ledgerEntry.direction);
-          await recordOutcome(redis, {
-            source: inferSource(ledgerEntry.sourcedFrom ?? ''),
-            category: inferCategory(resolvedQuestion),
-            question: resolvedQuestion.slice(0, 200),
-            direction,
-            consensusProbability: ledgerEntry.consensusProbability ?? 0.5,
-            divergence: ledgerEntry.edgeMagnitude ?? 0,
-            result: 'lost',
-            returnPct: -100,
-            holdingHours: ledgerEntry.openedAt
-              ? (Date.now() - new Date(ledgerEntry.openedAt).getTime()) / 3600000
-              : 0,
-            executionVenue: 'clob',
-          }, { sourcedFrom: ledgerEntry.sourcedFrom });
+          await recordPositionOutcome(
+            redis,
+            { ...ledgerEntry, question: resolvedQuestion, direction },
+            {
+              result: 'lost',
+              returnPct: -100,
+              executionVenueOverride: 'clob',
+              exitReason: 'orphan_sweep_lost',
+            },
+          );
         }
         continue;
       }
