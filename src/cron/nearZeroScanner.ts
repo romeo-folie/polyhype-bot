@@ -426,9 +426,18 @@ async function main() {
   }
 }
 
-void main().catch((err: unknown) => {
-  logger.error('[near-zero] fatal error', {
-    error: err instanceof Error ? err.message : String(err),
+// Only auto-run when executed as the direct entrypoint, not when imported
+// by tests or other modules.
+const isMainModule =
+  import.meta.url === `file://${process.argv[1]}` ||
+  process.argv[1]?.endsWith('/nearZeroScanner.js') === true ||
+  process.argv[1]?.endsWith('/nearZeroScanner.ts') === true;
+
+if (isMainModule) {
+  void main().catch((err: unknown) => {
+    logger.error('[near-zero] fatal error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    process.exit(1);
   });
-  process.exit(1);
-});
+}
