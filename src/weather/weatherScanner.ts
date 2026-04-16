@@ -491,14 +491,27 @@ export function daysUntil(targetDate: string, now?: Date): number {
 
 /**
  * Analyze a single weather event and find mispriced brackets.
+ *
+ * `stddevMultiplier` (default 1.0) widens or tightens the forecast distribution
+ * before bracket probabilities are computed. Calibration knob — see
+ * `WEATHER_STDDEV_MULTIPLIER` in config. Adjusted stddev is what feeds
+ * `estimateBracketProbability`; raw `forecast.stdDev` is preserved on the
+ * returned opportunity (`forecastStdDev`) so shadow analysis can compare.
  */
 export function findMispricedBrackets(
   event: ParsedWeatherEvent,
   forecast: ForecastResult,
   daysOut: number,
   minEdge: number,
+  stddevMultiplier = 1.0,
 ): WeatherBracketOpportunity[] {
   const opportunities: WeatherBracketOpportunity[] = [];
+
+  // Effective stddev after calibration multiplier. Multiplier > 1 broadens the
+  // distribution (less mass on central bracket, more on adjacent), which is
+  // what we'd reach for if shadow analysis shows modelProb is over-confident
+  // in the exact forecast point.
+  const effectiveStdDev = forecast.stdDev * stddevMultiplier;
 
   // Compute model probability for each bracket
   const modelProbs: number[] = [];
@@ -508,7 +521,7 @@ export function findMispricedBrackets(
       bracket.low,
       bracket.high,
       daysOut,
-      forecast.stdDev,
+      effectiveStdDev,
     );
     modelProbs.push(prob);
   }
@@ -655,7 +668,13 @@ export async function scanWeatherMarkets(
     }
 
     // Step 4: Find mispriced brackets
-    const opportunities = findMispricedBrackets(event, forecast, daysOut, cfg.WEATHER_MIN_EDGE);
+    const opportunities = findMispricedBrackets(
+      event,
+      forecast,
+      daysOut,
+      cfg.WEATHER_MIN_EDGE,
+      cfg.WEATHER_STDDEV_MULTIPLIER,
+    );
 
     // Step 6: Shadow-log every evaluated event
     const overround = event.brackets.reduce((s, b) => s + b.yesPrice, 0);
@@ -673,6 +692,8 @@ export async function scanWeatherMarkets(
       brackets: event.brackets.length,
       forecastHigh: forecast.forecastHigh.toFixed(1),
       forecastStdDev: forecast.stdDev.toFixed(2),
+      effectiveStdDev: (forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER).toFixed(2),
+      stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
       forecastSource: forecast.source,
       ensembleMembers: forecast.ensembleMembers,
       overround: overround.toFixed(3),
@@ -699,6 +720,11 @@ export async function scanWeatherMarkets(
         brackets: event.brackets.length,
         forecastHigh: forecast.forecastHigh,
         forecastStdDev: forecast.stdDev,
+        // Effective stddev = forecastStdDev * WEATHER_STDDEV_MULTIPLIER. Both
+        // are logged so calibration analysis can compare modelProb under
+        // different multipliers without re-deriving from raw stddev.
+        effectiveStdDev: forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER,
+        stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
         forecastSource: forecast.source,
         ensembleMembers: forecast.ensembleMembers,
         overround,
@@ -745,6 +771,13 @@ export async function scanWeatherMarkets(
           adjustedMarketProb: opp.adjustedMarketProb,
           outcomePrice: opp.outcomePrice,
           forecastHigh: opp.forecastHigh,
+          // Both raw and effective stddev are stored explicitly so downstream
+          // analyzers can read either without recomputing. Effective is what
+          // entered estimateBracketProbability; raw lets calibration sweeps
+          // try alternative multipliers post-hoc via normalCdf.
+          forecastStdDev: opp.forecastStdDev,
+          effectiveStdDev: opp.forecastStdDev * cfg.WEATHER_STDDEV_MULTIPLIER,
+          stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
           daysOut: opp.daysOut,
           wouldTrade,
         },

@@ -528,6 +528,38 @@ describe('findMispricedBrackets', () => {
     }
   });
 
+  it('stddevMultiplier widens the model distribution as expected', () => {
+    // A two-bracket world: central bracket near forecast point, tail bracket far.
+    // Multiplier > 1 should LOWER central modelProb and RAISE tail modelProb,
+    // because more mass is pushed away from the mean.
+    const event = {
+      eventId: 'e1', slug: 'mult-test', city: 'chicago', coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14', unit: 'fahrenheit' as const,
+      brackets: [
+        { marketId: 'm1', conditionId: 'c1', clobTokenIds: ['t1y', 't1n'], threshold: 1, low: 49, high: 51, label: 'central',
+          yesPrice: 0.01, noPrice: 0.99 },
+        { marketId: 'm2', conditionId: 'c2', clobTokenIds: ['t2y', 't2n'], threshold: 2, low: 60, high: null, label: 'tail',
+          yesPrice: 0.01, noPrice: 0.99 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 50, stdDev: 3, source: 'noaa' as const, ensembleMembers: 0 };
+
+    const baseline = findMispricedBrackets(event, forecast, 1, 0, 1.0);
+    const widened  = findMispricedBrackets(event, forecast, 1, 0, 1.5);
+
+    const centralBase = baseline.find((o) => o.bracketLabel === 'central')!;
+    const centralWide = widened.find((o) => o.bracketLabel === 'central')!;
+    const tailBase    = baseline.find((o) => o.bracketLabel === 'tail')!;
+    const tailWide    = widened.find((o) => o.bracketLabel === 'tail')!;
+
+    expect(centralWide.modelProbability).toBeLessThan(centralBase.modelProbability);
+    expect(tailWide.modelProbability).toBeGreaterThan(tailBase.modelProbability);
+    // Raw stddev is preserved on the opportunity for shadow analysis.
+    expect(centralWide.forecastStdDev).toBe(3);
+    expect(centralBase.forecastStdDev).toBe(3);
+  });
+
   it('returns empty when market prices match model', () => {
     // Build brackets where market prices roughly match model probs
     const forecast = { forecastHigh: 50, stdDev: 4, source: 'noaa' as const, ensembleMembers: 0 };
