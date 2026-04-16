@@ -39,10 +39,10 @@ export interface ActivityTrade {
 
 /**
  * REDEEM events are emitted when a wallet claims payout on a resolved market.
- * Scoped by `conditionId` (not asset): the winning outcome's token is burned
- * for $1/share USDC. `asset` is empty, `outcomeIndex` is 999. The `size` field
- * is the number of winning-outcome tokens redeemed; `usdcSize` is the payout
- * (typically `size × 1.0` for a resolved winner).
+ * Scoped by `conditionId` (not by outcome asset) — the Data API response has
+ * an empty `asset` and a sentinel `outcomeIndex` of 999, so those fields are
+ * omitted from this type. `size` is the quantity of winning-outcome tokens
+ * redeemed; `usdcSize` is the payout (typically `size × 1.0` for a winner).
  */
 export interface ActivityRedeem {
   proxyWallet: string;
