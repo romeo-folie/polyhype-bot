@@ -9,6 +9,7 @@ import { fetchMarketByConditionId, fetchMarketByQuestion, type GammaMarket } fro
 import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { isRecentlyClosed } from '../shared/closedGuard.js';
+import { getPendingOrder, deletePendingOrder } from '../execution/pendingMakerOrders.js';
 
 interface ReconciliationDetail {
   type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded' | 'recovered_outcome';
@@ -619,6 +620,19 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
 
     const direction: 'YES' | 'NO' = pos.asset === market.clobTokenIds[0] ? 'YES' : 'NO';
 
+    // Check whether this fill came from a bot-posted GTC maker order.
+    // If so, enrich the position with the signal's benchmark data and use the
+    // real sourcedFrom rather than the generic 'reconciled:clob' label.
+    const pendingOrder = await getPendingOrder(redis, market.id);
+    if (pendingOrder) {
+      await deletePendingOrder(redis, market.id);
+      logger.info('[reconcile] linked CLOB orphan to pending maker order', {
+        marketId: market.id,
+        orderId: pendingOrder.orderId,
+        sourcedFrom: pendingOrder.sourcedFrom,
+      });
+    }
+
     const newPos: Position = {
       marketId: market.id,
       conditionId: market.conditionId,
@@ -630,13 +644,19 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
       sharesHeld: shares,
       openedAt: new Date().toISOString(),
       executionVenue: 'clob',
-      sourcedFrom: 'reconciled:clob',
-      edgeMagnitude: 0,
+      sourcedFrom: pendingOrder?.sourcedFrom ?? 'reconciled:clob',
+      edgeMagnitude: pendingOrder?.edgeMagnitude ?? 0,
+      ...(pendingOrder?.consensusP != null && { consensusProbability: pendingOrder.consensusP }),
+      ...(pendingOrder != null && {
+        entryExecutionPath: 'maker_fill',
+        entryOrderType: 'maker' as const,
+        counterfactualImmediateTakerPrice: pendingOrder.outcomePrice,
+      }),
       reconciliationStatus: `imported:${new Date().toISOString()}`
     };
 
     await recordPosition(redis, newPos);
-    logger.info('[reconcile] imported CLOB orphan', { marketId: market.id, direction, shares });
+    logger.info('[reconcile] imported CLOB orphan', { marketId: market.id, direction, shares, linkedMakerOrder: pendingOrder != null });
     return true;
   } catch (err) {
     logger.warn('[reconcile] failed to import CLOB orphan', { error: String(err) });

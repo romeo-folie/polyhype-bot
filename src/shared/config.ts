@@ -199,6 +199,10 @@ const envSchema = z.object({
   // resume polling across cron cycles (non-blocking). Fills may take minutes to hours.
   MAKER_EMPTY_BOOK_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(900_000),
   MAKER_EMPTY_BOOK_EDGE_BPS: z.coerce.number().min(0).optional().default(150),
+  // Minimum LLM consensus strength for empty-book entries. Consensus must be
+  // >= this value or <= (1 - this value). Rejects borderline "I don't know"
+  // signals (e.g. 0.53) against a ghost-book price that may be months stale.
+  MAKER_EMPTY_BOOK_MIN_CONSENSUS: z.coerce.number().min(0).max(1).optional().default(0.65),
   // Thresholds for detecting an empty/ghost book. bid < BID_THRESHOLD and
   // ask > ASK_THRESHOLD means no real market maker is resting on the book.
   EMPTY_BOOK_BID_THRESHOLD: z.coerce.number().min(0).max(0.5).optional().default(0.04),

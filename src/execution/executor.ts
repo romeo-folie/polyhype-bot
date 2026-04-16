@@ -552,6 +552,10 @@ async function tryExecuteViaClobMaker(
         expiresAt,
         consensusP: signal.consensusProbability ?? 0.5,
         direction: signal.direction,
+        edgeMagnitude: signal.edgeMagnitude,
+        outcomePrice: signal.outcomePrice,
+        intendedStakeUsd: signal.stakeUsd,
+        sourcedFrom: signal.sourcedFrom,
       },
       Math.ceil(cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS / 1000) + 300,
     );
@@ -1585,6 +1589,16 @@ export async function executeSignal(
       return recordSkip('spread_too_wide', 'skipped', guardrailDiagnostic);
     }
     if (canEmptyBookMaker) {
+      const consensusP = signal.consensusProbability ?? 0.5;
+      const minStrength = cfg.MAKER_EMPTY_BOOK_MIN_CONSENSUS;
+      if (consensusP > (1 - minStrength) && consensusP < minStrength) {
+        logger.info('[executor] skipping empty-book maker — consensus too weak', {
+          marketId: signal.marketId,
+          consensusP,
+          minStrength,
+        });
+        return recordSkip('empty_book_weak_consensus', 'skipped', guardrailDiagnostic);
+      }
       emptyBookMakerRoute = true;
       logger.info('[executor] empty book — routing to fair-value maker', {
         marketId: signal.marketId,
