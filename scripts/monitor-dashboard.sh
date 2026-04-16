@@ -41,8 +41,9 @@ W8="while true; do npx tsx scripts/list-positions.ts; sleep 10; done"
 W9="docker compose logs -f --tail 100 pga-sports    | sed 's/\(\[[^]]*\]\)/\x1b[91m\1\x1b[0m/g'"
 W10="docker compose logs -f --tail 100 pga-clob-flow | sed 's/\(\[[^]]*\]\)/\x1b[93m\1\x1b[0m/g'"
 
-# ORACLE-LAG scanner focus pane (12)
-W11="docker compose logs -f --tail 200 pga-arb | grep --line-buffered -E '\[oracle-lag\]|chainlink_feed_' | sed 's/\(\[[^]]*\]\)/\x1b[94m\1\x1b[0m/g'"
+# DB WRITER (12) — choke point for every shadow_observations + analytics row.
+# Silent failures here are how shadow gaps happen (e.g. weather wiring 2026-04-13→14).
+W11="docker compose logs -f --tail 100 pga-db-writer | sed 's/\(\[[^]]*\]\)/\x1b[94m\1\x1b[0m/g'"
 
 # Partition the window into a dynamic tiled grid
 tmux new-session -d -s "$SESSION" -n w0 -x 220 -y 60 "sh -c \"$W0\""
