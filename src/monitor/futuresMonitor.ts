@@ -26,13 +26,13 @@ import {
   type Position,
 } from '../execution/positionLedger.js';
 import { scoreConfluence } from '../arb/confluenceScorer.js';
-import { recordOutcome, inferCategory } from '../shared/outcomeRecorder.js';
+import { recordPositionOutcome } from '../shared/positionOutcomeRecorder.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 
 const POLL_INTERVAL_MS = 5000; // 5 seconds — safe for rate limits, fast enough for intraday
 const MONITOR_LOCK_KEY = 'futures-monitor:lock';
 // TTL must be comfortably larger than the WORST-CASE single cycle (HL API stalls,
-// LLM calls in recordOutcome, network blips). 120s gives ~24 poll intervals of
+// LLM calls in recordPositionOutcome, network blips). 120s gives ~24 poll intervals of
 // margin before our own TTL would lapse — far beyond any realistic single-cycle
 // hang — so 'expired' should be vanishingly rare. See Bug A in
 // memory/recurring-worker-deaths.md for the history behind this choice.
@@ -174,7 +174,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
 
       // BACKFILL: if HL holds a position the ledger doesn't know about, write
       // a ledger row so the trailing-stop HWM can ratchet, stale-exit timers
-      // work, and recordOutcome can produce analytics on close. Without this,
+      // work, and recordPositionOutcome can produce analytics on close. Without this,
       // a ledger row lost during a worker restart/crash stays lost forever,
       // silently disabling trailing stops on real money. See Bug B in
       // memory/recurring-worker-deaths.md.
@@ -498,26 +498,22 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             });
 
             if (ledgerPos) {
-              const holdingHours = (Date.now() - new Date(ledgerPos.openedAt).getTime()) / 3600000;
-              // Fire-and-forget: recordOutcome + inferCategory can trigger LLM
-              // calls with unbounded tail latency. Awaiting them inside the hot
-              // loop used to blow past the lock TTL and trigger the false-steal
-              // shutdown. Errors are logged but never propagate to the loop.
-              void recordOutcome(redis, {
-                source: 'futures',
-                category: inferCategory(ledgerPos.question),
-                question: ledgerPos.question,
-                direction,
-                consensusProbability: ledgerPos.consensusProbability ?? 0,
-                divergence: ledgerPos.edgeMagnitude,
-                result: pnlUsd > 0 ? 'won' : pnlUsd < 0 ? 'lost' : 'pushed',
+              // Fire-and-forget: recordPositionOutcome writes to both Redis (for
+              // LLM consensus context + calibration) AND Postgres via the writer
+              // queue. Previously this only called recordOutcome (Redis-only), so
+              // every HL close since the recorder split silently dropped from the
+              // `outcomes` Postgres table — breaking analytics, calibration DB
+              // rollups, and execution-event → outcome join. Awaiting inside the
+              // hot loop used to blow past the lock TTL; fire-and-forget keeps
+              // the poll cycle lean, errors are logged but never propagate.
+              const result = pnlUsd > 0 ? 'won' : pnlUsd < 0 ? 'lost' : 'pushed';
+              void recordPositionOutcome(redis, ledgerPos, {
+                result,
                 returnPct: priceChangePct,
-                holdingHours,
-                executionVenue: 'hyperliquid',
+                executionVenueOverride: 'hyperliquid',
                 exitReason: reason,
-                ...(ledgerPos.priceZone !== undefined ? { priceZone: ledgerPos.priceZone } : {}),
-              }, { sourcedFrom: ledgerPos.sourcedFrom }).catch((e: unknown) => {
-                logger.warn('[futures-monitor] recordOutcome failed (non-fatal)', {
+              }).catch((e: unknown) => {
+                logger.warn('[futures-monitor] recordPositionOutcome failed (non-fatal)', {
                   symbol, error: String(e),
                 });
               });

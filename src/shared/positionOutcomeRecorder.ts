@@ -42,9 +42,10 @@ export async function recordPositionOutcome(
     | 'pendingSettlement'
   >,
   opts: {
-    result: 'won' | 'lost';
+    result: 'won' | 'lost' | 'pushed';
     returnPct: number;
     executionVenueOverride?: string;
+    exitReason?: string;
   },
 ): Promise<void> {
   const outcome = {
@@ -62,7 +63,12 @@ export async function recordPositionOutcome(
     executionVenue: opts.executionVenueOverride ?? position.executionVenue ?? 'simmer',
   } as const;
 
-  if (position.direction === 'UP' || position.direction === 'DOWN') {
+  // Pushed = exact zero PnL (rare, typically only futures with rounding). Skip
+  // the W/L streak counter for it — it's neither a win nor a loss.
+  if (
+    (position.direction === 'UP' || position.direction === 'DOWN') &&
+    opts.result !== 'pushed'
+  ) {
     const cfg = loadConfig();
     await recordUpDownOutcome(
       redis,
@@ -87,6 +93,8 @@ export async function recordPositionOutcome(
     ...(position.makerPriceImprovementUsd !== undefined
       ? { makerPriceImprovementUsd: position.makerPriceImprovementUsd }
       : {}),
+    ...(opts.exitReason ? { exitReason: opts.exitReason } : {}),
+    ...(position.priceZone !== undefined ? { priceZone: position.priceZone } : {}),
   }, { sourcedFrom: position.sourcedFrom });
 
   const holdingHours = position.openedAt
@@ -116,6 +124,7 @@ export async function recordPositionOutcome(
     decisionSpreadBps: position.decisionSpreadBps,
     makerPriceImprovementBps: position.makerPriceImprovementBps,
     makerPriceImprovementUsd: position.makerPriceImprovementUsd,
+    exitReason: opts.exitReason,
     entryPrice: position.entryPrice,
     stakeUsd: position.stakeUsd,
     sharesHeld: position.sharesHeld,
