@@ -41,6 +41,11 @@ vi.mock('../../shared/redis.js', () => ({
 
 vi.mock('../positionLedger.js', () => ({
   hasOpenPosition: vi.fn(),
+  recordPosition: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../../shared/bankroll.js', () => ({
+  deductStake: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../pendingMakerOrders.js', () => ({

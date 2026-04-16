@@ -1,6 +1,9 @@
 import { z } from 'zod';
 
-const SIGNAL_SOURCE = ['osint', 'copytrade', 'spot', 'arb', 'crypto-arb', 'futures', 'sports', 'clob-flow'] as const;
+const SIGNAL_SOURCE = [
+  'osint', 'copytrade', 'spot', 'arb', 'crypto-arb', 'futures', 'sports', 'clob-flow',
+  'oracle-lag', 'near-zero-arb', 'longshot-bias', 'correlation-arb',
+] as const;
 const DIRECTION = ['YES', 'NO', 'UP', 'DOWN', 'LONG', 'SHORT'] as const;
 
 export const shadowObservationRowSchema = z.object({

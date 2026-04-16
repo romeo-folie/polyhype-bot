@@ -15,14 +15,14 @@
  * Reuses:
  *   - spot:last:{assetId}        (poller-populated ticker)
  *   - watchlist:market_cache     (Gamma local cache)
- *   - executeSignal()            (full execution pipeline)
+ *   - executeAndRecordSignal()            (full execution pipeline)
  */
 
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getCachedMarkets } from '../shared/watchlist.js';
-import { executeSignal } from '../execution/executor.js';
+import { executeAndRecordSignal } from '../execution/executor.js';
 import { parseClobTokenIds } from '../mapping/gamma.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -312,10 +312,10 @@ export async function scanSettlementArb(redis: Redis): Promise<SettlementScanRes
 
     const signal = buildSignal(opp, cfg);
     try {
-      await executeSignal(signal, redis);
+      await executeAndRecordSignal(signal, redis);
       emitted++;
     } catch (err: unknown) {
-      logger.error('[settlement-arb] executeSignal failed', {
+      logger.error('[settlement-arb] executeAndRecordSignal failed', {
         marketId: signal.marketId,
         error: err instanceof Error ? err.message : String(err),
       });

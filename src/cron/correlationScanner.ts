@@ -3,7 +3,7 @@
  *
  * Reads the constraint graph from Redis, fetches current market prices from
  * the watchlist cache, detects constraint violations, and executes single-leg
- * trades on the tradeTarget side via executeSignal().
+ * trades on the tradeTarget side via executeAndRecordSignal().
  *
  * Ships dark: CORRELATION_SCANNER_ENABLED=false
  *
@@ -18,7 +18,7 @@ import { logger } from '../shared/logger.js';
 import { getBankroll } from '../shared/bankroll.js';
 import { getCachedMarkets } from '../shared/watchlist.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
-import { executeSignal } from '../execution/executor.js';
+import { executeAndRecordSignal } from '../execution/executor.js';
 import { priceZoneOf } from '../shared/zones.js';
 import { loadAllConstraints } from '../correlation/constraintGraph.js';
 import { detectViolations } from '../correlation/violationDetector.js';
@@ -273,7 +273,7 @@ export async function runCorrelationScan(redis: Redis): Promise<void> {
     });
 
     const signal = buildSignal(violation, target, other, stakeUsd);
-    const result = await executeSignal(signal, redis, stakeUsd);
+    const result = await executeAndRecordSignal(signal, redis, stakeUsd);
 
     if (!result.skipped) {
       logger.info('[corr-scan] trade executed', {

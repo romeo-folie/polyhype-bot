@@ -31,7 +31,7 @@ import { logger } from '../shared/logger.js';
 import { getBankroll } from '../shared/bankroll.js';
 import { getCachedMarkets } from '../shared/watchlist.js';
 import { parseOutcomePrices, parseClobTokenIds, parseOutcomes } from '../mapping/gamma.js';
-import { executeSignal } from '../execution/executor.js';
+import { executeAndRecordSignal } from '../execution/executor.js';
 import { priceZoneOf } from '../shared/zones.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -431,7 +431,7 @@ export async function runLongshotScan(redis: Redis): Promise<void> {
       endDate: opp.endDate ?? undefined,
     };
 
-    const result = await executeSignal(signal, redis, stakeUsd);
+    const result = await executeAndRecordSignal(signal, redis, stakeUsd);
     if (!result.skipped) {
       logger.info('[longshot] trade executed', {
         marketId: opp.marketId,

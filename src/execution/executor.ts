@@ -28,6 +28,7 @@ import {
   cancelClobOrder,
 } from '../shared/clob.js';
 import { hasOpenPosition, recordPosition } from './positionLedger.js';
+import { deductStake } from '../shared/bankroll.js';
 import { isStaleCooldownActive } from '../monitor/staleExit.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { computeATR } from '../arb/indicators.js';
@@ -508,12 +509,12 @@ async function tryExecuteViaClobMaker(
     stakeUsd: signal.stakeUsd,
   });
 
-  // In empty-book mode drop postOnly so the order can fill immediately if the
-  // real book has a resting ask at or below our limit price (the REST-API book
-  // is stale and doesn't reflect the matching-engine state; post-only rejects
-  // every order that crosses the real book even though the stale API hides it).
-  // A non-postOnly GTC at our fair-value limit is safe: worst case it fills as
-  // a taker at a price ≤ our limit, best case it rests and earns a maker rebate.
+  // Empty-book orders are ALWAYS post-only. The REST book can be stale relative
+  // to the matching engine, so a crossing limit can fill as a taker against
+  // hidden resting liquidity at an adverse price — precisely the failure mode
+  // that produced the 2026-04-16 OSINT empty-book losses. Post-only makes the
+  // matching engine reject any order that would cross, and we treat that as
+  // no-trade rather than falling through to a taker fill.
   const result = await submitClobLimitBuy({
     tokenId,
     price,
@@ -521,7 +522,7 @@ async function tryExecuteViaClobMaker(
     tickSize: book.tick_size as TickSize,
     negRisk: book.neg_risk,
     orderType: 'GTC',
-    postOnly: !emptyBookMode,
+    postOnly: true,
   });
 
   if (!result.success || !result.order_id) {
@@ -2241,7 +2242,7 @@ export async function executeSignals(
   let sessionExposureUsd = 0;
 
   for (const signal of signals) {
-    const result = await executeSignal(signal, redis, sessionExposureUsd);
+    const result = await executeAndRecordSignal(signal, redis, sessionExposureUsd);
 
     // If trade succeeded on HL, track margin so subsequent margin checks account for API lag.
     // Do NOT add hedgeDispatched to session exposure — the hedge is fire-and-forget and may
@@ -2254,4 +2255,107 @@ export async function executeSignals(
     results.push(result);
   }
   return results;
+}
+
+/**
+ * Single entry point for scanners/workers that should record positions after
+ * a successful fill. Wraps executeSignal and, on success, deducts the stake
+ * from bankroll and writes the open position to the Redis ledger so the
+ * monitor / TP / SL pipeline can find it.
+ *
+ * Callers that need extra caller-specific bookkeeping (e.g. Simmer fill
+ * reconciliation, per-source metric counters) can still wrap this — the
+ * position is already recorded by the time this returns.
+ *
+ * Prior to this helper, nearZero/longshot/correlation/settlement/sports/arb/
+ * oracle-lag scanners called executeSignal directly and skipped recording,
+ * producing ghost trades invisible to the monitor and analytics.
+ */
+export async function executeAndRecordSignal(
+  signal: TradeSignal,
+  redis: Redis,
+  knownSessionExposureUsd = 0,
+): Promise<ExecutionResult> {
+  const result = await executeSignal(signal, redis, knownSessionExposureUsd);
+  if (result.tradeResult?.success) {
+    await finalizeSuccessfulExecution(redis, result);
+  }
+  return result;
+}
+
+async function finalizeSuccessfulExecution(
+  redis: Redis,
+  result: ExecutionResult,
+): Promise<void> {
+  // Deduct bankroll so follow-on signals in the same tick respect reduced capital.
+  await deductStake(redis, result.signal.stakeUsd);
+
+  // Compute sharesHeld — prefer actual fill from venue, fall back to estimate.
+  let estimatedShares: number | undefined;
+  let sharesHeld: number | undefined;
+  if (result.sharesFilled != null) {
+    sharesHeld = result.sharesFilled;
+  } else if (result.tradeResult?.shares_bought != null) {
+    sharesHeld = result.tradeResult.shares_bought;
+  } else if (result.signal.outcomePrice > 0) {
+    estimatedShares = result.signal.stakeUsd / result.signal.outcomePrice;
+    sharesHeld = estimatedShares;
+    logger.warn(
+      '[executor] shares_bought unavailable — using estimated sharesHeld (stakeUsd/outcomePrice)',
+      {
+        marketId: result.signal.marketId,
+        executionId: result.signal.executionId,
+        estimatedShares,
+        stakeUsd: result.signal.stakeUsd,
+        outcomePrice: result.signal.outcomePrice,
+      },
+    );
+  }
+
+  await recordPosition(redis, {
+    marketId: result.signal.marketId,
+    executionId: result.signal.executionId,
+    conditionId: result.signal.conditionId,
+    clobTokenIds: result.signal.clobTokenIds,
+    question: result.signal.question,
+    direction: result.signal.direction,
+    entryPrice: result.entryPrice ?? result.signal.outcomePrice,
+    stakeUsd: result.signal.stakeUsd,
+    consensusProbability: result.signal.consensusProbability ?? 0.5,
+    consensusStddev: result.signal.consensusStddev,
+    edgeMagnitude: result.signal.edgeMagnitude,
+    sourcedFrom: result.signal.sourcedFrom,
+    openedAt: new Date().toISOString(),
+    txHash: result.tradeResult?.tx_hash,
+    sharesHeld,
+    executionVenue: result.executionVenue ?? 'simmer',
+    modeConfigured: result.modeConfigured,
+    entryExecutionPath: result.entryExecutionPath,
+    entryOrderType: result.entryOrderType,
+    decisionBestBid: result.decisionBenchmark?.decisionBestBid ?? undefined,
+    decisionBestAsk: result.decisionBenchmark?.decisionBestAsk ?? undefined,
+    decisionMidPrice: result.decisionBenchmark?.decisionMidPrice ?? undefined,
+    decisionSpreadBps: result.decisionBenchmark?.decisionSpreadBps ?? undefined,
+    counterfactualImmediateTakerPrice:
+      result.decisionBenchmark?.counterfactualImmediateTakerPrice ?? undefined,
+    counterfactualImmediateTakerShares:
+      result.decisionBenchmark?.counterfactualImmediateTakerShares ?? undefined,
+    counterfactualImmediateTakerCostUsd:
+      result.decisionBenchmark?.counterfactualImmediateTakerCostUsd ?? undefined,
+    makerPriceImprovementBps:
+      result.decisionBenchmark?.makerPriceImprovementBps ?? undefined,
+    makerPriceImprovementUsd:
+      result.decisionBenchmark?.makerPriceImprovementUsd ?? undefined,
+    fallbackReason: result.fallbackReason,
+    isFutures: result.signal.isFutures,
+    leverage: result.signal.leverage,
+    symbol:
+      result.signal.symbol ||
+      (result.signal.isFutures ? result.signal.marketId : undefined),
+    assetId: result.signal.assetId,
+    endDate: result.signal.endDate,
+    entryAtr: result.entryAtr,
+    entryAtrPct: result.entryAtrPct,
+    priceZone: result.signal.priceZone,
+  });
 }

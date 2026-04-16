@@ -40,15 +40,12 @@ const mockRunCopytrade = vi.fn();
 vi.mock('../index.js', () => ({ runCopytrade: mockRunCopytrade }));
 
 const mockExecuteSignal = vi.fn();
-vi.mock('../../execution/executor.js', () => ({ executeSignal: mockExecuteSignal }));
+vi.mock('../../execution/executor.js', () => ({
+  executeAndRecordSignal: mockExecuteSignal,
+}));
 
-const mockRecordPosition = vi.fn();
-vi.mock('../../execution/positionLedger.js', () => ({ recordPosition: mockRecordPosition }));
-
-const mockDeductStake = vi.fn();
 const mockGetBankroll = vi.fn();
 vi.mock('../../shared/bankroll.js', () => ({
-  deductStake: mockDeductStake,
   getBankroll: mockGetBankroll,
 }));
 
@@ -61,7 +58,7 @@ describe('copytrade worker', () => {
     mockRedis.get.mockResolvedValue(null);
   });
 
-  it('executes signals and records positions', async () => {
+  it('executes signals via executeAndRecordSignal', async () => {
     const signal = {
       marketId: 'm1',
       stakeUsd: 10,
@@ -84,8 +81,8 @@ describe('copytrade worker', () => {
     await runWorker(1);
 
     expect(mockRunCopytrade).toHaveBeenCalled();
+    // executeAndRecordSignal handles deductStake + recordPosition internally —
+    // the worker only needs to invoke it with the right arguments.
     expect(mockExecuteSignal).toHaveBeenCalledWith(signal, mockRedis, 0);
-    expect(mockDeductStake).toHaveBeenCalledWith(mockRedis, 10);
-    expect(mockRecordPosition).toHaveBeenCalled();
   });
 });

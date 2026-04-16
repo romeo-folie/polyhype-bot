@@ -15,12 +15,11 @@ import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.
 import { logger } from '../shared/logger.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping, mapNewsToFutures } from '../mapping/index.js';
-import { executeSignal } from './executor.js';
-import { recordPosition } from './positionLedger.js';
+import { executeAndRecordSignal } from './executor.js';
 import { resolveSimmerMarketId, getSimmerPositions } from '../shared/simmer.js';
 import { notifyTradeError } from './telegram.js';
 import { reEvaluatePositions } from '../monitor/signalReeval.js';
-import { getBankroll, deductStake } from '../shared/bankroll.js';
+import { getBankroll } from '../shared/bankroll.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 import type { TradeSignal } from '../mapping/index.js';
 
@@ -167,7 +166,8 @@ async function processScoredItemsInner(
     // The executor handles Idempotency (Grip-it-and-rip-it): ensures the same signal hash isn't fired twice
     // within the 3600s Redis window, protecting against feed re-ingestion noise or redundant LLM calls
     // during extreme breaking news cycles.
-    const result = await executeSignal(signal, redis, sessionExposureUsd);
+    // executeAndRecordSignal handles deductStake + recordPosition on success.
+    const result = await executeAndRecordSignal(signal, redis, sessionExposureUsd);
 
     if (result.skipped) {
       skipped++;
@@ -187,83 +187,18 @@ async function processScoredItemsInner(
 
     if (result.tradeResult?.success) {
       executed++;
-      // Immediate bankroll deduction ensures follow-on mapping cycles in this same tick
-      // respect the reduced capital, preventing over-allocation or leverage-recursion.
-      await deductStake(redis, result.signal.stakeUsd);
 
-      // Compute sharesHeld — prefer actual fill from venue, fall back to estimate.
+      // sharesHeld was recorded by the executor; derive the same value here for
+      // the Simmer reconciliation setTimeout below (uses estimate only if venue
+      // omitted shares_bought).
       let estimatedShares: number | undefined;
-      let sharesHeld: number | undefined;
-      if (result.sharesFilled != null) {
-        sharesHeld = result.sharesFilled;
-      } else if (result.tradeResult.shares_bought != null) {
-        sharesHeld = result.tradeResult.shares_bought;
-      } else {
-        // Simmer sometimes omits shares_bought — fall back to estimate from stake/price.
-        // This can overstate actual fill on partial fills; log a warning for reconciliation.
-        estimatedShares =
-          result.signal.outcomePrice > 0
-            ? result.signal.stakeUsd / result.signal.outcomePrice
-            : undefined;
-        sharesHeld = estimatedShares;
-        if (estimatedShares != null) {
-          logger.warn(
-            '[execution] shares_bought unavailable — using estimated sharesHeld (stakeUsd/outcomePrice)',
-            {
-              marketId: result.signal.marketId,
-              executionId: result.signal.executionId,
-              estimatedShares,
-              stakeUsd: result.signal.stakeUsd,
-              outcomePrice: result.signal.outcomePrice,
-            },
-          );
-        }
+      if (
+        result.sharesFilled == null &&
+        result.tradeResult.shares_bought == null &&
+        result.signal.outcomePrice > 0
+      ) {
+        estimatedShares = result.signal.stakeUsd / result.signal.outcomePrice;
       }
-
-      // Record in ledger
-      await recordPosition(redis, {
-        marketId: result.signal.marketId,
-        executionId: result.signal.executionId,
-        conditionId: result.signal.conditionId,
-        clobTokenIds: result.signal.clobTokenIds,
-        question: result.signal.question,
-        direction: result.signal.direction,
-        entryPrice: result.entryPrice ?? result.signal.outcomePrice,
-        stakeUsd: result.signal.stakeUsd,
-        consensusProbability: result.signal.consensusProbability ?? 0.5,
-        consensusStddev: result.signal.consensusStddev,
-        edgeMagnitude: result.signal.edgeMagnitude,
-        sourcedFrom: result.signal.sourcedFrom,
-        openedAt: new Date().toISOString(),
-        txHash: result.tradeResult.tx_hash,
-        sharesHeld,
-        executionVenue: result.executionVenue || 'simmer',
-        modeConfigured: result.modeConfigured,
-        entryExecutionPath: result.entryExecutionPath,
-        entryOrderType: result.entryOrderType,
-        decisionBestBid: result.decisionBenchmark?.decisionBestBid ?? undefined,
-        decisionBestAsk: result.decisionBenchmark?.decisionBestAsk ?? undefined,
-        decisionMidPrice: result.decisionBenchmark?.decisionMidPrice ?? undefined,
-        decisionSpreadBps: result.decisionBenchmark?.decisionSpreadBps ?? undefined,
-        counterfactualImmediateTakerPrice:
-          result.decisionBenchmark?.counterfactualImmediateTakerPrice ?? undefined,
-        counterfactualImmediateTakerShares:
-          result.decisionBenchmark?.counterfactualImmediateTakerShares ?? undefined,
-        counterfactualImmediateTakerCostUsd:
-          result.decisionBenchmark?.counterfactualImmediateTakerCostUsd ?? undefined,
-        makerPriceImprovementBps: result.decisionBenchmark?.makerPriceImprovementBps ?? undefined,
-        makerPriceImprovementUsd: result.decisionBenchmark?.makerPriceImprovementUsd ?? undefined,
-        fallbackReason: result.fallbackReason,
-        isFutures: result.signal.isFutures,
-        leverage: result.signal.leverage,
-        symbol:
-          result.signal.symbol || (result.signal.isFutures ? result.signal.marketId : undefined),
-        assetId: result.signal.assetId,
-        endDate: result.signal.endDate,
-        entryAtr: result.entryAtr,
-        entryAtrPct: result.entryAtrPct,
-        priceZone: result.signal.priceZone,
-      });
 
       // Simmer fill reconciliation: if shares_bought was unavailable and we used an
       // estimate, query Simmer after a short delay to get the confirmed fill amount.

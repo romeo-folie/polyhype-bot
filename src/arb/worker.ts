@@ -5,10 +5,8 @@ import { runNegRiskArbScan } from './negRiskScanner.js';
 import { loadConfig } from '../shared/config.js';
 import { scanCryptoArb, scanUpDownArb } from './cryptoArbScanner.js';
 import { BINANCE_SYMBOL_TO_ASSET } from '../shared/assets.js';
-import { executeSignal } from '../execution/executor.js';
-import { recordPosition } from '../execution/positionLedger.js';
+import { executeAndRecordSignal } from '../execution/executor.js';
 import { priceZoneOf } from '../shared/zones.js';
-import { deductStake } from '../shared/bankroll.js';
 import { setAgentAutoRedeem } from '../shared/simmer.js';
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
 import {
@@ -462,7 +460,8 @@ export class ArbitrageWorker {
             // endDate usually doesn't apply to HL symbols, but for clarity:
           };
 
-          const result = await executeSignal(signal, redis);
+          // executeAndRecordSignal handles deductStake + recordPosition on success.
+          const result = await executeAndRecordSignal(signal, redis);
 
           if (result.tradeResult?.success) {
             const executedStake = result.signal.stakeUsd;
@@ -475,26 +474,6 @@ export class ArbitrageWorker {
             });
             await recordCryptoArbMetric(redis, 'trades_executed').catch(() => {});
 
-            await recordPosition(redis, {
-              marketId: opp.marketId,
-              executionId: result.signal.executionId,
-              conditionId: opp.conditionId,
-              clobTokenIds: opp.clobTokenIds,
-              question: opp.question,
-              direction: opp.direction,
-              entryPrice: opp.currentPmPrice,
-              stakeUsd: executedStake,
-              consensusProbability: opp.fairValuePrice,
-              edgeMagnitude: result.signal.edgeMagnitude ?? opp.edge,
-              openedAt: new Date().toISOString(),
-              sourcedFrom: `crypto-arb:${opp.assetId}`,
-              executionVenue: result.executionVenue || 'simmer',
-              assetId: opp.assetId,
-              endDate: opp.endDate ?? undefined,
-              priceZone: result.signal.priceZone,
-            });
-
-            await deductStake(redis, executedStake);
             this.lastCryptoArbTradeTime = Date.now();
             await recordGlobalTrade(redis, 'polymarket');
 

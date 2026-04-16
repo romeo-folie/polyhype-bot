@@ -216,7 +216,7 @@ export async function scanLiveSportsArb(
         `${c.game.awayScore}-${c.game.homeScore} Q${c.game.period} ` +
         `${c.game.secondsRemaining}s left; model YES=${modelYesProb.toFixed(3)} vs price ${c.yesPrice.toFixed(3)}.`,
       isFutures: false,
-      source: 'osint',
+      source: 'sports',
       endDate: c.market.endDate ?? undefined,
       feesEnabled: c.market.feesEnabled ?? false,
     };

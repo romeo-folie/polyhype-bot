@@ -14,7 +14,7 @@ vi.mock('../../shared/redis.js', () => ({
 
 const executeSignalMock = vi.fn().mockResolvedValue({ skipped: false });
 vi.mock('../../execution/executor.js', () => ({
-  executeSignal: executeSignalMock,
+  executeAndRecordSignal: executeSignalMock,
 }));
 
 const scanMock = vi.fn();

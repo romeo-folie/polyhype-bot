@@ -21,7 +21,7 @@ vi.mock('../../shared/watchlist.js', () => ({
 
 const executeSignalMock = vi.fn().mockResolvedValue({ skipped: false });
 vi.mock('../../execution/executor.js', () => ({
-  executeSignal: (...args: unknown[]) => executeSignalMock(...args),
+  executeAndRecordSignal: (...args: unknown[]) => executeSignalMock(...args),
 }));
 
 const {

@@ -17,7 +17,19 @@ export interface PositionOutcome {
   id: string;
   closedAt: string;
   executionId?: string;
-  source: 'osint' | 'copytrade' | 'spot' | 'arb' | 'crypto-arb' | 'futures';
+  source:
+    | 'osint'
+    | 'copytrade'
+    | 'spot'
+    | 'arb'
+    | 'crypto-arb'
+    | 'futures'
+    | 'sports'
+    | 'clob-flow'
+    | 'oracle-lag'
+    | 'near-zero-arb'
+    | 'longshot-bias'
+    | 'correlation-arb';
   category: string;
   question: string;
   direction: 'YES' | 'NO' | 'UP' | 'DOWN' | 'LONG' | 'SHORT';

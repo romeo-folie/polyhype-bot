@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
-import { getBankroll, deductStake } from '../shared/bankroll.js';
+import { getBankroll } from '../shared/bankroll.js';
 import { getPriceFeed, destroyPriceFeed } from '../shared/feedSingleton.js';
 import { resolveYesPrice } from '../shared/priceCache.js';
 import { pollSpotPrices } from './poller.js';
@@ -21,7 +21,7 @@ import { findCorrelatedMarkets } from './marketCorrelator.js';
 import { estimateFastConsensus } from './fastPathConsensus.js';
 import { computeDivergence } from '../mapping/divergenceCalculator.js';
 import { executeSignals } from '../execution/executor.js';
-import { recordPosition, hasOpenPosition } from '../execution/positionLedger.js';
+import { hasOpenPosition } from '../execution/positionLedger.js';
 import { notifyTradeError } from '../execution/telegram.js';
 import { getOpportunities } from '../shared/simmer.js';
 import { HL_SYMBOL_MAP } from '../shared/hyperliquid.js';
@@ -507,35 +507,8 @@ async function runSpotMonitorInner(
       continue;
     }
 
-    // Record position
-    await recordPosition(redis, {
-      marketId: result.signal.marketId,
-      executionId: result.signal.executionId,
-      conditionId: result.signal.conditionId,
-      clobTokenIds: result.signal.clobTokenIds,
-      question: result.signal.question,
-      direction: result.signal.direction,
-      entryPrice: result.entryPrice ?? result.signal.outcomePrice,
-      stakeUsd: result.signal.stakeUsd,
-      openedAt: new Date().toISOString(),
-      sourcedFrom: result.signal.sourcedFrom,
-      consensusProbability: result.signal.consensusProbability,
-      consensusStddev: result.signal.consensusStddev,
-      edgeMagnitude: result.signal.edgeMagnitude,
-      executionVenue: result.executionVenue ?? 'simmer',
-      assetId: result.signal.assetId,
-      endDate: result.signal.endDate,
-      priceZone: result.signal.priceZone,
-      isFutures: result.signal.isFutures,
-      leverage: result.signal.leverage,
-      symbol: result.signal.symbol || (result.signal.isFutures ? result.signal.marketId : undefined),
-      sharesHeld: result.sharesFilled ?? undefined,
-      entryAtr: result.entryAtr,
-      entryAtrPct: result.entryAtrPct,
-    });
-
-    await deductStake(redis, result.signal.stakeUsd);
-    // Notification is handled by executor — no duplicate needed here.
+    // deductStake + recordPosition are handled by executeAndRecordSignal
+    // (wrapped inside executeSignals). Notification is handled by the executor.
 
     logger.info('[spot] trade executed', {
       marketId: result.signal.marketId,

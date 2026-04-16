@@ -34,7 +34,7 @@ import { getCachedMarkets, getNearZeroPeakPriceDetailed } from '../shared/watchl
 import { parseOutcomePrices, parseClobTokenIds, parseOutcomes } from '../mapping/gamma.js';
 import { estimateConsensusProbability } from '../mapping/consensusCalculator.js';
 import { checkTimeToResolution } from '../mapping/divergenceCalculator.js';
-import { executeSignal } from '../execution/executor.js';
+import { executeAndRecordSignal } from '../execution/executor.js';
 import { priceZoneOf } from '../shared/zones.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -393,7 +393,7 @@ async function main() {
         endDate: candidate.market.endDate ?? undefined,
       };
 
-      const result = await executeSignal(signal, redis, stakeUsd);
+      const result = await executeAndRecordSignal(signal, redis, stakeUsd);
       if (!result.skipped) {
         logger.info('[near-zero] trade executed', {
           marketId: candidate.market.id,

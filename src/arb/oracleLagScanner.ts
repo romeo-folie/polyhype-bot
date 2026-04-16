@@ -40,9 +40,7 @@ import {
   recordUpDownTrade,
 } from '../shared/updownThrottle.js';
 import { discoverUpDownMarketsBySlug, type UpDownMarket } from '../mapping/gamma.js';
-import { executeSignal } from '../execution/executor.js';
-import { recordPosition } from '../execution/positionLedger.js';
-import { deductStake } from '../shared/bankroll.js';
+import { executeAndRecordSignal } from '../execution/executor.js';
 import { priceZoneOf } from '../shared/zones.js';
 import type { ChainlinkFeed, ChainlinkMove } from '../spot/feeds/chainlinkFeed.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -598,7 +596,8 @@ export class OracleLagScanner {
     let executorEntryPrice: number | undefined;
 
     try {
-      const result = await executeSignal(signal, this.redis);
+      // executeAndRecordSignal handles deductStake + recordPosition on success.
+      const result = await executeAndRecordSignal(signal, this.redis);
 
       if (result.tradeResult?.success) {
         // Use result.signal for post-execution state — the executor reassigns
@@ -621,40 +620,6 @@ export class OracleLagScanner {
           movePct: +move.pctMove.toFixed(4),
           venue: result.executionVenue,
         });
-
-        try {
-          await recordPosition(this.redis, {
-            marketId: market.marketId,
-            executionId: result.signal.executionId,
-            clobTokenIds: [market.yesTokenId, market.noTokenId],
-            question: market.question,
-            direction,
-            entryPrice: executedEntryPrice,
-            stakeUsd: executedStake,
-            consensusProbability: evaluation.consensusProbability,
-            edgeMagnitude: result.signal.edgeMagnitude ?? signal.edgeMagnitude,
-            openedAt: new Date().toISOString(),
-            sourcedFrom: signal.sourcedFrom,
-            executionVenue: result.executionVenue ?? 'clob',
-            assetId: 'bitcoin',
-            endDate: market.endDate.toISOString(),
-            priceZone: result.signal.priceZone,
-          });
-        } catch (err) {
-          logger.warn('[oracle-lag] recordPosition failed (non-fatal)', {
-            marketId: market.marketId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-
-        try {
-          await deductStake(this.redis, executedStake);
-        } catch (err) {
-          logger.warn('[oracle-lag] deductStake failed (non-fatal)', {
-            marketId: market.marketId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
 
         // Stamp exit-state for the gap-compression exit monitor. One HSET +
         // EXPIRE in a pipeline — TTL generously larger than

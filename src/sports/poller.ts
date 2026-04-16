@@ -3,14 +3,14 @@
  *
  * Long-running worker (mirrors `src/clob/flowMonitor.ts`): acquires a Redis
  * lock, heartbeats it, and on each tick runs `scanLiveSportsArb()` → hands
- * signals to `executeSignal()`. Self-gates on ESPN game state — no host cron.
+ * signals to `executeAndRecordSignal()`. Self-gates on ESPN game state — no host cron.
  */
 
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { scanLiveSportsArb } from './scanner.js';
-import { executeSignal } from '../execution/executor.js';
+import { executeAndRecordSignal } from '../execution/executor.js';
 
 const LOCK_KEY = 'lock:sports:poller';
 const LOCK_TTL_S = 90;
@@ -31,9 +31,9 @@ async function tick(): Promise<void> {
   logger.info('[sports-poller] emitting signals', { count: signals.length });
   for (const signal of signals) {
     try {
-      await executeSignal(signal, redis);
+      await executeAndRecordSignal(signal, redis);
     } catch (err) {
-      logger.error('[sports-poller] executeSignal failed', {
+      logger.error('[sports-poller] executeAndRecordSignal failed', {
         marketId: signal.marketId,
         error: err instanceof Error ? err.message : String(err),
       });
