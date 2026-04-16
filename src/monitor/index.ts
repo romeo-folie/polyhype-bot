@@ -162,10 +162,15 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     // pga-arb (src/arb/oracleLagExitMonitor.ts) — gap-compression + reversal
     // + max-hold. The generic take-profit evaluator uses the crypto-updown
     // category's 3% TP, which fires on the first tick after fill and caps
-    // what should be a structural-edge trade. Skip here so the dedicated
-    // monitor owns the exit decision. Requires ORACLE_LAG_EXIT_ENABLED=true
-    // for live exits; in shadow the position rides to resolution.
-    if (position.sourcedFrom?.startsWith('oracle-lag:')) {
+    // what should be a structural-edge trade.
+    //
+    // Gated on ORACLE_LAG_EXIT_ENABLED so this is a true ownership-transfer:
+    // flag=true → dedicated monitor owns exits, generic monitor skips;
+    // flag=false → dedicated monitor is shadow-only, so generic monitor stays
+    // in charge as the documented fallback (see config.ts + oracleLagExitMonitor.ts
+    // headers). Prevents an oracle-lag position from losing all exit oversight
+    // if the flag is reverted without reverting the skip.
+    if (cfg.ORACLE_LAG_EXIT_ENABLED && position.sourcedFrom?.startsWith('oracle-lag:')) {
       held++;
       continue;
     }
