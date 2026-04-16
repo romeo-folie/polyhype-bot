@@ -196,9 +196,8 @@ export async function runMonitorWorker(): Promise<void> {
     // Periodically rebuild near-zero-arb theme open sets from the live ledger
     // to heal any drift caused by missed SREM calls (e.g. worker crash on exit).
     if (nowMs - lastNearZeroReconcile >= cfg.NEAR_ZERO_THEME_RECONCILE_INTERVAL_MS) {
-      rebuildNearZeroThemeSets(redis).then(() => {
-        lastNearZeroReconcile = Date.now();
-      }).catch((err: unknown) => {
+      lastNearZeroReconcile = nowMs; // mark before async so concurrent ticks don't stack
+      rebuildNearZeroThemeSets(redis).catch((err: unknown) => {
         logger.warn('[monitor-worker] near-zero theme reconcile failed', {
           error: err instanceof Error ? err.message : String(err),
         });

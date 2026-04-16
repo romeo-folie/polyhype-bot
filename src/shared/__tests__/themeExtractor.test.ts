@@ -21,23 +21,21 @@ const { extractTheme, addNearZeroPosition, removeNearZeroPosition, rebuildNearZe
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeRedis(): { redis: Redis; sadd: ReturnType<typeof vi.fn>; srem: ReturnType<typeof vi.fn>; scard: ReturnType<typeof vi.fn>; keys: ReturnType<typeof vi.fn>; del: ReturnType<typeof vi.fn>; pipeline: ReturnType<typeof vi.fn> } {
+function makeRedis(): { redis: Redis; sadd: ReturnType<typeof vi.fn>; srem: ReturnType<typeof vi.fn>; scard: ReturnType<typeof vi.fn>; del: ReturnType<typeof vi.fn>; multi: ReturnType<typeof vi.fn> } {
   const sadd = vi.fn().mockResolvedValue(1);
   const srem = vi.fn().mockResolvedValue(1);
   const scard = vi.fn().mockResolvedValue(0);
-  const keys = vi.fn().mockResolvedValue([]);
   const del = vi.fn().mockResolvedValue(1);
 
   const execMock = vi.fn().mockResolvedValue([]);
-  const pipeline = vi.fn(() => ({
+  const multi = vi.fn(() => ({
     del,
     sadd,
-    keys,
     exec: execMock,
   }));
 
-  const redis = { sadd, srem, scard, keys, del, pipeline } as unknown as Redis;
-  return { redis, sadd, srem, scard, keys, del, pipeline };
+  const redis = { sadd, srem, scard, del, multi } as unknown as Redis;
+  return { redis, sadd, srem, scard, del, multi };
 }
 
 // ---------------------------------------------------------------------------
@@ -239,18 +237,21 @@ describe('rebuildNearZeroThemeSets', () => {
     const { redis } = makeRedis();
     await rebuildNearZeroThemeSets(redis);
 
-    // Pipeline was used to execute the rebuild atomically
-    expect(redis.pipeline).toHaveBeenCalled();
+    // Transaction was used to execute the rebuild atomically
+    expect(redis.multi).toHaveBeenCalled();
   });
 
-  it('clears stale theme keys when no positions remain', async () => {
+  it('clears all known theme keys when no positions remain', async () => {
     mockGetOpenPositions.mockResolvedValue([]);
-    const { redis, keys } = makeRedis();
-    keys.mockResolvedValue(['near_zero:theme_open:iran-israel-conflict']);
+    const { redis, multi } = makeRedis();
 
     await rebuildNearZeroThemeSets(redis);
 
-    expect(redis.pipeline).toHaveBeenCalled();
+    // multi() should have been called and DEL issued for each THEME_RULES entry
+    expect(redis.multi).toHaveBeenCalled();
+    const txInstance = multi.mock.results[0]!.value as { del: ReturnType<typeof vi.fn> };
+    // At minimum the global key + one DEL per theme rule
+    expect(txInstance.del.mock.calls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('excludes positions not sourced from near-zero-arb', async () => {

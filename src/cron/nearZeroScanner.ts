@@ -293,20 +293,8 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     const dedupKey = `${DEDUP_KEY_PREFIX}${candidate.market.id}:${candidate.direction}`;
     const inflightKey = `${INFLIGHT_KEY_PREFIX}${candidate.market.id}:${candidate.direction}`;
 
-    // Pre-LLM NX claim — prevents two concurrent scanner runs (or a scanner and
-    // a manual invocation) from both paying the LLM cost for the same market.
-    // Short TTL so a crashed worker doesn't block for long.
-    const claimed = await redis.set(inflightKey, '1', 'EX', INFLIGHT_TTL_S, 'NX');
-    if (claimed === null) {
-      logger.debug('[near-zero] skipped — in-flight from concurrent run', {
-        marketId: candidate.market.id,
-        direction: candidate.direction,
-      });
-      continue;
-    }
-
-    // Theme concentration guard — skip LLM entirely when the theme cap is
-    // already reached so we don't burn budget on a trade we cannot place.
+    // Theme concentration guard — check caps before the NX claim so we
+    // don't hold an inflight slot on a candidate we cannot place anyway.
     const candidateTheme = extractTheme(candidate.market.question);
     if (candidateTheme) {
       const openInTheme = await redis.scard(`near_zero:theme_open:${candidateTheme}`);
@@ -327,6 +315,18 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
         marketId: candidate.market.id,
         totalOpen,
         cap: cfg.NEAR_ZERO_MAX_OPEN_POSITIONS,
+      });
+      continue;
+    }
+
+    // Pre-LLM NX claim — prevents two concurrent scanner runs (or a scanner and
+    // a manual invocation) from both paying the LLM cost for the same market.
+    // Placed after cap checks so we don't hold the slot unnecessarily.
+    const claimed = await redis.set(inflightKey, '1', 'EX', INFLIGHT_TTL_S, 'NX');
+    if (claimed === null) {
+      logger.debug('[near-zero] skipped — in-flight from concurrent run', {
+        marketId: candidate.market.id,
+        direction: candidate.direction,
       });
       continue;
     }

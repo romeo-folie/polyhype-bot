@@ -5,7 +5,7 @@
  * can enforce NEAR_ZERO_MAX_PER_THEME. Themes are curated keyword rules —
  * deterministic and inspectable vs. LLM tagging.
  *
- * Each rule is a pair of RegExps that must BOTH match (AND logic), reducing
+ * Each rule has 1+ RegExps that must ALL match (AND logic), reducing
  * false positives (e.g. "Iran" alone without a conflict keyword is not
  * iran-israel-conflict).
  *
@@ -154,19 +154,19 @@ export async function rebuildNearZeroThemeSets(redis: Redis): Promise<void> {
     }
   }
 
-  // Atomically replace the global set.
-  const pipeline = redis.pipeline();
-  pipeline.del(POSITIONS_OPEN_KEY);
-  if (allMembers.length > 0) pipeline.sadd(POSITIONS_OPEN_KEY, ...allMembers);
-
-  // Collect all existing theme keys to purge stale ones.
-  const existingKeys = await redis.keys(`${THEME_KEY_PREFIX}*`);
-  for (const key of existingKeys) pipeline.del(key);
+  // Atomically replace all sets via MULTI/EXEC transaction so there is no
+  // window where sets are empty or partially rebuilt.
+  // Purge known theme keys from THEME_RULES — no KEYS scan needed since
+  // all possible theme keys are derivable at compile time.
+  const tx = redis.multi();
+  tx.del(POSITIONS_OPEN_KEY);
+  if (allMembers.length > 0) tx.sadd(POSITIONS_OPEN_KEY, ...allMembers);
+  for (const rule of THEME_RULES) tx.del(themeKey(rule.theme));
   for (const [theme, members] of themeMap.entries()) {
-    pipeline.sadd(themeKey(theme), ...members);
+    tx.sadd(themeKey(theme), ...members);
   }
 
-  await pipeline.exec();
+  await tx.exec();
 
   logger.info('[theme-extractor] rebuilt near-zero open sets', {
     totalOpen: allMembers.length,
