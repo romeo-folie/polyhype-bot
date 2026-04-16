@@ -28,7 +28,9 @@ export interface PendingMakerOrder {
   // Signal benchmark fields — stored so the reconciler can enrich positions
   // that fill before the executor's next cron resume cycle.
   edgeMagnitude?: number;
-  outcomePrice?: number;       // market reference price at signal time (for counterfactual)
+  // bestAsk from the YES book at posting time — used as counterfactualImmediateTakerPrice
+  // (what we would have paid as an immediate taker at the moment of order placement).
+  bestAskAtPosting?: number;
   intendedStakeUsd?: number;
   sourcedFrom?: string;
 }

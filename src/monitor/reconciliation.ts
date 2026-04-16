@@ -621,11 +621,24 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
     const direction: 'YES' | 'NO' = pos.asset === market.clobTokenIds[0] ? 'YES' : 'NO';
 
     // Check whether this fill came from a bot-posted GTC maker order.
-    // If so, enrich the position with the signal's benchmark data and use the
-    // real sourcedFrom rather than the generic 'reconciled:clob' label.
-    // Key is deleted AFTER recordPosition() succeeds so a transient write
-    // failure doesn't permanently lose the benchmark metadata.
-    const pendingOrder = await getPendingOrder(redis, market.id);
+    // Validate tokenId and direction before enriching to avoid false attribution
+    // from a stale key or a concurrent fill in a different direction on the same
+    // market. Key is deleted AFTER recordPosition() succeeds so a transient write
+    // failure can't permanently lose the benchmark metadata.
+    const rawPending = await getPendingOrder(redis, market.id);
+    const pendingOrder =
+      rawPending?.tokenId === pos.asset && rawPending?.direction === direction
+        ? rawPending
+        : null;
+    if (rawPending && !pendingOrder) {
+      logger.warn('[reconcile] pending maker order token/direction mismatch — not enriching', {
+        marketId: market.id,
+        pendingTokenId: rawPending.tokenId,
+        pendingDirection: rawPending.direction,
+        fillTokenId: pos.asset,
+        fillDirection: direction,
+      });
+    }
     if (pendingOrder) {
       logger.info('[reconcile] linked CLOB orphan to pending maker order', {
         marketId: market.id,
@@ -651,7 +664,10 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
       ...(pendingOrder != null && {
         entryExecutionPath: 'maker_fill',
         entryOrderType: 'maker' as const,
-        counterfactualImmediateTakerPrice: pendingOrder.outcomePrice,
+        // bestAskAtPosting is the live taker price at the moment the GTC order was
+        // placed — the correct counterfactual for "what would an immediate taker fill
+        // have cost?" (consistent with buildDecisionBenchmark() in executor.ts).
+        counterfactualImmediateTakerPrice: pendingOrder.bestAskAtPosting,
       }),
       reconciliationStatus: `imported:${new Date().toISOString()}`
     };

@@ -431,9 +431,10 @@ async function tryExecuteViaClobMaker(
   // In empty-book mode always fetch a fresh YES-token book.
   // The ghost book (bid=0.01/ask=0.99) returned by the prefetched read is stale;
   // the matching engine may have real resting orders. For NO-direction signals the
-  // CLOB internally converts BUY NO @ P → SELL YES @ (1-P), so crossing is checked
-  // against the YES book regardless of which token we submit on.  Using the YES book
-  // as pricing ground truth prevents "order crosses book" post-only rejections.
+  // CLOB internally converts BUY NO @ P → SELL YES @ (1-P), so the matching engine
+  // checks crossing against the YES book regardless of which token we submit on.
+  // Using the YES book as pricing ground truth lets us cap the submitted price
+  // so it never crosses a resting YES order (which would cause an unexpected taker fill).
   const yesTokenId = emptyBookMode ? (signal.clobTokenIds?.[0] ?? tokenId) : tokenId;
   const book = emptyBookMode
     ? (await getClobOrderBook(yesTokenId))
@@ -456,11 +457,11 @@ async function tryExecuteViaClobMaker(
       : null;
 
   // Cap fair value so the submitted price can never cross resting YES-book orders.
-  // For YES direction: we BUY YES, price must stay below bestAsk.
-  // For NO direction: we BUY NO @ P → SELL YES @ (1-P); (1-P) must stay below
-  //   bestBid (the best price someone will BUY YES, i.e., best available YES bid).
-  //   Rearranged: P must stay above (1 - bestBid).  We cap from above using
-  //   (1 - bestBid - tick) so the complement is just below the YES best bid.
+  // For YES direction: we BUY YES → price must stay below YES bestAsk.
+  // For NO direction: we BUY NO @ P → SELL YES @ (1-P); to avoid crossing a
+  //   resting YES bid, (1-P) must stay BELOW bestBid, i.e. P must stay BELOW
+  //   (1 - bestBid).  We cap from above at (1 - bestBid - tick) so the complement
+  //   (1-P) lands just below the best resting YES bid.
   if (emptyBookMode && fairValue != null) {
     const tick = parseFloat(book.tick_size ?? '0.01');
     if (signal.direction === 'YES' || signal.direction === 'UP') {
@@ -559,7 +560,7 @@ async function tryExecuteViaClobMaker(
         consensusP: signal.consensusProbability ?? 0.5,
         direction: signal.direction,
         edgeMagnitude: signal.edgeMagnitude,
-        outcomePrice: signal.outcomePrice,
+        ...(bestAsk > 0 && { bestAskAtPosting: bestAsk }),
         intendedStakeUsd: signal.stakeUsd,
         sourcedFrom: signal.sourcedFrom,
       },
