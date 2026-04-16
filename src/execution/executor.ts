@@ -1567,11 +1567,17 @@ export async function executeSignal(
       (benchmark.decisionBestBid ?? 1) < cfg.EMPTY_BOOK_BID_THRESHOLD &&
       (benchmark.decisionBestAsk ?? 0) > cfg.EMPTY_BOOK_ASK_THRESHOLD;
 
+    // canEmptyBookMaker uses the empty-book-specific source whitelist rather than
+    // the general isMakerEligible set. This allows sources like oracle-lag (which
+    // should not use the maker path for real books — alpha decays too fast) to still
+    // post GTC orders when no real price discovery exists. Sources that are neither
+    // generally maker-eligible nor on the empty-book whitelist (e.g. spot) will fall
+    // through to the no_clob_book skip below.
     const canEmptyBookMaker =
       emptyBook &&
       executionMode !== 'taker' &&
       !signal.isFutures &&
-      isMakerEligible(signal);
+      (isMakerEligible(signal) || cfg.MAKER_EMPTY_BOOK_ALLOWED_SOURCES.includes(signal.source ?? ''));
 
     if (oneSidedBook) {
       logger.info('[executor] skipping — entry spread unknown due to one-sided book', {
@@ -1596,6 +1602,15 @@ export async function executeSignal(
       return recordSkip('spread_too_wide', 'skipped', guardrailDiagnostic);
     }
     if (canEmptyBookMaker) {
+      const signalSource = signal.source ?? '';
+      if (!cfg.MAKER_EMPTY_BOOK_ALLOWED_SOURCES.includes(signalSource)) {
+        logger.info('[executor] skipping empty-book maker — source not whitelisted', {
+          marketId: signal.marketId,
+          source: signalSource,
+          allowed: cfg.MAKER_EMPTY_BOOK_ALLOWED_SOURCES,
+        });
+        return recordSkip('empty_book_source_blocked', 'skipped', guardrailDiagnostic);
+      }
       const consensusP = signal.consensusProbability ?? 0.5;
       const minStrength = cfg.MAKER_EMPTY_BOOK_MIN_CONSENSUS;
       if (consensusP > (1 - minStrength) && consensusP < minStrength) {
