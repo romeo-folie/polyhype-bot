@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   computeWalletStats,
   scoreWallet,
+  type ActivityRedeem,
   type ActivityTrade,
   type QualityConfig,
 } from '../walletQuality.js';
@@ -23,6 +24,22 @@ function makeTrade(overrides: Partial<ActivityTrade>): ActivityTrade {
     slug: 'will-trump-win',
     eventSlug: 'trump-event',
     outcome: 'YES',
+    ...overrides,
+  };
+}
+
+function makeRedeem(overrides: Partial<ActivityRedeem>): ActivityRedeem {
+  return {
+    proxyWallet: '0xwallet',
+    timestamp: 1_700_000_100,
+    conditionId: '0xcond',
+    type: 'REDEEM',
+    size: 100,
+    usdcSize: 100,
+    transactionHash: '0xredeem-tx',
+    title: 'Will Trump win the election?',
+    slug: 'will-trump-win',
+    eventSlug: 'trump-event',
     ...overrides,
   };
 }
@@ -122,6 +139,79 @@ describe('walletQuality.computeWalletStats', () => {
     ];
     const stats = computeWalletStats('0xw', trades);
     expect(stats.sharpe).toBeNull();
+  });
+
+  it('REDEEM closes hold-to-resolution BUYs as wins', () => {
+    // Whale buys YES at $0.50, market resolves YES, redeems at $1.00/share.
+    const trades: ActivityTrade[] = [
+      makeTrade({ asset: 'yes-a', conditionId: '0xA', side: 'BUY', size: 100, usdcSize: 50, timestamp: 1 }),
+    ];
+    const redeems: ActivityRedeem[] = [
+      makeRedeem({ conditionId: '0xA', size: 100, usdcSize: 100, timestamp: 2 }),
+    ];
+    const stats = computeWalletStats('0xw', trades, redeems);
+    expect(stats.overallResolvedTrades).toBe(1);
+    expect(stats.overallWinRate).toBe(1);
+  });
+
+  it('multi-outcome REDEEM: winning asset at $1, losing assets at $0', () => {
+    // Whale buys two candidates in a multi-outcome race; one wins.
+    const trades: ActivityTrade[] = [
+      makeTrade({ asset: 'horse-a', conditionId: '0xR', side: 'BUY', size: 100, usdcSize: 30, timestamp: 1 }),
+      makeTrade({ asset: 'horse-b', conditionId: '0xR', side: 'BUY', size: 200, usdcSize: 40, timestamp: 2 }),
+    ];
+    // horse-b is the winner (size 200 matches REDEEM size)
+    const redeems: ActivityRedeem[] = [
+      makeRedeem({ conditionId: '0xR', size: 200, usdcSize: 200, timestamp: 3 }),
+    ];
+    const stats = computeWalletStats('0xw', trades, redeems);
+    // 1 win (horse-b: +$160) + 1 loss (horse-a: -$30) = 50% WR
+    expect(stats.overallResolvedTrades).toBe(2);
+    expect(stats.overallWinRate).toBe(0.5);
+  });
+
+  it('REDEEM after a partial SELL closes only the remaining inventory', () => {
+    // Whale buys 100 @ $0.50, sells 40 @ $0.90 (partial win), holds 60 to redemption.
+    const trades: ActivityTrade[] = [
+      makeTrade({ asset: 'yes-a', conditionId: '0xA', side: 'BUY', size: 100, usdcSize: 50, timestamp: 1 }),
+      makeTrade({ asset: 'yes-a', conditionId: '0xA', side: 'SELL', size: 40, usdcSize: 36, timestamp: 2 }),
+    ];
+    const redeems: ActivityRedeem[] = [
+      makeRedeem({ conditionId: '0xA', size: 60, usdcSize: 60, timestamp: 3 }),
+    ];
+    const stats = computeWalletStats('0xw', trades, redeems);
+    // Two round-trips, both wins
+    expect(stats.overallResolvedTrades).toBe(2);
+    expect(stats.overallWinRate).toBe(1);
+  });
+
+  it('REDEEM with no matching inventory is a silent no-op (truncated history)', () => {
+    // BUY for conditionId 0xA was outside the fetch window; only a REDEEM shows up.
+    const redeems: ActivityRedeem[] = [
+      makeRedeem({ conditionId: '0xA', size: 100, usdcSize: 100, timestamp: 2 }),
+    ];
+    const stats = computeWalletStats('0xw', [], redeems);
+    expect(stats.overallResolvedTrades).toBe(0);
+    expect(stats.overallWinRate).toBeNull();
+  });
+
+  it('does not double-count a conditionId redeemed across multiple REDEEM events', () => {
+    // Whale buys 100 YES and 100 NO, market resolves YES.
+    // The winning side is redeemed in two chunks (60 + 40).
+    const trades: ActivityTrade[] = [
+      makeTrade({ asset: 'yes-a', conditionId: '0xA', side: 'BUY', size: 100, usdcSize: 50, timestamp: 1 }),
+      makeTrade({ asset: 'no-a', conditionId: '0xA', side: 'BUY', size: 100, usdcSize: 50, timestamp: 2 }),
+    ];
+    const redeems: ActivityRedeem[] = [
+      makeRedeem({ conditionId: '0xA', size: 60, usdcSize: 60, timestamp: 3, transactionHash: '0xr1' }),
+      makeRedeem({ conditionId: '0xA', size: 40, usdcSize: 40, timestamp: 4, transactionHash: '0xr2' }),
+    ];
+    const stats = computeWalletStats('0xw', trades, redeems);
+    // First REDEEM: closes 60 of winner at $1 (pnl = +30) AND zeros NO side (pnl = -50).
+    // Second REDEEM: closes remaining 40 of winner at $1 (pnl = +20).
+    // Total: 3 round-trips, 2 wins + 1 loss.
+    expect(stats.overallResolvedTrades).toBe(3);
+    expect(stats.overallWinRate).toBeCloseTo(2 / 3);
   });
 });
 

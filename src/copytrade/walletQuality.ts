@@ -37,10 +37,30 @@ export interface ActivityTrade {
   outcome: string;
 }
 
+/**
+ * REDEEM events are emitted when a wallet claims payout on a resolved market.
+ * Scoped by `conditionId` (not by outcome asset) — the Data API response has
+ * an empty `asset` and a sentinel `outcomeIndex` of 999, so those fields are
+ * omitted from this type. `size` is the quantity of winning-outcome tokens
+ * redeemed; `usdcSize` is the payout (typically `size × 1.0` for a winner).
+ */
+export interface ActivityRedeem {
+  proxyWallet: string;
+  timestamp: number;
+  conditionId: string;
+  type: 'REDEEM';
+  size: number;
+  usdcSize: number;
+  transactionHash: string;
+  title: string;
+  slug: string;
+  eventSlug: string;
+}
+
 export interface CategoryBucket {
   trades: number;
   volumeUsd: number;
-  /** Round-trip wins inferred from BUY+SELL cost basis in this category. */
+  /** Round-trip wins inferred from BUY+SELL/REDEEM cost basis in this category. */
   wins: number;
   losses: number;
 }
@@ -89,13 +109,14 @@ export interface QualityConfig {
   weights: QualityWeights;
 }
 
-export async function fetchWalletActivity(
+async function fetchActivityPage<T>(
   wallet: string,
-  limit = DEFAULT_ACTIVITY_LIMIT,
-): Promise<ActivityTrade[]> {
+  type: 'TRADE' | 'REDEEM',
+  limit: number,
+): Promise<T[]> {
   const params = new URLSearchParams({
     user: wallet,
-    type: 'TRADE',
+    type,
     limit: String(limit),
     sortBy: 'TIMESTAMP',
     sortDirection: 'DESC',
@@ -105,72 +126,161 @@ export async function fetchWalletActivity(
   if (!res.ok) {
     throw new Error(`wallet activity fetch failed: ${res.status.toString()} ${res.statusText}`);
   }
-  const data = (await res.json()) as ActivityTrade[];
+  const data = (await res.json()) as T[];
   return Array.isArray(data) ? data : [];
 }
 
-/**
- * Reconstruct round-trip PnL from activity by walking trades chronologically
- * and matching SELLs against the average-cost inventory per asset.
- *
- * Each SELL emits one realized-PnL record for the closed portion (FIFO-avg
- * cost basis). Partial closes count — if a whale unwinds half a position at a
- * profit, that half is a realized win even while the other half remains open.
- * Inventory that's still open at the end of the window contributes no record,
- * since we can't tell from activity alone whether the whale will hold to
- * redemption or dump at a loss.
- */
-function matchRoundTrips(trades: ActivityTrade[]): {
+export async function fetchWalletActivity(
+  wallet: string,
+  limit = DEFAULT_ACTIVITY_LIMIT,
+): Promise<{ trades: ActivityTrade[]; redeems: ActivityRedeem[] }> {
+  // Fetch BUY/SELL and REDEEM events in parallel. REDEEMs close the
+  // hold-to-resolution inventory that BUY/SELL pairs alone can't see — a
+  // critical signal for the "specialist who rides winners to $1" cohort.
+  const [trades, redeems] = await Promise.all([
+    fetchActivityPage<ActivityTrade>(wallet, 'TRADE', limit),
+    fetchActivityPage<ActivityRedeem>(wallet, 'REDEEM', limit),
+  ]);
+  return { trades, redeems };
+}
+
+interface InventorySlot {
+  size: number;
+  costUsd: number;
+  conditionId: string;
+  title: string;
+}
+
+interface RoundTrip {
   asset: string;
   category: string;
   title: string;
   pnlUsd: number;
   closedAt: number;
-}[] {
-  const inventory = new Map<string, { size: number; costUsd: number }>();
-  const roundTrips: {
-    asset: string;
-    category: string;
-    title: string;
-    pnlUsd: number;
-    closedAt: number;
-  }[] = [];
+}
 
-  const chrono = [...trades].sort((a, b) => a.timestamp - b.timestamp);
-  for (const t of chrono) {
-    if (!Number.isFinite(t.size) || t.size <= 0) continue;
-    if (!Number.isFinite(t.usdcSize) || t.usdcSize < 0) continue;
+/**
+ * Reconstruct round-trip PnL by walking TRADE + REDEEM events chronologically
+ * and closing an average-cost inventory per asset.
+ *
+ * Closures happen on three kinds of event:
+ *   - SELL: close `min(sell.size, slot.size)` at the SELL fill price.
+ *   - REDEEM (winner): the slot under the redeemed `conditionId` whose
+ *     remaining size matches `redeem.size` closes at `redeem.usdcSize/size`
+ *     per share (≈ $1). This is the hold-to-resolution signal BUY+SELL alone
+ *     can't see — essential for whales who ride winners to payout.
+ *   - REDEEM (losers): the FIRST REDEEM per `conditionId` also closes every
+ *     OTHER open slot under the same condition at $0/share, on the logic that
+ *     a resolved market leaves non-winning outcomes worthless.
+ *
+ * Inventory that's still open (not SOLD, not REDEEMED) contributes no record —
+ * we don't want to guess outcomes for unresolved markets.
+ */
+function matchRoundTrips(
+  trades: ActivityTrade[],
+  redeems: ActivityRedeem[] = [],
+): RoundTrip[] {
+  const inventory = new Map<string, InventorySlot>();
+  const roundTrips: RoundTrip[] = [];
+  const redeemedConditions = new Set<string>();
 
-    const key = t.asset;
-    const slot = inventory.get(key) ?? { size: 0, costUsd: 0 };
-    if (t.side === 'BUY') {
-      slot.size += t.size;
-      slot.costUsd += t.usdcSize;
-      inventory.set(key, slot);
+  interface TradeEvent { kind: 'TRADE'; event: ActivityTrade }
+  interface RedeemEvent { kind: 'REDEEM'; event: ActivityRedeem }
+  const timeline: (TradeEvent | RedeemEvent)[] = [
+    ...trades.map((t) => ({ kind: 'TRADE' as const, event: t })),
+    ...redeems.map((r) => ({ kind: 'REDEEM' as const, event: r })),
+  ].sort((a, b) => a.event.timestamp - b.event.timestamp);
+
+  const closeSlot = (
+    asset: string,
+    slot: InventorySlot,
+    size: number,
+    proceedsUsd: number,
+    closedAt: number,
+  ): void => {
+    const avgCost = slot.size > 0 ? slot.costUsd / slot.size : 0;
+    const costBasis = size * avgCost;
+    roundTrips.push({
+      asset,
+      category: inferCategory(slot.title),
+      title: slot.title,
+      pnlUsd: proceedsUsd - costBasis,
+      closedAt,
+    });
+    slot.size -= size;
+    slot.costUsd -= costBasis;
+    if (slot.size <= 1e-9) {
+      inventory.delete(asset);
+    }
+  };
+
+  for (const ev of timeline) {
+    if (ev.kind === 'TRADE') {
+      const t = ev.event;
+      if (!Number.isFinite(t.size) || t.size <= 0) continue;
+      if (!Number.isFinite(t.usdcSize) || t.usdcSize < 0) continue;
+
+      const key = t.asset;
+      if (t.side === 'BUY') {
+        const slot = inventory.get(key) ?? {
+          size: 0,
+          costUsd: 0,
+          conditionId: t.conditionId,
+          title: t.title,
+        };
+        slot.size += t.size;
+        slot.costUsd += t.usdcSize;
+        inventory.set(key, slot);
+        continue;
+      }
+
+      if (t.side !== 'SELL') continue;
+      const slot = inventory.get(key);
+      if (!slot || slot.size <= 0) continue; // short / unattributed SELL — skip
+
+      const fillSize = Math.min(t.size, slot.size);
+      const proceedsUsd = fillSize * (t.usdcSize / t.size);
+      closeSlot(key, slot, fillSize, proceedsUsd, t.timestamp);
       continue;
     }
 
-    if (t.side !== 'SELL') continue;
-    if (slot.size <= 0) continue; // short / unattributed SELL — skip
+    // REDEEM
+    const r = ev.event;
+    if (!Number.isFinite(r.size) || r.size <= 0) continue;
+    if (!Number.isFinite(r.usdcSize) || r.usdcSize < 0) continue;
 
-    const fillSize = Math.min(t.size, slot.size);
-    const avgCost = slot.size > 0 ? slot.costUsd / slot.size : 0;
-    const proceedsUsd = fillSize * (t.usdcSize / t.size);
-    const costBasis = fillSize * avgCost;
-    const pnlUsd = proceedsUsd - costBasis;
-    roundTrips.push({
-      asset: key,
-      category: inferCategory(t.title),
-      title: t.title,
-      pnlUsd,
-      closedAt: t.timestamp,
-    });
-    slot.size -= fillSize;
-    slot.costUsd -= costBasis;
-    if (slot.size <= 1e-9) {
-      inventory.delete(key);
-    } else {
-      inventory.set(key, slot);
+    // Find all open inventory under this conditionId.
+    const condSlots: [string, InventorySlot][] = [];
+    for (const [asset, slot] of inventory) {
+      if (slot.conditionId === r.conditionId) condSlots.push([asset, slot]);
+    }
+    if (condSlots.length === 0) continue; // BUYs truncated by fetch limit — skip silently.
+
+    // Pick the winner: slot whose remaining size best matches redeem.size.
+    const firstForCondition = !redeemedConditions.has(r.conditionId);
+    redeemedConditions.add(r.conditionId);
+
+    const pricePerShare = r.size > 0 ? r.usdcSize / r.size : 0;
+    const winner = condSlots.reduce<[string, InventorySlot] | null>((best, entry) => {
+      if (!best) return entry;
+      return Math.abs(entry[1].size - r.size) < Math.abs(best[1].size - r.size) ? entry : best;
+    }, null);
+
+    if (winner) {
+      const [asset, slot] = winner;
+      const fillSize = Math.min(r.size, slot.size);
+      closeSlot(asset, slot, fillSize, fillSize * pricePerShare, r.timestamp);
+    }
+
+    // On the first REDEEM for a conditionId, zero out every OTHER open slot
+    // under it — resolved losing outcomes are worth $0.
+    if (firstForCondition) {
+      for (const [asset] of condSlots) {
+        if (winner && asset === winner[0]) continue;
+        const current = inventory.get(asset);
+        if (!current || current.size <= 0) continue;
+        closeSlot(asset, current, current.size, 0, r.timestamp);
+      }
     }
   }
   return roundTrips;
@@ -187,7 +297,11 @@ function computeHhi(counts: number[]): number {
   return hhi;
 }
 
-export function computeWalletStats(wallet: string, trades: ActivityTrade[]): WalletStats {
+export function computeWalletStats(
+  wallet: string,
+  trades: ActivityTrade[],
+  redeems: ActivityRedeem[] = [],
+): WalletStats {
   const tradeCount = trades.length;
   const totalVolumeUsd = trades.reduce((sum, t) => sum + (Number.isFinite(t.usdcSize) ? t.usdcSize : 0), 0);
   const avgTradeSizeUsd = tradeCount > 0 ? totalVolumeUsd / tradeCount : 0;
@@ -201,7 +315,7 @@ export function computeWalletStats(wallet: string, trades: ActivityTrade[]): Wal
     byCategory.set(cat, bucket);
   }
 
-  const roundTrips = matchRoundTrips(trades);
+  const roundTrips = matchRoundTrips(trades, redeems);
   let wins = 0;
   let losses = 0;
   const pnls: number[] = [];
@@ -343,8 +457,8 @@ export async function fetchAndScoreWallet(
   cfg: QualityConfig,
 ): Promise<{ stats: WalletStats; result: QualityScoreResult } | null> {
   try {
-    const trades = await fetchWalletActivity(wallet);
-    const stats = computeWalletStats(wallet, trades);
+    const { trades, redeems } = await fetchWalletActivity(wallet);
+    const stats = computeWalletStats(wallet, trades, redeems);
     const result = scoreWallet(stats, cfg);
     return { stats, result };
   } catch (err) {
