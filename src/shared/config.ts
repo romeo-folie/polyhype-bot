@@ -799,8 +799,12 @@ const envSchema = z.object({
   NEAR_ZERO_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(500),
   // Minimum hours until resolution — avoid markets resolving before position can compound.
   NEAR_ZERO_MIN_HOURS: z.coerce.number().min(0).optional().default(24),
-  // TTL for per-market dedup key. Prevents re-evaluating the same market for 6h.
+  // TTL for per-market dedup key after a successful OSINT-matched evaluation.
+  // Shorter because a fresh OSINT headline means new info worth re-evaluating.
   NEAR_ZERO_DEDUP_TTL_S: z.coerce.number().int().min(0).optional().default(21600),
+  // TTL for per-market dedup after a successful non-OSINT evaluation. Longer
+  // because nothing has changed — the market is in the same efficient state.
+  NEAR_ZERO_DEDUP_TTL_S_NON_OSINT: z.coerce.number().int().min(0).optional().default(86400),
   // Dead-horse filter: a real mispricing drops INTO the near-zero zone. Markets
   // that have always been cheap (long-tail championship futures, binary polls with
   // many competitors) are efficient at those prices and burn LLM budget for nothing.
