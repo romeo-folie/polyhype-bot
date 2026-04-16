@@ -45,11 +45,14 @@ const NEAR_ZERO_OSINT_KEY = 'near_zero:osint_signals';
 // ── Heuristic exclusion patterns ────────────────────────────────────────────
 // Markets matching these patterns are almost always correctly cheap at 3-10¢.
 // These are structural, not tunable via config.
-const HEURISTIC_EXCLUDE_PATTERNS: RegExp[] = [
+export const HEURISTIC_EXCLUDE_PATTERNS: RegExp[] = [
   /\bwin\b.*\b(championship|title|cup|trophy|medal|pennant|league)\b/i,
   /\bnext\b.*\b(president|prime minister|chancellor|leader)\b/i,
   /\b(win|receive|awarded?)\b.*\b(oscar|emmy|grammy|nobel|award|ballon)\b/i,
   /\b(make|reach)\b.*\b(playoff|final|semifinal)\b/i,
+  // Head-to-head matchups (tennis/baseball/etc.) — "X vs. Y" format.
+  // LLM has no information edge on specific games; consensus is hallucinated.
+  /\bvs\.?\s+[A-Z][a-z]/,
 ];
 
 function parseKeywordList(raw: string): string[] {
@@ -65,7 +68,7 @@ function isExcludedByKeyword(question: string, excludes: string[]): boolean {
   return excludes.some((kw) => q.includes(kw));
 }
 
-function isExcludedByHeuristic(question: string): boolean {
+export function isExcludedByHeuristic(question: string): boolean {
   return HEURISTIC_EXCLUDE_PATTERNS.some((re) => re.test(question));
 }
 
@@ -316,11 +319,14 @@ async function main() {
       const pOurSide = candidate.direction === 'YES' ? pYes : 1 - pYes;
       const edge = pOurSide - candidate.price;
       const meetsEdge = edge >= cfg.NEAR_ZERO_MIN_EDGE;
+      // Stddev gate: reject noisy LLM consensus where providers disagree.
+      const lowStddev = estimate.stddev <= cfg.NEAR_ZERO_MAX_STDDEV;
 
       const wouldTrade =
         cfg.NEAR_ZERO_SCANNER_ENABLED &&
         pOurSide >= cfg.NEAR_ZERO_MIN_CONSENSUS &&
-        meetsEdge;
+        meetsEdge &&
+        lowStddev;
 
       logger.info('[near-zero] candidate evaluated', {
         marketId: candidate.market.id,
@@ -330,6 +336,8 @@ async function main() {
         consensusPYes: pYes.toFixed(3),
         pOurSide: pOurSide.toFixed(3),
         stddev: estimate.stddev.toFixed(3),
+        maxStddev: cfg.NEAR_ZERO_MAX_STDDEV,
+        lowStddev,
         edge: edge.toFixed(3),
         minEdge: cfg.NEAR_ZERO_MIN_EDGE,
         meetsEdge,
@@ -352,6 +360,8 @@ async function main() {
           consensusPYes: pYes,
           pOurSide,
           stddev: estimate.stddev,
+          maxStddev: cfg.NEAR_ZERO_MAX_STDDEV,
+          lowStddev,
           meetsEdge,
           payoutRatio: (1 - candidate.price) / candidate.price,
           minConsensus: cfg.NEAR_ZERO_MIN_CONSENSUS,
@@ -416,9 +426,18 @@ async function main() {
   }
 }
 
-void main().catch((err: unknown) => {
-  logger.error('[near-zero] fatal error', {
-    error: err instanceof Error ? err.message : String(err),
+// Only auto-run when executed as the direct entrypoint, not when imported
+// by tests or other modules.
+const isMainModule =
+  import.meta.url === `file://${process.argv[1]}` ||
+  process.argv[1]?.endsWith('/nearZeroScanner.js') === true ||
+  process.argv[1]?.endsWith('/nearZeroScanner.ts') === true;
+
+if (isMainModule) {
+  void main().catch((err: unknown) => {
+    logger.error('[near-zero] fatal error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    process.exit(1);
   });
-  process.exit(1);
-});
+}

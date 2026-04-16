@@ -808,6 +808,10 @@ const envSchema = z.object({
   // Minimum edge (consensus - marketPrice) to trade. At near-zero prices, even 65%
   // consensus is massive edge — but require at least 50pp gap to filter noise.
   NEAR_ZERO_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.50),
+  // Maximum LLM consensus stddev. High stddev (>0.20) means providers strongly
+  // disagree — reject as noise. Shadow analysis 2026-04-16 showed ~40% of
+  // otherwise-qualifying signals had stddev > 0.25.
+  NEAR_ZERO_MAX_STDDEV: z.coerce.number().min(0).max(1).optional().default(0.20),
   // TTL for OSINT signal entries written by the mapping pipeline when a matched
   // market happens to be in the near-zero price range.
   NEAR_ZERO_OSINT_SIGNAL_TTL_S: z.coerce.number().int().min(0).optional().default(172800),
