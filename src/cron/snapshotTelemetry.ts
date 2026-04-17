@@ -26,8 +26,8 @@ import { logger } from '../shared/logger.js';
 async function main(): Promise<void> {
   const cfg = loadConfig();
 
-  if (!cfg.PG_URL) {
-    logger.info('[snapshot-cron] PG_URL not set — skipping');
+  if (!cfg.PG_URL && !cfg.PG_URL_NOPASS) {
+    logger.info('[snapshot-cron] No database URL set (PG_URL / PG_URL_NOPASS) — skipping');
     return;
   }
 

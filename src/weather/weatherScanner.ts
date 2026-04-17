@@ -500,6 +500,12 @@ export function daysUntil(targetDate: string, now?: Date): number {
  * `estimateBracketProbability`; raw `forecast.stdDev` is preserved on the
  * returned opportunity (`forecastStdDev`) so shadow analysis can compare.
  */
+export interface FindMispricedResult {
+  opportunities: WeatherBracketOpportunity[];
+  /** Sum of all bracket model probabilities — used for coverage check and shadow logging. */
+  modelSum: number;
+}
+
 export function findMispricedBrackets(
   event: ParsedWeatherEvent,
   forecast: ForecastResult,
@@ -507,7 +513,7 @@ export function findMispricedBrackets(
   minEdge: number,
   stddevMultiplier = 1.0,
   minModelCoverage = 0.95,
-): WeatherBracketOpportunity[] {
+): FindMispricedResult {
   const opportunities: WeatherBracketOpportunity[] = [];
 
   // Effective stddev after calibration multiplier. Multiplier > 1 broadens the
@@ -541,7 +547,7 @@ export function findMispricedBrackets(
       bracketCount: event.brackets.length,
       threshold: minModelCoverage,
     });
-    return [];
+    return { opportunities: [], modelSum };
   }
 
   // Compute overround (diagnostic): sum of all market YES prices.
@@ -609,7 +615,7 @@ export function findMispricedBrackets(
     });
   }
 
-  return opportunities;
+  return { opportunities, modelSum };
 }
 
 // ── Main scanner ─────────────────────────────────────────────────────────
@@ -675,9 +681,11 @@ export async function scanWeatherMarkets(
       continue;
     }
 
-    // Step 4: Find mispriced brackets (coverage guard inside; returns [] when bracket
-    // data is incomplete — e.g. late-day thinning from 11 → 4 brackets).
-    const opportunities = findMispricedBrackets(
+    // Step 4: Find mispriced brackets (coverage guard inside; returns empty opportunities
+    // when bracket data is incomplete — e.g. late-day thinning from 11 → 4 brackets).
+    // modelSum is returned by findMispricedBrackets so shadow logging reuses the exact
+    // values used for gating rather than recomputing them.
+    const { opportunities, modelSum } = findMispricedBrackets(
       event,
       forecast,
       daysOut,
@@ -685,13 +693,7 @@ export async function scanWeatherMarkets(
       cfg.WEATHER_STDDEV_MULTIPLIER,
       cfg.WEATHER_MIN_MODEL_COVERAGE,
     );
-
-    // Compute modelSum for shadow obs (same effective stddev as findMispricedBrackets).
     const effectiveStdDev = forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER;
-    const modelSum = event.brackets.reduce((s, b) =>
-      s + estimateBracketProbability(forecast.forecastHigh, b.low, b.high, daysOut, effectiveStdDev),
-      0,
-    );
     const coverageStatus = modelSum >= cfg.WEATHER_MIN_MODEL_COVERAGE ? 'ok' : 'skipped_low_coverage';
 
     // Step 6: Shadow-log every evaluated event

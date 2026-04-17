@@ -520,7 +520,7 @@ describe('findMispricedBrackets', () => {
       ensembleMembers: 31,
     };
 
-    const opps = findMispricedBrackets(event, forecast, 1, 0.08);
+    const { opportunities: opps } = findMispricedBrackets(event, forecast, 1, 0.08);
 
     // Should find at least one opportunity
     expect(opps.length).toBeGreaterThan(0);
@@ -552,13 +552,13 @@ describe('findMispricedBrackets', () => {
 
     // Pass minModelCoverage=0 to disable the coverage guard — this test focuses
     // on multiplier behaviour with an intentionally minimal 2-bracket event.
-    const baseline = findMispricedBrackets(event, forecast, 1, 0, 1.0, 0);
-    const widened  = findMispricedBrackets(event, forecast, 1, 0, 1.5, 0);
+    const { opportunities: baselineOpps } = findMispricedBrackets(event, forecast, 1, 0, 1.0, 0);
+    const { opportunities: widenedOpps }  = findMispricedBrackets(event, forecast, 1, 0, 1.5, 0);
 
-    const centralBase = baseline.find((o) => o.bracketLabel === 'central')!;
-    const centralWide = widened.find((o) => o.bracketLabel === 'central')!;
-    const tailBase    = baseline.find((o) => o.bracketLabel === 'tail')!;
-    const tailWide    = widened.find((o) => o.bracketLabel === 'tail')!;
+    const centralBase = baselineOpps.find((o) => o.bracketLabel === 'central')!;
+    const centralWide = widenedOpps.find((o) => o.bracketLabel === 'central')!;
+    const tailBase    = baselineOpps.find((o) => o.bracketLabel === 'tail')!;
+    const tailWide    = widenedOpps.find((o) => o.bracketLabel === 'tail')!;
 
     expect(centralWide.modelProbability).toBeLessThan(centralBase.modelProbability);
     expect(tailWide.modelProbability).toBeGreaterThan(tailBase.modelProbability);
@@ -603,7 +603,7 @@ describe('findMispricedBrackets', () => {
       endDate: '2026-04-14T12:00:00Z',
     };
 
-    const opps = findMispricedBrackets(event, forecast, 1, 0.08);
+    const { opportunities: opps } = findMispricedBrackets(event, forecast, 1, 0.08);
     // With fair prices, no bracket should have 8+ cents of edge
     expect(opps.length).toBe(0);
   });
@@ -629,7 +629,7 @@ describe('findMispricedBrackets', () => {
     // Forecast centred on the brackets so these 4 carry ~40-50% of total mass
     const forecast = { forecastHigh: 50, stdDev: 4, source: 'noaa' as const, ensembleMembers: 0 };
 
-    const opps = findMispricedBrackets(event, forecast, 1, 0.0, 1.0, 0.95);
+    const { opportunities: opps } = findMispricedBrackets(event, forecast, 1, 0.0, 1.0, 0.95);
     expect(opps).toHaveLength(0);
     expect(logger.warn).toHaveBeenCalledWith(
       '[weather] model probabilities below coverage threshold, skipping event',

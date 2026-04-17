@@ -1113,6 +1113,9 @@ const envSchema = z.object({
   // Postgres connection. Optional until #147 cutover; the writer is the
   // only consumer today and fails loud at startup if PG_URL is unset.
   PG_URL: z.string().optional(),
+  // Passwordless connection URL for host-side read-only scripts (e.g. shadow analysis).
+  // Uses .pgpass for authentication. Containers always use PG_URL (with password).
+  PG_URL_NOPASS: z.string().optional(),
   // Writer batch / poll tuning. Defaults are conservative for the CAX11.
   DB_WRITER_BATCH_SIZE: z.coerce.number().int().min(1).max(2000).optional().default(200),
   DB_WRITER_POLL_MS: z.coerce.number().int().min(50).max(10_000).optional().default(500),
