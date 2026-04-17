@@ -1113,6 +1113,9 @@ const envSchema = z.object({
   // Postgres connection. Optional until #147 cutover; the writer is the
   // only consumer today and fails loud at startup if PG_URL is unset.
   PG_URL: z.string().optional(),
+  // Passwordless connection URL for host-side read-only scripts (e.g. shadow analysis).
+  // Uses .pgpass for authentication. Containers always use PG_URL (with password).
+  PG_URL_NOPASS: z.string().optional(),
   // Writer batch / poll tuning. Defaults are conservative for the CAX11.
   DB_WRITER_BATCH_SIZE: z.coerce.number().int().min(1).max(2000).optional().default(200),
   DB_WRITER_POLL_MS: z.coerce.number().int().min(50).max(10_000).optional().default(500),
@@ -1158,6 +1161,16 @@ const envSchema = z.object({
   // point. Set <1 to tighten. Adjusted stddev is what enters estimateBracketProbability;
   // raw forecastStdDev is still logged on the shadow row for comparison.
   WEATHER_STDDEV_MULTIPLIER: z.coerce.number().min(0.1).max(5).optional().default(1.0),
+  // Minimum ratio of ensemble stddev to the climatology-default stddev. Prevents a
+  // tight ensemble from collapsing the bracket distribution (observed in tropical cities
+  // where ensemble stddev < 0.3°C causes 5-8σ misses against ground truth).
+  // 0.7 = ensemble stddev may not be tighter than 70% of the seasonal default.
+  WEATHER_STDDEV_MIN_FRACTION: z.coerce.number().min(0.1).max(1).optional().default(0.7),
+  // Minimum sum of all model bracket probabilities in an event. Below this threshold
+  // the event is skipped — late-day bracket thinning (11 → 4 brackets) leaves the
+  // surviving brackets with artificially high probability mass and trips the edge gate
+  // on a math artifact. 0.95 allows small tail leakage at outermost brackets.
+  WEATHER_MIN_MODEL_COVERAGE: z.coerce.number().min(0).max(1).optional().default(0.95),
   // --- WEATHER GROUND-TRUTH RECONCILER ---
   // Fills `weather_ground_truth` with observed daily highs for past events, so
   // shadow-scan predictions in `shadow_observations` can be validated against

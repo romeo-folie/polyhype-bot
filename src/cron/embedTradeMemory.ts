@@ -57,8 +57,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!cfg.PG_URL) {
-    logger.info('[embed-cron] PG_URL not set — skipping embedding run');
+  if (!cfg.PG_URL && !cfg.PG_URL_NOPASS) {
+    logger.info('[embed-cron] No database URL set (PG_URL / PG_URL_NOPASS) — skipping embedding run');
     return;
   }
 

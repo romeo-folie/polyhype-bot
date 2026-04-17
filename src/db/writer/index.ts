@@ -40,8 +40,8 @@ const HEARTBEAT_KEY = 'heartbeat:writer';
 
 async function runWriter(): Promise<void> {
   const cfg = loadConfig();
-  if (!process.env.PG_URL) {
-    logger.error('[writer] PG_URL not set — refusing to start');
+  if (!process.env.PG_URL && !process.env.PG_URL_NOPASS && !process.env.DATABASE_URL) {
+    logger.error('[writer] No database URL set (tried PG_URL, PG_URL_NOPASS, DATABASE_URL) — refusing to start');
     process.exit(1);
   }
 
