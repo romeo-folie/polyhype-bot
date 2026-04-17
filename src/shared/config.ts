@@ -404,10 +404,18 @@ const envSchema = z.object({
   UPDOWN_PNL_COOLDOWN_MIN: z.coerce.number().int().min(1).optional().default(30),
   UPDOWN_PNL_MIN_SAMPLES: z.coerce.number().int().min(1).optional().default(3),
 
-  // Oracle-Lag Scanner (BTC Up/Down 15m, Chainlink oracle-lag sniper).
-  // Ships dark — flip ORACLE_LAG_ENABLED to true only after shadow-log review.
+  // Oracle-Lag Scanner (BTC + ETH Up/Down 15m, Chainlink oracle-lag sniper).
+  // Ships dark — enable live trading per asset only after shadow-log review
+  // (ORACLE_LAG_ENABLED for BTC, ORACLE_LAG_ETH_ENABLED for ETH).
   ORACLE_LAG_ENABLED: boolFromEnv.optional().default(false),
-  // Minimum Chainlink BTC move % over the lookback window to consider entry (0.07 = 7 bps).
+  // Comma-separated assets to shadow-scan. Both BTC and ETH are wired; per-asset
+  // live flags (ORACLE_LAG_ENABLED for BTC, ORACLE_LAG_ETH_ENABLED for ETH)
+  // control whether trades actually fire.
+  ORACLE_LAG_ASSETS: z.string().optional().default('bitcoin,ethereum'),
+  // ETH oracle-lag live flag. Ships dark — shadow logs run, no trades fire until
+  // flipped. Only meaningful when 'ethereum' is in ORACLE_LAG_ASSETS.
+  ORACLE_LAG_ETH_ENABLED: boolFromEnv.optional().default(false),
+  // Minimum Chainlink move % over the lookback window to consider entry, shared across all assets (0.07 = 7 bps).
   ORACLE_LAG_MIN_MOVE_PCT: z.coerce.number().min(0).optional().default(0.07),
   // Lookback window in seconds for the Chainlink move computation.
   ORACLE_LAG_MOVE_WINDOW_SEC: z.coerce.number().int().min(1).optional().default(5),

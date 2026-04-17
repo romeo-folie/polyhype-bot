@@ -55,11 +55,13 @@ export function oracleLagExitStateKey(
 export interface OracleLagExitStateWrite {
   marketId: string;
   direction: 'UP' | 'DOWN';
+  /** Chainlink RTDS symbol for this asset (e.g. 'btc/usd', 'eth/usd'). */
+  chainlinkSymbol: string;
   /** PM YES-side price at entry (always YES, not the side we bought). */
   entryPmYesPrice: number;
   /** PM NO-side price at entry (stored so DOWN returnPct is exact). */
   entryPmNoPrice: number;
-  /** Chainlink BTC/USD mid at entry. */
+  /** Chainlink mid at entry for this asset. */
   entryChainlinkPrice: number;
   /** Triggering scanner move, in percent (e.g. +0.08 for +8 bps). */
   entryChainlinkMovePct: number;
@@ -85,6 +87,7 @@ export async function writeOracleLagExitState(
   await redis
     .multi()
     .hset(key, {
+      chainlinkSymbol: input.chainlinkSymbol,
       entryPmYesPrice: input.entryPmYesPrice.toFixed(6),
       entryPmNoPrice: input.entryPmNoPrice.toFixed(6),
       entryChainlinkPrice: input.entryChainlinkPrice.toFixed(4),
@@ -101,6 +104,8 @@ export async function writeOracleLagExitState(
 export interface OracleLagExitState {
   marketId: string;
   direction: 'UP' | 'DOWN';
+  /** Chainlink RTDS symbol for this asset. Falls back to 'btc/usd' for states written before this field was added. */
+  chainlinkSymbol: string;
   entryPmYesPrice: number;
   entryPmNoPrice: number;
   entryChainlinkPrice: number;
@@ -140,6 +145,7 @@ export async function readOracleLagExitState(
   return {
     marketId,
     direction: raw.direction === 'DOWN' ? 'DOWN' : 'UP',
+    chainlinkSymbol: raw.chainlinkSymbol ?? 'btc/usd',
     entryPmYesPrice,
     entryPmNoPrice,
     entryChainlinkPrice,
@@ -535,7 +541,7 @@ export class OracleLagExitMonitor {
     }
 
     // Chainlink feed staleness check (skip reversal if stale, not the whole tick).
-    const latestTick = this.feed.getLatest(CHAINLINK_SYMBOL);
+    const latestTick = this.feed.getLatest(state.chainlinkSymbol);
     const now = Date.now();
     const chainlinkStale =
       !latestTick || now - latestTick.receivedAt > CHAINLINK_STALE_MS;
