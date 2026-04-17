@@ -851,9 +851,9 @@ const envSchema = z.object({
   // Require a matching OSINT signal before the scanner will evaluate a candidate.
   // When true, candidates without an entry in near_zero:osint_signals are blocked.
   // Set false to restore pure-LLM mode (useful for testing).
-  NEAR_ZERO_REQUIRE_OSINT: z.coerce.boolean().optional().default(true),
+  NEAR_ZERO_REQUIRE_OSINT: boolFromEnv.optional().default(true),
   // Enable the NO-side OSINT injector cron (nearZeroOsintInjector.ts).
-  NEAR_ZERO_INJECTOR_ENABLED: z.coerce.boolean().optional().default(true),
+  NEAR_ZERO_INJECTOR_ENABLED: boolFromEnv.optional().default(true),
   // Minimum LLM relevance score (0–10) for a headline→market pair to be
   // injected as a NO-side OSINT signal.
   NEAR_ZERO_INJECTOR_MIN_NO_SCORE: z.coerce.number().int().min(0).max(10).optional().default(6),

@@ -145,6 +145,11 @@ export async function runNearZeroOsintInjector(redis: Redis): Promise<void> {
     return;
   }
 
+  if (!cfg.OPENAI_API_KEY) {
+    logger.warn('[nz-injector] OPENAI_API_KEY not configured — injector requires OpenAI; skipping');
+    return;
+  }
+
   // 1. Load recent OSINT items (last 24h).
   const osintItems = await getRecentOsintItems(redis);
   if (osintItems.length === 0) {
@@ -240,7 +245,7 @@ export async function runNearZeroOsintInjector(redis: Redis): Promise<void> {
         headline,
         candidate.question,
         candidate.endDate,
-        cfg.OPENAI_API_KEY ?? '',
+        cfg.OPENAI_API_KEY,
         cfg.OPENAI_MODEL,
       );
     } catch (err) {
