@@ -524,25 +524,29 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
 
   // ── NEAR_ZERO_REQUIRE_OSINT gate (PR 3) ──────────────────────────────────
 
-  it('blockedReason=no_osint_signal when REQUIRE_OSINT=true and no OSINT match', async () => {
-    const { redis } = makeRedis();
+  it('blockedReason=no_osint_signal short-circuits before LLM when REQUIRE_OSINT=true', async () => {
+    const { redis, state } = makeRedis();
     mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-no-osint' })]);
     mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_REQUIRE_OSINT: true });
-    // No OSINT signal in zrangeMembers → hasOsintSignal = false
-    mockEstimateConsensusProbability.mockResolvedValue({
-      probability: 0.80,
-      reasoning: 'ok',
-      stddev: 0.05,
-      sampleCount: 3,
-    });
+    // No OSINT signal → hasOsintSignal = false → early exit before LLM
 
     await runNearZeroScan(redis);
+
+    // LLM must NOT be called — the whole point of the early exit
+    expect(mockEstimateConsensusProbability).not.toHaveBeenCalled();
 
     const { enqueueWrite } = await import('../../db/writeQueue.js');
     const enqueueMock = vi.mocked(enqueueWrite);
     const [, payload] = enqueueMock.mock.calls[0]!;
     expect(payload.wouldBlock).toBe(true);
+    expect(payload.metricValue).toBe(0);
+    expect(payload.threshold).toBe(1);
     expect((payload.payload as Record<string, unknown>).blockedReason).toBe('no_osint_signal');
+
+    // Dedup key must be set (non-OSINT TTL) so we don't repeat the check every cycle
+    const dedupSets = state.setCalls.filter((c) => c.key === 'near_zero:dedup:mkt-no-osint:YES');
+    expect(dedupSets).toHaveLength(1);
+    expect(dedupSets[0]!.ttl).toBe(DEFAULT_CONFIG.NEAR_ZERO_DEDUP_TTL_S_NON_OSINT);
   });
 
   it('wouldTradeIfEnabled=true when REQUIRE_OSINT=true and OSINT signal exists', async () => {

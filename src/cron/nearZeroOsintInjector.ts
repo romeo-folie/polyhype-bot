@@ -159,9 +159,18 @@ export async function runNearZeroOsintInjector(redis: Redis): Promise<void> {
 
   for (const market of allMarkets) {
     if (!market.active || market.closed) continue;
-    const prices = parseOutcomePrices(market.outcomePrices);
-    if (!prices || prices.length < 2) continue;
-    const noPrice = parseFloat(prices[1] ?? '');
+    let noPrice: number;
+    try {
+      const prices = parseOutcomePrices(market.outcomePrices);
+      if (!prices || prices.length < 2) continue;
+      noPrice = parseFloat(prices[1] ?? '');
+    } catch (err) {
+      logger.warn('[nz-injector] skipping market with malformed outcomePrices', {
+        marketId: market.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
     if (
       isNaN(noPrice) ||
       noPrice < cfg.NEAR_ZERO_MIN_PRICE ||
@@ -186,33 +195,43 @@ export async function runNearZeroOsintInjector(redis: Redis): Promise<void> {
   const minOverlap = cfg.NEAR_ZERO_INJECTOR_MIN_ENTITY_OVERLAP;
   const minScore = cfg.NEAR_ZERO_INJECTOR_MIN_NO_SCORE;
 
-  // Build ranked pairs by overlap score, highest first, to spend LLM budget wisely.
-  const pairs: { candidate: InjectorCandidate; headline: string; urgency: number; overlap: number }[] = [];
+  // Build top pairs to score. For each candidate we keep at most
+  // PAIRS_PER_CANDIDATE best-matching OSINT items (by overlap then urgency),
+  // then take the global top maxLlm across all candidates. This bounds
+  // memory at O(candidates × PAIRS_PER_CANDIDATE) instead of O(N×M).
+  const PAIRS_PER_CANDIDATE = 2;
+  interface Pair { candidate: InjectorCandidate; headline: string; urgency: number; overlap: number }
+  const pairs: Pair[] = [];
 
   for (const candidate of candidates) {
+    const best: Pair[] = [];
     for (const item of osintItems) {
       const overlap = computeEntityOverlap(item.keywords, candidate.question);
       if (overlap >= minOverlap) {
-        pairs.push({ candidate, headline: item.title, urgency: item.urgencyScore, overlap });
+        best.push({ candidate, headline: item.title, urgency: item.urgencyScore, overlap });
       }
     }
+    if (best.length === 0) continue;
+    best.sort((a, b) => b.overlap - a.overlap || b.urgency - a.urgency);
+    pairs.push(...best.slice(0, PAIRS_PER_CANDIDATE));
   }
 
-  // Sort by overlap desc, then urgency desc.
+  // Final sort across all candidates; take only what the LLM budget allows.
   pairs.sort((a, b) => b.overlap - a.overlap || b.urgency - a.urgency);
+  const pairsToEval = pairs.slice(0, maxLlm);
 
   logger.info('[nz-injector] pairs to evaluate', {
     totalCandidates: candidates.length,
     osintItems: osintItems.length,
     qualifiedPairs: pairs.length,
+    pairsToEval: pairsToEval.length,
     llmBudget: maxLlm,
   });
 
   let llmCalls = 0;
   let injected = 0;
 
-  for (const { candidate, headline, overlap } of pairs) {
-    if (llmCalls >= maxLlm) break;
+  for (const { candidate, headline, overlap } of pairsToEval) {
 
     llmCalls++;
     let result: ScoreResult;
