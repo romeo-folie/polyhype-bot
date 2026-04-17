@@ -189,16 +189,16 @@ describe('runNearZeroOsintInjector', () => {
   });
 
   it('processes markets from the slim watchlist cache that omit active/closed fields', async () => {
-    // Regression: the watchlist cache writer only persists id/question/prices/etc.,
-    // NOT `active` or `closed`. The injector must not skip cache entries just
-    // because those fields are undefined — the cache is already filtered upstream
-    // to active=true&closed=false by refreshDynamicWatchlist.
+    // Regression: the watchlist cache writer does NOT persist `active` or `closed`
+    // (it does persist conditionId, clobTokenIds, liquidity, etc., but this fixture
+    // is intentionally minimal — it omits only `active`/`closed` to isolate the
+    // guard regression, not to replicate the full cache payload).
     const slimMarket = {
       id: 'slim-1',
       question: 'Will Iran and Israel sign a peace deal by July 2026?',
       outcomePrices: JSON.stringify(['0.95', '0.05']), // NO=5¢ → near-zero
       endDate: '2026-07-01T00:00:00Z',
-      // active + closed intentionally omitted — matches real cache shape
+      // active + closed intentionally absent — the injector must not gate on them
     };
     mockGetCachedMarkets.mockResolvedValue([slimMarket]);
     mockGetRecentOsintItems.mockResolvedValue([makeOsintItem()]);
