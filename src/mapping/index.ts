@@ -15,7 +15,7 @@ import { loadConfig } from '../shared/config.js';
 import { findCandidateMarkets, type CandidateMarket } from './entityExtractor.js';
 import { scoreMarketRelevance } from './relevanceGate.js';
 import { estimateConsensusProbability, estimateSentiment } from './consensusCalculator.js';
-import { computeDivergence } from './divergenceCalculator.js';
+import { computeDivergence, checkTimeToResolution } from './divergenceCalculator.js';
 import { resolveYesPrice, resolveNoPrice } from '../shared/priceCache.js';
 import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import { getRedis } from '../shared/redis.js';
@@ -325,6 +325,15 @@ interface EvaluateCandidateResult {
  */
 async function evaluateOsintCandidate(args: EvaluateCandidateArgs): Promise<EvaluateCandidateResult> {
   const { candidate, item, bankrollUsd, cfg, opts } = args;
+
+  // Pre-screen time horizon before any downstream work. The full gate runs
+  // again inside computeDivergence but doing it here avoids the WS subscribe,
+  // price resolution, and 3 consensus provider calls for markets that will be
+  // rejected as too_long_dated regardless.
+  const ttr = checkTimeToResolution(candidate.endDate ?? undefined, cfg.PM_MAX_HOURS_TO_RESOLUTION_OSINT, cfg.PM_MIN_HOURS_TO_RESOLUTION);
+  if (!ttr.ok) {
+    return { signal: null, skipReason: ttr.skipReason ?? 'time_to_resolution' };
+  }
 
   // Subscribe to WS updates for high-urgency items
   if (opts?.feed && item.urgencyScore >= cfg.URGENCY_THRESHOLD) {
