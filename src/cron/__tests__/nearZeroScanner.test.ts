@@ -63,6 +63,11 @@ vi.mock('../../execution/bookDepthCheck.js', () => ({
   checkBookDepthForStake: (...args: unknown[]) => mockCheckBookDepthForStake(...args),
 }));
 
+const mockGetRecentOsintItems = vi.fn<() => Promise<unknown[]>>().mockResolvedValue([]);
+vi.mock('../../ingestion/osintStore.js', () => ({
+  getRecentOsintItems: (...args: unknown[]) => mockGetRecentOsintItems(...(args as [])),
+}));
+
 const mockExtractTheme = vi.fn<(q: string) => string | null>(() => null);
 const mockAddNearZeroPosition = vi.fn().mockResolvedValue(undefined);
 const mockCountOpenNearZeroPositions = vi.fn<() => Promise<number>>().mockResolvedValue(0);
@@ -107,6 +112,8 @@ const DEFAULT_CONFIG = {
   NEAR_ZERO_MAX_OPEN_POSITIONS: 4,
   NEAR_ZERO_REQUIRE_OSINT: false, // off by default in tests to isolate other gates
   NEAR_ZERO_MAX_SLIPPAGE_BPS: 200,
+  NEAR_ZERO_REENTRY_COOLDOWN_S: 86400,
+  MIN_BET_USD: 5,
 };
 
 const mockLoadConfig = vi.fn(() => ({ ...DEFAULT_CONFIG }));
@@ -271,6 +278,7 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     mockCountOpenPositionsInTheme.mockResolvedValue(0);
     mockAddNearZeroPosition.mockResolvedValue(undefined);
     mockCheckBookDepthForStake.mockResolvedValue({ ok: true, expectedFillPrice: 0.07, expectedSlippageBps: 0 });
+    mockGetRecentOsintItems.mockResolvedValue([]);
   });
 
   it('wouldTradeIfEnabled is true when all gates pass but scanner is disabled', async () => {
@@ -605,7 +613,7 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     expect((payload.payload as Record<string, unknown>).blockedReason).not.toBe('no_osint_signal');
   });
 
-  // ── Book-depth slippage gate (PR 4) ──────────────────────────────────────
+  // ── Book-depth slippage gate (PR 5) ──────────────────────────────────────
 
   it('skips execution when depth gate returns insufficient_depth', async () => {
     const { redis } = makeRedis();
@@ -663,6 +671,25 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     expect(mockExecuteSignal).not.toHaveBeenCalled();
   });
 
+  it('skips candidate when clobTokenIds cannot be parsed', async () => {
+    const { redis } = makeRedis();
+    mockGetCachedMarkets.mockResolvedValue([
+      makeMarket({ id: 'mkt-bad-tokens', clobTokenIds: 'not-valid-json' }),
+    ]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_SCANNER_ENABLED: true });
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    expect(mockCheckBookDepthForStake).not.toHaveBeenCalled();
+    expect(mockExecuteSignal).not.toHaveBeenCalled();
+  });
+
   it('proceeds to execution when depth gate passes', async () => {
     const { redis } = makeRedis();
     mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-deep' })]);
@@ -683,5 +710,150 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     await runNearZeroScan(redis);
 
     expect(mockExecuteSignal).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Re-entry cooldown (PR 5) ──────────────────────────────────────────────
+
+  it('skips LLM when re-entry cooldown key is present', async () => {
+    const { redis } = makeRedis({
+      getMap: new Map([['near_zero:reentry_cooldown:mkt-1:YES', '1']]),
+    });
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-1' })]);
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    expect(mockEstimateConsensusProbability).not.toHaveBeenCalled();
+    expect(mockExecuteSignal).not.toHaveBeenCalled();
+  });
+
+  it('proceeds normally when re-entry cooldown key is absent', async () => {
+    const { redis } = makeRedis(); // no cooldown key
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-2' })]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_SCANNER_ENABLED: true });
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    expect(mockExecuteSignal).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Headline enrichment (PR 5) ───────────────────────────────────────────
+
+  it('enriches headline with additional OSINT items sharing keyword overlap', async () => {
+    const { redis } = makeRedis({
+      zrangeMembers: [
+        JSON.stringify({
+          marketId: 'mkt-enrich',
+          direction: 'YES',
+          headline: 'Iran threatens Kharg Island closure',
+          urgencyScore: 9,
+        }),
+      ],
+    });
+    mockGetCachedMarkets.mockResolvedValue([
+      makeMarket({ id: 'mkt-enrich', question: 'Will the Kharg Island terminal cease Iranian control?' }),
+    ]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_SCANNER_ENABLED: false });
+    mockGetRecentOsintItems.mockResolvedValue([
+      {
+        title: 'US warships positioned near Strait of Hormuz',
+        keywords: ['kharg', 'hormuz', 'iran'],
+        urgencyScore: 7,
+        categoryId: 'geopolitical',
+      },
+    ]);
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    expect(mockEstimateConsensusProbability).toHaveBeenCalledTimes(1);
+    const callArgs = mockEstimateConsensusProbability.mock.calls[0]?.[0] as { headline: string };
+    expect(callArgs.headline).toContain('Iran threatens Kharg Island closure');
+    expect(callArgs.headline).toContain('US warships positioned');
+    expect(callArgs.headline.length).toBeLessThanOrEqual(600);
+  });
+
+  it('does not enrich headline when candidate has no OSINT signal', async () => {
+    const { redis } = makeRedis(); // no OSINT signal in zrangeMembers
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-no-enrich' })]);
+    mockGetRecentOsintItems.mockResolvedValue([
+      {
+        title: 'Related headline',
+        keywords: ['kharg', 'iran'],
+        urgencyScore: 8,
+        categoryId: 'geopolitical',
+      },
+    ]);
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    const callArgs = mockEstimateConsensusProbability.mock.calls[0]?.[0] as { headline: string };
+    expect(callArgs.headline).not.toContain('Related headline');
+    expect(callArgs.headline).toContain('Market price:');
+  });
+
+  // ── Half-Kelly sizing (PR 5) ──────────────────────────────────────────────
+
+  it('computes Half-Kelly stake correctly for given edge and price', async () => {
+    const { redis } = makeRedis();
+    // pOurSide=0.80, price=0.07: kellyFraction=(0.80-0.07)/(1-0.07)/2 ≈ 0.3925
+    // halfKelly * bankroll(500) ≈ $196.2 → capped at MAX_STAKE_USD=5
+    mockGetBankroll.mockResolvedValue(500);
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-kelly' })]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_SCANNER_ENABLED: true });
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    expect(mockExecuteSignal).toHaveBeenCalledTimes(1);
+    const signal = mockExecuteSignal.mock.calls[0]?.[0] as { stakeUsd: number };
+    expect(signal.stakeUsd).toBeCloseTo(5);
+  });
+
+  it('floors stake at MIN_BET_USD when Kelly sizing computes a tiny stake', async () => {
+    const { redis } = makeRedis();
+    // Very small bankroll: $1. pOurSide=0.80, price=0.07: halfKelly≈0.3925 → $0.39
+    // Should be bumped to MIN_BET_USD=5
+    mockGetBankroll.mockResolvedValue(1);
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-floor' })]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_SCANNER_ENABLED: true });
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    const signal = mockExecuteSignal.mock.calls[0]?.[0] as { stakeUsd: number };
+    expect(signal.stakeUsd).toBe(5);
   });
 });
