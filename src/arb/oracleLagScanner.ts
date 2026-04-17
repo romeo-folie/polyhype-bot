@@ -46,6 +46,30 @@ import type { ChainlinkFeed, ChainlinkMove } from '../spot/feeds/chainlinkFeed.j
 import type { TradeSignal } from '../mapping/index.js';
 import { writeOracleLagExitState } from './oracleLagExitMonitor.js';
 
+// ── Asset ↔ feed mappings ───────────────────────────────────────────────────
+
+/** Maps oracle-lag asset names to Chainlink RTDS symbols. */
+export const ASSET_TO_CHAINLINK_SYMBOL: Record<string, string> = {
+  bitcoin: 'btc/usd',
+  ethereum: 'eth/usd',
+  solana: 'sol/usd',
+  xrp: 'xrp/usd',
+  dogecoin: 'doge/usd',
+  bnb: 'bnb/usd',
+  hyperliquid: 'hype/usd',
+};
+
+/** Maps asset names to their uppercase ticker for logging / shadow rows. */
+const ASSET_TO_LOG_SYMBOL: Record<string, string> = {
+  bitcoin: 'BTC',
+  ethereum: 'ETH',
+  solana: 'SOL',
+  xrp: 'XRP',
+  dogecoin: 'DOGE',
+  bnb: 'BNB',
+  hyperliquid: 'HYPE',
+};
+
 // ── Public types ────────────────────────────────────────────────────────────
 
 /**
@@ -115,6 +139,8 @@ export type OracleLagExecutorOutcome = 'success' | 'skipped' | 'error' | 'pendin
 
 export interface OracleLagExecutorShadowInput {
   outcome: OracleLagExecutorOutcome;
+  /** Asset name — e.g. 'bitcoin', 'ethereum'. Used to derive the log symbol. */
+  asset: string;
   skipReason?: string | undefined;
   error?: string | undefined;
   venue?: string | undefined;
@@ -139,7 +165,7 @@ export function buildOracleLagExecutorShadowRow(
   return {
     kind: 'oracle_lag_executor' as const,
     source: 'arb' as const,
-    symbol: 'BTC',
+    symbol: ASSET_TO_LOG_SYMBOL[input.asset] ?? input.asset.toUpperCase(),
     marketId: input.market.marketId,
     direction: input.side,
     wouldBlock: input.outcome !== 'success',
@@ -245,7 +271,6 @@ const TICK_INTERVAL_MS = 1000;
 const MARKET_REFRESH_MS = 30_000;
 const DEDUP_PREFIX = 'oracle-lag:dedup:';
 const DEDUP_TTL_S = 60;
-const CHAINLINK_SYMBOL = 'btc/usd';
 
 export interface OracleLagScannerOptions {
   redis: Redis;
@@ -260,9 +285,12 @@ export class OracleLagScanner {
   private tickTimer: NodeJS.Timeout | null = null;
   private lockRefreshTimer: NodeJS.Timeout | null = null;
   private lockToken: string | null = null;
-  private cachedMarkets: UpDownMarket[] = [];
-  private lastMarketRefreshMs = 0;
-  private marketRefreshInFlight = false;
+  /** Per-asset market caches. Key = asset name (e.g. 'bitcoin', 'ethereum'). */
+  private cachedMarkets = new Map<string, UpDownMarket[]>();
+  /** Last market-refresh wall-clock per asset. */
+  private lastMarketRefreshMs = new Map<string, number>();
+  /** Assets whose market refresh is currently in flight. */
+  private marketRefreshInFlight = new Set<string>();
   private tickInFlight = false;
   private stopped = false;
 
@@ -290,7 +318,9 @@ export class OracleLagScanner {
 
     const cfg = this.loadCfg();
     logger.info('[oracle-lag] scanner started', {
-      enabled: cfg.ORACLE_LAG_ENABLED,
+      assets: cfg.ORACLE_LAG_ASSETS,
+      btcEnabled: cfg.ORACLE_LAG_ENABLED,
+      ethEnabled: cfg.ORACLE_LAG_ETH_ENABLED,
       minMovePct: cfg.ORACLE_LAG_MIN_MOVE_PCT,
       moveWindowSec: cfg.ORACLE_LAG_MOVE_WINDOW_SEC,
       minTimeLeftMin: cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN,
@@ -366,17 +396,13 @@ export class OracleLagScanner {
     }
   }
 
-  private async refreshMarketsIfStale(): Promise<void> {
-    if (this.marketRefreshInFlight) return;
+  private async refreshMarketsIfStale(asset: string): Promise<void> {
+    if (this.marketRefreshInFlight.has(asset)) return;
     const now = Date.now();
-    if (now - this.lastMarketRefreshMs < MARKET_REFRESH_MS) {
-      return;
-    }
-    // Stamp the refresh time BEFORE the fetch so that failures and empty
-    // results still back off to the 30s cadence — otherwise an empty cache
-    // would retry every 1s tick and hammer Gamma.
-    this.lastMarketRefreshMs = now;
-    this.marketRefreshInFlight = true;
+    if (now - (this.lastMarketRefreshMs.get(asset) ?? 0) < MARKET_REFRESH_MS) return;
+    // Stamp BEFORE fetch so failures still back off to the 30s cadence.
+    this.lastMarketRefreshMs.set(asset, now);
+    this.marketRefreshInFlight.add(asset);
     try {
       // Slug-based discovery: Gamma's `/events?tag=crypto` endpoint orders by
       // startDate only, and Up/Down markets are listed ~24h before resolution,
@@ -384,19 +410,20 @@ export class OracleLagScanner {
       // response cap). We predict the deterministic slugs instead — current
       // window + 2 future windows — and fetch them directly.
       const markets = await discoverUpDownMarketsBySlug({
-        asset: 'bitcoin',
+        asset,
         lifetime: '15m',
         windowsAhead: 2,
       });
-      this.cachedMarkets = markets;
-      logger.debug('[oracle-lag] market refresh', { count: markets.length });
+      this.cachedMarkets.set(asset, markets);
+      logger.debug('[oracle-lag] market refresh', { asset, count: markets.length });
     } catch (err) {
       logger.warn('[oracle-lag] market refresh failed — keeping stale cache', {
+        asset,
         error: err instanceof Error ? err.message : String(err),
-        cachedCount: this.cachedMarkets.length,
+        cachedCount: this.cachedMarkets.get(asset)?.length ?? 0,
       });
     } finally {
-      this.marketRefreshInFlight = false;
+      this.marketRefreshInFlight.delete(asset);
     }
   }
 
@@ -404,24 +431,33 @@ export class OracleLagScanner {
     if (this.stopped || !this.feed || this.tickInFlight) return;
     this.tickInFlight = true;
     try {
-      await this.refreshMarketsIfStale();
-      if (this.cachedMarkets.length === 0) return;
-
       const cfg = this.loadCfg();
+      const assets = cfg.ORACLE_LAG_ASSETS
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => ASSET_TO_CHAINLINK_SYMBOL[s] != null);
+
       const evalConfig: OracleLagEvalConfig = {
         minMovePct: cfg.ORACLE_LAG_MIN_MOVE_PCT,
         minTimeLeftMin: cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN,
         maxEntryPrice: cfg.ORACLE_LAG_MAX_ENTRY_PRICE,
       };
 
-      const rawMove = this.feed.getMoveSince(
-        CHAINLINK_SYMBOL,
-        cfg.ORACLE_LAG_MOVE_WINDOW_SEC * 1000,
-      );
-      const move = rawMove ? this.toPercentMove(rawMove) : null;
+      for (const asset of assets) {
+        await this.refreshMarketsIfStale(asset);
+        const markets = this.cachedMarkets.get(asset) ?? [];
+        if (markets.length === 0) continue;
 
-      for (const market of this.cachedMarkets) {
-        await this.evaluateMarket(market, move, cfg, evalConfig);
+        const chainlinkSymbol = ASSET_TO_CHAINLINK_SYMBOL[asset]!;
+        const rawMove = this.feed.getMoveSince(
+          chainlinkSymbol,
+          cfg.ORACLE_LAG_MOVE_WINDOW_SEC * 1000,
+        );
+        const move = rawMove ? this.toPercentMove(rawMove) : null;
+
+        for (const market of markets) {
+          await this.evaluateMarket(market, move, cfg, evalConfig, asset);
+        }
       }
     } catch (err) {
       logger.warn('[oracle-lag] tick failed', {
@@ -447,6 +483,7 @@ export class OracleLagScanner {
     move: OracleLagMove | null,
     cfg: AppConfig,
     evalConfig: OracleLagEvalConfig,
+    asset: string,
   ): Promise<void> {
     const evaluation = evaluateOracleLagEntry(market, move, evalConfig);
 
@@ -497,7 +534,8 @@ export class OracleLagScanner {
           : null,
       wouldTrade,
       blockReason,
-      enabled: cfg.ORACLE_LAG_ENABLED,
+      asset,
+      enabled: asset === 'bitcoin' ? cfg.ORACLE_LAG_ENABLED : cfg.ORACLE_LAG_ETH_ENABLED,
     });
 
     // Persist to DB — only events that passed the move threshold (interesting
@@ -506,13 +544,14 @@ export class OracleLagScanner {
       void enqueueWrite('shadow_observations', {
         kind: 'oracle_lag',
         source: 'arb',
-        symbol: 'BTC',
+        symbol: ASSET_TO_LOG_SYMBOL[asset] ?? asset.toUpperCase(),
         marketId: market.marketId,
         direction: evaluation.side ?? (move && move.pctMove > 0 ? 'UP' : 'DOWN'),
         wouldBlock: !wouldTrade,
         metricValue: move ? move.pctMove : 0,
         threshold: cfg.ORACLE_LAG_MIN_MOVE_PCT,
         payload: {
+          asset,
           slug: market.slug,
           blockReason,
           entryPrice: evaluation.entryPrice,
@@ -526,8 +565,9 @@ export class OracleLagScanner {
     }
 
     if (!wouldTrade) return;
-    // Shadow mode — logged but never fires until ORACLE_LAG_ENABLED flips.
-    if (!cfg.ORACLE_LAG_ENABLED) return;
+    // Shadow mode — logged but never fires. Per-asset live flag.
+    const isLive = asset === 'bitcoin' ? cfg.ORACLE_LAG_ENABLED : cfg.ORACLE_LAG_ETH_ENABLED;
+    if (!isLive) return;
     if (
       !evaluation.side ||
       evaluation.entryPrice === undefined ||
@@ -540,7 +580,7 @@ export class OracleLagScanner {
     // `blocked` check above (rate cap / lockout were already handled).
     if (marketLocked || rateCapHit) return;
 
-    await this.fire(market, move, evaluation, cfg);
+    await this.fire(market, move, evaluation, cfg, asset);
   }
 
   private async fire(
@@ -548,6 +588,7 @@ export class OracleLagScanner {
     move: OracleLagMove,
     evaluation: EntryEvaluation,
     cfg: AppConfig,
+    asset: string,
   ): Promise<void> {
     if (
       !evaluation.side ||
@@ -587,10 +628,10 @@ export class OracleLagScanner {
       consensusProbability: evaluation.consensusProbability,
       outcomePrice: entryPrice,
       priceZone: priceZoneOf(entryPrice),
-      sourcedFrom: `oracle-lag:btc:${move.pctMove.toFixed(3)}pct:${cfg.ORACLE_LAG_MOVE_WINDOW_SEC}s`,
-      reasoning: `Chainlink BTC oracle move ${move.pctMove.toFixed(3)}% over ${cfg.ORACLE_LAG_MOVE_WINDOW_SEC}s — ${market.slug} reprice lag expected`,
+      sourcedFrom: `oracle-lag:${asset}:${move.pctMove.toFixed(3)}pct:${cfg.ORACLE_LAG_MOVE_WINDOW_SEC}s`,
+      reasoning: `Chainlink ${ASSET_TO_LOG_SYMBOL[asset] ?? asset.toUpperCase()} oracle move ${move.pctMove.toFixed(3)}% over ${cfg.ORACLE_LAG_MOVE_WINDOW_SEC}s — ${market.slug} reprice lag expected`,
       source: 'oracle-lag',
-      assetId: 'bitcoin',
+      assetId: asset,
       endDate: market.endDate.toISOString(),
     };
 
@@ -644,7 +685,7 @@ export class OracleLagScanner {
             entryPmYesPrice: market.outcomePrices[0],
             entryPmNoPrice: market.outcomePrices[1],
             entryChainlinkPrice:
-              this.feed?.getLatest(CHAINLINK_SYMBOL)?.value ?? move.newPrice,
+              this.feed?.getLatest(ASSET_TO_CHAINLINK_SYMBOL[asset] ?? 'btc/usd')?.value ?? move.newPrice,
             entryChainlinkMovePct: move.pctMove,
             entryTsMs: Date.now(),
           });
@@ -727,6 +768,7 @@ export class OracleLagScanner {
       'shadow_observations',
       buildOracleLagExecutorShadowRow({
         outcome,
+        asset,
         skipReason: executorSkipReason,
         error: executorError,
         venue: executorVenue,

@@ -152,7 +152,7 @@ export class ArbitrageWorker {
     // SIGTERM we await scanner.stop() before closing Redis so the scanner
     // can release its lock.
     try {
-      this.chainlinkFeed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+      this.chainlinkFeed = new ChainlinkFeed({ symbols: ['btc/usd', 'eth/usd'] });
       this.chainlinkFeed.start();
       this.oracleLagScanner = new OracleLagScanner({ redis: getRedis() });
       await this.oracleLagScanner.start(this.chainlinkFeed);
