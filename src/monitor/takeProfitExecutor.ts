@@ -12,6 +12,7 @@
  */
 
 import { logger } from '../shared/logger.js';
+import { extractTheme, removeNearZeroPosition } from '../shared/themeExtractor.js';
 import {
   submitSell,
   resolveSimmerMarketId,
@@ -31,6 +32,7 @@ import {
 import type { TickSize } from '@polymarket/clob-client';
 import {
   closePosition,
+  getPosition,
   markPositionSynthHedged,
   markPositionPendingSettlement,
   updatePositionShares,
@@ -56,7 +58,20 @@ async function closePositionWithHedge(
   marketId: string,
   direction: Position['direction'],
 ): Promise<void> {
+  // Fetch before closing so we can read sourcedFrom/question for near-zero
+  // theme set cleanup. closePosition() also calls getPosition() internally for
+  // its PG emit — one extra round-trip on an infrequent exit path, acceptable
+  // to avoid changing closePosition()'s return type or signature.
+  const posRecord = await getPosition(redis, marketId, direction).catch(() => null);
+
   await closePosition(redis, marketId, direction);
+
+  // Clean up near-zero-arb theme/global open sets on every exit path.
+  if (posRecord?.sourcedFrom?.startsWith('near-zero-arb')) {
+    const theme = extractTheme(posRecord.question ?? '');
+    await removeNearZeroPosition(redis, theme, marketId, direction);
+  }
+
   // Check for a linked HL hedge and close it if present.
   const hlSymbol = await redis.get(`hedge:link:${marketId}`).catch(() => null);
   if (hlSymbol) {

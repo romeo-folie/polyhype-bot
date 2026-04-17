@@ -838,6 +838,16 @@ const envSchema = z.object({
   // fraction of peak. Markets that have always been flat near zero are dead horses.
   // A market that peaked at 20¢ and is now 5¢ has a 75% drop — good candidate.
   NEAR_ZERO_MIN_PRICE_DROP_PCT: z.coerce.number().min(0).max(1).optional().default(0.10),
+  // Theme concentration cap: max simultaneous open near-zero-arb positions per
+  // correlated theme (iran-israel, btc-price-target, etc.). Prevents the scanner
+  // from building up a cluster of correlated bets that all move together.
+  NEAR_ZERO_MAX_PER_THEME: z.coerce.number().int().min(1).optional().default(1),
+  // Global belt-and-suspenders: max total open near-zero-arb positions regardless
+  // of theme. Enforced in addition to the per-theme cap.
+  NEAR_ZERO_MAX_OPEN_POSITIONS: z.coerce.number().int().min(1).optional().default(4),
+  // How often the monitor worker rebuilds near_zero:theme_open:* sets from the
+  // live position ledger (heals drift from missed SREM calls).
+  NEAR_ZERO_THEME_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(1).optional().default(600_000),
 
   // --- LONGSHOT BIAS / NO-SIDE SCANNER ---
   // Exploits the favorite-longshot bias documented by Whelan (300K contracts):

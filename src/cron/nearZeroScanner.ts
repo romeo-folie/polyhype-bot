@@ -42,6 +42,12 @@ import { checkTimeToResolution } from '../mapping/divergenceCalculator.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
 import { priceZoneOf } from '../shared/zones.js';
 import { enqueueWrite } from '../db/writeQueue.js';
+import {
+  extractTheme,
+  addNearZeroPosition,
+  countOpenNearZeroPositions,
+  countOpenPositionsInTheme,
+} from '../shared/themeExtractor.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 const DEDUP_KEY_PREFIX = 'near_zero:dedup:';
@@ -288,9 +294,41 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     const dedupKey = `${DEDUP_KEY_PREFIX}${candidate.market.id}:${candidate.direction}`;
     const inflightKey = `${INFLIGHT_KEY_PREFIX}${candidate.market.id}:${candidate.direction}`;
 
+    // Theme concentration guard — check caps before the NX claim so we
+    // don't hold an inflight slot on a candidate we cannot place anyway.
+    const candidateTheme = extractTheme(candidate.market.question);
+    if (candidateTheme) {
+      const openInTheme = await countOpenPositionsInTheme(redis, candidateTheme);
+      if (openInTheme >= cfg.NEAR_ZERO_MAX_PER_THEME) {
+        logger.info('[near-zero] skipped — theme cap reached', {
+          marketId: candidate.market.id,
+          theme: candidateTheme,
+          openInTheme,
+          cap: cfg.NEAR_ZERO_MAX_PER_THEME,
+        });
+        continue;
+      }
+    }
+    // Global position cap — belt-and-suspenders across all themes.
+    // Note: the SCARD → addNearZeroPosition sequence is not atomic. Candidates
+    // are evaluated sequentially within a run, and the inflight NX lock prevents
+    // the same market from racing across concurrent runs. A brief overshoot of
+    // the cap by one is possible if two different markets in the same theme are
+    // evaluated by two simultaneous scanner invocations; the periodic reconciler
+    // in monitor/worker.ts heals any resulting drift.
+    const totalOpen = await countOpenNearZeroPositions(redis);
+    if (totalOpen >= cfg.NEAR_ZERO_MAX_OPEN_POSITIONS) {
+      logger.info('[near-zero] skipped — global position cap reached', {
+        marketId: candidate.market.id,
+        totalOpen,
+        cap: cfg.NEAR_ZERO_MAX_OPEN_POSITIONS,
+      });
+      continue;
+    }
+
     // Pre-LLM NX claim — prevents two concurrent scanner runs (or a scanner and
     // a manual invocation) from both paying the LLM cost for the same market.
-    // Short TTL so a crashed worker doesn't block for long.
+    // Placed after cap checks so we don't hold the slot unnecessarily.
     const claimed = await redis.set(inflightKey, '1', 'EX', INFLIGHT_TTL_S, 'NX');
     if (claimed === null) {
       logger.debug('[near-zero] skipped — in-flight from concurrent run', {
@@ -464,6 +502,15 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
         venue: result.executionVenue,
         entryPrice: result.entryPrice,
       });
+      // Register in theme + global open sets so the cap is enforced on the
+      // next scanner run. Non-fatal — the periodic reconciler will heal any
+      // drift if this write fails.
+      await addNearZeroPosition(
+        redis,
+        candidateTheme,
+        candidate.market.id,
+        candidate.direction,
+      );
     } else {
       logger.info('[near-zero] trade skipped by executor', {
         marketId: candidate.market.id,
