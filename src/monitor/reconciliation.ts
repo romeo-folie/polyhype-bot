@@ -206,7 +206,7 @@ export async function runReconciliation(
             simmerMap.delete(`${ledgerPos.marketId}:${ledgerPos.direction}`);
             simmerMap.delete(`${metadata.id}:${ledgerPos.direction}`);
             if (metadata.clobTokenIds) {
-              const tokenId = ledgerPos.direction === 'YES' ? metadata.clobTokenIds[0] : metadata.clobTokenIds[1];
+              const tokenId = (ledgerPos.direction === 'YES' || ledgerPos.direction === 'UP') ? metadata.clobTokenIds[0] : metadata.clobTokenIds[1];
               if (tokenId) clobMap.delete(tokenId);
             }
 
@@ -670,6 +670,7 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
       executionVenue: 'clob',
       sourcedFrom: pendingOrder?.sourcedFrom ?? 'reconciled:clob',
       edgeMagnitude: pendingOrder?.edgeMagnitude ?? 0,
+      ...(market.endDate && { endDate: market.endDate }),
       ...(pendingOrder?.consensusP != null && { consensusProbability: pendingOrder.consensusP }),
       ...(pendingOrder != null && {
         entryExecutionPath: 'maker_fill',

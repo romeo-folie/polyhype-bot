@@ -706,35 +706,86 @@ async function redeemClobPositions(
         // For positions whose endDate has passed, close them —
         // the market is definitively over and Gamma will never resolve it.
         if (pos.endDate && new Date(pos.endDate).getTime() < Date.now()) {
-          const errorCode = isDust ? 'expired_dust_closed' : 'expired_unresolvable_closed';
-          logger.info('[redeemer] closing expired CLOB position (Gamma unresolvable)', {
+          logger.info('[redeemer] handling expired CLOB position (Gamma unresolvable)', {
             marketId: pos.marketId,
             direction: pos.direction,
             endDate: pos.endDate,
             isDust,
             reportedBalance,
           });
+          const q = pos.question || pos.marketId;
+
+          // Dust or no-balance positions: close the zombie entry without redemption.
+          if (isDust || (reportedBalance ?? 0) <= 0.01) {
+            await closePosition(redis, pos.marketId, pos.direction);
+            await markRecentlyClosed(redis, pos.marketId);
+            const exitReason = isDust ? 'expired_dust' : 'expired_unresolvable';
+            await recordPositionOutcome(
+              redis,
+              { ...pos, question: q, direction: pmDirection },
+              { result: 'lost', returnPct: -100, executionVenueOverride: 'clob', exitReason },
+            );
+            void notifyMarketResolved({
+              question: q,
+              direction: pos.direction,
+              result: 'lost',
+              stakeUsd: pos.stakeUsd,
+              reason: isDust ? 'expired dust position' : 'expired (Gamma unresolvable)',
+            }).catch(() => {});
+            results.push({ marketId: pos.marketId, side, success: false, error: exitReason });
+            continue;
+          }
+
+          // Attempt on-chain redemption. Only close after a definitive outcome;
+          // a non-success result may be transient — leave position open for retry.
+          const redeemResult = await redeemClobOutcome({ conditionId, direction: isYesSide ? 'YES' : 'NO' });
+
+          if (!redeemResult.success) {
+            logger.warn('[redeemer] on-chain redemption failed for expired position — will retry next cycle', {
+              marketId: pos.marketId,
+              error: redeemResult.error,
+            });
+            results.push({ marketId: pos.marketId, side, success: false, error: 'redemption_rpc_error' });
+            continue;
+          }
+
+          // success:true means the transaction landed; won iff we received proceeds.
+          // A successful redemption of the losing outcome returns 0.
+          const proceedsUsdc = pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : 0);
+          const won = proceedsUsdc > 0;
+          if (won) await creditProceeds(redis, proceedsUsdc);
+
           await closePosition(redis, pos.marketId, pos.direction);
           await markRecentlyClosed(redis, pos.marketId);
-          const q = pos.question || pos.marketId;
+
+          const exitReason = won ? 'expired_unresolvable_redeemed' : 'expired_unresolvable';
           await recordPositionOutcome(
             redis,
             { ...pos, question: q, direction: pmDirection },
             {
-              result: 'lost',
-              returnPct: -100,
+              result: won ? 'won' : 'lost',
+              returnPct: won && pos.stakeUsd > 0 ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : -100,
               executionVenueOverride: 'clob',
-              exitReason: isDust ? 'expired_dust' : 'expired_unresolvable',
+              exitReason,
             },
           );
-          void notifyMarketResolved({
-            question: q,
-            direction: pos.direction,
-            result: 'lost',
-            stakeUsd: pos.stakeUsd,
-            reason: isDust ? 'expired dust position' : 'expired (Gamma unresolvable)',
-          }).catch(() => {});
-          results.push({ marketId: pos.marketId, side, success: false, error: errorCode });
+          if (won) {
+            await notifyRedemptionExecuted({
+              marketId: pos.marketId,
+              question: q,
+              side,
+              valueUsdc: proceedsUsdc,
+            });
+          } else {
+            void notifyMarketResolved({
+              question: q,
+              direction: pos.direction,
+              result: 'lost',
+              stakeUsd: pos.stakeUsd,
+              reason: 'expired (Gamma unresolvable)',
+            }).catch(() => {});
+          }
+          results.push({ marketId: pos.marketId, side, success: won, ...(won ? {} : { error: exitReason }) });
         }
         continue;
       }

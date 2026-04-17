@@ -151,6 +151,75 @@ describe('redeemResolvedPositions', () => {
     expect(results.every((r) => r.success)).toBe(true);
   });
 
+  it('attempts on-chain redemption for expired Gamma-unresolvable position — success → credits + notifies win', async () => {
+    const pastDate = new Date(Date.now() - 60_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'ol-market-1',
+        conditionId: 'cond-ol-1',
+        clobTokenIds: ['token-yes-ol', 'token-no-ol'],
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Bitcoin Up or Down - April 17, 1:00PM-1:15PM ET',
+        sharesHeld: 10,
+        entryPrice: 0.5,
+        stakeUsd: 5,
+        endDate: pastDate,
+      },
+    ]);
+    // Gamma returns empty array — can't resolve Up/Down binary
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    mockRedeemClobOutcome.mockResolvedValue({ success: true, tx_hash: '0xabc' });
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockRedeemClobOutcome).toHaveBeenCalledWith({ conditionId: 'cond-ol-1', direction: 'YES' });
+    expect(mockCreditProceeds).toHaveBeenCalledWith(mockRedis, 10);
+    expect(mockNotifyRedemptionExecuted).toHaveBeenCalledWith(
+      expect.objectContaining({ marketId: 'ol-market-1', side: 'yes', valueUsdc: 10 }),
+    );
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'ol-market-1', 'YES');
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
+  });
+
+  it('attempts on-chain redemption for expired Gamma-unresolvable position — failure → skips close, retries next cycle', async () => {
+    const pastDate = new Date(Date.now() - 60_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'ol-market-2',
+        conditionId: 'cond-ol-2',
+        clobTokenIds: ['token-yes-ol2', 'token-no-ol2'],
+        direction: 'NO',
+        executionVenue: 'clob',
+        question: 'Bitcoin Up or Down - April 17, 1:15PM-1:30PM ET',
+        sharesHeld: 10,
+        entryPrice: 0.5,
+        stakeUsd: 5,
+        endDate: pastDate,
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    mockRedeemClobOutcome.mockResolvedValue({ success: false, error: 'RPC timeout' });
+
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockRedeemClobOutcome).toHaveBeenCalledWith({ conditionId: 'cond-ol-2', direction: 'NO' });
+    expect(mockCreditProceeds).not.toHaveBeenCalled();
+    expect(mockNotifyRedemptionExecuted).not.toHaveBeenCalled();
+    // Transient failure: position must stay open (no close, no loss notification)
+    expect(mockClosePosition).not.toHaveBeenCalled();
+    expect(vi.mocked(mockNotifyMarketResolved)).not.toHaveBeenCalled();
+    expect(results[0].success).toBe(false);
+    expect(results[0].error).toBe('redemption_rpc_error');
+  });
+
   it('closes CLOB position resolved as loss without redeeming', async () => {
     mockGetOpenPositions.mockResolvedValue([
       {
