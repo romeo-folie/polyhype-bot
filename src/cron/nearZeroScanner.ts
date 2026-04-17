@@ -48,6 +48,7 @@ import {
   countOpenNearZeroPositions,
   countOpenPositionsInTheme,
 } from '../shared/themeExtractor.js';
+import { checkBookDepthForStake } from '../execution/bookDepthCheck.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 const DEDUP_KEY_PREFIX = 'near_zero:dedup:';
@@ -507,6 +508,27 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
 
     const clobTokenIds = parseClobTokenIds(candidate.market.clobTokenIds);
     const stakeUsd = Math.min(cfg.NEAR_ZERO_MAX_STAKE_USD, bankrollUsd * 0.02);
+
+    // Book-depth slippage gate: simulate filling the stake against live asks.
+    // Skip on no_book as well — proceeding blind risks a bad fill on thin markets.
+    const tokenIdx = candidate.direction === 'YES' ? 0 : 1;
+    const depthCheck = await checkBookDepthForStake({
+      tokenId: clobTokenIds[tokenIdx] ?? '',
+      side: 'BUY',
+      stakeUsd,
+      maxSlippageBps: cfg.NEAR_ZERO_MAX_SLIPPAGE_BPS,
+    });
+    if (!depthCheck.ok) {
+      logger.info('[near-zero] depth gate blocked execution', {
+        marketId: candidate.market.id,
+        direction: candidate.direction,
+        reason: depthCheck.reason,
+        expectedFillPrice: depthCheck.expectedFillPrice,
+        expectedSlippageBps: depthCheck.expectedSlippageBps,
+        maxSlippageBps: cfg.NEAR_ZERO_MAX_SLIPPAGE_BPS,
+      });
+      continue;
+    }
 
     const signal: TradeSignal = {
       marketId: candidate.market.id,
