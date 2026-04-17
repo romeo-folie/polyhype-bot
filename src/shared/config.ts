@@ -415,7 +415,7 @@ const envSchema = z.object({
   // ETH oracle-lag live flag. Ships dark — shadow logs run, no trades fire until
   // flipped. Only meaningful when 'ethereum' is in ORACLE_LAG_ASSETS.
   ORACLE_LAG_ETH_ENABLED: boolFromEnv.optional().default(false),
-  // Minimum Chainlink BTC move % over the lookback window to consider entry (0.07 = 7 bps).
+  // Minimum Chainlink move % over the lookback window to consider entry, shared across all assets (0.07 = 7 bps).
   ORACLE_LAG_MIN_MOVE_PCT: z.coerce.number().min(0).optional().default(0.07),
   // Lookback window in seconds for the Chainlink move computation.
   ORACLE_LAG_MOVE_WINDOW_SEC: z.coerce.number().int().min(1).optional().default(5),

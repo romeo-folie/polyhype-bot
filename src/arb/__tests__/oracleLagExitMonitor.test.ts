@@ -29,6 +29,7 @@ function buildState(overrides: Partial<OracleLagExitState> = {}): OracleLagExitS
   return {
     marketId: 'm-test',
     direction: 'UP',
+    chainlinkSymbol: 'btc/usd',
     entryPmYesPrice: 0.52,
     entryPmNoPrice: 0.48,
     entryChainlinkPrice: 65000,
@@ -325,6 +326,7 @@ describe('writeOracleLagExitState ↔ readOracleLagExitState', () => {
     await writeOracleLagExitState(redis, {
       marketId: 'm-123',
       direction: 'UP',
+      chainlinkSymbol: 'btc/usd',
       entryPmYesPrice: 0.52,
       entryPmNoPrice: 0.48,
       entryChainlinkPrice: 65_123.45,
@@ -339,6 +341,7 @@ describe('writeOracleLagExitState ↔ readOracleLagExitState', () => {
     const state = await readOracleLagExitState(redis, 'm-123', 'UP');
     expect(state).not.toBeNull();
     expect(state?.direction).toBe('UP');
+    expect(state?.chainlinkSymbol).toBe('btc/usd');
     expect(state?.entryPmYesPrice).toBeCloseTo(0.52, 5);
     expect(state?.entryChainlinkPrice).toBeCloseTo(65_123.45, 1);
     expect(state?.entryChainlinkMovePct).toBeCloseTo(0.08, 5);
@@ -351,6 +354,7 @@ describe('writeOracleLagExitState ↔ readOracleLagExitState', () => {
     await writeOracleLagExitState(redis, {
       marketId: 'm-extreme',
       direction: 'UP',
+      chainlinkSymbol: 'btc/usd',
       entryPmYesPrice: 0.9,
       entryPmNoPrice: 0.1,
       entryChainlinkPrice: 65000,

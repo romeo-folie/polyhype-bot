@@ -548,7 +548,7 @@ export class OracleLagScanner {
         source: 'arb',
         symbol: ASSET_TO_LOG_SYMBOL[asset] ?? asset.toUpperCase(),
         marketId: market.marketId,
-        direction: evaluation.side ?? (move && move.pctMove > 0 ? 'UP' : 'DOWN'),
+        direction: evaluation.side ?? (move != null ? (move.pctMove > 0 ? 'UP' : 'DOWN') : undefined),
         wouldBlock: !wouldTrade,
         metricValue: move ? move.pctMove : 0,
         threshold: cfg.ORACLE_LAG_MIN_MOVE_PCT,
@@ -630,7 +630,7 @@ export class OracleLagScanner {
       consensusProbability: evaluation.consensusProbability,
       outcomePrice: entryPrice,
       priceZone: priceZoneOf(entryPrice),
-      sourcedFrom: `oracle-lag:${asset}:${move.pctMove.toFixed(3)}pct:${cfg.ORACLE_LAG_MOVE_WINDOW_SEC}s`,
+      sourcedFrom: `oracle-lag:${(ASSET_TO_LOG_SYMBOL[asset] ?? asset).toLowerCase()}:${move.pctMove.toFixed(3)}pct:${cfg.ORACLE_LAG_MOVE_WINDOW_SEC}s`,
       reasoning: `Chainlink ${ASSET_TO_LOG_SYMBOL[asset] ?? asset.toUpperCase()} oracle move ${move.pctMove.toFixed(3)}% over ${cfg.ORACLE_LAG_MOVE_WINDOW_SEC}s — ${market.slug} reprice lag expected`,
       source: 'oracle-lag',
       assetId: asset,
@@ -684,10 +684,11 @@ export class OracleLagScanner {
           await writeOracleLagExitState(this.redis, {
             marketId: market.marketId,
             direction,
+            chainlinkSymbol: ASSET_TO_CHAINLINK_SYMBOL[asset]!,
             entryPmYesPrice: market.outcomePrices[0],
             entryPmNoPrice: market.outcomePrices[1],
             entryChainlinkPrice:
-              this.feed?.getLatest(ASSET_TO_CHAINLINK_SYMBOL[asset] ?? 'btc/usd')?.value ?? move.newPrice,
+              this.feed?.getLatest(ASSET_TO_CHAINLINK_SYMBOL[asset]!)?.value ?? move.newPrice,
             entryChainlinkMovePct: move.pctMove,
             entryTsMs: Date.now(),
           });
