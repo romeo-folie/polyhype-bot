@@ -405,7 +405,8 @@ const envSchema = z.object({
   UPDOWN_PNL_MIN_SAMPLES: z.coerce.number().int().min(1).optional().default(3),
 
   // Oracle-Lag Scanner (BTC + ETH Up/Down 15m, Chainlink oracle-lag sniper).
-  // Ships dark — flip ORACLE_LAG_ENABLED to true only after shadow-log review.
+  // Ships dark — enable live trading per asset only after shadow-log review
+  // (ORACLE_LAG_ENABLED for BTC, ORACLE_LAG_ETH_ENABLED for ETH).
   ORACLE_LAG_ENABLED: boolFromEnv.optional().default(false),
   // Comma-separated assets to shadow-scan. Both BTC and ETH are wired; per-asset
   // live flags (ORACLE_LAG_ENABLED for BTC, ORACLE_LAG_ETH_ENABLED for ETH)

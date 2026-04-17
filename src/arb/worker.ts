@@ -21,7 +21,7 @@ import {
   recordCryptoArbMetric,
 } from '../shared/telemetry.js';
 import { ArbMarketWarmer } from './warmer.js';
-import { OracleLagScanner } from './oracleLagScanner.js';
+import { OracleLagScanner, ASSET_TO_CHAINLINK_SYMBOL } from './oracleLagScanner.js';
 import { OracleLagExitMonitor } from './oracleLagExitMonitor.js';
 import { ChainlinkFeed } from '../spot/feeds/chainlinkFeed.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
@@ -152,7 +152,7 @@ export class ArbitrageWorker {
     // SIGTERM we await scanner.stop() before closing Redis so the scanner
     // can release its lock.
     try {
-      this.chainlinkFeed = new ChainlinkFeed({ symbols: ['btc/usd', 'eth/usd'] });
+      this.chainlinkFeed = new ChainlinkFeed({ symbols: Object.values(ASSET_TO_CHAINLINK_SYMBOL) });
       this.chainlinkFeed.start();
       this.oracleLagScanner = new OracleLagScanner({ redis: getRedis() });
       await this.oracleLagScanner.start(this.chainlinkFeed);

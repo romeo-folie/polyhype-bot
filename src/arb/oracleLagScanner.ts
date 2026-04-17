@@ -48,26 +48,21 @@ import { writeOracleLagExitState } from './oracleLagExitMonitor.js';
 
 // ── Asset ↔ feed mappings ───────────────────────────────────────────────────
 
-/** Maps oracle-lag asset names to Chainlink RTDS symbols. */
+/**
+ * Assets supported by the oracle-lag scanner. Keep this list aligned with the
+ * per-asset live flags in AppConfig (ORACLE_LAG_ENABLED for BTC,
+ * ORACLE_LAG_ETH_ENABLED for ETH). Adding an asset here without a corresponding
+ * config flag would silently shadow-scan it but never trade — add the flag first.
+ */
 export const ASSET_TO_CHAINLINK_SYMBOL: Record<string, string> = {
   bitcoin: 'btc/usd',
   ethereum: 'eth/usd',
-  solana: 'sol/usd',
-  xrp: 'xrp/usd',
-  dogecoin: 'doge/usd',
-  bnb: 'bnb/usd',
-  hyperliquid: 'hype/usd',
 };
 
 /** Maps asset names to their uppercase ticker for logging / shadow rows. */
 const ASSET_TO_LOG_SYMBOL: Record<string, string> = {
   bitcoin: 'BTC',
   ethereum: 'ETH',
-  solana: 'SOL',
-  xrp: 'XRP',
-  dogecoin: 'DOGE',
-  bnb: 'BNB',
-  hyperliquid: 'HYPE',
 };
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -432,10 +427,17 @@ export class OracleLagScanner {
     this.tickInFlight = true;
     try {
       const cfg = this.loadCfg();
-      const assets = cfg.ORACLE_LAG_ASSETS
+      const configuredAssets = cfg.ORACLE_LAG_ASSETS
         .split(',')
         .map((s) => s.trim().toLowerCase())
-        .filter((s) => ASSET_TO_CHAINLINK_SYMBOL[s] != null);
+        .filter((s) => s.length > 0);
+      const unsupported = configuredAssets.filter((s) => ASSET_TO_CHAINLINK_SYMBOL[s] == null);
+      if (unsupported.length > 0) {
+        logger.warn('[oracle-lag] dropping unsupported assets from ORACLE_LAG_ASSETS', {
+          unsupported,
+        });
+      }
+      const assets = [...new Set(configuredAssets.filter((s) => ASSET_TO_CHAINLINK_SYMBOL[s] != null))];
 
       const evalConfig: OracleLagEvalConfig = {
         minMovePct: cfg.ORACLE_LAG_MIN_MOVE_PCT,
