@@ -1548,6 +1548,21 @@ describe('empty-book maker route', () => {
     mockConfig.ORACLE_LAG_MAKER_RETRY_ON_REJECT = true;
   });
 
+  it('does NOT retry on non-post-only failures (timeout / network / signer)', async () => {
+    // Indeterminate failures — first order may or may not have landed.
+    // Retrying could create duplicate live exposure, so the guard must bail out.
+    mockSubmitLimit.mockResolvedValueOnce({ success: false, error: 'request timed out after 15000ms' });
+
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({ source: 'oracle-lag', consensusProbability: 0.55, direction: 'UP' }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+  });
+
   it('resumes active pending order that is not yet filled — returns pending again', async () => {
     mockGetPendingOrder.mockResolvedValue({
       orderId: 'order-resume',

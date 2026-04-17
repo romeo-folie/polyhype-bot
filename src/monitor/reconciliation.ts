@@ -626,8 +626,18 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
     // market. Key is deleted AFTER recordPosition() succeeds so a transient write
     // failure can't permanently lose the benchmark metadata.
     const rawPending = await getPendingOrder(redis, market.id);
+    // Oracle-lag signals store direction as 'UP'/'DOWN' on the pending order,
+    // but reconciler derives 'YES'/'NO' from token index. Normalize the
+    // pending direction for the equivalence check (UP↔YES, DOWN↔NO) so
+    // oracle-lag fills link correctly and get enriched metadata + notification.
+    const pendingDirNormalized =
+      rawPending?.direction === 'UP'
+        ? 'YES'
+        : rawPending?.direction === 'DOWN'
+          ? 'NO'
+          : rawPending?.direction;
     const pendingOrder =
-      rawPending?.tokenId === pos.asset && rawPending?.direction === direction
+      rawPending?.tokenId === pos.asset && pendingDirNormalized === direction
         ? rawPending
         : null;
     if (rawPending && !pendingOrder) {

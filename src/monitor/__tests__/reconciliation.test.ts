@@ -4,6 +4,7 @@ import * as positionLedger from '../../execution/positionLedger.js';
 import * as simmer from '../../shared/simmer.js';
 import * as polymarketData from '../../shared/polymarketData.js';
 import * as polymarketGamma from '../../shared/polymarketGamma.js';
+import * as pendingMakerOrders from '../../execution/pendingMakerOrders.js';
 import type { Redis } from 'ioredis';
 
 vi.mock('../../execution/positionLedger.js', () => ({
@@ -28,6 +29,11 @@ vi.mock('../../shared/polymarketData.js', () => ({
 vi.mock('../../shared/polymarketGamma.js', () => ({
   fetchMarketByConditionId: vi.fn(),
   fetchMarketByQuestion: vi.fn(),
+}));
+
+vi.mock('../../execution/pendingMakerOrders.js', () => ({
+  getPendingOrder: vi.fn().mockResolvedValue(null),
+  deletePendingOrder: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe('Position Reconciliation Healer', () => {
@@ -257,6 +263,57 @@ describe('Position Reconciliation Healer', () => {
       stakeUsd: 600,
       executionVenue: 'clob'
     }));
+  });
+
+  it('links oracle-lag UP pending order to YES reconciled fill (UP↔YES normalization)', async () => {
+    const orphanClobPosition = {
+      conditionId: 'cond-oracle',
+      asset: 'tok-yes',
+      avgPrice: 0.49,
+      size: 10,
+    };
+
+    const mockGammaMarket = {
+      id: 'numeric-oracle',
+      question: 'Bitcoin Up or Down — 15m',
+      conditionId: 'cond-oracle',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([orphanClobPosition]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-oracle-1',
+      tokenId: 'tok-yes',
+      price: 0.49,
+      size: 10,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 60_000,
+      consensusP: 0.55,
+      direction: 'UP', // Oracle-lag stores signal direction — must normalize to YES for match
+      edgeMagnitude: 0.015,
+      bestAskAtPosting: 0.50,
+      intendedStakeUsd: 5,
+      sourcedFrom: 'oracle-lag:btc-15m',
+    });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Enrichment proves the link succeeded — without UP↔YES normalization the
+    // pendingOrder would be discarded and these fields would fall back to defaults.
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-oracle',
+      direction: 'YES',
+      sourcedFrom: 'oracle-lag:btc-15m',
+      edgeMagnitude: 0.015,
+      consensusProbability: 0.55,
+      entryExecutionPath: 'maker_fill',
+      entryOrderType: 'maker',
+      counterfactualImmediateTakerPrice: 0.50,
+    }));
+    expect(pendingMakerOrders.deletePendingOrder).toHaveBeenCalledWith(mockRedis, 'numeric-oracle');
   });
 
   it('reconciles a CLOB ledger position against the matching outcome token when Data API returns multiple rows for the same conditionId', async () => {

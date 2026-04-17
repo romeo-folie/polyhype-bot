@@ -535,11 +535,19 @@ async function tryExecuteViaClobMaker(
   // in the submission window (our book snapshot was stale). Re-fetch, recap
   // the fair value against the updated book, and post once more. See
   // ORACLE_LAG_MAKER_RETRY_ON_REJECT comment in config.ts.
+  //
+  // Scope the retry to explicit post-only crossing rejections. Other failure
+  // modes (timeout, network error, signer rejection) leave us unsure whether
+  // the first order was placed — retrying could duplicate live exposure.
+  const isPostOnlyReject =
+    !result.success &&
+    typeof result.error === 'string' &&
+    /post.?only|would (cross|match)/i.test(result.error);
   const canRetry =
     emptyBookMode &&
     signal.source === 'oracle-lag' &&
     cfg.ORACLE_LAG_MAKER_RETRY_ON_REJECT &&
-    (!result.success || !result.order_id);
+    isPostOnlyReject;
   if (canRetry) {
     logger.info('[executor] oracle-lag maker rejected — retrying with fresh book', {
       marketId: signal.marketId,
