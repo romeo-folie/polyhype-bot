@@ -185,7 +185,7 @@ describe('redeemResolvedPositions', () => {
     expect(results[0].success).toBe(true);
   });
 
-  it('attempts on-chain redemption for expired Gamma-unresolvable position — failure → closes as loss', async () => {
+  it('attempts on-chain redemption for expired Gamma-unresolvable position — failure → skips close, retries next cycle', async () => {
     const pastDate = new Date(Date.now() - 60_000).toISOString();
     mockGetOpenPositions.mockResolvedValue([
       {
@@ -213,12 +213,11 @@ describe('redeemResolvedPositions', () => {
     expect(mockRedeemClobOutcome).toHaveBeenCalledWith({ conditionId: 'cond-ol-2', direction: 'NO' });
     expect(mockCreditProceeds).not.toHaveBeenCalled();
     expect(mockNotifyRedemptionExecuted).not.toHaveBeenCalled();
-    expect(vi.mocked(mockNotifyMarketResolved)).toHaveBeenCalledWith(
-      expect.objectContaining({ result: 'lost' }),
-    );
-    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'ol-market-2', 'NO');
+    // Transient failure: position must stay open (no close, no loss notification)
+    expect(mockClosePosition).not.toHaveBeenCalled();
+    expect(vi.mocked(mockNotifyMarketResolved)).not.toHaveBeenCalled();
     expect(results[0].success).toBe(false);
-    expect(results[0].error).toBe('expired_unresolvable');
+    expect(results[0].error).toBe('redemption_rpc_error');
   });
 
   it('closes CLOB position resolved as loss without redeeming', async () => {

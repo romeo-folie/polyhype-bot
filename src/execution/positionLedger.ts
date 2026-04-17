@@ -257,10 +257,15 @@ export async function getPosition(
   marketId: string,
   direction: Position['direction'],
 ): Promise<Position | null> {
-  const key = `${POSITION_KEY_PREFIX}${marketId}:${direction}`;
+  const key = positionKey(marketId, direction);
   const raw = await redis.hgetall(key);
-  if (!raw.marketId) return null;
-  return deserialisePosition(raw);
+  if (raw.marketId) return deserialisePosition(raw);
+  // Backward compat: legacy positions stored under raw direction (e.g. ...:UP / ...:DOWN)
+  const legacyKey = `${POSITION_KEY_PREFIX}${marketId}:${direction}`;
+  if (legacyKey === key) return null;
+  const legacy = await redis.hgetall(legacyKey);
+  if (!legacy.marketId) return null;
+  return deserialisePosition(legacy);
 }
 
 /**
@@ -276,6 +281,12 @@ export async function closePosition(
   const posRecord = await getPosition(redis, marketId, direction);
   await redis.del(key);
   await redis.zrem(POSITIONS_INDEX_KEY, key);
+  // Clean up any legacy raw-direction key (e.g. ...:UP / ...:DOWN stored before canonicalization)
+  const legacyKey = `${POSITION_KEY_PREFIX}${marketId}:${direction}`;
+  if (legacyKey !== key) {
+    await redis.del(legacyKey);
+    await redis.zrem(POSITIONS_INDEX_KEY, legacyKey);
+  }
   // Guard: prevent reconciler from re-importing dust residuals on Simmer as a
   // fresh position after an intentional close. See shared/closedGuard.ts.
   await markRecentlyClosed(redis, marketId);
