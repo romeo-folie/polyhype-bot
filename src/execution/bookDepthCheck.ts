@@ -63,7 +63,9 @@ export function simulateFill(
     remainingUsd -= usdHere;
   }
 
-  if (remainingUsd > 0.01) {
+  // Tolerance is relative to stake to handle floating-point rounding only.
+  // 0.01% of stake avoids false "insufficient" from tiny FP errors at ~$5 stakes.
+  if (remainingUsd > stakeUsd * 0.0001) {
     return { ok: false, reason: 'insufficient_depth' };
   }
 

@@ -69,16 +69,19 @@ describe('simulateFill', () => {
   });
 
   it('passes when multi-level fill stays within maxSlippageBps', () => {
-    // Level 1: 0.0700 × 500 shares = $35
-    // Level 2: 0.0701 × 500 shares = $35.05
-    // $5 stake fills entirely at level 1 → 0 slippage
+    // Level 1: 0.0700 × 20 shares = $1.40 (consumed fully)
+    // Level 2: 0.0701 × 500 shares = $35.05 (remainder ~$3.60 filled here)
+    // Weighted avg ≈ 0.07007 → slippage ≈ 1 bps, well within 200 bps
     const book = makeBook([
-      { price: '0.0700', size: '500' },
+      { price: '0.0700', size: '20' },
       { price: '0.0701', size: '500' },
     ]);
     const result = simulateFill(book, 5, 200);
     expect(result.ok).toBe(true);
     if (result.ok) {
+      // Weighted avg must be between the two ask levels
+      expect(result.expectedFillPrice).toBeGreaterThan(0.0700);
+      expect(result.expectedFillPrice).toBeLessThan(0.0702);
       expect(result.expectedSlippageBps).toBeLessThanOrEqual(200);
     }
   });

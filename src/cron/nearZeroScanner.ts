@@ -512,8 +512,17 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     // Book-depth slippage gate: simulate filling the stake against live asks.
     // Skip on no_book as well — proceeding blind risks a bad fill on thin markets.
     const tokenIdx = candidate.direction === 'YES' ? 0 : 1;
+    const tokenId = clobTokenIds[tokenIdx];
+    if (!tokenId) {
+      logger.info('[near-zero] depth gate blocked execution', {
+        marketId: candidate.market.id,
+        direction: candidate.direction,
+        reason: 'no_book',
+      });
+      continue;
+    }
     const depthCheck = await checkBookDepthForStake({
-      tokenId: clobTokenIds[tokenIdx] ?? '',
+      tokenId,
       side: 'BUY',
       stakeUsd,
       maxSlippageBps: cfg.NEAR_ZERO_MAX_SLIPPAGE_BPS,
