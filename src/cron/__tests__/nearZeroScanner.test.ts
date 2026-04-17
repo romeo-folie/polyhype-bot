@@ -100,6 +100,7 @@ const DEFAULT_CONFIG = {
   NEAR_ZERO_MIN_PRICE_DROP_PCT: 0.10,
   NEAR_ZERO_MAX_PER_THEME: 1,
   NEAR_ZERO_MAX_OPEN_POSITIONS: 4,
+  NEAR_ZERO_REQUIRE_OSINT: false, // off by default in tests to isolate other gates
 };
 
 const mockLoadConfig = vi.fn(() => ({ ...DEFAULT_CONFIG }));
@@ -519,5 +520,77 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     await runNearZeroScan(redis);
 
     expect(mockAddNearZeroPosition).not.toHaveBeenCalled();
+  });
+
+  // ── NEAR_ZERO_REQUIRE_OSINT gate (PR 3) ──────────────────────────────────
+
+  it('blockedReason=no_osint_signal when REQUIRE_OSINT=true and no OSINT match', async () => {
+    const { redis } = makeRedis();
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-no-osint' })]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_REQUIRE_OSINT: true });
+    // No OSINT signal in zrangeMembers → hasOsintSignal = false
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    const enqueueMock = vi.mocked(enqueueWrite);
+    const [, payload] = enqueueMock.mock.calls[0]!;
+    expect(payload.wouldBlock).toBe(true);
+    expect((payload.payload as Record<string, unknown>).blockedReason).toBe('no_osint_signal');
+  });
+
+  it('wouldTradeIfEnabled=true when REQUIRE_OSINT=true and OSINT signal exists', async () => {
+    const { redis } = makeRedis({
+      zrangeMembers: [
+        JSON.stringify({
+          marketId: 'mkt-with-osint',
+          direction: 'YES',
+          headline: 'Iran escalates strike threat',
+          urgencyScore: 8,
+        }),
+      ],
+    });
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-with-osint' })]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_REQUIRE_OSINT: true });
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    const enqueueMock = vi.mocked(enqueueWrite);
+    const [, payload] = enqueueMock.mock.calls[0]!;
+    expect(payload.wouldBlock).toBe(false);
+    expect((payload.payload as Record<string, unknown>).blockedReason).toBeNull();
+  });
+
+  it('passes OSINT gate when REQUIRE_OSINT=false regardless of signals', async () => {
+    const { redis } = makeRedis(); // empty zrangeMembers → no OSINT signals
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-no-osint-ok' })]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_REQUIRE_OSINT: false });
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    const enqueueMock = vi.mocked(enqueueWrite);
+    const [, payload] = enqueueMock.mock.calls[0]!;
+    // Gate passes — not blocked by OSINT
+    expect((payload.payload as Record<string, unknown>).blockedReason).not.toBe('no_osint_signal');
   });
 });

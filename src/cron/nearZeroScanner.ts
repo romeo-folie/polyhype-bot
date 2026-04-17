@@ -383,8 +383,10 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     // Observability-only flag: would this candidate have traded if the scanner
     // were enabled? Split from wouldExecute so shadow logs reflect the true
     // gate outcome regardless of the ENABLED switch.
+    const osintRequired = cfg.NEAR_ZERO_REQUIRE_OSINT;
+    const osintGatePass = !osintRequired || hasOsintSignal;
     const wouldTradeIfEnabled =
-      pOurSide >= cfg.NEAR_ZERO_MIN_CONSENSUS && meetsEdge && lowStddev;
+      pOurSide >= cfg.NEAR_ZERO_MIN_CONSENSUS && meetsEdge && lowStddev && osintGatePass;
     const wouldExecute = wouldTradeIfEnabled && cfg.NEAR_ZERO_SCANNER_ENABLED;
 
     // Identify the first failing gate so metricValue/threshold in shadow_observations
@@ -393,7 +395,9 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     let shadowMetricValue = edge;
     let shadowThreshold = cfg.NEAR_ZERO_MIN_EDGE;
     if (!wouldTradeIfEnabled) {
-      if (pOurSide < cfg.NEAR_ZERO_MIN_CONSENSUS) {
+      if (!osintGatePass) {
+        blockedReason = 'no_osint_signal';
+      } else if (pOurSide < cfg.NEAR_ZERO_MIN_CONSENSUS) {
         blockedReason = 'consensus_below_threshold';
         shadowMetricValue = pOurSide;
         shadowThreshold = cfg.NEAR_ZERO_MIN_CONSENSUS;
