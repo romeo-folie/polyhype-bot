@@ -130,6 +130,10 @@ describe('copytrade helpers', () => {
     expect(matchesCategory('Bitcoin price above $100k?', null, ['crypto-regulatory'])).toBe(true);
     expect(matchesCategory('Anything here', null, ['all'])).toBe(true);
     expect(matchesCategory('Bitcoin price above $100k?', null, ['weather'])).toBe(false);
+    // Soccer club-name / match-day patterns
+    expect(matchesCategory('Will 1. FC Köln win on 2026-04-17?', null, ['sports-soccer'])).toBe(true);
+    expect(matchesCategory('Will BV Borussia 09 Dortmund win on 2026-04-18?', null, ['sports-soccer'])).toBe(true);
+    expect(matchesCategory('Will Arsenal win on 2026-05-01?', null, ['sports-soccer'])).toBe(true);
   });
 });
 

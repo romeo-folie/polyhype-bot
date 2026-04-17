@@ -701,7 +701,7 @@ const envSchema = z.object({
     .string()
     .optional()
     .default(
-      '{"crypto-regulatory": 100, "mentions": 50, "macro": 150, "us-politics": 200, "geopolitical": 200, "sports": 100}',
+      '{"crypto-regulatory": 150, "mentions": 50, "macro": 150, "us-politics": 200, "geopolitical": 200, "sports": 100}',
     )
     .transform((v, ctx) => {
       try {
