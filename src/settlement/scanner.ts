@@ -24,7 +24,7 @@ import { loadConfig } from '../shared/config.js';
 import { getCachedMarkets } from '../shared/watchlist.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
 import { parseClobTokenIds } from '../mapping/gamma.js';
-import type { GammaMarket } from '../mapping/gamma.js';
+import type { CachedMarket } from '../shared/watchlist.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 type ResolutionMode = 'sigmoid' | 'close_print';
@@ -87,7 +87,7 @@ async function readSpotLast(redis: Redis, ticker: string): Promise<SpotLast | nu
 }
 
 interface MarketImplied {
-  market: GammaMarket;
+  market: CachedMarket;
   ticker: string;
   spot: number;
   cutoff: number;
@@ -152,7 +152,7 @@ export function impliedYesProbClosePrint(
   return impliedYesProb(spot, cutoff, bandPct);
 }
 
-function parseYesPrice(market: GammaMarket): number | null {
+function parseYesPrice(market: CachedMarket): number | null {
   const op = market.outcomePrices;
   if (!op) return null;
   let arr: unknown = op;
@@ -174,7 +174,7 @@ function parseYesPrice(market: GammaMarket): number | null {
  * settlement-arb opportunities that clear the edge gate. Exposed for testing.
  */
 export function detectOpportunities(
-  markets: GammaMarket[],
+  markets: CachedMarket[],
   spotByTicker: Map<string, SpotLast>,
   cfg: { SETTLEMENT_MIN_EDGE: number },
   now = Date.now(),

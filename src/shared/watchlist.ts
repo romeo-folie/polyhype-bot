@@ -5,6 +5,34 @@ import { enqueueWrite } from '../db/writeQueue.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import type { Redis } from 'ioredis';
 
+/**
+ * Slim subset of `GammaMarket` that is actually persisted to Redis by
+ * `refreshDynamicWatchlist`. `active`, `closed`, and `slug` are intentionally
+ * omitted — the cache writer already filters to active=true & closed=false at
+ * fetch time and drops past-endDate markets, so downstream readers must not
+ * re-check those fields (they will be undefined).
+ *
+ * Typing `getCachedMarkets()` as `CachedMarket[]` (instead of `GammaMarket[]`)
+ * forces TypeScript to flag any consumer that reaches for a field the cache
+ * doesn't persist — a class of bug that previously shipped to prod silently
+ * (see the near-zero NO-side injector regression fixed alongside this type).
+ */
+export type CachedMarket = Pick<
+  GammaMarket,
+  | 'id'
+  | 'question'
+  | 'description'
+  | 'conditionId'
+  | 'clobTokenIds'
+  | 'outcomePrices'
+  | 'outcomes'
+  | 'liquidity'
+  | 'endDate'
+  | 'volume'
+  | 'feesEnabled'
+  | 'feeType'
+>;
+
 const WATCHLIST_KEY = 'watchlist:dynamic_keywords';
 const MARKET_CACHE_KEY = 'watchlist:market_cache';
 
@@ -202,11 +230,11 @@ export async function matchesWatchlist(text: string, redis: Redis): Promise<bool
  *
  * Returns an empty array if the cache is missing or corrupted.
  */
-export async function getCachedMarkets(redis: Redis): Promise<GammaMarket[]> {
+export async function getCachedMarkets(redis: Redis): Promise<CachedMarket[]> {
   try {
     const raw = await redis.get(MARKET_CACHE_KEY);
     if (!raw) return [];
-    const parsed = JSON.parse(raw) as GammaMarket[];
+    const parsed = JSON.parse(raw) as CachedMarket[];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
