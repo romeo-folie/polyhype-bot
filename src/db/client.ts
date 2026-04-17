@@ -19,7 +19,7 @@ export function getSql(): Sql {
   if (_sql) return _sql;
   const url = process.env.PG_URL ?? process.env.PG_URL_NOPASS ?? process.env.DATABASE_URL;
   if (!url) {
-    throw new Error('PG_URL environment variable is not set');
+    throw new Error('Database connection URL is not set; tried PG_URL, then PG_URL_NOPASS, then DATABASE_URL');
   }
   _sql = postgres(url, {
     max: 8,

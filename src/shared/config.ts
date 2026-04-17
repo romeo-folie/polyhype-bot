@@ -1162,7 +1162,7 @@ const envSchema = z.object({
   // tight ensemble from collapsing the bracket distribution (observed in tropical cities
   // where ensemble stddev < 0.3°C causes 5-8σ misses against ground truth).
   // 0.7 = ensemble stddev may not be tighter than 70% of the seasonal default.
-  WEATHER_STDDEV_MIN_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.7),
+  WEATHER_STDDEV_MIN_FRACTION: z.coerce.number().min(0.1).max(1).optional().default(0.7),
   // Minimum sum of all model bracket probabilities in an event. Below this threshold
   // the event is skipped — late-day bracket thinning (11 → 4 brackets) leaves the
   // surviving brackets with artificially high probability mass and trips the edge gate
