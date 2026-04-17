@@ -380,8 +380,10 @@ async function _estimateSingle(opts: {
 /**
  * Build a stable cache key for a consensus estimate.
  * Price is deliberately excluded — blind consensus means the same
- * question+headline always produces the same estimate regardless of market price.
- * Headline is trimmed to remove whitespace variation before slicing.
+ * normalized question always produces the same estimate regardless of market price.
+ * Headline is intentionally excluded from the cache key in v2, even though it still
+ * contributes context to the LLM prompt. The v2 prefix distinguishes this format
+ * from older headline-based cache entries.
  */
 function buildConsensusCacheKey(question: string): string {
   // Keyed on question only (not headline) so repeated news about the same
