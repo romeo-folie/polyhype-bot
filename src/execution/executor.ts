@@ -41,7 +41,7 @@ import {
   recordExecutionTiming,
   recordExecutionEvent,
 } from '../shared/telemetry.js';
-import { notifyTradeError, notifyTradeExecuted, notifyHedgeOpened, notifyMakerOrderPosted } from './telegram.js';
+import { notifyTradeError, notifyTradeExecuted, notifyHedgeOpened } from './telegram.js';
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
 import { getRedis } from '../shared/redis.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
@@ -444,10 +444,10 @@ async function tryExecuteViaClobMaker(
     return { ok: false, error: 'maker_no_orderbook', waitMs: Date.now() - startedAt };
   }
 
-  const bestBid = parseFloat(book.bids[0]?.price ?? '0');
-  const bestAsk = parseFloat(book.asks[0]?.price ?? '0');
-  const mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : null;
-  const spreadBps = bestBid > 0 && bestAsk > 0 && mid ? ((bestAsk - bestBid) / mid) * 10000 : null;
+  let bestBid = parseFloat(book.bids[0]?.price ?? '0');
+  let bestAsk = parseFloat(book.asks[0]?.price ?? '0');
+  let mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : null;
+  let spreadBps = bestBid > 0 && bestAsk > 0 && mid ? ((bestAsk - bestBid) / mid) * 10000 : null;
 
   // Oracle-lag needs a narrower empty-book edge than the shared default. See
   // ORACLE_LAG_MAKER_EDGE_BPS comment in config.ts for the fill-rate math.
@@ -478,7 +478,7 @@ async function tryExecuteViaClobMaker(
     }
   }
 
-  const price = resolveMakerPrice(book, edgeBps, fairValue);
+  let price = resolveMakerPrice(book, edgeBps, fairValue);
   if (price === null) {
     return {
       ok: false,
@@ -492,7 +492,7 @@ async function tryExecuteViaClobMaker(
     };
   }
 
-  const size = signal.stakeUsd / price;
+  let size = signal.stakeUsd / price;
   const minOrderSize = parseFloat(book.min_order_size ?? '0');
   if (isFinite(minOrderSize) && minOrderSize > 0 && size < minOrderSize) {
     return {
@@ -521,7 +521,7 @@ async function tryExecuteViaClobMaker(
   // that produced the 2026-04-16 OSINT empty-book losses. Post-only makes the
   // matching engine reject any order that would cross, and we treat that as
   // no-trade rather than falling through to a taker fill.
-  const result = await submitClobLimitBuy({
+  let result = await submitClobLimitBuy({
     tokenId,
     price,
     size,
@@ -530,6 +530,93 @@ async function tryExecuteViaClobMaker(
     orderType: 'GTC',
     postOnly: true,
   });
+
+  // Oracle-lag retry-on-reject: a post-only rejection means a seller arrived
+  // in the submission window (our book snapshot was stale). Re-fetch, recap
+  // the fair value against the updated book, and post once more. See
+  // ORACLE_LAG_MAKER_RETRY_ON_REJECT comment in config.ts.
+  //
+  // Scope the retry to explicit post-only crossing rejections. Other failure
+  // modes (timeout, network error, signer rejection) leave us unsure whether
+  // the first order was placed — retrying could duplicate live exposure.
+  const isPostOnlyReject =
+    !result.success &&
+    typeof result.error === 'string' &&
+    /post.?only|would (cross|match)/i.test(result.error);
+  const canRetry =
+    emptyBookMode &&
+    signal.source === 'oracle-lag' &&
+    cfg.ORACLE_LAG_MAKER_RETRY_ON_REJECT &&
+    isPostOnlyReject;
+  if (canRetry) {
+    logger.info('[executor] oracle-lag maker rejected — retrying with fresh book', {
+      marketId: signal.marketId,
+      firstPrice: price,
+      firstError: result.error,
+    });
+    const retryBook = await getClobOrderBook(yesTokenId);
+    if (retryBook) {
+      const rBestBid = parseFloat(retryBook.bids[0]?.price ?? '0');
+      const rBestAsk = parseFloat(retryBook.asks[0]?.price ?? '0');
+      const rMid = rBestBid > 0 && rBestAsk > 0 ? (rBestBid + rBestAsk) / 2 : null;
+      const rSpread =
+        rBestBid > 0 && rBestAsk > 0 && rMid ? ((rBestAsk - rBestBid) / rMid) * 10000 : null;
+
+      let retryFair: number | null =
+        signal.consensusProbability != null
+          ? signal.direction === 'YES' || signal.direction === 'UP'
+            ? signal.consensusProbability
+            : 1 - signal.consensusProbability
+          : null;
+      if (retryFair != null) {
+        const rTick = parseFloat(retryBook.tick_size ?? '0.01');
+        if (signal.direction === 'YES' || signal.direction === 'UP') {
+          if (rBestAsk > 0) retryFair = Math.min(retryFair, rBestAsk - rTick);
+        } else {
+          if (rBestBid > 0) retryFair = Math.min(retryFair, 1 - rBestBid - rTick);
+        }
+      }
+
+      const retryPrice = resolveMakerPrice(retryBook, edgeBps, retryFair);
+      const retryMinOrder = parseFloat(retryBook.min_order_size ?? '0');
+      if (retryPrice !== null && retryPrice !== price) {
+        const retrySize = signal.stakeUsd / retryPrice;
+        const sizeOk =
+          !isFinite(retryMinOrder) || retryMinOrder <= 0 || retrySize >= retryMinOrder;
+        if (sizeOk) {
+          logger.info('[executor] oracle-lag maker retry submitting', {
+            marketId: signal.marketId,
+            retryPrice,
+            retrySize,
+            prevPrice: price,
+          });
+          const retryResult = await submitClobLimitBuy({
+            tokenId,
+            price: retryPrice,
+            size: retrySize,
+            tickSize: retryBook.tick_size as TickSize,
+            negRisk: retryBook.neg_risk,
+            orderType: 'GTC',
+            postOnly: true,
+          });
+          result = retryResult;
+          price = retryPrice;
+          size = retrySize;
+          bestBid = rBestBid;
+          bestAsk = rBestAsk;
+          mid = rMid;
+          spreadBps = rSpread;
+          if (retryResult.success && retryResult.order_id) {
+            logger.info('[executor] oracle-lag maker retry succeeded', {
+              marketId: signal.marketId,
+              retryOrderId: retryResult.order_id,
+              retryPrice,
+            });
+          }
+        }
+      }
+    }
+  }
 
   if (!result.success || !result.order_id) {
     return {
@@ -1746,10 +1833,9 @@ export async function executeSignal(
         orderId: makerAttempt.makerOrderId,
         postedPrice: makerAttempt.makerPostedPrice,
       });
-      void notifyMakerOrderPosted(signal, {
-        postedPrice: makerAttempt.makerPostedPrice ?? signal.outcomePrice,
-        ...(makerAttempt.makerOrderId != null && { orderId: makerAttempt.makerOrderId }),
-      }).catch(() => {});
+      // Intentionally no Telegram notification here: we only alert on confirmed
+      // fills. Async fills are notified by the reconciler when the pending
+      // maker order is linked to a new position (see monitor/reconciliation.ts).
       finalizeAttempt({
         executionPath: 'maker_pending',
         finalExecutionPath: 'maker_pending',
