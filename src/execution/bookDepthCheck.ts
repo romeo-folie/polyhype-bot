@@ -13,7 +13,6 @@ import { getClobOrderBook } from '../shared/clob.js';
 
 export interface BookDepthCheckInput {
   tokenId: string;
-  side: 'BUY';
   stakeUsd: number;
   maxSlippageBps: number;
 }

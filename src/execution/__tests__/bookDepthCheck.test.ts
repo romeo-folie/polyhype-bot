@@ -110,7 +110,6 @@ describe('checkBookDepthForStake', () => {
     mockGetClobOrderBook.mockResolvedValue(null);
     const result = await checkBookDepthForStake({
       tokenId: 'tok-1',
-      side: 'BUY',
       stakeUsd: 5,
       maxSlippageBps: 200,
     });
@@ -123,7 +122,6 @@ describe('checkBookDepthForStake', () => {
     );
     const result = await checkBookDepthForStake({
       tokenId: 'tok-2',
-      side: 'BUY',
       stakeUsd: 5,
       maxSlippageBps: 200,
     });

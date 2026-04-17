@@ -671,6 +671,25 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     expect(mockExecuteSignal).not.toHaveBeenCalled();
   });
 
+  it('skips candidate when clobTokenIds cannot be parsed', async () => {
+    const { redis } = makeRedis();
+    mockGetCachedMarkets.mockResolvedValue([
+      makeMarket({ id: 'mkt-bad-tokens', clobTokenIds: 'not-valid-json' }),
+    ]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_SCANNER_ENABLED: true });
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+
+    await runNearZeroScan(redis);
+
+    expect(mockCheckBookDepthForStake).not.toHaveBeenCalled();
+    expect(mockExecuteSignal).not.toHaveBeenCalled();
+  });
+
   it('proceeds to execution when depth gate passes', async () => {
     const { redis } = makeRedis();
     mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-deep' })]);

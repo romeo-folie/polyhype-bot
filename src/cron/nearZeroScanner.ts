@@ -546,7 +546,16 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
 
     if (!wouldExecute) continue;
 
-    const clobTokenIds = parseClobTokenIds(candidate.market.clobTokenIds);
+    let clobTokenIds: string[];
+    try {
+      clobTokenIds = parseClobTokenIds(candidate.market.clobTokenIds);
+    } catch {
+      logger.warn('[near-zero] skipping candidate — failed to parse clobTokenIds', {
+        marketId: candidate.market.id,
+        clobTokenIds: candidate.market.clobTokenIds,
+      });
+      continue;
+    }
     // Half-Kelly sizing: fraction = (edge / (1 - price)) / 2
     // Capped at NEAR_ZERO_MAX_STAKE_USD; floored at MIN_BET_USD so we never
     // submit a sub-floor order when edge is tiny.
@@ -566,13 +575,14 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
       logger.info('[near-zero] depth gate blocked execution', {
         marketId: candidate.market.id,
         direction: candidate.direction,
-        reason: 'no_book',
+        reason: 'missing_token_id',
+        tokenIdx,
+        clobTokenIdsLength: clobTokenIds.length,
       });
       continue;
     }
     const depthCheck = await checkBookDepthForStake({
       tokenId,
-      side: 'BUY',
       stakeUsd,
       maxSlippageBps: cfg.NEAR_ZERO_MAX_SLIPPAGE_BPS,
     });
