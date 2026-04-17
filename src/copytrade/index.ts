@@ -143,8 +143,11 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     'serie a',
     'ligue 1',
     'mls',
-    // Club names not covered by league keywords — matches "Will X win on YYYY-MM-DD?" patterns
+    // "win on YYYY-MM-DD" — match-day question pattern (e.g. "Will FC Köln win on 2026-04-17?")
     'win on',
+    // Club names not covered by league keywords
+    'köln',
+    'koln',
     'dortmund',
     'münchen',
     'munich',
@@ -301,6 +304,19 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   ],
 };
 
+// Pre-compiled per-category regex (built once at module load, not per matchesCategory call).
+// Multi-word phrases use a literal substring alternation; single words are \b-anchored.
+const CATEGORY_REGEXES = new Map<string, RegExp>(
+  Object.entries(CATEGORY_KEYWORDS).map(([cat, keywords]) => {
+    const parts = keywords.map((kw) =>
+      kw.includes(' ')
+        ? kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // escape phrase for regex safety
+        : `\\b${kw}\\b`,
+    );
+    return [cat, new RegExp(parts.join('|'))];
+  }),
+);
+
 /**
  * Check if a market title or description matches any keyword from the allowed categories.
  * Keywords are matched as whole words to avoid false positives from short tokens.
@@ -311,10 +327,9 @@ export function matchesCategory(
   allowedScopes: string[],
 ): boolean {
   if (allowedScopes.includes('all') || allowedScopes.length === 0) return true;
-  const scopes = allowedScopes;
 
   // Warn about unrecognized scope values
-  for (const scope of scopes) {
+  for (const scope of allowedScopes) {
     if (scope !== 'all' && !CATEGORY_KEYWORDS[scope]) {
       logger.warn('[copytrade] unknown COPYTRADE_MARKET_SCOPE value — will match nothing', {
         scope,
@@ -324,18 +339,8 @@ export function matchesCategory(
   }
 
   const lowerText = `${title} ${description ?? ''}`.toLowerCase();
-  for (const scope of scopes) {
-    const keywords = CATEGORY_KEYWORDS[scope];
-    if (
-      keywords?.some((kw) => {
-        // Multi-word phrases: use substring match (the phrase already acts as its own boundary).
-        // Single words: anchor with \b to prevent 'un' matching 'until', 'cold' matching 'colder'.
-        if (kw.includes(' ')) return lowerText.includes(kw);
-        return new RegExp(`\\b${kw}\\b`).test(lowerText);
-      })
-    ) {
-      return true;
-    }
+  for (const scope of allowedScopes) {
+    if (CATEGORY_REGEXES.get(scope)?.test(lowerText)) return true;
   }
   return false;
 }
