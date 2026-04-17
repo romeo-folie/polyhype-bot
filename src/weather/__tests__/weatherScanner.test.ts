@@ -14,6 +14,9 @@ vi.mock('../../shared/config.js', () => ({
     WEATHER_DEDUP_TTL_S: 14400,
     WEATHER_MAX_EVENTS: 50,
     WEATHER_MAX_HORIZON_DAYS: 7,
+    WEATHER_STDDEV_MULTIPLIER: 1.0,
+    WEATHER_STDDEV_MIN_FRACTION: 0.7,
+    WEATHER_MIN_MODEL_COVERAGE: 0.95,
   })),
 }));
 
@@ -44,6 +47,7 @@ vi.mock('../noaaClient.js', async () => {
     await vi.importActual<typeof NoaaModule>('../noaaClient.js');
   return {
     lookupCity: actual.lookupCity,
+    canonicalCityKey: actual.canonicalCityKey,
     fetchNwsForecast: mockFetchNwsForecast,
     estimateBracketProbability: actual.estimateBracketProbability,
     estimateExceedanceProbability: actual.estimateExceedanceProbability,
@@ -67,6 +71,7 @@ const {
   parseBracketLabel,
   parseWeatherEvent,
   findMispricedBrackets,
+  fetchForecast,
   scanWeatherMarkets,
   daysUntil,
 } = await import('../weatherScanner.js');
@@ -545,8 +550,10 @@ describe('findMispricedBrackets', () => {
     };
     const forecast = { forecastHigh: 50, stdDev: 3, source: 'noaa' as const, ensembleMembers: 0 };
 
-    const baseline = findMispricedBrackets(event, forecast, 1, 0, 1.0);
-    const widened  = findMispricedBrackets(event, forecast, 1, 0, 1.5);
+    // Pass minModelCoverage=0 to disable the coverage guard — this test focuses
+    // on multiplier behaviour with an intentionally minimal 2-bracket event.
+    const baseline = findMispricedBrackets(event, forecast, 1, 0, 1.0, 0);
+    const widened  = findMispricedBrackets(event, forecast, 1, 0, 1.5, 0);
 
     const centralBase = baseline.find((o) => o.bracketLabel === 'central')!;
     const centralWide = widened.find((o) => o.bracketLabel === 'central')!;
@@ -599,6 +606,137 @@ describe('findMispricedBrackets', () => {
     const opps = findMispricedBrackets(event, forecast, 1, 0.08);
     // With fair prices, no bracket should have 8+ cents of edge
     expect(opps.length).toBe(0);
+  });
+
+  it('returns [] and warns when model coverage is below threshold', () => {
+    // Only 4 of 11 brackets present — modelSum will be well below 0.95
+    const thinBrackets = [
+      { marketId: 'm4', conditionId: 'c4', clobTokenIds: ['t4y', 't4n'], threshold: 4, low: 46, high: 47, label: '46-47°F', yesPrice: 0.15, noPrice: 0.85 },
+      { marketId: 'm5', conditionId: 'c5', clobTokenIds: ['t5y', 't5n'], threshold: 5, low: 48, high: 49, label: '48-49°F', yesPrice: 0.20, noPrice: 0.80 },
+      { marketId: 'm6', conditionId: 'c6', clobTokenIds: ['t6y', 't6n'], threshold: 6, low: 50, high: 51, label: '50-51°F', yesPrice: 0.18, noPrice: 0.82 },
+      { marketId: 'm7', conditionId: 'c7', clobTokenIds: ['t7y', 't7n'], threshold: 7, low: 52, high: 53, label: '52-53°F', yesPrice: 0.12, noPrice: 0.88 },
+    ];
+    const event = {
+      eventId: 'e-thin',
+      slug: 'thin-event',
+      city: 'chicago',
+      coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14',
+      unit: 'fahrenheit' as const,
+      brackets: thinBrackets,
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    // Forecast centred on the brackets so these 4 carry ~40-50% of total mass
+    const forecast = { forecastHigh: 50, stdDev: 4, source: 'noaa' as const, ensembleMembers: 0 };
+
+    const opps = findMispricedBrackets(event, forecast, 1, 0.0, 1.0, 0.95);
+    expect(opps).toHaveLength(0);
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[weather] model probabilities below coverage threshold, skipping event',
+      expect.objectContaining({ city: 'chicago' }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchForecast — stddev floor
+// ---------------------------------------------------------------------------
+
+describe('fetchForecast - stddev floor', () => {
+  it('floors ensemble stddev at defaultStd * stddevMinFraction for international city', async () => {
+    // Shenzhen: international, celsius. Ensemble returns a very tight stddev (0.2°C).
+    // With stddevMinFraction=0.7, default ~2°C → floor = 1.4°C.
+    // Result stddev should be ≥ floor even though ensemble reported 0.2.
+    const shenzhenCoords = lookupCity('shenzhen');
+    expect(shenzhenCoords).not.toBeNull();
+
+    mockFetchEnsemble.mockResolvedValueOnce({
+      meanHigh: 28,
+      stddevHigh: 0.2, // unrealistically tight tropical ensemble
+      meanLow: 22,
+      stddevLow: 0.1,
+      memberCount: 31,
+      forecastDate: '2026-04-20',
+    });
+    mockFetchOpenMeteo.mockResolvedValueOnce({
+      highTemp: 28,
+      lowTemp: 22,
+      precipProbability: 40,
+      forecastDate: '2026-04-20',
+    });
+
+    const mockEvent = {
+      eventId: 'szx-test',
+      slug: 'shenzhen-test',
+      city: 'shenzhen',
+      coords: shenzhenCoords!,
+      targetDate: '2026-04-20',
+      unit: 'celsius' as const,
+      brackets: [],
+      endDate: '2026-04-20T12:00:00Z',
+    };
+
+    // daysOut=3, April (month 4) — spring, base stddev × 5/9 for Celsius
+    const defaultStdCelsius = getDefaultStdDev(3, 4) * (5 / 9);
+    const result = await fetchForecast(mockEvent, 3, undefined, 0.7);
+    expect(result).not.toBeNull();
+    // Floor kicks in: stdDev must be ≥ defaultStdCelsius * 0.7
+    expect(result!.stdDev).toBeGreaterThanOrEqual(defaultStdCelsius * 0.7 - 0.01);
+    // And it should be strictly greater than the raw ensemble value
+    expect(result!.stdDev).toBeGreaterThan(0.2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseWeatherEvent — canonical city key
+// ---------------------------------------------------------------------------
+
+describe('parseWeatherEvent - canonical city key', () => {
+  function makeNycMarket(id: string, label: string, threshold: string, yesP: string, noP: string) {
+    return {
+      id,
+      question: `Will the highest temperature in NYC be ${label} on April 17?`,
+      conditionId: `cond-${id}`,
+      clobTokenIds: `["token-${id}-yes","token-${id}-no"]`,
+      outcomePrices: `["${yesP}","${noP}"]`,
+      outcomes: '["Yes","No"]',
+      active: true,
+      closed: false,
+      volume: '10000',
+      liquidity: '5000',
+      endDate: '2026-04-17T12:00:00Z',
+      description: null,
+      groupItemTitle: label,
+      groupItemThreshold: threshold,
+    };
+  }
+
+  it('stores canonical "new york" city key when event title uses "NYC"', () => {
+    const event = {
+      id: 'evt-nyc',
+      title: 'Highest temperature in NYC on April 17?',
+      slug: 'highest-temperature-in-nyc-on-april-17-2026',
+      active: true,
+      closed: false,
+      negRisk: true,
+      endDate: '2026-04-17T12:00:00Z',
+      markets: [
+        makeNycMarket('m0', '39°F or below', '0', '0.01', '0.99'),
+        makeNycMarket('m1', '40-41°F', '1', '0.03', '0.97'),
+        makeNycMarket('m2', '42-43°F', '2', '0.05', '0.95'),
+        makeNycMarket('m3', '44-45°F', '3', '0.10', '0.90'),
+        makeNycMarket('m4', '46-47°F', '4', '0.15', '0.85'),
+        makeNycMarket('m5', '48-49°F', '5', '0.20', '0.80'),
+        makeNycMarket('m6', '50-51°F', '6', '0.18', '0.82'),
+        makeNycMarket('m7', '52-53°F', '7', '0.12', '0.88'),
+        makeNycMarket('m8', '54-55°F', '8', '0.08', '0.92'),
+        makeNycMarket('m9', '56-57°F', '9', '0.05', '0.95'),
+        makeNycMarket('m10', '58°F or higher', '10', '0.03', '0.97'),
+      ],
+    };
+    const result = parseWeatherEvent(event);
+    expect(result).not.toBeNull();
+    expect(result!.city).toBe('new york');
   });
 });
 

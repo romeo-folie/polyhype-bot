@@ -28,6 +28,7 @@ import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import {
   lookupCity,
+  canonicalCityKey,
   fetchNwsForecast,
   estimateBracketProbability,
   getDefaultStdDev,
@@ -342,7 +343,7 @@ export function parseWeatherEvent(event: WeatherGammaEvent): ParsedWeatherEvent 
   return {
     eventId: event.id,
     slug: event.slug,
-    city: cityRaw,
+    city: canonicalCityKey(cityRaw) ?? cityRaw,
     coords,
     targetDate,
     unit: coords.unit,
@@ -373,6 +374,7 @@ export async function fetchForecast(
   event: ParsedWeatherEvent,
   daysOut: number,
   fetchFn?: FetchFn,
+  stddevMinFraction = 0.7,
 ): Promise<ForecastResult | null> {
   const { coords, targetDate, unit } = event;
   const month = parseInt(targetDate.slice(5, 7), 10);
@@ -407,10 +409,10 @@ export async function fetchForecast(
       forecastHigh = (noaaHigh + omForecast.highTemp) / 2;
       source = 'combined';
 
-      // Use max of ensemble stddev and source disagreement
+      // Use max of ensemble stddev and source disagreement; floor at fraction of climatology.
       const disagreement = Math.abs(noaaHigh - omForecast.highTemp) / 1.5;
       const ensStd = ensemble?.stddevHigh ?? 0;
-      const stdDev = Math.max(ensStd, disagreement, defaultStd * 0.7);
+      const stdDev = Math.max(ensStd, disagreement, defaultStd * stddevMinFraction);
       return { forecastHigh, stdDev, source, ensembleMembers: ensemble?.memberCount ?? 0 };
     }
 
@@ -424,7 +426,7 @@ export async function fetchForecast(
       source = 'open-meteo';
     }
 
-    const stdDev = ensemble?.stddevHigh ?? defaultStd;
+    const stdDev = Math.max(ensemble?.stddevHigh ?? defaultStd, defaultStd * stddevMinFraction);
     return { forecastHigh, stdDev, source, ensembleMembers: ensemble?.memberCount ?? 0 };
   }
 
@@ -432,7 +434,7 @@ export async function fetchForecast(
   const omForecast = await fetchOpenMeteoForecast(coords.lat, coords.lon, targetDate, unit, fetchFn);
   if (!omForecast) return null;
 
-  const stdDev = ensemble?.stddevHigh ?? defaultStd;
+  const stdDev = Math.max(ensemble?.stddevHigh ?? defaultStd, defaultStd * stddevMinFraction);
   return {
     forecastHigh: omForecast.highTemp,
     stdDev,
@@ -504,6 +506,7 @@ export function findMispricedBrackets(
   daysOut: number,
   minEdge: number,
   stddevMultiplier = 1.0,
+  minModelCoverage = 0.95,
 ): WeatherBracketOpportunity[] {
   const opportunities: WeatherBracketOpportunity[] = [];
 
@@ -526,14 +529,19 @@ export function findMispricedBrackets(
     modelProbs.push(prob);
   }
 
-  // Sum-to-one diagnostic: model probs should sum to ~1.0
+  // Coverage guard: model probs must sum to ≥ minModelCoverage.
+  // Late-day bracket thinning (11 → 4 brackets) causes low coverage; the
+  // surviving brackets inherit missing mass and produce synthetic edge.
   const modelSum = modelProbs.reduce((s, p) => s + p, 0);
-  if (Math.abs(modelSum - 1.0) > 0.01) {
-    logger.warn('[weather] model probabilities do not sum to 1', {
+  if (modelSum < minModelCoverage) {
+    logger.warn('[weather] model probabilities below coverage threshold, skipping event', {
       city: event.city,
       targetDate: event.targetDate,
       modelSum: modelSum.toFixed(4),
+      bracketCount: event.brackets.length,
+      threshold: minModelCoverage,
     });
+    return [];
   }
 
   // Compute overround (diagnostic): sum of all market YES prices.
@@ -661,20 +669,30 @@ export async function scanWeatherMarkets(
     }
 
     // Step 3: Fetch forecast
-    const forecast = await fetchForecast(event, daysOut, fetchFn);
+    const forecast = await fetchForecast(event, daysOut, fetchFn, cfg.WEATHER_STDDEV_MIN_FRACTION);
     if (!forecast) {
       noForecast++;
       continue;
     }
 
-    // Step 4: Find mispriced brackets
+    // Step 4: Find mispriced brackets (coverage guard inside; returns [] when bracket
+    // data is incomplete — e.g. late-day thinning from 11 → 4 brackets).
     const opportunities = findMispricedBrackets(
       event,
       forecast,
       daysOut,
       cfg.WEATHER_MIN_EDGE,
       cfg.WEATHER_STDDEV_MULTIPLIER,
+      cfg.WEATHER_MIN_MODEL_COVERAGE,
     );
+
+    // Compute modelSum for shadow obs (same effective stddev as findMispricedBrackets).
+    const effectiveStdDev = forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER;
+    const modelSum = event.brackets.reduce((s, b) =>
+      s + estimateBracketProbability(forecast.forecastHigh, b.low, b.high, daysOut, effectiveStdDev),
+      0,
+    );
+    const coverageStatus = modelSum >= cfg.WEATHER_MIN_MODEL_COVERAGE ? 'ok' : 'skipped_low_coverage';
 
     // Step 6: Shadow-log every evaluated event
     const overround = event.brackets.reduce((s, b) => s + b.yesPrice, 0);
@@ -692,11 +710,13 @@ export async function scanWeatherMarkets(
       brackets: event.brackets.length,
       forecastHigh: forecast.forecastHigh.toFixed(1),
       forecastStdDev: forecast.stdDev.toFixed(2),
-      effectiveStdDev: (forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER).toFixed(2),
+      effectiveStdDev: effectiveStdDev.toFixed(2),
       stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
       forecastSource: forecast.source,
       ensembleMembers: forecast.ensembleMembers,
       overround: overround.toFixed(3),
+      modelSum: modelSum.toFixed(4),
+      coverageStatus,
       opportunitiesFound: opportunities.length,
       bestEdge: bestEdge.toFixed(3),
       enabled: cfg.WEATHER_SCANNER_ENABLED,
@@ -723,11 +743,13 @@ export async function scanWeatherMarkets(
         // Effective stddev = forecastStdDev * WEATHER_STDDEV_MULTIPLIER. Both
         // are logged so calibration analysis can compare modelProb under
         // different multipliers without re-deriving from raw stddev.
-        effectiveStdDev: forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER,
+        effectiveStdDev,
         stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
         forecastSource: forecast.source,
         ensembleMembers: forecast.ensembleMembers,
         overround,
+        modelSum: parseFloat(modelSum.toFixed(4)),
+        status: coverageStatus,
         opportunitiesFound: opportunities.length,
         scannerEnabled: cfg.WEATHER_SCANNER_ENABLED,
       },
