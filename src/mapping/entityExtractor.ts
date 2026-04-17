@@ -16,9 +16,8 @@ import {
   parseOutcomePrices,
   parseOutcomes,
   parseClobTokenIds,
-  type GammaMarket,
 } from './gamma.js';
-import { getCachedMarkets } from '../shared/watchlist.js';
+import { getCachedMarkets, type CachedMarket } from '../shared/watchlist.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 
@@ -281,7 +280,7 @@ const DOMAIN_BLOCKLIST_RE = new RegExp(DOMAIN_BLOCKLIST_TERMS.join('|'), 'i');
  * liquidity, extreme price, unparseable token IDs).
  */
 function buildCandidate(
-  market: GammaMarket,
+  market: CachedMarket,
   matchedQuery: string,
   matchScore: number,
   searchRank?: number,
@@ -357,7 +356,7 @@ function buildCandidate(
  * identify which entity string surfaced the candidate.
  */
 function scoreMarketAgainstQueries(
-  market: GammaMarket,
+  market: CachedMarket,
   queries: string[],
 ): { score: number; matchedQuery: string } {
   const haystack = `${market.question} ${market.description ?? ''}`;
@@ -393,7 +392,7 @@ function scoreMarketAgainstQueries(
  */
 function retrieveFromCache(
   queries: string[],
-  cachedMarkets: GammaMarket[],
+  cachedMarkets: CachedMarket[],
 ): Map<string, CandidateMarket> {
   const out = new Map<string, CandidateMarket>();
   for (const market of cachedMarkets) {
@@ -419,7 +418,7 @@ function retrieveFromCache(
  */
 async function retrieveFromPublicSearch(
   queries: string[],
-  cachedMarkets: GammaMarket[],
+  cachedMarkets: CachedMarket[],
   limitPerEntity: number,
 ): Promise<Map<string, CandidateMarket>> {
   const out = new Map<string, CandidateMarket>();

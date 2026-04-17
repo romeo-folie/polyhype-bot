@@ -8,8 +8,8 @@
 
 import { logger } from '../shared/logger.js';
 import { loadConfig, type AppConfig } from '../shared/config.js';
-import { getCachedMarkets } from '../shared/watchlist.js';
-import { parseClobTokenIds, parseOutcomePrices, type GammaMarket } from '../mapping/gamma.js';
+import { getCachedMarkets, type CachedMarket } from '../shared/watchlist.js';
+import { parseClobTokenIds, parseOutcomePrices } from '../mapping/gamma.js';
 import { fetchLiveGames, type LiveGame, type SportsLeague } from './espnFeed.js';
 import { nbaWinProb, nhlWinProb } from './winProb.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -17,7 +17,7 @@ import type { Redis } from 'ioredis';
 
 export interface SportsArbCandidate {
   game: LiveGame;
-  market: GammaMarket;
+  market: CachedMarket;
   modelHomeProb: number;
   yesPrice: number;
   /**
@@ -55,7 +55,7 @@ function nickname(team: string): string {
  * Return true when the market question mentions both teams from the given game.
  * Uses team nickname matching against the normalised question text.
  */
-export function marketMatchesGame(market: GammaMarket, game: LiveGame): boolean {
+export function marketMatchesGame(market: CachedMarket, game: LiveGame): boolean {
   const q = norm(market.question ?? '');
   if (!q) return false;
   const home = nickname(game.homeTeam);
@@ -68,7 +68,7 @@ export function marketMatchesGame(market: GammaMarket, game: LiveGame): boolean 
  * Decide whether the YES outcome represents the home team winning.
  * Heuristic: whichever team appears first in the question is treated as YES.
  */
-function yesIsHomeTeam(market: GammaMarket, game: LiveGame): boolean {
+function yesIsHomeTeam(market: CachedMarket, game: LiveGame): boolean {
   const q = norm(market.question ?? '');
   const home = nickname(game.homeTeam);
   const away = nickname(game.awayTeam);
@@ -93,7 +93,7 @@ interface ScanDeps {
   /** Override ESPN fetch in tests. */
   fetchLive?: (league: SportsLeague) => Promise<LiveGame[]>;
   /** Override watchlist cache in tests. */
-  getMarkets?: (redis: Redis) => Promise<GammaMarket[]>;
+  getMarkets?: (redis: Redis) => Promise<CachedMarket[]>;
 }
 
 /**
