@@ -10,6 +10,8 @@ import { recordRedemptionOutcome } from '../shared/positionOutcomeRecorder.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { isRecentlyClosed } from '../shared/closedGuard.js';
 import { getPendingOrder, deletePendingOrder } from '../execution/pendingMakerOrders.js';
+import { notifyTradeExecuted } from '../execution/telegram.js';
+import type { TradeSignal } from '../mapping/index.js';
 
 interface ReconciliationDetail {
   type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded' | 'recovered_outcome';
@@ -674,6 +676,26 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
     // Delete the pending order key only after the position is durably recorded.
     if (pendingOrder) {
       await deletePendingOrder(redis, market.id);
+      // Bot-originated maker fill (async path). Emit the one-and-only Telegram
+      // notification for this trade — we intentionally don't notify at post time
+      // so the user only sees confirmed entries.
+      const signalLike: TradeSignal = {
+        marketId: market.id,
+        conditionId: market.conditionId,
+        clobTokenIds: market.clobTokenIds,
+        question: market.question,
+        direction,
+        stakeUsd: newPos.stakeUsd,
+        edgeMagnitude: pendingOrder.edgeMagnitude ?? 0,
+        ...(pendingOrder.consensusP != null && { consensusProbability: pendingOrder.consensusP }),
+        outcomePrice: pos.avgPrice,
+        sourcedFrom: pendingOrder.sourcedFrom ?? 'reconciled:clob',
+        reasoning: 'Async maker fill reconciled from CLOB position snapshot.',
+      };
+      void notifyTradeExecuted(signalLike, undefined, {
+        venue: 'clob',
+        sharesFilled: shares,
+      }).catch(() => {});
     }
     logger.info('[reconcile] imported CLOB orphan', { marketId: market.id, direction, shares, linkedMakerOrder: pendingOrder != null });
     return true;

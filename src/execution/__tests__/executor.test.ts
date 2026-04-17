@@ -89,6 +89,7 @@ const mockConfig = {
   MAKER_EMPTY_BOOK_MAX_STDDEV: 0.12,
   MAKER_EMPTY_BOOK_ALLOWED_SOURCES: ['oracle-lag', 'near-zero-arb'],
   ORACLE_LAG_MAKER_EDGE_BPS: 50,
+  ORACLE_LAG_MAKER_RETRY_ON_REJECT: true,
 };
 
 const mockLoadConfig = vi.fn(() => mockConfig);
@@ -1453,6 +1454,98 @@ describe('empty-book maker route', () => {
 
     // Fair-value for NO: 1 - 0.65 = 0.35; minus 50 bps (0.005) = 0.345 → roundDown → 0.34
     expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.34 }));
+  });
+
+  it('retries once on post-only reject with re-fetched book (oracle-lag)', async () => {
+    // First post at 0.5012-fair → 0.50 (edge=50bps rounds to 0.49 but scenario:
+    // consensusProbability=0.55 to make the math distinct between attempts).
+    // Reject → re-fetch book with a seller now at 0.50 → fair caps to 0.49 →
+    // new price 0.48. Second post succeeds.
+    mockSubmitLimit
+      .mockResolvedValueOnce({ success: false, error: 'post-only: would cross' })
+      .mockResolvedValueOnce({ success: true, order_id: 'order-retry-1' });
+
+    // executeSignal pre-check + tryExecuteViaClobMaker first fetch both see the
+    // ghost book. The retry fetch sees a seller at 0.50 (why the first post was
+    // rejected in reality).
+    const ghostBook = {
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.01', size: '100' }],
+      asks: [{ price: '0.99', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash-empty',
+    };
+    const thinBook = {
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.01', size: '100' }],
+      asks: [{ price: '0.50', size: '10' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash-thin',
+    };
+    mockGetOrderBook
+      .mockResolvedValueOnce(ghostBook)
+      .mockResolvedValueOnce(ghostBook)
+      .mockResolvedValueOnce(thinBook);
+
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeSignal({ source: 'oracle-lag', consensusProbability: 0.55, direction: 'UP' }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(mockSubmitLimit).toHaveBeenCalledTimes(2);
+    // First attempt: fair 0.55 - 50bps = 0.545 → tick 0.54
+    expect(mockSubmitLimit).toHaveBeenNthCalledWith(1, expect.objectContaining({ price: 0.54 }));
+    // Retry: fair capped to 0.50 - 0.01 = 0.49; 0.49 - 50bps = 0.485 → tick 0.48
+    expect(mockSubmitLimit).toHaveBeenNthCalledWith(2, expect.objectContaining({ price: 0.48 }));
+    expect(result.skipped).toBe(false);
+    expect(result.entryExecutionPath).toBe('maker_pending');
+    // Pending row should reflect the retry's price/order_id
+    expect(mockSetPendingOrder).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ orderId: 'order-retry-1', price: 0.48 }),
+      expect.any(Number),
+    );
+  });
+
+  it('does NOT retry for non-oracle-lag sources (scope guard)', async () => {
+    mockSubmitLimit.mockResolvedValueOnce({ success: false, error: 'post-only: would cross' });
+
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({ source: 'near-zero-arb', consensusProbability: 0.70, direction: 'YES' }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+  });
+
+  it('does NOT retry when ORACLE_LAG_MAKER_RETRY_ON_REJECT=false', async () => {
+    mockConfig.ORACLE_LAG_MAKER_RETRY_ON_REJECT = false;
+    mockSubmitLimit.mockResolvedValueOnce({ success: false, error: 'post-only: would cross' });
+
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({ source: 'oracle-lag', consensusProbability: 0.55, direction: 'UP' }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+    mockConfig.ORACLE_LAG_MAKER_RETRY_ON_REJECT = true;
   });
 
   it('resumes active pending order that is not yet filled — returns pending again', async () => {

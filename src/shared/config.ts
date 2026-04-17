@@ -435,6 +435,16 @@ const envSchema = z.object({
   // remain the norm for these markets.
   ORACLE_LAG_MAKER_EDGE_BPS: z.coerce.number().min(0).optional().default(10),
 
+  // When an oracle-lag empty-book maker post is rejected (post-only crossing)
+  // the REST book snapshot was stale — a seller arrived in the ~100-200ms
+  // submission window. Re-fetch the book and retry once at a freshly-capped
+  // fair value. Keeps the post-only safety shield intact (no taker fallback)
+  // while catching the common "book transitioned from empty to thin" failure
+  // mode that 2026-04-17 telemetry showed accounts for 5/11 maker attempts.
+  // Scoped to oracle-lag only; OSINT markets have deeper books and far more
+  // adverse-fill risk, so adding retries there requires its own analysis.
+  ORACLE_LAG_MAKER_RETRY_ON_REJECT: boolFromEnv.optional().default(true),
+
   // Oracle-Lag gap-compression exit monitor (colocated in arb worker with the
   // scanner). Ships dark: when ORACLE_LAG_EXIT_ENABLED=false the monitor still
   // runs every tick and records a shadow_observations row on the first trigger
