@@ -188,6 +188,33 @@ describe('runNearZeroOsintInjector', () => {
     expect(mockCreate).not.toHaveBeenCalled();
   });
 
+  it('processes markets from the slim watchlist cache that omit active/closed fields', async () => {
+    // Regression: the watchlist cache writer only persists id/question/prices/etc.,
+    // NOT `active` or `closed`. The injector must not skip cache entries just
+    // because those fields are undefined — the cache is already filtered upstream
+    // to active=true&closed=false by refreshDynamicWatchlist.
+    const slimMarket = {
+      id: 'slim-1',
+      question: 'Will Iran and Israel sign a peace deal by July 2026?',
+      outcomePrices: JSON.stringify(['0.95', '0.05']), // NO=5¢ → near-zero
+      endDate: '2026-07-01T00:00:00Z',
+      // active + closed intentionally omitted — matches real cache shape
+    };
+    mockGetCachedMarkets.mockResolvedValue([slimMarket]);
+    mockGetRecentOsintItems.mockResolvedValue([makeOsintItem()]);
+    mockLLMScore(8);
+    const { redis, zadd } = makeRedis();
+
+    await runNearZeroOsintInjector(redis);
+
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(zadd).toHaveBeenCalledTimes(1);
+    const [, , member] = zadd.mock.calls[0]!;
+    const parsed = JSON.parse(member as string) as Record<string, unknown>;
+    expect(parsed.marketId).toBe('slim-1');
+    expect(parsed.direction).toBe('NO');
+  });
+
   it('respects NEAR_ZERO_INJECTOR_MAX_LLM_PER_RUN cap', async () => {
     mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_INJECTOR_MAX_LLM_PER_RUN: 2 });
     // 3 markets, 1 OSINT item → 3 valid pairs; only 2 LLM calls allowed

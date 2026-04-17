@@ -163,7 +163,11 @@ export async function runNearZeroOsintInjector(redis: Redis): Promise<void> {
   const candidates: InjectorCandidate[] = [];
 
   for (const market of allMarkets) {
-    if (!market.active || market.closed) continue;
+    // NOTE: the watchlist slim-cache in `refreshDynamicWatchlist` does NOT
+    // persist `active` / `closed` — they are always undefined here. Gating on
+    // them silently rejected every market. The cache writer already filters to
+    // `active=true&closed=false` at the Gamma fetch and drops past-endDate
+    // markets, so no additional guard is needed.
     let noPrice: number;
     try {
       const prices = parseOutcomePrices(market.outcomePrices);
