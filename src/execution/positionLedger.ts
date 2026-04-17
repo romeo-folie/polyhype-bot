@@ -130,10 +130,10 @@ export function formatDirection(direction: Position['direction']): string {
 /**
  * Persist an open position to Redis.
  */
-export async function recordPosition(redis: Redis, position: Position): Promise<void> {
-  const normalized: Position = { ...position, direction: canonicalDirection(position.direction) };
-  const key = positionKey(normalized.marketId, normalized.direction);
-  const openedAtMs = new Date(normalized.openedAt).getTime();
+export async function recordPosition(redis: Redis, positionIn: Position): Promise<void> {
+  const position: Position = { ...positionIn, direction: canonicalDirection(positionIn.direction) };
+  const key = positionKey(position.marketId, position.direction);
+  const openedAtMs = new Date(position.openedAt).getTime();
 
   // Validate sharesHeld — warn if 0 or undefined (indicates missing shares_bought from venue).
   // Futures positions legitimately track via HL position state (symbol + USD margin)
@@ -163,7 +163,7 @@ export async function recordPosition(redis: Redis, position: Position): Promise<
     executionId: position.executionId ?? '',
     clobTokenIds: JSON.stringify(position.clobTokenIds ?? []),
     question: position.question,
-    direction: normalized.direction,
+    direction: position.direction,
     entryPrice: String(position.entryPrice),
     stakeUsd: String(position.stakeUsd),
     consensusProbability:
@@ -221,7 +221,7 @@ export async function recordPosition(redis: Redis, position: Position): Promise<
   // Add to sorted index (score = openedAt ms for chronological retrieval)
   await redis.zadd(POSITIONS_INDEX_KEY, openedAtMs, key);
 
-  void enqueueWrite('positions', normalized as unknown as Record<string, unknown>);
+  void enqueueWrite('positions', position as unknown as Record<string, unknown>);
   logger.info('[ledger] position recorded', {
     marketId: position.marketId,
     direction: position.direction,

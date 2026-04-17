@@ -706,19 +706,18 @@ async function redeemClobPositions(
         // For positions whose endDate has passed, close them —
         // the market is definitively over and Gamma will never resolve it.
         if (pos.endDate && new Date(pos.endDate).getTime() < Date.now()) {
-          logger.info('[redeemer] closing expired CLOB position (Gamma unresolvable)', {
+          logger.info('[redeemer] handling expired CLOB position (Gamma unresolvable)', {
             marketId: pos.marketId,
             direction: pos.direction,
             endDate: pos.endDate,
             isDust,
             reportedBalance,
           });
-          await closePosition(redis, pos.marketId, pos.direction);
-          await markRecentlyClosed(redis, pos.marketId);
           const q = pos.question || pos.marketId;
 
-          // Attempt on-chain redemption — CTF contract may have resolved even
-          // when Gamma API can't report it (common for Up/Down binaries).
+          // Attempt on-chain redemption before closing — CTF contract may have
+          // resolved even when Gamma API can't report it (common for Up/Down
+          // binaries). Close only after so a transient RPC failure can retry.
           let won = false;
           let proceedsUsdc = 0;
           if (!isDust && (reportedBalance ?? 0) > 0.01) {
@@ -736,6 +735,9 @@ async function redeemClobPositions(
               });
             }
           }
+
+          await closePosition(redis, pos.marketId, pos.direction);
+          await markRecentlyClosed(redis, pos.marketId);
 
           const exitReason = isDust ? 'expired_dust' : won ? 'expired_unresolvable_redeemed' : 'expired_unresolvable';
           await recordPositionOutcome(
