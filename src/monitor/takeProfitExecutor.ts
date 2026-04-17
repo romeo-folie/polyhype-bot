@@ -70,6 +70,11 @@ async function closePositionWithHedge(
   if (posRecord?.sourcedFrom?.startsWith('near-zero-arb')) {
     const theme = extractTheme(posRecord.question ?? '');
     await removeNearZeroPosition(redis, theme, marketId, direction);
+    // Block re-entry on the same market+direction for NEAR_ZERO_REENTRY_COOLDOWN_S.
+    const cooldownTtl = loadConfig().NEAR_ZERO_REENTRY_COOLDOWN_S;
+    await redis
+      .set(`near_zero:reentry_cooldown:${marketId}:${direction}`, '1', 'EX', cooldownTtl)
+      .catch(() => undefined);
   }
 
   // Check for a linked HL hedge and close it if present.

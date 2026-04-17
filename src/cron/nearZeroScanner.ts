@@ -49,6 +49,7 @@ import {
   countOpenPositionsInTheme,
 } from '../shared/themeExtractor.js';
 import { checkBookDepthForStake } from '../execution/bookDepthCheck.js';
+import { getRecentOsintItems } from '../ingestion/osintStore.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 const DEDUP_KEY_PREFIX = 'near_zero:dedup:';
@@ -246,6 +247,15 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     // Redis read failed — proceed without OSINT prioritization
   }
 
+  // Load stored OSINT items for headline enrichment (PR 5). These have keywords
+  // for overlap matching. Failure is non-fatal — enrichment is best-effort.
+  let recentOsintItems: Awaited<ReturnType<typeof getRecentOsintItems>> = [];
+  try {
+    recentOsintItems = await getRecentOsintItems(redis, cfg.NEAR_ZERO_OSINT_SIGNAL_TTL_S);
+  } catch {
+    // Proceed without enrichment on Redis failure
+  }
+
   // Split into OSINT-matched and non-OSINT, sort each group, then combine.
   const osintMatched: typeof qualified = [];
   const nonOsint: typeof qualified = [];
@@ -327,6 +337,19 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
       continue;
     }
 
+    // Re-entry cooldown check — skip markets that recently had a near-zero-arb
+    // position close (TP, SL, or stale exit). The cooldown key is set by the
+    // monitor's takeProfitExecutor when it closes a near-zero-arb position.
+    const reentryKey = `near_zero:reentry_cooldown:${candidate.market.id}:${candidate.direction}`;
+    const inCooldown = await redis.get(reentryKey);
+    if (inCooldown) {
+      logger.debug('[near-zero] skipped — re-entry cooldown active', {
+        marketId: candidate.market.id,
+        direction: candidate.direction,
+      });
+      continue;
+    }
+
     // Pre-LLM NX claim — prevents two concurrent scanner runs (or a scanner and
     // a manual invocation) from both paying the LLM cost for the same market.
     // Placed after cap checks so we don't hold the slot unnecessarily.
@@ -379,11 +402,28 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
       continue;
     }
 
-    const headline = osintSignal
+    const primaryHeadline = osintSignal
       ? osintSignal.headline
       : `Market price: ${(candidate.price * 100).toFixed(1)}¢. ` +
         `Assess whether the true probability of outcome "${candidate.direction}" ` +
         `is substantially higher than this price implies, based on fundamentals and context.`;
+
+    // For OSINT-matched candidates, enrich the headline with up to 2 additional
+    // OSINT items that share keyword overlap with the market question. Capped at
+    // 600 chars total to stay within LLM prompt budget.
+    let headline = primaryHeadline;
+    if (hasOsintSignal && recentOsintItems.length > 0) {
+      const qLower = candidate.market.question.toLowerCase();
+      const related = recentOsintItems
+        .filter((item) => item.title !== osintSignal?.headline)
+        .filter((item) => item.keywords.some((kw) => qLower.includes(kw.toLowerCase())))
+        .sort((a, b) => b.urgencyScore - a.urgencyScore)
+        .slice(0, 2);
+      if (related.length > 0) {
+        const extra = related.map((i) => i.title).join(' | ');
+        headline = `${primaryHeadline} | ${extra}`.slice(0, 600);
+      }
+    }
 
     let estimate;
     try {
@@ -507,7 +547,15 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     if (!wouldExecute) continue;
 
     const clobTokenIds = parseClobTokenIds(candidate.market.clobTokenIds);
-    const stakeUsd = Math.min(cfg.NEAR_ZERO_MAX_STAKE_USD, bankrollUsd * 0.02);
+    // Half-Kelly sizing: fraction = (edge / (1 - price)) / 2
+    // Capped at NEAR_ZERO_MAX_STAKE_USD; floored at MIN_BET_USD so we never
+    // submit a sub-floor order when edge is tiny.
+    const kellyFraction = (pOurSide - candidate.price) / (1 - candidate.price);
+    const halfKelly = Math.max(0, kellyFraction / 2);
+    const stakeUsd = Math.min(
+      cfg.NEAR_ZERO_MAX_STAKE_USD,
+      Math.max(cfg.MIN_BET_USD, bankrollUsd * halfKelly),
+    );
 
     // Book-depth slippage gate: simulate filling the stake against live asks.
     // Skip on no_book as well — proceeding blind risks a bad fill on thin markets.

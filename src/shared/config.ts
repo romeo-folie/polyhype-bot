@@ -866,6 +866,10 @@ const envSchema = z.object({
   // the live CLOB ask ladder. Prevents entering when the book is too thin to
   // absorb the stake without significant slippage. 200 bps = 2% price impact.
   NEAR_ZERO_MAX_SLIPPAGE_BPS: z.coerce.number().int().min(0).optional().default(200),
+  // After a near-zero-arb position closes, block re-entry on the same market
+  // and direction for this many seconds. Prevents immediately re-entering a
+  // market that just stopped out or resolved (24h default).
+  NEAR_ZERO_REENTRY_COOLDOWN_S: z.coerce.number().int().min(0).optional().default(86400),
 
   // --- LONGSHOT BIAS / NO-SIDE SCANNER ---
   // Exploits the favorite-longshot bias documented by Whelan (300K contracts):
