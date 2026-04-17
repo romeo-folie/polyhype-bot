@@ -15,7 +15,7 @@ import { loadConfig } from '../shared/config.js';
 import { findCandidateMarkets, type CandidateMarket } from './entityExtractor.js';
 import { scoreMarketRelevance } from './relevanceGate.js';
 import { estimateConsensusProbability, estimateSentiment } from './consensusCalculator.js';
-import { computeDivergence } from './divergenceCalculator.js';
+import { computeDivergence, checkTimeToResolution } from './divergenceCalculator.js';
 import { resolveYesPrice, resolveNoPrice } from '../shared/priceCache.js';
 import { resolveHlSymbol } from '../shared/hyperliquid.js';
 import { getRedis } from '../shared/redis.js';
@@ -329,6 +329,14 @@ async function evaluateOsintCandidate(args: EvaluateCandidateArgs): Promise<Eval
   // Subscribe to WS updates for high-urgency items
   if (opts?.feed && item.urgencyScore >= cfg.URGENCY_THRESHOLD) {
     await opts.feed.watch(candidate.marketId, candidate.clobTokenIds);
+  }
+
+  // Pre-screen time horizon before burning consensus LLM calls. The full gate
+  // runs again inside computeDivergence but doing it here avoids 3 provider
+  // calls for markets that will be rejected as too_long_dated regardless.
+  const ttr = checkTimeToResolution(candidate.endDate ?? undefined, cfg.PM_MAX_HOURS_TO_RESOLUTION_OSINT, cfg.PM_MIN_HOURS_TO_RESOLUTION);
+  if (!ttr.ok) {
+    return { signal: null, skipReason: ttr.skipReason ?? 'time_to_resolution' };
   }
 
   // Resolve price: WS cache first, then fall back to Gamma snapshot

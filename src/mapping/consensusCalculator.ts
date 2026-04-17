@@ -383,12 +383,12 @@ async function _estimateSingle(opts: {
  * question+headline always produces the same estimate regardless of market price.
  * Headline is trimmed to remove whitespace variation before slicing.
  */
-function buildConsensusCacheKey(
-  question: string,
-  headline: string,
-): string {
-  const raw = `${question}|${headline.trim().slice(0, 200)}`;
-  return 'consensus:' + createHash('sha256').update(raw).digest('hex');
+function buildConsensusCacheKey(question: string): string {
+  // Keyed on question only (not headline) so repeated news about the same
+  // market reuses the cached estimate within the TTL window instead of burning
+  // 3 provider calls per unique headline. Headline still flows into the LLM
+  // prompt for context quality. v2 prefix avoids serving stale v1 (question|headline) entries.
+  return 'consensus:v2:' + createHash('sha256').update(question.trim()).digest('hex');
 }
 
 export async function estimateConsensusProbability(opts: {
@@ -407,7 +407,7 @@ export async function estimateConsensusProbability(opts: {
 
   // Check consensus cache
   if (cfg.CONSENSUS_CACHE_ENABLED && opts.redis) {
-    const cacheKey = buildConsensusCacheKey(opts.question, opts.headline);
+    const cacheKey = buildConsensusCacheKey(opts.question);
     try {
       const cached = await opts.redis.get(cacheKey);
       if (cached) {
@@ -588,7 +588,7 @@ export async function estimateConsensusProbability(opts: {
 
   // Cache the result
   if (cfg.CONSENSUS_CACHE_ENABLED && opts.redis) {
-    const cacheKey = buildConsensusCacheKey(opts.question, opts.headline);
+    const cacheKey = buildConsensusCacheKey(opts.question);
     try {
       await opts.redis.set(cacheKey, JSON.stringify(estimate), 'EX', cfg.CONSENSUS_CACHE_TTL_S);
     } catch {
