@@ -93,8 +93,14 @@ export interface Position {
   priceZone?: 1 | 2 | 3 | 4 | 5 | undefined;
 }
 
+function canonicalDirection(direction: Position['direction']): Position['direction'] {
+  if (direction === 'UP') return 'YES';
+  if (direction === 'DOWN') return 'NO';
+  return direction;
+}
+
 function positionKey(marketId: string, direction: Position['direction']): string {
-  return `${POSITION_KEY_PREFIX}${marketId}:${direction}`;
+  return `${POSITION_KEY_PREFIX}${marketId}:${canonicalDirection(direction)}`;
 }
 
 /**
@@ -125,8 +131,9 @@ export function formatDirection(direction: Position['direction']): string {
  * Persist an open position to Redis.
  */
 export async function recordPosition(redis: Redis, position: Position): Promise<void> {
-  const key = positionKey(position.marketId, position.direction);
-  const openedAtMs = new Date(position.openedAt).getTime();
+  const normalized: Position = { ...position, direction: canonicalDirection(position.direction) };
+  const key = positionKey(normalized.marketId, normalized.direction);
+  const openedAtMs = new Date(normalized.openedAt).getTime();
 
   // Validate sharesHeld — warn if 0 or undefined (indicates missing shares_bought from venue).
   // Futures positions legitimately track via HL position state (symbol + USD margin)
@@ -156,7 +163,7 @@ export async function recordPosition(redis: Redis, position: Position): Promise<
     executionId: position.executionId ?? '',
     clobTokenIds: JSON.stringify(position.clobTokenIds ?? []),
     question: position.question,
-    direction: position.direction,
+    direction: normalized.direction,
     entryPrice: String(position.entryPrice),
     stakeUsd: String(position.stakeUsd),
     consensusProbability:
@@ -214,7 +221,7 @@ export async function recordPosition(redis: Redis, position: Position): Promise<
   // Add to sorted index (score = openedAt ms for chronological retrieval)
   await redis.zadd(POSITIONS_INDEX_KEY, openedAtMs, key);
 
-  void enqueueWrite('positions', position as unknown as Record<string, unknown>);
+  void enqueueWrite('positions', normalized as unknown as Record<string, unknown>);
   logger.info('[ledger] position recorded', {
     marketId: position.marketId,
     direction: position.direction,

@@ -7,6 +7,7 @@ export interface GammaMarket {
   clobTokenIds: string[]; // [yes, no]
   active: boolean;
   closed: boolean;
+  endDate?: string | null;
 }
 
 /**
@@ -46,6 +47,7 @@ export async function fetchMarketByConditionId(conditionId: string): Promise<Gam
       clobTokenIds,
       active: market.active === true,
       closed: market.closed === true,
+      endDate: typeof market.endDate === 'string' ? market.endDate : null,
     };
   } catch (err) {
     logger.error('[polymarket-gamma] fetch failed', { conditionId, error: String(err) });
@@ -92,6 +94,7 @@ export async function fetchMarketByQuestion(question: string): Promise<GammaMark
           clobTokenIds,
           active: market.active === true,
           closed: market.closed === true,
+          endDate: typeof market.endDate === 'string' ? market.endDate : null,
         };
       }
     }

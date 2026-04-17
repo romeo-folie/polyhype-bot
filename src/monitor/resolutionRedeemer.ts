@@ -706,7 +706,6 @@ async function redeemClobPositions(
         // For positions whose endDate has passed, close them —
         // the market is definitively over and Gamma will never resolve it.
         if (pos.endDate && new Date(pos.endDate).getTime() < Date.now()) {
-          const errorCode = isDust ? 'expired_dust_closed' : 'expired_unresolvable_closed';
           logger.info('[redeemer] closing expired CLOB position (Gamma unresolvable)', {
             marketId: pos.marketId,
             direction: pos.direction,
@@ -717,24 +716,55 @@ async function redeemClobPositions(
           await closePosition(redis, pos.marketId, pos.direction);
           await markRecentlyClosed(redis, pos.marketId);
           const q = pos.question || pos.marketId;
+
+          // Attempt on-chain redemption — CTF contract may have resolved even
+          // when Gamma API can't report it (common for Up/Down binaries).
+          let won = false;
+          let proceedsUsdc = 0;
+          if (!isDust && (reportedBalance ?? 0) > 0.01) {
+            try {
+              const redeemResult = await redeemClobOutcome({ conditionId, direction: isYesSide ? 'YES' : 'NO' });
+              if (redeemResult.success) {
+                won = true;
+                proceedsUsdc = pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : 0);
+                if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
+              }
+            } catch (redeemErr) {
+              logger.warn('[redeemer] on-chain redemption attempt failed for expired position', {
+                marketId: pos.marketId,
+                error: redeemErr instanceof Error ? redeemErr.message : String(redeemErr),
+              });
+            }
+          }
+
+          const exitReason = isDust ? 'expired_dust' : won ? 'expired_unresolvable_redeemed' : 'expired_unresolvable';
           await recordPositionOutcome(
             redis,
             { ...pos, question: q, direction: pmDirection },
             {
-              result: 'lost',
-              returnPct: -100,
+              result: won ? 'won' : 'lost',
+              returnPct: won && pos.stakeUsd > 0 ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : -100,
               executionVenueOverride: 'clob',
-              exitReason: isDust ? 'expired_dust' : 'expired_unresolvable',
+              exitReason,
             },
           );
-          void notifyMarketResolved({
-            question: q,
-            direction: pos.direction,
-            result: 'lost',
-            stakeUsd: pos.stakeUsd,
-            reason: isDust ? 'expired dust position' : 'expired (Gamma unresolvable)',
-          }).catch(() => {});
-          results.push({ marketId: pos.marketId, side, success: false, error: errorCode });
+          if (won) {
+            await notifyRedemptionExecuted({
+              marketId: pos.marketId,
+              question: q,
+              side,
+              valueUsdc: proceedsUsdc,
+            });
+          } else {
+            void notifyMarketResolved({
+              question: q,
+              direction: pos.direction,
+              result: 'lost',
+              stakeUsd: pos.stakeUsd,
+              reason: isDust ? 'expired dust position' : 'expired (Gamma unresolvable)',
+            }).catch(() => {});
+          }
+          results.push({ marketId: pos.marketId, side, success: won, ...(won ? {} : { error: exitReason }) });
         }
         continue;
       }
