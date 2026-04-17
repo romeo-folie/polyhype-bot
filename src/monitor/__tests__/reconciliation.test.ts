@@ -5,6 +5,7 @@ import * as simmer from '../../shared/simmer.js';
 import * as polymarketData from '../../shared/polymarketData.js';
 import * as polymarketGamma from '../../shared/polymarketGamma.js';
 import * as pendingMakerOrders from '../../execution/pendingMakerOrders.js';
+import * as telegram from '../../execution/telegram.js';
 import type { Redis } from 'ioredis';
 
 vi.mock('../../execution/positionLedger.js', () => ({
@@ -34,6 +35,10 @@ vi.mock('../../shared/polymarketGamma.js', () => ({
 vi.mock('../../execution/pendingMakerOrders.js', () => ({
   getPendingOrder: vi.fn().mockResolvedValue(null),
   deletePendingOrder: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../../execution/telegram.js', () => ({
+  notifyTradeExecuted: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe('Position Reconciliation Healer', () => {
@@ -314,6 +319,16 @@ describe('Position Reconciliation Healer', () => {
       counterfactualImmediateTakerPrice: 0.50,
     }));
     expect(pendingMakerOrders.deletePendingOrder).toHaveBeenCalledWith(mockRedis, 'numeric-oracle');
+    // Async maker fill confirmation → user is notified once here (not at posting time).
+    expect(telegram.notifyTradeExecuted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        marketId: 'numeric-oracle',
+        direction: 'YES',
+        sourcedFrom: 'oracle-lag:btc-15m',
+      }),
+      undefined,
+      expect.objectContaining({ venue: 'clob' }),
+    );
   });
 
   it('reconciles a CLOB ledger position against the matching outcome token when Data API returns multiple rows for the same conditionId', async () => {

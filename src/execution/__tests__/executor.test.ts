@@ -1535,17 +1535,20 @@ describe('empty-book maker route', () => {
 
   it('does NOT retry when ORACLE_LAG_MAKER_RETRY_ON_REJECT=false', async () => {
     mockConfig.ORACLE_LAG_MAKER_RETRY_ON_REJECT = false;
-    mockSubmitLimit.mockResolvedValueOnce({ success: false, error: 'post-only: would cross' });
+    try {
+      mockSubmitLimit.mockResolvedValueOnce({ success: false, error: 'post-only: would cross' });
 
-    const redis = makeRedis();
-    await executeSignal(
-      makeSignal({ source: 'oracle-lag', consensusProbability: 0.55, direction: 'UP' }),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      redis as any,
-    );
+      const redis = makeRedis();
+      await executeSignal(
+        makeSignal({ source: 'oracle-lag', consensusProbability: 0.55, direction: 'UP' }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
 
-    expect(mockSubmitLimit).toHaveBeenCalledOnce();
-    mockConfig.ORACLE_LAG_MAKER_RETRY_ON_REJECT = true;
+      expect(mockSubmitLimit).toHaveBeenCalledOnce();
+    } finally {
+      mockConfig.ORACLE_LAG_MAKER_RETRY_ON_REJECT = true;
+    }
   });
 
   it('does NOT retry on non-post-only failures (timeout / network / signer)', async () => {
