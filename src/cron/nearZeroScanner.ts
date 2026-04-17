@@ -342,6 +342,42 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     const osintKey = `${candidate.market.id}:${candidate.direction}`;
     const osintSignal = osintMap.get(osintKey);
     const hasOsintSignal = osintSignal !== undefined;
+
+    // Short-circuit before LLM when REQUIRE_OSINT=true and no signal exists.
+    // Saves LLM budget and emits a cheap shadow observation.
+    if (cfg.NEAR_ZERO_REQUIRE_OSINT && !hasOsintSignal) {
+      logger.info('[near-zero] candidate evaluated', {
+        marketId: candidate.market.id,
+        question: candidate.market.question.slice(0, 100),
+        direction: candidate.direction,
+        marketPrice: candidate.price.toFixed(4),
+        hasOsint: false,
+        wouldTradeIfEnabled: false,
+        wouldExecute: false,
+        blockedReason: 'no_osint_signal',
+      });
+      void enqueueWrite('shadow_observations', {
+        kind: 'near_zero',
+        source: 'near-zero-arb',
+        marketId: candidate.market.id,
+        direction: candidate.direction,
+        wouldBlock: true,
+        metricValue: 0, // 0 = no signal, gate requires 1
+        threshold: 1,
+        payload: {
+          question: candidate.market.question.slice(0, 200),
+          marketPrice: candidate.price,
+          hasOsint: false,
+          wouldTradeIfEnabled: false,
+          wouldExecute: false,
+          blockedReason: 'no_osint_signal',
+          scannerEnabled: cfg.NEAR_ZERO_SCANNER_ENABLED,
+        },
+      });
+      await redis.set(dedupKey, '1', 'EX', cfg.NEAR_ZERO_DEDUP_TTL_S_NON_OSINT);
+      continue;
+    }
+
     const headline = osintSignal
       ? osintSignal.headline
       : `Market price: ${(candidate.price * 100).toFixed(1)}¢. ` +
@@ -383,8 +419,10 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     // Observability-only flag: would this candidate have traded if the scanner
     // were enabled? Split from wouldExecute so shadow logs reflect the true
     // gate outcome regardless of the ENABLED switch.
+    const osintRequired = cfg.NEAR_ZERO_REQUIRE_OSINT;
+    const osintGatePass = !osintRequired || hasOsintSignal;
     const wouldTradeIfEnabled =
-      pOurSide >= cfg.NEAR_ZERO_MIN_CONSENSUS && meetsEdge && lowStddev;
+      pOurSide >= cfg.NEAR_ZERO_MIN_CONSENSUS && meetsEdge && lowStddev && osintGatePass;
     const wouldExecute = wouldTradeIfEnabled && cfg.NEAR_ZERO_SCANNER_ENABLED;
 
     // Identify the first failing gate so metricValue/threshold in shadow_observations
@@ -393,7 +431,11 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     let shadowMetricValue = edge;
     let shadowThreshold = cfg.NEAR_ZERO_MIN_EDGE;
     if (!wouldTradeIfEnabled) {
-      if (pOurSide < cfg.NEAR_ZERO_MIN_CONSENSUS) {
+      if (!osintGatePass) {
+        blockedReason = 'no_osint_signal';
+        shadowMetricValue = 0; // 0 = no OSINT signal
+        shadowThreshold = 1;  // gate requires signal present
+      } else if (pOurSide < cfg.NEAR_ZERO_MIN_CONSENSUS) {
         blockedReason = 'consensus_below_threshold';
         shadowMetricValue = pOurSide;
         shadowThreshold = cfg.NEAR_ZERO_MIN_CONSENSUS;

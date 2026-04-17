@@ -20,6 +20,7 @@ import { resolveSimmerMarketId, getSimmerPositions } from '../shared/simmer.js';
 import { notifyTradeError } from './telegram.js';
 import { reEvaluatePositions } from '../monitor/signalReeval.js';
 import { getBankroll } from '../shared/bankroll.js';
+import { persistOsintItems } from '../ingestion/osintStore.js';
 import type { ScoredItem } from '../ingestion/scorer.js';
 import type { TradeSignal } from '../mapping/index.js';
 
@@ -57,6 +58,13 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
   }
 
   if (highUrgencyItems.length > 0) {
+    // Persist snapshot so the near-zero NO-side injector cron can read
+    // recent OSINT items in a separate process.
+    void persistOsintItems(highUrgencyItems, redis).catch((err: unknown) => {
+      logger.warn('[execution] osint item persistence failed (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
     await processScoredItemsInner(highUrgencyItems, redis);
   }
 

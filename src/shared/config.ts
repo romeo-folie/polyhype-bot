@@ -848,6 +848,20 @@ const envSchema = z.object({
   // How often the monitor worker rebuilds near_zero:theme_open:* sets from the
   // live position ledger (heals drift from missed SREM calls).
   NEAR_ZERO_THEME_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(1).optional().default(600_000),
+  // Require a matching OSINT signal before the scanner will evaluate a candidate.
+  // When true, candidates without an entry in near_zero:osint_signals are blocked.
+  // Set false to restore pure-LLM mode (useful for testing).
+  NEAR_ZERO_REQUIRE_OSINT: boolFromEnv.optional().default(true),
+  // Enable the NO-side OSINT injector cron (nearZeroOsintInjector.ts).
+  NEAR_ZERO_INJECTOR_ENABLED: boolFromEnv.optional().default(true),
+  // Minimum LLM relevance score (0–10) for a headline→market pair to be
+  // injected as a NO-side OSINT signal.
+  NEAR_ZERO_INJECTOR_MIN_NO_SCORE: z.coerce.number().int().min(0).max(10).optional().default(6),
+  // Max LLM calls per injector run (cost guard).
+  NEAR_ZERO_INJECTOR_MAX_LLM_PER_RUN: z.coerce.number().int().min(1).optional().default(10),
+  // Minimum number of keyword tokens that must overlap between an OSINT item
+  // and a market question before spending an LLM call on the pair.
+  NEAR_ZERO_INJECTOR_MIN_ENTITY_OVERLAP: z.coerce.number().int().min(1).optional().default(2),
 
   // --- LONGSHOT BIAS / NO-SIDE SCANNER ---
   // Exploits the favorite-longshot bias documented by Whelan (300K contracts):
