@@ -701,7 +701,7 @@ const envSchema = z.object({
     .string()
     .optional()
     .default(
-      '{"crypto-regulatory": 100, "mentions": 50, "macro": 150, "us-politics": 200, "geopolitical": 200, "sports": 100}',
+      '{"crypto-regulatory": 150, "mentions": 50, "macro": 150, "us-politics": 200, "geopolitical": 200, "sports": 100}',
     )
     .transform((v, ctx) => {
       try {
@@ -760,8 +760,8 @@ const envSchema = z.object({
   COPYTRADE_MIN_PAYOUT_RATIO: z.coerce.number().min(0).optional().default(0.20),
   // Minimum edge magnitude: skip if market has fully repriced from whale's fill.
   // edgeMagnitude = |whale_fill_price - current_price|
-  // Default 0.01 = skip if price has moved to within 1¢ of whale's fill.
-  COPYTRADE_MIN_EDGE_MAGNITUDE: z.coerce.number().min(0).optional().default(0.01),
+  // Default 0.015 = skip if residual edge < 1.5¢ (historical bad trades were all <2%).
+  COPYTRADE_MIN_EDGE_MAGNITUDE: z.coerce.number().min(0).optional().default(0.015),
 
   // Mirror-exit near-resolution guard: skip whale-mirror SELLs when our side
   // of the position is already priced above this ceiling. At near-ceiling

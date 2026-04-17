@@ -130,6 +130,12 @@ describe('copytrade helpers', () => {
     expect(matchesCategory('Bitcoin price above $100k?', null, ['crypto-regulatory'])).toBe(true);
     expect(matchesCategory('Anything here', null, ['all'])).toBe(true);
     expect(matchesCategory('Bitcoin price above $100k?', null, ['weather'])).toBe(false);
+    // Soccer: match-day "win on" pattern
+    expect(matchesCategory('Will 1. FC Köln win on 2026-04-17?', null, ['sports-soccer'])).toBe(true);
+    // Soccer: club-name tokens (no "win on" — exercises the added club keywords directly)
+    expect(matchesCategory('Will Dortmund qualify for the Champions League?', null, ['sports-soccer'])).toBe(true);
+    expect(matchesCategory('Will Arsenal finish top-4?', null, ['sports-soccer'])).toBe(true);
+    expect(matchesCategory('Will Köln be relegated this season?', null, ['sports-soccer'])).toBe(true);
   });
 });
 
