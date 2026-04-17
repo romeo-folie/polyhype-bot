@@ -142,6 +142,7 @@ export async function runMonitorWorker(): Promise<void> {
 
   let lastHeartbeat = 0;
   let lastNearZeroReconcile = 0;
+  let nearZeroReconcileInFlight = false;
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -195,13 +196,21 @@ export async function runMonitorWorker(): Promise<void> {
 
     // Periodically rebuild near-zero-arb theme open sets from the live ledger
     // to heal any drift caused by missed SREM calls (e.g. worker crash on exit).
-    if (nowMs - lastNearZeroReconcile >= cfg.NEAR_ZERO_THEME_RECONCILE_INTERVAL_MS) {
-      lastNearZeroReconcile = nowMs; // mark before async so concurrent ticks don't stack
-      rebuildNearZeroThemeSets(redis).catch((err: unknown) => {
-        logger.warn('[monitor-worker] near-zero theme reconcile failed', {
-          error: err instanceof Error ? err.message : String(err),
+    if (
+      !nearZeroReconcileInFlight &&
+      nowMs - lastNearZeroReconcile >= cfg.NEAR_ZERO_THEME_RECONCILE_INTERVAL_MS
+    ) {
+      lastNearZeroReconcile = nowMs; // set before async so interval is measured from start
+      nearZeroReconcileInFlight = true;
+      rebuildNearZeroThemeSets(redis)
+        .catch((err: unknown) => {
+          logger.warn('[monitor-worker] near-zero theme reconcile failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => {
+          nearZeroReconcileInFlight = false;
         });
-      });
     }
 
     await new Promise((resolve) => setTimeout(resolve, cfg.MONITOR_LOOP_INTERVAL_MS));

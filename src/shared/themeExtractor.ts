@@ -130,6 +130,11 @@ export async function countOpenNearZeroPositions(redis: Redis): Promise<number> 
   return redis.scard(POSITIONS_OPEN_KEY);
 }
 
+/** Return the number of open near-zero-arb positions for a specific theme. */
+export async function countOpenPositionsInTheme(redis: Redis, theme: string): Promise<number> {
+  return redis.scard(themeKey(theme));
+}
+
 /**
  * Rebuild near_zero:theme_open:{theme} and near_zero:positions_open from the
  * live position ledger. Run periodically to heal any drift caused by missed

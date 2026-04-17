@@ -46,6 +46,7 @@ import {
   extractTheme,
   addNearZeroPosition,
   countOpenNearZeroPositions,
+  countOpenPositionsInTheme,
 } from '../shared/themeExtractor.js';
 import type { TradeSignal } from '../mapping/index.js';
 
@@ -297,7 +298,7 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     // don't hold an inflight slot on a candidate we cannot place anyway.
     const candidateTheme = extractTheme(candidate.market.question);
     if (candidateTheme) {
-      const openInTheme = await redis.scard(`near_zero:theme_open:${candidateTheme}`);
+      const openInTheme = await countOpenPositionsInTheme(redis, candidateTheme);
       if (openInTheme >= cfg.NEAR_ZERO_MAX_PER_THEME) {
         logger.info('[near-zero] skipped — theme cap reached', {
           marketId: candidate.market.id,
@@ -309,6 +310,12 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
       }
     }
     // Global position cap — belt-and-suspenders across all themes.
+    // Note: the SCARD → addNearZeroPosition sequence is not atomic. Candidates
+    // are evaluated sequentially within a run, and the inflight NX lock prevents
+    // the same market from racing across concurrent runs. A brief overshoot of
+    // the cap by one is possible if two different markets in the same theme are
+    // evaluated by two simultaneous scanner invocations; the periodic reconciler
+    // in monitor/worker.ts heals any resulting drift.
     const totalOpen = await countOpenNearZeroPositions(redis);
     if (totalOpen >= cfg.NEAR_ZERO_MAX_OPEN_POSITIONS) {
       logger.info('[near-zero] skipped — global position cap reached', {

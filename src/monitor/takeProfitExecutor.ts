@@ -58,8 +58,10 @@ async function closePositionWithHedge(
   marketId: string,
   direction: Position['direction'],
 ): Promise<void> {
-  // Fetch before closing so we can read sourcedFrom and question for near-zero
-  // theme set cleanup. Non-fatal if the position is already gone.
+  // Fetch before closing so we can read sourcedFrom/question for near-zero
+  // theme set cleanup. closePosition() also calls getPosition() internally for
+  // its PG emit — one extra round-trip on an infrequent exit path, acceptable
+  // to avoid changing closePosition()'s return type or signature.
   const posRecord = await getPosition(redis, marketId, direction).catch(() => null);
 
   await closePosition(redis, marketId, direction);

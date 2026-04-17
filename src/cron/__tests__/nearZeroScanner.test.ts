@@ -61,10 +61,12 @@ vi.mock('../../shared/redis.js', () => ({
 const mockExtractTheme = vi.fn<(q: string) => string | null>(() => null);
 const mockAddNearZeroPosition = vi.fn().mockResolvedValue(undefined);
 const mockCountOpenNearZeroPositions = vi.fn<() => Promise<number>>().mockResolvedValue(0);
+const mockCountOpenPositionsInTheme = vi.fn<() => Promise<number>>().mockResolvedValue(0);
 vi.mock('../../shared/themeExtractor.js', () => ({
   extractTheme: (...args: unknown[]) => mockExtractTheme(args[0] as string),
   addNearZeroPosition: (...args: unknown[]) => mockAddNearZeroPosition(...args),
   countOpenNearZeroPositions: () => mockCountOpenNearZeroPositions(),
+  countOpenPositionsInTheme: () => mockCountOpenPositionsInTheme(),
 }));
 
 // Real gamma parsers — they're pure helpers and trivial.
@@ -259,6 +261,7 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     });
     mockExtractTheme.mockReturnValue(null);
     mockCountOpenNearZeroPositions.mockResolvedValue(0);
+    mockCountOpenPositionsInTheme.mockResolvedValue(0);
     mockAddNearZeroPosition.mockResolvedValue(undefined);
   });
 
@@ -453,9 +456,8 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
   // ── Theme cap (PR 2) ──────────────────────────────────────────────────────
 
   it('skips LLM when theme cap is already reached', async () => {
-    const { redis } = makeRedis({
-      scardMap: new Map([['near_zero:theme_open:iran-israel-conflict', 1]]),
-    });
+    const { redis } = makeRedis();
+    mockCountOpenPositionsInTheme.mockResolvedValue(1); // at cap (NEAR_ZERO_MAX_PER_THEME=1)
     mockGetCachedMarkets.mockResolvedValue([
       makeMarket({ id: 'mkt-iran-new', question: 'Will Iran and Israel declare a ceasefire?' }),
     ]);

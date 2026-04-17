@@ -847,7 +847,7 @@ const envSchema = z.object({
   NEAR_ZERO_MAX_OPEN_POSITIONS: z.coerce.number().int().min(1).optional().default(4),
   // How often the monitor worker rebuilds near_zero:theme_open:* sets from the
   // live position ledger (heals drift from missed SREM calls).
-  NEAR_ZERO_THEME_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(0).optional().default(600_000),
+  NEAR_ZERO_THEME_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(1).optional().default(600_000),
 
   // --- LONGSHOT BIAS / NO-SIDE SCANNER ---
   // Exploits the favorite-longshot bias documented by Whelan (300K contracts):
