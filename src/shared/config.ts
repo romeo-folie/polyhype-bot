@@ -796,7 +796,7 @@ const envSchema = z.object({
   // Max LLM calls per run (cost control). OSINT-matched candidates first (by urgency desc),
   // then remaining candidates by price desc (higher near-zero = more likely genuine mispricing).
   NEAR_ZERO_MAX_CANDIDATES_PER_RUN: z.coerce.number().int().min(1).optional().default(5),
-  NEAR_ZERO_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(500),
+  NEAR_ZERO_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(1500),
   // Minimum hours until resolution — avoid markets resolving before position can compound.
   NEAR_ZERO_MIN_HOURS: z.coerce.number().min(0).optional().default(24),
   // TTL for per-market dedup key after a successful OSINT-matched evaluation.
@@ -862,6 +862,10 @@ const envSchema = z.object({
   // Minimum number of keyword tokens that must overlap between an OSINT item
   // and a market question before spending an LLM call on the pair.
   NEAR_ZERO_INJECTOR_MIN_ENTITY_OVERLAP: z.coerce.number().int().min(1).optional().default(2),
+  // Maximum price impact (bps) allowed when simulating the stake fill against
+  // the live CLOB ask ladder. Prevents entering when the book is too thin to
+  // absorb the stake without significant slippage. 200 bps = 2% price impact.
+  NEAR_ZERO_MAX_SLIPPAGE_BPS: z.coerce.number().int().min(0).optional().default(200),
 
   // --- LONGSHOT BIAS / NO-SIDE SCANNER ---
   // Exploits the favorite-longshot bias documented by Whelan (300K contracts):

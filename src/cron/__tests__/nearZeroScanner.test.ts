@@ -58,6 +58,11 @@ vi.mock('../../shared/redis.js', () => ({
   closeRedis: vi.fn(),
 }));
 
+const mockCheckBookDepthForStake = vi.fn();
+vi.mock('../../execution/bookDepthCheck.js', () => ({
+  checkBookDepthForStake: (...args: unknown[]) => mockCheckBookDepthForStake(...args),
+}));
+
 const mockExtractTheme = vi.fn<(q: string) => string | null>(() => null);
 const mockAddNearZeroPosition = vi.fn().mockResolvedValue(undefined);
 const mockCountOpenNearZeroPositions = vi.fn<() => Promise<number>>().mockResolvedValue(0);
@@ -101,6 +106,7 @@ const DEFAULT_CONFIG = {
   NEAR_ZERO_MAX_PER_THEME: 1,
   NEAR_ZERO_MAX_OPEN_POSITIONS: 4,
   NEAR_ZERO_REQUIRE_OSINT: false, // off by default in tests to isolate other gates
+  NEAR_ZERO_MAX_SLIPPAGE_BPS: 200,
 };
 
 const mockLoadConfig = vi.fn(() => ({ ...DEFAULT_CONFIG }));
@@ -264,6 +270,7 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     mockCountOpenNearZeroPositions.mockResolvedValue(0);
     mockCountOpenPositionsInTheme.mockResolvedValue(0);
     mockAddNearZeroPosition.mockResolvedValue(undefined);
+    mockCheckBookDepthForStake.mockResolvedValue({ ok: true, expectedFillPrice: 0.07, expectedSlippageBps: 0 });
   });
 
   it('wouldTradeIfEnabled is true when all gates pass but scanner is disabled', async () => {
@@ -596,5 +603,85 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     const [, payload] = enqueueMock.mock.calls[0]!;
     // Gate passes — not blocked by OSINT
     expect((payload.payload as Record<string, unknown>).blockedReason).not.toBe('no_osint_signal');
+  });
+
+  // ── Book-depth slippage gate (PR 4) ──────────────────────────────────────
+
+  it('skips execution when depth gate returns insufficient_depth', async () => {
+    const { redis } = makeRedis();
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-shallow' })]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_SCANNER_ENABLED: true });
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+    mockCheckBookDepthForStake.mockResolvedValue({ ok: false, reason: 'insufficient_depth' });
+
+    await runNearZeroScan(redis);
+
+    expect(mockExecuteSignal).not.toHaveBeenCalled();
+  });
+
+  it('skips execution when depth gate returns slippage_too_high', async () => {
+    const { redis } = makeRedis();
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-slippage' })]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_SCANNER_ENABLED: true });
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+    mockCheckBookDepthForStake.mockResolvedValue({
+      ok: false,
+      reason: 'slippage_too_high',
+      expectedFillPrice: 0.085,
+      expectedSlippageBps: 2142,
+    });
+
+    await runNearZeroScan(redis);
+
+    expect(mockExecuteSignal).not.toHaveBeenCalled();
+  });
+
+  it('skips execution when CLOB book unavailable (no_book)', async () => {
+    const { redis } = makeRedis();
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-no-book' })]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_SCANNER_ENABLED: true });
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+    mockCheckBookDepthForStake.mockResolvedValue({ ok: false, reason: 'no_book' });
+
+    await runNearZeroScan(redis);
+
+    expect(mockExecuteSignal).not.toHaveBeenCalled();
+  });
+
+  it('proceeds to execution when depth gate passes', async () => {
+    const { redis } = makeRedis();
+    mockGetCachedMarkets.mockResolvedValue([makeMarket({ id: 'mkt-deep' })]);
+    mockLoadConfig.mockReturnValue({ ...DEFAULT_CONFIG, NEAR_ZERO_SCANNER_ENABLED: true });
+    mockEstimateConsensusProbability.mockResolvedValue({
+      probability: 0.80,
+      reasoning: 'ok',
+      stddev: 0.05,
+      sampleCount: 3,
+    });
+    // default beforeEach already sets ok: true, but explicit for clarity
+    mockCheckBookDepthForStake.mockResolvedValue({
+      ok: true,
+      expectedFillPrice: 0.07,
+      expectedSlippageBps: 0,
+    });
+
+    await runNearZeroScan(redis);
+
+    expect(mockExecuteSignal).toHaveBeenCalledTimes(1);
   });
 });
