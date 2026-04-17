@@ -551,10 +551,11 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     // Capped at NEAR_ZERO_MAX_STAKE_USD; floored at MIN_BET_USD so we never
     // submit a sub-floor order when edge is tiny.
     const kellyFraction = (pOurSide - candidate.price) / (1 - candidate.price);
-    const halfKelly = Math.max(0, kellyFraction / 2);
-    const stakeUsd = Math.min(
-      cfg.NEAR_ZERO_MAX_STAKE_USD,
-      Math.max(cfg.MIN_BET_USD, bankrollUsd * halfKelly),
+    const halfKellyFraction = Math.max(0, kellyFraction / 2);
+    // Cap first, then floor — ensures floor wins even when MAX_STAKE_USD < MIN_BET_USD (invalid config).
+    const stakeUsd = Math.max(
+      cfg.MIN_BET_USD,
+      Math.min(cfg.NEAR_ZERO_MAX_STAKE_USD, bankrollUsd * halfKellyFraction),
     );
 
     // Book-depth slippage gate: simulate filling the stake against live asks.
@@ -599,7 +600,7 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
       consensusProbability: pYes,
       consensusStddev: estimate.stddev,
       outcomePrice: candidate.price,
-      halfKellyFraction: 0,
+      halfKellyFraction,
       priceZone: priceZoneOf(candidate.price),
       sourcedFrom: osintSignal
         ? `near-zero-arb (OSINT: ${osintSignal.headline.slice(0, 80)})`

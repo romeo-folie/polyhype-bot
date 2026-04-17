@@ -613,7 +613,7 @@ describe('runNearZeroScan — shadow observability + dedup hygiene', () => {
     expect((payload.payload as Record<string, unknown>).blockedReason).not.toBe('no_osint_signal');
   });
 
-  // ── Book-depth slippage gate (PR 4) ──────────────────────────────────────
+  // ── Book-depth slippage gate (PR 5) ──────────────────────────────────────
 
   it('skips execution when depth gate returns insufficient_depth', async () => {
     const { redis } = makeRedis();

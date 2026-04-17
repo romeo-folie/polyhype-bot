@@ -72,9 +72,26 @@ async function closePositionWithHedge(
     await removeNearZeroPosition(redis, theme, marketId, direction);
     // Block re-entry on the same market+direction for NEAR_ZERO_REENTRY_COOLDOWN_S.
     const cooldownTtl = loadConfig().NEAR_ZERO_REENTRY_COOLDOWN_S;
-    await redis
-      .set(`near_zero:reentry_cooldown:${marketId}:${direction}`, '1', 'EX', cooldownTtl)
-      .catch(() => undefined);
+    const cooldownKey = `near_zero:reentry_cooldown:${marketId}:${direction}`;
+    if (cooldownTtl <= 0) {
+      // TTL=0 means "disable cooldown" — clear any existing key instead of SET EX 0 (which Redis rejects).
+      await redis.del(cooldownKey).catch((e: unknown) => {
+        logger.debug('[take-profit-executor] near-zero reentry cooldown del failed (non-fatal)', {
+          marketId,
+          direction,
+          error: String(e),
+        });
+      });
+    } else {
+      await redis.set(cooldownKey, '1', 'EX', cooldownTtl).catch((e: unknown) => {
+        logger.warn('[take-profit-executor] near-zero reentry cooldown set failed (non-fatal)', {
+          marketId,
+          direction,
+          cooldownTtl,
+          error: String(e),
+        });
+      });
+    }
   }
 
   // Check for a linked HL hedge and close it if present.
