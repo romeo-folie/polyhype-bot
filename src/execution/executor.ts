@@ -1873,7 +1873,12 @@ export async function executeSignal(
       // Partial fill below $1 notional: position is on-chain but can't be exited
       // via CLOB until the price rises enough. sweep-residuals will handle cleanup
       // using current price, not entry price, so this won't get prematurely flagged.
-      if (makerAttempt.filledStakeUsd !== undefined && makerAttempt.filledStakeUsd < CLOB_MIN_ORDER_USD) {
+      if (
+        makerAttempt.makerFillStatus === 'partial' &&
+        makerAttempt.filledStakeUsd != null &&
+        makerAttempt.filledStakeUsd > 0 &&
+        makerAttempt.filledStakeUsd < CLOB_MIN_ORDER_USD
+      ) {
         logger.warn('[executor] partial fill below CLOB minimum exit notional — unexitable until price rises', {
           marketId: signal.marketId,
           filledStakeUsd: makerAttempt.filledStakeUsd,
