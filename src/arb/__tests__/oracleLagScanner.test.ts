@@ -32,6 +32,7 @@ const defaultConfig: OracleLagEvalConfig = {
   minMovePct: 0.06, // 6 bps
   minTimeLeftMin: 5,
   maxEntryPrice: 0.62,
+  minEntryPrice: 0.35,
 };
 
 interface MarketOverrides {
@@ -141,7 +142,8 @@ describe('evaluateOracleLagEntry', () => {
         | 'no_move_data'
         | 'move_below_threshold'
         | 'time_left_below_threshold'
-        | 'price_above_threshold';
+        | 'price_above_threshold'
+        | 'price_below_threshold';
     }[] = [
       {
         name: 'move too small (+0.05%) → move_below_threshold',
@@ -160,6 +162,15 @@ describe('evaluateOracleLagEntry', () => {
         buildOverrides: { outcomePrices: [0.65, 0.35], timeLeftMin: 10 },
         move: makeMove(0.08),
         expectedBlock: 'price_above_threshold',
+      },
+      {
+        name: 'DOWN entry NO price 0.10 < 0.35 floor → price_below_threshold',
+        // YES=0.90, NO=0.10 — market already priced in the UP direction strongly.
+        // A DOWN Chainlink tick would want to buy NO at 0.10, but the oracle-lag
+        // thesis doesn't hold when the market has already moved this far.
+        buildOverrides: { outcomePrices: [0.90, 0.10], timeLeftMin: 10 },
+        move: makeMove(-0.08),
+        expectedBlock: 'price_below_threshold',
       },
       {
         name: 'move is null → no_move_data',
@@ -223,6 +234,66 @@ describe('evaluateOracleLagEntry', () => {
 
       expect(result.shouldEnter).toBe(false);
       expect(result.blockReason).toBe('time_left_below_threshold');
+    });
+
+    it('time_left_below_threshold wins over price_below_threshold', () => {
+      // Move is valid (-0.08%), time-left is 2min (fails rule 3), DOWN entry
+      // price is 0.10 (would fail rule 5). Rule 3 runs before rule 5.
+      const market = buildMarket({
+        outcomePrices: [0.90, 0.10],
+        timeLeftMin: 2,
+      });
+      const move = makeMove(-0.08);
+
+      const result = evaluateOracleLagEntry(market, move, defaultConfig);
+
+      expect(result.shouldEnter).toBe(false);
+      expect(result.blockReason).toBe('time_left_below_threshold');
+    });
+
+    it('price_above_threshold wins over price_below_threshold (mutually exclusive by design)', () => {
+      // Sanity check: a config where min > max is misconfigured, but the
+      // evaluator should still return rule-4 (price_above) before it reaches
+      // rule-5 (price_below), since rule 4 runs first.
+      const badConfig: OracleLagEvalConfig = {
+        ...defaultConfig,
+        maxEntryPrice: 0.30,
+        minEntryPrice: 0.60, // inverted (bad config)
+      };
+      const market = buildMarket({ outcomePrices: [0.50, 0.50], timeLeftMin: 10 });
+      const move = makeMove(0.08); // UP → entryPrice = 0.50, above maxEntryPrice 0.30
+
+      const result = evaluateOracleLagEntry(market, move, badConfig);
+
+      expect(result.shouldEnter).toBe(false);
+      expect(result.blockReason).toBe('price_above_threshold');
+    });
+  });
+
+  describe('price gate symmetry', () => {
+    it('DOWN entry at 0.45 passes both price gates (within 0.35–0.62 band)', () => {
+      // The motivating case for the min-price gate: an entry near the midpoint
+      // (0.45) should still clear both the floor (0.35) and the ceiling (0.62).
+      const market = buildMarket({ outcomePrices: [0.55, 0.45], timeLeftMin: 10 });
+      const move = makeMove(-0.08);
+
+      const result = evaluateOracleLagEntry(market, move, defaultConfig);
+
+      expect(result.shouldEnter).toBe(true);
+      expect(result.entryPrice).toBe(0.45);
+      expect(result.blockReason).toBeUndefined();
+    });
+
+    it('DOWN entry at 0.35 (exactly at floor) passes', () => {
+      const market = buildMarket({ outcomePrices: [0.65, 0.35], timeLeftMin: 10 });
+      const move = makeMove(-0.08);
+      // Note: UP price is 0.65 which exceeds ceiling, but we're going DOWN
+      // so entryPrice = outcomePrices[1] = 0.35, which is exactly at floor.
+      // The price_above gate checks the DOWN side (0.35), not the UP side (0.65).
+      const result = evaluateOracleLagEntry(market, move, defaultConfig);
+
+      expect(result.shouldEnter).toBe(true);
+      expect(result.entryPrice).toBe(0.35);
     });
   });
 

@@ -423,6 +423,11 @@ const envSchema = z.object({
   ORACLE_LAG_MIN_TIME_LEFT_MIN: z.coerce.number().min(0).optional().default(5),
   // Skip entry if market price on the signal side exceeds this (fee math breaks above ~0.62).
   ORACLE_LAG_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.62),
+  // Skip entry if market price on the signal side is below this floor. Guards against buying
+  // the cheap side of an already-decided market (e.g. NO at 0.08 when YES is at 0.92 means
+  // the market has already priced in the oracle direction — the lag thesis doesn't apply).
+  // Symmetric partner to ORACLE_LAG_MAX_ENTRY_PRICE.
+  ORACLE_LAG_MIN_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.35),
   // Fixed per-entry stake — bypasses Half-Kelly (edge is timing, not probability).
   ORACLE_LAG_STAKE_USD: z.coerce.number().min(0).optional().default(5),
   // Hard cap on live entries per hour.
