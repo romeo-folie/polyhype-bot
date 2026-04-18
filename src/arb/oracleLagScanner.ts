@@ -106,9 +106,10 @@ export interface EntryEvaluation {
  *   4. price_above_threshold   — entry-side book price > config.maxEntryPrice
  *   5. price_below_threshold   — entry-side book price < config.minEntryPrice
  *
- * Rules 4 and 5 are mutually exclusive (max > min), so their relative order
- * only matters for future edge cases. Task 008 unit tests pin this order.
- * Do not reorder.
+ * Rules 4 and 5 are only mutually exclusive when config is correctly set with
+ * minEntryPrice < maxEntryPrice (enforced by loadConfig()). That relationship
+ * is a desired configuration property, not an invariant the evaluator itself
+ * guards. Task 008 unit tests pin this order. Do not reorder.
  */
 export type OracleLagBlockReason =
   | 'no_move_data'
@@ -254,8 +255,9 @@ export function evaluateOracleLagEntry(
   }
 
   // Rule 5 — entry-side book price floor. A very cheap signal-side token means
-  // the market has already priced in the oracle direction strongly (e.g. NO at
-  // 0.08 when YES is 0.92 — the lag thesis doesn't hold). Paired with rule 4.
+  // the market is already extremely lopsided / nearly decided (e.g. NO at 0.08
+  // when YES is 0.92), so the lag thesis and midpoint maker-post assumptions
+  // no longer hold. Paired with rule 4.
   if (entryPrice < config.minEntryPrice) {
     return {
       shouldEnter: false,
