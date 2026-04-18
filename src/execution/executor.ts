@@ -26,6 +26,7 @@ import {
   submitClobLimitBuy,
   getClobOrder,
   cancelClobOrder,
+  CLOB_MIN_ORDER_USD,
 } from '../shared/clob.js';
 import { hasOpenPosition, recordPosition } from './positionLedger.js';
 import { deductStake } from '../shared/bankroll.js';
@@ -1867,6 +1868,24 @@ export async function executeSignal(
         makerAttempt.filledStakeUsd !== signal.stakeUsd
       ) {
         signal = { ...signal, stakeUsd: makerAttempt.filledStakeUsd };
+      }
+
+      // Partial fill below $1 notional: position is on-chain but can't be exited
+      // via CLOB until the price rises enough. sweep-residuals will handle cleanup
+      // using current price, not entry price, so this won't get prematurely flagged.
+      if (
+        makerAttempt.makerFillStatus === 'partial' &&
+        makerAttempt.filledStakeUsd != null &&
+        makerAttempt.filledStakeUsd > 0 &&
+        makerAttempt.filledStakeUsd < CLOB_MIN_ORDER_USD
+      ) {
+        logger.warn('[executor] partial fill below CLOB minimum exit notional — unexitable until price rises', {
+          marketId: signal.marketId,
+          filledStakeUsd: makerAttempt.filledStakeUsd,
+          shares: makerAttempt.makerSharesFilled,
+          makerPostedPrice: makerAttempt.makerPostedPrice,
+          minUsd: CLOB_MIN_ORDER_USD,
+        });
       }
 
       makerFilled = true;

@@ -7,9 +7,10 @@
  * 1. Loads every open position from the Redis ledger.
  * 2. For CLOB positions, fetches the real on-chain ERC-1155 balance.
  * 3. Cross-references Redis sharesHeld vs on-chain balance.
- * 4. If the live shares * currentPrice (proxied by entryPrice) is below the
- *    configured minimum notional, marks the position pendingSettlement so the
- *    resolution redeemer handles it at settlement instead of retrying forever.
+ * 4. If the live shares * currentPrice (live CLOB best bid, falling back to
+ *    entryPrice when the book is empty) is below the configured minimum notional,
+ *    marks the position pendingSettlement so the resolution redeemer handles it
+ *    at settlement instead of retrying forever.
  *
  * This is a *passive* cleanup. The primary sweep happens synchronously inside
  * takeProfitExecutor on detected partial fills (Change 2). This script exists
@@ -23,7 +24,7 @@
 import 'dotenv/config';
 import { getRedis, closeRedis } from '../src/shared/redis.js';
 import { getOpenPositions, markPositionPendingSettlement } from '../src/execution/positionLedger.js';
-import { fetchClobTokenBalance, CLOB_MIN_ORDER_USD } from '../src/shared/clob.js';
+import { fetchClobTokenBalance, getClobOrderBook, CLOB_MIN_ORDER_USD } from '../src/shared/clob.js';
 import { loadConfig } from '../src/shared/config.js';
 import { logger } from '../src/shared/logger.js';
 
@@ -35,23 +36,47 @@ async function main(): Promise<void> {
   const positions = await getOpenPositions(redis);
   const open = positions.filter((p) => !p.pendingSettlement && !p.synthHedged);
 
-  let scanned = 0;
   let flagged = 0;
   let mutated = 0;
 
-  for (const pos of open) {
-    scanned++;
-    const venue = pos.executionVenue ?? 'simmer';
-    if (venue !== 'clob') continue;
-    if (!pos.clobTokenIds || pos.clobTokenIds.length === 0) continue;
+  // Fetch balance + live book for all eligible CLOB positions concurrently.
+  type FetchResult = {
+    pos: (typeof open)[number];
+    tokenId: string;
+    bal: Awaited<ReturnType<typeof fetchClobTokenBalance>>;
+    book: Awaited<ReturnType<typeof getClobOrderBook>>;
+  };
 
+  const eligible = open.flatMap((pos) => {
+    const venue = pos.executionVenue ?? 'simmer';
+    if (venue !== 'clob') return [];
+    if (!pos.clobTokenIds || pos.clobTokenIds.length === 0) return [];
     const tokenId =
       pos.direction === 'YES' || pos.direction === 'UP'
         ? pos.clobTokenIds[0]
         : pos.clobTokenIds[1];
-    if (!tokenId) continue;
+    if (!tokenId) return [];
+    return [{ pos, tokenId }];
+  });
 
-    const bal = await fetchClobTokenBalance(tokenId);
+  const fetched = await Promise.allSettled(
+    eligible.map(async ({ pos, tokenId }): Promise<FetchResult> => {
+      const [bal, book] = await Promise.all([
+        fetchClobTokenBalance(tokenId),
+        getClobOrderBook(tokenId),
+      ]);
+      return { pos, tokenId, bal, book };
+    }),
+  );
+
+  const scanned = open.length;
+  for (const outcome of fetched) {
+    if (outcome.status === 'rejected') {
+      logger.warn('[sweep-residuals] fetch error', { error: String(outcome.reason) });
+      continue;
+    }
+    const { pos, tokenId, bal, book } = outcome.value;
+
     if (!bal.ok) {
       logger.warn('[sweep-residuals] balance fetch failed', {
         marketId: pos.marketId,
@@ -60,10 +85,22 @@ async function main(): Promise<void> {
       continue;
     }
 
-    // Use entryPrice as a crude notional floor (we don't have current price here).
-    // This is conservative: if entryPrice notional is below the minimum, current
-    // price notional is very unlikely to clear the bar either.
-    const notional = bal.balance * pos.entryPrice;
+    // Fetch live best bid for an accurate notional. Using entryPrice was wrong for
+    // prediction markets — a position entered at 8¢ can trade at 99¢ minutes later,
+    // making the entry-price notional a massive underestimate that incorrectly
+    // triggers pendingSettlement on perfectly healthy positions.
+    const rawBid = parseFloat(book?.bids[0]?.price ?? '0');
+    const useFallback = !Number.isFinite(rawBid) || rawBid <= 0;
+    const currentPrice = useFallback ? pos.entryPrice : rawBid;
+    if (useFallback) {
+      logger.warn('[sweep-residuals] no valid live bid, falling back to entryPrice', {
+        marketId: pos.marketId,
+        tokenId,
+        bestBid: rawBid,
+        entryPrice: pos.entryPrice,
+      });
+    }
+    const notional = bal.balance * currentPrice;
     const ledgerShares = pos.sharesHeld ?? 0;
     const drift = Math.abs(ledgerShares - bal.balance);
 
@@ -90,6 +127,7 @@ async function main(): Promise<void> {
         onChain: bal.balance.toFixed(6),
         ledgerShares: ledgerShares.toFixed(6),
         drift: drift.toFixed(6),
+        currentPrice: currentPrice.toFixed(4),
         notional: notional.toFixed(4),
         execute,
       });
