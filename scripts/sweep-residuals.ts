@@ -7,9 +7,10 @@
  * 1. Loads every open position from the Redis ledger.
  * 2. For CLOB positions, fetches the real on-chain ERC-1155 balance.
  * 3. Cross-references Redis sharesHeld vs on-chain balance.
- * 4. If the live shares * currentPrice (proxied by entryPrice) is below the
- *    configured minimum notional, marks the position pendingSettlement so the
- *    resolution redeemer handles it at settlement instead of retrying forever.
+ * 4. If the live shares * currentPrice (live CLOB best bid, falling back to
+ *    entryPrice when the book is empty) is below the configured minimum notional,
+ *    marks the position pendingSettlement so the resolution redeemer handles it
+ *    at settlement instead of retrying forever.
  *
  * This is a *passive* cleanup. The primary sweep happens synchronously inside
  * takeProfitExecutor on detected partial fills (Change 2). This script exists

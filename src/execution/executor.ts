@@ -1878,7 +1878,7 @@ export async function executeSignal(
           marketId: signal.marketId,
           filledStakeUsd: makerAttempt.filledStakeUsd,
           shares: makerAttempt.makerSharesFilled,
-          entryPrice: makerAttempt.makerPostedPrice,
+          makerPostedPrice: makerAttempt.makerPostedPrice,
           minUsd: CLOB_MIN_ORDER_USD,
         });
       }
