@@ -91,6 +91,7 @@ const mockConfig = {
   MAKER_EMPTY_BOOK_ALLOWED_SOURCES: ['oracle-lag', 'near-zero-arb'],
   ORACLE_LAG_MAKER_EDGE_BPS: 50,
   ORACLE_LAG_MAKER_RETRY_ON_REJECT: true,
+  ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS: 0,
 };
 
 const mockLoadConfig = vi.fn(() => mockConfig);
@@ -1013,6 +1014,43 @@ describe('execution mode', () => {
     expect(result.entryOrderType).toBe('maker');
     expect(mockSubmitLimit).toHaveBeenCalled();
     expect(mockSubmit).not.toHaveBeenCalled();
+  });
+
+  it('oracle-lag on real book uses ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS, not MAKER_MAX_WAIT_MS', async () => {
+    // MAKER_MAX_WAIT_MS=10 (non-zero) — would allow polling for other sources.
+    // ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS=0 — forces immediate timeout for oracle-lag.
+    // After timeout oracle-lag should cancel the maker order and fall back to taker (hybrid mode).
+    mockConfig.EXECUTION_MODE = 'hybrid';
+    mockConfig.MAKER_MAX_WAIT_MS = 10;
+    mockConfig.ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS = 0;
+    mockResolve.mockResolvedValue(null); // no Simmer; goes straight to CLOB taker
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.49', size: '100' }],
+      asks: [{ price: '0.51', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+    mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-oracle-lag-real' });
+    mockCancelOrder.mockResolvedValue(true);
+    mockSubmitClob.mockResolvedValue({ success: true, shares_bought: 10 });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'oracle-lag', clobTokenIds: ['tok-yes', 'tok-no'] }), redis as any);
+
+    // Maker order was posted then immediately cancelled (maxWaitMs=0 path).
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+    expect(mockCancelOrder).toHaveBeenCalledWith('order-oracle-lag-real');
+    // Taker fallback fired in hybrid mode.
+    expect(mockSubmitClob).toHaveBeenCalledOnce();
+    expect(result.skipped).toBe(false);
+    expect(result.entryOrderType).toBe('taker');
   });
 
   it('skips taker when edge below TAKER_MIN_EDGE in hybrid mode', async () => {

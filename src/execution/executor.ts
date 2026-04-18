@@ -688,7 +688,7 @@ async function tryExecuteViaClobMaker(
 
   const maxWaitMs =
     signal.source === 'oracle-lag'
-      ? cfg.ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS
+      ? Math.min(cfg.ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS, cfg.MAKER_MAX_WAIT_MS)
       : cfg.MAKER_MAX_WAIT_MS;
   const pollIntervalMs = cfg.MAKER_POLL_INTERVAL_MS;
 
@@ -1928,8 +1928,9 @@ export async function executeSignal(
         logger.info('[executor] maker fill — rebate eligible', {
           marketId: signal.marketId,
           source: signal.source,
-          filledUsd: makerAttempt.filledStakeUsd?.toFixed(2),
-          feeBps: feeMarketBpsObserved ?? 'from_signal',
+          filledUsd: makerAttempt.filledStakeUsd ?? null,
+          feeBps: feeMarketBpsObserved ?? null,
+          feeBpsSource: feeMarketBpsObserved != null ? 'observed' : 'from_signal',
         });
       }
       void notifyTradeExecuted(signal, undefined, {
