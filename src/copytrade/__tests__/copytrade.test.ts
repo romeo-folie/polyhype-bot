@@ -160,19 +160,45 @@ describe('runCopytrade', () => {
     expect(mockGetMarketBySlug).not.toHaveBeenCalled();
   });
 
+  it('advances last_ts cursor even when every trade is filtered by recency guard', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const staleTs = nowSec - 45 * 60;
+    const staleTrade = makeTrade({ timestamp: staleTs });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [staleTrade] } as Response);
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    await runCopytrade(redis, 1000);
+
+    const cursorSet = redis.set.mock.calls.find(
+      ([k]: [string]) => typeof k === 'string' && k.startsWith('copytrade:last_ts:'),
+    );
+    expect(cursorSet).toBeDefined();
+    expect(cursorSet?.[1]).toBe(staleTs.toString());
+  });
+
   it('uses cached slug-404 to skip getMarketBySlug HTTP call', async () => {
     const trade = makeTrade();
     mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
 
     const { runCopytrade } = await import('../index.js');
     const redis = { get: vi.fn(), set: vi.fn() } as any;
-    // First call: last_ts lookup → null. Second call: slug-404 cache hit → '1'.
-    redis.get.mockResolvedValueOnce(null).mockResolvedValueOnce('1');
+    // Call order in runCopytrade:
+    //   1) last_ts lookup → null (fresh wallet)
+    //   2) persistent dedup check → null (tx not previously seen)
+    //   3) slug-404 cache lookup → '1' (cached miss, short-circuit)
+    redis.get
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce('1');
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis, 1000);
 
     expect(result.signals).toHaveLength(0);
     expect(mockGetMarketBySlug).not.toHaveBeenCalled();
+    expect(redis.get).toHaveBeenCalledWith(expect.stringMatching(/^copytrade:slug-404:/));
   });
 
   it('writes slug-404 cache entry when getMarketBySlug returns null', async () => {
