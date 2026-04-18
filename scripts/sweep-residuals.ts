@@ -23,7 +23,7 @@
 import 'dotenv/config';
 import { getRedis, closeRedis } from '../src/shared/redis.js';
 import { getOpenPositions, markPositionPendingSettlement } from '../src/execution/positionLedger.js';
-import { fetchClobTokenBalance, CLOB_MIN_ORDER_USD } from '../src/shared/clob.js';
+import { fetchClobTokenBalance, getClobOrderBook, CLOB_MIN_ORDER_USD } from '../src/shared/clob.js';
 import { loadConfig } from '../src/shared/config.js';
 import { logger } from '../src/shared/logger.js';
 
@@ -60,10 +60,20 @@ async function main(): Promise<void> {
       continue;
     }
 
-    // Use entryPrice as a crude notional floor (we don't have current price here).
-    // This is conservative: if entryPrice notional is below the minimum, current
-    // price notional is very unlikely to clear the bar either.
-    const notional = bal.balance * pos.entryPrice;
+    // Fetch live best bid for an accurate notional. Using entryPrice was wrong for
+    // prediction markets — a position entered at 8¢ can trade at 99¢ minutes later,
+    // making the entry-price notional a massive underestimate that incorrectly
+    // triggers pendingSettlement on perfectly healthy positions.
+    const book = await getClobOrderBook(tokenId);
+    const bestBid = parseFloat(book?.bids[0]?.price ?? '0');
+    const currentPrice = bestBid > 0 ? bestBid : pos.entryPrice;
+    if (bestBid === 0) {
+      logger.warn('[sweep-residuals] no live bid available, falling back to entryPrice', {
+        marketId: pos.marketId,
+        entryPrice: pos.entryPrice,
+      });
+    }
+    const notional = bal.balance * currentPrice;
     const ledgerShares = pos.sharesHeld ?? 0;
     const drift = Math.abs(ledgerShares - bal.balance);
 
@@ -90,6 +100,7 @@ async function main(): Promise<void> {
         onChain: bal.balance.toFixed(6),
         ledgerShares: ledgerShares.toFixed(6),
         drift: drift.toFixed(6),
+        currentPrice: currentPrice.toFixed(4),
         notional: notional.toFixed(4),
         execute,
       });

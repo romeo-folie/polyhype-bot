@@ -23,6 +23,7 @@ vi.mock('../../shared/clob.js', () => ({
   submitClobLimitBuy: vi.fn(),
   getClobOrder: vi.fn(),
   cancelClobOrder: vi.fn(),
+  CLOB_MIN_ORDER_USD: 1.0,
 }));
 
 vi.mock('../../shared/governor.js', () => ({

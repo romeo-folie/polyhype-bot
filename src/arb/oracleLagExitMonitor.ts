@@ -302,7 +302,7 @@ const LOCK_KEY = 'lock:oracle-lag-exit-monitor';
 const LOCK_TTL_SEC = 120;
 const LOCK_REFRESH_MS = 60_000;
 const SCAN_BATCH = 200;
-const CHAINLINK_SYMBOL = 'btc/usd';
+const _CHAINLINK_SYMBOL = 'btc/usd';
 const CHAINLINK_STALE_MS = 10_000;
 
 export interface OracleLagExitMonitorOptions {
