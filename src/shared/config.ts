@@ -742,6 +742,11 @@ const envSchema = z.object({
     .pipe(z.record(z.string(), z.coerce.number().min(0).max(10000))),
   COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS: z.coerce.number().min(0).optional().default(6),
   COPYTRADE_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(1000),
+  // Recency guard: drop any wallet-activity trade older than N minutes before
+  // the candidate pipeline runs. Protects against stale `copytrade:last_ts`
+  // cursors (silent wallet resumes, wiped keys) flooding the pipeline with
+  // resolved-market zombies.
+  COPYTRADE_MAX_TRADE_AGE_MIN: z.coerce.number().min(1).optional().default(30),
   // Extreme-price gate: skip entries where the outcome price is in the tails.
   // At ≤0.08 or ≥0.92, stop-loss % is dominated by spread noise and R/R is asymmetric
   // (e.g. buying NO at 0.95 = 5¢ upside vs 95¢ downside). Measured against the price

@@ -410,6 +410,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
   const signals: TradeSignal[] = [];
   let exits = 0;
   const localDedup = new Set<string>();
+  const walletLatestTs = new Map<string, number>();
 
   // 1. Fetch activity for all wallets in parallel
   const walletResults = await Promise.all(
@@ -424,6 +425,11 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
   );
 
   // 2. Identify trades that haven't been processed yet
+  // Recency guard: drop anything older than COPYTRADE_MAX_TRADE_AGE_MIN. Protects
+  // new wallets (no last_ts cursor → 0 → 100 historical trades flood the pipe)
+  // and silent wallets resuming after days (cursor stale → same flood).
+  const recencyFloorSec = Math.floor(Date.now() / 1000) - cfg.COPYTRADE_MAX_TRADE_AGE_MIN * 60;
+  let staleDropTotal = 0;
   const pendingTrades: { wallet: string; trade: ActivityTrade }[] = [];
   for (const { wallet, trades, error } of walletResults) {
     if (error) {
@@ -434,8 +440,14 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
     const lastKey = `copytrade:last_ts:${wallet}`;
     const lastRaw = await redis.get(lastKey);
     const lastTimestamp = lastRaw ? Number.parseInt(lastRaw, 10) : 0;
+    let newestFetchedTs = 0;
 
     for (const trade of trades) {
+      if (trade.timestamp > newestFetchedTs) newestFetchedTs = trade.timestamp;
+      if (trade.timestamp < recencyFloorSec) {
+        staleDropTotal++;
+        continue;
+      }
       if (trade.timestamp <= lastTimestamp) continue;
       if (!trade.transactionHash) continue;
 
@@ -444,16 +456,29 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
 
       pendingTrades.push({ wallet, trade });
     }
+
+    // Advance the cursor watermark even when all trades were filtered (stale
+    // wallets that only return history otherwise re-emit the same drops every
+    // poll). Existing `trade.timestamp <= lastTimestamp` check in the next
+    // cycle will short-circuit them before the recency guard runs.
+    if (newestFetchedTs > 0) {
+      walletLatestTs.set(wallet, Math.max(walletLatestTs.get(wallet) ?? 0, newestFetchedTs));
+    }
+  }
+
+  if (staleDropTotal > 0) {
+    logger.info('[copytrade] recency guard dropped stale trades', {
+      count: staleDropTotal,
+      maxAgeMin: cfg.COPYTRADE_MAX_TRADE_AGE_MIN,
+    });
   }
 
   if (pendingTrades.length === 0) {
     logger.info('[copytrade] no new trades detected');
-    return { signals: [], exits: 0 };
   }
 
   // 3. Process pending trades across all wallets, sorted by time
   const ordered = pendingTrades.sort((a, b) => a.trade.timestamp - b.trade.timestamp);
-  const walletLatestTs = new Map<string, number>();
 
   for (const { wallet, trade } of ordered) {
     const dedupKey = `copytrade:tx:${trade.transactionHash}:${trade.asset}:${trade.outcomeIndex.toString()}`;
@@ -477,9 +502,23 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
     });
 
     try {
+      // Negative-result cache: if Gamma returned null for this slug within the
+      // last hour, skip the HTTP call entirely. Amortises across wallets that
+      // each reference the same resolved/non-existent slug.
+      const slugMissKey = `copytrade:slug-404:${trade.slug}`;
+      const cachedMiss = await redis.get(slugMissKey);
+      if (cachedMiss) {
+        await recordCopytradeFilter(redis, 'market_lookup_failed_cached').catch(() => {
+          /* ignore telemetry errors */
+        });
+        await markDedup();
+        continue;
+      }
+
       const market = await getMarketBySlug(trade.slug);
       if (!market) {
         logger.warn('[copytrade] market lookup failed', { slug: trade.slug });
+        await redis.set(slugMissKey, '1', 'EX', 3600);
         await recordCopytradeFilter(redis, 'market_lookup_failed').catch(() => {
           /* ignore telemetry errors */
         });

@@ -12,6 +12,7 @@ let configOverride = {
   COPYTRADE_MAX_SLIPPAGE_BPS: 200,
   COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS: 6,
   COPYTRADE_MIN_LIQUIDITY: 1000,
+  COPYTRADE_MAX_TRADE_AGE_MIN: 30,
   COPYTRADE_EXIT_MODE: 'rules',
   MAX_BET_FRACTION: 0.1,
   TAKER_MIN_EDGE_CATEGORIES: {} as Record<string, number>,
@@ -55,7 +56,7 @@ vi.mock('../../shared/config.js', () => ({
 
 const makeTrade = (overrides?: Partial<Record<string, unknown>>) => ({
   proxyWallet: '0xabc',
-  timestamp: 1700000000,
+  timestamp: Math.floor(Date.now() / 1000),
   conditionId: '0xcond',
   type: 'TRADE',
   size: 1000,
@@ -106,6 +107,7 @@ beforeEach(() => {
     COPYTRADE_MAX_SLIPPAGE_BPS: 200,
     COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS: 6,
     COPYTRADE_MIN_LIQUIDITY: 1000,
+    COPYTRADE_MAX_TRADE_AGE_MIN: 30,
     COPYTRADE_EXIT_MODE: 'rules',
     MAX_BET_FRACTION: 0.1,
     TAKER_MIN_EDGE_CATEGORIES: {},
@@ -140,6 +142,85 @@ describe('copytrade helpers', () => {
 });
 
 describe('runCopytrade', () => {
+  it('drops trades older than COPYTRADE_MAX_TRADE_AGE_MIN before pipeline', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const staleTrade = makeTrade({ timestamp: nowSec - 45 * 60 }); // 45 min old, floor is 30
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [staleTrade] } as Response);
+    // If recency guard fails to drop, next gate is getMarketBySlug — force it to
+    // throw so a leaked-through trade surfaces as a test failure.
+    mockGetMarketBySlug.mockRejectedValue(new Error('recency guard leak'));
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
+    expect(result.signals).toHaveLength(0);
+    expect(mockGetMarketBySlug).not.toHaveBeenCalled();
+  });
+
+  it('advances last_ts cursor even when every trade is filtered by recency guard', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const staleTs = nowSec - 45 * 60;
+    const staleTrade = makeTrade({ timestamp: staleTs });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [staleTrade] } as Response);
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    await runCopytrade(redis, 1000);
+
+    const cursorSet = redis.set.mock.calls.find(
+      ([k]: [string]) => typeof k === 'string' && k.startsWith('copytrade:last_ts:'),
+    );
+    expect(cursorSet).toBeDefined();
+    expect(cursorSet?.[1]).toBe(staleTs.toString());
+  });
+
+  it('uses cached slug-404 to skip getMarketBySlug HTTP call', async () => {
+    const trade = makeTrade();
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    // Call order in runCopytrade:
+    //   1) last_ts lookup → null (fresh wallet)
+    //   2) persistent dedup check → null (tx not previously seen)
+    //   3) slug-404 cache lookup → '1' (cached miss, short-circuit)
+    redis.get
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce('1');
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
+    expect(result.signals).toHaveLength(0);
+    expect(mockGetMarketBySlug).not.toHaveBeenCalled();
+    expect(redis.get).toHaveBeenCalledWith(expect.stringMatching(/^copytrade:slug-404:/));
+  });
+
+  it('writes slug-404 cache entry when getMarketBySlug returns null', async () => {
+    const trade = makeTrade();
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(null);
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    await runCopytrade(redis, 1000);
+
+    const setexCall = redis.set.mock.calls.find(
+      ([k]: [string]) => typeof k === 'string' && k.startsWith('copytrade:slug-404:'),
+    );
+    expect(setexCall).toBeDefined();
+    expect(setexCall?.[1]).toBe('1');
+    expect(setexCall?.[2]).toBe('EX');
+    expect(setexCall?.[3]).toBe(3600);
+  });
+
   it('skips when slippage exceeds threshold', async () => {
     const trade = makeTrade({ price: 0.5 });
     mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
