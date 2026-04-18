@@ -111,6 +111,10 @@ function clobTokenForSignal(signal: TradeSignal): string | null {
  *   - 'osint'         — news-sentiment trades; edge persists for minutes
  *   - 'copytrade'     — whale conviction persists; our fill isn't time-critical
  *   - 'near-zero-arb' — illiquid markets at 3-10¢ don't reprice fast
+ *   - 'oracle-lag'    — ~55s Chainlink RTDS edge window; uses ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS
+ *                       (default 8s) instead of the full MAKER_MAX_WAIT_MS so fallback to taker
+ *                       still catches the trade within the edge window. Empty-book fires use the
+ *                       separate MAKER_EMPTY_BOOK path regardless of this set.
  *
  * Excluded (latency-sensitive, must fill NOW):
  *   - 'crypto-arb' — Binance→PM lag arbitrage, edge gone in seconds
@@ -118,7 +122,7 @@ function clobTokenForSignal(signal: TradeSignal): string | null {
  *   - 'futures'    — bypasses this branch via the isFutures path
  *   - undefined    — unlabelled; default-deny for safety
  */
-const MAKER_ELIGIBLE_SOURCES = new Set(['osint', 'copytrade', 'near-zero-arb', 'correlation-arb']);
+const MAKER_ELIGIBLE_SOURCES = new Set(['osint', 'copytrade', 'near-zero-arb', 'correlation-arb', 'oracle-lag']);
 
 function isMakerEligible(signal: TradeSignal): boolean {
   return MAKER_ELIGIBLE_SOURCES.has(signal.source ?? '');
@@ -682,7 +686,10 @@ async function tryExecuteViaClobMaker(
     };
   }
 
-  const maxWaitMs = cfg.MAKER_MAX_WAIT_MS;
+  const maxWaitMs =
+    signal.source === 'oracle-lag'
+      ? cfg.ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS
+      : cfg.MAKER_MAX_WAIT_MS;
   const pollIntervalMs = cfg.MAKER_POLL_INTERVAL_MS;
 
   if (maxWaitMs <= 0) {
@@ -1904,6 +1911,7 @@ export async function executeSignal(
       } else {
         safeRecordExecutionMetric('maker_full_fill');
       }
+      const isFeeMarket = feeMarketBpsObserved != null || signal.feesEnabled === true;
       logger.info('[executor] maker fill', {
         marketId: signal.marketId,
         stakeUsd: signal.stakeUsd,
@@ -1913,7 +1921,17 @@ export async function executeSignal(
         priceImprovementUsd: makerTelemetry.makerPriceImprovementUsd ?? null,
         waitMs: makerAttempt.waitMs,
         fillStatus: makerTelemetry.makerFillStatus,
+        feeMarket: isFeeMarket,
+        feeBps: feeMarketBpsObserved ?? null,
       });
+      if (isFeeMarket) {
+        logger.info('[executor] maker fill — rebate eligible', {
+          marketId: signal.marketId,
+          source: signal.source,
+          filledUsd: makerAttempt.filledStakeUsd?.toFixed(2),
+          feeBps: feeMarketBpsObserved ?? 'from_signal',
+        });
+      }
       void notifyTradeExecuted(signal, undefined, {
         venue: 'clob',
         ...(makerAttempt.tradeResult.shares_bought != null && {

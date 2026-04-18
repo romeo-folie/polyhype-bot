@@ -457,6 +457,10 @@ const envSchema = z.object({
   // Scoped to oracle-lag only; OSINT markets have deeper books and far more
   // adverse-fill risk, so adding retries there requires its own analysis.
   ORACLE_LAG_MAKER_RETRY_ON_REJECT: boolFromEnv.optional().default(true),
+  // For real (non-empty) books, cap the maker wait for oracle-lag signals so the
+  // taker fallback still executes within the ~55s Chainlink edge window.
+  // Must be shorter than MAKER_MAX_WAIT_MS (45s) to leave room for taker execution.
+  ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS: z.coerce.number().int().min(0).optional().default(8_000),
 
   // Oracle-Lag gap-compression exit monitor (colocated in arb worker with the
   // scanner). Ships dark: when ORACLE_LAG_EXIT_ENABLED=false the monitor still
