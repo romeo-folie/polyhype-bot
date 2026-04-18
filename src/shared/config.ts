@@ -1227,8 +1227,6 @@ export function loadConfig(forceReload = false): AppConfig {
     );
   }
 
-  _config = cfg;
-
   // Cross-validate CLOB-related config.
   // Only enforce wallet-key requirement when CLOB_FALLBACK_ENABLED is explicitly
   // set to true in the environment — the default=true must not block users who
@@ -1266,5 +1264,7 @@ export function loadConfig(forceReload = false): AppConfig {
     throw new Error('ORACLE_LAG_MIN_ENTRY_PRICE must be less than ORACLE_LAG_MAX_ENTRY_PRICE');
   }
 
+  // All cross-validations passed — cache only a valid config.
+  _config = cfg;
   return _config;
 }
