@@ -104,19 +104,25 @@ export interface EntryEvaluation {
  *   2. move_below_threshold    — |pctMove| < config.minMovePct
  *   3. time_left_below_threshold — market resolves in < config.minTimeLeftMin
  *   4. price_above_threshold   — entry-side book price > config.maxEntryPrice
+ *   5. price_below_threshold   — entry-side book price < config.minEntryPrice
  *
- * Task 008 unit tests pin this order. Do not reorder.
+ * Rules 4 and 5 are only mutually exclusive when config is correctly set with
+ * minEntryPrice < maxEntryPrice (enforced by loadConfig()). That relationship
+ * is a desired configuration property, not an invariant the evaluator itself
+ * guards. Task 008 unit tests pin this order. Do not reorder.
  */
 export type OracleLagBlockReason =
   | 'no_move_data'
   | 'move_below_threshold'
   | 'time_left_below_threshold'
-  | 'price_above_threshold';
+  | 'price_above_threshold'
+  | 'price_below_threshold';
 
 export interface OracleLagEvalConfig {
   minMovePct: number;
   minTimeLeftMin: number;
   maxEntryPrice: number;
+  minEntryPrice: number;
 }
 
 /**
@@ -245,6 +251,21 @@ export function evaluateOracleLagEntry(
       timeLeftMin,
       consensusProbability,
       blockReason: 'price_above_threshold',
+    };
+  }
+
+  // Rule 5 — entry-side book price floor. A very cheap signal-side token means
+  // the market is already extremely lopsided / nearly decided (e.g. NO at 0.08
+  // when YES is 0.92), so the lag thesis and midpoint maker-post assumptions
+  // no longer hold. Paired with rule 4.
+  if (entryPrice < config.minEntryPrice) {
+    return {
+      shouldEnter: false,
+      side,
+      entryPrice,
+      timeLeftMin,
+      consensusProbability,
+      blockReason: 'price_below_threshold',
     };
   }
 
@@ -443,6 +464,7 @@ export class OracleLagScanner {
         minMovePct: cfg.ORACLE_LAG_MIN_MOVE_PCT,
         minTimeLeftMin: cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN,
         maxEntryPrice: cfg.ORACLE_LAG_MAX_ENTRY_PRICE,
+        minEntryPrice: cfg.ORACLE_LAG_MIN_ENTRY_PRICE,
       };
 
       for (const asset of assets) {

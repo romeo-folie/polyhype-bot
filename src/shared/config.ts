@@ -423,6 +423,11 @@ const envSchema = z.object({
   ORACLE_LAG_MIN_TIME_LEFT_MIN: z.coerce.number().min(0).optional().default(5),
   // Skip entry if market price on the signal side exceeds this (fee math breaks above ~0.62).
   ORACLE_LAG_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.62),
+  // Skip entry if market price on the signal side is below this floor. Guards against buying
+  // the cheap side of an already-decided / highly-skewed market (e.g. NO at 0.08 when YES is
+  // at 0.92). In that state the lag thesis and midpoint maker-post assumptions no longer apply.
+  // Symmetric partner to ORACLE_LAG_MAX_ENTRY_PRICE. Must remain strictly below the max.
+  ORACLE_LAG_MIN_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.35),
   // Fixed per-entry stake — bypasses Half-Kelly (edge is timing, not probability).
   ORACLE_LAG_STAKE_USD: z.coerce.number().min(0).optional().default(5),
   // Hard cap on live entries per hour.
@@ -1222,8 +1227,6 @@ export function loadConfig(forceReload = false): AppConfig {
     );
   }
 
-  _config = cfg;
-
   // Cross-validate CLOB-related config.
   // Only enforce wallet-key requirement when CLOB_FALLBACK_ENABLED is explicitly
   // set to true in the environment — the default=true must not block users who
@@ -1256,5 +1259,12 @@ export function loadConfig(forceReload = false): AppConfig {
     throw new Error('MACD_FAST must be less than MACD_SLOW');
   }
 
+  // Oracle-lag price band must be non-inverted.
+  if (cfg.ORACLE_LAG_MIN_ENTRY_PRICE >= cfg.ORACLE_LAG_MAX_ENTRY_PRICE) {
+    throw new Error('ORACLE_LAG_MIN_ENTRY_PRICE must be less than ORACLE_LAG_MAX_ENTRY_PRICE');
+  }
+
+  // All cross-validations passed — cache only a valid config.
+  _config = cfg;
   return _config;
 }
