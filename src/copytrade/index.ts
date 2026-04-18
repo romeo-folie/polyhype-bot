@@ -424,6 +424,11 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
   );
 
   // 2. Identify trades that haven't been processed yet
+  // Recency guard: drop anything older than COPYTRADE_MAX_TRADE_AGE_MIN. Protects
+  // new wallets (no last_ts cursor → 0 → 100 historical trades flood the pipe)
+  // and silent wallets resuming after days (cursor stale → same flood).
+  const recencyFloorSec = Math.floor(Date.now() / 1000) - cfg.COPYTRADE_MAX_TRADE_AGE_MIN * 60;
+  let staleDropTotal = 0;
   const pendingTrades: { wallet: string; trade: ActivityTrade }[] = [];
   for (const { wallet, trades, error } of walletResults) {
     if (error) {
@@ -436,6 +441,10 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
     const lastTimestamp = lastRaw ? Number.parseInt(lastRaw, 10) : 0;
 
     for (const trade of trades) {
+      if (trade.timestamp < recencyFloorSec) {
+        staleDropTotal++;
+        continue;
+      }
       if (trade.timestamp <= lastTimestamp) continue;
       if (!trade.transactionHash) continue;
 
@@ -444,6 +453,13 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
 
       pendingTrades.push({ wallet, trade });
     }
+  }
+
+  if (staleDropTotal > 0) {
+    logger.info('[copytrade] recency guard dropped stale trades', {
+      count: staleDropTotal,
+      maxAgeMin: cfg.COPYTRADE_MAX_TRADE_AGE_MIN,
+    });
   }
 
   if (pendingTrades.length === 0) {
@@ -477,9 +493,23 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
     });
 
     try {
+      // Negative-result cache: if Gamma returned null for this slug within the
+      // last hour, skip the HTTP call entirely. Amortises across wallets that
+      // each reference the same resolved/non-existent slug.
+      const slugMissKey = `copytrade:slug-404:${trade.slug}`;
+      const cachedMiss = await redis.get(slugMissKey);
+      if (cachedMiss) {
+        await recordCopytradeFilter(redis, 'market_lookup_failed_cached').catch(() => {
+          /* ignore telemetry errors */
+        });
+        await markDedup();
+        continue;
+      }
+
       const market = await getMarketBySlug(trade.slug);
       if (!market) {
         logger.warn('[copytrade] market lookup failed', { slug: trade.slug });
+        await redis.set(slugMissKey, '1', 'EX', 3600);
         await recordCopytradeFilter(redis, 'market_lookup_failed').catch(() => {
           /* ignore telemetry errors */
         });
