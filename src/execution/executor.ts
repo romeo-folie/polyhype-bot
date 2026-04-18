@@ -1925,12 +1925,13 @@ export async function executeSignal(
         feeBps: feeMarketBpsObserved ?? null,
       });
       if (isFeeMarket) {
-        logger.info('[executor] maker fill — rebate eligible', {
+        logger.info('[executor] maker fill - rebate eligible', {
           marketId: signal.marketId,
           source: signal.source,
           filledUsd: makerAttempt.filledStakeUsd ?? null,
+          feesEnabled: signal.feesEnabled ?? null,
           feeBps: feeMarketBpsObserved ?? null,
-          feeBpsSource: feeMarketBpsObserved != null ? 'observed' : 'from_signal',
+          feeBpsSource: feeMarketBpsObserved != null ? 'observed' : 'unknown',
         });
       }
       void notifyTradeExecuted(signal, undefined, {
