@@ -629,10 +629,14 @@ export class ArbitrageWorker {
         });
         await recordGlobalTrade(redis, 'hyperliquid');
       } else if (result.skipped) {
-        // For permanent rejections (stake below HL minimum), hold the full cooldown so the
-        // symbol doesn't hammer the executor on every oracle tick. For transient skips, release.
-        if (result.skipReason === 'stake_below_hl_minimum') {
-          await redis.set(cooldownKey, 'min-skip', 'EX', cfg.HL_MOMENTUM_COOLDOWN_SEC);
+        // Hold the full cooldown for skip reasons that will recur on the next tick —
+        // stake too small (permanent until config changes) and already_executed (dedup
+        // key still live). Transient skips release the cooldown so retries are allowed.
+        const holdCooldown =
+          result.skipReason === 'stake_below_hl_minimum' ||
+          result.skipReason === 'already_executed';
+        if (holdCooldown) {
+          await redis.set(cooldownKey, 'skip', 'EX', cfg.HL_MOMENTUM_COOLDOWN_SEC);
         } else {
           await redis.del(cooldownKey);
         }
