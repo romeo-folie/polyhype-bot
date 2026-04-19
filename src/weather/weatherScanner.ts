@@ -40,6 +40,19 @@ const GAMMA_BASE = 'https://gamma-api.polymarket.com';
 const GAMMA_TIMEOUT_MS = 15_000;
 const DEDUP_KEY_PREFIX = 'weather:event:';
 
+/**
+ * Resolve the `WEATHER_TRADE_SIDES` config value into a set the scanner
+ * can check per-opportunity. `BOTH` (default) is legacy behavior;
+ * `YES`/`NO` restrict execution to a single side while shadow-logging
+ * both for calibration.
+ */
+export function parseAllowedSides(
+  mode: 'YES' | 'NO' | 'BOTH',
+): ReadonlySet<'YES' | 'NO'> {
+  if (mode === 'BOTH') return new Set(['YES', 'NO']);
+  return new Set([mode]);
+}
+
 // ── Gamma 429 circuit breaker (mirrors gamma.ts pattern) ─────────────────
 let rateLimitedUntilMs = 0;
 const RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
@@ -483,6 +496,12 @@ export interface WeatherBracketOpportunity {
   unit: 'fahrenheit' | 'celsius';
   /** Sum of all bracket YES prices (overround diagnostic). */
   overround: number;
+  /**
+   * True if `tradeSide` is permitted by `WEATHER_TRADE_SIDES`. When false the
+   * opportunity is shadow-logged but not tradable; kept populated on the opp
+   * so the executor layer (and shadow observations) can gate cleanly.
+   */
+  allowedByConfig: boolean;
 }
 
 /**
@@ -517,6 +536,7 @@ export function findMispricedBrackets(
   minEdge: number,
   stddevMultiplier = 1.0,
   minModelCoverage = 0.95,
+  allowedSides: ReadonlySet<'YES' | 'NO'> = new Set(['YES', 'NO']),
 ): FindMispricedResult {
   const opportunities: WeatherBracketOpportunity[] = [];
 
@@ -616,6 +636,7 @@ export function findMispricedBrackets(
       daysOut,
       unit: event.unit,
       overround,
+      allowedByConfig: allowedSides.has(tradeSide),
     });
   }
 
@@ -689,6 +710,7 @@ export async function scanWeatherMarkets(
     // when bracket data is incomplete — e.g. late-day thinning from 11 → 4 brackets).
     // modelSum is returned by findMispricedBrackets so shadow logging reuses the exact
     // values used for gating rather than recomputing them.
+    const allowedSides = parseAllowedSides(cfg.WEATHER_TRADE_SIDES);
     const { opportunities, modelSum } = findMispricedBrackets(
       event,
       forecast,
@@ -696,6 +718,7 @@ export async function scanWeatherMarkets(
       cfg.WEATHER_MIN_EDGE,
       cfg.WEATHER_STDDEV_MULTIPLIER,
       cfg.WEATHER_MIN_MODEL_COVERAGE,
+      allowedSides,
     );
     const effectiveStdDev = forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER;
     const coverageStatus = modelSum >= cfg.WEATHER_MIN_MODEL_COVERAGE ? 'ok' : 'skipped_low_coverage';
@@ -761,9 +784,11 @@ export async function scanWeatherMarkets(
       },
     });
 
-    // Log each opportunity individually for shadow analysis
+    // Log each opportunity individually for shadow analysis.
+    // Shadow still records disallowed-side opps so calibration analysis keeps
+    // accruing validation data for the gated side — only wouldTrade flips.
     for (const opp of opportunities) {
-      const wouldTrade = cfg.WEATHER_SCANNER_ENABLED;
+      const wouldTrade = cfg.WEATHER_SCANNER_ENABLED && opp.allowedByConfig;
       logger.info('[weather] bracket opportunity', {
         marketId: opp.marketId,
         eventSlug: opp.eventSlug,
@@ -778,6 +803,8 @@ export async function scanWeatherMarkets(
         outcomePrice: opp.outcomePrice.toFixed(3),
         forecastHigh: opp.forecastHigh.toFixed(1),
         daysOut: opp.daysOut,
+        tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
+        allowedByConfig: opp.allowedByConfig,
         wouldTrade,
       });
       void enqueueWrite('shadow_observations', {
@@ -806,6 +833,8 @@ export async function scanWeatherMarkets(
           forecastStdDev: opp.forecastStdDev,
           effectiveStdDev: opp.forecastStdDev * cfg.WEATHER_STDDEV_MULTIPLIER,
           stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
+          tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
+          allowedByConfig: opp.allowedByConfig,
           daysOut: opp.daysOut,
           wouldTrade,
         },
@@ -818,6 +847,7 @@ export async function scanWeatherMarkets(
     }
   }
 
+  const allowedOpportunities = allOpportunities.filter((o) => o.allowedByConfig);
   logger.info('[weather] scan summary', {
     totalEvents: rawEvents.length,
     parsedEvents: parsedCount,
@@ -826,10 +856,14 @@ export async function scanWeatherMarkets(
     noForecast,
     eventsWithOpportunities,
     totalOpportunities: allOpportunities.length,
+    allowedOpportunities: allowedOpportunities.length,
+    sideFiltered: allOpportunities.length - allowedOpportunities.length,
+    tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
     enabled: cfg.WEATHER_SCANNER_ENABLED,
   });
 
-  // Sort by edge descending
+  // Return shadow-logged opportunities in edge-descending order. Callers that
+  // execute must filter on `allowedByConfig`; the orchestrator below does so.
   allOpportunities.sort((a, b) => b.edge - a.edge);
   return allOpportunities;
 }
@@ -853,8 +887,18 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     return;
   }
 
+  // Filter by WEATHER_TRADE_SIDES. Opportunities on gated sides are shadow-only.
+  const tradable = opportunities.filter((o) => o.allowedByConfig);
+  if (tradable.length === 0) {
+    logger.info('[weather] no tradable opportunities after side filter', {
+      shadowOpportunities: opportunities.length,
+      tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
+    });
+    return;
+  }
+
   // Execution will be wired in a follow-up PR.
-  for (const opp of opportunities) {
+  for (const opp of tradable) {
     logger.info('[weather] would execute trade', {
       marketId: opp.marketId,
       eventSlug: opp.eventSlug,
