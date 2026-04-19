@@ -176,9 +176,6 @@ function oraclePricesKey(symbol: string): string {
 /** Pub/sub channel name. Mirrors `spot:price_moved` from BinanceFeed. */
 const ORACLE_PRICE_MOVED_CHANNEL = 'oracle:price_moved';
 
-/** Cap on the per-symbol oracle:prices:* ZSET. Matches in-memory ringbuffer. */
-const ORACLE_PRICES_ZSET_CAP = 600;
-
 /** TTL on oracle:last:* SET — staleness signal for downstream consumers. */
 const ORACLE_LAST_TTL_SEC = 120;
 
@@ -345,13 +342,16 @@ export class ChainlinkFeed {
 
   /**
    * Publish a tick to Redis: SET the latest, ZADD to the windowed history,
-   * and PUBLISH on the broadcast channel. All three ops go in one pipeline
-   * so a partial network failure doesn't leave a torn read.
+   * and PUBLISH on the broadcast channel. Ops are batched in one pipeline to
+   * reduce round trips; the pipeline is NOT atomic — if the connection drops
+   * mid-flight, Redis may observe a partial sequence.
    *
    * The ZSET member format `${oracleTs}:${value}` keeps each tick distinct
    * even when the oracle re-publishes the same price (member uniqueness is
    * required for ZADD to not overwrite). Score is `oracleTs` so consumers
    * can ZRANGEBYSCORE for time-windowed reads.
+   *
+   * ZSET is capped at `this.capacity` entries, mirroring the in-memory ringbuffer.
    */
   private async publishTick(tick: ChainlinkTick): Promise<void> {
     const redis = this.redis;
@@ -368,9 +368,22 @@ export class ChainlinkFeed {
     const pipe = redis.pipeline();
     pipe.set(lastKey, String(tick.value), 'EX', ORACLE_LAST_TTL_SEC);
     pipe.zadd(pricesKey, tick.oracleTs, member);
-    pipe.zremrangebyrank(pricesKey, 0, -(ORACLE_PRICES_ZSET_CAP + 1));
+    pipe.zremrangebyrank(pricesKey, 0, -(this.capacity + 1));
     pipe.publish(ORACLE_PRICE_MOVED_CHANNEL, payload);
-    await pipe.exec();
+    const results = await pipe.exec();
+    const commandErrors =
+      results?.flatMap((result, index) => {
+        const err = result?.[0];
+        return err
+          ? [{ command: ['set', 'zadd', 'zremrangebyrank', 'publish'][index] ?? `cmd_${index}`, error: err.message }]
+          : [];
+      }) ?? [];
+    if (commandErrors.length > 0) {
+      logger.warn('chainlink_feed_publish_partial_error', {
+        symbol: tick.symbol,
+        commandErrors,
+      });
+    }
   }
 
   /** Latest buffered tick for a symbol, or null if none yet. */
