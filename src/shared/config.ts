@@ -1193,6 +1193,12 @@ const envSchema = z.object({
   // events with ~11 brackets each (e.g. "40-41°F", "42-43°F", ...).
   // Ships dark (WEATHER_SCANNER_ENABLED=false). Shadow-log first, review, then enable.
   WEATHER_SCANNER_ENABLED: boolFromEnv.optional().default(false),
+  // Restricts which bracket sides the scanner will treat as tradable. Default 'BOTH'
+  // preserves legacy behavior. 'NO' is the 2026-04-19 post-analysis config: 186-outcome
+  // reconciliation showed NO side at 73.7% vs YES at 11.5% — gate out YES until the
+  // structural YES bias is understood. Shadow obs still log both sides with an
+  // `allowedByConfig` flag so the YES path keeps accruing validation data.
+  WEATHER_TRADE_SIDES: z.enum(['YES', 'NO', 'BOTH']).optional().default('BOTH'),
   // Minimum edge (model probability - market bid price) to consider a trade.
   // Compares modelProb vs yesPrice for YES, (1-modelProb) vs noPrice for NO.
   // Higher than binary markets because bracket model uncertainty is larger (8-10¢ recommended).

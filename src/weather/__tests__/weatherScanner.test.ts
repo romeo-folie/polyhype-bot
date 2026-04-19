@@ -9,6 +9,7 @@ import type * as NoaaModule from '../noaaClient.js';
 vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => ({
     WEATHER_SCANNER_ENABLED: false,
+    WEATHER_TRADE_SIDES: 'BOTH' as const,
     WEATHER_MIN_EDGE: 0.08,
     WEATHER_MAX_STAKE_FRACTION: 0.02,
     WEATHER_DEDUP_TTL_S: 14400,
@@ -74,6 +75,7 @@ const {
   fetchForecast,
   scanWeatherMarkets,
   daysUntil,
+  parseAllowedSides,
 } = await import('../weatherScanner.js');
 
 const {
@@ -635,6 +637,99 @@ describe('findMispricedBrackets', () => {
       '[weather] model probabilities below coverage threshold, skipping event',
       expect.objectContaining({ city: 'chicago' }),
     );
+  });
+
+  it('marks opportunities as allowedByConfig=true when side is in allowedSides', () => {
+    // Standard 11-bracket event with a clearly mispriced central bracket.
+    const event = {
+      eventId: 'e-allow',
+      slug: 'allow-event',
+      city: 'chicago',
+      coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14',
+      unit: 'fahrenheit' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'], threshold: 0, low: null, high: 39, label: '39°F or below', yesPrice: 0.01, noPrice: 0.99 },
+        { marketId: 'm1', conditionId: 'c1', clobTokenIds: ['t1y', 't1n'], threshold: 1, low: 40, high: 41, label: '40-41°F', yesPrice: 0.02, noPrice: 0.98 },
+        { marketId: 'm2', conditionId: 'c2', clobTokenIds: ['t2y', 't2n'], threshold: 2, low: 42, high: 43, label: '42-43°F', yesPrice: 0.05, noPrice: 0.95 },
+        { marketId: 'm3', conditionId: 'c3', clobTokenIds: ['t3y', 't3n'], threshold: 3, low: 44, high: 45, label: '44-45°F', yesPrice: 0.10, noPrice: 0.90 },
+        { marketId: 'm4', conditionId: 'c4', clobTokenIds: ['t4y', 't4n'], threshold: 4, low: 46, high: 47, label: '46-47°F', yesPrice: 0.15, noPrice: 0.85 },
+        { marketId: 'm5', conditionId: 'c5', clobTokenIds: ['t5y', 't5n'], threshold: 5, low: 48, high: 49, label: '48-49°F', yesPrice: 0.20, noPrice: 0.80 },
+        { marketId: 'm6', conditionId: 'c6', clobTokenIds: ['t6y', 't6n'], threshold: 6, low: 50, high: 51, label: '50-51°F', yesPrice: 0.18, noPrice: 0.82 },
+        { marketId: 'm7', conditionId: 'c7', clobTokenIds: ['t7y', 't7n'], threshold: 7, low: 52, high: 53, label: '52-53°F', yesPrice: 0.12, noPrice: 0.88 },
+        { marketId: 'm8', conditionId: 'c8', clobTokenIds: ['t8y', 't8n'], threshold: 8, low: 54, high: 55, label: '54-55°F', yesPrice: 0.08, noPrice: 0.92 },
+        { marketId: 'm9', conditionId: 'c9', clobTokenIds: ['t9y', 't9n'], threshold: 9, low: 56, high: 57, label: '56-57°F', yesPrice: 0.05, noPrice: 0.95 },
+        { marketId: 'm10', conditionId: 'c10', clobTokenIds: ['t10y', 't10n'], threshold: 10, low: 58, high: null, label: '58°F or higher', yesPrice: 0.04, noPrice: 0.96 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 52, stdDev: 3, source: 'combined' as const, ensembleMembers: 31 };
+
+    const bothOpps = findMispricedBrackets(event, forecast, 1, 0.08, 1.0, 0.95, new Set<'YES' | 'NO'>(['YES', 'NO'])).opportunities;
+    expect(bothOpps.length).toBeGreaterThan(0);
+    expect(bothOpps.every((o) => o.allowedByConfig)).toBe(true);
+  });
+
+  it('marks YES-side opportunities as allowedByConfig=false when only NO is allowed', () => {
+    // Same event as above — central bracket is underpriced so YES-best emerges.
+    const event = {
+      eventId: 'e-no-only',
+      slug: 'no-only-event',
+      city: 'chicago',
+      coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14',
+      unit: 'fahrenheit' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'], threshold: 0, low: null, high: 39, label: '39°F or below', yesPrice: 0.01, noPrice: 0.99 },
+        { marketId: 'm1', conditionId: 'c1', clobTokenIds: ['t1y', 't1n'], threshold: 1, low: 40, high: 41, label: '40-41°F', yesPrice: 0.02, noPrice: 0.98 },
+        { marketId: 'm2', conditionId: 'c2', clobTokenIds: ['t2y', 't2n'], threshold: 2, low: 42, high: 43, label: '42-43°F', yesPrice: 0.05, noPrice: 0.95 },
+        { marketId: 'm3', conditionId: 'c3', clobTokenIds: ['t3y', 't3n'], threshold: 3, low: 44, high: 45, label: '44-45°F', yesPrice: 0.10, noPrice: 0.90 },
+        { marketId: 'm4', conditionId: 'c4', clobTokenIds: ['t4y', 't4n'], threshold: 4, low: 46, high: 47, label: '46-47°F', yesPrice: 0.15, noPrice: 0.85 },
+        { marketId: 'm5', conditionId: 'c5', clobTokenIds: ['t5y', 't5n'], threshold: 5, low: 48, high: 49, label: '48-49°F', yesPrice: 0.20, noPrice: 0.80 },
+        { marketId: 'm6', conditionId: 'c6', clobTokenIds: ['t6y', 't6n'], threshold: 6, low: 50, high: 51, label: '50-51°F', yesPrice: 0.18, noPrice: 0.82 },
+        { marketId: 'm7', conditionId: 'c7', clobTokenIds: ['t7y', 't7n'], threshold: 7, low: 52, high: 53, label: '52-53°F', yesPrice: 0.12, noPrice: 0.88 },
+        { marketId: 'm8', conditionId: 'c8', clobTokenIds: ['t8y', 't8n'], threshold: 8, low: 54, high: 55, label: '54-55°F', yesPrice: 0.08, noPrice: 0.92 },
+        { marketId: 'm9', conditionId: 'c9', clobTokenIds: ['t9y', 't9n'], threshold: 9, low: 56, high: 57, label: '56-57°F', yesPrice: 0.05, noPrice: 0.95 },
+        { marketId: 'm10', conditionId: 'c10', clobTokenIds: ['t10y', 't10n'], threshold: 10, low: 58, high: null, label: '58°F or higher', yesPrice: 0.04, noPrice: 0.96 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 52, stdDev: 3, source: 'combined' as const, ensembleMembers: 31 };
+
+    const noOnly = findMispricedBrackets(event, forecast, 1, 0.08, 1.0, 0.95, new Set<'YES' | 'NO'>(['NO'])).opportunities;
+    // Shadow obs still sees the opps so calibration data keeps flowing.
+    expect(noOnly.length).toBeGreaterThan(0);
+    const yesOpps = noOnly.filter((o) => o.tradeSide === 'YES');
+    const noOpps = noOnly.filter((o) => o.tradeSide === 'NO');
+    // Both sides must actually appear or the per-side assertions below pass vacuously
+    // and the test would regress to meaningless. Fixture is tuned to yield both.
+    expect(yesOpps.length).toBeGreaterThan(0);
+    expect(noOpps.length).toBeGreaterThan(0);
+    // Every YES-side opp in this event is gated; every NO-side opp stays tradable.
+    for (const o of yesOpps) expect(o.allowedByConfig).toBe(false);
+    for (const o of noOpps) expect(o.allowedByConfig).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseAllowedSides
+// ---------------------------------------------------------------------------
+
+describe('parseAllowedSides', () => {
+  it('returns both sides for BOTH', () => {
+    const s = parseAllowedSides('BOTH');
+    expect(s.has('YES')).toBe(true);
+    expect(s.has('NO')).toBe(true);
+  });
+  it('returns only NO for NO', () => {
+    const s = parseAllowedSides('NO');
+    expect(s.has('YES')).toBe(false);
+    expect(s.has('NO')).toBe(true);
+  });
+  it('returns only YES for YES', () => {
+    const s = parseAllowedSides('YES');
+    expect(s.has('YES')).toBe(true);
+    expect(s.has('NO')).toBe(false);
   });
 });
 
