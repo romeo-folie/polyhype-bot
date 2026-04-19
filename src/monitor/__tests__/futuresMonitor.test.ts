@@ -198,6 +198,94 @@ describe('futuresMonitor', () => {
     expect(mockClosePosition).toHaveBeenCalledWith(symbol);
   });
 
+  describe('orphan prune — zero HL positions', () => {
+    it('closes all futures ledger entries when HL has no open positions', async () => {
+      mockGetOpenPositions.mockResolvedValue([]);
+      mockGetLedgerPositions.mockResolvedValue([
+        {
+          marketId: 'SOL',
+          symbol: 'SOL',
+          direction: 'LONG',
+          isFutures: true,
+          question: 'SOL perpetual',
+          entryPrice: 140,
+          stakeUsd: 700,
+          edgeMagnitude: 0,
+          sourcedFrom: 'backfill:futures-monitor',
+          openedAt: new Date().toISOString(),
+          executionVenue: 'hyperliquid',
+        },
+        {
+          marketId: 'XRP',
+          symbol: 'XRP',
+          direction: 'LONG',
+          isFutures: true,
+          question: 'XRP perpetual',
+          entryPrice: 2.1,
+          stakeUsd: 21,
+          edgeMagnitude: 0,
+          sourcedFrom: 'backfill:futures-monitor',
+          openedAt: new Date().toISOString(),
+          executionVenue: 'hyperliquid',
+        },
+      ]);
+
+      await runTick();
+
+      expect(mockCloseLedgerPosition).toHaveBeenCalledTimes(2);
+      expect(mockCloseLedgerPosition).toHaveBeenCalledWith(expect.anything(), 'SOL', 'LONG');
+      expect(mockCloseLedgerPosition).toHaveBeenCalledWith(expect.anything(), 'XRP', 'LONG');
+    });
+  });
+
+  describe('orphan prune — partial HL positions', () => {
+    it('closes only the ledger entries missing from HL, leaves live ones intact', async () => {
+      // HL has ETH open, but not SOL
+      mockGetOpenPositions.mockResolvedValue([
+        {
+          symbol: 'ETH',
+          position: { szi: '1.0', entryPx: '3000', unrealizedPnl: '30', marginUsed: '600' },
+        },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([
+        {
+          marketId: 'ETH',
+          symbol: 'ETH',
+          direction: 'LONG',
+          isFutures: true,
+          question: 'ETH perpetual',
+          entryPrice: 3000,
+          stakeUsd: 3000,
+          edgeMagnitude: 0,
+          sourcedFrom: 'futures-executor',
+          openedAt: new Date().toISOString(),
+          executionVenue: 'hyperliquid',
+        },
+        {
+          marketId: 'SOL',
+          symbol: 'SOL',
+          direction: 'SHORT',
+          isFutures: true,
+          question: 'SOL perpetual',
+          entryPrice: 140,
+          stakeUsd: 700,
+          edgeMagnitude: 0,
+          sourcedFrom: 'futures-executor',
+          openedAt: new Date().toISOString(),
+          executionVenue: 'hyperliquid',
+        },
+      ]);
+      // Mark both as already tracked so backfill is a no-op
+      mockHasOpenPosition.mockResolvedValue(true);
+
+      await runTick();
+
+      expect(mockCloseLedgerPosition).toHaveBeenCalledTimes(1);
+      expect(mockCloseLedgerPosition).toHaveBeenCalledWith(expect.anything(), 'SOL', 'SHORT');
+      expect(mockCloseLedgerPosition).not.toHaveBeenCalledWith(expect.anything(), 'ETH', 'LONG');
+    });
+  });
+
   describe('max-hold bypass on winner', () => {
     const longAgo = () => new Date(Date.now() - 25 * 3600 * 1000).toISOString();
 
