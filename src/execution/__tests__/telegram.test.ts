@@ -89,6 +89,17 @@ describe('Telegram notifications', () => {
       expect(body.text).toContain('0xabc');
     });
 
+    it('defaults to CLOB venue label when no venue is passed', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+      await notifyTradeExecuted(makeSignal(), '0xabc');
+
+      const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(opts.body as string) as { text: string };
+      expect(body.text).toContain('CLOB');
+      expect(body.text).not.toContain('Simmer');
+    });
+
     it('no-ops when bot token is missing', async () => {
       delete process.env.TELEGRAM_BOT_TOKEN;
       await notifyTradeExecuted(makeSignal(), undefined);
