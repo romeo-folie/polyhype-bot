@@ -417,6 +417,38 @@ describe('runCopytrade', () => {
     expect(result.signals).toHaveLength(1);
   });
 
+  it('does not reject a 3h-TTR market when PM_MIN_HOURS_TO_RESOLUTION is 6', async () => {
+    configOverride = {
+      ...configOverride,
+      COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS: 0.25,
+      PM_MIN_HOURS_TO_RESOLUTION: 6,
+      PM_MAX_HOURS_TO_RESOLUTION_COPYTRADE: 2160,
+    } as any;
+
+    const trade = makeTrade({ price: 0.6 });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({
+        outcomePrices: '["0.6","0.4"]',
+        endDate: new Date(Date.now() + 3 * 3600_000).toISOString(),
+      }),
+    );
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
+    const ttrSkip = mockLogger.info.mock.calls.some(
+      (c: any[]) =>
+        c[0] === '[copytrade] skipped by time-to-resolution gate' &&
+        String(c[1]?.skipReason).includes('too_soon_expiring'),
+    );
+    expect(ttrSkip).toBe(false);
+    expect(result.signals).toHaveLength(1);
+  });
+
   it('polls multiple wallets in parallel', async () => {
     configOverride = { ...configOverride, COPYTRADE_WALLETS: '0x1,0x2,0x3' };
     mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [] } as Response);

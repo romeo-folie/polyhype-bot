@@ -568,12 +568,14 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         }
       }
 
-      // Time-to-resolution gate. Min is 0 here — the near-resolution check above
-      // (COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS) already enforces the copytrade floor.
+      // Time-to-resolution gate. Min bound is undefined (disabled) because the
+      // near-resolution check above (COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS) already
+      // enforces copytrade's floor; relying on PM_MIN_HOURS_TO_RESOLUTION here
+      // would block sports markets that resolve in 2–5 h.
       const ttr = checkTimeToResolution(
         market.endDate ?? undefined,
         cfg.PM_MAX_HOURS_TO_RESOLUTION_COPYTRADE,
-        0,
+        undefined,
       );
       if (!ttr.ok) {
         logger.info('[copytrade] skipped by time-to-resolution gate', {
