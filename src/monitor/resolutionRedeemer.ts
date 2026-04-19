@@ -754,6 +754,14 @@ async function redeemClobPositions(
           const normalizedDirExpired = isYesSide ? 'YES' : 'NO';
           const wonExpired = onChainOutcome.outcome === normalizedDirExpired;
 
+          // Oracle-lag positions are stored with canonicalized YES/NO directions.
+          // Derive the user-facing label (UP/DOWN) from sourcedFrom so notifications
+          // match what the user saw at trade-execution time.
+          const displayDir =
+            pos.sourcedFrom?.startsWith('oracle-lag')
+              ? pos.direction === 'YES' ? 'UP' : pos.direction === 'NO' ? 'DOWN' : pos.direction
+              : pos.direction;
+
           if (!wonExpired) {
             await closePosition(redis, pos.marketId, pos.direction);
             await markRecentlyClosed(redis, pos.marketId);
@@ -764,7 +772,7 @@ async function redeemClobPositions(
             );
             void notifyMarketResolved({
               question: q,
-              direction: pos.direction,
+              direction: displayDir,
               result: 'lost',
               stakeUsd: pos.stakeUsd,
               reason: 'expired (Gamma unresolvable)',
@@ -785,7 +793,8 @@ async function redeemClobPositions(
             continue;
           }
 
-          const proceedsUsdc = pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : 0);
+          const entryPriceSafe = pos.entryPrice > 0;
+          const proceedsUsdc = preBalance ?? pos.sharesHeld ?? (entryPriceSafe ? pos.stakeUsd / pos.entryPrice : 0);
           if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
 
           await closePosition(redis, pos.marketId, pos.direction);
@@ -807,10 +816,16 @@ async function redeemClobPositions(
             side,
             valueUsdc: proceedsUsdc,
             stakeUsd: pos.stakeUsd,
-            displayDirection: pos.direction,
+            displayDirection: displayDir,
             ...(redeemResult.tx_hash ? { txHash: redeemResult.tx_hash } : {}),
           });
-          results.push({ marketId: pos.marketId, side, success: true });
+          results.push({
+            marketId: pos.marketId,
+            side,
+            success: true,
+            valueUsdc: proceedsUsdc,
+            ...(redeemResult.tx_hash ? { txHash: redeemResult.tx_hash } : {}),
+          });
         }
         continue;
       }
@@ -993,14 +1008,18 @@ async function redeemClobPositions(
         },
       );
 
-      // Notify
+      // Notify — derive user-facing direction label for oracle-lag positions
+      const notifyDisplayDir =
+        pos.sourcedFrom?.startsWith('oracle-lag')
+          ? pos.direction === 'YES' ? 'UP' : pos.direction === 'NO' ? 'DOWN' : pos.direction
+          : pos.direction;
       await notifyRedemptionExecuted({
         marketId: pos.marketId,
         question: resolvedQuestion,
         side,
         valueUsdc: proceedsUsdc,
         stakeUsd: pos.stakeUsd,
-        displayDirection: pos.direction,
+        displayDirection: notifyDisplayDir,
         ...(redeemResult.tx_hash ? { txHash: redeemResult.tx_hash } : {}),
       });
 

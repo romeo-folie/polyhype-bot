@@ -193,6 +193,8 @@ describe('redeemResolvedPositions', () => {
       index === 0 ? 1n : 0n,
     );
     mockRedeemClobOutcome.mockResolvedValue({ success: true, tx_hash: '0xabc' });
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 10 } as any);
 
     const results = await redeemResolvedPositions(mockRedis);
 
