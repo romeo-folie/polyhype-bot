@@ -226,11 +226,29 @@ export class ArbitrageWorker {
         }
         void this.triggerHlMomentum(tick);
         // Chainlink → PM crypto-arb: oracle ticks lead Binance by ~55s;
-        // changePercent = (oraclePrice − lastBinancePrice) / lastBinancePrice.
+        // changePercent = ((oraclePrice − lastBinancePrice) / lastBinancePrice) * 100.
+        // Pre-fetch spot:last:<sym> so triggerCryptoArbFromTicker gets the actual latest
+        // Binance close as its reference rather than falling back to the ZSET -2 position
+        // (which is tuned for Binance spot:price_moved events, not oracle ticks).
         if (cfg.CHAINLINK_CRYPTO_ARB_ENABLED) {
           const binanceSym = CHAINLINK_TO_BINANCE_SYMBOL[tick.symbol];
           if (binanceSym) {
-            void this.triggerCryptoArbFromTicker(binanceSym, tick.value, tick.receivedAt, null);
+            void (async () => {
+              let previousPrice: number | null = null;
+              try {
+                const raw = await getRedis().get(`spot:last:${binanceSym}`);
+                if (raw != null) {
+                  const parsed = Number(raw);
+                  if (Number.isFinite(parsed) && parsed > 0) previousPrice = parsed;
+                }
+              } catch {
+                logger.warn('[arb-worker] failed to load Binance reference price for oracle-triggered crypto arb', {
+                  chainlinkSymbol: tick.symbol,
+                  binanceSymbol: binanceSym,
+                });
+              }
+              await this.triggerCryptoArbFromTicker(binanceSym, tick.value, tick.receivedAt, previousPrice);
+            })();
           }
         }
       }

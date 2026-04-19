@@ -1134,7 +1134,7 @@ const envSchema = z.object({
   // ── Chainlink → PM crypto-arb trigger ──
   // When true, oracle:price_moved ticks also fan into the PM crypto-arb scanner
   // alongside the Binance spot:price_moved path. Edge = Chainlink oracle lead over
-  // Binance: changePercent is (oraclePrice − lastBinancePrice) / lastBinancePrice.
+  // Binance: changePercent is ((oraclePrice − lastBinancePrice) / lastBinancePrice) * 100.
   // Requires CHAINLINK_REDIS_PUBLISH_ENABLED=true. Ships dark.
   CHAINLINK_CRYPTO_ARB_ENABLED: boolFromEnv.optional().default(false),
 

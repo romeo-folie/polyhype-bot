@@ -308,6 +308,13 @@ describe('ArbitrageWorker', () => {
       executionVenue: 'simmer',
     });
 
+    // Stub latest Binance price for reference: oracle=65000, binance=64000
+    // expected changePercent = ((65000 - 64000) / 64000) * 100 ≈ 1.5625
+    mockRedis.get.mockImplementation((key: string) => {
+      if (key === 'spot:last:btcusdt') return Promise.resolve('64000');
+      return Promise.resolve(null);
+    });
+
     configOverride = {
       ARB_GLOBAL_MAX_TRADES_PER_MIN: 100000,
       ARB_MAX_TRADES_PER_MIN: 100000,
@@ -326,12 +333,16 @@ describe('ArbitrageWorker', () => {
     });
     onRedisMessage!('oracle:price_moved', tick);
 
-    await new Promise((r) => setTimeout(r, 100));
-
     // crypto arb scanner should have been called with the mapped Binance symbol
-    expect(mockScanCryptoArb).toHaveBeenCalledTimes(1);
+    // and the oracle-vs-Binance spread as the reference price / changePercent.
+    await vi.waitFor(() => expect(mockScanCryptoArb).toHaveBeenCalled(), { timeout: 500 });
     expect(mockScanCryptoArb).toHaveBeenCalledWith(
-      expect.objectContaining({ assetId: 'bitcoin' }),
+      expect.objectContaining({
+        assetId: 'bitcoin',
+        currentPrice: 65000,
+        referencePrice: 64000,
+        changePercent: expect.closeTo(1.5625, 4),
+      }),
       expect.anything(),
     );
 
