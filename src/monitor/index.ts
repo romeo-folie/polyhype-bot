@@ -217,11 +217,16 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
         }
       }
 
-      const isCryptoUpdown = inferCategory(position.question) === 'crypto-updown';
+      const inferredCategory = inferCategory(position.question);
+      const isCryptoUpdown = inferredCategory === 'crypto-updown';
+      const isWeather = inferredCategory === 'weather';
 
       if (isCryptoUpdown) {
         tpThreshold = cfg.CRYPTO_UPDOWN_TAKE_PROFIT;
         slThreshold = cfg.CRYPTO_UPDOWN_STOP_LOSS;
+      } else if (isWeather) {
+        tpThreshold = cfg.WEATHER_TAKE_PROFIT;
+        slThreshold = cfg.WEATHER_STOP_LOSS;
       } else if (isCrypto) {
         tpThreshold = cfg.CRYPTO_TAKE_PROFIT;
         slThreshold = cfg.CRYPTO_STOP_LOSS;

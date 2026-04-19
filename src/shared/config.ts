@@ -565,6 +565,10 @@ const envSchema = z.object({
   STALE_MIN_AGE_H_MACRO: z.coerce.number().min(1).optional().default(18),
   STALE_MIN_AGE_H_US_POLITICS: z.coerce.number().min(1).optional().default(24),
   STALE_MIN_AGE_H_GEOPOLITICAL: z.coerce.number().min(1).optional().default(24),
+  // Weather brackets resolve in ≤24h; a long stale window would dump most positions
+  // before resolution. 6h keeps the exit quick enough to catch decayed entries but
+  // past the first few forecast-refresh ticks.
+  STALE_MIN_AGE_H_WEATHER: z.coerce.number().min(1).optional().default(6),
   STALE_UNDERWATER_EXTRA_H: z.coerce.number().min(0).optional().default(12),
   STALE_VOL_WINDOW_H: z.coerce.number().min(1).optional().default(6),
   STALE_VOL_MAX_PCT: z.coerce.number().min(0).optional().default(1.5),
@@ -1229,6 +1233,34 @@ const envSchema = z.object({
   // surviving brackets with artificially high probability mass and trips the edge gate
   // on a math artifact. 0.95 allows small tail leakage at outermost brackets.
   WEATHER_MIN_MODEL_COVERAGE: z.coerce.number().min(0).max(1).optional().default(0.95),
+  // --- WEATHER EXECUTION ---
+  // Killswitch separate from the scanner flag. Scanner may be ENABLED=true (shadow +
+  // `would execute trade` logs) without actually placing orders. Flipping
+  // WEATHER_EXECUTION_ENABLED=true routes allowed opportunities through
+  // executeAndRecordSignal. Ship dark; flip once caps + monitor exits are validated.
+  WEATHER_EXECUTION_ENABLED: boolFromEnv.optional().default(false),
+  // Max real-trade entries per scan cycle (6h). Hard cap irrespective of bankroll —
+  // brackets are correlated per-city and edge-sorted opps from a single event can
+  // all point to the same forecast error. Start at 3 for first live run.
+  WEATHER_MAX_POSITIONS_PER_SCAN: z.coerce.number().int().min(0).optional().default(3),
+  // Max real-trade entries per city per scan. City-level correlation is near-1
+  // across brackets of the same event; stacking two brackets on Chicago doubles
+  // the exposure to one forecast error. 1 keeps risk diverse across cities.
+  WEATHER_MAX_PER_CITY: z.coerce.number().int().min(0).optional().default(1),
+  // Total USD committed across all weather entries in one scan. Safety net if Kelly
+  // sizing + count cap ever misbehave. Opp iteration stops once cumulative stake
+  // would exceed this.
+  WEATHER_MAX_SCAN_EXPOSURE_USD: z.coerce.number().min(0).optional().default(30),
+  // Half-Kelly fraction for weather stake sizing. Kept independent of the OSINT
+  // default because bracket model uncertainty is structurally larger and the side
+  // bias (YES 11.5% vs NO 73.7%) argues for lighter sizing.
+  WEATHER_KELLY_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.25),
+  // --- WEATHER EXIT RULES (monitor) ---
+  // Weather brackets resolve in ≤24h. Default 25%/7% TP/SL won't fire in time and
+  // stale-exit at 12h default would dump mid-swing. Tight exits keyed off the
+  // 'weather' inferCategory branch.
+  WEATHER_TAKE_PROFIT: z.coerce.number().min(0).optional().default(0.05),
+  WEATHER_STOP_LOSS: z.coerce.number().max(0).optional().default(-0.03),
   // --- WEATHER GROUND-TRUTH RECONCILER ---
   // Fills `weather_ground_truth` with observed daily highs for past events, so
   // shadow-scan predictions in `shadow_observations` can be validated against

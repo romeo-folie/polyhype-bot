@@ -131,6 +131,9 @@ export function inferCategory(question: string): string {
   if (/mention|say|tweet|post|transcript|phrase|word|quoted/.test(q)) {
     return 'mentions';
   }
+  if (/highest temperature|lowest temperature|\bweather\b|\bsnow\b|\brainfall\b|hurricane/.test(q)) {
+    return 'weather';
+  }
   return 'geopolitical';
 }
 

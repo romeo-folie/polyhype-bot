@@ -85,6 +85,7 @@ export function normalizeCategory(rawCategory: string): string {
     'macro',
     'us-politics',
     'geopolitical',
+    'weather',
   ]);
   if (canonical.has(rawCategory)) return rawCategory;
   return 'default';
@@ -109,6 +110,8 @@ export function getCategoryAgeH(category: string, cfg: AppConfig): number {
       return cfg.STALE_MIN_AGE_H_US_POLITICS;
     case 'geopolitical':
       return cfg.STALE_MIN_AGE_H_GEOPOLITICAL;
+    case 'weather':
+      return cfg.STALE_MIN_AGE_H_WEATHER;
     default:
       return cfg.STALE_MIN_AGE_H_DEFAULT;
   }
