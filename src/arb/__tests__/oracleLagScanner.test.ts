@@ -31,6 +31,7 @@ const NOW_MS = Date.UTC(2026, 3, 11, 12, 0, 0); // 2026-04-11T12:00:00Z
 const defaultConfig: OracleLagEvalConfig = {
   minMovePct: 0.06, // 6 bps
   minTimeLeftMin: 5,
+  maxTimeLeftMin: 999,
   maxEntryPrice: 0.62,
   minEntryPrice: 0.35,
 };
@@ -249,6 +250,38 @@ describe('evaluateOracleLagEntry', () => {
 
       expect(result.shouldEnter).toBe(false);
       expect(result.blockReason).toBe('time_left_below_threshold');
+    });
+
+    it('time_left_above_threshold blocks when timeLeft exceeds maxTimeLeftMin', () => {
+      const cfg: OracleLagEvalConfig = { ...defaultConfig, maxTimeLeftMin: 15 };
+      const market = buildMarket({ outcomePrices: [0.50, 0.50], timeLeftMin: 20 });
+      const move = makeMove(0.08);
+
+      const result = evaluateOracleLagEntry(market, move, cfg);
+
+      expect(result.shouldEnter).toBe(false);
+      expect(result.blockReason).toBe('time_left_above_threshold');
+    });
+
+    it('time_left_above_threshold does not fire when timeLeft equals maxTimeLeftMin', () => {
+      const cfg: OracleLagEvalConfig = { ...defaultConfig, maxTimeLeftMin: 15 };
+      const market = buildMarket({ outcomePrices: [0.50, 0.50], timeLeftMin: 15 });
+      const move = makeMove(0.08);
+
+      const result = evaluateOracleLagEntry(market, move, cfg);
+
+      expect(result.shouldEnter).toBe(true);
+    });
+
+    it('time_left_above_threshold wins over price_above_threshold (rule 3a before rule 4)', () => {
+      const cfg: OracleLagEvalConfig = { ...defaultConfig, maxTimeLeftMin: 15, maxEntryPrice: 0.30 };
+      const market = buildMarket({ outcomePrices: [0.50, 0.50], timeLeftMin: 20 });
+      const move = makeMove(0.08);
+
+      const result = evaluateOracleLagEntry(market, move, cfg);
+
+      expect(result.shouldEnter).toBe(false);
+      expect(result.blockReason).toBe('time_left_above_threshold');
     });
 
     it('price_above_threshold wins over price_below_threshold (mutually exclusive by design)', () => {

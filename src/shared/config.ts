@@ -428,6 +428,10 @@ const envSchema = z.object({
   ORACLE_LAG_MOVE_WINDOW_SEC: z.coerce.number().int().min(1).optional().default(5),
   // Skip entry if time to market resolution is below this many minutes.
   ORACLE_LAG_MIN_TIME_LEFT_MIN: z.coerce.number().min(0).optional().default(5),
+  // Skip entry if time to market resolution exceeds this many minutes. Use to restrict entries
+  // to the final window where oracle lag still dominates before the market reprices. Default is
+  // unbounded (Infinity-equivalent via large number) so BTC behaviour is unchanged.
+  ORACLE_LAG_MAX_TIME_LEFT_MIN: z.coerce.number().min(0).optional().default(999),
   // Skip entry if market price on the signal side exceeds this (fee math breaks above ~0.62).
   ORACLE_LAG_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.62),
   // Skip entry if market price on the signal side is below this floor. Guards against buying
