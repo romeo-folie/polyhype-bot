@@ -1169,7 +1169,7 @@ const envSchema = z.object({
   // Requires CHAINLINK_REDIS_PUBLISH_ENABLED=true. Ships dark.
   CHAINLINK_CRYPTO_ARB_ENABLED: boolFromEnv.optional().default(false),
 
-  // ── Phase 3: Sports arb (NBA + NHL) ──
+  // ── Phase 3: Sports arb (NBA + NHL + MLB) ──
   SPORTS_ARB_ENABLED: boolFromEnv.optional().default(true),
   SPORTS_LEAGUES: z
     .string()
@@ -1180,7 +1180,7 @@ const envSchema = z.object({
         v
           .split(',')
           .map((s) => s.trim().toLowerCase())
-          .filter((s): s is 'nba' | 'nhl' => s === 'nba' || s === 'nhl'),
+          .filter((s): s is 'nba' | 'nhl' | 'mlb' => s === 'nba' || s === 'nhl' || s === 'mlb'),
       ),
     ),
   SPORTS_POLL_INTERVAL_S: z.coerce.number().int().min(1).optional().default(8),

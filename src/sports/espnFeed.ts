@@ -1,9 +1,10 @@
 /**
- * ESPN public scoreboard client (NBA + NHL).
+ * ESPN public scoreboard client (NBA, NHL, MLB).
  *
  * Uses the no-auth public endpoints:
  *   https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard
  *   https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard
+ *   https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard
  *
  * Returns a flat list of live-game snapshots. Pre-game and final games are
  * filtered out — the scanner only acts on `STATUS_IN_PROGRESS`.
@@ -11,7 +12,7 @@
 
 import { logger } from '../shared/logger.js';
 
-export type SportsLeague = 'nba' | 'nhl';
+export type SportsLeague = 'nba' | 'nhl' | 'mlb';
 
 export interface LiveGame {
   league: SportsLeague;
@@ -24,25 +25,28 @@ export interface LiveGame {
   awayScore: number;
   /** Seconds remaining in regulation / current game (best-effort from clock). */
   secondsRemaining: number;
-  /** Period number (1,2,3, or 4+ for OT). */
+  /** Period number (1,2,3, or 4+ for OT/extra innings). */
   period: number;
   /** Raw ESPN status state for debugging. */
   state: string;
+  /** MLB only: which half of the inning is being played. */
+  halfInning?: 'top' | 'bottom';
 }
 
 const ESPN_ENDPOINTS: Record<SportsLeague, string> = {
   nba: 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard',
   nhl: 'https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard',
+  mlb: 'https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard',
 };
 
-/** Regulation length in seconds per league. */
-const REGULATION_SECONDS: Record<SportsLeague, number> = {
+/** Regulation length in seconds per league (MLB uses inning-based proxy). */
+const REGULATION_SECONDS: Record<'nba' | 'nhl', number> = {
   nba: 48 * 60,
   nhl: 60 * 60,
 };
 
-/** Per-period length in seconds. */
-const PERIOD_SECONDS: Record<SportsLeague, number> = {
+/** Per-period length in seconds (NBA/NHL only). */
+const PERIOD_SECONDS: Record<'nba' | 'nhl', number> = {
   nba: 12 * 60,
   nhl: 20 * 60,
 };
@@ -108,26 +112,39 @@ export function extractLiveGames(
       };
 
       const period = typeof status?.period === 'number' ? status.period : 1;
-      const clockRaw = status?.clock;
-      const clockDisplay =
-        (status?.displayClock as string | undefined) ??
-        (typeof clockRaw === 'number'
-          ? `${Math.floor(clockRaw / 60)}:${String(Math.floor(clockRaw % 60)).padStart(2, '0')}`
-          : undefined);
-      const periodSecondsLeft = parseClock(clockDisplay);
 
-      // Seconds remaining in regulation: full regulation minus elapsed periods,
-      // then add back the current period's remaining seconds.
       let secondsRemaining: number;
-      if (period > (league === 'nba' ? 4 : 3)) {
-        // In OT — we don't model OT separately; treat as "very little time".
-        secondsRemaining = Math.max(periodSecondsLeft, 1);
+      let halfInning: 'top' | 'bottom' | undefined;
+
+      if (league === 'mlb') {
+        // Baseball has no clock. Derive game-progress proxy from inning.
+        const shortDetail = (statusType?.shortDetail as string | undefined) ?? '';
+        const isTop = /^top/i.test(shortDetail.trim());
+        const isBot = /^bot/i.test(shortDetail.trim());
+        halfInning = isTop ? 'top' : isBot ? 'bottom' : 'top';
+        // Remaining innings including current half so secondsRemaining stays > 0
+        // for every live state (bottom 9th = 0.5, not 0). Use 25 min/inning.
+        const inningsLeft = Math.max(9 - period, 0) + (halfInning === 'top' ? 1 : 0.5);
+        secondsRemaining = inningsLeft * 1500;
       } else {
-        const completedPeriods = Math.max(period - 1, 0);
-        const elapsedBeforeCurrent = completedPeriods * PERIOD_SECONDS[league];
-        const elapsedInCurrent = PERIOD_SECONDS[league] - periodSecondsLeft;
-        const totalElapsed = elapsedBeforeCurrent + elapsedInCurrent;
-        secondsRemaining = Math.max(REGULATION_SECONDS[league] - totalElapsed, 0);
+        const clockRaw = status?.clock;
+        const clockDisplay =
+          (status?.displayClock as string | undefined) ??
+          (typeof clockRaw === 'number'
+            ? `${Math.floor(clockRaw / 60)}:${String(Math.floor(clockRaw % 60)).padStart(2, '0')}`
+            : undefined);
+        const periodSecondsLeft = parseClock(clockDisplay);
+
+        // In OT — treat as "very little time left".
+        if (period > (league === 'nba' ? 4 : 3)) {
+          secondsRemaining = Math.max(periodSecondsLeft, 1);
+        } else {
+          const ps = PERIOD_SECONDS[league];
+          const rs = REGULATION_SECONDS[league];
+          const completedPeriods = Math.max(period - 1, 0);
+          const totalElapsed = completedPeriods * ps + (ps - periodSecondsLeft);
+          secondsRemaining = Math.max(rs - totalElapsed, 0);
+        }
       }
 
       out.push({
@@ -142,6 +159,7 @@ export function extractLiveGames(
         secondsRemaining,
         period,
         state: stateRaw,
+        ...(halfInning !== undefined && { halfInning }),
       });
     } catch (err) {
       logger.debug('[espnFeed] skipping malformed event', {
