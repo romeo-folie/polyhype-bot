@@ -34,13 +34,22 @@ describe('buildCandles — kline source', () => {
     expect(candles[1]!.close).toBe(112);
   });
 
-  it('honours the timeframe option', async () => {
+  it('honours the timeframe option (5m)', async () => {
     const base = Math.floor(Date.now() / MINUTE_MS) * MINUTE_MS;
     const k = JSON.stringify({ t: base, o: 1, h: 2, l: 0.5, c: 1.8, v: 5, q: 9, n: 3 });
     const redis = makeRedis({ 'spot:klines:ethusdt:5m': [k] });
     const candles = await buildCandles('ethusdt', redis, { timeframe: '5m' });
     expect(candles).toHaveLength(1);
     expect(candles[0]!.close).toBe(1.8);
+  });
+
+  it.each(['15m', '1h', '4h'] as const)('reads from spot:klines:<sym>:%s', async (tf) => {
+    const base = Math.floor(Date.now() / MINUTE_MS) * MINUTE_MS;
+    const k = JSON.stringify({ t: base, o: 10, h: 12, l: 9, c: 11, v: 100, q: 1100, n: 50 });
+    const redis = makeRedis({ [`spot:klines:solusdt:${tf}`]: [k] });
+    const candles = await buildCandles('solusdt', redis, { timeframe: tf });
+    expect(candles).toHaveLength(1);
+    expect(candles[0]!.close).toBe(11);
   });
 
   it('skips malformed kline entries', async () => {

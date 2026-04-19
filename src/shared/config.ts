@@ -1061,9 +1061,12 @@ const envSchema = z.object({
 
   // ── Phase 1: Kline feed (real OHLCV from Binance) ──
   // Comma-separated list of timeframes to subscribe to. '1m' is required.
-  BINANCE_KLINE_TIMEFRAMES: z.string().optional().default('1m,5m'),
+  BINANCE_KLINE_TIMEFRAMES: z.string().optional().default('1m,5m,15m,1h,4h'),
   KLINE_RETENTION_1M: z.coerce.number().int().min(10).optional().default(240),
   KLINE_RETENTION_5M: z.coerce.number().int().min(10).optional().default(288),
+  KLINE_RETENTION_15M: z.coerce.number().int().min(10).optional().default(216),
+  KLINE_RETENTION_1H: z.coerce.number().int().min(10).optional().default(96),
+  KLINE_RETENTION_4H: z.coerce.number().int().min(10).optional().default(120),
 
   // ── Phase 1: ATR-based dynamic SL/TP (default off — ship-then-flip) ──
   FUTURES_ATR_SLTP_ENABLED: boolFromEnv.optional().default(false),
@@ -1134,10 +1137,25 @@ const envSchema = z.object({
   // Short cooldown for transient executor skips (stake_below_hl_minimum) — price fluctuation
   // can push order size above the HL minimum, so 60s is enough to allow a retry.
   HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC: z.coerce.number().int().min(10).optional().default(60),
-  // Lookback window for OHLCV candles. 60 min gives enough bars for all 6 voters (MACD needs 35).
-  HL_MOMENTUM_CANDLE_LOOKBACK_MS: z.coerce.number().int().min(60_000).optional().default(3_600_000),
+  // Lookback windows for each scoring timeframe.
+  // 15m primary: 54h (194,400,000ms) → ~216 bars (covers MACD 35-bar warmup with room to spare).
+  HL_MOMENTUM_PRIMARY_LOOKBACK_MS: z.coerce.number().int().min(60_000).optional().default(194_400_000),
+  // 1h MACD gate: 50h → ~50 bars (MACD 12/26/9 needs 35 closes).
+  HL_MOMENTUM_1H_LOOKBACK_MS: z.coerce.number().int().min(60_000).optional().default(180_000_000),
+  // 4h EMA gate: 10d → ~60 bars (EMA50 needs 50 closes).
+  HL_MOMENTUM_4H_LOOKBACK_MS: z.coerce.number().int().min(60_000).optional().default(864_000_000),
+  // Enable the MTF bias gates.
+  HL_MOMENTUM_MTF_4H_GATE_ENABLED: boolFromEnv.optional().default(true),
+  HL_MOMENTUM_MTF_1H_GATE_ENABLED: boolFromEnv.optional().default(true),
+  // EMA periods used for the 4h trend-bias gate.
+  HL_MOMENTUM_4H_EMA_FAST: z.coerce.number().int().min(2).optional().default(20),
+  HL_MOMENTUM_4H_EMA_SLOW: z.coerce.number().int().min(2).optional().default(50),
   // USD stake per momentum entry. Capped to FUTURES_MAX_PER_TRADE_USD at runtime.
   HL_MOMENTUM_STAKE_USD: z.coerce.number().min(1).optional().default(10),
+  // Per-source SL/TP overrides for the futures monitor. 15m swing signals need wider
+  // thresholds than 1m-tuned arb defaults to avoid being stopped out by normal chop.
+  HL_MOMENTUM_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(5),
+  HL_MOMENTUM_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(12),
 
   // ── Chainlink → PM crypto-arb trigger ──
   // When true, oracle:price_moved ticks also fan into the PM crypto-arb scanner
@@ -1338,6 +1356,11 @@ export function loadConfig(forceReload = false): AppConfig {
   // Phase 9: Cross-validate MACD periods
   if (cfg.MACD_FAST >= cfg.MACD_SLOW) {
     throw new Error('MACD_FAST must be less than MACD_SLOW');
+  }
+
+  // HL momentum: 4h EMA fast period must be shorter than slow period
+  if (cfg.HL_MOMENTUM_4H_EMA_FAST >= cfg.HL_MOMENTUM_4H_EMA_SLOW) {
+    throw new Error('HL_MOMENTUM_4H_EMA_FAST must be less than HL_MOMENTUM_4H_EMA_SLOW');
   }
 
   // Oracle-lag price band must be non-inverted.
