@@ -6,19 +6,37 @@ import type * as NoaaModule from '../noaaClient.js';
 // Mocks — must come before dynamic import
 // ---------------------------------------------------------------------------
 
+const baseConfig = {
+  WEATHER_SCANNER_ENABLED: false,
+  WEATHER_TRADE_SIDES: 'BOTH' as const,
+  WEATHER_MIN_EDGE: 0.08,
+  WEATHER_MAX_STAKE_FRACTION: 0.02,
+  WEATHER_DEDUP_TTL_S: 14400,
+  WEATHER_MAX_EVENTS: 50,
+  WEATHER_MAX_HORIZON_DAYS: 7,
+  WEATHER_STDDEV_MULTIPLIER: 1.0,
+  WEATHER_STDDEV_MIN_FRACTION: 0.7,
+  WEATHER_MIN_MODEL_COVERAGE: 0.95,
+  WEATHER_EXECUTION_ENABLED: false,
+  WEATHER_MAX_POSITIONS_PER_SCAN: 3,
+  WEATHER_MAX_PER_CITY: 1,
+  WEATHER_MAX_SCAN_EXPOSURE_USD: 30,
+  WEATHER_KELLY_FRACTION: 0.25,
+  MIN_BET_USD: 5,
+};
+const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
 vi.mock('../../shared/config.js', () => ({
-  loadConfig: vi.fn(() => ({
-    WEATHER_SCANNER_ENABLED: false,
-    WEATHER_TRADE_SIDES: 'BOTH' as const,
-    WEATHER_MIN_EDGE: 0.08,
-    WEATHER_MAX_STAKE_FRACTION: 0.02,
-    WEATHER_DEDUP_TTL_S: 14400,
-    WEATHER_MAX_EVENTS: 50,
-    WEATHER_MAX_HORIZON_DAYS: 7,
-    WEATHER_STDDEV_MULTIPLIER: 1.0,
-    WEATHER_STDDEV_MIN_FRACTION: 0.7,
-    WEATHER_MIN_MODEL_COVERAGE: 0.95,
-  })),
+  loadConfig: mockLoadConfig,
+}));
+
+const mockExecuteAndRecordSignal = vi.fn();
+vi.mock('../../execution/executor.js', () => ({
+  executeAndRecordSignal: mockExecuteAndRecordSignal,
+}));
+
+const mockGetBankroll = vi.fn();
+vi.mock('../../shared/bankroll.js', () => ({
+  getBankroll: mockGetBankroll,
 }));
 
 vi.mock('../../shared/logger.js', () => ({
@@ -76,7 +94,11 @@ const {
   scanWeatherMarkets,
   daysUntil,
   parseAllowedSides,
+  runWeatherScan,
 } = await import('../weatherScanner.js');
+
+const { inferCategory } = await import('../../shared/outcomeRecorder.js');
+const { normalizeCategory } = await import('../../monitor/staleExit.js');
 
 const {
   estimateBracketProbability,
@@ -981,5 +1003,172 @@ describe('scanWeatherMarkets', () => {
     expect(mockFetchNwsForecast).not.toHaveBeenCalled();
     expect(mockFetchOpenMeteo).not.toHaveBeenCalled();
     expect(mockFetchEnsemble).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // runWeatherScan — execution gating, caps, signal construction
+  // -------------------------------------------------------------------------
+
+  describe('runWeatherScan execution', () => {
+    function wireMockGammaAndForecast(yesPrices?: number[]) {
+      const evt = makeMockGammaEvent();
+      if (yesPrices) {
+        evt.markets.forEach((m, i) => {
+          const y = yesPrices[i] ?? 0.01;
+          m.outcomePrices = `["${y.toFixed(2)}","${(1 - y).toFixed(2)}"]`;
+        });
+      }
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve([evt]),
+      }) as unknown as typeof fetch;
+      // Forecast tight around 52F — creates strong NO edges on tail brackets
+      // (low NO prices on e.g. "39°F or below" when model says near-zero YES).
+      mockFetchNwsForecast.mockResolvedValue({
+        highF: 52, lowF: 38, precipProbability: 10, forecastDate: targetIso, shortForecast: 'Cloudy',
+      });
+      mockFetchOpenMeteo.mockResolvedValue({
+        highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: targetIso,
+      });
+      mockFetchEnsemble.mockResolvedValue({
+        meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: targetIso,
+      });
+    }
+
+    it('does not call executeAndRecordSignal when WEATHER_EXECUTION_ENABLED=false', async () => {
+      mockLoadConfig.mockReturnValueOnce({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: false,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+      expect(mockGetBankroll).not.toHaveBeenCalled();
+    });
+
+    it('executes with correct TradeSignal shape when enabled', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+      const signal = mockExecuteAndRecordSignal.mock.calls[0]![0] as {
+        direction: string; consensusProbability: number; outcomePrice: number;
+        stakeUsd: number; source: string; question: string; clobTokenIds: string[];
+      };
+      // consensusProbability is always P(YES) — executor flips to (1-p) for NO internally
+      expect(signal.consensusProbability).toBeGreaterThan(0);
+      expect(signal.consensusProbability).toBeLessThan(1);
+      expect(['YES', 'NO']).toContain(signal.direction);
+      expect(signal.source).toBe('weather');
+      expect(signal.question).toMatch(/Chicago/);
+      expect(signal.clobTokenIds).toHaveLength(2);
+      expect(signal.stakeUsd).toBeGreaterThan(0);
+    });
+
+    it('respects WEATHER_MAX_POSITIONS_PER_SCAN cap', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_POSITIONS_PER_SCAN: 2,
+        WEATHER_MAX_PER_CITY: 5, // relax so per-city doesn't bind first
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(10000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal.mock.calls.length).toBeLessThanOrEqual(2);
+    });
+
+    it('respects WEATHER_MAX_PER_CITY cap', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_POSITIONS_PER_SCAN: 10,
+        WEATHER_MAX_PER_CITY: 1,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(10000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      // Only one city in fixture (Chicago) — cap=1 means ≤1 execution
+      expect(mockExecuteAndRecordSignal.mock.calls.length).toBeLessThanOrEqual(1);
+    });
+
+    it('respects WEATHER_MAX_SCAN_EXPOSURE_USD cap', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_POSITIONS_PER_SCAN: 10,
+        WEATHER_MAX_PER_CITY: 10,
+        WEATHER_MAX_SCAN_EXPOSURE_USD: 5, // tight cap — first trade alone should exhaust it
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(10000); // large bankroll → each Kelly stake > $5
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      // Stake ≥ $5 blocks the *first* opp (proposed+0 > cap). But more likely first trade
+      // fires at <$5 then second exceeds. Either way ≤1 call under a $5 cap.
+      expect(mockExecuteAndRecordSignal.mock.calls.length).toBeLessThanOrEqual(1);
+    });
+
+    it('skips when bankroll is zero', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(0);
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Category wiring — inferCategory('Highest temperature…') → 'weather'
+// ---------------------------------------------------------------------------
+
+describe('weather category wiring', () => {
+  it('inferCategory matches highest temperature questions', () => {
+    expect(inferCategory('Highest temperature in Chicago on April 20, 2026?')).toBe('weather');
+  });
+  it('inferCategory matches lowest temperature questions', () => {
+    expect(inferCategory('Lowest temperature in NYC on April 20, 2026?')).toBe('weather');
+  });
+  it('normalizeCategory passes weather through', () => {
+    expect(normalizeCategory('weather')).toBe('weather');
   });
 });

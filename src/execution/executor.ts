@@ -1545,7 +1545,7 @@ export async function executeSignal(
 
   const executionMode = cfg.EXECUTION_MODE;
   const simmerId =
-    signal.source === 'crypto-arb' || !cfg.SIMMER_VENUE_ENABLED
+    signal.source === 'crypto-arb' || signal.source === 'weather' || !cfg.SIMMER_VENUE_ENABLED
       ? null
       : await resolveSimmerMarketId(signal.question);
 

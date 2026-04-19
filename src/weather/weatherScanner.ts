@@ -26,6 +26,10 @@ import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
+import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
+import { executeAndRecordSignal } from '../execution/executor.js';
+import type { TradeSignal } from '../mapping/index.js';
+import { getBankroll } from '../shared/bankroll.js';
 import {
   lookupCity,
   canonicalCityKey,
@@ -90,6 +94,8 @@ export interface ParsedBracket {
   high: number | null;
   /** Human-readable label from groupItemTitle. */
   label: string;
+  /** Full market question (for executor / category inference). */
+  question: string;
   /** Current YES price on the market. */
   yesPrice: number;
   /** Current NO price on the market. */
@@ -347,6 +353,7 @@ export function parseWeatherEvent(event: WeatherGammaEvent): ParsedWeatherEvent 
       low: parsed.low,
       high: parsed.high,
       label,
+      question: market.question,
       yesPrice,
       noPrice,
     });
@@ -473,6 +480,8 @@ export interface WeatherBracketOpportunity {
   targetDate: string;
   /** Bracket details. */
   bracketLabel: string;
+  /** Full market question — passed to executor + category inference. */
+  question: string;
   clobTokenIds: string[];
   /** Market prices. */
   yesPrice: number;
@@ -621,6 +630,7 @@ export function findMispricedBrackets(
       city: event.city,
       targetDate: event.targetDate,
       bracketLabel: bracket.label,
+      question: bracket.question,
       clobTokenIds: bracket.clobTokenIds,
       yesPrice: bracket.yesPrice,
       noPrice: bracket.noPrice,
@@ -881,9 +891,43 @@ export async function scanWeatherMarkets(
 }
 
 /**
+ * Build a TradeSignal for a weather bracket opportunity.
+ *
+ * Conventions (matching executor):
+ *   - consensusProbability is P(YES). `opp.modelProbability` is already P(YES)
+ *     regardless of tradeSide, so it is passed through unmodified. The executor
+ *     flips to (1 - p) internally when direction is NO.
+ *   - outcomePrice is side-relative (price of the side we are buying). `opp.outcomePrice`
+ *     is already constructed that way.
+ */
+function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): TradeSignal {
+  return {
+    marketId: opp.marketId,
+    conditionId: opp.conditionId,
+    clobTokenIds: opp.clobTokenIds,
+    direction: opp.tradeSide,
+    stakeUsd,
+    edgeMagnitude: opp.edge,
+    consensusProbability: opp.modelProbability,
+    outcomePrice: opp.outcomePrice,
+    question: opp.question,
+    source: 'weather',
+    sourcedFrom: `weather:${opp.city}:${opp.targetDate}:${opp.bracketLabel}`,
+    reasoning: `Forecast high ${opp.forecastHigh.toFixed(1)}°, model P=${opp.modelProbability.toFixed(3)} vs market ${opp.outcomePrice.toFixed(3)}; ${opp.tradeSide} bracket "${opp.bracketLabel}" daysOut=${opp.daysOut}`,
+  };
+}
+
+/**
  * Orchestrator: run a full weather scan cycle.
  *
- * Always shadow-logs. Only executes trades when WEATHER_SCANNER_ENABLED=true.
+ * Always shadow-logs. Real trades fire only when both `WEATHER_SCANNER_ENABLED`
+ * and `WEATHER_EXECUTION_ENABLED` are true. The separation lets the scanner
+ * live in shadow+side-filter mode while real execution stays dark.
+ *
+ * Execution caps (applied in order, sorted by edge desc):
+ *   1. `WEATHER_MAX_POSITIONS_PER_SCAN` — total count across the scan
+ *   2. `WEATHER_MAX_PER_CITY` — per-city count (brackets in one event are correlated)
+ *   3. `WEATHER_MAX_SCAN_EXPOSURE_USD` — cumulative stake ceiling
  */
 export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<void> {
   const cfg = loadConfig();
@@ -909,20 +953,127 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     return;
   }
 
-  // Execution will be wired in a follow-up PR.
-  for (const opp of tradable) {
-    logger.info('[weather] would execute trade', {
-      marketId: opp.marketId,
-      eventSlug: opp.eventSlug,
-      tradeSide: opp.tradeSide,
-      edge: opp.edge.toFixed(3),
-      modelProbability: opp.modelProbability.toFixed(3),
-      outcomePrice: opp.outcomePrice.toFixed(3),
-      city: opp.city,
-      bracket: opp.bracketLabel,
-      daysOut: opp.daysOut,
-    });
+  // Kill-switch: when execution is off, preserve the pre-wire "would execute"
+  // log line so shadow analysis keeps working and operators can see what *would*
+  // have fired without any order placement.
+  if (!cfg.WEATHER_EXECUTION_ENABLED) {
+    for (const opp of tradable) {
+      logger.info('[weather] would execute trade', {
+        marketId: opp.marketId,
+        eventSlug: opp.eventSlug,
+        tradeSide: opp.tradeSide,
+        edge: opp.edge.toFixed(3),
+        modelProbability: opp.modelProbability.toFixed(3),
+        outcomePrice: opp.outcomePrice.toFixed(3),
+        city: opp.city,
+        bracket: opp.bracketLabel,
+        daysOut: opp.daysOut,
+      });
+    }
+    return;
   }
+
+  const bankrollUsd = await getBankroll(redis);
+  if (bankrollUsd <= 0) {
+    logger.warn('[weather] skipping execution — bankroll is zero', { bankrollUsd });
+    return;
+  }
+
+  const maxStakeCap = bankrollUsd * cfg.WEATHER_MAX_STAKE_FRACTION;
+  const perCityCount = new Map<string, number>();
+  let executed = 0;
+  let cumulativeStakeUsd = 0;
+
+  for (let i = 0; i < tradable.length; i++) {
+    const opp = tradable[i]!;
+
+    if (executed >= cfg.WEATHER_MAX_POSITIONS_PER_SCAN) {
+      logger.info('[weather] per-scan count cap reached', {
+        cap: cfg.WEATHER_MAX_POSITIONS_PER_SCAN,
+        skippedRemaining: tradable.length - i,
+      });
+      break;
+    }
+
+    const cityCount = perCityCount.get(opp.city) ?? 0;
+    if (cityCount >= cfg.WEATHER_MAX_PER_CITY) {
+      logger.info('[weather] per-city cap reached — skipping opp', {
+        city: opp.city,
+        cap: cfg.WEATHER_MAX_PER_CITY,
+        marketId: opp.marketId,
+      });
+      continue;
+    }
+
+    // Half-Kelly sizing: use the win probability and price of the side we're buying.
+    // For YES: p = P(YES) = modelProbability, price = yesPrice.
+    // For NO:  p = P(NO)  = 1 - modelProbability, price = noPrice (= outcomePrice for NO).
+    // opp.outcomePrice is already side-relative so it covers both.
+    const winProb = opp.tradeSide === 'YES' ? opp.modelProbability : 1 - opp.modelProbability;
+    const kellyFraction = computeHalfKelly(winProb, opp.outcomePrice, cfg.WEATHER_KELLY_FRACTION);
+    if (kellyFraction <= 0) {
+      logger.info('[weather] skipping — kelly non-positive', {
+        marketId: opp.marketId,
+        tradeSide: opp.tradeSide,
+        winProb: winProb.toFixed(3),
+        outcomePrice: opp.outcomePrice.toFixed(3),
+      });
+      continue;
+    }
+    const stakeUsd = Math.min(bankrollUsd * kellyFraction, maxStakeCap);
+    // Gate on the worst-case filled amount: executor bumps stakes ≥60% of
+    // MIN_BET_USD up to the floor, so the actual committed amount may be higher
+    // than the Kelly-derived stakeUsd. Using max(stakeUsd, MIN_BET_USD) keeps
+    // the exposure check tight even after the floor bump.
+    const worstCaseStakeUsd = Math.max(stakeUsd, cfg.MIN_BET_USD);
+
+    if (cumulativeStakeUsd + worstCaseStakeUsd > cfg.WEATHER_MAX_SCAN_EXPOSURE_USD) {
+      logger.info('[weather] per-scan exposure cap would be exceeded — stopping', {
+        cumulativeStakeUsd: cumulativeStakeUsd.toFixed(2),
+        proposedStakeUsd: worstCaseStakeUsd.toFixed(2),
+        cap: cfg.WEATHER_MAX_SCAN_EXPOSURE_USD,
+      });
+      break;
+    }
+
+    const signal = buildWeatherSignal(opp, stakeUsd);
+    try {
+      const result = await executeAndRecordSignal(signal, redis);
+      const filledStakeUsd = result.signal.stakeUsd;
+      logger.info('[weather] execution result', {
+        marketId: opp.marketId,
+        eventSlug: opp.eventSlug,
+        city: opp.city,
+        bracket: opp.bracketLabel,
+        tradeSide: opp.tradeSide,
+        stakeUsd: filledStakeUsd.toFixed(2),
+        edge: opp.edge.toFixed(3),
+        skipped: result.skipped,
+        skipReason: result.skipReason,
+        executionVenue: result.executionVenue,
+        entryPrice: result.entryPrice,
+        sharesFilled: result.sharesFilled,
+      });
+      // Only count as executed when the executor actually opened a position.
+      // A skipped result (dedup, spread too wide, etc.) should not burn caps.
+      if (!result.skipped) {
+        executed++;
+        perCityCount.set(opp.city, cityCount + 1);
+        cumulativeStakeUsd += filledStakeUsd;
+      }
+    } catch (err) {
+      logger.error('[weather] execution threw', {
+        marketId: opp.marketId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  logger.info('[weather] execution cycle complete', {
+    executed,
+    cumulativeStakeUsd: cumulativeStakeUsd.toFixed(2),
+    tradableOpportunities: tradable.length,
+  });
 }
 
 // ── Standalone entrypoint (cron) ──────────────────────────────────────────
