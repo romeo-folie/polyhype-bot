@@ -163,14 +163,23 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         lastHeartbeat = now;
       }
 
-      if (positions.length === 0) {
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-        continue;
-      }
-
       // Sync HL positions with ledger to get true 'openedAt' timestamps
       let ledgerPositions = await getOpenPositions(redis);
       let futuresLedger = ledgerPositions.filter((p) => p.isFutures);
+
+      if (positions.length === 0) {
+        // No HL positions — close any stale ledger entries left over from previous sessions
+        for (const lp of futuresLedger) {
+          const sym = lp.symbol ?? lp.marketId;
+          logger.warn('[futures-monitor] pruning orphaned ledger entry — HL has no open positions', {
+            symbol: sym,
+            direction: lp.direction,
+          });
+          await closeLedgerPosition(redis, sym, lp.direction);
+        }
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+        continue;
+      }
 
       // BACKFILL: if HL holds a position the ledger doesn't know about, write
       // a ledger row so the trailing-stop HWM can ratchet, stale-exit timers
@@ -213,6 +222,31 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         ledgerPositions = await getOpenPositions(redis);
         futuresLedger = ledgerPositions.filter((p) => p.isFutures);
       }
+
+      // PRUNE: close ledger entries whose HL position no longer exists.
+      // Handles external closes, liquidations, and manual exits during downtime.
+      // The backfill loop above already skips szi==0; use the same threshold here.
+      const hlOpenSet = new Set(
+        positions
+          .filter((p) => Math.abs(parseFloat(p.position.szi)) > 0)
+          .map((p) => {
+            const d: 'LONG' | 'SHORT' = parseFloat(p.position.szi) > 0 ? 'LONG' : 'SHORT';
+            return `${p.symbol}:${d}`;
+          }),
+      );
+      for (const lp of futuresLedger) {
+        const sym = lp.symbol ?? lp.marketId;
+        const d = lp.direction === 'LONG' ? 'LONG' : 'SHORT';
+        if (!hlOpenSet.has(`${sym}:${d}`)) {
+          logger.warn('[futures-monitor] pruning orphaned ledger entry — no matching HL position', {
+            symbol: sym,
+            direction: lp.direction,
+          });
+          await closeLedgerPosition(redis, sym, lp.direction);
+        }
+      }
+      // Refresh futuresLedger so the exit loop below only sees live positions
+      futuresLedger = (await getOpenPositions(redis)).filter((p) => p.isFutures);
 
       for (const pos of positions) {
         const symbol = pos.symbol;
