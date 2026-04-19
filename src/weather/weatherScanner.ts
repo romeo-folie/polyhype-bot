@@ -1,7 +1,7 @@
 /**
  * Weather Bracket Market Scanner
  *
- * Discovers Polymarket weather bracket events via Gamma API (tag_slug=temperature),
+ * Discovers Polymarket weather bracket events via Gamma API (tag_slug=highest-temperature),
  * fetches forecasts from NOAA (US) and Open-Meteo (international), and computes
  * edge by comparing forecast bracket probabilities against market prices.
  *
@@ -209,9 +209,13 @@ export function parseBracketLabel(
 // ── Event discovery ──────────────────────────────────────────────────────
 
 /**
- * Fetch active weather events from Gamma API using tag_slug=temperature.
+ * Fetch active weather events from Gamma API using tag_slug=highest-temperature.
  * Orders by liquidity descending so we evaluate the most-traded events first.
  * Includes a 429 circuit breaker to avoid compounding rate limits.
+ *
+ * Note: the previous tag `temperature` was retired by Polymarket (returns ~1
+ * stale event as of 2026-04-19). `highest-temperature` is the canonical tag
+ * for the daily-city bracket events this scanner targets.
  */
 export async function fetchWeatherEvents(
   limit: number,
@@ -223,7 +227,7 @@ export async function fetchWeatherEvents(
   }
 
   const params = new URLSearchParams({
-    tag_slug: 'temperature',
+    tag_slug: 'highest-temperature',
     limit: limit.toString(),
     active: 'true',
     closed: 'false',
@@ -624,7 +628,7 @@ export function findMispricedBrackets(
  * Scan Polymarket for weather bracket events and find mispriced brackets.
  *
  * Steps:
- *   1. Discover weather events via Gamma API (tag_slug=temperature)
+ *   1. Discover weather events via Gamma API (tag_slug=highest-temperature)
  *   2. Parse each event to extract city, date, bracket structure
  *   3. Fetch forecast (NOAA + Open-Meteo + ensemble)
  *   4. Compute bracket probabilities and find edge
