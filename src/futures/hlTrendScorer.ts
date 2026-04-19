@@ -23,7 +23,7 @@ export interface HlTrendVoters {
 export interface HlTrendScore {
   /** Signed directional score: upVotes - downVotes. Range [-6, +6]. */
   score: number;
-  /** Raw ADX value for the momentum-gate gate (independent of the adxDI direction vote). */
+  /** Raw ADX value for the momentum-gate (independent of the adxDI direction vote). */
   adx: number | null;
   voters: HlTrendVoters;
 }
@@ -50,7 +50,11 @@ function signVote(value: number | null): TrendVote {
  * Null voters contribute 0 so partial-data candle arrays don't throw.
  *
  * Returns null only when the candle array is too short to compute anything
- * meaningful (< 2 bars). With 2–34 bars, at least VWAP + OBV will vote.
+ * meaningful (< 2 bars). With 2+ bars the scorer returns a result, but
+ * individual indicators remain neutral until they have enough data:
+ * OBV needs ≥ lookback+1 candles (11 with the default lookback of 10),
+ * VWAP returns null if total volume is 0, EMA21 needs ≥ 21, CMF ≥ 20,
+ * ADX ≥ 29, MACD ≥ 35.
  */
 export function scoreHlTrend(candles: OHLCVCandle[]): HlTrendScore | null {
   if (candles.length < 2) return null;

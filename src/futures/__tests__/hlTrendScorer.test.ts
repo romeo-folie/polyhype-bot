@@ -9,7 +9,9 @@ import type { OHLCVCandle } from '../../arb/candleAggregator.js';
 /**
  * Build a run of trending candles suitable for fully loading all 6 voters.
  * Each bar moves by `pctPerBar` from the previous close.
- * Volume is elevated on moves-in-trend and minimal on counter-trend bars.
+ * Volume is constant at 2 000 for bullish series and 500 for bearish — both
+ * are constant per-direction (not per-bar); OBV and CMF receive the bias from
+ * volume being elevated relative to counter-trend scenarios, not within a series.
  */
 function makeTrendingCandles(
   count: number,
@@ -24,7 +26,6 @@ function makeTrendingCandles(
     const close = price * (1 + pctPerBar / 100);
     const high = Math.max(open, close) * 1.0005;
     const low = Math.min(open, close) * 0.9995;
-    // Volume is high on in-trend bars to push OBV and CMF in the trend direction.
     const volume = bullish ? 2_000 : 500;
     candles.push({ openTime: i * 60_000, open, high, low, close, volume });
     price = close;
@@ -33,8 +34,14 @@ function makeTrendingCandles(
 }
 
 /**
- * Build candles that alternate between slightly-up and slightly-down bars
- * to produce a choppy, low-ADX environment.
+ * Build candles that alternate ±0.15% bars to produce a choppy, low-ADX
+ * environment (ADX ≈ 3-4 with these parameters).
+ *
+ * Uses asymmetric high/low per direction so that both +DM and -DM have
+ * non-zero contributions from each bar transition, keeping DX (and therefore
+ * ADX) low. If high were computed as max(open,close)*k for a constant k,
+ * the open of each down bar would equal the close of the prior up bar, making
+ * their highs identical and upMove always 0, which would force ADX=100.
  */
 function makeChoppyCandles(count: number, startPrice = 80_000): OHLCVCandle[] {
   const candles: OHLCVCandle[] = [];
@@ -44,8 +51,8 @@ function makeChoppyCandles(count: number, startPrice = 80_000): OHLCVCandle[] {
     const pct = up ? 0.15 : -0.15;
     const open = price;
     const close = price * (1 + pct / 100);
-    const high = Math.max(open, close) * 1.0005;
-    const low = Math.min(open, close) * 0.9995;
+    const high = up ? close * 1.003 : open * 1.001;
+    const low = up ? open * 0.999 : close * 0.997;
     candles.push({ openTime: i * 60_000, open, high, low, close, volume: 1_000 });
     price = close;
   }
@@ -117,9 +124,8 @@ describe('scoreHlTrend — insufficient candles', () => {
   });
 
   it('returns a result with neutral-heavy voters for 5 candles (most indicators insufficient)', () => {
-    // With 5 bars: VWAP and OBV can vote, rest are null → neutral.
-    // EMA9 needs 9, EMA21 needs 21 → ema vote neutral.
-    // MACD needs 35 → neutral. CMF needs 20 → neutral. ADX needs 29 → neutral.
+    // With 5 bars: only VWAP can vote; OBV needs ≥11 (lookback+1), EMA needs
+    // ≥21, MACD needs ≥35, CMF needs ≥20, ADX needs ≥29 — all neutral.
     const candles = makeTrendingCandles(5, 0.6);
     const result = scoreHlTrend(candles);
     expect(result).not.toBeNull();
@@ -129,6 +135,7 @@ describe('scoreHlTrend — insufficient candles', () => {
     expect(result!.voters.emaFastVsSlow).toBe('neutral');
     expect(result!.voters.cmf).toBe('neutral');
     expect(result!.voters.adxDI).toBe('neutral');
+    expect(result!.voters.obv).toBe('neutral');
     // The score is bounded by the voters that could actually compute.
     expect(Math.abs(result!.score)).toBeLessThanOrEqual(6);
   });
@@ -146,16 +153,15 @@ describe('scoreHlTrend — insufficient candles', () => {
 // ---------------------------------------------------------------------------
 
 describe('scoreHlTrend — adxDI suppression in choppy market', () => {
-  it('returns adxDI=neutral when ADX is below 20 in a choppy range', () => {
-    // 60-bar alternating up/down at tiny amplitude: ADX stays low.
+  it('returns adxDI=neutral and ADX < 20 for a balanced alternating range', () => {
+    // makeChoppyCandles uses asymmetric high/low per bar direction so that both
+    // +DM and -DM have non-zero contributions, keeping DX ≈ 0 and ADX ≈ 3-4.
     const candles = makeChoppyCandles(60);
     const result = scoreHlTrend(candles);
-    // ADX should be computable but below 20 in a sideways market.
-    if (result && result.adx !== null && result.adx < 20) {
-      expect(result.voters.adxDI).toBe('neutral');
-    }
-    // If ADX does happen to be ≥ 20 in this scenario, the test still passes —
-    // the behaviour is "neutral when ADX < 20", not "always neutral in chop".
+    expect(result).not.toBeNull();
+    expect(result!.adx).not.toBeNull();
+    expect(result!.adx!).toBeLessThan(20);
+    expect(result!.voters.adxDI).toBe('neutral');
   });
 });
 
