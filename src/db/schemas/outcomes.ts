@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 const SIGNAL_SOURCE = [
   'osint', 'copytrade', 'spot', 'arb', 'crypto-arb', 'futures', 'sports', 'clob-flow',
-  'oracle-lag', 'near-zero-arb', 'longshot-bias', 'correlation-arb',
+  'oracle-lag', 'near-zero-arb', 'longshot-bias', 'correlation-arb', 'hl-momentum',
 ] as const;
 const DIRECTION = ['YES', 'NO', 'UP', 'DOWN', 'LONG', 'SHORT'] as const;
 const VENUE = ['simmer', 'clob', 'hyperliquid', 'none'] as const;

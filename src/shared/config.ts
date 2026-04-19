@@ -1115,6 +1115,22 @@ const envSchema = z.object({
   FUTURES_MIN_CONFLUENCE_SCORE_NORMAL: z.coerce.number().int().min(0).max(7).optional().default(3),
   FUTURES_MIN_CONFLUENCE_SCORE_EXPLOSIVE: z.coerce.number().int().min(0).max(7).optional().default(4),
 
+  // ── HL Momentum Scanner (Chainlink oracle-triggered perp entries) ──
+  // Ships dark. Flip to true after ≥48h shadow review shows credible signals.
+  HL_MOMENTUM_ENABLED: boolFromEnv.optional().default(false),
+  // Comma-separated Chainlink symbols to watch (must be in the Chainlink feed subscription list).
+  HL_MOMENTUM_SYMBOLS: z.string().optional().default('btc/usd,eth/usd,sol/usd,xrp/usd,doge/usd'),
+  // Minimum trend-scorer confluence score (|upVotes - downVotes|) to open a position. Range [0,6].
+  HL_MOMENTUM_MIN_SCORE: z.coerce.number().int().min(0).max(6).optional().default(4),
+  // Minimum ADX to require a trending regime before acting on the direction vote.
+  HL_MOMENTUM_MIN_ADX: z.coerce.number().min(0).optional().default(20),
+  // Per-side cooldown in seconds after a momentum entry (prevents rapid re-entry on same side).
+  HL_MOMENTUM_COOLDOWN_SEC: z.coerce.number().int().min(60).optional().default(600),
+  // Lookback window for OHLCV candles. 60 min gives enough bars for all 6 voters (MACD needs 35).
+  HL_MOMENTUM_CANDLE_LOOKBACK_MS: z.coerce.number().int().min(60_000).optional().default(3_600_000),
+  // USD stake per momentum entry. Capped to FUTURES_MAX_PER_TRADE_USD at runtime.
+  HL_MOMENTUM_STAKE_USD: z.coerce.number().min(1).optional().default(10),
+
   // ── Phase 3: Sports arb (NBA + NHL) ──
   SPORTS_ARB_ENABLED: boolFromEnv.optional().default(true),
   SPORTS_LEAGUES: z

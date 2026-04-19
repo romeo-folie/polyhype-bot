@@ -18,6 +18,20 @@ vi.mock('../shared/config.js', () => ({
     BINANCE_SYMBOLS: 'btcusdt,ethusdt,solusdt',
     SPOT_CRYPTO_ASSETS: 'bitcoin,ethereum,solana',
     ARB_GLOBAL_MAX_TRADES_PER_MIN: 45,
+    ARB_MAX_TRADES_PER_MIN: 45,
+    CRYPTO_ARB_MAX_TRADES_PER_MIN: 45,
+    NEGRISK_ARB_ENABLED: false,
+    NEGRISK_ARB_SCAN_INTERVAL_MS: 30_000,
+    SIMMER_AUTO_REDEEM_ENABLED: false,
+    BINANCE_WS_ENABLED: false,
+    CHAINLINK_REDIS_PUBLISH_ENABLED: false,
+    HL_MOMENTUM_ENABLED: false,
+    HL_MOMENTUM_SYMBOLS: 'btc/usd,eth/usd',
+    HL_MOMENTUM_MIN_SCORE: 4,
+    HL_MOMENTUM_MIN_ADX: 20,
+    HL_MOMENTUM_COOLDOWN_SEC: 600,
+    HL_MOMENTUM_STAKE_USD: 10,
+    FUTURES_MAX_PER_TRADE_USD: 15,
     ...configOverride,
   })),
 }));
@@ -108,6 +122,7 @@ vi.mock('../spot/feeds/chainlinkFeed.js', () => ({
     getLatest: vi.fn().mockReturnValue(null),
     getMoveSince: vi.fn().mockReturnValue(null),
   })),
+  ORACLE_PRICE_MOVED_CHANNEL: 'oracle:price_moved',
 }));
 
 vi.mock('./oracleLagScanner.js', () => ({
@@ -115,6 +130,7 @@ vi.mock('./oracleLagScanner.js', () => ({
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
   })),
+  ASSET_TO_CHAINLINK_SYMBOL: { bitcoin: 'btc/usd', ethereum: 'eth/usd' },
 }));
 
 vi.mock('./oracleLagExitMonitor.js', () => ({
@@ -123,6 +139,11 @@ vi.mock('./oracleLagExitMonitor.js', () => ({
     stop: vi.fn().mockResolvedValue(undefined),
   })),
   writeOracleLagExitState: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../futures/hlMomentumScanner.js', () => ({
+  scanHlMomentum: vi.fn().mockResolvedValue(null),
+  momentumCooldownKey: (sym: string, dir: string) => `futures:momentum:cooldown:${sym}:${dir}`,
 }));
 
 describe('ArbitrageWorker', () => {
@@ -149,7 +170,7 @@ describe('ArbitrageWorker', () => {
     const worker = new ArbitrageWorker({ baselineIntervalMs: 100 });
     await worker.start();
 
-    expect(mockRedis.subscribe).toHaveBeenCalledWith('spot:price_moved');
+    expect(mockRedis.subscribe).toHaveBeenCalledWith('spot:price_moved', 'oracle:price_moved');
     expect(mockRedis.on).toHaveBeenCalledWith('message', expect.any(Function));
 
     // Cleanup worker timer

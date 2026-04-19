@@ -23,9 +23,11 @@ import {
 import { ArbMarketWarmer } from './warmer.js';
 import { OracleLagScanner, ASSET_TO_CHAINLINK_SYMBOL } from './oracleLagScanner.js';
 import { OracleLagExitMonitor } from './oracleLagExitMonitor.js';
-import { ChainlinkFeed } from '../spot/feeds/chainlinkFeed.js';
+import { ChainlinkFeed, ORACLE_PRICE_MOVED_CHANNEL } from '../spot/feeds/chainlinkFeed.js';
+import { scanHlMomentum, momentumCooldownKey } from '../futures/hlMomentumScanner.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { TradeSignal } from '../mapping/index.js';
+import type { ChainlinkTick } from '../spot/feeds/chainlinkFeed.js';
 
 interface WorkerOptions {
   baselineIntervalMs?: number;
@@ -53,6 +55,7 @@ export class ArbitrageWorker {
   private isScanning = false;
   private isCryptoArbRunning = false;
   private isNegRiskArbRunning = false;
+  private isHlMomentumRunning = false;
   private timer: NodeJS.Timeout | null = null;
   private negRiskTimer: NodeJS.Timeout | null = null;
   private negRiskScanIntervalMs = 30000;
@@ -152,8 +155,15 @@ export class ArbitrageWorker {
     // SIGTERM we await scanner.stop() before closing Redis so the scanner
     // can release its lock.
     try {
+      // Merge oracle-lag symbols with HL momentum symbols so a single WS
+      // subscription covers both consumers. HL_MOMENTUM_SYMBOLS defaults to
+      // btc/usd,eth/usd,sol/usd,xrp/usd,doge/usd; without this merge the
+      // momentum scanner would silently receive no ticks for SOL/XRP/DOGE.
+      const hlMomentumSymbols = cfg.HL_MOMENTUM_SYMBOLS.split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
       const chainlinkOpts = {
-        symbols: Object.values(ASSET_TO_CHAINLINK_SYMBOL),
+        symbols: [...new Set([...Object.values(ASSET_TO_CHAINLINK_SYMBOL), ...hlMomentumSymbols])],
         // Republish each tick to oracle:* keys + pub/sub when enabled. Other
         // workers (PM crypto trigger path, HL momentum scanner) consume from
         // these without holding their own Chainlink WS subscription.
@@ -189,9 +199,20 @@ export class ArbitrageWorker {
 
     // 1. Subscribe to real-time price updates
     const subscriber = getSubscriberRedis();
-    await subscriber.subscribe('spot:price_moved');
+    await subscriber.subscribe('spot:price_moved', ORACLE_PRICE_MOVED_CHANNEL);
 
     subscriber.on('message', (channel, message) => {
+      if (channel === ORACLE_PRICE_MOVED_CHANNEL) {
+        let tick: ChainlinkTick;
+        try {
+          tick = JSON.parse(message) as ChainlinkTick;
+        } catch {
+          logger.warn('[hl-momentum] invalid oracle:price_moved payload');
+          return;
+        }
+        void this.triggerHlMomentum(tick);
+      }
+
       if (channel === 'spot:price_moved') {
         let parsed: {
           symbol?: string;
@@ -527,6 +548,69 @@ export class ArbitrageWorker {
     }
   }
 
+  private async triggerHlMomentum(tick: ChainlinkTick): Promise<void> {
+    if (this.isHlMomentumRunning) return;
+    this.isHlMomentumRunning = true;
+    const redis = getRedis();
+    try {
+      const cfg = loadConfig();
+      const signal = await scanHlMomentum(tick, redis);
+      if (!signal) return;
+
+      // Atomic NX claim prevents double-fire across concurrent worker instances.
+      // Short TTL (30s) covers the executor round-trip; extended to the full
+      // cooldown on success, or deleted on skip/error so retries aren't blocked.
+      const direction = signal.direction as 'LONG' | 'SHORT';
+      const cooldownKey = momentumCooldownKey(signal.marketId, direction);
+      const claimed = await redis.set(cooldownKey, 'in-flight', 'EX', 30, 'NX');
+      if (!claimed) {
+        logger.debug('[hl-momentum] cooldown claim lost (race)', {
+          symbol: signal.marketId,
+          direction,
+        });
+        return;
+      }
+
+      let result;
+      try {
+        result = await executeAndRecordSignal(signal, redis);
+      } catch (execErr) {
+        await redis.del(cooldownKey);
+        throw execErr;
+      }
+
+      if (result.tradeResult?.success) {
+        await redis.set(cooldownKey, '1', 'EX', cfg.HL_MOMENTUM_COOLDOWN_SEC);
+        logger.info('[hl-momentum] trade executed', {
+          symbol: signal.marketId,
+          direction: signal.direction,
+          stakeUsd: signal.stakeUsd,
+          executionId: result.signal.executionId,
+        });
+        await recordGlobalTrade(redis, 'hyperliquid');
+      } else if (result.skipped) {
+        await redis.del(cooldownKey);
+        logger.debug('[hl-momentum] signal skipped by executor', {
+          symbol: signal.marketId,
+          reason: result.skipReason,
+        });
+      } else if (result.error) {
+        await redis.del(cooldownKey);
+        logger.warn('[hl-momentum] execution error', {
+          symbol: signal.marketId,
+          error: result.error,
+        });
+      }
+    } catch (err) {
+      logger.error('[hl-momentum] triggerHlMomentum failed', {
+        symbol: tick.symbol,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      this.isHlMomentumRunning = false;
+    }
+  }
+
   public stop(): void {
     if (this.timer) {
       clearTimeout(this.timer);
@@ -537,7 +621,7 @@ export class ArbitrageWorker {
       this.negRiskTimer = null;
     }
     const subscriber = getSubscriberRedis();
-    void subscriber.unsubscribe('spot:price_moved').catch((e: unknown) => {
+    void subscriber.unsubscribe('spot:price_moved', ORACLE_PRICE_MOVED_CHANNEL).catch((e: unknown) => {
       logger.debug('[arb-worker] unsubscribe failed (non-fatal)', { error: String(e) });
     });
     if (this.warmer) {
