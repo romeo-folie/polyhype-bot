@@ -174,7 +174,7 @@ function oraclePricesKey(symbol: string): string {
 }
 
 /** Pub/sub channel name. Mirrors `spot:price_moved` from BinanceFeed. */
-const ORACLE_PRICE_MOVED_CHANNEL = 'oracle:price_moved';
+export const ORACLE_PRICE_MOVED_CHANNEL = 'oracle:price_moved';
 
 /** TTL on oracle:last:* SET — staleness signal for downstream consumers. */
 const ORACLE_LAST_TTL_SEC = 120;
