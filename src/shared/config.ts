@@ -1169,7 +1169,7 @@ const envSchema = z.object({
   // Requires CHAINLINK_REDIS_PUBLISH_ENABLED=true. Ships dark.
   CHAINLINK_CRYPTO_ARB_ENABLED: boolFromEnv.optional().default(false),
 
-  // ── Phase 3: Sports arb (NBA + NHL) ──
+  // ── Phase 3: Sports arb (NBA + NHL + MLB) ──
   SPORTS_ARB_ENABLED: boolFromEnv.optional().default(true),
   SPORTS_LEAGUES: z
     .string()

@@ -1,7 +1,7 @@
 /**
  * Sports in-play arbitrage scanner.
  *
- * Matches live NBA/NHL games from ESPN against cached Polymarket markets,
+ * Matches live NBA/NHL/MLB games from ESPN against cached Polymarket markets,
  * computes a model win-probability, compares against the PM YES price, and
  * emits `TradeSignal`s when the drift exceeds `SPORTS_MIN_EDGE`.
  */
@@ -56,7 +56,7 @@ function nickname(team: string): string {
  * not when the game ends. Allow markets to stay eligible for this long after
  * their endDate so the scanner can act during the full duration of the game.
  */
-const STALE_GAME_GRACE_MS = 4 * 3600 * 1000; // 4 hours
+const STALE_GAME_GRACE_MS = 6 * 3600 * 1000; // 6 hours — covers MLB extra innings + rain delays
 
 /** Skip over/under, spread, and first-half prop markets — win-prob doesn't apply to them. */
 function isMoneylineMarket(question: string): boolean {
@@ -204,7 +204,7 @@ export async function scanLiveSportsArb(
   }
 
   if (games.length > 0 && !matchedAny) {
-    logger.info('[sports-arb] live games found but no matching PM markets', {
+    logger.debug('[sports-arb] live games found but no matching PM markets', {
       gameCount: games.length,
       games: games.map((g) => `${g.awayAbbrev}@${g.homeAbbrev} (${g.league})`),
     });

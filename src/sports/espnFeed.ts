@@ -1,9 +1,10 @@
 /**
- * ESPN public scoreboard client (NBA + NHL).
+ * ESPN public scoreboard client (NBA, NHL, MLB).
  *
  * Uses the no-auth public endpoints:
  *   https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard
  *   https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard
+ *   https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard
  *
  * Returns a flat list of live-game snapshots. Pre-game and final games are
  * filtered out — the scanner only acts on `STATUS_IN_PROGRESS`.

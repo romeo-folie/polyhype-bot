@@ -79,9 +79,9 @@ describe('scanLiveSportsArb', () => {
     expect(s.marketId).toBe('m1');
   });
 
-  it('skips PM markets whose endDate is well past the grace window (5h ago)', async () => {
+  it('skips PM markets whose endDate is well past the grace window (7h ago)', async () => {
     const expired = mkMarket({
-      endDate: new Date(Date.now() - 5 * 3600 * 1000).toISOString(),
+      endDate: new Date(Date.now() - 7 * 3600 * 1000).toISOString(),
     });
     const { signals } = await scanLiveSportsArb(fakeRedis, mkCfg(), {
       fetchLive: async () => [mkGame()],

@@ -79,8 +79,8 @@ export interface MlbState {
  *
  * Calibration anchors:
  *   - tied at start of game          → ~0.54 (home field)
- *   - home up 3 entering bottom 9th  → ~0.97
- *   - away up 1 entering bottom 9th  → ~0.33 (home can tie/win)
+ *   - home up 3 entering bottom 9th  → ~0.93
+ *   - away up 1 entering bottom 9th  → ~0.34 (home can tie/win)
  */
 export function mlbWinProb(state: MlbState): number {
   const { scoreDiff, inning, isTop } = state;
@@ -89,13 +89,6 @@ export function mlbWinProb(state: MlbState): number {
   // have inningsLeft > 0 (bottom 9th = 0.5, not 0).
   // Extra innings: treat each half the same as the 9th.
   const inningsLeft = Math.max(9 - inning, 0) + (isTop ? 1 : 0.5);
-
-  if (inningsLeft <= 0) {
-    // Game over (or extra innings beyond 9 — treat as coin flip for model purposes).
-    if (scoreDiff > 0) return 1;
-    if (scoreDiff < 0) return 0;
-    return 0.5;
-  }
 
   // Home advantage (~54% pre-game) + score scale by innings remaining.
   const homeEdge = 0.15;
