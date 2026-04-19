@@ -155,8 +155,15 @@ export class ArbitrageWorker {
     // SIGTERM we await scanner.stop() before closing Redis so the scanner
     // can release its lock.
     try {
+      // Merge oracle-lag symbols with HL momentum symbols so a single WS
+      // subscription covers both consumers. HL_MOMENTUM_SYMBOLS defaults to
+      // btc/usd,eth/usd,sol/usd,xrp/usd,doge/usd; without this merge the
+      // momentum scanner would silently receive no ticks for SOL/XRP/DOGE.
+      const hlMomentumSymbols = cfg.HL_MOMENTUM_SYMBOLS.split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
       const chainlinkOpts = {
-        symbols: Object.values(ASSET_TO_CHAINLINK_SYMBOL),
+        symbols: [...new Set([...Object.values(ASSET_TO_CHAINLINK_SYMBOL), ...hlMomentumSymbols])],
         // Republish each tick to oracle:* keys + pub/sub when enabled. Other
         // workers (PM crypto trigger path, HL momentum scanner) consume from
         // these without holding their own Chainlink WS subscription.
@@ -550,17 +557,30 @@ export class ArbitrageWorker {
       const signal = await scanHlMomentum(tick, redis);
       if (!signal) return;
 
-      // Set per-side cooldown before execution to prevent double-fire if
-      // another oracle tick arrives before the executor returns.
+      // Atomic NX claim prevents double-fire across concurrent worker instances.
+      // Short TTL (30s) covers the executor round-trip; extended to the full
+      // cooldown on success, or deleted on skip/error so retries aren't blocked.
       const direction = signal.direction as 'LONG' | 'SHORT';
-      await redis.setex(
-        momentumCooldownKey(signal.marketId, direction),
-        cfg.HL_MOMENTUM_COOLDOWN_SEC,
-        '1',
-      );
+      const cooldownKey = momentumCooldownKey(signal.marketId, direction);
+      const claimed = await redis.set(cooldownKey, 'in-flight', 'EX', 30, 'NX');
+      if (!claimed) {
+        logger.debug('[hl-momentum] cooldown claim lost (race)', {
+          symbol: signal.marketId,
+          direction,
+        });
+        return;
+      }
 
-      const result = await executeAndRecordSignal(signal, redis);
+      let result;
+      try {
+        result = await executeAndRecordSignal(signal, redis);
+      } catch (execErr) {
+        await redis.del(cooldownKey);
+        throw execErr;
+      }
+
       if (result.tradeResult?.success) {
+        await redis.set(cooldownKey, '1', 'EX', cfg.HL_MOMENTUM_COOLDOWN_SEC);
         logger.info('[hl-momentum] trade executed', {
           symbol: signal.marketId,
           direction: signal.direction,
@@ -569,11 +589,13 @@ export class ArbitrageWorker {
         });
         await recordGlobalTrade(redis, 'hyperliquid');
       } else if (result.skipped) {
+        await redis.del(cooldownKey);
         logger.debug('[hl-momentum] signal skipped by executor', {
           symbol: signal.marketId,
           reason: result.skipReason,
         });
       } else if (result.error) {
+        await redis.del(cooldownKey);
         logger.warn('[hl-momentum] execution error', {
           symbol: signal.marketId,
           error: result.error,
