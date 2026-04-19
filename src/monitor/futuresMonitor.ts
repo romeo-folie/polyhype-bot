@@ -170,12 +170,12 @@ export async function runFuturesMonitorWorker(): Promise<void> {
       if (positions.length === 0) {
         // No HL positions — close any stale ledger entries left over from previous sessions
         for (const lp of futuresLedger) {
-          const sym = lp.symbol ?? lp.marketId;
           logger.warn('[futures-monitor] pruning orphaned ledger entry — HL has no open positions', {
-            symbol: sym,
+            marketId: lp.marketId,
+            symbol: lp.symbol ?? lp.marketId,
             direction: lp.direction,
           });
-          await closeLedgerPosition(redis, sym, lp.direction);
+          await closeLedgerPosition(redis, lp.marketId, lp.direction);
         }
         await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
         continue;
@@ -235,14 +235,14 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           }),
       );
       for (const lp of futuresLedger) {
-        const sym = lp.symbol ?? lp.marketId;
         const d = lp.direction === 'LONG' ? 'LONG' : 'SHORT';
-        if (!hlOpenSet.has(`${sym}:${d}`)) {
+        if (!hlOpenSet.has(`${lp.marketId}:${d}`)) {
           logger.warn('[futures-monitor] pruning orphaned ledger entry — no matching HL position', {
-            symbol: sym,
+            marketId: lp.marketId,
+            symbol: lp.symbol ?? lp.marketId,
             direction: lp.direction,
           });
-          await closeLedgerPosition(redis, sym, lp.direction);
+          await closeLedgerPosition(redis, lp.marketId, lp.direction);
         }
       }
       // Refresh futuresLedger so the exit loop below only sees live positions
