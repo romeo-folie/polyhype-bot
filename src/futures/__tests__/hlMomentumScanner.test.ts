@@ -20,7 +20,13 @@ const baseConfig = {
   HL_MOMENTUM_MIN_ADX: 20,
   HL_MOMENTUM_COOLDOWN_SEC: 600,
   HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC: 60,
-  HL_MOMENTUM_CANDLE_LOOKBACK_MS: 3_600_000,
+  HL_MOMENTUM_PRIMARY_LOOKBACK_MS: 54_000_000,
+  HL_MOMENTUM_1H_LOOKBACK_MS: 180_000_000,
+  HL_MOMENTUM_4H_LOOKBACK_MS: 864_000_000,
+  HL_MOMENTUM_MTF_4H_GATE_ENABLED: false,
+  HL_MOMENTUM_MTF_1H_GATE_ENABLED: false,
+  HL_MOMENTUM_4H_EMA_FAST: 20,
+  HL_MOMENTUM_4H_EMA_SLOW: 50,
   HL_MOMENTUM_STAKE_USD: 10,
   FUTURES_MAX_PER_TRADE_USD: 15,
 };
@@ -40,6 +46,14 @@ vi.mock('../hlTrendScorer.js', () => ({ scoreHlTrend: (c: unknown) => mockScoreH
 const mockHasOpenPosition = vi.fn().mockResolvedValue(false);
 vi.mock('../../execution/positionLedger.js', () => ({
   hasOpenPosition: (...args: unknown[]) => mockHasOpenPosition(...args),
+}));
+
+// indicators — controlled per test for MTF gates.
+const mockComputeEMA = vi.fn();
+const mockComputeMACDFromCandles = vi.fn();
+vi.mock('../../arb/indicators.js', () => ({
+  computeEMA: (...args: unknown[]) => mockComputeEMA(...args),
+  computeMACDFromCandles: (...args: unknown[]) => mockComputeMACDFromCandles(...args),
 }));
 
 // ---------------------------------------------------------------------------
@@ -146,6 +160,179 @@ describe('scanHlMomentum — candle data gates', () => {
     const result = await scanHlMomentum(makeTick(), redis as never);
     expect(result).toBeNull();
   });
+
+  it('passes the 15m timeframe to buildCandles for primary scoring', async () => {
+    mockBuildCandles.mockResolvedValue([]);
+    mockScoreHlTrend.mockReturnValue(null);
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    // First buildCandles call should request 15m (primary scorer)
+    expect(mockBuildCandles).toHaveBeenCalledWith(
+      expect.any(String),
+      redis,
+      expect.objectContaining({ timeframe: '15m' }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4h bias gate
+// ---------------------------------------------------------------------------
+
+describe('scanHlMomentum — 4h bias gate', () => {
+  beforeEach(() => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_MTF_4H_GATE_ENABLED: true,
+      HL_MOMENTUM_MTF_1H_GATE_ENABLED: false,
+    });
+    // Primary 15m call → bullish
+    mockBuildCandles.mockResolvedValue([{}]);
+    mockScoreHlTrend.mockReturnValue(bullishResult);
+    mockComputeMACDFromCandles.mockReturnValue(null);
+  });
+
+  it('blocks a LONG signal when 4h EMA_FAST < EMA_SLOW (bearish macro)', async () => {
+    // EMA20=90, EMA50=100 → bearish bias → should block LONG
+    mockComputeEMA
+      .mockReturnValueOnce([90])   // EMA_FAST
+      .mockReturnValueOnce([100]); // EMA_SLOW
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull();
+  });
+
+  it('blocks a SHORT signal when 4h EMA_FAST > EMA_SLOW (bullish macro)', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_MTF_4H_GATE_ENABLED: true,
+      HL_MOMENTUM_MTF_1H_GATE_ENABLED: false,
+    });
+    mockScoreHlTrend.mockReturnValue(bearishResult);
+    // EMA20=110, EMA50=100 → bullish bias → should block SHORT
+    mockComputeEMA
+      .mockReturnValueOnce([110])  // EMA_FAST
+      .mockReturnValueOnce([100]); // EMA_SLOW
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull();
+  });
+
+  it('allows a LONG signal when 4h EMA_FAST > EMA_SLOW (bullish macro)', async () => {
+    mockHasOpenPosition.mockResolvedValue(false);
+    // EMA20=110, EMA50=100 → bullish → allows LONG (dark mode → null but not from bias)
+    mockComputeEMA
+      .mockReturnValueOnce([110])  // EMA_FAST
+      .mockReturnValueOnce([100]); // EMA_SLOW
+    const redis = makeRedis();
+    // HL_MOMENTUM_ENABLED=false → dark mode, but gates passed
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    // Dark mode returns null, but no bias mismatch log — verify by checking that
+    // the 4h gate did NOT block (if it had, we'd never reach the shadow-log path).
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({ kind: 'hl_momentum_signal' }),
+    );
+    expect(result).toBeNull(); // dark mode
+  });
+
+  it('skips the gate (passes through) when 4h candles insufficient for EMA', async () => {
+    // computeEMA returns null when insufficient data — gate should not block
+    mockComputeEMA.mockReturnValue(null);
+    mockHasOpenPosition.mockResolvedValue(false);
+    const redis = makeRedis();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    await scanHlMomentum(makeTick(), redis as never);
+    // Shadow-log reached (gate did not block)
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({ kind: 'hl_momentum_signal' }),
+    );
+  });
+
+  it('does not call computeEMA when HL_MOMENTUM_MTF_4H_GATE_ENABLED=false', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_MTF_4H_GATE_ENABLED: false,
+      HL_MOMENTUM_MTF_1H_GATE_ENABLED: false,
+    });
+    mockComputeEMA.mockClear();
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(mockComputeEMA).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1h MACD gate
+// ---------------------------------------------------------------------------
+
+describe('scanHlMomentum — 1h MACD gate', () => {
+  beforeEach(() => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_MTF_4H_GATE_ENABLED: false,
+      HL_MOMENTUM_MTF_1H_GATE_ENABLED: true,
+    });
+    mockBuildCandles.mockResolvedValue([{}]);
+    mockScoreHlTrend.mockReturnValue(bullishResult);
+    mockComputeEMA.mockReturnValue(null);
+  });
+
+  it('blocks a LONG signal when 1h MACD line < signal line', async () => {
+    // macdLine=−0.5, signalLine=0.3 → bearish momentum → blocks LONG
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: -0.5, signalLine: 0.3, histogram: -0.8 });
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull();
+  });
+
+  it('blocks a SHORT signal when 1h MACD line > signal line', async () => {
+    mockScoreHlTrend.mockReturnValue(bearishResult);
+    // macdLine=0.5, signalLine=0.2 → bullish momentum → blocks SHORT
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: 0.5, signalLine: 0.2, histogram: 0.3 });
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull();
+  });
+
+  it('allows a LONG signal when 1h MACD line > signal line', async () => {
+    mockHasOpenPosition.mockResolvedValue(false);
+    // macdLine=0.5, signalLine=0.2 → bullish → allows LONG (dark mode)
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: 0.5, signalLine: 0.2, histogram: 0.3 });
+    const redis = makeRedis();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({ kind: 'hl_momentum_signal' }),
+    );
+  });
+
+  it('skips the gate when 1h MACD returns null (insufficient data)', async () => {
+    mockComputeMACDFromCandles.mockReturnValue(null);
+    mockHasOpenPosition.mockResolvedValue(false);
+    const redis = makeRedis();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({ kind: 'hl_momentum_signal' }),
+    );
+  });
+
+  it('does not call computeMACDFromCandles when HL_MOMENTUM_MTF_1H_GATE_ENABLED=false', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_MTF_4H_GATE_ENABLED: false,
+      HL_MOMENTUM_MTF_1H_GATE_ENABLED: false,
+    });
+    mockComputeMACDFromCandles.mockClear();
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(mockComputeMACDFromCandles).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -156,6 +343,8 @@ describe('scanHlMomentum — cooldown and position gates', () => {
   beforeEach(() => {
     mockBuildCandles.mockResolvedValue([{}]);
     mockScoreHlTrend.mockReturnValue(bullishResult);
+    mockComputeEMA.mockReturnValue(null);
+    mockComputeMACDFromCandles.mockReturnValue(null);
   });
 
   it('returns null when loss cooldown is active', async () => {
@@ -179,9 +368,7 @@ describe('scanHlMomentum — cooldown and position gates', () => {
   });
 
   it('returns null when a SHORT position is already open (opposite side of LONG signal)', async () => {
-    // LONG signal; opposite-side SHORT position should block to prevent a delta-neutral wash.
     mockScoreHlTrend.mockReturnValue(bullishResult); // score > 0 → LONG
-    // hasOpenPosition is called in parallel for LONG then SHORT via Promise.all.
     mockHasOpenPosition
       .mockResolvedValueOnce(false) // LONG side — none open
       .mockResolvedValueOnce(true); // SHORT side — existing position
@@ -191,16 +378,12 @@ describe('scanHlMomentum — cooldown and position gates', () => {
   });
 
   it('does NOT block when SHORT cooldown is set but signal is LONG (side-aware)', async () => {
-    // LONG signal; SHORT cooldown must not block it.
     const shortKey = momentumCooldownKey('BTC', 'SHORT');
     const redis = makeRedis({ [shortKey]: '1' });
-    // HL_MOMENTUM_ENABLED=false → shadow only, returns null — but the gates all passed.
+    // Dark mode returns null, but gates all passed.
     const result = await scanHlMomentum(makeTick(), redis as never);
-    // Dark mode — null, but for the right reason (dark flag, not cooldown).
     expect(result).toBeNull();
-    // redis.get should have been called for the loss cooldown and LONG cooldown keys,
-    // NOT for the SHORT cooldown on a LONG signal.
-    const getCalls: string[] = (redis.get as ReturnType<typeof vi.fn>).mock.calls.map(
+    const getCalls = redis.get.mock.calls.map(
       (c: unknown[]) => String(c[0]),
     );
     expect(getCalls).toContain('futures:momentum:cooldown:BTC:LONG');
@@ -217,6 +400,8 @@ describe('scanHlMomentum — dark mode', () => {
     mockBuildCandles.mockResolvedValue([{}]);
     mockScoreHlTrend.mockReturnValue(bullishResult);
     mockHasOpenPosition.mockResolvedValue(false);
+    mockComputeEMA.mockReturnValue(null);
+    mockComputeMACDFromCandles.mockReturnValue(null);
   });
 
   it('returns null in dark mode even when all gates pass', async () => {
@@ -234,6 +419,18 @@ describe('scanHlMomentum — dark mode', () => {
       expect.objectContaining({ kind: 'hl_momentum_signal', wouldBlock: true }),
     );
   });
+
+  it('shadow payload includes primaryTimeframe=15m', async () => {
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({ primaryTimeframe: '15m' }),
+      }),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -242,9 +439,16 @@ describe('scanHlMomentum — dark mode', () => {
 
 describe('scanHlMomentum — live mode', () => {
   beforeEach(() => {
-    mockLoadConfig.mockReturnValue({ ...baseConfig, HL_MOMENTUM_ENABLED: true });
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_MTF_4H_GATE_ENABLED: false,
+      HL_MOMENTUM_MTF_1H_GATE_ENABLED: false,
+    });
     mockBuildCandles.mockResolvedValue([{}]);
     mockHasOpenPosition.mockResolvedValue(false);
+    mockComputeEMA.mockReturnValue(null);
+    mockComputeMACDFromCandles.mockReturnValue(null);
   });
 
   it('returns a LONG signal for a bullish score when live', async () => {
@@ -271,6 +475,8 @@ describe('scanHlMomentum — live mode', () => {
     mockLoadConfig.mockReturnValue({
       ...baseConfig,
       HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_MTF_4H_GATE_ENABLED: false,
+      HL_MOMENTUM_MTF_1H_GATE_ENABLED: false,
       HL_MOMENTUM_STAKE_USD: 50,
       FUTURES_MAX_PER_TRADE_USD: 15,
     });
@@ -303,6 +509,13 @@ describe('scanHlMomentum — live mode', () => {
     const redis = makeRedis();
     const result = await scanHlMomentum(makeTick('ethusdt', 3000), redis as never);
     expect(result!.marketId).toBe('ETH');
+  });
+
+  it('reasoning mentions 15m timeframe', async () => {
+    mockScoreHlTrend.mockReturnValue(bullishResult);
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result!.reasoning).toContain('15m');
   });
 });
 

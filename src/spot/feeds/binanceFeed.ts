@@ -49,8 +49,11 @@ export interface StoredKline {
 }
 
 const TF_RETENTION_KEYS = {
-  '1m': 'KLINE_RETENTION_1M' as const,
-  '5m': 'KLINE_RETENTION_5M' as const,
+  '1m':  'KLINE_RETENTION_1M'  as const,
+  '5m':  'KLINE_RETENTION_5M'  as const,
+  '15m': 'KLINE_RETENTION_15M' as const,
+  '1h':  'KLINE_RETENTION_1H'  as const,
+  '4h':  'KLINE_RETENTION_4H'  as const,
 };
 
 export class BinanceFeed {

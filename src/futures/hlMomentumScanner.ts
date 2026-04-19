@@ -2,6 +2,7 @@ import type { Redis } from 'ioredis';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { buildCandles } from '../arb/candleAggregator.js';
+import { computeEMA, computeMACDFromCandles } from '../arb/indicators.js';
 import { scoreHlTrend } from './hlTrendScorer.js';
 import { hasOpenPosition } from '../execution/positionLedger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
@@ -42,6 +43,13 @@ export function momentumCooldownKey(hlSymbol: string, direction: 'LONG' | 'SHORT
 /**
  * Evaluate a single Binance spot price tick for a momentum entry on Hyperliquid.
  *
+ * Multi-timeframe confluence gate (Option A swing rework):
+ *   - Primary scorer: 15m candles, 6 voters, |score|≥4, ADX≥20.
+ *   - 4h bias gate (HL_MOMENTUM_MTF_4H_GATE_ENABLED): EMA_FAST > EMA_SLOW for LONG,
+ *     < for SHORT. Prevents counter-trend entries on the macro timeframe.
+ *   - 1h MACD gate (HL_MOMENTUM_MTF_1H_GATE_ENABLED): MACD line > signal line for LONG,
+ *     < for SHORT. Confirms the intermediate momentum direction.
+ *
  * Pure-read: does not write to Redis. The caller (arb worker) sets the momentum
  * cooldown key and calls executeAndRecordSignal after receiving a non-null signal.
  *
@@ -53,6 +61,8 @@ export function momentumCooldownKey(hlSymbol: string, direction: 'LONG' | 'SHORT
  *   - no HL perp mapping for this Binance pair
  *   - scoreHlTrend returns null (< 2 candles) or score is 0
  *   - score or ADX below threshold
+ *   - 4h EMA bias disagrees with signal direction
+ *   - 1h MACD direction disagrees with signal direction
  *   - loss cooldown or momentum cooldown active
  *   - any position already open on this symbol (either direction)
  *   - HL_MOMENTUM_ENABLED is false (dark mode)
@@ -71,17 +81,18 @@ export async function scanHlMomentum(
   const hlSymbol = BINANCE_TO_HL[tick.symbol.toLowerCase()];
   if (!hlSymbol) return null;
 
-  // Fetch OHLCV candles — primary path reads Binance klines from Redis.
-  const candles = await buildCandles(hlSymbol, redis, {
-    lookbackMs: cfg.HL_MOMENTUM_CANDLE_LOOKBACK_MS,
-    timeframe: '1m',
+  // Primary scoring on 15m candles — swing-appropriate timeframe.
+  const primaryCandles = await buildCandles(hlSymbol, redis, {
+    lookbackMs: cfg.HL_MOMENTUM_PRIMARY_LOOKBACK_MS,
+    timeframe: '15m',
   });
 
-  const trendResult = scoreHlTrend(candles);
+  const trendResult = scoreHlTrend(primaryCandles);
   if (trendResult === null) {
     logger.debug('[hl-momentum] insufficient candles', {
       symbol: hlSymbol,
-      count: candles.length,
+      count: primaryCandles.length,
+      timeframe: '15m',
     });
     return null;
   }
@@ -111,6 +122,72 @@ export async function scanHlMomentum(
     });
     return null;
   }
+
+  // ── Multi-timeframe gates ────────────────────────────────────────────────
+
+  // Gate: 4h EMA bias — macro trend must agree with signal direction.
+  let fourHBiasOk: boolean | null = null;
+  if (cfg.HL_MOMENTUM_MTF_4H_GATE_ENABLED) {
+    const fourHCandles = await buildCandles(hlSymbol, redis, {
+      lookbackMs: cfg.HL_MOMENTUM_4H_LOOKBACK_MS,
+      timeframe: '4h',
+    });
+    const closes4h = fourHCandles.map((c) => c.close);
+    const ema4hFast = computeEMA(closes4h, cfg.HL_MOMENTUM_4H_EMA_FAST);
+    const ema4hSlow = computeEMA(closes4h, cfg.HL_MOMENTUM_4H_EMA_SLOW);
+    if (ema4hFast && ema4hSlow) {
+      const fastLast = ema4hFast[ema4hFast.length - 1]!;
+      const slowLast = ema4hSlow[ema4hSlow.length - 1]!;
+      const bullBias = fastLast > slowLast;
+      fourHBiasOk = direction === 'LONG' ? bullBias : !bullBias;
+      if (!fourHBiasOk) {
+        logger.debug('[hl-momentum] 4h bias mismatch', {
+          symbol: hlSymbol,
+          direction,
+          ema4hFast: fastLast.toFixed(4),
+          ema4hSlow: slowLast.toFixed(4),
+        });
+        return null;
+      }
+    } else {
+      logger.debug('[hl-momentum] 4h EMA insufficient data', {
+        symbol: hlSymbol,
+        candleCount: fourHCandles.length,
+        fastPeriod: cfg.HL_MOMENTUM_4H_EMA_FAST,
+        slowPeriod: cfg.HL_MOMENTUM_4H_EMA_SLOW,
+      });
+    }
+  }
+
+  // Gate: 1h MACD direction — intermediate momentum must agree.
+  let oneHMacdOk: boolean | null = null;
+  if (cfg.HL_MOMENTUM_MTF_1H_GATE_ENABLED) {
+    const oneHCandles = await buildCandles(hlSymbol, redis, {
+      lookbackMs: cfg.HL_MOMENTUM_1H_LOOKBACK_MS,
+      timeframe: '1h',
+    });
+    const macd1h = computeMACDFromCandles(oneHCandles, 12, 26, 9);
+    if (macd1h) {
+      const macdBull = macd1h.macdLine > macd1h.signalLine;
+      oneHMacdOk = direction === 'LONG' ? macdBull : !macdBull;
+      if (!oneHMacdOk) {
+        logger.debug('[hl-momentum] 1h MACD mismatch', {
+          symbol: hlSymbol,
+          direction,
+          macdLine: macd1h.macdLine.toFixed(6),
+          signalLine: macd1h.signalLine.toFixed(6),
+        });
+        return null;
+      }
+    } else {
+      logger.debug('[hl-momentum] 1h MACD insufficient data', {
+        symbol: hlSymbol,
+        candleCount: oneHCandles.length,
+      });
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
 
   // Gate: loss cooldown set by futuresMonitor after any losing close.
   const lossCooldown = await redis.get(`futures:loss-cooldown:${hlSymbol}`);
@@ -157,7 +234,10 @@ export async function scanHlMomentum(
       voters,
       binanceSymbol: tick.symbol,
       binancePrice: tick.price,
-      candleCount: candles.length,
+      candleCount: primaryCandles.length,
+      fourHBiasOk,
+      oneHMacdOk,
+      primaryTimeframe: '15m',
     },
   }).catch(() => {});
 
@@ -193,7 +273,7 @@ export async function scanHlMomentum(
     edgeMagnitude: absScore / 6,
     outcomePrice: tick.price,
     sourcedFrom: 'hl-momentum',
-    reasoning: `HL trend scorer: score=${score.toString()}, ADX=${adx.toFixed(1)}, voters=${JSON.stringify(voters)}`,
+    reasoning: `HL trend scorer (15m): score=${score.toString()}, ADX=${adx.toFixed(1)}, voters=${JSON.stringify(voters)}`,
     isFutures: true,
     source: 'hl-momentum',
     eventTs,

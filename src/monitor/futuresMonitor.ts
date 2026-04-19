@@ -245,6 +245,13 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         let slPct = cfg.FUTURES_STOP_LOSS_PCT; // negative
         let tpPct = cfg.FUTURES_TAKE_PROFIT_PCT; // positive
         let trailStopPct = cfg.FUTURES_TRAILING_STOP_PCT;
+
+        // Per-source override: hl-momentum uses wider 15m-appropriate SL/TP.
+        if (ledgerPosForAtr?.sourcedFrom === 'hl-momentum') {
+          slPct = -cfg.HL_MOMENTUM_STOP_LOSS_PCT;
+          tpPct = cfg.HL_MOMENTUM_TAKE_PROFIT_PCT;
+        }
+
         let usingAtrMode = false;
         if (
           cfg.FUTURES_ATR_SLTP_ENABLED &&
