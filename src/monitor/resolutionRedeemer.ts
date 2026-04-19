@@ -793,10 +793,36 @@ async function redeemClobPositions(
             continue;
           }
 
-          const entryPriceSafe = pos.entryPrice > 0;
-          const proceedsUsdc = preBalance ?? pos.sharesHeld ?? (entryPriceSafe ? pos.stakeUsd / pos.entryPrice : 0);
-          if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
+          const entryPriceSafe =
+            typeof pos.entryPrice === 'number' &&
+            Number.isFinite(pos.entryPrice) &&
+            pos.entryPrice > 0;
+          const proceedsUsdc =
+            typeof preBalance === 'number' && Number.isFinite(preBalance) && preBalance > 0
+              ? preBalance
+              : typeof pos.sharesHeld === 'number' && Number.isFinite(pos.sharesHeld) && pos.sharesHeld > 0
+                ? pos.sharesHeld
+                : typeof pos.stakeUsd === 'number' && Number.isFinite(pos.stakeUsd) && entryPriceSafe
+                  ? pos.stakeUsd / pos.entryPrice
+                  : null;
 
+          if (!(typeof proceedsUsdc === 'number' && Number.isFinite(proceedsUsdc) && proceedsUsdc > 0)) {
+            logger.error(
+              '[redeemer] redeemed expired position but could not determine proceeds — leaving open for retry/manual review',
+              {
+                marketId: pos.marketId,
+                preBalance,
+                sharesHeld: pos.sharesHeld,
+                entryPrice: pos.entryPrice,
+                stakeUsd: pos.stakeUsd,
+                txHash: redeemResult.tx_hash,
+              },
+            );
+            results.push({ marketId: pos.marketId, side, success: false, error: 'redemption_proceeds_unknown' });
+            continue;
+          }
+
+          await creditProceeds(redis, proceedsUsdc);
           await closePosition(redis, pos.marketId, pos.direction);
           await markRecentlyClosed(redis, pos.marketId);
 
