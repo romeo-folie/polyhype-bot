@@ -41,7 +41,7 @@ export function momentumCooldownKey(hlSymbol: string, direction: 'LONG' | 'SHORT
  *   - scoreHlTrend returns null (< 2 candles) or score is 0
  *   - score or ADX below threshold
  *   - loss cooldown or momentum cooldown active
- *   - position already open in the same direction
+ *   - any position already open on this symbol (either direction)
  *   - HL_MOMENTUM_ENABLED is false (dark mode)
  */
 export async function scanHlMomentum(

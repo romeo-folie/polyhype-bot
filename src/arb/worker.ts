@@ -598,8 +598,10 @@ export class ArbitrageWorker {
       if (!signal) return;
 
       // Atomic NX claim prevents double-fire across concurrent worker instances.
-      // Short TTL (30s) covers the executor round-trip; extended to the full
-      // cooldown on success, or deleted on skip/error so retries aren't blocked.
+      // Short TTL (30s) covers the executor round-trip; extended to the full cooldown
+      // on success. On skip: held at full TTL for permanent rejections (stake_below_hl_minimum,
+      // already_executed) so the executor isn't hammered every tick; deleted for transient
+      // skips so retries are allowed. Deleted on error.
       const direction = signal.direction as 'LONG' | 'SHORT';
       const cooldownKey = momentumCooldownKey(signal.marketId, direction);
       const claimed = await redis.set(cooldownKey, 'in-flight', 'EX', 30, 'NX');
