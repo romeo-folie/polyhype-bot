@@ -43,7 +43,7 @@ describe('buildCandles — kline source', () => {
     expect(candles[0]!.close).toBe(1.8);
   });
 
-  it.each(['15m', '1h', '4h'] as const)('reads from spot:klines:<sym>:%s when timeframe=%s', async (tf) => {
+  it.each(['15m', '1h', '4h'] as const)('reads from spot:klines:<sym>:%s', async (tf) => {
     const base = Math.floor(Date.now() / MINUTE_MS) * MINUTE_MS;
     const k = JSON.stringify({ t: base, o: 10, h: 12, l: 9, c: 11, v: 100, q: 1100, n: 50 });
     const redis = makeRedis({ [`spot:klines:solusdt:${tf}`]: [k] });
