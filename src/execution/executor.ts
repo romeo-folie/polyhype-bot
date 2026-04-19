@@ -2335,7 +2335,7 @@ export async function executeSignal(
       marketId: signal.marketId,
       txHash: tradeResult.tx_hash,
     });
-    void notifyTradeExecuted(signal, tradeResult.tx_hash).catch(() => {});
+    void notifyTradeExecuted(signal, tradeResult.tx_hash, { venue: 'clob' }).catch(() => {});
     // Fire-and-forget the delta hedge — do not block CLOB trade confirmation on HL latency.
     void triggerDeltaHedge(signal, redis, knownSessionExposureUsd).catch((err: unknown) => {
       logger.warn('[executor] delta hedge async error (non-fatal)', {

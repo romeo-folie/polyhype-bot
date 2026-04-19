@@ -105,7 +105,7 @@ export async function notifyTradeExecuted(
   const edgePct = (signal.edgeMagnitude * 100).toFixed(1);
   const consensusPct = ((signal.consensusProbability ?? 0.5) * 100).toFixed(1);
   const outcomePct = (signal.outcomePrice * 100).toFixed(1);
-  const venue = opts?.venue ? fmtVenue(opts.venue) : 'Simmer';
+  const venue = opts?.venue ? fmtVenue(opts.venue) : 'CLOB';
 
   const sharesLine =
     opts?.sharesFilled != null && opts.sharesFilled > 0
