@@ -38,7 +38,7 @@ export function momentumCooldownKey(hlSymbol: string, direction: 'LONG' | 'SHORT
  *
  * Returns null when:
  *   - symbol not in the configured watch list
- *   - candles insufficient for all 6 voters (< 35 bars)
+ *   - scoreHlTrend returns null (< 2 candles) or score is 0
  *   - score or ADX below threshold
  *   - loss cooldown or momentum cooldown active
  *   - position already open in the same direction
@@ -168,7 +168,7 @@ export async function scanHlMomentum(
     direction,
     stakeUsd,
     edgeMagnitude: absScore / 6,
-    outcomePrice: 0,
+    outcomePrice: tick.value,
     sourcedFrom: 'hl-momentum',
     reasoning: `HL trend scorer: score=${score.toString()}, ADX=${adx.toFixed(1)}, voters=${JSON.stringify(voters)}`,
     isFutures: true,

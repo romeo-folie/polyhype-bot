@@ -567,7 +567,7 @@ export class ArbitrageWorker {
           stakeUsd: signal.stakeUsd,
           executionId: result.signal.executionId,
         });
-        await recordGlobalTrade(redis, 'polymarket');
+        await recordGlobalTrade(redis, 'hyperliquid');
       } else if (result.skipped) {
         logger.debug('[hl-momentum] signal skipped by executor', {
           symbol: signal.marketId,
