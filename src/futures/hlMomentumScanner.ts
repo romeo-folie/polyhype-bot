@@ -15,8 +15,9 @@ export interface BinancePriceTick {
 
 /**
  * Maps Binance USDT pair names → Hyperliquid perp ticker.
- * Triggered off spot:price_moved so any pair with Binance kline data is supported,
- * including meme coins that are absent from the 7-symbol Chainlink RTDS feed.
+ * Triggered off spot:price_moved, but only pairs listed in this mapping AND included
+ * in the configured watch list are supported — including meme coins that are absent
+ * from the 7-symbol Chainlink RTDS feed.
  */
 const BINANCE_TO_HL: Record<string, string> = {
   // Majors
@@ -136,7 +137,11 @@ export async function scanHlMomentum(
     return null;
   }
 
-  const eventTs = tick.ts ?? Date.now();
+  // spot:price_moved timestamp comes from Binance kline close time (T), which can be
+  // slightly in the future for in-progress bars. Clamp to now to keep latency metrics sane.
+  const now = Date.now();
+  const eventTs =
+    typeof tick.ts === 'number' && Number.isFinite(tick.ts) && tick.ts <= now ? tick.ts : now;
 
   // Shadow-log regardless of live flag so dark-mode signals are visible in DB.
   void enqueueWrite('shadow_observations', {
