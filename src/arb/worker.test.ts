@@ -96,6 +96,7 @@ const mockRedis = {
   }),
   get: vi.fn().mockResolvedValue(null),
   set: vi.fn().mockResolvedValue('OK'),
+  del: vi.fn().mockResolvedValue(1),
   zrange: vi.fn().mockResolvedValue([]),
   hincrby: vi.fn().mockResolvedValue(1),
   pipeline: vi.fn(() => ({
@@ -396,6 +397,105 @@ describe('ArbitrageWorker', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(mockScanCryptoArb).not.toHaveBeenCalled();
+
+    worker.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HL momentum cooldown-on-skip behaviour
+// ---------------------------------------------------------------------------
+
+import { scanHlMomentum } from '../futures/hlMomentumScanner.js';
+
+describe('ArbitrageWorker — HL momentum cooldown on executor skip', () => {
+  const cooldownKey = 'futures:momentum:cooldown:BTC:LONG';
+
+  const mockSignal = {
+    marketId: 'BTC',
+    direction: 'LONG' as const,
+    stakeUsd: 10,
+    edgeMagnitude: 0.8,
+    outcomePrice: 75000,
+    sourcedFrom: 'hl-momentum' as const,
+    source: 'hl-momentum' as const,
+    question: 'HL momentum LONG BTC',
+    isFutures: true,
+    eventTs: Date.now(),
+    reasoning: '',
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRedis.on.mockImplementation(
+      (event: string, cb: (channel: string, msg: string) => void) => {
+        if (event === 'message') onRedisMessage = cb;
+      },
+    );
+    mockRedis.subscribe.mockResolvedValue(1);
+    mockRedis.unsubscribe.mockResolvedValue(1);
+    mockRedis.get.mockResolvedValue(null);
+    mockRedis.set.mockResolvedValue('OK');
+    mockRedis.zrange.mockResolvedValue([]);
+    mockRedis.hincrby.mockResolvedValue(1);
+    // NX claim succeeds (no prior cooldown)
+    mockRedis.set.mockResolvedValue('OK');
+    vi.mocked(scanHlMomentum).mockResolvedValue(mockSignal as never);
+  });
+
+  it('holds full cooldown TTL on stake_below_hl_minimum skip', async () => {
+    mockExecuteSignal.mockResolvedValueOnce({
+      signal: mockSignal,
+      skipped: true,
+      skipReason: 'stake_below_hl_minimum',
+    });
+
+    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
+    await worker.start();
+
+    onRedisMessage!('oracle:price_moved', JSON.stringify({ symbol: 'btc/usd', value: 75000, oracleTs: Date.now(), receivedAt: Date.now() }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Should set cooldown with full TTL, not delete it
+    expect(mockRedis.set).toHaveBeenCalledWith(cooldownKey, 'skip', 'EX', 600);
+    expect(mockRedis.del).not.toHaveBeenCalledWith(cooldownKey);
+
+    worker.stop();
+  });
+
+  it('holds full cooldown TTL on already_executed skip', async () => {
+    mockExecuteSignal.mockResolvedValueOnce({
+      signal: mockSignal,
+      skipped: true,
+      skipReason: 'already_executed',
+    });
+
+    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
+    await worker.start();
+
+    onRedisMessage!('oracle:price_moved', JSON.stringify({ symbol: 'btc/usd', value: 75000, oracleTs: Date.now(), receivedAt: Date.now() }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(mockRedis.set).toHaveBeenCalledWith(cooldownKey, 'skip', 'EX', 600);
+    expect(mockRedis.del).not.toHaveBeenCalledWith(cooldownKey);
+
+    worker.stop();
+  });
+
+  it('releases cooldown on other skip reasons (transient)', async () => {
+    mockExecuteSignal.mockResolvedValueOnce({
+      signal: mockSignal,
+      skipped: true,
+      skipReason: 'spread_too_wide',
+    });
+
+    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
+    await worker.start();
+
+    onRedisMessage!('oracle:price_moved', JSON.stringify({ symbol: 'btc/usd', value: 75000, oracleTs: Date.now(), receivedAt: Date.now() }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(mockRedis.del).toHaveBeenCalledWith(cooldownKey);
 
     worker.stop();
   });

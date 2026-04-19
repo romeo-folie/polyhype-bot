@@ -598,8 +598,10 @@ export class ArbitrageWorker {
       if (!signal) return;
 
       // Atomic NX claim prevents double-fire across concurrent worker instances.
-      // Short TTL (30s) covers the executor round-trip; extended to the full
-      // cooldown on success, or deleted on skip/error so retries aren't blocked.
+      // Short TTL (30s) covers the executor round-trip; extended to the full cooldown
+      // on success. On skip: held at full TTL for permanent rejections (stake_below_hl_minimum,
+      // already_executed) so the executor isn't hammered every tick; deleted for transient
+      // skips so retries are allowed. Deleted on error.
       const direction = signal.direction as 'LONG' | 'SHORT';
       const cooldownKey = momentumCooldownKey(signal.marketId, direction);
       const claimed = await redis.set(cooldownKey, 'in-flight', 'EX', 30, 'NX');
@@ -629,7 +631,17 @@ export class ArbitrageWorker {
         });
         await recordGlobalTrade(redis, 'hyperliquid');
       } else if (result.skipped) {
-        await redis.del(cooldownKey);
+        // Hold the full cooldown for skip reasons that will recur on the next tick —
+        // stake too small (permanent until config changes) and already_executed (dedup
+        // key still live). Transient skips release the cooldown so retries are allowed.
+        const holdCooldown =
+          result.skipReason === 'stake_below_hl_minimum' ||
+          result.skipReason === 'already_executed';
+        if (holdCooldown) {
+          await redis.set(cooldownKey, 'skip', 'EX', cfg.HL_MOMENTUM_COOLDOWN_SEC);
+        } else {
+          await redis.del(cooldownKey);
+        }
         logger.debug('[hl-momentum] signal skipped by executor', {
           symbol: signal.marketId,
           reason: result.skipReason,
