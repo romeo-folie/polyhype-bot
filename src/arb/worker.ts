@@ -29,6 +29,20 @@ import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { TradeSignal } from '../mapping/index.js';
 import type { ChainlinkTick } from '../spot/feeds/chainlinkFeed.js';
 
+/**
+ * Maps Chainlink oracle symbols to their Binance USDT pair equivalents.
+ * Used to feed oracle ticks into the PM crypto-arb scanner when
+ * CHAINLINK_CRYPTO_ARB_ENABLED is true.
+ */
+const CHAINLINK_TO_BINANCE_SYMBOL: Record<string, string> = {
+  'btc/usd': 'btcusdt',
+  'eth/usd': 'ethusdt',
+  'sol/usd': 'solusdt',
+  'xrp/usd': 'xrpusdt',
+  'doge/usd': 'dogeusdt',
+  'bnb/usd': 'bnbusdt',
+};
+
 interface WorkerOptions {
   baselineIntervalMs?: number;
   maxTradesPerMin?: number;
@@ -211,6 +225,14 @@ export class ArbitrageWorker {
           return;
         }
         void this.triggerHlMomentum(tick);
+        // Chainlink → PM crypto-arb: oracle ticks lead Binance by ~55s;
+        // changePercent = (oraclePrice − lastBinancePrice) / lastBinancePrice.
+        if (cfg.CHAINLINK_CRYPTO_ARB_ENABLED) {
+          const binanceSym = CHAINLINK_TO_BINANCE_SYMBOL[tick.symbol];
+          if (binanceSym) {
+            void this.triggerCryptoArbFromTicker(binanceSym, tick.value, tick.receivedAt, null);
+          }
+        }
       }
 
       if (channel === 'spot:price_moved') {
