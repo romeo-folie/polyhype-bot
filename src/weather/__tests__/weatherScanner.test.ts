@@ -22,6 +22,7 @@ const baseConfig = {
   WEATHER_MAX_PER_CITY: 1,
   WEATHER_MAX_SCAN_EXPOSURE_USD: 30,
   WEATHER_KELLY_FRACTION: 0.25,
+  MIN_BET_USD: 5,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
 vi.mock('../../shared/config.js', () => ({
@@ -1059,7 +1060,7 @@ describe('scanWeatherMarkets', () => {
       wireMockGammaAndForecast();
       mockGetBankroll.mockResolvedValue(1000);
       mockExecuteAndRecordSignal.mockResolvedValue({
-        signal: {} as never, skipped: false, executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
       });
 
       await runWeatherScan(redisMock as never);
@@ -1090,7 +1091,7 @@ describe('scanWeatherMarkets', () => {
       wireMockGammaAndForecast();
       mockGetBankroll.mockResolvedValue(10000);
       mockExecuteAndRecordSignal.mockResolvedValue({
-        signal: {} as never, skipped: false, executionVenue: 'clob',
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
       });
 
       await runWeatherScan(redisMock as never);
@@ -1109,7 +1110,7 @@ describe('scanWeatherMarkets', () => {
       wireMockGammaAndForecast();
       mockGetBankroll.mockResolvedValue(10000);
       mockExecuteAndRecordSignal.mockResolvedValue({
-        signal: {} as never, skipped: false, executionVenue: 'clob',
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
       });
 
       await runWeatherScan(redisMock as never);
@@ -1130,7 +1131,7 @@ describe('scanWeatherMarkets', () => {
       wireMockGammaAndForecast();
       mockGetBankroll.mockResolvedValue(10000); // large bankroll → each Kelly stake > $5
       mockExecuteAndRecordSignal.mockResolvedValue({
-        signal: {} as never, skipped: false, executionVenue: 'clob',
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
       });
 
       await runWeatherScan(redisMock as never);

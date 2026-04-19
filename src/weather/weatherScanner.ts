@@ -1021,11 +1021,16 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       continue;
     }
     const stakeUsd = Math.min(bankrollUsd * kellyFraction, maxStakeCap);
+    // Gate on the worst-case filled amount: executor bumps stakes ≥60% of
+    // MIN_BET_USD up to the floor, so the actual committed amount may be higher
+    // than the Kelly-derived stakeUsd. Using max(stakeUsd, MIN_BET_USD) keeps
+    // the exposure check tight even after the floor bump.
+    const worstCaseStakeUsd = Math.max(stakeUsd, cfg.MIN_BET_USD);
 
-    if (cumulativeStakeUsd + stakeUsd > cfg.WEATHER_MAX_SCAN_EXPOSURE_USD) {
+    if (cumulativeStakeUsd + worstCaseStakeUsd > cfg.WEATHER_MAX_SCAN_EXPOSURE_USD) {
       logger.info('[weather] per-scan exposure cap would be exceeded — stopping', {
         cumulativeStakeUsd: cumulativeStakeUsd.toFixed(2),
-        proposedStakeUsd: stakeUsd.toFixed(2),
+        proposedStakeUsd: worstCaseStakeUsd.toFixed(2),
         cap: cfg.WEATHER_MAX_SCAN_EXPOSURE_USD,
       });
       break;
