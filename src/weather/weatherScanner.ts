@@ -671,6 +671,10 @@ export async function scanWeatherMarkets(
     return [];
   }
 
+  // Hoisted out of the per-event loop — the mode is a static config read, so
+  // reparsing per event is wasted work and makes the read point less obvious.
+  const allowedSides = parseAllowedSides(cfg.WEATHER_TRADE_SIDES);
+
   let parsedCount = 0;
   let dedupSkipped = 0;
   let noForecast = 0;
@@ -710,7 +714,6 @@ export async function scanWeatherMarkets(
     // when bracket data is incomplete — e.g. late-day thinning from 11 → 4 brackets).
     // modelSum is returned by findMispricedBrackets so shadow logging reuses the exact
     // values used for gating rather than recomputing them.
-    const allowedSides = parseAllowedSides(cfg.WEATHER_TRADE_SIDES);
     const { opportunities, modelSum } = findMispricedBrackets(
       event,
       forecast,
@@ -728,6 +731,7 @@ export async function scanWeatherMarkets(
     const bestEdge = opportunities.length > 0
       ? Math.max(...opportunities.map((o) => o.edge))
       : 0;
+    const allowedInEvent = opportunities.filter((o) => o.allowedByConfig).length;
 
     logger.info('[weather] event evaluated', {
       eventId: event.eventId,
@@ -747,16 +751,22 @@ export async function scanWeatherMarkets(
       modelSum: modelSum.toFixed(4),
       coverageStatus,
       opportunitiesFound: opportunities.length,
+      allowedInEvent,
+      tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
       bestEdge: bestEdge.toFixed(3),
       enabled: cfg.WEATHER_SCANNER_ENABLED,
     });
     void enqueueWrite('shadow_observations', {
       kind: 'weather_event',
       source: 'arb',
-      // Block when either the feature is disabled OR no opportunities exist —
-      // matches weather_bracket semantics and lets analytics count disabled
-      // runs as blocks.
-      wouldBlock: !cfg.WEATHER_SCANNER_ENABLED || opportunities.length === 0,
+      // Block when the feature is disabled, no opportunities exist, or every
+      // opportunity is on a side gated off by WEATHER_TRADE_SIDES — matches
+      // weather_bracket semantics so event-level `wouldBlock` aggregates stay
+      // consistent with bracket-level `wouldTrade` counts.
+      wouldBlock:
+        !cfg.WEATHER_SCANNER_ENABLED ||
+        opportunities.length === 0 ||
+        allowedInEvent === 0,
       metricValue: bestEdge,
       threshold: cfg.WEATHER_MIN_EDGE,
       payload: {
@@ -780,6 +790,8 @@ export async function scanWeatherMarkets(
         modelSum: parseFloat(modelSum.toFixed(4)),
         status: coverageStatus,
         opportunitiesFound: opportunities.length,
+        allowedInEvent,
+        tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
         scannerEnabled: cfg.WEATHER_SCANNER_ENABLED,
       },
     });

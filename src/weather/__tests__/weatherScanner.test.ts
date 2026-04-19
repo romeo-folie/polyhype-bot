@@ -701,6 +701,10 @@ describe('findMispricedBrackets', () => {
     expect(noOnly.length).toBeGreaterThan(0);
     const yesOpps = noOnly.filter((o) => o.tradeSide === 'YES');
     const noOpps = noOnly.filter((o) => o.tradeSide === 'NO');
+    // Both sides must actually appear or the per-side assertions below pass vacuously
+    // and the test would regress to meaningless. Fixture is tuned to yield both.
+    expect(yesOpps.length).toBeGreaterThan(0);
+    expect(noOpps.length).toBeGreaterThan(0);
     // Every YES-side opp in this event is gated; every NO-side opp stays tradable.
     for (const o of yesOpps) expect(o.allowedByConfig).toBe(false);
     for (const o of noOpps) expect(o.allowedByConfig).toBe(true);
