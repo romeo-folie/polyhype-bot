@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nbaWinProb, nhlWinProb } from '../winProb.js';
+import { nbaWinProb, nhlWinProb, mlbWinProb } from '../winProb.js';
 
 describe('nbaWinProb', () => {
   it('home up 10 with 1 minute left → > 0.95', () => {
@@ -25,6 +25,34 @@ describe('nbaWinProb', () => {
 
   it('home up 1 at final buzzer → 1.0', () => {
     expect(nbaWinProb({ scoreDiff: 1, secondsRemaining: 0 })).toBe(1);
+  });
+});
+
+describe('mlbWinProb', () => {
+  it('tied at start of game → ~0.54 (home edge)', () => {
+    const p = mlbWinProb({ scoreDiff: 0, inning: 1, isTop: true });
+    expect(p).toBeGreaterThan(0.50);
+    expect(p).toBeLessThan(0.60);
+  });
+
+  it('home up 3 entering bottom 9th → > 0.95', () => {
+    const p = mlbWinProb({ scoreDiff: 3, inning: 9, isTop: false });
+    expect(p).toBeGreaterThan(0.95);
+  });
+
+  it('away up 1 entering bottom 9th → < 0.40 (home can tie)', () => {
+    const p = mlbWinProb({ scoreDiff: -1, inning: 9, isTop: false });
+    expect(p).toBeLessThan(0.40);
+  });
+
+  it('home up 2 in top 7th → > 0.70', () => {
+    const p = mlbWinProb({ scoreDiff: 2, inning: 7, isTop: true });
+    expect(p).toBeGreaterThan(0.70);
+  });
+
+  it('away up 3 at start → < 0.40', () => {
+    const p = mlbWinProb({ scoreDiff: -3, inning: 1, isTop: true });
+    expect(p).toBeLessThan(0.40);
   });
 });
 

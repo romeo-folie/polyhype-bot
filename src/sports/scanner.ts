@@ -11,7 +11,7 @@ import { loadConfig, type AppConfig } from '../shared/config.js';
 import { getCachedMarkets, type CachedMarket } from '../shared/watchlist.js';
 import { parseClobTokenIds, parseOutcomePrices } from '../mapping/gamma.js';
 import { fetchLiveGames, type LiveGame, type SportsLeague } from './espnFeed.js';
-import { nbaWinProb, nhlWinProb } from './winProb.js';
+import { nbaWinProb, nhlWinProb, mlbWinProb } from './winProb.js';
 import type { TradeSignal } from '../mapping/index.js';
 import type { Redis } from 'ioredis';
 
@@ -52,6 +52,18 @@ function nickname(team: string): string {
 }
 
 /**
+ * Polymarket sets endDate to approximately the game tip-off / first-pitch time,
+ * not when the game ends. Allow markets to stay eligible for this long after
+ * their endDate so the scanner can act during the full duration of the game.
+ */
+const STALE_GAME_GRACE_MS = 4 * 3600 * 1000; // 4 hours
+
+/** Skip over/under, spread, and first-half prop markets — win-prob doesn't apply to them. */
+function isMoneylineMarket(question: string): boolean {
+  return !/\bO\/U\b|Spread:|\b1H\b/i.test(question);
+}
+
+/**
  * Return true when the market question mentions both teams from the given game.
  * Uses team nickname matching against the normalised question text.
  */
@@ -84,6 +96,9 @@ export function modelHomeWinProb(game: LiveGame): number {
   const scoreDiff = game.homeScore - game.awayScore;
   if (game.league === 'nba') {
     return nbaWinProb({ scoreDiff, secondsRemaining: game.secondsRemaining });
+  }
+  if (game.league === 'mlb') {
+    return mlbWinProb({ scoreDiff, inning: game.period, isTop: game.halfInning !== 'bottom' });
   }
   // NHL — empty-net detection would need play-by-play; skip for now.
   return nhlWinProb({ scoreDiff, secondsRemaining: game.secondsRemaining, period: game.period });
@@ -132,14 +147,19 @@ export async function scanLiveSportsArb(
   const horizonMs = cfg.SPORTS_MARKET_LOOKAHEAD_H * 3600 * 1000;
 
   const candidates: SportsArbCandidate[] = [];
+  let matchedAny = false;
   for (const game of games) {
     for (const market of markets) {
       if (!market.endDate) continue;
       const endMs = new Date(market.endDate).getTime();
-      if (!Number.isFinite(endMs) || endMs < now) continue; // expired
+      if (!Number.isFinite(endMs) || endMs < now - STALE_GAME_GRACE_MS) continue; // well past game end
+      // Polymarket sets endDate ≈ tip-off/first-pitch, so endMs - now can be small or negative
+      // while the game is still in progress. The grace window above covers the full game duration.
       if (endMs - now > horizonMs) continue; // too far out
 
+      if (!isMoneylineMarket(market.question ?? '')) continue; // skip O/U, spread, 1H props
       if (!marketMatchesGame(market, game)) continue;
+      matchedAny = true;
 
       let yesPrice: number;
       try {
@@ -181,6 +201,13 @@ export async function scanLiveSportsArb(
         direction,
       });
     }
+  }
+
+  if (games.length > 0 && !matchedAny) {
+    logger.info('[sports-arb] live games found but no matching PM markets', {
+      gameCount: games.length,
+      games: games.map((g) => `${g.awayAbbrev}@${g.homeAbbrev} (${g.league})`),
+    });
   }
 
   if (!cfg.SPORTS_ARB_ENABLED) {

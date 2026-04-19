@@ -1180,7 +1180,7 @@ const envSchema = z.object({
         v
           .split(',')
           .map((s) => s.trim().toLowerCase())
-          .filter((s): s is 'nba' | 'nhl' => s === 'nba' || s === 'nhl'),
+          .filter((s): s is 'nba' | 'nhl' | 'mlb' => s === 'nba' || s === 'nhl' || s === 'mlb'),
       ),
     ),
   SPORTS_POLL_INTERVAL_S: z.coerce.number().int().min(1).optional().default(8),

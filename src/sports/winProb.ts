@@ -62,6 +62,45 @@ export function nbaWinProb(state: NbaState): number {
   return sigmoid(logit + possNudge);
 }
 
+export interface MlbState {
+  /** Home score minus away score. */
+  scoreDiff: number;
+  /** Current inning (1–9; 10+ for extra innings). */
+  inning: number;
+  /** True if the home team has not yet batted in the current inning (top half). */
+  isTop: boolean;
+}
+
+/**
+ * MLB home-team win probability.
+ *
+ * Model: logistic on score-diff scaled by sqrt of innings remaining.
+ * Home bats last, so the model carries a small home edge.
+ *
+ * Calibration anchors:
+ *   - tied at start of game          → ~0.54 (home field)
+ *   - home up 3 entering bottom 9th  → ~0.97
+ *   - away up 1 entering bottom 9th  → ~0.33 (home can tie/win)
+ */
+export function mlbWinProb(state: MlbState): number {
+  const { scoreDiff, inning, isTop } = state;
+
+  // Innings remaining: top = home hasn't batted yet in this inning.
+  const inningsLeft = Math.max(9 - inning, 0) + (isTop ? 0.5 : 0);
+
+  if (inningsLeft <= 0) {
+    // Game over (or extra innings beyond 9 — treat as coin flip for model purposes).
+    if (scoreDiff > 0) return 1;
+    if (scoreDiff < 0) return 0;
+    return 0.5;
+  }
+
+  // Home advantage (~54% pre-game) + score scale by innings remaining.
+  const homeEdge = 0.15;
+  const scaled = scoreDiff / Math.sqrt(inningsLeft + 0.5);
+  return sigmoid(homeEdge + 0.8 * scaled);
+}
+
 export interface NhlState {
   /** Home score minus away score. */
   scoreDiff: number;
