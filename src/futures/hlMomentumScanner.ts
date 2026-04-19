@@ -30,7 +30,7 @@ const BINANCE_TO_HL: Record<string, string> = {
   pepeusdt: 'kPEPE',   // HL trades 1000× units; same direction as Binance PEPEUSDT
   wifusdt:  'WIF',
   bonkusdt: 'kBONK',   // HL trades 1000× units; same direction as Binance BONKUSDT
-  penguusdt:'PENGU',
+  penguusdt: 'PENGU',
 };
 
 /** Redis key for the per-symbol per-side momentum cooldown. */

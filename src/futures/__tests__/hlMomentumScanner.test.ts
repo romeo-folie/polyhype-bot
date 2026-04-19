@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { scanHlMomentum, momentumCooldownKey } from '../hlMomentumScanner.js';
+import type { BinancePriceTick } from '../hlMomentumScanner.js';
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -45,7 +46,7 @@ vi.mock('../../execution/positionLedger.js', () => ({
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeTick(symbol = 'btcusdt', price = 70_000): { symbol: string; price: number; ts: number } {
+function makeTick(symbol = 'btcusdt', price = 70_000): BinancePriceTick {
   return { symbol, price, ts: Date.now() };
 }
 

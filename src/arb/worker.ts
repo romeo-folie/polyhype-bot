@@ -170,15 +170,10 @@ export class ArbitrageWorker {
     // SIGTERM we await scanner.stop() before closing Redis so the scanner
     // can release its lock.
     try {
-      // Merge oracle-lag symbols with HL momentum symbols so a single WS
-      // subscription covers both consumers. HL_MOMENTUM_SYMBOLS defaults to
-      // btc/usd,eth/usd,sol/usd,xrp/usd,doge/usd; without this merge the
-      // momentum scanner would silently receive no ticks for SOL/XRP/DOGE.
-      const hlMomentumSymbols = cfg.HL_MOMENTUM_SYMBOLS.split(',')
-        .map((s) => s.trim().toLowerCase())
-        .filter(Boolean);
+      // HL momentum scanner now fires off spot:price_moved (Binance), not oracle ticks,
+      // so HL_MOMENTUM_SYMBOLS no longer needs to be merged into the Chainlink subscription.
       const chainlinkOpts = {
-        symbols: [...new Set([...Object.values(ASSET_TO_CHAINLINK_SYMBOL), ...hlMomentumSymbols])],
+        symbols: [...new Set(Object.values(ASSET_TO_CHAINLINK_SYMBOL))],
         // Republish each tick to oracle:* keys + pub/sub when enabled. Other
         // workers (PM crypto trigger path, HL momentum scanner) consume from
         // these without holding their own Chainlink WS subscription.
@@ -222,7 +217,7 @@ export class ArbitrageWorker {
         try {
           tick = JSON.parse(message) as ChainlinkTick;
         } catch {
-          logger.warn('[hl-momentum] invalid oracle:price_moved payload');
+          logger.warn('[arb-worker] invalid oracle:price_moved payload');
           return;
         }
         // Chainlink → PM crypto-arb: oracle ticks lead Binance by ~55s;
@@ -606,10 +601,12 @@ export class ArbitrageWorker {
       if (!signal) return;
 
       // Atomic NX claim prevents double-fire across concurrent worker instances.
-      // Short TTL (30s) covers the executor round-trip; extended to the full cooldown
-      // on success. On skip: held at full TTL for permanent rejections (stake_below_hl_minimum,
-      // already_executed) so the executor isn't hammered every tick; deleted for transient
-      // skips so retries are allowed. Deleted on error.
+      // Short TTL (30s) covers the executor round-trip; extended on success/skip:
+      //   - success → full HL_MOMENTUM_COOLDOWN_SEC (prevents same-thesis re-entry)
+      //   - stake_below_hl_minimum → HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC (short; HL
+      //     minimum notional is price-dependent and may clear on the next tick)
+      //   - already_executed → full cooldown (dedup key is still live)
+      //   - other skips / errors → deleted (allow immediate retry)
       const direction = signal.direction as 'LONG' | 'SHORT';
       const cooldownKey = momentumCooldownKey(signal.marketId, direction);
       const claimed = await redis.set(cooldownKey, 'in-flight', 'EX', 30, 'NX');

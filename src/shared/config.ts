@@ -1122,7 +1122,8 @@ const envSchema = z.object({
   // ── HL Momentum Scanner (Binance spot-triggered perp entries) ──
   // Ships dark. Flip to true after ≥48h shadow review shows credible signals.
   HL_MOMENTUM_ENABLED: boolFromEnv.optional().default(false),
-  // Comma-separated Binance USDT pairs to watch (must match spot:klines:<sym> keys).
+  // Comma-separated Binance USDT pairs to watch (symbols must match the <sym> portion of
+  // spot:klines:<sym>:<timeframe> keys, e.g. spot:klines:ethusdt:1m).
   HL_MOMENTUM_SYMBOLS: z.string().optional().default('ethusdt,solusdt,xrpusdt,dogeusdt,pepeusdt,wifusdt,bonkusdt,penguusdt'),
   // Minimum trend-scorer confluence score (|upVotes - downVotes|) to open a position. Range [0,6].
   HL_MOMENTUM_MIN_SCORE: z.coerce.number().int().min(0).max(6).optional().default(4),
