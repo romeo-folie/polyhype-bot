@@ -380,3 +380,141 @@ describe('ChainlinkFeed', () => {
     expect((move?.pctMove ?? 0) * 100).toBeCloseTo(0.5, 4);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ChainlinkFeed — Redis publisher behavior
+// ---------------------------------------------------------------------------
+
+interface FakePipeline {
+  set: ReturnType<typeof vi.fn>;
+  zadd: ReturnType<typeof vi.fn>;
+  zremrangebyrank: ReturnType<typeof vi.fn>;
+  publish: ReturnType<typeof vi.fn>;
+  exec: ReturnType<typeof vi.fn>;
+}
+
+interface FakeRedis {
+  pipeline: ReturnType<typeof vi.fn>;
+  lastPipeline: FakePipeline | null;
+}
+
+function makeFakeRedis(): FakeRedis {
+  const fake: FakeRedis = {
+    lastPipeline: null,
+    pipeline: vi.fn(),
+  };
+  fake.pipeline.mockImplementation(() => {
+    const pipe: FakePipeline = {
+      set: vi.fn().mockReturnThis(),
+      zadd: vi.fn().mockReturnThis(),
+      zremrangebyrank: vi.fn().mockReturnThis(),
+      publish: vi.fn().mockReturnThis(),
+      exec: vi.fn().mockResolvedValue([]),
+    };
+    fake.lastPipeline = pipe;
+    return pipe;
+  });
+  return fake;
+}
+
+describe('ChainlinkFeed Redis publisher', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    currentWs = makeFakeWs();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(1_775_919_000_000);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('does not call redis when no client is provided', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+
+    deliver(feed, makeChainlinkMsg('btc/usd', 72_000));
+    // No assertion needed beyond "doesn't throw" — there is no redis to inspect.
+    expect(feed.getLatest('btc/usd')?.value).toBe(72_000);
+  });
+
+  it('publishes SET + ZADD + ZREMRANGEBYRANK + PUBLISH in one pipeline per tick', async () => {
+    const fakeRedis = makeFakeRedis();
+    const feed = new ChainlinkFeed({
+      symbols: ['btc/usd'],
+      redis: fakeRedis as unknown as ConstructorParameters<typeof ChainlinkFeed>[0]['redis'],
+    });
+    feed.start();
+
+    const oracleTs = 1_775_919_469_000;
+    deliver(feed, makeChainlinkMsg('btc/usd', 72_000, oracleTs));
+
+    // publishTick is fire-and-forget (void); flush any queued microtasks.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fakeRedis.pipeline).toHaveBeenCalledTimes(1);
+    const pipe = fakeRedis.lastPipeline;
+    expect(pipe).not.toBeNull();
+    expect(pipe!.set).toHaveBeenCalledWith('oracle:last:btc/usd', '72000', 'EX', 120);
+    expect(pipe!.zadd).toHaveBeenCalledWith(
+      'oracle:prices:btc/usd',
+      oracleTs,
+      `${oracleTs}:72000`,
+    );
+    // ZREMRANGEBYRANK keeps the latest 600 entries: 0..-601 removes everything older.
+    expect(pipe!.zremrangebyrank).toHaveBeenCalledWith('oracle:prices:btc/usd', 0, -601);
+    expect(pipe!.publish).toHaveBeenCalledTimes(1);
+    const [channel, payload] = pipe!.publish.mock.calls[0];
+    expect(channel).toBe('oracle:price_moved');
+    const parsed = JSON.parse(payload as string);
+    expect(parsed).toMatchObject({
+      symbol: 'btc/usd',
+      value: 72_000,
+      oracleTs,
+    });
+    expect(typeof parsed.receivedAt).toBe('number');
+    expect(pipe!.exec).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not publish for symbols outside the configured allowlist', async () => {
+    const fakeRedis = makeFakeRedis();
+    const feed = new ChainlinkFeed({
+      symbols: ['btc/usd'],
+      redis: fakeRedis as unknown as ConstructorParameters<typeof ChainlinkFeed>[0]['redis'],
+    });
+    feed.start();
+
+    deliver(feed, makeChainlinkMsg('eth/usd', 3_400));
+    await Promise.resolve();
+    expect(fakeRedis.pipeline).not.toHaveBeenCalled();
+  });
+
+  it('survives a redis pipeline rejection without throwing or interrupting in-process state', async () => {
+    const fakeRedis = makeFakeRedis();
+    fakeRedis.pipeline.mockImplementationOnce(() => {
+      const pipe: FakePipeline = {
+        set: vi.fn().mockReturnThis(),
+        zadd: vi.fn().mockReturnThis(),
+        zremrangebyrank: vi.fn().mockReturnThis(),
+        publish: vi.fn().mockReturnThis(),
+        exec: vi.fn().mockRejectedValue(new Error('redis down')),
+      };
+      fakeRedis.lastPipeline = pipe;
+      return pipe;
+    });
+
+    const feed = new ChainlinkFeed({
+      symbols: ['btc/usd'],
+      redis: fakeRedis as unknown as ConstructorParameters<typeof ChainlinkFeed>[0]['redis'],
+    });
+    feed.start();
+
+    expect(() => deliver(feed, makeChainlinkMsg('btc/usd', 72_000))).not.toThrow();
+    // In-process ringbuffer must still be populated even when publish fails.
+    expect(feed.getLatest('btc/usd')?.value).toBe(72_000);
+    // Drain the rejected promise so vitest doesn't flag an unhandled rejection.
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+});
