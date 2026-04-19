@@ -58,9 +58,9 @@ function nickname(team: string): string {
  */
 const STALE_GAME_GRACE_MS = 6 * 3600 * 1000; // 6 hours — covers MLB extra innings + rain delays
 
-/** Skip over/under, spread, and first-half prop markets — win-prob doesn't apply to them. */
+/** Skip over/under, spread, first-half, and first-inning prop markets — win-prob doesn't apply to them. */
 function isMoneylineMarket(question: string): boolean {
-  return !/\bO\/U\b|Spread:|\b1H\b/i.test(question);
+  return !/\bO\/U\b|Spread:|\b1H\b|\binning\b/i.test(question);
 }
 
 /**

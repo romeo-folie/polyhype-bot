@@ -111,6 +111,17 @@ describe('scanLiveSportsArb', () => {
     expect(signals).toHaveLength(0);
   });
 
+  it('skips first-inning run prop markets', async () => {
+    const inningMarket = mkMarket({
+      question: 'Will there be a run scored in the first inning?: Lakers vs. Warriors',
+    });
+    const { signals } = await scanLiveSportsArb(fakeRedis, mkCfg(), {
+      fetchLive: async () => [mkGame()],
+      getMarkets: async () => [inningMarket],
+    });
+    expect(signals).toHaveLength(0);
+  });
+
   it('skips Spread prop markets', async () => {
     const spreadMarket = mkMarket({ question: 'Spread: Warriors (-4.5)' });
     const { signals } = await scanLiveSportsArb(fakeRedis, mkCfg(), {
