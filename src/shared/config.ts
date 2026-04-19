@@ -404,6 +404,13 @@ const envSchema = z.object({
   UPDOWN_PNL_COOLDOWN_MIN: z.coerce.number().int().min(1).optional().default(30),
   UPDOWN_PNL_MIN_SAMPLES: z.coerce.number().int().min(1).optional().default(3),
 
+  // When true, the ChainlinkFeed (owned by the arb worker) republishes every
+  // tick to Redis: SET oracle:last:<symbol> EX 120, ZADD oracle:prices:<symbol>
+  // (capped at 600), PUBLISH oracle:price_moved. Lets other workers act on
+  // Chainlink ticks without holding their own WS. Off = pure in-process mode
+  // (the historical default before the HL momentum work).
+  CHAINLINK_REDIS_PUBLISH_ENABLED: boolFromEnv.optional().default(true),
+
   // Oracle-Lag Scanner (BTC + ETH Up/Down 15m, Chainlink oracle-lag sniper).
   // Ships dark — enable live trading per asset only after shadow-log review
   // (ORACLE_LAG_ENABLED for BTC, ORACLE_LAG_ETH_ENABLED for ETH).

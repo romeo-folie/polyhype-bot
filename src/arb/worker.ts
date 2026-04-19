@@ -152,7 +152,14 @@ export class ArbitrageWorker {
     // SIGTERM we await scanner.stop() before closing Redis so the scanner
     // can release its lock.
     try {
-      this.chainlinkFeed = new ChainlinkFeed({ symbols: Object.values(ASSET_TO_CHAINLINK_SYMBOL) });
+      const chainlinkOpts = {
+        symbols: Object.values(ASSET_TO_CHAINLINK_SYMBOL),
+        // Republish each tick to oracle:* keys + pub/sub when enabled. Other
+        // workers (PM crypto trigger path, HL momentum scanner) consume from
+        // these without holding their own Chainlink WS subscription.
+        ...(cfg.CHAINLINK_REDIS_PUBLISH_ENABLED ? { redis: getRedis() } : {}),
+      };
+      this.chainlinkFeed = new ChainlinkFeed(chainlinkOpts);
       this.chainlinkFeed.start();
       this.oracleLagScanner = new OracleLagScanner({ redis: getRedis() });
       await this.oracleLagScanner.start(this.chainlinkFeed);

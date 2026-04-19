@@ -1,5 +1,6 @@
 import { WebSocket } from 'ws';
 import type { RawData } from 'ws';
+import type { Redis } from 'ioredis';
 import { logger } from '../../shared/logger.js';
 
 /**
@@ -11,8 +12,12 @@ import { logger } from '../../shared/logger.js';
  * detect recent Chainlink price moves that Polymarket's BTC Up/Down markets
  * have not yet reacted to.
  *
- * Pure state — no Redis writes, no Pub/Sub. The process that owns the scanner
- * also owns the feed instance.
+ * Optional Redis pub/sub: when constructed with a `redis` client, every tick
+ * is also republished as `oracle:price_moved`, with the latest value cached
+ * at `oracle:last:<symbol>` (EX 120) and a windowed history at
+ * `oracle:prices:<symbol>` (ZSET capped at 600 entries). This mirrors the
+ * `spot:price_moved` pattern from BinanceFeed so consumers in other workers
+ * can act on Chainlink ticks without holding their own WS subscription.
  */
 
 const CHAINLINK_WS_URL = 'wss://ws-live-data.polymarket.com';
@@ -149,7 +154,30 @@ export interface ChainlinkFeedOptions {
   symbols?: string[];
   /** Ring buffer capacity per symbol. Must be ≥ 300. */
   capacity?: number;
+  /**
+   * Optional Redis client for pub/sub republish. When omitted, the feed runs
+   * in pure in-process mode (oracle-lag scanner only). When provided, every
+   * tick is also fan-out to `oracle:price_moved`, `oracle:last:<symbol>`,
+   * and `oracle:prices:<symbol>`.
+   */
+  redis?: Redis;
 }
+
+/** Redis key for the most-recent Chainlink price per symbol (EX 120). */
+function oracleLastKey(symbol: string): string {
+  return `oracle:last:${symbol}`;
+}
+
+/** Redis ZSET key for the windowed Chainlink price history per symbol. */
+function oraclePricesKey(symbol: string): string {
+  return `oracle:prices:${symbol}`;
+}
+
+/** Pub/sub channel name. Mirrors `spot:price_moved` from BinanceFeed. */
+const ORACLE_PRICE_MOVED_CHANNEL = 'oracle:price_moved';
+
+/** TTL on oracle:last:* SET — staleness signal for downstream consumers. */
+const ORACLE_LAST_TTL_SEC = 120;
 
 /**
  * Long-lived Chainlink WS subscriber with auto-reconnect.
@@ -165,6 +193,7 @@ export class ChainlinkFeed {
   private readonly symbols: string[];
   private readonly buffers = new Map<string, TickRingBuffer>();
   private readonly capacity: number;
+  private readonly redis: Redis | null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectCount = 0;
   private stopped = false;
@@ -175,6 +204,7 @@ export class ChainlinkFeed {
   constructor(opts: ChainlinkFeedOptions = {}) {
     this.symbols = (opts.symbols ?? DEFAULT_SYMBOLS).map((s) => s.toLowerCase());
     this.capacity = Math.max(300, opts.capacity ?? 600);
+    this.redis = opts.redis ?? null;
   }
 
   /** Open the WS connection and subscribe. Safe to call after stop(). */
@@ -231,6 +261,17 @@ export class ChainlinkFeed {
         this.buffers.set(tick.symbol, rb);
       }
       rb.push(tick);
+      // Fan out to Redis when configured. Fire-and-forget — pub/sub failure
+      // must never break the in-process oracle-lag scanner that depends on
+      // the ringbuffer we just updated.
+      if (this.redis) {
+        void this.publishTick(tick).catch((err) => {
+          logger.warn('chainlink_feed_publish_error', {
+            symbol: tick.symbol,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
     });
 
     ws.on('error', (err: Error) => {
@@ -296,6 +337,52 @@ export class ChainlinkFeed {
         /* ignore */
       }
       this.ws = null;
+    }
+  }
+
+  /**
+   * Publish a tick to Redis: SET the latest, ZADD to the windowed history,
+   * and PUBLISH on the broadcast channel. Ops are batched in one pipeline to
+   * reduce round trips; the pipeline is NOT atomic — if the connection drops
+   * mid-flight, Redis may observe a partial sequence.
+   *
+   * The ZSET member format `${oracleTs}:${value}` keeps each tick distinct
+   * even when the oracle re-publishes the same price (member uniqueness is
+   * required for ZADD to not overwrite). Score is `oracleTs` so consumers
+   * can ZRANGEBYSCORE for time-windowed reads.
+   *
+   * ZSET is capped at `this.capacity` entries, mirroring the in-memory ringbuffer.
+   */
+  private async publishTick(tick: ChainlinkTick): Promise<void> {
+    const redis = this.redis;
+    if (!redis) return;
+    const lastKey = oracleLastKey(tick.symbol);
+    const pricesKey = oraclePricesKey(tick.symbol);
+    const member = `${tick.oracleTs}:${tick.value}`;
+    const payload = JSON.stringify({
+      symbol: tick.symbol,
+      value: tick.value,
+      oracleTs: tick.oracleTs,
+      receivedAt: tick.receivedAt,
+    });
+    const pipe = redis.pipeline();
+    pipe.set(lastKey, String(tick.value), 'EX', ORACLE_LAST_TTL_SEC);
+    pipe.zadd(pricesKey, tick.oracleTs, member);
+    pipe.zremrangebyrank(pricesKey, 0, -(this.capacity + 1));
+    pipe.publish(ORACLE_PRICE_MOVED_CHANNEL, payload);
+    const results = await pipe.exec();
+    const commandErrors =
+      results?.flatMap((result, index) => {
+        const err = result?.[0];
+        return err
+          ? [{ command: ['set', 'zadd', 'zremrangebyrank', 'publish'][index] ?? `cmd_${index}`, error: err.message }]
+          : [];
+      }) ?? [];
+    if (commandErrors.length > 0) {
+      logger.warn('chainlink_feed_publish_partial_error', {
+        symbol: tick.symbol,
+        commandErrors,
+      });
     }
   }
 
