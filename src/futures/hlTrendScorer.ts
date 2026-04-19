@@ -59,9 +59,7 @@ function signVote(value: number | null): TrendVote {
 export function scoreHlTrend(candles: OHLCVCandle[]): HlTrendScore | null {
   if (candles.length < 2) return null;
 
-  const lastCandle = candles[candles.length - 1];
-  if (!lastCandle) return null;
-  const lastClose = lastCandle.close;
+  const lastClose = candles[candles.length - 1]!.close;
 
   // ── Voter 1: VWAP position ──────────────────────────────────────────────
   const vwap = computeVWAP(candles);
