@@ -115,8 +115,10 @@ export async function scanHlMomentum(
 
   // Gate: any open position on this symbol (either side). Opening a LONG against an
   // existing SHORT — or vice versa — just creates a delta-neutral wash that burns fees.
-  const longOpen = await hasOpenPosition(redis, hlSymbol, 'LONG');
-  const shortOpen = await hasOpenPosition(redis, hlSymbol, 'SHORT');
+  const [longOpen, shortOpen] = await Promise.all([
+    hasOpenPosition(redis, hlSymbol, 'LONG'),
+    hasOpenPosition(redis, hlSymbol, 'SHORT'),
+  ]);
   if (longOpen || shortOpen) {
     logger.debug('[hl-momentum] position already open', { symbol: hlSymbol, direction });
     return null;

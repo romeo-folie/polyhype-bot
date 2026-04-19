@@ -177,6 +177,18 @@ describe('scanHlMomentum — cooldown and position gates', () => {
     expect(result).toBeNull();
   });
 
+  it('returns null when a SHORT position is already open (opposite side of LONG signal)', async () => {
+    // LONG signal; opposite-side SHORT position should block to prevent a delta-neutral wash.
+    mockScoreHlTrend.mockReturnValue(bullishResult); // score > 0 → LONG
+    // hasOpenPosition is called in parallel for LONG then SHORT via Promise.all.
+    mockHasOpenPosition
+      .mockResolvedValueOnce(false) // LONG side — none open
+      .mockResolvedValueOnce(true); // SHORT side — existing position
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull();
+  });
+
   it('does NOT block when SHORT cooldown is set but signal is LONG (side-aware)', async () => {
     // LONG signal; SHORT cooldown must not block it.
     const shortKey = momentumCooldownKey('BTC', 'SHORT');
