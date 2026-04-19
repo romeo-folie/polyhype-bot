@@ -568,11 +568,12 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         }
       }
 
-      // Time-to-resolution gate (shared with mapping/spot paths).
+      // Time-to-resolution gate. Min is 0 here — the near-resolution check above
+      // (COPYTRADE_MIN_TIME_TO_RESOLVE_HOURS) already enforces the copytrade floor.
       const ttr = checkTimeToResolution(
         market.endDate ?? undefined,
         cfg.PM_MAX_HOURS_TO_RESOLUTION_COPYTRADE,
-        cfg.PM_MIN_HOURS_TO_RESOLUTION,
+        0,
       );
       if (!ttr.ok) {
         logger.info('[copytrade] skipped by time-to-resolution gate', {
