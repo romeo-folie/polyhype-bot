@@ -5,21 +5,33 @@ import { buildCandles } from '../arb/candleAggregator.js';
 import { scoreHlTrend } from './hlTrendScorer.js';
 import { hasOpenPosition } from '../execution/positionLedger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
-import type { ChainlinkTick } from '../spot/feeds/chainlinkFeed.js';
 import type { TradeSignal } from '../mapping/index.js';
 
+export interface BinancePriceTick {
+  symbol: string;   // Binance USDT pair, e.g. 'ethusdt'
+  price: number;
+  ts?: number;      // Unix ms timestamp
+}
+
 /**
- * Maps each Chainlink oracle symbol to its Hyperliquid perp ticker.
- * Only symbols that have both a Chainlink feed AND a Binance kline feed are
- * included — the scorer needs OHLCV candles from `spot:klines:<binanceSym>`.
+ * Maps Binance USDT pair names → Hyperliquid perp ticker.
+ * Triggered off spot:price_moved, but only pairs listed in this mapping AND included
+ * in the configured watch list are supported — including meme coins that are absent
+ * from the 7-symbol Chainlink RTDS feed.
  */
-const CHAINLINK_TO_HL: Record<string, string> = {
-  'btc/usd': 'BTC',
-  'eth/usd': 'ETH',
-  'sol/usd': 'SOL',
-  'xrp/usd': 'XRP',
-  'doge/usd': 'DOGE',
-  'bnb/usd': 'BNB',
+const BINANCE_TO_HL: Record<string, string> = {
+  // Majors
+  btcusdt:  'BTC',
+  ethusdt:  'ETH',
+  solusdt:  'SOL',
+  xrpusdt:  'XRP',
+  dogeusdt: 'DOGE',
+  bnbusdt:  'BNB',
+  // Meme / political
+  pepeusdt: 'kPEPE',   // HL trades 1000× units; same direction as Binance PEPEUSDT
+  wifusdt:  'WIF',
+  bonkusdt: 'kBONK',   // HL trades 1000× units; same direction as Binance BONKUSDT
+  penguusdt: 'PENGU',
 };
 
 /** Redis key for the per-symbol per-side momentum cooldown. */
@@ -28,16 +40,17 @@ export function momentumCooldownKey(hlSymbol: string, direction: 'LONG' | 'SHORT
 }
 
 /**
- * Evaluate a single Chainlink oracle tick for a momentum entry on Hyperliquid.
+ * Evaluate a single Binance spot price tick for a momentum entry on Hyperliquid.
  *
  * Pure-read: does not write to Redis. The caller (arb worker) sets the momentum
  * cooldown key and calls executeAndRecordSignal after receiving a non-null signal.
  *
  * Shadow-logs to shadow_observations regardless of HL_MOMENTUM_ENABLED so the
- * first 48h of deployment can be reviewed before flipping the live flag.
+ * first period of deployment can be reviewed before flipping the live flag.
  *
  * Returns null when:
  *   - symbol not in the configured watch list
+ *   - no HL perp mapping for this Binance pair
  *   - scoreHlTrend returns null (< 2 candles) or score is 0
  *   - score or ADX below threshold
  *   - loss cooldown or momentum cooldown active
@@ -45,7 +58,7 @@ export function momentumCooldownKey(hlSymbol: string, direction: 'LONG' | 'SHORT
  *   - HL_MOMENTUM_ENABLED is false (dark mode)
  */
 export async function scanHlMomentum(
-  tick: ChainlinkTick,
+  tick: BinancePriceTick,
   redis: Redis,
 ): Promise<TradeSignal | null> {
   const cfg = loadConfig();
@@ -53,9 +66,9 @@ export async function scanHlMomentum(
   const enabledSymbols = cfg.HL_MOMENTUM_SYMBOLS.split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
-  if (!enabledSymbols.includes(tick.symbol)) return null;
+  if (!enabledSymbols.includes(tick.symbol.toLowerCase())) return null;
 
-  const hlSymbol = CHAINLINK_TO_HL[tick.symbol];
+  const hlSymbol = BINANCE_TO_HL[tick.symbol.toLowerCase()];
   if (!hlSymbol) return null;
 
   // Fetch OHLCV candles — primary path reads Binance klines from Redis.
@@ -124,6 +137,12 @@ export async function scanHlMomentum(
     return null;
   }
 
+  // spot:price_moved timestamp comes from Binance kline close time (T), which can be
+  // slightly in the future for in-progress bars. Clamp to now to keep latency metrics sane.
+  const now = Date.now();
+  const eventTs =
+    typeof tick.ts === 'number' && Number.isFinite(tick.ts) && tick.ts <= now ? tick.ts : now;
+
   // Shadow-log regardless of live flag so dark-mode signals are visible in DB.
   void enqueueWrite('shadow_observations', {
     kind: 'hl_momentum_signal',
@@ -136,8 +155,8 @@ export async function scanHlMomentum(
       score,
       adx,
       voters,
-      chainlinkSymbol: tick.symbol,
-      chainlinkPrice: tick.value,
+      binanceSymbol: tick.symbol,
+      binancePrice: tick.price,
       candleCount: candles.length,
     },
   }).catch(() => {});
@@ -149,7 +168,7 @@ export async function scanHlMomentum(
       score,
       adx: adx.toFixed(1),
       voters,
-      chainlinkPrice: tick.value,
+      binancePrice: tick.price,
     });
     return null;
   }
@@ -163,7 +182,7 @@ export async function scanHlMomentum(
     adx: adx.toFixed(1),
     stakeUsd,
     voters,
-    chainlinkPrice: tick.value,
+    binancePrice: tick.price,
   });
 
   return {
@@ -172,11 +191,11 @@ export async function scanHlMomentum(
     direction,
     stakeUsd,
     edgeMagnitude: absScore / 6,
-    outcomePrice: tick.value,
+    outcomePrice: tick.price,
     sourcedFrom: 'hl-momentum',
     reasoning: `HL trend scorer: score=${score.toString()}, ADX=${adx.toFixed(1)}, voters=${JSON.stringify(voters)}`,
     isFutures: true,
     source: 'hl-momentum',
-    eventTs: tick.receivedAt,
+    eventTs,
   };
 }
