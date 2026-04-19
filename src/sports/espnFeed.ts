@@ -121,9 +121,9 @@ export function extractLiveGames(
         const isTop = /^top/i.test(shortDetail.trim());
         const isBot = /^bot/i.test(shortDetail.trim());
         halfInning = isTop ? 'top' : isBot ? 'bottom' : 'top';
-        // Innings remaining: 9 - current inning + fraction for bottom half
-        const inningsLeft = Math.max(9 - period, 0) + (halfInning === 'top' ? 0.5 : 0);
-        // Use 25 min/inning as a proxy so secondsRemaining is non-zero for the model.
+        // Remaining innings including current half so secondsRemaining stays > 0
+        // for every live state (bottom 9th = 0.5, not 0). Use 25 min/inning.
+        const inningsLeft = Math.max(9 - period, 0) + (halfInning === 'top' ? 1 : 0.5);
         secondsRemaining = inningsLeft * 1500;
       } else {
         const clockRaw = status?.clock;

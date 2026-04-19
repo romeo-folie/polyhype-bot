@@ -85,8 +85,10 @@ export interface MlbState {
 export function mlbWinProb(state: MlbState): number {
   const { scoreDiff, inning, isTop } = state;
 
-  // Innings remaining: top = home hasn't batted yet in this inning.
-  const inningsLeft = Math.max(9 - inning, 0) + (isTop ? 0.5 : 0);
+  // Remaining innings including the current half-inning, so live games always
+  // have inningsLeft > 0 (bottom 9th = 0.5, not 0).
+  // Extra innings: treat each half the same as the 9th.
+  const inningsLeft = Math.max(9 - inning, 0) + (isTop ? 1 : 0.5);
 
   if (inningsLeft <= 0) {
     // Game over (or extra innings beyond 9 — treat as coin flip for model purposes).

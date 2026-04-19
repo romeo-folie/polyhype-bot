@@ -35,13 +35,15 @@ describe('mlbWinProb', () => {
     expect(p).toBeLessThan(0.60);
   });
 
-  it('home up 3 entering bottom 9th → > 0.95', () => {
+  it('home up 3 entering bottom 9th → > 0.90 and < 1.0 (model, not hard end-state)', () => {
     const p = mlbWinProb({ scoreDiff: 3, inning: 9, isTop: false });
-    expect(p).toBeGreaterThan(0.95);
+    expect(p).toBeGreaterThan(0.90);
+    expect(p).toBeLessThan(1);
   });
 
-  it('away up 1 entering bottom 9th → < 0.40 (home can tie)', () => {
+  it('away up 1 entering bottom 9th → > 0 and < 0.40 (model, not hard end-state)', () => {
     const p = mlbWinProb({ scoreDiff: -1, inning: 9, isTop: false });
+    expect(p).toBeGreaterThan(0);
     expect(p).toBeLessThan(0.40);
   });
 
