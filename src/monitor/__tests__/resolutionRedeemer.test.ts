@@ -8,6 +8,17 @@ const mockRedeemClobOutcome = vi.fn<(...args: any[]) => Promise<any>>();
 const mockCreditProceeds = vi.fn<(...args: any[]) => Promise<void>>();
 const mockNotifyRedemptionExecuted = vi.fn<(...args: any[]) => Promise<void>>();
 
+// Shared mock for the CTF contract used by checkOnChainResolution
+const mockCtfContract = {
+  payoutDenominator: vi.fn<() => Promise<bigint>>(),
+  payoutNumerators: vi.fn<(conditionId: string, index: number) => Promise<bigint>>(),
+};
+
+vi.mock('ethers', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, Contract: vi.fn().mockImplementation(() => mockCtfContract) };
+});
+
 vi.mock('../../shared/simmer.js', () => ({
   getSimmerPositions: mockGetSimmerPositions,
   submitRedeem: mockSubmitRedeem,
@@ -35,12 +46,17 @@ vi.mock('../../shared/config.js', () => ({
     OUTCOME_HISTORY_DAYS: 180,
     OUTCOME_MAX_PER_CATEGORY: 500,
   }),
+  POLYGON_FALLBACK_RPCS: ['https://mock-rpc.polygon.test'],
+  CTF_ADDRESS: '0x4d97dcd97ec945f40cf65f87097ace5ea0476045',
+  USDC_E_ADDRESS: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
 }));
 
 vi.mock('../../shared/clob.js', () => ({
   redeemClobOutcome: mockRedeemClobOutcome,
   fetchClobTokenBalance: vi.fn().mockResolvedValue({ ok: true, balance: 100 }),
   getClobClient: vi.fn().mockReturnValue(null),
+  getPolygonProvider: vi.fn().mockReturnValue({}),
+  resetPolygonProvider: vi.fn(),
 }));
 
 vi.mock('../../shared/bankroll.js', () => ({
@@ -151,7 +167,7 @@ describe('redeemResolvedPositions', () => {
     expect(results.every((r) => r.success)).toBe(true);
   });
 
-  it('attempts on-chain redemption for expired Gamma-unresolvable position — success → credits + notifies win', async () => {
+  it('expired Gamma-unresolvable position: on-chain confirms win → redeems, credits, notifies', async () => {
     const pastDate = new Date(Date.now() - 60_000).toISOString();
     mockGetOpenPositions.mockResolvedValue([
       {
@@ -167,9 +183,14 @@ describe('redeemResolvedPositions', () => {
         endDate: pastDate,
       },
     ]);
-    // Gamma returns empty array — can't resolve Up/Down binary
+    // Gamma returns empty — can't resolve Up/Down binary
     global.fetch = vi.fn().mockImplementation(() =>
       Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    // On-chain: condition settled, YES won
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 0 ? 1n : 0n,
     );
     mockRedeemClobOutcome.mockResolvedValue({ success: true, tx_hash: '0xabc' });
 
@@ -185,14 +206,14 @@ describe('redeemResolvedPositions', () => {
     expect(results[0].success).toBe(true);
   });
 
-  it('attempts on-chain redemption for expired Gamma-unresolvable position — failure → skips close, retries next cycle', async () => {
+  it('expired Gamma-unresolvable position: on-chain not yet settled → skips, retries next cycle', async () => {
     const pastDate = new Date(Date.now() - 60_000).toISOString();
     mockGetOpenPositions.mockResolvedValue([
       {
         marketId: 'ol-market-2',
         conditionId: 'cond-ol-2',
         clobTokenIds: ['token-yes-ol2', 'token-no-ol2'],
-        direction: 'NO',
+        direction: 'DOWN',
         executionVenue: 'clob',
         question: 'Bitcoin Up or Down - April 17, 1:15PM-1:30PM ET',
         sharesHeld: 10,
@@ -204,18 +225,54 @@ describe('redeemResolvedPositions', () => {
     global.fetch = vi.fn().mockImplementation(() =>
       Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
     );
-    mockRedeemClobOutcome.mockResolvedValue({ success: false, error: 'RPC timeout' });
+    // On-chain: payoutDenominator = 0 → not yet settled
+    mockCtfContract.payoutDenominator.mockResolvedValue(0n);
 
     const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
 
     const results = await redeemResolvedPositions(mockRedis);
 
-    expect(mockRedeemClobOutcome).toHaveBeenCalledWith({ conditionId: 'cond-ol-2', direction: 'NO' });
+    // Should not attempt redemption, not close, not notify — just skip until settled
+    expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
     expect(mockCreditProceeds).not.toHaveBeenCalled();
     expect(mockNotifyRedemptionExecuted).not.toHaveBeenCalled();
-    // Transient failure: position must stay open (no close, no loss notification)
     expect(mockClosePosition).not.toHaveBeenCalled();
     expect(vi.mocked(mockNotifyMarketResolved)).not.toHaveBeenCalled();
+    expect(results).toHaveLength(0);
+  });
+
+  it('expired Gamma-unresolvable position: on-chain confirms win but redemption RPC fails → retry next cycle', async () => {
+    const pastDate = new Date(Date.now() - 60_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'ol-market-3',
+        conditionId: 'cond-ol-3',
+        clobTokenIds: ['token-yes-ol3', 'token-no-ol3'],
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Bitcoin Up or Down - April 17, 1:30PM-1:45PM ET',
+        sharesHeld: 10,
+        entryPrice: 0.5,
+        stakeUsd: 5,
+        endDate: pastDate,
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    // On-chain: YES won
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 0 ? 1n : 0n,
+    );
+    mockRedeemClobOutcome.mockResolvedValue({ success: false, error: 'RPC timeout' });
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockRedeemClobOutcome).toHaveBeenCalledWith({ conditionId: 'cond-ol-3', direction: 'YES' });
+    expect(mockCreditProceeds).not.toHaveBeenCalled();
+    expect(mockNotifyRedemptionExecuted).not.toHaveBeenCalled();
+    expect(mockClosePosition).not.toHaveBeenCalled();
     expect(results[0].success).toBe(false);
     expect(results[0].error).toBe('redemption_rpc_error');
   });

@@ -342,8 +342,11 @@ export async function notifyRedemptionExecuted(opts: {
   txHash?: string;
   valueUsdc: number;
   stakeUsd?: number;
+  /** Override the displayed side label (e.g. 'DOWN' for oracle-lag positions). */
+  displayDirection?: string;
 }): Promise<void> {
   const { question, side, txHash, valueUsdc } = opts;
+  const sideLabel = opts.displayDirection ?? side.toUpperCase();
   const profitLine =
     opts.stakeUsd != null && opts.stakeUsd > 0
       ? `\n<b>Profit:</b> +$${(valueUsdc - opts.stakeUsd).toFixed(2)} USDC (stake was $${opts.stakeUsd.toFixed(2)})`
@@ -352,7 +355,7 @@ export async function notifyRedemptionExecuted(opts: {
   const text =
     `🏆 <b>Position Redeemed</b>\n\n` +
     `<b>Market:</b> ${escapeHtml(question)}\n` +
-    `<b>Winning side:</b> ${side.toUpperCase()}\n` +
+    `<b>Winning side:</b> ${escapeHtml(sideLabel)}\n` +
     `<b>Proceeds:</b> $${valueUsdc.toFixed(2)} USDC` +
     profitLine +
     (txHash ? `\n<b>Tx:</b> <code>${escapeHtml(txHash)}</code>` : '');

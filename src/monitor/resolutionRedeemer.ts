@@ -736,9 +736,45 @@ async function redeemClobPositions(
             continue;
           }
 
-          // Attempt on-chain redemption. Only close after a definitive outcome;
-          // a non-success result may be transient — leave position open for retry.
-          const redeemResult = await redeemClobOutcome({ conditionId, direction: isYesSide ? 'YES' : 'NO' });
+          // Verify the on-chain outcome before attempting redemption. The CTF
+          // contract's redeemPositions() lands successfully even for losing outcomes
+          // (paying 0 proceeds), so a success=true tx is not evidence of a win.
+          // If the denominator is still 0 (not yet settled), skip and retry next cycle
+          // rather than firing a false-win notification.
+          const onChainOutcome = await checkOnChainResolution(conditionId);
+          if (!onChainOutcome) {
+            logger.info('[redeemer] expired CLOB position not yet settled on-chain — will retry', {
+              marketId: pos.marketId,
+              direction: pos.direction,
+              endDate: pos.endDate,
+            });
+            continue;
+          }
+
+          const normalizedDirExpired = isYesSide ? 'YES' : 'NO';
+          const wonExpired = onChainOutcome.outcome === normalizedDirExpired;
+
+          if (!wonExpired) {
+            await closePosition(redis, pos.marketId, pos.direction);
+            await markRecentlyClosed(redis, pos.marketId);
+            await recordPositionOutcome(
+              redis,
+              { ...pos, question: q, direction: pmDirection },
+              { result: 'lost', returnPct: -100, executionVenueOverride: 'clob', exitReason: 'expired_unresolvable' },
+            );
+            void notifyMarketResolved({
+              question: q,
+              direction: pos.direction,
+              result: 'lost',
+              stakeUsd: pos.stakeUsd,
+              reason: 'expired (Gamma unresolvable)',
+            }).catch(() => {});
+            results.push({ marketId: pos.marketId, side, success: false, error: 'expired_unresolvable' });
+            continue;
+          }
+
+          // Won — attempt on-chain redemption.
+          const redeemResult = await redeemClobOutcome({ conditionId, direction: normalizedDirExpired });
 
           if (!redeemResult.success) {
             logger.warn('[redeemer] on-chain redemption failed for expired position — will retry next cycle', {
@@ -749,43 +785,32 @@ async function redeemClobPositions(
             continue;
           }
 
-          // success:true means the transaction landed; won iff we received proceeds.
-          // A successful redemption of the losing outcome returns 0.
           const proceedsUsdc = pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : 0);
-          const won = proceedsUsdc > 0;
-          if (won) await creditProceeds(redis, proceedsUsdc);
+          if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
 
           await closePosition(redis, pos.marketId, pos.direction);
           await markRecentlyClosed(redis, pos.marketId);
 
-          const exitReason = won ? 'expired_unresolvable_redeemed' : 'expired_unresolvable';
           await recordPositionOutcome(
             redis,
             { ...pos, question: q, direction: pmDirection },
             {
-              result: won ? 'won' : 'lost',
-              returnPct: won && pos.stakeUsd > 0 ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : -100,
+              result: 'won',
+              returnPct: pos.stakeUsd > 0 ? ((proceedsUsdc - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
               executionVenueOverride: 'clob',
-              exitReason,
+              exitReason: 'expired_unresolvable_redeemed',
             },
           );
-          if (won) {
-            await notifyRedemptionExecuted({
-              marketId: pos.marketId,
-              question: q,
-              side,
-              valueUsdc: proceedsUsdc,
-            });
-          } else {
-            void notifyMarketResolved({
-              question: q,
-              direction: pos.direction,
-              result: 'lost',
-              stakeUsd: pos.stakeUsd,
-              reason: 'expired (Gamma unresolvable)',
-            }).catch(() => {});
-          }
-          results.push({ marketId: pos.marketId, side, success: won, ...(won ? {} : { error: exitReason }) });
+          await notifyRedemptionExecuted({
+            marketId: pos.marketId,
+            question: q,
+            side,
+            valueUsdc: proceedsUsdc,
+            stakeUsd: pos.stakeUsd,
+            displayDirection: pos.direction,
+            ...(redeemResult.tx_hash ? { txHash: redeemResult.tx_hash } : {}),
+          });
+          results.push({ marketId: pos.marketId, side, success: true });
         }
         continue;
       }
@@ -974,6 +999,8 @@ async function redeemClobPositions(
         question: resolvedQuestion,
         side,
         valueUsdc: proceedsUsdc,
+        stakeUsd: pos.stakeUsd,
+        displayDirection: pos.direction,
         ...(redeemResult.tx_hash ? { txHash: redeemResult.tx_hash } : {}),
       });
 
