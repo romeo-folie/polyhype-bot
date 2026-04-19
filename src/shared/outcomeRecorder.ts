@@ -29,7 +29,8 @@ export interface PositionOutcome {
     | 'oracle-lag'
     | 'near-zero-arb'
     | 'longshot-bias'
-    | 'correlation-arb';
+    | 'correlation-arb'
+    | 'weather';
   category: string;
   question: string;
   direction: 'YES' | 'NO' | 'UP' | 'DOWN' | 'LONG' | 'SHORT';
@@ -66,6 +67,7 @@ export function inferSource(sourcedFrom: string): PositionOutcome['source'] {
   if (s.startsWith('near-zero-arb')) return 'near-zero-arb';
   if (s.startsWith('longshot-bias')) return 'longshot-bias';
   if (s.startsWith('correlation-arb')) return 'correlation-arb';
+  if (s.startsWith('weather:')) return 'weather';
   // Futures origin markers (monitor-driven, backfill, and HL hedges) — these
   // are futures decisions, not OSINT. OSINT-triggered futures trades still
   // label 'osint' by design: the decision source was news, HL is only the venue.

@@ -984,11 +984,13 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
   let executed = 0;
   let cumulativeStakeUsd = 0;
 
-  for (const opp of tradable) {
+  for (let i = 0; i < tradable.length; i++) {
+    const opp = tradable[i]!;
+
     if (executed >= cfg.WEATHER_MAX_POSITIONS_PER_SCAN) {
       logger.info('[weather] per-scan count cap reached', {
         cap: cfg.WEATHER_MAX_POSITIONS_PER_SCAN,
-        skippedRemaining: tradable.length - (tradable.indexOf(opp)),
+        skippedRemaining: tradable.length - i,
       });
       break;
     }
@@ -1003,18 +1005,18 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       continue;
     }
 
-    // Half-Kelly on P(YES)/yesPrice — computeHalfKelly expects YES-convention
-    // inputs and returns a non-negative fraction. Cap at WEATHER_MAX_STAKE_FRACTION.
-    const kellyFraction = computeHalfKelly(
-      opp.modelProbability,
-      opp.yesPrice,
-      cfg.WEATHER_KELLY_FRACTION,
-    );
+    // Half-Kelly sizing: use the win probability and price of the side we're buying.
+    // For YES: p = P(YES) = modelProbability, price = yesPrice.
+    // For NO:  p = P(NO)  = 1 - modelProbability, price = noPrice (= outcomePrice for NO).
+    // opp.outcomePrice is already side-relative so it covers both.
+    const winProb = opp.tradeSide === 'YES' ? opp.modelProbability : 1 - opp.modelProbability;
+    const kellyFraction = computeHalfKelly(winProb, opp.outcomePrice, cfg.WEATHER_KELLY_FRACTION);
     if (kellyFraction <= 0) {
       logger.info('[weather] skipping — kelly non-positive', {
         marketId: opp.marketId,
-        modelProb: opp.modelProbability.toFixed(3),
-        yesPrice: opp.yesPrice.toFixed(3),
+        tradeSide: opp.tradeSide,
+        winProb: winProb.toFixed(3),
+        outcomePrice: opp.outcomePrice.toFixed(3),
       });
       continue;
     }
@@ -1032,16 +1034,14 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     const signal = buildWeatherSignal(opp, stakeUsd);
     try {
       const result = await executeAndRecordSignal(signal, redis);
-      executed++;
-      perCityCount.set(opp.city, cityCount + 1);
-      cumulativeStakeUsd += stakeUsd;
+      const filledStakeUsd = result.signal.stakeUsd;
       logger.info('[weather] execution result', {
         marketId: opp.marketId,
         eventSlug: opp.eventSlug,
         city: opp.city,
         bracket: opp.bracketLabel,
         tradeSide: opp.tradeSide,
-        stakeUsd: stakeUsd.toFixed(2),
+        stakeUsd: filledStakeUsd.toFixed(2),
         edge: opp.edge.toFixed(3),
         skipped: result.skipped,
         skipReason: result.skipReason,
@@ -1049,6 +1049,13 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         entryPrice: result.entryPrice,
         sharesFilled: result.sharesFilled,
       });
+      // Only count as executed when the executor actually opened a position.
+      // A skipped result (dedup, spread too wide, etc.) should not burn caps.
+      if (!result.skipped) {
+        executed++;
+        perCityCount.set(opp.city, cityCount + 1);
+        cumulativeStakeUsd += filledStakeUsd;
+      }
     } catch (err) {
       logger.error('[weather] execution threw', {
         marketId: opp.marketId,
