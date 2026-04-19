@@ -1131,6 +1131,13 @@ const envSchema = z.object({
   // USD stake per momentum entry. Capped to FUTURES_MAX_PER_TRADE_USD at runtime.
   HL_MOMENTUM_STAKE_USD: z.coerce.number().min(1).optional().default(10),
 
+  // ── Chainlink → PM crypto-arb trigger ──
+  // When true, oracle:price_moved ticks also fan into the PM crypto-arb scanner
+  // alongside the Binance spot:price_moved path. Edge = Chainlink oracle lead over
+  // Binance: changePercent is ((oraclePrice − lastBinancePrice) / lastBinancePrice) * 100.
+  // Requires CHAINLINK_REDIS_PUBLISH_ENABLED=true. Ships dark.
+  CHAINLINK_CRYPTO_ARB_ENABLED: boolFromEnv.optional().default(false),
+
   // ── Phase 3: Sports arb (NBA + NHL) ──
   SPORTS_ARB_ENABLED: boolFromEnv.optional().default(true),
   SPORTS_LEAGUES: z

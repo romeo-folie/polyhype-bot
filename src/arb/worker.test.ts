@@ -284,4 +284,119 @@ describe('ArbitrageWorker', () => {
 
     worker.stop();
   });
+
+  it('should trigger crypto arb on oracle:price_moved when CHAINLINK_CRYPTO_ARB_ENABLED', async () => {
+    const mockOpp = {
+      marketId: 'mkt-btc-100k',
+      conditionId: 'cond-1',
+      clobTokenIds: ['yes-tok', 'no-tok'],
+      question: 'Will Bitcoin be above $100,000?',
+      direction: 'YES' as const,
+      tokenId: 'yes-tok',
+      currentPmPrice: 0.6,
+      fairValuePrice: 0.75,
+      edge: 0.13,
+      stakeUsd: 3.9,
+      assetId: 'bitcoin',
+    };
+
+    mockScanCryptoArb.mockResolvedValueOnce([mockOpp]);
+    mockExecuteSignal.mockResolvedValueOnce({
+      signal: {},
+      skipped: false,
+      tradeResult: { success: true, tx_hash: '0xabc' },
+      executionVenue: 'simmer',
+    });
+
+    // Stub latest Binance price for reference: oracle=65000, binance=64000
+    // expected changePercent = ((65000 - 64000) / 64000) * 100 ≈ 1.5625
+    mockRedis.get.mockImplementation((key: string) => {
+      if (key === 'spot:last:btcusdt') return Promise.resolve('64000');
+      return Promise.resolve(null);
+    });
+
+    configOverride = {
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 100000,
+      ARB_MAX_TRADES_PER_MIN: 100000,
+      CRYPTO_ARB_MAX_TRADES_PER_MIN: 100000,
+      CHAINLINK_CRYPTO_ARB_ENABLED: true,
+    };
+    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
+    await worker.start();
+
+    // Simulate an oracle:price_moved tick for btc/usd
+    const tick = JSON.stringify({
+      symbol: 'btc/usd',
+      value: 65000,
+      oracleTs: Date.now() - 100,
+      receivedAt: Date.now(),
+    });
+    onRedisMessage!('oracle:price_moved', tick);
+
+    // crypto arb scanner should have been called with the mapped Binance symbol
+    // and the oracle-vs-Binance spread as the reference price / changePercent.
+    await vi.waitFor(() => expect(mockScanCryptoArb).toHaveBeenCalled(), { timeout: 500 });
+    expect(mockScanCryptoArb).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assetId: 'bitcoin',
+        currentPrice: 65000,
+        referencePrice: 64000,
+        changePercent: expect.closeTo(1.5625, 4),
+      }),
+      expect.anything(),
+    );
+
+    worker.stop();
+  });
+
+  it('should NOT trigger crypto arb on oracle:price_moved when CHAINLINK_CRYPTO_ARB_ENABLED is false', async () => {
+    configOverride = {
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 100000,
+      ARB_MAX_TRADES_PER_MIN: 100000,
+      CRYPTO_ARB_MAX_TRADES_PER_MIN: 100000,
+      CHAINLINK_CRYPTO_ARB_ENABLED: false,
+    };
+    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
+    await worker.start();
+
+    const tick = JSON.stringify({
+      symbol: 'btc/usd',
+      value: 65000,
+      oracleTs: Date.now() - 100,
+      receivedAt: Date.now(),
+    });
+    onRedisMessage!('oracle:price_moved', tick);
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    // crypto arb should be silent — only HL momentum path fired
+    expect(mockScanCryptoArb).not.toHaveBeenCalled();
+
+    worker.stop();
+  });
+
+  it('should NOT trigger crypto arb for unmapped Chainlink symbols (e.g. hype/usd)', async () => {
+    configOverride = {
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 100000,
+      ARB_MAX_TRADES_PER_MIN: 100000,
+      CRYPTO_ARB_MAX_TRADES_PER_MIN: 100000,
+      CHAINLINK_CRYPTO_ARB_ENABLED: true,
+    };
+    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
+    await worker.start();
+
+    const tick = JSON.stringify({
+      symbol: 'hype/usd',
+      value: 20,
+      oracleTs: Date.now() - 100,
+      receivedAt: Date.now(),
+    });
+    onRedisMessage!('oracle:price_moved', tick);
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(mockScanCryptoArb).not.toHaveBeenCalled();
+
+    worker.stop();
+  });
 });

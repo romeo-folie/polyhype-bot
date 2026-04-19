@@ -29,6 +29,20 @@ import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { TradeSignal } from '../mapping/index.js';
 import type { ChainlinkTick } from '../spot/feeds/chainlinkFeed.js';
 
+/**
+ * Maps Chainlink oracle symbols to their Binance USDT pair equivalents.
+ * Used to feed oracle ticks into the PM crypto-arb scanner when
+ * CHAINLINK_CRYPTO_ARB_ENABLED is true.
+ */
+const CHAINLINK_TO_BINANCE_SYMBOL: Record<string, string> = {
+  'btc/usd': 'btcusdt',
+  'eth/usd': 'ethusdt',
+  'sol/usd': 'solusdt',
+  'xrp/usd': 'xrpusdt',
+  'doge/usd': 'dogeusdt',
+  'bnb/usd': 'bnbusdt',
+};
+
 interface WorkerOptions {
   baselineIntervalMs?: number;
   maxTradesPerMin?: number;
@@ -211,6 +225,32 @@ export class ArbitrageWorker {
           return;
         }
         void this.triggerHlMomentum(tick);
+        // Chainlink → PM crypto-arb: oracle ticks lead Binance by ~55s;
+        // changePercent = ((oraclePrice − lastBinancePrice) / lastBinancePrice) * 100.
+        // Pre-fetch spot:last:<sym> so triggerCryptoArbFromTicker gets the actual latest
+        // Binance close as its reference rather than falling back to the ZSET -2 position
+        // (which is tuned for Binance spot:price_moved events, not oracle ticks).
+        if (cfg.CHAINLINK_CRYPTO_ARB_ENABLED) {
+          const binanceSym = CHAINLINK_TO_BINANCE_SYMBOL[tick.symbol];
+          if (binanceSym) {
+            void (async () => {
+              let previousPrice: number | null = null;
+              try {
+                const raw = await getRedis().get(`spot:last:${binanceSym}`);
+                if (raw != null) {
+                  const parsed = Number(raw);
+                  if (Number.isFinite(parsed) && parsed > 0) previousPrice = parsed;
+                }
+              } catch {
+                logger.warn('[arb-worker] failed to load Binance reference price for oracle-triggered crypto arb', {
+                  chainlinkSymbol: tick.symbol,
+                  binanceSymbol: binanceSym,
+                });
+              }
+              await this.triggerCryptoArbFromTicker(binanceSym, tick.value, tick.receivedAt, previousPrice);
+            })();
+          }
+        }
       }
 
       if (channel === 'spot:price_moved') {
