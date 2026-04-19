@@ -1373,6 +1373,11 @@ export function loadConfig(forceReload = false): AppConfig {
     throw new Error('ORACLE_LAG_MIN_ENTRY_PRICE must be less than ORACLE_LAG_MAX_ENTRY_PRICE');
   }
 
+  // Oracle-lag time window must be non-inverted (min <= max).
+  if (cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN > cfg.ORACLE_LAG_MAX_TIME_LEFT_MIN) {
+    throw new Error('ORACLE_LAG_MAX_TIME_LEFT_MIN must be >= ORACLE_LAG_MIN_TIME_LEFT_MIN');
+  }
+
   // All cross-validations passed — cache only a valid config.
   _config = cfg;
   return _config;

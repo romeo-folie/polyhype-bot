@@ -15,6 +15,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
+import { loadConfig } from '../../shared/config.js';
 import {
   buildOracleLagExecutorShadowRow,
   evaluateOracleLagEntry,
@@ -538,5 +539,44 @@ describe('evaluateOracleLagEntry', () => {
       expect(result.shouldEnter).toBe(true);
       expect(result.timeLeftMin).toBeCloseTo(10, 5);
     });
+  });
+});
+
+describe('loadConfig cross-validation: oracle-lag time window', () => {
+  const REQUIRED_ENV: Record<string, string> = {
+    REDIS_URL: 'redis://localhost:6379',
+    POLYGON_RPC_URL: 'https://mock.rpc',
+    PRIVATE_KEY: '0x' + 'a'.repeat(64),
+    POLYMARKET_API_KEY: 'test-key',
+    POLYMARKET_API_SECRET: 'test-secret',
+    POLYMARKET_API_PASSPHRASE: 'test-pass',
+  };
+
+  beforeEach(() => {
+    Object.entries(REQUIRED_ENV).forEach(([k, v]) => vi.stubEnv(k, v));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('throws when MAX_TIME_LEFT_MIN < MIN_TIME_LEFT_MIN', () => {
+    vi.stubEnv('ORACLE_LAG_MIN_TIME_LEFT_MIN', '10');
+    vi.stubEnv('ORACLE_LAG_MAX_TIME_LEFT_MIN', '5');
+    expect(() => loadConfig(true)).toThrow(
+      'ORACLE_LAG_MAX_TIME_LEFT_MIN must be >= ORACLE_LAG_MIN_TIME_LEFT_MIN',
+    );
+  });
+
+  it('accepts MAX_TIME_LEFT_MIN equal to MIN_TIME_LEFT_MIN', () => {
+    vi.stubEnv('ORACLE_LAG_MIN_TIME_LEFT_MIN', '10');
+    vi.stubEnv('ORACLE_LAG_MAX_TIME_LEFT_MIN', '10');
+    expect(() => loadConfig(true)).not.toThrow();
+  });
+
+  it('accepts MAX_TIME_LEFT_MIN greater than MIN_TIME_LEFT_MIN', () => {
+    vi.stubEnv('ORACLE_LAG_MIN_TIME_LEFT_MIN', '5');
+    vi.stubEnv('ORACLE_LAG_MAX_TIME_LEFT_MIN', '15');
+    expect(() => loadConfig(true)).not.toThrow();
   });
 });

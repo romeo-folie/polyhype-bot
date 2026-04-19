@@ -715,6 +715,14 @@ async function redeemClobPositions(
           });
           const q = pos.question || pos.marketId;
 
+          // Oracle-lag positions are stored with canonicalized YES/NO directions.
+          // Derive the user-facing label (UP/DOWN) from sourcedFrom so all
+          // notifications in this expired path (dust, loss, win) are consistent.
+          const displayDir =
+            pos.sourcedFrom?.startsWith('oracle-lag')
+              ? pos.direction === 'YES' ? 'UP' : pos.direction === 'NO' ? 'DOWN' : pos.direction
+              : pos.direction;
+
           // Dust or no-balance positions: close the zombie entry without redemption.
           if (isDust || (reportedBalance ?? 0) <= 0.01) {
             await closePosition(redis, pos.marketId, pos.direction);
@@ -727,7 +735,7 @@ async function redeemClobPositions(
             );
             void notifyMarketResolved({
               question: q,
-              direction: pos.direction,
+              direction: displayDir,
               result: 'lost',
               stakeUsd: pos.stakeUsd,
               reason: isDust ? 'expired dust position' : 'expired (Gamma unresolvable)',
@@ -753,14 +761,6 @@ async function redeemClobPositions(
 
           const normalizedDirExpired = isYesSide ? 'YES' : 'NO';
           const wonExpired = onChainOutcome.outcome === normalizedDirExpired;
-
-          // Oracle-lag positions are stored with canonicalized YES/NO directions.
-          // Derive the user-facing label (UP/DOWN) from sourcedFrom so notifications
-          // match what the user saw at trade-execution time.
-          const displayDir =
-            pos.sourcedFrom?.startsWith('oracle-lag')
-              ? pos.direction === 'YES' ? 'UP' : pos.direction === 'NO' ? 'DOWN' : pos.direction
-              : pos.direction;
 
           if (!wonExpired) {
             await closePosition(redis, pos.marketId, pos.direction);
@@ -808,7 +808,7 @@ async function redeemClobPositions(
 
           if (!(typeof proceedsUsdc === 'number' && Number.isFinite(proceedsUsdc) && proceedsUsdc > 0)) {
             logger.error(
-              '[redeemer] redeemed expired position but could not determine proceeds — leaving open for retry/manual review',
+              '[redeemer] redeemed expired position but could not determine proceeds — leaving open for manual review',
               {
                 marketId: pos.marketId,
                 preBalance,
@@ -818,6 +818,8 @@ async function redeemClobPositions(
                 txHash: redeemResult.tx_hash,
               },
             );
+            // Prevent repeated on-chain redemption attempts — the tx already landed.
+            await markRecentlyClosed(redis, pos.marketId);
             results.push({ marketId: pos.marketId, side, success: false, error: 'redemption_proceeds_unknown' });
             continue;
           }
