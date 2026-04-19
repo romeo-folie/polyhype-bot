@@ -113,9 +113,11 @@ export async function scanHlMomentum(
     return null;
   }
 
-  // Gate: open position in the same direction (executor also checks, but fail-fast here).
-  const alreadyOpen = await hasOpenPosition(redis, hlSymbol, direction);
-  if (alreadyOpen) {
+  // Gate: any open position on this symbol (either side). Opening a LONG against an
+  // existing SHORT — or vice versa — just creates a delta-neutral wash that burns fees.
+  const longOpen = await hasOpenPosition(redis, hlSymbol, 'LONG');
+  const shortOpen = await hasOpenPosition(redis, hlSymbol, 'SHORT');
+  if (longOpen || shortOpen) {
     logger.debug('[hl-momentum] position already open', { symbol: hlSymbol, direction });
     return null;
   }

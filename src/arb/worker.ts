@@ -629,7 +629,13 @@ export class ArbitrageWorker {
         });
         await recordGlobalTrade(redis, 'hyperliquid');
       } else if (result.skipped) {
-        await redis.del(cooldownKey);
+        // For permanent rejections (stake below HL minimum), hold the full cooldown so the
+        // symbol doesn't hammer the executor on every oracle tick. For transient skips, release.
+        if (result.skipReason === 'stake_below_hl_minimum') {
+          await redis.set(cooldownKey, 'min-skip', 'EX', cfg.HL_MOMENTUM_COOLDOWN_SEC);
+        } else {
+          await redis.del(cooldownKey);
+        }
         logger.debug('[hl-momentum] signal skipped by executor', {
           symbol: signal.marketId,
           reason: result.skipReason,
