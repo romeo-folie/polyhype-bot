@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { scanHlMomentum, momentumCooldownKey } from '../hlMomentumScanner.js';
-import type { ChainlinkTick } from '../../spot/feeds/chainlinkFeed.js';
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -15,10 +14,11 @@ vi.mock('../../db/writeQueue.js', () => ({ enqueueWrite: vi.fn().mockResolvedVal
 // Default config — most tests override HL_MOMENTUM_ENABLED / other fields.
 const baseConfig = {
   HL_MOMENTUM_ENABLED: false,
-  HL_MOMENTUM_SYMBOLS: 'btc/usd,eth/usd,sol/usd,xrp/usd,doge/usd',
+  HL_MOMENTUM_SYMBOLS: 'btcusdt,ethusdt,solusdt,xrpusdt,dogeusdt,pepeusdt,wifusdt,bonkusdt,penguusdt',
   HL_MOMENTUM_MIN_SCORE: 4,
   HL_MOMENTUM_MIN_ADX: 20,
   HL_MOMENTUM_COOLDOWN_SEC: 600,
+  HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC: 60,
   HL_MOMENTUM_CANDLE_LOOKBACK_MS: 3_600_000,
   HL_MOMENTUM_STAKE_USD: 10,
   FUTURES_MAX_PER_TRADE_USD: 15,
@@ -45,8 +45,8 @@ vi.mock('../../execution/positionLedger.js', () => ({
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeTick(symbol = 'btc/usd', value = 70_000): ChainlinkTick {
-  return { symbol, value, oracleTs: Date.now() - 100, receivedAt: Date.now() };
+function makeTick(symbol = 'btcusdt', price = 70_000): { symbol: string; price: number; ts: number } {
+  return { symbol, price, ts: Date.now() };
 }
 
 function makeRedis(overrides: Record<string, string | null> = {}): {
@@ -89,14 +89,14 @@ describe('scanHlMomentum — symbol filtering', () => {
 
   it('returns null for a symbol not in the configured watch list', async () => {
     const redis = makeRedis();
-    const result = await scanHlMomentum(makeTick('hype/usd'), redis as never);
+    const result = await scanHlMomentum(makeTick('hypeusdt'), redis as never);
     expect(result).toBeNull();
   });
 
-  it('returns null for a Chainlink symbol with no HL perp mapping', async () => {
-    mockLoadConfig.mockReturnValueOnce({ ...baseConfig, HL_MOMENTUM_SYMBOLS: 'ada/usd' });
+  it('returns null for a Binance symbol with no HL perp mapping', async () => {
+    mockLoadConfig.mockReturnValueOnce({ ...baseConfig, HL_MOMENTUM_SYMBOLS: 'adausdt' });
     const redis = makeRedis();
-    const result = await scanHlMomentum(makeTick('ada/usd'), redis as never);
+    const result = await scanHlMomentum(makeTick('adausdt'), redis as never);
     expect(result).toBeNull();
   });
 });
@@ -300,7 +300,7 @@ describe('scanHlMomentum — live mode', () => {
   it('ETH tick maps to ETH marketId', async () => {
     mockScoreHlTrend.mockReturnValue(bullishResult);
     const redis = makeRedis();
-    const result = await scanHlMomentum(makeTick('eth/usd', 3000), redis as never);
+    const result = await scanHlMomentum(makeTick('ethusdt', 3000), redis as never);
     expect(result!.marketId).toBe('ETH');
   });
 });

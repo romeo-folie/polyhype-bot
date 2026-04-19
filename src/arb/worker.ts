@@ -28,6 +28,7 @@ import { scanHlMomentum, momentumCooldownKey } from '../futures/hlMomentumScanne
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { TradeSignal } from '../mapping/index.js';
 import type { ChainlinkTick } from '../spot/feeds/chainlinkFeed.js';
+import type { BinancePriceTick } from '../futures/hlMomentumScanner.js';
 
 /**
  * Maps Chainlink oracle symbols to their Binance USDT pair equivalents.
@@ -224,7 +225,6 @@ export class ArbitrageWorker {
           logger.warn('[hl-momentum] invalid oracle:price_moved payload');
           return;
         }
-        void this.triggerHlMomentum(tick);
         // Chainlink → PM crypto-arb: oracle ticks lead Binance by ~55s;
         // changePercent = ((oraclePrice − lastBinancePrice) / lastBinancePrice) * 100.
         // Pre-fetch spot:last:<sym> so triggerCryptoArbFromTicker gets the actual latest
@@ -270,14 +270,22 @@ export class ArbitrageWorker {
         void recordCryptoArbEvent(getRedis(), 'spot_event').catch(() => {});
         void this.triggerScan('fast-path');
 
-        // Trigger crypto latency arb path (independent of YES+NO arb scan).
         if (parsed.symbol && parsed.price != null) {
+          // Trigger crypto latency arb path (independent of YES+NO arb scan).
           void this.triggerCryptoArbFromTicker(
             String(parsed.symbol),
             parsed.price,
             parsed.timestamp,
             parsed.previousPrice ?? null,
           );
+
+          // Trigger HL momentum scanner — Binance ticks cover 40+ pairs including
+          // meme coins, whereas Chainlink RTDS is limited to 7 symbols.
+          void this.triggerHlMomentum({
+            symbol: String(parsed.symbol),
+            price: parsed.price,
+            ...(parsed.timestamp != null && { ts: parsed.timestamp }),
+          });
         }
       }
     });
@@ -588,7 +596,7 @@ export class ArbitrageWorker {
     }
   }
 
-  private async triggerHlMomentum(tick: ChainlinkTick): Promise<void> {
+  private async triggerHlMomentum(tick: BinancePriceTick): Promise<void> {
     if (this.isHlMomentumRunning) return;
     this.isHlMomentumRunning = true;
     const redis = getRedis();
@@ -631,13 +639,12 @@ export class ArbitrageWorker {
         });
         await recordGlobalTrade(redis, 'hyperliquid');
       } else if (result.skipped) {
-        // Hold the full cooldown for skip reasons that will recur on the next tick —
-        // stake too small (permanent until config changes) and already_executed (dedup
-        // key still live). Transient skips release the cooldown so retries are allowed.
-        const holdCooldown =
-          result.skipReason === 'stake_below_hl_minimum' ||
-          result.skipReason === 'already_executed';
-        if (holdCooldown) {
+        if (result.skipReason === 'stake_below_hl_minimum') {
+          // Transient: HL minimum notional fluctuates with mid-price. Short cooldown
+          // allows a retry once price moves enough to push the order above the floor.
+          await redis.set(cooldownKey, 'skip', 'EX', cfg.HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC);
+        } else if (result.skipReason === 'already_executed') {
+          // Idempotency dedup key is still live — hold the full cooldown.
           await redis.set(cooldownKey, 'skip', 'EX', cfg.HL_MOMENTUM_COOLDOWN_SEC);
         } else {
           await redis.del(cooldownKey);

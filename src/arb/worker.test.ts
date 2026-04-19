@@ -26,10 +26,11 @@ vi.mock('../shared/config.js', () => ({
     BINANCE_WS_ENABLED: false,
     CHAINLINK_REDIS_PUBLISH_ENABLED: false,
     HL_MOMENTUM_ENABLED: false,
-    HL_MOMENTUM_SYMBOLS: 'btc/usd,eth/usd',
+    HL_MOMENTUM_SYMBOLS: 'btcusdt,ethusdt',
     HL_MOMENTUM_MIN_SCORE: 4,
     HL_MOMENTUM_MIN_ADX: 20,
     HL_MOMENTUM_COOLDOWN_SEC: 600,
+    HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC: 60,
     HL_MOMENTUM_STAKE_USD: 10,
     FUTURES_MAX_PER_TRADE_USD: 15,
     ...configOverride,
@@ -443,7 +444,7 @@ describe('ArbitrageWorker — HL momentum cooldown on executor skip', () => {
     vi.mocked(scanHlMomentum).mockResolvedValue(mockSignal as never);
   });
 
-  it('holds full cooldown TTL on stake_below_hl_minimum skip', async () => {
+  it('holds short cooldown TTL (HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC) on stake_below_hl_minimum skip', async () => {
     mockExecuteSignal.mockResolvedValueOnce({
       signal: mockSignal,
       skipped: true,
@@ -453,11 +454,12 @@ describe('ArbitrageWorker — HL momentum cooldown on executor skip', () => {
     const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
     await worker.start();
 
-    onRedisMessage!('oracle:price_moved', JSON.stringify({ symbol: 'btc/usd', value: 75000, oracleTs: Date.now(), receivedAt: Date.now() }));
+    // Momentum scanner now fires from spot:price_moved, not oracle:price_moved.
+    onRedisMessage!('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 75000, timestamp: Date.now() }));
     await new Promise((r) => setTimeout(r, 100));
 
-    // Should set cooldown with full TTL, not delete it
-    expect(mockRedis.set).toHaveBeenCalledWith(cooldownKey, 'skip', 'EX', 600);
+    // Short TTL for transient skip — price fluctuation can push order above HL minimum.
+    expect(mockRedis.set).toHaveBeenCalledWith(cooldownKey, 'skip', 'EX', 60);
     expect(mockRedis.del).not.toHaveBeenCalledWith(cooldownKey);
 
     worker.stop();
@@ -473,7 +475,7 @@ describe('ArbitrageWorker — HL momentum cooldown on executor skip', () => {
     const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
     await worker.start();
 
-    onRedisMessage!('oracle:price_moved', JSON.stringify({ symbol: 'btc/usd', value: 75000, oracleTs: Date.now(), receivedAt: Date.now() }));
+    onRedisMessage!('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 75000, timestamp: Date.now() }));
     await new Promise((r) => setTimeout(r, 100));
 
     expect(mockRedis.set).toHaveBeenCalledWith(cooldownKey, 'skip', 'EX', 600);
@@ -492,7 +494,7 @@ describe('ArbitrageWorker — HL momentum cooldown on executor skip', () => {
     const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
     await worker.start();
 
-    onRedisMessage!('oracle:price_moved', JSON.stringify({ symbol: 'btc/usd', value: 75000, oracleTs: Date.now(), receivedAt: Date.now() }));
+    onRedisMessage!('spot:price_moved', JSON.stringify({ symbol: 'btcusdt', price: 75000, timestamp: Date.now() }));
     await new Promise((r) => setTimeout(r, 100));
 
     expect(mockRedis.del).toHaveBeenCalledWith(cooldownKey);
