@@ -138,8 +138,7 @@ export async function scanHlMomentum(
     if (ema4hFast && ema4hSlow) {
       const fastLast = ema4hFast[ema4hFast.length - 1]!;
       const slowLast = ema4hSlow[ema4hSlow.length - 1]!;
-      const bullBias = fastLast > slowLast;
-      fourHBiasOk = direction === 'LONG' ? bullBias : !bullBias;
+      fourHBiasOk = direction === 'LONG' ? fastLast > slowLast : fastLast < slowLast;
       if (!fourHBiasOk) {
         logger.debug('[hl-momentum] 4h bias mismatch', {
           symbol: hlSymbol,
@@ -168,8 +167,9 @@ export async function scanHlMomentum(
     });
     const macd1h = computeMACDFromCandles(oneHCandles, 12, 26, 9);
     if (macd1h) {
-      const macdBull = macd1h.macdLine > macd1h.signalLine;
-      oneHMacdOk = direction === 'LONG' ? macdBull : !macdBull;
+      oneHMacdOk = direction === 'LONG'
+        ? macd1h.macdLine > macd1h.signalLine
+        : macd1h.macdLine < macd1h.signalLine;
       if (!oneHMacdOk) {
         logger.debug('[hl-momentum] 1h MACD mismatch', {
           symbol: hlSymbol,

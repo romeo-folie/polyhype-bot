@@ -1064,7 +1064,7 @@ const envSchema = z.object({
   BINANCE_KLINE_TIMEFRAMES: z.string().optional().default('1m,5m,15m,1h,4h'),
   KLINE_RETENTION_1M: z.coerce.number().int().min(10).optional().default(240),
   KLINE_RETENTION_5M: z.coerce.number().int().min(10).optional().default(288),
-  KLINE_RETENTION_15M: z.coerce.number().int().min(10).optional().default(120),
+  KLINE_RETENTION_15M: z.coerce.number().int().min(10).optional().default(216),
   KLINE_RETENTION_1H: z.coerce.number().int().min(10).optional().default(96),
   KLINE_RETENTION_4H: z.coerce.number().int().min(10).optional().default(120),
 
@@ -1138,8 +1138,8 @@ const envSchema = z.object({
   // can push order size above the HL minimum, so 60s is enough to allow a retry.
   HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC: z.coerce.number().int().min(10).optional().default(60),
   // Lookback windows for each scoring timeframe.
-  // 15m primary: 54h → ~216 bars (covers MACD 35-bar warmup with room to spare on 15m).
-  HL_MOMENTUM_PRIMARY_LOOKBACK_MS: z.coerce.number().int().min(60_000).optional().default(54_000_000),
+  // 15m primary: 54h (194,400,000ms) → ~216 bars (covers MACD 35-bar warmup with room to spare).
+  HL_MOMENTUM_PRIMARY_LOOKBACK_MS: z.coerce.number().int().min(60_000).optional().default(194_400_000),
   // 1h MACD gate: 50h → ~50 bars (MACD 12/26/9 needs 35 closes).
   HL_MOMENTUM_1H_LOOKBACK_MS: z.coerce.number().int().min(60_000).optional().default(180_000_000),
   // 4h EMA gate: 10d → ~60 bars (EMA50 needs 50 closes).
@@ -1356,6 +1356,11 @@ export function loadConfig(forceReload = false): AppConfig {
   // Phase 9: Cross-validate MACD periods
   if (cfg.MACD_FAST >= cfg.MACD_SLOW) {
     throw new Error('MACD_FAST must be less than MACD_SLOW');
+  }
+
+  // HL momentum: 4h EMA fast period must be shorter than slow period
+  if (cfg.HL_MOMENTUM_4H_EMA_FAST >= cfg.HL_MOMENTUM_4H_EMA_SLOW) {
+    throw new Error('HL_MOMENTUM_4H_EMA_FAST must be less than HL_MOMENTUM_4H_EMA_SLOW');
   }
 
   // Oracle-lag price band must be non-inverted.
