@@ -103,6 +103,7 @@ export interface EntryEvaluation {
  *   1. no_move_data            — feed has <2 qualifying ticks in window
  *   2. move_below_threshold    — |pctMove| < config.minMovePct
  *   3. time_left_below_threshold — market resolves in < config.minTimeLeftMin
+ *   3a. time_left_above_threshold — market resolves in > config.maxTimeLeftMin
  *   4. price_above_threshold   — entry-side book price > config.maxEntryPrice
  *   5. price_below_threshold   — entry-side book price < config.minEntryPrice
  *
@@ -115,12 +116,14 @@ export type OracleLagBlockReason =
   | 'no_move_data'
   | 'move_below_threshold'
   | 'time_left_below_threshold'
+  | 'time_left_above_threshold'
   | 'price_above_threshold'
   | 'price_below_threshold';
 
 export interface OracleLagEvalConfig {
   minMovePct: number;
   minTimeLeftMin: number;
+  maxTimeLeftMin: number;
   maxEntryPrice: number;
   minEntryPrice: number;
 }
@@ -238,6 +241,18 @@ export function evaluateOracleLagEntry(
     };
   }
 
+  // Rule 3a — maximum time-to-resolution. Oracle lag only dominates in the
+  // final window; with too much time remaining the market reprices before expiry.
+  if (timeLeftMin > config.maxTimeLeftMin) {
+    return {
+      shouldEnter: false,
+      side,
+      timeLeftMin,
+      consensusProbability,
+      blockReason: 'time_left_above_threshold',
+    };
+  }
+
   // Rule 4 — entry-side book price ceiling. For fee markets at ~2% taker,
   // entries above ~0.62 compress expected value below zero even with a solid
   // oracle move, so we gate explicitly.
@@ -340,6 +355,7 @@ export class OracleLagScanner {
       minMovePct: cfg.ORACLE_LAG_MIN_MOVE_PCT,
       moveWindowSec: cfg.ORACLE_LAG_MOVE_WINDOW_SEC,
       minTimeLeftMin: cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN,
+      maxTimeLeftMin: cfg.ORACLE_LAG_MAX_TIME_LEFT_MIN,
       maxEntryPrice: cfg.ORACLE_LAG_MAX_ENTRY_PRICE,
       stakeUsd: cfg.ORACLE_LAG_STAKE_USD,
       maxTradesPerHour: cfg.ORACLE_LAG_MAX_TRADES_PER_HOUR,
@@ -463,6 +479,7 @@ export class OracleLagScanner {
       const evalConfig: OracleLagEvalConfig = {
         minMovePct: cfg.ORACLE_LAG_MIN_MOVE_PCT,
         minTimeLeftMin: cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN,
+        maxTimeLeftMin: cfg.ORACLE_LAG_MAX_TIME_LEFT_MIN,
         maxEntryPrice: cfg.ORACLE_LAG_MAX_ENTRY_PRICE,
         minEntryPrice: cfg.ORACLE_LAG_MIN_ENTRY_PRICE,
       };

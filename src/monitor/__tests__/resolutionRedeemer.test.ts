@@ -279,6 +279,46 @@ describe('redeemResolvedPositions', () => {
     expect(results[0].error).toBe('redemption_rpc_error');
   });
 
+  it('expired Gamma-unresolvable position: redemption succeeds but proceeds unknown → logs error and retries', async () => {
+    const pastDate = new Date(Date.now() - 60_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'ol-market-4',
+        conditionId: 'cond-ol-4',
+        clobTokenIds: ['token-yes-ol4', 'token-no-ol4'],
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Bitcoin Up or Down - April 17, 1:45PM-2:00PM ET',
+        sharesHeld: null,
+        entryPrice: 0,   // invalid — entryPriceSafe = false
+        stakeUsd: 5,
+        endDate: pastDate,
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 0 ? 1n : 0n,
+    );
+    mockRedeemClobOutcome.mockResolvedValue({ success: true, tx_hash: '0xdef' });
+    // NaN balance: typeof NaN === 'number' (passes refreshTokenBalance), but
+    // Number.isFinite(NaN) is false so proceeds computation falls through to null.
+    // NaN also slips past the dust gate (NaN <= 0.01 is false), so we reach the
+    // proceeds-unknown guard rather than the earlier dust-close path.
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: NaN } as any);
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockCreditProceeds).not.toHaveBeenCalled();
+    expect(mockClosePosition).not.toHaveBeenCalled();
+    expect(mockNotifyRedemptionExecuted).not.toHaveBeenCalled();
+    expect(results[0].success).toBe(false);
+    expect(results[0].error).toBe('redemption_proceeds_unknown');
+  });
+
   it('closes CLOB position resolved as loss without redeeming', async () => {
     mockGetOpenPositions.mockResolvedValue([
       {

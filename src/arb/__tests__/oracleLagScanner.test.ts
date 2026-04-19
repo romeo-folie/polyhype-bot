@@ -15,6 +15,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
+import { loadConfig } from '../../shared/config.js';
 import {
   buildOracleLagExecutorShadowRow,
   evaluateOracleLagEntry,
@@ -31,6 +32,7 @@ const NOW_MS = Date.UTC(2026, 3, 11, 12, 0, 0); // 2026-04-11T12:00:00Z
 const defaultConfig: OracleLagEvalConfig = {
   minMovePct: 0.06, // 6 bps
   minTimeLeftMin: 5,
+  maxTimeLeftMin: 999,
   maxEntryPrice: 0.62,
   minEntryPrice: 0.35,
 };
@@ -249,6 +251,38 @@ describe('evaluateOracleLagEntry', () => {
 
       expect(result.shouldEnter).toBe(false);
       expect(result.blockReason).toBe('time_left_below_threshold');
+    });
+
+    it('time_left_above_threshold blocks when timeLeft exceeds maxTimeLeftMin', () => {
+      const cfg: OracleLagEvalConfig = { ...defaultConfig, maxTimeLeftMin: 15 };
+      const market = buildMarket({ outcomePrices: [0.50, 0.50], timeLeftMin: 20 });
+      const move = makeMove(0.08);
+
+      const result = evaluateOracleLagEntry(market, move, cfg);
+
+      expect(result.shouldEnter).toBe(false);
+      expect(result.blockReason).toBe('time_left_above_threshold');
+    });
+
+    it('time_left_above_threshold does not fire when timeLeft equals maxTimeLeftMin', () => {
+      const cfg: OracleLagEvalConfig = { ...defaultConfig, maxTimeLeftMin: 15 };
+      const market = buildMarket({ outcomePrices: [0.50, 0.50], timeLeftMin: 15 });
+      const move = makeMove(0.08);
+
+      const result = evaluateOracleLagEntry(market, move, cfg);
+
+      expect(result.shouldEnter).toBe(true);
+    });
+
+    it('time_left_above_threshold wins over price_above_threshold (rule 3a before rule 4)', () => {
+      const cfg: OracleLagEvalConfig = { ...defaultConfig, maxTimeLeftMin: 15, maxEntryPrice: 0.30 };
+      const market = buildMarket({ outcomePrices: [0.50, 0.50], timeLeftMin: 20 });
+      const move = makeMove(0.08);
+
+      const result = evaluateOracleLagEntry(market, move, cfg);
+
+      expect(result.shouldEnter).toBe(false);
+      expect(result.blockReason).toBe('time_left_above_threshold');
     });
 
     it('price_above_threshold wins over price_below_threshold (mutually exclusive by design)', () => {
@@ -505,5 +539,44 @@ describe('evaluateOracleLagEntry', () => {
       expect(result.shouldEnter).toBe(true);
       expect(result.timeLeftMin).toBeCloseTo(10, 5);
     });
+  });
+});
+
+describe('loadConfig cross-validation: oracle-lag time window', () => {
+  const REQUIRED_ENV: Record<string, string> = {
+    REDIS_URL: 'redis://localhost:6379',
+    POLYGON_RPC_URL: 'https://mock.rpc',
+    PRIVATE_KEY: '0x' + 'a'.repeat(64),
+    POLYMARKET_API_KEY: 'test-key',
+    POLYMARKET_API_SECRET: 'test-secret',
+    POLYMARKET_API_PASSPHRASE: 'test-pass',
+  };
+
+  beforeEach(() => {
+    Object.entries(REQUIRED_ENV).forEach(([k, v]) => vi.stubEnv(k, v));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('throws when MAX_TIME_LEFT_MIN < MIN_TIME_LEFT_MIN', () => {
+    vi.stubEnv('ORACLE_LAG_MIN_TIME_LEFT_MIN', '10');
+    vi.stubEnv('ORACLE_LAG_MAX_TIME_LEFT_MIN', '5');
+    expect(() => loadConfig(true)).toThrow(
+      'ORACLE_LAG_MAX_TIME_LEFT_MIN must be >= ORACLE_LAG_MIN_TIME_LEFT_MIN',
+    );
+  });
+
+  it('accepts MAX_TIME_LEFT_MIN equal to MIN_TIME_LEFT_MIN', () => {
+    vi.stubEnv('ORACLE_LAG_MIN_TIME_LEFT_MIN', '10');
+    vi.stubEnv('ORACLE_LAG_MAX_TIME_LEFT_MIN', '10');
+    expect(() => loadConfig(true)).not.toThrow();
+  });
+
+  it('accepts MAX_TIME_LEFT_MIN greater than MIN_TIME_LEFT_MIN', () => {
+    vi.stubEnv('ORACLE_LAG_MIN_TIME_LEFT_MIN', '5');
+    vi.stubEnv('ORACLE_LAG_MAX_TIME_LEFT_MIN', '15');
+    expect(() => loadConfig(true)).not.toThrow();
   });
 });

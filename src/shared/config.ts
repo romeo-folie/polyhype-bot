@@ -428,6 +428,11 @@ const envSchema = z.object({
   ORACLE_LAG_MOVE_WINDOW_SEC: z.coerce.number().int().min(1).optional().default(5),
   // Skip entry if time to market resolution is below this many minutes.
   ORACLE_LAG_MIN_TIME_LEFT_MIN: z.coerce.number().min(0).optional().default(5),
+  // Skip entry if time to market resolution exceeds this many minutes. Use to restrict entries
+  // to the final window where oracle lag still dominates before the market reprices. Default of
+  // 999 is effectively unbounded for short-duration (15m) oracle-lag markets and preserves
+  // existing BTC behaviour, but is a finite cap — not a true Infinity.
+  ORACLE_LAG_MAX_TIME_LEFT_MIN: z.coerce.number().min(0).optional().default(999),
   // Skip entry if market price on the signal side exceeds this (fee math breaks above ~0.62).
   ORACLE_LAG_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.62),
   // Skip entry if market price on the signal side is below this floor. Guards against buying
@@ -1366,6 +1371,11 @@ export function loadConfig(forceReload = false): AppConfig {
   // Oracle-lag price band must be non-inverted.
   if (cfg.ORACLE_LAG_MIN_ENTRY_PRICE >= cfg.ORACLE_LAG_MAX_ENTRY_PRICE) {
     throw new Error('ORACLE_LAG_MIN_ENTRY_PRICE must be less than ORACLE_LAG_MAX_ENTRY_PRICE');
+  }
+
+  // Oracle-lag time window must be non-inverted (min <= max).
+  if (cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN > cfg.ORACLE_LAG_MAX_TIME_LEFT_MIN) {
+    throw new Error('ORACLE_LAG_MAX_TIME_LEFT_MIN must be >= ORACLE_LAG_MIN_TIME_LEFT_MIN');
   }
 
   // All cross-validations passed — cache only a valid config.
