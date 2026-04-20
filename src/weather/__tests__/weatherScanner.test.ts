@@ -22,6 +22,7 @@ const baseConfig = {
   WEATHER_MAX_PER_CITY: 1,
   WEATHER_MAX_SCAN_EXPOSURE_USD: 30,
   WEATHER_KELLY_FRACTION: 0.25,
+  WEATHER_MODEL_ECMWF_ENABLED: false,
   MIN_BET_USD: 5,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));

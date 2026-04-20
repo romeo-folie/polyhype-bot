@@ -387,6 +387,8 @@ interface ForecastResult {
   source: 'noaa' | 'open-meteo' | 'combined';
   /** Number of ensemble members (0 if no ensemble data). */
   ensembleMembers: number;
+  /** Which ensemble model supplied the stddev. */
+  ensembleModel: 'gfs' | 'ecmwf' | 'none';
 }
 
 /**
@@ -399,6 +401,7 @@ export async function fetchForecast(
   daysOut: number,
   fetchFn?: FetchFn,
   stddevMinFraction = 0.7,
+  useEcmwf = false,
 ): Promise<ForecastResult | null> {
   const { coords, targetDate, unit } = event;
   const month = parseInt(targetDate.slice(5, 7), 10);
@@ -411,8 +414,9 @@ export async function fetchForecast(
 
   // Try ensemble first (works for both US and international)
   const ensemble = await fetchEnsembleForecast(
-    coords.lat, coords.lon, targetDate, unit, fetchFn,
+    coords.lat, coords.lon, targetDate, unit, fetchFn, useEcmwf,
   );
+  const ensembleModel: ForecastResult['ensembleModel'] = ensemble?.ensembleModel ?? 'none';
 
   if (coords.noaaCoverage) {
     // US city: use NOAA as primary, combine with Open-Meteo
@@ -437,7 +441,7 @@ export async function fetchForecast(
       const disagreement = Math.abs(noaaHigh - omForecast.highTemp) / 1.5;
       const ensStd = ensemble?.stddevHigh ?? 0;
       const stdDev = Math.max(ensStd, disagreement, defaultStd * stddevMinFraction);
-      return { forecastHigh, stdDev, source, ensembleMembers: ensemble?.memberCount ?? 0 };
+      return { forecastHigh, stdDev, source, ensembleMembers: ensemble?.memberCount ?? 0, ensembleModel };
     }
 
     if (noaaForecast) {
@@ -451,7 +455,7 @@ export async function fetchForecast(
     }
 
     const stdDev = Math.max(ensemble?.stddevHigh ?? defaultStd, defaultStd * stddevMinFraction);
-    return { forecastHigh, stdDev, source, ensembleMembers: ensemble?.memberCount ?? 0 };
+    return { forecastHigh, stdDev, source, ensembleMembers: ensemble?.memberCount ?? 0, ensembleModel };
   }
 
   // International city: Open-Meteo only
@@ -464,6 +468,7 @@ export async function fetchForecast(
     stdDev,
     source: 'open-meteo',
     ensembleMembers: ensemble?.memberCount ?? 0,
+    ensembleModel,
   };
 }
 
@@ -714,7 +719,7 @@ export async function scanWeatherMarkets(
     }
 
     // Step 3: Fetch forecast
-    const forecast = await fetchForecast(event, daysOut, fetchFn, cfg.WEATHER_STDDEV_MIN_FRACTION);
+    const forecast = await fetchForecast(event, daysOut, fetchFn, cfg.WEATHER_STDDEV_MIN_FRACTION, cfg.WEATHER_MODEL_ECMWF_ENABLED);
     if (!forecast) {
       noForecast++;
       continue;
@@ -796,6 +801,7 @@ export async function scanWeatherMarkets(
         stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
         forecastSource: forecast.source,
         ensembleMembers: forecast.ensembleMembers,
+        ensembleModel: forecast.ensembleModel,
         overround,
         modelSum: parseFloat(modelSum.toFixed(4)),
         status: coverageStatus,
@@ -855,6 +861,7 @@ export async function scanWeatherMarkets(
           forecastStdDev: opp.forecastStdDev,
           effectiveStdDev: opp.forecastStdDev * cfg.WEATHER_STDDEV_MULTIPLIER,
           stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
+          ensembleModel: forecast.ensembleModel,
           tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
           allowedByConfig: opp.allowedByConfig,
           daysOut: opp.daysOut,

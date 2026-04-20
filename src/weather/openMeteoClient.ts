@@ -61,6 +61,8 @@ export interface EnsembleForecast {
   memberCount: number;
   /** The date this forecast applies to (YYYY-MM-DD). */
   forecastDate: string;
+  /** Which ensemble model was used. */
+  ensembleModel: 'gfs' | 'ecmwf';
 }
 
 /** Injectable fetch function for testing. */
@@ -203,17 +205,21 @@ export async function fetchEnsembleForecast(
   targetDate: string,
   unit: 'fahrenheit' | 'celsius' = 'fahrenheit',
   fetchFn?: FetchFn,
+  useEcmwf = false,
 ): Promise<EnsembleForecast | null> {
   const isInjected = fetchFn !== undefined;
   const doFetch = fetchFn ?? fetch;
   try {
     if (!isInjected) await rateLimitWait();
 
+    // ECMWF IFS 0.25° (51 members) is more accurate than GFS (31 members) at
+    // 1-day lead globally. Gate on useEcmwf so the switch is a single env-var flip.
+    const model = useEcmwf ? 'ecmwf_ifs025' : 'gfs_seamless';
     const params = new URLSearchParams({
       latitude: lat.toFixed(4),
       longitude: lon.toFixed(4),
       daily: 'temperature_2m_max',
-      models: 'gfs_seamless',
+      models: model,
       temperature_unit: unit,
       timezone: 'auto',
       start_date: targetDate.slice(0, 10),
@@ -244,13 +250,15 @@ export async function fetchEnsembleForecast(
     if (idx === -1) return null;
 
     const members = daily.temperature_2m_max[idx];
+    const ensembleModel = useEcmwf ? 'ecmwf' : 'gfs' as const;
     if (!members || !Array.isArray(members) || members.length < 2) {
       // Open-Meteo ensemble returns members as columns, not nested arrays
       // Try parsing flat array: all values for the single target day
-      return parseEnsembleFlat(daily, targetStr);
+      const r = parseEnsembleFlat(daily, targetStr);
+      return r ? { ...r, ensembleModel } : null;
     }
 
-    return computeEnsembleStats(members, targetStr);
+    return { ...computeEnsembleStats(members, targetStr), ensembleModel };
   } catch (err) {
     logger.warn('[weather] fetchEnsembleForecast failed', {
       error: err instanceof Error ? err.message : String(err),
@@ -299,7 +307,7 @@ function parseEnsembleFlat(
   }
 
   if (members.length < 2) return null;
-  return computeEnsembleStats(members, targetDate);
+  return computeEnsembleStats(members, targetDate); // ensembleModel overridden by caller
 }
 
 // ── Historical archive (ground-truth reconciliation) ──────────────────────
@@ -411,5 +419,6 @@ function computeEnsembleStats(members: number[], forecastDate: string): Ensemble
     stddevLow: stddev,
     memberCount: n,
     forecastDate,
+    ensembleModel: 'gfs', // overridden by caller when useEcmwf=true
   };
 }
