@@ -41,12 +41,16 @@ export function momentumCooldownKey(hlSymbol: string, direction: 'LONG' | 'SHORT
 }
 
 /**
- * Strip the `usdt` suffix (Binance pair form) and/or the `k` prefix (Hyperliquid
- * 1000× unit marker used for `kPEPE`, `kBONK`, etc.) so both forms compare equal
- * against a base asset name.
+ * Strip the `usdt` suffix (Binance pair form) and, only for actual Hyperliquid
+ * 1000× unit markers (literal lowercase `k` followed by an uppercase base asset
+ * letter, e.g. `kPEPE`, `kBONK`, `kSHIB`), the leading `k`. Detection happens
+ * before lowercasing so legitimate symbols starting with `K`/`k` like `KAVA`
+ * are not mangled.
  */
 function normaliseMemeBase(s: string): string {
-  return s.toLowerCase().trim().replace(/usdt$/, '').replace(/^k/, '');
+  const trimmed = s.trim();
+  const dekayed = /^k[A-Z]/.test(trimmed) ? trimmed.slice(1) : trimmed;
+  return dekayed.toLowerCase().replace(/usdt$/, '');
 }
 
 /**
