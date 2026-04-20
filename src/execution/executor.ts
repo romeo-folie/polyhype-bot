@@ -2127,22 +2127,28 @@ export async function executeSignal(
     }
 
     // Empty-book orders that timeout have no taker path — the book is still empty.
-    // Distinguish submit-time post-only rejection (matching engine refused because
-    // our limit would cross a hidden resting order) from timeout/cancel: they mean
-    // different things operationally (rejection = book isn't really empty; timeout
-    // = still empty). Both land on skipReason='no_clob_book' to avoid a migration,
-    // but finalExecutionPath disambiguates for telemetry.
+    // Distinguish submit-time rejections from timeout/cancel: they mean different
+    // things operationally. Both land on skipReason='no_clob_book' to avoid a
+    // migration, but finalExecutionPath disambiguates for telemetry.
+    // Rejection sub-types:
+    //   - balance/allowance error  → CLOB wallet underfunded, book may still be empty
+    //   - post-only crossing       → hidden resting order crossed our limit (oracle-lag only)
+    //   - other                    → unknown; treat conservatively as non-empty
     if (emptyBookMakerRoute) {
       const isRejected = makerAttempt.makerFillStatus === 'rejected';
+      const rejectionError = makerAttempt.error ?? '';
+      const isBalanceError = isRejected && /balance|allowance/i.test(rejectionError);
       const finalExecutionPath = isRejected ? 'maker_rejected' : 'maker_timeout';
       logger.info(
-        isRejected
+        isBalanceError
+          ? '[executor] empty-book maker rejected — insufficient CLOB balance'
+          : isRejected
           ? '[executor] empty-book maker rejected at submit — book not actually empty'
           : '[executor] empty-book maker timed out — no taker fallback (book still empty)',
         {
           marketId: signal.marketId,
           fillStatus: makerAttempt.makerFillStatus,
-          ...(isRejected && makerAttempt.error ? { reason: makerAttempt.error } : {}),
+          ...(isRejected && rejectionError ? { reason: rejectionError } : {}),
         },
       );
       return recordSkip('no_clob_book', finalExecutionPath, makerTelemetry, 'clob', 'maker');
