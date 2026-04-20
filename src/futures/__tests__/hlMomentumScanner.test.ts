@@ -32,6 +32,9 @@ const baseConfig = {
   HL_MOMENTUM_MTF_SCORING_MODE: 'hard' as 'hard' | 'weighted',
   HL_MOMENTUM_4H_NEUTRAL_BAND_PCT: 0.5,
   HL_MOMENTUM_MIN_TOTAL_SCORE: 5,
+  HL_FUNDING_CONTRA_ENABLED: false,
+  HL_FUNDING_CONTRA_APR_THRESHOLD: 100,
+  HL_FUNDING_CONTRA_CACHE_TTL_SEC: 60,
 };
 
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
@@ -43,7 +46,9 @@ vi.mock('../../arb/candleAggregator.js', () => ({ buildCandles: (...args: unknow
 
 // scoreHlTrend — controlled per test.
 const mockScoreHlTrend = vi.fn();
-vi.mock('../hlTrendScorer.js', () => ({ scoreHlTrend: (c: unknown) => mockScoreHlTrend(c) }));
+vi.mock('../hlTrendScorer.js', () => ({
+  scoreHlTrend: (c: unknown, opts?: unknown) => mockScoreHlTrend(c, opts),
+}));
 
 // positionLedger — default: no open position.
 const mockHasOpenPosition = vi.fn().mockResolvedValue(false);
@@ -58,6 +63,16 @@ vi.mock('../../arb/indicators.js', () => ({
   computeEMA: (...args: unknown[]) => mockComputeEMA(...args),
   computeMACDFromCandles: (...args: unknown[]) => mockComputeMACDFromCandles(...args),
 }));
+
+// HL asset-ctx cache — controlled per test for the funding-contra voter.
+const mockGetCachedAssetCtx = vi.fn();
+vi.mock('../hlAssetCtxCache.js', async () => {
+  const actual = await vi.importActual('../hlAssetCtxCache.js');
+  return {
+    ...(actual as Record<string, unknown>),
+    getCachedAssetCtx: (...args: unknown[]) => mockGetCachedAssetCtx(...args),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -83,6 +98,7 @@ const bullishResult = {
     vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP',
     obv: 'UP', cmf: 'UP', adxDI: 'neutral',
   },
+  voterCount: 6,
 };
 
 // Full 6-voter bearish result.
@@ -93,6 +109,7 @@ const bearishResult = {
     vwap: 'DOWN', emaFastVsSlow: 'DOWN', macdLine: 'DOWN',
     obv: 'DOWN', cmf: 'DOWN', adxDI: 'neutral',
   },
+  voterCount: 6,
 };
 
 // ---------------------------------------------------------------------------
@@ -545,6 +562,7 @@ describe('scanHlMomentum — weighted MTF scoring', () => {
         vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP',
         obv: 'UP', cmf: 'UP', adxDI: 'neutral',
       },
+      voterCount: 6,
     };
   }
 
@@ -760,6 +778,7 @@ describe('scanHlMomentum — weighted MTF scoring', () => {
         vwap: 'DOWN', emaFastVsSlow: 'DOWN', macdLine: 'DOWN',
         obv: 'DOWN', cmf: 'DOWN', adxDI: 'neutral',
       },
+      voterCount: 6,
     });
     // 4h fast < slow, spread 10% (negative) → for SHORT, this is aligned → +2
     mockComputeEMA
@@ -779,6 +798,159 @@ describe('scanHlMomentum — weighted MTF scoring', () => {
       expect.objectContaining({
         direction: 'SHORT',
         payload: expect.objectContaining({ mtfBonus: 3, totalScore: 7 }),
+      }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Funding-contra voter wiring (issue #265 Sub-PR 1)
+// ---------------------------------------------------------------------------
+
+describe('scanHlMomentum — funding contra voter wiring', () => {
+  beforeEach(() => {
+    mockBuildCandles.mockResolvedValue([{}]);
+    mockScoreHlTrend.mockReturnValue(bullishResult);
+    mockHasOpenPosition.mockResolvedValue(false);
+    mockComputeEMA.mockReturnValue(null);
+    mockComputeMACDFromCandles.mockReturnValue(null);
+    mockGetCachedAssetCtx.mockReset();
+  });
+
+  it('does not fetch asset ctx when HL_FUNDING_CONTRA_ENABLED=false', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_FUNDING_CONTRA_ENABLED: false,
+    });
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(mockGetCachedAssetCtx).not.toHaveBeenCalled();
+    // scoreHlTrend still called, but with fundingApr=null.
+    expect(mockScoreHlTrend).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ fundingApr: null }),
+    );
+  });
+
+  it('fetches asset ctx and passes fundingApr to the scorer when enabled', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_FUNDING_CONTRA_ENABLED: true,
+      HL_FUNDING_CONTRA_APR_THRESHOLD: 100,
+    });
+    // hourly 0.0001 → APR = 0.0001 * 8760 * 100 = 87.6%
+    mockGetCachedAssetCtx.mockResolvedValue({
+      fundingRate: 0.0001, openInterest: 1_000_000, markPrice: 70_000,
+    });
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(mockGetCachedAssetCtx).toHaveBeenCalledWith('BTC', redis, 60);
+    expect(mockScoreHlTrend).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        fundingApr: expect.closeTo(87.6, 1) as unknown as number,
+        fundingAprThreshold: 100,
+      }),
+    );
+  });
+
+  it('passes fundingApr=null when the HL fetch fails (voter absent, signal continues)', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_FUNDING_CONTRA_ENABLED: true,
+    });
+    mockGetCachedAssetCtx.mockResolvedValue(null);
+    const redis = makeRedis();
+    // Should still reach shadow log (other voters carry the signal).
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(mockScoreHlTrend).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ fundingApr: null }),
+    );
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({ kind: 'hl_momentum_signal' }),
+    );
+  });
+
+  it('includes fundingApr and fundingContraVote in the shadow payload', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_FUNDING_CONTRA_ENABLED: true,
+    });
+    mockGetCachedAssetCtx.mockResolvedValue({
+      fundingRate: 0.0002, openInterest: 1_000_000, markPrice: 70_000,
+    });
+    // Score comes back with 7 voters including funding=DOWN.
+    mockScoreHlTrend.mockReturnValue({
+      score: 4,
+      adx: 35,
+      voters: {
+        vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP',
+        obv: 'UP', cmf: 'UP', adxDI: 'neutral', fundingContra: 'DOWN',
+      },
+      voterCount: 7,
+    });
+    const redis = makeRedis();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          fundingApr: expect.closeTo(175.2, 1) as unknown as number,
+          fundingContraVote: 'DOWN',
+          voterCount: 7,
+        }),
+      }),
+    );
+  });
+
+  it('edgeMagnitude uses voterCount (hard mode, 7 voters) → absScore/7', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_FUNDING_CONTRA_ENABLED: true,
+    });
+    mockGetCachedAssetCtx.mockResolvedValue({
+      fundingRate: 0, openInterest: 1_000_000, markPrice: 70_000,
+    });
+    // 7 voters, score=5 → edgeMagnitude = 5/7
+    mockScoreHlTrend.mockReturnValue({
+      score: 5,
+      adx: 35,
+      voters: {
+        vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP',
+        obv: 'UP', cmf: 'UP', adxDI: 'neutral', fundingContra: 'neutral',
+      },
+      voterCount: 7,
+    });
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).not.toBeNull();
+    expect(result!.edgeMagnitude).toBeCloseTo(5 / 7, 5);
+  });
+
+  it('shadow payload includes voterCount=6 and fundingContraVote=null when voter disabled', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_FUNDING_CONTRA_ENABLED: false,
+    });
+    const redis = makeRedis();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          voterCount: 6,
+          fundingContraVote: null,
+          fundingApr: null,
+        }),
       }),
     );
   });

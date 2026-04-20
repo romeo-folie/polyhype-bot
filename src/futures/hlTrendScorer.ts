@@ -18,14 +18,38 @@ export interface HlTrendVoters {
   cmf: TrendVote;
   /** Directional vote from +DI vs -DI. Suppressed (neutral) when ADX is too weak to be meaningful. */
   adxDI: TrendVote;
+  /**
+   * HL-native funding-rate contra voter (issue #265 Sub-PR 1).
+   * Only present when scoreHlTrend is called with `opts.fundingApr` defined.
+   * Extreme positive APR (crowded longs) → DOWN; extreme negative APR
+   * (crowded shorts) → UP; within the symmetric threshold band → neutral.
+   */
+  fundingContra?: TrendVote;
+}
+
+export interface HlTrendScoreOpts {
+  /**
+   * Annualized funding-rate APR as a percentage (e.g. 120 = 120% APR). When
+   * omitted or null the funding contra voter is excluded from the score
+   * entirely (voter count stays at 6).
+   */
+  fundingApr?: number | null;
+  /**
+   * Symmetric APR threshold for the funding contra voter. An APR above this
+   * triggers DOWN; below negative this triggers UP. Defaults to 100 (i.e.
+   * 100% annualized).
+   */
+  fundingAprThreshold?: number;
 }
 
 export interface HlTrendScore {
-  /** Signed directional score: upVotes - downVotes. Range [-6, +6]. */
+  /** Signed directional score: upVotes - downVotes. Range scales with active voter count — [-6,+6] by default, [-7,+7] when the funding voter is active. */
   score: number;
   /** Raw ADX value for the momentum-gate (independent of the adxDI direction vote). */
   adx: number | null;
   voters: HlTrendVoters;
+  /** Number of active voters contributing to the score (6 by default, 7 when the funding voter is active). */
+  voterCount: number;
 }
 
 // +DI/-DI divergence is noise when ADX is below this — suppress the vote.
@@ -56,7 +80,10 @@ function signVote(value: number | null): TrendVote {
  * VWAP returns null if total volume is 0, EMA21 needs ≥ 21, CMF ≥ 20,
  * ADX ≥ 29, MACD ≥ 35.
  */
-export function scoreHlTrend(candles: OHLCVCandle[]): HlTrendScore | null {
+export function scoreHlTrend(
+  candles: OHLCVCandle[],
+  opts: HlTrendScoreOpts = {},
+): HlTrendScore | null {
   if (candles.length < 2) return null;
 
   const lastClose = candles[candles.length - 1]!.close;
@@ -119,6 +146,18 @@ export function scoreHlTrend(candles: OHLCVCandle[]): HlTrendScore | null {
     }
   }
 
+  // ── Voter 7 (optional): HL funding-rate contra (issue #265 Sub-PR 1) ────
+  // Only active when a funding APR is supplied. Adds a DOWN vote when funding
+  // is extremely positive (crowded longs paying a premium → mean-revert bias)
+  // and an UP vote when funding is extremely negative (crowded shorts).
+  let fundingVote: TrendVote | undefined;
+  if (opts.fundingApr !== undefined && opts.fundingApr !== null) {
+    const threshold = opts.fundingAprThreshold ?? 100;
+    if (opts.fundingApr > threshold) fundingVote = 'DOWN';
+    else if (opts.fundingApr < -threshold) fundingVote = 'UP';
+    else fundingVote = 'neutral';
+  }
+
   const voters: HlTrendVoters = {
     vwap: vwapVote,
     emaFastVsSlow: emaVote,
@@ -126,10 +165,17 @@ export function scoreHlTrend(candles: OHLCVCandle[]): HlTrendScore | null {
     obv: obvVote,
     cmf: cmfVote,
     adxDI: adxDIVote,
+    ...(fundingVote !== undefined ? { fundingContra: fundingVote } : {}),
   };
 
-  const upCount = Object.values(voters).filter((v) => v === 'UP').length;
-  const downCount = Object.values(voters).filter((v) => v === 'DOWN').length;
+  const voterValues = Object.values(voters);
+  const upCount = voterValues.filter((v) => v === 'UP').length;
+  const downCount = voterValues.filter((v) => v === 'DOWN').length;
 
-  return { score: upCount - downCount, adx: adxValue, voters };
+  return {
+    score: upCount - downCount,
+    adx: adxValue,
+    voters,
+    voterCount: voterValues.length,
+  };
 }
