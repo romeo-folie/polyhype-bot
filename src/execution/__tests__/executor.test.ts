@@ -88,7 +88,7 @@ const mockConfig = {
   MAKER_EMPTY_BOOK_MIN_CONSENSUS: 0.65,
   MAKER_EMPTY_BOOK_MIN_EDGE: 0.20,
   MAKER_EMPTY_BOOK_MAX_STDDEV: 0.12,
-  MAKER_EMPTY_BOOK_ALLOWED_SOURCES: ['oracle-lag', 'near-zero-arb', 'weather'],
+  MAKER_EMPTY_BOOK_ALLOWED_SOURCES: ['oracle-lag', 'near-zero-arb', 'weather', 'sports'],
   ORACLE_LAG_MAKER_EDGE_BPS: 50,
   ORACLE_LAG_MAKER_RETRY_ON_REJECT: true,
   ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS: 0,
@@ -1473,6 +1473,28 @@ describe('empty-book maker route', () => {
         edgeMagnitude: 0.10,         // below MAKER_EMPTY_BOOK_MIN_EDGE=0.20
         consensusStddev: 0.4,        // above MAKER_EMPTY_BOOK_MAX_STDDEV=0.12
         direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(false);
+    expect(result.entryExecutionPath).toBe('maker_pending');
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+  });
+
+  it('sports bypasses consensus/edge/stddev gates (structural-edge source)', async () => {
+    // Sports edge comes from a live ESPN score model, not LLM consensus.
+    // The Astros/Guardians signal that triggered this fix had consensus=0.595
+    // (inside the MIN_CONSENSUS=0.65 weak band) and edge=0.15 (below MIN_EDGE=0.20).
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeSignal({
+        source: 'sports',
+        consensusProbability: 0.595,
+        edgeMagnitude: 0.15,  // below MAKER_EMPTY_BOOK_MIN_EDGE=0.20
+        consensusStddev: 0.5, // would trip MAX_STDDEV=0.12 on non-structural sources
+        direction: 'YES',
       }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       redis as any,
