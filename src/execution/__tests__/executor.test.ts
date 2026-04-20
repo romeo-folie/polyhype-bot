@@ -1505,6 +1505,26 @@ describe('empty-book maker route', () => {
     expect(mockSubmitLimit).toHaveBeenCalledOnce();
   });
 
+  it('sports CLOB balance rejection skips as no_clob_book (not "book not actually empty")', async () => {
+    // When the CLOB wallet has insufficient funds the order is rejected with a
+    // balance error, not a post-only crossing. The executor must not mislabel
+    // this as "book not actually empty" — the book may genuinely be empty.
+    mockSubmitLimit.mockResolvedValue({
+      success: false,
+      error: 'not enough balance / allowance: the balance is not enough',
+    });
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeSignal({ source: 'sports', consensusProbability: 0.595, direction: 'YES' }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('no_clob_book');
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+  });
+
   it('weather uses MAKER_EMPTY_BOOK_EDGE_BPS (150), not oracle-lag override', async () => {
     const redis = makeRedis();
     await executeSignal(
