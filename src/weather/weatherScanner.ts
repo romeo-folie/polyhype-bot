@@ -514,6 +514,8 @@ export interface WeatherBracketOpportunity {
   /** Forecast details. */
   forecastHigh: number;
   forecastStdDev: number;
+  /** Actual stddev that entered estimateBracketProbability: max(rawStdDev, empiricalStddev) when bias correction active. */
+  effectiveStdDev: number;
   forecastSource: string;
   ensembleMembers: number;
   daysOut: number;
@@ -563,6 +565,8 @@ export interface FindMispricedResult {
   opportunities: WeatherBracketOpportunity[];
   /** Sum of all bracket model probabilities — used for coverage check and shadow logging. */
   modelSum: number;
+  /** True when bias correction was applied during this invocation (regardless of whether any bracket cleared minEdge). */
+  biasApplied: boolean;
 }
 
 export function findMispricedBrackets(
@@ -623,7 +627,7 @@ export function findMispricedBrackets(
       bracketCount: event.brackets.length,
       threshold: minModelCoverage,
     });
-    return { opportunities: [], modelSum };
+    return { opportunities: [], modelSum, biasApplied: applyBias };
   }
 
   // Compute overround (diagnostic): sum of all market YES prices.
@@ -684,6 +688,7 @@ export function findMispricedBrackets(
       outcomePrice: tradeSide === 'YES' ? bracket.yesPrice : bracket.noPrice,
       forecastHigh: correctedForecastHigh,
       forecastStdDev: forecast.stdDev,
+      effectiveStdDev,
       forecastSource: forecast.source,
       ensembleMembers: forecast.ensembleMembers,
       daysOut,
@@ -699,7 +704,7 @@ export function findMispricedBrackets(
     });
   }
 
-  return { opportunities, modelSum };
+  return { opportunities, modelSum, biasApplied: applyBias };
 }
 
 // ── Main scanner ─────────────────────────────────────────────────────────
@@ -778,7 +783,7 @@ export async function scanWeatherMarkets(
     // when bracket data is incomplete — e.g. late-day thinning from 11 → 4 brackets).
     // modelSum is returned by findMispricedBrackets so shadow logging reuses the exact
     // values used for gating rather than recomputing them.
-    const { opportunities, modelSum } = findMispricedBrackets(
+    const { opportunities, modelSum, biasApplied: biasCorrectionApplied } = findMispricedBrackets(
       event,
       forecast,
       daysOut,
@@ -865,7 +870,7 @@ export async function scanWeatherMarkets(
         cityMeanBias: cityBias?.meanBias ?? null,
         cityEmpiricalStddev: cityBias?.empiricalStddev ?? null,
         citySampleSize: cityBias?.sampleSize ?? null,
-        biasApplied: opportunities.some((o) => o.biasApplied),
+        biasApplied: biasCorrectionApplied,
       },
     });
 
@@ -917,7 +922,7 @@ export async function scanWeatherMarkets(
           // entered estimateBracketProbability; raw lets calibration sweeps
           // try alternative multipliers post-hoc via normalCdf.
           forecastStdDev: opp.forecastStdDev,
-          effectiveStdDev: opp.forecastStdDev * cfg.WEATHER_STDDEV_MULTIPLIER,
+          effectiveStdDev: opp.effectiveStdDev,
           stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
           ensembleModel: forecast.ensembleModel,
           tradeSidesMode: cfg.WEATHER_TRADE_SIDES,

@@ -62,7 +62,7 @@ export async function computeCityBias(
       FROM shadow_observations so
       JOIN weather_ground_truth gt
         ON gt.city       = so.payload->>'city'
-       AND gt.target_date = so.payload->>'targetDate'
+       AND gt.target_date = (so.payload->>'targetDate')::date
       WHERE so.kind = 'weather_event'
         AND (so.payload->>'forecastHigh') IS NOT NULL
       GROUP BY gt.city
