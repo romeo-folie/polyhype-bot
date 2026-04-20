@@ -16,6 +16,8 @@ const baseCfg: Partial<AppConfig> = {
   SPORTS_MAX_STAKE_USD: 5,
   SPORTS_MARKET_LOOKAHEAD_H: 48,
   SPORTS_POLL_INTERVAL_S: 8,
+  SPORTS_MLB_MIN_INNING: 6,
+  SPORTS_MAKER_PREMIUM_PCT: 0.02,
 };
 
 function mkCfg(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -155,6 +157,67 @@ describe('scanLiveSportsArb', () => {
     );
     expect(signals).toHaveLength(1);
     expect(signals[0]!.sourcedFrom).toContain('mlb');
+  });
+
+  it('skips MLB games in early innings (below SPORTS_MLB_MIN_INNING)', async () => {
+    const earlyGame = mkGame({
+      league: 'mlb',
+      homeTeam: 'New York Yankees',
+      awayTeam: 'Boston Red Sox',
+      homeAbbrev: 'NYY',
+      awayAbbrev: 'BOS',
+      homeScore: 3,
+      awayScore: 0,
+      period: 3, // inning 3 < min inning 6
+      secondsRemaining: 3000,
+      halfInning: 'top',
+    });
+    const mlbMarket = mkMarket({ question: 'Yankees vs. Red Sox', outcomePrices: '["0.30","0.70"]' });
+    const { signals, candidates } = await scanLiveSportsArb(
+      fakeRedis,
+      mkCfg({ SPORTS_LEAGUES: new Set(['mlb']) as Set<'nba' | 'nhl' | 'mlb'>, SPORTS_MLB_MIN_INNING: 6 }),
+      {
+        fetchLive: async () => [earlyGame],
+        getMarkets: async () => [mlbMarket],
+      },
+    );
+    expect(candidates).toHaveLength(0);
+    expect(signals).toHaveLength(0);
+  });
+
+  it('allows MLB games at or above SPORTS_MLB_MIN_INNING', async () => {
+    const lateGame = mkGame({
+      league: 'mlb',
+      homeTeam: 'New York Yankees',
+      awayTeam: 'Boston Red Sox',
+      homeAbbrev: 'NYY',
+      awayAbbrev: 'BOS',
+      homeScore: 3,
+      awayScore: 0,
+      period: 7, // inning 7 >= min inning 6
+      secondsRemaining: 1500,
+      halfInning: 'top',
+    });
+    const mlbMarket = mkMarket({ question: 'Yankees vs. Red Sox', outcomePrices: '["0.30","0.70"]' });
+    const { signals } = await scanLiveSportsArb(
+      fakeRedis,
+      mkCfg({ SPORTS_LEAGUES: new Set(['mlb']) as Set<'nba' | 'nhl' | 'mlb'>, SPORTS_MLB_MIN_INNING: 6 }),
+      {
+        fetchLive: async () => [lateGame],
+        getMarkets: async () => [mlbMarket],
+      },
+    );
+    expect(signals).toHaveLength(1);
+  });
+
+  it('does not apply the inning gate to NBA games', async () => {
+    // period=2 (2nd quarter) for NBA should still be eligible
+    const earlyNba = mkGame({ period: 2, homeScore: 110, awayScore: 90, secondsRemaining: 600 });
+    const { signals } = await scanLiveSportsArb(fakeRedis, mkCfg(), {
+      fetchLive: async () => [earlyNba],
+      getMarkets: async () => [mkMarket()],
+    });
+    expect(signals).toHaveLength(1);
   });
 
   it('skips when ESPN reports no live games', async () => {

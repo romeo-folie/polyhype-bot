@@ -176,6 +176,18 @@ export async function scanLiveSportsArb(
     if (!bestMarket) continue;
     matchedAny = true;
 
+    // Skip early MLB innings — too much variance for reliable prediction.
+    // A multi-run lead in innings 1-5 reverses frequently, causing the model
+    // to fire a signal that gets stop-lossed before the edge can materialise.
+    if (game.league === 'mlb' && game.period < cfg.SPORTS_MLB_MIN_INNING) {
+      logger.debug('[sports-arb] skipping early-inning MLB game', {
+        gameId: game.gameId,
+        inning: game.period,
+        minInning: cfg.SPORTS_MLB_MIN_INNING,
+      });
+      continue;
+    }
+
     const market = bestMarket;
     let yesPrice: number;
     try {
