@@ -30,17 +30,41 @@ export async function getCachedAssetCtx(
   ttlSec: number,
 ): Promise<CachedAssetCtx | null> {
   const key = `hl:asset-ctx:${symbol}`;
-  const cached = await redis.get(key);
+  let cached: string | null = null;
+  try {
+    cached = await redis.get(key);
+  } catch (err) {
+    logger.warn('[hl-asset-ctx] redis get failed', {
+      symbol,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    // treat as cache miss and fall through to HL fetch
+  }
   if (cached) {
     try {
       return JSON.parse(cached) as CachedAssetCtx;
     } catch {
-      // fall through and refetch — malformed cache entry
+      // Malformed cache entry — delete it so we don't keep reparsing the same
+      // garbage on every tick until TTL expires. Best-effort: a delete failure
+      // just means we'll retry parsing next tick, which is harmless.
+      try {
+        await redis.del(key);
+      } catch {
+        // ignore — non-critical cleanup
+      }
     }
   }
   try {
     const ctx = await getHyperliquid().getAssetContext(symbol);
-    await redis.setex(key, ttlSec, JSON.stringify(ctx));
+    try {
+      await redis.setex(key, ttlSec, JSON.stringify(ctx));
+    } catch (err) {
+      // Cache write failure is non-fatal — we still return the fresh ctx.
+      logger.warn('[hl-asset-ctx] redis setex failed', {
+        symbol,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
     return ctx;
   } catch (err) {
     logger.warn('[hl-asset-ctx] fetch failed', {

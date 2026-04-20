@@ -20,7 +20,8 @@ export interface HlTrendVoters {
   adxDI: TrendVote;
   /**
    * HL-native funding-rate contra voter (issue #265 Sub-PR 1).
-   * Only present when scoreHlTrend is called with `opts.fundingApr` defined.
+   * Only present when scoreHlTrend is called with `opts.fundingApr` set to a
+   * finite number (both `undefined` and `null` exclude the voter entirely).
    * Extreme positive APR (crowded longs) → DOWN; extreme negative APR
    * (crowded shorts) → UP; within the symmetric threshold band → neutral.
    */
@@ -70,7 +71,9 @@ function signVote(value: number | null): TrendVote {
  * sustained selloff all six should agree bearish; in a sustained rally all
  * six should agree bullish.
  *
- * Score = upVotes - downVotes (range [-6, +6]).
+ * Score = upVotes - downVotes. The range scales with the number of active
+ * voters: [-6, +6] by default (6 core voters), [-7, +7] when the optional
+ * funding-contra voter is active (via `opts.fundingApr`).
  * Null voters contribute 0 so partial-data candle arrays don't throw.
  *
  * Returns null only when the candle array is too short to compute anything
