@@ -33,7 +33,7 @@ import {
   fetchClobTokenBalance,
 } from '../shared/clob.js';
 import { creditProceeds } from '../shared/bankroll.js';
-import { markRecentlyClosed, isRecentlyClosed } from '../shared/closedGuard.js';
+import { markRecentlyClosed, isRecentlyClosed, markRecentlyResolved, isRecentlyResolved } from '../shared/closedGuard.js';
 
 /** @deprecated Use isRecentlyClosed from shared/closedGuard.js. Kept for external callers. */
 export const isRecentlyRedeemed = isRecentlyClosed;
@@ -362,6 +362,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
             redeemResult.tx_hash ?? undefined,
           );
           await markRecentlyClosed(redis, pos.market_id);
+          await markRecentlyResolved(redis, pos.market_id);
 
           // Record outcome (Phase 8).
           // Position is won if marked redeemable OR if outcome matches our side.
@@ -475,6 +476,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
                     clobResult.tx_hash ?? undefined,
                   );
                   await markRecentlyClosed(redis, pos.market_id);
+                  await markRecentlyResolved(redis, pos.market_id);
                   const question = pos.question ?? pos.market_id;
                   await recordRedemptionOutcome(redis, ledgerPos, null, {
                     marketId: pos.market_id,
@@ -637,10 +639,9 @@ async function redeemClobPositions(
     if (pos.direction !== 'YES' && pos.direction !== 'NO'
         && pos.direction !== 'UP' && pos.direction !== 'DOWN') continue;
 
-    if (await isRecentlyClosed(redis, pos.marketId)) {
-      // Market was already resolved/closed (e.g. another side of the same market).
-      // Close this position too instead of leaving it as a zombie.
-      logger.info('[redeemer] closing CLOB position — market already in recently-closed set', {
+    if (await isRecentlyResolved(redis, pos.marketId)) {
+      // A sibling side of this binary market resolved on-chain — close this position too.
+      logger.info('[redeemer] closing CLOB position — sibling side resolved on-chain', {
         marketId: pos.marketId,
         direction: pos.direction,
       });
@@ -724,6 +725,7 @@ async function redeemClobPositions(
               : pos.direction;
 
           // Dust or no-balance positions: close the zombie entry without redemption.
+          // Do NOT markRecentlyResolved here — on-chain settlement is unconfirmed at this point.
           if (isDust || (reportedBalance ?? 0) <= 0.01) {
             await closePosition(redis, pos.marketId, pos.direction);
             await markRecentlyClosed(redis, pos.marketId);
@@ -765,6 +767,7 @@ async function redeemClobPositions(
           if (!wonExpired) {
             await closePosition(redis, pos.marketId, pos.direction);
             await markRecentlyClosed(redis, pos.marketId);
+            await markRecentlyResolved(redis, pos.marketId);
             await recordPositionOutcome(
               redis,
               { ...pos, question: q, direction: pmDirection },
@@ -820,6 +823,7 @@ async function redeemClobPositions(
             );
             // Prevent repeated on-chain redemption attempts — the tx already landed.
             await markRecentlyClosed(redis, pos.marketId);
+            await markRecentlyResolved(redis, pos.marketId);
             results.push({ marketId: pos.marketId, side, success: false, error: 'redemption_proceeds_unknown' });
             continue;
           }
@@ -827,6 +831,7 @@ async function redeemClobPositions(
           await creditProceeds(redis, proceedsUsdc);
           await closePosition(redis, pos.marketId, pos.direction);
           await markRecentlyClosed(redis, pos.marketId);
+          await markRecentlyResolved(redis, pos.marketId);
 
           await recordPositionOutcome(
             redis,
@@ -886,6 +891,7 @@ async function redeemClobPositions(
         });
         await closePosition(redis, pos.marketId, pos.direction);
         await markRecentlyClosed(redis, pos.marketId);
+        await markRecentlyResolved(redis, pos.marketId);
         await recordPositionOutcome(
           redis,
           { ...pos, question: resolvedQuestion, direction: pmDirection },
@@ -1405,6 +1411,7 @@ async function redeemSimmerLedgerFallback(
             onChainResult.tx_hash,
           );
           await markRecentlyClosed(redis, pos.marketId);
+          await markRecentlyResolved(redis, pos.marketId);
           logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), {
             marketId: pos.marketId,
             postBalance,
@@ -1537,6 +1544,7 @@ async function redeemSimmerLedgerFallback(
           redeemResult.tx_hash ?? undefined,
         );
         await markRecentlyClosed(redis, pos.marketId);
+        await markRecentlyResolved(redis, pos.marketId);
         logRedemptionOutcome(conditionId, classifyRedemptionStatus(postBalance, cfg), {
           marketId: pos.marketId,
           postBalance,
