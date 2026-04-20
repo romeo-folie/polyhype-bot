@@ -1821,9 +1821,12 @@ export async function executeSignal(
       //     NO-side trades have consensusProbability (P(YES)) near zero and
       //     edgeMagnitude ~0.08-0.14 — neither fits LLM-conviction thresholds, yet
       //     both encode a genuine directional signal.
+      //   - sports: live score model edge (ESPN win-probability vs PM price);
+      //     consensusProbability is the model win-prob (e.g. 0.595) and
+      //     edgeMagnitude is the raw model-vs-market gap — neither is LLM-derived.
       // The source whitelist (MAKER_EMPTY_BOOK_ALLOWED_SOURCES) is the primary gate;
       // this flag only bypasses the secondary conviction guards.
-      const hasStructuralEdge = signalSource === 'oracle-lag' || signalSource === 'weather';
+      const hasStructuralEdge = signalSource === 'oracle-lag' || signalSource === 'weather' || signalSource === 'sports';
       if (!hasStructuralEdge) {
         const consensusP = signal.consensusProbability ?? 0.5;
         const minStrength = cfg.MAKER_EMPTY_BOOK_MIN_CONSENSUS;
