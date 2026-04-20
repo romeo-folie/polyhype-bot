@@ -211,7 +211,10 @@ export async function fetchHrrrForecast(
       latitude: lat.toFixed(4),
       longitude: lon.toFixed(4),
       daily: 'temperature_2m_max,temperature_2m_min,precipitation_probability_max',
-      models: 'hrrr',
+      // Open-Meteo exposes HRRR under the `gfs_hrrr` MultiDomains alias; the
+      // plain `hrrr` string is rejected with HTTP 400. Verified against the
+      // live API 2026-04-20.
+      models: 'gfs_hrrr',
       temperature_unit: 'fahrenheit',
       timezone: 'auto',
       start_date: targetDate.slice(0, 10),
