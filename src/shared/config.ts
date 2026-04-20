@@ -1345,7 +1345,7 @@ const envSchema = z.object({
   // stale-exit at 12h default would dump mid-swing. Tight exits keyed off the
   // 'weather' inferCategory branch.
   WEATHER_TAKE_PROFIT: z.coerce.number().min(0).optional().default(0.05),
-  WEATHER_STOP_LOSS: z.coerce.number().max(0).optional().default(-0.03),
+  WEATHER_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.03),
   // --- WEATHER GROUND-TRUTH RECONCILER ---
   // Fills `weather_ground_truth` with observed daily highs for past events, so
   // shadow-scan predictions in `shadow_observations` can be validated against
