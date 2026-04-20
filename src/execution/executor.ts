@@ -531,8 +531,8 @@ async function tryExecuteViaClobMaker(
   // OSINT empty-book loss case). Oracle-lag handles rejection with a retry and
   // re-priced order.
   //
-  // Other structural-edge sources (weather) use non-post-only GTC in empty-book
-  // mode: if the matching engine has real resting liquidity below our fair value,
+  // All other empty-book sources (weather, near-zero-arb, …) use non-post-only
+  // GTC: if the matching engine has real resting liquidity below our fair value,
   // a taker fill is a better-than-expected entry. The fair-value cap already
   // prevents overpaying — GTC rests as a maker if no matching ask is found.
   const postOnly = emptyBookMode ? signal.source === 'oracle-lag' : true;
@@ -633,10 +633,17 @@ async function tryExecuteViaClobMaker(
     }
   }
 
-  // GTC without post-only can fill immediately as a taker when real resting
-  // liquidity exists in the matching engine. Handle the instant-fill in this
-  // cycle rather than persisting and polling over 15 min.
-  if (emptyBookMode && !postOnly && result.success && result.order_id && (result.shares_bought ?? 0) > 0) {
+  // GTC without post-only can fill fully as a taker when real resting liquidity
+  // exists in the matching engine. Only take the fast-path on confirmed full fills
+  // (shares_bought ≥ size - ε); partial fills fall through to persist-and-poll so
+  // the residual open portion is correctly tracked and cancelled on the next cycle.
+  const isImmediateFullFill =
+    emptyBookMode &&
+    !postOnly &&
+    result.success &&
+    result.order_id != null &&
+    (result.shares_bought ?? 0) >= size - 1e-9;
+  if (isImmediateFullFill) {
     logger.info('[executor] empty-book GTC filled immediately (taker)', {
       marketId: signal.marketId,
       tokenId,
@@ -648,9 +655,12 @@ async function tryExecuteViaClobMaker(
     return {
       ok: true,
       tradeResult: { success: true, shares_bought: result.shares_bought },
-      filledStakeUsd: (result.shares_bought ?? 0) * price,
+      // Use reported cost (actual USDC spent at taker price) when available;
+      // fall back to shares * posted price which may overstate on price improvement.
+      filledStakeUsd: result.cost ?? (result.shares_bought ?? 0) * price,
       waitMs: Date.now() - startedAt,
-      makerOrderId: result.order_id,
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      makerOrderId: result.order_id!,
       makerPostedPrice: price,
       makerPostedSize: size,
       makerBestBid: bestBid,
