@@ -456,8 +456,12 @@ export async function fetchForecast(
     const spread = availableHighs.length > 1
       ? (Math.max(...availableHighs) - Math.min(...availableHighs)) / 1.5
       : 0;
-    const ensStd = ensemble?.stddevHigh ?? 0;
-    const stdDev = Math.max(ensStd, spread, defaultStd * stddevMinFraction);
+    // Single-source: use defaultStd as the ensemble fallback so a partial outage
+    // (only NOAA responds, ensemble null) doesn't silently tighten uncertainty to the
+    // stddevMinFraction floor. Multi-source: spread already adds variance, so 0 fallback is fine.
+    const stdDev = availableHighs.length === 1
+      ? Math.max(ensemble?.stddevHigh ?? defaultStd, defaultStd * stddevMinFraction)
+      : Math.max(ensemble?.stddevHigh ?? 0, spread, defaultStd * stddevMinFraction);
 
     return { forecastHigh, stdDev, source, ensembleMembers: ensemble?.memberCount ?? 0, ensembleModel };
   }
