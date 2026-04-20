@@ -126,7 +126,7 @@ function clobTokenForSignal(signal: TradeSignal): string | null {
  *   - 'futures'    — bypasses this branch via the isFutures path
  *   - undefined    — unlabelled; default-deny for safety
  */
-const MAKER_ELIGIBLE_SOURCES = new Set(['osint', 'copytrade', 'near-zero-arb', 'correlation-arb', 'oracle-lag']);
+const MAKER_ELIGIBLE_SOURCES = new Set(['osint', 'copytrade', 'near-zero-arb', 'correlation-arb', 'oracle-lag', 'weather']);
 
 function isMakerEligible(signal: TradeSignal): boolean {
   return MAKER_ELIGIBLE_SOURCES.has(signal.source ?? '');
@@ -1773,7 +1773,7 @@ export async function executeSignal(
       // encoding of the signal — not a weak one. The three gates below reject
       // exactly the shape of a valid oracle-lag signal. The source whitelist
       // is the contract for structural-edge sources.
-      const hasStructuralEdge = signalSource === 'oracle-lag';
+      const hasStructuralEdge = signalSource === 'oracle-lag' || signalSource === 'weather';
       if (!hasStructuralEdge) {
         const consensusP = signal.consensusProbability ?? 0.5;
         const minStrength = cfg.MAKER_EMPTY_BOOK_MIN_CONSENSUS;

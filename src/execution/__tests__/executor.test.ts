@@ -88,7 +88,7 @@ const mockConfig = {
   MAKER_EMPTY_BOOK_MIN_CONSENSUS: 0.65,
   MAKER_EMPTY_BOOK_MIN_EDGE: 0.20,
   MAKER_EMPTY_BOOK_MAX_STDDEV: 0.12,
-  MAKER_EMPTY_BOOK_ALLOWED_SOURCES: ['oracle-lag', 'near-zero-arb'],
+  MAKER_EMPTY_BOOK_ALLOWED_SOURCES: ['oracle-lag', 'near-zero-arb', 'weather'],
   ORACLE_LAG_MAKER_EDGE_BPS: 50,
   ORACLE_LAG_MAKER_RETRY_ON_REJECT: true,
   ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS: 0,
@@ -1458,6 +1458,47 @@ describe('empty-book maker route', () => {
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('empty_book_weak_consensus');
     expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
+  it('weather bypasses consensus/edge/stddev gates (structural-edge source)', async () => {
+    // Weather edge is physics-based (forecast vs observed temp), not LLM
+    // conviction. Like oracle-lag, its edgeMagnitude and consensusProbability
+    // encode real-world signal rather than LLM opinion, so the conviction
+    // gates are bypassed via the structural-edge path.
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.08,  // typical NO trade: modelP(YES) near zero
+        edgeMagnitude: 0.10,         // below MAKER_EMPTY_BOOK_MIN_EDGE=0.20
+        consensusStddev: 0.4,        // above MAKER_EMPTY_BOOK_MAX_STDDEV=0.12
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(false);
+    expect(result.entryExecutionPath).toBe('maker_pending');
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+  });
+
+  it('weather uses MAKER_EMPTY_BOOK_EDGE_BPS (150), not oracle-lag override', async () => {
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.08,
+        edgeMagnitude: 0.10,
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    // direction=NO: fair value = 1 - consensusProbability = 1 - 0.08 = 0.92
+    // price = 0.92 − 150 bps (0.015) = 0.905 → roundDown to tick 0.01 → 0.90
+    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.90 }));
   });
 
   it('routes to fair-value maker and returns pending on ghost book (YES direction)', async () => {
