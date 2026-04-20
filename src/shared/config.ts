@@ -1168,9 +1168,9 @@ const envSchema = z.object({
   // Weighted mode only: 4h EMA spread (% of slow EMA) below this counts as neutral
   // (0 pts, no penalty). Above: aligned = +2, opposed = -2.
   HL_MOMENTUM_4H_NEUTRAL_BAND_PCT: z.coerce.number().min(0).optional().default(0.5),
-  // Weighted mode only: minimum total score (15m absScore + MTF bonuses) required to trade.
+  // Weighted mode only: minimum integer total score (15m absScore + MTF bonuses) required to trade.
   // Range: capped at 9 (6 + 2 + 1). Default 5 = 4-of-6 + 1h aligned, OR 3-of-6 + both MTF aligned.
-  HL_MOMENTUM_MIN_TOTAL_SCORE: z.coerce.number().min(0).max(9).optional().default(5),
+  HL_MOMENTUM_MIN_TOTAL_SCORE: z.coerce.number().int().min(0).max(9).optional().default(5),
 
   // ── Chainlink → PM crypto-arb trigger ──
   // When true, oracle:price_moved ticks also fan into the PM crypto-arb scanner
@@ -1388,11 +1388,6 @@ export function loadConfig(forceReload = false): AppConfig {
   // HL momentum: 4h EMA fast period must be shorter than slow period
   if (cfg.HL_MOMENTUM_4H_EMA_FAST >= cfg.HL_MOMENTUM_4H_EMA_SLOW) {
     throw new Error('HL_MOMENTUM_4H_EMA_FAST must be less than HL_MOMENTUM_4H_EMA_SLOW');
-  }
-
-  // HL momentum weighted mode: total score cap is 6 (primary) + 2 (4h) + 1 (1h) = 9
-  if (cfg.HL_MOMENTUM_MIN_TOTAL_SCORE > 9) {
-    throw new Error('HL_MOMENTUM_MIN_TOTAL_SCORE cannot exceed 9 (max 6 primary + 2 4h + 1 1h)');
   }
 
   // Oracle-lag price band must be non-inverted.

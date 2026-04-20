@@ -665,10 +665,10 @@ describe('scanHlMomentum — weighted MTF scoring', () => {
     );
   });
 
-  it('treats spread exactly at neutral band as neutral (0 pts), not aligned', async () => {
+  it('treats spread just inside the neutral band as neutral (0 pts), not aligned', async () => {
     mockScoreHlTrend.mockReturnValue(bullishResultWithScore(4));
-    // Spread exactly 0.5% → at the band threshold. abs(0.5) < 0.5 is FALSE → would be ±2.
-    // So set just above: 0.499% → neutral.
+    // Boundary is strict (`absSpread < neutralBand`): 0.5% is NOT neutral (would be +2).
+    // Use 0.499% — just inside the band — to verify the strict-boundary neutral case.
     mockComputeEMA
       .mockReturnValueOnce([100.499])
       .mockReturnValueOnce([100]);
