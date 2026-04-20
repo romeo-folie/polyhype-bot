@@ -24,6 +24,8 @@ const baseConfig = {
   WEATHER_KELLY_FRACTION: 0.25,
   WEATHER_MODEL_ECMWF_ENABLED: false,
   WEATHER_HRRR_ENABLED: false,
+  WEATHER_BIAS_CORRECTION_ENABLED: false,
+  WEATHER_BIAS_MIN_SAMPLES: 14,
   MIN_BET_USD: 5,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
@@ -734,6 +736,88 @@ describe('findMispricedBrackets', () => {
     // Every YES-side opp in this event is gated; every NO-side opp stays tradable.
     for (const o of yesOpps) expect(o.allowedByConfig).toBe(false);
     for (const o of noOpps) expect(o.allowedByConfig).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findMispricedBrackets — city bias correction
+// ---------------------------------------------------------------------------
+
+describe('findMispricedBrackets - city bias correction', () => {
+  // Minimal 3-bracket event centred at 50°F with a 2°F interior bracket
+  const biasEvent = {
+    eventId: 'bias-test',
+    slug: 'bias-test',
+    city: 'chicago',
+    coords: lookupCity('chicago')!,
+    targetDate: '2026-04-20',
+    unit: 'fahrenheit' as const,
+    endDate: '2026-04-20T12:00:00Z',
+    brackets: [
+      { marketId: 'b0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'], threshold: 0, low: null, high: 47, label: '47°F or below', yesPrice: 0.15, noPrice: 0.85 },
+      { marketId: 'b1', conditionId: 'c1', clobTokenIds: ['t1y', 't1n'], threshold: 1, low: 48, high: 51, label: '48-51°F', yesPrice: 0.55, noPrice: 0.45 },
+      { marketId: 'b2', conditionId: 'c2', clobTokenIds: ['t2y', 't2n'], threshold: 2, low: 52, high: null, label: '52°F or higher', yesPrice: 0.30, noPrice: 0.70 },
+    ],
+  };
+  const biasBaseForecast = {
+    forecastHigh: 52,  // warm bias: model runs 2°F warm, truth is 50°F
+    stdDev: 3,
+    source: 'combined' as const,
+    ensembleMembers: 31,
+    ensembleModel: 'gfs' as const,
+  };
+
+  it('bias disabled → forecastHigh unchanged, biasApplied=false', () => {
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 20, updatedAt: '' };
+    const { opportunities } = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01, 1.0, 0.0, new Set(['YES', 'NO']),
+      cityBias, false, 14,
+    );
+    for (const opp of opportunities) {
+      expect(opp.biasApplied).toBe(false);
+      expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
+    }
+  });
+
+  it('bias enabled + sampleSize ≥ threshold → forecastHigh shifts by -meanBias', () => {
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 20, updatedAt: '' };
+    const { opportunities } = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01, 1.0, 0.0, new Set(['YES', 'NO']),
+      cityBias, true, 14,
+    );
+    expect(opportunities.length).toBeGreaterThan(0);
+    for (const opp of opportunities) {
+      expect(opp.biasApplied).toBe(true);
+      // correctedForecastHigh = 52 - 2 = 50
+      expect(opp.correctedForecastHigh).toBeCloseTo(50, 4);
+      expect(opp.cityMeanBias).toBeCloseTo(2.0, 4);
+      expect(opp.citySampleSize).toBe(20);
+    }
+  });
+
+  it('bias enabled + sampleSize < threshold → correction not applied', () => {
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 10, updatedAt: '' };
+    const { opportunities } = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01, 1.0, 0.0, new Set(['YES', 'NO']),
+      cityBias, true, 14,  // minSamples=14, cityBias.sampleSize=10 → below threshold
+    );
+    for (const opp of opportunities) {
+      expect(opp.biasApplied).toBe(false);
+      expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
+    }
+  });
+
+  it('shadow payload contains rawForecastHigh and correctedForecastHigh', () => {
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 20, updatedAt: '' };
+    const { opportunities } = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01, 1.0, 0.0, new Set(['YES', 'NO']),
+      cityBias, true, 14,
+    );
+    expect(opportunities.length).toBeGreaterThan(0);
+    const opp = opportunities[0]!;
+    expect(opp.rawForecastHigh).toBeCloseTo(52, 4);
+    expect(opp.correctedForecastHigh).toBeCloseTo(50, 4);
+    expect(opp.biasApplied).toBe(true);
   });
 });
 

@@ -1266,6 +1266,12 @@ const envSchema = z.object({
   // Use HRRR (3km, hourly-updating, radar-assimilated) as 3rd voter for US cities at daysOut≤1.
   // HRRR is the highest-accuracy US model at 0–18h lead. Ships dark.
   WEATHER_HRRR_ENABLED: boolFromEnv.optional().default(false),
+  // Apply per-city mean-bias subtraction and empirical σ overlay. Requires Redis cache
+  // to be populated by the reconciler (runs automatically, no extra cron needed). Ships dark.
+  WEATHER_BIAS_CORRECTION_ENABLED: boolFromEnv.optional().default(false),
+  // Minimum paired (forecast, observed) samples required before bias correction is applied
+  // for a city. Cities below threshold pass through uncorrected (safe default).
+  WEATHER_BIAS_MIN_SAMPLES: z.coerce.number().int().min(1).optional().default(14),
   // --- WEATHER EXECUTION ---
   // Killswitch separate from the scanner flag. Scanner may be ENABLED=true (shadow +
   // `would execute trade` logs) without actually placing orders. Flipping
