@@ -806,6 +806,103 @@ describe('fetchForecast - stddev floor', () => {
 });
 
 // ---------------------------------------------------------------------------
+// fetchForecast — WEATHER_MODEL_ECMWF_ENABLED flag wiring
+// ---------------------------------------------------------------------------
+
+describe('fetchForecast - ECMWF flag wiring', () => {
+  it('passes useEcmwf=true to fetchEnsembleForecast and propagates ensembleModel=ecmwf', async () => {
+    const shenzhenCoords = lookupCity('shenzhen');
+    expect(shenzhenCoords).not.toBeNull();
+
+    mockFetchEnsemble.mockResolvedValueOnce({
+      meanHigh: 29,
+      stddevHigh: 1.2,
+      meanLow: 23,
+      stddevLow: 0.8,
+      memberCount: 51,
+      forecastDate: '2026-04-20',
+      ensembleModel: 'ecmwf',
+    });
+    mockFetchOpenMeteo.mockResolvedValueOnce({
+      highTemp: 29,
+      lowTemp: 23,
+      precipProbability: 30,
+      forecastDate: '2026-04-20',
+    });
+
+    const mockEvent = {
+      eventId: 'szx-ecmwf',
+      slug: 'shenzhen-ecmwf-test',
+      city: 'shenzhen',
+      coords: shenzhenCoords!,
+      targetDate: '2026-04-20',
+      unit: 'celsius' as const,
+      brackets: [],
+      endDate: '2026-04-20T12:00:00Z',
+    };
+
+    const result = await fetchForecast(mockEvent, 1, undefined, 0.7, true);
+    expect(result).not.toBeNull();
+    expect(result!.ensembleModel).toBe('ecmwf');
+    expect(result!.ensembleMembers).toBe(51);
+    // Verify the 6th arg (useEcmwf=true) was forwarded to fetchEnsembleForecast
+    expect(mockFetchEnsemble).toHaveBeenCalledWith(
+      shenzhenCoords!.lat,
+      shenzhenCoords!.lon,
+      '2026-04-20',
+      'celsius',
+      undefined,
+      true,
+    );
+  });
+
+  it('passes useEcmwf=false when flag is disabled and propagates ensembleModel=gfs', async () => {
+    const londonCoords = lookupCity('london');
+    expect(londonCoords).not.toBeNull();
+
+    mockFetchEnsemble.mockResolvedValueOnce({
+      meanHigh: 15,
+      stddevHigh: 1.5,
+      meanLow: 9,
+      stddevLow: 0.9,
+      memberCount: 31,
+      forecastDate: '2026-04-20',
+      ensembleModel: 'gfs',
+    });
+    mockFetchOpenMeteo.mockResolvedValueOnce({
+      highTemp: 15,
+      lowTemp: 9,
+      precipProbability: 50,
+      forecastDate: '2026-04-20',
+    });
+
+    const mockEvent = {
+      eventId: 'lon-gfs',
+      slug: 'london-gfs-test',
+      city: 'london',
+      coords: londonCoords!,
+      targetDate: '2026-04-20',
+      unit: 'celsius' as const,
+      brackets: [],
+      endDate: '2026-04-20T12:00:00Z',
+    };
+
+    const result = await fetchForecast(mockEvent, 1, undefined, 0.7, false);
+    expect(result).not.toBeNull();
+    expect(result!.ensembleModel).toBe('gfs');
+    expect(result!.ensembleMembers).toBe(31);
+    expect(mockFetchEnsemble).toHaveBeenCalledWith(
+      londonCoords!.lat,
+      londonCoords!.lon,
+      '2026-04-20',
+      'celsius',
+      undefined,
+      false,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // parseWeatherEvent — canonical city key
 // ---------------------------------------------------------------------------
 
