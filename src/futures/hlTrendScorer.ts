@@ -154,7 +154,8 @@ export function scoreHlTrend(
   // is extremely positive (crowded longs paying a premium → mean-revert bias)
   // and an UP vote when funding is extremely negative (crowded shorts).
   let fundingVote: TrendVote | undefined;
-  if (opts.fundingApr !== undefined && opts.fundingApr !== null) {
+  if (opts.fundingApr !== undefined && opts.fundingApr !== null
+      && Number.isFinite(opts.fundingApr)) {
     const threshold = opts.fundingAprThreshold ?? 100;
     if (opts.fundingApr > threshold) fundingVote = 'DOWN';
     else if (opts.fundingApr < -threshold) fundingVote = 'UP';

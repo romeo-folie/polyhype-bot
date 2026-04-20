@@ -256,4 +256,20 @@ describe('scoreHlTrend — funding contra voter', () => {
     const negative = scoreHlTrend(candles, { fundingApr: -100 });
     expect(negative!.voters.fundingContra).toBe('neutral');
   });
+
+  it('excludes the voter when fundingApr is NaN or Infinity (non-finite)', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    // NaN: comparisons always return false → would fall through to neutral
+    // and incorrectly bump voterCount to 7. Guard must exclude the voter.
+    const nan = scoreHlTrend(candles, { fundingApr: Number.NaN });
+    expect(nan!.voters.fundingContra).toBeUndefined();
+    expect(nan!.voterCount).toBe(6);
+    // Infinity: would always vote DOWN (> threshold). Guard must exclude.
+    const pos = scoreHlTrend(candles, { fundingApr: Number.POSITIVE_INFINITY });
+    expect(pos!.voters.fundingContra).toBeUndefined();
+    expect(pos!.voterCount).toBe(6);
+    const neg = scoreHlTrend(candles, { fundingApr: Number.NEGATIVE_INFINITY });
+    expect(neg!.voters.fundingContra).toBeUndefined();
+    expect(neg!.voterCount).toBe(6);
+  });
 });
