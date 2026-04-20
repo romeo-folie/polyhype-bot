@@ -39,6 +39,8 @@ import {
 } from './noaaClient.js';
 import type { CityCoordinates, FetchFn } from './noaaClient.js';
 import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast } from './openMeteoClient.js';
+import { getCityBias } from './cityBias.js';
+import type { CityBias } from './cityBias.js';
 
 const GAMMA_BASE = 'https://gamma-api.polymarket.com';
 const GAMMA_TIMEOUT_MS = 15_000;
@@ -512,6 +514,8 @@ export interface WeatherBracketOpportunity {
   /** Forecast details. */
   forecastHigh: number;
   forecastStdDev: number;
+  /** Actual stddev that entered estimateBracketProbability: max(rawStdDev, empiricalStddev) when bias correction active. */
+  effectiveStdDev: number;
   forecastSource: string;
   ensembleMembers: number;
   daysOut: number;
@@ -524,6 +528,18 @@ export interface WeatherBracketOpportunity {
    * so the executor layer (and shadow observations) can gate cleanly.
    */
   allowedByConfig: boolean;
+  /** Raw forecast high before any bias correction was applied. Equal to forecastHigh when biasApplied=false. */
+  rawForecastHigh: number;
+  /** Forecast high after subtracting cityMeanBias, or same as rawForecastHigh if correction was not applied. */
+  correctedForecastHigh: number;
+  /** Per-city mean forecast bias (forecastHigh − observedHigh). Null when no bias data available. */
+  cityMeanBias: number | null;
+  /** Per-city empirical standard deviation of forecast errors. Null when no bias data available. */
+  cityEmpiricalStddev: number | null;
+  /** Number of samples used for this city's bias estimate. Null when no bias data available. */
+  citySampleSize: number | null;
+  /** True when bias correction was applied to forecastHigh and/or effectiveStdDev. */
+  biasApplied: boolean;
 }
 
 /**
@@ -549,6 +565,8 @@ export interface FindMispricedResult {
   opportunities: WeatherBracketOpportunity[];
   /** Sum of all bracket model probabilities — used for coverage check and shadow logging. */
   modelSum: number;
+  /** True when bias correction was applied during this invocation (regardless of whether any bracket cleared minEdge). */
+  biasApplied: boolean;
 }
 
 export function findMispricedBrackets(
@@ -559,20 +577,36 @@ export function findMispricedBrackets(
   stddevMultiplier = 1.0,
   minModelCoverage = 0.95,
   allowedSides: ReadonlySet<'YES' | 'NO'> = new Set(['YES', 'NO']),
+  cityBias: CityBias | null = null,
+  biasCorrectionEnabled = false,
+  biasMinSamples = 14,
 ): FindMispricedResult {
   const opportunities: WeatherBracketOpportunity[] = [];
 
-  // Effective stddev after calibration multiplier. Multiplier > 1 broadens the
-  // distribution (less mass on central bracket, more on adjacent), which is
-  // what we'd reach for if shadow analysis shows modelProb is over-confident
-  // in the exact forecast point.
-  const effectiveStdDev = forecast.stdDev * stddevMultiplier;
+  // Apply per-city bias correction when enabled and enough samples are available.
+  const applyBias =
+    biasCorrectionEnabled &&
+    cityBias !== null &&
+    cityBias.sampleSize >= biasMinSamples;
+
+  const rawForecastHigh = forecast.forecastHigh;
+  // Subtract mean bias so the corrected forecast is unbiased on average.
+  const correctedForecastHigh = applyBias ? rawForecastHigh - cityBias!.meanBias : rawForecastHigh;
+  const forecastHighForCalc = correctedForecastHigh;
+
+  // Effective stddev: take max of ensemble spread and empirical error σ (when bias available).
+  // This prevents over-confidence in stable regimes where ensemble spread is tight but
+  // realized error is larger.
+  const rawEffectiveStdDev = forecast.stdDev * stddevMultiplier;
+  const effectiveStdDev = applyBias
+    ? Math.max(rawEffectiveStdDev, cityBias!.empiricalStddev * stddevMultiplier)
+    : rawEffectiveStdDev;
 
   // Compute model probability for each bracket
   const modelProbs: number[] = [];
   for (const bracket of event.brackets) {
     const prob = estimateBracketProbability(
-      forecast.forecastHigh,
+      forecastHighForCalc,
       bracket.low,
       bracket.high,
       daysOut,
@@ -593,7 +627,7 @@ export function findMispricedBrackets(
       bracketCount: event.brackets.length,
       threshold: minModelCoverage,
     });
-    return { opportunities: [], modelSum };
+    return { opportunities: [], modelSum, biasApplied: applyBias };
   }
 
   // Compute overround (diagnostic): sum of all market YES prices.
@@ -652,18 +686,25 @@ export function findMispricedBrackets(
       edge,
       tradeSide,
       outcomePrice: tradeSide === 'YES' ? bracket.yesPrice : bracket.noPrice,
-      forecastHigh: forecast.forecastHigh,
+      forecastHigh: correctedForecastHigh,
       forecastStdDev: forecast.stdDev,
+      effectiveStdDev,
       forecastSource: forecast.source,
       ensembleMembers: forecast.ensembleMembers,
       daysOut,
       unit: event.unit,
       overround,
       allowedByConfig: allowedSides.has(tradeSide),
+      rawForecastHigh,
+      correctedForecastHigh,
+      cityMeanBias: cityBias?.meanBias ?? null,
+      cityEmpiricalStddev: cityBias?.empiricalStddev ?? null,
+      citySampleSize: cityBias?.sampleSize ?? null,
+      biasApplied: applyBias,
     });
   }
 
-  return { opportunities, modelSum };
+  return { opportunities, modelSum, biasApplied: applyBias };
 }
 
 // ── Main scanner ─────────────────────────────────────────────────────────
@@ -733,11 +774,16 @@ export async function scanWeatherMarkets(
       continue;
     }
 
+    // Fetch per-city bias (null when WEATHER_BIAS_CORRECTION_ENABLED=false or cache miss).
+    const cityBias = cfg.WEATHER_BIAS_CORRECTION_ENABLED
+      ? await getCityBias(redis, event.city)
+      : null;
+
     // Step 4: Find mispriced brackets (coverage guard inside; returns empty opportunities
     // when bracket data is incomplete — e.g. late-day thinning from 11 → 4 brackets).
     // modelSum is returned by findMispricedBrackets so shadow logging reuses the exact
     // values used for gating rather than recomputing them.
-    const { opportunities, modelSum } = findMispricedBrackets(
+    const { opportunities, modelSum, biasApplied: biasCorrectionApplied } = findMispricedBrackets(
       event,
       forecast,
       daysOut,
@@ -745,6 +791,9 @@ export async function scanWeatherMarkets(
       cfg.WEATHER_STDDEV_MULTIPLIER,
       cfg.WEATHER_MIN_MODEL_COVERAGE,
       allowedSides,
+      cityBias,
+      cfg.WEATHER_BIAS_CORRECTION_ENABLED,
+      cfg.WEATHER_BIAS_MIN_SAMPLES,
     );
     const effectiveStdDev = forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER;
     const coverageStatus = modelSum >= cfg.WEATHER_MIN_MODEL_COVERAGE ? 'ok' : 'skipped_low_coverage';
@@ -818,6 +867,10 @@ export async function scanWeatherMarkets(
         allowedInEvent,
         tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
         scannerEnabled: cfg.WEATHER_SCANNER_ENABLED,
+        cityMeanBias: cityBias?.meanBias ?? null,
+        cityEmpiricalStddev: cityBias?.empiricalStddev ?? null,
+        citySampleSize: cityBias?.sampleSize ?? null,
+        biasApplied: biasCorrectionApplied,
       },
     });
 
@@ -869,13 +922,19 @@ export async function scanWeatherMarkets(
           // entered estimateBracketProbability; raw lets calibration sweeps
           // try alternative multipliers post-hoc via normalCdf.
           forecastStdDev: opp.forecastStdDev,
-          effectiveStdDev: opp.forecastStdDev * cfg.WEATHER_STDDEV_MULTIPLIER,
+          effectiveStdDev: opp.effectiveStdDev,
           stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
           ensembleModel: forecast.ensembleModel,
           tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
           allowedByConfig: opp.allowedByConfig,
           daysOut: opp.daysOut,
           wouldTrade,
+          rawForecastHigh: opp.rawForecastHigh,
+          correctedForecastHigh: opp.correctedForecastHigh,
+          cityMeanBias: opp.cityMeanBias,
+          cityEmpiricalStddev: opp.cityEmpiricalStddev,
+          citySampleSize: opp.citySampleSize,
+          biasApplied: opp.biasApplied,
         },
       });
     }

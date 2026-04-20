@@ -24,12 +24,14 @@ import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { getSql } from '../db/client.js';
+import { getRedis } from '../shared/redis.js';
 import { CITY_COORDINATES, canonicalCityKey, lookupCity } from './noaaClient.js';
 import {
   fetchHistoricalHigh,
   type FetchFn,
   type HistoricalHigh,
 } from './openMeteoClient.js';
+import { computeCityBias } from './cityBias.js';
 
 /** One unresolved (city, target_date) tuple to reconcile. */
 export interface UnresolvedTarget {
@@ -188,6 +190,13 @@ export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
     candidates: targets.length,
     ...summary,
   });
+
+  // After ground-truth upserts, refresh per-city bias cache in Redis.
+  // This runs unconditionally regardless of WEATHER_BIAS_CORRECTION_ENABLED so
+  // the cache is warm by the time the flag is flipped.
+  const redis = getRedis();
+  const sql = getSql();
+  await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES);
 }
 
 // ── Standalone entrypoint (cron) ──────────────────────────────────────────
