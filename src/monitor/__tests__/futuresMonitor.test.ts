@@ -443,9 +443,9 @@ describe('futuresMonitor', () => {
 
     it('meme SL does not fire at -5% when the frozen SL is -15% (avoids chop)', async () => {
       loadConfigMock.mockReturnValue(memeCfg);
-      mockGetOpenPositions.mockResolvedValue([makeHlPos('PEPE', -5)]);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('kPEPE', -5)]);
       mockGetLedgerPositions.mockResolvedValue([
-        makeLedgerMemePos({ symbol: 'PEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+        makeLedgerMemePos({ symbol: 'kPEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
       ]);
 
       await runTick();
@@ -455,14 +455,14 @@ describe('futuresMonitor', () => {
 
     it('meme SL fires when price hits the frozen -15% SL', async () => {
       loadConfigMock.mockReturnValue(memeCfg);
-      mockGetOpenPositions.mockResolvedValue([makeHlPos('PEPE', -16)]);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('kPEPE', -16)]);
       mockGetLedgerPositions.mockResolvedValue([
-        makeLedgerMemePos({ symbol: 'PEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+        makeLedgerMemePos({ symbol: 'kPEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
       ]);
 
       await runTick();
 
-      expect(mockClosePosition).toHaveBeenCalledWith('PEPE');
+      expect(mockClosePosition).toHaveBeenCalledWith('kPEPE');
     });
 
     it('meme TP fires at the frozen TP (no trailing configured)', async () => {
@@ -483,14 +483,14 @@ describe('futuresMonitor', () => {
         ...baseCfg,
         HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: false,
       });
-      mockGetOpenPositions.mockResolvedValue([makeHlPos('BONK', -10)]);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('kBONK', -10)]);
       mockGetLedgerPositions.mockResolvedValue([
-        makeLedgerMemePos({ symbol: 'BONK', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+        makeLedgerMemePos({ symbol: 'kBONK', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
       ]);
 
       await runTick();
 
-      expect(mockClosePosition).toHaveBeenCalledWith('BONK');
+      expect(mockClosePosition).toHaveBeenCalledWith('kBONK');
     });
 
     it('major symbol (BTC) with HL momentum source falls through to fixed, not meme branch', async () => {
@@ -510,10 +510,10 @@ describe('futuresMonitor', () => {
     it('non-hl-momentum source falls through even on a meme symbol', async () => {
       loadConfigMock.mockReturnValue(memeCfg);
       // -10% crosses the default FUTURES_STOP_LOSS_PCT (-1.5%).
-      mockGetOpenPositions.mockResolvedValue([makeHlPos('PEPE', -10)]);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('kPEPE', -10)]);
       mockGetLedgerPositions.mockResolvedValue([
         makeLedgerMemePos({
-          symbol: 'PEPE',
+          symbol: 'kPEPE',
           memeAtrSlPct: 15,
           memeAtrTpPct: 30,
           sourcedFrom: 'arb-scanner',
@@ -522,20 +522,20 @@ describe('futuresMonitor', () => {
 
       await runTick();
 
-      expect(mockClosePosition).toHaveBeenCalledWith('PEPE');
+      expect(mockClosePosition).toHaveBeenCalledWith('kPEPE');
     });
 
     it('meme symbol without frozen ATR snapshot falls back to fixed HL momentum SL', async () => {
       loadConfigMock.mockReturnValue(memeCfg);
-      mockGetOpenPositions.mockResolvedValue([makeHlPos('PEPE', -6)]);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('kPEPE', -6)]);
       mockGetLedgerPositions.mockResolvedValue([
         // No memeAtrSlPct/TpPct — simulates ATR unavailable at entry.
-        makeLedgerMemePos({ symbol: 'PEPE' }),
+        makeLedgerMemePos({ symbol: 'kPEPE' }),
       ]);
 
       await runTick();
 
-      expect(mockClosePosition).toHaveBeenCalledWith('PEPE');
+      expect(mockClosePosition).toHaveBeenCalledWith('kPEPE');
     });
 
     it('shadow divergence emitted when verdicts disagree and feature is dark', async () => {
@@ -544,9 +544,9 @@ describe('futuresMonitor', () => {
         HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: false,
       });
       // -7%: fixed HL SL (-5%) would fire; meme SL (-15%) would not → verdict mismatch.
-      mockGetOpenPositions.mockResolvedValue([makeHlPos('PEPE', -7)]);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('kPEPE', -7)]);
       mockGetLedgerPositions.mockResolvedValue([
-        makeLedgerMemePos({ symbol: 'PEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+        makeLedgerMemePos({ symbol: 'kPEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
       ]);
 
       await runTick();
@@ -569,9 +569,9 @@ describe('futuresMonitor', () => {
         HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: false,
       });
       // +1%: both verdicts are hold → no divergence log.
-      mockGetOpenPositions.mockResolvedValue([makeHlPos('PEPE', 1)]);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('kPEPE', 1)]);
       mockGetLedgerPositions.mockResolvedValue([
-        makeLedgerMemePos({ symbol: 'PEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+        makeLedgerMemePos({ symbol: 'kPEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
       ]);
 
       await runTick();

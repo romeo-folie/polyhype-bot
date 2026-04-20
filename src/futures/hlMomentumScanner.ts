@@ -41,19 +41,27 @@ export function momentumCooldownKey(hlSymbol: string, direction: 'LONG' | 'SHORT
 }
 
 /**
- * True when the symbol is in the meme-perp ATR-SL/TP set. Accepts either Binance
- * lower-case form (e.g. `pepeusdt`) or HL upper-case form (`PEPE`); compared via
- * normalised lower-case substring so callers don't need to translate.
+ * Strip the `usdt` suffix (Binance pair form) and/or the `k` prefix (Hyperliquid
+ * 1000× unit marker used for `kPEPE`, `kBONK`, etc.) so both forms compare equal
+ * against a base asset name.
+ */
+function normaliseMemeBase(s: string): string {
+  return s.toLowerCase().trim().replace(/usdt$/, '').replace(/^k/, '');
+}
+
+/**
+ * True when the symbol is in the meme-perp ATR-SL/TP set. Accepts all three forms:
+ * Binance pair (`pepeusdt`), HL 1000× ticker (`kPEPE`, `kBONK`), or plain HL base
+ * (`WIF`, `PENGU`). Comparison happens on the normalised base name so callers
+ * don't need to translate before checking.
  */
 export function isMemeSymbol(symbol: string, memeList: string): boolean {
-  const candidate = symbol.toLowerCase();
+  const candidate = normaliseMemeBase(symbol);
+  if (!candidate) return false;
   for (const raw of memeList.split(',')) {
-    const meme = raw.trim().toLowerCase();
+    const meme = normaliseMemeBase(raw);
     if (!meme) continue;
-    // Exact match against the Binance form OR substring of the HL form (PEPE → pepeusdt).
-    if (meme === candidate) return true;
-    const hlBase = meme.replace(/usdt$/, '');
-    if (hlBase && candidate === hlBase) return true;
+    if (candidate === meme) return true;
   }
   return false;
 }

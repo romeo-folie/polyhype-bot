@@ -803,8 +803,17 @@ describe('isMemeSymbol', () => {
     expect(isMemeSymbol('bonkusdt', memeList)).toBe(true);
   });
 
-  it('matches HL upper-case base form (executor passes "PEPE", not "pepeusdt")', () => {
-    expect(isMemeSymbol('PEPE', memeList)).toBe(true);
+  it('matches HL 1000× unit tickers (kPEPE, kBONK — the real Hyperliquid form)', () => {
+    // Hyperliquid lists PEPE and BONK as 1000× unit perps named `kPEPE` / `kBONK`.
+    // The executor receives these tickers from positionLedger / scanner, so this
+    // is the production-relevant case — without `k` stripping the meme branch
+    // would never trigger live for PEPE/BONK.
+    expect(isMemeSymbol('kPEPE', memeList)).toBe(true);
+    expect(isMemeSymbol('kBONK', memeList)).toBe(true);
+  });
+
+  it('matches HL upper-case base form for non-1000× perps (WIF, PENGU)', () => {
+    // WIF and PENGU are listed on HL as plain `WIF` / `PENGU` (no k prefix).
     expect(isMemeSymbol('WIF', memeList)).toBe(true);
     expect(isMemeSymbol('PENGU', memeList)).toBe(true);
   });
@@ -817,12 +826,13 @@ describe('isMemeSymbol', () => {
   });
 
   it('tolerates whitespace and empty entries in the csv', () => {
-    expect(isMemeSymbol('PEPE', ' pepeusdt , ,wifusdt ')).toBe(true);
+    expect(isMemeSymbol('kPEPE', ' pepeusdt , ,wifusdt ')).toBe(true);
     expect(isMemeSymbol('BTC', '')).toBe(false);
   });
 
   it('is case-insensitive on input', () => {
     expect(isMemeSymbol('pepe', memeList)).toBe(true);
     expect(isMemeSymbol('Pepe', memeList)).toBe(true);
+    expect(isMemeSymbol('kpepe', memeList)).toBe(true);
   });
 });

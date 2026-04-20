@@ -401,9 +401,14 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         ) {
           const memeSlPct = -ledgerPosForAtr.memeAtrSlPct;
           const memeTpPct = ledgerPosForAtr.memeAtrTpPct;
-          // Fixed verdict uses the active slPct/tpPct (post-source-override, pre-meme/ATR).
-          const fixedSlHit = priceChangePct <= slPct;
-          const fixedTpHit = priceChangePct >= tpPct;
+          // Fixed baseline is the hl-momentum per-source override, NOT the active
+          // slPct/tpPct — those may already have been mutated by the global ATR
+          // overlay (FUTURES_ATR_SLTP_ENABLED). Use cfg values directly so the
+          // shadow stays interpretable as "meme-ATR vs fixed HL pcts".
+          const fixedBaselineSlPct = -cfg.HL_MOMENTUM_STOP_LOSS_PCT;
+          const fixedBaselineTpPct = cfg.HL_MOMENTUM_TAKE_PROFIT_PCT;
+          const fixedSlHit = priceChangePct <= fixedBaselineSlPct;
+          const fixedTpHit = priceChangePct >= fixedBaselineTpPct;
           const memeSlHit = priceChangePct <= memeSlPct;
           const memeTpHit = priceChangePct >= memeTpPct;
           if (fixedSlHit !== memeSlHit || fixedTpHit !== memeTpHit) {
@@ -415,8 +420,8 @@ export async function runFuturesMonitorWorker(): Promise<void> {
               priceChangePct: priceChangePct.toFixed(2),
               memeAtrSlPct: ledgerPosForAtr.memeAtrSlPct.toFixed(2),
               memeAtrTpPct: ledgerPosForAtr.memeAtrTpPct.toFixed(2),
-              fixedSlPct: slPct,
-              fixedTpPct: tpPct,
+              fixedSlPct: fixedBaselineSlPct,
+              fixedTpPct: fixedBaselineTpPct,
               fixedVerdict,
               memeVerdict,
             });
@@ -431,8 +436,8 @@ export async function runFuturesMonitorWorker(): Promise<void> {
                 priceChangePct,
                 memeAtrSlPct: ledgerPosForAtr.memeAtrSlPct,
                 memeAtrTpPct: ledgerPosForAtr.memeAtrTpPct,
-                fixedSlPct: slPct,
-                fixedTpPct: tpPct,
+                fixedSlPct: fixedBaselineSlPct,
+                fixedTpPct: fixedBaselineTpPct,
                 fixedVerdict,
                 memeVerdict,
               },
