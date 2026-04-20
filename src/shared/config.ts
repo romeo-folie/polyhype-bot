@@ -1263,6 +1263,9 @@ const envSchema = z.object({
   // Use ECMWF IFS 0.25° 51-member ensemble instead of GFS 31-member for stddev estimation.
   // ECMWF has ~0.2-0.5°C lower Tmax MAE at 1-day lead globally. Ships dark.
   WEATHER_MODEL_ECMWF_ENABLED: boolFromEnv.optional().default(false),
+  // Use HRRR (3km, hourly-updating, radar-assimilated) as 3rd voter for US cities at daysOut≤1.
+  // HRRR is the highest-accuracy US model at 0–18h lead. Ships dark.
+  WEATHER_HRRR_ENABLED: boolFromEnv.optional().default(false),
   // --- WEATHER EXECUTION ---
   // Killswitch separate from the scanner flag. Scanner may be ENABLED=true (shadow +
   // `would execute trade` logs) without actually placing orders. Flipping

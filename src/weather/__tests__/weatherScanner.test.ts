@@ -23,6 +23,7 @@ const baseConfig = {
   WEATHER_MAX_SCAN_EXPOSURE_USD: 30,
   WEATHER_KELLY_FRACTION: 0.25,
   WEATHER_MODEL_ECMWF_ENABLED: false,
+  WEATHER_HRRR_ENABLED: false,
   MIN_BET_USD: 5,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
@@ -79,9 +80,11 @@ vi.mock('../noaaClient.js', async () => {
 
 const mockFetchOpenMeteo = vi.fn<() => Promise<unknown>>();
 const mockFetchEnsemble = vi.fn<() => Promise<unknown>>();
+const mockFetchHrrr = vi.fn<() => Promise<unknown>>();
 vi.mock('../openMeteoClient.js', () => ({
   fetchOpenMeteoForecast: mockFetchOpenMeteo,
   fetchEnsembleForecast: mockFetchEnsemble,
+  fetchHrrrForecast: mockFetchHrrr,
 }));
 
 // Dynamic imports — after mocks
@@ -899,6 +902,101 @@ describe('fetchForecast - ECMWF flag wiring', () => {
       undefined,
       false,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchForecast — HRRR flag wiring
+// ---------------------------------------------------------------------------
+
+describe('fetchForecast - HRRR flag wiring', () => {
+  function makeUsEvent(city: string, targetDate: string) {
+    const coords = lookupCity(city);
+    expect(coords).not.toBeNull();
+    return {
+      eventId: `${city}-hrrr-test`,
+      slug: `${city}-hrrr-test`,
+      city,
+      coords: coords!,
+      targetDate,
+      unit: 'fahrenheit' as const,
+      brackets: [],
+      endDate: `${targetDate}T12:00:00Z`,
+    };
+  }
+
+  const ensembleMock = {
+    meanHigh: 72,
+    stddevHigh: 2.0,
+    meanLow: 58,
+    stddevLow: 1.5,
+    memberCount: 31,
+    forecastDate: '2026-04-20',
+    ensembleModel: 'gfs',
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetchEnsemble.mockResolvedValue(ensembleMock);
+  });
+
+  it('US city + daysOut=1 + useHrrr=true → 3-way average, source=hrrr-combined', async () => {
+    const mockEvent = makeUsEvent('chicago', '2026-04-20');
+    mockFetchNwsForecast.mockResolvedValueOnce({ highF: 70, lowF: 55, forecastDate: '2026-04-20' });
+    mockFetchOpenMeteo.mockResolvedValueOnce({ highTemp: 72, lowTemp: 57, precipProbability: 20, forecastDate: '2026-04-20' });
+    mockFetchHrrr.mockResolvedValueOnce({ highTemp: 74, lowTemp: 58, precipProbability: 18, forecastDate: '2026-04-20' });
+
+    const result = await fetchForecast(mockEvent, 1, undefined, 0.7, false, true);
+    expect(result).not.toBeNull();
+    // Mean of 70 + 72 + 74 = 72
+    expect(result!.forecastHigh).toBeCloseTo(72, 1);
+    expect(result!.source).toBe('hrrr-combined');
+  });
+
+  it('US city + daysOut=2 → HRRR skipped, source=combined', async () => {
+    const mockEvent = makeUsEvent('chicago', '2026-04-21');
+    mockFetchEnsemble.mockResolvedValue({ ...ensembleMock, forecastDate: '2026-04-21' });
+    mockFetchNwsForecast.mockResolvedValueOnce({ highF: 70, lowF: 55, forecastDate: '2026-04-21' });
+    mockFetchOpenMeteo.mockResolvedValueOnce({ highTemp: 72, lowTemp: 57, precipProbability: 20, forecastDate: '2026-04-21' });
+
+    const result = await fetchForecast(mockEvent, 2, undefined, 0.7, false, true);
+    expect(result).not.toBeNull();
+    expect(result!.source).not.toBe('hrrr-combined');
+    expect(mockFetchHrrr).not.toHaveBeenCalled();
+  });
+
+  it('HRRR fetch fails → falls back to NOAA + OM 2-way average', async () => {
+    const mockEvent = makeUsEvent('chicago', '2026-04-20');
+    mockFetchNwsForecast.mockResolvedValueOnce({ highF: 70, lowF: 55, forecastDate: '2026-04-20' });
+    mockFetchOpenMeteo.mockResolvedValueOnce({ highTemp: 72, lowTemp: 57, precipProbability: 20, forecastDate: '2026-04-20' });
+    mockFetchHrrr.mockResolvedValueOnce(null);
+
+    const result = await fetchForecast(mockEvent, 1, undefined, 0.7, false, true);
+    expect(result).not.toBeNull();
+    expect(result!.forecastHigh).toBeCloseTo(71, 1); // (70 + 72) / 2
+    expect(result!.source).toBe('combined');
+  });
+
+  it('international city → HRRR skipped even when useHrrr=true', async () => {
+    const londonCoords = lookupCity('london');
+    expect(londonCoords).not.toBeNull();
+    const mockEvent = {
+      eventId: 'lon-hrrr-skip',
+      slug: 'london-hrrr-skip',
+      city: 'london',
+      coords: londonCoords!,
+      targetDate: '2026-04-20',
+      unit: 'celsius' as const,
+      brackets: [],
+      endDate: '2026-04-20T12:00:00Z',
+    };
+    mockFetchEnsemble.mockResolvedValueOnce({ ...ensembleMock, forecastDate: '2026-04-20' });
+    mockFetchOpenMeteo.mockResolvedValueOnce({ highTemp: 15, lowTemp: 9, precipProbability: 40, forecastDate: '2026-04-20' });
+
+    const result = await fetchForecast(mockEvent, 1, undefined, 0.7, false, true);
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('open-meteo');
+    expect(mockFetchHrrr).not.toHaveBeenCalled();
   });
 });
 

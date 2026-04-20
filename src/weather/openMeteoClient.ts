@@ -191,6 +191,74 @@ export async function fetchOpenMeteoForecast(
 }
 
 /**
+ * Fetch HRRR (High-Resolution Rapid Refresh) deterministic forecast via the
+ * Open-Meteo forecast API. HRRR uses 3 km resolution with hourly updates and
+ * radar data assimilation — the most accurate short-range (0–18h) model for
+ * US locations. Only valid for US coordinates; always returns Fahrenheit.
+ */
+export async function fetchHrrrForecast(
+  lat: number,
+  lon: number,
+  targetDate: string,
+  fetchFn?: FetchFn,
+): Promise<OpenMeteoForecast | null> {
+  const isInjected = fetchFn !== undefined;
+  const doFetch = fetchFn ?? fetch;
+  try {
+    if (!isInjected) await rateLimitWait();
+
+    const params = new URLSearchParams({
+      latitude: lat.toFixed(4),
+      longitude: lon.toFixed(4),
+      daily: 'temperature_2m_max,temperature_2m_min,precipitation_probability_max',
+      models: 'hrrr',
+      temperature_unit: 'fahrenheit',
+      timezone: 'auto',
+      start_date: targetDate.slice(0, 10),
+      end_date: targetDate.slice(0, 10),
+    });
+
+    const url = `${FORECAST_BASE}?${params.toString()}`;
+    const res = await fetchWithTimeout(url, doFetch);
+
+    if (!res.ok) {
+      logger.warn('[weather] HRRR forecast API error', { status: res.status, lat, lon });
+      return null;
+    }
+
+    const data = (await res.json()) as DailyForecastResponse;
+    const daily = data.daily;
+    if (!daily?.time?.length || !daily.temperature_2m_max?.length || !daily.temperature_2m_min?.length) {
+      logger.warn('[weather] HRRR returned no daily data', { lat, lon, targetDate });
+      return null;
+    }
+
+    const targetStr = targetDate.slice(0, 10);
+    const idx = daily.time.indexOf(targetStr);
+    if (idx === -1) return null;
+
+    const highTemp = daily.temperature_2m_max[idx];
+    const lowTemp = daily.temperature_2m_min[idx];
+    if (highTemp === undefined || lowTemp === undefined) return null;
+
+    return {
+      highTemp: Math.round(highTemp * 10) / 10,
+      lowTemp: Math.round(lowTemp * 10) / 10,
+      precipProbability: daily.precipitation_probability_max?.[idx] ?? 0,
+      forecastDate: targetStr,
+    };
+  } catch (err) {
+    logger.warn('[weather] fetchHrrrForecast failed', {
+      error: err instanceof Error ? err.message : String(err),
+      lat,
+      lon,
+      targetDate,
+    });
+    return null;
+  }
+}
+
+/**
  * Fetch ensemble forecast data for dynamic stddev estimation.
  *
  * By default uses GFS (31 members, `gfs_seamless`). Set `useEcmwf=true` to
