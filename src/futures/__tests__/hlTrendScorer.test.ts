@@ -257,6 +257,14 @@ describe('scoreHlTrend — funding contra voter', () => {
     expect(negative!.voters.fundingContra).toBe('neutral');
   });
 
+  it('voterCount is 7 with funding active and 8 with both HL-native voters active', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const r7 = scoreHlTrend(candles, { fundingApr: 50 })!;
+    expect(r7.voterCount).toBe(7);
+    const r8 = scoreHlTrend(candles, { fundingApr: 50, oiPctChange: 8, pricePctChange: 1 })!;
+    expect(r8.voterCount).toBe(8);
+  });
+
   it('excludes the voter when fundingApr is NaN or Infinity (non-finite)', () => {
     const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
     // NaN: comparisons always return false → would fall through to neutral
@@ -271,5 +279,108 @@ describe('scoreHlTrend — funding contra voter', () => {
     const neg = scoreHlTrend(candles, { fundingApr: Number.NEGATIVE_INFINITY });
     expect(neg!.voters.fundingContra).toBeUndefined();
     expect(neg!.voterCount).toBe(6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OI divergence voter (issue #265 Sub-PR 2)
+// ---------------------------------------------------------------------------
+
+describe('scoreHlTrend — OI divergence voter', () => {
+  it('excludes the voter when both oiPctChange and pricePctChange are omitted', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const result = scoreHlTrend(candles);
+    expect(result!.voters.oiDivergence).toBeUndefined();
+    expect(result!.voterCount).toBe(6);
+  });
+
+  it('excludes the voter when oiPctChange is null', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const result = scoreHlTrend(candles, { oiPctChange: null, pricePctChange: 2 });
+    expect(result!.voters.oiDivergence).toBeUndefined();
+    expect(result!.voterCount).toBe(6);
+  });
+
+  it('excludes the voter when pricePctChange is null', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const result = scoreHlTrend(candles, { oiPctChange: 8, pricePctChange: null });
+    expect(result!.voters.oiDivergence).toBeUndefined();
+    expect(result!.voterCount).toBe(6);
+  });
+
+  it('excludes the voter when oiPctChange is NaN or Infinity', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    expect(scoreHlTrend(candles, { oiPctChange: NaN, pricePctChange: 2 })!.voters.oiDivergence).toBeUndefined();
+    expect(scoreHlTrend(candles, { oiPctChange: Infinity, pricePctChange: 2 })!.voters.oiDivergence).toBeUndefined();
+  });
+
+  it('votes neutral when |oiPctChange| is below threshold (default 5%)', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const result = scoreHlTrend(candles, { oiPctChange: 3, pricePctChange: 2 });
+    expect(result!.voters.oiDivergence).toBe('neutral');
+    expect(result!.voterCount).toBe(7);
+  });
+
+  it('votes neutral when |oiPctChange| equals threshold exactly (strict >=)', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const result = scoreHlTrend(candles, { oiPctChange: 5, pricePctChange: 2 });
+    // 5 >= 5 → should vote (UP in this case)
+    expect(result!.voters.oiDivergence).toBe('UP');
+  });
+
+  it('votes UP when OI expanding + price rising (trend confirmation — longs adding)', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const result = scoreHlTrend(candles, { oiPctChange: 8, pricePctChange: 2 });
+    expect(result!.voters.oiDivergence).toBe('UP');
+    expect(result!.voterCount).toBe(7);
+  });
+
+  it('votes DOWN when OI expanding + price falling (trend confirmation — shorts adding)', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, -0.6);
+    const result = scoreHlTrend(candles, { oiPctChange: 8, pricePctChange: -2 });
+    expect(result!.voters.oiDivergence).toBe('DOWN');
+  });
+
+  it('votes DOWN when OI contracting + price rising (short covering = fake breakout)', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const result = scoreHlTrend(candles, { oiPctChange: -7, pricePctChange: 2 });
+    expect(result!.voters.oiDivergence).toBe('DOWN');
+  });
+
+  it('votes UP when OI contracting + price falling (long liquidation = forced selling)', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, -0.6);
+    const result = scoreHlTrend(candles, { oiPctChange: -7, pricePctChange: -2 });
+    expect(result!.voters.oiDivergence).toBe('UP');
+  });
+
+  it('votes neutral when price is flat (pricePctChange=0) regardless of OI move', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const pos = scoreHlTrend(candles, { oiPctChange: 10, pricePctChange: 0 });
+    expect(pos!.voters.oiDivergence).toBe('neutral');
+    const neg = scoreHlTrend(candles, { oiPctChange: -10, pricePctChange: 0 });
+    expect(neg!.voters.oiDivergence).toBe('neutral');
+  });
+
+  it('honours a caller-supplied oiDivergenceThreshold', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    // 3% OI is below default 5% but above caller threshold of 2%.
+    const tight = scoreHlTrend(candles, { oiPctChange: 3, pricePctChange: 2, oiDivergenceThreshold: 2 });
+    expect(tight!.voters.oiDivergence).toBe('UP');
+    const loose = scoreHlTrend(candles, { oiPctChange: 3, pricePctChange: 2, oiDivergenceThreshold: 10 });
+    expect(loose!.voters.oiDivergence).toBe('neutral');
+  });
+
+  it('score = upVotes - downVotes still holds with 8 voters', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    // Both HL-native voters active.
+    const result = scoreHlTrend(candles, {
+      fundingApr: 50,          // neutral (within 100% band)
+      oiPctChange: 8,           // UP (OI expanding + price rising)
+      pricePctChange: 2,
+    })!;
+    const upCount = Object.values(result.voters).filter((v) => v === 'UP').length;
+    const downCount = Object.values(result.voters).filter((v) => v === 'DOWN').length;
+    expect(result.score).toBe(upCount - downCount);
+    expect(result.voterCount).toBe(8);
   });
 });

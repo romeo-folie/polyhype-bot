@@ -26,6 +26,18 @@ export interface HlTrendVoters {
    * (crowded shorts) → UP; within the symmetric threshold band → neutral.
    */
   fundingContra?: TrendVote;
+  /**
+   * HL-native OI divergence voter (issue #265 Sub-PR 2).
+   * Only present when scoreHlTrend is called with both `opts.oiPctChange` and
+   * `opts.pricePctChange` set to finite numbers. Interprets whether open
+   * interest expansion/contraction confirms or contradicts the price move:
+   * - OI expanding + price rising → UP (real trend, longs adding)
+   * - OI expanding + price falling → DOWN (real trend, shorts adding)
+   * - OI contracting + price rising → DOWN (fake breakout — short covering only)
+   * - OI contracting + price falling → UP (fake breakdown — forced long liq)
+   * - |OI change| below threshold → neutral
+   */
+  oiDivergence?: TrendVote;
 }
 
 export interface HlTrendScoreOpts {
@@ -41,15 +53,28 @@ export interface HlTrendScoreOpts {
    * 100% annualized).
    */
   fundingAprThreshold?: number;
+  /**
+   * OI percent change vs baseline (e.g. 7.5 = +7.5%). Both oiPctChange and
+   * pricePctChange must be finite to activate the voter; either being null /
+   * undefined / non-finite leaves voterCount at its previous value.
+   */
+  oiPctChange?: number | null;
+  /** Price percent change vs the same OI baseline window. */
+  pricePctChange?: number | null;
+  /**
+   * Absolute OI % threshold. If |oiPctChange| is below this the voter is
+   * neutral regardless of price direction. Defaults to 5 (5%).
+   */
+  oiDivergenceThreshold?: number;
 }
 
 export interface HlTrendScore {
-  /** Signed directional score: upVotes - downVotes. Range scales with active voter count — [-6,+6] by default, [-7,+7] when the funding voter is active. */
+  /** Signed directional score: upVotes - downVotes. Range: [-6,+6] base, [-7,+7] with funding voter, [-8,+8] with both HL-native voters active. */
   score: number;
   /** Raw ADX value for the momentum-gate (independent of the adxDI direction vote). */
   adx: number | null;
   voters: HlTrendVoters;
-  /** Number of active voters contributing to the score (6 by default, 7 when the funding voter is active). */
+  /** Number of active voters contributing to the score (6–8 depending on which optional HL-native voters are active). */
   voterCount: number;
 }
 
@@ -72,8 +97,8 @@ function signVote(value: number | null): TrendVote {
  * six should agree bullish.
  *
  * Score = upVotes - downVotes. The range scales with the number of active
- * voters: [-6, +6] by default (6 core voters), [-7, +7] when the optional
- * funding-contra voter is active (via `opts.fundingApr`).
+ * voters: [-6, +6] base, [-7, +7] with the funding-contra voter active,
+ * [-8, +8] with both HL-native voters active (funding + OI divergence).
  * Null voters contribute 0 so partial-data candle arrays don't throw.
  *
  * Returns null only when the candle array is too short to compute anything
@@ -162,6 +187,30 @@ export function scoreHlTrend(
     else fundingVote = 'neutral';
   }
 
+  // ── Voter 8 (optional): HL OI divergence (issue #265 Sub-PR 2) ──────────
+  // Interprets whether OI expansion/contraction confirms or contradicts the
+  // price move over the same baseline window. Requires both oiPctChange and
+  // pricePctChange to be finite numbers — otherwise the voter is absent.
+  let oiDivergenceVote: TrendVote | undefined;
+  if (
+    opts.oiPctChange !== undefined && opts.oiPctChange !== null && Number.isFinite(opts.oiPctChange) &&
+    opts.pricePctChange !== undefined && opts.pricePctChange !== null && Number.isFinite(opts.pricePctChange)
+  ) {
+    const oiThreshold = opts.oiDivergenceThreshold ?? 5;
+    if (Math.abs(opts.oiPctChange) >= oiThreshold) {
+      const oiExpanding = opts.oiPctChange > 0;
+      const priceRising = opts.pricePctChange > 0;
+      const priceFalling = opts.pricePctChange < 0;
+      if (oiExpanding && priceRising) oiDivergenceVote = 'UP';
+      else if (oiExpanding && priceFalling) oiDivergenceVote = 'DOWN';
+      else if (!oiExpanding && priceRising) oiDivergenceVote = 'DOWN'; // short covering = fake breakout
+      else if (!oiExpanding && priceFalling) oiDivergenceVote = 'UP';  // long liq = forced selling
+      else oiDivergenceVote = 'neutral'; // price flat
+    } else {
+      oiDivergenceVote = 'neutral';
+    }
+  }
+
   const voters: HlTrendVoters = {
     vwap: vwapVote,
     emaFastVsSlow: emaVote,
@@ -170,6 +219,7 @@ export function scoreHlTrend(
     cmf: cmfVote,
     adxDI: adxDIVote,
     ...(fundingVote !== undefined ? { fundingContra: fundingVote } : {}),
+    ...(oiDivergenceVote !== undefined ? { oiDivergence: oiDivergenceVote } : {}),
   };
 
   const voterValues = Object.values(voters);

@@ -35,6 +35,9 @@ const baseConfig = {
   HL_FUNDING_CONTRA_ENABLED: false,
   HL_FUNDING_CONTRA_APR_THRESHOLD: 100,
   HL_FUNDING_CONTRA_CACHE_TTL_SEC: 60,
+  HL_OI_DIVERGENCE_ENABLED: false,
+  HL_OI_DIVERGENCE_THRESHOLD_PCT: 5,
+  HL_OI_BASELINE_TTL_SEC: 900,
 };
 
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
@@ -64,13 +67,15 @@ vi.mock('../../arb/indicators.js', () => ({
   computeMACDFromCandles: (...args: unknown[]) => mockComputeMACDFromCandles(...args),
 }));
 
-// HL asset-ctx cache — controlled per test for the funding-contra voter.
+// HL asset-ctx cache — controlled per test for both HL-native voters.
 const mockGetCachedAssetCtx = vi.fn();
+const mockGetOrSetOiBaseline = vi.fn();
 vi.mock('../hlAssetCtxCache.js', async () => {
   const actual = await vi.importActual('../hlAssetCtxCache.js');
   return {
     ...(actual as Record<string, unknown>),
     getCachedAssetCtx: (...args: unknown[]) => mockGetCachedAssetCtx(...args),
+    getOrSetOiBaseline: (...args: unknown[]) => mockGetOrSetOiBaseline(...args),
   };
 });
 
@@ -815,6 +820,7 @@ describe('scanHlMomentum — funding contra voter wiring', () => {
     mockComputeEMA.mockReturnValue(null);
     mockComputeMACDFromCandles.mockReturnValue(null);
     mockGetCachedAssetCtx.mockReset();
+    mockGetOrSetOiBaseline.mockReset();
   });
 
   it('does not fetch asset ctx when HL_FUNDING_CONTRA_ENABLED=false', async () => {
@@ -953,6 +959,161 @@ describe('scanHlMomentum — funding contra voter wiring', () => {
         }),
       }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OI divergence voter wiring (issue #265 Sub-PR 2)
+// ---------------------------------------------------------------------------
+
+describe('scanHlMomentum — OI divergence voter wiring', () => {
+  beforeEach(() => {
+    mockBuildCandles.mockResolvedValue([{}]);
+    mockScoreHlTrend.mockReturnValue(bullishResult);
+    mockHasOpenPosition.mockResolvedValue(false);
+    mockComputeEMA.mockReturnValue(null);
+    mockComputeMACDFromCandles.mockReturnValue(null);
+    mockGetCachedAssetCtx.mockReset();
+    mockGetOrSetOiBaseline.mockReset();
+  });
+
+  it('does not fetch asset ctx or baseline when both HL-native voters disabled', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_FUNDING_CONTRA_ENABLED: false,
+      HL_OI_DIVERGENCE_ENABLED: false,
+    });
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(mockGetCachedAssetCtx).not.toHaveBeenCalled();
+    expect(mockGetOrSetOiBaseline).not.toHaveBeenCalled();
+  });
+
+  it('fetches ctx once even when both voters are enabled (shared fetch)', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_FUNDING_CONTRA_ENABLED: true,
+      HL_OI_DIVERGENCE_ENABLED: true,
+    });
+    mockGetCachedAssetCtx.mockResolvedValue({
+      fundingRate: 0, openInterest: 1_000_000, markPrice: 70_000,
+    });
+    mockGetOrSetOiBaseline.mockResolvedValue(null); // no baseline this tick
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(mockGetCachedAssetCtx).toHaveBeenCalledTimes(1);
+  });
+
+  it('calls getOrSetOiBaseline with current OI + markPrice when enabled', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_OI_DIVERGENCE_ENABLED: true,
+      HL_OI_BASELINE_TTL_SEC: 900,
+    });
+    const ctx = { fundingRate: 0, openInterest: 1_200_000, markPrice: 72_000 };
+    mockGetCachedAssetCtx.mockResolvedValue(ctx);
+    mockGetOrSetOiBaseline.mockResolvedValue(null);
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(mockGetOrSetOiBaseline).toHaveBeenCalledWith('BTC', redis, 1_200_000, 72_000, 900);
+  });
+
+  it('passes oiPctChange + pricePctChange to scorer when baseline available', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_OI_DIVERGENCE_ENABLED: true,
+      HL_OI_DIVERGENCE_THRESHOLD_PCT: 5,
+    });
+    mockGetCachedAssetCtx.mockResolvedValue({
+      fundingRate: 0, openInterest: 1_100_000, markPrice: 71_000,
+    });
+    // Baseline: oi=1_000_000, markPrice=70_000
+    mockGetOrSetOiBaseline.mockResolvedValue({
+      oi: 1_000_000, markPrice: 70_000, ts: Date.now() - 60_000,
+    });
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    // oiPctChange = (1_100_000 - 1_000_000) / 1_000_000 * 100 = 10%
+    // pricePctChange = (71_000 - 70_000) / 70_000 * 100 ≈ 1.43%
+    expect(mockScoreHlTrend).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        oiPctChange: expect.closeTo(10, 1) as unknown as number,
+        pricePctChange: expect.closeTo(1.43, 1) as unknown as number,
+        oiDivergenceThreshold: 5,
+      }),
+    );
+  });
+
+  it('passes null OI args when no baseline (voter absent, signal continues)', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_OI_DIVERGENCE_ENABLED: true,
+    });
+    mockGetCachedAssetCtx.mockResolvedValue({
+      fundingRate: 0, openInterest: 1_000_000, markPrice: 70_000,
+    });
+    mockGetOrSetOiBaseline.mockResolvedValue(null); // first tick, no baseline
+    const redis = makeRedis();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    await scanHlMomentum(makeTick(), redis as never);
+    // Signal still shadow-logs (voter absent = neutral)
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({ kind: 'hl_momentum_signal' }),
+    );
+    expect(mockScoreHlTrend).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ oiPctChange: null, pricePctChange: null }),
+    );
+  });
+
+  it('shadow payload includes oiPctChange, pricePctChange, oiDivergenceVote', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_OI_DIVERGENCE_ENABLED: true,
+    });
+    mockGetCachedAssetCtx.mockResolvedValue({
+      fundingRate: 0, openInterest: 1_100_000, markPrice: 71_000,
+    });
+    mockGetOrSetOiBaseline.mockResolvedValue({
+      oi: 1_000_000, markPrice: 70_000, ts: Date.now() - 60_000,
+    });
+    mockScoreHlTrend.mockReturnValue({
+      score: 5,
+      adx: 35,
+      voters: {
+        vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP',
+        obv: 'UP', cmf: 'UP', adxDI: 'neutral', oiDivergence: 'UP',
+      },
+      voterCount: 7,
+    });
+    const redis = makeRedis();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          oiPctChange: expect.closeTo(10, 1) as unknown as number,
+          pricePctChange: expect.closeTo(1.43, 1) as unknown as number,
+          oiDivergenceVote: 'UP',
+        }),
+      }),
+    );
+  });
+
+  it('does not call getOrSetOiBaseline when ctx fetch fails', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_OI_DIVERGENCE_ENABLED: true,
+    });
+    mockGetCachedAssetCtx.mockResolvedValue(null); // HL fetch failed
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(mockGetOrSetOiBaseline).not.toHaveBeenCalled();
   });
 });
 

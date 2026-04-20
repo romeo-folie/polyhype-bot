@@ -4,7 +4,8 @@ import { logger } from '../shared/logger.js';
 import { buildCandles } from '../arb/candleAggregator.js';
 import { computeEMA, computeMACDFromCandles } from '../arb/indicators.js';
 import { scoreHlTrend } from './hlTrendScorer.js';
-import { fundingRateToApr, getCachedAssetCtx } from './hlAssetCtxCache.js';
+import { fundingRateToApr, getCachedAssetCtx, getOrSetOiBaseline } from './hlAssetCtxCache.js';
+import type { CachedAssetCtx } from './hlAssetCtxCache.js';
 import { hasOpenPosition } from '../execution/positionLedger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -113,22 +114,40 @@ export async function scanHlMomentum(
     timeframe: '15m',
   });
 
-  // HL-native funding-contra voter (issue #265 Sub-PR 1). When disabled or
-  // the HL info fetch fails we pass `null` — the scorer then omits the voter
-  // entirely and the score range stays at [-6,+6].
+  // HL-native voters (issue #265). Both Sub-PR 1 (funding contra) and Sub-PR 2
+  // (OI divergence) share one getCachedAssetCtx fetch — fetch once when either
+  // is enabled, then derive the per-voter inputs from the single ctx.
+  let hlCtx: CachedAssetCtx | null = null;
+  if (cfg.HL_FUNDING_CONTRA_ENABLED || cfg.HL_OI_DIVERGENCE_ENABLED) {
+    hlCtx = await getCachedAssetCtx(hlSymbol, redis, cfg.HL_FUNDING_CONTRA_CACHE_TTL_SEC);
+  }
+
+  // Sub-PR 1: funding-rate contra voter.
   let fundingApr: number | null = null;
-  if (cfg.HL_FUNDING_CONTRA_ENABLED) {
-    const ctx = await getCachedAssetCtx(
-      hlSymbol,
-      redis,
-      cfg.HL_FUNDING_CONTRA_CACHE_TTL_SEC,
+  if (cfg.HL_FUNDING_CONTRA_ENABLED && hlCtx) {
+    fundingApr = fundingRateToApr(hlCtx.fundingRate);
+    logger.debug('[hl-momentum] funding APR computed', {
+      symbol: hlSymbol,
+      fundingRate: hlCtx.fundingRate,
+      fundingApr: fundingApr.toFixed(2),
+    });
+  }
+
+  // Sub-PR 2: OI divergence voter.
+  let oiPctChange: number | null = null;
+  let pricePctChange: number | null = null;
+  if (cfg.HL_OI_DIVERGENCE_ENABLED && hlCtx) {
+    const baseline = await getOrSetOiBaseline(
+      hlSymbol, redis, hlCtx.openInterest, hlCtx.markPrice, cfg.HL_OI_BASELINE_TTL_SEC,
     );
-    if (ctx) {
-      fundingApr = fundingRateToApr(ctx.fundingRate);
-      logger.debug('[hl-momentum] funding APR computed', {
+    if (baseline && baseline.oi > 0 && baseline.markPrice > 0) {
+      oiPctChange = (hlCtx.openInterest - baseline.oi) / baseline.oi * 100;
+      pricePctChange = (hlCtx.markPrice - baseline.markPrice) / baseline.markPrice * 100;
+      logger.debug('[hl-momentum] OI divergence computed', {
         symbol: hlSymbol,
-        fundingRate: ctx.fundingRate,
-        fundingApr: fundingApr.toFixed(2),
+        oiPctChange: oiPctChange.toFixed(2),
+        pricePctChange: pricePctChange.toFixed(2),
+        baselineAge: Math.round((Date.now() - baseline.ts) / 1000),
       });
     }
   }
@@ -136,6 +155,9 @@ export async function scanHlMomentum(
   const trendResult = scoreHlTrend(primaryCandles, {
     fundingApr,
     fundingAprThreshold: cfg.HL_FUNDING_CONTRA_APR_THRESHOLD,
+    oiPctChange,
+    pricePctChange,
+    oiDivergenceThreshold: cfg.HL_OI_DIVERGENCE_THRESHOLD_PCT,
   });
   if (trendResult === null) {
     logger.debug('[hl-momentum] insufficient candles', {
@@ -333,6 +355,9 @@ export async function scanHlMomentum(
       totalScore,
       fundingApr,
       fundingContraVote: voters.fundingContra ?? null,
+      oiPctChange,
+      pricePctChange,
+      oiDivergenceVote: voters.oiDivergence ?? null,
     },
   }).catch(() => {});
 

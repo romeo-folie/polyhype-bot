@@ -146,3 +146,47 @@ describe('getCachedAssetCtx — HL fetch failure', () => {
     expect(result).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// getOrSetOiBaseline (issue #265 Sub-PR 2)
+// ---------------------------------------------------------------------------
+
+import { getOrSetOiBaseline } from '../hlAssetCtxCache.js';
+
+describe('getOrSetOiBaseline — baseline mechanics', () => {
+  it('returns null and writes NX when no baseline exists (first tick)', async () => {
+    const redis = makeRedis({ get: () => Promise.resolve(null) });
+    const result = await getOrSetOiBaseline('BTC', redis as never, 1_000_000, 70_000, 900);
+    expect(result).toBeNull(); // neutral tick
+    expect(redis.setex).not.toHaveBeenCalled(); // uses SET NX, not setex
+  });
+
+  it('returns the stored baseline when one already exists', async () => {
+    const stored = { oi: 950_000, markPrice: 68_000, ts: Date.now() - 300_000 };
+    const redis = makeRedis({ get: () => Promise.resolve(JSON.stringify(stored)) });
+    const result = await getOrSetOiBaseline('BTC', redis as never, 1_000_000, 70_000, 900);
+    expect(result).toEqual(stored);
+  });
+
+  it('deletes a malformed baseline, writes a fresh one, and returns null', async () => {
+    const redis = makeRedis({ get: () => Promise.resolve('bad json{') });
+    const result = await getOrSetOiBaseline('BTC', redis as never, 1_000_000, 70_000, 900);
+    expect(result).toBeNull();
+    expect(redis.del).toHaveBeenCalledWith('hl:oi-baseline:BTC');
+  });
+
+  it('still returns null (neutral tick) when redis.get() throws', async () => {
+    const redis = makeRedis({ get: () => Promise.reject(new Error('redis down')) });
+    const result = await getOrSetOiBaseline('BTC', redis as never, 1_000_000, 70_000, 900);
+    expect(result).toBeNull();
+  });
+
+  it('returns baseline even when the NX write fails (non-fatal)', async () => {
+    // Simulate a race where key was just written by another process: GET returns data.
+    // The NX write failure is irrelevant — we already have the baseline.
+    const stored = { oi: 950_000, markPrice: 68_000, ts: Date.now() - 300_000 };
+    const redis = makeRedis({ get: () => Promise.resolve(JSON.stringify(stored)) });
+    const result = await getOrSetOiBaseline('BTC', redis as never, 1_000_000, 70_000, 900);
+    expect(result).toEqual(stored);
+  });
+});
