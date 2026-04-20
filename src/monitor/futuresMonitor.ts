@@ -28,6 +28,7 @@ import {
 import { scoreConfluence } from '../arb/confluenceScorer.js';
 import { recordPositionOutcome } from '../shared/positionOutcomeRecorder.js';
 import { enqueueWrite } from '../db/writeQueue.js';
+import { isMemeSymbol } from '../futures/hlMomentumScanner.js';
 
 const POLL_INTERVAL_MS = 5000; // 5 seconds — safe for rate limits, fast enough for intraday
 const MONITOR_LOCK_KEY = 'futures-monitor:lock';
@@ -286,6 +287,27 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           tpPct = cfg.HL_MOMENTUM_TAKE_PROFIT_PCT;
         }
 
+        // Issue #264: meme ATR-scaled SL/TP. Frozen entry-time values; the monitor
+        // only consumes them — never re-derives from current ATR. Sits between the
+        // per-source override and the global ATR overlay so the global overlay
+        // (currently dark) still wins if both are enabled (legacy precedence).
+        let usingMemeAtr = false;
+        if (
+          cfg.HL_MOMENTUM_MEME_ATR_SLTP_ENABLED &&
+          ledgerPosForAtr?.sourcedFrom === 'hl-momentum' &&
+          isMemeSymbol(symbol, cfg.HL_MOMENTUM_MEME_SYMBOLS) &&
+          ledgerPosForAtr?.memeAtrSlPct !== undefined &&
+          Number.isFinite(ledgerPosForAtr.memeAtrSlPct) &&
+          ledgerPosForAtr.memeAtrSlPct > 0 &&
+          ledgerPosForAtr?.memeAtrTpPct !== undefined &&
+          Number.isFinite(ledgerPosForAtr.memeAtrTpPct) &&
+          ledgerPosForAtr.memeAtrTpPct > 0
+        ) {
+          slPct = -ledgerPosForAtr.memeAtrSlPct;
+          tpPct = ledgerPosForAtr.memeAtrTpPct;
+          usingMemeAtr = true;
+        }
+
         let usingAtrMode = false;
         if (
           cfg.FUTURES_ATR_SLTP_ENABLED &&
@@ -362,16 +384,87 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           }
         }
 
+        // Issue #264: meme ATR-scaled SL/TP shadow divergence. Fires when the
+        // feature is OFF but the position has a frozen meme SL/TP snapshot,
+        // so we can validate sizing before flipping the live flag. Logs only on
+        // verdict mismatch (SL/TP/hold) between fixed-pct and meme-ATR thresholds.
+        if (
+          !cfg.HL_MOMENTUM_MEME_ATR_SLTP_ENABLED &&
+          ledgerPosForAtr?.sourcedFrom === 'hl-momentum' &&
+          isMemeSymbol(symbol, cfg.HL_MOMENTUM_MEME_SYMBOLS) &&
+          ledgerPosForAtr?.memeAtrSlPct !== undefined &&
+          Number.isFinite(ledgerPosForAtr.memeAtrSlPct) &&
+          ledgerPosForAtr.memeAtrSlPct > 0 &&
+          ledgerPosForAtr?.memeAtrTpPct !== undefined &&
+          Number.isFinite(ledgerPosForAtr.memeAtrTpPct) &&
+          ledgerPosForAtr.memeAtrTpPct > 0
+        ) {
+          const memeSlPct = -ledgerPosForAtr.memeAtrSlPct;
+          const memeTpPct = ledgerPosForAtr.memeAtrTpPct;
+          // Fixed baseline is the hl-momentum per-source override, NOT the active
+          // slPct/tpPct — those may already have been mutated by the global ATR
+          // overlay (FUTURES_ATR_SLTP_ENABLED). Use cfg values directly so the
+          // shadow stays interpretable as "meme-ATR vs fixed HL pcts".
+          const fixedBaselineSlPct = -cfg.HL_MOMENTUM_STOP_LOSS_PCT;
+          const fixedBaselineTpPct = cfg.HL_MOMENTUM_TAKE_PROFIT_PCT;
+          const fixedSlHit = priceChangePct <= fixedBaselineSlPct;
+          const fixedTpHit = priceChangePct >= fixedBaselineTpPct;
+          const memeSlHit = priceChangePct <= memeSlPct;
+          const memeTpHit = priceChangePct >= memeTpPct;
+          if (fixedSlHit !== memeSlHit || fixedTpHit !== memeTpHit) {
+            const fixedVerdict = fixedSlHit ? 'SL' : fixedTpHit ? 'TP' : 'hold';
+            const memeVerdict = memeSlHit ? 'SL' : memeTpHit ? 'TP' : 'hold';
+            logger.info('[hl-momentum] meme atr sltp shadow', {
+              symbol,
+              direction,
+              priceChangePct: priceChangePct.toFixed(2),
+              memeAtrSlPct: ledgerPosForAtr.memeAtrSlPct.toFixed(2),
+              memeAtrTpPct: ledgerPosForAtr.memeAtrTpPct.toFixed(2),
+              fixedSlPct: fixedBaselineSlPct,
+              fixedTpPct: fixedBaselineTpPct,
+              fixedVerdict,
+              memeVerdict,
+            });
+            void enqueueWrite('shadow_observations', {
+              kind: 'meme_atr_sltp_shadow',
+              source: 'futures',
+              symbol,
+              direction,
+              wouldBlock: false,
+              metricValue: ledgerPosForAtr.memeAtrSlPct,
+              payload: {
+                priceChangePct,
+                memeAtrSlPct: ledgerPosForAtr.memeAtrSlPct,
+                memeAtrTpPct: ledgerPosForAtr.memeAtrTpPct,
+                fixedSlPct: fixedBaselineSlPct,
+                fixedTpPct: fixedBaselineTpPct,
+                fixedVerdict,
+                memeVerdict,
+              },
+            });
+          }
+        }
+
         if (priceChangePct <= slPct) {
           shouldExit = true;
-          reason = `Stop-Loss triggered (${priceChangePct.toFixed(2).toString()}%${usingAtrMode ? ` atr_sl=${slPct.toFixed(2)}` : ''})`;
+          const slTag = usingAtrMode
+            ? ` atr_sl=${slPct.toFixed(2)}`
+            : usingMemeAtr
+              ? ` meme_atr_sl=${slPct.toFixed(2)}`
+              : '';
+          reason = `Stop-Loss triggered (${priceChangePct.toFixed(2).toString()}%${slTag})`;
         } else if (!cfg.FUTURES_TRAILING_STOP_ENABLED && priceChangePct >= tpPct) {
           // Fixed TP only when trailing is disabled. When trailing is on, it
           // supersedes fixed TP so winners can run beyond the TP line; the
           // floor is clamped to TP below so the worst case at the TP line is
           // identical to fixed-TP behavior.
           shouldExit = true;
-          reason = `Take-Profit triggered (${priceChangePct.toFixed(2).toString()}%${usingAtrMode ? ` atr_tp=${tpPct.toFixed(2)}` : ''})`;
+          const tpTag = usingAtrMode
+            ? ` atr_tp=${tpPct.toFixed(2)}`
+            : usingMemeAtr
+              ? ` meme_atr_tp=${tpPct.toFixed(2)}`
+              : '';
+          reason = `Take-Profit triggered (${priceChangePct.toFixed(2).toString()}%${tpTag})`;
         }
 
         // 2b. Trailing stop — supersedes fixed TP when enabled. Arms once the

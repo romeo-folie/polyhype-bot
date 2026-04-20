@@ -33,6 +33,7 @@ import { deductStake } from '../shared/bankroll.js';
 import { isStaleCooldownActive } from '../monitor/staleExit.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { computeATR } from '../arb/indicators.js';
+import { isMemeSymbol } from '../futures/hlMomentumScanner.js';
 import { loadConfig } from '../shared/config.js';
 import { getCalibrationStats, applyCalibrationCorrection } from '../shared/calibration.js';
 import { inferCategory } from '../shared/outcomeRecorder.js';
@@ -76,6 +77,9 @@ export interface ExecutionResult {
   /** ATR snapshot at futures entry — persisted to ledger for ATR-based SL/TP. */
   entryAtr?: number;
   entryAtrPct?: number;
+  /** Frozen meme ATR-derived SL/TP magnitudes (issue #264). */
+  memeAtrSlPct?: number;
+  memeAtrTpPct?: number;
 }
 
 interface DecisionBenchmark {
@@ -1017,6 +1021,50 @@ async function executeHyperliquidSignal(
         });
       }
 
+      // Issue #264: snapshot 15m-ATR-derived SL/TP for meme HL-momentum positions.
+      // Frozen at entry — the monitor reads these unmodified each tick. Only populated
+      // for hl-momentum-sourced trades on whitelisted symbols; the monitor still
+      // respects HL_MOMENTUM_MEME_ATR_SLTP_ENABLED before applying them.
+      let memeAtrSlPct: number | undefined;
+      let memeAtrTpPct: number | undefined;
+      if (
+        signal.sourcedFrom === 'hl-momentum' &&
+        isMemeSymbol(signal.marketId, cfg.HL_MOMENTUM_MEME_SYMBOLS)
+      ) {
+        try {
+          const memeAtr = await computeATR(signal.marketId, redis, undefined, {
+            timeframe: '15m',
+            lookbackMs: cfg.HL_MOMENTUM_PRIMARY_LOOKBACK_MS,
+          });
+          if (memeAtr && memeAtr.atrPct > 0) {
+            const rawSl = memeAtr.atrPct * cfg.HL_MOMENTUM_MEME_SL_ATR_MULT;
+            memeAtrSlPct = Math.min(
+              Math.max(rawSl, cfg.HL_MOMENTUM_MEME_SL_FLOOR_PCT),
+              cfg.HL_MOMENTUM_MEME_SL_CEIL_PCT,
+            );
+            // TP intentionally unbounded — trailing stop manages the upside.
+            memeAtrTpPct = memeAtr.atrPct * cfg.HL_MOMENTUM_MEME_TP_ATR_MULT;
+            logger.info('[executor] meme ATR SL/TP captured', {
+              symbol: signal.marketId,
+              atr15mPct: memeAtr.atrPct.toFixed(3),
+              memeAtrSlPct: memeAtrSlPct.toFixed(3),
+              memeAtrTpPct: memeAtrTpPct.toFixed(3),
+              slFloorActive: rawSl < cfg.HL_MOMENTUM_MEME_SL_FLOOR_PCT,
+              slCeilActive: rawSl > cfg.HL_MOMENTUM_MEME_SL_CEIL_PCT,
+            });
+          } else {
+            logger.warn('[executor] meme 15m ATR unavailable — monitor will use fixed HL momentum SL/TP', {
+              symbol: signal.marketId,
+            });
+          }
+        } catch (e: unknown) {
+          logger.warn('[executor] meme ATR computation failed at entry (non-fatal)', {
+            symbol: signal.marketId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+
       const result: ExecutionResult = {
         signal,
         skipped: false,
@@ -1029,6 +1077,8 @@ async function executeHyperliquidSignal(
       };
       if (entryAtr !== undefined) result.entryAtr = entryAtr;
       if (entryAtrPct !== undefined) result.entryAtrPct = entryAtrPct;
+      if (memeAtrSlPct !== undefined) result.memeAtrSlPct = memeAtrSlPct;
+      if (memeAtrTpPct !== undefined) result.memeAtrTpPct = memeAtrTpPct;
 
       void notifyTradeExecuted(signal, tradeResult.txHash, { venue: 'hyperliquid' }).catch(() => {});
 
@@ -2555,6 +2605,8 @@ async function finalizeSuccessfulExecution(
     endDate: result.signal.endDate,
     entryAtr: result.entryAtr,
     entryAtrPct: result.entryAtrPct,
+    memeAtrSlPct: result.memeAtrSlPct,
+    memeAtrTpPct: result.memeAtrTpPct,
     priceZone: result.signal.priceZone,
   });
 }

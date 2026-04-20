@@ -8,7 +8,7 @@
  */
 
 import type { Redis } from 'ioredis';
-import { buildCandles, type OHLCVCandle } from './candleAggregator.js';
+import { buildCandles, type BuildCandlesOpts, type OHLCVCandle } from './candleAggregator.js';
 import { loadConfig } from '../shared/config.js';
 
 // ---------------------------------------------------------------------------
@@ -91,15 +91,20 @@ export function computeATRFromCandles(candles: OHLCVCandle[], period: number): A
 
 /**
  * Compute ATR from Redis candle data for a given symbol.
+ *
+ * `opts` selects which timeframe to read (`'1m'` default for back-compat with the
+ * crypto-arb confluence engine; pass `{ timeframe: '15m' }` for swing-appropriate
+ * sizing on HL momentum positions).
  */
 export async function computeATR(
   symbol: string,
   redis: Redis,
   period?: number,
+  opts: BuildCandlesOpts = {},
 ): Promise<ATRResult | null> {
   const cfg = loadConfig();
   const p = period ?? cfg.FUTURES_ATR_PERIOD;
-  const candles = await buildCandles(symbol, redis);
+  const candles = await buildCandles(symbol, redis, opts);
   return computeATRFromCandles(candles, p);
 }
 

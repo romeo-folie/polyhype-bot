@@ -1171,6 +1171,19 @@ const envSchema = z.object({
   // Weighted mode only: minimum integer total score (15m absScore + MTF bonuses) required to trade.
   // Range: capped at 9 (6 + 2 + 1). Default 5 = 4-of-6 + 1h aligned, OR 3-of-6 + both MTF aligned.
   HL_MOMENTUM_MIN_TOTAL_SCORE: z.coerce.number().int().min(0).max(9).optional().default(5),
+  // ── Meme-perp ATR-scaled SL/TP (issue #264) ──
+  // Replaces the fixed HL_MOMENTUM_STOP_LOSS_PCT / _TAKE_PROFIT_PCT for meme symbols whose
+  // 15m ATR is too wide for the 5%/12% defaults (typical meme ATR 8-15%). Computes SL/TP at
+  // entry using 15m ATR × multiplier, frozen on the position. TP is unbounded — trailing stop
+  // rides the upside. Ships dark; flip per-symbol after shadow review.
+  HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: boolFromEnv.optional().default(false),
+  HL_MOMENTUM_MEME_SYMBOLS: z.string().optional().default('pepeusdt,wifusdt,bonkusdt,penguusdt'),
+  HL_MOMENTUM_MEME_SL_ATR_MULT: z.coerce.number().min(0).optional().default(1.5),
+  HL_MOMENTUM_MEME_TP_ATR_MULT: z.coerce.number().min(0).optional().default(3.0),
+  // Floor + ceiling on the SL magnitude — protects against pathological ATR readings.
+  // No corresponding cap on TP: user wants the trailing stop to manage the upside.
+  HL_MOMENTUM_MEME_SL_FLOOR_PCT: z.coerce.number().min(0).optional().default(8),
+  HL_MOMENTUM_MEME_SL_CEIL_PCT: z.coerce.number().min(0).optional().default(20),
 
   // ── Chainlink → PM crypto-arb trigger ──
   // When true, oracle:price_moved ticks also fan into the PM crypto-arb scanner
@@ -1388,6 +1401,11 @@ export function loadConfig(forceReload = false): AppConfig {
   // HL momentum: 4h EMA fast period must be shorter than slow period
   if (cfg.HL_MOMENTUM_4H_EMA_FAST >= cfg.HL_MOMENTUM_4H_EMA_SLOW) {
     throw new Error('HL_MOMENTUM_4H_EMA_FAST must be less than HL_MOMENTUM_4H_EMA_SLOW');
+  }
+
+  // HL momentum meme ATR: floor must be ≤ ceiling so the clamp interval is non-empty.
+  if (cfg.HL_MOMENTUM_MEME_SL_FLOOR_PCT > cfg.HL_MOMENTUM_MEME_SL_CEIL_PCT) {
+    throw new Error('HL_MOMENTUM_MEME_SL_FLOOR_PCT must be ≤ HL_MOMENTUM_MEME_SL_CEIL_PCT');
   }
 
   // Oracle-lag price band must be non-inverted.

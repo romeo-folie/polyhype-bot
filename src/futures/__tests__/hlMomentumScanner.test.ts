@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { scanHlMomentum, momentumCooldownKey } from '../hlMomentumScanner.js';
+import { scanHlMomentum, momentumCooldownKey, isMemeSymbol } from '../hlMomentumScanner.js';
 import type { BinancePriceTick } from '../hlMomentumScanner.js';
 
 // ---------------------------------------------------------------------------
@@ -792,5 +792,60 @@ describe('momentumCooldownKey', () => {
   it('encodes symbol and direction', () => {
     expect(momentumCooldownKey('BTC', 'LONG')).toBe('futures:momentum:cooldown:BTC:LONG');
     expect(momentumCooldownKey('ETH', 'SHORT')).toBe('futures:momentum:cooldown:ETH:SHORT');
+  });
+});
+
+describe('isMemeSymbol', () => {
+  const memeList = 'pepeusdt,wifusdt,bonkusdt,penguusdt';
+
+  it('matches Binance lower-case form exactly', () => {
+    expect(isMemeSymbol('pepeusdt', memeList)).toBe(true);
+    expect(isMemeSymbol('bonkusdt', memeList)).toBe(true);
+  });
+
+  it('matches HL 1000× unit tickers (kPEPE, kBONK — the real Hyperliquid form)', () => {
+    // Hyperliquid lists PEPE and BONK as 1000× unit perps named `kPEPE` / `kBONK`.
+    // The executor receives these tickers from positionLedger / scanner, so this
+    // is the production-relevant case — without `k` stripping the meme branch
+    // would never trigger live for PEPE/BONK.
+    expect(isMemeSymbol('kPEPE', memeList)).toBe(true);
+    expect(isMemeSymbol('kBONK', memeList)).toBe(true);
+  });
+
+  it('matches HL upper-case base form for non-1000× perps (WIF, PENGU)', () => {
+    // WIF and PENGU are listed on HL as plain `WIF` / `PENGU` (no k prefix).
+    expect(isMemeSymbol('WIF', memeList)).toBe(true);
+    expect(isMemeSymbol('PENGU', memeList)).toBe(true);
+  });
+
+  it('rejects non-meme symbols even when HL form', () => {
+    expect(isMemeSymbol('BTC', memeList)).toBe(false);
+    expect(isMemeSymbol('ETH', memeList)).toBe(false);
+    expect(isMemeSymbol('DOGE', memeList)).toBe(false); // DOGE classified as major per PR #268
+    expect(isMemeSymbol('btcusdt', memeList)).toBe(false);
+  });
+
+  it('does not strip the leading K of non-1000× symbols that happen to start with k (e.g. KAVA)', () => {
+    // Regression: early `normaliseMemeBase` lowercased before stripping `^k`,
+    // which would turn `KAVA` → `ava`. With an `ava`-like entry in the meme
+    // list that caused a false positive. The HL 1000× form is specifically
+    // literal lowercase `k` + uppercase base asset letter (e.g. `kPEPE`),
+    // so `KAVA` (uppercase `K`) must not be treated as `AVA`.
+    expect(isMemeSymbol('KAVA', 'avausdt,pepeusdt')).toBe(false);
+    expect(isMemeSymbol('KSM', 'smusdt,pepeusdt')).toBe(false);
+  });
+
+  it('tolerates whitespace and empty entries in the csv', () => {
+    expect(isMemeSymbol('kPEPE', ' pepeusdt , ,wifusdt ')).toBe(true);
+    expect(isMemeSymbol('BTC', '')).toBe(false);
+  });
+
+  it('is case-insensitive on the Binance pair form', () => {
+    // HL 1000× tickers are always literal `k` + uppercase, so `kpepe` is not
+    // a real HL form and deliberately does not match here (avoids the KAVA
+    // false-positive class).
+    expect(isMemeSymbol('pepe', memeList)).toBe(true);
+    expect(isMemeSymbol('Pepe', memeList)).toBe(true);
+    expect(isMemeSymbol('PEPEUSDT', memeList)).toBe(true);
   });
 });

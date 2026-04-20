@@ -41,6 +41,36 @@ export function momentumCooldownKey(hlSymbol: string, direction: 'LONG' | 'SHORT
 }
 
 /**
+ * Strip the `usdt` suffix (Binance pair form) and, only for actual Hyperliquid
+ * 1000× unit markers (literal lowercase `k` followed by an uppercase base asset
+ * letter, e.g. `kPEPE`, `kBONK`, `kSHIB`), the leading `k`. Detection happens
+ * before lowercasing so legitimate symbols starting with `K`/`k` like `KAVA`
+ * are not mangled.
+ */
+function normaliseMemeBase(s: string): string {
+  const trimmed = s.trim();
+  const dekayed = /^k[A-Z]/.test(trimmed) ? trimmed.slice(1) : trimmed;
+  return dekayed.toLowerCase().replace(/usdt$/, '');
+}
+
+/**
+ * True when the symbol is in the meme-perp ATR-SL/TP set. Accepts all three forms:
+ * Binance pair (`pepeusdt`), HL 1000× ticker (`kPEPE`, `kBONK`), or plain HL base
+ * (`WIF`, `PENGU`). Comparison happens on the normalised base name so callers
+ * don't need to translate before checking.
+ */
+export function isMemeSymbol(symbol: string, memeList: string): boolean {
+  const candidate = normaliseMemeBase(symbol);
+  if (!candidate) return false;
+  for (const raw of memeList.split(',')) {
+    const meme = normaliseMemeBase(raw);
+    if (!meme) continue;
+    if (candidate === meme) return true;
+  }
+  return false;
+}
+
+/**
  * Evaluate a single Binance spot price tick for a momentum entry on Hyperliquid.
  *
  * Two scoring modes (HL_MOMENTUM_MTF_SCORING_MODE):
