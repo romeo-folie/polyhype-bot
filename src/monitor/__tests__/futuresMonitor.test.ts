@@ -14,6 +14,10 @@ const baseCfg = {
   FUTURES_REEVAL_MIN_AGE_S: 600,
   FUTURES_EXIT_CONFLUENCE_SCORE: 5,
   FUTURES_ATR_SLTP_ENABLED: false,
+  HL_MOMENTUM_STOP_LOSS_PCT: 5,
+  HL_MOMENTUM_TAKE_PROFIT_PCT: 12,
+  HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: false,
+  HL_MOMENTUM_MEME_SYMBOLS: 'pepeusdt,wifusdt,bonkusdt,penguusdt',
 };
 const loadConfigMock = vi.fn().mockReturnValue(baseCfg);
 vi.mock('../../shared/config.js', () => ({
@@ -24,6 +28,12 @@ vi.mock('../../shared/config.js', () => ({
 const mockScoreConfluence = vi.fn();
 vi.mock('../../arb/confluenceScorer.js', () => ({
   scoreConfluence: mockScoreConfluence,
+}));
+
+// Mock write queue (used by ATR + meme ATR shadow paths)
+const mockEnqueueWrite = vi.fn();
+vi.mock('../../db/writeQueue.js', () => ({
+  enqueueWrite: mockEnqueueWrite,
 }));
 
 // Mock Logger
@@ -390,6 +400,188 @@ describe('futuresMonitor', () => {
       await runTick();
 
       expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('meme ATR SL/TP (issue #264)', () => {
+    // Meme config: ATR SL/TP active + HL momentum per-source override in place.
+    const memeCfg = {
+      ...baseCfg,
+      HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: true,
+    };
+
+    const makeLedgerMemePos = (opts: {
+      symbol: string;
+      memeAtrSlPct?: number;
+      memeAtrTpPct?: number;
+      sourcedFrom?: string;
+    }) => ({
+      marketId: opts.symbol,
+      symbol: opts.symbol,
+      direction: 'LONG' as const,
+      isFutures: true,
+      question: `${opts.symbol} perpetual`,
+      entryPrice: 0.001,
+      stakeUsd: 10,
+      edgeMagnitude: 0,
+      sourcedFrom: opts.sourcedFrom ?? 'hl-momentum',
+      openedAt: new Date().toISOString(),
+      executionVenue: 'hyperliquid' as const,
+      memeAtrSlPct: opts.memeAtrSlPct,
+      memeAtrTpPct: opts.memeAtrTpPct,
+    });
+
+    const makeHlPos = (symbol: string, pnlPct: number) => ({
+      symbol,
+      position: {
+        szi: '100',
+        entryPx: '1',
+        unrealizedPnl: String(pnlPct), // 1 szi * entryPx=1 → margin 100, pnl === pct
+        marginUsed: '100',
+      },
+    });
+
+    it('meme SL does not fire at -5% when the frozen SL is -15% (avoids chop)', async () => {
+      loadConfigMock.mockReturnValue(memeCfg);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('PEPE', -5)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerMemePos({ symbol: 'PEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+
+    it('meme SL fires when price hits the frozen -15% SL', async () => {
+      loadConfigMock.mockReturnValue(memeCfg);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('PEPE', -16)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerMemePos({ symbol: 'PEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('PEPE');
+    });
+
+    it('meme TP fires at the frozen TP (no trailing configured)', async () => {
+      loadConfigMock.mockReturnValue(memeCfg);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('WIF', 30)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerMemePos({ symbol: 'WIF', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('WIF');
+    });
+
+    it('feature disabled: meme ledger fields are ignored, fixed HL momentum -5% SL stays active', async () => {
+      // Same -10% scenario; fixed HL SL=-5% should trigger even though meme SL=-15% would not.
+      loadConfigMock.mockReturnValue({
+        ...baseCfg,
+        HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: false,
+      });
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('BONK', -10)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerMemePos({ symbol: 'BONK', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('BONK');
+    });
+
+    it('major symbol (BTC) with HL momentum source falls through to fixed, not meme branch', async () => {
+      loadConfigMock.mockReturnValue(memeCfg);
+      // -10% is past fixed HL SL (-5%) but not past meme-ATR SL (-15%).
+      // If the meme branch incorrectly matched BTC it would hold; correct behavior = SL fires.
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('BTC', -10)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerMemePos({ symbol: 'BTC', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('BTC');
+    });
+
+    it('non-hl-momentum source falls through even on a meme symbol', async () => {
+      loadConfigMock.mockReturnValue(memeCfg);
+      // -10% crosses the default FUTURES_STOP_LOSS_PCT (-1.5%).
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('PEPE', -10)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerMemePos({
+          symbol: 'PEPE',
+          memeAtrSlPct: 15,
+          memeAtrTpPct: 30,
+          sourcedFrom: 'arb-scanner',
+        }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('PEPE');
+    });
+
+    it('meme symbol without frozen ATR snapshot falls back to fixed HL momentum SL', async () => {
+      loadConfigMock.mockReturnValue(memeCfg);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('PEPE', -6)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        // No memeAtrSlPct/TpPct — simulates ATR unavailable at entry.
+        makeLedgerMemePos({ symbol: 'PEPE' }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('PEPE');
+    });
+
+    it('shadow divergence emitted when verdicts disagree and feature is dark', async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseCfg,
+        HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: false,
+      });
+      // -7%: fixed HL SL (-5%) would fire; meme SL (-15%) would not → verdict mismatch.
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('PEPE', -7)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerMemePos({ symbol: 'PEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+      ]);
+
+      await runTick();
+
+      expect(mockEnqueueWrite).toHaveBeenCalledWith(
+        'shadow_observations',
+        expect.objectContaining({
+          kind: 'meme_atr_sltp_shadow',
+          payload: expect.objectContaining({
+            fixedVerdict: 'SL',
+            memeVerdict: 'hold',
+          }),
+        }),
+      );
+    });
+
+    it('shadow does not fire when fixed and meme verdicts agree', async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseCfg,
+        HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: false,
+      });
+      // +1%: both verdicts are hold → no divergence log.
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('PEPE', 1)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerMemePos({ symbol: 'PEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+      ]);
+
+      await runTick();
+
+      const memeShadowCalls = mockEnqueueWrite.mock.calls.filter(
+        ([kind, payload]) =>
+          kind === 'shadow_observations' &&
+          (payload as { kind?: string }).kind === 'meme_atr_sltp_shadow',
+      );
+      expect(memeShadowCalls).toHaveLength(0);
     });
   });
 });

@@ -41,6 +41,24 @@ export function momentumCooldownKey(hlSymbol: string, direction: 'LONG' | 'SHORT
 }
 
 /**
+ * True when the symbol is in the meme-perp ATR-SL/TP set. Accepts either Binance
+ * lower-case form (e.g. `pepeusdt`) or HL upper-case form (`PEPE`); compared via
+ * normalised lower-case substring so callers don't need to translate.
+ */
+export function isMemeSymbol(symbol: string, memeList: string): boolean {
+  const candidate = symbol.toLowerCase();
+  for (const raw of memeList.split(',')) {
+    const meme = raw.trim().toLowerCase();
+    if (!meme) continue;
+    // Exact match against the Binance form OR substring of the HL form (PEPE → pepeusdt).
+    if (meme === candidate) return true;
+    const hlBase = meme.replace(/usdt$/, '');
+    if (hlBase && candidate === hlBase) return true;
+  }
+  return false;
+}
+
+/**
  * Evaluate a single Binance spot price tick for a momentum entry on Hyperliquid.
  *
  * Two scoring modes (HL_MOMENTUM_MTF_SCORING_MODE):

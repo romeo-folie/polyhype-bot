@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { scanHlMomentum, momentumCooldownKey } from '../hlMomentumScanner.js';
+import { scanHlMomentum, momentumCooldownKey, isMemeSymbol } from '../hlMomentumScanner.js';
 import type { BinancePriceTick } from '../hlMomentumScanner.js';
 
 // ---------------------------------------------------------------------------
@@ -792,5 +792,37 @@ describe('momentumCooldownKey', () => {
   it('encodes symbol and direction', () => {
     expect(momentumCooldownKey('BTC', 'LONG')).toBe('futures:momentum:cooldown:BTC:LONG');
     expect(momentumCooldownKey('ETH', 'SHORT')).toBe('futures:momentum:cooldown:ETH:SHORT');
+  });
+});
+
+describe('isMemeSymbol', () => {
+  const memeList = 'pepeusdt,wifusdt,bonkusdt,penguusdt';
+
+  it('matches Binance lower-case form exactly', () => {
+    expect(isMemeSymbol('pepeusdt', memeList)).toBe(true);
+    expect(isMemeSymbol('bonkusdt', memeList)).toBe(true);
+  });
+
+  it('matches HL upper-case base form (executor passes "PEPE", not "pepeusdt")', () => {
+    expect(isMemeSymbol('PEPE', memeList)).toBe(true);
+    expect(isMemeSymbol('WIF', memeList)).toBe(true);
+    expect(isMemeSymbol('PENGU', memeList)).toBe(true);
+  });
+
+  it('rejects non-meme symbols even when HL form', () => {
+    expect(isMemeSymbol('BTC', memeList)).toBe(false);
+    expect(isMemeSymbol('ETH', memeList)).toBe(false);
+    expect(isMemeSymbol('DOGE', memeList)).toBe(false); // DOGE classified as major per PR #268
+    expect(isMemeSymbol('btcusdt', memeList)).toBe(false);
+  });
+
+  it('tolerates whitespace and empty entries in the csv', () => {
+    expect(isMemeSymbol('PEPE', ' pepeusdt , ,wifusdt ')).toBe(true);
+    expect(isMemeSymbol('BTC', '')).toBe(false);
+  });
+
+  it('is case-insensitive on input', () => {
+    expect(isMemeSymbol('pepe', memeList)).toBe(true);
+    expect(isMemeSymbol('Pepe', memeList)).toBe(true);
   });
 });

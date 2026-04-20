@@ -89,6 +89,14 @@ export interface Position {
   /** ATR snapshot at entry (futures only) — drives ATR-based SL/TP */
   entryAtr?: number | undefined;
   entryAtrPct?: number | undefined;
+  /**
+   * Frozen ATR-derived SL/TP for HL-momentum meme positions (issue #264).
+   * Stored as final clamped percentages (positive magnitudes). Computed at entry
+   * from 15m ATR × multipliers and never mutated after, so config tweaks while a
+   * position is open don't change its risk profile mid-trade.
+   */
+  memeAtrSlPct?: number | undefined;
+  memeAtrTpPct?: number | undefined;
   /** Price-zone classification (Change 3 telemetry) */
   priceZone?: 1 | 2 | 3 | 4 | 5 | undefined;
 }
@@ -215,6 +223,8 @@ export async function recordPosition(redis: Redis, positionIn: Position): Promis
     endDate: position.endDate ?? '',
     entryAtr: position.entryAtr !== undefined ? String(position.entryAtr) : '',
     entryAtrPct: position.entryAtrPct !== undefined ? String(position.entryAtrPct) : '',
+    memeAtrSlPct: position.memeAtrSlPct !== undefined ? String(position.memeAtrSlPct) : '',
+    memeAtrTpPct: position.memeAtrTpPct !== undefined ? String(position.memeAtrTpPct) : '',
     priceZone: position.priceZone !== undefined ? String(position.priceZone) : '',
   });
 
@@ -453,6 +463,10 @@ function deserialisePosition(raw: Record<string, string>): Position {
     pos.entryAtr = parseFloat(raw.entryAtr);
   if (raw.entryAtrPct !== undefined && raw.entryAtrPct !== '')
     pos.entryAtrPct = parseFloat(raw.entryAtrPct);
+  if (raw.memeAtrSlPct !== undefined && raw.memeAtrSlPct !== '')
+    pos.memeAtrSlPct = parseFloat(raw.memeAtrSlPct);
+  if (raw.memeAtrTpPct !== undefined && raw.memeAtrTpPct !== '')
+    pos.memeAtrTpPct = parseFloat(raw.memeAtrTpPct);
   if (raw.highWaterMarkPct !== undefined && raw.highWaterMarkPct !== '')
     pos.highWaterMarkPct = parseFloat(raw.highWaterMarkPct);
   if (raw.priceZone !== undefined && raw.priceZone !== '') {
