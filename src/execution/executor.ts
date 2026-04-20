@@ -1823,7 +1823,7 @@ export async function executeSignal(
       //     both encode a genuine directional signal.
       // The source whitelist (MAKER_EMPTY_BOOK_ALLOWED_SOURCES) is the primary gate;
       // this flag only bypasses the secondary conviction guards.
-      const hasStructuralEdge = signalSource === 'oracle-lag' || signalSource === 'weather';
+      const hasStructuralEdge = signalSource === 'oracle-lag' || signalSource === 'weather' || signalSource === 'sports';
       if (!hasStructuralEdge) {
         const consensusP = signal.consensusProbability ?? 0.5;
         const minStrength = cfg.MAKER_EMPTY_BOOK_MIN_CONSENSUS;
