@@ -43,29 +43,24 @@ export function momentumCooldownKey(hlSymbol: string, direction: 'LONG' | 'SHORT
 /**
  * Evaluate a single Binance spot price tick for a momentum entry on Hyperliquid.
  *
- * Multi-timeframe confluence gate (Option A swing rework):
- *   - Primary scorer: 15m candles, 6 voters, |score|≥4, ADX≥20.
- *   - 4h bias gate (HL_MOMENTUM_MTF_4H_GATE_ENABLED): EMA_FAST > EMA_SLOW for LONG,
- *     < for SHORT. Prevents counter-trend entries on the macro timeframe.
- *   - 1h MACD gate (HL_MOMENTUM_MTF_1H_GATE_ENABLED): MACD line > signal line for LONG,
- *     < for SHORT. Confirms the intermediate momentum direction.
+ * Two scoring modes (HL_MOMENTUM_MTF_SCORING_MODE):
+ *
+ *   'hard' (default): MTF gates are vetoes. Trades require 15m |score|≥MIN_SCORE,
+ *     ADX≥MIN_ADX, AND 4h EMA bias aligned (when enabled), AND 1h MACD aligned (when
+ *     enabled). Original behavior — preserved verbatim for zero-change merges.
+ *
+ *   'weighted': MTF signals become score boosts. The 4h EMA bias contributes
+ *     +2/0/-2 (aligned / neutral band / opposed); the 1h MACD contributes +1/0
+ *     (aligned / not). Trade if (15m absScore + MTF bonuses) ≥ MIN_TOTAL_SCORE.
+ *     ADX still hard-gates (chop filter). Per-gate ENABLED flags become no-ops
+ *     in weighted mode — MTF signals are always computed when candle data is
+ *     available, gracefully treating missing data as 0 contribution.
  *
  * Pure-read: does not write to Redis. The caller (arb worker) sets the momentum
  * cooldown key and calls executeAndRecordSignal after receiving a non-null signal.
  *
  * Shadow-logs to shadow_observations regardless of HL_MOMENTUM_ENABLED so the
  * first period of deployment can be reviewed before flipping the live flag.
- *
- * Returns null when:
- *   - symbol not in the configured watch list
- *   - no HL perp mapping for this Binance pair
- *   - scoreHlTrend returns null (< 2 candles) or score is 0
- *   - score or ADX below threshold
- *   - 4h EMA bias disagrees with signal direction
- *   - 1h MACD direction disagrees with signal direction
- *   - loss cooldown or momentum cooldown active
- *   - any position already open on this symbol (either direction)
- *   - HL_MOMENTUM_ENABLED is false (dark mode)
  */
 export async function scanHlMomentum(
   tick: BinancePriceTick,
@@ -102,9 +97,10 @@ export async function scanHlMomentum(
 
   const direction: 'LONG' | 'SHORT' = score > 0 ? 'LONG' : 'SHORT';
   const absScore = Math.abs(score);
+  const isWeighted = cfg.HL_MOMENTUM_MTF_SCORING_MODE === 'weighted';
 
-  // Gate: minimum confluence score.
-  if (absScore < cfg.HL_MOMENTUM_MIN_SCORE) {
+  // Gate: minimum confluence score (hard mode only — weighted uses total score below).
+  if (!isWeighted && absScore < cfg.HL_MOMENTUM_MIN_SCORE) {
     logger.debug('[hl-momentum] score below threshold', {
       symbol: hlSymbol,
       score,
@@ -113,7 +109,7 @@ export async function scanHlMomentum(
     return null;
   }
 
-  // Gate: trending regime — ADX must be meaningful.
+  // Gate: trending regime — ADX must be meaningful (both modes).
   if (adx === null || adx < cfg.HL_MOMENTUM_MIN_ADX) {
     logger.debug('[hl-momentum] ADX below threshold', {
       symbol: hlSymbol,
@@ -123,11 +119,14 @@ export async function scanHlMomentum(
     return null;
   }
 
-  // ── Multi-timeframe gates ────────────────────────────────────────────────
+  // ── Multi-timeframe signals ──────────────────────────────────────────────
+  // In hard mode: behave as before — gate flag controls fetch + veto.
+  // In weighted mode: always fetch (gate flag is a no-op), missing data → 0 bonus.
 
-  // Gate: 4h EMA bias — macro trend must agree with signal direction.
   let fourHBiasOk: boolean | null = null;
-  if (cfg.HL_MOMENTUM_MTF_4H_GATE_ENABLED) {
+  let fourHSpreadPct: number | null = null;
+  let fourHBonus = 0;
+  if (cfg.HL_MOMENTUM_MTF_4H_GATE_ENABLED || isWeighted) {
     const fourHCandles = await buildCandles(hlSymbol, redis, {
       lookbackMs: cfg.HL_MOMENTUM_4H_LOOKBACK_MS,
       timeframe: '4h',
@@ -139,7 +138,24 @@ export async function scanHlMomentum(
       const fastLast = ema4hFast[ema4hFast.length - 1]!;
       const slowLast = ema4hSlow[ema4hSlow.length - 1]!;
       fourHBiasOk = direction === 'LONG' ? fastLast > slowLast : fastLast < slowLast;
-      if (!fourHBiasOk) {
+      fourHSpreadPct = ((fastLast - slowLast) / slowLast) * 100;
+
+      if (isWeighted) {
+        const absSpread = Math.abs(fourHSpreadPct);
+        if (absSpread < cfg.HL_MOMENTUM_4H_NEUTRAL_BAND_PCT) {
+          fourHBonus = 0;
+        } else if (fourHBiasOk) {
+          fourHBonus = 2;
+        } else {
+          fourHBonus = -2;
+          logger.debug('[hl-momentum] weighted mode: 4h headwind penalty applied', {
+            symbol: hlSymbol,
+            direction,
+            spreadPct: fourHSpreadPct.toFixed(3),
+            neutralBandPct: cfg.HL_MOMENTUM_4H_NEUTRAL_BAND_PCT,
+          });
+        }
+      } else if (cfg.HL_MOMENTUM_MTF_4H_GATE_ENABLED && !fourHBiasOk) {
         logger.debug('[hl-momentum] 4h bias mismatch', {
           symbol: hlSymbol,
           direction,
@@ -158,9 +174,9 @@ export async function scanHlMomentum(
     }
   }
 
-  // Gate: 1h MACD direction — intermediate momentum must agree.
   let oneHMacdOk: boolean | null = null;
-  if (cfg.HL_MOMENTUM_MTF_1H_GATE_ENABLED) {
+  let oneHBonus = 0;
+  if (cfg.HL_MOMENTUM_MTF_1H_GATE_ENABLED || isWeighted) {
     const oneHCandles = await buildCandles(hlSymbol, redis, {
       lookbackMs: cfg.HL_MOMENTUM_1H_LOOKBACK_MS,
       timeframe: '1h',
@@ -170,7 +186,10 @@ export async function scanHlMomentum(
       oneHMacdOk = direction === 'LONG'
         ? macd1h.macdLine > macd1h.signalLine
         : macd1h.macdLine < macd1h.signalLine;
-      if (!oneHMacdOk) {
+
+      if (isWeighted) {
+        oneHBonus = oneHMacdOk ? 1 : 0;
+      } else if (cfg.HL_MOMENTUM_MTF_1H_GATE_ENABLED && !oneHMacdOk) {
         logger.debug('[hl-momentum] 1h MACD mismatch', {
           symbol: hlSymbol,
           direction,
@@ -185,6 +204,22 @@ export async function scanHlMomentum(
         candleCount: oneHCandles.length,
       });
     }
+  }
+
+  const mtfBonus = fourHBonus + oneHBonus;
+  const totalScore = absScore + mtfBonus;
+
+  // Weighted mode: total score gate replaces MIN_SCORE / individual MTF vetoes.
+  if (isWeighted && totalScore < cfg.HL_MOMENTUM_MIN_TOTAL_SCORE) {
+    logger.debug('[hl-momentum] weighted mode: totalScore below threshold', {
+      symbol: hlSymbol,
+      direction,
+      absScore,
+      mtfBonus,
+      totalScore,
+      threshold: cfg.HL_MOMENTUM_MIN_TOTAL_SCORE,
+    });
+    return null;
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -227,7 +262,7 @@ export async function scanHlMomentum(
     symbol: hlSymbol,
     direction,
     wouldBlock: !cfg.HL_MOMENTUM_ENABLED,
-    metricValue: score,
+    metricValue: isWeighted ? totalScore : score,
     payload: {
       score,
       adx,
@@ -238,42 +273,56 @@ export async function scanHlMomentum(
       fourHBiasOk,
       oneHMacdOk,
       primaryTimeframe: '15m',
+      scoringMode: cfg.HL_MOMENTUM_MTF_SCORING_MODE,
+      mtfBonus,
+      totalScore,
     },
   }).catch(() => {});
 
   if (!cfg.HL_MOMENTUM_ENABLED) {
-    logger.info('[hl-momentum] shadow signal (dark)', {
-      symbol: hlSymbol,
-      direction,
-      score,
-      adx: adx.toFixed(1),
-      voters,
-      binancePrice: tick.price,
-    });
+    logger.info(
+      isWeighted ? '[hl-momentum] shadow signal (weighted dark)' : '[hl-momentum] shadow signal (dark)',
+      {
+        symbol: hlSymbol,
+        direction,
+        score,
+        adx: adx.toFixed(1),
+        voters,
+        binancePrice: tick.price,
+        ...(isWeighted ? { mtfBonus, totalScore } : {}),
+      },
+    );
     return null;
   }
 
   const stakeUsd = Math.min(cfg.HL_MOMENTUM_STAKE_USD, cfg.FUTURES_MAX_PER_TRADE_USD);
+  const edgeMagnitude = isWeighted ? totalScore / 9 : absScore / 6;
 
   logger.info('[hl-momentum] signal', {
     symbol: hlSymbol,
     direction,
     score,
+    scoringMode: cfg.HL_MOMENTUM_MTF_SCORING_MODE,
+    ...(isWeighted ? { mtfBonus, totalScore } : {}),
     adx: adx.toFixed(1),
     stakeUsd,
     voters,
     binancePrice: tick.price,
   });
 
+  const reasoningSuffix = isWeighted
+    ? `, totalScore=${totalScore.toString()} (mtfBonus=${mtfBonus.toString()})`
+    : '';
+
   return {
     marketId: hlSymbol,
     question: `HL momentum ${direction} ${hlSymbol}`,
     direction,
     stakeUsd,
-    edgeMagnitude: absScore / 6,
+    edgeMagnitude,
     outcomePrice: tick.price,
     sourcedFrom: 'hl-momentum',
-    reasoning: `HL trend scorer (15m): score=${score.toString()}, ADX=${adx.toFixed(1)}, voters=${JSON.stringify(voters)}`,
+    reasoning: `HL trend scorer (15m): score=${score.toString()}, ADX=${adx.toFixed(1)}, voters=${JSON.stringify(voters)}${reasoningSuffix}`,
     isFutures: true,
     source: 'hl-momentum',
     eventTs,

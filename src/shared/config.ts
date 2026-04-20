@@ -1161,6 +1161,16 @@ const envSchema = z.object({
   // thresholds than 1m-tuned arb defaults to avoid being stopped out by normal chop.
   HL_MOMENTUM_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(5),
   HL_MOMENTUM_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(12),
+  // MTF scoring mode. 'hard' = AND-stack (current — both MTF gates must pass);
+  // 'weighted' = each MTF signal becomes a score boost, trade if total ≥ MIN_TOTAL_SCORE.
+  // Ships with 'hard' default → zero behavior change at merge.
+  HL_MOMENTUM_MTF_SCORING_MODE: z.enum(['hard', 'weighted']).optional().default('hard'),
+  // Weighted mode only: 4h EMA spread (% of slow EMA) below this counts as neutral
+  // (0 pts, no penalty). Above: aligned = +2, opposed = -2.
+  HL_MOMENTUM_4H_NEUTRAL_BAND_PCT: z.coerce.number().min(0).optional().default(0.5),
+  // Weighted mode only: minimum integer total score (15m absScore + MTF bonuses) required to trade.
+  // Range: capped at 9 (6 + 2 + 1). Default 5 = 4-of-6 + 1h aligned, OR 3-of-6 + both MTF aligned.
+  HL_MOMENTUM_MIN_TOTAL_SCORE: z.coerce.number().int().min(0).max(9).optional().default(5),
 
   // ── Chainlink → PM crypto-arb trigger ──
   // When true, oracle:price_moved ticks also fan into the PM crypto-arb scanner
