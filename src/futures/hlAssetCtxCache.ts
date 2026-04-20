@@ -89,3 +89,91 @@ export async function getCachedAssetCtx(
 export function fundingRateToApr(hourlyFundingRate: number): number {
   return hourlyFundingRate * HL_FUNDING_SETTLEMENTS_PER_YEAR * 100;
 }
+
+// ── OI divergence baseline (issue #265 Sub-PR 2) ────────────────────────────
+
+/** Snapshot of OI + mark price at a fixed point in time for divergence comparison. */
+export interface OiBaseline {
+  oi: number;
+  markPrice: number;
+  ts: number;
+}
+
+/**
+ * Read the existing OI baseline for `symbol` and, if none exists (first call
+ * or TTL expired), atomically write the current values as the new baseline.
+ *
+ * The baseline key `hl:oi-baseline:<symbol>` is written with SET NX EX so
+ * only the first caller per TTL window wins — subsequent callers within the
+ * same window all read the same frozen snapshot, giving a consistent lookback.
+ *
+ * Returns:
+ * - The existing baseline (non-null) when one is already stored — caller can
+ *   compute oiPctChange and pricePctChange vs this.
+ * - null on the first call of each TTL cycle (no prior baseline to compare
+ *   against) — caller should treat the OI voter as neutral for this tick.
+ */
+export async function getOrSetOiBaseline(
+  symbol: string,
+  redis: Redis,
+  currentOi: number,
+  currentMarkPrice: number,
+  ttlSec: number,
+): Promise<OiBaseline | null> {
+  const key = `hl:oi-baseline:${symbol}`;
+
+  // 1. Try to read an existing baseline.
+  let existing: string | null = null;
+  try {
+    existing = await redis.get(key);
+  } catch (err) {
+    logger.warn('[hl-asset-ctx] oi baseline get failed', {
+      symbol,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    // Treat as cache miss — fall through to write attempt.
+  }
+
+  if (existing) {
+    try {
+      return JSON.parse(existing) as OiBaseline;
+    } catch (err) {
+      logger.warn('[hl-asset-ctx] malformed oi baseline, invalidating', {
+        symbol,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      try {
+        await redis.del(key);
+      } catch (deleteErr) {
+        logger.warn('[hl-asset-ctx] failed to delete malformed oi baseline', {
+          symbol,
+          err: deleteErr instanceof Error ? deleteErr.message : String(deleteErr),
+        });
+      }
+      // Fall through to write a fresh baseline.
+    }
+  }
+
+  // 2. No usable baseline — write current as the new baseline (NX = only if
+  //    not exists, so a parallel scanner tick can't stomp a just-written key).
+  const newBaseline: OiBaseline = { oi: currentOi, markPrice: currentMarkPrice, ts: Date.now() };
+  try {
+    const setResult = await redis.set(key, JSON.stringify(newBaseline), 'EX', ttlSec, 'NX');
+    if (setResult === null) {
+      // NX race lost — another process wrote the key between our GET and SET.
+      // Read what they wrote so this tick can participate in divergence scoring.
+      try {
+        const raced = await redis.get(key);
+        if (raced) return JSON.parse(raced) as OiBaseline;
+      } catch {
+        // Ignore — treat as neutral tick if second read also fails.
+      }
+    }
+  } catch (err) {
+    logger.warn('[hl-asset-ctx] oi baseline write failed', {
+      symbol,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return null; // No prior baseline this tick — voter is neutral.
+}
