@@ -196,7 +196,10 @@ export function scoreHlTrend(
     opts.oiPctChange !== undefined && opts.oiPctChange !== null && Number.isFinite(opts.oiPctChange) &&
     opts.pricePctChange !== undefined && opts.pricePctChange !== null && Number.isFinite(opts.pricePctChange)
   ) {
-    const oiThreshold = opts.oiDivergenceThreshold ?? 5;
+    // Validate threshold: fall back to default if non-finite or negative so a
+    // NaN/Infinity passed by a caller doesn't silently produce unexpected votes.
+    const rawThreshold = opts.oiDivergenceThreshold ?? 5;
+    const oiThreshold = Number.isFinite(rawThreshold) && rawThreshold >= 0 ? rawThreshold : 5;
     // Treat zero OI change as neutral regardless of threshold to avoid
     // misclassifying flat OI as "contracting" when threshold is 0.
     if (opts.oiPctChange === 0 || Math.abs(opts.oiPctChange) < oiThreshold) {

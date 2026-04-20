@@ -367,6 +367,15 @@ describe('scoreHlTrend — OI divergence voter', () => {
     expect(neg!.voters.oiDivergence).toBe('neutral');
   });
 
+  it('falls back to default threshold (5) when caller passes NaN or negative', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    // 3% OI would vote under threshold=0 but should stay neutral under the 5% default fallback.
+    const nan = scoreHlTrend(candles, { oiPctChange: 3, pricePctChange: 2, oiDivergenceThreshold: NaN });
+    expect(nan!.voters.oiDivergence).toBe('neutral');
+    const neg = scoreHlTrend(candles, { oiPctChange: 3, pricePctChange: 2, oiDivergenceThreshold: -1 });
+    expect(neg!.voters.oiDivergence).toBe('neutral');
+  });
+
   it('honours a caller-supplied oiDivergenceThreshold', () => {
     const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
     // 3% OI is below default 5% but above caller threshold of 2%.

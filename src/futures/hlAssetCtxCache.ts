@@ -142,7 +142,14 @@ export async function getOrSetOiBaseline(
         symbol,
         err: err instanceof Error ? err.message : String(err),
       });
-      try { await redis.del(key); } catch { /* non-critical */ }
+      try {
+        await redis.del(key);
+      } catch (deleteErr) {
+        logger.warn('[hl-asset-ctx] failed to delete malformed oi baseline', {
+          symbol,
+          err: deleteErr instanceof Error ? deleteErr.message : String(deleteErr),
+        });
+      }
       // Fall through to write a fresh baseline.
     }
   }
