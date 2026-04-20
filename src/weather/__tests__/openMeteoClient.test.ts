@@ -9,7 +9,7 @@ vi.mock('../../shared/logger.js', () => ({
   },
 }));
 
-const { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHistoricalHigh } = await import(
+const { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHistoricalHigh, fetchHrrrForecast } = await import(
   '../openMeteoClient.js'
 );
 
@@ -245,6 +245,72 @@ describe('fetchHistoricalHigh', () => {
     const result = await fetchHistoricalHigh(
       40.7128, -74.006, '2026-04-10', 'fahrenheit', fetchFn,
     );
+    expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchHrrrForecast
+// ---------------------------------------------------------------------------
+
+describe('fetchHrrrForecast', () => {
+  it('returns forecast for a valid HRRR response', async () => {
+    const fetchFn = mockFetch({
+      daily: {
+        time: ['2026-04-20'],
+        temperature_2m_max: [75.4],
+        temperature_2m_min: [61.2],
+        precipitation_probability_max: [10],
+      },
+    });
+
+    const result = await fetchHrrrForecast(41.88, -87.63, '2026-04-20', fetchFn);
+
+    expect(result).not.toBeNull();
+    expect(result!.highTemp).toBeCloseTo(75.4, 0);
+    expect(result!.lowTemp).toBeCloseTo(61.2, 0);
+    expect(result!.forecastDate).toBe('2026-04-20');
+  });
+
+  it('passes models=hrrr and temperature_unit=fahrenheit to the API URL', async () => {
+    const fetchFn = mockFetch({
+      daily: {
+        time: ['2026-04-20'],
+        temperature_2m_max: [75.4],
+        temperature_2m_min: [61.2],
+        precipitation_probability_max: [10],
+      },
+    });
+
+    await fetchHrrrForecast(41.88, -87.63, '2026-04-20', fetchFn);
+
+    const calledUrl = fetchFn.mock.calls[0]?.[0] as string;
+    expect(calledUrl).toContain('models=hrrr');
+    expect(calledUrl).toContain('temperature_unit=fahrenheit');
+  });
+
+  it('returns null on API error', async () => {
+    const fetchFn = mockFetch({}, 500);
+    const result = await fetchHrrrForecast(41.88, -87.63, '2026-04-20', fetchFn);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when target date not in response', async () => {
+    const fetchFn = mockFetch({
+      daily: {
+        time: ['2026-04-21'],
+        temperature_2m_max: [75.0],
+        temperature_2m_min: [60.0],
+        precipitation_probability_max: [5],
+      },
+    });
+    const result = await fetchHrrrForecast(41.88, -87.63, '2026-04-20', fetchFn);
+    expect(result).toBeNull();
+  });
+
+  it('returns null on network error', async () => {
+    const fetchFn = vi.fn().mockRejectedValue(new Error('Network error'));
+    const result = await fetchHrrrForecast(41.88, -87.63, '2026-04-20', fetchFn);
     expect(result).toBeNull();
   });
 });

@@ -38,7 +38,7 @@ import {
   getDefaultStdDev,
 } from './noaaClient.js';
 import type { CityCoordinates, FetchFn } from './noaaClient.js';
-import { fetchOpenMeteoForecast, fetchEnsembleForecast } from './openMeteoClient.js';
+import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast } from './openMeteoClient.js';
 
 const GAMMA_BASE = 'https://gamma-api.polymarket.com';
 const GAMMA_TIMEOUT_MS = 15_000;
@@ -384,7 +384,7 @@ interface ForecastResult {
   /** Standard deviation to use for probability model. */
   stdDev: number;
   /** Source of the forecast. */
-  source: 'noaa' | 'open-meteo' | 'combined';
+  source: 'noaa' | 'open-meteo' | 'combined' | 'hrrr-combined';
   /** Number of ensemble members (0 if no ensemble data). */
   ensembleMembers: number;
   /**
@@ -407,6 +407,7 @@ export async function fetchForecast(
   fetchFn?: FetchFn,
   stddevMinFraction = 0.7,
   useEcmwf = false,
+  useHrrr = false,
 ): Promise<ForecastResult | null> {
   const { coords, targetDate, unit } = event;
   const month = parseInt(targetDate.slice(5, 7), 10);
@@ -424,46 +425,48 @@ export async function fetchForecast(
   const ensembleModel: ForecastResult['ensembleModel'] = ensemble?.ensembleModel ?? 'none';
 
   if (coords.noaaCoverage) {
-    // US city: use NOAA as primary, combine with Open-Meteo
-    const noaaForecast = await fetchNwsForecast(coords.lat, coords.lon, targetDate, fetchFn);
-    const omForecast = await fetchOpenMeteoForecast(coords.lat, coords.lon, targetDate, unit, fetchFn);
+    // US city: fetch NOAA, Open-Meteo, and (when enabled at 1-day) HRRR in parallel.
+    const hrrrEnabled = useHrrr && daysOut <= 1;
+    const [noaaForecast, omForecast, hrrrForecast] = await Promise.all([
+      fetchNwsForecast(coords.lat, coords.lon, targetDate, fetchFn),
+      fetchOpenMeteoForecast(coords.lat, coords.lon, targetDate, unit, fetchFn),
+      hrrrEnabled ? fetchHrrrForecast(coords.lat, coords.lon, targetDate, fetchFn) : Promise.resolve(null),
+    ]);
 
-    if (!noaaForecast && !omForecast) return null;
+    // Collect available deterministic highs. NOAA is in °F — convert if needed.
+    const noaaHigh = noaaForecast
+      ? (unit === 'celsius' ? (noaaForecast.highF - 32) * 5 / 9 : noaaForecast.highF)
+      : null;
+    // HRRR is always °F — convert if the event uses Celsius (US cities are always °F, but be safe).
+    const hrrrHigh = hrrrForecast
+      ? (unit === 'celsius' ? (hrrrForecast.highTemp - 32) * 5 / 9 : hrrrForecast.highTemp)
+      : null;
+    const omHigh = omForecast?.highTemp ?? null;
 
-    let forecastHigh: number;
-    let source: 'noaa' | 'open-meteo' | 'combined';
+    const availableHighs = [noaaHigh, omHigh, hrrrHigh].filter((v): v is number => v !== null);
+    if (availableHighs.length === 0) return null;
 
-    if (noaaForecast && omForecast) {
-      // Convert NOAA to event unit if needed
-      const noaaHigh = unit === 'celsius'
-        ? (noaaForecast.highF - 32) * 5 / 9
-        : noaaForecast.highF;
-      // Simple average of two sources
-      forecastHigh = (noaaHigh + omForecast.highTemp) / 2;
-      source = 'combined';
+    const forecastHigh = availableHighs.reduce((s, v) => s + v, 0) / availableHighs.length;
+    const hrrrContributed = hrrrHigh !== null;
+    const source: ForecastResult['source'] = hrrrContributed
+      ? 'hrrr-combined'
+      : availableHighs.length > 1 ? 'combined' : (noaaHigh !== null ? 'noaa' : 'open-meteo');
 
-      // Use max of ensemble stddev and source disagreement; floor at fraction of climatology.
-      const disagreement = Math.abs(noaaHigh - omForecast.highTemp) / 1.5;
-      const ensStd = ensemble?.stddevHigh ?? 0;
-      const stdDev = Math.max(ensStd, disagreement, defaultStd * stddevMinFraction);
-      return { forecastHigh, stdDev, source, ensembleMembers: ensemble?.memberCount ?? 0, ensembleModel };
-    }
+    // Disagreement = spread across available sources / 1.5 to scale to ~1σ.
+    const spread = availableHighs.length > 1
+      ? (Math.max(...availableHighs) - Math.min(...availableHighs)) / 1.5
+      : 0;
+    // Single-source: use defaultStd as the ensemble fallback so a partial outage
+    // (only NOAA responds, ensemble null) doesn't silently tighten uncertainty to the
+    // stddevMinFraction floor. Multi-source: spread already adds variance, so 0 fallback is fine.
+    const stdDev = availableHighs.length === 1
+      ? Math.max(ensemble?.stddevHigh ?? defaultStd, defaultStd * stddevMinFraction)
+      : Math.max(ensemble?.stddevHigh ?? 0, spread, defaultStd * stddevMinFraction);
 
-    if (noaaForecast) {
-      forecastHigh = unit === 'celsius'
-        ? (noaaForecast.highF - 32) * 5 / 9
-        : noaaForecast.highF;
-      source = 'noaa';
-    } else {
-      forecastHigh = omForecast!.highTemp;
-      source = 'open-meteo';
-    }
-
-    const stdDev = Math.max(ensemble?.stddevHigh ?? defaultStd, defaultStd * stddevMinFraction);
     return { forecastHigh, stdDev, source, ensembleMembers: ensemble?.memberCount ?? 0, ensembleModel };
   }
 
-  // International city: Open-Meteo only
+  // International city: Open-Meteo only (HRRR is US-only)
   const omForecast = await fetchOpenMeteoForecast(coords.lat, coords.lon, targetDate, unit, fetchFn);
   if (!omForecast) return null;
 
@@ -724,7 +727,7 @@ export async function scanWeatherMarkets(
     }
 
     // Step 3: Fetch forecast
-    const forecast = await fetchForecast(event, daysOut, fetchFn, cfg.WEATHER_STDDEV_MIN_FRACTION, cfg.WEATHER_MODEL_ECMWF_ENABLED);
+    const forecast = await fetchForecast(event, daysOut, fetchFn, cfg.WEATHER_STDDEV_MIN_FRACTION, cfg.WEATHER_MODEL_ECMWF_ENABLED, cfg.WEATHER_HRRR_ENABLED);
     if (!forecast) {
       noForecast++;
       continue;
