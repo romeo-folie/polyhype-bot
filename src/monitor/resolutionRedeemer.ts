@@ -725,10 +725,10 @@ async function redeemClobPositions(
               : pos.direction;
 
           // Dust or no-balance positions: close the zombie entry without redemption.
+          // Do NOT markRecentlyResolved here — on-chain settlement is unconfirmed at this point.
           if (isDust || (reportedBalance ?? 0) <= 0.01) {
             await closePosition(redis, pos.marketId, pos.direction);
             await markRecentlyClosed(redis, pos.marketId);
-            await markRecentlyResolved(redis, pos.marketId);
             const exitReason = isDust ? 'expired_dust' : 'expired_unresolvable';
             await recordPositionOutcome(
               redis,
