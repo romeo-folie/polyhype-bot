@@ -526,12 +526,16 @@ async function tryExecuteViaClobMaker(
     stakeUsd: signal.stakeUsd,
   });
 
-  // Empty-book orders are ALWAYS post-only. The REST book can be stale relative
-  // to the matching engine, so a crossing limit can fill as a taker against
-  // hidden resting liquidity at an adverse price — precisely the failure mode
-  // that produced the 2026-04-16 OSINT empty-book losses. Post-only makes the
-  // matching engine reject any order that would cross, and we treat that as
-  // no-trade rather than falling through to a taker fill.
+  // Oracle-lag uses post-only in empty-book mode: the REST book can be stale,
+  // so a crossing limit risks a taker fill at an adverse price (the 2026-04-16
+  // OSINT empty-book loss case). Oracle-lag handles rejection with a retry and
+  // re-priced order.
+  //
+  // Other structural-edge sources (weather) use non-post-only GTC in empty-book
+  // mode: if the matching engine has real resting liquidity below our fair value,
+  // a taker fill is a better-than-expected entry. The fair-value cap already
+  // prevents overpaying — GTC rests as a maker if no matching ask is found.
+  const postOnly = emptyBookMode ? signal.source === 'oracle-lag' : true;
   let result = await submitClobLimitBuy({
     tokenId,
     price,
@@ -539,7 +543,7 @@ async function tryExecuteViaClobMaker(
     tickSize: book.tick_size as TickSize,
     negRisk: book.neg_risk,
     orderType: 'GTC',
-    postOnly: true,
+    postOnly,
   });
 
   // Oracle-lag retry-on-reject: a post-only rejection means a seller arrived
@@ -627,6 +631,35 @@ async function tryExecuteViaClobMaker(
         }
       }
     }
+  }
+
+  // GTC without post-only can fill immediately as a taker when real resting
+  // liquidity exists in the matching engine. Handle the instant-fill in this
+  // cycle rather than persisting and polling over 15 min.
+  if (emptyBookMode && !postOnly && result.success && result.order_id && (result.shares_bought ?? 0) > 0) {
+    logger.info('[executor] empty-book GTC filled immediately (taker)', {
+      marketId: signal.marketId,
+      tokenId,
+      orderId: result.order_id,
+      price,
+      sharesFilled: result.shares_bought,
+    });
+    await recordGlobalTrade(getRedis(), 'polymarket');
+    return {
+      ok: true,
+      tradeResult: { success: true, shares_bought: result.shares_bought },
+      filledStakeUsd: (result.shares_bought ?? 0) * price,
+      waitMs: Date.now() - startedAt,
+      makerOrderId: result.order_id,
+      makerPostedPrice: price,
+      makerPostedSize: size,
+      makerBestBid: bestBid,
+      makerBestAsk: bestAsk,
+      ...(mid ? { makerMidPrice: mid } : {}),
+      ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
+      makerFillStatus: 'full',
+      ...(result.shares_bought != null ? { makerSharesFilled: result.shares_bought } : {}),
+    };
   }
 
   if (!result.success || !result.order_id) {
@@ -2093,7 +2126,11 @@ export async function executeSignal(
         isRejected
           ? '[executor] empty-book maker rejected at submit — book not actually empty'
           : '[executor] empty-book maker timed out — no taker fallback (book still empty)',
-        { marketId: signal.marketId, fillStatus: makerAttempt.makerFillStatus },
+        {
+          marketId: signal.marketId,
+          fillStatus: makerAttempt.makerFillStatus,
+          ...(isRejected && makerAttempt.error ? { reason: makerAttempt.error } : {}),
+        },
       );
       return recordSkip('no_clob_book', finalExecutionPath, makerTelemetry, 'clob', 'maker');
     }
