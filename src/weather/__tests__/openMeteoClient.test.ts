@@ -272,7 +272,7 @@ describe('fetchHrrrForecast', () => {
     expect(result!.forecastDate).toBe('2026-04-20');
   });
 
-  it('passes models=hrrr and temperature_unit=fahrenheit to the API URL', async () => {
+  it('passes models=gfs_hrrr and temperature_unit=fahrenheit to the API URL', async () => {
     const fetchFn = mockFetch({
       daily: {
         time: ['2026-04-20'],
@@ -285,7 +285,7 @@ describe('fetchHrrrForecast', () => {
     await fetchHrrrForecast(41.88, -87.63, '2026-04-20', fetchFn);
 
     const calledUrl = fetchFn.mock.calls[0]?.[0] as string;
-    expect(calledUrl).toContain('models=hrrr');
+    expect(calledUrl).toContain('models=gfs_hrrr');
     expect(calledUrl).toContain('temperature_unit=fahrenheit');
   });
 

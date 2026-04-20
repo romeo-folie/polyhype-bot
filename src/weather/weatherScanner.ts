@@ -925,6 +925,8 @@ export async function scanWeatherMarkets(
           effectiveStdDev: opp.effectiveStdDev,
           stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
           ensembleModel: forecast.ensembleModel,
+          forecastSource: forecast.source,
+          ensembleMembers: forecast.ensembleMembers,
           tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
           allowedByConfig: opp.allowedByConfig,
           daysOut: opp.daysOut,
