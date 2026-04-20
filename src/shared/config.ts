@@ -1260,6 +1260,9 @@ const envSchema = z.object({
   // surviving brackets with artificially high probability mass and trips the edge gate
   // on a math artifact. 0.95 allows small tail leakage at outermost brackets.
   WEATHER_MIN_MODEL_COVERAGE: z.coerce.number().min(0).max(1).optional().default(0.95),
+  // Use ECMWF IFS 0.25° 51-member ensemble instead of GFS 31-member for stddev estimation.
+  // ECMWF has ~0.2-0.5°C lower Tmax MAE at 1-day lead globally. Ships dark.
+  WEATHER_MODEL_ECMWF_ENABLED: boolFromEnv.optional().default(false),
   // --- WEATHER EXECUTION ---
   // Killswitch separate from the scanner flag. Scanner may be ENABLED=true (shadow +
   // `would execute trade` logs) without actually placing orders. Flipping

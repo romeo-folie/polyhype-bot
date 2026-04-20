@@ -61,6 +61,8 @@ export interface EnsembleForecast {
   memberCount: number;
   /** The date this forecast applies to (YYYY-MM-DD). */
   forecastDate: string;
+  /** Which ensemble model was used. */
+  ensembleModel: 'gfs' | 'ecmwf';
 }
 
 /** Injectable fetch function for testing. */
@@ -189,13 +191,18 @@ export async function fetchOpenMeteoForecast(
 }
 
 /**
- * Fetch GFS ensemble forecast data for dynamic stddev estimation.
+ * Fetch ensemble forecast data for dynamic stddev estimation.
  *
- * Returns the mean and standard deviation of the 31 GFS ensemble members'
- * daily high temperature forecast. This captures regime-dependent uncertainty
- * (frontal passages → high stddev, stable high-pressure → low stddev).
+ * By default uses GFS (31 members, `gfs_seamless`). Set `useEcmwf=true` to
+ * use ECMWF IFS 0.25° (51 members, `ecmwf_ifs025`), which has ~0.2–0.5°C
+ * lower Tmax MAE at 1-day lead globally. Returns the mean and standard
+ * deviation of ensemble member daily high temperatures, capturing
+ * regime-dependent uncertainty (frontal passages → high stddev, stable
+ * high-pressure → low stddev). The result is tagged with `ensembleModel`
+ * so callers can log which model supplied the stddev.
  *
  * @param unit - 'fahrenheit' or 'celsius'
+ * @param useEcmwf - use ECMWF IFS instead of GFS (default false)
  */
 export async function fetchEnsembleForecast(
   lat: number,
@@ -203,17 +210,21 @@ export async function fetchEnsembleForecast(
   targetDate: string,
   unit: 'fahrenheit' | 'celsius' = 'fahrenheit',
   fetchFn?: FetchFn,
+  useEcmwf = false,
 ): Promise<EnsembleForecast | null> {
   const isInjected = fetchFn !== undefined;
   const doFetch = fetchFn ?? fetch;
   try {
     if (!isInjected) await rateLimitWait();
 
+    // ECMWF IFS 0.25° (51 members) is more accurate than GFS (31 members) at
+    // 1-day lead globally. Gate on useEcmwf so the switch is a single env-var flip.
+    const model = useEcmwf ? 'ecmwf_ifs025' : 'gfs_seamless';
     const params = new URLSearchParams({
       latitude: lat.toFixed(4),
       longitude: lon.toFixed(4),
       daily: 'temperature_2m_max',
-      models: 'gfs_seamless',
+      models: model,
       temperature_unit: unit,
       timezone: 'auto',
       start_date: targetDate.slice(0, 10),
@@ -244,13 +255,14 @@ export async function fetchEnsembleForecast(
     if (idx === -1) return null;
 
     const members = daily.temperature_2m_max[idx];
+    const ensembleModel: EnsembleForecast['ensembleModel'] = useEcmwf ? 'ecmwf' : 'gfs';
     if (!members || !Array.isArray(members) || members.length < 2) {
       // Open-Meteo ensemble returns members as columns, not nested arrays
       // Try parsing flat array: all values for the single target day
-      return parseEnsembleFlat(daily, targetStr);
+      return parseEnsembleFlat(daily, targetStr, ensembleModel);
     }
 
-    return computeEnsembleStats(members, targetStr);
+    return computeEnsembleStats(members, targetStr, ensembleModel);
   } catch (err) {
     logger.warn('[weather] fetchEnsembleForecast failed', {
       error: err instanceof Error ? err.message : String(err),
@@ -269,6 +281,7 @@ export async function fetchEnsembleForecast(
 function parseEnsembleFlat(
   daily: Record<string, unknown>,
   targetDate: string,
+  ensembleModel: EnsembleForecast['ensembleModel'],
 ): EnsembleForecast | null {
   const members: number[] = [];
   const time = daily.time as string[] | undefined;
@@ -299,7 +312,7 @@ function parseEnsembleFlat(
   }
 
   if (members.length < 2) return null;
-  return computeEnsembleStats(members, targetDate);
+  return computeEnsembleStats(members, targetDate, ensembleModel);
 }
 
 // ── Historical archive (ground-truth reconciliation) ──────────────────────
@@ -397,7 +410,11 @@ export async function fetchHistoricalHigh(
   }
 }
 
-function computeEnsembleStats(members: number[], forecastDate: string): EnsembleForecast {
+function computeEnsembleStats(
+  members: number[],
+  forecastDate: string,
+  ensembleModel: EnsembleForecast['ensembleModel'],
+): EnsembleForecast {
   const n = members.length;
   const mean = members.reduce((s, v) => s + v, 0) / n;
   const variance = members.reduce((s, v) => s + (v - mean) ** 2, 0) / (n - 1);
@@ -411,5 +428,6 @@ function computeEnsembleStats(members: number[], forecastDate: string): Ensemble
     stddevLow: stddev,
     memberCount: n,
     forecastDate,
+    ensembleModel,
   };
 }
