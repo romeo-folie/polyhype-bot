@@ -29,6 +29,9 @@ const baseConfig = {
   HL_MOMENTUM_4H_EMA_SLOW: 50,
   HL_MOMENTUM_STAKE_USD: 10,
   FUTURES_MAX_PER_TRADE_USD: 15,
+  HL_MOMENTUM_MTF_SCORING_MODE: 'hard' as 'hard' | 'weighted',
+  HL_MOMENTUM_4H_NEUTRAL_BAND_PCT: 0.5,
+  HL_MOMENTUM_MIN_TOTAL_SCORE: 5,
 };
 
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
@@ -516,6 +519,268 @@ describe('scanHlMomentum — live mode', () => {
     const redis = makeRedis();
     const result = await scanHlMomentum(makeTick(), redis as never);
     expect(result!.reasoning).toContain('15m');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Weighted MTF scoring mode
+// ---------------------------------------------------------------------------
+
+describe('scanHlMomentum — weighted MTF scoring', () => {
+  const weightedConfig = {
+    ...baseConfig,
+    HL_MOMENTUM_MTF_SCORING_MODE: 'weighted' as const,
+    // Gate flags become no-ops in weighted mode but set them on to mirror prod.
+    HL_MOMENTUM_MTF_4H_GATE_ENABLED: true,
+    HL_MOMENTUM_MTF_1H_GATE_ENABLED: true,
+    HL_MOMENTUM_MIN_TOTAL_SCORE: 5,
+    HL_MOMENTUM_4H_NEUTRAL_BAND_PCT: 0.5,
+  };
+
+  function bullishResultWithScore(score: number) {
+    return {
+      score,
+      adx: 35,
+      voters: {
+        vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP',
+        obv: 'UP', cmf: 'UP', adxDI: 'neutral',
+      },
+    };
+  }
+
+  beforeEach(() => {
+    mockLoadConfig.mockReturnValue({ ...weightedConfig });
+    mockBuildCandles.mockResolvedValue([{ close: 100 }]);
+    mockHasOpenPosition.mockResolvedValue(false);
+  });
+
+  it('passes when score=3 + 4h aligned (+2) + 1h aligned (+1) = 6 ≥ 5', async () => {
+    mockScoreHlTrend.mockReturnValue(bullishResultWithScore(3));
+    // 4h fast > slow, spread 10% > 0.5% band → +2 (LONG)
+    mockComputeEMA
+      .mockReturnValueOnce([110])
+      .mockReturnValueOnce([100]);
+    // 1h MACD aligned (LONG: macdLine > signalLine) → +1
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: 0.5, signalLine: 0.2, histogram: 0.3 });
+
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).toBeNull(); // dark mode
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        kind: 'hl_momentum_signal',
+        wouldBlock: true,
+        metricValue: 6,
+        payload: expect.objectContaining({
+          scoringMode: 'weighted',
+          mtfBonus: 3,
+          totalScore: 6,
+          fourHBiasOk: true,
+          oneHMacdOk: true,
+        }),
+      }),
+    );
+  });
+
+  it('passes at threshold when score=4 + 4h neutral (0) + 1h aligned (+1) = 5', async () => {
+    mockScoreHlTrend.mockReturnValue(bullishResultWithScore(4));
+    // 4h spread 0.2% < 0.5% band → 0 (neutral)
+    mockComputeEMA
+      .mockReturnValueOnce([100.2])
+      .mockReturnValueOnce([100]);
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: 0.5, signalLine: 0.2, histogram: 0.3 });
+
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({ mtfBonus: 1, totalScore: 5 }),
+      }),
+    );
+  });
+
+  it('blocks when score=4 + 4h opposed (-2) + 1h aligned (+1) = 3 < 5', async () => {
+    mockScoreHlTrend.mockReturnValue(bullishResultWithScore(4));
+    // 4h fast < slow, spread 10% > band → -2 (LONG against bearish 4h)
+    mockComputeEMA
+      .mockReturnValueOnce([90])
+      .mockReturnValueOnce([100]);
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: 0.5, signalLine: 0.2, histogram: 0.3 });
+
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).toBeNull();
+    // Blocked before shadow log (matches existing MIN_SCORE/ADX/hard-MTF pattern).
+    expect(enqueueWrite).not.toHaveBeenCalled();
+  });
+
+  it('blocks when score=4 + 4h null + 1h null = 4 (no MTF data) < 5', async () => {
+    mockScoreHlTrend.mockReturnValue(bullishResultWithScore(4));
+    mockComputeEMA.mockReturnValue(null);              // insufficient 4h data
+    mockComputeMACDFromCandles.mockReturnValue(null);  // insufficient 1h data
+
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).toBeNull();
+    expect(enqueueWrite).not.toHaveBeenCalled();
+  });
+
+  it('passes when score=5 + neutral (0) + neutral (0) = 5 (strong 15m alone)', async () => {
+    mockScoreHlTrend.mockReturnValue(bullishResultWithScore(5));
+    mockComputeEMA
+      .mockReturnValueOnce([100.1])  // 0.1% spread → neutral
+      .mockReturnValueOnce([100]);
+    // 1h MACD opposed → 0 (no penalty)
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: -0.1, signalLine: 0.1, histogram: -0.2 });
+
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({ mtfBonus: 0, totalScore: 5 }),
+      }),
+    );
+  });
+
+  it('treats spread exactly at neutral band as neutral (0 pts), not aligned', async () => {
+    mockScoreHlTrend.mockReturnValue(bullishResultWithScore(4));
+    // Spread exactly 0.5% → at the band threshold. abs(0.5) < 0.5 is FALSE → would be ±2.
+    // So set just above: 0.499% → neutral.
+    mockComputeEMA
+      .mockReturnValueOnce([100.499])
+      .mockReturnValueOnce([100]);
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: 0.5, signalLine: 0.2, histogram: 0.3 });
+
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({ mtfBonus: 1 }), // 0 + 1 = 1 (4h neutral, 1h aligned)
+      }),
+    );
+  });
+
+  it('does NOT apply MIN_SCORE veto in weighted mode (allows score=2 to reach total gate)', async () => {
+    mockScoreHlTrend.mockReturnValue(bullishResultWithScore(2));
+    mockComputeEMA
+      .mockReturnValueOnce([110])
+      .mockReturnValueOnce([100]); // +2
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: 0.5, signalLine: 0.2, histogram: 0.3 }); // +1
+
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+
+    // Total = 2 + 2 + 1 = 5 → passes MIN_TOTAL_SCORE gate, shadow logs
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({ totalScore: 5 }),
+      }),
+    );
+  });
+
+  it('returns a live signal in weighted mode with edgeMagnitude = totalScore / 9', async () => {
+    mockLoadConfig.mockReturnValue({ ...weightedConfig, HL_MOMENTUM_ENABLED: true });
+    mockScoreHlTrend.mockReturnValue(bullishResultWithScore(4));
+    mockComputeEMA
+      .mockReturnValueOnce([110])
+      .mockReturnValueOnce([100]); // +2
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: 0.5, signalLine: 0.2, histogram: 0.3 }); // +1
+
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).not.toBeNull();
+    expect(result!.direction).toBe('LONG');
+    // totalScore = 4 + 2 + 1 = 7; edgeMagnitude = 7/9
+    expect(result!.edgeMagnitude).toBeCloseTo(7 / 9, 5);
+    expect(result!.reasoning).toContain('totalScore=7');
+    expect(result!.reasoning).toContain('mtfBonus=3');
+  });
+
+  it('emits shadow signal (weighted dark) marker in dark mode', async () => {
+    const { logger } = await import('../../shared/logger.js');
+    vi.mocked(logger.info).mockClear();
+    mockScoreHlTrend.mockReturnValue(bullishResultWithScore(5));
+    mockComputeEMA
+      .mockReturnValueOnce([110])
+      .mockReturnValueOnce([100]);
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: 0.5, signalLine: 0.2, histogram: 0.3 });
+
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+
+    expect(logger.info).toHaveBeenCalledWith(
+      '[hl-momentum] shadow signal (weighted dark)',
+      expect.objectContaining({
+        symbol: 'BTC',
+        direction: 'LONG',
+        mtfBonus: 3,
+        totalScore: 8,
+      }),
+    );
+  });
+
+  it('SHORT signal: 4h aligned means fast < slow', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: -4,
+      adx: 35,
+      voters: {
+        vwap: 'DOWN', emaFastVsSlow: 'DOWN', macdLine: 'DOWN',
+        obv: 'DOWN', cmf: 'DOWN', adxDI: 'neutral',
+      },
+    });
+    // 4h fast < slow, spread 10% (negative) → for SHORT, this is aligned → +2
+    mockComputeEMA
+      .mockReturnValueOnce([90])
+      .mockReturnValueOnce([100]);
+    // 1h MACD: macdLine < signalLine → SHORT aligned → +1
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: -0.5, signalLine: -0.2, histogram: -0.3 });
+
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        direction: 'SHORT',
+        payload: expect.objectContaining({ mtfBonus: 3, totalScore: 7 }),
+      }),
+    );
   });
 });
 
