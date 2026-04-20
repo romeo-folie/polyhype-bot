@@ -387,7 +387,12 @@ interface ForecastResult {
   source: 'noaa' | 'open-meteo' | 'combined';
   /** Number of ensemble members (0 if no ensemble data). */
   ensembleMembers: number;
-  /** Which ensemble model supplied the stddev. */
+  /**
+   * Ensemble model used when ensemble data is available. Note: the final
+   * stdDev may also be influenced by cross-source disagreement or a
+   * climatology floor, so this field is not guaranteed to be the sole
+   * provenance of stdDev.
+   */
   ensembleModel: 'gfs' | 'ecmwf' | 'none';
 }
 
@@ -762,6 +767,7 @@ export async function scanWeatherMarkets(
       stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
       forecastSource: forecast.source,
       ensembleMembers: forecast.ensembleMembers,
+      ensembleModel: forecast.ensembleModel,
       overround: overround.toFixed(3),
       modelSum: modelSum.toFixed(4),
       coverageStatus,
@@ -830,6 +836,7 @@ export async function scanWeatherMarkets(
         edge: opp.edge.toFixed(3),
         outcomePrice: opp.outcomePrice.toFixed(3),
         forecastHigh: opp.forecastHigh.toFixed(1),
+        ensembleModel: forecast.ensembleModel,
         daysOut: opp.daysOut,
         tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
         allowedByConfig: opp.allowedByConfig,
