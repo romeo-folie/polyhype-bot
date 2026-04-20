@@ -1501,6 +1501,33 @@ describe('empty-book maker route', () => {
     expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.90 }));
   });
 
+  it('weather empty-book GTC fills immediately (taker) — no persist-and-poll', async () => {
+    // Non-post-only GTC for weather: if real liquidity exists in the matching
+    // engine, the order fills as a taker in the same cycle.
+    mockSubmitLimit.mockResolvedValueOnce({
+      success: true,
+      order_id: 'order-weather-taker',
+      shares_bought: 5.88,
+    });
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.08,
+        edgeMagnitude: 0.10,
+        consensusStddev: 0.4,
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(false);
+    expect(result.entryExecutionPath).toBe('maker_fill');
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+    expect(mockSetPendingOrder).not.toHaveBeenCalled();
+  });
+
   it('routes to fair-value maker and returns pending on ghost book (YES direction)', async () => {
     const redis = makeRedis();
     const result = await executeSignal(
