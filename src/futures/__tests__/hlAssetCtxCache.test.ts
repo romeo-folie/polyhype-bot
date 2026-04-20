@@ -9,17 +9,20 @@ vi.mock('../../shared/hyperliquid.js', () => ({
   getHyperliquid: () => ({ getAssetContext: mockGetAssetContext }),
 }));
 
-import { getCachedAssetCtx, fundingRateToApr } from '../hlAssetCtxCache.js';
+import { getCachedAssetCtx, fundingRateToApr, getOrSetOiBaseline } from '../hlAssetCtxCache.js';
 
 function makeRedis(overrides: {
   get?: (key: string) => Promise<string | null>;
   setex?: (key: string, ttl: number, value: string) => Promise<'OK'>;
   del?: (key: string) => Promise<number>;
+  set?: (...args: unknown[]) => Promise<string | null>;
 } = {}) {
   return {
     get: vi.fn(overrides.get ?? (() => Promise.resolve(null))),
     setex: vi.fn(overrides.setex ?? (() => Promise.resolve('OK' as const))),
     del: vi.fn(overrides.del ?? (() => Promise.resolve(1))),
+    // SET NX EX returns 'OK' on success, null when key already exists.
+    set: vi.fn(overrides.set ?? (() => Promise.resolve('OK' as string | null))),
   };
 }
 
@@ -151,28 +154,33 @@ describe('getCachedAssetCtx — HL fetch failure', () => {
 // getOrSetOiBaseline (issue #265 Sub-PR 2)
 // ---------------------------------------------------------------------------
 
-import { getOrSetOiBaseline } from '../hlAssetCtxCache.js';
-
 describe('getOrSetOiBaseline — baseline mechanics', () => {
-  it('returns null and writes NX when no baseline exists (first tick)', async () => {
+  it('returns null on first tick, calls SET NX (not setex) with correct TTL', async () => {
     const redis = makeRedis({ get: () => Promise.resolve(null) });
     const result = await getOrSetOiBaseline('BTC', redis as never, 1_000_000, 70_000, 900);
-    expect(result).toBeNull(); // neutral tick
-    expect(redis.setex).not.toHaveBeenCalled(); // uses SET NX, not setex
+    expect(result).toBeNull(); // neutral tick — no prior baseline
+    expect(redis.setex).not.toHaveBeenCalled();
+    expect(redis.set).toHaveBeenCalledWith(
+      'hl:oi-baseline:BTC',
+      expect.stringContaining('"oi":1000000'),
+      'EX', 900, 'NX',
+    );
   });
 
-  it('returns the stored baseline when one already exists', async () => {
+  it('returns the stored baseline when one already exists (no SET called)', async () => {
     const stored = { oi: 950_000, markPrice: 68_000, ts: Date.now() - 300_000 };
     const redis = makeRedis({ get: () => Promise.resolve(JSON.stringify(stored)) });
     const result = await getOrSetOiBaseline('BTC', redis as never, 1_000_000, 70_000, 900);
     expect(result).toEqual(stored);
+    expect(redis.set).not.toHaveBeenCalled();
   });
 
-  it('deletes a malformed baseline, writes a fresh one, and returns null', async () => {
+  it('deletes a malformed baseline, attempts fresh SET NX, returns null', async () => {
     const redis = makeRedis({ get: () => Promise.resolve('bad json{') });
     const result = await getOrSetOiBaseline('BTC', redis as never, 1_000_000, 70_000, 900);
     expect(result).toBeNull();
     expect(redis.del).toHaveBeenCalledWith('hl:oi-baseline:BTC');
+    expect(redis.set).toHaveBeenCalled();
   });
 
   it('still returns null (neutral tick) when redis.get() throws', async () => {
@@ -181,12 +189,30 @@ describe('getOrSetOiBaseline — baseline mechanics', () => {
     expect(result).toBeNull();
   });
 
-  it('returns baseline even when the NX write fails (non-fatal)', async () => {
-    // Simulate a race where key was just written by another process: GET returns data.
-    // The NX write failure is irrelevant — we already have the baseline.
-    const stored = { oi: 950_000, markPrice: 68_000, ts: Date.now() - 300_000 };
-    const redis = makeRedis({ get: () => Promise.resolve(JSON.stringify(stored)) });
+  it('reads the winner key when NX race is lost (returns existing baseline, not null)', async () => {
+    // Sequence: GET → null (key just expired), SET NX → null (another process beat us),
+    // second GET → returns what the winner wrote. Caller gets the baseline, not null.
+    const winner = { oi: 1_050_000, markPrice: 71_000, ts: Date.now() - 5_000 };
+    let getCallCount = 0;
+    const redis = makeRedis({
+      get: () => {
+        getCallCount++;
+        // First GET: miss; second GET (after NX loss): returns winner's value
+        return Promise.resolve(getCallCount >= 2 ? JSON.stringify(winner) : null);
+      },
+      set: () => Promise.resolve(null), // null = NX lost (key already set by other process)
+    });
     const result = await getOrSetOiBaseline('BTC', redis as never, 1_000_000, 70_000, 900);
-    expect(result).toEqual(stored);
+    expect(result).toEqual(winner);
+  });
+
+  it('returns null when NX race is lost AND second GET also fails', async () => {
+    const redis = makeRedis({
+      get: () => Promise.resolve(null), // always miss
+      set: () => Promise.resolve(null), // NX lost
+    });
+    // Second GET will also return null → neutral tick, no crash.
+    const result = await getOrSetOiBaseline('BTC', redis as never, 1_000_000, 70_000, 900);
+    expect(result).toBeNull();
   });
 });

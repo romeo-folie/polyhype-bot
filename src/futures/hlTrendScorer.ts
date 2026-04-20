@@ -197,7 +197,11 @@ export function scoreHlTrend(
     opts.pricePctChange !== undefined && opts.pricePctChange !== null && Number.isFinite(opts.pricePctChange)
   ) {
     const oiThreshold = opts.oiDivergenceThreshold ?? 5;
-    if (Math.abs(opts.oiPctChange) >= oiThreshold) {
+    // Treat zero OI change as neutral regardless of threshold to avoid
+    // misclassifying flat OI as "contracting" when threshold is 0.
+    if (opts.oiPctChange === 0 || Math.abs(opts.oiPctChange) < oiThreshold) {
+      oiDivergenceVote = 'neutral';
+    } else {
       const oiExpanding = opts.oiPctChange > 0;
       const priceRising = opts.pricePctChange > 0;
       const priceFalling = opts.pricePctChange < 0;
@@ -206,8 +210,6 @@ export function scoreHlTrend(
       else if (!oiExpanding && priceRising) oiDivergenceVote = 'DOWN'; // short covering = fake breakout
       else if (!oiExpanding && priceFalling) oiDivergenceVote = 'UP';  // long liq = forced selling
       else oiDivergenceVote = 'neutral'; // price flat
-    } else {
-      oiDivergenceVote = 'neutral';
     }
   }
 

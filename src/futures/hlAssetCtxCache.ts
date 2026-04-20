@@ -149,9 +149,19 @@ export async function getOrSetOiBaseline(
 
   // 2. No usable baseline — write current as the new baseline (NX = only if
   //    not exists, so a parallel scanner tick can't stomp a just-written key).
-  const baseline: OiBaseline = { oi: currentOi, markPrice: currentMarkPrice, ts: Date.now() };
+  const newBaseline: OiBaseline = { oi: currentOi, markPrice: currentMarkPrice, ts: Date.now() };
   try {
-    await redis.set(key, JSON.stringify(baseline), 'EX', ttlSec, 'NX');
+    const setResult = await redis.set(key, JSON.stringify(newBaseline), 'EX', ttlSec, 'NX');
+    if (setResult === null) {
+      // NX race lost — another process wrote the key between our GET and SET.
+      // Read what they wrote so this tick can participate in divergence scoring.
+      try {
+        const raced = await redis.get(key);
+        if (raced) return JSON.parse(raced) as OiBaseline;
+      } catch {
+        // Ignore — treat as neutral tick if second read also fails.
+      }
+    }
   } catch (err) {
     logger.warn('[hl-asset-ctx] oi baseline write failed', {
       symbol,

@@ -147,7 +147,7 @@ export async function scanHlMomentum(
         symbol: hlSymbol,
         oiPctChange: oiPctChange.toFixed(2),
         pricePctChange: pricePctChange.toFixed(2),
-        baselineAge: Math.round((Date.now() - baseline.ts) / 1000),
+        baselineAgeSec: Number.isFinite(baseline.ts) ? Math.round((Date.now() - baseline.ts) / 1000) : null,
       });
     }
   }

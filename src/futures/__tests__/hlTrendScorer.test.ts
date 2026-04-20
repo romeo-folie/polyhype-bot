@@ -321,10 +321,10 @@ describe('scoreHlTrend — OI divergence voter', () => {
     expect(result!.voterCount).toBe(7);
   });
 
-  it('votes neutral when |oiPctChange| equals threshold exactly (strict >=)', () => {
+  it('votes when |oiPctChange| equals threshold exactly (>= is inclusive)', () => {
     const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
     const result = scoreHlTrend(candles, { oiPctChange: 5, pricePctChange: 2 });
-    // 5 >= 5 → should vote (UP in this case)
+    // 5 >= 5 → threshold met → UP (OI expanding + price rising)
     expect(result!.voters.oiDivergence).toBe('UP');
   });
 
@@ -351,6 +351,12 @@ describe('scoreHlTrend — OI divergence voter', () => {
     const candles = makeTrendingCandles(FULL_CANDLES, -0.6);
     const result = scoreHlTrend(candles, { oiPctChange: -7, pricePctChange: -2 });
     expect(result!.voters.oiDivergence).toBe('UP');
+  });
+
+  it('votes neutral when oiPctChange=0 even when threshold=0 (zero OI change is not contracting)', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const result = scoreHlTrend(candles, { oiPctChange: 0, pricePctChange: 2, oiDivergenceThreshold: 0 });
+    expect(result!.voters.oiDivergence).toBe('neutral');
   });
 
   it('votes neutral when price is flat (pricePctChange=0) regardless of OI move', () => {

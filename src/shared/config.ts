@@ -1169,8 +1169,8 @@ const envSchema = z.object({
   // (0 pts, no penalty). Above: aligned = +2, opposed = -2.
   HL_MOMENTUM_4H_NEUTRAL_BAND_PCT: z.coerce.number().min(0).optional().default(0.5),
   // Weighted mode only: minimum integer total score (15m absScore + MTF bonuses) required to trade.
-  // Range: capped at 10 (7 + 2 + 1 — 7 is the max voter count with the funding-contra voter active).
-  // Default 5 = 4-of-6 + 1h aligned, OR 3-of-6 + both MTF aligned.
+  // Range: capped at 11 (8 voters + 2 for 4h aligned + 1 for 1h aligned; 8 is the max when both
+  // HL-native voters — funding contra + OI divergence — are active). Default 5 is conservative.
   HL_MOMENTUM_MIN_TOTAL_SCORE: z.coerce.number().int().min(0).max(11).optional().default(5),
   // ── Meme-perp ATR-scaled SL/TP (issue #264) ──
   // Replaces the fixed HL_MOMENTUM_STOP_LOSS_PCT / _TAKE_PROFIT_PCT for meme symbols whose
