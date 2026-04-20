@@ -1232,7 +1232,7 @@ const envSchema = z.object({
   SPORTS_POLL_INTERVAL_S: z.coerce.number().int().min(1).optional().default(8),
   SPORTS_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   SPORTS_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(5),
-  SPORTS_MARKET_LOOKAHEAD_H: z.coerce.number().int().min(1).optional().default(48),
+  SPORTS_MARKET_LOOKAHEAD_H: z.coerce.number().int().min(1).optional().default(200),
   // Purely informational — documents which TELEGRAM_CHANNELS entries are
   // sports-primary. Not used by runtime; channels are added directly to
   // TELEGRAM_CHANNELS and auto-classified by the category classifier.
