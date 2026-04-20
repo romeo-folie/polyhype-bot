@@ -1169,8 +1169,9 @@ const envSchema = z.object({
   // (0 pts, no penalty). Above: aligned = +2, opposed = -2.
   HL_MOMENTUM_4H_NEUTRAL_BAND_PCT: z.coerce.number().min(0).optional().default(0.5),
   // Weighted mode only: minimum integer total score (15m absScore + MTF bonuses) required to trade.
-  // Range: capped at 9 (6 + 2 + 1). Default 5 = 4-of-6 + 1h aligned, OR 3-of-6 + both MTF aligned.
-  HL_MOMENTUM_MIN_TOTAL_SCORE: z.coerce.number().int().min(0).max(9).optional().default(5),
+  // Range: capped at 10 (7 + 2 + 1 — 7 is the max voter count with the funding-contra voter active).
+  // Default 5 = 4-of-6 + 1h aligned, OR 3-of-6 + both MTF aligned.
+  HL_MOMENTUM_MIN_TOTAL_SCORE: z.coerce.number().int().min(0).max(10).optional().default(5),
   // ── Meme-perp ATR-scaled SL/TP (issue #264) ──
   // Replaces the fixed HL_MOMENTUM_STOP_LOSS_PCT / _TAKE_PROFIT_PCT for meme symbols whose
   // 15m ATR is too wide for the 5%/12% defaults (typical meme ATR 8-15%). Computes SL/TP at
@@ -1184,6 +1185,18 @@ const envSchema = z.object({
   // No corresponding cap on TP: user wants the trailing stop to manage the upside.
   HL_MOMENTUM_MEME_SL_FLOOR_PCT: z.coerce.number().min(0).optional().default(8),
   HL_MOMENTUM_MEME_SL_CEIL_PCT: z.coerce.number().min(0).optional().default(20),
+
+  // ── HL-native signals (issue #265) ──
+  // Sub-PR 1: Funding-rate contra voter. HL settles perp funding hourly at
+  // 1/8 of the computed 8h rate, so APR = hourlyFundingRate × 24 × 365.
+  // Extreme APR → crowded positioning → contra vote. Within ±threshold band
+  // the voter stays neutral and doesn't affect the existing 6-voter score.
+  HL_FUNDING_CONTRA_ENABLED: boolFromEnv.optional().default(false),
+  // Symmetric APR threshold (percent). Default 100 = ±100% APR ≈ ±0.0114%/hr.
+  HL_FUNDING_CONTRA_APR_THRESHOLD: z.coerce.number().min(0).optional().default(100),
+  // Per-symbol Redis cache TTL for hl:asset-ctx:<symbol>. Shared across all
+  // HL-native voters (Sub-PRs 1 + 2) to keep info-endpoint load flat.
+  HL_FUNDING_CONTRA_CACHE_TTL_SEC: z.coerce.number().int().min(5).optional().default(60),
 
   // ── Chainlink → PM crypto-arb trigger ──
   // When true, oracle:price_moved ticks also fan into the PM crypto-arb scanner

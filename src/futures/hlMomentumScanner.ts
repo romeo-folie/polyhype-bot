@@ -4,6 +4,7 @@ import { logger } from '../shared/logger.js';
 import { buildCandles } from '../arb/candleAggregator.js';
 import { computeEMA, computeMACDFromCandles } from '../arb/indicators.js';
 import { scoreHlTrend } from './hlTrendScorer.js';
+import { fundingRateToApr, getCachedAssetCtx } from './hlAssetCtxCache.js';
 import { hasOpenPosition } from '../execution/positionLedger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -112,7 +113,30 @@ export async function scanHlMomentum(
     timeframe: '15m',
   });
 
-  const trendResult = scoreHlTrend(primaryCandles);
+  // HL-native funding-contra voter (issue #265 Sub-PR 1). When disabled or
+  // the HL info fetch fails we pass `null` — the scorer then omits the voter
+  // entirely and the score range stays at [-6,+6].
+  let fundingApr: number | null = null;
+  if (cfg.HL_FUNDING_CONTRA_ENABLED) {
+    const ctx = await getCachedAssetCtx(
+      hlSymbol,
+      redis,
+      cfg.HL_FUNDING_CONTRA_CACHE_TTL_SEC,
+    );
+    if (ctx) {
+      fundingApr = fundingRateToApr(ctx.fundingRate);
+      logger.debug('[hl-momentum] funding APR computed', {
+        symbol: hlSymbol,
+        fundingRate: ctx.fundingRate,
+        fundingApr: fundingApr.toFixed(2),
+      });
+    }
+  }
+
+  const trendResult = scoreHlTrend(primaryCandles, {
+    fundingApr,
+    fundingAprThreshold: cfg.HL_FUNDING_CONTRA_APR_THRESHOLD,
+  });
   if (trendResult === null) {
     logger.debug('[hl-momentum] insufficient candles', {
       symbol: hlSymbol,
@@ -122,7 +146,7 @@ export async function scanHlMomentum(
     return null;
   }
 
-  const { score, adx, voters } = trendResult;
+  const { score, adx, voters, voterCount } = trendResult;
   if (score === 0) return null;
 
   const direction: 'LONG' | 'SHORT' = score > 0 ? 'LONG' : 'SHORT';
@@ -297,6 +321,7 @@ export async function scanHlMomentum(
       score,
       adx,
       voters,
+      voterCount,
       binanceSymbol: tick.symbol,
       binancePrice: tick.price,
       candleCount: primaryCandles.length,
@@ -306,6 +331,8 @@ export async function scanHlMomentum(
       scoringMode: cfg.HL_MOMENTUM_MTF_SCORING_MODE,
       mtfBonus,
       totalScore,
+      fundingApr,
+      fundingContraVote: voters.fundingContra ?? null,
     },
   }).catch(() => {});
 
@@ -326,7 +353,10 @@ export async function scanHlMomentum(
   }
 
   const stakeUsd = Math.min(cfg.HL_MOMENTUM_STAKE_USD, cfg.FUTURES_MAX_PER_TRADE_USD);
-  const edgeMagnitude = isWeighted ? totalScore / 9 : absScore / 6;
+  // Max possible totalScore = voterCount + 3 (2 for 4h aligned, 1 for 1h aligned).
+  // Max possible absScore = voterCount. Both denominators scale with voterCount
+  // so edge stays in [0,1] regardless of whether the funding voter is active.
+  const edgeMagnitude = isWeighted ? totalScore / (voterCount + 3) : absScore / voterCount;
 
   logger.info('[hl-momentum] signal', {
     symbol: hlSymbol,

@@ -190,3 +190,86 @@ describe('scoreHlTrend — score signs', () => {
     expect(result.score).toBe(upCount - downCount);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Funding-contra voter (issue #265 Sub-PR 1)
+// ---------------------------------------------------------------------------
+
+describe('scoreHlTrend — funding contra voter', () => {
+  it('excludes the funding voter entirely when opts.fundingApr is omitted', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const result = scoreHlTrend(candles);
+    expect(result).not.toBeNull();
+    expect(result!.voters.fundingContra).toBeUndefined();
+    expect(result!.voterCount).toBe(6);
+  });
+
+  it('excludes the funding voter when opts.fundingApr is null', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const result = scoreHlTrend(candles, { fundingApr: null });
+    expect(result!.voters.fundingContra).toBeUndefined();
+    expect(result!.voterCount).toBe(6);
+  });
+
+  it('casts DOWN when funding APR exceeds positive threshold (crowded longs)', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    // 120% APR > default 100% threshold → DOWN (contra the long crowd).
+    const result = scoreHlTrend(candles, { fundingApr: 120 });
+    expect(result!.voters.fundingContra).toBe('DOWN');
+    expect(result!.voterCount).toBe(7);
+    // Bullish trend score should be 6 - 1 = 5 after contra DOWN.
+    expect(result!.score).toBe(5);
+  });
+
+  it('casts UP when funding APR is below negative threshold (crowded shorts)', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, -0.6);
+    // -120% APR < -100% default threshold → UP (contra the short crowd).
+    const result = scoreHlTrend(candles, { fundingApr: -120 });
+    expect(result!.voters.fundingContra).toBe('UP');
+    expect(result!.voterCount).toBe(7);
+    // Bearish trend was -6, contra UP lifts to -5.
+    expect(result!.score).toBe(-5);
+  });
+
+  it('casts neutral when funding APR sits inside the symmetric band', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const result = scoreHlTrend(candles, { fundingApr: 25 });
+    expect(result!.voters.fundingContra).toBe('neutral');
+    expect(result!.voterCount).toBe(7);
+    // Neutral funding vote does not shift the bullish score.
+    expect(result!.score).toBe(6);
+  });
+
+  it('honours a caller-supplied fundingAprThreshold', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    // 60% APR is above the 50% caller threshold but below the 100% default.
+    const tight = scoreHlTrend(candles, { fundingApr: 60, fundingAprThreshold: 50 });
+    expect(tight!.voters.fundingContra).toBe('DOWN');
+    const loose = scoreHlTrend(candles, { fundingApr: 60, fundingAprThreshold: 200 });
+    expect(loose!.voters.fundingContra).toBe('neutral');
+  });
+
+  it('treats APR exactly equal to the threshold as neutral (strict > / <)', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    const positive = scoreHlTrend(candles, { fundingApr: 100 });
+    expect(positive!.voters.fundingContra).toBe('neutral');
+    const negative = scoreHlTrend(candles, { fundingApr: -100 });
+    expect(negative!.voters.fundingContra).toBe('neutral');
+  });
+
+  it('excludes the voter when fundingApr is NaN or Infinity (non-finite)', () => {
+    const candles = makeTrendingCandles(FULL_CANDLES, 0.6);
+    // NaN: comparisons always return false → would fall through to neutral
+    // and incorrectly bump voterCount to 7. Guard must exclude the voter.
+    const nan = scoreHlTrend(candles, { fundingApr: Number.NaN });
+    expect(nan!.voters.fundingContra).toBeUndefined();
+    expect(nan!.voterCount).toBe(6);
+    // Infinity: would always vote DOWN (> threshold). Guard must exclude.
+    const pos = scoreHlTrend(candles, { fundingApr: Number.POSITIVE_INFINITY });
+    expect(pos!.voters.fundingContra).toBeUndefined();
+    expect(pos!.voterCount).toBe(6);
+    const neg = scoreHlTrend(candles, { fundingApr: Number.NEGATIVE_INFINITY });
+    expect(neg!.voters.fundingContra).toBeUndefined();
+    expect(neg!.voterCount).toBe(6);
+  });
+});
