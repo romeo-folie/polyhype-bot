@@ -112,13 +112,15 @@ function clobTokenForSignal(signal: TradeSignal): string | null {
  * (poll up to MAKER_MAX_WAIT_MS) and may not fill at all. We only attempt them
  * for signals where the alpha doesn't decay in seconds:
  *
- *   - 'osint'         — news-sentiment trades; edge persists for minutes
- *   - 'copytrade'     — whale conviction persists; our fill isn't time-critical
- *   - 'near-zero-arb' — illiquid markets at 3-10¢ don't reprice fast
- *   - 'oracle-lag'    — ~55s Chainlink RTDS edge window; uses ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS
- *                       (default 8s) instead of the full MAKER_MAX_WAIT_MS so fallback to taker
- *                       still catches the trade within the edge window. Empty-book fires use the
- *                       separate MAKER_EMPTY_BOOK path regardless of this set.
+ *   - 'osint'            — news-sentiment trades; edge persists for minutes
+ *   - 'copytrade'        — whale conviction persists; our fill isn't time-critical
+ *   - 'near-zero-arb'   — illiquid markets at 3-10¢ don't reprice fast
+ *   - 'correlation-arb' — constraint-based edge; signal remains valid until event resolves
+ *   - 'oracle-lag'      — ~55s Chainlink RTDS edge window; uses ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS
+ *                         (default 8s) instead of the full MAKER_MAX_WAIT_MS so fallback to taker
+ *                         still catches the trade within the edge window. Empty-book fires use the
+ *                         separate MAKER_EMPTY_BOOK path regardless of this set.
+ *   - 'weather'         — forecast-based edge; bracket resolves once/day so alpha is stable for hours
  *
  * Excluded (latency-sensitive, must fill NOW):
  *   - 'crypto-arb' — Binance→PM lag arbitrage, edge gone in seconds
@@ -1766,13 +1768,18 @@ export async function executeSignal(
         });
         return recordSkip('empty_book_source_blocked', 'skipped', guardrailDiagnostic);
       }
-      // Oracle-lag's edge is structural timing (Chainlink RTDS front-runs
-      // Polymarket's reprice), not LLM conviction. Its consensusProbability is
-      // ~0.5 + pctMove/100 (≈0.5012 for a 12 bps move), and its edgeMagnitude
-      // encodes the raw % move (≈0.0015), both of which are the correct
-      // encoding of the signal — not a weak one. The three gates below reject
-      // exactly the shape of a valid oracle-lag signal. The source whitelist
-      // is the contract for structural-edge sources.
+      // Structural-edge sources bypass the LLM-conviction gates below because
+      // their edgeMagnitude and consensusProbability encode real-world signal
+      // rather than LLM opinion:
+      //   - oracle-lag: timing edge (Chainlink RTDS front-runs Polymarket reprice);
+      //     consensusProbability ≈ 0.5012 and edgeMagnitude ≈ 0.0015 are the correct
+      //     signal encoding, not a "weak" one.
+      //   - weather: physics-based forecast edge (GFS/HRRR/ECMWF vs observed temp);
+      //     NO-side trades have consensusProbability (P(YES)) near zero and
+      //     edgeMagnitude ~0.08-0.14 — neither fits LLM-conviction thresholds, yet
+      //     both encode a genuine directional signal.
+      // The source whitelist (MAKER_EMPTY_BOOK_ALLOWED_SOURCES) is the primary gate;
+      // this flag only bypasses the secondary conviction guards.
       const hasStructuralEdge = signalSource === 'oracle-lag' || signalSource === 'weather';
       if (!hasStructuralEdge) {
         const consensusP = signal.consensusProbability ?? 0.5;
