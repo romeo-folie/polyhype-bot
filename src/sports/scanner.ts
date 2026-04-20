@@ -149,6 +149,13 @@ export async function scanLiveSportsArb(
   const candidates: SportsArbCandidate[] = [];
   let matchedAny = false;
   for (const game of games) {
+    // Collect all eligible moneyline markets for this game, then pick the one
+    // with the earliest endDate. This prevents series games (same matchup,
+    // different dates) from being matched to a live earlier game when both
+    // fall inside the lookahead horizon.
+    let bestMarket: CachedMarket | null = null;
+    let bestEndMs = Infinity;
+
     for (const market of markets) {
       if (!market.endDate) continue;
       const endMs = new Date(market.endDate).getTime();
@@ -159,48 +166,56 @@ export async function scanLiveSportsArb(
 
       if (!isMoneylineMarket(market.question ?? '')) continue; // skip O/U, spread, 1H props
       if (!marketMatchesGame(market, game)) continue;
-      matchedAny = true;
 
-      let yesPrice: number;
-      try {
-        const prices = parseOutcomePrices(market.outcomePrices);
-        const yes = parseFloat(prices[0] ?? '');
-        if (!Number.isFinite(yes)) continue;
-        yesPrice = yes;
-      } catch {
-        continue;
+      if (endMs < bestEndMs) {
+        bestEndMs = endMs;
+        bestMarket = market;
       }
-
-      const modelHomeProb = modelHomeWinProb(game);
-      const yesIsHome = yesIsHomeTeam(market, game);
-      const modelYesProb = yesIsHome ? modelHomeProb : 1 - modelHomeProb;
-      const rawEdge = modelYesProb - yesPrice;
-      const edge = Math.abs(rawEdge);
-      const direction: 'YES' | 'NO' = rawEdge > 0 ? 'YES' : 'NO';
-
-      logger.info('[sports-arb] divergence', {
-        league: game.league,
-        gameId: game.gameId,
-        marketId: market.id,
-        question: market.question,
-        modelYesProb: modelYesProb.toFixed(3),
-        yesPrice: yesPrice.toFixed(3),
-        edge: edge.toFixed(3),
-        direction,
-      });
-
-      if (edge < cfg.SPORTS_MIN_EDGE) continue;
-
-      candidates.push({
-        game,
-        market,
-        modelHomeProb,
-        yesPrice,
-        yesIsHome,
-        edge,
-        direction,
-      });
     }
+
+    if (!bestMarket) continue;
+    matchedAny = true;
+
+    const market = bestMarket;
+    let yesPrice: number;
+    try {
+      const prices = parseOutcomePrices(market.outcomePrices);
+      const yes = parseFloat(prices[0] ?? '');
+      if (!Number.isFinite(yes)) continue;
+      yesPrice = yes;
+    } catch {
+      continue;
+    }
+
+    const modelHomeProb = modelHomeWinProb(game);
+    const yesIsHome = yesIsHomeTeam(market, game);
+    const modelYesProb = yesIsHome ? modelHomeProb : 1 - modelHomeProb;
+    const rawEdge = modelYesProb - yesPrice;
+    const edge = Math.abs(rawEdge);
+    const direction: 'YES' | 'NO' = rawEdge > 0 ? 'YES' : 'NO';
+
+    logger.info('[sports-arb] divergence', {
+      league: game.league,
+      gameId: game.gameId,
+      marketId: market.id,
+      question: market.question,
+      modelYesProb: modelYesProb.toFixed(3),
+      yesPrice: yesPrice.toFixed(3),
+      edge: edge.toFixed(3),
+      direction,
+    });
+
+    if (edge < cfg.SPORTS_MIN_EDGE) continue;
+
+    candidates.push({
+      game,
+      market,
+      modelHomeProb,
+      yesPrice,
+      yesIsHome,
+      edge,
+      direction,
+    });
   }
 
   if (games.length > 0 && !matchedAny) {
