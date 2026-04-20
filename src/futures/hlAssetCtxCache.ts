@@ -43,14 +43,21 @@ export async function getCachedAssetCtx(
   if (cached) {
     try {
       return JSON.parse(cached) as CachedAssetCtx;
-    } catch {
+    } catch (err) {
       // Malformed cache entry — delete it so we don't keep reparsing the same
-      // garbage on every tick until TTL expires. Best-effort: a delete failure
-      // just means we'll retry parsing next tick, which is harmless.
+      // garbage on every tick until TTL expires. Log so a poison pattern
+      // (e.g. a deploy that changed the struct shape) is visible in ops.
+      logger.warn('[hl-asset-ctx] malformed cache entry, invalidating', {
+        symbol,
+        err: err instanceof Error ? err.message : String(err),
+      });
       try {
         await redis.del(key);
-      } catch {
-        // ignore — non-critical cleanup
+      } catch (deleteErr) {
+        logger.warn('[hl-asset-ctx] failed to delete malformed cache entry', {
+          symbol,
+          err: deleteErr instanceof Error ? deleteErr.message : String(deleteErr),
+        });
       }
     }
   }
