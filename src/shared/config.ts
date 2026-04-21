@@ -637,10 +637,22 @@ const envSchema = z.object({
   CALIBRATION_ENABLED: boolFromEnv.optional().default(true),
   MIN_BET_USD: z.coerce.number().min(0).optional().default(5),
   CALIBRATION_MIN_SAMPLES: z.coerce.number().int().positive().optional().default(20),
+  CALIBRATION_MIN_BUCKET_SAMPLES: z.coerce.number().int().positive().optional().default(10),
   OUTCOME_HISTORY_DAYS: z.coerce.number().int().positive().optional().default(180),
   OUTCOME_MAX_PER_CATEGORY: z.coerce.number().int().positive().optional().default(500),
   CONTEXT_INJECTION_ENABLED: boolFromEnv.optional().default(true),
   CONTEXT_INJECTION_LIMIT: z.coerce.number().int().min(1).max(10).optional().default(5),
+
+  // Multi-signal conviction multiplier
+  CONVICTION_MULTIPLIER_ENABLED: boolFromEnv.optional().default(false),
+  CONVICTION_BONUS_PER_SOURCE: z.coerce.number().min(0).max(1).optional().default(0.25),
+  CONVICTION_MAX_MULTIPLIER: z.coerce.number().min(1).max(3).optional().default(1.5),
+  CONVICTION_SIGNAL_TTL_S: z.coerce.number().int().positive().optional().default(1800),
+
+  // OSINT sibling fan-out
+  OSINT_SIBLING_FANOUT_ENABLED: boolFromEnv.optional().default(false),
+  OSINT_SIBLING_MIN_FIT_SCORE: z.coerce.number().min(0).max(1).optional().default(0.6),
+  OSINT_SIBLING_MAX_PER_EVENT: z.coerce.number().int().min(1).max(10).optional().default(3),
 
   // Redeemer guardrails
   REDEEMER_DUPLICATE_WINDOW_S: z.coerce

@@ -35,7 +35,7 @@ import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { computeATR } from '../arb/indicators.js';
 import { isMemeSymbol } from '../futures/hlMomentumScanner.js';
 import { loadConfig } from '../shared/config.js';
-import { getCalibrationStats, applyCalibrationCorrection } from '../shared/calibration.js';
+import { getCalibrationStats, applyCalibrationCorrection, getBucketCorrection } from '../shared/calibration.js';
 import { inferCategory } from '../shared/outcomeRecorder.js';
 import {
   recordArbLatency,
@@ -57,6 +57,45 @@ const IDEMPOTENCY_TTL_SECONDS = 3600; // 1 hour
 // Prevents dust positions that can't be redeemed and burn fees on tiny stakes.
 const getMinStake = () => loadConfig().MIN_BET_USD;
 const IDEMPOTENCY_KEY_PREFIX = 'trade:executed:';
+const CONVICTION_KEY_PREFIX = 'signal:recent:';
+
+/**
+ * Multi-signal conviction multiplier.
+ *
+ * Records this signal's source in a per-(marketId, direction) Redis ZSET, then
+ * counts how many DISTINCT other sources have fired on the same market+direction
+ * within the TTL window. Returns a stake multiplier > 1.0 when corroborating
+ * sources are present.
+ *
+ * Shadow-logs when CONVICTION_MULTIPLIER_ENABLED=false so we can review the
+ * distribution before flipping live.
+ */
+async function getConvictionMultiplier(
+  redis: Redis,
+  marketId: string,
+  direction: string,
+  source: string,
+  cfg: ReturnType<typeof loadConfig>,
+): Promise<number> {
+  const key = `${CONVICTION_KEY_PREFIX}${marketId}:${direction}`;
+  const nowS = Math.floor(Date.now() / 1000);
+  const cutoff = nowS - cfg.CONVICTION_SIGNAL_TTL_S;
+
+  // Prune stale entries, then record current source.
+  await redis.zremrangebyscore(key, '-inf', cutoff);
+  await redis.zadd(key, nowS, source);
+  await redis.expire(key, cfg.CONVICTION_SIGNAL_TTL_S * 2);
+
+  // Count distinct OTHER sources that fired within the window.
+  const members: string[] = await redis.zrangebyscore(key, cutoff, '+inf');
+  const otherSources = new Set(members.filter((m) => m !== source));
+  const extraSources = otherSources.size;
+
+  if (extraSources === 0) return 1;
+
+  const rawMultiplier = 1 + cfg.CONVICTION_BONUS_PER_SOURCE * extraSources;
+  return Math.min(rawMultiplier, cfg.CONVICTION_MAX_MULTIPLIER);
+}
 
 export interface ExecutionResult {
   signal: TradeSignal;
@@ -1505,21 +1544,85 @@ export async function executeSignal(
         cfg.CALIBRATION_MIN_SAMPLES,
       );
       if (cal && correctedEdge !== signal.edgeMagnitude) {
-        // Scale stakeUsd proportionally so the correction actually changes trade size.
-        const correctionFactor = cal.edgeCorrectionFactor;
+        // Use per-bucket correction factor when that bucket has enough samples;
+        // fall back to the overall category factor when the bucket is thin.
+        const correctionFactor = getBucketCorrection(
+          cal,
+          signal.consensusProbability ?? 0.5,
+          cfg.CALIBRATION_MIN_BUCKET_SAMPLES,
+        );
         const correctedStake = Math.max(0, signal.stakeUsd * correctionFactor);
+        const usedBucket = correctionFactor !== cal.edgeCorrectionFactor;
         logger.info('[executor] calibration correction applied', {
           category,
+          consensusP: signal.consensusProbability,
           originalEdge: signal.edgeMagnitude,
           correctedEdge,
           originalStake: signal.stakeUsd,
           correctedStake,
           factor: correctionFactor,
+          bucketAware: usedBucket,
         });
         signal = { ...signal, edgeMagnitude: correctedEdge, stakeUsd: correctedStake };
       }
     } catch (err: unknown) {
       logger.warn('[executor] calibration lookup failed (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // 1b) Multi-signal conviction multiplier — scale stake when independent sources agree.
+  if (!signal.isFutures && signal.source) {
+    try {
+      const multiplier = await getConvictionMultiplier(
+        redis,
+        signal.marketId,
+        signal.direction,
+        signal.source,
+        cfg,
+      );
+      if (multiplier > 1) {
+        // Original stake is already Kelly-capped against bankroll; multiplier
+        // is bounded at CONVICTION_MAX_MULTIPLIER so the boosted value is at
+        // most that factor above an already-safe stake.
+        const boostedStake = signal.stakeUsd * multiplier;
+        if (cfg.CONVICTION_MULTIPLIER_ENABLED) {
+          logger.info('[executor] conviction multiplier applied', {
+            marketId: signal.marketId,
+            direction: signal.direction,
+            source: signal.source,
+            multiplier: multiplier.toFixed(2),
+            originalStake: signal.stakeUsd,
+            boostedStake,
+          });
+          signal = { ...signal, stakeUsd: boostedStake };
+        } else {
+          logger.info('[executor] conviction multiplier shadow', {
+            marketId: signal.marketId,
+            direction: signal.direction,
+            source: signal.source,
+            multiplier: multiplier.toFixed(2),
+            originalStake: signal.stakeUsd,
+            wouldBoostTo: boostedStake,
+          });
+          void enqueueWrite('shadow_observations', {
+            kind: 'conviction_multiplier',
+            source: signal.source as 'osint' | 'copytrade' | 'spot',
+            marketId: signal.marketId,
+            wouldBlock: false,
+            metricValue: multiplier,
+            threshold: 1,
+            payload: {
+              direction: signal.direction,
+              originalStake: signal.stakeUsd,
+              wouldBoostTo: boostedStake,
+            },
+          });
+        }
+      }
+    } catch (err: unknown) {
+      logger.warn('[executor] conviction multiplier failed (non-fatal)', {
         error: err instanceof Error ? err.message : String(err),
       });
     }
