@@ -189,6 +189,14 @@ export interface CandidateMarket {
    * broad query returns many tangential results.
    */
   searchRank?: number;
+  /**
+   * Gamma event ID that this market belongs to. Only populated when the
+   * candidate was sourced via `/public-search` or `/events` (which return
+   * GammaEvent objects). Absent for candidates sourced from the flat
+   * watchlist cache. Used by the OSINT sibling fan-out to evaluate other
+   * active markets in the same event after the top-fit market is selected.
+   */
+  eventId?: string;
 }
 
 const MIN_LIQUIDITY = 100; // USDC — skip ghost markets
@@ -284,6 +292,7 @@ function buildCandidate(
   matchedQuery: string,
   matchScore: number,
   searchRank?: number,
+  eventId?: string,
 ): CandidateMarket | null {
   const questionLower = market.question.toLowerCase();
   if (DOMAIN_BLOCKLIST_RE.test(questionLower)) return null;
@@ -342,6 +351,7 @@ function buildCandidate(
     matchedQuery,
     matchScore,
     ...(searchRank !== undefined ? { searchRank } : {}),
+    ...(eventId !== undefined ? { eventId } : {}),
   };
 }
 
@@ -453,7 +463,7 @@ async function retrieveFromPublicSearch(
         const finalScore = score > 0 ? score : 0.5;
         const finalQuery = score > 0 ? matchedQuery : query;
         const stampedRank = score > 0 ? undefined : searchRank;
-        const cand = buildCandidate(source, finalQuery, finalScore, stampedRank);
+        const cand = buildCandidate(source, finalQuery, finalScore, stampedRank, event.id);
         if (cand) {
           out.set(market.id, cand);
           if (score === 0) searchRank++;
@@ -502,7 +512,7 @@ async function retrieveFromGammaEvents(
           if (out.has(market.id)) continue;
           const { score, matchedQuery } = scoreMarketAgainstQueries(market, queries);
           if (score === 0) continue;
-          const cand = buildCandidate(market, matchedQuery, score);
+          const cand = buildCandidate(market, matchedQuery, score, undefined, event.id);
           if (cand) out.set(market.id, cand);
         }
       }

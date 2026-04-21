@@ -221,13 +221,81 @@ export async function runMapping(
       if (result.signal) {
         registerSignal(bestByMarket, result.signal);
       } else {
-        logger.info('[mapping] dropping headline — top-fit gated (strict mode)', {
+        logger.info('[mapping] top-fit gated (strict mode)', {
           title: item.title,
           marketId: topFit.candidate.marketId,
           fitScore: topFit.fitScore.toFixed(3),
           skipReason: result.skipReason,
         });
       }
+
+      // Sibling fan-out: after evaluating the top-fit market, also evaluate
+      // other fit-qualified candidates that share the same Gamma event. These
+      // are structurally correlated (same event umbrella) so the same news
+      // item may move multiple legs simultaneously.
+      const siblingEventId = topFit.candidate.eventId;
+      if (siblingEventId && fitRanked.length > 1) {
+        const siblings = fitRanked
+          .slice(1) // exclude top-fit itself
+          .filter(
+            (s) =>
+              s.candidate.eventId === siblingEventId &&
+              s.fitScore >= cfg.OSINT_SIBLING_MIN_FIT_SCORE,
+          )
+          .slice(0, cfg.OSINT_SIBLING_MAX_PER_EVENT);
+
+        if (siblings.length > 0) {
+          logger.info('[mapping] sibling_fanout evaluating', {
+            title: item.title,
+            eventId: siblingEventId,
+            siblingCount: siblings.length,
+            enabled: cfg.OSINT_SIBLING_FANOUT_ENABLED,
+          });
+
+          for (const sibling of siblings) {
+            const sibResult = await evaluateOsintCandidate({
+              candidate: sibling.candidate,
+              fitScore: sibling.fitScore,
+              item,
+              bankrollUsd,
+              cfg,
+              opts,
+            });
+            if (sibResult.signal) {
+              if (cfg.OSINT_SIBLING_FANOUT_ENABLED) {
+                registerSignal(bestByMarket, sibResult.signal);
+              }
+              logger.info('[mapping] sibling_fanout result', {
+                marketId: sibling.candidate.marketId,
+                fitScore: sibling.fitScore.toFixed(3),
+                hasTrade: true,
+                enabled: cfg.OSINT_SIBLING_FANOUT_ENABLED,
+              });
+            } else {
+              logger.debug('[mapping] sibling_fanout gated', {
+                marketId: sibling.candidate.marketId,
+                skipReason: sibResult.skipReason,
+              });
+            }
+            void enqueueWrite('shadow_observations', {
+              kind: 'osint_sibling_fanout',
+              source: 'osint',
+              marketId: sibling.candidate.marketId,
+              wouldBlock: !cfg.OSINT_SIBLING_FANOUT_ENABLED && sibResult.signal != null,
+              metricValue: sibling.fitScore,
+              threshold: cfg.OSINT_SIBLING_MIN_FIT_SCORE,
+              payload: {
+                eventId: siblingEventId,
+                topFitMarketId: topFit.candidate.marketId,
+                siblingFitScore: sibling.fitScore,
+                hasTrade: sibResult.signal !== null,
+                skipReason: sibResult.skipReason,
+              },
+            });
+          }
+        }
+      }
+
       continue;
     }
 

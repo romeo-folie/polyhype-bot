@@ -197,6 +197,36 @@ export async function getCalibrationStats(
 }
 
 /**
+ * Return the calibration correction factor for a specific consensus probability.
+ *
+ * Looks up the probability bucket that contains `consensusP` and returns its
+ * per-bucket correction factor when that bucket has enough samples. Falls back
+ * to the overall category correction factor when the bucket is thin.
+ *
+ * Returns 1.0 (no adjustment) when stats are null or sampleSize is zero.
+ * The caller is responsible for enforcing an overall minimum sample floor before calling.
+ */
+export function getBucketCorrection(
+  stats: CalibrationStats | null,
+  consensusP: number,
+  minBucketSamples: number,
+): number {
+  if (!stats || stats.sampleSize === 0) return 1;
+
+  const p = Math.max(0, Math.min(1, consensusP));
+  for (const bucket of stats.buckets) {
+    const br = BUCKET_RANGES.find((r) => r.label === bucket.range);
+    if (!br) continue;
+    const inBucket = p >= br.min && (p < br.max || (p >= 1.0 && br.label === '0.90-1.00'));
+    if (!inBucket) continue;
+    if (bucket.count >= minBucketSamples) return bucket.correctionFactor;
+    return stats.edgeCorrectionFactor;
+  }
+
+  return stats.edgeCorrectionFactor;
+}
+
+/**
  * Apply calibration correction to an edge value.
  * Returns edge unchanged if stats are null or sample size is below threshold.
  */

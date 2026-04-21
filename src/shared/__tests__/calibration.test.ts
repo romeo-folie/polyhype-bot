@@ -9,7 +9,7 @@ vi.mock('../logger.js', () => ({
   },
 }));
 
-const { computeCalibration, getCalibrationStats, applyCalibrationCorrection } =
+const { computeCalibration, getCalibrationStats, applyCalibrationCorrection, getBucketCorrection } =
   await import('../calibration.js');
 
 type OutcomeData = Record<string, string>;
@@ -236,5 +236,68 @@ describe('applyCalibrationCorrection', () => {
       buckets: [],
     };
     expect(applyCalibrationCorrection(0.1, stats, 20)).toBeCloseTo(0.13);
+  });
+});
+
+describe('getBucketCorrection', () => {
+  function makeStats(buckets: { range: string; count: number; correctionFactor: number }[]): import('../calibration.js').CalibrationStats {
+    return {
+      category: 'geo',
+      updatedAt: '',
+      sampleSize: buckets.reduce((s, b) => s + b.count, 0),
+      winRate: 0.6,
+      avgReturn: 5,
+      edgeCorrectionFactor: 0.9,
+      buckets: buckets.map((b) => ({
+        range: b.range,
+        statedMid: 0.65,
+        actualWinRate: 0.6,
+        count: b.count,
+        correctionFactor: b.correctionFactor,
+      })),
+    };
+  }
+
+  it('returns 1.0 for null stats', () => {
+    expect(getBucketCorrection(null, 0.65, 10)).toBe(1);
+  });
+
+  it('returns bucket correction when bucket has enough samples', () => {
+    const stats = makeStats([{ range: '0.60-0.70', count: 15, correctionFactor: 0.75 }]);
+    expect(getBucketCorrection(stats, 0.65, 10)).toBe(0.75);
+  });
+
+  it('falls back to overall correction when bucket has too few samples', () => {
+    const stats = makeStats([{ range: '0.60-0.70', count: 5, correctionFactor: 0.75 }]);
+    expect(getBucketCorrection(stats, 0.65, 10)).toBe(0.9);
+  });
+
+  it('matches bucket boundary correctly — lower bound inclusive, upper bound exclusive', () => {
+    const stats = makeStats([
+      { range: '0.60-0.70', count: 15, correctionFactor: 0.75 },
+      { range: '0.70-0.80', count: 15, correctionFactor: 1.1 },
+    ]);
+    expect(getBucketCorrection(stats, 0.60, 10)).toBe(0.75);
+    expect(getBucketCorrection(stats, 0.699, 10)).toBe(0.75);
+    expect(getBucketCorrection(stats, 0.70, 10)).toBe(1.1);
+  });
+
+  it('handles p=1.0 via the 0.90-1.00 bucket', () => {
+    const stats = makeStats([{ range: '0.90-1.00', count: 12, correctionFactor: 1.2 }]);
+    expect(getBucketCorrection(stats, 1.0, 10)).toBe(1.2);
+  });
+
+  it('clamps p to [0, 1] before lookup', () => {
+    const stats = makeStats([
+      { range: '0.00-0.10', count: 12, correctionFactor: 0.8 },
+      { range: '0.90-1.00', count: 12, correctionFactor: 1.3 },
+    ]);
+    expect(getBucketCorrection(stats, -0.1, 10)).toBe(0.8);
+    expect(getBucketCorrection(stats, 1.5, 10)).toBe(1.3);
+  });
+
+  it('returns 1.0 when sampleSize is zero', () => {
+    const stats = makeStats([]);
+    expect(getBucketCorrection(stats, 0.65, 10)).toBe(1);
   });
 });

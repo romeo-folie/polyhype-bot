@@ -368,6 +368,7 @@ describe('runMapping', () => {
         sampleCount: 3,
       });
 
+
       const signals = await runMapping([makeScoredItem()], 100);
 
       // Cascade evaluates every fit-qualified candidate; dedup keeps one
@@ -375,6 +376,178 @@ describe('runMapping', () => {
       expect(signals.length).toBeGreaterThan(0);
       expect(mockScoreRelevance).toHaveBeenCalledTimes(2);
       // Cascade ran consensus on both candidates.
+      expect(mockEstimate).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('OSINT sibling fan-out', () => {
+    const TOP_FIT_MARKET = {
+      ...CANDIDATE,
+      marketId: 'mkt-top',
+      question: 'Will Russia sign a ceasefire?',
+      eventId: 'evt-russia-ukraine',
+    };
+    const SIBLING_A = {
+      ...CANDIDATE,
+      marketId: 'mkt-sibling-a',
+      question: 'Will Ukraine accept peace terms?',
+      eventId: 'evt-russia-ukraine',
+    };
+    const SIBLING_B = {
+      ...CANDIDATE,
+      marketId: 'mkt-sibling-b',
+      question: 'Will sanctions on Russia be lifted?',
+      eventId: 'evt-russia-ukraine',
+    };
+    const UNRELATED = {
+      ...CANDIDATE,
+      marketId: 'mkt-unrelated',
+      question: 'Will NATO expand?',
+      eventId: 'evt-nato',
+    };
+
+    beforeEach(() => {
+      (mockConfig as Record<string, unknown>).STRICT_TOP_FIT_ENABLED = true;
+      (mockConfig as Record<string, unknown>).OSINT_SIBLING_FANOUT_ENABLED = false;
+      (mockConfig as Record<string, unknown>).OSINT_SIBLING_MIN_FIT_SCORE = 0.6;
+      (mockConfig as Record<string, unknown>).OSINT_SIBLING_MAX_PER_EVENT = 3;
+    });
+
+    afterEach(() => {
+      delete (mockConfig as Record<string, unknown>).OSINT_SIBLING_FANOUT_ENABLED;
+      delete (mockConfig as Record<string, unknown>).OSINT_SIBLING_MIN_FIT_SCORE;
+      delete (mockConfig as Record<string, unknown>).OSINT_SIBLING_MAX_PER_EVENT;
+    });
+
+    it('shadow-logs siblings but does not register signals when disabled', async () => {
+      mockFindCandidates.mockResolvedValue([TOP_FIT_MARKET, SIBLING_A, SIBLING_B, UNRELATED]);
+      mockScoreRelevance.mockImplementation(async ({ question }) => {
+        if (question === TOP_FIT_MARKET.question) return { fitScore: 0.95, reason: 'llm' as const };
+        if (question === SIBLING_A.question) return { fitScore: 0.75, reason: 'llm' as const };
+        if (question === SIBLING_B.question) return { fitScore: 0.65, reason: 'llm' as const };
+        return { fitScore: 0.7, reason: 'llm' as const };
+      });
+      mockEstimate.mockResolvedValue({
+        probability: 0.72,
+        reasoning: 'Signal',
+        stddev: 0.01,
+        sampleCount: 3,
+      });
+
+      const signals = await runMapping([makeScoredItem()], 100);
+
+      // Fan-out disabled → only top-fit signal emitted
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.marketId).toBe(TOP_FIT_MARKET.marketId);
+      // Siblings still evaluated (shadow): top-fit + 2 siblings from same event + unrelated sibling
+      expect(mockEstimate.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('registers sibling signals when enabled', async () => {
+      (mockConfig as Record<string, unknown>).OSINT_SIBLING_FANOUT_ENABLED = true;
+      mockFindCandidates.mockResolvedValue([TOP_FIT_MARKET, SIBLING_A]);
+      mockScoreRelevance.mockImplementation(async ({ question }) => ({
+        fitScore: question === TOP_FIT_MARKET.question ? 0.95 : 0.75,
+        reason: 'llm' as const,
+      }));
+      mockEstimate.mockResolvedValue({
+        probability: 0.72,
+        reasoning: 'Signal',
+        stddev: 0.01,
+        sampleCount: 3,
+      });
+
+      const signals = await runMapping([makeScoredItem()], 100);
+
+      // Both top-fit and sibling should produce signals
+      expect(signals.length).toBeGreaterThanOrEqual(2);
+      const marketIds = signals.map((s) => s.marketId);
+      expect(marketIds).toContain(TOP_FIT_MARKET.marketId);
+      expect(marketIds).toContain(SIBLING_A.marketId);
+    });
+
+    it('excludes siblings from a different event', async () => {
+      (mockConfig as Record<string, unknown>).OSINT_SIBLING_FANOUT_ENABLED = true;
+      mockFindCandidates.mockResolvedValue([TOP_FIT_MARKET, UNRELATED]);
+      mockScoreRelevance.mockResolvedValue({ fitScore: 0.8, reason: 'llm' as const });
+      mockEstimate.mockResolvedValue({
+        probability: 0.72,
+        reasoning: 'Signal',
+        stddev: 0.01,
+        sampleCount: 3,
+      });
+
+      const signals = await runMapping([makeScoredItem()], 100);
+
+      // UNRELATED has a different eventId — must not be fan-out evaluated
+      const marketIds = signals.map((s) => s.marketId);
+      expect(marketIds).not.toContain(UNRELATED.marketId);
+    });
+
+    it('skips siblings below OSINT_SIBLING_MIN_FIT_SCORE', async () => {
+      (mockConfig as Record<string, unknown>).OSINT_SIBLING_FANOUT_ENABLED = true;
+      (mockConfig as Record<string, unknown>).OSINT_SIBLING_MIN_FIT_SCORE = 0.8;
+      mockFindCandidates.mockResolvedValue([TOP_FIT_MARKET, SIBLING_A]);
+      mockScoreRelevance.mockImplementation(async ({ question }) => ({
+        // top-fit = 0.95, sibling = 0.75 (below 0.8 threshold)
+        fitScore: question === TOP_FIT_MARKET.question ? 0.95 : 0.75,
+        reason: 'llm' as const,
+      }));
+      mockEstimate.mockResolvedValue({
+        probability: 0.72,
+        reasoning: 'Signal',
+        stddev: 0.01,
+        sampleCount: 3,
+      });
+
+      const signals = await runMapping([makeScoredItem()], 100);
+
+      // Sibling below threshold — only top-fit signal
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.marketId).toBe(TOP_FIT_MARKET.marketId);
+    });
+
+    it('does not fan-out when top-fit market has no eventId', async () => {
+      (mockConfig as Record<string, unknown>).OSINT_SIBLING_FANOUT_ENABLED = true;
+      const noEventCandidate = { ...TOP_FIT_MARKET, eventId: undefined };
+      mockFindCandidates.mockResolvedValue([noEventCandidate, SIBLING_A]);
+      mockScoreRelevance.mockResolvedValue({ fitScore: 0.9, reason: 'llm' as const });
+      mockEstimate.mockResolvedValue({
+        probability: 0.72,
+        reasoning: 'Signal',
+        stddev: 0.01,
+        sampleCount: 3,
+      });
+
+      const signals = await runMapping([makeScoredItem()], 100);
+
+      // No eventId on top-fit → no fan-out → only 1 signal
+      expect(signals).toHaveLength(1);
+      // Consensus called only once (top-fit, no siblings)
+      expect(mockEstimate).toHaveBeenCalledTimes(1);
+    });
+
+    it('respects OSINT_SIBLING_MAX_PER_EVENT cap', async () => {
+      (mockConfig as Record<string, unknown>).OSINT_SIBLING_FANOUT_ENABLED = true;
+      (mockConfig as Record<string, unknown>).OSINT_SIBLING_MAX_PER_EVENT = 1;
+      const manySiblings = [
+        TOP_FIT_MARKET,
+        { ...SIBLING_A },
+        { ...SIBLING_B },
+        { ...CANDIDATE, marketId: 'mkt-sib-c', question: 'Sibling C', eventId: 'evt-russia-ukraine' },
+      ];
+      mockFindCandidates.mockResolvedValue(manySiblings);
+      mockScoreRelevance.mockResolvedValue({ fitScore: 0.8, reason: 'llm' as const });
+      mockEstimate.mockResolvedValue({
+        probability: 0.72,
+        reasoning: 'Signal',
+        stddev: 0.01,
+        sampleCount: 3,
+      });
+
+      await runMapping([makeScoredItem()], 100);
+
+      // top-fit (1) + max 1 sibling = 2 consensus calls
       expect(mockEstimate).toHaveBeenCalledTimes(2);
     });
   });
