@@ -57,6 +57,7 @@ function buildInput(
     nowMs: NOW_MS + 10_000,
     compressionThreshold: 0.7,
     reversalBps: 5,
+    reversalMinReturnPct: 0,
     maxHoldSec: 180,
     nearResMinLeftMin: 3,
     nearResMinReturnPct: 0.5,
@@ -206,9 +207,12 @@ describe('evaluateOracleLagExit', () => {
     });
 
     it('fires reversal on DOWN entry when Chainlink rises past buffer', () => {
+      // PM NO hasn't repriced yet (currentNoPrice = entryPmNoPrice = 0.45 → returnPct = 0).
+      // Chainlink rises +10 bps past buffer → reversal fires because returnPct >= 0.
       const stateDown = buildState({
         direction: 'DOWN',
         entryPmYesPrice: 0.55,
+        entryPmNoPrice: 0.45,
         entryChainlinkMovePct: -8,
         entryFairPyes: 0.42,
         entryChainlinkPrice: 65000,
@@ -217,7 +221,7 @@ describe('evaluateOracleLagExit', () => {
         buildInput({
           state: stateDown,
           currentYesPrice: 0.55,
-          currentNoPrice: 0.45,
+          currentNoPrice: 0.45, // flat — returnPct = 0, meets threshold
           currentChainlinkPrice: 65065, // +10 bps
           reversalBps: 5,
         }),
@@ -246,6 +250,68 @@ describe('evaluateOracleLagExit', () => {
           currentNoPrice: 0.4,
           currentChainlinkPrice: 64935, // -10 bps
           reversalBps: 5,
+        }),
+      );
+      expect(res?.trigger).toBe('oracle_lag_reversed');
+    });
+
+    it('suppresses reversal when PM return is below reversalMinReturnPct', () => {
+      // Chainlink adverse 6 bps (would normally fire), but YES dropped from
+      // entry 0.52 to 0.50 → returnPct ≈ -3.8%, below minReturnPct=0.
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateUp,
+          currentYesPrice: 0.50,
+          currentNoPrice: 0.50,
+          currentChainlinkPrice: 64961, // -6 bps
+          reversalBps: 5,
+          reversalMinReturnPct: 0,
+        }),
+      );
+      expect(res).toBeNull();
+    });
+
+    it('fires reversal when PM return meets reversalMinReturnPct', () => {
+      // YES ticked up to 0.525 → returnPct ≈ +0.96% ≥ minReturnPct=0.
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateUp,
+          currentYesPrice: 0.525,
+          currentNoPrice: 0.475,
+          currentChainlinkPrice: 64961, // -6 bps adverse
+          reversalBps: 5,
+          reversalMinReturnPct: 0,
+        }),
+      );
+      expect(res?.trigger).toBe('oracle_lag_reversed');
+    });
+
+    it('suppresses reversal when PM return is just below a non-zero reversalMinReturnPct', () => {
+      // YES at 0.525 → returnPct ≈ +0.96%, below minReturnPct=1.
+      // Verifies the threshold is treated as percent, not bps or decimal.
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateUp,
+          currentYesPrice: 0.525,
+          currentNoPrice: 0.475,
+          currentChainlinkPrice: 64961, // -6 bps adverse
+          reversalBps: 5,
+          reversalMinReturnPct: 1,
+        }),
+      );
+      expect(res).toBeNull();
+    });
+
+    it('fires reversal when PM return clears a non-zero reversalMinReturnPct', () => {
+      // YES at 0.5254 → returnPct ≈ +1.04%, above minReturnPct=1.
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateUp,
+          currentYesPrice: 0.5254,
+          currentNoPrice: 0.4746,
+          currentChainlinkPrice: 64961, // -6 bps adverse
+          reversalBps: 5,
+          reversalMinReturnPct: 1,
         }),
       );
       expect(res?.trigger).toBe('oracle_lag_reversed');
