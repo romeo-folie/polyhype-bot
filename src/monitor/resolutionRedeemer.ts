@@ -859,6 +859,168 @@ async function redeemClobPositions(
             valueUsdc: proceedsUsdc,
             ...(redeemResult.tx_hash ? { txHash: redeemResult.tx_hash } : {}),
           });
+        } else if (!pos.endDate) {
+          // No endDate stored and Gamma can't find the market — fall back to
+          // direct on-chain resolution. This handles oracle-lag and sports positions
+          // entered before endDate was reliably persisted.
+          logger.info('[redeemer] CLOB position missing endDate — checking on-chain directly', {
+            marketId: pos.marketId,
+            conditionId,
+          });
+          const onChainFallback = await checkOnChainResolution(conditionId);
+          await new Promise((r) => setTimeout(r, 200));
+          if (!onChainFallback) {
+            // Not yet settled on-chain — skip and retry next cycle.
+            continue;
+          }
+
+          const q = pos.question || pos.marketId;
+          const displayDir =
+            pos.sourcedFrom?.startsWith('oracle-lag')
+              ? pos.direction === 'YES'
+                ? 'UP'
+                : pos.direction === 'NO'
+                  ? 'DOWN'
+                  : pos.direction
+              : pos.direction;
+          const normalizedDir = isYesSide ? 'YES' : 'NO';
+          const wonFallback = onChainFallback.outcome === normalizedDir;
+
+          logger.info('[redeemer] closing no-endDate CLOB position via on-chain fallback', {
+            marketId: pos.marketId,
+            direction: pos.direction,
+            outcome: onChainFallback.outcome,
+            wonFallback,
+            isDust,
+          });
+
+          if (!wonFallback) {
+            await closePosition(redis, pos.marketId, pos.direction);
+            await markRecentlyClosed(redis, pos.marketId);
+            await markRecentlyResolved(redis, pos.marketId);
+            await recordPositionOutcome(
+              redis,
+              { ...pos, question: q, direction: pmDirection },
+              {
+                result: 'lost',
+                returnPct: -100,
+                executionVenueOverride: 'clob',
+                exitReason: 'no_end_date_on_chain_resolved',
+              },
+            );
+            void notifyMarketResolved({
+              question: q,
+              direction: displayDir,
+              result: 'lost',
+              stakeUsd: pos.stakeUsd,
+              reason: 'on-chain settled (no endDate stored)',
+            }).catch(() => {});
+            results.push({ marketId: pos.marketId, side, success: false, error: 'no_end_date_on_chain_resolved' });
+            continue;
+          }
+
+          // Dust positions that won: close without redemption, record actual outcome.
+          if (isDust) {
+            await closePosition(redis, pos.marketId, pos.direction);
+            await markRecentlyClosed(redis, pos.marketId);
+            await markRecentlyResolved(redis, pos.marketId);
+            await recordPositionOutcome(
+              redis,
+              { ...pos, question: q, direction: pmDirection },
+              {
+                result: 'won',
+                returnPct: -100,
+                executionVenueOverride: 'clob',
+                exitReason: 'no_end_date_dust_closed',
+              },
+            );
+            void notifyMarketResolved({
+              question: q,
+              direction: displayDir,
+              result: 'won',
+              stakeUsd: pos.stakeUsd,
+              reason: 'dust position, on-chain settled (no endDate stored)',
+            }).catch(() => {});
+            results.push({ marketId: pos.marketId, side, success: false, error: 'no_end_date_dust_closed' });
+            continue;
+          }
+
+          // Won — attempt on-chain redemption.
+          const redeemFallback = await redeemClobOutcome({ conditionId, direction: normalizedDir });
+          if (!redeemFallback.success) {
+            logger.warn('[redeemer] on-chain redemption failed for no-endDate position — will retry next cycle', {
+              marketId: pos.marketId,
+              error: redeemFallback.error,
+            });
+            results.push({ marketId: pos.marketId, side, success: false, error: 'redemption_rpc_error' });
+            continue;
+          }
+
+          const entryPriceSafeFb =
+            typeof pos.entryPrice === 'number' && Number.isFinite(pos.entryPrice) && pos.entryPrice > 0;
+          const proceedsUsdcFb =
+            typeof preBalance === 'number' && Number.isFinite(preBalance) && preBalance > 0
+              ? preBalance
+              : typeof pos.sharesHeld === 'number' && Number.isFinite(pos.sharesHeld) && pos.sharesHeld > 0
+                ? pos.sharesHeld
+                : typeof pos.stakeUsd === 'number' && Number.isFinite(pos.stakeUsd) && entryPriceSafeFb
+                  ? pos.stakeUsd / pos.entryPrice
+                  : null;
+
+          if (!(typeof proceedsUsdcFb === 'number' && Number.isFinite(proceedsUsdcFb) && proceedsUsdcFb > 0)) {
+            logger.error(
+              '[redeemer] redeemed no-endDate position but could not determine proceeds — closing with zero return',
+              {
+                marketId: pos.marketId,
+                preBalance,
+                sharesHeld: pos.sharesHeld,
+                txHash: redeemFallback.tx_hash,
+              },
+            );
+            // Close the position now so it cannot re-fire as a false loss after
+            // markRecentlyResolved's TTL expires on a future cycle.
+            await closePosition(redis, pos.marketId, pos.direction);
+            await markRecentlyClosed(redis, pos.marketId);
+            await markRecentlyResolved(redis, pos.marketId);
+            await recordPositionOutcome(
+              redis,
+              { ...pos, question: q, direction: pmDirection },
+              { result: 'won', returnPct: 0, executionVenueOverride: 'clob', exitReason: 'redemption_proceeds_unknown' },
+            );
+            results.push({ marketId: pos.marketId, side, success: false, error: 'redemption_proceeds_unknown' });
+            continue;
+          }
+
+          await creditProceeds(redis, proceedsUsdcFb);
+          await closePosition(redis, pos.marketId, pos.direction);
+          await markRecentlyClosed(redis, pos.marketId);
+          await markRecentlyResolved(redis, pos.marketId);
+          await recordPositionOutcome(
+            redis,
+            { ...pos, question: q, direction: pmDirection },
+            {
+              result: 'won',
+              returnPct: pos.stakeUsd > 0 ? ((proceedsUsdcFb - pos.stakeUsd) / pos.stakeUsd) * 100 : 0,
+              executionVenueOverride: 'clob',
+              exitReason: 'no_end_date_on_chain_redeemed',
+            },
+          );
+          await notifyRedemptionExecuted({
+            marketId: pos.marketId,
+            question: q,
+            side,
+            valueUsdc: proceedsUsdcFb,
+            stakeUsd: pos.stakeUsd,
+            displayDirection: displayDir,
+            ...(redeemFallback.tx_hash ? { txHash: redeemFallback.tx_hash } : {}),
+          });
+          results.push({
+            marketId: pos.marketId,
+            side,
+            success: true,
+            valueUsdc: proceedsUsdcFb,
+            ...(redeemFallback.tx_hash ? { txHash: redeemFallback.tx_hash } : {}),
+          });
         }
         continue;
       }

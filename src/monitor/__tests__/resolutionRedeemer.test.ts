@@ -45,6 +45,7 @@ vi.mock('../../shared/config.js', () => ({
     SIMMER_API_KEY: 'test-key',
     OUTCOME_HISTORY_DAYS: 180,
     OUTCOME_MAX_PER_CATEGORY: 500,
+    REDEEMER_DUST_THRESHOLD_USDC: 0.25,
   }),
   POLYGON_FALLBACK_RPCS: ['https://mock-rpc.polygon.test'],
   CTF_ADDRESS: '0x4d97dcd97ec945f40cf65f87097ace5ea0476045',
@@ -317,6 +318,154 @@ describe('redeemResolvedPositions', () => {
     expect(mockNotifyRedemptionExecuted).not.toHaveBeenCalled();
     expect(results[0].success).toBe(false);
     expect(results[0].error).toBe('redemption_proceeds_unknown');
+  });
+
+  it('no-endDate position: on-chain confirms loss → closes without redemption', async () => {
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'ol-no-date-1',
+        conditionId: 'cond-nd-1',
+        clobTokenIds: ['token-yes-nd1', 'token-no-nd1'],
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Bitcoin Up or Down - April 17, 1:00PM-1:15PM ET',
+        sharesHeld: 10,
+        entryPrice: 0.5,
+        stakeUsd: 5,
+        endDate: '', // missing — simulates pre-endDate-fix entries
+      },
+    ]);
+    // Gamma returns empty
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    // On-chain: condition settled, NO won (index 1) — our YES position lost
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 1 ? 1n : 0n,
+    );
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
+    expect(mockCreditProceeds).not.toHaveBeenCalled();
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'ol-no-date-1', 'YES');
+    expect(vi.mocked(mockNotifyMarketResolved)).toHaveBeenCalledWith(
+      expect.objectContaining({ result: 'lost', reason: 'on-chain settled (no endDate stored)' }),
+    );
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(false);
+    expect(results[0].error).toBe('no_end_date_on_chain_resolved');
+  });
+
+  it('no-endDate position: on-chain confirms win → redeems, credits, notifies', async () => {
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'ol-no-date-2',
+        conditionId: 'cond-nd-2',
+        clobTokenIds: ['token-yes-nd2', 'token-no-nd2'],
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Bitcoin Up or Down - April 17, 1:15PM-1:30PM ET',
+        sharesHeld: 10,
+        entryPrice: 0.5,
+        stakeUsd: 5,
+        endDate: '',
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    // On-chain: YES won
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 0 ? 1n : 0n,
+    );
+    mockRedeemClobOutcome.mockResolvedValue({ success: true, tx_hash: '0xnd2' });
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 10 } as any);
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockRedeemClobOutcome).toHaveBeenCalledWith({ conditionId: 'cond-nd-2', direction: 'YES' });
+    expect(mockCreditProceeds).toHaveBeenCalledWith(mockRedis, 10);
+    expect(mockNotifyRedemptionExecuted).toHaveBeenCalledWith(
+      expect.objectContaining({ marketId: 'ol-no-date-2', side: 'yes', valueUsdc: 10 }),
+    );
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'ol-no-date-2', 'YES');
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
+  });
+
+  it('no-endDate dust position: on-chain confirms win → closes without redemption, records won', async () => {
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'ol-no-date-dust',
+        conditionId: 'cond-nd-dust',
+        clobTokenIds: ['token-yes-ndd', 'token-no-ndd'],
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Bitcoin Up or Down - April 17',
+        sharesHeld: 0.05,
+        entryPrice: 0.5,
+        stakeUsd: 5,
+        endDate: '',
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    // On-chain: YES won — but balance is dust (≤0.01 threshold triggers skipped_dust)
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 0 ? 1n : 0n,
+    );
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 0.005 } as any);
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    // Should not attempt redemption — dust
+    expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
+    expect(mockCreditProceeds).not.toHaveBeenCalled();
+    // But should close and record as won
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'ol-no-date-dust', 'YES');
+    expect(vi.mocked(mockNotifyMarketResolved)).toHaveBeenCalledWith(
+      expect.objectContaining({ result: 'won' }),
+    );
+    expect(results).toHaveLength(1);
+    expect(results[0].error).toBe('no_end_date_dust_closed');
+  });
+
+  it('no-endDate position: on-chain not yet settled → skips and retries next cycle', async () => {
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'ol-no-date-3',
+        conditionId: 'cond-nd-3',
+        clobTokenIds: ['token-yes-nd3', 'token-no-nd3'],
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Spurs vs Nuggets - April 4',
+        sharesHeld: 5,
+        entryPrice: 0.6,
+        stakeUsd: 3,
+        endDate: '',
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    // payoutDenominator = 0 → not yet settled
+    mockCtfContract.payoutDenominator.mockResolvedValue(0n);
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
+    expect(mockCreditProceeds).not.toHaveBeenCalled();
+    expect(mockClosePosition).not.toHaveBeenCalled();
+    expect(results).toHaveLength(0);
   });
 
   it('closes CLOB position resolved as loss without redeeming', async () => {
