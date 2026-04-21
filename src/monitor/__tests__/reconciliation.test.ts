@@ -332,6 +332,90 @@ describe('Position Reconciliation Healer', () => {
     );
   });
 
+  it('forwards pendingOrder.reasoning to the async maker-fill Telegram notification', async () => {
+    const orphanClobPosition = {
+      conditionId: 'cond-reason',
+      asset: 'tok-yes',
+      avgPrice: 0.49,
+      size: 10,
+    };
+    const mockGammaMarket = {
+      id: 'numeric-reason',
+      question: 'Will Shenzhen hit 29°C?',
+      conditionId: 'cond-reason',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([orphanClobPosition]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-reason-1',
+      tokenId: 'tok-yes',
+      price: 0.49,
+      size: 10,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 60_000,
+      consensusP: 0.6,
+      direction: 'YES',
+      sourcedFrom: 'weather:shenzhen:2026-04-22:29°C',
+      reasoning: 'Forecast high 29.0°, model P=0.123 vs market 0.710; NO bracket.',
+    });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(telegram.notifyTradeExecuted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reasoning: 'Forecast high 29.0°, model P=0.123 vs market 0.710; NO bracket.',
+      }),
+      undefined,
+      expect.anything(),
+    );
+  });
+
+  it('falls back to generic reasoning string when pendingOrder has no reasoning field', async () => {
+    const orphanClobPosition = {
+      conditionId: 'cond-legacy',
+      asset: 'tok-yes',
+      avgPrice: 0.49,
+      size: 10,
+    };
+    const mockGammaMarket = {
+      id: 'numeric-legacy',
+      question: 'Legacy order question?',
+      conditionId: 'cond-legacy',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([orphanClobPosition]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-legacy-1',
+      tokenId: 'tok-yes',
+      price: 0.49,
+      size: 10,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 60_000,
+      consensusP: 0.55,
+      direction: 'YES',
+      sourcedFrom: 'oracle-lag:btc-15m',
+      // reasoning intentionally absent — simulates an order posted before this fix
+    });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(telegram.notifyTradeExecuted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reasoning: 'Async maker fill reconciled from CLOB position snapshot.',
+      }),
+      undefined,
+      expect.anything(),
+    );
+  });
+
   it('reconciles a CLOB ledger position against the matching outcome token when Data API returns multiple rows for the same conditionId', async () => {
     const ledgerPosition = {
       marketId: 'numeric-99',
