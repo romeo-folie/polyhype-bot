@@ -889,13 +889,13 @@ describe('scanHlMomentum — funding contra voter wiring', () => {
     mockGetCachedAssetCtx.mockResolvedValue({
       fundingRate: 0.0002, openInterest: 1_000_000, markPrice: 70_000,
     });
-    // Score comes back with 7 voters including funding=DOWN.
+    // Score comes back with 7 voters; fundingContra=neutral so the veto gate does not fire.
     mockScoreHlTrend.mockReturnValue({
       score: 4,
       adx: 35,
       voters: {
         vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP',
-        obv: 'UP', cmf: 'UP', adxDI: 'neutral', fundingContra: 'DOWN',
+        obv: 'UP', cmf: 'UP', adxDI: 'neutral', fundingContra: 'neutral',
       },
       voterCount: 7,
     });
@@ -908,7 +908,7 @@ describe('scanHlMomentum — funding contra voter wiring', () => {
       expect.objectContaining({
         payload: expect.objectContaining({
           fundingApr: expect.closeTo(175.2, 1) as unknown as number,
-          fundingContraVote: 'DOWN',
+          fundingContraVote: 'neutral',
           voterCount: 7,
         }),
       }),
@@ -1114,6 +1114,117 @@ describe('scanHlMomentum — OI divergence voter wiring', () => {
     const redis = makeRedis();
     await scanHlMomentum(makeTick(), redis as never);
     expect(mockGetOrSetOiBaseline).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HL-native voter veto gates
+// ---------------------------------------------------------------------------
+
+describe('scanHlMomentum — HL-native voter veto gates', () => {
+  beforeEach(() => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_FUNDING_CONTRA_ENABLED: true,
+      HL_OI_DIVERGENCE_ENABLED: true,
+    });
+    mockBuildCandles.mockResolvedValue([{}]);
+    mockHasOpenPosition.mockResolvedValue(false);
+    mockComputeEMA.mockReturnValue(null);
+    mockComputeMACDFromCandles.mockReturnValue(null);
+    mockGetCachedAssetCtx.mockResolvedValue({
+      fundingRate: 0, openInterest: 1_000_000, markPrice: 70_000,
+    });
+    mockGetOrSetOiBaseline.mockResolvedValue(null);
+  });
+
+  it('blocks a LONG when fundingContra=DOWN (crowded longs — mean-reversion risk)', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: 5, adx: 30,
+      voters: { vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP', obv: 'UP', cmf: 'UP', adxDI: 'neutral', fundingContra: 'DOWN' },
+      voterCount: 7,
+    });
+    const result = await scanHlMomentum(makeTick(), makeRedis() as never);
+    expect(result).toBeNull();
+  });
+
+  it('blocks a SHORT when fundingContra=UP (crowded shorts)', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: -5, adx: 30,
+      voters: { vwap: 'DOWN', emaFastVsSlow: 'DOWN', macdLine: 'DOWN', obv: 'DOWN', cmf: 'DOWN', adxDI: 'neutral', fundingContra: 'UP' },
+      voterCount: 7,
+    });
+    const result = await scanHlMomentum(makeTick(), makeRedis() as never);
+    expect(result).toBeNull();
+  });
+
+  it('allows a LONG when fundingContra=neutral', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: 5, adx: 30,
+      voters: { vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP', obv: 'UP', cmf: 'UP', adxDI: 'neutral', fundingContra: 'neutral' },
+      voterCount: 7,
+    });
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    await scanHlMomentum(makeTick(), makeRedis() as never);
+    expect(enqueueWrite).toHaveBeenCalledWith('shadow_observations', expect.objectContaining({ kind: 'hl_momentum_signal' }));
+  });
+
+  it('blocks a LONG when oiDivergence=DOWN (short covering — fake breakout)', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: 5, adx: 30,
+      voters: { vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP', obv: 'UP', cmf: 'UP', adxDI: 'neutral', oiDivergence: 'DOWN' },
+      voterCount: 7,
+    });
+    const result = await scanHlMomentum(makeTick(), makeRedis() as never);
+    expect(result).toBeNull();
+  });
+
+  it('blocks a SHORT when oiDivergence=UP (forced liquidation — fake breakdown)', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: -5, adx: 30,
+      voters: { vwap: 'DOWN', emaFastVsSlow: 'DOWN', macdLine: 'DOWN', obv: 'DOWN', cmf: 'DOWN', adxDI: 'neutral', oiDivergence: 'UP' },
+      voterCount: 7,
+    });
+    const result = await scanHlMomentum(makeTick(), makeRedis() as never);
+    expect(result).toBeNull();
+  });
+
+  it('allows a LONG when oiDivergence=UP (OI expanding with price — real buying)', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: 5, adx: 30,
+      voters: { vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP', obv: 'UP', cmf: 'UP', adxDI: 'neutral', oiDivergence: 'UP' },
+      voterCount: 7,
+    });
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    await scanHlMomentum(makeTick(), makeRedis() as never);
+    expect(enqueueWrite).toHaveBeenCalledWith('shadow_observations', expect.objectContaining({ kind: 'hl_momentum_signal' }));
+  });
+
+  it('does not shadow-log when the veto fires (signal never reached shadow write)', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: 5, adx: 30,
+      voters: { vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP', obv: 'UP', cmf: 'UP', adxDI: 'neutral', fundingContra: 'DOWN' },
+      voterCount: 7,
+    });
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    await scanHlMomentum(makeTick(), makeRedis() as never);
+    expect(enqueueWrite).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when both HL-native voters are disabled (voters absent from result)', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_FUNDING_CONTRA_ENABLED: false,
+      HL_OI_DIVERGENCE_ENABLED: false,
+    });
+    mockScoreHlTrend.mockReturnValue(bullishResult); // no HL-native voter keys
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    await scanHlMomentum(makeTick(), makeRedis() as never);
+    expect(enqueueWrite).toHaveBeenCalledWith('shadow_observations', expect.objectContaining({ kind: 'hl_momentum_signal' }));
   });
 });
 

@@ -195,6 +195,28 @@ export async function scanHlMomentum(
     return null;
   }
 
+  // Gate: HL-native voters must not actively contradict the trade direction.
+  // fundingContra DOWN on a LONG = longs already crowded, APR at ceiling — mean-reversion
+  // risk that the correlated price-lag voters cannot outweigh.
+  // oiDivergence DOWN on a LONG = OI contracting while price rises — short covering only,
+  // not real buying; the breakout is likely fake.
+  // Both checks are naturally no-ops when the voter is disabled (voter key absent from
+  // `voters`, so the === comparison is false).
+  if (
+    (direction === 'LONG' && voters.fundingContra === 'DOWN') ||
+    (direction === 'SHORT' && voters.fundingContra === 'UP')
+  ) {
+    logger.debug('[hl-momentum] funding contra veto', { symbol: hlSymbol, direction, fundingApr });
+    return null;
+  }
+  if (
+    (direction === 'LONG' && voters.oiDivergence === 'DOWN') ||
+    (direction === 'SHORT' && voters.oiDivergence === 'UP')
+  ) {
+    logger.debug('[hl-momentum] OI divergence veto', { symbol: hlSymbol, direction, oiPctChange, pricePctChange });
+    return null;
+  }
+
   // ── Multi-timeframe signals ──────────────────────────────────────────────
   // In hard mode: behave as before — gate flag controls fetch + veto.
   // In weighted mode: always fetch (gate flag is a no-op), missing data → 0 bonus.
