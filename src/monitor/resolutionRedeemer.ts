@@ -894,7 +894,7 @@ async function redeemClobPositions(
             isDust,
           });
 
-          if (!wonFallback || isDust) {
+          if (!wonFallback) {
             await closePosition(redis, pos.marketId, pos.direction);
             await markRecentlyClosed(redis, pos.marketId);
             await markRecentlyResolved(redis, pos.marketId);
@@ -916,6 +916,32 @@ async function redeemClobPositions(
               reason: 'on-chain settled (no endDate stored)',
             }).catch(() => {});
             results.push({ marketId: pos.marketId, side, success: false, error: 'no_end_date_on_chain_resolved' });
+            continue;
+          }
+
+          // Dust positions that won: close without redemption, record actual outcome.
+          if (isDust) {
+            await closePosition(redis, pos.marketId, pos.direction);
+            await markRecentlyClosed(redis, pos.marketId);
+            await markRecentlyResolved(redis, pos.marketId);
+            await recordPositionOutcome(
+              redis,
+              { ...pos, question: q, direction: pmDirection },
+              {
+                result: 'won',
+                returnPct: -100,
+                executionVenueOverride: 'clob',
+                exitReason: 'no_end_date_dust_closed',
+              },
+            );
+            void notifyMarketResolved({
+              question: q,
+              direction: displayDir,
+              result: 'won',
+              stakeUsd: pos.stakeUsd,
+              reason: 'dust position, on-chain settled (no endDate stored)',
+            }).catch(() => {});
+            results.push({ marketId: pos.marketId, side, success: false, error: 'no_end_date_dust_closed' });
             continue;
           }
 
@@ -943,7 +969,7 @@ async function redeemClobPositions(
 
           if (!(typeof proceedsUsdcFb === 'number' && Number.isFinite(proceedsUsdcFb) && proceedsUsdcFb > 0)) {
             logger.error(
-              '[redeemer] redeemed no-endDate position but could not determine proceeds — leaving open for manual review',
+              '[redeemer] redeemed no-endDate position but could not determine proceeds — closing with zero return',
               {
                 marketId: pos.marketId,
                 preBalance,
@@ -951,8 +977,16 @@ async function redeemClobPositions(
                 txHash: redeemFallback.tx_hash,
               },
             );
+            // Close the position now so it cannot re-fire as a false loss after
+            // markRecentlyResolved's TTL expires on a future cycle.
+            await closePosition(redis, pos.marketId, pos.direction);
             await markRecentlyClosed(redis, pos.marketId);
             await markRecentlyResolved(redis, pos.marketId);
+            await recordPositionOutcome(
+              redis,
+              { ...pos, question: q, direction: pmDirection },
+              { result: 'won', returnPct: 0, executionVenueOverride: 'clob', exitReason: 'redemption_proceeds_unknown' },
+            );
             results.push({ marketId: pos.marketId, side, success: false, error: 'redemption_proceeds_unknown' });
             continue;
           }
