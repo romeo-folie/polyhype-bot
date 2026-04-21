@@ -55,5 +55,6 @@ redis-cli KEYS '*lock*'       # verify no stale locks after restart
 - Commit messages: imperative mood, prefixed with `feat:`, `fix:`, `chore:`, etc.
 - **Always create a PR. Never push directly to main unless the user explicitly asks.**
   Branch naming: `feat/<slug>`, `fix/<slug>`, `chore/<slug>`. Open PR, wait for merge.
+- **Always branch from `main`** unless explicitly told to branch from a specific feature branch.
 - Prefer editing existing files over creating new ones.
 - `MIN_BET_USD=5` is the preferred minimum bet amount.
