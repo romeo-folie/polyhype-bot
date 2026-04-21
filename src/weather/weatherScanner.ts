@@ -569,19 +569,33 @@ export interface FindMispricedResult {
   biasApplied: boolean;
 }
 
+export interface FindMispricedOptions {
+  stddevMultiplier?: number;
+  minModelCoverage?: number;
+  allowedSides?: ReadonlySet<'YES' | 'NO'>;
+  cityBias?: CityBias | null;
+  biasCorrectionEnabled?: boolean;
+  biasMinSamples?: number;
+  /** Skip NO bets on tail brackets when modelProb exceeds this (default 0.5). */
+  maxTailNoBetModelProb?: number;
+}
+
 export function findMispricedBrackets(
   event: ParsedWeatherEvent,
   forecast: ForecastResult,
   daysOut: number,
   minEdge: number,
-  stddevMultiplier = 1.0,
-  minModelCoverage = 0.95,
-  allowedSides: ReadonlySet<'YES' | 'NO'> = new Set(['YES', 'NO']),
-  cityBias: CityBias | null = null,
-  biasCorrectionEnabled = false,
-  biasMinSamples = 14,
-  maxTailNoBetModelProb = 0.5,
+  options: FindMispricedOptions = {},
 ): FindMispricedResult {
+  const {
+    stddevMultiplier = 1.0,
+    minModelCoverage = 0.95,
+    allowedSides = new Set<'YES' | 'NO'>(['YES', 'NO']),
+    cityBias = null,
+    biasCorrectionEnabled = false,
+    biasMinSamples = 14,
+    maxTailNoBetModelProb = 0.5,
+  } = options;
   const opportunities: WeatherBracketOpportunity[] = [];
 
   // Apply per-city bias correction when enabled and enough samples are available.
@@ -803,13 +817,15 @@ export async function scanWeatherMarkets(
       forecast,
       daysOut,
       cfg.WEATHER_MIN_EDGE,
-      cfg.WEATHER_STDDEV_MULTIPLIER,
-      cfg.WEATHER_MIN_MODEL_COVERAGE,
-      allowedSides,
-      cityBias,
-      cfg.WEATHER_BIAS_CORRECTION_ENABLED,
-      cfg.WEATHER_BIAS_MIN_SAMPLES,
-      cfg.WEATHER_THRESHOLD_NO_BET_MAX_PROB,
+      {
+        stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
+        minModelCoverage: cfg.WEATHER_MIN_MODEL_COVERAGE,
+        allowedSides,
+        cityBias,
+        biasCorrectionEnabled: cfg.WEATHER_BIAS_CORRECTION_ENABLED,
+        biasMinSamples: cfg.WEATHER_BIAS_MIN_SAMPLES,
+        maxTailNoBetModelProb: cfg.WEATHER_THRESHOLD_NO_BET_MAX_PROB,
+      },
     );
     const effectiveStdDev = forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER;
     const coverageStatus = modelSum >= cfg.WEATHER_MIN_MODEL_COVERAGE ? 'ok' : 'skipped_low_coverage';
