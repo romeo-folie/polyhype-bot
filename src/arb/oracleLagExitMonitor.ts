@@ -199,6 +199,8 @@ export interface OracleLagExitEvalInput {
   nowMs: number;
   compressionThreshold: number;
   reversalBps: number;
+  /** Only fire reversal when PM return on the held side is >= this (%). Prevents selling into spread when PM hasn't repriced. */
+  reversalMinReturnPct: number;
   maxHoldSec: number;
   /** Exit when profitable with < this many minutes left before resolution. */
   nearResMinLeftMin: number;
@@ -210,8 +212,11 @@ export interface OracleLagExitEvalInput {
  * Pure function — no Redis, no feed. Decides whether (and why) to early-exit.
  *
  * Trigger priority (first matching rule wins):
- *   1. Reversal        — Chainlink has moved against us past the configured buffer.
+ *   1. Reversal        — Chainlink has moved against us past the configured buffer AND
+ *                        PM return on the held side is >= `reversalMinReturnPct`.
  *                        Skipped when `chainlinkStale` (don't exit on missing data).
+ *                        Skipped when PM hasn't repriced: selling into the spread at
+ *                        entry price is a guaranteed loss vs holding to resolution.
  *   2. Near-resolution — profitable with < nearResMinLeftMin remaining before market
  *                        resolution (locks in gains before a last-minute reversal).
  *                        Skipped when endDateMs=0 (legacy states without endDateMs).
@@ -233,6 +238,7 @@ export function evaluateOracleLagExit(
     nowMs,
     compressionThreshold,
     reversalBps,
+    reversalMinReturnPct,
     maxHoldSec,
     nearResMinLeftMin,
     nearResMinReturnPct,
@@ -253,6 +259,16 @@ export function evaluateOracleLagExit(
   const compressionPct =
     entryGap > 0 ? Math.max(0, Math.min(1, 1 - currentGap / entryGap)) : 0;
 
+  // returnPct on the side we actually hold (used for ledger/bankroll math and reversal gate).
+  // UP → bought YES at entryPmYesPrice → current = currentYesPrice.
+  // DOWN → bought NO at entryPmNoPrice → current = currentNoPrice.
+  const heldEntryPrice = isUp ? state.entryPmYesPrice : state.entryPmNoPrice;
+  const heldCurrentPrice = isUp ? currentYesPrice : currentNoPrice;
+  const returnPct =
+    heldEntryPrice > 0
+      ? ((heldCurrentPrice - heldEntryPrice) / heldEntryPrice) * 100
+      : 0;
+
   // Reversal math — Chainlink move against us past the buffer.
   // UP entries bet on Chainlink trending up; reversal = current < entry * (1 - bps).
   // DOWN entries bet on Chainlink trending down; reversal = current > entry * (1 + bps).
@@ -264,17 +280,10 @@ export function evaluateOracleLagExit(
     : ((currentChainlinkPrice - state.entryChainlinkPrice) /
         state.entryChainlinkPrice) *
       10000;
-  const reversed = !chainlinkStale && actualReversalBps >= reversalBps;
-
-  // returnPct on the side we actually hold (used for ledger/bankroll math).
-  // UP → bought YES at entryPmYesPrice → current = currentYesPrice.
-  // DOWN → bought NO at entryPmNoPrice → current = currentNoPrice.
-  const heldEntryPrice = isUp ? state.entryPmYesPrice : state.entryPmNoPrice;
-  const heldCurrentPrice = isUp ? currentYesPrice : currentNoPrice;
-  const returnPct =
-    heldEntryPrice > 0
-      ? ((heldCurrentPrice - heldEntryPrice) / heldEntryPrice) * 100
-      : 0;
+  const reversed =
+    !chainlinkStale &&
+    actualReversalBps >= reversalBps &&
+    returnPct >= reversalMinReturnPct;
 
   // Belt+suspenders against scanner regression — don't fire compression on
   // degenerate gaps (shouldn't happen since scanner requires ORACLE_LAG_MIN_MOVE_PCT).
@@ -396,6 +405,7 @@ export class OracleLagExitMonitor {
       enabled: cfg.ORACLE_LAG_EXIT_ENABLED,
       compressionPct: cfg.ORACLE_LAG_EXIT_COMPRESSION_PCT,
       reversalBps: cfg.ORACLE_LAG_EXIT_REVERSAL_BPS,
+      reversalMinReturnPct: cfg.ORACLE_LAG_EXIT_REVERSAL_MIN_RETURN_PCT,
       maxHoldSec: cfg.ORACLE_LAG_EXIT_MAX_HOLD_SEC,
       nearResMinLeftMin: cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN,
       nearResMinReturnPct: cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_RETURN_PCT,
@@ -603,6 +613,7 @@ export class OracleLagExitMonitor {
       nowMs: now,
       compressionThreshold: cfg.ORACLE_LAG_EXIT_COMPRESSION_PCT,
       reversalBps: cfg.ORACLE_LAG_EXIT_REVERSAL_BPS,
+      reversalMinReturnPct: cfg.ORACLE_LAG_EXIT_REVERSAL_MIN_RETURN_PCT,
       maxHoldSec: cfg.ORACLE_LAG_EXIT_MAX_HOLD_SEC,
       nearResMinLeftMin: cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN,
       nearResMinReturnPct: cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_RETURN_PCT,
