@@ -1233,6 +1233,18 @@ const envSchema = z.object({
   SPORTS_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   SPORTS_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(5),
   SPORTS_MARKET_LOOKAHEAD_H: z.coerce.number().int().min(1).optional().default(200),
+  // Only generate MLB signals from this inning onwards. Early innings have high
+  // variance (a 2-run lead in the 3rd easily reverses), which causes stop-losses
+  // to fire before the model's edge can materialise. Default 6 targets the back
+  // half of the game where outcomes are more predictable.
+  SPORTS_MLB_MIN_INNING: z.coerce.number().int().min(1).optional().default(6),
+  // In empty-book mode, sports signals post their maker order at the current
+  // market price + this premium instead of the logistic model probability. The
+  // model price can be 10-20% above the stale Polymarket mid (pre-game odds),
+  // causing an immediate paper loss that triggers the stop-loss on the next
+  // monitor tick. Near-market anchoring eliminates adverse selection while
+  // keeping the model probability for divergence-closed exit checks.
+  SPORTS_MAKER_PREMIUM_PCT: z.coerce.number().min(0).max(0.5).optional().default(0.02),
   // Purely informational — documents which TELEGRAM_CHANNELS entries are
   // sports-primary. Not used by runtime; channels are added directly to
   // TELEGRAM_CHANNELS and auto-classified by the category classifier.

@@ -92,6 +92,7 @@ const mockConfig = {
   ORACLE_LAG_MAKER_EDGE_BPS: 50,
   ORACLE_LAG_MAKER_RETRY_ON_REJECT: true,
   ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS: 0,
+  SPORTS_MAKER_PREMIUM_PCT: 0.02,
 };
 
 const mockLoadConfig = vi.fn(() => mockConfig);
@@ -1523,6 +1524,78 @@ describe('empty-book maker route', () => {
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('no_clob_book');
     expect(mockSubmitLimit).toHaveBeenCalledOnce();
+  });
+
+  it('sports YES anchors maker price near market price (not model probability)', async () => {
+    // Root-cause fix: model says Reds=59.4%, market (stale) at 46.5%.
+    // Old behaviour: post at 0.594 − 1.5% ≈ 0.58 → immediate -21% paper loss.
+    // New behaviour: anchor at market + 2% premium, capped at model.
+    //   marketSide = 0.465, nearMarket = 0.485, model = 0.594
+    //   fairValue  = min(0.485, 0.594) = 0.485
+    //   price      = 0.485 − 0.015 (EDGE_BPS=150) = 0.47
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'sports',
+        consensusProbability: 0.594,
+        outcomePrice: 0.465, // stale Polymarket mid (pre-game price for Reds)
+        edgeMagnitude: 0.129,
+        direction: 'YES',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.47 }));
+  });
+
+  it('sports NO anchors maker price near market NO price (not model probability)', async () => {
+    // Nationals winning 2-0 but market (stale) still shows Braves at 56.5%.
+    // direction=NO means we buy the NO token (betting Nationals win).
+    //   consensusProbability = 0.328 (Braves YES model prob)
+    //   outcomePrice = 0.565 (Braves YES market price)
+    //   NO market price = 1 − 0.565 = 0.435
+    //   nearMarket  = 0.435 + 0.02 = 0.455
+    //   model fair  = 1 − 0.328   = 0.672
+    //   fairValue   = min(0.455, 0.672) = 0.455
+    //   price       = 0.455 − 0.015 = 0.44
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'sports',
+        consensusProbability: 0.328,
+        outcomePrice: 0.565, // stale Braves YES price
+        edgeMagnitude: 0.237,
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.44 }));
+  });
+
+  it('sports maker price caps at model when market + premium exceeds model fair value', async () => {
+    // If the stale market is already close to model, use the model price not
+    // the (slightly higher) near-market anchor.
+    //   consensusProbability = 0.62, outcomePrice = 0.61
+    //   nearMarket = 0.61 + 0.02 = 0.63 > model = 0.62
+    //   fairValue  = min(0.63, 0.62) = 0.62
+    //   price      = 0.62 − 0.015 = 0.605 → 0.60
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'sports',
+        consensusProbability: 0.62,
+        outcomePrice: 0.61,
+        edgeMagnitude: 0.11,
+        direction: 'YES',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.60 }));
   });
 
   it('weather uses MAKER_EMPTY_BOOK_EDGE_BPS (150), not oracle-lag override', async () => {

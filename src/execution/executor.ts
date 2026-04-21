@@ -474,6 +474,20 @@ async function tryExecuteViaClobMaker(
         : 1 - signal.consensusProbability
       : null;
 
+  // Sports empty-book: anchor maker price near the current market price + a small
+  // premium instead of posting at the logistic model probability. The model can
+  // be 10-20% above the stale Polymarket mid (pre-game odds), so a fill at model
+  // price produces an immediate paper loss that triggers the stop-loss on the next
+  // monitor tick. Near-market anchoring (capped at the model fair value) avoids
+  // this while keeping consensusProbability intact for divergence-closed exits.
+  if (emptyBookMode && signal.source === 'sports' && signal.outcomePrice != null && fairValue != null) {
+    const marketSide =
+      signal.direction === 'YES' || signal.direction === 'UP'
+        ? signal.outcomePrice
+        : 1 - signal.outcomePrice;
+    fairValue = Math.min(marketSide + cfg.SPORTS_MAKER_PREMIUM_PCT, fairValue);
+  }
+
   // Cap fair value so the submitted price can never cross resting YES-book orders.
   // For YES direction: we BUY YES → price must stay below YES bestAsk.
   // For NO direction: we BUY NO @ P → SELL YES @ (1-P); to avoid crossing a
