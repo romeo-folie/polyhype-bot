@@ -701,7 +701,7 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
         ...(pendingOrder.consensusP != null && { consensusProbability: pendingOrder.consensusP }),
         outcomePrice: pos.avgPrice,
         sourcedFrom: pendingOrder.sourcedFrom ?? 'reconciled:clob',
-        reasoning: 'Async maker fill reconciled from CLOB position snapshot.',
+        reasoning: pendingOrder.reasoning ?? 'Async maker fill reconciled from CLOB position snapshot.',
       };
       void notifyTradeExecuted(signalLike, undefined, {
         venue: 'clob',

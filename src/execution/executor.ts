@@ -764,6 +764,7 @@ async function tryExecuteViaClobMaker(
         ...(bestAsk > 0 && { bestAskAtPosting: bestAsk }),
         intendedStakeUsd: signal.stakeUsd,
         sourcedFrom: signal.sourcedFrom,
+        reasoning: signal.reasoning,
       },
       Math.ceil(cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS / 1000) + 300,
     );

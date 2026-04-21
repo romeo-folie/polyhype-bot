@@ -33,6 +33,7 @@ export interface PendingMakerOrder {
   bestAskAtPosting?: number;
   intendedStakeUsd?: number;
   sourcedFrom?: string;
+  reasoning?: string;
 }
 
 function pendingKey(marketId: string): string {
