@@ -1515,7 +1515,7 @@ export async function executeSignal(
     return { signal, skipped: true, skipReason: 'already_executed' };
   }
 
-  // 1b) Calibration correction (Phase 8b) — adjust edge before sizing
+  // 1a) Calibration correction (Phase 8b) — adjust edge before sizing
   const recordSkip = (
     reason: string,
     finalExecutionPath = 'skipped',
@@ -1608,11 +1608,11 @@ export async function executeSignal(
             kind: 'conviction_multiplier',
             source: signal.source as 'osint' | 'copytrade' | 'spot',
             marketId: signal.marketId,
-            wouldBlock: false,
+            direction: signal.direction,
+            wouldBlock: true,
             metricValue: multiplier,
             threshold: 1,
             payload: {
-              direction: signal.direction,
               originalStake: signal.stakeUsd,
               wouldBoostTo: boostedStake,
             },

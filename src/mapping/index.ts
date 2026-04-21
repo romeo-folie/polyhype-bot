@@ -221,7 +221,7 @@ export async function runMapping(
       if (result.signal) {
         registerSignal(bestByMarket, result.signal);
       } else {
-        logger.info('[mapping] dropping headline — top-fit gated (strict mode)', {
+        logger.info('[mapping] top-fit gated (strict mode)', {
           title: item.title,
           marketId: topFit.candidate.marketId,
           fitScore: topFit.fitScore.toFixed(3),
@@ -281,7 +281,7 @@ export async function runMapping(
               kind: 'osint_sibling_fanout',
               source: 'osint',
               marketId: sibling.candidate.marketId,
-              wouldBlock: !cfg.OSINT_SIBLING_FANOUT_ENABLED,
+              wouldBlock: !cfg.OSINT_SIBLING_FANOUT_ENABLED && sibResult.signal != null,
               metricValue: sibling.fitScore,
               threshold: cfg.OSINT_SIBLING_MIN_FIT_SCORE,
               payload: {

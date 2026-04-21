@@ -203,7 +203,8 @@ export async function getCalibrationStats(
  * per-bucket correction factor when that bucket has enough samples. Falls back
  * to the overall category correction factor when the bucket is thin.
  *
- * Returns 1.0 (no adjustment) when stats are null or below the sample floor.
+ * Returns 1.0 (no adjustment) when stats are null or sampleSize is zero.
+ * The caller is responsible for enforcing an overall minimum sample floor before calling.
  */
 export function getBucketCorrection(
   stats: CalibrationStats | null,
