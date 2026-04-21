@@ -490,7 +490,7 @@ const envSchema = z.object({
   ORACLE_LAG_EXIT_REVERSAL_BPS: z.coerce.number().min(0).optional().default(5),
   // Only exit via reversal if PM return on the held side >= this (%). 0 = break-even gate:
   // if PM hasn't repriced at all, holding to resolution beats selling into the spread.
-  ORACLE_LAG_EXIT_REVERSAL_MIN_RETURN_PCT: z.coerce.number().optional().default(0),
+  ORACLE_LAG_EXIT_REVERSAL_MIN_RETURN_PCT: z.coerce.number().min(0).optional().default(0),
   // Hard timeout — drop the position after this many seconds regardless of
   // compression progress, since the convergence window is ~55s.
   // Upper-bounded at 1500s to stay safely inside the 30-minute exit-state

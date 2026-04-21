@@ -285,6 +285,37 @@ describe('evaluateOracleLagExit', () => {
       );
       expect(res?.trigger).toBe('oracle_lag_reversed');
     });
+
+    it('suppresses reversal when PM return is just below a non-zero reversalMinReturnPct', () => {
+      // YES at 0.525 → returnPct ≈ +0.96%, below minReturnPct=1.
+      // Verifies the threshold is treated as percent, not bps or decimal.
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateUp,
+          currentYesPrice: 0.525,
+          currentNoPrice: 0.475,
+          currentChainlinkPrice: 64961, // -6 bps adverse
+          reversalBps: 5,
+          reversalMinReturnPct: 1,
+        }),
+      );
+      expect(res).toBeNull();
+    });
+
+    it('fires reversal when PM return clears a non-zero reversalMinReturnPct', () => {
+      // YES at 0.5254 → returnPct ≈ +1.04%, above minReturnPct=1.
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateUp,
+          currentYesPrice: 0.5254,
+          currentNoPrice: 0.4746,
+          currentChainlinkPrice: 64961, // -6 bps adverse
+          reversalBps: 5,
+          reversalMinReturnPct: 1,
+        }),
+      );
+      expect(res?.trigger).toBe('oracle_lag_reversed');
+    });
   });
 
   describe('near_resolution trigger', () => {
