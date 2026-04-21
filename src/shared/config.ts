@@ -1473,6 +1473,15 @@ export function loadConfig(forceReload = false): AppConfig {
     throw new Error('ORACLE_LAG_MAX_TIME_LEFT_MIN must be >= ORACLE_LAG_MIN_TIME_LEFT_MIN');
   }
 
+  // Near-resolution exit threshold must be strictly below the entry floor so
+  // a freshly entered position isn't immediately triggered for exit.
+  if (cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN >= cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN) {
+    throw new Error(
+      'ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN must be < ORACLE_LAG_MIN_TIME_LEFT_MIN ' +
+        `(currently ${cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN} >= ${cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN})`,
+    );
+  }
+
   // All cross-validations passed — cache only a valid config.
   _config = cfg;
   return _config;

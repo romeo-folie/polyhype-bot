@@ -9,7 +9,7 @@
  *   2. For each, reads current PM YES price (WS cache → Gamma REST fallback)
  *      and the latest Chainlink tick.
  *   3. Evaluates trigger priority via the pure `evaluateOracleLagExit`:
- *        reversal > compression > timeout.
+ *        reversal > near_resolution > compression > timeout.
  *   4. If live (`ORACLE_LAG_EXIT_ENABLED=true`): calls `executeTakeProfit`.
  *      If shadow: writes one `shadow_observations` row per position.
  *   5. Always DELs the exit-state key after any trigger so we record one
@@ -210,10 +210,13 @@ export interface OracleLagExitEvalInput {
  * Pure function — no Redis, no feed. Decides whether (and why) to early-exit.
  *
  * Trigger priority (first matching rule wins):
- *   1. Reversal  — Chainlink has moved against us past the configured buffer.
- *                  Skipped when `chainlinkStale` (don't exit on missing data).
- *   2. Compression — PM has closed `>= compressionThreshold` of the entry gap.
- *   3. Timeout   — position has been held longer than `maxHoldSec`.
+ *   1. Reversal        — Chainlink has moved against us past the configured buffer.
+ *                        Skipped when `chainlinkStale` (don't exit on missing data).
+ *   2. Near-resolution — profitable with < nearResMinLeftMin remaining before market
+ *                        resolution (locks in gains before a last-minute reversal).
+ *                        Skipped when endDateMs=0 (legacy states without endDateMs).
+ *   3. Compression     — PM has closed `>= compressionThreshold` of the entry gap.
+ *   4. Timeout         — position has been held longer than `maxHoldSec`.
  *
  * Returns `null` when no trigger applies. `compressionPct` is clamped to
  * [0, 1] (overshoot past fair value still fires as 1.0).
