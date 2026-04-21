@@ -890,8 +890,9 @@ describe('scanHlMomentum — funding contra voter wiring', () => {
       fundingRate: 0.0002, openInterest: 1_000_000, markPrice: 70_000,
     });
     // Score comes back with 7 voters; fundingContra=neutral so the veto gate does not fire.
+    // score=6 ensures the MIN_SCORE gate passes regardless of the baseConfig default.
     mockScoreHlTrend.mockReturnValue({
-      score: 4,
+      score: 6,
       adx: 35,
       voters: {
         vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP',
@@ -1140,7 +1141,7 @@ describe('scanHlMomentum — HL-native voter veto gates', () => {
 
   it('blocks a LONG when fundingContra=DOWN (crowded longs — mean-reversion risk)', async () => {
     mockScoreHlTrend.mockReturnValue({
-      score: 5, adx: 30,
+      score: 6, adx: 30,
       voters: { vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP', obv: 'UP', cmf: 'UP', adxDI: 'neutral', fundingContra: 'DOWN' },
       voterCount: 7,
     });
@@ -1150,7 +1151,7 @@ describe('scanHlMomentum — HL-native voter veto gates', () => {
 
   it('blocks a SHORT when fundingContra=UP (crowded shorts)', async () => {
     mockScoreHlTrend.mockReturnValue({
-      score: -5, adx: 30,
+      score: -6, adx: 30,
       voters: { vwap: 'DOWN', emaFastVsSlow: 'DOWN', macdLine: 'DOWN', obv: 'DOWN', cmf: 'DOWN', adxDI: 'neutral', fundingContra: 'UP' },
       voterCount: 7,
     });
@@ -1160,7 +1161,7 @@ describe('scanHlMomentum — HL-native voter veto gates', () => {
 
   it('allows a LONG when fundingContra=neutral', async () => {
     mockScoreHlTrend.mockReturnValue({
-      score: 5, adx: 30,
+      score: 6, adx: 30,
       voters: { vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP', obv: 'UP', cmf: 'UP', adxDI: 'neutral', fundingContra: 'neutral' },
       voterCount: 7,
     });
@@ -1172,7 +1173,7 @@ describe('scanHlMomentum — HL-native voter veto gates', () => {
 
   it('blocks a LONG when oiDivergence=DOWN (short covering — fake breakout)', async () => {
     mockScoreHlTrend.mockReturnValue({
-      score: 5, adx: 30,
+      score: 6, adx: 30,
       voters: { vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP', obv: 'UP', cmf: 'UP', adxDI: 'neutral', oiDivergence: 'DOWN' },
       voterCount: 7,
     });
@@ -1182,7 +1183,7 @@ describe('scanHlMomentum — HL-native voter veto gates', () => {
 
   it('blocks a SHORT when oiDivergence=UP (forced liquidation — fake breakdown)', async () => {
     mockScoreHlTrend.mockReturnValue({
-      score: -5, adx: 30,
+      score: -6, adx: 30,
       voters: { vwap: 'DOWN', emaFastVsSlow: 'DOWN', macdLine: 'DOWN', obv: 'DOWN', cmf: 'DOWN', adxDI: 'neutral', oiDivergence: 'UP' },
       voterCount: 7,
     });
@@ -1192,7 +1193,7 @@ describe('scanHlMomentum — HL-native voter veto gates', () => {
 
   it('allows a LONG when oiDivergence=UP (OI expanding with price — real buying)', async () => {
     mockScoreHlTrend.mockReturnValue({
-      score: 5, adx: 30,
+      score: 6, adx: 30,
       voters: { vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP', obv: 'UP', cmf: 'UP', adxDI: 'neutral', oiDivergence: 'UP' },
       voterCount: 7,
     });
@@ -1204,7 +1205,7 @@ describe('scanHlMomentum — HL-native voter veto gates', () => {
 
   it('does not shadow-log when the veto fires (signal never reached shadow write)', async () => {
     mockScoreHlTrend.mockReturnValue({
-      score: 5, adx: 30,
+      score: 6, adx: 30,
       voters: { vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP', obv: 'UP', cmf: 'UP', adxDI: 'neutral', fundingContra: 'DOWN' },
       voterCount: 7,
     });
