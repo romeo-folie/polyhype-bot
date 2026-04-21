@@ -67,6 +67,8 @@ export interface OracleLagExitStateWrite {
   entryChainlinkMovePct: number;
   /** Wall-clock entry timestamp in ms. */
   entryTsMs: number;
+  /** Market resolution timestamp in ms — drives the near-resolution exit trigger. */
+  endDateMs: number;
 }
 
 /**
@@ -95,6 +97,7 @@ export async function writeOracleLagExitState(
       entryFairPyes: entryFairPyes.toFixed(6),
       direction: input.direction,
       entryTs: String(input.entryTsMs),
+      endDateMs: String(input.endDateMs),
       scannerVersion: SCANNER_VERSION,
     })
     .expire(key, EXIT_STATE_TTL_SEC)
@@ -112,6 +115,8 @@ export interface OracleLagExitState {
   entryChainlinkMovePct: number;
   entryFairPyes: number;
   entryTsMs: number;
+  /** Market resolution timestamp in ms. 0 for legacy states written before this field was added (near-res trigger won't fire). */
+  endDateMs: number;
   scannerVersion: string;
 }
 
@@ -129,6 +134,9 @@ export async function readOracleLagExitState(
   const entryChainlinkPrice = Number(raw.entryChainlinkPrice ?? '0');
   const entryChainlinkMovePct = Number(raw.entryChainlinkMovePct ?? '0');
   const entryFairPyes = Number(raw.entryFairPyes ?? '0.5');
+  // endDateMs defaults to 0 for legacy states — near-res trigger simply won't
+  // fire when timeLeftMin is deeply negative.
+  const endDateMs = Number(raw.endDateMs ?? '0');
   if (
     !Number.isFinite(entryTsMs) ||
     !Number.isFinite(entryPmYesPrice) ||
@@ -152,6 +160,7 @@ export async function readOracleLagExitState(
     entryChainlinkMovePct,
     entryFairPyes,
     entryTsMs,
+    endDateMs,
     scannerVersion: raw.scannerVersion ?? SCANNER_VERSION,
   };
 }
@@ -169,7 +178,8 @@ export async function clearOracleLagExitState(
 export type OracleLagExitTrigger =
   | 'oracle_lag_compressed'
   | 'oracle_lag_reversed'
-  | 'oracle_lag_timeout';
+  | 'oracle_lag_timeout'
+  | 'oracle_lag_near_resolution';
 
 export interface OracleLagExitDecision {
   trigger: OracleLagExitTrigger;
@@ -190,6 +200,10 @@ export interface OracleLagExitEvalInput {
   compressionThreshold: number;
   reversalBps: number;
   maxHoldSec: number;
+  /** Exit when profitable with < this many minutes left before resolution. */
+  nearResMinLeftMin: number;
+  /** Minimum return (%) on the held token before near-resolution trigger fires. */
+  nearResMinReturnPct: number;
 }
 
 /**
@@ -217,6 +231,8 @@ export function evaluateOracleLagExit(
     compressionThreshold,
     reversalBps,
     maxHoldSec,
+    nearResMinLeftMin,
+    nearResMinReturnPct,
   } = input;
 
   const ageSec = Math.max(0, (nowMs - state.entryTsMs) / 1000);
@@ -264,6 +280,21 @@ export function evaluateOracleLagExit(
   if (reversed) {
     return {
       trigger: 'oracle_lag_reversed',
+      compressionPct,
+      reversalBps: actualReversalBps,
+      ageSec,
+      returnPct,
+    };
+  }
+
+  // Near-resolution profit lock — fired after reversal but before compression
+  // so we lock in any positive return in the final window regardless of whether
+  // PM has fully repriced. endDateMs=0 on legacy states → timeLeftMin deeply
+  // negative → the `timeLeftMin > 0` guard silently skips.
+  const timeLeftMin = (state.endDateMs - nowMs) / 60_000;
+  if (timeLeftMin > 0 && timeLeftMin < nearResMinLeftMin && returnPct >= nearResMinReturnPct) {
+    return {
+      trigger: 'oracle_lag_near_resolution',
       compressionPct,
       reversalBps: actualReversalBps,
       ageSec,
@@ -363,6 +394,8 @@ export class OracleLagExitMonitor {
       compressionPct: cfg.ORACLE_LAG_EXIT_COMPRESSION_PCT,
       reversalBps: cfg.ORACLE_LAG_EXIT_REVERSAL_BPS,
       maxHoldSec: cfg.ORACLE_LAG_EXIT_MAX_HOLD_SEC,
+      nearResMinLeftMin: cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN,
+      nearResMinReturnPct: cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_RETURN_PCT,
       tickMs: cfg.ORACLE_LAG_EXIT_TICK_MS,
     });
 
@@ -500,7 +533,18 @@ export class OracleLagExitMonitor {
     // Position may have been closed by an inherited exit (TP/SL/stale/resolution)
     // between scanner-stamp and this tick. Drop the exit-state and move on.
     const position = await getPosition(this.redis, marketId, direction);
-    if (!position || position.pendingSettlement) {
+    if (!position) {
+      // Maker orders fill asynchronously — the reconciler imports the position
+      // minutes after the scanner writes the exit state. Skip this tick if the
+      // state is young (< 15 min); the position should land soon. Only delete
+      // once the state is old enough that a fill would have been imported.
+      if (Date.now() - state.entryTsMs < 15 * 60 * 1000) {
+        return;
+      }
+      await this.redis.del(key).catch(() => {});
+      return;
+    }
+    if (position.pendingSettlement) {
       await this.redis.del(key).catch(() => {});
       return;
     }
@@ -557,6 +601,8 @@ export class OracleLagExitMonitor {
       compressionThreshold: cfg.ORACLE_LAG_EXIT_COMPRESSION_PCT,
       reversalBps: cfg.ORACLE_LAG_EXIT_REVERSAL_BPS,
       maxHoldSec: cfg.ORACLE_LAG_EXIT_MAX_HOLD_SEC,
+      nearResMinLeftMin: cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN,
+      nearResMinReturnPct: cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_RETURN_PCT,
     });
 
     if (!decision) return;
