@@ -60,6 +60,7 @@ function makeRedis() {
       return 1;
     }),
     exists: vi.fn(async (key: string) => (store[key] ? 1 : 0)),
+    set: vi.fn(async () => 'OK'),
     sadd: vi.fn(async () => 1),
     sismember: vi.fn(async () => 0),
     _store: store,

@@ -13,46 +13,47 @@ export interface GammaMarket {
 /**
  * Fetch market metadata from Polymarket Gamma API by conditionId.
  * Validates the condition exists and returns the numeric ID and question.
+ * Tries live markets first; if empty, retries with closed=true for resolved markets.
  */
 export async function fetchMarketByConditionId(conditionId: string): Promise<GammaMarket | null> {
-  const url = `https://gamma-api.polymarket.com/markets?condition_ids=${conditionId}`;
-  
-  try {
-    const resp = await fetch(url, {
-      headers: { 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (!resp.ok) return null;
-
-    const data = await resp.json();
-    if (!Array.isArray(data) || data.length === 0) return null;
-
-    const market = data[0] as Record<string, unknown>;
-    
-    // Gamma returns 'id' as a numeric string, 'question' as the title, 
-    // and 'clobTokenIds' as a JSON string or array.
-    const clobTokenIdsRaw = market.clobTokenIds;
+  const parseMarket = (raw: Record<string, unknown>): GammaMarket => {
+    const clobTokenIdsRaw = raw.clobTokenIds;
     let clobTokenIds: string[] = [];
     if (typeof clobTokenIdsRaw === 'string') {
       clobTokenIds = JSON.parse(clobTokenIdsRaw) as string[];
     } else if (Array.isArray(clobTokenIdsRaw)) {
       clobTokenIds = clobTokenIdsRaw as string[];
     }
-
     return {
-      id: String(market.id),
-      question: String(market.question),
-      conditionId: String(market.conditionId),
+      id: String(raw.id),
+      question: String(raw.question),
+      conditionId: String(raw.conditionId),
       clobTokenIds,
-      active: market.active === true,
-      closed: market.closed === true,
-      endDate: typeof market.endDate === 'string' ? market.endDate : null,
+      active: raw.active === true,
+      closed: raw.closed === true,
+      endDate: typeof raw.endDate === 'string' ? raw.endDate : null,
     };
-  } catch (err) {
-    logger.error('[polymarket-gamma] fetch failed', { conditionId, error: String(err) });
-    return null;
-  }
+  };
+
+  const fetchOne = async (closed: boolean): Promise<GammaMarket | null> => {
+    const url = `https://gamma-api.polymarket.com/markets?condition_ids=${conditionId}${closed ? '&closed=true' : ''}`;
+    try {
+      const resp = await fetch(url, {
+        headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      if (!Array.isArray(data) || data.length === 0) return null;
+      return parseMarket(data[0] as Record<string, unknown>);
+    } catch (err) {
+      logger.error('[polymarket-gamma] fetch failed', { conditionId, closed, error: String(err) });
+      return null;
+    }
+  };
+
+  // Live markets first; Gamma excludes closed markets from the default query.
+  return (await fetchOne(false)) ?? (await fetchOne(true));
 }
 
 /**
