@@ -1376,6 +1376,20 @@ export async function executeSignal(
     return { signal, skipped: true, skipReason: 'global_governor' };
   }
 
+  // API migration blackout: block new Polymarket entries into markets that resolve
+  // on/after the configured cutover date so no open positions need managing post-cutover.
+  if (!signal.isFutures && cfg.API_MIGRATION_CUTOVER_DATE && signal.endDate) {
+    const marketEndDay = signal.endDate.slice(0, 10);
+    if (marketEndDay >= cfg.API_MIGRATION_CUTOVER_DATE) {
+      logger.info('[executor] skipping — market resolves on/after API migration cutover', {
+        marketId: signal.marketId,
+        endDate: signal.endDate,
+        cutoverDate: cfg.API_MIGRATION_CUTOVER_DATE,
+      });
+      return { signal, skipped: true, skipReason: 'pre_migration_blackout' };
+    }
+  }
+
   const executionId = createHash('sha256')
     .update(`${signal.marketId}:${signal.direction}:${Date.now()}:${Math.random()}`)
     .digest('hex')

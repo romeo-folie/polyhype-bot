@@ -98,6 +98,12 @@ const envSchema = z.object({
     })
     .transform((v: string) => !['false', '0'].includes(v.trim().toLowerCase())),
   CLOB_ORDER_TYPE: z.enum(['FOK', 'FAK']).optional().default('FAK'),
+  // YYYY-MM-DD. When set, new entries into markets resolving on/after this date are blocked.
+  // Use before an API migration cutover to avoid accumulating positions that need post-cutover management.
+  API_MIGRATION_CUTOVER_DATE: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'API_MIGRATION_CUTOVER_DATE must be YYYY-MM-DD')
+    .optional(),
 
   // Model selection (optional — defaults to recommended fast/cheap models)
   OPENAI_MODEL: z.string().optional().default('gpt-4o-mini'),
