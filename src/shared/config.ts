@@ -1396,6 +1396,10 @@ const envSchema = z.object({
   // priced outcomes). 3% fired within 82 seconds of entry on spread jitter.
   WEATHER_TAKE_PROFIT: z.coerce.number().min(0).optional().default(0.05),
   WEATHER_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.15),
+  // Gate: skip NO bets on tail brackets ("or higher" / "or below") when the model's
+  // own P(YES) exceeds this threshold. Prevents betting against the model's directional
+  // call — edgeNo can be spuriously positive even when modelProb is 0.80+ for YES.
+  WEATHER_THRESHOLD_NO_BET_MAX_PROB: z.coerce.number().min(0).max(1).optional().default(0.5),
   // --- WEATHER GROUND-TRUTH RECONCILER ---
   // Fills `weather_ground_truth` with observed daily highs for past events, so
   // shadow-scan predictions in `shadow_observations` can be validated against

@@ -737,6 +737,91 @@ describe('findMispricedBrackets', () => {
     for (const o of yesOpps) expect(o.allowedByConfig).toBe(false);
     for (const o of noOpps) expect(o.allowedByConfig).toBe(true);
   });
+
+  // ---------------------------------------------------------------------------
+  // Tail NO-bet gate (maxTailNoBetModelProb)
+  // ---------------------------------------------------------------------------
+
+  it('blocks NO bet on high-tail bracket when modelProb > maxTailNoBetModelProb', () => {
+    // "31°C or higher" (low=31, high=null). Forecast 32°C with stdDev=3 →
+    // modelProb ≈ 0.69 > 0.5. noPrice=0.25 gives edgeNo≈0.06 (spurious positive).
+    const event = {
+      eventId: 'e-tail-hi', slug: 'tail-hi', city: 'chicago', coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14', unit: 'celsius' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: 31, high: null, label: '31°C or higher',
+          yesPrice: 0.72, noPrice: 0.25 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 32, stdDev: 3, source: 'noaa' as const, ensembleMembers: 0 };
+
+    // Default gate (0.5): NO bet with modelProb ~0.69 should be blocked.
+    const { opportunities: blocked } = findMispricedBrackets(event, forecast, 1, 0.0, 1.0, 0.0, new Set(['YES', 'NO']), null, false, 14, 0.5);
+    expect(blocked.filter((o) => o.tradeSide === 'NO')).toHaveLength(0);
+  });
+
+  it('blocks NO bet on low-tail bracket when modelProb > maxTailNoBetModelProb', () => {
+    // "39°F or below" (low=null, high=39). Forecast 38°F with stdDev=3 →
+    // modelProb ≈ 0.69 > 0.5. noPrice=0.25 gives edgeNo≈0.06 (spurious positive).
+    const event = {
+      eventId: 'e-tail-lo', slug: 'tail-lo', city: 'chicago', coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14', unit: 'fahrenheit' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: null, high: 39, label: '39°F or below',
+          yesPrice: 0.72, noPrice: 0.25 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 38, stdDev: 3, source: 'noaa' as const, ensembleMembers: 0 };
+
+    const { opportunities: blocked } = findMispricedBrackets(event, forecast, 1, 0.0, 1.0, 0.0, new Set(['YES', 'NO']), null, false, 14, 0.5);
+    expect(blocked.filter((o) => o.tradeSide === 'NO')).toHaveLength(0);
+  });
+
+  it('allows NO bet on tail bracket when modelProb < maxTailNoBetModelProb', () => {
+    // "39°F or below" (low=null, high=39). Forecast 52°F → modelProb ≈ 0 << 0.5.
+    // Model agrees with NO; the gate must not block it.
+    const event = {
+      eventId: 'e-tail-lo-pass', slug: 'tail-lo-pass', city: 'chicago', coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14', unit: 'fahrenheit' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: null, high: 39, label: '39°F or below',
+          yesPrice: 0.02, noPrice: 0.80 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 52, stdDev: 3, source: 'noaa' as const, ensembleMembers: 0 };
+
+    const { opportunities: opps } = findMispricedBrackets(event, forecast, 1, 0.0, 1.0, 0.0, new Set(['YES', 'NO']), null, false, 14, 0.5);
+    const noOpps = opps.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps.length).toBeGreaterThan(0);
+  });
+
+  it('does NOT block NO bet on an interior bracket even when modelProb > 0.5', () => {
+    // Interior bracket (low=50, high=51): NOT a tail bracket.
+    // Forecast 50°F, stdDev=0.5 → modelProb ≈ 0.84 for this bracket.
+    // yesPrice=0.90 means edgeYes<0; noPrice=0.05 means edgeNo≈0.11 → tradeSide=NO.
+    // Gate must only fire for tail brackets, not interior ones.
+    const event = {
+      eventId: 'e-interior-no', slug: 'interior-no', city: 'chicago', coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14', unit: 'fahrenheit' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: 50, high: 51, label: '50-51°F',
+          yesPrice: 0.90, noPrice: 0.05 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 50, stdDev: 0.5, source: 'noaa' as const, ensembleMembers: 0 };
+
+    const { opportunities: opps } = findMispricedBrackets(event, forecast, 1, 0.0, 1.0, 0.0, new Set(['YES', 'NO']), null, false, 14, 0.5);
+    const noOpps = opps.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps.length).toBeGreaterThan(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

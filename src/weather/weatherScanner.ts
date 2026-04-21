@@ -580,6 +580,7 @@ export function findMispricedBrackets(
   cityBias: CityBias | null = null,
   biasCorrectionEnabled = false,
   biasMinSamples = 14,
+  maxTailNoBetModelProb = 0.5,
 ): FindMispricedResult {
   const opportunities: WeatherBracketOpportunity[] = [];
 
@@ -664,6 +665,20 @@ export function findMispricedBrackets(
     }
 
     if (edge < minEdge) continue;
+
+    // Gate: tail brackets ("X or higher" / "X or below") produce spuriously positive
+    // NO edge when the model's P(YES) is high — edgeNo = (1-modelProb) - noPrice can
+    // be positive at modelProb=0.82 if noPrice=0.08. Betting NO there means betting
+    // against our own forecast direction; skip unless model genuinely leans NO.
+    if (tradeSide === 'NO' && (bracket.low === null || bracket.high === null) && modelProb > maxTailNoBetModelProb) {
+      logger.debug('[weather] skipping tail NO — model favours YES', {
+        city: event.city,
+        bracket: bracket.label,
+        modelProb: modelProb.toFixed(3),
+        maxTailNoBetModelProb,
+      });
+      continue;
+    }
 
     // Skip near-zero markets where liquidity is negligible
     if (bracket.yesPrice < 0.005 && tradeSide === 'YES') continue;
@@ -794,6 +809,7 @@ export async function scanWeatherMarkets(
       cityBias,
       cfg.WEATHER_BIAS_CORRECTION_ENABLED,
       cfg.WEATHER_BIAS_MIN_SAMPLES,
+      cfg.WEATHER_THRESHOLD_NO_BET_MAX_PROB,
     );
     const effectiveStdDev = forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER;
     const coverageStatus = modelSum >= cfg.WEATHER_MIN_MODEL_COVERAGE ? 'ok' : 'skipped_low_coverage';
