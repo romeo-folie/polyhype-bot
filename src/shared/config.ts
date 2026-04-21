@@ -102,7 +102,15 @@ const envSchema = z.object({
   // Use before an API migration cutover to avoid accumulating positions that need post-cutover management.
   API_MIGRATION_CUTOVER_DATE: z
     .string()
+    .trim()
     .regex(/^\d{4}-\d{2}-\d{2}$/, 'API_MIGRATION_CUTOVER_DATE must be YYYY-MM-DD')
+    .refine(
+      (v: string) => {
+        const date = new Date(`${v}T00:00:00Z`);
+        return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === v;
+      },
+      { message: 'API_MIGRATION_CUTOVER_DATE must be a valid calendar date in YYYY-MM-DD format' }
+    )
     .optional(),
 
   // Model selection (optional — defaults to recommended fast/cheap models)
