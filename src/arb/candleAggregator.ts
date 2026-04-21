@@ -79,9 +79,9 @@ const HL_TO_BINANCE_PAIR: Record<string, string> = {
   STX: 'stxusdt',
   // --- Political / meme ---
   TRUMP: 'trumpusdt',
-  kPEPE: 'pepeusdt',      // HL 1000× unit; same price direction as Binance PEPEUSDT
+  KPEPE: 'pepeusdt',      // HL 1000× unit; same price direction as Binance PEPEUSDT
   WIF: 'wifusdt',
-  kBONK: 'bonkusdt',      // HL 1000× unit; same price direction as Binance BONKUSDT
+  KBONK: 'bonkusdt',      // HL 1000× unit; same price direction as Binance BONKUSDT
   PENGU: 'penguusdt',
   // --- Narrative ---
   FET: 'fetusdt',
