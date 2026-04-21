@@ -1984,4 +1984,87 @@ describe('empty-book maker route', () => {
     expect(result.skipReason).toBe('spread_too_wide');
     expect(mockSubmitLimit).not.toHaveBeenCalled();
   });
+
+  describe('API migration blackout gate', () => {
+    beforeEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).API_MIGRATION_CUTOVER_DATE = '2026-04-28';
+    });
+
+    afterEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (mockConfig as any).API_MIGRATION_CUTOVER_DATE;
+    });
+
+    it('blocks a market whose endDate is on the cutover date', async () => {
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({ endDate: '2026-04-28T20:00:00Z' }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipped).toBe(true);
+      expect(result.skipReason).toBe('pre_migration_blackout');
+      expect(mockSubmit).not.toHaveBeenCalled();
+    });
+
+    it('blocks a market whose endDate is after the cutover date', async () => {
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({ endDate: '2026-05-10T12:00:00Z' }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipped).toBe(true);
+      expect(result.skipReason).toBe('pre_migration_blackout');
+    });
+
+    it('does not block a market that resolves before the cutover date', async () => {
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({ endDate: '2026-04-27T23:59:59Z' }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipReason).not.toBe('pre_migration_blackout');
+    });
+
+    it('does not block when endDate is absent', async () => {
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({ endDate: undefined }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipReason).not.toBe('pre_migration_blackout');
+    });
+
+    it('does not block futures signals regardless of endDate', async () => {
+      const redis = makeRedis();
+      try {
+        const result = await executeSignal(
+          makeSignal({ isFutures: true, endDate: '2026-05-01T00:00:00Z', marketId: 'BTC' }),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          redis as any,
+        );
+        // If it returned, confirm the gate didn't fire
+        expect(result.skipReason).not.toBe('pre_migration_blackout');
+      } catch (err) {
+        // HL client throws (not configured in test env) — gate was not hit
+        expect((err as Error).message).not.toContain('pre_migration_blackout');
+      }
+    });
+
+    it('is inactive when API_MIGRATION_CUTOVER_DATE is not set', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (mockConfig as any).API_MIGRATION_CUTOVER_DATE;
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({ endDate: '2026-05-01T00:00:00Z' }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipReason).not.toBe('pre_migration_blackout');
+    });
+  });
 });
