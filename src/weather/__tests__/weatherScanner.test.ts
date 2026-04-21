@@ -582,8 +582,8 @@ describe('findMispricedBrackets', () => {
 
     // Pass minModelCoverage=0 to disable the coverage guard — this test focuses
     // on multiplier behaviour with an intentionally minimal 2-bracket event.
-    const { opportunities: baselineOpps } = findMispricedBrackets(event, forecast, 1, 0, 1.0, 0);
-    const { opportunities: widenedOpps }  = findMispricedBrackets(event, forecast, 1, 0, 1.5, 0);
+    const { opportunities: baselineOpps } = findMispricedBrackets(event, forecast, 1, 0, { stddevMultiplier: 1.0, minModelCoverage: 0 });
+    const { opportunities: widenedOpps }  = findMispricedBrackets(event, forecast, 1, 0, { stddevMultiplier: 1.5, minModelCoverage: 0 });
 
     const centralBase = baselineOpps.find((o) => o.bracketLabel === 'central')!;
     const centralWide = widenedOpps.find((o) => o.bracketLabel === 'central')!;
@@ -659,7 +659,7 @@ describe('findMispricedBrackets', () => {
     // Forecast centred on the brackets so these 4 carry ~40-50% of total mass
     const forecast = { forecastHigh: 50, stdDev: 4, source: 'noaa' as const, ensembleMembers: 0 };
 
-    const { opportunities: opps } = findMispricedBrackets(event, forecast, 1, 0.0, 1.0, 0.95);
+    const { opportunities: opps } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0.95 });
     expect(opps).toHaveLength(0);
     expect(logger.warn).toHaveBeenCalledWith(
       '[weather] model probabilities below coverage threshold, skipping event',
@@ -693,7 +693,7 @@ describe('findMispricedBrackets', () => {
     };
     const forecast = { forecastHigh: 52, stdDev: 3, source: 'combined' as const, ensembleMembers: 31 };
 
-    const bothOpps = findMispricedBrackets(event, forecast, 1, 0.08, 1.0, 0.95, new Set<'YES' | 'NO'>(['YES', 'NO'])).opportunities;
+    const bothOpps = findMispricedBrackets(event, forecast, 1, 0.08, { allowedSides: new Set<'YES' | 'NO'>(['YES', 'NO']) }).opportunities;
     expect(bothOpps.length).toBeGreaterThan(0);
     expect(bothOpps.every((o) => o.allowedByConfig)).toBe(true);
   });
@@ -724,7 +724,7 @@ describe('findMispricedBrackets', () => {
     };
     const forecast = { forecastHigh: 52, stdDev: 3, source: 'combined' as const, ensembleMembers: 31 };
 
-    const noOnly = findMispricedBrackets(event, forecast, 1, 0.08, 1.0, 0.95, new Set<'YES' | 'NO'>(['NO'])).opportunities;
+    const noOnly = findMispricedBrackets(event, forecast, 1, 0.08, { allowedSides: new Set<'YES' | 'NO'>(['NO']) }).opportunities;
     // Shadow obs still sees the opps so calibration data keeps flowing.
     expect(noOnly.length).toBeGreaterThan(0);
     const yesOpps = noOnly.filter((o) => o.tradeSide === 'YES');
@@ -736,6 +736,91 @@ describe('findMispricedBrackets', () => {
     // Every YES-side opp in this event is gated; every NO-side opp stays tradable.
     for (const o of yesOpps) expect(o.allowedByConfig).toBe(false);
     for (const o of noOpps) expect(o.allowedByConfig).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Tail NO-bet gate (maxTailNoBetModelProb)
+  // ---------------------------------------------------------------------------
+
+  it('blocks NO bet on high-tail bracket when modelProb > maxTailNoBetModelProb', () => {
+    // "31°C or higher" (low=31, high=null). Forecast 32°C with stdDev=3 →
+    // modelProb ≈ 0.69 > 0.5. noPrice=0.25 gives edgeNo≈0.06 (spurious positive).
+    const event = {
+      eventId: 'e-tail-hi', slug: 'tail-hi', city: 'chicago', coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14', unit: 'celsius' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: 31, high: null, label: '31°C or higher',
+          yesPrice: 0.72, noPrice: 0.25 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 32, stdDev: 3, source: 'noaa' as const, ensembleMembers: 0 };
+
+    // Default gate (0.5): NO bet with modelProb ~0.69 should be blocked.
+    const { opportunities: blocked } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0, maxTailNoBetModelProb: 0.5 });
+    expect(blocked.filter((o) => o.tradeSide === 'NO')).toHaveLength(0);
+  });
+
+  it('blocks NO bet on low-tail bracket when modelProb > maxTailNoBetModelProb', () => {
+    // "39°F or below" (low=null, high=39). Forecast 38°F with stdDev=3 →
+    // modelProb ≈ 0.69 > 0.5. noPrice=0.25 gives edgeNo≈0.06 (spurious positive).
+    const event = {
+      eventId: 'e-tail-lo', slug: 'tail-lo', city: 'chicago', coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14', unit: 'fahrenheit' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: null, high: 39, label: '39°F or below',
+          yesPrice: 0.72, noPrice: 0.25 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 38, stdDev: 3, source: 'noaa' as const, ensembleMembers: 0 };
+
+    const { opportunities: blocked } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0, maxTailNoBetModelProb: 0.5 });
+    expect(blocked.filter((o) => o.tradeSide === 'NO')).toHaveLength(0);
+  });
+
+  it('allows NO bet on tail bracket when modelProb < maxTailNoBetModelProb', () => {
+    // "39°F or below" (low=null, high=39). Forecast 52°F → modelProb ≈ 0 << 0.5.
+    // Model agrees with NO; the gate must not block it.
+    const event = {
+      eventId: 'e-tail-lo-pass', slug: 'tail-lo-pass', city: 'chicago', coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14', unit: 'fahrenheit' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: null, high: 39, label: '39°F or below',
+          yesPrice: 0.02, noPrice: 0.80 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 52, stdDev: 3, source: 'noaa' as const, ensembleMembers: 0 };
+
+    const { opportunities: opps } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0, maxTailNoBetModelProb: 0.5 });
+    const noOpps = opps.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps.length).toBeGreaterThan(0);
+  });
+
+  it('does NOT block NO bet on an interior bracket even when modelProb > 0.5', () => {
+    // Interior bracket (low=50, high=51): NOT a tail bracket.
+    // Forecast 50°F, stdDev=0.5 → modelProb ≈ 0.84 for this bracket.
+    // yesPrice=0.90 means edgeYes<0; noPrice=0.05 means edgeNo≈0.11 → tradeSide=NO.
+    // Gate must only fire for tail brackets, not interior ones.
+    const event = {
+      eventId: 'e-interior-no', slug: 'interior-no', city: 'chicago', coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14', unit: 'fahrenheit' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: 50, high: 51, label: '50-51°F',
+          yesPrice: 0.90, noPrice: 0.05 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 50, stdDev: 0.5, source: 'noaa' as const, ensembleMembers: 0 };
+
+    const { opportunities: opps } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0, maxTailNoBetModelProb: 0.5 });
+    const noOpps = opps.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps.length).toBeGreaterThan(0);
   });
 });
 
@@ -770,8 +855,8 @@ describe('findMispricedBrackets - city bias correction', () => {
   it('bias disabled → forecastHigh unchanged, biasApplied=false on result and opps', () => {
     const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 20, updatedAt: '' };
     const result = findMispricedBrackets(
-      biasEvent, biasBaseForecast, 1, 0.01, 1.0, 0.0, new Set(['YES', 'NO']),
-      cityBias, false, 14,
+      biasEvent, biasBaseForecast, 1, 0.01,
+      { minModelCoverage: 0, cityBias, biasCorrectionEnabled: false },
     );
     expect(result.biasApplied).toBe(false);
     for (const opp of result.opportunities) {
@@ -785,8 +870,8 @@ describe('findMispricedBrackets - city bias correction', () => {
     // empiricalStddev=2.5 < stdDev=3 → effectiveStdDev stays at 3 (max wins)
     const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 20, updatedAt: '' };
     const result = findMispricedBrackets(
-      biasEvent, biasBaseForecast, 1, 0.01, 1.0, 0.0, new Set(['YES', 'NO']),
-      cityBias, true, 14,
+      biasEvent, biasBaseForecast, 1, 0.01,
+      { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
     );
     expect(result.biasApplied).toBe(true);
     expect(result.opportunities.length).toBeGreaterThan(0);
@@ -805,8 +890,8 @@ describe('findMispricedBrackets - city bias correction', () => {
     // empiricalStddev=5 > stdDev=3 → effectiveStdDev should be 5
     const cityBias = { meanBias: 2.0, empiricalStddev: 5.0, sampleSize: 20, updatedAt: '' };
     const result = findMispricedBrackets(
-      biasEvent, biasBaseForecast, 1, 0.01, 1.0, 0.0, new Set(['YES', 'NO']),
-      cityBias, true, 14,
+      biasEvent, biasBaseForecast, 1, 0.01,
+      { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
     );
     expect(result.biasApplied).toBe(true);
     for (const opp of result.opportunities) {
@@ -817,8 +902,8 @@ describe('findMispricedBrackets - city bias correction', () => {
   it('bias enabled + sampleSize < threshold → correction not applied, result.biasApplied=false', () => {
     const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 10, updatedAt: '' };
     const result = findMispricedBrackets(
-      biasEvent, biasBaseForecast, 1, 0.01, 1.0, 0.0, new Set(['YES', 'NO']),
-      cityBias, true, 14,  // minSamples=14, cityBias.sampleSize=10 → below threshold
+      biasEvent, biasBaseForecast, 1, 0.01,
+      { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true, biasMinSamples: 14 }, // sampleSize=10 < 14 → no correction
     );
     expect(result.biasApplied).toBe(false);
     for (const opp of result.opportunities) {
@@ -831,8 +916,8 @@ describe('findMispricedBrackets - city bias correction', () => {
     // High minEdge so no brackets pass, but bias was still applied internally
     const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 20, updatedAt: '' };
     const result = findMispricedBrackets(
-      biasEvent, biasBaseForecast, 1, 0.99, 1.0, 0.0, new Set(['YES', 'NO']),
-      cityBias, true, 14,
+      biasEvent, biasBaseForecast, 1, 0.99,
+      { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
     );
     expect(result.opportunities).toHaveLength(0);
     expect(result.biasApplied).toBe(true); // was applied even though no opps returned
@@ -841,8 +926,8 @@ describe('findMispricedBrackets - city bias correction', () => {
   it('shadow payload contains rawForecastHigh, correctedForecastHigh, and effectiveStdDev', () => {
     const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 20, updatedAt: '' };
     const { opportunities } = findMispricedBrackets(
-      biasEvent, biasBaseForecast, 1, 0.01, 1.0, 0.0, new Set(['YES', 'NO']),
-      cityBias, true, 14,
+      biasEvent, biasBaseForecast, 1, 0.01,
+      { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
     );
     expect(opportunities.length).toBeGreaterThan(0);
     const opp = opportunities[0]!;
