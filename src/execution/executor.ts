@@ -35,7 +35,7 @@ import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { computeATR } from '../arb/indicators.js';
 import { isMemeSymbol } from '../futures/hlMomentumScanner.js';
 import { loadConfig } from '../shared/config.js';
-import { getCalibrationStats, applyCalibrationCorrection, getBucketCorrection } from '../shared/calibration.js';
+import { getCalibrationStats, getBucketCorrection } from '../shared/calibration.js';
 import { inferCategory } from '../shared/outcomeRecorder.js';
 import {
   recordArbLatency,
@@ -70,7 +70,7 @@ const CONVICTION_KEY_PREFIX = 'signal:recent:';
  * Shadow-logs when CONVICTION_MULTIPLIER_ENABLED=false so we can review the
  * distribution before flipping live.
  */
-async function getConvictionMultiplier(
+export async function getConvictionMultiplier(
   redis: Redis,
   marketId: string,
   direction: string,
@@ -1538,32 +1538,29 @@ export async function executeSignal(
     try {
       const category = inferCategory(signal.question);
       const cal = await getCalibrationStats(redis, category);
-      const correctedEdge = applyCalibrationCorrection(
-        signal.edgeMagnitude ?? 0,
-        cal,
-        cfg.CALIBRATION_MIN_SAMPLES,
-      );
-      if (cal && correctedEdge !== signal.edgeMagnitude) {
-        // Use per-bucket correction factor when that bucket has enough samples;
-        // fall back to the overall category factor when the bucket is thin.
+      if (cal && cal.sampleSize >= cfg.CALIBRATION_MIN_SAMPLES) {
+        // Single factor: per-bucket when sampled, overall otherwise.
         const correctionFactor = getBucketCorrection(
           cal,
           signal.consensusProbability ?? 0.5,
           cfg.CALIBRATION_MIN_BUCKET_SAMPLES,
         );
-        const correctedStake = Math.max(0, signal.stakeUsd * correctionFactor);
-        const usedBucket = correctionFactor !== cal.edgeCorrectionFactor;
-        logger.info('[executor] calibration correction applied', {
-          category,
-          consensusP: signal.consensusProbability,
-          originalEdge: signal.edgeMagnitude,
-          correctedEdge,
-          originalStake: signal.stakeUsd,
-          correctedStake,
-          factor: correctionFactor,
-          bucketAware: usedBucket,
-        });
-        signal = { ...signal, edgeMagnitude: correctedEdge, stakeUsd: correctedStake };
+        if (correctionFactor !== 1) {
+          const correctedEdge = Math.max(0, (signal.edgeMagnitude ?? 0) * correctionFactor);
+          const correctedStake = Math.max(0, signal.stakeUsd * correctionFactor);
+          const usedBucket = correctionFactor !== cal.edgeCorrectionFactor;
+          logger.info('[executor] calibration correction applied', {
+            category,
+            consensusP: signal.consensusProbability,
+            originalEdge: signal.edgeMagnitude,
+            correctedEdge,
+            originalStake: signal.stakeUsd,
+            correctedStake,
+            factor: correctionFactor,
+            bucketAware: usedBucket,
+          });
+          signal = { ...signal, edgeMagnitude: correctedEdge, stakeUsd: correctedStake };
+        }
       }
     } catch (err: unknown) {
       logger.warn('[executor] calibration lookup failed (non-fatal)', {
@@ -1573,7 +1570,8 @@ export async function executeSignal(
   }
 
   // 1b) Multi-signal conviction multiplier — scale stake when independent sources agree.
-  if (!signal.isFutures && signal.source) {
+  const CONVICTION_ELIGIBLE_SOURCES = new Set(['osint', 'copytrade', 'spot']);
+  if (!signal.isFutures && signal.source && CONVICTION_ELIGIBLE_SOURCES.has(signal.source)) {
     try {
       const multiplier = await getConvictionMultiplier(
         redis,
