@@ -35,16 +35,21 @@ export async function fetchMarketByConditionId(conditionId: string): Promise<Gam
     };
   };
 
-  const fetchOne = async (closed: boolean): Promise<GammaMarket | null> => {
-    const url = `https://gamma-api.polymarket.com/markets?condition_ids=${conditionId}${closed ? '&closed=true' : ''}`;
+  // Returns the parsed market, null on error/non-OK, or the sentinel 'empty' when
+  // the request succeeded but Gamma returned no results (the only case warranting a retry).
+  const fetchOne = async (closed: boolean): Promise<GammaMarket | null | 'empty'> => {
+    const url = `https://gamma-api.polymarket.com/markets?condition_ids=${encodeURIComponent(conditionId)}${closed ? '&closed=true' : ''}`;
     try {
       const resp = await fetch(url, {
         headers: { 'Accept': 'application/json' },
         signal: AbortSignal.timeout(10_000),
       });
-      if (!resp.ok) return null;
+      if (!resp.ok) {
+        logger.warn('[polymarket-gamma] non-OK response', { conditionId, closed, status: resp.status });
+        return null;
+      }
       const data = await resp.json();
-      if (!Array.isArray(data) || data.length === 0) return null;
+      if (!Array.isArray(data) || data.length === 0) return 'empty';
       return parseMarket(data[0] as Record<string, unknown>);
     } catch (err) {
       logger.error('[polymarket-gamma] fetch failed', { conditionId, closed, error: String(err) });
@@ -53,7 +58,12 @@ export async function fetchMarketByConditionId(conditionId: string): Promise<Gam
   };
 
   // Live markets first; Gamma excludes closed markets from the default query.
-  return (await fetchOne(false)) ?? (await fetchOne(true));
+  // Only retry with closed=true when the first call returned an empty result set —
+  // not on HTTP errors, to avoid double-hitting on 4xx/5xx/429 responses.
+  const first = await fetchOne(false);
+  if (first !== 'empty') return first;
+  const second = await fetchOne(true);
+  return second === 'empty' ? null : second;
 }
 
 /**
