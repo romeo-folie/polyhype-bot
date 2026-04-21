@@ -25,6 +25,9 @@ import {
 
 const NOW_MS = Date.UTC(2026, 3, 14, 12, 0, 0);
 
+// Market resolves 10 minutes after the fixture's NOW_MS.
+const END_DATE_MS = NOW_MS + 10 * 60 * 1000;
+
 function buildState(overrides: Partial<OracleLagExitState> = {}): OracleLagExitState {
   return {
     marketId: 'm-test',
@@ -36,6 +39,7 @@ function buildState(overrides: Partial<OracleLagExitState> = {}): OracleLagExitS
     entryChainlinkMovePct: 0.08, // +8 bps
     entryFairPyes: 0.5 + 0.08 / 100, // 0.5008
     entryTsMs: NOW_MS,
+    endDateMs: END_DATE_MS,
     scannerVersion: 'oracle-lag-v1',
     ...overrides,
   };
@@ -54,6 +58,8 @@ function buildInput(
     compressionThreshold: 0.7,
     reversalBps: 5,
     maxHoldSec: 180,
+    nearResMinLeftMin: 3,
+    nearResMinReturnPct: 0.5,
     ...overrides,
   };
 }
@@ -246,6 +252,122 @@ describe('evaluateOracleLagExit', () => {
     });
   });
 
+  describe('near_resolution trigger', () => {
+    // Use a large oracle move (-5%) so entryFairPyes = 0.45 and entryGap = 0.05.
+    // This keeps prices well away from the compression threshold (0.7) in cases
+    // that are only testing the near-res gate.
+    const baseDown = buildState({
+      direction: 'DOWN',
+      entryPmYesPrice: 0.50,
+      entryPmNoPrice: 0.50,
+      entryChainlinkMovePct: -5,
+      entryFairPyes: 0.45,
+      endDateMs: NOW_MS + 2 * 60 * 1000, // 2 min left
+    });
+
+    it('fires oracle_lag_near_resolution when profitable and < minLeftMin remain', () => {
+      // YES at 0.47 → compressionPct = 1-(0.02/0.05)=0.60 (below threshold).
+      // NO at 0.53 → returnPct = (0.53-0.50)/0.50*100 = 6%.
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: baseDown,
+          currentYesPrice: 0.47,
+          currentNoPrice: 0.53,
+          nowMs: NOW_MS + 10_000,
+          nearResMinLeftMin: 3,
+          nearResMinReturnPct: 0.5,
+        }),
+      );
+      expect(res?.trigger).toBe('oracle_lag_near_resolution');
+      expect(res?.returnPct).toBeCloseTo(6, 1);
+    });
+
+    it('does NOT fire when time left exceeds threshold', () => {
+      // 5 min left — above the 3-min gate.
+      const stateWith5MinLeft = buildState({
+        ...baseDown,
+        endDateMs: NOW_MS + 5 * 60 * 1000,
+      });
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateWith5MinLeft,
+          currentYesPrice: 0.47,
+          currentNoPrice: 0.53,
+          nowMs: NOW_MS + 10_000,
+          nearResMinLeftMin: 3,
+          nearResMinReturnPct: 0.5,
+        }),
+      );
+      expect(res).toBeNull();
+    });
+
+    it('does NOT fire when return is below the minimum threshold', () => {
+      // NO token at 0.502 → returnPct = 0.4%, below 0.5% gate.
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: baseDown,
+          currentYesPrice: 0.498,
+          currentNoPrice: 0.502,
+          nowMs: NOW_MS + 10_000,
+          nearResMinLeftMin: 3,
+          nearResMinReturnPct: 0.5,
+        }),
+      );
+      expect(res).toBeNull();
+    });
+
+    it('does NOT fire when position is a loser (returnPct < 0)', () => {
+      // NO token at 0.49 (below entry 0.50) → we are losing.
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: baseDown,
+          currentYesPrice: 0.51,
+          currentNoPrice: 0.49,
+          nowMs: NOW_MS + 10_000,
+          nearResMinLeftMin: 3,
+          nearResMinReturnPct: 0.5,
+        }),
+      );
+      expect(res).toBeNull();
+    });
+
+    it('reversal takes priority over near_resolution when both would trigger', () => {
+      // Chainlink adverse 10 bps AND near-res + profitable — reversal wins.
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: baseDown,
+          currentYesPrice: 0.47,
+          currentNoPrice: 0.53,
+          currentChainlinkPrice: 65000 * 1.001, // +10 bps adverse for DOWN
+          nowMs: NOW_MS + 10_000,
+          reversalBps: 5,
+          nearResMinLeftMin: 3,
+          nearResMinReturnPct: 0.5,
+        }),
+      );
+      expect(res?.trigger).toBe('oracle_lag_reversed');
+    });
+
+    it('silently skips when endDateMs is 0 (legacy state without endDateMs)', () => {
+      const legacyState = buildState({
+        ...baseDown,
+        endDateMs: 0,
+      });
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: legacyState,
+          currentYesPrice: 0.47,
+          currentNoPrice: 0.53,
+          nowMs: NOW_MS + 10_000,
+          nearResMinLeftMin: 3,
+          nearResMinReturnPct: 0.5,
+        }),
+      );
+      // timeLeftMin deeply negative → timeLeftMin > 0 guard skips trigger
+      expect(res).toBeNull();
+    });
+  });
+
   describe('timeout trigger', () => {
     it('fires oracle_lag_timeout when age exceeds maxHoldSec', () => {
       const state = buildState({ entryTsMs: NOW_MS });
@@ -332,6 +454,7 @@ describe('writeOracleLagExitState ↔ readOracleLagExitState', () => {
       entryChainlinkPrice: 65_123.45,
       entryChainlinkMovePct: 0.08,
       entryTsMs: NOW_MS,
+      endDateMs: END_DATE_MS,
     });
 
     const key = oracleLagExitStateKey('m-123', 'UP');
@@ -347,6 +470,7 @@ describe('writeOracleLagExitState ↔ readOracleLagExitState', () => {
     expect(state?.entryChainlinkMovePct).toBeCloseTo(0.08, 5);
     expect(state?.entryFairPyes).toBeCloseTo(0.5008, 4);
     expect(state?.entryTsMs).toBe(NOW_MS);
+    expect(state?.endDateMs).toBe(END_DATE_MS);
   });
 
   it('clamps entryFairPyes to [0.02, 0.98] on extreme move magnitudes', async () => {
@@ -360,6 +484,7 @@ describe('writeOracleLagExitState ↔ readOracleLagExitState', () => {
       entryChainlinkPrice: 65000,
       entryChainlinkMovePct: 60, // fair would be 1.1 without clamp
       entryTsMs: NOW_MS,
+      endDateMs: END_DATE_MS,
     });
     const state = await readOracleLagExitState(redis, 'm-extreme', 'UP');
     expect(state?.entryFairPyes).toBeCloseTo(0.98, 5);

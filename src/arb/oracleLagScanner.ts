@@ -730,6 +730,7 @@ export class OracleLagScanner {
               this.feed?.getLatest(ASSET_TO_CHAINLINK_SYMBOL[asset]!)?.value ?? move.newPrice,
             entryChainlinkMovePct: move.pctMove,
             entryTsMs: Date.now(),
+            endDateMs: market.endDate.getTime(),
           });
         } catch (err) {
           logger.warn('[oracle-lag] exit-state stamp failed (non-fatal)', {
@@ -792,6 +793,29 @@ export class OracleLagScanner {
           stakeUsd: executorStakeUsd,
           movePct: +move.pctMove.toFixed(4),
         });
+        // Write exit state now so the exit monitor can watch the position
+        // once the reconciler imports the fill. The monitor skips ticks
+        // where getPosition() returns null (fill not yet imported), so
+        // there's no race — it just waits for the position to appear.
+        try {
+          await writeOracleLagExitState(this.redis, {
+            marketId: market.marketId,
+            direction,
+            chainlinkSymbol: ASSET_TO_CHAINLINK_SYMBOL[asset]!,
+            entryPmYesPrice: market.outcomePrices[0],
+            entryPmNoPrice: market.outcomePrices[1],
+            entryChainlinkPrice:
+              this.feed?.getLatest(ASSET_TO_CHAINLINK_SYMBOL[asset]!)?.value ?? move.newPrice,
+            entryChainlinkMovePct: move.pctMove,
+            entryTsMs: Date.now(),
+            endDateMs: market.endDate.getTime(),
+          });
+        } catch (err) {
+          logger.warn('[oracle-lag] exit-state stamp failed for maker_pending (non-fatal)', {
+            marketId: market.marketId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     } catch (err) {
       outcome = 'error';

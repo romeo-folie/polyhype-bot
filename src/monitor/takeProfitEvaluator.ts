@@ -31,7 +31,8 @@ export type ExitReason =
   | 'trend_exit'
   | 'oracle_lag_compressed'
   | 'oracle_lag_reversed'
-  | 'oracle_lag_timeout';
+  | 'oracle_lag_timeout'
+  | 'oracle_lag_near_resolution';
 
 export interface ExitDecision {
   shouldExit: boolean;

@@ -496,6 +496,14 @@ const envSchema = z.object({
   ORACLE_LAG_EXIT_MAX_HOLD_SEC: z.coerce.number().int().min(30).max(1500).optional().default(180),
   // Exit-monitor tick cadence.
   ORACLE_LAG_EXIT_TICK_MS: z.coerce.number().int().min(500).optional().default(2000),
+  // Near-resolution profit lock: exit when profitable with < N minutes left
+  // before market resolution, avoiding last-minute reversals (e.g. Apr-21 ETH
+  // pump). Must be below ORACLE_LAG_MIN_TIME_LEFT_MIN so fresh entries aren't
+  // immediately exited.
+  ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN: z.coerce.number().min(0).optional().default(3),
+  // Minimum return (%) on the held token before the near-resolution trigger
+  // fires. Prevents exiting positions barely above the entry price.
+  ORACLE_LAG_EXIT_NEAR_RES_MIN_RETURN_PCT: z.coerce.number().min(0).optional().default(0.5),
 
   // Minimum edge to allow entry on fee-enabled markets (executor fee gate).
   // Defaults to 0.04 (4%) — must exceed this to justify the ~2% taker fee.
@@ -1463,6 +1471,15 @@ export function loadConfig(forceReload = false): AppConfig {
   // Oracle-lag time window must be non-inverted (min <= max).
   if (cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN > cfg.ORACLE_LAG_MAX_TIME_LEFT_MIN) {
     throw new Error('ORACLE_LAG_MAX_TIME_LEFT_MIN must be >= ORACLE_LAG_MIN_TIME_LEFT_MIN');
+  }
+
+  // Near-resolution exit threshold must be strictly below the entry floor so
+  // a freshly entered position isn't immediately triggered for exit.
+  if (cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN >= cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN) {
+    throw new Error(
+      'ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN must be < ORACLE_LAG_MIN_TIME_LEFT_MIN ' +
+        `(currently ${cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN} >= ${cfg.ORACLE_LAG_MIN_TIME_LEFT_MIN})`,
+    );
   }
 
   // All cross-validations passed — cache only a valid config.
