@@ -50,6 +50,7 @@ describe('Position Reconciliation Healer', () => {
       hset: vi.fn().mockResolvedValue(1),
       incr: vi.fn().mockResolvedValue(1),
       sismember: vi.fn().mockResolvedValue(0),
+      exists: vi.fn().mockResolvedValue(0),
     } as unknown as Redis;
 
     // Default mocks
