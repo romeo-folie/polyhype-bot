@@ -1389,6 +1389,10 @@ const envSchema = z.object({
   // default because bracket model uncertainty is structurally larger and the side
   // bias (YES 11.5% vs NO 73.7%) argues for lighter sizing.
   WEATHER_KELLY_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.25),
+  // Gate: skip NO bets on tail brackets ("or higher" / "or below") when the model's
+  // own P(YES) exceeds this threshold. Prevents betting against the model's directional
+  // call — edgeNo can be spuriously positive even when modelProb is 0.80+ for YES.
+  WEATHER_THRESHOLD_NO_BET_MAX_PROB: z.coerce.number().min(0).max(1).optional().default(0.5),
   // --- WEATHER EXIT RULES (monitor) ---
   // Weather brackets resolve in 1–3 days. Stale-exit at 12h and divergence_closed
   // are the primary exits. SL is a backstop for genuinely wrong forecasts only —
