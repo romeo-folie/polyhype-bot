@@ -60,6 +60,21 @@ const IDEMPOTENCY_KEY_PREFIX = 'trade:executed:';
 const CONVICTION_KEY_PREFIX = 'signal:recent:';
 
 /**
+ * Pick the ATR candle timeframe appropriate for the signal source.
+ *
+ * hl-momentum is a 15m swing strategy — its SL/TP must be sized on 15m ATR,
+ * not the 1m default that crypto-arb uses. Using 1m ATR for meme perp swings
+ * produced sub-percent SL values that hit the FUTURES_ATR_SL_MIN_PCT=1.0 floor
+ * and stopped out every entry on intraday bid-ask noise (burned on WIF
+ * 2026-04-22: three consecutive SL-outs at -1%).
+ */
+export function atrTimeframeForSignalSource(
+  sourcedFrom: string | undefined,
+): '1m' | '15m' {
+  return sourcedFrom === 'hl-momentum' ? '15m' : '1m';
+}
+
+/**
  * Multi-signal conviction multiplier.
  *
  * Records this signal's source in a per-(marketId, direction) Redis ZSET, then
@@ -1094,15 +1109,26 @@ async function executeHyperliquidSignal(
       // Capture ATR snapshot at entry — drives ATR-based SL/TP in futuresMonitor.
       // Best-effort: if candles aren't available yet, leave undefined and the
       // monitor will fall back to fixed-percent thresholds for this position.
+      // 15m timeframe needs a wider lookback than the 60-min buildCandles default:
+      // FUTURES_ATR_PERIOD=14 requires ≥15 candles, which is ~3.75h of 15m bars.
+      // Reuse HL_MOMENTUM_PRIMARY_LOOKBACK_MS (54h = 216 bars) — matches the lookback
+      // the scanner itself uses for scoring, same as the meme ATR path below.
+      const atrTimeframe = atrTimeframeForSignalSource(signal.sourcedFrom);
+      const atrLookbackMs =
+        atrTimeframe === '15m' ? cfg.HL_MOMENTUM_PRIMARY_LOOKBACK_MS : undefined;
       let entryAtr: number | undefined;
       let entryAtrPct: number | undefined;
       try {
-        const atr = await computeATR(signal.marketId, redis);
+        const atr = await computeATR(signal.marketId, redis, undefined, {
+          timeframe: atrTimeframe,
+          ...(atrLookbackMs !== undefined ? { lookbackMs: atrLookbackMs } : {}),
+        });
         if (atr) {
           entryAtr = atr.atr;
           entryAtrPct = atr.atrPct;
           logger.info('[executor] futures entryAtrPct captured', {
             symbol: signal.marketId,
+            timeframe: atrTimeframe,
             entryAtrPct: entryAtrPct.toFixed(3),
             wouldBeSlPct: (entryAtrPct * cfg.FUTURES_ATR_SL_MULT).toFixed(3),
             wouldBeTpPct: (entryAtrPct * cfg.FUTURES_ATR_TP_MULT).toFixed(3),
