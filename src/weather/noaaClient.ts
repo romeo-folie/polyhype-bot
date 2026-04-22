@@ -71,7 +71,7 @@ export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   madrid: { lat: 40.4168, lon: -3.7038, noaaCoverage: false, unit: 'celsius', wuStation: 'LEMD' },
   warsaw: { lat: 52.2297, lon: 21.0122, noaaCoverage: false, unit: 'celsius', wuStation: 'EPWA' },
   shenzhen: { lat: 22.5431, lon: 114.0579, noaaCoverage: false, unit: 'celsius', wuStation: 'ZGSZ' },
-  istanbul: { lat: 41.0082, lon: 28.9784, noaaCoverage: false, unit: 'celsius', wuStation: 'LTFM' },
+  istanbul: { lat: 41.2611, lon: 28.7425, noaaCoverage: false, unit: 'celsius', wuStation: 'LTFM' },
   'mexico city': { lat: 19.4326, lon: -99.1332, noaaCoverage: false, unit: 'celsius', wuStation: 'MMMX' },
   amsterdam: { lat: 52.3676, lon: 4.9041, noaaCoverage: false, unit: 'celsius', wuStation: 'EHAM' },
   'panama city': { lat: 8.9824, lon: -79.5199, noaaCoverage: false, unit: 'celsius', wuStation: 'MPTO' },
