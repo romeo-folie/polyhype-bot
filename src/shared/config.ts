@@ -1274,6 +1274,14 @@ const envSchema = z.object({
   SPORTS_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   SPORTS_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(5),
   SPORTS_MARKET_LOOKAHEAD_H: z.coerce.number().int().min(1).optional().default(200),
+  // Tolerance (hours) for matching a live ESPN game to a Polymarket market by
+  // endDate. Expected endDate = game scheduledStart + per-league offset
+  // (NBA/NHL: 0h, MLB: +168h). A live game matches only markets whose endDate
+  // falls within ±this many hours of the expected value. Disambiguates
+  // back-to-back-day series (same two teams, different games) where nickname
+  // matching alone fires an in-play signal against the next day's pregame
+  // market — e.g., the 2026-04-22 White Sox/Diamondbacks incident.
+  SPORTS_LIVE_MATCH_TOLERANCE_H: z.coerce.number().min(1).optional().default(6),
   // Only generate MLB signals from this inning onwards. Early innings have high
   // variance (a 2-run lead in the 3rd easily reverses), which causes stop-losses
   // to fire before the model's edge can materialise. Default 6 targets the back

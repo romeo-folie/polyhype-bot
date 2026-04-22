@@ -15,6 +15,7 @@ const baseCfg: Partial<AppConfig> = {
   SPORTS_MIN_EDGE: 0.08,
   SPORTS_MAX_STAKE_USD: 5,
   SPORTS_MARKET_LOOKAHEAD_H: 48,
+  SPORTS_LIVE_MATCH_TOLERANCE_H: 6,
   SPORTS_POLL_INTERVAL_S: 8,
   SPORTS_MLB_MIN_INNING: 6,
   SPORTS_MAKER_PREMIUM_PCT: 0.02,
@@ -39,8 +40,14 @@ function mkGame(overrides: Partial<LiveGame> = {}): LiveGame {
     secondsRemaining: 60,
     period: 4,
     state: 'in',
+    scheduledStart: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
     ...overrides,
   };
+}
+
+/** PM's endDate for a live MLB game = scheduledStart + 168h (7d resolution buffer). */
+function mlbEndDate(scheduledStartMs: number): string {
+  return new Date(scheduledStartMs + 168 * 3600 * 1000).toISOString();
 }
 
 function mkMarket(overrides: Partial<GammaMarket> = {}): GammaMarket {
@@ -55,7 +62,9 @@ function mkMarket(overrides: Partial<GammaMarket> = {}): GammaMarket {
     closed: false,
     volume: '1000',
     liquidity: '500',
-    endDate: new Date(Date.now() + 4 * 3600 * 1000).toISOString(),
+    // Default endDate aligns with mkGame's scheduledStart (NBA convention:
+    // endDate == tipoff). MLB tests must override to scheduledStart + 168h.
+    endDate: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
     description: null,
     feesEnabled: false,
     ...overrides,
@@ -81,27 +90,104 @@ describe('scanLiveSportsArb', () => {
     expect(s.marketId).toBe('m1');
   });
 
-  it('skips PM markets whose endDate is well past the grace window (7h ago)', async () => {
-    const expired = mkMarket({
-      endDate: new Date(Date.now() - 7 * 3600 * 1000).toISOString(),
+  it('skips PM markets whose endDate is outside the live-match tolerance window', async () => {
+    // Game scheduledStart = now - 2h (default); NBA expected endDate = scheduledStart + 0 = now - 2h.
+    // A market whose endDate is now - 10h is 8h away from expected → outside ±6h tolerance.
+    const mismatched = mkMarket({
+      endDate: new Date(Date.now() - 10 * 3600 * 1000).toISOString(),
     });
     const { signals } = await scanLiveSportsArb(fakeRedis, mkCfg(), {
       fetchLive: async () => [mkGame()],
-      getMarkets: async () => [expired],
+      getMarkets: async () => [mismatched],
     });
     expect(signals).toHaveLength(0);
   });
 
-  it('still matches a market whose endDate just passed (within 4h grace window)', async () => {
-    // Polymarket sets endDate = tip-off time; game runs ~2.5h after that.
-    const tippedOff = mkMarket({
-      endDate: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
+  it('matches a market whose endDate is within the live-match tolerance', async () => {
+    // endDate 1h from expected — well within ±6h tolerance.
+    const close = mkMarket({
+      endDate: new Date(Date.now() - 1 * 3600 * 1000).toISOString(),
     });
     const { signals } = await scanLiveSportsArb(fakeRedis, mkCfg(), {
       fetchLive: async () => [mkGame()],
-      getMarkets: async () => [tippedOff],
+      getMarkets: async () => [close],
     });
     expect(signals).toHaveLength(1);
+  });
+
+  it('rejects a same-teams market for a future/next-day game (cross-day series bug)', async () => {
+    // Simulates the 2026-04-22 White Sox/Diamondbacks incident: a live MLB
+    // game matched to the next day's market because nicknames overlap.
+    const liveGameStart = Date.now() - 2 * 3600 * 1000; // live game started 2h ago
+    const nextDayMarketEnd = liveGameStart + 24 * 3600 * 1000 + 168 * 3600 * 1000; // tomorrow's game + 168h MLB offset
+    const mlbGame = mkGame({
+      league: 'mlb',
+      homeTeam: 'Arizona Diamondbacks',
+      awayTeam: 'Chicago White Sox',
+      homeAbbrev: 'ARI',
+      awayAbbrev: 'CHW',
+      homeScore: 5,
+      awayScore: 11,
+      period: 7,
+      halfInning: 'top',
+      scheduledStart: new Date(liveGameStart).toISOString(),
+    });
+    const nextDayMarket = mkMarket({
+      question: 'Chicago White Sox vs. Arizona Diamondbacks',
+      endDate: new Date(nextDayMarketEnd).toISOString(),
+    });
+    const { signals, candidates } = await scanLiveSportsArb(
+      fakeRedis,
+      mkCfg({ SPORTS_LEAGUES: new Set(['mlb']) as Set<'nba' | 'nhl' | 'mlb'> }),
+      {
+        fetchLive: async () => [mlbGame],
+        getMarkets: async () => [nextDayMarket],
+      },
+    );
+    expect(candidates).toHaveLength(0);
+    expect(signals).toHaveLength(0);
+  });
+
+  it('picks the closest-endDate market when multiple same-teams markets are in horizon', async () => {
+    // Two MLB markets for the same matchup — today's game (should match) and
+    // tomorrow's game (should not). Scanner must pick today's.
+    const liveGameStart = Date.now() - 2 * 3600 * 1000;
+    const todayEnd = liveGameStart + 168 * 3600 * 1000;
+    const tomorrowEnd = liveGameStart + 24 * 3600 * 1000 + 168 * 3600 * 1000;
+    const mlbGame = mkGame({
+      league: 'mlb',
+      homeTeam: 'Arizona Diamondbacks',
+      awayTeam: 'Chicago White Sox',
+      homeAbbrev: 'ARI',
+      awayAbbrev: 'CHW',
+      homeScore: 5,
+      awayScore: 11,
+      period: 7,
+      halfInning: 'top',
+      scheduledStart: new Date(liveGameStart).toISOString(),
+    });
+    const todayMarket = mkMarket({
+      id: 'today',
+      question: 'Chicago White Sox vs. Arizona Diamondbacks',
+      endDate: new Date(todayEnd).toISOString(),
+      outcomePrices: '["0.30","0.70"]',
+    });
+    const tomorrowMarket = mkMarket({
+      id: 'tomorrow',
+      question: 'Chicago White Sox vs. Arizona Diamondbacks',
+      endDate: new Date(tomorrowEnd).toISOString(),
+      outcomePrices: '["0.50","0.50"]',
+    });
+    const { signals } = await scanLiveSportsArb(
+      fakeRedis,
+      mkCfg({ SPORTS_LEAGUES: new Set(['mlb']) as Set<'nba' | 'nhl' | 'mlb'> }),
+      {
+        fetchLive: async () => [mlbGame],
+        getMarkets: async () => [tomorrowMarket, todayMarket],
+      },
+    );
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.marketId).toBe('today');
   });
 
   it('skips O/U prop markets even when both team names appear', async () => {
@@ -146,7 +232,10 @@ describe('scanLiveSportsArb', () => {
       secondsRemaining: 3000,
       halfInning: 'top',
     });
-    const mlbMarket = mkMarket({ question: 'Yankees vs. Red Sox' });
+    const mlbMarket = mkMarket({
+      question: 'Yankees vs. Red Sox',
+      endDate: mlbEndDate(new Date(mlbGame.scheduledStart).getTime()),
+    });
     const { signals } = await scanLiveSportsArb(
       fakeRedis,
       mkCfg({ SPORTS_LEAGUES: new Set(['mlb']) as Set<'nba' | 'nhl' | 'mlb'> }),
@@ -172,7 +261,11 @@ describe('scanLiveSportsArb', () => {
       secondsRemaining: 3000,
       halfInning: 'top',
     });
-    const mlbMarket = mkMarket({ question: 'Yankees vs. Red Sox', outcomePrices: '["0.30","0.70"]' });
+    const mlbMarket = mkMarket({
+      question: 'Yankees vs. Red Sox',
+      outcomePrices: '["0.30","0.70"]',
+      endDate: mlbEndDate(new Date(earlyGame.scheduledStart).getTime()),
+    });
     const { signals, candidates } = await scanLiveSportsArb(
       fakeRedis,
       mkCfg({ SPORTS_LEAGUES: new Set(['mlb']) as Set<'nba' | 'nhl' | 'mlb'>, SPORTS_MLB_MIN_INNING: 6 }),
@@ -198,7 +291,11 @@ describe('scanLiveSportsArb', () => {
       secondsRemaining: 1500,
       halfInning: 'top',
     });
-    const mlbMarket = mkMarket({ question: 'Yankees vs. Red Sox', outcomePrices: '["0.30","0.70"]' });
+    const mlbMarket = mkMarket({
+      question: 'Yankees vs. Red Sox',
+      outcomePrices: '["0.30","0.70"]',
+      endDate: mlbEndDate(new Date(lateGame.scheduledStart).getTime()),
+    });
     const { signals } = await scanLiveSportsArb(
       fakeRedis,
       mkCfg({ SPORTS_LEAGUES: new Set(['mlb']) as Set<'nba' | 'nhl' | 'mlb'>, SPORTS_MLB_MIN_INNING: 6 }),
