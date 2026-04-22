@@ -1720,10 +1720,13 @@ export async function executeSignal(
     signal.stakeUsd = minStake;
   }
 
-  // 4) Open position check — don't enter a market we already hold on either side
-  const oppositeDir = signal.direction === 'YES' ? 'NO' : 'YES';
+  // 4) Open position check — don't enter a market we already hold on either side.
+  // UP and YES are the same canonical side; DOWN and NO are the other.
+  const canonicalSide = (d: string): 'YES' | 'NO' => (d === 'YES' || d === 'UP' ? 'YES' : 'NO');
+  const currentSide = canonicalSide(signal.direction);
+  const oppositeDir: 'YES' | 'NO' = currentSide === 'YES' ? 'NO' : 'YES';
   const [alreadyHolding, holdingOpposite] = await Promise.all([
-    hasOpenPosition(redis, signal.marketId, signal.direction),
+    hasOpenPosition(redis, signal.marketId, currentSide),
     hasOpenPosition(redis, signal.marketId, oppositeDir),
   ]);
   if (alreadyHolding || holdingOpposite) {

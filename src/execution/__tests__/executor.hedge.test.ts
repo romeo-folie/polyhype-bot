@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import type { Redis } from 'ioredis';
 
 // Mock Config
@@ -68,6 +69,7 @@ vi.mock('../../shared/hyperliquid.js', () => ({
 }));
 
 const { executeSignal } = await import('../executor.js');
+const { hasOpenPosition } = await import('../positionLedger.js');
 
 describe('Delta Hedging Integration', () => {
   const mockRedis = {
@@ -119,6 +121,52 @@ describe('Delta Hedging Integration', () => {
       'EX',
       expect.any(Number),
     );
+  });
+
+  it('skips when an opposite-side position is already open (YES signal, NO held)', async () => {
+    (hasOpenPosition as Mock).mockImplementation((_redis, _marketId, direction) =>
+      Promise.resolve(direction === 'NO'),
+    );
+
+    const result = await executeSignal(
+      {
+        marketId: 'pm-456',
+        question: 'Will Girona FC win?',
+        direction: 'YES' as const,
+        stakeUsd: 10,
+        outcomePrice: 0.5,
+        edgeMagnitude: 0.2,
+        sourcedFrom: 'copytrade:0xwallet',
+        isFutures: false,
+      } as any,
+      mockRedis,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('position_already_open');
+  });
+
+  it('skips when an opposite-side position is already open (UP signal, NO held)', async () => {
+    (hasOpenPosition as Mock).mockImplementation((_redis, _marketId, direction) =>
+      Promise.resolve(direction === 'NO'),
+    );
+
+    const result = await executeSignal(
+      {
+        marketId: 'crypto-updown-btc',
+        question: 'Will BTC be UP at expiry?',
+        direction: 'UP' as const,
+        stakeUsd: 10,
+        outcomePrice: 0.5,
+        edgeMagnitude: 0.2,
+        sourcedFrom: 'copytrade:0xwallet',
+        isFutures: false,
+      } as any,
+      mockRedis,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('position_already_open');
   });
 
   it('does NOT trigger hedge for non-correlated markets', async () => {
