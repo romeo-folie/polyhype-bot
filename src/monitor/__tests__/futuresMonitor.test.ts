@@ -584,4 +584,41 @@ describe('futuresMonitor', () => {
       expect(memeShadowCalls).toHaveLength(0);
     });
   });
+
+  describe('signal-fade exit gate', () => {
+    const fadeCfg = { ...baseCfg, FUTURES_EXIT_ON_SIGNAL_FADE: true };
+    const oldEnough = () => new Date(Date.now() - 20 * 60 * 1000).toISOString();
+
+    it('exits a flat/losing position when confluence flips against direction', async () => {
+      loadConfigMock.mockReturnValue(fadeCfg);
+      // -0.5%: above SL, below TP, in the red → fade should fire
+      mockGetOpenPositions.mockResolvedValue([
+        { symbol: 'MATIC', position: { szi: '100', entryPx: '1', unrealizedPnl: '-0.5', marginUsed: '20' } },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([
+        { marketId: 'MATIC', openedAt: oldEnough(), isFutures: true, direction: 'LONG', question: 'MATIC perpetual', entryPrice: 1, stakeUsd: 20 },
+      ]);
+      mockScoreConfluence.mockResolvedValue({ direction: 'DOWN', score: 5, signals: {} });
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('MATIC');
+    });
+
+    it('does NOT exit a winning position even when confluence flips against direction', async () => {
+      loadConfigMock.mockReturnValue(fadeCfg);
+      // +0.5%: priceChangePct > 0 → fade gate blocked, position held
+      mockGetOpenPositions.mockResolvedValue([
+        { symbol: 'DOT', position: { szi: '100', entryPx: '1', unrealizedPnl: '0.5', marginUsed: '20' } },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([
+        { marketId: 'DOT', openedAt: oldEnough(), isFutures: true, direction: 'LONG', question: 'DOT perpetual', entryPrice: 1, stakeUsd: 20 },
+      ]);
+      mockScoreConfluence.mockResolvedValue({ direction: 'DOWN', score: 5, signals: {} });
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+  });
 });
