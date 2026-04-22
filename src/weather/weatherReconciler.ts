@@ -122,7 +122,7 @@ export async function fetchTargetsToReconcile(
 export async function reconcileTargets(
   targets: UnresolvedTarget[],
   archiveFetcher: ArchiveFetcher = fetchHistoricalHigh,
-  resolutionFetcher: ResolutionFetcher = defaultResolutionFetcher,
+  resolutionFetcher: ResolutionFetcher = makeResolutionFetcher(getRedis()),
 ): Promise<{ resolved: number; unknownCity: number; noData: number }> {
   let resolved = 0;
   let unknownCity = 0;
@@ -151,8 +151,16 @@ export async function reconcileTargets(
       archiveHigh = result.observedHigh;
     }
 
-    // Fetch from the exact Polymarket resolution source (best-effort; doesn't block row write).
-    const resolution = await resolutionFetcher(coords, t.targetDate);
+    // Fetch from the exact Polymarket resolution source (best-effort; never aborts the loop).
+    let resolution: { high: number; source: string } | null = null;
+    try {
+      resolution = await resolutionFetcher(coords, t.targetDate);
+    } catch (err) {
+      logger.warn('[weather-reconciler] resolution fetch threw, continuing without it', {
+        city: canonical, targetDate: t.targetDate,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     // For hasArchive rows we only want to backfill resolution_high.
     // If resolution also returned nothing there is nothing new to write.
@@ -165,16 +173,33 @@ export async function reconcileTargets(
     }
 
     const observedAt = new Date().toISOString();
-    void enqueueWrite('weather_ground_truth', {
-      city: canonical,
-      targetDate: t.targetDate,
-      unit: coords.unit,
-      observedHigh: archiveHigh ?? 0,
-      source: archiveHigh !== undefined ? 'open-meteo-archive' : 'resolution-backfill',
-      resolutionHigh: resolution?.high,
-      resolutionSource: resolution?.source,
-      observedAt,
-    });
+
+    if (t.hasArchive) {
+      // Resolution-only backfill: issue a targeted UPDATE so the zero sentinel
+      // can never be written to observed_high if the row is unexpectedly absent.
+      void enqueueWrite('weather_ground_truth', {
+        city: canonical,
+        targetDate: t.targetDate,
+        unit: coords.unit,
+        observedHigh: 0,
+        source: 'resolution-backfill',
+        resolutionHigh: resolution!.high,
+        resolutionSource: resolution!.source,
+        observedAt,
+        backfillOnly: true,
+      });
+    } else {
+      void enqueueWrite('weather_ground_truth', {
+        city: canonical,
+        targetDate: t.targetDate,
+        unit: coords.unit,
+        observedHigh: archiveHigh!,
+        source: 'open-meteo-archive',
+        resolutionHigh: resolution?.high,
+        resolutionSource: resolution?.source,
+        observedAt,
+      });
+    }
 
     logger.info('[weather-reconciler] ground truth enqueued', {
       city: canonical,
@@ -191,40 +216,39 @@ export async function reconcileTargets(
 }
 
 /**
- * Default resolution fetcher — dispatches to the appropriate client based on
- * the city's resolutionSource. Requires a live Redis instance for WU key caching.
+ * Build a ResolutionFetcher bound to the given Redis instance and optional fetchFn.
+ * The fetchFn is forwarded to all three underlying HTTP clients so tests can inject
+ * a mock and production can use the global fetch uniformly.
  */
-let _redis: Redis | null = null;
-function getResolverRedis(): Redis {
-  if (!_redis) _redis = getRedis();
-  return _redis;
-}
-
-async function defaultResolutionFetcher(
-  coords: CityCoordinates,
-  targetDate: string,
-): Promise<{ high: number; source: string } | null> {
-  if (coords.resolutionSource === 'hko') {
-    const high = await fetchHkoDailyHigh(targetDate);
-    return high !== null ? { high, source: 'hko' } : null;
-  }
-  if (coords.resolutionSource === 'metar') {
-    const high = await fetchMetarDailyHigh(coords.wuStation, targetDate);
-    return high !== null ? { high, source: 'metar' } : null;
-  }
-  // WU
-  if (!coords.isoCountry) {
-    logger.warn('[weather-reconciler] wu city missing isoCountry', { wuStation: coords.wuStation });
-    return null;
-  }
-  const high = await fetchWuHistoricalHigh(
-    coords.wuStation,
-    coords.isoCountry,
-    targetDate,
-    coords.unit,
-    getResolverRedis(),
-  );
-  return high !== null ? { high, source: 'wu' } : null;
+function makeResolutionFetcher(redis: Redis, fetchFn?: FetchFn): ResolutionFetcher {
+  // wu/metar/hkoClient use `typeof fetch` (accepts string | URL | Request); our FetchFn
+  // only passes plain strings, so the cast is safe — we just widen the parameter type.
+  type WideFetch = typeof fetch;
+  const wf = fetchFn as WideFetch | undefined;
+  return async (coords, targetDate) => {
+    if (coords.resolutionSource === 'hko') {
+      const high = await fetchHkoDailyHigh(targetDate, wf);
+      return high !== null ? { high, source: 'hko' } : null;
+    }
+    if (coords.resolutionSource === 'metar') {
+      const high = await fetchMetarDailyHigh(coords.wuStation, targetDate, wf);
+      return high !== null ? { high, source: 'metar' } : null;
+    }
+    // WU
+    if (!coords.isoCountry) {
+      logger.warn('[weather-reconciler] wu city missing isoCountry', { wuStation: coords.wuStation });
+      return null;
+    }
+    const high = await fetchWuHistoricalHigh(
+      coords.wuStation,
+      coords.isoCountry,
+      targetDate,
+      coords.unit,
+      redis,
+      wf,
+    );
+    return high !== null ? { high, source: 'wu' } : null;
+  };
 }
 
 /**
@@ -254,8 +278,9 @@ export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
   const archiveFetcher: ArchiveFetcher = fetchFn
     ? (lat, lon, date, unit) => fetchHistoricalHigh(lat, lon, date, unit, fetchFn)
     : fetchHistoricalHigh;
+  const resolutionFetcher = makeResolutionFetcher(redis, fetchFn);
 
-  const summary = await reconcileTargets(targets, archiveFetcher);
+  const summary = await reconcileTargets(targets, archiveFetcher, resolutionFetcher);
   logger.info('[weather-reconciler] run complete', {
     candidates: targets.length,
     ...summary,

@@ -140,11 +140,11 @@ describe('reconcileTargets', () => {
     );
 
     expect(summary).toEqual({ resolved: 1, unknownCity: 0, noData: 0 });
-    // Archive fetcher must not be called — we already have observed_high.
     expect(archiveFetcher).not.toHaveBeenCalled();
     expect(enqueueWriteMock).toHaveBeenCalledTimes(1);
     const [, payload] = enqueueWriteMock.mock.calls[0]!;
     expect((payload as { source: string }).source).toBe('resolution-backfill');
+    expect((payload as { backfillOnly: boolean }).backfillOnly).toBe(true);
     expect((payload as { resolutionHigh: number }).resolutionHigh).toBe(28.4);
     expect((payload as { resolutionSource: string }).resolutionSource).toBe('wu');
   });
@@ -162,6 +162,25 @@ describe('reconcileTargets', () => {
     expect(summary).toEqual({ resolved: 0, unknownCity: 0, noData: 1 });
     expect(archiveFetcher).not.toHaveBeenCalled();
     expect(enqueueWriteMock).not.toHaveBeenCalled();
+  });
+
+  it('continues reconciling other targets when resolution fetcher throws', async () => {
+    const archiveFetcher = vi.fn().mockResolvedValue({
+      observedHigh: 70.0, targetDate: '2026-04-10', unit: 'fahrenheit',
+    });
+    const resolutionFetcher = vi.fn().mockRejectedValue(new Error('network error'));
+
+    const summary = await reconcileTargets(
+      [{ city: 'new york', targetDate: '2026-04-10', hasArchive: false }],
+      archiveFetcher,
+      resolutionFetcher,
+    );
+
+    // Row is still written — resolution is best-effort and a throw should not abort the loop.
+    expect(summary).toEqual({ resolved: 1, unknownCity: 0, noData: 0 });
+    expect(enqueueWriteMock).toHaveBeenCalledTimes(1);
+    const [, payload] = enqueueWriteMock.mock.calls[0]!;
+    expect((payload as { resolutionHigh: unknown }).resolutionHigh).toBeUndefined();
   });
 });
 

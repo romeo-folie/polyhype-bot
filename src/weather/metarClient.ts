@@ -59,7 +59,13 @@ export async function fetchMetarDailyHigh(
     return null;
   }
 
-  const obs = (await res.json()) as MetarObservation[];
+  let obs: MetarObservation[];
+  try {
+    obs = (await res.json()) as MetarObservation[];
+  } catch {
+    logger.warn('[weather-metar] JSON parse failed', { icao, date });
+    return null;
+  }
   if (!Array.isArray(obs) || obs.length === 0) {
     logger.debug('[weather-metar] no observations returned', { icao, date });
     return null;

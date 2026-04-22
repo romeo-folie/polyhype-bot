@@ -18,6 +18,21 @@ export const weatherGroundTruthRowSchema = z.object({
   resolutionSource: z.enum(['wu', 'metar', 'hko']).optional(),
   /** Optional override for the fetch timestamp (defaults to now() in SQL). */
   observedAt:    z.string().datetime().optional(),
+  /**
+   * When true the writer issues an UPDATE (resolution columns only) instead of
+   * INSERT … ON CONFLICT, preventing a zero sentinel from being stored as
+   * observed_high if the row is somehow absent.
+   */
+  backfillOnly:  z.boolean().optional(),
+}).superRefine((d, ctx) => {
+  const hasHigh = d.resolutionHigh !== undefined;
+  const hasSrc  = d.resolutionSource !== undefined;
+  if (hasHigh !== hasSrc) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'resolutionHigh and resolutionSource must both be present or both absent',
+    });
+  }
 });
 
 export type WeatherGroundTruthRow = z.infer<typeof weatherGroundTruthRowSchema>;

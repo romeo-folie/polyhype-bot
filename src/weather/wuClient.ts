@@ -122,7 +122,13 @@ export async function fetchWuHistoricalHigh(
       return null;
     }
 
-    const data = (await res.json()) as { observations?: WuObservation[] };
+    let data: { observations?: WuObservation[] };
+    try {
+      data = (await res.json()) as { observations?: WuObservation[] };
+    } catch {
+      logger.warn('[weather-wu] JSON parse failed', { icao, date });
+      return null;
+    }
     const obs = data.observations;
     if (!obs?.length) {
       logger.debug('[weather-wu] no observations returned', { icao, date });
