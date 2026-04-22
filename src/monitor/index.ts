@@ -220,6 +220,10 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       const inferredCategory = inferCategory(position.question);
       const isCryptoUpdown = inferredCategory === 'crypto-updown';
       const isWeather = inferredCategory === 'weather';
+      // Sports-arb signals set sourcedFrom='sports:league:gameId'. Don't rely on
+      // inferCategory — it misses team-name questions that lack keywords like
+      // "mlb"/"baseball", falling through to 'geopolitical' and the default 16% SL.
+      const isSports = position.sourcedFrom?.startsWith('sports:') ?? false;
 
       if (isCryptoUpdown) {
         tpThreshold = cfg.CRYPTO_UPDOWN_TAKE_PROFIT;
@@ -227,6 +231,9 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       } else if (isWeather) {
         tpThreshold = cfg.WEATHER_TAKE_PROFIT;
         slThreshold = cfg.WEATHER_STOP_LOSS;
+      } else if (isSports) {
+        tpThreshold = cfg.SPORTS_TAKE_PROFIT;
+        slThreshold = cfg.SPORTS_STOP_LOSS;
       } else if (isCrypto) {
         tpThreshold = cfg.CRYPTO_TAKE_PROFIT;
         slThreshold = cfg.CRYPTO_STOP_LOSS;
