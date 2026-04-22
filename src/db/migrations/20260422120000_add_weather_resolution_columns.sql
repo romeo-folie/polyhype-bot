@@ -10,5 +10,5 @@
 -- The writer handler uses ON CONFLICT DO UPDATE so existing rows get backfilled.
 
 ALTER TABLE weather_ground_truth
-  ADD COLUMN resolution_high   DOUBLE PRECISION,
-  ADD COLUMN resolution_source TEXT;
+  ADD COLUMN IF NOT EXISTS resolution_high   DOUBLE PRECISION,
+  ADD COLUMN IF NOT EXISTS resolution_source TEXT;
