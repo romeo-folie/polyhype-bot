@@ -128,10 +128,10 @@ const TYPES = {
   ],
 };
 
-// Monotonic nonce generator. Starts at Date.now() on each call if time has moved forward,
-// increments locally if multiple calls happen within the same millisecond.
-// Starting at 0 (not Date.now()) means the first call always gets at least the current timestamp,
-// preventing stale-startup nonces when a container restarts after a long idle period.
+// Monotonic nonce generator. On each call, use Date.now() if wall-clock time has moved
+// forward; otherwise increment locally when multiple calls happen within the same millisecond.
+// Initializing to 0 (not Date.now() at module load) ensures the first nonce is derived from
+// the current time at call time, avoiding a stale pre-seeded startup value after a delayed first use.
 let _hlNonce = 0;
 function nextHlNonce(): number {
   const now = Date.now();
@@ -170,11 +170,15 @@ interface HlMeta {
 
 interface HlExchangeResponse {
   status: string;
-  response?: {
-    data?: {
-      statuses?: unknown[];
-    };
-  };
+  // On success, response is an object with statuses. On error (e.g. nonce rejection),
+  // HL returns response as a plain string describing the error.
+  response?:
+    | string
+    | {
+        data?: {
+          statuses?: unknown[];
+        };
+      };
 }
 
 interface HlClearinghouseState {
@@ -348,7 +352,8 @@ class HyperliquidClient {
       });
 
       if (response.data.status === 'ok') {
-        const statuses = response.data.response?.data?.statuses;
+        const responseObj = typeof response.data.response === 'object' ? response.data.response : undefined;
+        const statuses = responseObj?.data?.statuses;
         if (!Array.isArray(statuses) || statuses.length === 0) {
           return { success: false, error: 'HL response missing statuses array' };
         }
@@ -374,9 +379,9 @@ class HyperliquidClient {
       // Self-heal on "nonce too low" — parse the required minimum, bump the counter, retry once.
       // Root cause: two containers (pga-futures, pga-arb) share the same HL wallet but have
       // independent in-memory nonce counters; whichever started earlier can fall behind.
-      const errBody = response.data as unknown as Record<string, unknown>;
-      if (!_retrying && typeof errBody.response === 'string') {
-        const m = /nonce too low \d+ < (\d+)/.exec(errBody.response);
+      const errorResponse: unknown = response.data.response;
+      if (!_retrying && typeof errorResponse === 'string') {
+        const m = /nonce too low \d+ < (\d+)/.exec(errorResponse);
         if (m?.[1]) {
           const required = Number(m[1]);
           _hlNonce = Math.max(Date.now(), required);
@@ -393,6 +398,18 @@ class HyperliquidClient {
         ? JSON.stringify(axiosErr.response.data).slice(0, 500)
         : undefined;
       const msg = axiosErr.message ?? String(err);
+
+      // Apply same nonce self-heal for non-2xx responses (HL may return 4xx with nonce errors)
+      if (!_retrying && typeof responseBody === 'string') {
+        const m = /nonce too low \d+ < (\d+)/.exec(responseBody);
+        if (m?.[1]) {
+          const required = Number(m[1]);
+          _hlNonce = Math.max(Date.now(), required);
+          logger.warn('[hyperliquid] nonce too low (http error) — bumping and retrying', { required, newNonce: _hlNonce });
+          return this.placeMarketOrder(opts, true);
+        }
+      }
+
       if (responseBody) {
         logger.error('[hyperliquid] order rejected', {
           status: axiosErr.response?.status,

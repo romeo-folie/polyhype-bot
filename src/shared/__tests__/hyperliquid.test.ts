@@ -119,4 +119,59 @@ describe('HyperliquidClient', () => {
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/invalid value/);
   });
+
+  it('placeMarketOrder retries once on nonce-too-low rejection and succeeds', async () => {
+    const client = getHyperliquid();
+
+    // First attempt: meta + leverage + mids + nonce rejection (4 calls)
+    mockedAxiosPost.mockResolvedValueOnce({ data: { universe: [{ name: 'BTC', szDecimals: 3, index: 0 }] } });
+    mockedAxiosPost.mockResolvedValueOnce({ data: { status: 'ok' } }); // updateLeverage
+    mockedAxiosPost.mockResolvedValueOnce({ data: { BTC: '50000' } }); // getMidPrice
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { status: 'err', response: 'Invalid nonce: nonce too low 1000 < 9999' },
+    });
+
+    // Retry: meta + mids are cached; only updateLeverage + exchange are re-called (2 calls)
+    mockedAxiosPost.mockResolvedValueOnce({ data: { status: 'ok' } }); // updateLeverage (retry)
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { status: 'ok', response: { data: { statuses: [{ filled: { oid: 99999 } }] } } },
+    });
+
+    const result = await client.placeMarketOrder({
+      symbol: 'BTC',
+      isBuy: true,
+      sizeUsd: 100,
+      leverage: 5,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.txHash).toBe('99999');
+    expect(mockedAxiosPost).toHaveBeenCalledTimes(6);
+  });
+
+  it('placeMarketOrder does not retry a second time on repeated nonce error', async () => {
+    const client = getHyperliquid();
+
+    const nonceError = { data: { status: 'err', response: 'Invalid nonce: nonce too low 1000 < 9999' } };
+
+    // First attempt: meta + leverage + mids + nonce rejection (4 calls)
+    mockedAxiosPost.mockResolvedValueOnce({ data: { universe: [{ name: 'BTC', szDecimals: 3, index: 0 }] } });
+    mockedAxiosPost.mockResolvedValueOnce({ data: { status: 'ok' } }); // updateLeverage
+    mockedAxiosPost.mockResolvedValueOnce({ data: { BTC: '50000' } }); // getMidPrice
+    mockedAxiosPost.mockResolvedValueOnce(nonceError);
+
+    // Retry: meta + mids cached; updateLeverage + exchange (2 calls) — nonce error again, no third attempt
+    mockedAxiosPost.mockResolvedValueOnce({ data: { status: 'ok' } }); // updateLeverage (retry)
+    mockedAxiosPost.mockResolvedValueOnce(nonceError);
+
+    const result = await client.placeMarketOrder({
+      symbol: 'BTC',
+      isBuy: true,
+      sizeUsd: 100,
+      leverage: 5,
+    });
+
+    expect(result.success).toBe(false);
+    expect(mockedAxiosPost).toHaveBeenCalledTimes(6); // exactly 2 attempts, no third
+  });
 });
