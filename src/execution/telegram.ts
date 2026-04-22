@@ -178,7 +178,8 @@ export type TakeProfitReason =
   | 'oracle_lag_compressed'
   | 'oracle_lag_reversed'
   | 'oracle_lag_timeout'
-  | 'oracle_lag_near_resolution';
+  | 'oracle_lag_near_resolution'
+  | 'oracle_lag_stop_loss';
 
 export async function notifyTakeProfitExecuted(opts: {
   position: Position;
@@ -204,6 +205,7 @@ export async function notifyTakeProfitExecuted(opts: {
     oracle_lag_reversed: '↩️ Oracle-lag — Chainlink reversed',
     oracle_lag_timeout: '⏱️ Oracle-lag — max hold reached',
     oracle_lag_near_resolution: '🔒 Oracle-lag — near-resolution profit lock',
+    oracle_lag_stop_loss: '🛑 Oracle-lag — stop-loss triggered',
   };
   let reasonLabel = reasonLabels[reason] ?? reason;
   if (mechanismDetail) reasonLabel = `${reasonLabel} [${mechanismDetail}]`;

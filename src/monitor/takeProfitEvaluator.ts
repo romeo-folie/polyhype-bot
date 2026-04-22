@@ -32,7 +32,8 @@ export type ExitReason =
   | 'oracle_lag_compressed'
   | 'oracle_lag_reversed'
   | 'oracle_lag_timeout'
-  | 'oracle_lag_near_resolution';
+  | 'oracle_lag_near_resolution'
+  | 'oracle_lag_stop_loss';
 
 export interface ExitDecision {
   shouldExit: boolean;
