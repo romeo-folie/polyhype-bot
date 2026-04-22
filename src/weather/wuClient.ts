@@ -68,21 +68,32 @@ async function refreshKey(redis: Redis, fetchFn: FetchFn): Promise<string | null
 }
 
 async function getKey(redis: Redis, fetchFn: FetchFn, force = false): Promise<string | null> {
-  // Env var takes priority — avoids the page scrape on every cold start.
   const envKey = process.env.WU_API_KEY;
-  if (envKey && /^[0-9a-f]{32}$/i.test(envKey)) {
-    if (!force) {
-      const cached = await redis.get(WU_REDIS_KEY);
-      if (cached) return cached;
+  const validEnvKey = envKey && /^[0-9a-f]{32}$/i.test(envKey) ? envKey : null;
+
+  if (force) {
+    // On 401/403 retry: attempt a real page refresh first so key rotation still works,
+    // then fall back to env var, then cached — never short-circuit to env var directly.
+    const refreshed = await refreshKey(redis, fetchFn);
+    if (refreshed) return refreshed;
+    if (validEnvKey) {
+      await redis.set(WU_REDIS_KEY, validEnvKey, 'EX', WU_KEY_TTL_S);
+      return validEnvKey;
     }
-    // Seed Redis from env var so subsequent per-city calls hit the cache.
-    await redis.set(WU_REDIS_KEY, envKey, 'EX', WU_KEY_TTL_S);
-    return envKey;
+    logger.warn('[weather-wu] key refresh failed');
+    return null;
   }
-  if (!force) {
-    const cached = await redis.get(WU_REDIS_KEY);
-    if (cached) return cached;
+
+  // Normal lookup: Redis cache → env var → page scrape.
+  const cached = await redis.get(WU_REDIS_KEY);
+  if (cached) return cached;
+
+  if (validEnvKey) {
+    // Seed Redis so subsequent per-city calls within the same run hit the cache.
+    await redis.set(WU_REDIS_KEY, validEnvKey, 'EX', WU_KEY_TTL_S);
+    return validEnvKey;
   }
+
   const refreshed = await refreshKey(redis, fetchFn);
   if (!refreshed) logger.warn('[weather-wu] key refresh failed and no cached key available');
   return refreshed;
