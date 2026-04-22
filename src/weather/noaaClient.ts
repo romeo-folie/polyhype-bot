@@ -42,11 +42,11 @@ export interface CityCoordinates {
   wuStation: string;
 }
 
-// All 30 cities currently active on Polymarket weather markets.
+// Cities active on Polymarket weather markets.
 // US cities use Fahrenheit, international cities use Celsius.
 export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   // US cities (Fahrenheit, NOAA coverage)
-  // wuStation = Weather Underground ICAO used by Polymarket for resolution
+  // wuStation = Polymarket resolution station identifier (ICAO/WU for most cities; 'HKO' for Hong Kong Observatory)
   'new york': { lat: 40.7128, lon: -74.006, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KLGA' },
   chicago: { lat: 41.8781, lon: -87.6298, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KORD' },
   miami: { lat: 25.7617, lon: -80.1918, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KMIA' },
@@ -70,7 +70,8 @@ export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   lucknow: { lat: 26.8467, lon: 80.9462, noaaCoverage: false, unit: 'celsius', wuStation: 'VILK' },
   // NOAA WRH station LLBG — coords pinned to airport, not city centre
   'tel aviv': { lat: 31.9965, lon: 34.8906, noaaCoverage: false, unit: 'celsius', wuStation: 'LLBG' },
-  // Resolves via Hong Kong Observatory (HKO), not WU — 1 decimal place precision
+  // Resolves via Hong Kong Observatory (HKO), not WU. HKO reports to 1 dp (e.g. 22.3°C),
+  // but bracket labels are integer °C — scanner parsing is unaffected.
   'hong kong': { lat: 22.3020, lon: 114.1740, noaaCoverage: false, unit: 'celsius', wuStation: 'HKO' },
   // Malpensa (LIMC), not Linate (LIML) — Polymarket resolves against LIMC
   milan: { lat: 45.6306, lon: 8.7281, noaaCoverage: false, unit: 'celsius', wuStation: 'LIMC' },
