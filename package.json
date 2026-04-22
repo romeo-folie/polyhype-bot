@@ -1,7 +1,7 @@
 {
-  "name": "polymarket-geopolitical-agent",
+  "name": "polymarket-general-agent",
   "version": "0.1.0",
-  "description": "Autonomous geopolitical trading agent for Polymarket",
+  "description": "Autonomous general-purpose trading agent for Polymarket",
   "private": true,
   "type": "module",
   "engines": {
