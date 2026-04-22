@@ -308,9 +308,16 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           usingMemeAtr = true;
         }
 
+        // Global ATR overlay is calibrated for 1m crypto-arb scalps (SL floor 1%,
+        // TP floor 2%). Applying it to hl-momentum 15m swing positions produces
+        // absurdly tight stops that SL every entry on intraday noise (burned on
+        // WIF 2026-04-22: three consecutive SL-outs at -1%). hl-momentum
+        // positions instead use the per-source override (HL_MOMENTUM_STOP_LOSS_PCT
+        // fixed) plus the meme-ATR path when enabled for meme symbols.
         let usingAtrMode = false;
         if (
           cfg.FUTURES_ATR_SLTP_ENABLED &&
+          ledgerPosForAtr?.sourcedFrom !== 'hl-momentum' &&
           ledgerPosForAtr?.entryAtrPct !== undefined &&
           Number.isFinite(ledgerPosForAtr.entryAtrPct) &&
           ledgerPosForAtr.entryAtrPct > 0

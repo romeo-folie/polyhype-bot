@@ -585,6 +585,93 @@ describe('futuresMonitor', () => {
     });
   });
 
+  describe('global ATR bypass for hl-momentum (2026-04-22 WIF fix)', () => {
+    // Global ATR path (FUTURES_ATR_SLTP_ENABLED=true) is calibrated for 1m
+    // crypto-arb scalps with a 1% SL floor. hl-momentum is a 15m swing strategy
+    // that needs the wider HL_MOMENTUM_STOP_LOSS_PCT. These tests lock in the
+    // bypass: global ATR must NOT apply to hl-momentum positions.
+    const globalAtrCfg = {
+      ...baseCfg,
+      FUTURES_ATR_SLTP_ENABLED: true,
+      FUTURES_ATR_SL_MULT: 1.5,
+      FUTURES_ATR_TP_MULT: 3.0,
+      FUTURES_ATR_SL_MIN_PCT: 1.0,
+      FUTURES_ATR_SL_MAX_PCT: 5.0,
+      FUTURES_ATR_TP_MIN_PCT: 2.0,
+      FUTURES_ATR_TP_MAX_PCT: 10.0,
+      FUTURES_ATR_TRAIL_STOP_MULT: 1.0,
+    };
+
+    const makeLedgerPos = (opts: {
+      symbol: string;
+      sourcedFrom: string;
+      entryAtrPct?: number;
+    }) => ({
+      marketId: opts.symbol,
+      symbol: opts.symbol,
+      direction: 'LONG' as const,
+      isFutures: true,
+      question: `${opts.symbol} perpetual`,
+      entryPrice: 1,
+      stakeUsd: 10,
+      edgeMagnitude: 0,
+      sourcedFrom: opts.sourcedFrom,
+      openedAt: new Date().toISOString(),
+      executionVenue: 'hyperliquid' as const,
+      entryAtrPct: opts.entryAtrPct,
+    });
+
+    const makeHlPos = (symbol: string, pnlPct: number) => ({
+      symbol,
+      position: {
+        szi: '100',
+        entryPx: '1',
+        unrealizedPnl: String(pnlPct),
+        marginUsed: '100',
+      },
+    });
+
+    it('hl-momentum position survives -2% when 15m ATR would compute 1.15% SL', async () => {
+      // 0.77% entryAtr × 1.5 = 1.155 → global ATR would SL here at -2%.
+      // After the bypass hl-momentum runs on fixed HL_MOMENTUM_STOP_LOSS_PCT=5%,
+      // so -2% is well inside the allowed range and the position holds.
+      loadConfigMock.mockReturnValue(globalAtrCfg);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('WIF', -2)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerPos({ symbol: 'WIF', sourcedFrom: 'hl-momentum', entryAtrPct: 0.77 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+
+    it('hl-momentum position SL fires at the fixed -5% floor, not the global ATR -1%', async () => {
+      loadConfigMock.mockReturnValue(globalAtrCfg);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('WIF', -5.5)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerPos({ symbol: 'WIF', sourcedFrom: 'hl-momentum', entryAtrPct: 0.77 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('WIF');
+    });
+
+    it('non-hl-momentum (crypto-arb) still uses global ATR path', async () => {
+      // Global ATR SL = clamp(0.5 × 1.5, 1.0, 5.0) = 1.0% → -1.5% should SL.
+      loadConfigMock.mockReturnValue(globalAtrCfg);
+      mockGetOpenPositions.mockResolvedValue([makeHlPos('BTC', -1.5)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerPos({ symbol: 'BTC', sourcedFrom: 'crypto-arb', entryAtrPct: 0.5 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('BTC');
+    });
+  });
+
   describe('signal-fade exit gate', () => {
     const fadeCfg = { ...baseCfg, FUTURES_EXIT_ON_SIGNAL_FADE: true };
     const oldEnough = () => new Date(Date.now() - 20 * 60 * 1000).toISOString();
