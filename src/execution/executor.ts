@@ -1109,12 +1109,19 @@ async function executeHyperliquidSignal(
       // Capture ATR snapshot at entry — drives ATR-based SL/TP in futuresMonitor.
       // Best-effort: if candles aren't available yet, leave undefined and the
       // monitor will fall back to fixed-percent thresholds for this position.
+      // 15m timeframe needs a wider lookback than the 60-min buildCandles default:
+      // FUTURES_ATR_PERIOD=14 requires ≥15 candles, which is ~3.75h of 15m bars.
+      // Reuse HL_MOMENTUM_PRIMARY_LOOKBACK_MS (54h = 216 bars) — matches the lookback
+      // the scanner itself uses for scoring, same as the meme ATR path below.
       const atrTimeframe = atrTimeframeForSignalSource(signal.sourcedFrom);
+      const atrLookbackMs =
+        atrTimeframe === '15m' ? cfg.HL_MOMENTUM_PRIMARY_LOOKBACK_MS : undefined;
       let entryAtr: number | undefined;
       let entryAtrPct: number | undefined;
       try {
         const atr = await computeATR(signal.marketId, redis, undefined, {
           timeframe: atrTimeframe,
+          ...(atrLookbackMs !== undefined ? { lookbackMs: atrLookbackMs } : {}),
         });
         if (atr) {
           entryAtr = atr.atr;
