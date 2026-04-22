@@ -27,43 +27,76 @@ function fetchWithTimeout(url: string, options: RequestInit, fetchFn: FetchFn): 
   return fetchFn(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
-async function extractKeyFromPage(html: string): Promise<string | null> {
-  // Key is a 32-char hex string used as apiKey in the weather.com calls
-  const m = html.match(/"apiKey"\s*:\s*"([0-9a-f]{32})"/i);
-  return m?.[1] ?? null;
+function extractKeyFromPage(html: string): string | null {
+  // WU embeds the key in two forms depending on render path:
+  //   JSON app-state: "apiKey":"<hex32>"
+  //   URL query param: apiKey=<hex32>
+  const m = html.match(/"apiKey"\s*:\s*"([0-9a-f]{32})"|[?&]apiKey=([0-9a-f]{32})/i);
+  return m?.[1] ?? m?.[2] ?? null;
 }
 
 async function refreshKey(redis: Redis, fetchFn: FetchFn): Promise<string | null> {
   try {
     const res = await fetchWithTimeout(
       WU_KEY_REFRESH_URL,
-      { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; pga-weather/1.0)' } },
+      {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+      },
       fetchFn,
     );
     if (res.ok) {
       const html = await res.text();
-      const key = await extractKeyFromPage(html);
+      const key = extractKeyFromPage(html);
       if (key) {
         await redis.set(WU_REDIS_KEY, key, 'EX', WU_KEY_TTL_S);
         logger.info('[weather-wu] api key refreshed from page');
         return key;
       }
+      logger.warn('[weather-wu] key not found in page response');
+    } else {
+      logger.warn('[weather-wu] key refresh page returned non-ok status', { status: res.status });
     }
   } catch (err) {
     logger.warn('[weather-wu] key refresh fetch failed', {
       error: err instanceof Error ? err.message : String(err),
     });
   }
-  logger.warn('[weather-wu] key refresh failed and no cached key available');
   return null;
 }
 
 async function getKey(redis: Redis, fetchFn: FetchFn, force = false): Promise<string | null> {
-  if (!force) {
-    const cached = await redis.get(WU_REDIS_KEY);
-    if (cached) return cached;
+  const envKey = process.env.WU_API_KEY;
+  const validEnvKey = envKey && /^[0-9a-f]{32}$/i.test(envKey) ? envKey : null;
+
+  if (force) {
+    // On 401/403 retry: attempt a real page refresh first so key rotation still works,
+    // then fall back to env var, then cached — never short-circuit to env var directly.
+    const refreshed = await refreshKey(redis, fetchFn);
+    if (refreshed) return refreshed;
+    if (validEnvKey) {
+      await redis.set(WU_REDIS_KEY, validEnvKey, 'EX', WU_KEY_TTL_S);
+      return validEnvKey;
+    }
+    logger.warn('[weather-wu] key refresh failed');
+    return null;
   }
-  return refreshKey(redis, fetchFn);
+
+  // Normal lookup: Redis cache → env var → page scrape.
+  const cached = await redis.get(WU_REDIS_KEY);
+  if (cached) return cached;
+
+  if (validEnvKey) {
+    // Seed Redis so subsequent per-city calls within the same run hit the cache.
+    await redis.set(WU_REDIS_KEY, validEnvKey, 'EX', WU_KEY_TTL_S);
+    return validEnvKey;
+  }
+
+  const refreshed = await refreshKey(redis, fetchFn);
+  if (!refreshed) logger.warn('[weather-wu] key refresh failed and no cached key available');
+  return refreshed;
 }
 
 interface WuObservation {
