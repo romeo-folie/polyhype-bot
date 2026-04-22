@@ -128,10 +128,15 @@ const TYPES = {
   ],
 };
 
-// Monotonic nonce generator to prevent collision when Date.now() is called twice in the same millisecond.
-let _hlNonce = Date.now();
+// Monotonic nonce generator. On each call, use Date.now() if wall-clock time has moved
+// forward; otherwise increment locally when multiple calls happen within the same millisecond.
+// Initializing to 0 (not Date.now() at module load) ensures the first nonce is derived from
+// the current time at call time, avoiding a stale pre-seeded startup value after a delayed first use.
+let _hlNonce = 0;
 function nextHlNonce(): number {
-  return ++_hlNonce;
+  const now = Date.now();
+  _hlNonce = now > _hlNonce ? now : _hlNonce + 1;
+  return _hlNonce;
 }
 
 export interface HlPosition {
@@ -165,11 +170,15 @@ interface HlMeta {
 
 interface HlExchangeResponse {
   status: string;
-  response?: {
-    data?: {
-      statuses?: unknown[];
-    };
-  };
+  // On success, response is an object with statuses. On error (e.g. nonce rejection),
+  // HL returns response as a plain string describing the error.
+  response?:
+    | string
+    | {
+        data?: {
+          statuses?: unknown[];
+        };
+      };
 }
 
 interface HlClearinghouseState {
@@ -240,14 +249,17 @@ class HyperliquidClient {
   /**
    * Place a market order on Hyperliquid.
    */
-  async placeMarketOrder(opts: {
-    symbol: string;
-    isBuy: boolean;
-    sizeUsd: number;
-    leverage: number;
-    reduceOnly?: boolean;
-    sizeBase?: number; // Added to avoid double lookup if possible
-  }): Promise<{ success: boolean; txHash?: string; price?: number; error?: string }> {
+  async placeMarketOrder(
+    opts: {
+      symbol: string;
+      isBuy: boolean;
+      sizeUsd: number;
+      leverage: number;
+      reduceOnly?: boolean;
+      sizeBase?: number; // Added to avoid double lookup if possible
+    },
+    _retrying = false,
+  ): Promise<{ success: boolean; txHash?: string; price?: number; error?: string }> {
     // Dry-run mode: log the order without submitting — safe validation path.
     if (loadConfig().HL_DRY_RUN) {
       logger.info('[hyperliquid] DRY RUN — order not submitted', {
@@ -340,7 +352,8 @@ class HyperliquidClient {
       });
 
       if (response.data.status === 'ok') {
-        const statuses = response.data.response?.data?.statuses;
+        const responseObj = typeof response.data.response === 'object' ? response.data.response : undefined;
+        const statuses = responseObj?.data?.statuses;
         if (!Array.isArray(statuses) || statuses.length === 0) {
           return { success: false, error: 'HL response missing statuses array' };
         }
@@ -363,6 +376,20 @@ class HyperliquidClient {
         }
       }
 
+      // Self-heal on "nonce too low" — parse the required minimum, bump the counter, retry once.
+      // Root cause: two containers (pga-futures, pga-arb) share the same HL wallet but have
+      // independent in-memory nonce counters; whichever started earlier can fall behind.
+      const errorResponse: unknown = response.data.response;
+      if (!_retrying && typeof errorResponse === 'string') {
+        const m = /nonce too low \d+ < (\d+)/.exec(errorResponse);
+        if (m?.[1]) {
+          const required = Number(m[1]);
+          _hlNonce = Math.max(Date.now(), required);
+          logger.warn('[hyperliquid] nonce too low — bumping and retrying', { required, newNonce: _hlNonce });
+          return this.placeMarketOrder(opts, true);
+        }
+      }
+
       return { success: false, error: JSON.stringify(response.data) };
     } catch (err: unknown) {
       // Capture HL response body on HTTP errors (e.g. 422) for diagnostics
@@ -371,6 +398,18 @@ class HyperliquidClient {
         ? JSON.stringify(axiosErr.response.data).slice(0, 500)
         : undefined;
       const msg = axiosErr.message ?? String(err);
+
+      // Apply same nonce self-heal for non-2xx responses (HL may return 4xx with nonce errors)
+      if (!_retrying && typeof responseBody === 'string') {
+        const m = /nonce too low \d+ < (\d+)/.exec(responseBody);
+        if (m?.[1]) {
+          const required = Number(m[1]);
+          _hlNonce = Math.max(Date.now(), required);
+          logger.warn('[hyperliquid] nonce too low (http error) — bumping and retrying', { required, newNonce: _hlNonce });
+          return this.placeMarketOrder(opts, true);
+        }
+      }
+
       if (responseBody) {
         logger.error('[hyperliquid] order rejected', {
           status: axiosErr.response?.status,
