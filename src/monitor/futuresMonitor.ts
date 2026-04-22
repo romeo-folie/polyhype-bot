@@ -561,8 +561,10 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             }
           }
 
-          // 4. TA re-evaluation — exit if confluence flips against held direction
-          if (!shouldExit && cfg.FUTURES_EXIT_ON_SIGNAL_FADE) {
+          // 4. TA re-evaluation — exit if confluence flips against held direction.
+          // Only applies when position is flat or negative; winners ride until
+          // trailing fires so a short-term TA blip doesn't cut a live winner.
+          if (!shouldExit && cfg.FUTURES_EXIT_ON_SIGNAL_FADE && priceChangePct <= 0) {
             const ageSec = (Date.now() - openedAt) / 1000;
             const lastCheck = lastRevalCheck.get(symbol) ?? 0;
             const secSinceCheck = (Date.now() - lastCheck) / 1000;
