@@ -1404,7 +1404,7 @@ const envSchema = z.object({
   // plays — the default 16% SL fires within one 5s monitor tick on normal
   // variance. 0.45 requires the position to be down 45% before cutting, which
   // only happens when the game situation has definitively turned against us.
-  SPORTS_TAKE_PROFIT: z.coerce.number().min(0).optional().default(0.25),
+  SPORTS_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.25),
   SPORTS_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.45),
   // --- WEATHER GROUND-TRUTH RECONCILER ---
   // Fills `weather_ground_truth` with observed daily highs for past events, so

@@ -223,7 +223,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       // Sports-arb signals set sourcedFrom='sports:league:gameId'. Don't rely on
       // inferCategory — it misses team-name questions that lack keywords like
       // "mlb"/"baseball", falling through to 'geopolitical' and the default 16% SL.
-      const isSports = position.sourcedFrom?.startsWith('sports:') ?? false;
+      const isSports = inferSource(position.sourcedFrom ?? '') === 'sports';
 
       if (isCryptoUpdown) {
         tpThreshold = cfg.CRYPTO_UPDOWN_TAKE_PROFIT;
