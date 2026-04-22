@@ -14,20 +14,28 @@ export async function handleWeatherGroundTruth(sql: Sql, payloads: unknown[]): P
     }
     const d = parsed.data;
     rows.push({
-      observed_at:   d.observedAt ?? new Date().toISOString(),
-      city:          d.city,
-      target_date:   d.targetDate,
-      unit:          d.unit,
-      observed_high: d.observedHigh,
-      source:        d.source,
+      observed_at:       d.observedAt ?? new Date().toISOString(),
+      city:              d.city,
+      target_date:       d.targetDate,
+      unit:              d.unit,
+      observed_high:     d.observedHigh,
+      source:            d.source,
+      resolution_high:   d.resolutionHigh ?? null,
+      resolution_source: d.resolutionSource ?? null,
     });
   }
   if (rows.length === 0) return;
-  // UNIQUE(city, target_date) — reconciler retries are safe.
+  // ON CONFLICT: insert new rows normally; for existing rows, backfill
+  // resolution_high/source if not yet set (never overwrite once populated).
   await sql`
     INSERT INTO weather_ground_truth ${sql(rows,
-      'observed_at', 'city', 'target_date', 'unit', 'observed_high', 'source'
+      'observed_at', 'city', 'target_date', 'unit', 'observed_high', 'source',
+      'resolution_high', 'resolution_source'
     )}
-    ON CONFLICT (city, target_date) DO NOTHING
+    ON CONFLICT (city, target_date) DO UPDATE
+      SET resolution_high   = EXCLUDED.resolution_high,
+          resolution_source = EXCLUDED.resolution_source
+      WHERE weather_ground_truth.resolution_high IS NULL
+        AND EXCLUDED.resolution_high IS NOT NULL
   `;
 }

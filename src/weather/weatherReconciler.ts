@@ -2,18 +2,19 @@
  * Weather ground-truth reconciler.
  *
  * For every city in `CITY_COORDINATES` and every past target_date in the
- * lookback window, look up the observed daily high via the Open-Meteo archive
- * API and write a row to `weather_ground_truth`. This gives us a persistent
- * oracle to validate whatever the weather scanner predicted — the scanner
- * currently produces 18-27% edges that we cannot tell apart from bugs until we
- * can see whether the winning bracket actually won in reality.
+ * lookback window, fetches two ground-truth readings and writes them to
+ * `weather_ground_truth`:
  *
- * Discovery is intentionally NOT driven from `shadow_observations`: that path
- * left us empty when the writer wasn't wired yet (2026-04-13/14) and would
- * silently miss any future writer downtime. Iterating cities × dates makes the
- * reconciler self-healing regardless of upstream emit gaps. Already-reconciled
- * (city, target_date) pairs are filtered via LEFT JOIN against
- * `weather_ground_truth` so each pair is fetched at most once ever.
+ *   observed_high     — Open-Meteo archive at forecast coordinates (existing)
+ *   resolution_high   — exact Polymarket resolution source: WU, METAR, or HKO
+ *
+ * Running both side-by-side lets the bias system compare forecast vs resolution
+ * source (eliminating basis risk) while retaining the Open-Meteo delta for
+ * diagnosing coordinate vs model error separately.
+ *
+ * Discovery covers:
+ *   (a) (city, date) pairs with no ground-truth row yet
+ *   (b) existing rows where resolution_high IS NULL (backfill)
  *
  * Read-only with respect to trading: no signals, no positions. Safe to run
  * unconditionally; no *_ENABLED flag.
@@ -25,12 +26,16 @@ import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { getSql } from '../db/client.js';
 import { getRedis } from '../shared/redis.js';
-import { CITY_COORDINATES, canonicalCityKey, lookupCity } from './noaaClient.js';
+import type { Redis } from 'ioredis';
+import { CITY_COORDINATES, canonicalCityKey, lookupCity, type CityCoordinates } from './noaaClient.js';
 import {
   fetchHistoricalHigh,
   type FetchFn,
   type HistoricalHigh,
 } from './openMeteoClient.js';
+import { fetchWuHistoricalHigh } from './wuClient.js';
+import { fetchMetarDailyHigh } from './metarClient.js';
+import { fetchHkoDailyHigh } from './hkoClient.js';
 import { computeCityBias } from './cityBias.js';
 
 /** One unresolved (city, target_date) tuple to reconcile. */
@@ -38,6 +43,8 @@ export interface UnresolvedTarget {
   /** City name; may be aliased (e.g. "nyc") — canonicalized at reconcile time. */
   city: string;
   targetDate: string; // YYYY-MM-DD
+  /** True if an Open-Meteo archive row already exists; only resolution_high needs populating. */
+  hasArchive: boolean;
 }
 
 type ArchiveFetcher = (
@@ -46,6 +53,12 @@ type ArchiveFetcher = (
   targetDate: string,
   unit: 'fahrenheit' | 'celsius',
 ) => Promise<HistoricalHigh | null>;
+
+/** Injectable resolution fetcher for tests. */
+export type ResolutionFetcher = (
+  coords: CityCoordinates,
+  targetDate: string,
+) => Promise<{ high: number; source: string } | null>;
 
 /**
  * Generate (city, target_date) tuples for every canonical city in
@@ -67,7 +80,7 @@ export async function fetchTargetsToReconcile(
 ): Promise<UnresolvedTarget[]> {
   const sql = getSql();
   const cities = Object.keys(CITY_COORDINATES);
-  const rows = await sql<{ city: string; target_date: string }[]>`
+  const rows = await sql<{ city: string; target_date: string; has_archive: boolean }[]>`
     WITH date_range AS (
       SELECT generate_series(
         (CURRENT_DATE - ${lookbackDays}::int)::date,
@@ -78,13 +91,16 @@ export async function fetchTargetsToReconcile(
     city_list AS (
       SELECT unnest(${cities}::text[]) AS city
     )
-    SELECT cl.city AS city, dr.target_date::text AS target_date
+    SELECT cl.city AS city,
+           dr.target_date::text AS target_date,
+           (gt.id IS NOT NULL) AS has_archive
     FROM city_list cl
     CROSS JOIN date_range dr
     LEFT JOIN weather_ground_truth gt
       ON gt.city = cl.city
      AND gt.target_date = dr.target_date
     WHERE gt.id IS NULL
+       OR gt.resolution_high IS NULL
     ORDER BY dr.target_date DESC, cl.city ASC
     LIMIT ${limit}
   `;
@@ -92,27 +108,21 @@ export async function fetchTargetsToReconcile(
   return rows.map((r) => ({
     city: r.city,
     targetDate: r.target_date.slice(0, 10),
+    hasArchive: Boolean(r.has_archive),
   }));
 }
 
 /**
- * Reconcile the given list of (city, target_date) tuples by fetching
- * historical highs and enqueueing `weather_ground_truth` rows. Returns a
- * summary for logging.
+ * Reconcile the given list of (city, target_date) tuples. For each target:
+ *   - If no archive row exists: fetch Open-Meteo archive + resolution source, write both.
+ *   - If archive row exists but resolution_high is NULL: fetch resolution source only.
  *
- * City keys are canonicalized against CITY_COORDINATES before persistence so
- * aliases ("nyc", "new york city") collapse to the same row, and unit is
- * derived from the city's coords — never from the shadow payload — because
- * unit is a property of the location (US=°F, international=°C).
- *
- * `fetcher` is injectable for tests — defaults to the real Open-Meteo archive
- * client. Unknown cities (missing from CITY_COORDINATES) are skipped with a
- * warning; archive misses (stale data, network errors) are counted but not
- * thrown so a partial failure doesn't fail the whole run.
+ * Both fetchers are injectable for tests.
  */
 export async function reconcileTargets(
   targets: UnresolvedTarget[],
-  fetcher: ArchiveFetcher = fetchHistoricalHigh,
+  archiveFetcher: ArchiveFetcher = fetchHistoricalHigh,
+  resolutionFetcher: ResolutionFetcher = defaultResolutionFetcher,
 ): Promise<{ resolved: number; unknownCity: number; noData: number }> {
   let resolved = 0;
   let unknownCity = 0;
@@ -127,38 +137,86 @@ export async function reconcileTargets(
       continue;
     }
 
-    const result = await fetcher(coords.lat, coords.lon, t.targetDate, coords.unit);
-    if (!result) {
-      logger.debug('[weather-reconciler] archive returned no data (will retry next run)', {
-        city: canonical,
-        targetDate: t.targetDate,
-      });
-      noData++;
-      continue;
+    // If archive row already exists, skip the Open-Meteo fetch and only populate resolution.
+    let archiveHigh: number | undefined;
+    if (!t.hasArchive) {
+      const result = await archiveFetcher(coords.lat, coords.lon, t.targetDate, coords.unit);
+      if (!result) {
+        logger.debug('[weather-reconciler] archive returned no data (will retry next run)', {
+          city: canonical, targetDate: t.targetDate,
+        });
+        noData++;
+        continue;
+      }
+      archiveHigh = result.observedHigh;
     }
 
-    // Stamp observedAt at fetch time so the column's documented meaning
-    // ("when we fetched it") survives writer lag/replays.
+    // Fetch from the exact Polymarket resolution source (best-effort; doesn't block row write).
+    const resolution = await resolutionFetcher(coords, t.targetDate);
+
     const observedAt = new Date().toISOString();
     void enqueueWrite('weather_ground_truth', {
       city: canonical,
       targetDate: t.targetDate,
       unit: coords.unit,
-      observedHigh: result.observedHigh,
-      source: 'open-meteo-archive',
+      // observedHigh is required by the schema; for backfill-only rows set a sentinel
+      // that the ON CONFLICT handler will ignore (it only updates resolution columns).
+      observedHigh: archiveHigh ?? 0,
+      source: archiveHigh !== undefined ? 'open-meteo-archive' : 'backfill-sentinel',
+      resolutionHigh: resolution?.high,
+      resolutionSource: resolution?.source,
       observedAt,
     });
+
     logger.info('[weather-reconciler] ground truth enqueued', {
       city: canonical,
-      rawCity: t.city,
       targetDate: t.targetDate,
       unit: coords.unit,
-      observedHigh: result.observedHigh,
+      observedHigh: archiveHigh,
+      resolutionHigh: resolution?.high,
+      resolutionSource: resolution?.source,
     });
     resolved++;
   }
 
   return { resolved, unknownCity, noData };
+}
+
+/**
+ * Default resolution fetcher — dispatches to the appropriate client based on
+ * the city's resolutionSource. Requires a live Redis instance for WU key caching.
+ */
+let _redis: Redis | null = null;
+function getResolverRedis(): Redis {
+  if (!_redis) _redis = getRedis();
+  return _redis;
+}
+
+async function defaultResolutionFetcher(
+  coords: CityCoordinates,
+  targetDate: string,
+): Promise<{ high: number; source: string } | null> {
+  if (coords.resolutionSource === 'hko') {
+    const high = await fetchHkoDailyHigh(targetDate);
+    return high !== null ? { high, source: 'hko' } : null;
+  }
+  if (coords.resolutionSource === 'metar') {
+    const high = await fetchMetarDailyHigh(coords.wuStation, targetDate);
+    return high !== null ? { high, source: 'metar' } : null;
+  }
+  // WU
+  if (!coords.isoCountry) {
+    logger.warn('[weather-reconciler] wu city missing isoCountry', { wuStation: coords.wuStation });
+    return null;
+  }
+  const high = await fetchWuHistoricalHigh(
+    coords.wuStation,
+    coords.isoCountry,
+    targetDate,
+    coords.unit,
+    getResolverRedis(),
+  );
+  return high !== null ? { high, source: 'wu' } : null;
 }
 
 /**
@@ -173,19 +231,23 @@ export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
     cfg.WEATHER_RECONCILER_MAX_PER_RUN,
   );
 
+  const redis = getRedis();
+  const sql = getSql();
+
   if (targets.length === 0) {
-    logger.info('[weather-reconciler] no unresolved targets', {
+    logger.info('[weather-reconciler] no unresolved targets — refreshing bias cache only', {
       lagDays: cfg.WEATHER_RECONCILER_LAG_DAYS,
       lookbackDays: cfg.WEATHER_RECONCILER_LOOKBACK_DAYS,
     });
+    await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES);
     return;
   }
 
-  const fetcher: ArchiveFetcher = fetchFn
+  const archiveFetcher: ArchiveFetcher = fetchFn
     ? (lat, lon, date, unit) => fetchHistoricalHigh(lat, lon, date, unit, fetchFn)
     : fetchHistoricalHigh;
 
-  const summary = await reconcileTargets(targets, fetcher);
+  const summary = await reconcileTargets(targets, archiveFetcher);
   logger.info('[weather-reconciler] run complete', {
     candidates: targets.length,
     ...summary,
@@ -194,8 +256,6 @@ export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
   // After ground-truth upserts, refresh per-city bias cache in Redis.
   // This runs unconditionally regardless of WEATHER_BIAS_CORRECTION_ENABLED so
   // the cache is warm by the time the flag is flipped.
-  const redis = getRedis();
-  const sql = getSql();
   await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES);
 }
 

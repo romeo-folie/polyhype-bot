@@ -38,59 +38,61 @@ export interface CityCoordinates {
   noaaCoverage: boolean;
   /** Temperature unit used by Polymarket for this city. */
   unit: 'fahrenheit' | 'celsius';
-  /** Weather Underground station code for resolution verification. */
+  /** Polymarket resolution station identifier (ICAO/WU for most cities; 'HKO' for Hong Kong Observatory). */
   wuStation: string;
+  /** Which ground-truth fetcher to use for this city's resolution source. */
+  resolutionSource: 'wu' | 'metar' | 'hko';
+  /** ISO 3166-1 alpha-2 country code — required for WU cities (constructs ICAO:9:ISO2 location key). */
+  isoCountry?: string;
 }
 
 // Cities active on Polymarket weather markets.
 // US cities use Fahrenheit, international cities use Celsius.
 export const CITY_COORDINATES: Record<string, CityCoordinates> = {
-  // US cities (Fahrenheit, NOAA coverage)
-  // wuStation = Polymarket resolution station identifier (ICAO/WU for most cities; 'HKO' for Hong Kong Observatory)
-  'new york': { lat: 40.7128, lon: -74.006, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KLGA' },
-  chicago: { lat: 41.8781, lon: -87.6298, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KORD' },
-  miami: { lat: 25.7617, lon: -80.1918, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KMIA' },
+  // US cities (Fahrenheit) — all resolve via Weather Underground
+  'new york':      { lat: 40.7128, lon: -74.006,    noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KLGA', resolutionSource: 'wu', isoCountry: 'US' },
+  chicago:         { lat: 41.8781, lon: -87.6298,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KORD', resolutionSource: 'wu', isoCountry: 'US' },
+  miami:           { lat: 25.7617, lon: -80.1918,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KMIA', resolutionSource: 'wu', isoCountry: 'US' },
   // Hobby (KHOU), not IAH — Polymarket resolves against KHOU
-  houston: { lat: 29.6454, lon: -95.2789, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KHOU' },
-  dallas: { lat: 32.7767, lon: -96.797, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KDAL' },
+  houston:         { lat: 29.6454, lon: -95.2789,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KHOU', resolutionSource: 'wu', isoCountry: 'US' },
+  dallas:          { lat: 32.7767, lon: -96.797,    noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KDAL', resolutionSource: 'wu', isoCountry: 'US' },
   // Buckley SFB (KBKF) in Aurora, not Denver airport — Polymarket resolves against KBKF
-  denver: { lat: 39.7016, lon: -104.7516, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KBKF' },
-  seattle: { lat: 47.6062, lon: -122.3321, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KSEA' },
-  atlanta: { lat: 33.749, lon: -84.388, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KATL' },
-  austin: { lat: 30.2672, lon: -97.7431, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KAUS' },
-  'los angeles': { lat: 34.0522, lon: -118.2437, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KLAX' },
-  'san francisco': { lat: 37.7749, lon: -122.4194, noaaCoverage: true, unit: 'fahrenheit', wuStation: 'KSFO' },
-  // International cities (Celsius) — most resolve via Weather Underground; NOAA WRH noted below
-  london: { lat: 51.5074, lon: -0.1278, noaaCoverage: false, unit: 'celsius', wuStation: 'EGLC' },
-  paris: { lat: 48.8566, lon: 2.3522, noaaCoverage: false, unit: 'celsius', wuStation: 'LFPG' },
-  toronto: { lat: 43.6532, lon: -79.3832, noaaCoverage: false, unit: 'celsius', wuStation: 'CYYZ' },
-  'sao paulo': { lat: -23.5505, lon: -46.6333, noaaCoverage: false, unit: 'celsius', wuStation: 'SBGR' },
-  'buenos aires': { lat: -34.6037, lon: -58.3816, noaaCoverage: false, unit: 'celsius', wuStation: 'SAEZ' },
-  ankara: { lat: 39.9334, lon: 32.8597, noaaCoverage: false, unit: 'celsius', wuStation: 'LTAC' },
-  lucknow: { lat: 26.8467, lon: 80.9462, noaaCoverage: false, unit: 'celsius', wuStation: 'VILK' },
-  // NOAA WRH station LLBG — coords pinned to airport, not city centre
-  'tel aviv': { lat: 31.9965, lon: 34.8906, noaaCoverage: false, unit: 'celsius', wuStation: 'LLBG' },
-  // Resolves via Hong Kong Observatory (HKO), not WU. HKO reports to 1 dp (e.g. 22.3°C),
-  // but bracket labels are integer °C — scanner parsing is unaffected.
-  'hong kong': { lat: 22.3020, lon: 114.1740, noaaCoverage: false, unit: 'celsius', wuStation: 'HKO' },
+  denver:          { lat: 39.7016, lon: -104.7516,  noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KBKF', resolutionSource: 'wu', isoCountry: 'US' },
+  seattle:         { lat: 47.6062, lon: -122.3321,  noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KSEA', resolutionSource: 'wu', isoCountry: 'US' },
+  atlanta:         { lat: 33.749,  lon: -84.388,    noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KATL', resolutionSource: 'wu', isoCountry: 'US' },
+  austin:          { lat: 30.2672, lon: -97.7431,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KAUS', resolutionSource: 'wu', isoCountry: 'US' },
+  'los angeles':   { lat: 34.0522, lon: -118.2437,  noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KLAX', resolutionSource: 'wu', isoCountry: 'US' },
+  'san francisco': { lat: 37.7749, lon: -122.4194,  noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KSFO', resolutionSource: 'wu', isoCountry: 'US' },
+  // International cities (Celsius) — WU unless noted
+  london:          { lat: 51.5074, lon: -0.1278,    noaaCoverage: false, unit: 'celsius', wuStation: 'EGLC', resolutionSource: 'wu', isoCountry: 'GB' },
+  paris:           { lat: 48.8566, lon: 2.3522,     noaaCoverage: false, unit: 'celsius', wuStation: 'LFPG', resolutionSource: 'wu', isoCountry: 'FR' },
+  toronto:         { lat: 43.6532, lon: -79.3832,   noaaCoverage: false, unit: 'celsius', wuStation: 'CYYZ', resolutionSource: 'wu', isoCountry: 'CA' },
+  'sao paulo':     { lat: -23.5505, lon: -46.6333,  noaaCoverage: false, unit: 'celsius', wuStation: 'SBGR', resolutionSource: 'wu', isoCountry: 'BR' },
+  'buenos aires':  { lat: -34.6037, lon: -58.3816,  noaaCoverage: false, unit: 'celsius', wuStation: 'SAEZ', resolutionSource: 'wu', isoCountry: 'AR' },
+  ankara:          { lat: 39.9334, lon: 32.8597,    noaaCoverage: false, unit: 'celsius', wuStation: 'LTAC', resolutionSource: 'wu', isoCountry: 'TR' },
+  lucknow:         { lat: 26.8467, lon: 80.9462,    noaaCoverage: false, unit: 'celsius', wuStation: 'VILK', resolutionSource: 'wu', isoCountry: 'IN' },
+  // NOAA WRH station LLBG — coords pinned to airport; resolved via METAR, not WU
+  'tel aviv':      { lat: 31.9965, lon: 34.8906,    noaaCoverage: false, unit: 'celsius', wuStation: 'LLBG', resolutionSource: 'metar' },
+  // Resolves via Hong Kong Observatory. HKO reports to 1 dp; bracket labels are integer °C.
+  'hong kong':     { lat: 22.3020, lon: 114.1740,   noaaCoverage: false, unit: 'celsius', wuStation: 'HKO',  resolutionSource: 'hko' },
   // Malpensa (LIMC), not Linate (LIML) — Polymarket resolves against LIMC
-  milan: { lat: 45.6306, lon: 8.7281, noaaCoverage: false, unit: 'celsius', wuStation: 'LIMC' },
-  madrid: { lat: 40.4168, lon: -3.7038, noaaCoverage: false, unit: 'celsius', wuStation: 'LEMD' },
-  warsaw: { lat: 52.2297, lon: 21.0122, noaaCoverage: false, unit: 'celsius', wuStation: 'EPWA' },
-  shenzhen: { lat: 22.5431, lon: 114.0579, noaaCoverage: false, unit: 'celsius', wuStation: 'ZGSZ' },
-  // NOAA WRH station LTFM — coords pinned to airport, not city centre (PR #296)
-  istanbul: { lat: 41.2611, lon: 28.7425, noaaCoverage: false, unit: 'celsius', wuStation: 'LTFM' },
-  'mexico city': { lat: 19.4326, lon: -99.1332, noaaCoverage: false, unit: 'celsius', wuStation: 'MMMX' },
-  amsterdam: { lat: 52.3676, lon: 4.9041, noaaCoverage: false, unit: 'celsius', wuStation: 'EHAM' },
-  // Marcos A. Gelabert/Albrook (MPMG), not Tocumen (MPTO) — Polymarket resolves against MPMG
-  'panama city': { lat: 8.9833, lon: -79.5556, noaaCoverage: false, unit: 'celsius', wuStation: 'MPMG' },
-  // Halim Perdanakusuma (WIHH), not Soekarno-Hatta (WIII) — Polymarket resolves against WIHH
-  jakarta: { lat: -6.2661, lon: 106.8908, noaaCoverage: false, unit: 'celsius', wuStation: 'WIHH' },
-  jeddah: { lat: 21.4858, lon: 39.1925, noaaCoverage: false, unit: 'celsius', wuStation: 'OEJN' },
-  // NOAA WRH station UUWW — Vnukovo International
-  moscow: { lat: 55.5915, lon: 37.2615, noaaCoverage: false, unit: 'celsius', wuStation: 'UUWW' },
-  // NOAA WRH station RCTP — Taiwan Taoyuan International
-  taipei: { lat: 25.0777, lon: 121.2328, noaaCoverage: false, unit: 'celsius', wuStation: 'RCTP' },
+  milan:           { lat: 45.6306, lon: 8.7281,     noaaCoverage: false, unit: 'celsius', wuStation: 'LIMC', resolutionSource: 'wu', isoCountry: 'IT' },
+  madrid:          { lat: 40.4168, lon: -3.7038,    noaaCoverage: false, unit: 'celsius', wuStation: 'LEMD', resolutionSource: 'wu', isoCountry: 'ES' },
+  warsaw:          { lat: 52.2297, lon: 21.0122,    noaaCoverage: false, unit: 'celsius', wuStation: 'EPWA', resolutionSource: 'wu', isoCountry: 'PL' },
+  shenzhen:        { lat: 22.5431, lon: 114.0579,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZGSZ', resolutionSource: 'wu', isoCountry: 'CN' },
+  // NOAA WRH station LTFM — coords pinned to airport; resolved via METAR, not WU
+  istanbul:        { lat: 41.2611, lon: 28.7425,    noaaCoverage: false, unit: 'celsius', wuStation: 'LTFM', resolutionSource: 'metar' },
+  'mexico city':   { lat: 19.4326, lon: -99.1332,   noaaCoverage: false, unit: 'celsius', wuStation: 'MMMX', resolutionSource: 'wu', isoCountry: 'MX' },
+  amsterdam:       { lat: 52.3676, lon: 4.9041,     noaaCoverage: false, unit: 'celsius', wuStation: 'EHAM', resolutionSource: 'wu', isoCountry: 'NL' },
+  // Marcos A. Gelabert/Albrook (MPMG), not Tocumen (MPTO)
+  'panama city':   { lat: 8.9833,  lon: -79.5556,   noaaCoverage: false, unit: 'celsius', wuStation: 'MPMG', resolutionSource: 'wu', isoCountry: 'PA' },
+  // Halim Perdanakusuma (WIHH), not Soekarno-Hatta (WIII)
+  jakarta:         { lat: -6.2661, lon: 106.8908,   noaaCoverage: false, unit: 'celsius', wuStation: 'WIHH', resolutionSource: 'wu', isoCountry: 'ID' },
+  jeddah:          { lat: 21.4858, lon: 39.1925,    noaaCoverage: false, unit: 'celsius', wuStation: 'OEJN', resolutionSource: 'wu', isoCountry: 'SA' },
+  // NOAA WRH station UUWW — Vnukovo International; resolved via METAR
+  moscow:          { lat: 55.5915, lon: 37.2615,    noaaCoverage: false, unit: 'celsius', wuStation: 'UUWW', resolutionSource: 'metar' },
+  // NOAA WRH station RCTP — Taiwan Taoyuan International; resolved via METAR
+  taipei:          { lat: 25.0777, lon: 121.2328,   noaaCoverage: false, unit: 'celsius', wuStation: 'RCTP', resolutionSource: 'metar' },
 };
 
 // ── Aliases: map Polymarket event title city names to canonical keys ───────

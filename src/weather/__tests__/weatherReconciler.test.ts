@@ -138,8 +138,8 @@ describe('fetchTargetsToReconcile', () => {
     ];
     const targets = await fetchTargetsToReconcile(1, 30, 50);
     expect(targets).toEqual([
-      { city: 'new york', targetDate: '2026-04-15' },
-      { city: 'london',   targetDate: '2026-04-15' },
+      { city: 'new york', targetDate: '2026-04-15', hasArchive: false },
+      { city: 'london',   targetDate: '2026-04-15', hasArchive: false },
     ]);
     expect(sqlCalls).toHaveLength(1);
     const call = sqlCalls[0]!;

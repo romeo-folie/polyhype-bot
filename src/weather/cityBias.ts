@@ -57,8 +57,9 @@ export async function computeCityBias(
       SELECT
         gt.city,
         COUNT(*)::int                                                  AS sample_size,
-        AVG((so.payload->>'forecastHigh')::float - gt.observed_high)  AS mean_bias,
-        STDDEV((so.payload->>'forecastHigh')::float - gt.observed_high) AS empirical_stddev
+        -- Prefer resolution_high (exact Polymarket source) over observed_high (Open-Meteo archive).
+        AVG((so.payload->>'forecastHigh')::float - COALESCE(gt.resolution_high, gt.observed_high))  AS mean_bias,
+        STDDEV((so.payload->>'forecastHigh')::float - COALESCE(gt.resolution_high, gt.observed_high)) AS empirical_stddev
       FROM shadow_observations so
       JOIN weather_ground_truth gt
         ON gt.city       = so.payload->>'city'
