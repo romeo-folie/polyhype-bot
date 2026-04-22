@@ -167,7 +167,12 @@ function clobTokenForSignal(signal: TradeSignal): string | null {
  *   - 'futures'    — bypasses this branch via the isFutures path
  *   - undefined    — unlabelled; default-deny for safety
  */
-const MAKER_ELIGIBLE_SOURCES = new Set(['osint', 'copytrade', 'near-zero-arb', 'correlation-arb', 'oracle-lag', 'weather']);
+// oracle-lag is intentionally excluded: it targets 15-min binary markets where
+// alpha decays in seconds. A GTC maker order can sit on the book past market
+// expiry and fill after resolution (experienced: stale fills at 09:14/20:46 UTC).
+// For real books, oracle-lag uses the taker (FAK) path for an immediate fill.
+// Empty-book GTC posting is still allowed via MAKER_EMPTY_BOOK_ALLOWED_SOURCES.
+const MAKER_ELIGIBLE_SOURCES = new Set(['osint', 'copytrade', 'near-zero-arb', 'correlation-arb', 'weather']);
 
 function isMakerEligible(signal: TradeSignal): boolean {
   return MAKER_ELIGIBLE_SOURCES.has(signal.source ?? '');
