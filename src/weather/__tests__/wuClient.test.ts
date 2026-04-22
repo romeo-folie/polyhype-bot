@@ -28,9 +28,10 @@ describe('fetchWuHistoricalHigh', () => {
     expect(result).toBe(22);
   });
 
-  it('refreshes key and retries on 401', async () => {
+  it('refreshes key and retries on 401 (URL query-param format)', async () => {
     redisMock.get.mockResolvedValueOnce('bad0bad0bad0bad0bad0bad0bad0bad0');
-    const refreshHtml = `<script id="app-root-state" type="application/json">{"apiKey":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}</script>`;
+    // WU now embeds the key as a URL query param in inline script src attributes.
+    const refreshHtml = `<script src="/some/bundle.js?apiKey=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4&lang=en"></script>`;
     const fetchFn = vi.fn()
       .mockResolvedValueOnce({ ok: false, status: 401, text: async () => '' })
       .mockResolvedValueOnce({ ok: true, status: 200, text: async () => refreshHtml }) // key refresh
