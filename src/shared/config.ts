@@ -521,6 +521,10 @@ const envSchema = z.object({
   // Minimum return (%) on the held token before the near-resolution trigger
   // fires. Prevents exiting positions barely above the entry price.
   ORACLE_LAG_EXIT_NEAR_RES_MIN_RETURN_PCT: z.coerce.number().min(0).optional().default(0.5),
+  // Exit immediately if PM return on held side drops below -X%. Fires at highest
+  // priority — before reversal, near-resolution, and timeout. Limits losses when
+  // Chainlink reverses and PM has already repriced hard against us.
+  ORACLE_LAG_EXIT_SL_PCT: z.coerce.number().min(0).max(100).optional().default(20),
 
   // Minimum edge to allow entry on fee-enabled markets (executor fee gate).
   // Defaults to 0.04 (4%) — must exceed this to justify the ~2% taker fee.

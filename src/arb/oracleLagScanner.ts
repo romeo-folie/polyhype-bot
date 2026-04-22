@@ -816,6 +816,16 @@ export class OracleLagScanner {
             error: err instanceof Error ? err.message : String(err),
           });
         }
+
+        // Lock the market immediately — even though no fill yet, the GTC is
+        // posted on one side. Without this, the opposite side fires within
+        // seconds on the same Chainlink tick (whipsaw).
+        await lockUpDownMarket(
+          this.redis,
+          market.marketId,
+          market.endDate.toISOString(),
+        );
+        await recordUpDownTrade(this.redis, market.marketId, direction);
       }
     } catch (err) {
       outcome = 'error';

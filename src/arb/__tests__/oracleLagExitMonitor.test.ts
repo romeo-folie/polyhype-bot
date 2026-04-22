@@ -58,6 +58,7 @@ function buildInput(
     compressionThreshold: 0.7,
     reversalBps: 5,
     reversalMinReturnPct: 0,
+    stopLossPct: 20,
     maxHoldSec: 180,
     nearResMinLeftMin: 3,
     nearResMinReturnPct: 0.5,
@@ -431,6 +432,104 @@ describe('evaluateOracleLagExit', () => {
       );
       // timeLeftMin deeply negative → timeLeftMin > 0 guard skips trigger
       expect(res).toBeNull();
+    });
+  });
+
+  describe('stop-loss trigger', () => {
+    const stateUp = buildState({
+      entryPmYesPrice: 0.52,
+      entryChainlinkMovePct: 8,
+      entryFairPyes: 0.58,
+      entryChainlinkPrice: 65000,
+    });
+
+    it('fires oracle_lag_stop_loss at exactly the threshold', () => {
+      // returnPct on YES: (0.416 - 0.52) / 0.52 * 100 = -20%
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateUp,
+          currentYesPrice: 0.416,
+          currentNoPrice: 0.584,
+          stopLossPct: 20,
+        }),
+      );
+      expect(res?.trigger).toBe('oracle_lag_stop_loss');
+      expect(res?.returnPct).toBeCloseTo(-20, 1);
+    });
+
+    it('fires oracle_lag_stop_loss when return is below the threshold', () => {
+      // YES at 0.40 → returnPct ≈ -23.1%, clearly below -20%
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateUp,
+          currentYesPrice: 0.40,
+          currentNoPrice: 0.60,
+          stopLossPct: 20,
+        }),
+      );
+      expect(res?.trigger).toBe('oracle_lag_stop_loss');
+    });
+
+    it('does NOT fire when return is above the threshold', () => {
+      // YES at 0.43 → returnPct ≈ -17.3%, above -20%
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateUp,
+          currentYesPrice: 0.43,
+          currentNoPrice: 0.57,
+          stopLossPct: 20,
+        }),
+      );
+      expect(res).toBeNull();
+    });
+
+    it('fires stop-loss ahead of reversal when both would trigger', () => {
+      // Chainlink adverse 10 bps (reversal) AND YES at 0.40 (stop-loss). SL wins.
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateUp,
+          currentYesPrice: 0.40,
+          currentNoPrice: 0.60,
+          currentChainlinkPrice: 64935, // -10 bps adverse
+          reversalBps: 5,
+          stopLossPct: 20,
+        }),
+      );
+      expect(res?.trigger).toBe('oracle_lag_stop_loss');
+    });
+
+    it('fires stop-loss ahead of timeout when both would trigger', () => {
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateUp,
+          currentYesPrice: 0.40,
+          currentNoPrice: 0.60,
+          nowMs: NOW_MS + 200_000, // past maxHoldSec=180
+          stopLossPct: 20,
+        }),
+      );
+      expect(res?.trigger).toBe('oracle_lag_stop_loss');
+    });
+
+    it('fires stop-loss on the NO side for a DOWN entry', () => {
+      // DOWN entry: we hold NO at 0.45. NO drops to 0.36 → returnPct ≈ -20%
+      const stateDown = buildState({
+        direction: 'DOWN',
+        entryPmYesPrice: 0.55,
+        entryPmNoPrice: 0.45,
+        entryChainlinkMovePct: -5,
+        entryFairPyes: 0.45,
+      });
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state: stateDown,
+          currentYesPrice: 0.64,
+          currentNoPrice: 0.36, // returnPct = (0.36-0.45)/0.45*100 = -20%
+          stopLossPct: 20,
+        }),
+      );
+      expect(res?.trigger).toBe('oracle_lag_stop_loss');
+      expect(res?.returnPct).toBeCloseTo(-20, 1);
     });
   });
 

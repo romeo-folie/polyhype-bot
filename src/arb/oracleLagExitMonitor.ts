@@ -179,7 +179,8 @@ export type OracleLagExitTrigger =
   | 'oracle_lag_compressed'
   | 'oracle_lag_reversed'
   | 'oracle_lag_timeout'
-  | 'oracle_lag_near_resolution';
+  | 'oracle_lag_near_resolution'
+  | 'oracle_lag_stop_loss';
 
 export interface OracleLagExitDecision {
   trigger: OracleLagExitTrigger;
@@ -206,22 +207,27 @@ export interface OracleLagExitEvalInput {
   nearResMinLeftMin: number;
   /** Minimum return (%) on the held token before near-resolution trigger fires. */
   nearResMinReturnPct: number;
+  /** Exit immediately if PM return on held side drops below -stopLossPct (%). Fires before all other checks. */
+  stopLossPct: number;
 }
 
 /**
  * Pure function — no Redis, no feed. Decides whether (and why) to early-exit.
  *
  * Trigger priority (first matching rule wins):
- *   1. Reversal        — Chainlink has moved against us past the configured buffer AND
+ *   1. Stop-loss       — PM return on held side has dropped below -stopLossPct (%).
+ *                        Fires regardless of Chainlink state — thesis is dead once the
+ *                        market has moved this far against us.
+ *   2. Reversal        — Chainlink has moved against us past the configured buffer AND
  *                        PM return on the held side is >= `reversalMinReturnPct`.
  *                        Skipped when `chainlinkStale` (don't exit on missing data).
  *                        Skipped when PM hasn't repriced: selling into the spread at
  *                        entry price is a guaranteed loss vs holding to resolution.
- *   2. Near-resolution — profitable with < nearResMinLeftMin remaining before market
+ *   3. Near-resolution — profitable with < nearResMinLeftMin remaining before market
  *                        resolution (locks in gains before a last-minute reversal).
  *                        Skipped when endDateMs=0 (legacy states without endDateMs).
- *   3. Compression     — PM has closed `>= compressionThreshold` of the entry gap.
- *   4. Timeout         — position has been held longer than `maxHoldSec`.
+ *   4. Compression     — PM has closed `>= compressionThreshold` of the entry gap.
+ *   5. Timeout         — position has been held longer than `maxHoldSec`.
  *
  * Returns `null` when no trigger applies. `compressionPct` is clamped to
  * [0, 1] (overshoot past fair value still fires as 1.0).
@@ -242,6 +248,7 @@ export function evaluateOracleLagExit(
     maxHoldSec,
     nearResMinLeftMin,
     nearResMinReturnPct,
+    stopLossPct,
   } = input;
 
   const ageSec = Math.max(0, (nowMs - state.entryTsMs) / 1000);
@@ -288,6 +295,19 @@ export function evaluateOracleLagExit(
   // Belt+suspenders against scanner regression — don't fire compression on
   // degenerate gaps (shouldn't happen since scanner requires ORACLE_LAG_MIN_MOVE_PCT).
   const compressionFiredEligible = entryGap > 0;
+
+  // Stop-loss — highest priority. PM has moved hard against us; the thesis is
+  // dead regardless of what Chainlink is doing. Exit immediately to limit losses
+  // rather than waiting for the timeout at an even worse price.
+  if (returnPct <= -stopLossPct) {
+    return {
+      trigger: 'oracle_lag_stop_loss',
+      compressionPct,
+      reversalBps: actualReversalBps,
+      ageSec,
+      returnPct,
+    };
+  }
 
   if (reversed) {
     return {
@@ -409,6 +429,7 @@ export class OracleLagExitMonitor {
       maxHoldSec: cfg.ORACLE_LAG_EXIT_MAX_HOLD_SEC,
       nearResMinLeftMin: cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN,
       nearResMinReturnPct: cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_RETURN_PCT,
+      stopLossPct: cfg.ORACLE_LAG_EXIT_SL_PCT,
       tickMs: cfg.ORACLE_LAG_EXIT_TICK_MS,
     });
 
@@ -617,6 +638,7 @@ export class OracleLagExitMonitor {
       maxHoldSec: cfg.ORACLE_LAG_EXIT_MAX_HOLD_SEC,
       nearResMinLeftMin: cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_LEFT_MIN,
       nearResMinReturnPct: cfg.ORACLE_LAG_EXIT_NEAR_RES_MIN_RETURN_PCT,
+      stopLossPct: cfg.ORACLE_LAG_EXIT_SL_PCT,
     });
 
     if (!decision) return;
