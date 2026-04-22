@@ -55,6 +55,8 @@ redis-cli KEYS '*lock*'       # verify no stale locks after restart
 - Commit messages: imperative mood, prefixed with `feat:`, `fix:`, `chore:`, etc.
 - **Always create a PR. Never push directly to main unless the user explicitly asks.**
   Branch naming: `feat/<slug>`, `fix/<slug>`, `chore/<slug>`. Open PR, wait for merge.
+  After creating a PR, start a Monitor task to watch for comments and status. When the PR status shows `merged=true`, stop the monitor task with `TaskStop`.
+- **After a PR merges into `main`, redeploy the affected container(s).** Claude Code runs on the Hetzner prod server — merging does not restart running workers. Pull `main`, then `docker compose up -d --build <service>` for the service(s) whose source changed (e.g. `pga-sports` for `src/sports/*`, `pga-arb` for `src/arb/*`, `pga-monitor` for `src/monitor/*`, or all services if shared `src/shared/*` or `src/execution/*` changed). Confirm the container restarted and verify logs.
 - **Always branch from `main`** unless explicitly told to branch from a specific feature branch.
 - Prefer editing existing files over creating new ones.
 - `MIN_BET_USD=5` is the preferred minimum bet amount.
