@@ -14,8 +14,8 @@ export const weatherGroundTruthRowSchema = z.object({
   source:        z.string().min(1).default('open-meteo-archive'),
   /** Daily high from the exact Polymarket resolution source (WU/METAR/HKO). */
   resolutionHigh:   z.number().finite().optional(),
-  /** Which fetcher produced resolutionHigh: 'wu' | 'metar' | 'hko'. */
-  resolutionSource: z.string().min(1).optional(),
+  /** Which fetcher produced resolutionHigh. */
+  resolutionSource: z.enum(['wu', 'metar', 'hko']).optional(),
   /** Optional override for the fetch timestamp (defaults to now() in SQL). */
   observedAt:    z.string().datetime().optional(),
 });

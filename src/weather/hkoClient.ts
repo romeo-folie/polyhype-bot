@@ -21,8 +21,15 @@
 import { logger } from '../shared/logger.js';
 
 const HKO_BASE = 'https://www.weather.gov.hk/cis/dailyExtract';
+const REQUEST_TIMEOUT_MS = 10_000;
 
 export type FetchFn = typeof fetch;
+
+function fetchWithTimeout(url: string, fetchFn: FetchFn): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  return fetchFn(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+}
 
 interface HkoMonthBlock {
   month: number;
@@ -57,7 +64,7 @@ export async function fetchHkoDailyHigh(
 
   let res: Response;
   try {
-    res = await fetchFn(url);
+    res = await fetchWithTimeout(url, fetchFn);
   } catch (err) {
     logger.warn('[weather-hko] fetch error', {
       date, error: err instanceof Error ? err.message : String(err),

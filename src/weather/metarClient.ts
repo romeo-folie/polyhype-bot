@@ -16,8 +16,15 @@ import { logger } from '../shared/logger.js';
 
 const METAR_BASE = 'https://aviationweather.gov/api/data/metar';
 const MAX_HOURS = 720;
+const REQUEST_TIMEOUT_MS = 10_000;
 
 export type FetchFn = typeof fetch;
+
+function fetchWithTimeout(url: string, fetchFn: FetchFn): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  return fetchFn(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+}
 
 interface MetarObservation {
   reportTime: string; // UTC ISO8601, e.g. "2026-04-17 14:00:00"
@@ -39,7 +46,7 @@ export async function fetchMetarDailyHigh(
 
   let res: Response;
   try {
-    res = await fetchFn(url);
+    res = await fetchWithTimeout(url, fetchFn);
   } catch (err) {
     logger.warn('[weather-metar] fetch error', {
       icao, date, error: err instanceof Error ? err.message : String(err),

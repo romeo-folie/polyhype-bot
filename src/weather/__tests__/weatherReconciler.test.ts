@@ -52,8 +52,8 @@ describe('reconcileTargets', () => {
 
     const summary = await reconcileTargets(
       [
-        { city: 'new york', targetDate: '2026-04-10' },
-        { city: 'london',   targetDate: '2026-04-10' },
+        { city: 'new york', targetDate: '2026-04-10', hasArchive: false },
+        { city: 'london',   targetDate: '2026-04-10', hasArchive: false },
       ],
       fetcher,
     );
@@ -83,7 +83,7 @@ describe('reconcileTargets', () => {
       unit: 'fahrenheit',
     });
     await reconcileTargets(
-      [{ city: 'NYC', targetDate: '2026-04-10' }],
+      [{ city: 'NYC', targetDate: '2026-04-10', hasArchive: false }],
       fetcher,
     );
     expect(enqueueWriteMock).toHaveBeenCalledTimes(1);
@@ -99,7 +99,7 @@ describe('reconcileTargets', () => {
       unit: 'celsius',
     });
     await reconcileTargets(
-      [{ city: 'london', targetDate: '2026-04-10' }],
+      [{ city: 'london', targetDate: '2026-04-10', hasArchive: false }],
       fetcher,
     );
     // London is international → celsius, pulled from CITY_COORDINATES not the caller.
@@ -111,7 +111,7 @@ describe('reconcileTargets', () => {
   it('skips unknown cities and counts them separately', async () => {
     const fetcher = vi.fn();
     const summary = await reconcileTargets(
-      [{ city: 'atlantis', targetDate: '2026-04-10' }],
+      [{ city: 'atlantis', targetDate: '2026-04-10', hasArchive: false }],
       fetcher,
     );
     expect(summary).toEqual({ resolved: 0, unknownCity: 1, noData: 0 });
@@ -122,10 +122,45 @@ describe('reconcileTargets', () => {
   it('counts archive misses as noData without throwing', async () => {
     const fetcher = vi.fn().mockResolvedValue(null);
     const summary = await reconcileTargets(
-      [{ city: 'chicago', targetDate: '2026-04-10' }],
+      [{ city: 'chicago', targetDate: '2026-04-10', hasArchive: false }],
       fetcher,
     );
     expect(summary).toEqual({ resolved: 0, unknownCity: 0, noData: 1 });
+    expect(enqueueWriteMock).not.toHaveBeenCalled();
+  });
+
+  it('enqueues resolution backfill when hasArchive=true and resolution is available', async () => {
+    const archiveFetcher = vi.fn();
+    const resolutionFetcher = vi.fn().mockResolvedValue({ high: 28.4, source: 'wu' });
+
+    const summary = await reconcileTargets(
+      [{ city: 'london', targetDate: '2026-04-10', hasArchive: true }],
+      archiveFetcher,
+      resolutionFetcher,
+    );
+
+    expect(summary).toEqual({ resolved: 1, unknownCity: 0, noData: 0 });
+    // Archive fetcher must not be called — we already have observed_high.
+    expect(archiveFetcher).not.toHaveBeenCalled();
+    expect(enqueueWriteMock).toHaveBeenCalledTimes(1);
+    const [, payload] = enqueueWriteMock.mock.calls[0]!;
+    expect((payload as { source: string }).source).toBe('resolution-backfill');
+    expect((payload as { resolutionHigh: number }).resolutionHigh).toBe(28.4);
+    expect((payload as { resolutionSource: string }).resolutionSource).toBe('wu');
+  });
+
+  it('skips enqueue when hasArchive=true and resolution is unavailable', async () => {
+    const archiveFetcher = vi.fn();
+    const resolutionFetcher = vi.fn().mockResolvedValue(null);
+
+    const summary = await reconcileTargets(
+      [{ city: 'london', targetDate: '2026-04-10', hasArchive: true }],
+      archiveFetcher,
+      resolutionFetcher,
+    );
+
+    expect(summary).toEqual({ resolved: 0, unknownCity: 0, noData: 1 });
+    expect(archiveFetcher).not.toHaveBeenCalled();
     expect(enqueueWriteMock).not.toHaveBeenCalled();
   });
 });

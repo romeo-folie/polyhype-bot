@@ -14,12 +14,18 @@ import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 
 const WU_REDIS_KEY = 'weather:wu_api_key';
-const WU_KEY_FALLBACK = 'e1f10a1e78da46f5b10a1e78da96f525';
 const WU_KEY_TTL_S = 7 * 24 * 60 * 60;
 const WU_KEY_REFRESH_URL =
   'https://www.wunderground.com/history/daily/gb/london/EGLC/date/2026-1-1';
+const REQUEST_TIMEOUT_MS = 10_000;
 
 export type FetchFn = typeof fetch;
+
+function fetchWithTimeout(url: string, options: RequestInit, fetchFn: FetchFn): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  return fetchFn(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
 
 async function extractKeyFromPage(html: string): Promise<string | null> {
   // Key is a 32-char hex string used as apiKey in the weather.com calls
@@ -27,11 +33,13 @@ async function extractKeyFromPage(html: string): Promise<string | null> {
   return m?.[1] ?? null;
 }
 
-async function refreshKey(redis: Redis, fetchFn: FetchFn): Promise<string> {
+async function refreshKey(redis: Redis, fetchFn: FetchFn): Promise<string | null> {
   try {
-    const res = await fetchFn(WU_KEY_REFRESH_URL, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; pga-weather/1.0)' },
-    });
+    const res = await fetchWithTimeout(
+      WU_KEY_REFRESH_URL,
+      { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; pga-weather/1.0)' } },
+      fetchFn,
+    );
     if (res.ok) {
       const html = await res.text();
       const key = await extractKeyFromPage(html);
@@ -46,11 +54,11 @@ async function refreshKey(redis: Redis, fetchFn: FetchFn): Promise<string> {
       error: err instanceof Error ? err.message : String(err),
     });
   }
-  logger.warn('[weather-wu] falling back to hardcoded key');
-  return WU_KEY_FALLBACK;
+  logger.warn('[weather-wu] key refresh failed and no cached key available');
+  return null;
 }
 
-async function getKey(redis: Redis, fetchFn: FetchFn, force = false): Promise<string> {
+async function getKey(redis: Redis, fetchFn: FetchFn, force = false): Promise<string | null> {
   if (!force) {
     const cached = await redis.get(WU_REDIS_KEY);
     if (cached) return cached;
@@ -85,13 +93,17 @@ export async function fetchWuHistoricalHigh(
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const key = await getKey(redis, fetchFn, attempt > 0);
+    if (!key) {
+      logger.warn('[weather-wu] no api key available', { icao, date });
+      return null;
+    }
     const url =
       `https://api.weather.com/v1/location/${icao}:9:${isoCountry}/observations/historical.json` +
       `?apiKey=${key}&units=${units}&startDate=${dateStr}&endDate=${dateStr}`;
 
     let res: Response;
     try {
-      res = await fetchFn(url);
+      res = await fetchWithTimeout(url, {}, fetchFn);
     } catch (err) {
       logger.warn('[weather-wu] fetch error', {
         icao, date, error: err instanceof Error ? err.message : String(err),

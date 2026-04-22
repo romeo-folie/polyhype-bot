@@ -154,15 +154,23 @@ export async function reconcileTargets(
     // Fetch from the exact Polymarket resolution source (best-effort; doesn't block row write).
     const resolution = await resolutionFetcher(coords, t.targetDate);
 
+    // For hasArchive rows we only want to backfill resolution_high.
+    // If resolution also returned nothing there is nothing new to write.
+    if (t.hasArchive && !resolution) {
+      logger.debug('[weather-reconciler] archive row exists, resolution unavailable — skipping enqueue', {
+        city: canonical, targetDate: t.targetDate,
+      });
+      noData++;
+      continue;
+    }
+
     const observedAt = new Date().toISOString();
     void enqueueWrite('weather_ground_truth', {
       city: canonical,
       targetDate: t.targetDate,
       unit: coords.unit,
-      // observedHigh is required by the schema; for backfill-only rows set a sentinel
-      // that the ON CONFLICT handler will ignore (it only updates resolution columns).
       observedHigh: archiveHigh ?? 0,
-      source: archiveHigh !== undefined ? 'open-meteo-archive' : 'backfill-sentinel',
+      source: archiveHigh !== undefined ? 'open-meteo-archive' : 'resolution-backfill',
       resolutionHigh: resolution?.high,
       resolutionSource: resolution?.source,
       observedAt,
