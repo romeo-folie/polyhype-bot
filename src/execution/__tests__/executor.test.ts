@@ -1020,8 +1020,11 @@ describe('execution mode', () => {
   it('oracle-lag on real book goes directly to taker — no maker order posted', async () => {
     // oracle-lag is excluded from MAKER_ELIGIBLE_SOURCES because GTC maker orders
     // can fill after market expiry (stale fill), causing expired_unresolvable losses.
-    // For real books it uses FAK taker for an immediate fill.
+    // For real books it uses the taker path (FAK/FOK per CLOB_ORDER_TYPE) for an immediate fill.
     mockConfig.EXECUTION_MODE = 'hybrid';
+    // Active spread gate ensures the real-book spread-check path is exercised.
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockConfig.ORACLE_LAG_MAX_ENTRY_SPREAD_BPS = 2000; // prod default — wider than the 200bps test spread
     mockResolve.mockResolvedValue(null); // no Simmer; goes straight to CLOB taker
     mockGetOrderBook.mockResolvedValue({
       market: 'mkt-test',
@@ -1041,6 +1044,8 @@ describe('execution mode', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeSignal(makeSignal({ source: 'oracle-lag', clobTokenIds: ['tok-yes', 'tok-no'] }), redis as any);
 
+    // Order book was fetched — confirms real-book path was exercised.
+    expect(mockGetOrderBook).toHaveBeenCalled();
     // No maker order posted — oracle-lag is not maker-eligible for real books.
     expect(mockSubmitLimit).not.toHaveBeenCalled();
     expect(mockCancelOrder).not.toHaveBeenCalled();
