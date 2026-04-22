@@ -122,8 +122,11 @@ export async function fetchTargetsToReconcile(
 export async function reconcileTargets(
   targets: UnresolvedTarget[],
   archiveFetcher: ArchiveFetcher = fetchHistoricalHigh,
-  resolutionFetcher: ResolutionFetcher = makeResolutionFetcher(getRedis()),
+  resolutionFetcher?: ResolutionFetcher,
 ): Promise<{ resolved: number; unknownCity: number; noData: number }> {
+  // No-op default keeps reconcileTargets pure; runWeatherReconcile always
+  // passes an explicit makeResolutionFetcher so production is unaffected.
+  const resolverFn: ResolutionFetcher = resolutionFetcher ?? (() => Promise.resolve(null));
   let resolved = 0;
   let unknownCity = 0;
   let noData = 0;
@@ -154,7 +157,7 @@ export async function reconcileTargets(
     // Fetch from the exact Polymarket resolution source (best-effort; never aborts the loop).
     let resolution: { high: number; source: string } | null = null;
     try {
-      resolution = await resolutionFetcher(coords, t.targetDate);
+      resolution = await resolverFn(coords, t.targetDate);
     } catch (err) {
       logger.warn('[weather-reconciler] resolution fetch threw, continuing without it', {
         city: canonical, targetDate: t.targetDate,
@@ -175,14 +178,11 @@ export async function reconcileTargets(
     const observedAt = new Date().toISOString();
 
     if (t.hasArchive) {
-      // Resolution-only backfill: issue a targeted UPDATE so the zero sentinel
-      // can never be written to observed_high if the row is unexpectedly absent.
+      // Resolution-only backfill: writer issues a bare UPDATE — no INSERT path.
       void enqueueWrite('weather_ground_truth', {
         city: canonical,
         targetDate: t.targetDate,
         unit: coords.unit,
-        observedHigh: 0,
-        source: 'resolution-backfill',
         resolutionHigh: resolution!.high,
         resolutionSource: resolution!.source,
         observedAt,
