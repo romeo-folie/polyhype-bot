@@ -128,10 +128,15 @@ const TYPES = {
   ],
 };
 
-// Monotonic nonce generator to prevent collision when Date.now() is called twice in the same millisecond.
-let _hlNonce = Date.now();
+// Monotonic nonce generator. Starts at Date.now() on each call if time has moved forward,
+// increments locally if multiple calls happen within the same millisecond.
+// Starting at 0 (not Date.now()) means the first call always gets at least the current timestamp,
+// preventing stale-startup nonces when a container restarts after a long idle period.
+let _hlNonce = 0;
 function nextHlNonce(): number {
-  return ++_hlNonce;
+  const now = Date.now();
+  _hlNonce = now > _hlNonce ? now : _hlNonce + 1;
+  return _hlNonce;
 }
 
 export interface HlPosition {
@@ -240,14 +245,17 @@ class HyperliquidClient {
   /**
    * Place a market order on Hyperliquid.
    */
-  async placeMarketOrder(opts: {
-    symbol: string;
-    isBuy: boolean;
-    sizeUsd: number;
-    leverage: number;
-    reduceOnly?: boolean;
-    sizeBase?: number; // Added to avoid double lookup if possible
-  }): Promise<{ success: boolean; txHash?: string; price?: number; error?: string }> {
+  async placeMarketOrder(
+    opts: {
+      symbol: string;
+      isBuy: boolean;
+      sizeUsd: number;
+      leverage: number;
+      reduceOnly?: boolean;
+      sizeBase?: number; // Added to avoid double lookup if possible
+    },
+    _retrying = false,
+  ): Promise<{ success: boolean; txHash?: string; price?: number; error?: string }> {
     // Dry-run mode: log the order without submitting — safe validation path.
     if (loadConfig().HL_DRY_RUN) {
       logger.info('[hyperliquid] DRY RUN — order not submitted', {
@@ -360,6 +368,20 @@ class HyperliquidClient {
         }
         if (errorMsg) {
           return { success: false, error: errorMsg };
+        }
+      }
+
+      // Self-heal on "nonce too low" — parse the required minimum, bump the counter, retry once.
+      // Root cause: two containers (pga-futures, pga-arb) share the same HL wallet but have
+      // independent in-memory nonce counters; whichever started earlier can fall behind.
+      const errBody = response.data as unknown as Record<string, unknown>;
+      if (!_retrying && typeof errBody.response === 'string') {
+        const m = /nonce too low \d+ < (\d+)/.exec(errBody.response);
+        if (m?.[1]) {
+          const required = Number(m[1]);
+          _hlNonce = Math.max(Date.now(), required);
+          logger.warn('[hyperliquid] nonce too low — bumping and retrying', { required, newNonce: _hlNonce });
+          return this.placeMarketOrder(opts, true);
         }
       }
 
