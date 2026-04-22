@@ -155,19 +155,18 @@ function clobTokenForSignal(signal: TradeSignal): string | null {
  *   - 'copytrade'        — whale conviction persists; our fill isn't time-critical
  *   - 'near-zero-arb'   — illiquid markets at 3-10¢ don't reprice fast
  *   - 'correlation-arb' — constraint-based edge; signal remains valid until event resolves
- *   - 'oracle-lag'      — ~55s Chainlink RTDS edge window; uses ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS
- *                         (default 8s) instead of the full MAKER_MAX_WAIT_MS so fallback to taker
- *                         still catches the trade within the edge window. Empty-book fires use the
- *                         separate MAKER_EMPTY_BOOK path regardless of this set.
  *   - 'weather'         — forecast-based edge; bracket resolves once/day so alpha is stable for hours
  *
  * Excluded (latency-sensitive, must fill NOW):
- *   - 'crypto-arb' — Binance→PM lag arbitrage, edge gone in seconds
- *   - 'spot'       — spot momentum on PM markets, edge decays with the move
- *   - 'futures'    — bypasses this branch via the isFutures path
- *   - undefined    — unlabelled; default-deny for safety
+ *   - 'oracle-lag'  — 15-min binary markets; GTC maker can fill post-expiry (stale fills at
+ *                     09:14/20:46 UTC observed). Real books use taker (FAK/FOK per CLOB_ORDER_TYPE).
+ *                     Empty-book GTC posting still allowed via MAKER_EMPTY_BOOK_ALLOWED_SOURCES.
+ *   - 'crypto-arb'  — Binance→PM lag arbitrage, edge gone in seconds
+ *   - 'spot'        — spot momentum on PM markets, edge decays with the move
+ *   - 'futures'     — bypasses this branch via the isFutures path
+ *   - undefined     — unlabelled; default-deny for safety
  */
-const MAKER_ELIGIBLE_SOURCES = new Set(['osint', 'copytrade', 'near-zero-arb', 'correlation-arb', 'oracle-lag', 'weather']);
+const MAKER_ELIGIBLE_SOURCES = new Set(['osint', 'copytrade', 'near-zero-arb', 'correlation-arb', 'weather']);
 
 function isMakerEligible(signal: TradeSignal): boolean {
   return MAKER_ELIGIBLE_SOURCES.has(signal.source ?? '');
