@@ -29,6 +29,8 @@ export interface LiveGame {
   period: number;
   /** Raw ESPN status state for debugging. */
   state: string;
+  /** Scheduled game start (ISO 8601) — used to disambiguate series games in the scanner. */
+  scheduledStart: string;
   /** MLB only: which half of the inning is being played. */
   halfInning?: 'top' | 'bottom';
 }
@@ -79,6 +81,11 @@ export function extractLiveGames(
         : [];
       const comp = competitions[0];
       if (!comp) continue;
+
+      // ESPN publishes the scheduled start on the event and/or competition.
+      // Prefer the competition-level date, fall back to the event-level.
+      const scheduledStart = (comp.date ?? ev.date) as string | undefined;
+      if (!scheduledStart || typeof scheduledStart !== 'string') continue;
 
       const status = (comp.status ?? ev.status) as Record<string, unknown> | undefined;
       const statusType = status?.type as Record<string, unknown> | undefined;
@@ -159,6 +166,7 @@ export function extractLiveGames(
         secondsRemaining,
         period,
         state: stateRaw,
+        scheduledStart,
         ...(halfInning !== undefined && { halfInning }),
       });
     } catch (err) {

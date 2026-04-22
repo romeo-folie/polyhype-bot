@@ -15,6 +15,17 @@ import { nbaWinProb, nhlWinProb, mlbWinProb } from './winProb.js';
 import type { TradeSignal } from '../mapping/index.js';
 import type { Redis } from 'ioredis';
 
+/**
+ * Polymarket's sports-market endDate convention is per-league: NBA/NHL set it
+ * to tipoff; MLB sets it to first pitch + 168h (7-day resolution buffer).
+ * Empirically verified against the live watchlist cache on 2026-04-22.
+ */
+const PM_ENDDATE_OFFSET_H: Record<SportsLeague, number> = {
+  nba: 0,
+  nhl: 0,
+  mlb: 168,
+};
+
 export interface SportsArbCandidate {
   game: LiveGame;
   market: CachedMarket;
@@ -50,13 +61,6 @@ function nickname(team: string): string {
   const parts = n.split(' ');
   return parts.length > 0 ? parts[parts.length - 1]! : n;
 }
-
-/**
- * Polymarket sets endDate to approximately the game tip-off / first-pitch time,
- * not when the game ends. Allow markets to stay eligible for this long after
- * their endDate so the scanner can act during the full duration of the game.
- */
-const STALE_GAME_GRACE_MS = 6 * 3600 * 1000; // 6 hours — covers MLB extra innings + rain delays
 
 /** Skip over/under, spread, first-half, and first-inning prop markets — win-prob doesn't apply to them. */
 function isMoneylineMarket(question: string): boolean {
@@ -143,32 +147,41 @@ export async function scanLiveSportsArb(
   }
 
   const markets = await getMarkets(redis);
-  const now = Date.now();
-  const horizonMs = cfg.SPORTS_MARKET_LOOKAHEAD_H * 3600 * 1000;
+  const toleranceMs = cfg.SPORTS_LIVE_MATCH_TOLERANCE_H * 3600 * 1000;
 
   const candidates: SportsArbCandidate[] = [];
   let matchedAny = false;
   for (const game of games) {
-    // Collect all eligible moneyline markets for this game, then pick the one
-    // with the earliest endDate. This prevents series games (same matchup,
-    // different dates) from being matched to a live earlier game when both
-    // fall inside the lookahead horizon.
+    const scheduledStartMs = new Date(game.scheduledStart).getTime();
+    if (!Number.isFinite(scheduledStartMs)) {
+      logger.debug('[sports-arb] skipping live game with unparseable scheduledStart', {
+        gameId: game.gameId,
+        scheduledStart: game.scheduledStart,
+      });
+      continue;
+    }
+    const expectedEndMs =
+      scheduledStartMs + PM_ENDDATE_OFFSET_H[game.league] * 3600 * 1000;
+
+    // Require the market's endDate to fall within ±SPORTS_LIVE_MATCH_TOLERANCE_H
+    // of the league-specific expected endDate for this live game. This
+    // disambiguates back-to-back-day series where the same two teams appear on
+    // consecutive days — nickname matching alone can't tell them apart.
     let bestMarket: CachedMarket | null = null;
-    let bestEndMs = Infinity;
+    let bestDelta = Infinity;
 
     for (const market of markets) {
       if (!market.endDate) continue;
       const endMs = new Date(market.endDate).getTime();
-      if (!Number.isFinite(endMs) || endMs < now - STALE_GAME_GRACE_MS) continue; // well past game end
-      // Polymarket sets endDate ≈ tip-off/first-pitch, so endMs - now can be small or negative
-      // while the game is still in progress. The grace window above covers the full game duration.
-      if (endMs - now > horizonMs) continue; // too far out
+      if (!Number.isFinite(endMs)) continue;
+      const delta = Math.abs(endMs - expectedEndMs);
+      if (delta > toleranceMs) continue;
 
       if (!isMoneylineMarket(market.question ?? '')) continue; // skip O/U, spread, 1H props
       if (!marketMatchesGame(market, game)) continue;
 
-      if (endMs < bestEndMs) {
-        bestEndMs = endMs;
+      if (delta < bestDelta) {
+        bestDelta = delta;
         bestMarket = market;
       }
     }
