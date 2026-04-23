@@ -129,6 +129,12 @@ export function inferCategory(question: string): string {
   if (/soccer|fifa|champions league|premier league|epl|la liga/.test(q)) {
     return 'sports-soccer';
   }
+  if (/\bf1\b|formula[ -]?1|formula[ -]?one|grand prix/.test(q)) {
+    return 'sports-f1';
+  }
+  if (/\bufc\b|\bmma\b|bellator|mixed martial|cage fighting/.test(q)) {
+    return 'sports-mma';
+  }
   if (/olympics|mlb|baseball|tennis|atp|wta|nhl|hockey|championship/.test(q)) {
     return 'sports';
   }
