@@ -137,50 +137,72 @@ export async function fetchRedeems(wallet: string, limit = DEFAULT_LIMIT): Promi
   });
 }
 
-async function queryPositionsByConditionId(conditionId: string): Promise<PositionRow[]> {
+/**
+ * Build a conditionId → marketId[] map in a single SELECT against
+ * market_catalog. market_catalog has no index on condition_id (only
+ * (market_id, captured_at) and snapshot_id), so doing a per-redeem
+ * subquery in the positions lookup devolves into a sequential scan
+ * every call — painful as snapshots accumulate. One scan per cycle
+ * is much better.
+ */
+async function buildConditionToMarketsMap(
+  conditionIds: string[],
+): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>();
+  if (conditionIds.length === 0) return result;
   const sql = getSql();
-  // `positions` doesn't carry a condition_id column (only market_id), so we
-  // join `market_catalog` to translate conditionId → marketId. Both `outcomes`
-  // and `market_catalog` have condition_id; market_catalog is the cleaner
-  // source because it pre-dates any outcome being written for that market
-  // (which is exactly the "no outcome yet" case this reconciler exists for).
+  const rows = await sql<Array<{ condition_id: string; market_id: string }>>`
+    SELECT DISTINCT condition_id, market_id
+    FROM market_catalog
+    WHERE condition_id = ANY(${conditionIds}::text[])
+  `;
+  for (const row of rows) {
+    const existing = result.get(row.condition_id) ?? [];
+    existing.push(row.market_id);
+    result.set(row.condition_id, existing);
+  }
+  return result;
+}
+
+async function queryPositionsByMarketIds(
+  marketIds: string[],
+  conditionId: string,
+): Promise<PositionRow[]> {
+  if (marketIds.length === 0) return [];
+  const sql = getSql();
   const rows = await sql<PositionRow[]>`
     SELECT
-      p.id::text,
-      p.market_id AS "marketId",
-      p.direction,
-      p.opened_at AS "openedAt",
-      p.closed_at AS "closedAt",
-      p.entry_price::float8 AS "entryPrice",
-      p.stake_usd::float8 AS "stakeUsd",
-      p.shares_held::float8 AS "sharesHeld",
-      p.execution_id AS "executionId",
-      p.mode_configured AS "modeConfigured",
-      p.sourced_from AS "sourcedFrom",
-      p.question,
-      p.pending_settlement AS "pendingSettlement",
-      p.reconciliation_status AS "reconciliationStatus",
+      id::text,
+      market_id AS "marketId",
+      direction,
+      opened_at AS "openedAt",
+      closed_at AS "closedAt",
+      entry_price::float8 AS "entryPrice",
+      stake_usd::float8 AS "stakeUsd",
+      shares_held::float8 AS "sharesHeld",
+      execution_id AS "executionId",
+      mode_configured AS "modeConfigured",
+      sourced_from AS "sourcedFrom",
+      question,
+      pending_settlement AS "pendingSettlement",
+      reconciliation_status AS "reconciliationStatus",
       ${conditionId}::text AS "conditionId",
-      p.execution_venue AS "executionVenue",
-      p.consensus_probability::float8 AS "consensusProbability",
-      p.entry_execution_path AS "entryExecutionPath",
-      p.entry_order_type AS "entryOrderType",
-      p.fallback_reason AS "fallbackReason",
-      p.edge_class AS "edgeClass",
-      p.decision_spread_bps::float8 AS "decisionSpreadBps",
-      p.maker_price_improvement_bps::float8 AS "makerPriceImprovementBps",
-      p.maker_price_improvement_usd::float8 AS "makerPriceImprovementUsd",
-      p.price_zone AS "priceZone",
-      p.entry_atr::float8 AS "entryAtr",
-      p.entry_atr_pct::float8 AS "entryAtrPct",
-      p.synth_hedged AS "synthHedged"
-    FROM positions p
-    WHERE p.market_id IN (
-      SELECT DISTINCT market_id
-      FROM market_catalog
-      WHERE condition_id = ${conditionId}
-    )
-    ORDER BY p.opened_at DESC
+      execution_venue AS "executionVenue",
+      consensus_probability::float8 AS "consensusProbability",
+      entry_execution_path AS "entryExecutionPath",
+      entry_order_type AS "entryOrderType",
+      fallback_reason AS "fallbackReason",
+      edge_class AS "edgeClass",
+      decision_spread_bps::float8 AS "decisionSpreadBps",
+      maker_price_improvement_bps::float8 AS "makerPriceImprovementBps",
+      maker_price_improvement_usd::float8 AS "makerPriceImprovementUsd",
+      price_zone AS "priceZone",
+      entry_atr::float8 AS "entryAtr",
+      entry_atr_pct::float8 AS "entryAtrPct",
+      synth_hedged AS "synthHedged"
+    FROM positions
+    WHERE market_id = ANY(${marketIds}::text[])
+    ORDER BY opened_at DESC
   `;
   return rows;
 }
@@ -426,6 +448,7 @@ export async function reconcileRedeem(
   redis: Redis,
   redeem: RedeemActivity,
   summary: ReconcilerSummary,
+  conditionToMarkets?: Map<string, string[]>,
 ): Promise<void> {
   const dedupKey = `${PROCESSED_PREFIX}${redeem.transactionHash}`;
   if ((await redis.exists(dedupKey)) === 1) {
@@ -433,7 +456,19 @@ export async function reconcileRedeem(
     return;
   }
 
-  const positions = await queryPositionsByConditionId(redeem.conditionId);
+  // conditionToMarkets is pre-computed once per cycle in runPmActivityReconciler.
+  // When absent (e.g. direct test calls), fall back to a single-shot lookup.
+  const marketIds = conditionToMarkets
+    ? conditionToMarkets.get(redeem.conditionId) ?? []
+    : await (async () => {
+        const sql = getSql();
+        const rows = await sql<Array<{ market_id: string }>>`
+          SELECT DISTINCT market_id FROM market_catalog
+          WHERE condition_id = ${redeem.conditionId}
+        `;
+        return rows.map((r) => r.market_id);
+      })();
+  const positions = await queryPositionsByMarketIds(marketIds, redeem.conditionId);
   const match = pickBestMatch(positions, redeem);
 
   if (!match) {
@@ -582,6 +617,12 @@ export async function runPmActivityReconciler(redis: Redis): Promise<ReconcilerS
     wallet,
   });
 
+  // Pre-compute conditionId → marketId[] in a single scan against
+  // market_catalog. Keeps the per-redeem lookup to a Map hit and avoids
+  // seq-scanning an unindexed column 500 times.
+  const uniqueConditionIds = [...new Set(toProcess.map((r) => r.conditionId))];
+  const conditionToMarkets = await buildConditionToMarketsMap(uniqueConditionIds);
+
   // Track the max timestamp of redeems that reconciled WITHOUT throwing. On
   // any error we leave the checkpoint where it was so the next cycle retries
   // the failed event (per-tx dedup still prevents double-writes on retry).
@@ -589,7 +630,7 @@ export async function runPmActivityReconciler(redis: Redis): Promise<ReconcilerS
   let anyError = false;
   for (const redeem of toProcess) {
     try {
-      await reconcileRedeem(redis, redeem, summary);
+      await reconcileRedeem(redis, redeem, summary, conditionToMarkets);
       if (redeem.timestamp > maxSuccessTs) maxSuccessTs = redeem.timestamp;
     } catch (err) {
       anyError = true;

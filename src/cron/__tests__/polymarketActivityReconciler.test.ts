@@ -215,6 +215,7 @@ describe('reconcileRedeem', () => {
 
   it('records closedAt at redeem.timestamp (not Date.now) so backfill preserves hold times', async () => {
     scriptSqlCalls([
+      [{ market_id: '2029699' }],              // market_catalog: conditionId → marketId
       [makePositionRow()],
       [],
       { count: 1 },
@@ -232,6 +233,7 @@ describe('reconcileRedeem', () => {
 
   it('preserves position.executionVenue on outcome write (simmer stays simmer, not forced to clob)', async () => {
     scriptSqlCalls([
+      [{ market_id: '2029699' }],              // market_catalog: conditionId → marketId
       [makePositionRow({ executionVenue: 'simmer' })],
       [],
       { count: 1 },
@@ -249,6 +251,7 @@ describe('reconcileRedeem', () => {
 
   it('inserts a new won outcome when no prior outcome exists and position is matched', async () => {
     scriptSqlCalls([
+      [{ market_id: '2029699' }],              // market_catalog: conditionId → marketId
       [makePositionRow()],            // positions lookup
       [],                              // outcomes lookup (empty)
       { count: 1 },                    // positions update (clear pending_settlement)
@@ -291,6 +294,7 @@ describe('reconcileRedeem', () => {
 
   it('flips an existing stop_loss outcome when PM shows a winning redeem', async () => {
     scriptSqlCalls([
+      [{ market_id: '2029699' }],              // market_catalog: conditionId → marketId
       [makePositionRow()],
       [{ outcome_id: 'o1', result: 'lost', return_pct: -6.12, exit_reason: 'stop_loss', closed_at: new Date() }],
       { count: 1 },  // UPDATE outcomes
@@ -315,6 +319,7 @@ describe('reconcileRedeem', () => {
 
   it('leaves already-won outcomes alone', async () => {
     scriptSqlCalls([
+      [{ market_id: '2029699' }],              // market_catalog: conditionId → marketId
       [makePositionRow()],
       [{ outcome_id: 'o1', result: 'won', return_pct: 5.0, exit_reason: 'trailing_stop', closed_at: new Date() }],
     ]);
@@ -333,6 +338,7 @@ describe('reconcileRedeem', () => {
 
   it('inserts a loss outcome when redeem paid $0 and no prior outcome exists', async () => {
     scriptSqlCalls([
+      [{ market_id: '2029699' }],              // market_catalog: conditionId → marketId
       [makePositionRow()],
       [],
       { count: 1 },
@@ -359,6 +365,7 @@ describe('reconcileRedeem', () => {
 
   it('leaves an existing lost outcome alone when PM also shows $0 redeem', async () => {
     scriptSqlCalls([
+      [{ market_id: '2029699' }],              // market_catalog: conditionId → marketId
       [makePositionRow()],
       [{ outcome_id: 'o1', result: 'lost', return_pct: -100, exit_reason: 'expired_unresolvable', closed_at: new Date() }],
     ]);
@@ -443,8 +450,13 @@ describe('runPmActivityReconciler', () => {
           makeRedeem({ transactionHash: '0xtx2', conditionId: '0xcond_b', usdcSize: 0, size: 10 }),
         ]),
     } as Response);
-    // Two redeems × up-to-3 SQL calls each = script enough to cover
+    // Cycle scripts need: buildConditionToMarketsMap (1 call with BOTH condition_id + market_id per conditionId)
+    // + per-redeem (positions + outcomes + update) × N.
     scriptSqlCalls([
+      [
+        { condition_id: '0xcond_a', market_id: 'mkt-a' },
+        { condition_id: '0xcond_b', market_id: 'mkt-b' },
+      ],  // market_catalog map build
       [makePositionRow({ conditionId: '0xcond_a' })],  // positions A
       [],                                                // outcomes A
       { count: 1 },                                      // positions update A
@@ -474,6 +486,7 @@ describe('runPmActivityReconciler', () => {
         ]),
     } as Response);
     scriptSqlCalls([
+      [{ condition_id: '0xc', market_id: 'mkt-c' }],  // map build — only 0xc survives the checkpoint filter
       [makePositionRow({ conditionId: '0xc' })],
       [],
       { count: 1 },
@@ -507,10 +520,19 @@ describe('runPmActivityReconciler', () => {
     } as Response);
     mockSqlTag.mockReset();
     mockSqlTag
+      // map build (single call up front for the whole cycle)
+      .mockResolvedValueOnce([
+        { condition_id: '0xa', market_id: 'mkt-a' },
+        { condition_id: '0xb', market_id: 'mkt-b' },
+        { condition_id: '0xc', market_id: 'mkt-c' },
+      ])
+      // redeem A (success)
       .mockResolvedValueOnce([makePositionRow({ conditionId: '0xa' })])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce({ count: 1 })
+      // redeem B (positions lookup throws)
       .mockRejectedValueOnce(new Error('simulated db failure on B'))
+      // redeem C (success)
       .mockResolvedValueOnce([makePositionRow({ conditionId: '0xc' })])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce({ count: 1 });
@@ -536,14 +558,20 @@ describe('runPmActivityReconciler', () => {
     let capturedFlipArgs: unknown[] | null = null;
     mockSqlTag.mockReset();
     mockSqlTag
+      // map build
+      .mockImplementationOnce(() =>
+        Promise.resolve([{ condition_id: '0xcond_weather_hk_30', market_id: 'mkt-hk' }]),
+      )
+      // positions by marketIds
       .mockImplementationOnce(() => Promise.resolve([makePositionRow({ openedAt })]))
+      // outcomes lookup
       .mockImplementationOnce(() =>
         Promise.resolve([
           { outcome_id: 'o1', result: 'lost', return_pct: -6.12, exit_reason: 'stop_loss', closed_at: new Date() },
         ]),
       )
+      // UPDATE outcomes — capture template args
       .mockImplementationOnce((...args: unknown[]) => {
-        // UPDATE outcomes — capture the template args to verify closed_at is present
         capturedFlipArgs = args;
         return Promise.resolve({ count: 1 });
       })
@@ -574,6 +602,10 @@ describe('runPmActivityReconciler', () => {
         ]),
     } as Response);
     scriptSqlCalls([
+      [
+        { condition_id: '0xa', market_id: 'mkt-a' },
+        { condition_id: '0xb', market_id: 'mkt-b' },
+      ],  // map build
       [makePositionRow({ conditionId: '0xa' })],
       [],
       { count: 1 },
