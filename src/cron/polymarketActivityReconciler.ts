@@ -325,12 +325,21 @@ async function flipExistingOutcome(
   const correctedExitReason = correctedResult === 'won'
     ? 'auto_redeemed_win_pm_reconciler_flip'
     : 'auto_redeemed_loss_pm_reconciler_flip';
+  // The redeem event IS when this position truly closed (CTF burned the
+  // shares and paid out). Update closed_at + holding_hours to match so
+  // downstream analytics (daily rollups, cohort studies) see the right time.
+  const correctedClosedAt = new Date(redeem.timestamp * 1000).toISOString();
+  const correctedHoldingHours = match.openedAt
+    ? (redeem.timestamp * 1000 - new Date(match.openedAt).getTime()) / 3_600_000
+    : 0;
   await sql`
     UPDATE outcomes
     SET
       result = ${correctedResult},
       return_pct = ${correctedReturnPct},
       exit_reason = ${correctedExitReason},
+      closed_at = ${correctedClosedAt}::timestamptz,
+      holding_hours = ${correctedHoldingHours},
       raw = COALESCE(raw, '{}'::jsonb) || ${JSON.stringify({
         pm_reconciler: {
           tx_hash: redeem.transactionHash,
@@ -564,10 +573,17 @@ export async function runPmActivityReconciler(redis: Redis): Promise<ReconcilerS
     wallet,
   });
 
+  // Track the max timestamp of redeems that reconciled WITHOUT throwing. On
+  // any error we leave the checkpoint where it was so the next cycle retries
+  // the failed event (per-tx dedup still prevents double-writes on retry).
+  let maxSuccessTs = 0;
+  let anyError = false;
   for (const redeem of toProcess) {
     try {
       await reconcileRedeem(redis, redeem, summary);
+      if (redeem.timestamp > maxSuccessTs) maxSuccessTs = redeem.timestamp;
     } catch (err) {
+      anyError = true;
       summary.errors += 1;
       logger.warn('[pm-reconciler] reconcile failed for redeem — continuing', {
         conditionId: redeem.conditionId,
@@ -577,12 +593,12 @@ export async function runPmActivityReconciler(redis: Redis): Promise<ReconcilerS
     }
   }
 
-  // Advance the checkpoint to the newest processed timestamp. Only redeems we
-  // filtered into `toProcess` count — a partial-failure run leaves the
-  // checkpoint where it was so the next cycle retries from the same point.
-  const maxProcessedTs = toProcess.reduce((a, r) => Math.max(a, r.timestamp), 0);
-  if (maxProcessedTs > effectiveCheckpointTs) {
-    await redis.set(CHECKPOINT_KEY, String(maxProcessedTs)).catch(() => {});
+  // Only advance the checkpoint when every event in this cycle succeeded.
+  // Partial-failure runs leave the checkpoint unchanged so the next cycle
+  // pulls the same window again and retries whatever failed. Per-tx dedup
+  // prevents double-writes on the successful portion.
+  if (!anyError && maxSuccessTs > effectiveCheckpointTs) {
+    await redis.set(CHECKPOINT_KEY, String(maxSuccessTs)).catch(() => {});
   }
 
   logger.info('[pm-reconciler] cycle complete', { ...summary });

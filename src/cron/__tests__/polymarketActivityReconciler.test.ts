@@ -493,6 +493,77 @@ describe('runPmActivityReconciler', () => {
     );
   });
 
+  it('does NOT advance the checkpoint when any redeem reconcile throws', async () => {
+    // Three redeems in the toProcess window; the middle one's SQL throws.
+    // Checkpoint should NOT advance — next cycle must retry the whole window.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          makeRedeem({ transactionHash: '0xa', conditionId: '0xa', timestamp: 110 }),
+          makeRedeem({ transactionHash: '0xb', conditionId: '0xb', timestamp: 120 }),
+          makeRedeem({ transactionHash: '0xc', conditionId: '0xc', timestamp: 130 }),
+        ]),
+    } as Response);
+    mockSqlTag.mockReset();
+    mockSqlTag
+      .mockResolvedValueOnce([makePositionRow({ conditionId: '0xa' })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ count: 1 })
+      .mockRejectedValueOnce(new Error('simulated db failure on B'))
+      .mockResolvedValueOnce([makePositionRow({ conditionId: '0xc' })])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ count: 1 });
+    const redis = makeRedis({ get: vi.fn().mockResolvedValue('100') });
+    const out = await runPmActivityReconciler(redis as never);
+
+    expect(out.errors).toBe(1);
+    expect(out.outcomesInserted).toBe(2);
+    const checkpointSet = (redis.set.mock.calls as unknown[][]).find(
+      (args) => args[0] === 'pm-reconciler:last-ts',
+    );
+    expect(checkpointSet).toBeUndefined();
+  });
+
+  it('flip path updates closed_at and holding_hours on the outcome row', async () => {
+    // Redeem at ts=1776923780 (2026-04-21T18:36:20Z); position opened 2026-04-21T18:34:57Z.
+    // Expected holding_hours = (1776923780*1000 - 2026-04-21T18:34:57Z) / 3.6e6 ≈ 0.0228
+    const openedAt = '2026-04-21T18:34:57Z';
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve([makeRedeem({ timestamp: 1776923780 })]),
+    } as Response);
+    let capturedFlipArgs: unknown[] | null = null;
+    mockSqlTag.mockReset();
+    mockSqlTag
+      .mockImplementationOnce(() => Promise.resolve([makePositionRow({ openedAt })]))
+      .mockImplementationOnce(() =>
+        Promise.resolve([
+          { outcome_id: 'o1', result: 'lost', return_pct: -6.12, exit_reason: 'stop_loss', closed_at: new Date() },
+        ]),
+      )
+      .mockImplementationOnce((...args: unknown[]) => {
+        // UPDATE outcomes — capture the template args to verify closed_at is present
+        capturedFlipArgs = args;
+        return Promise.resolve({ count: 1 });
+      })
+      .mockImplementationOnce(() => Promise.resolve({ count: 1 })); // UPDATE positions
+    const redis = makeRedis({ get: vi.fn().mockResolvedValue('0') });
+    const out = await runPmActivityReconciler(redis as never);
+
+    expect(out.outcomesFlipped).toBe(1);
+    expect(capturedFlipArgs).not.toBeNull();
+    // The UPDATE interpolates closedAt (ISO string) and holdingHours (number)
+    // somewhere in its tagged-template values. Verify both are present.
+    const serialized = JSON.stringify(capturedFlipArgs);
+    // redeem.timestamp 1776923780 = 2026-04-23T05:56:20Z; must appear in UPDATE
+    expect(serialized).toContain('2026-04-23T05:56:20.000Z');
+    // holding_hours ≈ 35.36 (redeem_ts - opened_at over 3.6e6 ms)
+    const expectedHours =
+      (1776923780 * 1000 - new Date(openedAt).getTime()) / 3_600_000;
+    expect(serialized).toContain(expectedHours.toString().slice(0, 5));
+  });
+
   it('first-ever run (no checkpoint) processes the full fetched window', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
