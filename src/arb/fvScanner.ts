@@ -17,7 +17,8 @@
  *
  * Sizing: Half-Kelly (quarter-Kelly fraction = 25% of full Kelly) via
  * computeHalfKelly(), capped at FV_MAX_STAKE_USD and MIN_BET_USD floor.
- * Order type: maker-post (via existing hybrid execution path in executor.ts).
+ * Order type: maker-post via hybrid execution path (fv-scanner is in MAKER_ELIGIBLE_SOURCES
+ * and MAKER_EMPTY_BOOK_ALLOWED_SOURCES — ghost-book GTC posting is the primary fill path).
  * consensusProbability is ALWAYS stored as P(YES) per codebase invariant.
  */
 
@@ -151,19 +152,25 @@ export function evaluateFvEntry(
   if (strike <= 0) return blank('strike_not_resolved');
 
   const tauSec = (market.endDate.getTime() - nowMs) / 1000;
-  if (tauSec < cfg.tauMinSec) return blank('tau_below_minimum');
+  // Preserve tauSec in diagnostic returns from here on
+  const withTau = (blockReason: FvBlockReason): FvEvalResult => ({ ...blank(blockReason), tauSec });
+  if (tauSec < cfg.tauMinSec) return withTau('tau_below_minimum');
 
   const bs = computePModel(spot, strike, sigma, tauSec);
-  if (!bs.valid) return blank('bs_invalid');
+  if (!bs.valid) return withTau('bs_invalid');
 
   const { pYes, pNo } = bs;
+  // Preserve tauSec + pYes/pNo in diagnostic returns from here on
+  const withBs = (blockReason: FvBlockReason): FvEvalResult => ({
+    ...blank(blockReason), tauSec, pYes, pNo, consensusProbability: pYes,
+  });
 
   // YES gate: p_model in [yesPModelMin, yesPModelMax]
   const inYesRange = pYes >= cfg.yesPModelMin && pYes <= cfg.yesPModelMax;
   // NO gate: p_model ≤ noPModelMax (mutually exclusive with YES gate)
   const inNoRange = pYes <= cfg.noPModelMax;
 
-  if (!inYesRange && !inNoRange) return blank('p_model_out_of_range');
+  if (!inYesRange && !inNoRange) return withBs('p_model_out_of_range');
 
   // Determine side and compute edge vs Gamma book mid
   let side: 'YES' | 'NO';
@@ -175,24 +182,30 @@ export function evaluateFvEntry(
     // outcomePrices[0] = YES token price (Gamma mid)
     entryPrice = market.outcomePrices[0];
     edge = pYes - entryPrice;
-    if (edge < cfg.yesMinEdge) return blank('yes_edge_below_minimum');
   } else {
     side = 'NO';
     // outcomePrices[1] = NO token price (Gamma mid)
     entryPrice = market.outcomePrices[1];
     edge = pNo - entryPrice;
-    if (edge < cfg.noMinEdge) return blank('no_edge_below_minimum');
-    if (edge > cfg.noMaxEdge) return blank('no_edge_above_maximum');
   }
+
+  // Preserve all computed fields in diagnostic returns from here on
+  const withEdge = (blockReason: FvBlockReason): FvEvalResult => ({
+    ...blank(blockReason), tauSec, pYes, pNo, consensusProbability: pYes, side, edge, entryPrice,
+  });
+
+  if (inYesRange && edge < cfg.yesMinEdge) return withEdge('yes_edge_below_minimum');
+  if (!inYesRange && edge < cfg.noMinEdge) return withEdge('no_edge_below_minimum');
+  if (!inYesRange && edge > cfg.noMaxEdge) return withEdge('no_edge_above_maximum');
 
   // Momentum suppression: 10 bps threshold as signed fraction
   if (tenSecLogReturn !== null) {
     const thresholdFrac = cfg.momentumSuppressBps / 10_000;
     if (side === 'NO' && tenSecLogReturn > thresholdFrac) {
-      return blank('momentum_suppressed'); // trending up → don't buy NO
+      return withEdge('momentum_suppressed'); // trending up → don't buy NO
     }
     if (side === 'YES' && tenSecLogReturn < -thresholdFrac) {
-      return blank('momentum_suppressed'); // trending down → don't buy YES
+      return withEdge('momentum_suppressed'); // trending down → don't buy YES
     }
   }
 
@@ -390,6 +403,9 @@ export class FvScanner {
     try {
       const cfg = this.cfg;
       const assets = cfg.FV_ASSETS.split(',').map((a) => a.trim()).filter(Boolean);
+      // Fetch bankroll once per tick cycle — not per market — to avoid one Redis
+      // round-trip per market in the inner loop.
+      const bankrollUsd = await getBankroll(this.redis).catch(() => 0);
 
       for (const asset of assets) {
         const symbol = FV_ASSET_TO_CHAINLINK[asset];
@@ -416,7 +432,7 @@ export class FvScanner {
         const markets = this.marketCache.get(asset) ?? [];
 
         for (const market of markets) {
-          await this.evaluateMarket(market, asset, symbol, sigmaResult.sigma, sigmaResult.warmedUp, tenSecLogReturn, cfg);
+          await this.evaluateMarket(market, asset, symbol, sigmaResult.sigma, sigmaResult.warmedUp, tenSecLogReturn, cfg, bankrollUsd);
         }
       }
     } catch (err) {
@@ -436,14 +452,13 @@ export class FvScanner {
     sigmaWarmedUp: boolean,
     tenSecLogReturn: number | null,
     cfg: AppConfig,
+    bankrollUsd: number,
   ): Promise<void> {
     const latestTick = this.feed!.getLatest(symbol);
     if (!latestTick) return;
 
     const spot = latestTick.value;
     const strike = await this.resolveStrike(market, asset, cfg.FV_STRIKE_TOLERANCE_S);
-
-    const bankrollUsd = await getBankroll(this.redis).catch(() => 0);
 
     const evalCfg: FvEvalConfig = {
       tauMinSec: cfg.FV_TAU_MIN_S,

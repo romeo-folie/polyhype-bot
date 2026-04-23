@@ -234,7 +234,7 @@ const envSchema = z.object({
   MAKER_EMPTY_BOOK_ALLOWED_SOURCES: z
     .string()
     .optional()
-    .default('oracle-lag,near-zero-arb')
+    .default('oracle-lag,near-zero-arb,fv-scanner')
     .transform((s) => s.split(',').map((x) => x.trim()).filter(Boolean)),
   // Thresholds for detecting an empty/ghost book. bid < BID_THRESHOLD and
   // ask > ASK_THRESHOLD means no real market maker is resting on the book.
@@ -1289,7 +1289,8 @@ const envSchema = z.object({
   FV_YES_P_MODEL_MIN: z.coerce.number().min(0).max(1).optional().default(0.80),
   FV_YES_P_MODEL_MAX: z.coerce.number().min(0).max(1).optional().default(0.95),
   FV_NO_P_MODEL_MAX: z.coerce.number().min(0).max(1).optional().default(0.10),
-  // Edge thresholds (|p_model - book_mid|). NO needs 4× YES due to σ-floor distortion.
+  // Edge thresholds: YES edge = pYes − yesMid; NO edge = pNo − noMid. Both must be positive.
+  // NO minimum is wider than YES due to σ-floor distortion inflating pNo.
   FV_YES_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.02),
   FV_NO_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   FV_NO_MAX_EDGE: z.coerce.number().min(0).max(1).optional().default(0.10),
