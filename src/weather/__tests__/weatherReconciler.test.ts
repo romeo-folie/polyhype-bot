@@ -151,8 +151,10 @@ describe('reconcileTargets', () => {
     expect((payload as { backfillOnly: boolean }).backfillOnly).toBe(true);
     expect((payload as { resolutionHigh: number }).resolutionHigh).toBe(28.4);
     expect((payload as { resolutionSource: string }).resolutionSource).toBe('wu');
-    expect((payload as { source?: unknown }).source).toBeUndefined();
-    expect((payload as { observedHigh?: unknown }).observedHigh).toBeUndefined();
+    // Strictly assert key absence (not just undefined value) so an accidental
+    // `source: undefined` in production code would still fail the test.
+    expect(payload).not.toHaveProperty('source');
+    expect(payload).not.toHaveProperty('observedHigh');
   });
 
   it('skips enqueue when hasArchive=true and resolution is unavailable', async () => {
