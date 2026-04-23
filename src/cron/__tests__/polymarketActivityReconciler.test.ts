@@ -282,7 +282,7 @@ describe('reconcileRedeem', () => {
     const opts = call[2] as { returnPct: number };
     expect(opts.returnPct).toBeCloseTo(97.9, 1);
     expect(mockNotifyMarketResolved).toHaveBeenCalledWith(
-      expect.objectContaining({ result: 'won' }),
+      expect.objectContaining({ result: 'won', proceedsUsdc: 6.57 }),
     );
     expect(redis.set).toHaveBeenCalledWith(
       expect.stringContaining('pm-reconciler:processed:0xtx1'),
@@ -313,7 +313,7 @@ describe('reconcileRedeem', () => {
     // recordPositionOutcome is NOT called — flips bypass the writer path
     expect(mockRecordOutcome).not.toHaveBeenCalled();
     expect(mockNotifyMarketResolved).toHaveBeenCalledWith(
-      expect.objectContaining({ result: 'won' }),
+      expect.objectContaining({ result: 'won', proceedsUsdc: 6.57 }),
     );
   });
 
