@@ -137,7 +137,38 @@ export async function fetchRedeems(wallet: string, limit = DEFAULT_LIMIT): Promi
   });
 }
 
-async function queryPositionsByConditionId(conditionId: string): Promise<PositionRow[]> {
+/**
+ * Build a conditionId → marketId[] map in a single SELECT against
+ * market_catalog. market_catalog has no index on condition_id (only
+ * (market_id, captured_at) and snapshot_id), so doing a per-redeem
+ * subquery in the positions lookup devolves into a sequential scan
+ * every call — painful as snapshots accumulate. One scan per cycle
+ * is much better.
+ */
+async function buildConditionToMarketsMap(
+  conditionIds: string[],
+): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>();
+  if (conditionIds.length === 0) return result;
+  const sql = getSql();
+  const rows = await sql<Array<{ condition_id: string; market_id: string }>>`
+    SELECT DISTINCT condition_id, market_id
+    FROM market_catalog
+    WHERE condition_id = ANY(${conditionIds}::text[])
+  `;
+  for (const row of rows) {
+    const existing = result.get(row.condition_id) ?? [];
+    existing.push(row.market_id);
+    result.set(row.condition_id, existing);
+  }
+  return result;
+}
+
+async function queryPositionsByMarketIds(
+  marketIds: string[],
+  conditionId: string,
+): Promise<PositionRow[]> {
+  if (marketIds.length === 0) return [];
   const sql = getSql();
   const rows = await sql<PositionRow[]>`
     SELECT
@@ -155,7 +186,7 @@ async function queryPositionsByConditionId(conditionId: string): Promise<Positio
       question,
       pending_settlement AS "pendingSettlement",
       reconciliation_status AS "reconciliationStatus",
-      condition_id AS "conditionId",
+      ${conditionId}::text AS "conditionId",
       execution_venue AS "executionVenue",
       consensus_probability::float8 AS "consensusProbability",
       entry_execution_path AS "entryExecutionPath",
@@ -170,7 +201,7 @@ async function queryPositionsByConditionId(conditionId: string): Promise<Positio
       entry_atr_pct::float8 AS "entryAtrPct",
       synth_hedged AS "synthHedged"
     FROM positions
-    WHERE condition_id = ${conditionId}
+    WHERE market_id = ANY(${marketIds}::text[])
     ORDER BY opened_at DESC
   `;
   return rows;
@@ -417,6 +448,7 @@ export async function reconcileRedeem(
   redis: Redis,
   redeem: RedeemActivity,
   summary: ReconcilerSummary,
+  conditionToMarkets?: Map<string, string[]>,
 ): Promise<void> {
   const dedupKey = `${PROCESSED_PREFIX}${redeem.transactionHash}`;
   if ((await redis.exists(dedupKey)) === 1) {
@@ -424,7 +456,19 @@ export async function reconcileRedeem(
     return;
   }
 
-  const positions = await queryPositionsByConditionId(redeem.conditionId);
+  // conditionToMarkets is pre-computed once per cycle in runPmActivityReconciler.
+  // When absent (e.g. direct test calls), fall back to a single-shot lookup.
+  const marketIds = conditionToMarkets
+    ? conditionToMarkets.get(redeem.conditionId) ?? []
+    : await (async () => {
+        const sql = getSql();
+        const rows = await sql<Array<{ market_id: string }>>`
+          SELECT DISTINCT market_id FROM market_catalog
+          WHERE condition_id = ${redeem.conditionId}
+        `;
+        return rows.map((r) => r.market_id);
+      })();
+  const positions = await queryPositionsByMarketIds(marketIds, redeem.conditionId);
   const match = pickBestMatch(positions, redeem);
 
   if (!match) {
@@ -573,6 +617,12 @@ export async function runPmActivityReconciler(redis: Redis): Promise<ReconcilerS
     wallet,
   });
 
+  // Pre-compute conditionId → marketId[] in a single scan against
+  // market_catalog. Keeps the per-redeem lookup to a Map hit and avoids
+  // seq-scanning an unindexed column 500 times.
+  const uniqueConditionIds = [...new Set(toProcess.map((r) => r.conditionId))];
+  const conditionToMarkets = await buildConditionToMarketsMap(uniqueConditionIds);
+
   // Track the max timestamp of redeems that reconciled WITHOUT throwing. On
   // any error we leave the checkpoint where it was so the next cycle retries
   // the failed event (per-tx dedup still prevents double-writes on retry).
@@ -580,7 +630,7 @@ export async function runPmActivityReconciler(redis: Redis): Promise<ReconcilerS
   let anyError = false;
   for (const redeem of toProcess) {
     try {
-      await reconcileRedeem(redis, redeem, summary);
+      await reconcileRedeem(redis, redeem, summary, conditionToMarkets);
       if (redeem.timestamp > maxSuccessTs) maxSuccessTs = redeem.timestamp;
     } catch (err) {
       anyError = true;
