@@ -1423,6 +1423,16 @@ const envSchema = z.object({
   // (typ 3–5 cents on 0.5–0.7 priced outcomes) and forecast-update reprices.
   WEATHER_TAKE_PROFIT: z.coerce.number().min(0).optional().default(0.05),
   WEATHER_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.40),
+  // ── PM-activity reconciler (src/cron/polymarketActivityReconciler.ts) ──
+  // Every-15min cron that catches auto-redeemed wins our local redeemer missed:
+  //   (a) positions closed via SL/TP leaving residual shares that auto-redeemed
+  //       afterward (partial-fill pattern — PR #309 can't catch these because
+  //       an outcome row already exists, marking the position closed-as-lost)
+  //   (b) positions stuck at pending_settlement=true with no outcome row
+  // Reads Polymarket's public /activity?type=REDEEM endpoint and reconciles
+  // against the positions table by condition_id.
+  PM_RECONCILER_ENABLED: boolFromEnv.optional().default(true),
+  PM_RECONCILER_LIMIT: z.coerce.number().int().min(10).max(1000).optional().default(500),
   // Sports in-play arb SL/TP. Live game prices swing ±15–30% on single scoring
   // plays — the default 16% SL fires within one 5s monitor tick on normal
   // variance. 0.45 requires the position to be down 45% before cutting, which

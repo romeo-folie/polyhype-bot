@@ -57,8 +57,18 @@ export async function recordPositionOutcome(
     returnPct: number;
     executionVenueOverride?: string;
     exitReason?: string;
+    /**
+     * Close timestamp override in milliseconds. Used by the PM-activity
+     * reconciler to record historical REDEEM events with their actual
+     * redemption timestamp instead of "now" — prevents backfill from
+     * making hours-old wins look like they just closed. Applies to
+     * holdingHours, closedAt, and any Redis outcome-history score.
+     * Defaults to `Date.now()` for the normal exit path.
+     */
+    closedAtMs?: number;
   },
 ): Promise<void> {
+  const closedAtMs = opts.closedAtMs ?? Date.now();
   const outcome = {
     source: inferSource(position.sourcedFrom),
     category: inferCategory(position.question),
@@ -69,7 +79,7 @@ export async function recordPositionOutcome(
     result: opts.result,
     returnPct: opts.returnPct,
     holdingHours: position.openedAt
-      ? (Date.now() - new Date(position.openedAt).getTime()) / 3600000
+      ? (closedAtMs - new Date(position.openedAt).getTime()) / 3600000
       : 0,
     executionVenue: opts.executionVenueOverride ?? position.executionVenue ?? 'simmer',
   } as const;
@@ -106,14 +116,17 @@ export async function recordPositionOutcome(
       : {}),
     ...(opts.exitReason ? { exitReason: opts.exitReason } : {}),
     ...(position.priceZone !== undefined ? { priceZone: position.priceZone } : {}),
-  }, { sourcedFrom: position.sourcedFrom });
+  }, {
+    sourcedFrom: position.sourcedFrom,
+    ...(opts.closedAtMs !== undefined ? { closedAtMs: opts.closedAtMs } : {}),
+  });
 
   const holdingHours = position.openedAt
-    ? (Date.now() - new Date(position.openedAt).getTime()) / 3_600_000
+    ? (closedAtMs - new Date(position.openedAt).getTime()) / 3_600_000
     : 0;
   void enqueueWrite('outcomes', {
     outcomeId: randomUUID(),
-    closedAt: new Date().toISOString(),
+    closedAt: new Date(closedAtMs).toISOString(),
     openedAt: position.openedAt,
     executionId: position.executionId,
     source: inferSource(position.sourcedFrom),
