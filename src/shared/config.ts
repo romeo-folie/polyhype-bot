@@ -1277,6 +1277,40 @@ const envSchema = z.object({
   // Requires CHAINLINK_REDIS_PUBLISH_ENABLED=true. Ships dark.
   CHAINLINK_CRYPTO_ARB_ENABLED: boolFromEnv.optional().default(false),
 
+  // ── FV scanner (Black-Scholes fair-value vs book mid on 15m BTC/ETH Up/Down) ──
+  // Ships dark: FV_SCANNER_ENABLED=false. Empirical data (n=14,134, 87.6% WR) from
+  // sister bot confirms FV is the correct signal family; OL on 15m is 21.1% WR.
+  FV_SCANNER_ENABLED: boolFromEnv.optional().default(false),
+  FV_ASSETS: z.string().optional().default('bitcoin,ethereum'),
+  // τ gate: don't trade below this many seconds to expiry.
+  // Gaussian log-normal overconfidence bites at τ < 120s on 15m markets.
+  FV_TAU_MIN_S: z.coerce.number().int().min(30).optional().default(120),
+  // p_model gates (asymmetric — both sides can't trigger simultaneously)
+  FV_YES_P_MODEL_MIN: z.coerce.number().min(0).max(1).optional().default(0.80),
+  FV_YES_P_MODEL_MAX: z.coerce.number().min(0).max(1).optional().default(0.95),
+  FV_NO_P_MODEL_MAX: z.coerce.number().min(0).max(1).optional().default(0.10),
+  // Edge thresholds (|p_model - book_mid|). NO needs 4× YES due to σ-floor distortion.
+  FV_YES_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.02),
+  FV_NO_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
+  FV_NO_MAX_EDGE: z.coerce.number().min(0).max(1).optional().default(0.10),
+  // Momentum suppression: signed log-return threshold over the last N seconds.
+  // Prevents buying against the oracle direction on fast-moving ticks.
+  FV_MOMENTUM_LOOKBACK_S: z.coerce.number().int().min(1).optional().default(10),
+  FV_MOMENTUM_SUPPRESS_BPS: z.coerce.number().min(0).optional().default(10),
+  // Kelly sizing — uses computeHalfKelly with this fraction (0.25 = quarter-Kelly).
+  FV_KELLY_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.25),
+  FV_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(10),
+  FV_MAX_TRADES_PER_HOUR: z.coerce.number().int().min(1).optional().default(20),
+  // σ calibrator knobs (match sister bot's implementation exactly)
+  FV_SIGMA_ROLLING_WINDOW_MS: z.coerce.number().int().min(60_000).optional().default(3_600_000),
+  FV_SIGMA_EWMA_HALF_LIFE_S: z.coerce.number().min(0).optional().default(300),
+  FV_SIGMA_EWMA_SPIKE_MULT: z.coerce.number().min(1).optional().default(1.5),
+  FV_SIGMA_MIN: z.coerce.number().min(0).optional().default(0.20),
+  FV_SIGMA_MAX: z.coerce.number().min(0).optional().default(5.00),
+  FV_SIGMA_WARMUP_TICKS: z.coerce.number().int().min(1).optional().default(180),
+  // Strike resolution: max seconds between window_start_ts and closest RTDS tick.
+  FV_STRIKE_TOLERANCE_S: z.coerce.number().int().min(1).optional().default(60),
+
   // ── Phase 3: Sports arb (NBA + NHL + MLB) ──
   SPORTS_ARB_ENABLED: boolFromEnv.optional().default(true),
   SPORTS_LEAGUES: z

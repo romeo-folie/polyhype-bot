@@ -462,8 +462,8 @@ describe('ChainlinkFeed Redis publisher', () => {
       oracleTs,
       `${oracleTs}:72000`,
     );
-    // ZREMRANGEBYRANK keeps the latest 600 entries: 0..-601 removes everything older.
-    expect(pipe!.zremrangebyrank).toHaveBeenCalledWith('oracle:prices:btc/usd', 0, -601);
+    // ZREMRANGEBYRANK keeps the latest 3600 entries (default capacity): 0..-3601 removes everything older.
+    expect(pipe!.zremrangebyrank).toHaveBeenCalledWith('oracle:prices:btc/usd', 0, -3601);
     expect(pipe!.publish).toHaveBeenCalledTimes(1);
     const [channel, payload] = pipe!.publish.mock.calls[0];
     expect(channel).toBe('oracle:price_moved');
