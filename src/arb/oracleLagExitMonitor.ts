@@ -211,11 +211,11 @@ export interface OracleLagExitEvalInput {
   stopLossPct: number;
   /**
    * When set, compute ageSec from this timestamp (ms) instead of
-   * `state.entryTsMs`. The monitor passes `position.openedAt` here so the
-   * timeout rule is anchored to the actual fill time, not the scanner-fire
-   * time. Maker-pending fills can land 3–5 minutes after the scanner writes
-   * entryTsMs; using entryTsMs would fire `oracle_lag_timeout` immediately
-   * on first visibility of the position.
+   * `state.entryTsMs`. The monitor passes `position.openedAt` — the ledger
+   * record/import timestamp, which is close to (but not literally) the
+   * venue fill time. Anchoring here gives the timeout rule a window
+   * reflecting real post-record runtime instead of firing immediately on
+   * first visibility when scanner-fire preceded the maker fill by minutes.
    */
   openedAtMs?: number;
 }
@@ -261,9 +261,10 @@ export function evaluateOracleLagExit(
     openedAtMs,
   } = input;
 
-  // Anchor ageSec to the actual fill time when the caller supplies it
-  // (position.openedAt). Falls back to state.entryTsMs for shadow path and
-  // any caller that doesn't have a Position on hand.
+  // Anchor ageSec to the ledger openedAt / record-at timestamp when the
+  // caller supplies it (live monitor passes position.openedAt). Falls back
+  // to state.entryTsMs (scanner-fire time) for the shadow path and any
+  // caller that doesn't have a Position on hand.
   const ageAnchorMs = openedAtMs ?? state.entryTsMs;
   const ageSec = Math.max(0, (nowMs - ageAnchorMs) / 1000);
 
@@ -639,9 +640,13 @@ export class OracleLagExitMonitor {
       !latestTick || now - latestTick.receivedAt > CHAINLINK_STALE_MS;
     const currentChainlinkPrice = latestTick?.value ?? state.entryChainlinkPrice;
 
-    // Anchor ageSec to the ledger's openedAt (= reconciler import = actual
-    // fill time) so maker-pending orders that take minutes to fill aren't
-    // treated as "already past max-hold" the moment the position appears.
+    // Anchor ageSec to the ledger openedAt (set at recordPosition / orphan-
+    // import time — close to fill time for both taker and maker-pending
+    // paths, though not the literal venue fill timestamp). This prevents
+    // the observed failure mode where a maker GTC fires from scanner at
+    // T-5min, then appears in the ledger 5 minutes later and gets
+    // oracle_lag_timeout on the very first tick because scanner-fire time
+    // already exceeded the cap.
     const openedAtMs = new Date(position.openedAt).getTime();
     const decision = evaluateOracleLagExit({
       state,

@@ -507,12 +507,15 @@ const envSchema = z.object({
   ORACLE_LAG_EXIT_REVERSAL_MIN_RETURN_PCT: z.coerce.number().min(0).optional().default(0),
   // Hard timeout — drop the position after this many seconds regardless of
   // compression progress, since the convergence window is ~55s. ageSec is
-  // computed from position.openedAt (actual fill time), NOT state.entryTsMs
-  // (scanner-fire time) — so maker-pending fills that land 3–5 min after the
-  // scanner writes the state get a full `maxHoldSec` window from fill.
+  // computed from position.openedAt (the ledger record/import timestamp),
+  // NOT state.entryTsMs (scanner-fire time) — so maker-pending fills that
+  // only appear in the ledger 3–5 min after the scanner writes the state
+  // get a full `maxHoldSec` window from record-time instead of firing
+  // immediately on first visibility.
   // Default raised 180 → 300s (2026-04-23) to cushion against borderline
   // cases where the position barely exceeded the old cap on first visibility;
-  // 300 gives 5 minutes of post-fill runtime for compression/reversal to act.
+  // 300 gives 5 minutes of runtime for compression/reversal to act after
+  // the ledger openedAt / record timestamp.
   // Upper-bounded at 1500s to stay safely inside the 30-minute exit-state
   // Redis TTL (see EXIT_STATE_TTL_SEC in oracleLagExitMonitor.ts) — otherwise
   // the key could expire before the timeout trigger fires.
