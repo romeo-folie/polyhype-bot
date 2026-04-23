@@ -143,10 +143,18 @@ describe('reconcileTargets', () => {
     expect(archiveFetcher).not.toHaveBeenCalled();
     expect(enqueueWriteMock).toHaveBeenCalledTimes(1);
     const [, payload] = enqueueWriteMock.mock.calls[0]!;
-    expect((payload as { source: string }).source).toBe('resolution-backfill');
+    // `backfillOnly: true` routes the writer through a bare UPDATE that only
+    // touches `resolution_high` / `resolution_source` (see
+    // src/db/writer/handlers/weather_ground_truth.ts). `source` and
+    // `observedHigh` are not part of that path's payload contract — commit
+    // 8de8fa2 (2026-04-22) intentionally stripped them.
     expect((payload as { backfillOnly: boolean }).backfillOnly).toBe(true);
     expect((payload as { resolutionHigh: number }).resolutionHigh).toBe(28.4);
     expect((payload as { resolutionSource: string }).resolutionSource).toBe('wu');
+    // Strictly assert key absence (not just undefined value) so an accidental
+    // `source: undefined` in production code would still fail the test.
+    expect(payload).not.toHaveProperty('source');
+    expect(payload).not.toHaveProperty('observedHigh');
   });
 
   it('skips enqueue when hasArchive=true and resolution is unavailable', async () => {
