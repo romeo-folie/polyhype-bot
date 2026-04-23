@@ -1346,6 +1346,10 @@ describe('empty-book maker route', () => {
     mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
     mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
     mockConfig.SIMMER_VENUE_ENABLED = false; // skip Simmer so spread gate always fires
+    // Weather knobs — reset to defaults every test so a failing case that
+    // skips the manual reset at the bottom doesn't leak state into siblings.
+    mockConfig.WEATHER_MAKER_POST_ONLY = true;
+    mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 500;
 
     mockGetOrderBook.mockResolvedValue(makeGhostBook());
     mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-eb' });

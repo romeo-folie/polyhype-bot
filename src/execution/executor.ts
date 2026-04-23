@@ -550,10 +550,14 @@ async function tryExecuteViaClobMaker(
   //   YES direction → side-ask = bestAsk (YES book)
   //   NO direction  → side-ask = 1 - bestBid (YES-book bestBid is NO's bestAsk)
   if (emptyBookMode && signal.source === 'weather' && cfg.WEATHER_MAKER_DISCOUNT_BPS > 0) {
-    const sideAsk =
-      signal.direction === 'YES' || signal.direction === 'UP'
-        ? bestAsk
-        : bestBid > 0 ? 1 - bestBid : 0;
+    // side-ask computation, by direction:
+    //   YES: bestAsk (YES-book). When there are no resting asks (bestAsk=0)
+    //        we can't meaningfully discount — skip.
+    //   NO:  1 - bestBid (YES-book bestBid is NO's bestAsk). bestBid=0 maps
+    //        to sideAsk=1 (the NO ask is $1 when no one's bidding YES), which
+    //        yields a valid discounted anchor.
+    const isYesDir = signal.direction === 'YES' || signal.direction === 'UP';
+    const sideAsk = isYesDir ? bestAsk : 1 - Math.max(bestBid, 0);
     if (sideAsk > 0) {
       const discountedAnchor = sideAsk * (1 - cfg.WEATHER_MAKER_DISCOUNT_BPS / 10_000);
       fairValue = fairValue != null
