@@ -677,10 +677,10 @@ export async function runFuturesMonitorWorker(): Promise<void> {
               // This closes the gap where successful HL exits could disappear from
               // Postgres analytics if the worker died after scheduling the async
               // recorder but before the promise settled.
-              const result = pnlUsd > 0 ? 'won' : pnlUsd < 0 ? 'lost' : 'pushed';
+              const outcomeResult = pnlUsd > 0 ? 'won' : pnlUsd < 0 ? 'lost' : 'pushed';
               try {
                 await recordPositionOutcome(redis, ledgerPos, {
-                  result,
+                  result: outcomeResult,
                   returnPct: priceChangePct,
                   executionVenueOverride: 'hyperliquid',
                   exitReason: reason,

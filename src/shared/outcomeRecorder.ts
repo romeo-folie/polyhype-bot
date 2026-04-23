@@ -24,6 +24,7 @@ export interface PositionOutcome {
     | 'arb'
     | 'crypto-arb'
     | 'futures'
+    | 'hl-momentum'
     | 'sports'
     | 'clob-flow'
     | 'oracle-lag'
