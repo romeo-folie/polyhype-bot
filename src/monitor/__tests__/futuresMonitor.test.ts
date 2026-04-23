@@ -7,6 +7,7 @@ const baseCfg = {
   FUTURES_TAKE_PROFIT_PCT: 3.0,
   FUTURES_MAX_HOLD_HOURS: 24,
   FUTURES_MAX_HOLD_BYPASS_ON_WINNER: false,
+  FUTURES_MAX_HOLD_BLOCK_ON_LOSER: true,
   FUTURES_TRAILING_STOP_ENABLED: false,
   FUTURES_TRAILING_STOP_PCT: 1.5,
   FUTURES_EXIT_ON_SIGNAL_FADE: false,
@@ -206,6 +207,109 @@ describe('futuresMonitor', () => {
     await runTick();
 
     expect(mockClosePosition).toHaveBeenCalledWith(symbol);
+  });
+
+  it('does NOT trigger max-hold exit when the position is underwater', async () => {
+    // pnlUsd=-50 on positionValue=5000 → priceChangePct=-1% (loser but above
+    // the -1.5% SL floor, so max-hold is what would decide). Age 25h > 24h cap.
+    // With FUTURES_MAX_HOLD_BLOCK_ON_LOSER=true (default), the exit is suppressed.
+    const symbol = 'BTC';
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        symbol,
+        position: {
+          szi: '0.1',
+          entryPx: '50000',
+          unrealizedPnl: '-50', // -1% of 5000 notional
+          marginUsed: '1000',
+        },
+      },
+    ]);
+    const longAgo = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+    mockGetLedgerPositions.mockResolvedValue([
+      {
+        marketId: symbol,
+        openedAt: longAgo,
+        isFutures: true,
+        direction: 'LONG',
+        question: `News Futures: ${symbol} LONG`,
+        entryPrice: 50000,
+        stakeUsd: 10,
+      },
+    ]);
+
+    await runTick();
+
+    expect(mockClosePosition).not.toHaveBeenCalled();
+  });
+
+  it('STILL triggers max-hold exit when position is breakeven (priceChangePct >= 0)', async () => {
+    // Entry 50000, current 50000 → 0% priceChangePct; not a loser, so exit fires.
+    const symbol = 'BTC';
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        symbol,
+        position: {
+          szi: '0.1',
+          entryPx: '50000',
+          unrealizedPnl: '0',
+          markPx: '50000',
+          marginUsed: '1000',
+        },
+      },
+    ]);
+    const longAgo = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+    mockGetLedgerPositions.mockResolvedValue([
+      {
+        marketId: symbol,
+        openedAt: longAgo,
+        isFutures: true,
+        direction: 'LONG',
+        question: `News Futures: ${symbol} LONG`,
+        entryPrice: 50000,
+        stakeUsd: 10,
+      },
+    ]);
+
+    await runTick();
+
+    expect(mockClosePosition).toHaveBeenCalledWith(symbol);
+  });
+
+  it('max-hold exit is labeled futures_max_hold (not futures_sl) when it fires', async () => {
+    const { notifyTakeProfitExecuted: mockNotify } = await import('../../execution/telegram.js');
+    const symbol = 'BTC';
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        symbol,
+        position: {
+          szi: '0.1',
+          entryPx: '50000',
+          unrealizedPnl: '0',
+          markPx: '50000',
+          marginUsed: '1000',
+        },
+      },
+    ]);
+    const longAgo = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+    mockGetLedgerPositions.mockResolvedValue([
+      {
+        marketId: symbol,
+        openedAt: longAgo,
+        isFutures: true,
+        direction: 'LONG',
+        question: `News Futures: ${symbol} LONG`,
+        entryPrice: 50000,
+        stakeUsd: 10,
+      },
+    ]);
+
+    await runTick();
+
+    expect(mockClosePosition).toHaveBeenCalledWith(symbol);
+    expect(vi.mocked(mockNotify)).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'futures_max_hold' }),
+    );
   });
 
   describe('orphan prune — zero HL positions', () => {

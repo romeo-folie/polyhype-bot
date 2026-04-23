@@ -44,6 +44,11 @@ let _releaseLock: (() => Promise<void>) | null = null;
 
 // Per-symbol last re-eval timestamp (process-local, not Redis — scoped to this worker)
 const lastRevalCheck = new Map<string, number>();
+// Separate cadence tracker for the max-hold-on-loser guard's one-shot log.
+// Kept independent of `lastRevalCheck` so the loser-guard firing every tick
+// doesn't starve the TA-fade re-eval below (which uses `lastRevalCheck` to
+// throttle scoreConfluence calls).
+const lastMaxHoldLoserLog = new Map<string, number>();
 
 export async function runFuturesMonitorWorker(): Promise<void> {
   const cfg = loadConfig();
@@ -512,11 +517,36 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           const ageHours = (Date.now() - openedAt) / (1000 * 3600);
           if (ageHours >= cfg.FUTURES_MAX_HOLD_HOURS) {
             let bypassed = false;
+            // Loser guard: max-hold never kicks a position that's underwater.
+            // Observed failure mode: ETH LONG at -2.16% cut at 24h; had it held
+            // to TP/trailing it might have recovered. Losers stay open until
+            // SL (ATR), TP, trailing, or TA-fade fires — max-hold only enforces
+            // the time cap on breakeven / profitable positions. A subsequent
+            // tick will re-check and fire max-hold if the position climbs ≥0%.
+            if (cfg.FUTURES_MAX_HOLD_BLOCK_ON_LOSER && priceChangePct < 0) {
+              bypassed = true;
+              // One-shot log per REEVAL_INTERVAL_S so we don't spam every 5s
+              // poll. Uses a dedicated map (lastMaxHoldLoserLog) rather than
+              // the shared lastRevalCheck so we don't starve the TA-fade
+              // re-eval below — that block reads lastRevalCheck to throttle
+              // scoreConfluence calls.
+              const lastLog = lastMaxHoldLoserLog.get(symbol) ?? 0;
+              const secSinceLog = (Date.now() - lastLog) / 1000;
+              if (secSinceLog >= cfg.FUTURES_REEVAL_INTERVAL_S) {
+                lastMaxHoldLoserLog.set(symbol, Date.now());
+                logger.info('[futures-monitor] max_hold suppressed on loser', {
+                  symbol,
+                  direction,
+                  ageHours: ageHours.toFixed(1),
+                  priceChangePct: priceChangePct.toFixed(2),
+                });
+              }
+            }
             // Bypass gate: winning runners with still-aligned TA escape the
             // time cap. Zombies (trailing not armed) always exit here.
             // Shares `lastRevalCheck` cadence with the TA-fade block below
             // so we don't double-call scoreConfluence on the same tick.
-            if (cfg.FUTURES_MAX_HOLD_BYPASS_ON_WINNER && trailingArmed) {
+            if (!bypassed && cfg.FUTURES_MAX_HOLD_BYPASS_ON_WINNER && trailingArmed) {
               const lastCheck = lastRevalCheck.get(symbol) ?? 0;
               const secSinceCheck = (Date.now() - lastCheck) / 1000;
               let taAgrees = true;
@@ -618,7 +648,9 @@ export async function runFuturesMonitorWorker(): Promise<void> {
                   ? 'futures_tp'
                   : reason.startsWith('TA reversal')
                     ? 'signal_reeval'
-                    : 'stop_loss';
+                    : reason.startsWith('Max hold')
+                      ? 'futures_max_hold'
+                      : 'stop_loss';
             await notifyTakeProfitExecuted({
               position: ledgerPos ?? {
                 marketId: symbol,

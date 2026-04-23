@@ -172,6 +172,7 @@ export type TakeProfitReason =
   | 'synthetic'
   | 'futures_sl'
   | 'futures_tp'
+  | 'futures_max_hold'
   | 'stale_exit'
   | 'trailing_stop'
   | 'trend_exit'
@@ -198,6 +199,7 @@ export async function notifyTakeProfitExecuted(opts: {
     synthetic: '🛡️ Synthetic exit (Hedged on Hyperliquid)',
     futures_sl: '🛑 Futures Stop-Loss triggered',
     futures_tp: '🎯 Futures Take-Profit triggered',
+    futures_max_hold: '⏱️ Futures max hold reached',
     stale_exit: '⏱️ Stale-exit — position rotated out',
     trailing_stop: '🪤 Trailing stop — gains locked in',
     trend_exit: '📉 Trend exit — adverse drift',

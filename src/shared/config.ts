@@ -1067,6 +1067,13 @@ const envSchema = z.object({
   // still exit at MAX_HOLD_HOURS. Protects runners without sacrificing the
   // zombie-cleanup purpose of the time cap.
   FUTURES_MAX_HOLD_BYPASS_ON_WINNER: boolFromEnv.optional().default(false),
+  // When true, suppress the time-based max-hold exit on positions currently
+  // underwater (priceChangePct < 0). Losers stay open until SL (ATR), TP,
+  // trailing, or TA-fade fires — max-hold only enforces the time cap on
+  // breakeven-or-better positions. If the position climbs ≥0% after the cap,
+  // a subsequent tick fires max-hold normally. Prevents the observed pattern
+  // of closing losers at -2% after 24h when a recovery was plausible.
+  FUTURES_MAX_HOLD_BLOCK_ON_LOSER: boolFromEnv.optional().default(true),
   // Minimum urgency score (1-10) for news items to trigger a futures signal.
   // Lowered from 8 to 6 to increase signal frequency; combined with stake scaling.
   FUTURES_URGENCY_THRESHOLD: z.coerce.number().int().min(1).max(10).optional().default(6),
