@@ -1716,12 +1716,28 @@ export async function executeSignal(
       return recordSkip('already_executed');
     }
 
-    // Open position check for futures — prevent stacking from multiple signal sources.
-    const alreadyHoldingFutures = await hasOpenPosition(redis, signal.marketId, signal.direction);
-    if (alreadyHoldingFutures) {
+    // Open position check for futures — prevent stacking from multiple signal
+    // sources, in EITHER direction. Opposite-side stacking (e.g. ETH LONG open
+    // + ETH SHORT signal firing) was silently allowed before this gate: the
+    // PM-side opposite-direction check at line 1749 never runs for futures
+    // because the futures branch `return`s before it. Result would be net-zero
+    // market exposure with double-funded margin — pure fee burn.
+    const futuresOpposite: 'LONG' | 'SHORT' =
+      signal.direction === 'LONG' ? 'SHORT' : 'LONG';
+    const [alreadyHoldingFuturesSameSide, alreadyHoldingFuturesOpposite] =
+      await Promise.all([
+        hasOpenPosition(redis, signal.marketId, signal.direction),
+        hasOpenPosition(redis, signal.marketId, futuresOpposite),
+      ]);
+    if (alreadyHoldingFuturesSameSide || alreadyHoldingFuturesOpposite) {
+      // Reuse the existing `position_already_open` skip reason for both cases
+      // to avoid a DB enum migration. The log message carries the distinction
+      // (sameSide vs oppositeSide) for anyone tracing a specific skip.
       logger.info('[executor] skipping futures — already holding position', {
         marketId: signal.marketId,
         direction: signal.direction,
+        sameSide: alreadyHoldingFuturesSameSide,
+        oppositeSide: alreadyHoldingFuturesOpposite,
       });
       return recordSkip('position_already_open');
     }

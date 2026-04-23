@@ -242,6 +242,31 @@ describe('executeSignal', () => {
     expect(mockSubmitClob).not.toHaveBeenCalled();
   });
 
+  it('skips futures SHORT when a same-market LONG is already open (opposite-side dedup)', async () => {
+    mockConfig.FUTURES_ENABLED = true;
+    // Model hasOpenPosition: (marketId='ETH', direction='SHORT') → false,
+    //                       (marketId='ETH', direction='LONG')  → true
+    // So the SHORT signal is blocked by the existing LONG.
+    mockHasPosition.mockImplementation((_redis: unknown, _marketId: string, direction: string) => {
+      return Promise.resolve(direction === 'LONG');
+    });
+    const redis = makeRedis();
+    const signal = makeSignal({
+      marketId: 'ETH',
+      isFutures: true,
+      direction: 'SHORT' as unknown as TradeSignal['direction'],
+      stakeUsd: 10,
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(signal, redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('position_already_open');
+    // Must NOT place the order on Hyperliquid
+    mockConfig.FUTURES_ENABLED = false;
+  });
+
   it('skips when stake is below floor', async () => {
     const redis = makeRedis();
     const signal = makeSignal({ stakeUsd: 0.001 });
