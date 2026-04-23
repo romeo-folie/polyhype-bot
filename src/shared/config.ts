@@ -1422,15 +1422,27 @@ const envSchema = z.object({
   // bias (YES 11.5% vs NO 73.7%) argues for lighter sizing.
   WEATHER_KELLY_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.25),
   // --- WEATHER ENTRY PRICE OPTIMIZATION ---
-  // Force post-only GTC for weather entries (no taker fallback). Days-scale edge
-  // means missing a fill is far cheaper than overpaying; let the market come to us.
-  WEATHER_MAKER_POST_ONLY: boolFromEnv.optional().default(true),
+  // Post-only GTC vs plain GTC for weather empty-book entries.
+  //   true  → strict post-only; rejections drop straight to no_clob_book. Safer
+  //           against overpay but yielded 0 fills for 13h on 2026-04-23 when the
+  //           real book had resting orders the YES-book read didn't surface.
+  //   false → plain GTC; crossing limits taker-fill at the existing ask (capped
+  //           by our limit), residual rests as maker. Paired with WEATHER_MAX_ENTRY_PRICE
+  //           this is strictly ≤ our cap, so "overpay" is bounded by that knob.
+  WEATHER_MAKER_POST_ONLY: boolFromEnv.optional().default(false),
   // Aggressive price improvement: post at bestAsk * (1 - BPS/10000) so the maker
   // only fills when someone crosses *into* us at a meaningfully better price.
   // Still capped by fair value (modelProb) so we never post above what we think
   // the side is worth. Fill rate drops as this increases — 500 (5%) is a moderate
   // starting point; tune upward once fill rate on current ask minus 40bps is known.
   WEATHER_MAKER_DISCOUNT_BPS: z.coerce.number().min(0).max(5000).optional().default(500),
+  // Absolute ceiling on weather empty-book post price. Binds independently of
+  // fairValue (modelProb) and discountedAnchor (sideAsk*discount) — a high-conviction
+  // NO bracket with modelProb=0.87 could otherwise post at ~0.85 and taker-fill at
+  // whatever the resting ask is. With postOnly:false the limit IS the worst price
+  // we pay, so this caps entry cost directly and lets us skip expensive entries
+  // that will likely reprice lower within hours. 0 disables the cap.
+  WEATHER_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.65),
   // Gate: skip NO bets on tail brackets ("or higher" / "or below") when the model's
   // own P(YES) exceeds this threshold. Prevents betting against the model's directional
   // call — edgeNo can be spuriously positive even when modelProb is 0.80+ for YES.
