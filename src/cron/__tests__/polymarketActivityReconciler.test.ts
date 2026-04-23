@@ -213,6 +213,40 @@ describe('reconcileRedeem', () => {
     expect(mockSqlTag).not.toHaveBeenCalled();
   });
 
+  it('records closedAt at redeem.timestamp (not Date.now) so backfill preserves hold times', async () => {
+    scriptSqlCalls([
+      [makePositionRow()],
+      [],
+      { count: 1 },
+    ]);
+    const redis = makeRedis();
+    const summary = {
+      redeemsFetched: 0, alreadyProcessed: 0, outcomesInserted: 0,
+      outcomesFlipped: 0, positionsCleared: 0, synthInsertsSkipped: 0, errors: 0,
+    };
+    await reconcileRedeem(redis as never, makeRedeem({ timestamp: 1776923780 }), summary);
+    const call = mockRecordOutcome.mock.calls[0]!;
+    const opts = call[2] as { closedAtMs: number };
+    expect(opts.closedAtMs).toBe(1776923780 * 1000);
+  });
+
+  it('preserves position.executionVenue on outcome write (simmer stays simmer, not forced to clob)', async () => {
+    scriptSqlCalls([
+      [makePositionRow({ executionVenue: 'simmer' })],
+      [],
+      { count: 1 },
+    ]);
+    const redis = makeRedis();
+    const summary = {
+      redeemsFetched: 0, alreadyProcessed: 0, outcomesInserted: 0,
+      outcomesFlipped: 0, positionsCleared: 0, synthInsertsSkipped: 0, errors: 0,
+    };
+    await reconcileRedeem(redis as never, makeRedeem(), summary);
+    const call = mockRecordOutcome.mock.calls[0]!;
+    const opts = call[2] as { executionVenueOverride: string };
+    expect(opts.executionVenueOverride).toBe('simmer');
+  });
+
   it('inserts a new won outcome when no prior outcome exists and position is matched', async () => {
     scriptSqlCalls([
       [makePositionRow()],            // positions lookup
@@ -425,5 +459,60 @@ describe('runPmActivityReconciler', () => {
     expect(out.outcomesInserted).toBe(2);
     expect(out.positionsCleared).toBe(2);
     expect(mockRecordOutcome).toHaveBeenCalledTimes(2);
+  });
+
+  it('checkpoint filters out redeems at-or-before the stored timestamp', async () => {
+    // Three fetched redeems with timestamps 100, 200, 300.
+    // Stored checkpoint = 200 → only ts=300 should be processed.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          makeRedeem({ transactionHash: '0xa', conditionId: '0xa', timestamp: 100 }),
+          makeRedeem({ transactionHash: '0xb', conditionId: '0xb', timestamp: 200 }),
+          makeRedeem({ transactionHash: '0xc', conditionId: '0xc', timestamp: 300 }),
+        ]),
+    } as Response);
+    scriptSqlCalls([
+      [makePositionRow({ conditionId: '0xc' })],
+      [],
+      { count: 1 },
+    ]);
+    const redis = makeRedis({
+      get: vi.fn().mockResolvedValue('200'),
+    });
+    const out = await runPmActivityReconciler(redis as never);
+
+    expect(out.redeemsFetched).toBe(3);
+    expect(out.outcomesInserted).toBe(1);
+    expect(mockRecordOutcome).toHaveBeenCalledTimes(1);
+    // Advance checkpoint to 300 (max processed)
+    expect(redis.set).toHaveBeenCalledWith(
+      'pm-reconciler:last-ts',
+      '300',
+    );
+  });
+
+  it('first-ever run (no checkpoint) processes the full fetched window', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          makeRedeem({ transactionHash: '0xa', conditionId: '0xa', timestamp: 100 }),
+          makeRedeem({ transactionHash: '0xb', conditionId: '0xb', timestamp: 200 }),
+        ]),
+    } as Response);
+    scriptSqlCalls([
+      [makePositionRow({ conditionId: '0xa' })],
+      [],
+      { count: 1 },
+      [makePositionRow({ conditionId: '0xb' })],
+      [],
+      { count: 1 },
+    ]);
+    const redis = makeRedis({ get: vi.fn().mockResolvedValue(null) });
+    const out = await runPmActivityReconciler(redis as never);
+    expect(out.redeemsFetched).toBe(2);
+    expect(out.outcomesInserted).toBe(2);
   });
 });

@@ -146,13 +146,13 @@ export function inferCategory(question: string): string {
 export async function recordOutcome(
   redis: Redis,
   outcome: Omit<PositionOutcome, 'id' | 'closedAt'>,
-  opts?: { sourcedFrom?: string | undefined },
+  opts?: { sourcedFrom?: string | undefined; closedAtMs?: number | undefined },
 ): Promise<void> {
   try {
     const cfg = loadConfig();
     const id = randomUUID();
-    const closedAt = new Date().toISOString();
-    const ts = Date.now();
+    const ts = opts?.closedAtMs ?? Date.now();
+    const closedAt = new Date(ts).toISOString();
 
     const full: PositionOutcome = { ...outcome, id, closedAt };
 

@@ -23,8 +23,11 @@
  * invocations of this script are idempotent.
  *
  * Checkpoint: we always fetch the most recent `PM_RECONCILER_LIMIT` redeems
- * (default 500) and rely on per-tx dedup. A timestamp checkpoint gates the
- * inner loop so we don't linearly process N×last-run's worth of rows.
+ * (default 500) and then filter to events with timestamp > stored checkpoint
+ * before processing. The checkpoint is advanced to the newest processed
+ * timestamp at the end of a successful run. Per-tx dedup is the correctness
+ * backstop; the checkpoint is the fast-path filter so steady-state cycles
+ * only touch new rows.
  *
  * Gated by `PM_RECONCILER_ENABLED` (default true). Notifies via Telegram on
  * every flipped/inserted row.
@@ -39,6 +42,7 @@ import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { fetchWithTimeout } from '../mapping/gamma.js';
 import { recordPositionOutcome } from '../shared/positionOutcomeRecorder.js';
+import { recordOutcome, inferSource, inferCategory } from '../shared/outcomeRecorder.js';
 import { notifyMarketResolved } from '../execution/telegram.js';
 import type { Position } from '../execution/positionLedger.js';
 
@@ -180,11 +184,48 @@ interface ExistingOutcome {
   closed_at: Date;
 }
 
+/**
+ * Look up outcome rows that correspond to a specific position, not just any
+ * outcome on the same market+direction. Multi-entry markets (same side
+ * traded more than once) would otherwise cause false no-ops or flips on the
+ * wrong row. `execution_id` is the preferred key when the position row has
+ * one — it's unique per executor.ts run. When execution_id is missing
+ * (pre-PR-197 positions), falls back to an opened_at proximity window so we
+ * still apply to the closest match in time.
+ */
 async function queryExistingOutcome(
   marketId: string,
   direction: string,
+  executionId: string | null,
+  openedAt: string | null,
 ): Promise<ExistingOutcome[]> {
   const sql = getSql();
+  if (executionId) {
+    return await sql<ExistingOutcome[]>`
+      SELECT outcome_id, result, return_pct, exit_reason, closed_at
+      FROM outcomes
+      WHERE market_id = ${marketId}
+        AND direction = ${direction}
+        AND execution_id = ${executionId}
+      ORDER BY closed_at DESC
+    `;
+  }
+  if (openedAt) {
+    // ±2h window around the ledger's opened_at — tight enough to distinguish
+    // intra-day re-entries on the same market.
+    const anchor = new Date(openedAt);
+    const lo = new Date(anchor.getTime() - 2 * 3600_000).toISOString();
+    const hi = new Date(anchor.getTime() + 2 * 3600_000).toISOString();
+    return await sql<ExistingOutcome[]>`
+      SELECT outcome_id, result, return_pct, exit_reason, closed_at
+      FROM outcomes
+      WHERE market_id = ${marketId}
+        AND direction = ${direction}
+        AND opened_at BETWEEN ${lo}::timestamptz AND ${hi}::timestamptz
+      ORDER BY closed_at DESC
+    `;
+  }
+  // No disambiguator available — fall back to the loose lookup.
   return await sql<ExistingOutcome[]>`
     SELECT outcome_id, result, return_pct, exit_reason, closed_at
     FROM outcomes
@@ -270,6 +311,7 @@ function computeReturnPct(redeem: RedeemActivity, match: PositionRow): number {
 }
 
 async function flipExistingOutcome(
+  redis: Redis,
   outcomeId: string,
   redeem: RedeemActivity,
   match: PositionRow,
@@ -279,15 +321,16 @@ async function flipExistingOutcome(
 ): Promise<void> {
   const sql = getSql();
   const correctedReturnPct = computeReturnPct(redeem, match);
-  const correctedResult = redeem.usdcSize > 0 ? 'won' : 'lost';
+  const correctedResult: 'won' | 'lost' = redeem.usdcSize > 0 ? 'won' : 'lost';
+  const correctedExitReason = correctedResult === 'won'
+    ? 'auto_redeemed_win_pm_reconciler_flip'
+    : 'auto_redeemed_loss_pm_reconciler_flip';
   await sql`
     UPDATE outcomes
     SET
       result = ${correctedResult},
       return_pct = ${correctedReturnPct},
-      exit_reason = ${correctedResult === 'won'
-        ? 'auto_redeemed_win_pm_reconciler'
-        : 'auto_redeemed_loss_pm_reconciler'},
+      exit_reason = ${correctedExitReason},
       raw = COALESCE(raw, '{}'::jsonb) || ${JSON.stringify({
         pm_reconciler: {
           tx_hash: redeem.transactionHash,
@@ -302,6 +345,31 @@ async function flipExistingOutcome(
       })}::jsonb
     WHERE outcome_id = ${outcomeId}
   `;
+  // Keep the Redis outcome history in sync: append a correction entry with
+  // the same timestamp as the redeem so context injection / calibration
+  // picks up the corrected result. The original (stale-lost) entry stays
+  // but is superseded by the corrected one — acceptable given how rare
+  // flips are and that Redis entries expire via OUTCOME_HISTORY_DAYS.
+  await recordOutcome(
+    redis,
+    {
+      source: inferSource(match.sourcedFrom ?? 'pm_reconciler'),
+      category: inferCategory(match.question),
+      question: match.question.slice(0, 200),
+      direction: match.direction,
+      consensusProbability: match.consensusProbability ?? 0.5,
+      divergence: 0,
+      result: correctedResult,
+      returnPct: correctedReturnPct,
+      holdingHours: match.openedAt
+        ? (redeem.timestamp * 1000 - new Date(match.openedAt).getTime()) / 3_600_000
+        : 0,
+      executionVenue: (match.executionVenue ?? 'clob') as 'clob' | 'simmer' | 'hyperliquid',
+      ...(match.executionId ? { executionId: match.executionId } : {}),
+      exitReason: correctedExitReason,
+    },
+    { sourcedFrom: match.sourcedFrom ?? undefined, closedAtMs: redeem.timestamp * 1000 },
+  );
 }
 
 async function insertOutcomeForPosition(
@@ -314,10 +382,15 @@ async function insertOutcomeForPosition(
   await recordPositionOutcome(redis, positionRowToPosition(match), {
     result: weWon ? 'won' : 'lost',
     returnPct,
-    executionVenueOverride: 'clob',
+    // Preserve the ledger's venue (simmer vs clob) so venue-sliced analytics
+    // stay correct. Falls back to 'clob' only when the ledger truly lacks it.
+    executionVenueOverride: match.executionVenue ?? 'clob',
     exitReason: weWon
       ? 'auto_redeemed_win_pm_reconciler'
       : 'auto_redeemed_loss_pm_reconciler',
+    // Record at PM's redeem timestamp, NOT Date.now() — critical for backfill
+    // so holding_hours and daily rollups reflect when the trade actually closed.
+    closedAtMs: redeem.timestamp * 1000,
   });
 }
 
@@ -360,7 +433,12 @@ export async function reconcileRedeem(
     return;
   }
 
-  const existing = await queryExistingOutcome(match.marketId, match.direction);
+  const existing = await queryExistingOutcome(
+    match.marketId,
+    match.direction,
+    match.executionId,
+    match.openedAt,
+  );
 
   if (existing.some((o) => o.result === 'won')) {
     // Already correctly recorded as a win — nothing to do.
@@ -375,6 +453,7 @@ export async function reconcileRedeem(
     // Flip misattributed loss (partial SL fill + residual auto-redeem pattern).
     const target = lostOutcomes[0]!;
     await flipExistingOutcome(
+      redis,
       target.outcome_id,
       redeem,
       match,
@@ -469,16 +548,23 @@ export async function runPmActivityReconciler(redis: Redis): Promise<ReconcilerS
 
   const redeems = await fetchRedeems(wallet, cfg.PM_RECONCILER_LIMIT);
   summary.redeemsFetched = redeems.length;
-  logger.info('[pm-reconciler] fetched redeems', { count: redeems.length, wallet });
 
-  // Update checkpoint to the newest observed timestamp (advisory — per-tx dedup
-  // is the real correctness guarantee).
-  const maxTs = redeems.reduce((a, r) => Math.max(a, r.timestamp), 0);
-  if (maxTs > 0) {
-    await redis.set(CHECKPOINT_KEY, String(maxTs)).catch(() => {});
-  }
+  // Read the timestamp checkpoint and filter down to new redeems only.
+  // First-ever run has no checkpoint → processes all 500 (intentional backfill
+  // pass). Subsequent runs only walk events newer than the last processed ts.
+  const checkpointRaw = await redis.get(CHECKPOINT_KEY).catch(() => null);
+  const checkpointTs = checkpointRaw ? Number(checkpointRaw) : 0;
+  const effectiveCheckpointTs = Number.isFinite(checkpointTs) ? checkpointTs : 0;
+  const toProcess = redeems.filter((r) => r.timestamp > effectiveCheckpointTs);
 
-  for (const redeem of redeems) {
+  logger.info('[pm-reconciler] fetched redeems', {
+    count: redeems.length,
+    toProcess: toProcess.length,
+    checkpointTs: effectiveCheckpointTs,
+    wallet,
+  });
+
+  for (const redeem of toProcess) {
     try {
       await reconcileRedeem(redis, redeem, summary);
     } catch (err) {
@@ -489,6 +575,14 @@ export async function runPmActivityReconciler(redis: Redis): Promise<ReconcilerS
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // Advance the checkpoint to the newest processed timestamp. Only redeems we
+  // filtered into `toProcess` count — a partial-failure run leaves the
+  // checkpoint where it was so the next cycle retries from the same point.
+  const maxProcessedTs = toProcess.reduce((a, r) => Math.max(a, r.timestamp), 0);
+  if (maxProcessedTs > effectiveCheckpointTs) {
+    await redis.set(CHECKPOINT_KEY, String(maxProcessedTs)).catch(() => {});
   }
 
   logger.info('[pm-reconciler] cycle complete', { ...summary });
