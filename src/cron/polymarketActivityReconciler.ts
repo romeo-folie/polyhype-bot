@@ -139,39 +139,48 @@ export async function fetchRedeems(wallet: string, limit = DEFAULT_LIMIT): Promi
 
 async function queryPositionsByConditionId(conditionId: string): Promise<PositionRow[]> {
   const sql = getSql();
+  // `positions` doesn't carry a condition_id column (only market_id), so we
+  // join `market_catalog` to translate conditionId → marketId. Both `outcomes`
+  // and `market_catalog` have condition_id; market_catalog is the cleaner
+  // source because it pre-dates any outcome being written for that market
+  // (which is exactly the "no outcome yet" case this reconciler exists for).
   const rows = await sql<PositionRow[]>`
     SELECT
-      id::text,
-      market_id AS "marketId",
-      direction,
-      opened_at AS "openedAt",
-      closed_at AS "closedAt",
-      entry_price::float8 AS "entryPrice",
-      stake_usd::float8 AS "stakeUsd",
-      shares_held::float8 AS "sharesHeld",
-      execution_id AS "executionId",
-      mode_configured AS "modeConfigured",
-      sourced_from AS "sourcedFrom",
-      question,
-      pending_settlement AS "pendingSettlement",
-      reconciliation_status AS "reconciliationStatus",
-      condition_id AS "conditionId",
-      execution_venue AS "executionVenue",
-      consensus_probability::float8 AS "consensusProbability",
-      entry_execution_path AS "entryExecutionPath",
-      entry_order_type AS "entryOrderType",
-      fallback_reason AS "fallbackReason",
-      edge_class AS "edgeClass",
-      decision_spread_bps::float8 AS "decisionSpreadBps",
-      maker_price_improvement_bps::float8 AS "makerPriceImprovementBps",
-      maker_price_improvement_usd::float8 AS "makerPriceImprovementUsd",
-      price_zone AS "priceZone",
-      entry_atr::float8 AS "entryAtr",
-      entry_atr_pct::float8 AS "entryAtrPct",
-      synth_hedged AS "synthHedged"
-    FROM positions
-    WHERE condition_id = ${conditionId}
-    ORDER BY opened_at DESC
+      p.id::text,
+      p.market_id AS "marketId",
+      p.direction,
+      p.opened_at AS "openedAt",
+      p.closed_at AS "closedAt",
+      p.entry_price::float8 AS "entryPrice",
+      p.stake_usd::float8 AS "stakeUsd",
+      p.shares_held::float8 AS "sharesHeld",
+      p.execution_id AS "executionId",
+      p.mode_configured AS "modeConfigured",
+      p.sourced_from AS "sourcedFrom",
+      p.question,
+      p.pending_settlement AS "pendingSettlement",
+      p.reconciliation_status AS "reconciliationStatus",
+      ${conditionId}::text AS "conditionId",
+      p.execution_venue AS "executionVenue",
+      p.consensus_probability::float8 AS "consensusProbability",
+      p.entry_execution_path AS "entryExecutionPath",
+      p.entry_order_type AS "entryOrderType",
+      p.fallback_reason AS "fallbackReason",
+      p.edge_class AS "edgeClass",
+      p.decision_spread_bps::float8 AS "decisionSpreadBps",
+      p.maker_price_improvement_bps::float8 AS "makerPriceImprovementBps",
+      p.maker_price_improvement_usd::float8 AS "makerPriceImprovementUsd",
+      p.price_zone AS "priceZone",
+      p.entry_atr::float8 AS "entryAtr",
+      p.entry_atr_pct::float8 AS "entryAtrPct",
+      p.synth_hedged AS "synthHedged"
+    FROM positions p
+    WHERE p.market_id IN (
+      SELECT DISTINCT market_id
+      FROM market_catalog
+      WHERE condition_id = ${conditionId}
+    )
+    ORDER BY p.opened_at DESC
   `;
   return rows;
 }
