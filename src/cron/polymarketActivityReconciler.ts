@@ -627,6 +627,7 @@ export async function reconcileRedeem(
       direction: match.direction,
       result: 'won',
       stakeUsd: match.stakeUsd ?? 0,
+      proceedsUsdc: redeem.usdcSize,
       reason: 'pm-reconciler backfill (partial fill + auto-redeem)',
     }).catch(() => {});
     return;
@@ -670,6 +671,7 @@ export async function reconcileRedeem(
       direction: match.direction,
       result: 'won',
       stakeUsd: match.stakeUsd ?? 0,
+      proceedsUsdc: redeem.usdcSize,
       reason: 'pm-reconciler backfill (auto-redeemed win)',
     }).catch(() => {});
   }
