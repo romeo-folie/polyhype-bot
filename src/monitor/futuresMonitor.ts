@@ -44,6 +44,11 @@ let _releaseLock: (() => Promise<void>) | null = null;
 
 // Per-symbol last re-eval timestamp (process-local, not Redis — scoped to this worker)
 const lastRevalCheck = new Map<string, number>();
+// Separate cadence tracker for the max-hold-on-loser guard's one-shot log.
+// Kept independent of `lastRevalCheck` so the loser-guard firing every tick
+// doesn't starve the TA-fade re-eval below (which uses `lastRevalCheck` to
+// throttle scoreConfluence calls).
+const lastMaxHoldLoserLog = new Map<string, number>();
 
 export async function runFuturesMonitorWorker(): Promise<void> {
   const cfg = loadConfig();
@@ -520,13 +525,15 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             // tick will re-check and fire max-hold if the position climbs ≥0%.
             if (cfg.FUTURES_MAX_HOLD_BLOCK_ON_LOSER && priceChangePct < 0) {
               bypassed = true;
-              // One-shot log per max-hold-window-crossing so we don't spam
-              // every 5s poll. The cadence-shared `lastRevalCheck` timestamp
-              // doubles as the "we already noted this bypass" marker.
-              const lastCheck = lastRevalCheck.get(symbol) ?? 0;
-              const secSinceCheck = (Date.now() - lastCheck) / 1000;
-              if (secSinceCheck >= cfg.FUTURES_REEVAL_INTERVAL_S) {
-                lastRevalCheck.set(symbol, Date.now());
+              // One-shot log per REEVAL_INTERVAL_S so we don't spam every 5s
+              // poll. Uses a dedicated map (lastMaxHoldLoserLog) rather than
+              // the shared lastRevalCheck so we don't starve the TA-fade
+              // re-eval below — that block reads lastRevalCheck to throttle
+              // scoreConfluence calls.
+              const lastLog = lastMaxHoldLoserLog.get(symbol) ?? 0;
+              const secSinceLog = (Date.now() - lastLog) / 1000;
+              if (secSinceLog >= cfg.FUTURES_REEVAL_INTERVAL_S) {
+                lastMaxHoldLoserLog.set(symbol, Date.now());
                 logger.info('[futures-monitor] max_hold suppressed on loser', {
                   symbol,
                   direction,

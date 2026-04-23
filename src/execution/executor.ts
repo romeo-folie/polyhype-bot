@@ -1719,9 +1719,10 @@ export async function executeSignal(
     // Open position check for futures — prevent stacking from multiple signal
     // sources, in EITHER direction. Opposite-side stacking (e.g. ETH LONG open
     // + ETH SHORT signal firing) was silently allowed before this gate: the
-    // PM-side opposite-direction check at line 1749 never runs for futures
-    // because the futures branch `return`s before it. Result would be net-zero
-    // market exposure with double-funded margin — pure fee burn.
+    // PM-side opposite-direction check in the non-futures branch below never
+    // runs for futures because this branch `return`s before reaching it.
+    // Result would be net-zero market exposure with double-funded margin —
+    // pure fee burn.
     const futuresOpposite: 'LONG' | 'SHORT' =
       signal.direction === 'LONG' ? 'SHORT' : 'LONG';
     const [alreadyHoldingFuturesSameSide, alreadyHoldingFuturesOpposite] =
