@@ -29,6 +29,7 @@ const baseConfig = {
   HL_MOMENTUM_4H_EMA_SLOW: 50,
   HL_MOMENTUM_STAKE_USD: 10,
   FUTURES_MAX_PER_TRADE_USD: 15,
+  HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION: false,
   HL_MOMENTUM_MTF_SCORING_MODE: 'hard' as 'hard' | 'weighted',
   HL_MOMENTUM_4H_NEUTRAL_BAND_PCT: 0.5,
   HL_MOMENTUM_MIN_TOTAL_SCORE: 5,
@@ -416,12 +417,80 @@ describe('scanHlMomentum — cooldown and position gates', () => {
   });
 });
 
+describe('scanHlMomentum — long HL confirmation gate', () => {
+  beforeEach(() => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION: true,
+      HL_FUNDING_CONTRA_ENABLED: true,
+      HL_OI_DIVERGENCE_ENABLED: true,
+    });
+    mockBuildCandles.mockResolvedValue([{}]);
+    mockHasOpenPosition.mockResolvedValue(false);
+    mockComputeEMA.mockReturnValue(null);
+    mockComputeMACDFromCandles.mockReturnValue(null);
+  });
+
+  it('blocks a LONG when present HL-native votes are neutral', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      ...bullishResult,
+      voters: {
+        ...bullishResult.voters,
+        fundingContra: 'neutral',
+        oiDivergence: 'neutral',
+      },
+      voterCount: 8,
+    });
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull();
+  });
+
+  it('allows a LONG when OI divergence actively confirms UP', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      ...bullishResult,
+      voters: {
+        ...bullishResult.voters,
+        fundingContra: 'neutral',
+        oiDivergence: 'UP',
+      },
+      voterCount: 8,
+    });
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).not.toBeNull();
+    expect(result!.direction).toBe('LONG');
+  });
+
+  it('does not apply the confirmation gate to SHORT signals', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      ...bearishResult,
+      voters: {
+        ...bearishResult.voters,
+        fundingContra: 'neutral',
+        oiDivergence: 'neutral',
+      },
+      voterCount: 8,
+    });
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).not.toBeNull();
+    expect(result!.direction).toBe('SHORT');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Dark mode (HL_MOMENTUM_ENABLED=false)
 // ---------------------------------------------------------------------------
 
 describe('scanHlMomentum — dark mode', () => {
   beforeEach(() => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: false,
+      HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION: false,
+    });
     mockBuildCandles.mockResolvedValue([{}]);
     mockScoreHlTrend.mockReturnValue(bullishResult);
     mockHasOpenPosition.mockResolvedValue(false);

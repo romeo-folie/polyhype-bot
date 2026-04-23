@@ -216,6 +216,19 @@ export async function scanHlMomentum(
     logger.debug('[hl-momentum] OI divergence veto', { symbol: hlSymbol, direction, oiPctChange, pricePctChange });
     return null;
   }
+  if (direction === 'LONG' && cfg.HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION) {
+    const longConfirmationVotes = [voters.fundingContra, voters.oiDivergence].filter(
+      (vote): vote is 'UP' | 'DOWN' | 'neutral' => vote !== undefined,
+    );
+    if (longConfirmationVotes.length > 0 && !longConfirmationVotes.includes('UP')) {
+      logger.debug('[hl-momentum] long HL confirmation missing', {
+        symbol: hlSymbol,
+        fundingContraVote: voters.fundingContra ?? null,
+        oiDivergenceVote: voters.oiDivergence ?? null,
+      });
+      return null;
+    }
+  }
 
   // ── Multi-timeframe signals ──────────────────────────────────────────────
   // In hard mode: behave as before — gate flag controls fetch + veto.
