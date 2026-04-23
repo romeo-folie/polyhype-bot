@@ -209,6 +209,15 @@ export interface OracleLagExitEvalInput {
   nearResMinReturnPct: number;
   /** Exit immediately if PM return on held side drops below -stopLossPct (%). Fires before all other checks. */
   stopLossPct: number;
+  /**
+   * When set, compute ageSec from this timestamp (ms) instead of
+   * `state.entryTsMs`. The monitor passes `position.openedAt` — the ledger
+   * record/import timestamp, which is close to (but not literally) the
+   * venue fill time. Anchoring here gives the timeout rule a window
+   * reflecting real post-record runtime instead of firing immediately on
+   * first visibility when scanner-fire preceded the maker fill by minutes.
+   */
+  openedAtMs?: number;
 }
 
 /**
@@ -249,9 +258,15 @@ export function evaluateOracleLagExit(
     nearResMinLeftMin,
     nearResMinReturnPct,
     stopLossPct,
+    openedAtMs,
   } = input;
 
-  const ageSec = Math.max(0, (nowMs - state.entryTsMs) / 1000);
+  // Anchor ageSec to the ledger openedAt / record-at timestamp when the
+  // caller supplies it (live monitor passes position.openedAt). Falls back
+  // to state.entryTsMs (scanner-fire time) for the shadow path and any
+  // caller that doesn't have a Position on hand.
+  const ageAnchorMs = openedAtMs ?? state.entryTsMs;
+  const ageSec = Math.max(0, (nowMs - ageAnchorMs) / 1000);
 
   // Compression math — uniform by storing the gap relative to P(YES):
   //   UP (fair > entryYes):  entryGap = entryFair - entryYes; currentGap = entryFair - currentYes
@@ -625,6 +640,14 @@ export class OracleLagExitMonitor {
       !latestTick || now - latestTick.receivedAt > CHAINLINK_STALE_MS;
     const currentChainlinkPrice = latestTick?.value ?? state.entryChainlinkPrice;
 
+    // Anchor ageSec to the ledger openedAt (set at recordPosition / orphan-
+    // import time — close to fill time for both taker and maker-pending
+    // paths, though not the literal venue fill timestamp). This prevents
+    // the observed failure mode where a maker GTC fires from scanner at
+    // T-5min, then appears in the ledger 5 minutes later and gets
+    // oracle_lag_timeout on the very first tick because scanner-fire time
+    // already exceeded the cap.
+    const openedAtMs = new Date(position.openedAt).getTime();
     const decision = evaluateOracleLagExit({
       state,
       currentYesPrice,
@@ -632,6 +655,7 @@ export class OracleLagExitMonitor {
       currentChainlinkPrice,
       chainlinkStale,
       nowMs: now,
+      ...(Number.isFinite(openedAtMs) ? { openedAtMs } : {}),
       compressionThreshold: cfg.ORACLE_LAG_EXIT_COMPRESSION_PCT,
       reversalBps: cfg.ORACLE_LAG_EXIT_REVERSAL_BPS,
       reversalMinReturnPct: cfg.ORACLE_LAG_EXIT_REVERSAL_MIN_RETURN_PCT,
