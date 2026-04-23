@@ -1221,7 +1221,7 @@ const envSchema = z.object({
   // Longs have been the weak side of the book. When enabled, a LONG only passes if at
   // least one present HL-native voter (funding contra / OI divergence) actively confirms UP.
   // Missing HL-native data is not treated as a veto; the gate only acts on present votes.
-  HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION: boolFromEnv.optional().default(false),
+  HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION: boolFromEnv.optional().default(true),
   // MTF scoring mode. 'hard' = AND-stack (current — both MTF gates must pass);
   // 'weighted' = each MTF signal becomes a score boost, trade if total ≥ MIN_TOTAL_SCORE.
   // Ships with 'hard' default → zero behavior change at merge.
