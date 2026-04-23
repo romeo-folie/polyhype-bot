@@ -383,7 +383,8 @@ describe('reconcileRedeem', () => {
 
   it('skips synthetic insert when no position row matches the condition_id', async () => {
     scriptSqlCalls([
-      [],  // no positions for this conditionId
+      [],  // market_catalog fallback → no marketIds
+      [],  // question-fallback lookup → no positions either
     ]);
     const redis = makeRedis();
     const summary = {
@@ -395,6 +396,29 @@ describe('reconcileRedeem', () => {
     expect(summary.synthInsertsSkipped).toBe(1);
     expect(mockRecordOutcome).not.toHaveBeenCalled();
     expect(redis.set).toHaveBeenCalled();
+  });
+
+  it('question-fallback recovers a position when market_catalog has no mapping', async () => {
+    // First SQL (market_catalog IIFE) returns empty → marketIds=[] → positions empty.
+    // Second SQL (question-fallback queryPositionsByQuestion) returns a position.
+    // Third SQL (outcomes lookup) returns empty.
+    // Fourth SQL (positions update) confirms clear.
+    scriptSqlCalls([
+      [],                                   // market_catalog → no marketIds
+      [makePositionRow()],                  // question-fallback → found
+      [],                                   // outcomes lookup
+      { count: 1 },                         // positions update
+    ]);
+    const redis = makeRedis();
+    const summary = {
+      redeemsFetched: 0, alreadyProcessed: 0, outcomesInserted: 0,
+      outcomesFlipped: 0, positionsCleared: 0, synthInsertsSkipped: 0, errors: 0,
+    };
+    await reconcileRedeem(redis as never, makeRedeem(), summary);
+
+    expect(summary.outcomesInserted).toBe(1);
+    expect(summary.synthInsertsSkipped).toBe(0);
+    expect(mockRecordOutcome).toHaveBeenCalled();
   });
 });
 
