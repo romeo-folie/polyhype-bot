@@ -724,25 +724,161 @@ async function redeemClobPositions(
               ? pos.direction === 'YES' ? 'UP' : pos.direction === 'NO' ? 'DOWN' : pos.direction
               : pos.direction;
 
-          // Dust or no-balance positions: close the zombie entry without redemption.
-          // Do NOT markRecentlyResolved here — on-chain settlement is unconfirmed at this point.
+          // Dust or no-balance positions: before writing -100% loss, verify
+          // on-chain resolution. A zero balance on an expired market can mean
+          // either (a) Polymarket's auto-redeemer already paid out our winning
+          // shares (they get burned by CTF at payout → we see 0 balance) or
+          // (b) we really hold nothing of value. Distinguish via CTF
+          // payoutDenominator before assuming loss.
+          //
+          // Polymarket's auto-redeem is a user-account setting on their side,
+          // not in our config. When on, our local redeemer never sees the
+          // winning balance — Polymarket pays out first, our on-chain query
+          // runs afterward and sees zero shares.
           if (isDust || (reportedBalance ?? 0) <= 0.01) {
-            await closePosition(redis, pos.marketId, pos.direction);
-            await markRecentlyClosed(redis, pos.marketId);
-            const exitReason = isDust ? 'expired_dust' : 'expired_unresolvable';
-            await recordPositionOutcome(
-              redis,
-              { ...pos, question: q, direction: pmDirection },
-              { result: 'lost', returnPct: -100, executionVenueOverride: 'clob', exitReason },
+            // `isDust` can mean either "never really filled" (ledger shares ≈ 0,
+            // like healed_mismatch remnants) OR "had a real position that
+            // Polymarket auto-redeemed down to 0 balance". We distinguish via
+            // the ledger's recorded `sharesHeld`: if we ever held meaningful
+            // shares, the balance going to zero + on-chain resolution = an
+            // auto-redeemed outcome worth recording properly.
+            const hadRealPosition =
+              typeof pos.sharesHeld === 'number' &&
+              Number.isFinite(pos.sharesHeld) &&
+              pos.sharesHeld > 0.01;
+            const onChainOutcomeDust = await checkOnChainResolution(conditionId);
+            if (onChainOutcomeDust) {
+              const normalizedDirDust = isYesSide ? 'YES' : 'NO';
+              const weWonDust = onChainOutcomeDust.outcome === normalizedDirDust;
+              await closePosition(redis, pos.marketId, pos.direction);
+              await markRecentlyClosed(redis, pos.marketId);
+              await markRecentlyResolved(redis, pos.marketId);
+              if (weWonDust && hadRealPosition) {
+                // Auto-redeemed win: Polymarket's CTF pays $1 per winning
+                // share, so the realized return is (sharesHeld − stakeUsd) /
+                // stakeUsd. We prefer this over (1 − entryPrice)/entryPrice
+                // because stakeUsd + sharesHeld capture any fees/slippage the
+                // entryPrice doesn't. Fall back to the entryPrice formula
+                // when stake/shares are missing or invalid.
+                const stakeSafe =
+                  typeof pos.stakeUsd === 'number' &&
+                  Number.isFinite(pos.stakeUsd) &&
+                  pos.stakeUsd > 0;
+                const entryPriceSafeDust =
+                  typeof pos.entryPrice === 'number' &&
+                  Number.isFinite(pos.entryPrice) &&
+                  pos.entryPrice > 0;
+                let returnPctDust: number;
+                if (stakeSafe && typeof pos.sharesHeld === 'number' && Number.isFinite(pos.sharesHeld)) {
+                  returnPctDust = ((pos.sharesHeld - pos.stakeUsd) / pos.stakeUsd) * 100;
+                } else if (entryPriceSafeDust) {
+                  returnPctDust = ((1 - pos.entryPrice) / pos.entryPrice) * 100;
+                } else {
+                  returnPctDust = 0;
+                }
+                await recordPositionOutcome(
+                  redis,
+                  { ...pos, question: q, direction: pmDirection },
+                  {
+                    result: 'won',
+                    returnPct: returnPctDust,
+                    executionVenueOverride: 'clob',
+                    exitReason: 'auto_redeemed_win',
+                  },
+                );
+                void notifyMarketResolved({
+                  question: q,
+                  direction: displayDir,
+                  result: 'won',
+                  stakeUsd: pos.stakeUsd,
+                  reason: 'auto-redeemed by Polymarket (zero balance post-resolution)',
+                }).catch(() => {});
+                results.push({ marketId: pos.marketId, side, success: true });
+                logger.info('[redeemer] detected auto-redeemed win via dust/zero-balance path', {
+                  marketId: pos.marketId,
+                  direction: pos.direction,
+                  entryPrice: pos.entryPrice,
+                  returnPct: returnPctDust.toFixed(2),
+                });
+                continue;
+              }
+              // Either on-chain confirms loss, or we never held a real position
+              // (ledger dust without a prior meaningful fill).
+              const exitReasonDust = hadRealPosition
+                ? 'resolved_as_loss'
+                : 'expired_dust';
+              await recordPositionOutcome(
+                redis,
+                { ...pos, question: q, direction: pmDirection },
+                {
+                  result: 'lost',
+                  returnPct: -100,
+                  executionVenueOverride: 'clob',
+                  exitReason: exitReasonDust,
+                },
+              );
+              void notifyMarketResolved({
+                question: q,
+                direction: displayDir,
+                result: 'lost',
+                stakeUsd: pos.stakeUsd,
+                reason: hadRealPosition
+                  ? 'resolved (on-chain confirmed loss)'
+                  : 'expired dust position',
+              }).catch(() => {});
+              results.push({
+                marketId: pos.marketId,
+                side,
+                success: false,
+                error: exitReasonDust,
+              });
+              continue;
+            }
+            // On-chain not yet settled.
+            if (!hadRealPosition) {
+              // Genuine dust (ledger never recorded real shares) with no
+              // resolution yet: never going to become real. Close as expired_dust.
+              await closePosition(redis, pos.marketId, pos.direction);
+              await markRecentlyClosed(redis, pos.marketId);
+              await recordPositionOutcome(
+                redis,
+                { ...pos, question: q, direction: pmDirection },
+                {
+                  result: 'lost',
+                  returnPct: -100,
+                  executionVenueOverride: 'clob',
+                  exitReason: 'expired_dust',
+                },
+              );
+              void notifyMarketResolved({
+                question: q,
+                direction: displayDir,
+                result: 'lost',
+                stakeUsd: pos.stakeUsd,
+                reason: 'expired dust position',
+              }).catch(() => {});
+              results.push({
+                marketId: pos.marketId,
+                side,
+                success: false,
+                error: 'expired_dust',
+              });
+              continue;
+            }
+            // We held a real position; balance is 0 but CTF hasn't finalized yet.
+            // Previously this wrote -100% 'expired_unresolvable' immediately,
+            // silently marking auto-redeemed wins as losses whenever CTF payout
+            // data lagged Polymarket's backend. Retry next cycle so we can
+            // distinguish win from loss correctly when on-chain settles.
+            logger.info(
+              '[redeemer] zero balance on expired real position — on-chain not yet settled, retrying',
+              {
+                marketId: pos.marketId,
+                direction: pos.direction,
+                sharesHeld: pos.sharesHeld,
+                endDate: pos.endDate,
+              },
             );
-            void notifyMarketResolved({
-              question: q,
-              direction: displayDir,
-              result: 'lost',
-              stakeUsd: pos.stakeUsd,
-              reason: isDust ? 'expired dust position' : 'expired (Gamma unresolvable)',
-            }).catch(() => {});
-            results.push({ marketId: pos.marketId, side, success: false, error: exitReason });
             continue;
           }
 
