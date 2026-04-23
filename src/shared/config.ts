@@ -1411,7 +1411,7 @@ const envSchema = z.object({
   // must be wide enough to survive bid-ask spread noise (typ 3–5 cents on 0.5–0.7
   // priced outcomes). 3% fired within 82 seconds of entry on spread jitter.
   WEATHER_TAKE_PROFIT: z.coerce.number().min(0).optional().default(0.05),
-  WEATHER_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.15),
+  WEATHER_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.40),
   // Sports in-play arb SL/TP. Live game prices swing ±15–30% on single scoring
   // plays — the default 16% SL fires within one 5s monitor tick on normal
   // variance. 0.45 requires the position to be down 45% before cutting, which
