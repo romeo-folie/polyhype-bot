@@ -92,6 +92,12 @@ vi.mock('../../execution/telegram.js', () => ({
   notifyTakeProfitExecuted: vi.fn(),
 }));
 
+// Mock outcome recorder
+const mockRecordPositionOutcome = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../shared/positionOutcomeRecorder.js', () => ({
+  recordPositionOutcome: mockRecordPositionOutcome,
+}));
+
 const { runFuturesMonitorWorker } = await import('../futuresMonitor.js');
 
 describe('futuresMonitor', () => {
@@ -99,6 +105,7 @@ describe('futuresMonitor', () => {
     vi.clearAllMocks();
     loadConfigMock.mockReturnValue(baseCfg);
     mockScoreConfluence.mockResolvedValue({ direction: 'NEUTRAL', score: 0, signals: {} });
+    mockRecordPositionOutcome.mockResolvedValue(undefined);
     // Break the while(true) loop after one tick.
     // We throw WITHOUT calling fn() so the Promise constructor rejects (uncaught resolve
     // would swallow the throw). The rejection propagates past the inner try/catch
