@@ -364,10 +364,15 @@ describe('reconcileRedeem', () => {
   });
 
   it('leaves an existing lost outcome alone when PM also shows $0 redeem', async () => {
+    // Position is still pending_settlement=true and has an existing 'lost' row.
+    // Reconciler must: NOT rewrite exit_reason, NOT write an outcome, BUT
+    // clear the stale pending_settlement flag (the redeem is definitive
+    // on-chain resolution, even at usdc=0).
     scriptSqlCalls([
       [{ market_id: '2029699' }],              // market_catalog: conditionId → marketId
-      [makePositionRow()],
+      [makePositionRow()],                     // positions by marketId (pendingSettlement=true by default)
       [{ outcome_id: 'o1', result: 'lost', return_pct: -100, exit_reason: 'expired_unresolvable', closed_at: new Date() }],
+      { count: 1 },                            // clearPositionPendingSettlement UPDATE
     ]);
     const redis = makeRedis();
     const summary = {
@@ -378,12 +383,35 @@ describe('reconcileRedeem', () => {
 
     expect(summary.outcomesInserted).toBe(0);
     expect(summary.outcomesFlipped).toBe(0);
+    // NEW behavior: positionsCleared increments even though we didn't touch the outcome row
+    expect(summary.positionsCleared).toBe(1);
+    expect(mockRecordOutcome).not.toHaveBeenCalled();
+  });
+
+  it('does NOT clear pending_settlement when it was already false on existing-lost', async () => {
+    // Same as above but positions row has pending_settlement=false already.
+    // No UPDATE fires; positionsCleared stays 0.
+    scriptSqlCalls([
+      [{ market_id: '2029699' }],
+      [makePositionRow({ pendingSettlement: false })],
+      [{ outcome_id: 'o1', result: 'lost', return_pct: -100, exit_reason: 'expired_unresolvable', closed_at: new Date() }],
+      // Note: no { count: 1 } since we don't expect the UPDATE SQL to fire
+    ]);
+    const redis = makeRedis();
+    const summary = {
+      redeemsFetched: 0, alreadyProcessed: 0, outcomesInserted: 0,
+      outcomesFlipped: 0, positionsCleared: 0, synthInsertsSkipped: 0, errors: 0,
+    };
+    await reconcileRedeem(redis as never, makeRedeem({ usdcSize: 0 }), summary);
+
+    expect(summary.positionsCleared).toBe(0);
     expect(mockRecordOutcome).not.toHaveBeenCalled();
   });
 
   it('skips synthetic insert when no position row matches the condition_id', async () => {
     scriptSqlCalls([
-      [],  // no positions for this conditionId
+      [],  // market_catalog fallback → no marketIds
+      [],  // question-fallback lookup → no positions either
     ]);
     const redis = makeRedis();
     const summary = {
@@ -395,6 +423,29 @@ describe('reconcileRedeem', () => {
     expect(summary.synthInsertsSkipped).toBe(1);
     expect(mockRecordOutcome).not.toHaveBeenCalled();
     expect(redis.set).toHaveBeenCalled();
+  });
+
+  it('question-fallback recovers a position when market_catalog has no mapping', async () => {
+    // First SQL (market_catalog IIFE) returns empty → marketIds=[] → positions empty.
+    // Second SQL (question-fallback queryPositionsByQuestion) returns a position.
+    // Third SQL (outcomes lookup) returns empty.
+    // Fourth SQL (positions update) confirms clear.
+    scriptSqlCalls([
+      [],                                   // market_catalog → no marketIds
+      [makePositionRow()],                  // question-fallback → found
+      [],                                   // outcomes lookup
+      { count: 1 },                         // positions update
+    ]);
+    const redis = makeRedis();
+    const summary = {
+      redeemsFetched: 0, alreadyProcessed: 0, outcomesInserted: 0,
+      outcomesFlipped: 0, positionsCleared: 0, synthInsertsSkipped: 0, errors: 0,
+    };
+    await reconcileRedeem(redis as never, makeRedeem(), summary);
+
+    expect(summary.outcomesInserted).toBe(1);
+    expect(summary.synthInsertsSkipped).toBe(0);
+    expect(mockRecordOutcome).toHaveBeenCalled();
   });
 });
 

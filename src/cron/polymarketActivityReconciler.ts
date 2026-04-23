@@ -164,6 +164,72 @@ async function buildConditionToMarketsMap(
   return result;
 }
 
+const QUESTION_FALLBACK_WINDOW_DAYS = 30;
+
+/**
+ * Fallback path: look up positions by exact question match when the
+ * conditionId → marketId join via market_catalog returns nothing. This
+ * handles the case where `market_catalog` is incomplete for markets we've
+ * actually traded (observed 2026-04-23 for 2 weather markets where the
+ * scanner ran but market_catalog wasn't written). Exact-match on
+ * `question` (NOT fuzzy) — PM's activity API title mirrors our DB
+ * question 1:1 for markets we've seen.
+ *
+ * Scoped to a 30-day window ending at the redeem timestamp because
+ * (a) `positions` has no index on `question` — a full scan is cheap when
+ * bounded on `opened_at` (which IS indexed) but pathological without,
+ * and (b) weather bracket questions recur year over year ("Hong Kong
+ * 30°C on April 22" could match an earlier year's identical bracket).
+ */
+async function queryPositionsByQuestion(
+  question: string,
+  conditionId: string,
+  redeemTimestampSec: number,
+): Promise<PositionRow[]> {
+  if (!question) return [];
+  const sql = getSql();
+  const redeemMs = redeemTimestampSec * 1000;
+  const windowStartMs = redeemMs - QUESTION_FALLBACK_WINDOW_DAYS * 86_400_000;
+  const windowStartIso = new Date(windowStartMs).toISOString();
+  const windowEndIso = new Date(redeemMs).toISOString();
+  const rows = await sql<PositionRow[]>`
+    SELECT
+      id::text,
+      market_id AS "marketId",
+      direction,
+      opened_at AS "openedAt",
+      closed_at AS "closedAt",
+      entry_price::float8 AS "entryPrice",
+      stake_usd::float8 AS "stakeUsd",
+      shares_held::float8 AS "sharesHeld",
+      execution_id AS "executionId",
+      mode_configured AS "modeConfigured",
+      sourced_from AS "sourcedFrom",
+      question,
+      pending_settlement AS "pendingSettlement",
+      reconciliation_status AS "reconciliationStatus",
+      ${conditionId}::text AS "conditionId",
+      execution_venue AS "executionVenue",
+      consensus_probability::float8 AS "consensusProbability",
+      entry_execution_path AS "entryExecutionPath",
+      entry_order_type AS "entryOrderType",
+      fallback_reason AS "fallbackReason",
+      edge_class AS "edgeClass",
+      decision_spread_bps::float8 AS "decisionSpreadBps",
+      maker_price_improvement_bps::float8 AS "makerPriceImprovementBps",
+      maker_price_improvement_usd::float8 AS "makerPriceImprovementUsd",
+      price_zone AS "priceZone",
+      entry_atr::float8 AS "entryAtr",
+      entry_atr_pct::float8 AS "entryAtrPct",
+      synth_hedged AS "synthHedged"
+    FROM positions
+    WHERE question = ${question}
+      AND opened_at BETWEEN ${windowStartIso}::timestamptz AND ${windowEndIso}::timestamptz
+    ORDER BY opened_at DESC
+  `;
+  return rows;
+}
+
 async function queryPositionsByMarketIds(
   marketIds: string[],
   conditionId: string,
@@ -468,7 +534,37 @@ export async function reconcileRedeem(
         `;
         return rows.map((r) => r.market_id);
       })();
-  const positions = await queryPositionsByMarketIds(marketIds, redeem.conditionId);
+  let positions = await queryPositionsByMarketIds(marketIds, redeem.conditionId);
+
+  // Fallback: ONLY when market_catalog has no mapping for this conditionId
+  // (observed 2026-04-23 for Moscow 12°C and Houston 70-71°F — positions we
+  // actually traded but market_catalog never snapshotted). Gated on
+  // `marketIds.length === 0`, NOT on `positions.length === 0`: if
+  // market_catalog mapped but positions came back empty, that's a
+  // legitimate manual-PM-trade case and we must NOT blind-match by
+  // question text (risk of attributing the redeem to an unrelated position
+  // sharing the same question text on a recurring weather bracket).
+  //
+  // Scoped to a 30-day pre-redeem window in the query to bound the seq
+  // scan (positions has no index on question) and to filter out ancient
+  // duplicates on recurring brackets like "Hong Kong 30°C on April 22" —
+  // same question text can appear year over year.
+  if (marketIds.length === 0 && redeem.title) {
+    positions = await queryPositionsByQuestion(
+      redeem.title,
+      redeem.conditionId,
+      redeem.timestamp,
+    );
+    if (positions.length > 0) {
+      logger.info('[pm-reconciler] question-fallback recovered a position', {
+        conditionId: redeem.conditionId,
+        title: redeem.title,
+        marketIds: positions.map((p) => p.marketId),
+        txHash: redeem.transactionHash,
+      });
+    }
+  }
+
   const match = pickBestMatch(positions, redeem);
 
   if (!match) {
@@ -537,7 +633,17 @@ export async function reconcileRedeem(
   }
 
   if (expectedResult === 'lost' && lostOutcomes.length > 0) {
-    // Already recorded as lost; leave it alone (don't overwrite SL/TP exit_reason).
+    // Outcome row is already 'lost' — keep its original exit_reason (could be
+    // SL/TP, expired_unresolvable, etc.) and don't rewrite history. BUT the
+    // PM redeem (even at $0) is definitive resolution, so clear the stale
+    // pending_settlement flag on the positions row if still set. Without
+    // this, positions show pending_settlement=true forever for
+    // confirmed-loss resolutions where our redeemer wrote a loss before
+    // seeing the on-chain outcome.
+    if (match.pendingSettlement) {
+      await clearPositionPendingSettlement(match.id, redeem.transactionHash);
+      summary.positionsCleared += 1;
+    }
     await redis.set(dedupKey, '1', 'EX', PROCESSED_TTL_SEC);
     return;
   }
