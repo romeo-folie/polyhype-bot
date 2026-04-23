@@ -29,6 +29,11 @@ export interface GammaEvent {
   negRisk?: boolean;
 }
 
+export interface GammaMarketEvent {
+  id: string;
+  slug: string;
+}
+
 export interface GammaMarket {
   id: string;
   /** Market slug, e.g. `btc-updown-15m-1776005100`. Present on most Gamma responses. */
@@ -61,6 +66,8 @@ export interface GammaMarket {
   feesEnabled?: boolean;
   /** Fee type string when feesEnabled=true (e.g. "taker", "both"). Null when no fees. */
   feeType?: string | null;
+  /** Parent events for this market. Present on /markets responses from Gamma. */
+  events?: GammaMarketEvent[];
 }
 
 interface SearchEventsOptions {
@@ -874,4 +881,65 @@ export async function discoverUpDownMarketsBySlug(
   }
 
   return results;
+}
+
+// Process-local tag cache — 24h TTL per hit, 5-min TTL per miss/error.
+const eventTagCache = new Map<string, { slugs: string[]; expiresAt: number }>();
+const EVENT_TAG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const EVENT_TAG_CACHE_MISS_TTL_MS = 5 * 60 * 1000;
+const EVENT_TAG_CACHE_MAX = 2000;
+
+function setEventTagEntry(eventId: string, slugs: string[], ttlMs: number): void {
+  // Evict all expired entries before inserting when near the cap.
+  // This prevents unbounded growth without nuking fresh entries.
+  if (eventTagCache.size >= EVENT_TAG_CACHE_MAX) {
+    const now = Date.now();
+    for (const [key, entry] of eventTagCache) {
+      if (now >= entry.expiresAt) eventTagCache.delete(key);
+    }
+    // If still at the cap after evicting expired entries, remove the oldest live entry.
+    if (eventTagCache.size >= EVENT_TAG_CACHE_MAX) {
+      const oldestKey = eventTagCache.keys().next().value;
+      if (oldestKey !== undefined) eventTagCache.delete(oldestKey);
+    }
+  }
+  eventTagCache.set(eventId, { slugs, expiresAt: Date.now() + ttlMs });
+}
+
+/**
+ * Fetch Gamma tag slugs for a single event ID.
+ *
+ * Successful lookups are cached 24h; errors/non-OK responses are cached 5 min
+ * to prevent hammering a degraded Gamma endpoint on a hot eventId.
+ * Slugs are lowercased for case-insensitive matching. Malformed/nullish
+ * tag entries from the API are silently skipped.
+ * Returns [] on any error — callers degrade gracefully.
+ */
+export async function getEventTagSlugs(eventId: string): Promise<string[]> {
+  const cached = eventTagCache.get(eventId);
+  if (cached) {
+    if (Date.now() < cached.expiresAt) return cached.slugs;
+    eventTagCache.delete(eventId);
+  }
+
+  try {
+    const url = `${BASE_URL}/events/${encodeURIComponent(eventId)}`;
+    const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+    if (!res.ok) {
+      setEventTagEntry(eventId, [], EVENT_TAG_CACHE_MISS_TTL_MS);
+      return [];
+    }
+
+    const event = (await res.json()) as { tags?: unknown[] };
+    const slugs = Array.isArray(event.tags)
+      ? event.tags
+          .filter((t): t is { slug: string } => typeof (t as any)?.slug === 'string')
+          .map((t) => t.slug.toLowerCase())
+      : [];
+    setEventTagEntry(eventId, slugs, EVENT_TAG_CACHE_TTL_MS);
+    return slugs;
+  } catch {
+    setEventTagEntry(eventId, [], EVENT_TAG_CACHE_MISS_TTL_MS);
+    return [];
+  }
 }

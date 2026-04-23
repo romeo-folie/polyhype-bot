@@ -777,6 +777,7 @@ const envSchema = z.object({
         .map((s) => s.trim().toLowerCase())
         .filter(Boolean),
     ),
+  COPYTRADE_SCOPE_TAG_FALLBACK: boolFromEnv.optional().default(true),
   COPYTRADE_SIZE_SCALE: z.coerce.number().min(0).optional().default(0.1),
   COPYTRADE_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(25),
   COPYTRADE_MAX_SLIPPAGE_BPS: z.coerce.number().min(0).optional().default(200),

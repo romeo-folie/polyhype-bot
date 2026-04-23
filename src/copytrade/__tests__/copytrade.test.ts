@@ -26,12 +26,14 @@ vi.mock('../../shared/redis.js', () => ({ dedup: mockDedup }));
 
 const mockFetchWithTimeout = vi.fn();
 const mockGetMarketBySlug = vi.fn();
+const mockGetEventTagSlugs = vi.fn();
 vi.mock('../../mapping/gamma.js', async (importOriginal) => {
   const actual = await importOriginal<typeof GammaModule>();
   return {
     ...actual,
     fetchWithTimeout: mockFetchWithTimeout,
     getMarketBySlug: mockGetMarketBySlug,
+    getEventTagSlugs: mockGetEventTagSlugs,
   };
 });
 
@@ -93,6 +95,7 @@ beforeEach(() => {
   mockDedup.mockResolvedValue(true);
   mockFetchWithTimeout.mockReset();
   mockGetMarketBySlug.mockReset();
+  mockGetEventTagSlugs.mockReset().mockResolvedValue([]);
   mockGetOpenPositions.mockReset().mockResolvedValue([]);
   mockFetchCurrentPrice.mockReset();
   mockExecuteTakeProfit.mockReset();
@@ -138,6 +141,37 @@ describe('copytrade helpers', () => {
     expect(matchesCategory('Will Dortmund qualify for the Champions League?', null, ['sports-soccer'])).toBe(true);
     expect(matchesCategory('Will Arsenal finish top-4?', null, ['sports-soccer'])).toBe(true);
     expect(matchesCategory('Will Köln be relegated this season?', null, ['sports-soccer'])).toBe(true);
+  });
+
+  it('matches new sport keyword buckets', async () => {
+    const { matchesCategory } = await import('../index.js');
+    // NHL
+    expect(matchesCategory('Stars vs. Wild', null, ['sports-nhl'])).toBe(true);
+    expect(matchesCategory('Penguins vs. Flyers', null, ['sports-nhl'])).toBe(true);
+    expect(matchesCategory('Who wins the Stanley Cup?', null, ['sports-nhl'])).toBe(true);
+    // F1
+    expect(matchesCategory('Will Valtteri Bottas be the 2026 F1 Drivers Champion?', null, ['sports-f1'])).toBe(true);
+    expect(matchesCategory('Will Cadillac be the 2026 F1 Constructors Champion?', null, ['sports-f1'])).toBe(true);
+    expect(matchesCategory('Monaco Grand Prix winner?', null, ['sports-f1'])).toBe(true);
+    // MMA
+    expect(matchesCategory('O/U 1.5 Rounds', null, ['sports-mma'])).toBe(true);
+    expect(matchesCategory('Will fighter A win by TKO?', null, ['sports-mma'])).toBe(true);
+    // broader soccer clubs
+    expect(matchesCategory('Vejle BK vs. Silkeborg IF: O/U 2.5', null, ['sports-soccer'])).toBe(true);
+    expect(matchesCategory('Club Necaxa vs. CD Guadalajara: O/U 4.5', null, ['sports-soccer'])).toBe(true);
+  });
+
+  it('matches via Gamma event tags when keyword fails', async () => {
+    const { matchesCategory } = await import('../index.js');
+    // "Avalanche vs. Kings" — team names are in keyword bucket so this is keyword match
+    // Use a title with no keyword overlap to exercise the tag path
+    const title = 'Mystery Market Title';
+    expect(matchesCategory(title, null, ['sports-nhl'])).toBe(false);
+    expect(matchesCategory(title, null, ['sports-nhl'], ['nhl', 'hockey', 'sports'])).toBe(true);
+    expect(matchesCategory(title, null, ['sports-f1'], ['f1', 'formula-1'])).toBe(true);
+    expect(matchesCategory(title, null, ['sports-mma'], ['ufc', 'sports'])).toBe(true);
+    // Wrong scope — tags don't match
+    expect(matchesCategory(title, null, ['weather'], ['nhl', 'hockey'])).toBe(false);
   });
 });
 
@@ -446,6 +480,60 @@ describe('runCopytrade', () => {
         String(c[1]?.skipReason).includes('too_soon_expiring'),
     );
     expect(ttrSkip).toBe(false);
+    expect(result.signals).toHaveLength(1);
+  });
+
+  it('rescues out-of-scope market via Gamma event tags', async () => {
+    // Title has no keyword match for sports-nhl (no team names, no "nhl"/"hockey" etc.)
+    // but the parent event carries the 'nhl' tag — exercises the tag fallback path.
+    const trade = makeTrade({ title: 'Eastern Conference Playoff Series', slug: 'ec-playoff' });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({
+        question: 'Eastern Conference Playoff Series',
+        outcomePrices: '["0.6","0.4"]',
+        events: [{ id: 'evt-999', slug: 'ec-playoff-event' }],
+      }),
+    );
+    mockGetEventTagSlugs.mockResolvedValue(['nhl', 'hockey', 'sports']);
+
+    configOverride = {
+      ...configOverride,
+      COPYTRADE_MARKET_SCOPE: ['sports-nhl'],
+      COPYTRADE_SCOPE_TAG_FALLBACK: true,
+    } as any;
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
+    expect(mockGetEventTagSlugs).toHaveBeenCalledWith('evt-999');
+    expect(result.signals).toHaveLength(1);
+  });
+
+  it('does not fetch event tags when keyword already matches', async () => {
+    // "rain" triggers the weather keyword — tag fetch must be skipped
+    const trade = makeTrade({ title: 'Will it rain in NYC?' });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({ question: 'Will it rain in NYC?', outcomePrices: '["0.6","0.4"]' }),
+    );
+
+    configOverride = {
+      ...configOverride,
+      COPYTRADE_MARKET_SCOPE: ['weather'],
+      COPYTRADE_SCOPE_TAG_FALLBACK: true,
+    } as any;
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
+    expect(mockGetEventTagSlugs).not.toHaveBeenCalled();
     expect(result.signals).toHaveLength(1);
   });
 
