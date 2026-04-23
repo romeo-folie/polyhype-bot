@@ -31,7 +31,8 @@ export interface PositionOutcome {
     | 'near-zero-arb'
     | 'longshot-bias'
     | 'correlation-arb'
-    | 'weather';
+    | 'weather'
+    | 'fv-scanner';
   category: string;
   question: string;
   direction: 'YES' | 'NO' | 'UP' | 'DOWN' | 'LONG' | 'SHORT';
@@ -66,6 +67,7 @@ export function inferSource(sourcedFrom: string): PositionOutcome['source'] {
   if (s.startsWith('arb:') || s.startsWith('market arb')) return 'arb';
   if (s.startsWith('sports:')) return 'sports';
   if (s.startsWith('oracle-lag:')) return 'oracle-lag';
+  if (s.startsWith('fv-scanner:')) return 'fv-scanner';
   if (s.startsWith('near-zero-arb')) return 'near-zero-arb';
   if (s.startsWith('longshot-bias')) return 'longshot-bias';
   if (s.startsWith('correlation-arb')) return 'correlation-arb';

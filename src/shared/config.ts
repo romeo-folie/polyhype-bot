@@ -1308,6 +1308,9 @@ const envSchema = z.object({
   FV_SIGMA_MIN: z.coerce.number().min(0).optional().default(0.20),
   FV_SIGMA_MAX: z.coerce.number().min(0).optional().default(5.00),
   FV_SIGMA_WARMUP_TICKS: z.coerce.number().int().min(1).optional().default(180),
+  // Wall-clock warmup floor: no signals until this many ms have elapsed since
+  // the first tick, regardless of tick count. Prevents fast-restart drift.
+  FV_SIGMA_WARMUP_MIN_S: z.coerce.number().int().min(0).optional().default(180),
   // Strike resolution: max seconds between window_start_ts and closest RTDS tick.
   FV_STRIKE_TOLERANCE_S: z.coerce.number().int().min(1).optional().default(60),
 

@@ -6,8 +6,9 @@
  *   EWMA     — recursive half-life-300s variance × √SECONDS_PER_YEAR
  *
  * Selection: EWMA wins if EWMA > spikeMultiplier × rolling (vol-spike regime).
- * Output is clamped to [sigmaMin, sigmaMax] and suppressed until warmupTicks
- * ticks have been received (warmedUp=false during this period).
+ * Output is clamped to [sigmaMin, sigmaMax] and suppressed until both
+ * warmupTicks ticks have been received AND warmupMinMs wall-clock time has
+ * elapsed (warmedUp=false during this period).
  */
 
 import { SECONDS_PER_YEAR } from './blackScholes.js';
@@ -20,6 +21,8 @@ export interface SigmaConfig {
   sigmaMin: number;            // 0.20
   sigmaMax: number;            // 5.00
   warmupTicks: number;         // 180
+  /** Minimum wall-clock ms before warmedUp=true, regardless of tick count. */
+  warmupMinMs: number;         // 180_000 (3 min)
 }
 
 export const DEFAULT_SIGMA_CONFIG: SigmaConfig = {
@@ -29,6 +32,7 @@ export const DEFAULT_SIGMA_CONFIG: SigmaConfig = {
   sigmaMin: 0.20,
   sigmaMax: 5.00,
   warmupTicks: 180,
+  warmupMinMs: 180_000,
 };
 
 export interface SigmaResult {
@@ -45,6 +49,8 @@ interface EwmaState {
   ewmaVar: number;
   lastValue: number;
   tickCount: number;
+  /** Wall-clock ms when the first tick was received for this symbol. */
+  firstTickAt: number;
 }
 
 export class SigmaCalibrator {
@@ -64,7 +70,7 @@ export class SigmaCalibrator {
     const sym = tick.symbol.toLowerCase();
     const s = this.state.get(sym);
     if (!s) {
-      this.state.set(sym, { ewmaVar: 0, lastValue: tick.value, tickCount: 1 });
+      this.state.set(sym, { ewmaVar: 0, lastValue: tick.value, tickCount: 1, firstTickAt: Date.now() });
       return;
     }
     if (s.lastValue > 0 && tick.value > 0) {
@@ -84,7 +90,8 @@ export class SigmaCalibrator {
     const sym = symbol.toLowerCase();
     const s = this.state.get(sym);
     const tickCount = s?.tickCount ?? 0;
-    const warmedUp = tickCount >= this.cfg.warmupTicks;
+    const elapsedMs = s ? Date.now() - s.firstTickAt : 0;
+    const warmedUp = tickCount >= this.cfg.warmupTicks && elapsedMs >= this.cfg.warmupMinMs;
 
     // Rolling σ from provided window
     let sigmaRolling = this.cfg.sigmaMin;

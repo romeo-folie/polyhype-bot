@@ -234,6 +234,8 @@ export class FvScanner {
   private readonly marketCache = new Map<string, UpDownMarket[]>();
   private readonly lastMarketRefreshMs = new Map<string, number>();
   private readonly marketRefreshInFlight = new Set<string>();
+  // Track last-seen oracleTs per symbol — only call calibrator.onTick() on new ticks
+  private readonly lastSeenOracleTs = new Map<string, number>();
 
   constructor({ redis }: { redis: Redis }) {
     this.redis = redis;
@@ -260,6 +262,7 @@ export class FvScanner {
       sigmaMin: cfg.FV_SIGMA_MIN,
       sigmaMax: cfg.FV_SIGMA_MAX,
       warmupTicks: cfg.FV_SIGMA_WARMUP_TICKS,
+      warmupMinMs: cfg.FV_SIGMA_WARMUP_MIN_S * 1000,
     });
 
     logger.info('[fv-scanner] scanner started', { assets, lockKey: LOCK_KEY });
@@ -392,9 +395,13 @@ export class FvScanner {
         const symbol = FV_ASSET_TO_CHAINLINK[asset];
         if (!symbol) continue;
 
-        // Feed latest tick into calibrator EWMA
+        // Feed latest tick into calibrator EWMA — skip stale ticks so a
+        // Chainlink stall doesn't inflate tickCount or distort EWMA.
         const latestTick = this.feed.getLatest(symbol);
-        if (latestTick) this.calibrator.onTick(latestTick);
+        if (latestTick && latestTick.oracleTs !== this.lastSeenOracleTs.get(symbol)) {
+          this.lastSeenOracleTs.set(symbol, latestTick.oracleTs);
+          this.calibrator.onTick(latestTick);
+        }
 
         // Compute σ from 1-hour rolling window
         const recentTicks = this.feed.getTicksSince(symbol, cfg.FV_SIGMA_ROLLING_WINDOW_MS);
@@ -484,20 +491,23 @@ export class FvScanner {
 
     void enqueueWrite('shadow_observations', {
       kind: 'fv_scanner',
-      market_id: market.marketId,
-      asset,
-      spot,
-      strike,
-      sigma,
-      sigma_warmed_up: sigmaWarmedUp,
-      tau_sec: evaluation.tauSec,
-      p_yes: evaluation.pYes,
-      p_no: evaluation.pNo,
-      side: evaluation.side ?? null,
-      edge: evaluation.edge,
-      stake_usd: evaluation.stakeUsd,
-      would_trade: wouldTrade,
-      block_reason: evaluation.blockReason ?? null,
+      source: 'fv-scanner',
+      marketId: market.marketId,
+      direction: evaluation.side ?? undefined,
+      wouldBlock: !wouldTrade,
+      metricValue: evaluation.edge,
+      payload: {
+        asset,
+        spot,
+        strike,
+        sigma,
+        sigmaWarmedUp,
+        tauSec: evaluation.tauSec,
+        pYes: evaluation.pYes,
+        pNo: evaluation.pNo,
+        stakeUsd: evaluation.stakeUsd,
+        blockReason: evaluation.blockReason ?? null,
+      },
     });
 
     if (!wouldTrade || !cfg.FV_SCANNER_ENABLED) return;
@@ -568,7 +578,7 @@ export class FvScanner {
     let executorOutcome: 'success' | 'error' | 'skipped' | 'pending' = 'pending';
 
     try {
-      const result = await executeAndRecordSignal(signal, this.redis, evaluation.stakeUsd);
+      const result = await executeAndRecordSignal(signal, this.redis);
       if (result.skipped) {
         executorOutcome = 'skipped';
         logger.info('[fv-scanner] executor skipped', {
@@ -616,12 +626,16 @@ export class FvScanner {
     } finally {
       void enqueueWrite('shadow_observations', {
         kind: 'fv_scanner_executor',
-        market_id: market.marketId,
-        asset,
-        side,
-        stake_usd: evaluation.stakeUsd,
-        entry_price: entryPrice,
-        outcome: executorOutcome,
+        source: 'fv-scanner',
+        marketId: market.marketId,
+        direction: side,
+        wouldBlock: false,
+        payload: {
+          asset,
+          stakeUsd: evaluation.stakeUsd,
+          entryPrice,
+          outcome: executorOutcome,
+        },
       });
     }
   }
