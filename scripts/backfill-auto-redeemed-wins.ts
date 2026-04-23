@@ -28,6 +28,7 @@
 import 'dotenv/config';
 import { readFileSync } from 'node:fs';
 import { getSql, closeSql } from '../src/db/client.js';
+import { inferCategory } from '../src/shared/outcomeRecorder.js';
 
 type Action = 'Buy' | 'Sell' | 'Redeem' | 'Deposit';
 
@@ -41,6 +42,10 @@ interface CsvRow {
   hash: string;
 }
 
+// Minimal RFC-4180 CSV line parser: handles quoted fields and escaped quotes
+// (""). Expects caller to have already stripped the trailing \r (or to not have
+// one). Suitable for the single-line Polymarket export where questions may
+// contain commas but don't embed raw quotes.
 function parseCsvLine(line: string): string[] {
   const out: string[] = [];
   let cur = '';
@@ -48,7 +53,12 @@ function parseCsvLine(line: string): string[] {
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (c === '"') {
-      inQuotes = !inQuotes;
+      if (inQuotes && line[i + 1] === '"') {
+        cur += '"';
+        i++; // skip the escaped quote
+      } else {
+        inQuotes = !inQuotes;
+      }
     } else if (c === ',' && !inQuotes) {
       out.push(cur);
       cur = '';
@@ -60,31 +70,105 @@ function parseCsvLine(line: string): string[] {
   return out;
 }
 
-function parseCsv(path: string): CsvRow[] {
-  const raw = readFileSync(path, 'utf8').replace(/^﻿/, '');
+// Polymarket token-name conventions in the CSV export:
+//   Yes/Up/Over/<team-or-bracket-name> → YES side
+//   No/Down/Under                      → NO side
+//   Empty (always on Redeem rows)      → infer from the latest Buy/Sell
+// Returns null when we cannot confidently map the label.
+function normalizeDirection(tokenName: string): 'YES' | 'NO' | null {
+  const u = tokenName.trim().toUpperCase();
+  if (u === '') return null;
+  if (u === 'YES' || u === 'UP' || u === 'OVER') return 'YES';
+  if (u === 'NO' || u === 'DOWN' || u === 'UNDER') return 'NO';
+  // Named outcome (team / bracket label). Polymarket encodes these as the
+  // YES side of a sub-market, so they always map to YES.
+  return 'YES';
+}
+
+function parseCsv(path: string): { rows: CsvRow[]; skipped: number } {
+  // Strip BOM, normalize CRLF → LF, then split.
+  const raw = readFileSync(path, 'utf8').replace(/^﻿/, '').replace(/\r\n?/g, '\n');
   const lines = raw.split('\n').filter((l) => l.trim());
-  const rows: CsvRow[] = [];
+  // Two-pass parse: first collect direction per (question) from Buy/Sell rows,
+  // then resolve empty-tokenName Redeem rows by lookup.
+  type Raw = {
+    question: string;
+    action: Action;
+    usdc: number;
+    tokens: number;
+    tokenName: string;
+    timestamp: number;
+    hash: string;
+  };
+  const rawRows: Raw[] = [];
+  let skipped = 0;
   for (let i = 1; i < lines.length; i++) {
     const fields = parseCsvLine(lines[i]!);
-    if (fields.length < 7) continue;
+    if (fields.length < 7) {
+      skipped++;
+      continue;
+    }
     const [question, action, usdcStr, tokenAmountStr, tokenName, tsStr, hash] = fields;
-    if (action !== 'Buy' && action !== 'Sell' && action !== 'Redeem' && action !== 'Deposit') continue;
-    if (action === 'Deposit') continue;
+    if (action !== 'Buy' && action !== 'Sell' && action !== 'Redeem') continue;
     const usdc = parseFloat(usdcStr ?? '0');
     const tokens = parseFloat(tokenAmountStr ?? '0');
     const ts = parseInt(tsStr ?? '0', 10);
-    const dir: 'YES' | 'NO' = (tokenName ?? '').toUpperCase().startsWith('Y') ? 'YES' : 'NO';
-    rows.push({
-      action: action as Action,
+    rawRows.push({
       question: question ?? '',
-      direction: dir,
-      usdcAmount: Number.isFinite(usdc) ? usdc : 0,
-      tokenAmount: Number.isFinite(tokens) ? tokens : 0,
+      action: action as Action,
+      usdc: Number.isFinite(usdc) ? usdc : 0,
+      tokens: Number.isFinite(tokens) ? tokens : 0,
+      tokenName: tokenName ?? '',
       timestamp: Number.isFinite(ts) ? ts : 0,
       hash: hash ?? '',
     });
   }
-  return rows;
+
+  // Pass 1: latest observed direction per (question) from Buy/Sell rows.
+  // When the account has traded both sides of a market, the latest Buy/Sell
+  // before a given Redeem is the best hint for which side was being redeemed.
+  const directionByQuestion = new Map<string, { dir: 'YES' | 'NO'; ts: number }[]>();
+  for (const r of rawRows) {
+    if (r.action === 'Redeem') continue;
+    const dir = normalizeDirection(r.tokenName);
+    if (!dir) continue;
+    const existing = directionByQuestion.get(r.question) ?? [];
+    existing.push({ dir, ts: r.timestamp });
+    directionByQuestion.set(r.question, existing);
+  }
+
+  // Pass 2: build output rows, resolving direction for Redeems.
+  const rows: CsvRow[] = [];
+  for (const r of rawRows) {
+    let dir: 'YES' | 'NO' | null = normalizeDirection(r.tokenName);
+    if (!dir && r.action === 'Redeem') {
+      // Use the latest Buy/Sell direction at or before this Redeem's timestamp.
+      const buys = directionByQuestion.get(r.question) ?? [];
+      const priorSorted = buys
+        .filter((b) => b.ts <= r.timestamp)
+        .sort((a, b) => b.ts - a.ts);
+      if (priorSorted.length > 0) {
+        dir = priorSorted[0]!.dir;
+      } else if (buys.length > 0) {
+        // No prior direction but we have some from later rows — use earliest.
+        dir = buys.sort((a, b) => a.ts - b.ts)[0]!.dir;
+      }
+    }
+    if (!dir) {
+      skipped++;
+      continue;
+    }
+    rows.push({
+      action: r.action,
+      question: r.question,
+      direction: dir,
+      usdcAmount: r.usdc,
+      tokenAmount: r.tokens,
+      timestamp: r.timestamp,
+      hash: r.hash,
+    });
+  }
+  return { rows, skipped };
 }
 
 interface Aggregate {
@@ -125,29 +209,9 @@ function aggregate(rows: CsvRow[]): Map<string, Aggregate> {
   return out;
 }
 
-function inferCategory(question: string): string {
-  const q = question.toLowerCase();
-  if (q.includes('temperature') || q.includes('highest temp')) return 'weather';
-  if (q.includes('up or down')) return 'crypto-updown';
-  if (q.includes('bitcoin') || q.includes('ethereum') || q.includes('btc') || q.includes('eth')) {
-    return 'crypto-regulatory';
-  }
-  if (
-    q.includes('vs.') ||
-    q.includes(' vs ') ||
-    q.includes('win on') ||
-    q.includes('spread:') ||
-    q.includes(' o/u ') ||
-    q.includes('both teams to score')
-  ) {
-    return 'sports';
-  }
-  return 'other';
-}
-
 interface Correction {
   outcomeId: string;
-  market: string;
+  question: string;
   direction: 'YES' | 'NO';
   dbResult: string;
   dbReturnPct: number;
@@ -161,6 +225,36 @@ interface Correction {
   correctedResult: 'won' | 'lost';
 }
 
+function pickClosestBefore<
+  T extends { closed_at: Date },
+>(rows: T[], targetMs: number): T | null {
+  let best: T | null = null;
+  let bestDelta = Number.POSITIVE_INFINITY;
+  for (const r of rows) {
+    const ts = new Date(r.closed_at).getTime();
+    if (!Number.isFinite(ts)) continue;
+    if (ts > targetMs) continue; // closed after the redeem — unlikely match
+    const delta = targetMs - ts;
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      best = r;
+    }
+  }
+  return best;
+}
+
+// Exit reasons that previously produced incorrect loss attribution on
+// auto-redeemed positions. Used to rank DB candidates when multiple outcomes
+// exist for the same (question, direction) — a bug-shaped row is preferred
+// over one that resolved normally (e.g. a legitimate trailing_stop exit).
+const BUG_SHAPED_EXIT_REASONS = new Set([
+  'expired_dust',
+  'expired_unresolvable',
+  'expired_unresolvable_redeemed',
+  'no_end_date_on_chain_resolved',
+  'resolved_as_loss',
+]);
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const csvPath = args.find((a) => !a.startsWith('--'));
@@ -173,8 +267,11 @@ async function main(): Promise<void> {
   }
 
   console.log(`Reading CSV: ${csvPath}`);
-  const rows = parseCsv(csvPath);
-  console.log(`Parsed ${rows.length} Buy/Sell/Redeem rows`);
+  const { rows, skipped } = parseCsv(csvPath);
+  console.log(
+    `Parsed ${rows.length} Buy/Sell/Redeem rows` +
+      (skipped > 0 ? ` (${skipped} rows skipped: unknown direction or malformed)` : ''),
+  );
 
   const aggregates = aggregate(rows);
   const autoRedeems = [...aggregates.values()].filter((a) => a.hasRedeemPayout);
@@ -197,6 +294,11 @@ async function main(): Promise<void> {
   let alreadyCorrectLost = 0;
 
   for (const agg of autoRedeems) {
+    // Match DB direction against the normalized CSV side. Our outcomes table
+    // uses YES/NO for most sources and UP/DOWN for oracle-lag, so include the
+    // synonym alongside the canonical value.
+    const dbDirections =
+      agg.direction === 'YES' ? ['YES', 'UP'] : ['NO', 'DOWN'];
     const rowsDb = await sql<
       Array<{
         outcome_id: string;
@@ -209,7 +311,7 @@ async function main(): Promise<void> {
     >`
       SELECT outcome_id, result, return_pct, stake_usd, exit_reason, closed_at
       FROM outcomes
-      WHERE question = ${agg.question} AND direction = ${agg.direction}
+      WHERE question = ${agg.question} AND direction IN ${sql(dbDirections)}
       ORDER BY closed_at DESC
     `;
 
@@ -234,6 +336,33 @@ async function main(): Promise<void> {
       continue;
     }
 
+    // Pick the DB row most likely to be the misattributed one. Preference order:
+    //   1. result='lost' AND exit_reason ∈ BUG_SHAPED_EXIT_REASONS (direct match
+    //      for the auto-redeem bug)
+    //   2. result='lost' with closed_at closest-before the redeem timestamp
+    //      (for partial-fill cases where SL fired before resolution and residual
+    //      shares later auto-redeemed)
+    //   3. Most recent 'lost' row, as final fallback
+    const redeemTsMs = agg.latestTs * 1000;
+    const lostRows = rowsDb.filter((r) => r.result === 'lost');
+    if (lostRows.length === 0) {
+      // No lost row to correct. Skip silently (already_won path caught the good case).
+      continue;
+    }
+    const bugShaped = lostRows.filter(
+      (r) => r.exit_reason != null && BUG_SHAPED_EXIT_REASONS.has(r.exit_reason),
+    );
+    let target: (typeof lostRows)[number];
+    if (bugShaped.length === 1) {
+      target = bugShaped[0]!;
+    } else if (bugShaped.length > 1) {
+      // Multiple bug-shaped rows: pick the one with closed_at closest-before redeem ts.
+      target = pickClosestBefore(bugShaped, redeemTsMs) ?? bugShaped[0]!;
+    } else {
+      // No explicitly-bug-shaped rows; fall back to closest-before across all losses.
+      target = pickClosestBefore(lostRows, redeemTsMs) ?? lostRows[0]!;
+    }
+
     // Compute realized net P&L from PM events.
     const cost = agg.buyUsdc;
     const proceeds = agg.sellUsdc + agg.redeemUsdc;
@@ -241,9 +370,8 @@ async function main(): Promise<void> {
     const correctedResult: 'won' | 'lost' = proceeds > cost ? 'won' : 'lost';
 
     // If net P&L is negative, our DB's "lost" may already be roughly correct
-    // (just with an inaccurate magnitude). Still flag if return_pct is far off.
+    // (just with an inaccurate magnitude). Skip if return_pct is close.
     if (correctedResult === 'lost') {
-      const target = rowsDb[0]!;
       const diff = Math.abs(Number(target.return_pct) - netReturnPct);
       if (diff < 1) {
         alreadyCorrectLost++;
@@ -251,10 +379,9 @@ async function main(): Promise<void> {
       }
     }
 
-    const target = rowsDb[0]!;
     corrections.push({
       outcomeId: target.outcome_id,
-      market: agg.question,
+      question: agg.question,
       direction: agg.direction,
       dbResult: target.result,
       dbReturnPct: Number(target.return_pct),
@@ -293,18 +420,24 @@ async function main(): Promise<void> {
     console.log('entered outside this agent. PR 9 (ongoing PM reconciler) will');
     console.log('insert synthetic outcomes using PM activity data.');
     console.log();
+    const fmtSigned = (n: number) =>
+      `${n >= 0 ? '+' : '-'}$${Math.abs(n).toFixed(2)}`;
     for (const [cat, agg] of [...byCategory.entries()].sort(
       (a, b) => b[1].netPnl - a[1].netPnl,
     )) {
-      console.log(`  ${cat.padEnd(20)} ${agg.count} wins, +$${agg.netPnl.toFixed(2)}`);
+      console.log(
+        `  ${cat.padEnd(20)} ${agg.count} wins, ${fmtSigned(agg.netPnl)}`,
+      );
     }
-    console.log(`  ${'TOTAL'.padEnd(20)} ${noDbRowEntries.length} wins, +$${totalMissingPnl.toFixed(2)}`);
+    console.log(
+      `  ${'TOTAL'.padEnd(20)} ${noDbRowEntries.length} wins, ${fmtSigned(totalMissingPnl)}`,
+    );
     console.log();
     console.log('  Detailed list:');
     for (const e of noDbRowEntries) {
       const qShort = e.question.length > 70 ? e.question.slice(0, 67) + '...' : e.question;
       console.log(
-        `    [${e.category}/${e.direction}] net=+$${e.netPnl.toFixed(2).padStart(6)} redeem=$${e.redeemUsdc.toFixed(2)}  ${qShort}`,
+        `    [${e.category}/${e.direction}] net=${fmtSigned(e.netPnl).padStart(8)} redeem=$${e.redeemUsdc.toFixed(2).padStart(6)}  ${qShort}`,
       );
     }
     console.log();
@@ -318,7 +451,7 @@ async function main(): Promise<void> {
     console.log();
 
     for (const c of wins) {
-      const qShort = c.market.length > 65 ? c.market.slice(0, 62) + '...' : c.market;
+      const qShort = c.question.length > 65 ? c.question.slice(0, 62) + '...' : c.question;
       console.log(`  [${c.direction}] "${qShort}"`);
       console.log(
         `     DB before:  ${c.dbResult.padEnd(5)} ${c.dbReturnPct.toFixed(1).padStart(7)}%  exit=${c.dbExitReason ?? '-'}  stake=$${c.dbStakeUsd.toFixed(2)}`,
@@ -334,7 +467,7 @@ async function main(): Promise<void> {
     if (losses.length > 0) {
       console.log('\n--- Magnitude-only fixes (still lost, return_pct changes) ---');
       for (const c of losses) {
-        const qShort = c.market.length > 65 ? c.market.slice(0, 62) + '...' : c.market;
+        const qShort = c.question.length > 65 ? c.question.slice(0, 62) + '...' : c.question;
         console.log(
           `  [${c.direction}] "${qShort}" ${c.dbReturnPct.toFixed(1)}% → ${c.correctedReturnPct.toFixed(1)}%`,
         );
