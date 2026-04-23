@@ -44,7 +44,10 @@ const COMMODITY_KEYWORDS: CommodityKeywordSpec[] = [
   { ticker: 'NQ=F', keywords: ['nasdaq', 'ndx'], resolutionMode: 'close_print' },
 ];
 
-const PRICE_REGEX = /\$?\s*([0-9]+(?:[,_][0-9]{3})*(?:\.[0-9]+)?)/g;
+// `$` is REQUIRED. Making it optional caused us to capture date digits
+// (e.g. "by 2026-04-23" → "23") as the cutoff price. Every logged opportunity
+// between 2026-04-09 and 2026-04-23 was a false positive from this bug.
+const PRICE_REGEX = /\$\s*([0-9]+(?:[,_][0-9]{3})*(?:\.[0-9]+)?)/g;
 
 /**
  * Word-boundary keyword match. Plain `String.includes` produces false positives
@@ -199,11 +202,12 @@ export function detectOpportunities(
     const cutoff = extractCutoffPrice(m.question ?? '');
     if (cutoff === null) continue;
 
-    // Sanity gate: cutoff must be within an order of magnitude of spot.
-    // Catches "Spread (-1.5)" or "O/U 6.5" style markets that match a commodity
-    // keyword but whose numeric is a hockey total, not a commodity price.
+    // Sanity gate: cutoff must be within 2x of spot in either direction.
+    // For 24h settlement horizons the cutoff is always near spot (otherwise
+    // the market is trivially resolved); anything outside this band is a
+    // parsing/keyword miss or a multi-week market that doesn't belong here.
     const ratio = cutoff / spot.price;
-    if (ratio < 0.1 || ratio > 10) continue;
+    if (ratio < 0.5 || ratio > 2) continue;
 
     const impliedYes =
       spec.resolutionMode === 'close_print'

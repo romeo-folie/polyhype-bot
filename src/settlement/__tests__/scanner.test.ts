@@ -67,11 +67,16 @@ beforeEach(() => {
 describe('extractCutoffPrice', () => {
   it('parses dollar amounts with commas', () => {
     expect(extractCutoffPrice('Will gold close above $2,650 today?')).toBe(2650);
-    expect(extractCutoffPrice('Silver above 32.5 by Friday?')).toBe(32.5);
     expect(extractCutoffPrice('Crude oil above $78.40?')).toBe(78.4);
   });
-  it('returns null when no number present', () => {
+  it('returns null when no $-denominated number present', () => {
     expect(extractCutoffPrice('Will gold rise?')).toBeNull();
+    expect(extractCutoffPrice('Silver above 32.5 by Friday?')).toBeNull();
+  });
+  it('ignores date digits and captures the $-prefixed cutoff', () => {
+    expect(extractCutoffPrice('Will WTI close above $100 on 2026-04-23?')).toBe(100);
+    expect(extractCutoffPrice('Will crude oil be above $85 by April 30?')).toBe(85);
+    expect(extractCutoffPrice('Gold above $4,700 on 2026-04-23?')).toBe(4700);
   });
 });
 
@@ -181,7 +186,7 @@ describe('detectOpportunities', () => {
   });
 
   it('matches S&P / SPX equity index keywords with close-print resolution', () => {
-    const markets = [mkMarket({ id: '1', q: 'Will S&P 500 close above 5800 today?', yesPrice: 0.4 })];
+    const markets = [mkMarket({ id: '1', q: 'Will S&P 500 close above $5,800 today?', yesPrice: 0.4 })];
     const spot = new Map([['ES=F', { price: 5850, timestamp: now }]]);
     const out = detectOpportunities(markets, spot, { SETTLEMENT_MIN_EDGE: 0.03 }, now);
     expect(out).toHaveLength(1);
@@ -190,7 +195,7 @@ describe('detectOpportunities', () => {
   });
 
   it('matches Nasdaq equity index keywords', () => {
-    const markets = [mkMarket({ id: '1', q: 'Will Nasdaq close above 20000 today?', yesPrice: 0.7 })];
+    const markets = [mkMarket({ id: '1', q: 'Will Nasdaq close above $20,000 today?', yesPrice: 0.7 })];
     const spot = new Map([['NQ=F', { price: 19500, timestamp: now }]]);
     const out = detectOpportunities(markets, spot, { SETTLEMENT_MIN_EDGE: 0.03 }, now);
     expect(out).toHaveLength(1);
