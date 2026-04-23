@@ -117,13 +117,16 @@ export async function detectMoves(currentPrices: SpotPrice[]): Promise<SpotMove[
 
     // Session-aware multiplier: widen threshold during high-vol hours, narrow during quiet hours.
     // Applies to the percent path only — z-score is already regime-normalized.
+    const baseThreshold = threshold;
+    let sessionMultiplier = 1.0;
+    let sessionHour = 0;
     if (cfg.SESSION_THRESHOLD_ENABLED) {
-      const hour = new Date().getUTCHours();
+      sessionHour = new Date().getUTCHours();
       const multipliers = cfg.SESSION_MULTIPLIERS.split(',').map(Number);
-      const multiplier = multipliers[hour] ?? 1.0;
-      threshold *= multiplier;
+      sessionMultiplier = multipliers[sessionHour] ?? 1.0;
+      threshold *= sessionMultiplier;
       logger.debug('[spot-threshold] session-adjusted threshold', {
-        assetId: sp.assetId, hour, multiplier, threshold: threshold.toFixed(3),
+        assetId: sp.assetId, hour: sessionHour, multiplier: sessionMultiplier, threshold: threshold.toFixed(3),
       });
     }
 
@@ -135,6 +138,31 @@ export async function detectMoves(currentPrices: SpotPrice[]): Promise<SpotMove[
 
     const changePercent = ((sp.price - referencePrice) / referencePrice) * 100;
     const pctTriggered = Math.abs(changePercent) >= threshold;
+
+    // Shadow-log when the session multiplier flips the trigger outcome — gives
+    // visibility into how often the multiplier matters without log spam.
+    if (cfg.SESSION_THRESHOLD_ENABLED && sessionMultiplier !== 1.0) {
+      const pctTriggeredBase = Math.abs(changePercent) >= baseThreshold;
+      if (pctTriggered !== pctTriggeredBase) {
+        void enqueueWrite('shadow_observations', {
+          kind: 'session_threshold', source: 'spot',
+          symbol: sp.assetId,
+          // wouldBlock=true means multiplier prevented a trigger; false means it enabled one.
+          wouldBlock: !pctTriggered,
+          metricValue: sessionMultiplier, threshold: 1.0,
+          payload: {
+            hour: sessionHour,
+            baseThreshold,
+            adjustedThreshold: threshold,
+            sessionMultiplier,
+            changePercent,
+            pctTriggeredBase,
+            pctTriggeredAdjusted: pctTriggered,
+            outcome: pctTriggered ? 'multiplier_enabled_trigger' : 'multiplier_blocked_trigger',
+          },
+        });
+      }
+    }
 
     // Z-score path: log "would-have-triggered" in pct mode, hard-gate in zscore/both modes.
     let zscoreTriggered: boolean | null = null;

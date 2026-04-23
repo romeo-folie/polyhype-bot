@@ -148,6 +148,11 @@ vi.mock('../futures/hlMomentumScanner.js', () => ({
   momentumCooldownKey: (sym: string, dir: string) => `futures:momentum:cooldown:${sym}:${dir}`,
 }));
 
+const mockEnqueueWrite = vi.fn();
+vi.mock('../db/writeQueue.js', () => ({
+  enqueueWrite: (...args: unknown[]) => mockEnqueueWrite(...args),
+}));
+
 describe('ArbitrageWorker', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -373,6 +378,125 @@ describe('ArbitrageWorker', () => {
 
     // crypto arb should be silent — only HL momentum path fired
     expect(mockScanCryptoArb).not.toHaveBeenCalled();
+
+    worker.stop();
+  });
+
+  it('writes chainlink_crypto_arb shadow row when flag off AND gap > 0.03%', async () => {
+    // 1.56% oracle-vs-Binance gap (65000 vs 64000) — well above shadow floor
+    mockRedis.set.mockResolvedValueOnce('OK'); // dedup claim succeeds
+    mockRedis.get.mockImplementation((key: string) => {
+      if (key === 'spot:last:btcusdt') return Promise.resolve('64000');
+      return Promise.resolve(null);
+    });
+
+    configOverride = {
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 100000,
+      ARB_MAX_TRADES_PER_MIN: 100000,
+      CRYPTO_ARB_MAX_TRADES_PER_MIN: 100000,
+      CHAINLINK_CRYPTO_ARB_ENABLED: false,
+    };
+    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
+    await worker.start();
+
+    const tick = JSON.stringify({
+      symbol: 'btc/usd',
+      value: 65000,
+      oracleTs: Date.now() - 100,
+      receivedAt: Date.now(),
+    });
+    onRedisMessage!('oracle:price_moved', tick);
+
+    await vi.waitFor(
+      () => {
+        const call = mockEnqueueWrite.mock.calls.find(
+          ([table, row]) => table === 'shadow_observations' && row?.kind === 'chainlink_crypto_arb',
+        );
+        expect(call).toBeDefined();
+      },
+      { timeout: 500 },
+    );
+
+    const shadowCall = mockEnqueueWrite.mock.calls.find(
+      ([table, row]) => table === 'shadow_observations' && row?.kind === 'chainlink_crypto_arb',
+    );
+    const row = shadowCall![1];
+    expect(row.symbol).toBe('btcusdt');
+    expect(row.wouldBlock).toBe(true);
+    expect(row.payload.oraclePrice).toBe(65000);
+    expect(row.payload.lastBinance).toBe(64000);
+    expect(row.payload.gapPct).toBeCloseTo(1.5625, 3);
+    expect(row.payload.scannerEnabled).toBe(false);
+    expect(mockScanCryptoArb).not.toHaveBeenCalled();
+
+    worker.stop();
+  });
+
+  it('does NOT write chainlink_crypto_arb shadow row when gap < 0.03%', async () => {
+    // 0.015% gap — below shadow floor
+    mockRedis.set.mockResolvedValueOnce('OK');
+    mockRedis.get.mockImplementation((key: string) => {
+      if (key === 'spot:last:btcusdt') return Promise.resolve('65000');
+      return Promise.resolve(null);
+    });
+
+    configOverride = {
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 100000,
+      ARB_MAX_TRADES_PER_MIN: 100000,
+      CRYPTO_ARB_MAX_TRADES_PER_MIN: 100000,
+      CHAINLINK_CRYPTO_ARB_ENABLED: false,
+    };
+    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
+    await worker.start();
+
+    const tick = JSON.stringify({
+      symbol: 'btc/usd',
+      value: 65010, // 0.015% above Binance
+      oracleTs: Date.now() - 100,
+      receivedAt: Date.now(),
+    });
+    onRedisMessage!('oracle:price_moved', tick);
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const shadowCall = mockEnqueueWrite.mock.calls.find(
+      ([table, row]) => table === 'shadow_observations' && row?.kind === 'chainlink_crypto_arb',
+    );
+    expect(shadowCall).toBeUndefined();
+
+    worker.stop();
+  });
+
+  it('does NOT write chainlink_crypto_arb shadow row when dedup claim fails', async () => {
+    mockRedis.set.mockResolvedValueOnce(null); // dedup occupied
+    mockRedis.get.mockImplementation((key: string) => {
+      if (key === 'spot:last:btcusdt') return Promise.resolve('64000');
+      return Promise.resolve(null);
+    });
+
+    configOverride = {
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 100000,
+      ARB_MAX_TRADES_PER_MIN: 100000,
+      CRYPTO_ARB_MAX_TRADES_PER_MIN: 100000,
+      CHAINLINK_CRYPTO_ARB_ENABLED: false,
+    };
+    const worker = new ArbitrageWorker({ baselineIntervalMs: 100000 });
+    await worker.start();
+
+    const tick = JSON.stringify({
+      symbol: 'btc/usd',
+      value: 65000,
+      oracleTs: Date.now() - 100,
+      receivedAt: Date.now(),
+    });
+    onRedisMessage!('oracle:price_moved', tick);
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const shadowCall = mockEnqueueWrite.mock.calls.find(
+      ([table, row]) => table === 'shadow_observations' && row?.kind === 'chainlink_crypto_arb',
+    );
+    expect(shadowCall).toBeUndefined();
 
     worker.stop();
   });

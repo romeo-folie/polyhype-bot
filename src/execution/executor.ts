@@ -1071,12 +1071,29 @@ async function executeHyperliquidSignal(
       return { signal, skipped: true, skipReason: 'global_margin_cap' };
     }
 
-    // 1b. Funding-rate gate (Change 4). Shadow-logs skips when disabled.
+    // 1b. Funding-rate gate (Change 4). Always shadow-logs the observation so
+    // the funding distribution is visible regardless of whether the gate fires.
+    // Previously only wrote a shadow row when the gate would have triggered,
+    // leaving us with 2 rows in 11 days and no way to evaluate the threshold.
     try {
       const ctx = await hl.getAssetContext(signal.marketId);
       const hourlyBps = ctx.fundingRate * 10000;
       const signedBps = signal.direction === 'LONG' ? hourlyBps : -hourlyBps;
-      if (signedBps > cfg.HL_MAX_ADVERSE_FUNDING_BPS) {
+      const wouldBlockGate = signedBps > cfg.HL_MAX_ADVERSE_FUNDING_BPS;
+
+      void enqueueWrite('shadow_observations', {
+        kind: 'hl_funding', source: 'futures',
+        symbol: signal.marketId, direction: signal.direction,
+        wouldBlock: wouldBlockGate,
+        metricValue: Math.abs(signedBps),
+        threshold: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
+        payload: {
+          hourlyBps, signedBps, marketId: signal.marketId,
+          gateEnabled: cfg.HL_FUNDING_GATE_ENABLED,
+        },
+      });
+
+      if (wouldBlockGate) {
         if (cfg.HL_FUNDING_GATE_ENABLED) {
           logger.info('[hl-funding] funding_adverse block', {
             symbol: signal.marketId,
@@ -1097,12 +1114,6 @@ async function executeHyperliquidSignal(
             hourlyBps: hourlyBps.toFixed(4),
             signedBps: signedBps.toFixed(4),
             max: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
-          });
-          void enqueueWrite('shadow_observations', {
-            kind: 'hl_funding', source: 'futures',
-            symbol: signal.marketId, direction: signal.direction,
-            wouldBlock: true, metricValue: Math.abs(signedBps), threshold: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
-            payload: { hourlyBps, signedBps, marketId: signal.marketId },
           });
         }
       }
@@ -1655,7 +1666,18 @@ export async function executeSignal(
         signal.source,
         cfg,
       );
-      if (multiplier > 1) {
+      if (multiplier <= 1) {
+        // Visibility log: confirms the conviction lookup ran but found no
+        // independent-source confluence on this market+direction. Without this,
+        // a quiet `conviction_multiplier` shadow kind is indistinguishable from
+        // dead instrumentation.
+        logger.debug('[executor] conviction multiplier neutral (no boost)', {
+          marketId: signal.marketId,
+          direction: signal.direction,
+          source: signal.source,
+          multiplier: multiplier.toFixed(2),
+        });
+      } else {
         // Original stake is already Kelly-capped against bankroll; multiplier
         // is bounded at CONVICTION_MAX_MULTIPLIER so the boosted value is at
         // most that factor above an already-safe stake.

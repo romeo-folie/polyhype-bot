@@ -30,6 +30,11 @@ vi.mock('../../shared/redis.js', () => ({
   getRedis: vi.fn().mockReturnValue(mockRedis),
 }));
 
+const enqueueWriteMock = vi.fn();
+vi.mock('../../db/writeQueue.js', () => ({
+  enqueueWrite: enqueueWriteMock,
+}));
+
 const { detectMoves } = await import('../thresholdDetector.js');
 
 beforeEach(() => {
@@ -37,6 +42,7 @@ beforeEach(() => {
   mockRedis.set.mockReset().mockResolvedValue('OK');
   mockRedis.zrangebyscore.mockReset().mockResolvedValue([]);
   mockRedis.zrange.mockReset().mockResolvedValue([]);
+  enqueueWriteMock.mockReset();
 });
 
 describe('detectMoves', () => {
@@ -232,6 +238,77 @@ describe('detectMoves', () => {
     expect(moves).toHaveLength(1);
 
     // Reset
+    mockConfig.SESSION_THRESHOLD_ENABLED = false;
+    mockConfig.SESSION_MULTIPLIERS = '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.3,1.3,1.3,1.3,1.3,1.5,1.5,1.5,1.5,1.2,1.2,1.2,1.2,0.8,0.8,0.8';
+  });
+
+  it('session_threshold shadow row written when multiplier blocks a trigger', async () => {
+    mockConfig.SESSION_THRESHOLD_ENABLED = true;
+    mockConfig.SESSION_MULTIPLIERS = Array(24).fill('2.0').join(',');
+
+    const now = Date.now();
+    const refTs = now - 310_000;
+    // 3.08% move — above base 3% but below adjusted 6%
+    mockRedis.zrangebyscore.mockResolvedValue([`${refTs}:65000`]);
+
+    await detectMoves([{ assetId: 'bitcoin', price: 67000, timestamp: now }]);
+
+    const sessionCall = enqueueWriteMock.mock.calls.find(
+      ([table, row]) => table === 'shadow_observations' && row?.kind === 'session_threshold',
+    );
+    expect(sessionCall).toBeDefined();
+    const row = sessionCall![1];
+    expect(row.symbol).toBe('bitcoin');
+    expect(row.wouldBlock).toBe(true);
+    expect(row.payload.outcome).toBe('multiplier_blocked_trigger');
+    expect(row.payload.pctTriggeredBase).toBe(true);
+    expect(row.payload.pctTriggeredAdjusted).toBe(false);
+
+    mockConfig.SESSION_THRESHOLD_ENABLED = false;
+    mockConfig.SESSION_MULTIPLIERS = '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.3,1.3,1.3,1.3,1.3,1.5,1.5,1.5,1.5,1.2,1.2,1.2,1.2,0.8,0.8,0.8';
+  });
+
+  it('session_threshold shadow row written when multiplier enables a trigger', async () => {
+    mockConfig.SESSION_THRESHOLD_ENABLED = true;
+    mockConfig.SESSION_MULTIPLIERS = Array(24).fill('0.5').join(',');
+
+    const now = Date.now();
+    const refTs = now - 310_000;
+    // 2% move — below base 3% but above adjusted 1.5%
+    mockRedis.zrangebyscore.mockResolvedValue([`${refTs}:65000`]);
+
+    await detectMoves([{ assetId: 'bitcoin', price: 66300, timestamp: now }]);
+
+    const sessionCall = enqueueWriteMock.mock.calls.find(
+      ([table, row]) => table === 'shadow_observations' && row?.kind === 'session_threshold',
+    );
+    expect(sessionCall).toBeDefined();
+    const row = sessionCall![1];
+    expect(row.wouldBlock).toBe(false);
+    expect(row.payload.outcome).toBe('multiplier_enabled_trigger');
+    expect(row.payload.pctTriggeredBase).toBe(false);
+    expect(row.payload.pctTriggeredAdjusted).toBe(true);
+
+    mockConfig.SESSION_THRESHOLD_ENABLED = false;
+    mockConfig.SESSION_MULTIPLIERS = '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.3,1.3,1.3,1.3,1.3,1.5,1.5,1.5,1.5,1.2,1.2,1.2,1.2,0.8,0.8,0.8';
+  });
+
+  it('session_threshold shadow row NOT written when multiplier does not flip outcome', async () => {
+    mockConfig.SESSION_THRESHOLD_ENABLED = true;
+    mockConfig.SESSION_MULTIPLIERS = Array(24).fill('1.5').join(',');
+
+    const now = Date.now();
+    const refTs = now - 310_000;
+    // 1% move — below both base 3% and adjusted 4.5%
+    mockRedis.zrangebyscore.mockResolvedValue([`${refTs}:66000`]);
+
+    await detectMoves([{ assetId: 'bitcoin', price: 66660, timestamp: now }]);
+
+    const sessionCall = enqueueWriteMock.mock.calls.find(
+      ([table, row]) => table === 'shadow_observations' && row?.kind === 'session_threshold',
+    );
+    expect(sessionCall).toBeUndefined();
+
     mockConfig.SESSION_THRESHOLD_ENABLED = false;
     mockConfig.SESSION_MULTIPLIERS = '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.3,1.3,1.3,1.3,1.3,1.5,1.5,1.5,1.5,1.2,1.2,1.2,1.2,0.8,0.8,0.8';
   });
