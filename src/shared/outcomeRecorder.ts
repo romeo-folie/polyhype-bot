@@ -58,6 +58,7 @@ export interface PositionOutcome {
  */
 export function inferSource(sourcedFrom: string): PositionOutcome['source'] {
   const s = sourcedFrom.toLowerCase();
+  if (s === 'hl-momentum') return 'hl-momentum';
   if (s.startsWith('copytrade:')) return 'copytrade';
   if (s.startsWith('crypto-arb:')) return 'crypto-arb';
   if (s.startsWith('spot:') || s.startsWith('spot ')) return 'spot';

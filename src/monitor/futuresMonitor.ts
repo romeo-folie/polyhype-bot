@@ -673,25 +673,23 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             });
 
             if (ledgerPos) {
-              // Fire-and-forget: recordPositionOutcome writes to both Redis (for
-              // LLM consensus context + calibration) AND Postgres via the writer
-              // queue. Previously this only called recordOutcome (Redis-only), so
-              // every HL close since the recorder split silently dropped from the
-              // `outcomes` Postgres table — breaking analytics, calibration DB
-              // rollups, and execution-event → outcome join. Awaiting inside the
-              // hot loop used to blow past the lock TTL; fire-and-forget keeps
-              // the poll cycle lean, errors are logged but never propagate.
+              // Persist the closed-position outcome before we prune the ledger row.
+              // This closes the gap where successful HL exits could disappear from
+              // Postgres analytics if the worker died after scheduling the async
+              // recorder but before the promise settled.
               const result = pnlUsd > 0 ? 'won' : pnlUsd < 0 ? 'lost' : 'pushed';
-              void recordPositionOutcome(redis, ledgerPos, {
-                result,
-                returnPct: priceChangePct,
-                executionVenueOverride: 'hyperliquid',
-                exitReason: reason,
-              }).catch((e: unknown) => {
+              try {
+                await recordPositionOutcome(redis, ledgerPos, {
+                  result,
+                  returnPct: priceChangePct,
+                  executionVenueOverride: 'hyperliquid',
+                  exitReason: reason,
+                });
+              } catch (e: unknown) {
                 logger.warn('[futures-monitor] recordPositionOutcome failed (non-fatal)', {
                   symbol, error: String(e),
                 });
-              });
+              }
             }
 
             await closeLedgerPosition(redis, symbol, direction);

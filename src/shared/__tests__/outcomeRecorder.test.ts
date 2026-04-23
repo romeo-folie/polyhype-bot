@@ -18,7 +18,7 @@ vi.mock('../logger.js', () => ({
   },
 }));
 
-const { recordOutcome, getRecentOutcomes, inferCategory } = await import('../outcomeRecorder.js');
+const { recordOutcome, getRecentOutcomes, inferCategory, inferSource } = await import('../outcomeRecorder.js');
 const { logger } = await import('../logger.js');
 
 function makeOutcome(overrides: Record<string, unknown> = {}) {
@@ -113,6 +113,12 @@ describe('recordOutcome', () => {
       expect.stringContaining('failed to record outcome'),
       expect.any(Object),
     );
+  });
+});
+
+describe('inferSource', () => {
+  it('classifies hl-momentum outcomes correctly', () => {
+    expect(inferSource('hl-momentum')).toBe('hl-momentum');
   });
 });
 
