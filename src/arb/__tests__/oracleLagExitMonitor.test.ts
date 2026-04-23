@@ -561,6 +561,64 @@ describe('evaluateOracleLagExit', () => {
       );
       expect(res).toBeNull();
     });
+
+    it('uses openedAtMs override for ageSec when provided (maker-pending fill scenario)', () => {
+      // Scenario: scanner fired 8 minutes ago and wrote entryTsMs=T-480s.
+      // Maker-pending GTC just filled 10s ago; the reconciler imported the
+      // position with openedAt = T-10s. Without the openedAtMs override,
+      // ageSec = 480s > maxHoldSec=300s and timeout would fire immediately
+      // on the first tick the position is visible. With the override,
+      // ageSec = 10s and nothing fires.
+      const state = buildState({ entryTsMs: NOW_MS - 480_000 });
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state,
+          nowMs: NOW_MS,
+          openedAtMs: NOW_MS - 10_000, // 10s since fill
+          maxHoldSec: 300,
+          currentYesPrice: 0.52,
+          currentNoPrice: 0.48,
+          currentChainlinkPrice: 65000,
+        }),
+      );
+      expect(res).toBeNull();
+    });
+
+    it('still fires timeout when openedAtMs ageSec exceeds maxHoldSec', () => {
+      // Position filled 6 min ago, maxHoldSec = 300s → timeout fires.
+      // Scanner-fire time (entryTsMs) is irrelevant here.
+      const state = buildState({ entryTsMs: NOW_MS - 900_000 }); // 15 min ago
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state,
+          nowMs: NOW_MS,
+          openedAtMs: NOW_MS - 360_000, // 6 min since fill
+          maxHoldSec: 300,
+          currentYesPrice: 0.52,
+          currentNoPrice: 0.48,
+          currentChainlinkPrice: 65000,
+        }),
+      );
+      expect(res?.trigger).toBe('oracle_lag_timeout');
+      expect(res?.ageSec).toBeCloseTo(360, 0);
+    });
+
+    it('falls back to state.entryTsMs when openedAtMs is not supplied (shadow path)', () => {
+      // No openedAtMs in input → use entryTsMs (legacy / shadow-path behavior).
+      const state = buildState({ entryTsMs: NOW_MS - 400_000 });
+      const res = evaluateOracleLagExit(
+        buildInput({
+          state,
+          nowMs: NOW_MS,
+          maxHoldSec: 300,
+          currentYesPrice: 0.52,
+          currentNoPrice: 0.48,
+          currentChainlinkPrice: 65000,
+        }),
+      );
+      expect(res?.trigger).toBe('oracle_lag_timeout');
+      expect(res?.ageSec).toBeCloseTo(400, 0);
+    });
   });
 });
 

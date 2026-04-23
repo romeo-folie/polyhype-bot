@@ -209,6 +209,15 @@ export interface OracleLagExitEvalInput {
   nearResMinReturnPct: number;
   /** Exit immediately if PM return on held side drops below -stopLossPct (%). Fires before all other checks. */
   stopLossPct: number;
+  /**
+   * When set, compute ageSec from this timestamp (ms) instead of
+   * `state.entryTsMs`. The monitor passes `position.openedAt` here so the
+   * timeout rule is anchored to the actual fill time, not the scanner-fire
+   * time. Maker-pending fills can land 3–5 minutes after the scanner writes
+   * entryTsMs; using entryTsMs would fire `oracle_lag_timeout` immediately
+   * on first visibility of the position.
+   */
+  openedAtMs?: number;
 }
 
 /**
@@ -249,9 +258,14 @@ export function evaluateOracleLagExit(
     nearResMinLeftMin,
     nearResMinReturnPct,
     stopLossPct,
+    openedAtMs,
   } = input;
 
-  const ageSec = Math.max(0, (nowMs - state.entryTsMs) / 1000);
+  // Anchor ageSec to the actual fill time when the caller supplies it
+  // (position.openedAt). Falls back to state.entryTsMs for shadow path and
+  // any caller that doesn't have a Position on hand.
+  const ageAnchorMs = openedAtMs ?? state.entryTsMs;
+  const ageSec = Math.max(0, (nowMs - ageAnchorMs) / 1000);
 
   // Compression math — uniform by storing the gap relative to P(YES):
   //   UP (fair > entryYes):  entryGap = entryFair - entryYes; currentGap = entryFair - currentYes
@@ -625,6 +639,10 @@ export class OracleLagExitMonitor {
       !latestTick || now - latestTick.receivedAt > CHAINLINK_STALE_MS;
     const currentChainlinkPrice = latestTick?.value ?? state.entryChainlinkPrice;
 
+    // Anchor ageSec to the ledger's openedAt (= reconciler import = actual
+    // fill time) so maker-pending orders that take minutes to fill aren't
+    // treated as "already past max-hold" the moment the position appears.
+    const openedAtMs = new Date(position.openedAt).getTime();
     const decision = evaluateOracleLagExit({
       state,
       currentYesPrice,
@@ -632,6 +650,7 @@ export class OracleLagExitMonitor {
       currentChainlinkPrice,
       chainlinkStale,
       nowMs: now,
+      ...(Number.isFinite(openedAtMs) ? { openedAtMs } : {}),
       compressionThreshold: cfg.ORACLE_LAG_EXIT_COMPRESSION_PCT,
       reversalBps: cfg.ORACLE_LAG_EXIT_REVERSAL_BPS,
       reversalMinReturnPct: cfg.ORACLE_LAG_EXIT_REVERSAL_MIN_RETURN_PCT,

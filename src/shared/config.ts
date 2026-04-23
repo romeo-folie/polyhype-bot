@@ -506,11 +506,17 @@ const envSchema = z.object({
   // if PM hasn't repriced at all, holding to resolution beats selling into the spread.
   ORACLE_LAG_EXIT_REVERSAL_MIN_RETURN_PCT: z.coerce.number().min(0).optional().default(0),
   // Hard timeout — drop the position after this many seconds regardless of
-  // compression progress, since the convergence window is ~55s.
+  // compression progress, since the convergence window is ~55s. ageSec is
+  // computed from position.openedAt (actual fill time), NOT state.entryTsMs
+  // (scanner-fire time) — so maker-pending fills that land 3–5 min after the
+  // scanner writes the state get a full `maxHoldSec` window from fill.
+  // Default raised 180 → 300s (2026-04-23) to cushion against borderline
+  // cases where the position barely exceeded the old cap on first visibility;
+  // 300 gives 5 minutes of post-fill runtime for compression/reversal to act.
   // Upper-bounded at 1500s to stay safely inside the 30-minute exit-state
   // Redis TTL (see EXIT_STATE_TTL_SEC in oracleLagExitMonitor.ts) — otherwise
   // the key could expire before the timeout trigger fires.
-  ORACLE_LAG_EXIT_MAX_HOLD_SEC: z.coerce.number().int().min(30).max(1500).optional().default(180),
+  ORACLE_LAG_EXIT_MAX_HOLD_SEC: z.coerce.number().int().min(30).max(1500).optional().default(300),
   // Exit-monitor tick cadence.
   ORACLE_LAG_EXIT_TICK_MS: z.coerce.number().int().min(500).optional().default(2000),
   // Near-resolution profit lock: exit when profitable with < N minutes left
