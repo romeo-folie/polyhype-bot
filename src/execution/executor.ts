@@ -669,6 +669,29 @@ async function tryExecuteViaClobMaker(
     };
   }
 
+  // Defense-in-depth for WEATHER_MAX_ENTRY_PRICE: clamping fairValue makes
+  // `price = fairValue - edgeBps ≤ cap` in the common case, but the tick-floor
+  // inside resolveMakerPrice (`Math.max(price, tick)`) can raise a sub-tick price
+  // above the cap when someone sets the cap below the book's tick size.
+  // Refuse to post in that case rather than silently overpay.
+  if (
+    emptyBookMode
+    && signal.source === 'weather'
+    && cfg.WEATHER_MAX_ENTRY_PRICE > 0
+    && price > cfg.WEATHER_MAX_ENTRY_PRICE + 1e-9
+  ) {
+    return {
+      ok: false,
+      error: 'maker_price_above_cap',
+      waitMs: Date.now() - startedAt,
+      makerBestBid: bestBid,
+      makerBestAsk: bestAsk,
+      ...(mid ? { makerMidPrice: mid } : {}),
+      ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
+      makerFillStatus: 'rejected',
+    };
+  }
+
   let size = signal.stakeUsd / price;
   const minOrderSize = parseFloat(book.min_order_size ?? '0');
   if (isFinite(minOrderSize) && minOrderSize > 0 && size < minOrderSize) {

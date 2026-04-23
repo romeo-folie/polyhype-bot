@@ -1385,6 +1385,7 @@ describe('empty-book maker route', () => {
     // skips the manual reset at the bottom doesn't leak state into siblings.
     mockConfig.WEATHER_MAKER_POST_ONLY = true;
     mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 500;
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0;
 
     mockGetOrderBook.mockResolvedValue(makeGhostBook());
     mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-eb' });
@@ -1626,14 +1627,12 @@ describe('empty-book maker route', () => {
     expect(call.price).toBeLessThanOrEqual(0.65);
     expect(call.price).toBeCloseTo(0.63, 2);
     expect(call.postOnly).toBe(false);
-    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0;
-    mockConfig.WEATHER_MAKER_POST_ONLY = true;
   });
 
   it('weather WEATHER_MAX_ENTRY_PRICE=0 disables the cap (no-op)', async () => {
     // Same high-conviction NO setup, but cap disabled — post price reflects
     // modelProb - edgeBps = 0.90 - 0.015 = 0.885 (no 0.65 clamp).
-    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0;
+    // beforeEach already sets WEATHER_MAX_ENTRY_PRICE = 0.
     const redis = makeRedis();
     await executeSignal(
       makeSignal({
@@ -1648,6 +1647,28 @@ describe('empty-book maker route', () => {
 
     const call = mockSubmitLimit.mock.calls[0]![0];
     expect(call.price).toBeGreaterThan(0.80);
+  });
+
+  it('weather refuses to post when WEATHER_MAX_ENTRY_PRICE < tick floor', async () => {
+    // Tick floor inside resolveMakerPrice would lift a sub-tick price above the
+    // cap; defense-in-depth branch refuses to post in that case rather than
+    // silently overpay. Setting cap=0.005 with tick=0.01 hits the edge case.
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.005;
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.10,
+        edgeMagnitude: 0.30,
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
   });
 
   it('non-weather source does not apply the weather entry-price cap', async () => {
@@ -1668,7 +1689,6 @@ describe('empty-book maker route', () => {
     const call = mockSubmitLimit.mock.calls[0]![0];
     // Without weather cap: fairValue = 0.90, price ≈ 0.885
     expect(call.price).toBeGreaterThan(0.80);
-    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0;
   });
 
   it('non-weather source does not apply the weather discount', async () => {

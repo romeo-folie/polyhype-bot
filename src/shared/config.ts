@@ -1441,7 +1441,10 @@ const envSchema = z.object({
   // NO bracket with modelProb=0.87 could otherwise post at ~0.85 and taker-fill at
   // whatever the resting ask is. With postOnly:false the limit IS the worst price
   // we pay, so this caps entry cost directly and lets us skip expensive entries
-  // that will likely reprice lower within hours. 0 disables the cap.
+  // that will likely reprice lower within hours. 0 disables the cap. Values below
+  // the book's tick size (typ 0.01) are unsupported — the tick-floor in
+  // resolveMakerPrice would otherwise lift the post price above the cap; the
+  // executor refuses to post in that case (maker_price_above_cap).
   WEATHER_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.65),
   // Gate: skip NO bets on tail brackets ("or higher" / "or below") when the model's
   // own P(YES) exceeds this threshold. Prevents betting against the model's directional
