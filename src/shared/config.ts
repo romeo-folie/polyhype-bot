@@ -1217,7 +1217,7 @@ const envSchema = z.object({
   // Per-source SL/TP overrides for the futures monitor. 15m swing signals need wider
   // thresholds than 1m-tuned arb defaults to avoid being stopped out by normal chop.
   HL_MOMENTUM_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(5),
-  HL_MOMENTUM_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(12),
+  HL_MOMENTUM_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(6),
   // Longs have been the weak side of the book. When enabled, a LONG only passes if at
   // least one present HL-native voter (funding contra / OI divergence) actively confirms UP.
   // Missing HL-native data is not treated as a veto; the gate only acts on present votes.
