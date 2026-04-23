@@ -201,7 +201,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       // Sports copytrades get a tighter SL — fast-resolving binaries where
       // losses are catastrophic (-41% to -57% observed over 2 weeks).
       const cat = inferCategory(position.question);
-      if (cat === 'sports') {
+      if (cat.startsWith('sports')) {
         slThreshold = cfg.COPYTRADE_SPORTS_STOP_LOSS;
       }
     } else if (cfg.TIERED_LOGIC_ENABLED) {

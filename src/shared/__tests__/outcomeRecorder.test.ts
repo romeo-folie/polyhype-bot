@@ -406,6 +406,20 @@ describe('inferCategory', () => {
     expect(inferCategory('NVIDIA announces new GPU')).toBe('ai-tech');
   });
 
+  it('returns sports-f1 for Formula 1 markets', () => {
+    expect(inferCategory('Will Max Verstappen win the Spanish Grand Prix?')).toBe('sports-f1');
+    expect(inferCategory('F1 2024 drivers championship winner')).toBe('sports-f1');
+    expect(inferCategory('Formula 1 Monaco race podium')).toBe('sports-f1');
+    expect(inferCategory('Formula-1 season points leader')).toBe('sports-f1');
+  });
+
+  it('returns sports-mma for UFC/MMA markets', () => {
+    expect(inferCategory('Will Jon Jones win by KO at UFC 309?')).toBe('sports-mma');
+    expect(inferCategory('MMA fight goes to decision')).toBe('sports-mma');
+    expect(inferCategory('Bellator heavyweight title fight result')).toBe('sports-mma');
+    expect(inferCategory('Mixed martial arts bout winner')).toBe('sports-mma');
+  });
+
   it('defaults to geopolitical', () => {
     expect(inferCategory('Unknown topic signal')).toBe('geopolitical');
     expect(inferCategory('War breaks out in region')).toBe('geopolitical');
