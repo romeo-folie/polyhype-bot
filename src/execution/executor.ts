@@ -627,6 +627,19 @@ async function tryExecuteViaClobMaker(
     }
   }
 
+  // Absolute entry-price ceiling for weather. Binds independently of modelProb so
+  // a high-conviction NO (modelProb≈0.87) can't taker-fill at 0.85 when the real
+  // market will reprice to 0.30 within hours. With postOnly:false the limit is
+  // the worst price we pay, so capping fairValue here bounds taker cost directly.
+  if (
+    emptyBookMode
+    && signal.source === 'weather'
+    && cfg.WEATHER_MAX_ENTRY_PRICE > 0
+    && fairValue != null
+  ) {
+    fairValue = Math.min(fairValue, cfg.WEATHER_MAX_ENTRY_PRICE);
+  }
+
   // Cap fair value so the submitted price can never cross resting YES-book orders.
   // For YES direction: we BUY YES → price must stay below YES bestAsk.
   // For NO direction: we BUY NO @ P → SELL YES @ (1-P); to avoid crossing a
@@ -647,6 +660,29 @@ async function tryExecuteViaClobMaker(
     return {
       ok: false,
       error: 'maker_bad_price',
+      waitMs: Date.now() - startedAt,
+      makerBestBid: bestBid,
+      makerBestAsk: bestAsk,
+      ...(mid ? { makerMidPrice: mid } : {}),
+      ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
+      makerFillStatus: 'rejected',
+    };
+  }
+
+  // Defense-in-depth for WEATHER_MAX_ENTRY_PRICE: clamping fairValue makes
+  // `price = fairValue - edgeBps ≤ cap` in the common case, but the tick-floor
+  // inside resolveMakerPrice (`Math.max(price, tick)`) can raise a sub-tick price
+  // above the cap when someone sets the cap below the book's tick size.
+  // Refuse to post in that case rather than silently overpay.
+  if (
+    emptyBookMode
+    && signal.source === 'weather'
+    && cfg.WEATHER_MAX_ENTRY_PRICE > 0
+    && price > cfg.WEATHER_MAX_ENTRY_PRICE + 1e-9
+  ) {
+    return {
+      ok: false,
+      error: 'maker_price_above_cap',
       waitMs: Date.now() - startedAt,
       makerBestBid: bestBid,
       makerBestAsk: bestAsk,
@@ -693,7 +729,7 @@ async function tryExecuteViaClobMaker(
   // matching engine has real resting liquidity below our fair value, a taker
   // fill is a better-than-expected entry. The fair-value cap already prevents
   // overpaying — GTC rests as a maker if no matching ask is found.
-  const weatherPostOnly: boolean = Boolean(
+  const weatherPostOnly = Boolean(
     emptyBookMode && signal.source === 'weather' && cfg.WEATHER_MAKER_POST_ONLY,
   );
   const postOnly = emptyBookMode
