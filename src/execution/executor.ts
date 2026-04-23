@@ -112,6 +112,67 @@ export async function getConvictionMultiplier(
   return Math.min(rawMultiplier, cfg.CONVICTION_MAX_MULTIPLIER);
 }
 
+/**
+ * Hyperliquid funding-rate shadow observation.
+ *
+ * Pre-computed shape that `executeHyperliquidSignal` enqueues to
+ * `shadow_observations` on every futures gate evaluation, regardless of
+ * whether the gate would have fired. Always-on logging gives the
+ * funding-rate distribution full visibility for evaluating the threshold.
+ */
+export interface HlFundingObservation {
+  hourlyBps: number;
+  signedBps: number;
+  wouldBlock: boolean;
+  shadowRow: {
+    kind: 'hl_funding';
+    source: 'futures';
+    symbol: string;
+    direction: 'LONG' | 'SHORT';
+    wouldBlock: boolean;
+    metricValue: number;
+    threshold: number;
+    payload: Record<string, unknown>;
+  };
+}
+
+/**
+ * Pure helper that computes the hl_funding shadow observation from a futures
+ * signal + funding rate + gate config. Extracted so the always-on shadow row
+ * can be unit-tested without standing up the full executor pipeline.
+ */
+export function buildHlFundingObservation(
+  signal: { marketId: string; direction: 'LONG' | 'SHORT' },
+  fundingRate: number,
+  gateThresholdBps: number,
+  gateEnabled: boolean,
+): HlFundingObservation {
+  const hourlyBps = fundingRate * 10000;
+  const signedBps = signal.direction === 'LONG' ? hourlyBps : -hourlyBps;
+  const wouldBlock = signedBps > gateThresholdBps;
+  return {
+    hourlyBps,
+    signedBps,
+    wouldBlock,
+    shadowRow: {
+      kind: 'hl_funding',
+      source: 'futures',
+      symbol: signal.marketId,
+      direction: signal.direction,
+      wouldBlock,
+      metricValue: signedBps,
+      threshold: gateThresholdBps,
+      payload: {
+        hourlyBps,
+        signedBps,
+        absSignedBps: Math.abs(signedBps),
+        marketId: signal.marketId,
+        gateEnabled,
+      },
+    },
+  };
+}
+
 export interface ExecutionResult {
   signal: TradeSignal;
   skipped: boolean;
@@ -1071,38 +1132,42 @@ async function executeHyperliquidSignal(
       return { signal, skipped: true, skipReason: 'global_margin_cap' };
     }
 
-    // 1b. Funding-rate gate (Change 4). Shadow-logs skips when disabled.
+    // 1b. Funding-rate gate (Change 4). Always shadow-logs the observation so
+    // the funding distribution is visible regardless of whether the gate fires.
+    // Previously only wrote a shadow row when the gate would have triggered,
+    // leaving us with 2 rows in 11 days and no way to evaluate the threshold.
     try {
       const ctx = await hl.getAssetContext(signal.marketId);
-      const hourlyBps = ctx.fundingRate * 10000;
-      const signedBps = signal.direction === 'LONG' ? hourlyBps : -hourlyBps;
-      if (signedBps > cfg.HL_MAX_ADVERSE_FUNDING_BPS) {
+      const obs = buildHlFundingObservation(
+        signal as { marketId: string; direction: 'LONG' | 'SHORT' },
+        ctx.fundingRate,
+        cfg.HL_MAX_ADVERSE_FUNDING_BPS,
+        cfg.HL_FUNDING_GATE_ENABLED,
+      );
+
+      void enqueueWrite('shadow_observations', obs.shadowRow);
+
+      if (obs.wouldBlock) {
         if (cfg.HL_FUNDING_GATE_ENABLED) {
           logger.info('[hl-funding] funding_adverse block', {
             symbol: signal.marketId,
             direction: signal.direction,
-            hourlyBps: hourlyBps.toFixed(4),
-            signedBps: signedBps.toFixed(4),
+            hourlyBps: obs.hourlyBps.toFixed(4),
+            signedBps: obs.signedBps.toFixed(4),
             max: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
           });
           return {
             signal,
             skipped: true,
-            skipReason: `funding_adverse:hourlyBps=${hourlyBps.toFixed(4)},dir=${signal.direction}`,
+            skipReason: `funding_adverse:hourlyBps=${obs.hourlyBps.toFixed(4)},dir=${signal.direction}`,
           };
         } else {
           logger.info('[hl-funding] shadow skip', {
             symbol: signal.marketId,
             direction: signal.direction,
-            hourlyBps: hourlyBps.toFixed(4),
-            signedBps: signedBps.toFixed(4),
+            hourlyBps: obs.hourlyBps.toFixed(4),
+            signedBps: obs.signedBps.toFixed(4),
             max: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
-          });
-          void enqueueWrite('shadow_observations', {
-            kind: 'hl_funding', source: 'futures',
-            symbol: signal.marketId, direction: signal.direction,
-            wouldBlock: true, metricValue: Math.abs(signedBps), threshold: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
-            payload: { hourlyBps, signedBps, marketId: signal.marketId },
           });
         }
       }
@@ -1655,7 +1720,18 @@ export async function executeSignal(
         signal.source,
         cfg,
       );
-      if (multiplier > 1) {
+      if (multiplier <= 1) {
+        // Visibility log: confirms the conviction lookup ran but found no
+        // independent-source confluence on this market+direction. Without this,
+        // a quiet `conviction_multiplier` shadow kind is indistinguishable from
+        // dead instrumentation.
+        logger.debug('[executor] conviction multiplier neutral (no boost)', {
+          marketId: signal.marketId,
+          direction: signal.direction,
+          source: signal.source,
+          multiplier: multiplier.toFixed(2),
+        });
+      } else {
         // Original stake is already Kelly-capped against bankroll; multiplier
         // is bounded at CONVICTION_MAX_MULTIPLIER so the boosted value is at
         // most that factor above an already-safe stake.
