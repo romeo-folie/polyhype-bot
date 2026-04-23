@@ -164,23 +164,34 @@ async function buildConditionToMarketsMap(
   return result;
 }
 
+const QUESTION_FALLBACK_WINDOW_DAYS = 30;
+
 /**
  * Fallback path: look up positions by exact question match when the
  * conditionId → marketId join via market_catalog returns nothing. This
  * handles the case where `market_catalog` is incomplete for markets we've
  * actually traded (observed 2026-04-23 for 2 weather markets where the
- * scanner ran but market_catalog wasn't written). The fallback is
- * deliberately exact-match on `question` (NOT fuzzy) — Polymarket's
- * activity API's `title` field mirrors our DB `question` 1:1 for the
- * markets we've seen, so exact match is safe. Fuzzy match would risk
- * false positives on similar temperature-bracket questions.
+ * scanner ran but market_catalog wasn't written). Exact-match on
+ * `question` (NOT fuzzy) — PM's activity API title mirrors our DB
+ * question 1:1 for markets we've seen.
+ *
+ * Scoped to a 30-day window ending at the redeem timestamp because
+ * (a) `positions` has no index on `question` — a full scan is cheap when
+ * bounded on `opened_at` (which IS indexed) but pathological without,
+ * and (b) weather bracket questions recur year over year ("Hong Kong
+ * 30°C on April 22" could match an earlier year's identical bracket).
  */
 async function queryPositionsByQuestion(
   question: string,
   conditionId: string,
+  redeemTimestampSec: number,
 ): Promise<PositionRow[]> {
   if (!question) return [];
   const sql = getSql();
+  const redeemMs = redeemTimestampSec * 1000;
+  const windowStartMs = redeemMs - QUESTION_FALLBACK_WINDOW_DAYS * 86_400_000;
+  const windowStartIso = new Date(windowStartMs).toISOString();
+  const windowEndIso = new Date(redeemMs).toISOString();
   const rows = await sql<PositionRow[]>`
     SELECT
       id::text,
@@ -213,6 +224,7 @@ async function queryPositionsByQuestion(
       synth_hedged AS "synthHedged"
     FROM positions
     WHERE question = ${question}
+      AND opened_at BETWEEN ${windowStartIso}::timestamptz AND ${windowEndIso}::timestamptz
     ORDER BY opened_at DESC
   `;
   return rows;
@@ -523,21 +535,27 @@ export async function reconcileRedeem(
         return rows.map((r) => r.market_id);
       })();
   let positions = await queryPositionsByMarketIds(marketIds, redeem.conditionId);
-  let matchedVia: 'market_catalog' | 'question_fallback' = 'market_catalog';
 
-  // Fallback: when market_catalog is missing this conditionId (observed
-  // 2026-04-23 for Moscow 12°C and Houston 70-71°F — positions we actually
-  // traded but market_catalog never snapshotted), try matching positions by
-  // exact question text against `redeem.title`. PM's activity API title
-  // mirrors our DB question 1:1 for markets we've seen; fuzzy matching
-  // would risk false positives across similar temperature brackets so we
-  // stick to exact. Fallback hits are logged so we can monitor how often
-  // this is needed — consistent hits mean market_catalog has a systemic
-  // gap that should be fixed at the write side.
-  if (positions.length === 0 && redeem.title) {
-    positions = await queryPositionsByQuestion(redeem.title, redeem.conditionId);
+  // Fallback: ONLY when market_catalog has no mapping for this conditionId
+  // (observed 2026-04-23 for Moscow 12°C and Houston 70-71°F — positions we
+  // actually traded but market_catalog never snapshotted). Gated on
+  // `marketIds.length === 0`, NOT on `positions.length === 0`: if
+  // market_catalog mapped but positions came back empty, that's a
+  // legitimate manual-PM-trade case and we must NOT blind-match by
+  // question text (risk of attributing the redeem to an unrelated position
+  // sharing the same question text on a recurring weather bracket).
+  //
+  // Scoped to a 30-day pre-redeem window in the query to bound the seq
+  // scan (positions has no index on question) and to filter out ancient
+  // duplicates on recurring brackets like "Hong Kong 30°C on April 22" —
+  // same question text can appear year over year.
+  if (marketIds.length === 0 && redeem.title) {
+    positions = await queryPositionsByQuestion(
+      redeem.title,
+      redeem.conditionId,
+      redeem.timestamp,
+    );
     if (positions.length > 0) {
-      matchedVia = 'question_fallback';
       logger.info('[pm-reconciler] question-fallback recovered a position', {
         conditionId: redeem.conditionId,
         title: redeem.title,
@@ -563,8 +581,6 @@ export async function reconcileRedeem(
     await redis.set(dedupKey, '1', 'EX', PROCESSED_TTL_SEC);
     return;
   }
-
-  void matchedVia; // logged above; retained for future telemetry
 
   const existing = await queryExistingOutcome(
     match.marketId,
