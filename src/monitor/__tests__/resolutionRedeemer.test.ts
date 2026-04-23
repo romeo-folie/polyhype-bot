@@ -497,4 +497,178 @@ describe('redeemResolvedPositions', () => {
     expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'clob-loss1', 'YES');
     expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
   });
+
+  it('expired zero-balance position with real ledger shares + on-chain WIN → records auto_redeemed_win', async () => {
+    // Simulates Polymarket's auto-redeemer having already paid us out: we held
+    // 6.66 NO shares, market resolved NO, Polymarket's backend redeemed them
+    // to USDC. By the time our redeemer runs, balance is 0 but on-chain
+    // payout confirms NO won.
+    const pastDate = new Date(Date.now() - 60_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'weather-autoredeem',
+        conditionId: 'cond-weather-autoredeem',
+        clobTokenIds: ['token-yes-w', 'token-no-w'],
+        direction: 'NO',
+        executionVenue: 'clob',
+        question: 'Will the highest temperature in Hong Kong be 29°C on April 22?',
+        sharesHeld: 6.66,          // ledger recorded a real fill
+        entryPrice: 0.015,
+        stakeUsd: 0.10,
+        endDate: pastDate,
+        sourcedFrom: 'weather:hong kong:2026-04-22:29°C',
+      },
+    ]);
+    // Gamma returns empty (unresolvable for this market type)
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    // On-chain: NO won (index 1)
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 1 ? 1n : 0n,
+    );
+    // Balance has been auto-redeemed to 0
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 0 } as any);
+
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    // Must NOT attempt on-chain redemption (no shares to redeem)
+    expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
+    // Must close the ledger position and notify a WIN
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'weather-autoredeem', 'NO');
+    expect(vi.mocked(mockNotifyMarketResolved)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        result: 'won',
+        reason: expect.stringContaining('auto-redeemed'),
+      }),
+    );
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
+  });
+
+  it('expired zero-balance position with real ledger shares + on-chain LOSS → records resolved_as_loss', async () => {
+    // Same balance=0 state, but on-chain says the other side won.
+    const pastDate = new Date(Date.now() - 60_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'weather-lost',
+        conditionId: 'cond-weather-lost',
+        clobTokenIds: ['token-yes-wl', 'token-no-wl'],
+        direction: 'NO',
+        executionVenue: 'clob',
+        question: 'Will the highest temperature in Shenzhen be 26°C on April 23?',
+        sharesHeld: 5.83,
+        entryPrice: 0.59,
+        stakeUsd: 3.44,
+        endDate: pastDate,
+        sourcedFrom: 'weather:shenzhen:2026-04-23:26°C',
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    // On-chain: YES won (we held NO, so we lost)
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 0 ? 1n : 0n,
+    );
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 0 } as any);
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'weather-lost', 'NO');
+    expect(vi.mocked(mockNotifyMarketResolved)).toHaveBeenCalledWith(
+      expect.objectContaining({ result: 'lost' }),
+    );
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(false);
+    expect(results[0].error).toBe('resolved_as_loss');
+  });
+
+  it('expired zero-balance position with real ledger shares + on-chain NOT YET settled → retries without writing outcome', async () => {
+    // Polymarket auto-redeem ran before CTF payout finalized — our on-chain
+    // check sees denominator=0. Previously we would have prematurely written
+    // a -100% expired_unresolvable loss here, silently dropping a real win.
+    const pastDate = new Date(Date.now() - 60_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'weather-pending',
+        conditionId: 'cond-weather-pending',
+        clobTokenIds: ['token-yes-wp', 'token-no-wp'],
+        direction: 'NO',
+        executionVenue: 'clob',
+        question: 'Will the highest temperature in Moscow be 12°C on April 22?',
+        sharesHeld: 6.74,
+        entryPrice: 0.44,
+        stakeUsd: 2.97,
+        endDate: pastDate,
+        sourcedFrom: 'weather:moscow:2026-04-22:12°C',
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    // On-chain: not yet resolved
+    mockCtfContract.payoutDenominator.mockResolvedValue(0n);
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 0 } as any);
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    // Must NOT write a premature loss outcome
+    expect(mockClosePosition).not.toHaveBeenCalled();
+    expect(vi.mocked(mockNotifyMarketResolved)).not.toHaveBeenCalled();
+    expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
+    expect(results).toHaveLength(0);
+  });
+
+  it('expired dust position (never filled) + on-chain WIN → records expired_dust, NOT auto_redeemed_win', async () => {
+    // Avoids ghost wins: if the ledger never recorded meaningful sharesHeld,
+    // even a resolved-in-our-favor on-chain outcome should NOT be counted as
+    // a win (there were no shares to auto-redeem in the first place).
+    const pastDate = new Date(Date.now() - 60_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'weather-neverfilled',
+        conditionId: 'cond-weather-neverfilled',
+        clobTokenIds: ['token-yes-wn', 'token-no-wn'],
+        direction: 'NO',
+        executionVenue: 'clob',
+        question: 'Will the highest temperature in Toronto be 18°C on April 22?',
+        sharesHeld: 0.005,     // healed_mismatch remnant — no real fill
+        entryPrice: 0.74,
+        stakeUsd: 4.21,        // stake recorded at submit but order didn't fill
+        endDate: pastDate,
+        sourcedFrom: 'weather:toronto:2026-04-22:18°C',
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 1 ? 1n : 0n,
+    );
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 0 } as any);
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'weather-neverfilled', 'NO');
+    expect(vi.mocked(mockNotifyMarketResolved)).toHaveBeenCalledWith(
+      expect.objectContaining({ result: 'lost', reason: 'expired dust position' }),
+    );
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(false);
+    expect(results[0].error).toBe('expired_dust');
+  });
 });
