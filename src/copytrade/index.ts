@@ -4,6 +4,7 @@ import { dedup } from '../shared/redis.js';
 import {
   fetchWithTimeout,
   getMarketBySlug,
+  getEventTagSlugs,
   parseClobTokenIds,
   parseOutcomePrices,
 } from '../mapping/gamma.js';
@@ -131,6 +132,89 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   ],
   'sports-nba': ['nba', 'basketball', 'lakers', 'warriors', 'celtics', 'playoffs', 'finals', 'mvp'],
   'sports-nfl': ['nfl', 'american football', 'super bowl', 'touchdown', 'quarterback', 'playoffs'],
+  'sports-nhl': [
+    'nhl',
+    'hockey',
+    'stanley cup',
+    'bruins',
+    'rangers',
+    'maple leafs',
+    'canadiens',
+    'panthers',
+    'lightning',
+    'capitals',
+    'penguins',
+    'flyers',
+    'devils',
+    'islanders',
+    'red wings',
+    'hurricanes',
+    'senators',
+    'sabres',
+    'blackhawks',
+    'stars',
+    'wild',
+    'avalanche',
+    'blues',
+    'predators',
+    'jets',
+    'oilers',
+    'flames',
+    'canucks',
+    'kraken',
+    'sharks',
+    'ducks',
+    'golden knights',
+    'utah hockey',
+    'mcdavid',
+    'crosby',
+    'ovechkin',
+    'matthews',
+    'power play',
+    'face-off',
+    'empty net',
+  ],
+  'sports-f1': [
+    'formula 1',
+    'formula one',
+    'formula-1',
+    'grand prix',
+    'pole position',
+    'drivers champion',
+    'constructors champion',
+    'verstappen',
+    'hamilton',
+    'norris',
+    'leclerc',
+    'bottas',
+    'russell',
+    'piastri',
+    'sainz',
+    'alonso',
+    'ferrari',
+    'mclaren',
+    'red bull',
+    'cadillac',
+    'aston martin',
+  ],
+  'sports-mma': [
+    'ufc',
+    'mma',
+    'bellator',
+    'one championship',
+    'mixed martial arts',
+    'octagon',
+    'pfl',
+    'submission',
+    'knockout',
+    'by ko',
+    'tko',
+    'o/u rounds',
+    'o/u 1.5 rounds',
+    'o/u 2.5 rounds',
+    'o/u 3.5 rounds',
+    'decision',
+  ],
   'sports-soccer': [
     'soccer',
     'fifa',
@@ -143,9 +227,11 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     'serie a',
     'ligue 1',
     'mls',
+    'liga mx',
+    'europa league',
     // "win on YYYY-MM-DD" — match-day question pattern (e.g. "Will FC Köln win on 2026-04-17?")
     'win on',
-    // Club names not covered by league keywords
+    // Big-5 club names
     'köln',
     'koln',
     'dortmund',
@@ -166,6 +252,26 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     'psg',
     'liverpool',
     'manchester',
+    // Additional clubs surfaced from blocked trades
+    'vejle',
+    'silkeborg',
+    'necaxa',
+    'guadalajara',
+    'tigres',
+    'atlas fc',
+    'atlas',
+    'strasbourg',
+    'ogc nice',
+    'real sociedad',
+    'getafe',
+    'elche',
+    'bournemouth',
+    'leeds',
+    'odense',
+    'karagumruk',
+    'karagümrük',
+    'fc københavn',
+    'copenhagen',
   ],
   'sports-mlb': ['mlb', 'baseball', 'world series', 'home run', 'pitcher'],
   'sports-tennis': [
@@ -175,6 +281,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     'grand slam',
     'wimbledon',
     'roland garros',
+    'french open',
     'us open',
     'australian open',
   ],
@@ -317,14 +424,49 @@ const CATEGORY_REGEXES = new Map<string, RegExp>(
   }),
 );
 
+// Maps each scope name to the Gamma tag slugs that represent it.
+// Used as a fallback when the keyword regex misses (e.g. obscure club/player names).
+const SCOPE_TAG_ALIASES: Record<string, string[]> = {
+  'sports-nhl': ['nhl', 'hockey'],
+  'sports-nba': ['nba', 'basketball'],
+  'sports-mlb': ['mlb', 'baseball'],
+  'sports-nfl': ['nfl', 'american-football'],
+  'sports-soccer': [
+    'soccer',
+    'football',
+    'premier-league',
+    'la-liga',
+    'bundesliga',
+    'serie-a',
+    'ligue-1',
+    'mls',
+    'liga-mx',
+    'champions-league',
+    'europa-league',
+  ],
+  'sports-tennis': ['tennis', 'atp', 'wta'],
+  'sports-f1': ['f1', 'formula-1', 'formula-one'],
+  'sports-mma': ['mma', 'ufc'],
+  weather: ['weather'],
+  macro: ['economy', 'finance', 'business', 'macro', 'markets'],
+  'crypto-regulatory': ['crypto', 'bitcoin', 'ethereum', 'defi', 'web3'],
+  'us-politics': ['us-politics', 'politics', 'trump', 'congress', 'elections'],
+  geopolitical: ['geopolitics', 'middle-east', 'russia', 'ukraine', 'china', 'israel', 'iran'],
+};
+
 /**
  * Check if a market title or description matches any keyword from the allowed categories.
- * Keywords are matched as whole words to avoid false positives from short tokens.
+ * Keywords are matched as whole words (primary path — zero HTTP cost).
+ *
+ * Pass `tagSlugs` from `getEventTagSlugs()` to enable the tag-based fallback layer.
+ * Tags are only checked when the keyword pass returns false — callers should
+ * fetch tags lazily rather than unconditionally.
  */
 export function matchesCategory(
   title: string,
   description: string | null,
   allowedScopes: string[],
+  tagSlugs?: string[],
 ): boolean {
   if (allowedScopes.includes('all') || allowedScopes.length === 0) return true;
 
@@ -339,9 +481,20 @@ export function matchesCategory(
   }
 
   const lowerText = `${title} ${description ?? ''}`.toLowerCase();
+
+  // Primary: keyword regex
   for (const scope of allowedScopes) {
     if (CATEGORY_REGEXES.get(scope)?.test(lowerText)) return true;
   }
+
+  // Fallback: Gamma event tags
+  if (tagSlugs && tagSlugs.length > 0) {
+    for (const scope of allowedScopes) {
+      const aliases = SCOPE_TAG_ALIASES[scope];
+      if (aliases?.some((alias) => tagSlugs.includes(alias))) return true;
+    }
+  }
+
   return false;
 }
 
@@ -526,9 +679,29 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         continue;
       }
 
-      // Category Filter (check both the activity Title and the official Market Question)
+      // Category Filter — keyword-first, Gamma-tag fallback on miss.
       const scanText = `${trade.title} ${market.question}`;
-      if (!matchesCategory(scanText, market.description, cfg.COPYTRADE_MARKET_SCOPE)) {
+      const keywordHit = matchesCategory(scanText, market.description, cfg.COPYTRADE_MARKET_SCOPE);
+      let scopePassed = keywordHit;
+
+      if (!keywordHit && cfg.COPYTRADE_SCOPE_TAG_FALLBACK) {
+        const eventId = Array.isArray(market.events) ? market.events[0]?.id : undefined;
+        if (eventId) {
+          const tagSlugs = await getEventTagSlugs(eventId);
+          if (matchesCategory(scanText, market.description, cfg.COPYTRADE_MARKET_SCOPE, tagSlugs)) {
+            scopePassed = true;
+            logger.debug('[copytrade] scope matched via event tags', {
+              marketId: market.id,
+              tags: tagSlugs,
+            });
+            await recordCopytradeFilter(redis, 'scope_tag_rescue').catch(() => {
+              /* ignore telemetry errors */
+            });
+          }
+        }
+      }
+
+      if (!scopePassed) {
         logger.info('[copytrade] skipped market outside scope', {
           title: trade.title,
           question: market.question,

@@ -29,6 +29,11 @@ export interface GammaEvent {
   negRisk?: boolean;
 }
 
+export interface GammaMarketEvent {
+  id: string;
+  slug: string;
+}
+
 export interface GammaMarket {
   id: string;
   /** Market slug, e.g. `btc-updown-15m-1776005100`. Present on most Gamma responses. */
@@ -61,6 +66,8 @@ export interface GammaMarket {
   feesEnabled?: boolean;
   /** Fee type string when feesEnabled=true (e.g. "taker", "both"). Null when no fees. */
   feeType?: string | null;
+  /** Parent events for this market. Present on /markets responses from Gamma. */
+  events?: GammaMarketEvent[];
 }
 
 interface SearchEventsOptions {
@@ -874,4 +881,33 @@ export async function discoverUpDownMarketsBySlug(
   }
 
   return results;
+}
+
+// Process-local tag cache — 24h TTL per event ID.
+const eventTagCache = new Map<string, { slugs: string[]; expiresAt: number }>();
+const EVENT_TAG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Fetch Gamma tag slugs for a single event ID.
+ *
+ * Results are cached in-process for 24 hours so repeated copytrade cycles
+ * don't hammer the Gamma API for the same long-running event.
+ * Returns [] on any HTTP error — callers degrade gracefully.
+ */
+export async function getEventTagSlugs(eventId: string): Promise<string[]> {
+  const cached = eventTagCache.get(eventId);
+  if (cached && Date.now() < cached.expiresAt) return cached.slugs;
+
+  try {
+    const url = `${BASE_URL}/events/${encodeURIComponent(eventId)}`;
+    const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+    if (!res.ok) return [];
+
+    const event = (await res.json()) as { tags?: Array<{ slug: string }> };
+    const slugs = Array.isArray(event.tags) ? event.tags.map((t) => t.slug) : [];
+    eventTagCache.set(eventId, { slugs, expiresAt: Date.now() + EVENT_TAG_CACHE_TTL_MS });
+    return slugs;
+  } catch {
+    return [];
+  }
 }
