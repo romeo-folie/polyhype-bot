@@ -1401,6 +1401,16 @@ const envSchema = z.object({
   // default because bracket model uncertainty is structurally larger and the side
   // bias (YES 11.5% vs NO 73.7%) argues for lighter sizing.
   WEATHER_KELLY_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.25),
+  // --- WEATHER ENTRY PRICE OPTIMIZATION ---
+  // Force post-only GTC for weather entries (no taker fallback). Days-scale edge
+  // means missing a fill is far cheaper than overpaying; let the market come to us.
+  WEATHER_MAKER_POST_ONLY: boolFromEnv.optional().default(true),
+  // Aggressive price improvement: post at bestAsk * (1 - BPS/10000) so the maker
+  // only fills when someone crosses *into* us at a meaningfully better price.
+  // Still capped by fair value (modelProb) so we never post above what we think
+  // the side is worth. Fill rate drops as this increases — 500 (5%) is a moderate
+  // starting point; tune upward once fill rate on current ask minus 40bps is known.
+  WEATHER_MAKER_DISCOUNT_BPS: z.coerce.number().min(0).max(5000).optional().default(500),
   // Gate: skip NO bets on tail brackets ("or higher" / "or below") when the model's
   // own P(YES) exceeds this threshold. Prevents betting against the model's directional
   // call — edgeNo can be spuriously positive even when modelProb is 0.80+ for YES.

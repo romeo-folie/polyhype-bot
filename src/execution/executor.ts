@@ -541,6 +541,27 @@ async function tryExecuteViaClobMaker(
     fairValue = Math.min(marketSide + cfg.SPORTS_MAKER_PREMIUM_PCT, fairValue);
   }
 
+  // Weather empty-book: aggressive price improvement below current side-ask.
+  // Weather brackets have days-scale edges, not seconds-scale — missing a fill is
+  // far cheaper than overpaying by a wide margin, and we've observed entries at
+  // 0.80 that reprice to 0.30 within hours (we'd rather catch those on the way
+  // down). The discount stacks on top of the existing fair-value cap: we still
+  // never post above what the model thinks the side is worth.
+  //   YES direction → side-ask = bestAsk (YES book)
+  //   NO direction  → side-ask = 1 - bestBid (YES-book bestBid is NO's bestAsk)
+  if (emptyBookMode && signal.source === 'weather' && cfg.WEATHER_MAKER_DISCOUNT_BPS > 0) {
+    const sideAsk =
+      signal.direction === 'YES' || signal.direction === 'UP'
+        ? bestAsk
+        : bestBid > 0 ? 1 - bestBid : 0;
+    if (sideAsk > 0) {
+      const discountedAnchor = sideAsk * (1 - cfg.WEATHER_MAKER_DISCOUNT_BPS / 10_000);
+      fairValue = fairValue != null
+        ? Math.min(fairValue, discountedAnchor)
+        : discountedAnchor;
+    }
+  }
+
   // Cap fair value so the submitted price can never cross resting YES-book orders.
   // For YES direction: we BUY YES → price must stay below YES bestAsk.
   // For NO direction: we BUY NO @ P → SELL YES @ (1-P); to avoid crossing a
@@ -598,11 +619,21 @@ async function tryExecuteViaClobMaker(
   // OSINT empty-book loss case). Oracle-lag handles rejection with a retry and
   // re-priced order.
   //
-  // All other empty-book sources (weather, near-zero-arb, …) use non-post-only
-  // GTC: if the matching engine has real resting liquidity below our fair value,
-  // a taker fill is a better-than-expected entry. The fair-value cap already
-  // prevents overpaying — GTC rests as a maker if no matching ask is found.
-  const postOnly = emptyBookMode ? signal.source === 'oracle-lag' : true;
+  // Weather uses post-only when WEATHER_MAKER_POST_ONLY=true: days-scale edge
+  // means we want strict maker behavior (no taker fallback). Without post-only,
+  // a discounted limit could still take at a better-than-modelProb price, but
+  // we've decided to forego those fills to keep entry behavior predictable.
+  //
+  // Other empty-book sources (near-zero-arb, …) use non-post-only GTC: if the
+  // matching engine has real resting liquidity below our fair value, a taker
+  // fill is a better-than-expected entry. The fair-value cap already prevents
+  // overpaying — GTC rests as a maker if no matching ask is found.
+  const weatherPostOnly: boolean = Boolean(
+    emptyBookMode && signal.source === 'weather' && cfg.WEATHER_MAKER_POST_ONLY,
+  );
+  const postOnly = emptyBookMode
+    ? (signal.source === 'oracle-lag' || weatherPostOnly)
+    : true;
   let result = await submitClobLimitBuy({
     tokenId,
     price,

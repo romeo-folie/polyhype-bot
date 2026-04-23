@@ -93,6 +93,8 @@ const mockConfig = {
   ORACLE_LAG_MAKER_RETRY_ON_REJECT: true,
   ORACLE_LAG_REAL_BOOK_MAKER_MAX_WAIT_MS: 0,
   SPORTS_MAKER_PREMIUM_PCT: 0.02,
+  WEATHER_MAKER_POST_ONLY: true,
+  WEATHER_MAKER_DISCOUNT_BPS: 500,
 };
 
 const mockLoadConfig = vi.fn(() => mockConfig);
@@ -1485,6 +1487,102 @@ describe('empty-book maker route', () => {
     expect(mockSubmitLimit).toHaveBeenCalledOnce();
   });
 
+  it('weather YES applies DISCOUNT_BPS below bestAsk and posts post-only', async () => {
+    // Ghost book: YES bestBid=0.01, bestAsk=0.99. With modelProb=0.95 (close to
+    // bestAsk) and DISCOUNT_BPS=1500 (15%):
+    //   discountedAnchor = 0.99 * 0.85 = 0.8415
+    //   fairValue = min(0.95, 0.8415) = 0.8415
+    //   no-cross cap = min(0.8415, 0.99 - 0.01) = 0.8415
+    //   edgeBps = 150 → price = 0.8415 - 0.015 = 0.8265 → tick-rounded 0.82
+    mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 1500;
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.95,
+        edgeMagnitude: 0.30,
+        consensusStddev: 0.05,
+        direction: 'YES',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    const call = mockSubmitLimit.mock.calls[0]![0];
+    expect(call.postOnly).toBe(true);
+    expect(call.price).toBeCloseTo(0.82, 2);
+    expect(call.price).toBeLessThan(0.95); // well below modelProb
+    mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 500;
+  });
+
+  it('weather NO applies discount against NO-side ask (1 - bestBid)', async () => {
+    // Ghost book: YES bestBid=0.01, bestAsk=0.99 → NO side ask = 1 - 0.01 = 0.99.
+    // modelProb=P(YES)=0.05 → P(NO)=0.95 (fairValue init for NO).
+    // DISCOUNT_BPS=1500 → discountedAnchor = 0.99 * 0.85 = 0.8415.
+    //   fairValue = min(0.95, 0.8415) = 0.8415
+    //   no-cross cap for NO = min(0.8415, 1 - 0.01 - 0.01) = 0.8415
+    //   edgeBps=150 → 0.8415 - 0.015 = 0.8265 → tick-rounded 0.82
+    mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 1500;
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.05,
+        edgeMagnitude: 0.30,
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    const call = mockSubmitLimit.mock.calls[0]![0];
+    expect(call.price).toBeCloseTo(0.82, 2);
+    expect(call.postOnly).toBe(true);
+    mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 500;
+  });
+
+  it('weather with WEATHER_MAKER_POST_ONLY=false posts non-post-only GTC', async () => {
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.85,
+        edgeMagnitude: 0.30,
+        direction: 'YES',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(mockSubmitLimit).toHaveBeenCalledWith(
+      expect.objectContaining({ postOnly: false }),
+    );
+    mockConfig.WEATHER_MAKER_POST_ONLY = true;
+  });
+
+  it('non-weather source does not apply the weather discount', async () => {
+    // near-zero-arb on the ghost book should NOT be discounted by
+    // WEATHER_MAKER_DISCOUNT_BPS. Only weather source gets the knob applied.
+    mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 5000; // extreme — would be obvious if applied
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'near-zero-arb',
+        consensusProbability: 0.95,
+        edgeMagnitude: 0.50,
+        direction: 'YES',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    const call = mockSubmitLimit.mock.calls[0]![0];
+    // Without discount: fairValue = min(0.95, 0.99 - 0.01) = 0.95; price = 0.95 - 0.015 = 0.935
+    expect(call.price).toBeGreaterThan(0.90);
+    mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 500;
+  });
+
   it('sports bypasses consensus/edge/stddev gates (structural-edge source)', async () => {
     // Sports edge comes from a live ESPN score model, not LLM consensus.
     // The Astros/Guardians signal that triggered this fix had consensus=0.595
@@ -1617,21 +1715,24 @@ describe('empty-book maker route', () => {
     expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.90 }));
   });
 
-  it('weather empty-book GTC fills immediately (taker) — no persist-and-poll', async () => {
-    // Non-post-only GTC for weather: if real liquidity exists in the matching
-    // engine, the order fills as a taker in the same cycle.
+  it('near-zero-arb empty-book GTC fills immediately (taker) — no persist-and-poll', async () => {
+    // Non-post-only GTC for sources that allow taker fallback in empty-book
+    // mode (near-zero-arb, etc.). If real liquidity exists in the matching
+    // engine, the order fills as a taker in the same cycle. Weather was the
+    // canonical case here until WEATHER_MAKER_POST_ONLY shipped — it's now
+    // strictly post-only and covered by the dedicated post-only tests.
     mockSubmitLimit.mockResolvedValueOnce({
       success: true,
-      order_id: 'order-weather-taker',
+      order_id: 'order-nz-taker',
       shares_bought: 5.88,
     });
     const redis = makeRedis();
     const result = await executeSignal(
       makeSignal({
-        source: 'weather',
+        source: 'near-zero-arb',
         consensusProbability: 0.08,
-        edgeMagnitude: 0.10,
-        consensusStddev: 0.4,
+        edgeMagnitude: 0.50,
+        consensusStddev: 0.05,
         direction: 'NO',
       }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
