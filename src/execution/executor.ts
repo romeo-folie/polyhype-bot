@@ -85,6 +85,41 @@ export function atrTimeframeForSignalSource(
  * Shadow-logs when CONVICTION_MULTIPLIER_ENABLED=false so we can review the
  * distribution before flipping live.
  */
+export async function getConvictionMultiplier(
+  redis: Redis,
+  marketId: string,
+  direction: string,
+  source: string,
+  cfg: ReturnType<typeof loadConfig>,
+): Promise<number> {
+  const key = `${CONVICTION_KEY_PREFIX}${marketId}:${direction}`;
+  const nowS = Math.floor(Date.now() / 1000);
+  const cutoff = nowS - cfg.CONVICTION_SIGNAL_TTL_S;
+
+  // Prune stale entries, then record current source.
+  await redis.zremrangebyscore(key, '-inf', cutoff);
+  await redis.zadd(key, nowS, source);
+  await redis.expire(key, cfg.CONVICTION_SIGNAL_TTL_S * 2);
+
+  // Count distinct OTHER sources that fired within the window.
+  const members: string[] = await redis.zrangebyscore(key, cutoff, '+inf');
+  const otherSources = new Set(members.filter((m) => m !== source));
+  const extraSources = otherSources.size;
+
+  if (extraSources === 0) return 1;
+
+  const rawMultiplier = 1 + cfg.CONVICTION_BONUS_PER_SOURCE * extraSources;
+  return Math.min(rawMultiplier, cfg.CONVICTION_MAX_MULTIPLIER);
+}
+
+/**
+ * Hyperliquid funding-rate shadow observation.
+ *
+ * Pre-computed shape that `executeHyperliquidSignal` enqueues to
+ * `shadow_observations` on every futures gate evaluation, regardless of
+ * whether the gate would have fired. Always-on logging gives the
+ * funding-rate distribution full visibility for evaluating the threshold.
+ */
 export interface HlFundingObservation {
   hourlyBps: number;
   signedBps: number;
@@ -136,33 +171,6 @@ export function buildHlFundingObservation(
       },
     },
   };
-}
-
-export async function getConvictionMultiplier(
-  redis: Redis,
-  marketId: string,
-  direction: string,
-  source: string,
-  cfg: ReturnType<typeof loadConfig>,
-): Promise<number> {
-  const key = `${CONVICTION_KEY_PREFIX}${marketId}:${direction}`;
-  const nowS = Math.floor(Date.now() / 1000);
-  const cutoff = nowS - cfg.CONVICTION_SIGNAL_TTL_S;
-
-  // Prune stale entries, then record current source.
-  await redis.zremrangebyscore(key, '-inf', cutoff);
-  await redis.zadd(key, nowS, source);
-  await redis.expire(key, cfg.CONVICTION_SIGNAL_TTL_S * 2);
-
-  // Count distinct OTHER sources that fired within the window.
-  const members: string[] = await redis.zrangebyscore(key, cutoff, '+inf');
-  const otherSources = new Set(members.filter((m) => m !== source));
-  const extraSources = otherSources.size;
-
-  if (extraSources === 0) return 1;
-
-  const rawMultiplier = 1 + cfg.CONVICTION_BONUS_PER_SOURCE * extraSources;
-  return Math.min(rawMultiplier, cfg.CONVICTION_MAX_MULTIPLIER);
 }
 
 export interface ExecutionResult {
