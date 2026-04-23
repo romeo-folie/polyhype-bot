@@ -883,31 +883,54 @@ export async function discoverUpDownMarketsBySlug(
   return results;
 }
 
-// Process-local tag cache — 24h TTL per event ID.
+// Process-local tag cache — 24h TTL per hit, 5-min TTL per miss/error.
 const eventTagCache = new Map<string, { slugs: string[]; expiresAt: number }>();
 const EVENT_TAG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const EVENT_TAG_CACHE_MISS_TTL_MS = 5 * 60 * 1000;
+const EVENT_TAG_CACHE_MAX = 2000;
+
+function pruneEventTagCache(): void {
+  const now = Date.now();
+  for (const [key, entry] of eventTagCache) {
+    if (now >= entry.expiresAt) eventTagCache.delete(key);
+  }
+  // If still over limit after pruning, clear entirely — shouldn't happen in practice.
+  if (eventTagCache.size > EVENT_TAG_CACHE_MAX) eventTagCache.clear();
+}
 
 /**
  * Fetch Gamma tag slugs for a single event ID.
  *
- * Results are cached in-process for 24 hours so repeated copytrade cycles
- * don't hammer the Gamma API for the same long-running event.
- * Returns [] on any HTTP error — callers degrade gracefully.
+ * Successful lookups are cached 24h; errors/non-OK responses are cached 5 min
+ * to prevent hammering a degraded Gamma endpoint on a hot eventId.
+ * Slugs are lowercased for case-insensitive matching.
+ * Returns [] on any error — callers degrade gracefully.
  */
 export async function getEventTagSlugs(eventId: string): Promise<string[]> {
   const cached = eventTagCache.get(eventId);
-  if (cached && Date.now() < cached.expiresAt) return cached.slugs;
+  if (cached) {
+    if (Date.now() < cached.expiresAt) return cached.slugs;
+    eventTagCache.delete(eventId);
+  }
+
+  if (eventTagCache.size >= EVENT_TAG_CACHE_MAX) pruneEventTagCache();
 
   try {
     const url = `${BASE_URL}/events/${encodeURIComponent(eventId)}`;
     const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
-    if (!res.ok) return [];
+    if (!res.ok) {
+      eventTagCache.set(eventId, { slugs: [], expiresAt: Date.now() + EVENT_TAG_CACHE_MISS_TTL_MS });
+      return [];
+    }
 
     const event = (await res.json()) as { tags?: Array<{ slug: string }> };
-    const slugs = Array.isArray(event.tags) ? event.tags.map((t) => t.slug) : [];
+    const slugs = Array.isArray(event.tags)
+      ? event.tags.map((t) => t.slug.toLowerCase())
+      : [];
     eventTagCache.set(eventId, { slugs, expiresAt: Date.now() + EVENT_TAG_CACHE_TTL_MS });
     return slugs;
   } catch {
+    eventTagCache.set(eventId, { slugs: [], expiresAt: Date.now() + EVENT_TAG_CACHE_MISS_TTL_MS });
     return [];
   }
 }
