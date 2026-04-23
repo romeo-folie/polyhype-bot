@@ -754,15 +754,28 @@ async function redeemClobPositions(
               await markRecentlyClosed(redis, pos.marketId);
               await markRecentlyResolved(redis, pos.marketId);
               if (weWonDust && hadRealPosition) {
-                // Auto-redeemed win: theoretical payout is $1 per share; our
-                // return is (1 - entryPrice) / entryPrice.
+                // Auto-redeemed win: Polymarket's CTF pays $1 per winning
+                // share, so the realized return is (sharesHeld − stakeUsd) /
+                // stakeUsd. We prefer this over (1 − entryPrice)/entryPrice
+                // because stakeUsd + sharesHeld capture any fees/slippage the
+                // entryPrice doesn't. Fall back to the entryPrice formula
+                // when stake/shares are missing or invalid.
+                const stakeSafe =
+                  typeof pos.stakeUsd === 'number' &&
+                  Number.isFinite(pos.stakeUsd) &&
+                  pos.stakeUsd > 0;
                 const entryPriceSafeDust =
                   typeof pos.entryPrice === 'number' &&
                   Number.isFinite(pos.entryPrice) &&
                   pos.entryPrice > 0;
-                const returnPctDust = entryPriceSafeDust
-                  ? ((1 - pos.entryPrice) / pos.entryPrice) * 100
-                  : 0;
+                let returnPctDust: number;
+                if (stakeSafe && typeof pos.sharesHeld === 'number' && Number.isFinite(pos.sharesHeld)) {
+                  returnPctDust = ((pos.sharesHeld - pos.stakeUsd) / pos.stakeUsd) * 100;
+                } else if (entryPriceSafeDust) {
+                  returnPctDust = ((1 - pos.entryPrice) / pos.entryPrice) * 100;
+                } else {
+                  returnPctDust = 0;
+                }
                 await recordPositionOutcome(
                   redis,
                   { ...pos, question: q, direction: pmDirection },
