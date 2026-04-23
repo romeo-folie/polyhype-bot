@@ -1406,10 +1406,11 @@ const envSchema = z.object({
   // call — edgeNo can be spuriously positive even when modelProb is 0.80+ for YES.
   WEATHER_THRESHOLD_NO_BET_MAX_PROB: z.coerce.number().min(0).max(1).optional().default(0.5),
   // --- WEATHER EXIT RULES (monitor) ---
-  // Weather brackets resolve in 1–3 days. Stale-exit at 12h and divergence_closed
-  // are the primary exits. SL is a backstop for genuinely wrong forecasts only —
-  // must be wide enough to survive bid-ask spread noise (typ 3–5 cents on 0.5–0.7
-  // priced outcomes). 3% fired within 82 seconds of entry on spread jitter.
+  // Weather brackets resolve at end-of-day of their target date; realized hold
+  // times run ~17–26h when entering 0–1 day out. Stale-exit (STALE_MIN_AGE_H_WEATHER=6h)
+  // and divergence_closed are the primary exits. SL is a backstop for genuinely
+  // wrong forecasts only — must be wide enough to survive bid-ask spread noise
+  // (typ 3–5 cents on 0.5–0.7 priced outcomes) and forecast-update reprices.
   WEATHER_TAKE_PROFIT: z.coerce.number().min(0).optional().default(0.05),
   WEATHER_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.40),
   // Sports in-play arb SL/TP. Live game prices swing ±15–30% on single scoring
