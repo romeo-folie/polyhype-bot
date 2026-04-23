@@ -249,23 +249,25 @@ export class ArbitrageWorker {
         } else if (binanceSym) {
           // Shadow: log oracle-vs-Binance gap so the latency-arb thesis can be
           // evaluated from `shadow_observations` without flipping the live trigger.
-          // Dedup per symbol per 30s to avoid flooding (Chainlink ticks ~1Hz).
+          // Compute gap on every tick; only claim the per-symbol dedup key once
+          // we know we'd write — this prevents a brief 0.04% crossing from being
+          // suppressed by an earlier sub-threshold tick within the 30s window.
           void (async () => {
             try {
               const redis = getRedis();
-              const claimed = await redis.set(
-                `chainlink-arb-shadow:${binanceSym}`, '1', 'EX', 30, 'NX',
-              );
-              if (!claimed) return;
               const raw = await redis.get(`spot:last:${binanceSym}`);
               if (raw == null) return;
               const lastBinance = Number(raw);
               if (!Number.isFinite(lastBinance) || lastBinance <= 0) return;
               const gapPct = ((tick.value - lastBinance) / lastBinance) * 100;
               if (Math.abs(gapPct) < 0.03) return;
+              const claimed = await redis.set(
+                `chainlink-arb-shadow:${binanceSym}`, '1', 'EX', 30, 'NX',
+              );
+              if (!claimed) return;
               void enqueueWrite('shadow_observations', {
                 kind: 'chainlink_crypto_arb',
-                source: 'spot',
+                source: 'crypto-arb',
                 symbol: binanceSym,
                 wouldBlock: true,
                 metricValue: Math.abs(gapPct),

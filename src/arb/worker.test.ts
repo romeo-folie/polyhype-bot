@@ -384,10 +384,14 @@ describe('ArbitrageWorker', () => {
 
   it('writes chainlink_crypto_arb shadow row when flag off AND gap > 0.03%', async () => {
     // 1.56% oracle-vs-Binance gap (65000 vs 64000) — well above shadow floor
-    mockRedis.set.mockResolvedValueOnce('OK'); // dedup claim succeeds
     mockRedis.get.mockImplementation((key: string) => {
       if (key === 'spot:last:btcusdt') return Promise.resolve('64000');
       return Promise.resolve(null);
+    });
+    // Keyed set mock — dedup succeeds for chainlink shadow key, default 'OK' elsewhere
+    mockRedis.set.mockImplementation((key: string) => {
+      if (key === 'chainlink-arb-shadow:btcusdt') return Promise.resolve('OK');
+      return Promise.resolve('OK');
     });
 
     configOverride = {
@@ -422,6 +426,7 @@ describe('ArbitrageWorker', () => {
     );
     const row = shadowCall![1];
     expect(row.symbol).toBe('btcusdt');
+    expect(row.source).toBe('crypto-arb');
     expect(row.wouldBlock).toBe(true);
     expect(row.payload.oraclePrice).toBe(65000);
     expect(row.payload.lastBinance).toBe(64000);
@@ -433,8 +438,6 @@ describe('ArbitrageWorker', () => {
   });
 
   it('does NOT write chainlink_crypto_arb shadow row when gap < 0.03%', async () => {
-    // 0.015% gap — below shadow floor
-    mockRedis.set.mockResolvedValueOnce('OK');
     mockRedis.get.mockImplementation((key: string) => {
       if (key === 'spot:last:btcusdt') return Promise.resolve('65000');
       return Promise.resolve(null);
@@ -463,15 +466,30 @@ describe('ArbitrageWorker', () => {
       ([table, row]) => table === 'shadow_observations' && row?.kind === 'chainlink_crypto_arb',
     );
     expect(shadowCall).toBeUndefined();
+    // Dedup key must NOT be claimed when gap is below floor — proves the
+    // restructured ordering (gap check before dedup) doesn't burn the 30s slot.
+    expect(mockRedis.set).not.toHaveBeenCalledWith(
+      'chainlink-arb-shadow:btcusdt',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
 
     worker.stop();
   });
 
   it('does NOT write chainlink_crypto_arb shadow row when dedup claim fails', async () => {
-    mockRedis.set.mockResolvedValueOnce(null); // dedup occupied
     mockRedis.get.mockImplementation((key: string) => {
       if (key === 'spot:last:btcusdt') return Promise.resolve('64000');
       return Promise.resolve(null);
+    });
+    // Keyed set mock: dedup returns null (occupied) ONLY for the chainlink key.
+    // Other set calls (e.g. HL momentum cooldown) keep the default 'OK' so test
+    // isolation isn't compromised by mockResolvedValueOnce queue leaks.
+    mockRedis.set.mockImplementation((key: string) => {
+      if (key === 'chainlink-arb-shadow:btcusdt') return Promise.resolve(null);
+      return Promise.resolve('OK');
     });
 
     configOverride = {
@@ -491,7 +509,7 @@ describe('ArbitrageWorker', () => {
     });
     onRedisMessage!('oracle:price_moved', tick);
 
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 100));
 
     const shadowCall = mockEnqueueWrite.mock.calls.find(
       ([table, row]) => table === 'shadow_observations' && row?.kind === 'chainlink_crypto_arb',

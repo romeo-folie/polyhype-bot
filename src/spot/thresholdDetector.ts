@@ -140,16 +140,22 @@ export async function detectMoves(currentPrices: SpotPrice[]): Promise<SpotMove[
     const pctTriggered = Math.abs(changePercent) >= threshold;
 
     // Shadow-log when the session multiplier flips the trigger outcome — gives
-    // visibility into how often the multiplier matters without log spam.
-    if (cfg.SESSION_THRESHOLD_ENABLED && sessionMultiplier !== 1.0) {
+    // visibility into how often the multiplier matters without log spam. Only
+    // meaningful when the trigger mode actually consults pct (zscore mode
+    // bypasses it entirely, so the multiplier has no causal effect there).
+    const triggerModeUsesPct = triggerMode !== 'zscore';
+    if (cfg.SESSION_THRESHOLD_ENABLED && sessionMultiplier !== 1.0 && triggerModeUsesPct) {
       const pctTriggeredBase = Math.abs(changePercent) >= baseThreshold;
       if (pctTriggered !== pctTriggeredBase) {
         void enqueueWrite('shadow_observations', {
           kind: 'session_threshold', source: 'spot',
           symbol: sp.assetId,
           // wouldBlock=true means multiplier prevented a trigger; false means it enabled one.
+          // metricValue/threshold align with that verdict: |changePercent| vs the *adjusted*
+          // threshold gives `metricValue >= threshold ⇔ !wouldBlock`.
           wouldBlock: !pctTriggered,
-          metricValue: sessionMultiplier, threshold: 1.0,
+          metricValue: Math.abs(changePercent),
+          threshold,
           payload: {
             hour: sessionHour,
             baseThreshold,
@@ -158,6 +164,7 @@ export async function detectMoves(currentPrices: SpotPrice[]): Promise<SpotMove[
             changePercent,
             pctTriggeredBase,
             pctTriggeredAdjusted: pctTriggered,
+            triggerMode,
             outcome: pctTriggered ? 'multiplier_enabled_trigger' : 'multiplier_blocked_trigger',
           },
         });

@@ -85,6 +85,59 @@ export function atrTimeframeForSignalSource(
  * Shadow-logs when CONVICTION_MULTIPLIER_ENABLED=false so we can review the
  * distribution before flipping live.
  */
+export interface HlFundingObservation {
+  hourlyBps: number;
+  signedBps: number;
+  wouldBlock: boolean;
+  shadowRow: {
+    kind: 'hl_funding';
+    source: 'futures';
+    symbol: string;
+    direction: 'LONG' | 'SHORT';
+    wouldBlock: boolean;
+    metricValue: number;
+    threshold: number;
+    payload: Record<string, unknown>;
+  };
+}
+
+/**
+ * Pure helper that computes the hl_funding shadow observation from a futures
+ * signal + funding rate + gate config. Extracted so the always-on shadow row
+ * can be unit-tested without standing up the full executor pipeline.
+ */
+export function buildHlFundingObservation(
+  signal: { marketId: string; direction: 'LONG' | 'SHORT' },
+  fundingRate: number,
+  gateThresholdBps: number,
+  gateEnabled: boolean,
+): HlFundingObservation {
+  const hourlyBps = fundingRate * 10000;
+  const signedBps = signal.direction === 'LONG' ? hourlyBps : -hourlyBps;
+  const wouldBlock = signedBps > gateThresholdBps;
+  return {
+    hourlyBps,
+    signedBps,
+    wouldBlock,
+    shadowRow: {
+      kind: 'hl_funding',
+      source: 'futures',
+      symbol: signal.marketId,
+      direction: signal.direction,
+      wouldBlock,
+      metricValue: signedBps,
+      threshold: gateThresholdBps,
+      payload: {
+        hourlyBps,
+        signedBps,
+        absSignedBps: Math.abs(signedBps),
+        marketId: signal.marketId,
+        gateEnabled,
+      },
+    },
+  };
+}
+
 export async function getConvictionMultiplier(
   redis: Redis,
   marketId: string,
@@ -1077,42 +1130,35 @@ async function executeHyperliquidSignal(
     // leaving us with 2 rows in 11 days and no way to evaluate the threshold.
     try {
       const ctx = await hl.getAssetContext(signal.marketId);
-      const hourlyBps = ctx.fundingRate * 10000;
-      const signedBps = signal.direction === 'LONG' ? hourlyBps : -hourlyBps;
-      const wouldBlockGate = signedBps > cfg.HL_MAX_ADVERSE_FUNDING_BPS;
+      const obs = buildHlFundingObservation(
+        signal as { marketId: string; direction: 'LONG' | 'SHORT' },
+        ctx.fundingRate,
+        cfg.HL_MAX_ADVERSE_FUNDING_BPS,
+        cfg.HL_FUNDING_GATE_ENABLED,
+      );
 
-      void enqueueWrite('shadow_observations', {
-        kind: 'hl_funding', source: 'futures',
-        symbol: signal.marketId, direction: signal.direction,
-        wouldBlock: wouldBlockGate,
-        metricValue: Math.abs(signedBps),
-        threshold: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
-        payload: {
-          hourlyBps, signedBps, marketId: signal.marketId,
-          gateEnabled: cfg.HL_FUNDING_GATE_ENABLED,
-        },
-      });
+      void enqueueWrite('shadow_observations', obs.shadowRow);
 
-      if (wouldBlockGate) {
+      if (obs.wouldBlock) {
         if (cfg.HL_FUNDING_GATE_ENABLED) {
           logger.info('[hl-funding] funding_adverse block', {
             symbol: signal.marketId,
             direction: signal.direction,
-            hourlyBps: hourlyBps.toFixed(4),
-            signedBps: signedBps.toFixed(4),
+            hourlyBps: obs.hourlyBps.toFixed(4),
+            signedBps: obs.signedBps.toFixed(4),
             max: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
           });
           return {
             signal,
             skipped: true,
-            skipReason: `funding_adverse:hourlyBps=${hourlyBps.toFixed(4)},dir=${signal.direction}`,
+            skipReason: `funding_adverse:hourlyBps=${obs.hourlyBps.toFixed(4)},dir=${signal.direction}`,
           };
         } else {
           logger.info('[hl-funding] shadow skip', {
             symbol: signal.marketId,
             direction: signal.direction,
-            hourlyBps: hourlyBps.toFixed(4),
-            signedBps: signedBps.toFixed(4),
+            hourlyBps: obs.hourlyBps.toFixed(4),
+            signedBps: obs.signedBps.toFixed(4),
             max: cfg.HL_MAX_ADVERSE_FUNDING_BPS,
           });
         }
