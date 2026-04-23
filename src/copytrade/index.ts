@@ -685,9 +685,12 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       let scopePassed = keywordHit;
 
       if (!keywordHit && cfg.COPYTRADE_SCOPE_TAG_FALLBACK) {
-        const eventId = Array.isArray(market.events) ? market.events[0]?.id : undefined;
-        if (eventId) {
-          const tagSlugs = await getEventTagSlugs(eventId);
+        const eventIds = Array.isArray(market.events)
+          ? market.events.map((e) => e.id).filter(Boolean)
+          : [];
+        if (eventIds.length > 0) {
+          const tagArrays = await Promise.all(eventIds.map((id) => getEventTagSlugs(id)));
+          const tagSlugs = [...new Set(tagArrays.flat())];
           if (matchesCategory(scanText, market.description, cfg.COPYTRADE_MARKET_SCOPE, tagSlugs)) {
             scopePassed = true;
             logger.debug('[copytrade] scope matched via event tags', {

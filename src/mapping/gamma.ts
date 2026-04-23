@@ -889,13 +889,21 @@ const EVENT_TAG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const EVENT_TAG_CACHE_MISS_TTL_MS = 5 * 60 * 1000;
 const EVENT_TAG_CACHE_MAX = 2000;
 
-function pruneEventTagCache(): void {
-  const now = Date.now();
-  for (const [key, entry] of eventTagCache) {
-    if (now >= entry.expiresAt) eventTagCache.delete(key);
+function setEventTagEntry(eventId: string, slugs: string[], ttlMs: number): void {
+  // Evict all expired entries before inserting when near the cap.
+  // This prevents unbounded growth without nuking fresh entries.
+  if (eventTagCache.size >= EVENT_TAG_CACHE_MAX) {
+    const now = Date.now();
+    for (const [key, entry] of eventTagCache) {
+      if (now >= entry.expiresAt) eventTagCache.delete(key);
+    }
+    // If still at the cap after evicting expired entries, remove the oldest live entry.
+    if (eventTagCache.size >= EVENT_TAG_CACHE_MAX) {
+      const oldestKey = eventTagCache.keys().next().value;
+      if (oldestKey !== undefined) eventTagCache.delete(oldestKey);
+    }
   }
-  // If still over limit after pruning, clear entirely — shouldn't happen in practice.
-  if (eventTagCache.size > EVENT_TAG_CACHE_MAX) eventTagCache.clear();
+  eventTagCache.set(eventId, { slugs, expiresAt: Date.now() + ttlMs });
 }
 
 /**
@@ -903,7 +911,8 @@ function pruneEventTagCache(): void {
  *
  * Successful lookups are cached 24h; errors/non-OK responses are cached 5 min
  * to prevent hammering a degraded Gamma endpoint on a hot eventId.
- * Slugs are lowercased for case-insensitive matching.
+ * Slugs are lowercased for case-insensitive matching. Malformed/nullish
+ * tag entries from the API are silently skipped.
  * Returns [] on any error — callers degrade gracefully.
  */
 export async function getEventTagSlugs(eventId: string): Promise<string[]> {
@@ -913,24 +922,24 @@ export async function getEventTagSlugs(eventId: string): Promise<string[]> {
     eventTagCache.delete(eventId);
   }
 
-  if (eventTagCache.size >= EVENT_TAG_CACHE_MAX) pruneEventTagCache();
-
   try {
     const url = `${BASE_URL}/events/${encodeURIComponent(eventId)}`;
     const res = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
     if (!res.ok) {
-      eventTagCache.set(eventId, { slugs: [], expiresAt: Date.now() + EVENT_TAG_CACHE_MISS_TTL_MS });
+      setEventTagEntry(eventId, [], EVENT_TAG_CACHE_MISS_TTL_MS);
       return [];
     }
 
-    const event = (await res.json()) as { tags?: Array<{ slug: string }> };
+    const event = (await res.json()) as { tags?: unknown[] };
     const slugs = Array.isArray(event.tags)
-      ? event.tags.map((t) => t.slug.toLowerCase())
+      ? event.tags
+          .filter((t): t is { slug: string } => typeof (t as any)?.slug === 'string')
+          .map((t) => t.slug.toLowerCase())
       : [];
-    eventTagCache.set(eventId, { slugs, expiresAt: Date.now() + EVENT_TAG_CACHE_TTL_MS });
+    setEventTagEntry(eventId, slugs, EVENT_TAG_CACHE_TTL_MS);
     return slugs;
   } catch {
-    eventTagCache.set(eventId, { slugs: [], expiresAt: Date.now() + EVENT_TAG_CACHE_MISS_TTL_MS });
+    setEventTagEntry(eventId, [], EVENT_TAG_CACHE_MISS_TTL_MS);
     return [];
   }
 }
