@@ -16,7 +16,7 @@ import { logger } from '../shared/logger.js';
 import { isCryptoAsset } from '../shared/assets.js';
 import { inferCategory, inferSource } from '../shared/outcomeRecorder.js';
 import { enqueueWrite } from '../db/writeQueue.js';
-import { getOpenPositions, updateHighWaterMark } from '../execution/positionLedger.js';
+import { getOpenPositions, updateHighWaterMark, markPositionPendingSettlement } from '../execution/positionLedger.js';
 import { evaluateTrailingStop } from './trailingStopExit.js';
 import { fetchAllCurrentPrices } from './priceFetcher.js';
 import { getPriceFeed, destroyPriceFeed } from '../shared/feedSingleton.js';
@@ -183,6 +183,47 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
         marketId: position.marketId,
       });
       priceError++;
+      continue;
+    }
+
+    // Near-resolution gate: when the held outcome's price reaches the near-res
+    // threshold (default 0.95), the market is effectively settled — the only way
+    // to capture the remaining value is on-chain redemption, not a CLOB sell.
+    //
+    // Why this matters: the WS best-bid cache derives NO price as (1 − YES bid).
+    // When a market resolves, YES bids collapse to ~0.01, so NO appears to be
+    // worth ~0.99.  The trailing stop records this as its peak (HWM = +60 %+).
+    // Thirty seconds later the WS TTL expires; Gamma REST returns the stale CLOB
+    // mid-price (~0.575) and the drawdown from peak fires the trailing stop,
+    // selling our position at a significant loss instead of waiting for the
+    // redeemer to collect full settlement value.
+    //
+    // Fix: as soon as currentOutcomePrice ≥ threshold, mark the position as
+    // pendingSettlement (skipped by this loop henceforth) and let the redeemer's
+    // heavy cycle handle on-chain collection.  The redeemer checks on-chain
+    // status before acting — if the market hasn't settled yet it simply waits.
+    //
+    // The threshold (0.95) is intentionally high so normal in-play price swings
+    // never trigger this gate.  At 0.95+, the implied probability of the other
+    // side winning is ≤5%; a CLOB exit at that point would capture far less than
+    // the settlement payout.
+    if (currentPrice.currentOutcomePrice >= cfg.MONITOR_NEAR_RES_PRICE_THRESHOLD) {
+      logger.info('[monitor] near-resolution detected — routing to redeemer', {
+        marketId: position.marketId,
+        direction: position.direction,
+        currentOutcomePrice: currentPrice.currentOutcomePrice.toFixed(3),
+        entryPrice: position.entryPrice.toFixed(3),
+        threshold: cfg.MONITOR_NEAR_RES_PRICE_THRESHOLD,
+      });
+      await markPositionPendingSettlement(redis, position.marketId, position.direction).catch(
+        (err: unknown) => {
+          logger.warn('[monitor] near-res: failed to mark pendingSettlement — will retry next cycle', {
+            marketId: position.marketId,
+            error: String(err),
+          });
+        },
+      );
+      held++;
       continue;
     }
 

@@ -260,6 +260,13 @@ const envSchema = z.object({
   TRAILING_STOP_ENABLED: boolFromEnv.optional().default(false),
   TRAILING_GIVEBACK_PCT: z.coerce.number().min(0).optional().default(10),
   TRAILING_MIN_EXIT_BID: z.coerce.number().min(0).max(1).optional().default(0.05),
+  // When the held outcome's price reaches this level, the market is near settlement.
+  // The monitor routes to the redeemer (pendingSettlement) instead of executing a
+  // CLOB exit, preventing the trailing-stop peak from being poisoned by a
+  // resolution-spike price and then firing when the WS cache TTL expires and stale
+  // CLOB prices are returned (burned 2026-04-24: Feldbausch/Tabur NO exit at -6.5%
+  // instead of redemption at +59%).
+  MONITOR_NEAR_RES_PRICE_THRESHOLD: z.coerce.number().min(0.5).max(1).optional().default(0.95),
   TAKER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   TAKER_MIN_EDGE_CATEGORIES: z
     .string()
