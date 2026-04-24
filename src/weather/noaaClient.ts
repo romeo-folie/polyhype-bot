@@ -87,8 +87,9 @@ export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   // in WU's historical database (returns HTTP 400), so we proxy via LTBA —
   // the long-standing Istanbul weather station present in most historical
   // datasets. cityBias absorbs any station-to-station offset vs Polymarket's
-  // actual resolution source once ≥6 samples accumulate. Switched from
-  // METAR/LTFM → WU/LTBA 2026-04-24 (same reason as tel aviv above).
+  // actual resolution source once enough samples accumulate (configured via
+  // WEATHER_BIAS_MIN_SAMPLES). Switched from METAR/LTFM → WU/LTBA 2026-04-24
+  // (same reason as tel aviv above).
   istanbul:        { lat: 40.9769, lon: 28.8146,    noaaCoverage: false, unit: 'celsius', wuStation: 'LTBA', resolutionSource: 'wu', isoCountry: 'TR' },
   'mexico city':   { lat: 19.4326, lon: -99.1332,   noaaCoverage: false, unit: 'celsius', wuStation: 'MMMX', resolutionSource: 'wu', isoCountry: 'MX' },
   amsterdam:       { lat: 52.3676, lon: 4.9041,     noaaCoverage: false, unit: 'celsius', wuStation: 'EHAM', resolutionSource: 'wu', isoCountry: 'NL' },

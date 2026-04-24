@@ -43,7 +43,7 @@ interface MetarObservation {
  * Fetch the daily maximum temperature from the METAR record for an ICAO station.
  * Groups observations by UTC date; use the group matching `date`.
  *
- * Returns null if the date is outside the 30-day window or data is unavailable.
+ * Returns null if the date is outside the effective ~8–9 day window or data is unavailable.
  */
 export async function fetchMetarDailyHigh(
   icao: string,
