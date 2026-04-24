@@ -9,8 +9,11 @@ export async function handleWeatherGroundTruth(sql: Sql, payloads: unknown[]): P
   for (const p of payloads) {
     const parsed = weatherGroundTruthRowSchema.safeParse(p);
     if (!parsed.success) {
+      const first = parsed.error.errors[0];
       logger.warn('[writer] weather_ground_truth payload rejected', {
-        error: parsed.error.errors[0]?.message,
+        error: first?.message,
+        path: first?.path?.join('.') ?? null,
+        issueCount: parsed.error.errors.length,
       });
       continue;
     }
