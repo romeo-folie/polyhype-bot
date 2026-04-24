@@ -170,6 +170,20 @@ describe('SigmaCalibrator', () => {
 
       expect(slowGap.sigmaEwma).toBeGreaterThan(fastGap.sigmaEwma);
     });
+
+    it('does not poison EWMA when duplicate oracle timestamps produce dtSec=0', () => {
+      const cal = new SigmaCalibrator({
+        sigmaMin: 0.0,
+        sigmaMax: 1000,
+        ewmaHalfLifeS: 300,
+      });
+      const base = Date.now();
+      cal.onTick(mkTick('btc/usd', 50_000, base, base));
+      cal.onTick(mkTick('btc/usd', 55_000, base, base));
+      const result = cal.getSigma('btc/usd', []);
+      expect(Number.isFinite(result.sigmaEwma)).toBe(true);
+      expect(result.sigmaEwma).toBe(0);
+    });
   });
 
   describe('clamp [sigmaMin, sigmaMax]', () => {

@@ -112,6 +112,13 @@ export function findClosestOraclePricePoint(
   return best !== null && bestDiff <= toleranceMs ? best : null;
 }
 
+export function shouldResolveStrikeAt(
+  targetTs: number,
+  nowMs = Date.now(),
+): boolean {
+  return nowMs >= targetTs;
+}
+
 // ── Pure evaluator ────────────────────────────────────────────────────────
 
 export interface FvEvalConfig {
@@ -430,18 +437,22 @@ export class FvScanner {
     toleranceS: number,
   ): Promise<number> {
     const redisKey = `${STRIKE_PREFIX}${market.marketId}`;
+    const windowStartMs = market.endDate.getTime() - WINDOW_DURATION_S * 1000;
+
+    // Never resolve/capture strike before the market window has actually opened.
+    if (!shouldResolveStrikeAt(windowStartMs)) return 0;
 
     // Fast path: already cached in Redis
     const cached = await this.redis.get(redisKey).catch(() => null);
     if (cached !== null) {
       const v = parseFloat(cached);
-      return Number.isFinite(v) && v > 0 ? v : 0;
+      if (Number.isFinite(v) && v > 0) return v;
+      await this.redis.del(redisKey).catch(() => null);
     }
 
     const symbol = FV_ASSET_TO_CHAINLINK[asset];
     if (!symbol || !this.feed) return 0;
 
-    const windowStartMs = market.endDate.getTime() - WINDOW_DURATION_S * 1000;
     const tick = this.feed.findTickAt(symbol, windowStartMs, toleranceS * 1000);
     if (tick) {
       // Cache until market resolves + 1 h

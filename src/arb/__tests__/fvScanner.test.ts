@@ -19,6 +19,7 @@ import {
   findClosestOraclePricePoint,
   isChainlinkTickFresh,
   parseOraclePriceEntry,
+  shouldResolveStrikeAt,
   type FvEvalConfig,
 } from '../fvScanner.js';
 import type { UpDownMarket } from '../../mapping/gamma.js';
@@ -262,5 +263,10 @@ describe('FV helper utilities', () => {
       { oracleTs: NOW_MS + 15_000, value: 50_200 },
     ], NOW_MS, 5_000);
     expect(point).toEqual({ oracleTs: NOW_MS - 2_000, value: 50_100 });
+  });
+
+  it('does not resolve strike before the target window opens', () => {
+    expect(shouldResolveStrikeAt(NOW_MS + 1_000, NOW_MS)).toBe(false);
+    expect(shouldResolveStrikeAt(NOW_MS, NOW_MS)).toBe(true);
   });
 });

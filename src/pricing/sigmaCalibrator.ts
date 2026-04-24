@@ -80,7 +80,10 @@ export class SigmaCalibrator {
     if (s.lastValue > 0 && tick.value > 0) {
       const r = Math.log(tick.value / s.lastValue);
       const dtSec = Math.max(0, (tick.oracleTs - s.lastOracleTs) / 1000);
-      const lambda = Math.exp(-Math.LN2 * dtSec / this.cfg.ewmaHalfLifeS);
+      const lambda =
+        dtSec === 0
+          ? 1
+          : Math.exp(-Math.LN2 * dtSec / this.cfg.ewmaHalfLifeS);
       s.ewmaVar = lambda * s.ewmaVar + (1 - lambda) * r * r;
     }
     s.lastValue = tick.value;
