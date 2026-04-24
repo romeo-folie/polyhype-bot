@@ -29,6 +29,7 @@ import {
   markStaleCooldown,
 } from './staleExit.js';
 import { evaluateTrend, fetchTrendSamples } from './trendExit.js';
+import { evaluateWeatherNearRes } from './weatherNearResExit.js';
 import { redeemResolvedPositions } from './resolutionRedeemer.js';
 import { runClobProbe } from '../shared/clobProbe.js';
 import { setAgentAutoRedeem } from '../shared/simmer.js';
@@ -231,6 +232,9 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     let tpThreshold = cfg.TAKE_PROFIT_THRESHOLD;
     let slThreshold = cfg.STOP_LOSS_THRESHOLD;
 
+    // Hoisted here — also needed by the weather near-res gate outside the tiered block.
+    const isWeather = inferCategory(position.question) === 'weather';
+
     const isRebateFarming = position.sourcedFrom === 'rebate-farming';
     const isCopytrade = position.sourcedFrom?.startsWith('copytrade:');
     if (isRebateFarming) {
@@ -260,7 +264,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
 
       const inferredCategory = inferCategory(position.question);
       const isCryptoUpdown = inferredCategory === 'crypto-updown';
-      const isWeather = inferredCategory === 'weather';
+      // isWeather hoisted above for use by weather near-res gate
       // Sports-arb signals set sourcedFrom='sports:league:gameId'. Don't rely on
       // inferCategory — it misses team-name questions that lack keywords like
       // "mlb"/"baseball", falling through to 'geopolitical' and the default 16% SL.
@@ -337,6 +341,77 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       reason: decision.reason,
       ...(suppressTpExit ? { suppressedByTrailing: true } : {}),
     });
+
+    // ── Weather near-resolution loss-cut ─────────────────────────────────────
+    // Fires when: weather position, within WEATHER_NEAR_RES_HOURS of endDate,
+    // losing more than WEATHER_NEAR_RES_MIN_LOSS_PCT. By that point the actual
+    // temperature is effectively known and a losing position will not recover.
+    // Ships dark (WEATHER_NEAR_RES_ENABLED=false); shadow rows always written.
+    if (isWeather) {
+      const nearResDecision = evaluateWeatherNearRes(
+        position.endDate,
+        decision.returnPct,
+        {
+          nearResHours: cfg.WEATHER_NEAR_RES_HOURS,
+          nearResMinLossPct: cfg.WEATHER_NEAR_RES_MIN_LOSS_PCT,
+        },
+      );
+
+      if (nearResDecision.shouldFire) {
+        if (cfg.WEATHER_NEAR_RES_ENABLED) {
+          logger.info('[monitor] weather_near_resolution triggered', {
+            marketId: position.marketId,
+            direction: position.direction,
+            hoursLeft: nearResDecision.hoursLeft.toFixed(2),
+            returnPct: decision.returnPct.toFixed(2),
+            endDate: position.endDate,
+          });
+          const nearResResult = await executeTakeProfit({
+            position,
+            currentPrice: currentPrice.currentOutcomePrice,
+            returnPct: decision.returnPct,
+            reason: 'weather_near_resolution',
+            redis,
+          });
+          if (nearResResult.success) {
+            exited++;
+          } else {
+            logger.warn('[monitor] weather near-res exit failed — will retry next cycle', {
+              marketId: position.marketId,
+              error: nearResResult.error,
+            });
+            held++;
+          }
+          continue;
+        }
+
+        // Shadow mode: log would-have-fired event
+        logger.info('[monitor] weather_near_resolution shadow', {
+          marketId: position.marketId,
+          direction: position.direction,
+          hoursLeft: nearResDecision.hoursLeft.toFixed(2),
+          returnPct: decision.returnPct.toFixed(2),
+          endDate: position.endDate,
+          wouldExit: true,
+        });
+        void enqueueWrite('shadow_observations', {
+          kind: 'weather_near_resolution',
+          source: 'weather',
+          marketId: position.marketId,
+          direction: position.direction,
+          wouldBlock: false,
+          metricValue: nearResDecision.hoursLeft,
+          threshold: cfg.WEATHER_NEAR_RES_HOURS,
+          payload: {
+            returnPct: decision.returnPct,
+            hoursLeft: nearResDecision.hoursLeft,
+            entryPrice: position.entryPrice,
+            currentPrice: currentPrice.currentOutcomePrice,
+            endDate: position.endDate,
+          },
+        });
+      }
+    }
 
     if (decision.shouldExit && decision.reason && !suppressTpExit) {
       const result = await executeTakeProfit({
