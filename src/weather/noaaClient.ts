@@ -71,8 +71,11 @@ export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   'buenos aires':  { lat: -34.6037, lon: -58.3816,  noaaCoverage: false, unit: 'celsius', wuStation: 'SAEZ', resolutionSource: 'wu', isoCountry: 'AR' },
   ankara:          { lat: 39.9334, lon: 32.8597,    noaaCoverage: false, unit: 'celsius', wuStation: 'LTAC', resolutionSource: 'wu', isoCountry: 'TR' },
   lucknow:         { lat: 26.8467, lon: 80.9462,    noaaCoverage: false, unit: 'celsius', wuStation: 'VILK', resolutionSource: 'wu', isoCountry: 'IN' },
-  // NOAA WRH station LLBG — coords pinned to airport; resolved via METAR, not WU
-  'tel aviv':      { lat: 31.9965, lon: 34.8906,    noaaCoverage: false, unit: 'celsius', wuStation: 'LLBG', resolutionSource: 'metar' },
+  // Ben Gurion (LLBG). Originally routed through METAR; switched to WU
+  // 2026-04-24 after the aviationweather.gov endpoint was found to cap at
+  // ~400 obs regardless of the `hours` param (effective ~9-day window, not
+  // the 30 days the code assumed). WU has 35+ days of LLBG history.
+  'tel aviv':      { lat: 31.9965, lon: 34.8906,    noaaCoverage: false, unit: 'celsius', wuStation: 'LLBG', resolutionSource: 'wu', isoCountry: 'IL' },
   // Resolves via Hong Kong Observatory. HKO reports to 1 dp; bracket labels are integer °C.
   'hong kong':     { lat: 22.3020, lon: 114.1740,   noaaCoverage: false, unit: 'celsius', wuStation: 'HKO',  resolutionSource: 'hko' },
   // Malpensa (LIMC), not Linate (LIML) — Polymarket resolves against LIMC
@@ -80,8 +83,14 @@ export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   madrid:          { lat: 40.4168, lon: -3.7038,    noaaCoverage: false, unit: 'celsius', wuStation: 'LEMD', resolutionSource: 'wu', isoCountry: 'ES' },
   warsaw:          { lat: 52.2297, lon: 21.0122,    noaaCoverage: false, unit: 'celsius', wuStation: 'EPWA', resolutionSource: 'wu', isoCountry: 'PL' },
   shenzhen:        { lat: 22.5431, lon: 114.0579,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZGSZ', resolutionSource: 'wu', isoCountry: 'CN' },
-  // NOAA WRH station LTFM — coords pinned to airport; resolved via METAR, not WU
-  istanbul:        { lat: 41.2611, lon: 28.7425,    noaaCoverage: false, unit: 'celsius', wuStation: 'LTFM', resolutionSource: 'metar' },
+  // Istanbul Atatürk (LTBA). The new IST airport (LTFM, opened 2019) is not
+  // in WU's historical database (returns HTTP 400), so we proxy via LTBA —
+  // the long-standing Istanbul weather station present in most historical
+  // datasets. cityBias absorbs any station-to-station offset vs Polymarket's
+  // actual resolution source once enough samples accumulate (configured via
+  // WEATHER_BIAS_MIN_SAMPLES). Switched from METAR/LTFM → WU/LTBA 2026-04-24
+  // (same reason as tel aviv above).
+  istanbul:        { lat: 40.9769, lon: 28.8146,    noaaCoverage: false, unit: 'celsius', wuStation: 'LTBA', resolutionSource: 'wu', isoCountry: 'TR' },
   'mexico city':   { lat: 19.4326, lon: -99.1332,   noaaCoverage: false, unit: 'celsius', wuStation: 'MMMX', resolutionSource: 'wu', isoCountry: 'MX' },
   amsterdam:       { lat: 52.3676, lon: 4.9041,     noaaCoverage: false, unit: 'celsius', wuStation: 'EHAM', resolutionSource: 'wu', isoCountry: 'NL' },
   // Marcos A. Gelabert/Albrook (MPMG), not Tocumen (MPTO)
@@ -89,10 +98,10 @@ export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   // Halim Perdanakusuma (WIHH), not Soekarno-Hatta (WIII)
   jakarta:         { lat: -6.2661, lon: 106.8908,   noaaCoverage: false, unit: 'celsius', wuStation: 'WIHH', resolutionSource: 'wu', isoCountry: 'ID' },
   jeddah:          { lat: 21.4858, lon: 39.1925,    noaaCoverage: false, unit: 'celsius', wuStation: 'OEJN', resolutionSource: 'wu', isoCountry: 'SA' },
-  // NOAA WRH station UUWW — Vnukovo International; resolved via METAR
-  moscow:          { lat: 55.5915, lon: 37.2615,    noaaCoverage: false, unit: 'celsius', wuStation: 'UUWW', resolutionSource: 'metar' },
-  // NOAA WRH station RCTP — Taiwan Taoyuan International; resolved via METAR
-  taipei:          { lat: 25.0777, lon: 121.2328,   noaaCoverage: false, unit: 'celsius', wuStation: 'RCTP', resolutionSource: 'metar' },
+  // Vnukovo (UUWW). Switched METAR → WU 2026-04-24 (same reason as tel aviv).
+  moscow:          { lat: 55.5915, lon: 37.2615,    noaaCoverage: false, unit: 'celsius', wuStation: 'UUWW', resolutionSource: 'wu', isoCountry: 'RU' },
+  // Taiwan Taoyuan (RCTP). Switched METAR → WU 2026-04-24.
+  taipei:          { lat: 25.0777, lon: 121.2328,   noaaCoverage: false, unit: 'celsius', wuStation: 'RCTP', resolutionSource: 'wu', isoCountry: 'TW' },
 };
 
 // ── Aliases: map Polymarket event title city names to canonical keys ───────
