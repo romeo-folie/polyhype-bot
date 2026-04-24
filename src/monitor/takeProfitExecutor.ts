@@ -796,28 +796,76 @@ async function finalizeClobExit(
     }
   }
 
+  // Realized return from actual proceeds. The trigger `returnPct` is what the
+  // evaluator saw at decision time (possibly off a stale WS cache); the fill
+  // can be materially different — a stale $0.30 signal can still lucky-fill
+  // a post-only maker sell at the real $0.78 ask because the maker-exit path
+  // re-reads the book. Recording the trigger value instead of realized was
+  // the 2026-04-24 chain that logged a +54% ETH Up-or-Down trade as −40%
+  // lost. Prefer realized whenever stake and proceeds are both finite; fall
+  // back to the trigger value only when proceeds are unusable.
+  const stakeUsd = position.stakeUsd;
+  const stakeIsReal =
+    typeof stakeUsd === 'number' && Number.isFinite(stakeUsd) && stakeUsd > 0;
+  const proceedsUsable = Number.isFinite(totalProceedsUsd) && totalProceedsUsd >= 0;
+  const realizedReturnPct =
+    stakeIsReal && proceedsUsable
+      ? ((totalProceedsUsd - stakeUsd) / stakeUsd) * 100
+      : returnPct;
+
+  if (stakeIsReal && proceedsUsable && Math.abs(realizedReturnPct - returnPct) >= 5) {
+    logger.warn('[take-profit-executor] trigger vs realized returnPct divergence', {
+      marketId: position.marketId,
+      reason,
+      triggerReturnPct: +returnPct.toFixed(2),
+      realizedReturnPct: +realizedReturnPct.toFixed(2),
+      stakeUsd,
+      totalProceedsUsd: +totalProceedsUsd.toFixed(6),
+      totalSharesSold: +totalSharesSold.toFixed(6),
+    });
+  }
+
   if (pendingDueToResidual) {
+    // Reconcile the ledger sharesHeld down to the residual BEFORE flagging
+    // pendingSettlement. Otherwise the next reconciler cycle compares ledger
+    // shares (still at original) vs on-chain (just sold) and "heals" via the
+    // mismatch path — which later triggers `expired_dust` and a duplicate
+    // -100% outcome row. Root cause of the second outcome row in the
+    // 2026-04-24 incident.
+    const originalShares =
+      typeof position.sharesHeld === 'number' && Number.isFinite(position.sharesHeld)
+        ? position.sharesHeld
+        : totalSharesSold;
+    const residualShares = Math.max(0, originalShares - totalSharesSold);
+    await updatePositionShares(
+      redis,
+      position.marketId,
+      position.direction,
+      residualShares,
+      `partial_exit:${new Date().toISOString()}`,
+    );
     await markPositionPendingSettlement(redis, position.marketId, position.direction);
     logger.info('[take-profit-executor] clob exit partial — marked pendingSettlement', {
       marketId: position.marketId,
       totalSharesSold: totalSharesSold.toFixed(6),
+      residualShares: residualShares.toFixed(6),
     });
   } else {
     await closePositionWithHedge(redis, position.marketId, position.direction);
   }
   await creditProceeds(redis, totalProceedsUsd);
   await recordPositionOutcome(redis, position, {
-    result: returnPct >= 0 ? 'won' : 'lost',
-    returnPct,
+    result: realizedReturnPct >= 0 ? 'won' : 'lost',
+    returnPct: realizedReturnPct,
     executionVenueOverride: 'clob',
     exitReason: reason,
   });
-  await notifyTakeProfitExecuted({ position, currentPrice, returnPct, reason });
+  await notifyTakeProfitExecuted({ position, currentPrice, returnPct: realizedReturnPct, reason });
 
   const result: TakeProfitResult = {
     marketId: position.marketId,
     success: true,
-    returnPct,
+    returnPct: realizedReturnPct,
     reason,
   };
   if (txHash) result.txHash = txHash;

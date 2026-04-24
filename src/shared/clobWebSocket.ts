@@ -1,8 +1,20 @@
 /**
  * CLOB WebSocket price feed.
  *
- * Subscribes to real-time order book price updates for watched markets.
- * Caches latest YES ask price in Redis: key = `ws:price:<marketId>`, TTL = 30s.
+ * Subscribes to real-time order book updates for watched markets and caches
+ * the current best-bid per outcome in Redis:
+ *   YES best-bid → `ws:price:yes:<marketId>`
+ *   NO  best-bid → `ws:price:no:<marketId>`
+ *   (`ws:price:<marketId>` legacy alias is kept in sync with YES.)
+ * TTL = 30s.
+ *
+ * Source of truth is the `book` event (full bid/ask snapshots Polymarket
+ * emits on subscribe and when the touch moves). `price_change` events report
+ * per-level deltas at arbitrary price levels — NOT the best-bid — so they
+ * are intentionally not cached. Caching from `price_change.price` was the
+ * root of a 2026-04-24 silent-loss incident where a non-touch level update
+ * at $0.30 overwrote a real $0.78 best-bid, triggering a stop-loss on
+ * fiction and logging a +54% realized trade as a −40% loss.
  *
  * Usage:
  *   const feed = new ClobPriceFeed(redis);
@@ -205,8 +217,12 @@ export class ClobPriceFeed {
       if (typeof msg !== 'object' || msg === null) continue;
       const m = msg as Record<string, unknown>;
 
-      // Dispatch book / trade events to optional handlers (used by flowMonitor).
+      // `book` events carry authoritative bid/ask levels. Cache best-bid per
+      // side (YES/NO) for the `watch()`-registered markets; flowMonitor-style
+      // `subscribeBook()` callers (tokenToMarket self-mapped) are skipped so
+      // we don't cache under a tokenId masquerading as a marketId.
       if (m.event_type === 'book' || m.type === 'book') {
+        await this.cacheBookBestBid(m);
         if (this.onBook) {
           try { await this.onBook(m); } catch (err) {
             logger.warn('[clob-ws] onBook error', { error: err instanceof Error ? err.message : String(err) });
@@ -227,38 +243,53 @@ export class ClobPriceFeed {
         continue;
       }
 
-      if (
-        m.type === 'price_change' &&
-        typeof m.asset_id === 'string' &&
-        typeof m.price === 'string'
-      ) {
-        const tokenId = m.asset_id;
-        const price = parseFloat(m.price);
-        if (!isFinite(price)) continue;
-
-        const marketId = this.tokenToMarket.get(tokenId);
-        if (!marketId) continue;
-
-        const tokens = this.watchedMarkets.get(marketId);
-        if (!tokens) continue;
-
-        const formattedPrice = price.toFixed(6);
-
-        if (tokens[0] === tokenId) {
-          // YES token price
-          await Promise.all([
-            this.redis.setex(WS_YES_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, formattedPrice),
-            // Backward compatibility
-            this.redis.setex(WS_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, formattedPrice),
-          ]);
-        } else if (tokens[1] === tokenId) {
-          // NO token price
-          await this.redis.setex(WS_NO_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, formattedPrice);
-        }
-
-        logger.debug('[clob-ws] price cached', { marketId, tokenId, price });
-      }
+      // `price_change` is per-level deltas, not a best-bid signal. Silently
+      // drop — letting the book-event cache age out via its 30s TTL is safer
+      // than overwriting a real best-bid with a random level change.
+      // (See module header for the 2026-04-24 incident that motivated this.)
     }
+  }
+
+  /**
+   * Cache the best-bid from a CLOB `book` event. Bids are sorted descending
+   * in Polymarket's protocol, so `bids[0]` is the authoritative best-bid for
+   * the token. We cache under the YES or NO key depending on which side of
+   * the watched market the token belongs to.
+   */
+  private async cacheBookBestBid(m: Record<string, unknown>): Promise<void> {
+    const tokenId = typeof m.asset_id === 'string' ? m.asset_id : null;
+    if (!tokenId) return;
+    const marketId = this.tokenToMarket.get(tokenId);
+    if (!marketId) return;
+    const tokens = this.watchedMarkets.get(marketId);
+    // subscribeBook() self-maps tokenId → tokenId (no watchedMarkets entry).
+    // Only cache when a caller has explicitly registered YES/NO token order.
+    if (!tokens) return;
+
+    const bids = Array.isArray(m.bids) ? m.bids : null;
+    if (!bids || bids.length === 0) return;
+    const firstBid = bids[0];
+    if (!firstBid || typeof firstBid !== 'object') return;
+    const priceField = (firstBid as Record<string, unknown>).price;
+    const rawPrice =
+      typeof priceField === 'string' ? priceField
+      : typeof priceField === 'number' ? String(priceField)
+      : null;
+    if (rawPrice === null) return;
+    const price = parseFloat(rawPrice);
+    if (!isFinite(price)) return;
+    const formatted = price.toFixed(6);
+
+    if (tokens[0] === tokenId) {
+      await Promise.all([
+        this.redis.setex(WS_YES_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, formatted),
+        this.redis.setex(WS_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, formatted),
+      ]);
+    } else if (tokens[1] === tokenId) {
+      await this.redis.setex(WS_NO_PRICE_KEY(marketId), PRICE_CACHE_TTL_S, formatted);
+    }
+
+    logger.debug('[clob-ws] best-bid cached', { marketId, tokenId, bestBid: price });
   }
 
   private scheduleReconnect(): void {

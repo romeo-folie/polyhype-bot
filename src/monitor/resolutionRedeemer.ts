@@ -735,17 +735,56 @@ async function redeemClobPositions(
           // not in our config. When on, our local redeemer never sees the
           // winning balance — Polymarket pays out first, our on-chain query
           // runs afterward and sees zero shares.
+          // Dust left behind by a maker-exit partial fill has already had its
+          // realized outcome recorded by `finalizeClobExit`. Writing a second
+          // outcome row here (typically -100% / expired_dust) would both
+          // double-count the loss and mask the realized win. The partial-exit
+          // marker on reconciliationStatus is the signal.
+          const alreadyRecordedViaPartialExit =
+            typeof pos.reconciliationStatus === 'string' &&
+            pos.reconciliationStatus.startsWith('partial_exit:');
+          if (alreadyRecordedViaPartialExit) {
+            logger.info(
+              '[redeemer] skipping expired-dust outcome — partial_exit already recorded a realized outcome',
+              {
+                marketId: pos.marketId,
+                direction: pos.direction,
+                reconciliationStatus: pos.reconciliationStatus,
+                reportedBalance,
+              },
+            );
+            await closePosition(redis, pos.marketId, pos.direction);
+            await markRecentlyClosed(redis, pos.marketId);
+            await markRecentlyResolved(redis, pos.marketId);
+            results.push({ marketId: pos.marketId, side, success: true });
+            continue;
+          }
+
           if (isDust || (reportedBalance ?? 0) <= 0.01) {
             // `isDust` can mean either "never really filled" (ledger shares ≈ 0,
             // like healed_mismatch remnants) OR "had a real position that
-            // Polymarket auto-redeemed down to 0 balance". We distinguish via
-            // the ledger's recorded `sharesHeld`: if we ever held meaningful
-            // shares, the balance going to zero + on-chain resolution = an
-            // auto-redeemed outcome worth recording properly.
-            const hadRealPosition =
+            // Polymarket auto-redeemed down to 0 balance" OR "had a real
+            // position that got reconciler-healed to dust after a maker-exit
+            // partial fill". We decide via `stakeUsd` — the position's
+            // ORIGINAL stake, which the reconciler does not mutate — rather
+            // than the current `sharesHeld`, which the reconciler overwrites
+            // on venue mismatch. `sharesHeld > 0.01` is kept as a secondary
+            // signal for positions whose `stakeUsd` is missing (older rows).
+            //
+            // 2026-04-24 incident: an ETH Up-or-Down winner was healed from
+            // 9.9944 → 0.0044 shares when a maker-exit sold 9.99 of our YES
+            // to an external buyer; reading post-heal sharesHeld here routed
+            // it to the `expired_dust` −100% branch instead of the
+            // `auto_redeemed_win` branch despite on-chain YES confirmation.
+            const stakeSignalsRealPosition =
+              typeof pos.stakeUsd === 'number' &&
+              Number.isFinite(pos.stakeUsd) &&
+              pos.stakeUsd > 1;
+            const sharesSignalsRealPosition =
               typeof pos.sharesHeld === 'number' &&
               Number.isFinite(pos.sharesHeld) &&
               pos.sharesHeld > 0.01;
+            const hadRealPosition = stakeSignalsRealPosition || sharesSignalsRealPosition;
             const onChainOutcomeDust = await checkOnChainResolution(conditionId);
             if (onChainOutcomeDust) {
               const normalizedDirDust = isYesSide ? 'YES' : 'NO';
