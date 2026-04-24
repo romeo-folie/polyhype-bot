@@ -2,12 +2,20 @@
  * METAR ground-truth client.
  *
  * Fetches hourly METAR observations from aviationweather.gov for international
- * ICAO stations that Polymarket resolves via NOAA WRH (Istanbul/LTFM,
- * Tel Aviv/LLBG, Moscow/UUWW, Taipei/RCTP). Derives the daily maximum from
- * the hourly `temp` field.
+ * ICAO stations. Derives the daily maximum from the hourly `temp` field.
  *
  * Endpoint: GET https://aviationweather.gov/api/data/metar?ids={ICAO}&hours=720&format=json
- * No auth required. Max lookback: 720 hours (~30 days).
+ * No auth required.
+ *
+ * Effective lookback: ~8–9 days, NOT the 30 days the `hours=720` query
+ * parameter suggests. aviationweather.gov caps responses at ~400 observations
+ * regardless of the requested range, so older dates return empty. Callers
+ * that need a longer historical window should route via `wuClient.ts`
+ * instead. As of 2026-04-24, no city in CITY_COORDINATES uses METAR as its
+ * primary resolution source — all international stations moved to WU after
+ * this cap was discovered during the weather_ground_truth backfill audit.
+ * The module is kept for potential future use (e.g., same-day resolution
+ * on stations without WU coverage).
  *
  * Log marker: [weather-metar]
  */
