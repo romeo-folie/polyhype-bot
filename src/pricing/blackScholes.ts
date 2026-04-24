@@ -15,8 +15,15 @@ export const SECONDS_PER_YEAR = 365.25 * 24 * 3600;
 /**
  * Normal CDF via Abramowitz & Stegun rational approximation (error < 7.5e-8).
  * Exposed for unit testing.
+ *
+ * Non-finite handling: +Inf → 1, −Inf → 0, NaN → NaN. Callers are expected
+ * to treat a NaN result as a hard signal that upstream inputs were invalid —
+ * `computePModel` validates Number.isFinite on all inputs up front so this
+ * path shouldn't fire in production, but returning NaN keeps the failure
+ * loud rather than turning bad math into a deceptively valid probability.
  */
 export function normalCdf(x: number): number {
+  if (Number.isNaN(x)) return NaN;
   if (!Number.isFinite(x)) return x > 0 ? 1 : 0;
   const t = 1 / (1 + 0.2316419 * Math.abs(x));
   const poly =
@@ -53,6 +60,14 @@ export function computePModel(
   sigma: number,
   tauSecs: number,
 ): PModelResult {
+  if (
+    !Number.isFinite(spot) ||
+    !Number.isFinite(strike) ||
+    !Number.isFinite(sigma) ||
+    !Number.isFinite(tauSecs)
+  ) {
+    return { pYes: 0.5, pNo: 0.5, d: 0, tauYears: 0, valid: false, invalidReason: 'non_finite_input' };
+  }
   if (spot <= 0 || strike <= 0) {
     return { pYes: 0.5, pNo: 0.5, d: 0, tauYears: 0, valid: false, invalidReason: 'non_positive_price' };
   }

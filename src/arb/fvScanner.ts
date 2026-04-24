@@ -216,7 +216,7 @@ export function evaluateFvEntry(
     cfg.kellyFraction,
   );
   const stakeUsd = Math.min(cfg.bankrollUsd * kellyFrac, cfg.maxStakeUsd);
-  if (stakeUsd <= 0) return blank('zero_stake');
+  if (stakeUsd <= 0) return withEdge('zero_stake');
 
   return {
     shouldEnter: true,
@@ -504,33 +504,63 @@ export class FvScanner {
       blockReason: evaluation.blockReason,
     });
 
-    void enqueueWrite('shadow_observations', {
-      kind: 'fv_scanner',
-      source: 'fv-scanner',
-      marketId: market.marketId,
-      direction: evaluation.side ?? undefined,
-      wouldBlock: !wouldTrade,
-      metricValue: evaluation.edge,
-      payload: {
-        asset,
-        spot,
-        strike,
-        sigma,
-        sigmaWarmedUp,
-        tauSec: evaluation.tauSec,
-        pYes: evaluation.pYes,
-        pNo: evaluation.pNo,
-        stakeUsd: evaluation.stakeUsd,
-        blockReason: evaluation.blockReason ?? null,
-      },
-    });
+    // Gate DB writes to meaningful rows. Pre-model early blocks fire on every
+    // tick for every market during warmup/strike-lookup and carry no p_model
+    // signal — skipping them keeps shadow_observations focused on gate
+    // analysis (p_model, edge, momentum, sizing) and prevents table spam.
+    // Would-trade rows are always persisted.
+    const NOISY_BLOCK_REASONS: ReadonlySet<FvBlockReason> = new Set([
+      'sigma_not_warmed_up',
+      'strike_not_resolved',
+      'bs_invalid',
+    ]);
+    const shouldPersistShadow =
+      wouldTrade ||
+      !evaluation.blockReason ||
+      !NOISY_BLOCK_REASONS.has(evaluation.blockReason);
+
+    if (shouldPersistShadow) {
+      void enqueueWrite('shadow_observations', {
+        kind: 'fv_scanner',
+        source: 'fv-scanner',
+        marketId: market.marketId,
+        direction: evaluation.side ?? undefined,
+        wouldBlock: !wouldTrade,
+        metricValue: evaluation.edge,
+        payload: {
+          asset,
+          spot,
+          strike,
+          sigma,
+          sigmaWarmedUp,
+          tauSec: evaluation.tauSec,
+          pYes: evaluation.pYes,
+          pNo: evaluation.pNo,
+          stakeUsd: evaluation.stakeUsd,
+          blockReason: evaluation.blockReason ?? null,
+        },
+      });
+    }
 
     if (!wouldTrade || !cfg.FV_SCANNER_ENABLED) return;
 
     // ── Live execution path ────────────────────────────────────────────────
 
-    // Rate cap (shared hourly bucket)
-    const recentCount = await countRecentUpDownTrades(this.redis).catch(() => 0);
+    // Rate cap (shared hourly bucket).
+    // Fail-CLOSED on Redis error: if we can't read the throttle counter, we
+    // can't assume the cap isn't hit — treating a Redis outage as "no trades
+    // recorded" would let the scanner fire uncapped while throttle state is
+    // unreadable. Default to blocking.
+    let recentCount: number;
+    try {
+      recentCount = await countRecentUpDownTrades(this.redis);
+    } catch (err) {
+      logger.warn('[fv-scanner] rate cap read failed — blocking as fail-safe', {
+        asset,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
     if (recentCount >= cfg.FV_MAX_TRADES_PER_HOUR) {
       logger.debug('[fv-scanner] rate cap hit', { asset, recentCount, cap: cfg.FV_MAX_TRADES_PER_HOUR });
       return;
@@ -556,7 +586,6 @@ export class FvScanner {
 
     const direction = side; // 'YES' | 'NO' — executor.ts canonical mapping handles UP/DOWN alias
     const throttleDir = side === 'YES' ? 'UP' : 'DOWN'; // updownThrottle uses UP/DOWN
-    const tokenId = side === 'YES' ? market.yesTokenId : market.noTokenId;
     const entryPrice = evaluation.entryPrice;
 
     const signal: TradeSignal = {

@@ -379,6 +379,144 @@ describe('ChainlinkFeed', () => {
     expect(move?.newPrice).toBe(72_360);
     expect((move?.pctMove ?? 0) * 100).toBeCloseTo(0.5, 4);
   });
+
+  // -------------------------------------------------------------------------
+  // getTicksSince — used by SigmaCalibrator rolling window
+  // -------------------------------------------------------------------------
+
+  it('getTicksSince returns [] when buffer is empty', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+    expect(feed.getTicksSince('btc/usd', 60_000)).toEqual([]);
+  });
+
+  it('getTicksSince returns [] for unknown symbol', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+    deliver(feed, makeChainlinkMsg('btc/usd', 72_000));
+    expect(feed.getTicksSince('eth/usd', 60_000)).toEqual([]);
+  });
+
+  it('getTicksSince returns [] for windowMs <= 0', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+    deliver(feed, makeChainlinkMsg('btc/usd', 72_000));
+    expect(feed.getTicksSince('btc/usd', 0)).toEqual([]);
+    expect(feed.getTicksSince('btc/usd', -1)).toEqual([]);
+  });
+
+  it('getTicksSince returns [] for non-finite windowMs', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+    deliver(feed, makeChainlinkMsg('btc/usd', 72_000));
+    expect(feed.getTicksSince('btc/usd', Number.NaN)).toEqual([]);
+    expect(feed.getTicksSince('btc/usd', Infinity)).toEqual([]);
+  });
+
+  it('getTicksSince returns ticks inside the window in chronological order', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+    const t0 = 1_775_919_000_000;
+    vi.setSystemTime(t0);
+    deliver(feed, makeChainlinkMsg('btc/usd', 50_000));
+    vi.setSystemTime(t0 + 10_000);
+    deliver(feed, makeChainlinkMsg('btc/usd', 50_100));
+    vi.setSystemTime(t0 + 20_000);
+    deliver(feed, makeChainlinkMsg('btc/usd', 50_200));
+
+    vi.setSystemTime(t0 + 25_000);
+    const ticks = feed.getTicksSince('btc/usd', 60_000);
+    expect(ticks.length).toBe(3);
+    expect(ticks[0]?.value).toBe(50_000);
+    expect(ticks[1]?.value).toBe(50_100);
+    expect(ticks[2]?.value).toBe(50_200);
+  });
+
+  it('getTicksSince filters out ticks older than the window', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+    const t0 = 1_775_919_000_000;
+    vi.setSystemTime(t0);
+    deliver(feed, makeChainlinkMsg('btc/usd', 50_000)); // too old
+    vi.setSystemTime(t0 + 5 * 60_000);
+    deliver(feed, makeChainlinkMsg('btc/usd', 50_100)); // inside window
+
+    vi.setSystemTime(t0 + 5 * 60_000 + 30_000);
+    const ticks = feed.getTicksSince('btc/usd', 60_000);
+    expect(ticks.length).toBe(1);
+    expect(ticks[0]?.value).toBe(50_100);
+  });
+
+  // -------------------------------------------------------------------------
+  // findTickAt — used by FvScanner to resolve window-open strike K
+  // -------------------------------------------------------------------------
+
+  it('findTickAt returns null when buffer is empty', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+    const t0 = 1_775_919_000_000;
+    expect(feed.findTickAt('btc/usd', t0, 60_000)).toBeNull();
+  });
+
+  it('findTickAt returns null for unknown symbol', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+    deliver(feed, makeChainlinkMsg('btc/usd', 72_000));
+    expect(feed.findTickAt('eth/usd', Date.now(), 60_000)).toBeNull();
+  });
+
+  it('findTickAt returns null when no tick falls within tolerance', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+    const t0 = 1_775_919_000_000;
+    vi.setSystemTime(t0);
+    deliver(feed, makeChainlinkMsg('btc/usd', 50_000, t0)); // oracleTs = t0
+    vi.setSystemTime(t0 + 1000);
+    // Query far away from any buffered oracleTs
+    expect(feed.findTickAt('btc/usd', t0 - 5 * 60_000, 60_000)).toBeNull();
+  });
+
+  it('findTickAt returns closest tick when within tolerance', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+    const t0 = 1_775_919_000_000;
+    // Three ticks at t0, t0+30s, t0+60s
+    vi.setSystemTime(t0);
+    deliver(feed, makeChainlinkMsg('btc/usd', 50_000, t0));
+    vi.setSystemTime(t0 + 30_000);
+    deliver(feed, makeChainlinkMsg('btc/usd', 50_100, t0 + 30_000));
+    vi.setSystemTime(t0 + 60_000);
+    deliver(feed, makeChainlinkMsg('btc/usd', 50_200, t0 + 60_000));
+
+    // Query at t0+32s — closest oracleTs is t0+30_000 (diff 2s)
+    vi.setSystemTime(t0 + 65_000);
+    const tick = feed.findTickAt('btc/usd', t0 + 32_000, 10_000);
+    expect(tick).not.toBeNull();
+    expect(tick?.value).toBe(50_100);
+  });
+
+  it('findTickAt rejects closest-but-outside-tolerance', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+    const t0 = 1_775_919_000_000;
+    vi.setSystemTime(t0);
+    deliver(feed, makeChainlinkMsg('btc/usd', 50_000, t0));
+    vi.setSystemTime(t0 + 1000);
+    // Closest is t0 but diff = 30s — larger than tolerance 10s
+    const tick = feed.findTickAt('btc/usd', t0 + 30_000, 10_000);
+    expect(tick).toBeNull();
+  });
+
+  it('findTickAt handles future targets by returning null (no future ticks)', () => {
+    const feed = new ChainlinkFeed({ symbols: ['btc/usd'] });
+    feed.start();
+    const t0 = 1_775_919_000_000;
+    vi.setSystemTime(t0);
+    deliver(feed, makeChainlinkMsg('btc/usd', 50_000, t0));
+    // Target 5 minutes in the future, tolerance 60s — no tick within range
+    const tick = feed.findTickAt('btc/usd', t0 + 5 * 60_000, 60_000);
+    expect(tick).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

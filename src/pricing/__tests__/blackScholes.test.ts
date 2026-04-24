@@ -23,6 +23,11 @@ describe('normalCdf', () => {
   it('Φ(-∞) = 0', () => {
     expect(normalCdf(-Infinity)).toBe(0);
   });
+  it('Φ(NaN) = NaN', () => {
+    // NaN propagates loudly instead of collapsing to 0/1 — prevents silent
+    // math bugs upstream from turning into a seemingly-valid probability.
+    expect(Number.isNaN(normalCdf(NaN))).toBe(true);
+  });
   it('is symmetric: Φ(x) + Φ(-x) = 1', () => {
     for (const x of [0.5, 1, 2, 3]) {
       expect(normalCdf(x) + normalCdf(-x)).toBeCloseTo(1, 10);
@@ -38,6 +43,30 @@ describe('computePModel', () => {
     const r = computePModel(0, 50000, sigma, tauSecs);
     expect(r.valid).toBe(false);
     expect(r.invalidReason).toBe('non_positive_price');
+  });
+
+  it('returns valid=false for NaN spot', () => {
+    const r = computePModel(NaN, 50000, sigma, tauSecs);
+    expect(r.valid).toBe(false);
+    expect(r.invalidReason).toBe('non_finite_input');
+  });
+
+  it('returns valid=false for Infinity strike', () => {
+    const r = computePModel(50000, Infinity, sigma, tauSecs);
+    expect(r.valid).toBe(false);
+    expect(r.invalidReason).toBe('non_finite_input');
+  });
+
+  it('returns valid=false for NaN sigma', () => {
+    const r = computePModel(50000, 50000, NaN, tauSecs);
+    expect(r.valid).toBe(false);
+    expect(r.invalidReason).toBe('non_finite_input');
+  });
+
+  it('returns valid=false for NaN tauSecs', () => {
+    const r = computePModel(50000, 50000, sigma, NaN);
+    expect(r.valid).toBe(false);
+    expect(r.invalidReason).toBe('non_finite_input');
   });
 
   it('returns valid=false for non-positive sigma', () => {
