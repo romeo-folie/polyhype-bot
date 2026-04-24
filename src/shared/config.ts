@@ -1304,7 +1304,7 @@ const envSchema = z.object({
   FV_MAX_TRADES_PER_HOUR: z.coerce.number().int().min(1).optional().default(20),
   // σ calibrator knobs (match sister bot's implementation exactly)
   FV_SIGMA_ROLLING_WINDOW_MS: z.coerce.number().int().min(60_000).optional().default(3_600_000),
-  FV_SIGMA_EWMA_HALF_LIFE_S: z.coerce.number().min(0).optional().default(300),
+  FV_SIGMA_EWMA_HALF_LIFE_S: z.coerce.number().positive().optional().default(300),
   FV_SIGMA_EWMA_SPIKE_MULT: z.coerce.number().min(1).optional().default(1.5),
   FV_SIGMA_MIN: z.coerce.number().min(0).optional().default(0.20),
   FV_SIGMA_MAX: z.coerce.number().min(0).optional().default(5.00),
