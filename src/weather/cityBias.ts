@@ -20,6 +20,10 @@ const REDIS_TTL_S = 7 * 24 * 60 * 60; // 7 days
 // seasonal drift (e.g. spring marine-layer bias for KLAX) shows up in ~5 days
 // instead of the ~12 days a simple mean would take with the same sample volume.
 const EWMA_HALF_LIFE_DAYS = 7;
+// Lookback window: beyond 4 half-lives the weight is < 7% of today's — negligible.
+// Bounding the query lets the DB use a (kind, observed_at DESC) index and keeps
+// the join size constant as the shadow table grows over time.
+const EWMA_LOOKBACK_DAYS = 4 * EWMA_HALF_LIFE_DAYS; // 28 days
 
 export interface CityBias {
   /** Mean of (forecastHigh − observedHigh) across paired samples. Positive → model runs warm. */
@@ -77,6 +81,7 @@ export async function computeCityBias(
           ON gt.city       = so.payload->>'city'
          AND gt.target_date = (so.payload->>'targetDate')::date
         WHERE so.kind = 'weather_event'
+          AND so.observed_at >= NOW() - ${EWMA_LOOKBACK_DAYS} * INTERVAL '1 day'
           AND (so.payload->>'forecastHigh') IS NOT NULL
       )
       SELECT

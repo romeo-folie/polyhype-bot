@@ -1121,11 +1121,18 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
 
   // Cities excluded from execution while their bias recalibrates. Shadow
   // observations still flow so bias keeps converging in the background.
-  const excludedCities = new Set(
-    cfg.WEATHER_EXCLUDED_CITIES.split(',')
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean),
-  );
+  // Entries are canonicalized via canonicalCityKey so aliases ("LA", "NYC",
+  // "São Paulo") match the same way the rest of the pipeline does.
+  const excludedCities = new Set<string>();
+  for (const raw of (cfg.WEATHER_EXCLUDED_CITIES ?? '').split(',')) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    const canonical = canonicalCityKey(trimmed) ?? trimmed.toLowerCase();
+    if (!canonicalCityKey(trimmed)) {
+      logger.warn('[weather] WEATHER_EXCLUDED_CITIES entry not recognised — using as-is', { entry: trimmed });
+    }
+    excludedCities.add(canonical);
+  }
 
   // Filter by WEATHER_TRADE_SIDES and excluded-city list. Excluded-city opps
   // remain in shadow records (wouldTrade=true) so calibration data stays clean.
