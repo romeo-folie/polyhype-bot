@@ -155,6 +155,14 @@ describe('reconcileTargets', () => {
     // `source: undefined` in production code would still fail the test.
     expect(payload).not.toHaveProperty('source');
     expect(payload).not.toHaveProperty('observedHigh');
+
+    // Regression (2026-04-24): the reconciler's output MUST roundtrip through
+    // the writer's Zod schema. Without this assertion, a schema/producer drift
+    // can silently cause every backfill enqueue to be rejected by the db-writer
+    // — which is what happened from 2026-04-22 (PR #298) onward: 1,122 rows
+    // were missing their resolution_high until this guard was added.
+    const parsed = weatherGroundTruthRowSchema.safeParse(payload);
+    expect(parsed.success).toBe(true);
   });
 
   it('skips enqueue when hasArchive=true and resolution is unavailable', async () => {
@@ -271,6 +279,60 @@ describe('weatherGroundTruthRowSchema', () => {
       targetDate: '2026-04-10',
       unit: 'fahrenheit',
       observedHigh: Number.NaN,
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('rejects INSERT payloads (backfillOnly unset) without observedHigh', () => {
+    const parsed = weatherGroundTruthRowSchema.safeParse({
+      city: 'new york',
+      targetDate: '2026-04-10',
+      unit: 'fahrenheit',
+      // observedHigh intentionally missing — INSERT path must require it.
+    });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      const hit = parsed.error.errors.find((e) => e.path.join('.') === 'observedHigh');
+      expect(hit).toBeDefined();
+    }
+  });
+
+  it('accepts backfillOnly payloads without observedHigh', () => {
+    // The reconciler's resolution-backfill branch (weatherReconciler.ts:182-190)
+    // produces exactly this shape — no observedHigh, resolution columns only.
+    // Pre-fix, Zod rejected these with "Required" and 1,122 rows lost their
+    // canonical resolution source.
+    const parsed = weatherGroundTruthRowSchema.safeParse({
+      city: 'london',
+      targetDate: '2026-04-10',
+      unit: 'celsius',
+      resolutionHigh: 14,
+      resolutionSource: 'wu',
+      observedAt: '2026-04-10T12:00:00.000Z',
+      backfillOnly: true,
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('rejects backfillOnly payloads missing resolutionHigh', () => {
+    const parsed = weatherGroundTruthRowSchema.safeParse({
+      city: 'london',
+      targetDate: '2026-04-10',
+      unit: 'celsius',
+      backfillOnly: true,
+      // resolutionHigh + resolutionSource missing — nothing to backfill.
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('still rejects unpaired resolutionHigh / resolutionSource on INSERT path', () => {
+    const parsed = weatherGroundTruthRowSchema.safeParse({
+      city: 'new york',
+      targetDate: '2026-04-10',
+      unit: 'fahrenheit',
+      observedHigh: 71.4,
+      resolutionHigh: 72.0,
+      // resolutionSource missing → superRefine catches the half-specified pair.
     });
     expect(parsed.success).toBe(false);
   });
