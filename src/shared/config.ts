@@ -780,6 +780,7 @@ const envSchema = z.object({
   COPYTRADE_SCOPE_TAG_FALLBACK: boolFromEnv.optional().default(true),
   COPYTRADE_SIZE_SCALE: z.coerce.number().min(0).optional().default(0.1),
   COPYTRADE_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(25),
+  COPYTRADE_MAX_BET_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.1),
   COPYTRADE_MAX_SLIPPAGE_BPS: z.coerce.number().min(0).optional().default(200),
   COPYTRADE_MAX_SLIPPAGE_BPS_CATEGORIES: z
     .string()

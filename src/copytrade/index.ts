@@ -980,7 +980,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       }
 
       const scaledStake = trade.usdcSize * cfg.COPYTRADE_SIZE_SCALE;
-      const maxStake = Math.min(cfg.COPYTRADE_MAX_STAKE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
+      const maxStake = Math.min(cfg.COPYTRADE_MAX_STAKE_USD, bankrollUsd * cfg.COPYTRADE_MAX_BET_FRACTION);
       let stakeUsd = Math.max(0, Math.min(scaledStake, maxStake));
 
       // Apply the same stake floor bump the executor uses: stakes >= 60%
