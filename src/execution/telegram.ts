@@ -321,6 +321,9 @@ export async function notifyMarketResolved(opts: {
     if (isWin && proceedsUsdc != null && proceedsUsdc > 0) {
       const profit = proceedsUsdc - stakeUsd;
       stakeLine = `\n<b>Stake:</b> $${stakeUsd.toFixed(2)} → <b>$${proceedsUsdc.toFixed(2)}</b> (+$${profit.toFixed(2)})`;
+    } else if (isWin) {
+      // Won directionally but proceeds are unavailable (e.g. auto-redeemed by Polymarket before our redeemer ran)
+      stakeLine = `\n<b>Stake:</b> $${stakeUsd.toFixed(2)} (proceeds unknown)`;
     } else {
       stakeLine = `\n<b>Stake lost:</b> $${stakeUsd.toFixed(2)}`;
     }

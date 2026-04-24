@@ -1105,29 +1105,78 @@ async function redeemClobPositions(
             continue;
           }
 
-          // Dust positions that won: close without redemption, record actual outcome.
+          // Dust + won: zero token balance on a resolved market almost always means
+          // Polymarket's auto-redeemer already paid out the win (tokens burned → USDC
+          // sent). Apply the same hadRealPosition gate used in the regular expired path.
           if (isDust) {
+            const stakePopulated =
+              typeof pos.stakeUsd === 'number' && Number.isFinite(pos.stakeUsd) && pos.stakeUsd > 0;
+            const sharesNonZero =
+              typeof pos.sharesHeld === 'number' && Number.isFinite(pos.sharesHeld) && pos.sharesHeld > 0;
+            const hadRealPosition = stakePopulated && sharesNonZero;
+
             await closePosition(redis, pos.marketId, pos.direction);
             await markRecentlyClosed(redis, pos.marketId);
             await markRecentlyResolved(redis, pos.marketId);
-            await recordPositionOutcome(
-              redis,
-              { ...pos, question: q, direction: pmDirection },
-              {
+
+            if (hadRealPosition) {
+              // Auto-redeemed win: calculate return from ledger shares (same formula as regular path).
+              // sharesHeld may be reconciler-healed to dust, so don't pass it as proceedsUsdc —
+              // we can't verify the actual payout amount here.
+              const entryPriceSafe =
+                typeof pos.entryPrice === 'number' && Number.isFinite(pos.entryPrice) && pos.entryPrice > 0;
+              let returnPct: number;
+              if (typeof pos.sharesHeld === 'number' && Number.isFinite(pos.sharesHeld)) {
+                returnPct = ((pos.sharesHeld - pos.stakeUsd) / pos.stakeUsd) * 100;
+              } else if (entryPriceSafe) {
+                returnPct = ((1 - pos.entryPrice) / pos.entryPrice) * 100;
+              } else {
+                returnPct = 0;
+              }
+              await recordPositionOutcome(
+                redis,
+                { ...pos, question: q, direction: pmDirection },
+                {
+                  result: 'won',
+                  returnPct,
+                  executionVenueOverride: 'clob',
+                  exitReason: 'no_end_date_auto_redeemed_win',
+                },
+              );
+              void notifyMarketResolved({
+                question: q,
+                direction: displayDir,
                 result: 'won',
-                returnPct: -100,
-                executionVenueOverride: 'clob',
-                exitReason: 'no_end_date_dust_closed',
-              },
-            );
-            void notifyMarketResolved({
-              question: q,
-              direction: displayDir,
-              result: 'won',
-              stakeUsd: pos.stakeUsd,
-              reason: 'dust position, on-chain settled (no endDate stored)',
-            }).catch(() => {});
-            results.push({ marketId: pos.marketId, side, success: false, error: 'no_end_date_dust_closed' });
+                stakeUsd: pos.stakeUsd,
+                reason: 'auto-redeemed by Polymarket (no endDate stored)',
+              }).catch(() => {});
+              results.push({ marketId: pos.marketId, side, success: true });
+              logger.info('[redeemer] detected auto-redeemed win via no-endDate dust path', {
+                marketId: pos.marketId,
+                direction: pos.direction,
+                returnPct: returnPct.toFixed(2),
+              });
+            } else {
+              // Genuine dust (never really filled): close as loss.
+              await recordPositionOutcome(
+                redis,
+                { ...pos, question: q, direction: pmDirection },
+                {
+                  result: 'lost',
+                  returnPct: -100,
+                  executionVenueOverride: 'clob',
+                  exitReason: 'no_end_date_dust_closed',
+                },
+              );
+              void notifyMarketResolved({
+                question: q,
+                direction: displayDir,
+                result: 'lost',
+                stakeUsd: pos.stakeUsd,
+                reason: 'dust position, on-chain settled (no endDate stored)',
+              }).catch(() => {});
+              results.push({ marketId: pos.marketId, side, success: false, error: 'no_end_date_dust_closed' });
+            }
             continue;
           }
 
