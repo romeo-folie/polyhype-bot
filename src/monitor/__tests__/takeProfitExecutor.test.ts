@@ -441,15 +441,17 @@ describe('executeTakeProfit', () => {
 
   // ── Realized returnPct recording (2026-04-24 incident fix) ───────────────
 
-  it('records realized returnPct from proceeds, not the trigger returnPct', async () => {
+  it('records realized returnPct from venue fill price, not the trigger returnPct', async () => {
     // Mirrors the 2026-04-24 ETH Up-or-Down incident: trigger reports −40%
-    // (stale WS cache said $0.30), sell re-reads fresh book and fills at
-    // $0.80 on 10 shares for $8 proceeds → realized = (8 − 5) / 5 = +60%.
+    // (stale WS cache said $0.30), sell actually fills at $0.80 (venue
+    // reports `price`). realized = (10 × 0.8 − 5) / 5 = +60%.
     mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 10 });
     mockClobSell.mockResolvedValue({
       success: true,
       tx_hash: '0xluckyfill',
       shares_bought: 10,
+      price: 0.8,
+      cost: 8.0,
     });
 
     const result = await executeTakeProfit({
@@ -460,7 +462,7 @@ describe('executeTakeProfit', () => {
         sharesHeld: 10,
         entryPrice: 0.5,
       }),
-      currentPrice: 0.8,
+      currentPrice: 0.3, // stale quote — what triggered the signal
       returnPct: -40,
       reason: 'oracle_lag_stop_loss',
       redis: makeRedis(),
@@ -478,12 +480,75 @@ describe('executeTakeProfit', () => {
     expect(notifyCall.returnPct).toBeCloseTo(60, 2);
   });
 
+  it('falls back to trigger returnPct when the venue does not report a fill price', async () => {
+    // Taker path today: `submitClobSell` returns shares_bought but SDK didn't
+    // populate `price` or `cost`. Without a venue-reported fill price we
+    // cannot confidently compute realized P&L from `currentPrice` (which
+    // may be the stale quote), so we keep the trigger returnPct and warn.
+    mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 10 });
+    mockClobSell.mockResolvedValue({
+      success: true,
+      tx_hash: '0xnoprice',
+      shares_bought: 10,
+    });
+
+    await executeTakeProfit({
+      position: makePosition({
+        executionVenue: 'clob',
+        direction: 'YES',
+        stakeUsd: 5.0,
+        sharesHeld: 10,
+        entryPrice: 0.5,
+      }),
+      currentPrice: 0.3,
+      returnPct: -40,
+      reason: 'oracle_lag_stop_loss',
+      redis: makeRedis(),
+    });
+
+    expect(mockRecordOutcome).toHaveBeenCalledTimes(1);
+    const outcomeArgs = mockRecordOutcome.mock.calls[0]?.[2] as { returnPct: number; result: string };
+    expect(outcomeArgs.returnPct).toBeCloseTo(-40, 2);
+    expect(outcomeArgs.result).toBe('lost');
+  });
+
+  it('derives fill price from cost/shares_bought when `price` is absent', async () => {
+    // Some SDK paths populate `cost` (USDC) and `shares_bought` but not
+    // `price` directly. `deriveClobFillPrice` fills the gap.
+    mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 10 });
+    mockClobSell.mockResolvedValue({
+      success: true,
+      tx_hash: '0xcostonly',
+      shares_bought: 10,
+      cost: 7.7,
+    });
+
+    await executeTakeProfit({
+      position: makePosition({
+        executionVenue: 'clob',
+        direction: 'YES',
+        stakeUsd: 5.0,
+        sharesHeld: 10,
+        entryPrice: 0.5,
+      }),
+      currentPrice: 0.3,
+      returnPct: -40,
+      reason: 'oracle_lag_stop_loss',
+      redis: makeRedis(),
+    });
+
+    // proceeds = 10 × (7.7 / 10) = 7.7 → realized = (7.7 − 5) / 5 = +54%
+    const outcomeArgs = mockRecordOutcome.mock.calls[0]?.[2] as { returnPct: number };
+    expect(outcomeArgs.returnPct).toBeCloseTo(54, 2);
+  });
+
   it('falls back to trigger returnPct when stakeUsd is missing', async () => {
     mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 10 });
     mockClobSell.mockResolvedValue({
       success: true,
       tx_hash: '0xnostake',
       shares_bought: 10,
+      price: 0.5,
     });
 
     await executeTakeProfit({
@@ -565,6 +630,7 @@ describe('executeTakeProfit', () => {
       success: true,
       tx_hash: '0xpartialsweep',
       shares_bought: 9.99,
+      price: 0.8,
     });
 
     const callOrder: string[] = [];

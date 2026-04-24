@@ -765,26 +765,37 @@ async function redeemClobPositions(
             // like healed_mismatch remnants) OR "had a real position that
             // Polymarket auto-redeemed down to 0 balance" OR "had a real
             // position that got reconciler-healed to dust after a maker-exit
-            // partial fill". We decide via `stakeUsd` — the position's
-            // ORIGINAL stake, which the reconciler does not mutate — rather
-            // than the current `sharesHeld`, which the reconciler overwrites
-            // on venue mismatch. `sharesHeld > 0.01` is kept as a secondary
-            // signal for positions whose `stakeUsd` is missing (older rows).
+            // partial fill".
+            //
+            // Distinguishing gate: BOTH a positive original stake AND some
+            // non-zero on-ledger share count must be present. Either signal
+            // alone is insufficient:
+            //   - `stakeUsd > X` alone: misclassifies recorded-but-never-
+            //     filled entries (stakeUsd is persisted at signal time on
+            //     some paths, before fill confirmation) as real positions.
+            //   - `sharesHeld > 0.01` alone: the 2026-04-24 incident — a
+            //     reconciler-healed winner has sharesHeld = 0.0044, below
+            //     the threshold, so we'd miss the auto-redeemed-win branch.
+            // Requiring `sharesHeld > 0` (any non-zero) catches healed-to-
+            // dust positions (any real fill leaves residual shares in the
+            // ledger even after a heal) AND excludes never-filled entries
+            // (which have sharesHeld = 0 exactly). Pairing with a stake-
+            // populated check rules out rows missing stakeUsd entirely.
             //
             // 2026-04-24 incident: an ETH Up-or-Down winner was healed from
             // 9.9944 → 0.0044 shares when a maker-exit sold 9.99 of our YES
-            // to an external buyer; reading post-heal sharesHeld here routed
-            // it to the `expired_dust` −100% branch instead of the
-            // `auto_redeemed_win` branch despite on-chain YES confirmation.
-            const stakeSignalsRealPosition =
+            // to an external buyer; reading post-heal sharesHeld here with
+            // the old > 0.01 threshold routed it to the `expired_dust`
+            // −100% branch instead of the `auto_redeemed_win` branch.
+            const stakePopulated =
               typeof pos.stakeUsd === 'number' &&
               Number.isFinite(pos.stakeUsd) &&
-              pos.stakeUsd > 1;
-            const sharesSignalsRealPosition =
+              pos.stakeUsd > 0;
+            const sharesNonZero =
               typeof pos.sharesHeld === 'number' &&
               Number.isFinite(pos.sharesHeld) &&
-              pos.sharesHeld > 0.01;
-            const hadRealPosition = stakeSignalsRealPosition || sharesSignalsRealPosition;
+              pos.sharesHeld > 0;
+            const hadRealPosition = stakePopulated && sharesNonZero;
             const onChainOutcomeDust = await checkOnChainResolution(conditionId);
             if (onChainOutcomeDust) {
               const normalizedDirDust = isYesSide ? 'YES' : 'NO';

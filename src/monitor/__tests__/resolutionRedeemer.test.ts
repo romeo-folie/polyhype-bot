@@ -631,9 +631,9 @@ describe('redeemResolvedPositions', () => {
   });
 
   it('expired dust position (genuinely never filled) + on-chain WIN → records expired_dust', async () => {
-    // Avoids ghost wins: if neither stakeUsd nor sharesHeld show a meaningful
-    // fill, a resolved-in-our-favor on-chain outcome is NOT counted as a win.
-    // `stakeUsd` tiny (<$1) and `sharesHeld` tiny → truly nothing to redeem.
+    // Avoids ghost wins: a position whose order was recorded but never
+    // actually filled (sharesHeld = 0 exactly) must NOT be counted as a
+    // win even when on-chain resolution matches our direction.
     const pastDate = new Date(Date.now() - 60_000).toISOString();
     mockGetOpenPositions.mockResolvedValue([
       {
@@ -643,9 +643,9 @@ describe('redeemResolvedPositions', () => {
         direction: 'NO',
         executionVenue: 'clob',
         question: 'Will the highest temperature in Toronto be 18°C on April 22?',
-        sharesHeld: 0.005,     // healed_mismatch remnant — no real fill
+        sharesHeld: 0,          // nothing ever filled
         entryPrice: 0.74,
-        stakeUsd: 0.15,        // below the $1 real-stake gate
+        stakeUsd: 4.21,         // recorded at signal time, before fill
         endDate: pastDate,
         sourcedFrom: 'weather:toronto:2026-04-22:18°C',
       },

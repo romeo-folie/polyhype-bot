@@ -27,6 +27,7 @@ import {
   fetchClobTokenBalance,
   parseBalanceFromClobError,
   type ClobBalanceResult,
+  type ClobTradeResult,
   CLOB_MIN_ORDER_USD,
 } from '../shared/clob.js';
 import type { TickSize } from '@polymarket/clob-client';
@@ -755,6 +756,29 @@ async function attemptSimmerRecovery(
 }
 
 /**
+ * Extract the venue-reported fill price from a CLOB sell response, or
+ * `undefined` if the SDK didn't populate enough fields to compute one.
+ * Prefers the explicit `price`, falls back to `cost / shares_bought`.
+ */
+function deriveClobFillPrice(result: ClobTradeResult): number | undefined {
+  if (typeof result.price === 'number' && Number.isFinite(result.price) && result.price > 0) {
+    return result.price;
+  }
+  if (
+    typeof result.cost === 'number' &&
+    Number.isFinite(result.cost) &&
+    result.cost > 0 &&
+    typeof result.shares_bought === 'number' &&
+    Number.isFinite(result.shares_bought) &&
+    result.shares_bought > 0
+  ) {
+    const derived = result.cost / result.shares_bought;
+    if (Number.isFinite(derived) && derived > 0) return derived;
+  }
+  return undefined;
+}
+
+/**
  * Post-sell cleanup for CLOB: close position, credit proceeds, record outcome, notify.
  *
  * Uses the venue-reported actual filled amount (`shares_bought` from the CLOB
@@ -771,11 +795,28 @@ async function finalizeClobExit(
   reason: ExitReason,
   txHash?: string | null | undefined,
   sweepCtx?: { tokenId: string },
+  /**
+   * Venue-reported fill price for the primary sell, when known (e.g. the
+   * maker-exit path passes the posted price — post-only matches at the
+   * posted price by construction). When omitted, we fall back to
+   * `currentPrice` for the proceeds estimate and treat the resulting return
+   * as a QUOTE-TIME estimate, not realized.
+   */
+  primaryFillPrice?: number | undefined,
 ): Promise<TakeProfitResult> {
   const cfg = loadConfig();
   const primaryFill = actualSharesSold > 0 ? actualSharesSold : sharesRequested;
+  // Prefer venue-reported fill price over quote-time `currentPrice`. For the
+  // maker-exit path these are equal, but for the taker path `currentPrice`
+  // is the quote at signal time and the real fill can differ.
+  const priceForProceeds =
+    typeof primaryFillPrice === 'number' && Number.isFinite(primaryFillPrice) && primaryFillPrice > 0
+      ? primaryFillPrice
+      : currentPrice;
+  const hasVenueFillPrice =
+    typeof primaryFillPrice === 'number' && Number.isFinite(primaryFillPrice) && primaryFillPrice > 0;
   let totalSharesSold = primaryFill;
-  let totalProceedsUsd = primaryFill * currentPrice;
+  let totalProceedsUsd = primaryFill * priceForProceeds;
   let pendingDueToResidual = false;
 
   if (primaryFill < sharesRequested - 1e-6) {
@@ -796,24 +837,42 @@ async function finalizeClobExit(
     }
   }
 
-  // Realized return from actual proceeds. The trigger `returnPct` is what the
-  // evaluator saw at decision time (possibly off a stale WS cache); the fill
-  // can be materially different — a stale $0.30 signal can still lucky-fill
-  // a post-only maker sell at the real $0.78 ask because the maker-exit path
-  // re-reads the book. Recording the trigger value instead of realized was
-  // the 2026-04-24 chain that logged a +54% ETH Up-or-Down trade as −40%
-  // lost. Prefer realized whenever stake and proceeds are both finite; fall
-  // back to the trigger value only when proceeds are unusable.
+  // Realized return from actual proceeds. The trigger `returnPct` is what
+  // the evaluator saw at decision time (possibly off a stale WS cache); the
+  // fill can be materially different — a stale $0.30 signal can still
+  // lucky-fill a post-only maker sell at the real $0.78 ask because the
+  // maker-exit path re-reads the book. Recording the trigger value instead
+  // of realized was the 2026-04-24 chain that logged a +54% ETH Up-or-Down
+  // trade as −40% lost.
+  //
+  // We only LABEL the result "realized" when `primaryFillPrice` was
+  // provided by the caller (i.e., the venue reported an actual fill price
+  // rather than our quote-time estimate). Otherwise the proceeds are still
+  // `currentPrice * shares`, which may under/overstate the realized P&L on
+  // taker FAK fills, so we keep the trigger returnPct — better to under-
+  // correct than to publish a confidently-wrong number labelled "realized".
   const stakeUsd = position.stakeUsd;
   const stakeIsReal =
     typeof stakeUsd === 'number' && Number.isFinite(stakeUsd) && stakeUsd > 0;
   const proceedsUsable = Number.isFinite(totalProceedsUsd) && totalProceedsUsd >= 0;
-  const realizedReturnPct =
-    stakeIsReal && proceedsUsable
-      ? ((totalProceedsUsd - stakeUsd) / stakeUsd) * 100
-      : returnPct;
+  const canUseRealized = stakeIsReal && proceedsUsable && hasVenueFillPrice;
+  const realizedReturnPct = canUseRealized
+    ? ((totalProceedsUsd - stakeUsd) / stakeUsd) * 100
+    : returnPct;
 
-  if (stakeIsReal && proceedsUsable && Math.abs(realizedReturnPct - returnPct) >= 5) {
+  if (stakeIsReal && !hasVenueFillPrice) {
+    logger.warn(
+      '[take-profit-executor] realized return fallback: no venue fill price',
+      {
+        marketId: position.marketId,
+        reason,
+        triggerReturnPct: +returnPct.toFixed(2),
+        currentPrice: +currentPrice.toFixed(6),
+        estimatedProceedsUsd: +totalProceedsUsd.toFixed(6),
+        totalSharesSold: +totalSharesSold.toFixed(6),
+      },
+    );
+  } else if (canUseRealized && Math.abs(realizedReturnPct - returnPct) >= 5) {
     logger.warn('[take-profit-executor] trigger vs realized returnPct divergence', {
       marketId: position.marketId,
       reason,
@@ -1074,8 +1133,10 @@ async function tryExecuteViaClobMakerExit(opts: {
     });
   }
 
-  // Use the actual resting price as the realized exit price (not the stale currentPrice).
-  // finalize uses this both for proceeds credit and for the partial-fill sweep ctx.
+  // Post-only maker fills match AT the posted price by construction, so
+  // `price` is the venue-reported fill price for this path. Forward it as
+  // `primaryFillPrice` so finalizeClobExit can compute a true realized
+  // returnPct rather than fall back to the trigger value.
   const result = await finalizeClobExit(
     redis,
     position,
@@ -1086,6 +1147,7 @@ async function tryExecuteViaClobMakerExit(opts: {
     reason,
     undefined,
     { tokenId },
+    price,
   );
   return { ok: true, result };
 }
@@ -1272,6 +1334,14 @@ async function executeClobExit(opts: {
         txHash: clobResult.tx_hash,
         shares: safeShares,
       });
+      // Taker path: prefer the venue's reported fill price when the SDK
+      // populates it (cost/shares_bought or explicit `price`). A FAK fill
+      // can land materially away from the quote-time `currentPrice` on
+      // fast-moving or thin books. If neither the explicit price nor a
+      // usable cost field is set, we pass undefined and finalizeClobExit
+      // keeps the trigger returnPct rather than publish a lie labelled
+      // "realized".
+      const venueFillPrice = deriveClobFillPrice(clobResult);
       return finalizeClobExit(
         redis,
         position,
@@ -1282,6 +1352,7 @@ async function executeClobExit(opts: {
         reason,
         clobResult.tx_hash,
         { tokenId },
+        venueFillPrice,
       );
     }
 
@@ -1311,6 +1382,7 @@ async function executeClobExit(opts: {
               txHash: retryResult.tx_hash,
               shares: retryShares,
             });
+            const retryFillPrice = deriveClobFillPrice(retryResult);
             return finalizeClobExit(
               redis,
               position,
@@ -1321,6 +1393,7 @@ async function executeClobExit(opts: {
               reason,
               retryResult.tx_hash,
               { tokenId },
+              retryFillPrice,
             );
           }
         }
