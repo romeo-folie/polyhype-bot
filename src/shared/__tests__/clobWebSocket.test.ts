@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { ClobPriceFeed, WS_PRICE_KEY } from '../clobWebSocket.js';
+import {
+  ClobPriceFeed,
+  WS_PRICE_KEY,
+  WS_YES_PRICE_KEY,
+  WS_NO_PRICE_KEY,
+} from '../clobWebSocket.js';
 
 // ── Mock Redis ──────────────────────────────────────────────────────────────
 
@@ -47,7 +52,7 @@ describe('ClobPriceFeed', () => {
     expect(price).toBeNull();
   });
 
-  it('returns cached value after handleMessage fires', async () => {
+  it('returns cached best-bid after a book event fires', async () => {
     // Set up token mapping manually (watch is a no-op when disabled,
     // so we access internals)
     const feedAny = feed as unknown as {
@@ -60,7 +65,12 @@ describe('ClobPriceFeed', () => {
     feedAny.tokenToMarket.set('no-token', 'market-1');
 
     await feedAny.handleMessage(
-      JSON.stringify({ type: 'price_change', asset_id: 'yes-token', price: '0.72' }),
+      JSON.stringify({
+        event_type: 'book',
+        asset_id: 'yes-token',
+        bids: [{ price: '0.72', size: '50' }, { price: '0.71', size: '10' }],
+        asks: [{ price: '0.75', size: '20' }],
+      }),
     );
 
     const price = await feed.getCachedPrice('market-1');
@@ -112,7 +122,7 @@ describe('ClobPriceFeed', () => {
 
   // ── handleMessage ───────────────────────────────────────────────────────
 
-  it('ignores NO token (index 1), caches YES token (index 0)', async () => {
+  it('caches YES best-bid to YES key, NO best-bid to NO key', async () => {
     const feedAny = feed as unknown as {
       watchedMarkets: Map<string, string[]>;
       tokenToMarket: Map<string, string>;
@@ -122,20 +132,32 @@ describe('ClobPriceFeed', () => {
     feedAny.tokenToMarket.set('yes-tok', 'mkt-2');
     feedAny.tokenToMarket.set('no-tok', 'mkt-2');
 
-    // NO token update — should be ignored
+    // NO book event → NO key only
     await feedAny.handleMessage(
-      JSON.stringify({ type: 'price_change', asset_id: 'no-tok', price: '0.28' }),
+      JSON.stringify({
+        event_type: 'book',
+        asset_id: 'no-tok',
+        bids: [{ price: '0.28', size: '5' }],
+        asks: [{ price: '0.30', size: '5' }],
+      }),
     );
     expect(await feed.getCachedPrice('mkt-2')).toBeNull();
+    expect(redis._store.get(WS_NO_PRICE_KEY('mkt-2'))?.value).toBe('0.280000');
 
-    // YES token update — should be cached
+    // YES book event → YES key and legacy key
     await feedAny.handleMessage(
-      JSON.stringify({ type: 'price_change', asset_id: 'yes-tok', price: '0.72' }),
+      JSON.stringify({
+        event_type: 'book',
+        asset_id: 'yes-tok',
+        bids: [{ price: '0.72', size: '10' }],
+        asks: [{ price: '0.74', size: '10' }],
+      }),
     );
     expect(await feed.getCachedPrice('mkt-2')).toBeCloseTo(0.72, 4);
+    expect(redis._store.get(WS_YES_PRICE_KEY('mkt-2'))?.value).toBe('0.720000');
   });
 
-  it('handles array-wrapped messages', async () => {
+  it('takes bids[0] as best-bid even when multiple levels present', async () => {
     const feedAny = feed as unknown as {
       watchedMarkets: Map<string, string[]>;
       tokenToMarket: Map<string, string>;
@@ -146,13 +168,49 @@ describe('ClobPriceFeed', () => {
 
     await feedAny.handleMessage(
       JSON.stringify([
-        { type: 'price_change', asset_id: 'tok-a', price: '0.55' },
-        { type: 'price_change', asset_id: 'tok-a', price: '0.56' },
+        {
+          event_type: 'book',
+          asset_id: 'tok-a',
+          bids: [
+            { price: '0.56', size: '100' },
+            { price: '0.55', size: '50' },
+            { price: '0.40', size: '10' },
+          ],
+          asks: [{ price: '0.58', size: '20' }],
+        },
       ]),
     );
 
-    // Last update wins
     expect(await feed.getCachedPrice('mkt-3')).toBeCloseTo(0.56, 4);
+  });
+
+  it('does NOT cache from price_change events (2026-04-24 incident guard)', async () => {
+    const feedAny = feed as unknown as {
+      watchedMarkets: Map<string, string[]>;
+      tokenToMarket: Map<string, string>;
+      handleMessage: (raw: string) => Promise<void>;
+    };
+    feedAny.watchedMarkets.set('mkt-p', ['yes-tok', 'no-tok']);
+    feedAny.tokenToMarket.set('yes-tok', 'mkt-p');
+
+    // Seed the cache with a real best-bid from a book event first.
+    await feedAny.handleMessage(
+      JSON.stringify({
+        event_type: 'book',
+        asset_id: 'yes-tok',
+        bids: [{ price: '0.78', size: '10' }],
+        asks: [{ price: '0.79', size: '10' }],
+      }),
+    );
+    expect(await feed.getCachedPrice('mkt-p')).toBeCloseTo(0.78, 4);
+
+    // A spurious price_change event at a non-touch level of 0.30 must NOT
+    // overwrite the cached best-bid of 0.78. This exact pattern produced the
+    // stale -40% stop-loss fire on 2026-04-24.
+    await feedAny.handleMessage(
+      JSON.stringify({ type: 'price_change', asset_id: 'yes-tok', price: '0.30' }),
+    );
+    expect(await feed.getCachedPrice('mkt-p')).toBeCloseTo(0.78, 4);
   });
 
   it('ignores malformed JSON', async () => {
@@ -163,14 +221,41 @@ describe('ClobPriceFeed', () => {
     await feedAny.handleMessage('not-json{{{');
   });
 
-  it('ignores unknown token IDs', async () => {
+  it('ignores unknown token IDs on book events', async () => {
     const feedAny = feed as unknown as {
       handleMessage: (raw: string) => Promise<void>;
     };
     await feedAny.handleMessage(
-      JSON.stringify({ type: 'price_change', asset_id: 'unknown-tok', price: '0.50' }),
+      JSON.stringify({
+        event_type: 'book',
+        asset_id: 'unknown-tok',
+        bids: [{ price: '0.50', size: '5' }],
+        asks: [{ price: '0.52', size: '5' }],
+      }),
     );
     // No crash, no cache entry
+  });
+
+  it('ignores book events with empty bids', async () => {
+    const feedAny = feed as unknown as {
+      watchedMarkets: Map<string, string[]>;
+      tokenToMarket: Map<string, string>;
+      handleMessage: (raw: string) => Promise<void>;
+    };
+    feedAny.watchedMarkets.set('mkt-empty', ['yes-tok', 'no-tok']);
+    feedAny.tokenToMarket.set('yes-tok', 'mkt-empty');
+
+    await feedAny.handleMessage(
+      JSON.stringify({
+        event_type: 'book',
+        asset_id: 'yes-tok',
+        bids: [],
+        asks: [{ price: '0.60', size: '5' }],
+      }),
+    );
+
+    // No bid means nothing to cache — legacy and YES keys should stay empty.
+    expect(await feed.getCachedPrice('mkt-empty')).toBeNull();
   });
 
   // ── WS_PRICE_KEY ────────────────────────────────────────────────────────
@@ -219,20 +304,22 @@ describe('ClobPriceFeed', () => {
       expect(onTrade).toHaveBeenCalledOnce();
     });
 
-    it('does not affect price_change handling when handlers absent', async () => {
-      // Sanity: price_change still flows when no book/trade handlers set.
-      // Use the existing watched-markets path (need to register a token first).
+    it('still caches best-bid from book events when onBook is also registered', async () => {
+      // Flow-monitor-style registration + internal caching must coexist.
       const f = new ClobPriceFeed(redis as never, { enabled: true });
-      // Inject token mapping without opening WS
+      const onBook = vi.fn().mockResolvedValue(undefined);
+      f.onBook = onBook;
       (f as unknown as { tokenToMarket: Map<string, string>; watchedMarkets: Map<string, string[]> })
         .tokenToMarket.set('tok-yes', 'mkt-1');
       (f as unknown as { tokenToMarket: Map<string, string>; watchedMarkets: Map<string, string[]> })
         .watchedMarkets.set('mkt-1', ['tok-yes', 'tok-no']);
       await f.handleMessage(JSON.stringify({
-        type: 'price_change',
+        event_type: 'book',
         asset_id: 'tok-yes',
-        price: '0.42',
+        bids: [{ price: '0.42', size: '10' }],
+        asks: [{ price: '0.44', size: '10' }],
       }));
+      expect(onBook).toHaveBeenCalledOnce();
       expect(redis._store.get(WS_PRICE_KEY('mkt-1'))?.value).toBe('0.420000');
       f.destroy();
     });

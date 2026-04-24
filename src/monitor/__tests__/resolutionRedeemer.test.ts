@@ -630,10 +630,10 @@ describe('redeemResolvedPositions', () => {
     expect(results).toHaveLength(0);
   });
 
-  it('expired dust position (never filled) + on-chain WIN → records expired_dust, NOT auto_redeemed_win', async () => {
-    // Avoids ghost wins: if the ledger never recorded meaningful sharesHeld,
-    // even a resolved-in-our-favor on-chain outcome should NOT be counted as
-    // a win (there were no shares to auto-redeem in the first place).
+  it('expired dust position (genuinely never filled) + on-chain WIN → records expired_dust', async () => {
+    // Avoids ghost wins: a position whose order was recorded but never
+    // actually filled (sharesHeld = 0 exactly) must NOT be counted as a
+    // win even when on-chain resolution matches our direction.
     const pastDate = new Date(Date.now() - 60_000).toISOString();
     mockGetOpenPositions.mockResolvedValue([
       {
@@ -643,9 +643,9 @@ describe('redeemResolvedPositions', () => {
         direction: 'NO',
         executionVenue: 'clob',
         question: 'Will the highest temperature in Toronto be 18°C on April 22?',
-        sharesHeld: 0.005,     // healed_mismatch remnant — no real fill
+        sharesHeld: 0,          // nothing ever filled
         entryPrice: 0.74,
-        stakeUsd: 4.21,        // stake recorded at submit but order didn't fill
+        stakeUsd: 4.21,         // recorded at signal time, before fill
         endDate: pastDate,
         sourcedFrom: 'weather:toronto:2026-04-22:18°C',
       },
@@ -670,5 +670,139 @@ describe('redeemResolvedPositions', () => {
     expect(results).toHaveLength(1);
     expect(results[0].success).toBe(false);
     expect(results[0].error).toBe('expired_dust');
+  });
+
+  it('reconciler-healed-to-dust winner + on-chain WIN → auto_redeemed_win (2026-04-24 fix)', async () => {
+    // The exact 2026-04-24 incident shape: a real fill that the reconciler
+    // subsequently healed down to dust after a maker-exit partial fill.
+    // `stakeUsd` is the authoritative "did we have a real position" signal
+    // because the reconciler does not touch it; `sharesHeld` is post-heal
+    // dust. Previously this routed to `expired_dust` (−100%); the fix routes
+    // to `auto_redeemed_win` when on-chain confirms our side won.
+    const pastDate = new Date(Date.now() - 60_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'eth-updown-healed',
+        conditionId: 'cond-eth-updown-healed',
+        clobTokenIds: ['token-yes-eth', 'token-no-eth'],
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Ethereum Up or Down - April 24, 7:15AM-7:30AM ET',
+        sharesHeld: 0.0044,    // healed down from 9.9944
+        entryPrice: 0.5,
+        stakeUsd: 4.9972,      // real original stake, untouched by reconciler
+        endDate: pastDate,
+        sourcedFrom: 'oracle-lag:eth:0.129pct:5s',
+        reconciliationStatus: 'healed_mismatch:2026-04-24T11:28:28.636Z',
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    // On-chain: YES won (we held YES)
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 0 ? 1n : 0n,
+    );
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 0.0044 } as any);
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'eth-updown-healed', 'YES');
+    expect(vi.mocked(mockNotifyMarketResolved)).toHaveBeenCalledWith(
+      expect.objectContaining({ result: 'won' }),
+    );
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
+  });
+
+  it('partial-exit-marker position + Gamma RESOLVED + dust: skips resolved_dust_closed write', async () => {
+    // Mirror of the !resolved partial_exit test, but exercising the Gamma-
+    // resolved code path. Same duplicate-outcome risk: `finalizeClobExit`
+    // already recorded a realized outcome at the moment of the partial fill;
+    // writing `resolved_dust_closed/−100` here would double-count.
+    const pastDate = new Date(Date.now() - 60_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'resolved-partial',
+        conditionId: 'cond-resolved-partial',
+        clobTokenIds: ['token-yes-rp', 'token-no-rp'],
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Will BTC close > $70k by April 30?',
+        sharesHeld: 0.005,
+        entryPrice: 0.5,
+        stakeUsd: 4.9972,
+        endDate: pastDate,
+        sourcedFrom: 'osint',
+        reconciliationStatus: 'partial_exit:2026-04-28T10:15:00.000Z',
+        pendingSettlement: true,
+      },
+    ]);
+    // Gamma IS able to resolve this one (not an Up/Down binary).
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([{ resolved: true, outcomePrices: '["1","0"]' }]),
+      } as any),
+    );
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 0.005 } as any);
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'resolved-partial', 'YES');
+    expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
+    expect(vi.mocked(mockNotifyMarketResolved)).not.toHaveBeenCalled();
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
+  });
+
+  it('partial-exit-marker position skips expired_dust write (prevents duplicate outcome row)', async () => {
+    // After a maker-exit partial fill, `finalizeClobExit` already recorded
+    // the realized outcome and left a `partial_exit:` marker on the ledger.
+    // The redeemer must NOT write a second outcome row at resolution, else
+    // we get the 2026-04-24-style double-count (lost/−40 + lost/−100).
+    const pastDate = new Date(Date.now() - 60_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'eth-updown-partial',
+        conditionId: 'cond-eth-updown-partial',
+        clobTokenIds: ['token-yes-eth2', 'token-no-eth2'],
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Ethereum Up or Down - April 25, 8:00AM-8:15AM ET',
+        sharesHeld: 0.0044,
+        entryPrice: 0.5,
+        stakeUsd: 4.9972,
+        endDate: pastDate,
+        sourcedFrom: 'oracle-lag:eth:0.140pct:5s',
+        reconciliationStatus: 'partial_exit:2026-04-25T08:03:00.000Z',
+        pendingSettlement: true,
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    // On-chain: YES won (we held YES) — the most dangerous case for a dup-write
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 0 ? 1n : 0n,
+    );
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 0.0044 } as any);
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    // Position is closed, but NO new outcome notification is sent (one was
+    // already sent by finalizeClobExit's notifyTakeProfitExecuted path).
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'eth-updown-partial', 'YES');
+    expect(vi.mocked(mockNotifyMarketResolved)).not.toHaveBeenCalled();
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
   });
 });
