@@ -336,4 +336,55 @@ describe('weatherGroundTruthRowSchema', () => {
     });
     expect(parsed.success).toBe(false);
   });
+
+  it('issue `path` points at the actually-missing field (writer log diagnostic)', () => {
+    // Unpaired — resolutionHigh present, resolutionSource missing. The
+    // `path` must be `resolutionSource` so the writer's rejection log
+    // identifies the real absent field rather than always blaming
+    // resolutionHigh.
+    const missingSource = weatherGroundTruthRowSchema.safeParse({
+      city: 'new york',
+      targetDate: '2026-04-10',
+      unit: 'fahrenheit',
+      observedHigh: 71.4,
+      resolutionHigh: 72.0,
+    });
+    expect(missingSource.success).toBe(false);
+    if (!missingSource.success) {
+      const hit = missingSource.error.errors.find(
+        (e) => e.path.join('.') === 'resolutionSource',
+      );
+      expect(hit).toBeDefined();
+    }
+
+    // Inverse — resolutionSource present, resolutionHigh missing.
+    const missingHigh = weatherGroundTruthRowSchema.safeParse({
+      city: 'new york',
+      targetDate: '2026-04-10',
+      unit: 'fahrenheit',
+      observedHigh: 71.4,
+      resolutionSource: 'wu',
+    });
+    expect(missingHigh.success).toBe(false);
+    if (!missingHigh.success) {
+      const hit = missingHigh.error.errors.find(
+        (e) => e.path.join('.') === 'resolutionHigh',
+      );
+      expect(hit).toBeDefined();
+    }
+
+    // backfillOnly with both halves missing emits one issue per absent field.
+    const backfillEmpty = weatherGroundTruthRowSchema.safeParse({
+      city: 'london',
+      targetDate: '2026-04-10',
+      unit: 'celsius',
+      backfillOnly: true,
+    });
+    expect(backfillEmpty.success).toBe(false);
+    if (!backfillEmpty.success) {
+      const paths = backfillEmpty.error.errors.map((e) => e.path.join('.'));
+      expect(paths).toContain('resolutionHigh');
+      expect(paths).toContain('resolutionSource');
+    }
+  });
 });

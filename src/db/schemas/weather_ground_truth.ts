@@ -33,10 +33,12 @@ export const weatherGroundTruthRowSchema = z.object({
   const hasHigh = d.resolutionHigh !== undefined;
   const hasSrc  = d.resolutionSource !== undefined;
   if (hasHigh !== hasSrc) {
+    // Point the issue at whichever half of the pair is missing, so the
+    // writer's rejection log identifies the actual absent field.
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: 'resolutionHigh and resolutionSource must both be present or both absent',
-      path: ['resolutionHigh'],
+      path: [hasHigh ? 'resolutionSource' : 'resolutionHigh'],
     });
   }
   // `observedHigh` is only optional for the backfillOnly (UPDATE-resolution)
@@ -51,12 +53,24 @@ export const weatherGroundTruthRowSchema = z.object({
       path: ['observedHigh'],
     });
   }
-  if (d.backfillOnly === true && (d.resolutionHigh === undefined || d.resolutionSource === undefined)) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'backfillOnly payloads must include resolutionHigh and resolutionSource',
-      path: ['resolutionHigh'],
-    });
+  // backfillOnly payloads must carry BOTH resolution columns. Emit a separate
+  // issue per missing field so each absent field is individually identifiable
+  // in the writer's rejection log.
+  if (d.backfillOnly === true) {
+    if (d.resolutionHigh === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'backfillOnly payloads must include resolutionHigh',
+        path: ['resolutionHigh'],
+      });
+    }
+    if (d.resolutionSource === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'backfillOnly payloads must include resolutionSource',
+        path: ['resolutionSource'],
+      });
+    }
   }
 });
 
