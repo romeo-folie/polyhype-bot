@@ -55,6 +55,29 @@ export function evaluateTrailingStop(opts: {
 }): TrailingStopDecision {
   const { position, currentPnlPct, currentBid, activationPct, cfg } = opts;
 
+  // Near-resolution guard (defense-in-depth): when the market price signals
+  // imminent settlement (currentBid ≥ threshold, e.g. NO = 0.99 because YES
+  // bids collapsed to 0.01), do not update the HWM and do not fire the
+  // trailing stop.  The primary gate is in monitor/index.ts (routes the
+  // position to pendingSettlement); this guard prevents HWM poisoning if a
+  // future refactor ever reaches this function with a near-res price.
+  if (
+    typeof currentBid === 'number' &&
+    Number.isFinite(currentBid) &&
+    currentBid >= cfg.MONITOR_NEAR_RES_PRICE_THRESHOLD
+  ) {
+    const priorHwm = position.highWaterMarkPct;
+    const preservedHwm =
+      typeof priorHwm === 'number' && Number.isFinite(priorHwm) ? priorHwm : currentPnlPct;
+    return {
+      shouldExit: false,
+      newHwmPct: preservedHwm,
+      peakPct: preservedHwm,
+      floorPct: Math.max(activationPct, preservedHwm - cfg.TRAILING_GIVEBACK_PCT),
+      drawdownPct: preservedHwm - currentPnlPct,
+    };
+  }
+
   // HWM is monotonic: max of prior hwm and current PnL.
   const priorHwm = position.highWaterMarkPct;
   const newHwmPct = Math.max(
