@@ -15,7 +15,7 @@
  *   6. Momentum suppression — 10s log-return: suppress NO if +10bps, YES if −10bps
  *   7. Rate cap + per-market lockout (shared updownThrottle)
  *
- * Sizing: Half-Kelly (quarter-Kelly fraction = 25% of full Kelly) via
+ * Sizing: fractional Kelly (quarter-Kelly at the default 0.25) via
  * computeHalfKelly(), capped at FV_MAX_STAKE_USD and MIN_BET_USD floor.
  * Order type: maker-post via hybrid execution path (fv-scanner is in MAKER_ELIGIBLE_SOURCES
  * and MAKER_EMPTY_BOOK_ALLOWED_SOURCES — ghost-book GTC posting is the primary fill path).
@@ -595,7 +595,7 @@ export class FvScanner {
     const wouldTrade = evaluation.shouldEnter;
 
     // Shadow log always writes — regardless of FV_SCANNER_ENABLED
-    logger.info('[fv-scanner] shadow candidate', {
+    logger.debug('[fv-scanner] shadow candidate', {
       marketId: market.marketId,
       asset,
       spot,
@@ -684,7 +684,7 @@ export class FvScanner {
     const { side } = evaluation;
     if (!side) return;
 
-    // Dedup: prevent firing on the same market+side within one tick cycle
+    // Dedup: prevent re-firing on the same market+side within the 60s dedup TTL
     const dedupKey = `${DEDUP_PREFIX}${market.marketId}:${side}`;
     const isNew = await this.redis.set(dedupKey, '1', 'EX', DEDUP_TTL_S, 'NX').catch(() => null);
     if (!isNew) {

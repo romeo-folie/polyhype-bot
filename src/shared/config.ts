@@ -1298,7 +1298,7 @@ const envSchema = z.object({
   // Prevents buying against the oracle direction on fast-moving ticks.
   FV_MOMENTUM_LOOKBACK_S: z.coerce.number().int().min(1).optional().default(10),
   FV_MOMENTUM_SUPPRESS_BPS: z.coerce.number().min(0).optional().default(10),
-  // Kelly sizing — uses computeHalfKelly with this fraction (0.25 = quarter-Kelly).
+  // Kelly sizing — fractional Kelly; 0.25 = quarter-Kelly (25% of full Kelly).
   FV_KELLY_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.25),
   FV_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(10),
   FV_MAX_TRADES_PER_HOUR: z.coerce.number().int().min(1).optional().default(20),
