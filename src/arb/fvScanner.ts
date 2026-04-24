@@ -249,6 +249,8 @@ export class FvScanner {
   private readonly marketRefreshInFlight = new Set<string>();
   // Track last-seen oracleTs per symbol — only call calibrator.onTick() on new ticks
   private readonly lastSeenOracleTs = new Map<string, number>();
+  /** Parsed, lowercased, filtered-to-supported assets. Set in start(). */
+  private assets: string[] = [];
 
   constructor({ redis }: { redis: Redis }) {
     this.redis = redis;
@@ -267,7 +269,25 @@ export class FvScanner {
     this.feed = feed;
     this.lockToken = token;
 
-    const assets = cfg.FV_ASSETS.split(',').map((a) => a.trim()).filter(Boolean);
+    // Parse FV_ASSETS once: normalize case, filter to assets we have a
+    // Chainlink mapping for, warn on anything we drop. Reused each tick so
+    // the inner loop never pays the per-tick regex / case-sensitivity cost.
+    const parsed = cfg.FV_ASSETS.split(',').map((a) => a.trim().toLowerCase()).filter(Boolean);
+    const unsupported = parsed.filter((a) => !(a in FV_ASSET_TO_CHAINLINK));
+    this.assets = parsed.filter((a) => a in FV_ASSET_TO_CHAINLINK);
+    if (unsupported.length > 0) {
+      logger.warn('[fv-scanner] dropping unsupported FV_ASSETS entries', {
+        unsupported,
+        configuredAssets: cfg.FV_ASSETS,
+        supportedKeys: Object.keys(FV_ASSET_TO_CHAINLINK),
+      });
+    }
+    if (this.assets.length === 0) {
+      logger.warn('[fv-scanner] no supported assets configured — scanner will idle', {
+        configuredAssets: cfg.FV_ASSETS,
+      });
+    }
+
     this.calibrator = new SigmaCalibrator({
       rollingWindowMs: cfg.FV_SIGMA_ROLLING_WINDOW_MS,
       ewmaHalfLifeS: cfg.FV_SIGMA_EWMA_HALF_LIFE_S,
@@ -278,7 +298,7 @@ export class FvScanner {
       warmupMinMs: cfg.FV_SIGMA_WARMUP_MIN_S * 1000,
     });
 
-    logger.info('[fv-scanner] scanner started', { assets, lockKey: LOCK_KEY });
+    logger.info('[fv-scanner] scanner started', { assets: this.assets, lockKey: LOCK_KEY });
 
     this.lockRefreshTimer = setInterval(() => {
       void this.refreshLockOnce();
@@ -340,8 +360,10 @@ export class FvScanner {
     this.lastMarketRefreshMs.set(asset, now);
     this.marketRefreshInFlight.add(asset);
     try {
+      // asset has already been lowercase-normalized and filtered to keys of
+      // FV_ASSET_TO_CHAINLINK in start(), so the UpDownAsset contract holds.
       const markets = await discoverUpDownMarketsBySlug({
-        asset: asset as 'bitcoin' | 'ethereum',
+        asset,
         lifetime: '15m',
         windowsAhead: 2,
       });
@@ -402,12 +424,11 @@ export class FvScanner {
     this.tickInFlight = true;
     try {
       const cfg = this.cfg;
-      const assets = cfg.FV_ASSETS.split(',').map((a) => a.trim()).filter(Boolean);
       // Fetch bankroll once per tick cycle — not per market — to avoid one Redis
       // round-trip per market in the inner loop.
       const bankrollUsd = await getBankroll(this.redis).catch(() => 0);
 
-      for (const asset of assets) {
+      for (const asset of this.assets) {
         const symbol = FV_ASSET_TO_CHAINLINK[asset];
         if (!symbol) continue;
 

@@ -15,9 +15,11 @@ import { logger } from '../../shared/logger.js';
  * Optional Redis pub/sub: when constructed with a `redis` client, every tick
  * is also republished as `oracle:price_moved`, with the latest value cached
  * at `oracle:last:<symbol>` (EX 120) and a windowed history at
- * `oracle:prices:<symbol>` (ZSET capped at 600 entries). This mirrors the
- * `spot:price_moved` pattern from BinanceFeed so consumers in other workers
- * can act on Chainlink ticks without holding their own WS subscription.
+ * `oracle:prices:<symbol>` (ZSET capped at the buffer's `capacity`, default
+ * 3600 ≈ 1 h at ~1 Hz — sized for the FV scanner's rolling σ window). This
+ * mirrors the `spot:price_moved` pattern from BinanceFeed so consumers in
+ * other workers can act on Chainlink ticks without holding their own WS
+ * subscription.
  */
 
 const CHAINLINK_WS_URL = 'wss://ws-live-data.polymarket.com';
@@ -105,7 +107,8 @@ export function parseChainlinkMessage(raw: string | Buffer): ChainlinkTick | nul
 /**
  * In-memory ringbuffer of recent ticks for a single symbol.
  * Backed by a plain array used as a circular buffer — O(1) push, O(n) scan.
- * 600 slots ≈ 10 minutes of headroom at ~1 tick/sec.
+ * Capacity is configured at construction; the FV scanner uses 3600 (~1 h at
+ * ~1 Hz) so the rolling σ window can be computed over a full hour of ticks.
  */
 class TickRingBuffer {
   private readonly buf: (ChainlinkTick | null)[];
