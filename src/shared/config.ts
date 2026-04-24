@@ -1435,9 +1435,22 @@ const envSchema = z.object({
   // Apply per-city mean-bias subtraction and empirical σ overlay. Requires Redis cache
   // to be populated by the reconciler (runs automatically, no extra cron needed). Ships dark.
   WEATHER_BIAS_CORRECTION_ENABLED: boolFromEnv.optional().default(false),
-  // Minimum paired (forecast, observed) samples required before bias correction is applied
-  // for a city. Cities below threshold pass through uncorrected (safe default).
+  // Minimum paired (forecast, observed) samples required before bias metadata is trusted
+  // at all. Below this, cities pass through fully uncorrected (safe default).
   WEATHER_BIAS_MIN_SAMPLES: z.coerce.number().int().min(1).optional().default(14),
+  // Sample count at which we trust mean-bias correction enough to shift the forecast.
+  // Between WEATHER_BIAS_MIN_SAMPLES and this, the scanner enters a "weak band":
+  // it does NOT subtract cityMeanBias from the forecast, but widens effective σ
+  // via WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER. At or above this threshold, full
+  // correction (mean shift + empirical σ overlay) applies. Keeping the default
+  // equal to WEATHER_BIAS_MIN_SAMPLES means prod opens the weak band by lowering
+  // min in .env, so code-default behavior stays conservative.
+  WEATHER_BIAS_TRUSTED_SAMPLES: z.coerce.number().int().min(1).optional().default(14),
+  // Stddev inflator applied inside the weak band (min ≤ n < trusted). Reflects
+  // that thin-sample bias estimates are genuine evidence of forecast noise but
+  // not reliable enough to shift the mean — so we respond by widening the
+  // distribution instead. 1.2 = +20% effective σ in the weak band.
+  WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER: z.coerce.number().min(1).max(3).optional().default(1.2),
   // --- WEATHER EXECUTION ---
   // Killswitch separate from the scanner flag. Scanner may be ENABLED=true (shadow +
   // `would execute trade` logs) without actually placing orders. Flipping

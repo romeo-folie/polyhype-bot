@@ -26,6 +26,8 @@ const baseConfig = {
   WEATHER_HRRR_ENABLED: false,
   WEATHER_BIAS_CORRECTION_ENABLED: false,
   WEATHER_BIAS_MIN_SAMPLES: 14,
+  WEATHER_BIAS_TRUSTED_SAMPLES: 14,
+  WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER: 1.2,
   MIN_BET_USD: 5,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
@@ -934,7 +936,145 @@ describe('findMispricedBrackets - city bias correction', () => {
     expect(opp.rawForecastHigh).toBeCloseTo(52, 4);
     expect(opp.correctedForecastHigh).toBeCloseTo(50, 4);
     expect(opp.biasApplied).toBe(true);
+    expect(opp.biasMode).toBe('full');
     expect(opp.effectiveStdDev).toBeCloseTo(3, 5); // max(3, 2.5) = 3
+  });
+
+  // ── Weak-band (min ≤ sampleSize < trusted): widen σ, no mean shift ────────
+  it('weak-band → mean NOT shifted, biasApplied=false, biasMode=weak', () => {
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 10, updatedAt: '' };
+    const result = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01,
+      {
+        minModelCoverage: 0,
+        cityBias,
+        biasCorrectionEnabled: true,
+        biasMinSamples: 6,        // 10 ≥ 6 → weak band opens
+        biasTrustedSamples: 14,   // 10 < 14 → not full
+        weakBiasStddevMultiplier: 1.2,
+      },
+    );
+    expect(result.biasMode).toBe('weak');
+    expect(result.biasApplied).toBe(false);
+    expect(result.opportunities.length).toBeGreaterThan(0);
+    for (const opp of result.opportunities) {
+      expect(opp.biasApplied).toBe(false);
+      expect(opp.biasMode).toBe('weak');
+      // Mean unchanged: corrected === raw
+      expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
+      expect(opp.correctedForecastHigh).toBeCloseTo(52, 5);
+      // Bias metadata still surfaced so shadow analysis can see what was considered.
+      expect(opp.cityMeanBias).toBeCloseTo(2.0, 4);
+      expect(opp.citySampleSize).toBe(10);
+    }
+  });
+
+  it('weak-band → effectiveStdDev widened by weakBiasStddevMultiplier', () => {
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 10, updatedAt: '' };
+    const result = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01,
+      {
+        minModelCoverage: 0,
+        cityBias,
+        biasCorrectionEnabled: true,
+        biasMinSamples: 6,
+        biasTrustedSamples: 14,
+        weakBiasStddevMultiplier: 1.2,
+      },
+    );
+    expect(result.opportunities.length).toBeGreaterThan(0);
+    for (const opp of result.opportunities) {
+      // stdDev=3, stddevMultiplier defaults to 1.0 → raw=3; weak inflator=1.2 → 3.6
+      expect(opp.effectiveStdDev).toBeCloseTo(3.6, 5);
+      // Specifically NOT the empirical σ (would be 2.5 — we don't trust the magnitude).
+      expect(opp.effectiveStdDev).not.toBeCloseTo(2.5, 2);
+    }
+  });
+
+  it('weak-band ignores empiricalStddev magnitude even when large', () => {
+    // empiricalStddev=8 is huge, but with only 10 samples we don't trust its
+    // magnitude — the uniform 1.2× inflator is what applies.
+    const cityBias = { meanBias: 2.0, empiricalStddev: 8.0, sampleSize: 10, updatedAt: '' };
+    const result = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01,
+      {
+        minModelCoverage: 0,
+        cityBias,
+        biasCorrectionEnabled: true,
+        biasMinSamples: 6,
+        biasTrustedSamples: 14,
+        weakBiasStddevMultiplier: 1.2,
+      },
+    );
+    for (const opp of result.opportunities) {
+      expect(opp.effectiveStdDev).toBeCloseTo(3.6, 5);
+    }
+  });
+
+  it('sampleSize at biasTrustedSamples boundary → full correction', () => {
+    // sampleSize exactly equals biasTrustedSamples → full tier
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 14, updatedAt: '' };
+    const result = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01,
+      {
+        minModelCoverage: 0,
+        cityBias,
+        biasCorrectionEnabled: true,
+        biasMinSamples: 6,
+        biasTrustedSamples: 14,
+      },
+    );
+    expect(result.biasMode).toBe('full');
+    expect(result.biasApplied).toBe(true);
+    for (const opp of result.opportunities) {
+      expect(opp.correctedForecastHigh).toBeCloseTo(50, 4); // 52 - 2
+      expect(opp.biasMode).toBe('full');
+    }
+  });
+
+  it('sampleSize below biasMinSamples → biasMode=none, fully uncorrected', () => {
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 3, updatedAt: '' };
+    const result = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01,
+      {
+        minModelCoverage: 0,
+        cityBias,
+        biasCorrectionEnabled: true,
+        biasMinSamples: 6,
+        biasTrustedSamples: 14,
+        weakBiasStddevMultiplier: 1.2,
+      },
+    );
+    expect(result.biasMode).toBe('none');
+    expect(result.biasApplied).toBe(false);
+    for (const opp of result.opportunities) {
+      expect(opp.biasMode).toBe('none');
+      expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
+      expect(opp.effectiveStdDev).toBeCloseTo(3, 5); // no inflator, no overlay
+    }
+  });
+
+  it('shadow payload carries biasMode and weak-band metadata fields', () => {
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 10, updatedAt: '' };
+    const { opportunities } = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01,
+      {
+        minModelCoverage: 0,
+        cityBias,
+        biasCorrectionEnabled: true,
+        biasMinSamples: 6,
+        biasTrustedSamples: 14,
+        weakBiasStddevMultiplier: 1.2,
+      },
+    );
+    expect(opportunities.length).toBeGreaterThan(0);
+    const opp = opportunities[0]!;
+    expect(opp.rawForecastHigh).toBeCloseTo(52, 4);
+    expect(opp.correctedForecastHigh).toBeCloseTo(52, 4); // no shift in weak band
+    expect(opp.biasApplied).toBe(false);
+    expect(opp.biasMode).toBe('weak');
+    expect(opp.citySampleSize).toBe(10);
+    expect(opp.effectiveStdDev).toBeCloseTo(3.6, 5);
   });
 });
 

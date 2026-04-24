@@ -538,8 +538,15 @@ export interface WeatherBracketOpportunity {
   cityEmpiricalStddev: number | null;
   /** Number of samples used for this city's bias estimate. Null when no bias data available. */
   citySampleSize: number | null;
-  /** True when bias correction was applied to forecastHigh and/or effectiveStdDev. */
+  /** True when full bias correction (mean shift + empirical σ overlay) was applied. */
   biasApplied: boolean;
+  /**
+   * Which tier of bias handling ran for this opportunity:
+   *   - `none` — no bias data trusted (either disabled, missing, or sampleSize < min)
+   *   - `weak` — min ≤ n < trusted: σ widened by WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER, mean unchanged
+   *   - `full` — n ≥ trusted: mean shifted by -cityMeanBias, σ = max(raw, empirical)
+   */
+  biasMode: 'none' | 'weak' | 'full';
 }
 
 /**
@@ -565,8 +572,10 @@ export interface FindMispricedResult {
   opportunities: WeatherBracketOpportunity[];
   /** Sum of all bracket model probabilities — used for coverage check and shadow logging. */
   modelSum: number;
-  /** True when bias correction was applied during this invocation (regardless of whether any bracket cleared minEdge). */
+  /** True when full bias correction was applied (regardless of whether any bracket cleared minEdge). */
   biasApplied: boolean;
+  /** Tri-state tier of bias handling for this invocation (`none` | `weak` | `full`). */
+  biasMode: 'none' | 'weak' | 'full';
 }
 
 export interface FindMispricedOptions {
@@ -576,6 +585,11 @@ export interface FindMispricedOptions {
   cityBias?: CityBias | null;
   biasCorrectionEnabled?: boolean;
   biasMinSamples?: number;
+  /** Sample count at which full mean-bias correction is trusted. Between min and
+   *  trusted the scanner enters the weak band (widen σ, don't shift mean). */
+  biasTrustedSamples?: number;
+  /** σ inflator used inside the weak band (default 1.2 = +20%). */
+  weakBiasStddevMultiplier?: number;
   /** Skip NO bets on tail brackets when modelProb exceeds this (default 0.5). */
   maxTailNoBetModelProb?: number;
 }
@@ -594,28 +608,50 @@ export function findMispricedBrackets(
     cityBias = null,
     biasCorrectionEnabled = false,
     biasMinSamples = 14,
+    biasTrustedSamples = 14,
+    weakBiasStddevMultiplier = 1.2,
     maxTailNoBetModelProb = 0.5,
   } = options;
   const opportunities: WeatherBracketOpportunity[] = [];
 
-  // Apply per-city bias correction when enabled and enough samples are available.
-  const applyBias =
-    biasCorrectionEnabled &&
-    cityBias !== null &&
-    cityBias.sampleSize >= biasMinSamples;
+  // Three-tier trust model for per-city bias metadata:
+  //   - n < biasMinSamples           → 'none': ignore bias entirely
+  //   - min ≤ n < biasTrustedSamples → 'weak': σ widened, mean NOT shifted
+  //   - n ≥ biasTrustedSamples       → 'full': mean shift + empirical σ overlay
+  // Weak-band mean correction is the riskiest part to trust on small samples
+  // (observed April 2026: 6–13 sample cities ran 26.7% WR / -664% return vs
+  // historical 68% NO accuracy). Widening σ is the safer response.
+  let biasMode: 'none' | 'weak' | 'full' = 'none';
+  if (biasCorrectionEnabled && cityBias !== null) {
+    if (cityBias.sampleSize >= biasTrustedSamples) {
+      biasMode = 'full';
+    } else if (cityBias.sampleSize >= biasMinSamples) {
+      biasMode = 'weak';
+    }
+  }
+  const applyBias = biasMode === 'full';
 
   const rawForecastHigh = forecast.forecastHigh;
-  // Subtract mean bias so the corrected forecast is unbiased on average.
+  // Only the trusted tier subtracts meanBias — weak-band samples are too noisy
+  // to justify shifting the forecast centre.
   const correctedForecastHigh = applyBias ? rawForecastHigh - cityBias!.meanBias : rawForecastHigh;
   const forecastHighForCalc = correctedForecastHigh;
 
-  // Effective stddev: take max of ensemble spread and empirical error σ (when bias available).
-  // This prevents over-confidence in stable regimes where ensemble spread is tight but
-  // realized error is larger.
+  // Effective stddev:
+  //   - full: max of ensemble spread and empirical σ (prevents overconfidence
+  //     in stable regimes where ensemble spread is tight but realized error is larger)
+  //   - weak: inflate by weakBiasStddevMultiplier (de-confidence; ignore empiricalStddev
+  //     directly since the sample is too thin to trust its magnitude)
+  //   - none: raw stddev × stddevMultiplier
   const rawEffectiveStdDev = forecast.stdDev * stddevMultiplier;
-  const effectiveStdDev = applyBias
-    ? Math.max(rawEffectiveStdDev, cityBias!.empiricalStddev * stddevMultiplier)
-    : rawEffectiveStdDev;
+  let effectiveStdDev: number;
+  if (biasMode === 'full') {
+    effectiveStdDev = Math.max(rawEffectiveStdDev, cityBias!.empiricalStddev * stddevMultiplier);
+  } else if (biasMode === 'weak') {
+    effectiveStdDev = rawEffectiveStdDev * weakBiasStddevMultiplier;
+  } else {
+    effectiveStdDev = rawEffectiveStdDev;
+  }
 
   // Compute model probability for each bracket
   const modelProbs: number[] = [];
@@ -642,7 +678,7 @@ export function findMispricedBrackets(
       bracketCount: event.brackets.length,
       threshold: minModelCoverage,
     });
-    return { opportunities: [], modelSum, biasApplied: applyBias };
+    return { opportunities: [], modelSum, biasApplied: applyBias, biasMode };
   }
 
   // Compute overround (diagnostic): sum of all market YES prices.
@@ -730,10 +766,11 @@ export function findMispricedBrackets(
       cityEmpiricalStddev: cityBias?.empiricalStddev ?? null,
       citySampleSize: cityBias?.sampleSize ?? null,
       biasApplied: applyBias,
+      biasMode,
     });
   }
 
-  return { opportunities, modelSum, biasApplied: applyBias };
+  return { opportunities, modelSum, biasApplied: applyBias, biasMode };
 }
 
 // ── Main scanner ─────────────────────────────────────────────────────────
@@ -812,7 +849,12 @@ export async function scanWeatherMarkets(
     // when bracket data is incomplete — e.g. late-day thinning from 11 → 4 brackets).
     // modelSum is returned by findMispricedBrackets so shadow logging reuses the exact
     // values used for gating rather than recomputing them.
-    const { opportunities, modelSum, biasApplied: biasCorrectionApplied } = findMispricedBrackets(
+    const {
+      opportunities,
+      modelSum,
+      biasApplied: biasCorrectionApplied,
+      biasMode: eventBiasMode,
+    } = findMispricedBrackets(
       event,
       forecast,
       daysOut,
@@ -824,9 +866,14 @@ export async function scanWeatherMarkets(
         cityBias,
         biasCorrectionEnabled: cfg.WEATHER_BIAS_CORRECTION_ENABLED,
         biasMinSamples: cfg.WEATHER_BIAS_MIN_SAMPLES,
+        biasTrustedSamples: cfg.WEATHER_BIAS_TRUSTED_SAMPLES,
+        weakBiasStddevMultiplier: cfg.WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER,
         maxTailNoBetModelProb: cfg.WEATHER_THRESHOLD_NO_BET_MAX_PROB,
       },
     );
+    // Event-level diagnostic: σ after the static multiplier but before the weak-band
+    // inflator or empirical-σ overlay. Per-opp `effectiveStdDev` on the opp objects
+    // carries the post-bias value used by estimateBracketProbability.
     const effectiveStdDev = forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER;
     const coverageStatus = modelSum >= cfg.WEATHER_MIN_MODEL_COVERAGE ? 'ok' : 'skipped_low_coverage';
 
@@ -903,6 +950,10 @@ export async function scanWeatherMarkets(
         cityEmpiricalStddev: cityBias?.empiricalStddev ?? null,
         citySampleSize: cityBias?.sampleSize ?? null,
         biasApplied: biasCorrectionApplied,
+        biasMode: eventBiasMode,
+        biasMinSamples: cfg.WEATHER_BIAS_MIN_SAMPLES,
+        biasTrustedSamples: cfg.WEATHER_BIAS_TRUSTED_SAMPLES,
+        weakBiasStddevMultiplier: cfg.WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER,
       },
     });
 
@@ -969,6 +1020,7 @@ export async function scanWeatherMarkets(
           cityEmpiricalStddev: opp.cityEmpiricalStddev,
           citySampleSize: opp.citySampleSize,
           biasApplied: opp.biasApplied,
+          biasMode: opp.biasMode,
         },
       });
     }
