@@ -1119,8 +1119,31 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     return;
   }
 
-  // Filter by WEATHER_TRADE_SIDES. Opportunities on gated sides are shadow-only.
-  const tradable = opportunities.filter((o) => o.allowedByConfig);
+  // Cities excluded from execution while their bias recalibrates. Shadow
+  // observations still flow so bias keeps converging in the background.
+  const excludedCities = new Set(
+    cfg.WEATHER_EXCLUDED_CITIES.split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+
+  // Filter by WEATHER_TRADE_SIDES and excluded-city list. Excluded-city opps
+  // remain in shadow records (wouldTrade=true) so calibration data stays clean.
+  const tradable = opportunities.filter(
+    (o) => o.allowedByConfig && !excludedCities.has(o.city.toLowerCase()),
+  );
+
+  if (excludedCities.size > 0) {
+    const suppressed = opportunities.filter(
+      (o) => o.allowedByConfig && excludedCities.has(o.city.toLowerCase()),
+    ).length;
+    if (suppressed > 0) {
+      logger.info('[weather] excluded cities suppressed tradable opportunities', {
+        excludedCities: [...excludedCities],
+        suppressed,
+      });
+    }
+  }
   if (tradable.length === 0) {
     logger.info('[weather] no tradable opportunities after side filter', {
       shadowOpportunities: opportunities.length,
