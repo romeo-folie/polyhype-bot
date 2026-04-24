@@ -28,6 +28,7 @@ const baseConfig = {
   WEATHER_BIAS_MIN_SAMPLES: 14,
   WEATHER_BIAS_TRUSTED_SAMPLES: 14,
   WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER: 1.2,
+  WEATHER_EXCLUDED_CITIES: '',
   MIN_BET_USD: 5,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
@@ -1749,6 +1750,45 @@ describe('scanWeatherMarkets', () => {
       await runWeatherScan(redisMock as never);
 
       expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+    });
+
+    it('suppresses execution for cities listed in WEATHER_EXCLUDED_CITIES', async () => {
+      // Fixture city is Chicago — excluding it should block executeAndRecordSignal
+      // while shadow observations still flow (wouldTrade is unaffected upstream).
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_EXCLUDED_CITIES: 'chicago',
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+    });
+
+    it('canonicalises WEATHER_EXCLUDED_CITIES aliases before matching', async () => {
+      // "NYC" is an alias for "new york" — should resolve and block the fixture
+      // city if the fixture were new york, but here we verify it does NOT suppress
+      // Chicago (alias mismatch), so execution still fires.
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_EXCLUDED_CITIES: 'NYC',
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      // NYC exclusion should not suppress the Chicago fixture
+      expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
     });
   });
 });

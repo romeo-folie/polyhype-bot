@@ -1451,6 +1451,12 @@ const envSchema = z.object({
   // not reliable enough to shift the mean — so we respond by widening the
   // distribution instead. 1.2 = +20% effective σ in the weak band.
   WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER: z.coerce.number().min(1).max(3).optional().default(1.2),
+  // Comma-separated city names to exclude from trade execution while their bias
+  // is recalibrating. Shadow observations and ground-truth collection continue
+  // unaffected so the bias converges in the background. Remove a city from this
+  // list (and restart pga-cron) once its residual error stabilises. Example:
+  // WEATHER_EXCLUDED_CITIES=los angeles,miami,amsterdam,london
+  WEATHER_EXCLUDED_CITIES: z.string().optional().default(''),
   // --- WEATHER EXECUTION ---
   // Killswitch separate from the scanner flag. Scanner may be ENABLED=true (shadow +
   // `would execute trade` logs) without actually placing orders. Flipping
