@@ -7,6 +7,7 @@ const mockGetOpenPositions = vi.fn<(...args: any[]) => Promise<any[]>>();
 const mockRedeemClobOutcome = vi.fn<(...args: any[]) => Promise<any>>();
 const mockCreditProceeds = vi.fn<(...args: any[]) => Promise<void>>();
 const mockNotifyRedemptionExecuted = vi.fn<(...args: any[]) => Promise<void>>();
+const mockRecordPositionOutcome = vi.fn<(...args: any[]) => Promise<void>>();
 
 // Shared mock for the CTF contract used by checkOnChainResolution
 const mockCtfContract = {
@@ -38,6 +39,11 @@ vi.mock('../../shared/outcomeRecorder.js', () => ({
   recordOutcome: vi.fn().mockResolvedValue(undefined),
   inferCategory: vi.fn().mockReturnValue('geopolitical'),
   inferSource: vi.fn().mockReturnValue('osint'),
+}));
+
+vi.mock('../../shared/positionOutcomeRecorder.js', () => ({
+  recordPositionOutcome: mockRecordPositionOutcome.mockResolvedValue(undefined),
+  recordRedemptionOutcome: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../../shared/config.js', () => ({
@@ -398,7 +404,7 @@ describe('redeemResolvedPositions', () => {
     expect(results[0].success).toBe(true);
   });
 
-  it('no-endDate dust position: on-chain confirms win → closes without redemption, records won', async () => {
+  it('no-endDate dust position: on-chain confirms win + real position → auto-redeemed win (not redemption attempt)', async () => {
     mockGetOpenPositions.mockResolvedValue([
       {
         marketId: 'ol-no-date-dust',
@@ -416,7 +422,7 @@ describe('redeemResolvedPositions', () => {
     global.fetch = vi.fn().mockImplementation(() =>
       Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
     );
-    // On-chain: YES won — but balance is dust (≤0.01 threshold triggers skipped_dust)
+    // On-chain: YES won — balance is dust because Polymarket auto-redeemed already
     mockCtfContract.payoutDenominator.mockResolvedValue(1n);
     mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
       index === 0 ? 1n : 0n,
@@ -427,13 +433,60 @@ describe('redeemResolvedPositions', () => {
 
     const results = await redeemResolvedPositions(mockRedis);
 
-    // Should not attempt redemption — dust
+    // Should not attempt redemption — already auto-redeemed
     expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
     expect(mockCreditProceeds).not.toHaveBeenCalled();
-    // But should close and record as won
+    // Should close and record as auto-redeemed win (stakeUsd>0 + sharesHeld>0 → hadRealPosition)
     expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'ol-no-date-dust', 'YES');
+    expect(mockRecordPositionOutcome).toHaveBeenCalledWith(
+      mockRedis,
+      expect.objectContaining({ marketId: 'ol-no-date-dust' }),
+      expect.objectContaining({ result: 'won', exitReason: 'no_end_date_auto_redeemed_win' }),
+    );
     expect(vi.mocked(mockNotifyMarketResolved)).toHaveBeenCalledWith(
       expect.objectContaining({ result: 'won' }),
+    );
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
+  });
+
+  it('no-endDate dust position: on-chain confirms win + never filled → records as lost', async () => {
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'ol-no-date-dust-nofill',
+        conditionId: 'cond-nd-dust-nf',
+        clobTokenIds: ['token-yes-ndnf', 'token-no-ndnf'],
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Bitcoin Up or Down - April 18',
+        sharesHeld: 0,
+        entryPrice: 0.5,
+        stakeUsd: 5,
+        endDate: '',
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 0 ? 1n : 0n,
+    );
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 0.005 } as any);
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'ol-no-date-dust-nofill', 'YES');
+    expect(mockRecordPositionOutcome).toHaveBeenCalledWith(
+      mockRedis,
+      expect.objectContaining({ marketId: 'ol-no-date-dust-nofill' }),
+      expect.objectContaining({ result: 'lost', exitReason: 'no_end_date_dust_closed' }),
+    );
+    expect(vi.mocked(mockNotifyMarketResolved)).toHaveBeenCalledWith(
+      expect.objectContaining({ result: 'lost' }),
     );
     expect(results).toHaveLength(1);
     expect(results[0].error).toBe('no_end_date_dust_closed');
