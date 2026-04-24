@@ -1076,6 +1076,65 @@ describe('findMispricedBrackets - city bias correction', () => {
     expect(opp.citySampleSize).toBe(10);
     expect(opp.effectiveStdDev).toBeCloseTo(3.6, 5);
   });
+
+  it('result.effectiveStdDev matches per-opp σ across all biasModes', () => {
+    // 'none': raw * stddevMultiplier
+    const none = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01,
+      { minModelCoverage: 0, cityBias: null, biasCorrectionEnabled: true },
+    );
+    expect(none.effectiveStdDev).toBeCloseTo(3, 5);
+    for (const opp of none.opportunities) expect(opp.effectiveStdDev).toBeCloseTo(none.effectiveStdDev, 5);
+
+    // 'weak': raw * stddevMultiplier * weakBiasStddevMultiplier
+    const weakBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 10, updatedAt: '' };
+    const weak = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01,
+      {
+        minModelCoverage: 0,
+        cityBias: weakBias,
+        biasCorrectionEnabled: true,
+        biasMinSamples: 6,
+        biasTrustedSamples: 14,
+        weakBiasStddevMultiplier: 1.2,
+      },
+    );
+    expect(weak.effectiveStdDev).toBeCloseTo(3.6, 5);
+    for (const opp of weak.opportunities) expect(opp.effectiveStdDev).toBeCloseTo(weak.effectiveStdDev, 5);
+
+    // 'full' with empirical σ that dominates
+    const fullBias = { meanBias: 2.0, empiricalStddev: 5.0, sampleSize: 20, updatedAt: '' };
+    const full = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01,
+      { minModelCoverage: 0, cityBias: fullBias, biasCorrectionEnabled: true },
+    );
+    expect(full.effectiveStdDev).toBeCloseTo(5.0, 5);
+    for (const opp of full.opportunities) expect(opp.effectiveStdDev).toBeCloseTo(full.effectiveStdDev, 5);
+  });
+
+  it('defense-in-depth: biasTrustedSamples < biasMinSamples is clamped, not inverted', () => {
+    // Misconfiguration: trusted=5 < min=10. Without the clamp, a sampleSize=7
+    // would incorrectly trip 'full' mode (since 7 >= 5) despite being below
+    // the min threshold. With the clamp, trusted effectively = 10, so
+    // sampleSize=7 falls back to 'none'.
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 7, updatedAt: '' };
+    const result = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01,
+      {
+        minModelCoverage: 0,
+        cityBias,
+        biasCorrectionEnabled: true,
+        biasMinSamples: 10,
+        biasTrustedSamples: 5, // inverted on purpose
+      },
+    );
+    expect(result.biasMode).toBe('none');
+    expect(result.biasApplied).toBe(false);
+    for (const opp of result.opportunities) {
+      expect(opp.biasMode).toBe('none');
+      expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

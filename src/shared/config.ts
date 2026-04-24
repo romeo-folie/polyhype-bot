@@ -1630,6 +1630,17 @@ export function loadConfig(forceReload = false): AppConfig {
     );
   }
 
+  // Weather bias trust tiers must be non-inverted: full correction (trusted)
+  // kicks in at n ≥ trusted, weak-band at min ≤ n < trusted. If trusted < min
+  // the weak band collapses and 'full' can apply on smaller samples than 'weak'
+  // would have — defeating the de-risking goal.
+  if (cfg.WEATHER_BIAS_TRUSTED_SAMPLES < cfg.WEATHER_BIAS_MIN_SAMPLES) {
+    throw new Error(
+      'WEATHER_BIAS_TRUSTED_SAMPLES must be >= WEATHER_BIAS_MIN_SAMPLES ' +
+        `(currently ${cfg.WEATHER_BIAS_TRUSTED_SAMPLES} < ${cfg.WEATHER_BIAS_MIN_SAMPLES})`,
+    );
+  }
+
   // All cross-validations passed — cache only a valid config.
   _config = cfg;
   return _config;

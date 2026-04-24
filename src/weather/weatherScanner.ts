@@ -576,6 +576,14 @@ export interface FindMispricedResult {
   biasApplied: boolean;
   /** Tri-state tier of bias handling for this invocation (`none` | `weak` | `full`). */
   biasMode: 'none' | 'weak' | 'full';
+  /**
+   * The σ actually fed to `estimateBracketProbability`, after the static
+   * stddevMultiplier AND any bias-mode adjustment (weak-band inflator or
+   * full-tier empirical-σ overlay). Surfacing this lets callers log the real
+   * value used rather than recomputing a pre-bias figure that disagrees with
+   * the model run.
+   */
+  effectiveStdDev: number;
 }
 
 export interface FindMispricedOptions {
@@ -608,10 +616,15 @@ export function findMispricedBrackets(
     cityBias = null,
     biasCorrectionEnabled = false,
     biasMinSamples = 14,
-    biasTrustedSamples = 14,
+    biasTrustedSamples: biasTrustedSamplesRaw = 14,
     weakBiasStddevMultiplier = 1.2,
     maxTailNoBetModelProb = 0.5,
   } = options;
+  // Defense-in-depth clamp: loadConfig() cross-validates trusted ≥ min, but this
+  // helper is also called directly from tests and could accept arbitrary values.
+  // Clamping here means a caller passing trusted < min never causes 'full' to
+  // fire on thinner samples than the weak band requires.
+  const biasTrustedSamples = Math.max(biasTrustedSamplesRaw, biasMinSamples);
   const opportunities: WeatherBracketOpportunity[] = [];
 
   // Three-tier trust model for per-city bias metadata:
@@ -678,7 +691,7 @@ export function findMispricedBrackets(
       bracketCount: event.brackets.length,
       threshold: minModelCoverage,
     });
-    return { opportunities: [], modelSum, biasApplied: applyBias, biasMode };
+    return { opportunities: [], modelSum, biasApplied: applyBias, biasMode, effectiveStdDev };
   }
 
   // Compute overround (diagnostic): sum of all market YES prices.
@@ -770,7 +783,7 @@ export function findMispricedBrackets(
     });
   }
 
-  return { opportunities, modelSum, biasApplied: applyBias, biasMode };
+  return { opportunities, modelSum, biasApplied: applyBias, biasMode, effectiveStdDev };
 }
 
 // ── Main scanner ─────────────────────────────────────────────────────────
@@ -854,6 +867,7 @@ export async function scanWeatherMarkets(
       modelSum,
       biasApplied: biasCorrectionApplied,
       biasMode: eventBiasMode,
+      effectiveStdDev,
     } = findMispricedBrackets(
       event,
       forecast,
@@ -871,10 +885,10 @@ export async function scanWeatherMarkets(
         maxTailNoBetModelProb: cfg.WEATHER_THRESHOLD_NO_BET_MAX_PROB,
       },
     );
-    // Event-level diagnostic: σ after the static multiplier but before the weak-band
-    // inflator or empirical-σ overlay. Per-opp `effectiveStdDev` on the opp objects
-    // carries the post-bias value used by estimateBracketProbability.
-    const effectiveStdDev = forecast.stdDev * cfg.WEATHER_STDDEV_MULTIPLIER;
+    // `effectiveStdDev` above is the post-bias σ actually used by
+    // estimateBracketProbability (weak-band inflator or full-tier empirical-σ
+    // overlay already applied). Surfaced up from findMispricedBrackets so the
+    // event-level shadow payload matches the per-opp records.
     const coverageStatus = modelSum >= cfg.WEATHER_MIN_MODEL_COVERAGE ? 'ok' : 'skipped_low_coverage';
 
     // Step 6: Shadow-log every evaluated event
