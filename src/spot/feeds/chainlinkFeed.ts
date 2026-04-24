@@ -15,9 +15,11 @@ import { logger } from '../../shared/logger.js';
  * Optional Redis pub/sub: when constructed with a `redis` client, every tick
  * is also republished as `oracle:price_moved`, with the latest value cached
  * at `oracle:last:<symbol>` (EX 120) and a windowed history at
- * `oracle:prices:<symbol>` (ZSET capped at 600 entries). This mirrors the
- * `spot:price_moved` pattern from BinanceFeed so consumers in other workers
- * can act on Chainlink ticks without holding their own WS subscription.
+ * `oracle:prices:<symbol>` (ZSET capped at the buffer's `capacity`, default
+ * 3600 ≈ 1 h at ~1 Hz — sized for the FV scanner's rolling σ window). This
+ * mirrors the `spot:price_moved` pattern from BinanceFeed so consumers in
+ * other workers can act on Chainlink ticks without holding their own WS
+ * subscription.
  */
 
 const CHAINLINK_WS_URL = 'wss://ws-live-data.polymarket.com';
@@ -105,7 +107,8 @@ export function parseChainlinkMessage(raw: string | Buffer): ChainlinkTick | nul
 /**
  * In-memory ringbuffer of recent ticks for a single symbol.
  * Backed by a plain array used as a circular buffer — O(1) push, O(n) scan.
- * 600 slots ≈ 10 minutes of headroom at ~1 tick/sec.
+ * Capacity is configured at construction; the FV scanner uses 3600 (~1 h at
+ * ~1 Hz) so the rolling σ window can be computed over a full hour of ticks.
  */
 class TickRingBuffer {
   private readonly buf: (ChainlinkTick | null)[];
@@ -203,7 +206,8 @@ export class ChainlinkFeed {
 
   constructor(opts: ChainlinkFeedOptions = {}) {
     this.symbols = (opts.symbols ?? DEFAULT_SYMBOLS).map((s) => s.toLowerCase());
-    this.capacity = Math.max(300, opts.capacity ?? 600);
+    // 3600 entries = 1 h at ~1 Hz, needed by SigmaCalibrator's rolling window.
+    this.capacity = Math.max(300, opts.capacity ?? 3600);
     this.redis = opts.redis ?? null;
   }
 
@@ -390,6 +394,45 @@ export class ChainlinkFeed {
   public getLatest(symbol: string): ChainlinkTick | null {
     const rb = this.buffers.get(symbol.toLowerCase());
     return rb ? rb.latest() : null;
+  }
+
+  /**
+   * Return all ticks whose `receivedAt >= Date.now() - windowMs`, in
+   * chronological order. Used by SigmaCalibrator for rolling-window σ and
+   * by FvScanner for strike lookup.
+   */
+  public getTicksSince(symbol: string, windowMs: number): ChainlinkTick[] {
+    if (!Number.isFinite(windowMs) || windowMs <= 0) return [];
+    const rb = this.buffers.get(symbol.toLowerCase());
+    if (!rb) return [];
+    return rb.ticksSince(Date.now() - windowMs);
+  }
+
+  /**
+   * Find the buffered tick whose `oracleTs` is closest to `targetTs` (ms),
+   * accepted only if within `toleranceMs` of the target.
+   *
+   * Used by FvScanner to resolve the window-open strike price K.
+   */
+  public findTickAt(
+    symbol: string,
+    targetTs: number,
+    toleranceMs = 60_000,
+  ): ChainlinkTick | null {
+    // Look back far enough to include the target plus tolerance buffer.
+    const lookbackMs = Date.now() - targetTs + toleranceMs * 2;
+    const ticks = this.getTicksSince(symbol, lookbackMs);
+    if (ticks.length === 0) return null;
+    let best: ChainlinkTick | null = null;
+    let bestDiff = Infinity;
+    for (const tick of ticks) {
+      const diff = Math.abs(tick.oracleTs - targetTs);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = tick;
+      }
+    }
+    return bestDiff <= toleranceMs ? best : null;
   }
 
   /**

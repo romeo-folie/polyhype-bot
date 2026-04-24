@@ -23,6 +23,7 @@ import {
 import { ArbMarketWarmer } from './warmer.js';
 import { OracleLagScanner, ASSET_TO_CHAINLINK_SYMBOL } from './oracleLagScanner.js';
 import { OracleLagExitMonitor } from './oracleLagExitMonitor.js';
+import { FvScanner } from './fvScanner.js';
 import { ChainlinkFeed, ORACLE_PRICE_MOVED_CHANNEL } from '../spot/feeds/chainlinkFeed.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { scanHlMomentum, momentumCooldownKey } from '../futures/hlMomentumScanner.js';
@@ -79,6 +80,7 @@ export class ArbitrageWorker {
   private chainlinkFeed: ChainlinkFeed | null = null;
   private oracleLagScanner: OracleLagScanner | null = null;
   private oracleLagExitMonitor: OracleLagExitMonitor | null = null;
+  private fvScanner: FvScanner | null = null;
 
   constructor(options: WorkerOptions = {}) {
     this.baselineIntervalMs = options.baselineIntervalMs ?? 10000; // 10s baseline
@@ -203,6 +205,20 @@ export class ArbitrageWorker {
         await this.oracleLagExitMonitor.start();
       } catch (err) {
         logger.warn('[arb-worker] oracle-lag exit monitor failed to start (non-fatal)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // 0d. Start FV scanner (Black-Scholes fair-value vs book mid on 15m Up/Down).
+    // Shares ChainlinkFeed with OL scanner — one WS connection, multiple consumers.
+    // Ships dark: FV_SCANNER_ENABLED=false (shadow-log only until gate metrics confirm).
+    if (this.chainlinkFeed) {
+      try {
+        this.fvScanner = new FvScanner({ redis: getRedis() });
+        await this.fvScanner.start(this.chainlinkFeed);
+      } catch (err) {
+        logger.warn('[arb-worker] fv scanner failed to start (non-fatal)', {
           error: err instanceof Error ? err.message : String(err),
         });
       }
@@ -761,6 +777,16 @@ export class ArbitrageWorker {
         });
       }
       this.oracleLagScanner = null;
+    }
+    if (this.fvScanner) {
+      try {
+        await this.fvScanner.stop();
+      } catch (err) {
+        logger.warn('[arb-worker] fv scanner stop failed (non-fatal)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      this.fvScanner = null;
     }
     if (this.chainlinkFeed) {
       try {
