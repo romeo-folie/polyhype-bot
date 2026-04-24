@@ -718,6 +718,49 @@ describe('redeemResolvedPositions', () => {
     expect(results[0].success).toBe(true);
   });
 
+  it('partial-exit-marker position + Gamma RESOLVED + dust: skips resolved_dust_closed write', async () => {
+    // Mirror of the !resolved partial_exit test, but exercising the Gamma-
+    // resolved code path. Same duplicate-outcome risk: `finalizeClobExit`
+    // already recorded a realized outcome at the moment of the partial fill;
+    // writing `resolved_dust_closed/−100` here would double-count.
+    const pastDate = new Date(Date.now() - 60_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'resolved-partial',
+        conditionId: 'cond-resolved-partial',
+        clobTokenIds: ['token-yes-rp', 'token-no-rp'],
+        direction: 'YES',
+        executionVenue: 'clob',
+        question: 'Will BTC close > $70k by April 30?',
+        sharesHeld: 0.005,
+        entryPrice: 0.5,
+        stakeUsd: 4.9972,
+        endDate: pastDate,
+        sourcedFrom: 'osint',
+        reconciliationStatus: 'partial_exit:2026-04-28T10:15:00.000Z',
+        pendingSettlement: true,
+      },
+    ]);
+    // Gamma IS able to resolve this one (not an Up/Down binary).
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([{ resolved: true, outcomePrices: '["1","0"]' }]),
+      } as any),
+    );
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 0.005 } as any);
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'resolved-partial', 'YES');
+    expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
+    expect(vi.mocked(mockNotifyMarketResolved)).not.toHaveBeenCalled();
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
+  });
+
   it('partial-exit-marker position skips expired_dust write (prevents duplicate outcome row)', async () => {
     // After a maker-exit partial fill, `finalizeClobExit` already recorded
     // the realized outcome and left a `partial_exit:` marker on the ledger.

@@ -506,11 +506,9 @@ describe('executeTakeProfit', () => {
 
   // ── Partial-fill ledger update (2026-04-24 incident fix) ─────────────────
 
-  it('on partial CLOB fill, updates sharesHeld to residual BEFORE pendingSettlement', async () => {
-    // Requested 10 shares, only 9.99 filled → residual 0.01 left on-chain.
-    // The reconciler must see the healed ledger on its next cycle; failure
-    // to update sharesHeld caused the 2026-04-24 healed_mismatch / duplicate
-    // outcome chain.
+  it('on partial CLOB fill (no sweep), falls through to normal close path', async () => {
+    // Baseline: RESIDUAL_SWEEP_ENABLED off in the default config mock so the
+    // sweep branch never fires. Position closes cleanly with realized return.
     mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 10 });
     mockClobSell.mockResolvedValue({
       success: true,
@@ -532,16 +530,85 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
-    // When RESIDUAL_SWEEP is off (config mock doesn't set it), the
-    // pendingDueToResidual branch doesn't fire — partial fill just closes
-    // normally. The interesting case is the sweep-enabled branch, but our
-    // config loadConfig mock doesn't model it here. Assert the primary
-    // close path runs instead, and that update is NOT accidentally called
-    // with wrong args. This is a sanity guard for the simple path.
     expect(mockClose).toHaveBeenCalledWith(
       expect.any(Object),
       'mkt-1',
       'YES',
     );
+  });
+
+  it('sweep-enabled partial fill leaves residual: updates sharesHeld + partial_exit marker BEFORE pendingSettlement', async () => {
+    // Force the sweep path: primary fill is 9.99 of 10, sweep finds 0.01
+    // residual worth <$0.01 → below RESIDUAL_SWEEP_MIN_NOTIONAL_USD → sweep
+    // bails with residualRemainsOnVenue=true and additionalSharesSold=0.
+    // finalizeClobExit must then: (1) update sharesHeld to residual with a
+    // `partial_exit:<ts>` marker, (2) mark pendingSettlement. Order matters
+    // — the marker is what lets the redeemer suppress the dup-outcome row,
+    // so it must land BEFORE pendingSettlement (otherwise any racing
+    // reconciler-then-redeemer cycle in between could write -100%).
+    const { loadConfig } = await import('../../shared/config.js');
+    const mockCfg = vi.mocked(loadConfig);
+    mockCfg.mockReturnValue({
+      CLOB_ORDER_TYPE: 'FAK',
+      SIMMER_VENUE_ENABLED: true,
+      RESIDUAL_SWEEP_ENABLED: true,
+      RESIDUAL_SWEEP_MAX_ATTEMPTS: 1,
+      RESIDUAL_SWEEP_MIN_NOTIONAL_USD: 1.0,
+    } as any);
+
+    // First call: entry-side balance check → full position. Second call:
+    // sweep's fetchClobTokenBalance → tiny residual below min notional.
+    mockFetchClobTokenBalance
+      .mockResolvedValueOnce({ ok: true, balance: 10 })
+      .mockResolvedValueOnce({ ok: true, balance: 0.01 });
+    mockClobSell.mockResolvedValue({
+      success: true,
+      tx_hash: '0xpartialsweep',
+      shares_bought: 9.99,
+    });
+
+    const callOrder: string[] = [];
+    mockUpdateShares.mockImplementation(async () => {
+      callOrder.push('updatePositionShares');
+    });
+    mockMarkPending.mockImplementation(async () => {
+      callOrder.push('markPositionPendingSettlement');
+    });
+
+    await executeTakeProfit({
+      position: makePosition({
+        executionVenue: 'clob',
+        direction: 'YES',
+        stakeUsd: 5.0,
+        sharesHeld: 10,
+        entryPrice: 0.5,
+      }),
+      currentPrice: 0.8,
+      returnPct: 60,
+      reason: 'take_profit_threshold',
+      redis: makeRedis(),
+    });
+
+    // updatePositionShares(redis, marketId, direction, residualShares, 'partial_exit:<ts>')
+    expect(mockUpdateShares).toHaveBeenCalledTimes(1);
+    const updateCall = mockUpdateShares.mock.calls[0];
+    expect(updateCall?.[1]).toBe('mkt-1');
+    expect(updateCall?.[2]).toBe('YES');
+    expect(updateCall?.[3]).toBeCloseTo(0.01, 6); // residual = 10 − 9.99
+    expect(updateCall?.[4]).toMatch(/^partial_exit:/);
+
+    expect(mockMarkPending).toHaveBeenCalledWith(expect.any(Object), 'mkt-1', 'YES');
+
+    // The marker must land BEFORE the pending flag so no reconciler window
+    // can slip in between.
+    expect(callOrder).toEqual([
+      'updatePositionShares',
+      'markPositionPendingSettlement',
+    ]);
+
+    // And the realized outcome must be recorded with realized returnPct.
+    const outcomeArgs = mockRecordOutcome.mock.calls[0]?.[2] as { result: string; returnPct: number };
+    expect(outcomeArgs.result).toBe('won');
+    expect(outcomeArgs.returnPct).toBeCloseTo(((9.99 * 0.8) - 5.0) / 5.0 * 100, 2);
   });
 });

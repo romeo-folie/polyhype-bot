@@ -129,7 +129,15 @@ export class ClobPriceFeed {
     return isFinite(p) ? p : null;
   }
 
-  /** Get the cached spread (YES+NO-1) if both prices are available. */
+  /**
+   * Get the cached bid-side spread. Both cached values are best-bids (see
+   * `cacheBookBestBid`), so for a binary market:
+   *   YES bid + NO bid = 1.0 − spread
+   * → spread = 1.0 − (YES bid + NO bid)
+   *
+   * Returns 0 when the book is tighter than our cache resolution; caller
+   * decides whether 0 means "no slack to deduct" or "cache not yet warm".
+   */
   async getCachedSpread(marketId: string): Promise<number | null> {
     const [yes, no] = await Promise.all([
       this.redis.get(WS_YES_PRICE_KEY(marketId)),
@@ -139,9 +147,7 @@ export class ClobPriceFeed {
     const pYes = parseFloat(yes);
     const pNo = parseFloat(no);
     if (!isFinite(pYes) || !isFinite(pNo)) return null;
-    // For a binary market, YES ask + NO ask = 1.0 + spread.
-    // Thus spread = (YES + NO) - 1.0.
-    return Math.max(0, pYes + pNo - 1.0);
+    return Math.max(0, 1.0 - (pYes + pNo));
   }
 
   destroy(): void {
@@ -247,6 +253,13 @@ export class ClobPriceFeed {
       // drop — letting the book-event cache age out via its 30s TTL is safer
       // than overwriting a real best-bid with a random level change.
       // (See module header for the 2026-04-24 incident that motivated this.)
+      if (m.type === 'price_change' || m.event_type === 'price_change') {
+        continue;
+      }
+
+      // Unknown event type — ignore. Explicit continue so future event types
+      // don't silently fall into the cache by accident.
+      continue;
     }
   }
 

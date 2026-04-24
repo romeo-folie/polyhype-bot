@@ -1219,6 +1219,31 @@ async function redeemClobPositions(
       // Dust positions: close the zombie ledger entry without on-chain redemption.
       // The fill was negligible (sub-$0.25) so there's nothing to redeem.
       if (isDust) {
+        // Partial-exit residual: `finalizeClobExit` already recorded the
+        // realized outcome. Close the ledger and move on — re-recording here
+        // would double-count (same root cause as the !resolved branch above).
+        const alreadyRecordedViaPartialExit =
+          typeof pos.reconciliationStatus === 'string' &&
+          pos.reconciliationStatus.startsWith('partial_exit:');
+        if (alreadyRecordedViaPartialExit) {
+          logger.info(
+            '[redeemer] skipping resolved-dust outcome — partial_exit already recorded a realized outcome',
+            {
+              marketId: pos.marketId,
+              direction: pos.direction,
+              reconciliationStatus: pos.reconciliationStatus,
+              outcome: resolved.outcome,
+              won,
+              dustBalance: reportedBalance,
+            },
+          );
+          await closePosition(redis, pos.marketId, pos.direction);
+          await markRecentlyClosed(redis, pos.marketId);
+          await markRecentlyResolved(redis, pos.marketId);
+          results.push({ marketId: pos.marketId, side, success: true });
+          continue;
+        }
+
         logger.info('[redeemer] closing dust CLOB position after resolution', {
           marketId: pos.marketId,
           direction: pos.direction,
