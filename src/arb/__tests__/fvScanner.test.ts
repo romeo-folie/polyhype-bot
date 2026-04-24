@@ -14,8 +14,15 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { evaluateFvEntry, type FvEvalConfig } from '../fvScanner.js';
+import {
+  evaluateFvEntry,
+  findClosestOraclePricePoint,
+  isChainlinkTickFresh,
+  parseOraclePriceEntry,
+  type FvEvalConfig,
+} from '../fvScanner.js';
 import type { UpDownMarket } from '../../mapping/gamma.js';
+import type { ChainlinkTick } from '../../spot/feeds/chainlinkFeed.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -227,5 +234,33 @@ describe('evaluateFvEntry — stake sizing', () => {
       expect(r.stakeUsd).toBeGreaterThan(0);
       expect(r.stakeUsd).toBeLessThanOrEqual(DEFAULT_CFG.maxStakeUsd);
     }
+  });
+});
+
+describe('FV helper utilities', () => {
+  it('treats old Chainlink ticks as stale', () => {
+    const tick: ChainlinkTick = {
+      symbol: 'btc/usd',
+      value: 50_000,
+      oracleTs: NOW_MS - 15_000,
+      receivedAt: NOW_MS - 15_000,
+    };
+    expect(isChainlinkTickFresh(tick, NOW_MS)).toBe(false);
+  });
+
+  it('parses oracle:prices entries into timestamp/value pairs', () => {
+    expect(parseOraclePriceEntry('1770000000000:50000.25')).toEqual({
+      oracleTs: 1_770_000_000_000,
+      value: 50_000.25,
+    });
+  });
+
+  it('selects the closest Redis strike tick within tolerance', () => {
+    const point = findClosestOraclePricePoint([
+      { oracleTs: NOW_MS - 20_000, value: 49_900 },
+      { oracleTs: NOW_MS - 2_000, value: 50_100 },
+      { oracleTs: NOW_MS + 15_000, value: 50_200 },
+    ], NOW_MS, 5_000);
+    expect(point).toEqual({ oracleTs: NOW_MS - 2_000, value: 50_100 });
   });
 });

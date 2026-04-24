@@ -147,6 +147,29 @@ describe('SigmaCalibrator', () => {
       const r = cal.getSigma('btc/usd', ticks);
       expect(r.source).toBe('rolling');
     });
+
+    it('uses elapsed seconds between ticks for EWMA decay', () => {
+      const cal = new SigmaCalibrator({
+        sigmaMin: 0.0,
+        sigmaMax: 1000,
+        ewmaHalfLifeS: 300,
+      });
+      const base = Date.now();
+      cal.onTick(mkTick('btc/usd', 50_000, base, base));
+      cal.onTick(mkTick('btc/usd', 55_000, base + 1_000, base + 1_000));
+      const fastGap = cal.getSigma('btc/usd', []);
+
+      const slow = new SigmaCalibrator({
+        sigmaMin: 0.0,
+        sigmaMax: 1000,
+        ewmaHalfLifeS: 300,
+      });
+      slow.onTick(mkTick('btc/usd', 50_000, base, base));
+      slow.onTick(mkTick('btc/usd', 55_000, base + 60_000, base + 60_000));
+      const slowGap = slow.getSigma('btc/usd', []);
+
+      expect(slowGap.sigmaEwma).toBeGreaterThan(fastGap.sigmaEwma);
+    });
   });
 
   describe('clamp [sigmaMin, sigmaMax]', () => {

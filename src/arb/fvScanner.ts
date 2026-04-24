@@ -46,7 +46,7 @@ import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
 import { priceZoneOf } from '../shared/zones.js';
 import { computePModel } from '../pricing/blackScholes.js';
 import { SigmaCalibrator } from '../pricing/sigmaCalibrator.js';
-import type { ChainlinkFeed } from '../spot/feeds/chainlinkFeed.js';
+import type { ChainlinkFeed, ChainlinkTick } from '../spot/feeds/chainlinkFeed.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 // ── Mapping: PGA asset name → Chainlink symbol ────────────────────────────
@@ -63,6 +63,7 @@ const LOCK_TTL_S = 60;
 const LOCK_REFRESH_MS = 20_000;
 const TICK_INTERVAL_MS = 1_000;
 const MARKET_REFRESH_MS = 30_000;
+const CHAINLINK_STALE_MS = 10_000;
 /** Window_start for a 15m market is exactly 15 min before resolution. */
 const WINDOW_DURATION_S = 900;
 
@@ -71,6 +72,45 @@ const WINDOW_DURATION_S = 900;
 const DEDUP_PREFIX = 'fv:dedup:';
 const STRIKE_PREFIX = 'fv:strike:';
 const DEDUP_TTL_S = 60;
+
+interface OraclePricePoint {
+  oracleTs: number;
+  value: number;
+}
+
+export function isChainlinkTickFresh(
+  tick: ChainlinkTick | null,
+  nowMs = Date.now(),
+  staleMs = CHAINLINK_STALE_MS,
+): boolean {
+  return tick !== null && nowMs - tick.receivedAt <= staleMs;
+}
+
+export function parseOraclePriceEntry(entry: string): OraclePricePoint | null {
+  const colonIdx = entry.indexOf(':');
+  if (colonIdx === -1) return null;
+  const oracleTs = parseInt(entry.slice(0, colonIdx), 10);
+  const value = parseFloat(entry.slice(colonIdx + 1));
+  if (!Number.isFinite(oracleTs) || !Number.isFinite(value) || oracleTs <= 0 || value <= 0) return null;
+  return { oracleTs, value };
+}
+
+export function findClosestOraclePricePoint(
+  points: OraclePricePoint[],
+  targetTs: number,
+  toleranceMs: number,
+): OraclePricePoint | null {
+  let best: OraclePricePoint | null = null;
+  let bestDiff = Infinity;
+  for (const point of points) {
+    const diff = Math.abs(point.oracleTs - targetTs);
+    if (diff < bestDiff) {
+      best = point;
+      bestDiff = diff;
+    }
+  }
+  return best !== null && bestDiff <= toleranceMs ? best : null;
+}
 
 // ── Pure evaluator ────────────────────────────────────────────────────────
 
@@ -403,20 +443,47 @@ export class FvScanner {
 
     const windowStartMs = market.endDate.getTime() - WINDOW_DURATION_S * 1000;
     const tick = this.feed.findTickAt(symbol, windowStartMs, toleranceS * 1000);
-    if (!tick) return 0;
+    if (tick) {
+      // Cache until market resolves + 1 h
+      const ttlS = Math.max(
+        3600,
+        Math.ceil((market.endDate.getTime() - Date.now()) / 1000) + 3600,
+      );
+      await this.redis.set(redisKey, String(tick.value), 'EX', ttlS).catch(() => null);
+      logger.debug('[fv-scanner] strike resolved', {
+        marketId: market.marketId,
+        strike: tick.value,
+        lagMs: Math.abs(tick.oracleTs - windowStartMs),
+        source: 'memory',
+      });
+      return tick.value;
+    }
 
-    // Cache until market resolves + 1 h
+    const pricesKey = `oracle:prices:${symbol}`;
+    const toleranceMs = toleranceS * 1000;
+    const entries = await this.redis.zrangebyscore(
+      pricesKey,
+      windowStartMs - toleranceMs,
+      windowStartMs + toleranceMs,
+    ).catch(() => []);
+    const parsed = entries
+      .map(parseOraclePriceEntry)
+      .filter((point): point is OraclePricePoint => point !== null);
+    const redisTick = findClosestOraclePricePoint(parsed, windowStartMs, toleranceMs);
+    if (!redisTick) return 0;
+
     const ttlS = Math.max(
       3600,
       Math.ceil((market.endDate.getTime() - Date.now()) / 1000) + 3600,
     );
-    await this.redis.set(redisKey, String(tick.value), 'EX', ttlS).catch(() => null);
+    await this.redis.set(redisKey, String(redisTick.value), 'EX', ttlS).catch(() => null);
     logger.debug('[fv-scanner] strike resolved', {
       marketId: market.marketId,
-      strike: tick.value,
-      lagMs: Math.abs(tick.oracleTs - windowStartMs),
+      strike: redisTick.value,
+      lagMs: Math.abs(redisTick.oracleTs - windowStartMs),
+      source: 'redis',
     });
-    return tick.value;
+    return redisTick.value;
   }
 
   private async onTick(): Promise<void> {
@@ -476,9 +543,18 @@ export class FvScanner {
     bankrollUsd: number,
   ): Promise<void> {
     const latestTick = this.feed!.getLatest(symbol);
-    if (!latestTick) return;
+    if (latestTick === null || !isChainlinkTickFresh(latestTick)) {
+      logger.debug('[fv-scanner] stale chainlink tick — skipping market evaluation', {
+        marketId: market.marketId,
+        asset,
+        symbol,
+        receivedAt: latestTick?.receivedAt ?? null,
+      });
+      return;
+    }
+    const freshTick = latestTick;
 
-    const spot = latestTick.value;
+    const spot = freshTick.value;
     const strike = await this.resolveStrike(market, asset, cfg.FV_STRIKE_TOLERANCE_S);
 
     const evalCfg: FvEvalConfig = {

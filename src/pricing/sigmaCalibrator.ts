@@ -49,6 +49,8 @@ interface EwmaState {
   ewmaVar: number;
   lastValue: number;
   tickCount: number;
+  /** Oracle timestamp of the last observed tick. */
+  lastOracleTs: number;
   /** Wall-clock ms when the first tick was received for this symbol. */
   firstTickAt: number;
 }
@@ -57,12 +59,8 @@ export class SigmaCalibrator {
   private readonly cfg: SigmaConfig;
   private readonly state = new Map<string, EwmaState>();
 
-  /** EWMA decay factor per tick (assumes ~1 s cadence from RTDS). */
-  private readonly lambda: number;
-
   constructor(cfg: Partial<SigmaConfig> = {}) {
     this.cfg = { ...DEFAULT_SIGMA_CONFIG, ...cfg };
-    this.lambda = Math.exp(-Math.LN2 / this.cfg.ewmaHalfLifeS);
   }
 
   /** Feed one new RTDS tick. Call on every Chainlink tick for relevant symbols. */
@@ -70,14 +68,23 @@ export class SigmaCalibrator {
     const sym = tick.symbol.toLowerCase();
     const s = this.state.get(sym);
     if (!s) {
-      this.state.set(sym, { ewmaVar: 0, lastValue: tick.value, tickCount: 1, firstTickAt: Date.now() });
+      this.state.set(sym, {
+        ewmaVar: 0,
+        lastValue: tick.value,
+        tickCount: 1,
+        lastOracleTs: tick.oracleTs,
+        firstTickAt: Date.now(),
+      });
       return;
     }
     if (s.lastValue > 0 && tick.value > 0) {
       const r = Math.log(tick.value / s.lastValue);
-      s.ewmaVar = this.lambda * s.ewmaVar + (1 - this.lambda) * r * r;
+      const dtSec = Math.max(0, (tick.oracleTs - s.lastOracleTs) / 1000);
+      const lambda = Math.exp(-Math.LN2 * dtSec / this.cfg.ewmaHalfLifeS);
+      s.ewmaVar = lambda * s.ewmaVar + (1 - lambda) * r * r;
     }
     s.lastValue = tick.value;
+    s.lastOracleTs = tick.oracleTs;
     s.tickCount++;
   }
 
