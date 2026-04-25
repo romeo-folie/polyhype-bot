@@ -1532,6 +1532,12 @@ const envSchema = z.object({
   // Minimum loss percentage required before the near-res gate fires (avoids
   // cutting near break-even positions on spread noise).
   WEATHER_NEAR_RES_MIN_LOSS_PCT: z.coerce.number().min(0).optional().default(10),
+  // Near-resolution entry gate: block new weather entries when the market resolves
+  // within WEATHER_NEAR_RES_ENTRY_HOURS. By that point the overnight GFS forecast
+  // is stale — intraday temperature tracking has already priced it in.
+  // Ships enabled=true (pure entry guard; no position closures).
+  WEATHER_NEAR_RES_ENTRY_ENABLED: boolFromEnv.optional().default(true),
+  WEATHER_NEAR_RES_ENTRY_HOURS: z.coerce.number().min(0).optional().default(10),
   // ── PM-activity reconciler (src/cron/polymarketActivityReconciler.ts) ──
   // Every-15min cron that catches auto-redeemed wins our local redeemer missed:
   //   (a) positions closed via SL/TP leaving residual shares that auto-redeemed

@@ -24,6 +24,7 @@ import type { Redis } from 'ioredis';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
+import { evaluateWeatherNearResEntry } from './nearResEntry.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
@@ -547,6 +548,8 @@ export interface WeatherBracketOpportunity {
    *   - `full` — n ≥ trusted: mean shifted by -cityMeanBias, σ = max(raw, empirical)
    */
   biasMode: 'none' | 'weak' | 'full';
+  /** Market end date from Gamma — used by the near-res entry gate. */
+  endDate: string | null;
 }
 
 /**
@@ -780,6 +783,7 @@ export function findMispricedBrackets(
       citySampleSize: cityBias?.sampleSize ?? null,
       biasApplied: applyBias,
       biasMode,
+      endDate: event.endDate,
     });
   }
 
@@ -1136,7 +1140,7 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
 
   // Filter by WEATHER_TRADE_SIDES and excluded-city list. Excluded-city opps
   // remain in shadow records (wouldTrade=true) so calibration data stays clean.
-  const tradable = opportunities.filter(
+  let tradable = opportunities.filter(
     (o) => o.allowedByConfig && !excludedCities.has(o.city.toLowerCase()),
   );
 
@@ -1156,6 +1160,41 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       shadowOpportunities: opportunities.length,
       tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
     });
+    return;
+  }
+
+  // Near-resolution entry gate applied to the tradable list so both shadow-mode
+  // "would execute" logs and the live execution loop see the same filtered set.
+  if (cfg.WEATHER_NEAR_RES_ENTRY_ENABLED) {
+    const before = tradable.length;
+    tradable = tradable.filter((opp) => {
+      const eval_ = evaluateWeatherNearResEntry(
+        opp.endDate ?? undefined,
+        cfg.WEATHER_NEAR_RES_ENTRY_HOURS,
+      );
+      if (eval_.shouldSkip) {
+        logger.info('[weather] skipping — within near-res entry window', {
+          marketId: opp.marketId,
+          city: opp.city,
+          bracket: opp.bracketLabel,
+          hoursLeft: eval_.hoursLeft.toFixed(1),
+          threshold: cfg.WEATHER_NEAR_RES_ENTRY_HOURS,
+          endDate: opp.endDate,
+        });
+      }
+      return !eval_.shouldSkip;
+    });
+    if (tradable.length < before) {
+      logger.info('[weather] near-res entry gate filtered opportunities', {
+        before,
+        after: tradable.length,
+        blocked: before - tradable.length,
+      });
+    }
+  }
+
+  if (tradable.length === 0) {
+    logger.info('[weather] no tradable opportunities after near-res entry gate', {});
     return;
   }
 
