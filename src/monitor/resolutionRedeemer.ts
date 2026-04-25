@@ -820,12 +820,8 @@ async function redeemClobPositions(
                   pos.entryPrice > 0;
                 let returnPctDust: number;
                 // Each winning share = $1 at resolution; use sharesHeld as proceeds.
-                const proceedsUsdcDust =
-                  typeof pos.sharesHeld === 'number' && Number.isFinite(pos.sharesHeld) && pos.sharesHeld > 0
-                    ? pos.sharesHeld
-                    : entryPriceSafeDust && stakeSafe
-                      ? pos.stakeUsd / pos.entryPrice
-                      : null;
+                // `hadRealPosition` already guarantees sharesHeld is a positive finite number.
+                const proceedsUsdcDust = pos.sharesHeld as number;
                 if (stakeSafe && typeof pos.sharesHeld === 'number' && Number.isFinite(pos.sharesHeld)) {
                   returnPctDust = ((pos.sharesHeld - pos.stakeUsd) / pos.stakeUsd) * 100;
                 } else if (entryPriceSafeDust) {
@@ -833,7 +829,7 @@ async function redeemClobPositions(
                 } else {
                   returnPctDust = 0;
                 }
-                if (proceedsUsdcDust != null && proceedsUsdcDust > 0) {
+                if (proceedsUsdcDust > 0) {
                   await creditProceeds(redis, proceedsUsdcDust);
                 }
                 await recordPositionOutcome(
@@ -851,7 +847,7 @@ async function redeemClobPositions(
                   direction: displayDir,
                   result: 'won',
                   stakeUsd: pos.stakeUsd,
-                  ...(proceedsUsdcDust != null && proceedsUsdcDust > 0 && { proceedsUsdc: proceedsUsdcDust }),
+                  ...(proceedsUsdcDust > 0 && { proceedsUsdc: proceedsUsdcDust }),
                   reason: 'auto-redeemed by Polymarket (zero balance post-resolution)',
                 }).catch(() => {});
                 results.push({ marketId: pos.marketId, side, success: true });
