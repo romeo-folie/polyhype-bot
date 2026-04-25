@@ -238,7 +238,16 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
 
     const isRebateFarming = position.sourcedFrom === 'rebate-farming';
     const isCopytrade = position.sourcedFrom?.startsWith('copytrade:');
-    if (isRebateFarming) {
+    const isFvScanner = position.sourcedFrom?.startsWith('fv-scanner:') ?? false;
+
+    // FV scanner positions are 15-minute binaries that should hold to resolution.
+    // The near-res gate (0.95 → redeemer) is the winning exit; SL is the losing
+    // exit. TP and trailing would fire prematurely on the natural drift toward 1.0,
+    // so tpThreshold is set above any reachable binary return to keep them dormant.
+    if (isFvScanner) {
+      tpThreshold = 2; // 200% — unreachable; disables TP and trailing activation
+      slThreshold = cfg.CRYPTO_UPDOWN_STOP_LOSS;
+    } else if (isRebateFarming) {
       tpThreshold = cfg.REBATE_TAKE_PROFIT_PCT / 100;
       slThreshold = cfg.REBATE_STOP_LOSS_PCT / 100;
     } else if (isCopytrade) {

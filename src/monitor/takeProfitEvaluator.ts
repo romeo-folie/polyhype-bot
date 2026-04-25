@@ -102,7 +102,8 @@ export function evaluateTakeProfit(
   // default causes either premature exits or stuck positions.
   if (
     !position.sourcedFrom.startsWith('copytrade:') &&
-    !position.sourcedFrom.startsWith('reconciled:')
+    !position.sourcedFrom.startsWith('reconciled:') &&
+    !position.sourcedFrom.startsWith('fv-scanner:')
   ) {
     // UP (BTC Up/Down) is a YES-side direction — its token IS the YES-token.
     // Must be treated as 'YES' here or the else branch inverts the check.
