@@ -591,11 +591,13 @@ describe('redeemResolvedPositions', () => {
 
     // Must NOT attempt on-chain redemption (no shares to redeem)
     expect(mockRedeemClobOutcome).not.toHaveBeenCalled();
-    // Must close the ledger position and notify a WIN
+    // Must close the ledger position and notify a WIN with proceeds
     expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'weather-autoredeem', 'NO');
+    expect(mockCreditProceeds).toHaveBeenCalledWith(mockRedis, 6.66);
     expect(vi.mocked(mockNotifyMarketResolved)).toHaveBeenCalledWith(
       expect.objectContaining({
         result: 'won',
+        proceedsUsdc: 6.66,
         reason: expect.stringContaining('auto-redeemed'),
       }),
     );
@@ -764,8 +766,9 @@ describe('redeemResolvedPositions', () => {
     const results = await redeemResolvedPositions(mockRedis);
 
     expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'eth-updown-healed', 'YES');
+    expect(mockCreditProceeds).toHaveBeenCalledWith(mockRedis, 0.0044);
     expect(vi.mocked(mockNotifyMarketResolved)).toHaveBeenCalledWith(
-      expect.objectContaining({ result: 'won' }),
+      expect.objectContaining({ result: 'won', proceedsUsdc: 0.0044 }),
     );
     expect(results).toHaveLength(1);
     expect(results[0].success).toBe(true);
