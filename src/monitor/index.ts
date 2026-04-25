@@ -245,7 +245,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     // exit. TP and trailing would fire prematurely on the natural drift toward 1.0,
     // so tpThreshold is set above any reachable binary return to keep them dormant.
     if (isFvScanner) {
-      tpThreshold = 2; // 200% — unreachable; disables TP and trailing activation
+      tpThreshold = Number.POSITIVE_INFINITY; // disables TP and trailing activation for all entry prices
       slThreshold = cfg.CRYPTO_UPDOWN_STOP_LOSS;
     } else if (isRebateFarming) {
       tpThreshold = cfg.REBATE_TAKE_PROFIT_PCT / 100;
