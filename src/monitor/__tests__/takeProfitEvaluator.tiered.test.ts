@@ -68,6 +68,77 @@ describe('takeProfitEvaluator Tiered Logic', () => {
   });
 });
 
+// FV scanner: tpThreshold=2 (disabled), slThreshold=CRYPTO_UPDOWN_STOP_LOSS (0.10).
+// TP and trailing must never fire — the near-res gate (0.95) is the winning exit.
+describe('takeProfitEvaluator — fv-scanner tier (tpThreshold=2, slThreshold=0.10)', () => {
+  const fvPosition = {
+    marketId: '2062109',
+    direction: 'YES' as const,
+    entryPrice: 0.65,
+    consensusProbability: 0.87,
+    sourcedFrom: 'fv-scanner:bitcoin:YES:p0.870:e0.220',
+  };
+
+  it('holds at +3% gain (old crypto-updown TP would have fired)', () => {
+    const currentPrice = {
+      marketId: '2062109',
+      direction: 'YES' as const,
+      currentOutcomePrice: 0.65 * 1.031,
+      currentYesPrice: 0.65 * 1.031,
+    };
+    const decision = evaluateTakeProfit(fvPosition as any, currentPrice, Number.POSITIVE_INFINITY, 0.10);
+    expect(decision.shouldExit).toBe(false);
+  });
+
+  it('holds at +50% gain (market drifting toward resolution)', () => {
+    const currentPrice = {
+      marketId: '2062109',
+      direction: 'YES' as const,
+      currentOutcomePrice: 0.65 * 1.50,
+      currentYesPrice: 0.65 * 1.50,
+    };
+    const decision = evaluateTakeProfit(fvPosition as any, currentPrice, Number.POSITIVE_INFINITY, 0.10);
+    expect(decision.shouldExit).toBe(false);
+  });
+
+  it('holds at +300% gain with low entry price (would exceed tpThreshold=2)', () => {
+    // entryPrice=0.25 → max binary return = (1.0−0.25)/0.25 = 300%; sentinel must survive this
+    const lowEntryPosition = { ...fvPosition, entryPrice: 0.25 };
+    const currentPrice = {
+      marketId: '2062109',
+      direction: 'YES' as const,
+      currentOutcomePrice: 0.94, // +276% return — above 200% but below near-res gate
+      currentYesPrice: 0.94,
+    };
+    const decision = evaluateTakeProfit(lowEntryPosition as any, currentPrice, Number.POSITIVE_INFINITY, 0.10);
+    expect(decision.shouldExit).toBe(false);
+  });
+
+  it('holds when price reaches consensusProbability (divergence_closed skipped)', () => {
+    // consensusProbability=0.87; without the fv-scanner skip this would fire divergence_closed
+    const currentPrice = {
+      marketId: '2062109',
+      direction: 'YES' as const,
+      currentOutcomePrice: 0.88,
+      currentYesPrice: 0.88,
+    };
+    const decision = evaluateTakeProfit(fvPosition as any, currentPrice, Number.POSITIVE_INFINITY, 0.10);
+    expect(decision.shouldExit).toBe(false);
+  });
+
+  it('fires stop-loss at -10% (spot flipped below strike)', () => {
+    const currentPrice = {
+      marketId: '2062109',
+      direction: 'YES' as const,
+      currentOutcomePrice: 0.65 * (1 - 0.101),
+      currentYesPrice: 0.65 * (1 - 0.101),
+    };
+    const decision = evaluateTakeProfit(fvPosition as any, currentPrice, Number.POSITIVE_INFINITY, 0.10);
+    expect(decision.shouldExit).toBe(true);
+    expect(decision.reason).toBe('stop_loss');
+  });
+});
+
 // SPORTS_STOP_LOSS=0.45, SPORTS_TAKE_PROFIT=0.25
 // Live in-play prices swing ±15-30% on scoring plays — the old 16% default
 // fired within one 5s monitor tick. These tests document the expected routing
