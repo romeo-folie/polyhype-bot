@@ -25,8 +25,9 @@ export function evaluateWeatherNearRes(
 ): WeatherNearResDecision {
   if (!endDate) return { shouldFire: false, hoursLeft: Infinity };
   const endMs = new Date(endDate).getTime();
+  if (!Number.isFinite(endMs)) return { shouldFire: false, hoursLeft: Infinity };
   const hoursLeft = (endMs - nowMs) / (1000 * 60 * 60);
-  const meetsTimeGate = hoursLeft > 0 && hoursLeft < cfg.nearResHours;
+  const meetsTimeGate = hoursLeft > 0 && hoursLeft <= cfg.nearResHours;
   const meetsLossGate = returnPct <= -cfg.nearResMinLossPct;
   return { shouldFire: meetsTimeGate && meetsLossGate, hoursLeft };
 }

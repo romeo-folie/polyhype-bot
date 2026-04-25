@@ -232,8 +232,9 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     let tpThreshold = cfg.TAKE_PROFIT_THRESHOLD;
     let slThreshold = cfg.STOP_LOSS_THRESHOLD;
 
-    // Hoisted here — also needed by the weather near-res gate outside the tiered block.
-    const isWeather = inferCategory(position.question) === 'weather';
+    // Computed once and reused across all threshold/gate branches below.
+    const inferredCategory = inferCategory(position.question);
+    const isWeather = inferredCategory === 'weather';
 
     const isRebateFarming = position.sourcedFrom === 'rebate-farming';
     const isCopytrade = position.sourcedFrom?.startsWith('copytrade:');
@@ -245,8 +246,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       slThreshold = cfg.COPYTRADE_STOP_LOSS;
       // Sports copytrades get a tighter SL — fast-resolving binaries where
       // losses are catastrophic (-41% to -57% observed over 2 weeks).
-      const cat = inferCategory(position.question);
-      if (cat.startsWith('sports')) {
+      if (inferredCategory.startsWith('sports')) {
         slThreshold = cfg.COPYTRADE_SPORTS_STOP_LOSS;
       }
     } else if (cfg.TIERED_LOGIC_ENABLED) {
@@ -262,9 +262,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
         }
       }
 
-      const inferredCategory = inferCategory(position.question);
       const isCryptoUpdown = inferredCategory === 'crypto-updown';
-      // isWeather hoisted above for use by weather near-res gate
       // Sports-arb signals set sourcedFrom='sports:league:gameId'. Don't rely on
       // inferCategory — it misses team-name questions that lack keywords like
       // "mlb"/"baseball", falling through to 'geopolitical' and the default 16% SL.

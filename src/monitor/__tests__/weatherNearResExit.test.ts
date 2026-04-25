@@ -29,8 +29,7 @@ describe('evaluateWeatherNearRes', () => {
     expect(result.shouldFire).toBe(false);
   });
 
-  it('does not fire exactly at the minimum loss threshold', () => {
-    // -10% exactly meets threshold (<=), so this should fire
+  it('fires exactly at the minimum loss threshold', () => {
     const result = evaluateWeatherNearRes(endDate(2), -10, cfg);
     expect(result.shouldFire).toBe(true);
   });
@@ -78,5 +77,18 @@ describe('evaluateWeatherNearRes', () => {
     const enoughLoss = evaluateWeatherNearRes(endDate(2), -25, strictCfg);
     expect(notEnoughLoss.shouldFire).toBe(false);
     expect(enoughLoss.shouldFire).toBe(true);
+  });
+
+  it('fires exactly at the nearResHours boundary', () => {
+    const nowMs = new Date('2026-04-25T18:00:00Z').getTime();
+    const exactly3hMs = nowMs + 3 * 60 * 60 * 1000;
+    const result = evaluateWeatherNearRes(new Date(exactly3hMs).toISOString(), -15, cfg, nowMs);
+    expect(result.shouldFire).toBe(true);
+  });
+
+  it('does not fire on a malformed endDate string', () => {
+    const result = evaluateWeatherNearRes('not-a-date', -50, cfg);
+    expect(result.shouldFire).toBe(false);
+    expect(result.hoursLeft).toBe(Infinity);
   });
 });
