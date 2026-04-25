@@ -24,6 +24,7 @@ import type { Redis } from 'ioredis';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
+import { evaluateWeatherNearResEntry } from './nearResEntry.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
@@ -547,6 +548,8 @@ export interface WeatherBracketOpportunity {
    *   - `full` — n ≥ trusted: mean shifted by -cityMeanBias, σ = max(raw, empirical)
    */
   biasMode: 'none' | 'weak' | 'full';
+  /** Market end date from Gamma — used by the near-res entry gate. */
+  endDate: string | null;
 }
 
 /**
@@ -780,6 +783,7 @@ export function findMispricedBrackets(
       citySampleSize: cityBias?.sampleSize ?? null,
       biasApplied: applyBias,
       biasMode,
+      endDate: event.endDate,
     });
   }
 
@@ -1209,6 +1213,27 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         marketId: opp.marketId,
       });
       continue;
+    }
+
+    // Near-resolution entry gate: the overnight GFS forecast loses alpha once
+    // intraday temperature tracking is visible (typically after local noon).
+    // Block new entries when the market resolves within WEATHER_NEAR_RES_ENTRY_HOURS.
+    if (cfg.WEATHER_NEAR_RES_ENTRY_ENABLED) {
+      const entryEval = evaluateWeatherNearResEntry(
+        opp.endDate ?? undefined,
+        cfg.WEATHER_NEAR_RES_ENTRY_HOURS,
+      );
+      if (entryEval.shouldSkip) {
+        logger.info('[weather] skipping — within near-res entry window', {
+          marketId: opp.marketId,
+          city: opp.city,
+          bracket: opp.bracketLabel,
+          hoursLeft: entryEval.hoursLeft.toFixed(1),
+          threshold: cfg.WEATHER_NEAR_RES_ENTRY_HOURS,
+          endDate: opp.endDate,
+        });
+        continue;
+      }
     }
 
     // Half-Kelly sizing: use the win probability and price of the side we're buying.
