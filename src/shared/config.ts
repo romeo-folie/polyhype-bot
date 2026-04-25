@@ -582,6 +582,12 @@ const envSchema = z.object({
   COPYTRADE_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.40),
   COPYTRADE_TAKE_PROFIT: z.coerce.number().min(0).max(1).optional().default(0.50),
   COPYTRADE_SPORTS_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.15),
+  // When true, sports-copytrade positions disable TP + trailing and hold to
+  // resolution.  Binary sports markets resolve at 0 or 1; intermediate prices
+  // are in-play noise (a single break of serve can move ±13% in one tick).
+  // SL (COPYTRADE_SPORTS_STOP_LOSS) handles downside; the near-res gate (0.95)
+  // handles winning redemption.  Mirrors the FV-scanner hold-to-res pattern.
+  COPYTRADE_SPORTS_HOLD_TO_RES: boolFromEnv.optional().default(true),
   MONITOR_HEAVY_INTERVAL_MIN: z.coerce.number().int().min(1).optional().default(5),
   // Persistent monitor worker sleep between cycles (ms). Only consumed by
   // `src/monitor/worker.ts` — the cron entrypoint still runs on its own schedule.
