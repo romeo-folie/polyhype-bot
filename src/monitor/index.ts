@@ -260,8 +260,9 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
         // Hold-to-resolution: disable TP + trailing so in-play price swings
         // (a single break of serve can move ±13% in one monitor tick) don't
         // trigger premature exits.  Binary markets resolve at 0 or 1; the only
-        // legitimate exits are the SL above and the near-res gate (0.95 →
-        // redeemer).  Mirrors the FV-scanner hold-to-res pattern.
+        // legitimate exits are the SL above and the near-res gate
+        // (MONITOR_NEAR_RES_PRICE_THRESHOLD → redeemer).
+        // Mirrors the FV-scanner hold-to-res pattern.
         if (cfg.COPYTRADE_SPORTS_HOLD_TO_RES) {
           tpThreshold = Number.POSITIVE_INFINITY;
         }

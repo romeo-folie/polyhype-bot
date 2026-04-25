@@ -585,8 +585,9 @@ const envSchema = z.object({
   // When true, sports-copytrade positions disable TP + trailing and hold to
   // resolution.  Binary sports markets resolve at 0 or 1; intermediate prices
   // are in-play noise (a single break of serve can move ±13% in one tick).
-  // SL (COPYTRADE_SPORTS_STOP_LOSS) handles downside; the near-res gate (0.95)
-  // handles winning redemption.  Mirrors the FV-scanner hold-to-res pattern.
+  // SL (COPYTRADE_SPORTS_STOP_LOSS) handles downside; the near-res gate
+  // (MONITOR_NEAR_RES_PRICE_THRESHOLD, default 0.95) handles winning redemption.
+  // Mirrors the FV-scanner hold-to-res pattern.
   COPYTRADE_SPORTS_HOLD_TO_RES: boolFromEnv.optional().default(true),
   MONITOR_HEAVY_INTERVAL_MIN: z.coerce.number().int().min(1).optional().default(5),
   // Persistent monitor worker sleep between cycles (ms). Only consumed by
