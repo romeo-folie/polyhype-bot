@@ -1140,7 +1140,7 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
 
   // Filter by WEATHER_TRADE_SIDES and excluded-city list. Excluded-city opps
   // remain in shadow records (wouldTrade=true) so calibration data stays clean.
-  const tradable = opportunities.filter(
+  let tradable = opportunities.filter(
     (o) => o.allowedByConfig && !excludedCities.has(o.city.toLowerCase()),
   );
 
@@ -1160,6 +1160,41 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       shadowOpportunities: opportunities.length,
       tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
     });
+    return;
+  }
+
+  // Near-resolution entry gate applied to the tradable list so both shadow-mode
+  // "would execute" logs and the live execution loop see the same filtered set.
+  if (cfg.WEATHER_NEAR_RES_ENTRY_ENABLED) {
+    const before = tradable.length;
+    tradable = tradable.filter((opp) => {
+      const eval_ = evaluateWeatherNearResEntry(
+        opp.endDate ?? undefined,
+        cfg.WEATHER_NEAR_RES_ENTRY_HOURS,
+      );
+      if (eval_.shouldSkip) {
+        logger.info('[weather] skipping — within near-res entry window', {
+          marketId: opp.marketId,
+          city: opp.city,
+          bracket: opp.bracketLabel,
+          hoursLeft: eval_.hoursLeft.toFixed(1),
+          threshold: cfg.WEATHER_NEAR_RES_ENTRY_HOURS,
+          endDate: opp.endDate,
+        });
+      }
+      return !eval_.shouldSkip;
+    });
+    if (tradable.length < before) {
+      logger.info('[weather] near-res entry gate filtered opportunities', {
+        before,
+        after: tradable.length,
+        blocked: before - tradable.length,
+      });
+    }
+  }
+
+  if (tradable.length === 0) {
+    logger.info('[weather] no tradable opportunities after near-res entry gate', {});
     return;
   }
 
@@ -1213,27 +1248,6 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         marketId: opp.marketId,
       });
       continue;
-    }
-
-    // Near-resolution entry gate: the overnight GFS forecast loses alpha once
-    // intraday temperature tracking is visible (typically after local noon).
-    // Block new entries when the market resolves within WEATHER_NEAR_RES_ENTRY_HOURS.
-    if (cfg.WEATHER_NEAR_RES_ENTRY_ENABLED) {
-      const entryEval = evaluateWeatherNearResEntry(
-        opp.endDate ?? undefined,
-        cfg.WEATHER_NEAR_RES_ENTRY_HOURS,
-      );
-      if (entryEval.shouldSkip) {
-        logger.info('[weather] skipping — within near-res entry window', {
-          marketId: opp.marketId,
-          city: opp.city,
-          bracket: opp.bracketLabel,
-          hoursLeft: entryEval.hoursLeft.toFixed(1),
-          threshold: cfg.WEATHER_NEAR_RES_ENTRY_HOURS,
-          endDate: opp.endDate,
-        });
-        continue;
-      }
     }
 
     // Half-Kelly sizing: use the win probability and price of the side we're buying.
