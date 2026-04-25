@@ -1524,6 +1524,14 @@ const envSchema = z.object({
   // (typ 3–5 cents on 0.5–0.7 priced outcomes) and forecast-update reprices.
   WEATHER_TAKE_PROFIT: z.coerce.number().min(0).optional().default(0.05),
   WEATHER_STOP_LOSS: z.coerce.number().min(0).max(1).optional().default(0.40),
+  // Near-resolution loss-cut: exit a losing weather position when within
+  // WEATHER_NEAR_RES_HOURS of endDate. By that point the actual temperature is
+  // effectively known and the position will not recover.
+  WEATHER_NEAR_RES_ENABLED: boolFromEnv.optional().default(false),
+  WEATHER_NEAR_RES_HOURS: z.coerce.number().min(0).optional().default(3),
+  // Minimum loss percentage required before the near-res gate fires (avoids
+  // cutting near break-even positions on spread noise).
+  WEATHER_NEAR_RES_MIN_LOSS_PCT: z.coerce.number().min(0).optional().default(10),
   // ── PM-activity reconciler (src/cron/polymarketActivityReconciler.ts) ──
   // Every-15min cron that catches auto-redeemed wins our local redeemer missed:
   //   (a) positions closed via SL/TP leaving residual shares that auto-redeemed
