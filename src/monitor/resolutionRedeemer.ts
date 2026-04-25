@@ -819,12 +819,22 @@ async function redeemClobPositions(
                   Number.isFinite(pos.entryPrice) &&
                   pos.entryPrice > 0;
                 let returnPctDust: number;
+                // Each winning share = $1 at resolution; use sharesHeld as proceeds.
+                const proceedsUsdcDust =
+                  typeof pos.sharesHeld === 'number' && Number.isFinite(pos.sharesHeld) && pos.sharesHeld > 0
+                    ? pos.sharesHeld
+                    : entryPriceSafeDust && stakeSafe
+                      ? pos.stakeUsd / pos.entryPrice
+                      : null;
                 if (stakeSafe && typeof pos.sharesHeld === 'number' && Number.isFinite(pos.sharesHeld)) {
                   returnPctDust = ((pos.sharesHeld - pos.stakeUsd) / pos.stakeUsd) * 100;
                 } else if (entryPriceSafeDust) {
                   returnPctDust = ((1 - pos.entryPrice) / pos.entryPrice) * 100;
                 } else {
                   returnPctDust = 0;
+                }
+                if (proceedsUsdcDust != null && proceedsUsdcDust > 0) {
+                  await creditProceeds(redis, proceedsUsdcDust);
                 }
                 await recordPositionOutcome(
                   redis,
@@ -841,6 +851,7 @@ async function redeemClobPositions(
                   direction: displayDir,
                   result: 'won',
                   stakeUsd: pos.stakeUsd,
+                  ...(proceedsUsdcDust != null && proceedsUsdcDust > 0 && { proceedsUsdc: proceedsUsdcDust }),
                   reason: 'auto-redeemed by Polymarket (zero balance post-resolution)',
                 }).catch(() => {});
                 results.push({ marketId: pos.marketId, side, success: true });
@@ -848,6 +859,8 @@ async function redeemClobPositions(
                   marketId: pos.marketId,
                   direction: pos.direction,
                   entryPrice: pos.entryPrice,
+                  sharesHeld: pos.sharesHeld,
+                  proceedsUsdc: proceedsUsdcDust,
                   returnPct: returnPctDust.toFixed(2),
                 });
                 continue;
