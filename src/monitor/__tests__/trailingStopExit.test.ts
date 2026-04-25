@@ -268,7 +268,29 @@ describe('evaluateTrailingStop', () => {
       expect(result.newHwmPct).toBe(0); // HWM not updated
     });
 
-    it('treats 0.94 as normal (just below threshold)', () => {
+    it('sports-copytrade hold-to-res: trailing never arms when activationPct is Infinity', () => {
+      // COPYTRADE_SPORTS_HOLD_TO_RES=true sets tpThreshold=Infinity in the monitor,
+      // which flows into activationPct=Infinity here.  A sports position at +20.67%
+      // that then crashes to +4.86% (the Medvedev/Marozsan 2026-04-25 incident)
+      // must not trigger a trailing exit — the in-play price swing is noise, not
+      // a signal.  SL and the near-res gate are the only valid exits for binaries.
+      const result = evaluateTrailingStop({
+        position: makePosition({
+          sourcedFrom: 'copytrade:0xwhale',
+          question: 'Madrid Open: Daniil Medvedev vs Fabian Marozsan',
+          highWaterMarkPct: 20.67,
+        }),
+        currentPnlPct: 4.86,
+        currentBid: 0.669,
+        activationPct: Number.POSITIVE_INFINITY,
+        cfg,
+      });
+      expect(result.shouldExit).toBe(false);
+      // HWM still advances normally (monotonic tracking is harmless).
+      expect(result.newHwmPct).toBe(20.67);
+    });
+
+  it('treats 0.94 as normal (just below threshold)', () => {
       const position = makePosition({
         sourcedFrom: 'copytrade:0xwhale',
         highWaterMarkPct: 55,

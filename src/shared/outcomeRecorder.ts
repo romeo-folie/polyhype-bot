@@ -137,7 +137,14 @@ export function inferCategory(question: string): string {
   if (/\bufc\b|\bmma\b|bellator|mixed martial|cage fighting/.test(q)) {
     return 'sports-mma';
   }
-  if (/olympics|mlb|baseball|tennis|atp|wta|nhl|hockey|championship/.test(q)) {
+  // Tennis tournaments — question format is typically "<Tournament>: <Player> vs <Player>"
+  // and rarely contains the word "tennis" itself. Keep in the generic `sports`
+  // bucket so category-keyed config lookups (e.g. slippage maps) continue to use
+  // existing sports defaults rather than silently falling back to global defaults.
+  if (/tennis|atp|wta|roland.garros|wimbledon|australian open|french open|us open(?! source)|miami open|indian wells|monte.carlo|madrid open|barcelona open|italian open|rome masters|cincinnati|canadian open|rogers cup|shanghai|paris masters|davis cup|laver cup|atp finals|wta finals/.test(q)) {
+    return 'sports';
+  }
+  if (/olympics|mlb|baseball|nhl|hockey|championship/.test(q)) {
     return 'sports';
   }
   if (/mention|say|tweet|post|transcript|phrase|word|quoted/.test(q)) {

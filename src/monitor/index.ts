@@ -253,10 +253,19 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     } else if (isCopytrade) {
       tpThreshold = cfg.COPYTRADE_TAKE_PROFIT;
       slThreshold = cfg.COPYTRADE_STOP_LOSS;
-      // Sports copytrades get a tighter SL — fast-resolving binaries where
-      // losses are catastrophic (-41% to -57% observed over 2 weeks).
       if (inferredCategory.startsWith('sports')) {
+        // Sports copytrades get a tighter SL — fast-resolving binaries where
+        // losses are catastrophic (-41% to -57% observed over 2 weeks).
         slThreshold = cfg.COPYTRADE_SPORTS_STOP_LOSS;
+        // Hold-to-resolution: disable TP + trailing so in-play price swings
+        // (a single break of serve can move ±13% in one monitor tick) don't
+        // trigger premature exits.  Binary markets resolve at 0 or 1; the only
+        // legitimate exits are the SL above and the near-res gate
+        // (MONITOR_NEAR_RES_PRICE_THRESHOLD → redeemer).
+        // Mirrors the FV-scanner hold-to-res pattern.
+        if (cfg.COPYTRADE_SPORTS_HOLD_TO_RES) {
+          tpThreshold = Number.POSITIVE_INFINITY;
+        }
       }
     } else if (cfg.TIERED_LOGIC_ENABLED) {
       const isCrypto = position.assetId ? isCryptoAsset(position.assetId) : false;
