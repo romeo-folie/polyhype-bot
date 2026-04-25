@@ -266,12 +266,16 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         const positionValue = size * entryPx;
         const direction = sziRaw > 0 ? 'LONG' : 'SHORT';
 
-        // Price change % — independent of leverage
+        // Price change % — independent of leverage (used for SL/TP gate comparisons)
         const priceChangePct = (pnlUsd / positionValue) * 100;
+        // ROE % — matches what Hyperliquid UI displays (pnlUsd / margin, leverage-scaled)
+        const marginUsed = parseFloat(pos.position.marginUsed ?? '0');
+        const roePct = marginUsed > 0 ? (pnlUsd / marginUsed) * 100 : priceChangePct;
 
         logger.debug('[futures-monitor] checking position', {
           symbol,
           priceChangePct: priceChangePct.toFixed(2),
+          roePct: roePct.toFixed(2),
         });
 
         let shouldExit = false;
@@ -667,7 +671,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
               currentPrice: exitPrice,
               returnPct: priceChangePct,
               reason: tpReason,
-              mechanismDetail: reason,
+              mechanismDetail: `${reason} | ROE: ${roePct.toFixed(2)}%`,
             }).catch((e: unknown) => {
               logger.warn('[futures-monitor] notification failed', { symbol, error: String(e) });
             });
