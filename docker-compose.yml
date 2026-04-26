@@ -2,7 +2,7 @@
 services:
   # The central state for the whole agent
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     restart: unless-stopped
     ports:
       - "127.0.0.1:6379:6379"

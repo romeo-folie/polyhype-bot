@@ -87,6 +87,7 @@ export async function handlePositions(sql: Sql, payloads: unknown[]): Promise<vo
       pending_settlement    = EXCLUDED.pending_settlement,
       synth_hedged          = EXCLUDED.synth_hedged,
       hedge_link            = EXCLUDED.hedge_link,
+      stake_usd             = EXCLUDED.stake_usd,
       shares_held           = EXCLUDED.shares_held,
       updated_at            = now(),
       raw                   = EXCLUDED.raw

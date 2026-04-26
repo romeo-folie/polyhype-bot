@@ -319,13 +319,24 @@ export async function runReconciliation(
 
         if (forceFix) {
           const healedStakeUsd = venueShares * ledgerPos.entryPrice;
+          const validStakeUsd = Number.isFinite(healedStakeUsd) && healedStakeUsd >= 0
+            ? healedStakeUsd
+            : undefined;
+          if (!validStakeUsd) {
+            logger.warn('[reconcile] skipping healed stakeUsd — invalid entryPrice', {
+              marketId: ledgerPos.marketId,
+              direction: ledgerPos.direction,
+              entryPrice: ledgerPos.entryPrice,
+              healedStakeUsd,
+            });
+          }
           await updatePositionShares(
             redis,
             ledgerPos.marketId,
             ledgerPos.direction,
             venueShares,
             `healed_mismatch:${new Date().toISOString()}`,
-            healedStakeUsd,
+            validStakeUsd,
           );
           healedCount++;
         }
