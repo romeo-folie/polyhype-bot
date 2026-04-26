@@ -82,11 +82,14 @@ describe('Position Reconciliation Healer', () => {
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    // Expecting heal: shares updated to 200, entryPrice preserved at 0.40
-    expect(mockRedis.hset).toHaveBeenCalledWith(
-      'position:mkt-1:YES',
-      'sharesHeld', '200',
-      'reconciliationStatus', expect.stringContaining('healed_mismatch')
+    // Expecting heal: shares updated to 200, stakeUsd = 200 * 0.40 = 80
+    expect(positionLedger.updatePositionShares).toHaveBeenCalledWith(
+      mockRedis,
+      'mkt-1',
+      'YES',
+      200,
+      expect.stringContaining('healed_mismatch'),
+      80,
     );
   });
 
@@ -457,11 +460,14 @@ describe('Position Reconciliation Healer', () => {
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    // Expecting healing for the YES token (1250 shares, entryPrice preserved at 0.50)
-    expect(mockRedis.hset).toHaveBeenCalledWith(
-      'position:numeric-99:YES',
-      'sharesHeld', '1250',
-      'reconciliationStatus', expect.stringContaining('healed_mismatch')
+    // Expecting healing for the YES token (1250 shares, stakeUsd = 1250 * 0.50 = 625)
+    expect(positionLedger.updatePositionShares).toHaveBeenCalledWith(
+      mockRedis,
+      'numeric-99',
+      'YES',
+      1250,
+      expect.stringContaining('healed_mismatch'),
+      625,
     );
     
     // The 'NO' token (which was also on venue but not in ledger) should be imported as an orphan
@@ -492,7 +498,7 @@ describe('Position Reconciliation Healer', () => {
     // Should NOT close any positions (no false ghost cleanup)
     expect(positionLedger.closePosition).not.toHaveBeenCalled();
     // Should NOT heal anything
-    expect(mockRedis.hset).not.toHaveBeenCalled();
+    expect(positionLedger.updatePositionShares).not.toHaveBeenCalled();
   });
 
   it('upgrades a legacy Simmer UUID marketId back to a numeric Polymarket ID using the Correlation Matrix', async () => {
@@ -596,11 +602,14 @@ describe('Position Reconciliation Healer', () => {
     // Should NOT ghost-delete (position was found on venue after bridging)
     expect(positionLedger.closePosition).not.toHaveBeenCalled();
 
-    // Should heal the share mismatch (100 → 120)
-    expect(mockRedis.hset).toHaveBeenCalledWith(
-      'position:numeric-500:YES',
-      'sharesHeld', '120',
-      'reconciliationStatus', expect.stringContaining('healed_mismatch')
+    // Should heal the share mismatch (100 → 120), stakeUsd = 120 * 0.50 = 60
+    expect(positionLedger.updatePositionShares).toHaveBeenCalledWith(
+      mockRedis,
+      'numeric-500',
+      'YES',
+      120,
+      expect.stringContaining('healed_mismatch'),
+      60,
     );
 
     // Should NOT import as orphan
@@ -695,11 +704,14 @@ describe('Position Reconciliation Healer', () => {
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    // CLOB position should heal shares (200 → 250)
-    expect(mockRedis.hset).toHaveBeenCalledWith(
-      'position:numeric-700:YES',
-      'sharesHeld', '250',
-      'reconciliationStatus', expect.stringContaining('healed_mismatch')
+    // CLOB position should heal shares (200 → 250), stakeUsd = 250 * 0.50 = 125
+    expect(positionLedger.updatePositionShares).toHaveBeenCalledWith(
+      mockRedis,
+      'numeric-700',
+      'YES',
+      250,
+      expect.stringContaining('healed_mismatch'),
+      125,
     );
 
     // Should NOT ghost-delete the CLOB position
