@@ -945,6 +945,10 @@ const envSchema = z.object({
   // disagree — reject as noise. Shadow analysis 2026-04-16 showed ~40% of
   // otherwise-qualifying signals had stddev > 0.25.
   NEAR_ZERO_MAX_STDDEV: z.coerce.number().min(0).max(1).optional().default(0.20),
+  // Patient real-book entry: GTC posted this many bps below side-ask on real
+  // books; falls back to taker after MAKER_MAX_WAIT_MS if not filled. 0 = use
+  // the global MAKER_PRICE_EDGE_BPS logic (post near the bid) instead.
+  NEAR_ZERO_REAL_BOOK_DISCOUNT_BPS: z.coerce.number().min(0).max(5000).optional().default(200),
   // TTL for OSINT signal entries written by the mapping pipeline when a matched
   // market happens to be in the near-zero price range.
   NEAR_ZERO_OSINT_SIGNAL_TTL_S: z.coerce.number().int().min(0).optional().default(172800),
@@ -1317,6 +1321,10 @@ const envSchema = z.object({
   FV_KELLY_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.25),
   FV_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(10),
   FV_MAX_TRADES_PER_HOUR: z.coerce.number().int().min(1).optional().default(20),
+  // Patient real-book entry: GTC posted this many bps below side-ask on real
+  // books; falls back to taker after MAKER_MAX_WAIT_MS if not filled. 0 = use
+  // the global MAKER_PRICE_EDGE_BPS logic (post near the bid) instead.
+  FV_REAL_BOOK_DISCOUNT_BPS: z.coerce.number().min(0).max(5000).optional().default(200),
   // σ calibrator knobs (match sister bot's implementation exactly)
   FV_SIGMA_ROLLING_WINDOW_MS: z.coerce.number().int().min(60_000).optional().default(3_600_000),
   FV_SIGMA_EWMA_HALF_LIFE_S: z.coerce.number().positive().optional().default(300),
@@ -1519,6 +1527,12 @@ const envSchema = z.object({
   // resolveMakerPrice would otherwise lift the post price above the cap; the
   // executor refuses to post in that case (maker_price_above_cap).
   WEATHER_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.65),
+  // Patient real-book entry: on markets with a live order book, post a GTC
+  // limit order this many bps below the current side-ask instead of buying at
+  // the ask. The order rests indefinitely (no taker fallback); re-posts on the
+  // next scan cycle with a refreshed side-ask anchor if not yet filled.
+  // 0 = use the global MAKER_PRICE_EDGE_BPS logic instead.
+  WEATHER_REAL_BOOK_DISCOUNT_BPS: z.coerce.number().min(0).max(5000).optional().default(300),
   // Gate: skip NO bets on tail brackets ("or higher" / "or below") when the model's
   // own P(YES) exceeds this threshold. Prevents betting against the model's directional
   // call — edgeNo can be spuriously positive even when modelProb is 0.80+ for YES.

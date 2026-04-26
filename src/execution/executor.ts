@@ -457,6 +457,16 @@ function resolveMakerPrice(
   return price;
 }
 
+function getPatientRealBookDiscountBps(
+  source: string | undefined,
+  cfg: ReturnType<typeof loadConfig>,
+): number {
+  if (source === 'weather') return cfg.WEATHER_REAL_BOOK_DISCOUNT_BPS;
+  if (source === 'fv-scanner') return cfg.FV_REAL_BOOK_DISCOUNT_BPS;
+  if (source === 'near-zero-arb') return cfg.NEAR_ZERO_REAL_BOOK_DISCOUNT_BPS;
+  return 0;
+}
+
 async function tryExecuteViaClobMaker(
   signal: TradeSignal,
   cfg: ReturnType<typeof loadConfig>,
@@ -484,9 +494,17 @@ async function tryExecuteViaClobMaker(
     return { ok: false, error: 'clob_disabled', waitMs: Date.now() - startedAt };
   }
 
-  // --- Empty-book pending order handling ---
+  // Patient real-book mode: for these sources on real (non-empty) books, post a
+  // GTC limit order below the current side-ask rather than near the bid.
+  // Weather: post-and-leave (no taker fallback, same pending-order lifecycle as
+  // empty-book). fv-scanner / near-zero-arb: discounted price + taker fallback.
+  const patientDiscountBps = emptyBookMode ? 0 : getPatientRealBookDiscountBps(signal.source, cfg);
+  const isPatientRealBook = patientDiscountBps > 0;
+  const isWeatherPatient = isPatientRealBook && signal.source === 'weather';
+
+  // --- Pending order handling (empty-book + weather patient real-book) ---
   // On each cron cycle, resume polling an existing open order rather than re-posting.
-  if (emptyBookMode && redis) {
+  if ((emptyBookMode || isWeatherPatient) && redis) {
     const pending = await getPendingOrder(redis, signal.marketId);
     if (pending) {
       if (Date.now() < pending.expiresAt) {
@@ -500,7 +518,7 @@ async function tryExecuteViaClobMaker(
             if (isPartial) {
               // Partial fill — cancel the residual open size so it doesn't
               // continue filling untracked on the next cron cycle.
-              logger.info('[executor] partial fill on empty-book order — cancelling residual', {
+              logger.info('[executor] partial fill on pending maker order — cancelling residual', {
                 marketId: signal.marketId,
                 orderId: pending.orderId,
                 matched,
@@ -535,7 +553,7 @@ async function tryExecuteViaClobMaker(
         };
       } else {
         // Expired — cancel and fall through to re-post
-        logger.info('[executor] empty-book maker order expired — cancelling before re-post', {
+        logger.info('[executor] pending maker order expired — cancelling before re-post', {
           marketId: signal.marketId,
           orderId: pending.orderId,
         });
@@ -655,7 +673,18 @@ async function tryExecuteViaClobMaker(
     }
   }
 
-  let price = resolveMakerPrice(book, edgeBps, fairValue);
+  // Patient real-book: anchor price below the current side-ask rather than
+  // near the bid. Both YES and NO use their own token's book, so bestAsk IS
+  // the side-ask in both cases — no directional conversion needed.
+  let price: number | null;
+  if (isPatientRealBook && bestAsk > 0) {
+    const tick = parseFloat(book.tick_size);
+    const rawPrice = bestAsk * (1 - patientDiscountBps / 10_000);
+    const clipped = roundDownToTick(Math.max(Math.min(rawPrice, 1 - tick), tick), tick);
+    price = isFinite(clipped) && clipped > 0 ? clipped : resolveMakerPrice(book, edgeBps, fairValue);
+  } else {
+    price = resolveMakerPrice(book, edgeBps, fairValue);
+  }
   if (price === null) {
     return {
       ok: false,
@@ -669,13 +698,11 @@ async function tryExecuteViaClobMaker(
     };
   }
 
-  // Defense-in-depth for WEATHER_MAX_ENTRY_PRICE: clamping fairValue makes
-  // `price = fairValue - edgeBps ≤ cap` in the common case, but the tick-floor
-  // inside resolveMakerPrice (`Math.max(price, tick)`) can raise a sub-tick price
-  // above the cap when someone sets the cap below the book's tick size.
-  // Refuse to post in that case rather than silently overpay.
+  // Defense-in-depth for WEATHER_MAX_ENTRY_PRICE: applies to both empty-book
+  // and patient real-book paths. For patient real-book the price is derived from
+  // side-ask, not fairValue, so we guard the final price directly.
   if (
-    emptyBookMode
+    (emptyBookMode || isWeatherPatient)
     && signal.source === 'weather'
     && cfg.WEATHER_MAX_ENTRY_PRICE > 0
     && price > cfg.WEATHER_MAX_ENTRY_PRICE + 1e-9
@@ -890,9 +917,10 @@ async function tryExecuteViaClobMaker(
   // Record trade in governor immediately upon order acceptance (limit orders consume budget)
   await recordGlobalTrade(getRedis(), 'polymarket');
 
-  // In empty-book mode: persist the order and return immediately (non-blocking).
-  // The next cron cycle resumes via the idempotency check at the top of this function.
-  if (emptyBookMode && redis) {
+  // Empty-book mode or weather patient real-book: persist the order and return
+  // immediately (non-blocking). The next cron cycle resumes via the pending-order
+  // check at the top of this function.
+  if ((emptyBookMode || isWeatherPatient) && redis) {
     const expiresAt = startedAt + cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS;
     await setPendingOrder(
       redis,
@@ -914,8 +942,10 @@ async function tryExecuteViaClobMaker(
       },
       Math.ceil(cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS / 1000) + 300,
     );
-    logger.info('[executor] empty-book maker order posted — returning pending', {
+    logger.info('[executor] maker order posted — returning pending', {
       marketId: signal.marketId,
+      source: signal.source,
+      mode: emptyBookMode ? 'empty_book' : 'weather_patient',
       orderId: result.order_id,
       price,
       expiresAt: new Date(expiresAt).toISOString(),
@@ -1000,7 +1030,7 @@ async function tryExecuteViaClobMaker(
         }
       }
 
-      if (emptyBookMode && redis) await deletePendingOrder(redis, signal.marketId);
+      if ((emptyBookMode || isWeatherPatient) && redis) await deletePendingOrder(redis, signal.marketId);
       const filledStakeUsd = matched * price;
       const tradeResult: SimmerTradeResult = {
         success: true,
@@ -1026,7 +1056,7 @@ async function tryExecuteViaClobMaker(
     await sleep(pollIntervalMs);
   }
 
-  if (emptyBookMode && redis) await deletePendingOrder(redis, signal.marketId);
+  if ((emptyBookMode || isWeatherPatient) && redis) await deletePendingOrder(redis, signal.marketId);
   const cancelled = await confirmMakerCancel(result.order_id);
   if (!cancelled) {
     return {
