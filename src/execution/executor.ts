@@ -507,7 +507,16 @@ async function tryExecuteViaClobMaker(
   if ((emptyBookMode || isWeatherPatient) && redis) {
     const pending = await getPendingOrder(redis, signal.marketId);
     if (pending) {
-      if (Date.now() < pending.expiresAt) {
+      if (pending.direction && pending.direction !== signal.direction) {
+        // Stale order from a different side — cancel and re-post for new direction.
+        logger.info('[executor] pending order direction mismatch — cancelling stale order', {
+          marketId: signal.marketId,
+          pendingDirection: pending.direction,
+          signalDirection: signal.direction,
+        });
+        await confirmMakerCancel(pending.orderId);
+        await deletePendingOrder(redis, signal.marketId);
+      } else if (Date.now() < pending.expiresAt) {
         // Active order from a previous cycle — poll it once and return.
         const order = await getClobOrder(pending.orderId);
         if (order) {
