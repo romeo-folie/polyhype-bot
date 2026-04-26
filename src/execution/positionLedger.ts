@@ -359,10 +359,12 @@ export async function updatePositionShares(
   direction: Position['direction'],
   sharesHeld: number,
   reconciliationStatus?: string,
+  stakeUsd?: number,
 ): Promise<void> {
   const key = positionKey(marketId, direction);
   await redis.hset(key, {
     sharesHeld: String(sharesHeld),
+    ...(stakeUsd !== undefined ? { stakeUsd: String(stakeUsd) } : {}),
     ...(reconciliationStatus ? { reconciliationStatus } : {}),
   });
   const pos = await getPosition(redis, marketId, direction);
@@ -371,6 +373,7 @@ export async function updatePositionShares(
     marketId,
     direction,
     sharesHeld,
+    ...(stakeUsd !== undefined ? { stakeUsd } : {}),
     reconciliationStatus,
   });
 }

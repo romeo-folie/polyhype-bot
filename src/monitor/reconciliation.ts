@@ -1,6 +1,6 @@
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
-import { getOpenPositions, closePosition, recordPosition, type Position } from '../execution/positionLedger.js';
+import { getOpenPositions, closePosition, recordPosition, updatePositionShares, type Position } from '../execution/positionLedger.js';
 import { getSimmerPositions, type SimmerPosition } from '../shared/simmer.js';
 import { fetchClobTokenBalance } from '../shared/clob.js';
 import { fetchPolymarketPositions, type PolymarketPosition } from '../shared/polymarketData.js';
@@ -318,9 +318,14 @@ export async function runReconciliation(
         });
 
         if (forceFix) {
-          await redis.hset(`position:${ledgerPos.marketId}:${ledgerPos.direction}`,
-            'sharesHeld', String(venueShares),
-            'reconciliationStatus', `healed_mismatch:${new Date().toISOString()}`
+          const healedStakeUsd = venueShares * ledgerPos.entryPrice;
+          await updatePositionShares(
+            redis,
+            ledgerPos.marketId,
+            ledgerPos.direction,
+            venueShares,
+            `healed_mismatch:${new Date().toISOString()}`,
+            healedStakeUsd,
           );
           healedCount++;
         }
