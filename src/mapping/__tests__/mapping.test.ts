@@ -29,6 +29,7 @@ const mockConfig = {
   NEAR_ZERO_MIN_PRICE: 0.01,
   NEAR_ZERO_MAX_PRICE: 0.05,
   NEAR_ZERO_OSINT_SIGNAL_TTL_S: 1800,
+  OSINT_ALLOWED_CATEGORIES: [] as string[],
 };
 
 vi.mock('../../shared/config.js', () => ({
@@ -235,6 +236,41 @@ describe('runMapping', () => {
 
     // Should not throw — divergenceCalculator handles edge cases gracefully
     await expect(runMapping([makeScoredItem()], 100)).resolves.toBeDefined();
+  });
+
+  it('blocks candidates whose market question falls outside OSINT_ALLOWED_CATEGORIES', async () => {
+    // Gate fires inside evaluateOsintCandidate, after candidate lookup and relevance
+    // scoring but before consensus/LLM calls. Weather market matched by an OSINT headline
+    // should be silently dropped — weather has its own dedicated scanner.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mockConfig as any).OSINT_ALLOWED_CATEGORIES = ['geopolitical', 'macro', 'ai-tech', 'us-politics'];
+    const weatherCandidate = {
+      ...CANDIDATE,
+      marketId: 'mkt-weather',
+      question: 'Will the highest temperature in Chicago exceed 80°F?',
+    };
+    mockFindCandidates.mockResolvedValue([weatherCandidate]);
+
+    const signals = await runMapping([makeScoredItem()], 100);
+
+    expect(signals).toHaveLength(0);
+    expect(mockEstimate).not.toHaveBeenCalled(); // blocked before LLM
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mockConfig as any).OSINT_ALLOWED_CATEGORIES = [];
+  });
+
+  it('allows candidates whose market question matches OSINT_ALLOWED_CATEGORIES', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mockConfig as any).OSINT_ALLOWED_CATEGORIES = ['geopolitical', 'macro', 'ai-tech', 'us-politics'];
+    mockFindCandidates.mockResolvedValue([CANDIDATE]); // Russia question → geopolitical
+    mockEstimate.mockResolvedValue({ probability: 0.72, reasoning: 'High tension', stddev: 0.01, sampleCount: 3 });
+
+    const signals = await runMapping([makeScoredItem()], 100);
+
+    expect(mockEstimate).toHaveBeenCalled(); // gate passed, LLM called
+    expect(signals).toHaveLength(1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mockConfig as any).OSINT_ALLOWED_CATEGORIES = [];
   });
 
   it('rejects non-political items (e.g. sports) before candidate retrieval', async () => {

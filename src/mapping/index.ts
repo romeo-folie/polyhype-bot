@@ -403,6 +403,16 @@ async function evaluateOsintCandidate(args: EvaluateCandidateArgs): Promise<Eval
     return { signal: null, skipReason: ttr.skipReason ?? 'time_to_resolution' };
   }
 
+  // Category gate: OSINT only operates on its allowed categories. Check before
+  // any LLM calls so we don't burn API budget on weather/crypto markets that
+  // have dedicated scanners.
+  if (cfg.OSINT_ALLOWED_CATEGORIES.length > 0) {
+    const preCategory = inferCategory(candidate.question);
+    if (!cfg.OSINT_ALLOWED_CATEGORIES.includes(preCategory)) {
+      return { signal: null, skipReason: 'osint_category_blocked' };
+    }
+  }
+
   // Subscribe to WS updates for high-urgency items
   if (opts?.feed && item.urgencyScore >= cfg.URGENCY_THRESHOLD) {
     await opts.feed.watch(candidate.marketId, candidate.clobTokenIds);

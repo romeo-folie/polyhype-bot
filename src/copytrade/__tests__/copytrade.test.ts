@@ -53,6 +53,12 @@ vi.mock('../../monitor/takeProfitExecutor.js', () => ({
   executeTakeProfit: mockExecuteTakeProfit,
 }));
 
+const mockNotify = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+vi.mock('../../execution/telegram.js', () => ({
+  notify: mockNotify,
+  escapeHtml: (s: string) => s,
+}));
+
 vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => configOverride),
 }));
@@ -102,6 +108,7 @@ beforeEach(() => {
   mockExecuteTakeProfit.mockReset();
   mockLogger.info.mockReset();
   mockLogger.warn.mockReset();
+  mockNotify.mockReset().mockResolvedValue(undefined);
   configOverride = {
     COPYTRADE_ENABLED: true,
     COPYTRADE_WALLETS: '0xabc',
@@ -333,6 +340,38 @@ describe('runCopytrade', () => {
 
     expect(result.signals).toHaveLength(1);
     expect(result.signals[0]?.stakeUsd).toBe(25);
+  });
+
+  it('suppresses sports signals and sends Telegram notification when COPYTRADE_SPORTS_NOTIFY_ONLY=true', async () => {
+    configOverride = {
+      ...configOverride,
+      COPYTRADE_SPORTS_NOTIFY_ONLY: true,
+      COPYTRADE_MARKET_SCOPE: ['all'],
+    };
+
+    // Lakers/NBA title → inferCategory returns 'sports-nba' → starts with 'sports'
+    const trade = makeTrade({
+      title: 'Will the Lakers win the NBA Finals?',
+      price: 0.4,
+      side: 'BUY',
+      outcomeIndex: 0,
+    });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({
+        question: 'Will the Lakers win the NBA Finals?',
+        outcomePrices: '["0.4","0.6"]',
+      }),
+    );
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
+    expect(result.signals).toHaveLength(0);
+    expect(mockNotify).toHaveBeenCalledWith(expect.stringContaining('suppressed'));
   });
 
   it('exits copytrade position when whale sells in rules mode', async () => {

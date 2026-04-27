@@ -1590,6 +1590,16 @@ export async function executeSignal(
     }
   }
 
+  if (!signal.isFutures && cfg.MAX_ENTRY_PRICE > 0 && (signal.outcomePrice ?? 0) > cfg.MAX_ENTRY_PRICE) {
+    logger.info('[executor] skipping — entry price above global cap', {
+      marketId: signal.marketId,
+      source: signal.source,
+      outcomePrice: signal.outcomePrice,
+      maxEntryPrice: cfg.MAX_ENTRY_PRICE,
+    });
+    return { signal, skipped: true, skipReason: 'entry_price_above_global_cap' };
+  }
+
   const executionId = createHash('sha256')
     .update(`${signal.marketId}:${signal.direction}:${Date.now()}:${Math.random()}`)
     .digest('hex')

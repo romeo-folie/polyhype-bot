@@ -98,6 +98,10 @@ const envSchema = z.object({
     })
     .transform((v: string) => !['false', '0'].includes(v.trim().toLowerCase())),
   CLOB_ORDER_TYPE: z.enum(['FOK', 'FAK']).optional().default('FAK'),
+  // Global ceiling on any non-futures entry price (outcomePrice). Applies across all sources
+  // in the executor before any order is placed. Set to 0 to disable. Per-source caps
+  // (WEATHER_MAX_ENTRY_PRICE, ORACLE_LAG_MAX_ENTRY_PRICE, etc.) still apply independently.
+  MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.55),
   // YYYY-MM-DD. When set, new entries into markets resolving on/after this date are blocked.
   // Use before an API migration cutover to avoid accumulating positions that need post-cutover management.
   API_MIGRATION_CUTOVER_DATE: z
@@ -200,6 +204,19 @@ const envSchema = z.object({
   PM_MAX_HOURS_TO_RESOLUTION_DEFAULT: z.coerce.number().min(0).optional().default(504),
   PM_MIN_HOURS_TO_RESOLUTION: z.coerce.number().min(0).optional().default(6),
   PM_MAX_HOURS_TO_RESOLUTION_OSINT: z.coerce.number().min(0).optional().default(504),
+  // Comma-separated list of categories the OSINT pipeline is allowed to trade.
+  // Dedicated scanners (weather, oracle-lag, sports, crypto-arb) own their own paths.
+  // Empty string disables the gate (all categories allowed).
+  OSINT_ALLOWED_CATEGORIES: z
+    .string()
+    .optional()
+    .default('geopolitical,macro,ai-tech,us-politics')
+    .transform((v) =>
+      v
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
+    ),
   PM_MAX_HOURS_TO_RESOLUTION_SPOT: z.coerce.number().min(0).optional().default(168),
   PM_MAX_HOURS_TO_RESOLUTION_COPYTRADE: z.coerce.number().min(0).optional().default(2160),
 
@@ -835,6 +852,9 @@ const envSchema = z.object({
   // we'd actually pay (currentOutcomePrice), not the whale's fill.
   COPYTRADE_MIN_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.08),
   COPYTRADE_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.92),
+  // When true, sports copytrades (any category starting with 'sports') fire a Telegram
+  // alert but are NOT executed. Lets you review whale sports signals without risking capital.
+  COPYTRADE_SPORTS_NOTIFY_ONLY: boolFromEnv.optional().default(true),
   // Directional slippage gate: reject only ADVERSE drift vs. whale fill.
   // Symmetric COPYTRADE_MAX_SLIPPAGE_BPS treats a favorable move (better fill for us)
   // identically to an adverse move (already underwater at entry). This caps adverse
@@ -1554,6 +1574,10 @@ const envSchema = z.object({
   // Minimum loss percentage required before the near-res gate fires (avoids
   // cutting near break-even positions on spread noise).
   WEATHER_NEAR_RES_MIN_LOSS_PCT: z.coerce.number().min(0).optional().default(10),
+  // Max-lookahead gate: block weather entries into markets resolving more than
+  // WEATHER_MAX_LOOKAHEAD_HOURS from now. Forecasts beyond 28h carry significantly
+  // more uncertainty; 1-day-out bets only. Set to 0 to disable.
+  WEATHER_MAX_LOOKAHEAD_HOURS: z.coerce.number().min(0).optional().default(28),
   // Near-resolution entry gate: block new weather entries when the market resolves
   // within WEATHER_NEAR_RES_ENTRY_HOURS. By that point the overnight GFS forecast
   // is stale — intraday temperature tracking has already priced it in.
