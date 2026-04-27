@@ -1107,19 +1107,20 @@ const envSchema = z.object({
   // Lowered from 8 to 6 to increase signal frequency; combined with stake scaling.
   FUTURES_URGENCY_THRESHOLD: z.coerce.number().int().min(1).max(10).optional().default(6),
   // Notional-based SL/TP thresholds (percentage of margin used, NOT account equity).
-  // At 5x leverage a 1.5% notional SL represents a 7.5% equity drawdown.
-  // Use values relative to notional, not leverage-adjusted equity.
+  // Values are in ROE % (pnl / margin, leverage-scaled) — matches the HL UI.
+  // ATR-mode positions use notional % internally; these fixed-pct defaults apply
+  // only to the non-ATR path.
   FUTURES_STOP_LOSS_PCT: z.coerce
     .number()
     .max(-0.01, 'FUTURES_STOP_LOSS_PCT must be negative')
-    .default(-1.5),
+    .default(-7.5),
   FUTURES_TAKE_PROFIT_PCT: z.coerce
     .number()
     .min(0.01, 'FUTURES_TAKE_PROFIT_PCT must be positive')
-    .default(3.0),
+    .default(15),
   // Trailing stop — activates after position reaches ACTIVATION_PCT, then exits if it drops TRAILING_STOP_PCT from peak.
   FUTURES_TRAILING_STOP_ENABLED: boolFromEnv.optional().default(true),
-  FUTURES_TRAILING_STOP_PCT: z.coerce.number().min(0.1).optional().default(1.5),
+  FUTURES_TRAILING_STOP_PCT: z.coerce.number().min(0.1).optional().default(7.5),
   FUTURES_EXIT_ON_SIGNAL_FADE: boolFromEnv.optional().default(true),
   // TA confluence gate for futures entries — requires RSI/MACD/Stochastic agreement before opening a position.
   FUTURES_CONFLUENCE_GATE_ENABLED: boolFromEnv.optional().default(true),
@@ -1236,8 +1237,8 @@ const envSchema = z.object({
   HL_MOMENTUM_STAKE_USD: z.coerce.number().min(1).optional().default(10),
   // Per-source SL/TP overrides for the futures monitor. 15m swing signals need wider
   // thresholds than 1m-tuned arb defaults to avoid being stopped out by normal chop.
-  HL_MOMENTUM_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(5),
-  HL_MOMENTUM_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(6),
+  HL_MOMENTUM_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(25),
+  HL_MOMENTUM_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(30),
   // Longs have been the weak side of the book. When enabled, a LONG only passes if at
   // least one present HL-native voter (funding contra / OI divergence) actively confirms UP.
   // Missing HL-native data is not treated as a veto; the gate only acts on present votes.
