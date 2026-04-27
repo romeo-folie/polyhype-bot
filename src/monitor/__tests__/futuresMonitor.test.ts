@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 // Mock Config
 const baseCfg = {
   FUTURES_ENABLED: true,
-  FUTURES_STOP_LOSS_PCT: -1.5,
+  FUTURES_STOP_LOSS_PCT: -7.5,  // ROE % — 5× leverage means -1.5% notional ≈ -7.5% ROE
   FUTURES_TAKE_PROFIT_PCT: 3.0,
   FUTURES_MAX_HOLD_HOURS: 24,
   FUTURES_MAX_HOLD_BYPASS_ON_WINNER: false,
@@ -129,14 +129,14 @@ describe('futuresMonitor', () => {
     }
   }
 
-  it('triggers SL when price falls below -1.5%', async () => {
+  it('triggers SL when ROE falls below -7.5%', async () => {
     mockGetOpenPositions.mockResolvedValue([
       {
         symbol: 'BTC',
         position: {
           szi: '0.1',
           entryPx: '50000',
-          unrealizedPnl: '-100', // -2.0% (100 / 5000)
+          unrealizedPnl: '-100', // roePct = -100/1000 * 100 = -10% → below -7.5% SL
           marginUsed: '1000',
         },
       },
@@ -217,8 +217,8 @@ describe('futuresMonitor', () => {
   });
 
   it('does NOT trigger max-hold exit when the position is underwater', async () => {
-    // pnlUsd=-50 on positionValue=5000 → priceChangePct=-1% (loser but above
-    // the -1.5% SL floor, so max-hold is what would decide). Age 25h > 24h cap.
+    // pnlUsd=-50, marginUsed=1000 → roePct=-5% (loser but above the -7.5% ROE
+    // SL floor, so max-hold is what would decide). Age 25h > 24h cap.
     // With FUTURES_MAX_HOLD_BLOCK_ON_LOSER=true (default), the exit is suppressed.
     const symbol = 'BTC';
     mockGetOpenPositions.mockResolvedValue([

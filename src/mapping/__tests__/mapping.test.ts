@@ -29,6 +29,7 @@ const mockConfig = {
   NEAR_ZERO_MIN_PRICE: 0.01,
   NEAR_ZERO_MAX_PRICE: 0.05,
   NEAR_ZERO_OSINT_SIGNAL_TTL_S: 1800,
+  OSINT_ALLOWED_CATEGORIES: [] as string[],
 };
 
 vi.mock('../../shared/config.js', () => ({
