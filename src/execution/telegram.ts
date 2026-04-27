@@ -35,7 +35,7 @@ async function sendMessage(token: string, chatId: string, text: string): Promise
 /**
  * Send a notification if Telegram is configured. No-ops silently if not.
  */
-async function notify(text: string): Promise<void> {
+export async function notify(text: string): Promise<void> {
   const cfg = loadConfig();
   const token = cfg.TELEGRAM_BOT_TOKEN;
   const chatId = cfg.TELEGRAM_CHAT_ID;

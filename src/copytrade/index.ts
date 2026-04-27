@@ -14,6 +14,7 @@ import { executeTakeProfit } from '../monitor/takeProfitExecutor.js';
 import { getPriceFeed } from '../shared/feedSingleton.js';
 import { recordCopytradeFilter, recordCopytradeMetric } from '../shared/telemetry.js';
 import { inferCategory } from '../shared/outcomeRecorder.js';
+import { notify } from '../execution/telegram.js';
 import { checkTimeToResolution } from '../mapping/divergenceCalculator.js';
 import { priceZoneOf } from '../shared/zones.js';
 import type { Redis } from 'ioredis';
@@ -1032,6 +1033,29 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         reasoning: `Copytrade mirror of ${wallet} ${trade.side} @ ${trade.price.toFixed(4)} (tx ${trade.transactionHash.slice(0, 10)}...)`,
         source: 'copytrade',
       };
+
+      const signalCategory = inferCategory(signal.question);
+      if (cfg.COPYTRADE_SPORTS_NOTIFY_ONLY && signalCategory.startsWith('sports')) {
+        logger.info('[copytrade] sports signal suppressed — notify-only mode', {
+          wallet,
+          question: signal.question,
+          category: signalCategory,
+          direction,
+          outcomePrice: currentOutcomePrice,
+          stakeUsd,
+        });
+        void notify(
+          `⚽ <b>Copytrade sports signal (suppressed)</b>\n` +
+          `Wallet: <code>${wallet.slice(0, 10)}…</code>\n` +
+          `Market: ${signal.question}\n` +
+          `Side: ${direction} @ ${currentOutcomePrice.toFixed(3)}\n` +
+          `Would-be stake: $${stakeUsd.toFixed(2)}\n` +
+          `<i>Set COPYTRADE_SPORTS_NOTIFY_ONLY=false to execute</i>`
+        ).catch(() => {});
+        await recordCopytradeFilter(redis, 'sports_notify_only').catch(() => {});
+        await markDedup();
+        continue;
+      }
 
       signals.push(signal);
       await recordCopytradeMetric(redis, 'signals_created').catch(() => {

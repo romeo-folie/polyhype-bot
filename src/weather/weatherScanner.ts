@@ -1163,6 +1163,44 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     return;
   }
 
+  // Max-lookahead gate: only enter markets resolving within WEATHER_MAX_LOOKAHEAD_HOURS.
+  // Forecasts beyond 28h are too uncertain to trade — 1-day-out only.
+  if (cfg.WEATHER_MAX_LOOKAHEAD_HOURS > 0) {
+    const nowMs = Date.now();
+    const before = tradable.length;
+    tradable = tradable.filter((opp) => {
+      if (!opp.endDate) return true;
+      const endMs = new Date(opp.endDate).getTime();
+      if (!Number.isFinite(endMs)) return true;
+      const hoursUntil = (endMs - nowMs) / (1000 * 60 * 60);
+      const tooFarOut = hoursUntil > cfg.WEATHER_MAX_LOOKAHEAD_HOURS;
+      if (tooFarOut) {
+        logger.info('[weather] skipping — market too far out', {
+          marketId: opp.marketId,
+          city: opp.city,
+          bracket: opp.bracketLabel,
+          hoursUntil: hoursUntil.toFixed(1),
+          maxLookaheadHours: cfg.WEATHER_MAX_LOOKAHEAD_HOURS,
+          endDate: opp.endDate,
+        });
+      }
+      return !tooFarOut;
+    });
+    if (tradable.length < before) {
+      logger.info('[weather] max-lookahead gate filtered opportunities', {
+        before,
+        after: tradable.length,
+        blocked: before - tradable.length,
+        maxLookaheadHours: cfg.WEATHER_MAX_LOOKAHEAD_HOURS,
+      });
+    }
+  }
+
+  if (tradable.length === 0) {
+    logger.info('[weather] no tradable opportunities after max-lookahead gate', {});
+    return;
+  }
+
   // Near-resolution entry gate applied to the tradable list so both shadow-mode
   // "would execute" logs and the live execution loop see the same filtered set.
   if (cfg.WEATHER_NEAR_RES_ENTRY_ENABLED) {
