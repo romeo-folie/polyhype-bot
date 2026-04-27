@@ -266,11 +266,21 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         const positionValue = size * entryPx;
         const direction = sziRaw > 0 ? 'LONG' : 'SHORT';
 
-        // Price change % — independent of leverage (used for SL/TP gate comparisons)
+        // Price change % — independent of leverage (used for ATR path gate comparisons)
         const priceChangePct = (pnlUsd / positionValue) * 100;
-        // ROE % — matches what Hyperliquid UI displays (pnlUsd / margin, leverage-scaled)
+        // ROE % — matches what Hyperliquid UI displays (pnlUsd / margin, leverage-scaled).
+        // If marginUsed is missing/zero, derive from positionValue / configured leverage so
+        // fixed-pct thresholds (expressed in ROE units) stay correctly scaled.
         const marginUsed = parseFloat(pos.position.marginUsed ?? '0');
-        const roePct = marginUsed > 0 ? (pnlUsd / marginUsed) * 100 : priceChangePct;
+        const effectiveLeverage = marginUsed > 0
+          ? positionValue / marginUsed
+          : cfg.FUTURES_DEFAULT_LEVERAGE;
+        if (marginUsed <= 0) {
+          logger.warn('[futures-monitor] marginUsed missing; falling back to configured leverage for ROE', {
+            symbol, effectiveLeverage,
+          });
+        }
+        const roePct = (pnlUsd / (positionValue / effectiveLeverage)) * 100;
 
         logger.debug('[futures-monitor] checking position', {
           symbol,
@@ -346,6 +356,17 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           usingAtrMode = true;
         }
 
+        // Meme-ATR slPct/tpPct are notional %; the default trailStopPct is ROE %.
+        // Convert so all three are in the same notional unit for the trailing math.
+        if (usingMemeAtr) {
+          trailStopPct = cfg.FUTURES_TRAILING_STOP_PCT / effectiveLeverage;
+        }
+
+        // ATR-derived thresholds are in notional % (price-action based); fixed-pct
+        // thresholds are in ROE % (margin-based, matches HL UI). Use roePct for the
+        // fixed-pct gate so config values are intuitive: SL=15 means -15% ROE.
+        const gatePct = (usingAtrMode || usingMemeAtr) ? priceChangePct : roePct;
+
         // Shadow comparison: when ATR mode is OFF but we have an entryAtrPct snapshot,
         // compute what the ATR-derived thresholds WOULD be and log when their verdict
         // diverges from the active fixed-pct verdict. Lets us validate ATR sizing
@@ -367,14 +388,16 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           );
           const shadowSlPct = -shadowSlMag;
           const shadowTpPct = shadowTpMag;
-          const fixedSlHit = priceChangePct <= cfg.FUTURES_STOP_LOSS_PCT;
-          const fixedTpHit = priceChangePct >= cfg.FUTURES_TAKE_PROFIT_PCT;
+          // Fixed-pct thresholds are ROE units; compare against roePct, not priceChangePct.
+          const fixedSlHit = roePct <= cfg.FUTURES_STOP_LOSS_PCT;
+          const fixedTpHit = roePct >= cfg.FUTURES_TAKE_PROFIT_PCT;
           const atrSlHit = priceChangePct <= shadowSlPct;
           const atrTpHit = priceChangePct >= shadowTpPct;
           if (fixedSlHit !== atrSlHit || fixedTpHit !== atrTpHit) {
             logger.info('[futures-monitor] atr shadow divergence', {
               symbol,
               direction,
+              roePct: roePct.toFixed(2),
               priceChangePct: priceChangePct.toFixed(2),
               entryAtrPct: atrPct.toFixed(3),
               fixedSlPct: cfg.FUTURES_STOP_LOSS_PCT,
@@ -421,10 +444,12 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           // slPct/tpPct — those may already have been mutated by the global ATR
           // overlay (FUTURES_ATR_SLTP_ENABLED). Use cfg values directly so the
           // shadow stays interpretable as "meme-ATR vs fixed HL pcts".
+          // Fixed-pct baseline (HL_MOMENTUM_*) is ROE units — compare against roePct.
+          // Meme-ATR thresholds are notional — compare against priceChangePct.
           const fixedBaselineSlPct = -cfg.HL_MOMENTUM_STOP_LOSS_PCT;
           const fixedBaselineTpPct = cfg.HL_MOMENTUM_TAKE_PROFIT_PCT;
-          const fixedSlHit = priceChangePct <= fixedBaselineSlPct;
-          const fixedTpHit = priceChangePct >= fixedBaselineTpPct;
+          const fixedSlHit = roePct <= fixedBaselineSlPct;
+          const fixedTpHit = roePct >= fixedBaselineTpPct;
           const memeSlHit = priceChangePct <= memeSlPct;
           const memeTpHit = priceChangePct >= memeTpPct;
           if (fixedSlHit !== memeSlHit || fixedTpHit !== memeTpHit) {
@@ -433,6 +458,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             logger.info('[hl-momentum] meme atr sltp shadow', {
               symbol,
               direction,
+              roePct: roePct.toFixed(2),
               priceChangePct: priceChangePct.toFixed(2),
               memeAtrSlPct: ledgerPosForAtr.memeAtrSlPct.toFixed(2),
               memeAtrTpPct: ledgerPosForAtr.memeAtrTpPct.toFixed(2),
@@ -461,15 +487,15 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           }
         }
 
-        if (priceChangePct <= slPct) {
+        if (gatePct <= slPct) {
           shouldExit = true;
           const slTag = usingAtrMode
             ? ` atr_sl=${slPct.toFixed(2)}`
             : usingMemeAtr
               ? ` meme_atr_sl=${slPct.toFixed(2)}`
               : '';
-          reason = `Stop-Loss triggered (${priceChangePct.toFixed(2).toString()}%${slTag})`;
-        } else if (!cfg.FUTURES_TRAILING_STOP_ENABLED && priceChangePct >= tpPct) {
+          reason = `Stop-Loss triggered (${gatePct.toFixed(2)}%${slTag})`;
+        } else if (!cfg.FUTURES_TRAILING_STOP_ENABLED && gatePct >= tpPct) {
           // Fixed TP only when trailing is disabled. When trailing is on, it
           // supersedes fixed TP so winners can run beyond the TP line; the
           // floor is clamped to TP below so the worst case at the TP line is
@@ -480,7 +506,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             : usingMemeAtr
               ? ` meme_atr_tp=${tpPct.toFixed(2)}`
               : '';
-          reason = `Take-Profit triggered (${priceChangePct.toFixed(2).toString()}%${tpTag})`;
+          reason = `Take-Profit triggered (${gatePct.toFixed(2)}%${tpTag})`;
         }
 
         // 2b. Trailing stop — supersedes fixed TP when enabled. Arms once the
@@ -494,20 +520,20 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         if (cfg.FUTURES_TRAILING_STOP_ENABLED) {
           const ledgerPos = futuresLedger.find((p) => p.marketId === symbol);
           const priorHwm = ledgerPos?.highWaterMarkPct;
-          hwm = typeof priorHwm === 'number' && Number.isFinite(priorHwm) ? priorHwm : priceChangePct;
-          if (priceChangePct > hwm) {
-            hwm = priceChangePct;
+          hwm = typeof priorHwm === 'number' && Number.isFinite(priorHwm) ? priorHwm : gatePct;
+          if (gatePct > hwm) {
+            hwm = gatePct;
             updateHighWaterMark(redis, symbol, direction, hwm).catch(() => {});
           }
           trailingArmed = hwm >= tpPct;
           if (!shouldExit && trailingArmed) {
             const floorPct = Math.max(tpPct, hwm - trailStopPct);
-            if (priceChangePct <= floorPct) {
+            if (gatePct <= floorPct) {
               shouldExit = true;
-              reason = `Trailing stop (peak +${hwm.toFixed(2)}%, floor +${floorPct.toFixed(2)}%, now +${priceChangePct.toFixed(2)}%${usingAtrMode ? ` atr_trail=${trailStopPct.toFixed(2)}` : ''})`;
+              reason = `Trailing stop (peak +${hwm.toFixed(2)}%, floor +${floorPct.toFixed(2)}%, now +${gatePct.toFixed(2)}%${usingAtrMode ? ` atr_trail=${trailStopPct.toFixed(2)}` : ''})`;
             } else {
               logger.debug('[futures-monitor] trailing active', {
-                symbol, hwm: hwm.toFixed(2), floor: floorPct.toFixed(2), current: priceChangePct.toFixed(2),
+                symbol, hwm: hwm.toFixed(2), floor: floorPct.toFixed(2), current: gatePct.toFixed(2),
               });
             }
           }
