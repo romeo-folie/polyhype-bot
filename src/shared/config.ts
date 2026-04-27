@@ -204,6 +204,19 @@ const envSchema = z.object({
   PM_MAX_HOURS_TO_RESOLUTION_DEFAULT: z.coerce.number().min(0).optional().default(504),
   PM_MIN_HOURS_TO_RESOLUTION: z.coerce.number().min(0).optional().default(6),
   PM_MAX_HOURS_TO_RESOLUTION_OSINT: z.coerce.number().min(0).optional().default(504),
+  // Comma-separated list of categories the OSINT pipeline is allowed to trade.
+  // Dedicated scanners (weather, oracle-lag, sports, crypto-arb) own their own paths.
+  // Empty string disables the gate (all categories allowed).
+  OSINT_ALLOWED_CATEGORIES: z
+    .string()
+    .optional()
+    .default('geopolitical,macro,ai-tech,us-politics')
+    .transform((v) =>
+      v
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
+    ),
   PM_MAX_HOURS_TO_RESOLUTION_SPOT: z.coerce.number().min(0).optional().default(168),
   PM_MAX_HOURS_TO_RESOLUTION_COPYTRADE: z.coerce.number().min(0).optional().default(2160),
 
