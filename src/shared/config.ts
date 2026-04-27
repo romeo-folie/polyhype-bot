@@ -1237,7 +1237,7 @@ const envSchema = z.object({
   HL_MOMENTUM_STAKE_USD: z.coerce.number().min(1).optional().default(10),
   // Per-source SL/TP overrides for the futures monitor. 15m swing signals need wider
   // thresholds than 1m-tuned arb defaults to avoid being stopped out by normal chop.
-  HL_MOMENTUM_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(25),
+  HL_MOMENTUM_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(15),
   HL_MOMENTUM_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(30),
   // Longs have been the weak side of the book. When enabled, a LONG only passes if at
   // least one present HL-native voter (funding contra / OI divergence) actively confirms UP.
