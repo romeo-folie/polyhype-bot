@@ -2299,4 +2299,65 @@ describe('empty-book maker route', () => {
       expect(result.skipReason).not.toBe('pre_migration_blackout');
     });
   });
+
+  describe('global entry price cap (MAX_ENTRY_PRICE)', () => {
+    beforeEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).MAX_ENTRY_PRICE = 0.55;
+    });
+
+    afterEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (mockConfig as any).MAX_ENTRY_PRICE;
+    });
+
+    it('skips a non-futures signal when outcomePrice exceeds the cap', async () => {
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({ outcomePrice: 0.60 }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipped).toBe(true);
+      expect(result.skipReason).toBe('entry_price_above_global_cap');
+      expect(mockSubmit).not.toHaveBeenCalled();
+    });
+
+    it('does not skip when outcomePrice is at the cap', async () => {
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({ outcomePrice: 0.55 }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipReason).not.toBe('entry_price_above_global_cap');
+    });
+
+    it('does not gate futures signals regardless of outcomePrice', async () => {
+      const redis = makeRedis();
+      try {
+        const result = await executeSignal(
+          makeSignal({ isFutures: true, outcomePrice: 0.99, marketId: 'BTC' }),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          redis as any,
+        );
+        expect(result.skipReason).not.toBe('entry_price_above_global_cap');
+      } catch (err) {
+        // HL client throws in test env — confirm the cap gate was not the cause
+        expect((err as Error).message).not.toContain('entry_price_above_global_cap');
+      }
+    });
+
+    it('is inactive when MAX_ENTRY_PRICE is 0', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).MAX_ENTRY_PRICE = 0;
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({ outcomePrice: 0.99 }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipReason).not.toBe('entry_price_above_global_cap');
+    });
+  });
 });

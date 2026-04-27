@@ -1790,6 +1790,60 @@ describe('scanWeatherMarkets', () => {
       // NYC exclusion should not suppress the Chicago fixture
       expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
     });
+
+    it('blocks opportunities beyond WEATHER_MAX_LOOKAHEAD_HOURS', async () => {
+      // endDateIso is 48h out; gate set to 28h should filter all opportunities
+      mockLoadConfig.mockReturnValueOnce({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_LOOKAHEAD_HOURS: 28,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+    });
+
+    it('allows opportunities within WEATHER_MAX_LOOKAHEAD_HOURS', async () => {
+      // endDateIso is 48h out; gate set to 72h should pass
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_LOOKAHEAD_HOURS: 72,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+    });
+
+    it('disables the lookahead gate when WEATHER_MAX_LOOKAHEAD_HOURS is 0', async () => {
+      // Gate value 0 means disabled — events at any horizon should execute
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+    });
   });
 });
 
