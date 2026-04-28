@@ -415,6 +415,15 @@ describe('inferCategory', () => {
     expect(inferCategory('Champions League final result')).toBe('sports-soccer');
     expect(inferCategory('Europa League quarterfinal')).toBe('sports-soccer');
     expect(inferCategory('PSG vs. Liverpool: total goals O/U 3.5')).toBe('sports-soccer');
+    // Club-name match without O/U — must not depend on the O/U fallback
+    expect(inferCategory('Will VfB Stuttgart win the Bundesliga title?')).toBe('sports-soccer');
+  });
+
+  it('vs+O/U fallback returns generic sports, not soccer, for non-soccer matchups', () => {
+    // MMA fight with no MMA keywords — should not be misclassified as soccer
+    const mmaOu = inferCategory('Conor McGregor vs. Dustin Poirier: O/U 1.5 rounds');
+    expect(mmaOu).toBe('sports');
+    expect(mmaOu).not.toBe('sports-soccer');
   });
 
   it('returns sports-f1 for Formula 1 markets', () => {
