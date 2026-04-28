@@ -8,14 +8,17 @@ echo "🚀 Starting Automated Agent Deployment..."
 # Note: This assumes you are on the main branch on the Pi
 git pull origin main
 
-# 2. Rebuild and restart services in detached mode
+# 2. Pre-build prune: free space before parallel image extraction.
+# Without this, building all services simultaneously can exhaust disk during
+# the containerd layer-unpack phase even when df shows headroom (burned 2026-04-28).
+docker image prune -f
+docker builder prune -f --filter "until=24h"
+
+# 3. Rebuild and restart services in detached mode
 # Docker Compose will only restart services whose code has changed.
 docker compose up -d --build
 
-# 3. Cleanup old images and stale build cache to prevent disk bloat.
-# Build cache from `docker compose up --build` accumulates faster than dangling
-# images and was the dominant disk eater (~6 GB after a few days). The 24h
-# filter keeps recent incremental cache for fast rebuilds while bounding growth.
+# 4. Post-build cleanup of any newly dangling images and residual cache.
 docker image prune -f
 docker builder prune -f --filter "until=24h"
 
