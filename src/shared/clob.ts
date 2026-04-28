@@ -8,26 +8,25 @@
 /**
  * ethers v5 ↔ v6 bridge note:
  *
- * The project uses ethers v6, but @polymarket/clob-client expects an ethers v5
- * Wallet (specifically the `_signTypedData` method). ethers v6 renamed this to
- * `signTypedData`. We create a v6 Wallet and patch `_signTypedData` onto it in
- * getClobClient() to satisfy the SDK's interface without downgrading ethers.
+ * The project uses ethers v6, but @polymarket/clob-client-v2's EthersSigner type
+ * still checks for the `_signTypedData` method (ethers v5 name). ethers v6 renamed
+ * this to `signTypedData`. We patch `_signTypedData` onto the v6 Wallet in
+ * getClobClient() so the SDK's runtime signer detector accepts it.
  *
  * @ethersproject/wallet (v5) is retained as a direct dependency because
  * src/shared/clobProbe.ts still imports it for Simmer's signing flow.
  * It can be removed once clobProbe.ts is migrated to ethers v6.
  */
 
-import { ClobClient, OrderType, Side, AssetType } from '@polymarket/clob-client';
-import type { OrderBookSummary, OpenOrder, TickSize } from '@polymarket/clob-client';
+import { ClobClient, OrderType, Side, AssetType, Chain } from '@polymarket/clob-client-v2';
+import type { OrderBookSummary, OpenOrder, TickSize } from '@polymarket/clob-client-v2';
 import { Wallet, Contract, Interface, JsonRpcProvider, Network, FetchRequest } from 'ethers';
-import { loadConfig, CTF_ADDRESS, USDC_E_ADDRESS, POLYGON_FALLBACK_RPCS } from './config.js';
+import { loadConfig, CTF_ADDRESS, PUSD_ADDRESS, POLYGON_FALLBACK_RPCS } from './config.js';
 import { logger } from './logger.js';
 import { getRedis } from './redis.js';
-import type { ApiKeyCreds } from '@polymarket/clob-client';
+import type { ApiKeyCreds } from '@polymarket/clob-client-v2';
 
 const CLOB_HOST = 'https://clob.polymarket.com';
-const POLYGON_CHAIN_ID = 137;
 // Hard timeout for CLOB order submission. The SDK has no built-in timeout;
 // without this a hung connection would keep the cron process alive indefinitely.
 const CLOB_ORDER_TIMEOUT_MS = 30_000;
@@ -261,28 +260,27 @@ export async function getClobClient(): Promise<ClobClient> {
       // ties API keys to the account identity (EOA / proxy / gnosis safe). Deriving
       // with a bare EOA client (sig type 0) when the account is a proxy (sig type 1)
       // produces a key bound to the wrong address — causing 400 on all subsequent calls.
-      const bootstrap = new ClobClient(
-        CLOB_HOST,
-        POLYGON_CHAIN_ID,
+      const bootstrap = new ClobClient({
+        host: CLOB_HOST,
+        chain: Chain.POLYGON,
         // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-explicit-any
-        signer as any, // TODO: Replace with proper SignerV6 interface when SDK is updated
-        undefined, // no creds yet
-        sigType,
+        signer: signerAny as any,
+        signatureType: sigType,
         funderAddress,
-      );
+      });
       creds = await bootstrap.createOrDeriveApiKey();
       await persistCreds(creds);
     }
 
-    return new ClobClient(
-      CLOB_HOST,
-      POLYGON_CHAIN_ID,
+    return new ClobClient({
+      host: CLOB_HOST,
+      chain: Chain.POLYGON,
       // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-explicit-any
-      signer as any, // TODO: Replace with proper SignerV6 interface when SDK is updated
+      signer: signerAny as any,
       creds,
-      sigType,
+      signatureType: sigType,
       funderAddress,
-    );
+    });
   })();
 
   cachedClient = initPromise;
@@ -747,7 +745,7 @@ async function redeemClobOutcomeWithRpc(
   // the wallet actually holds (i.e. the winning side). Using both avoids needing to
   // know which specific index won; the contract ignores zero-balance outcomes.
   const data = ctfInterface.encodeFunctionData('redeemPositions', [
-    USDC_E_ADDRESS,
+    PUSD_ADDRESS,
     '0x0000000000000000000000000000000000000000000000000000000000000000',
     input.conditionId,
     [1, 2],
@@ -844,8 +842,9 @@ async function redeemClobOutcomeWithRpc(
     const response = await relayClient.execute([
       { to: CTF_ADDRESS as `0x${string}`, data, value: '0' },
     ]);
+    // V2 relayer returns {transactionID, state:"STATE_NEW"} — no synchronous transactionHash.
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-    const txHash: string | undefined = (response as any).transactionHash ?? undefined;
+    const txHash: string | undefined = (response as any).transactionHash ?? (response as any).transactionID ?? undefined;
 
     logger.info('[clob] Relayer redemption submitted', {
       conditionId: input.conditionId,

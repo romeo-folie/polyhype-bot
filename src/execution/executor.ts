@@ -47,7 +47,7 @@ import { notifyTradeError, notifyTradeExecuted, notifyHedgeOpened } from './tele
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
 import { getRedis } from '../shared/redis.js';
 import type { SimmerTradeResult } from '../shared/simmer.js';
-import type { OrderBookSummary, TickSize } from '@polymarket/clob-client';
+import type { OrderBookSummary, TickSize } from '@polymarket/clob-client-v2';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
 import { getPendingOrder, setPendingOrder, deletePendingOrder } from './pendingMakerOrders.js';

@@ -12,6 +12,8 @@ import { z } from 'zod';
 export const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
 /** USDC.e (bridged USDC) on Polygon mainnet — used for CLOB approvals. */
 export const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+/** pUSD (Polymarket USD) on Polygon mainnet — V2 collateral token replacing USDC.e. Backed 1:1 by USDC. */
+export const PUSD_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
 /**
  * Public Polygon RPC fallback endpoints — used by clob.ts and bankroll.ts.
  * Order matters: first is tried first. publicnode.com is last (rate-limited on free tier).
