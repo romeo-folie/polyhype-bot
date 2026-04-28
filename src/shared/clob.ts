@@ -850,11 +850,14 @@ async function redeemClobOutcomeWithRpc(
     ]);
     // V2 relayer returns {transactionID, state:"STATE_NEW"} — no synchronous transactionHash.
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-    const txHash: string | undefined = (response as any).transactionHash ?? (response as any).transactionID ?? undefined;
+    const txHash: string | undefined = (response as any).transactionHash ?? undefined;
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+    const relayerTxId: string | undefined = (response as any).transactionID ?? undefined;
 
     logger.info('[clob] Relayer redemption submitted', {
       conditionId: input.conditionId,
-      txHash,
+      ...(txHash ? { txHash } : {}),
+      ...(relayerTxId ? { relayerTxId } : {}),
     });
 
     return { success: true, ...(txHash ? { tx_hash: txHash } : {}), raw: response };

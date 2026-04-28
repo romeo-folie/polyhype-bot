@@ -10,7 +10,7 @@ import { z } from 'zod';
 
 /** Polymarket Conditional Tokens Framework (CTF) contract on Polygon mainnet. */
 export const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
-/** USDC.e (bridged USDC) on Polygon mainnet — used for CLOB approvals. */
+/** USDC.e (bridged USDC) on Polygon mainnet — legacy pre-V2 collateral/approval token, retained for reference/compatibility. */
 export const USDC_E_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 /** pUSD (Polymarket USD) on Polygon mainnet — V2 collateral token replacing USDC.e. Backed 1:1 by USDC. */
 export const PUSD_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
