@@ -41,7 +41,7 @@ vi.mock('@polymarket/clob-client-v2', () => ({
     updateBalanceAllowance: mockUpdateBalanceAllowance,
     createOrDeriveApiKey: vi
       .fn()
-      .mockResolvedValue({ apiKey: 'test', secret: 'test', passphrase: 'test' }),
+      .mockResolvedValue({ key: 'test', secret: 'test', passphrase: 'test' }),
   })),
   OrderType: { FOK: 'FOK', FAK: 'FAK' },
   Side: { BUY: 'BUY', SELL: 'SELL' },

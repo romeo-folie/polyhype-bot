@@ -188,6 +188,8 @@ async function loadPersistedCreds(): Promise<ApiKeyCreds | null> {
     const raw = await redis.get(CLOB_CREDS_REDIS_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as unknown;
+    // v2 ApiKeyCreds still uses {key, secret, passphrase} — same shape as v1.
+    // (ApiKeyRaw from the HTTP response uses apiKey, but the SDK normalises it before returning.)
     if (
       parsed &&
       typeof parsed === 'object' &&
@@ -690,7 +692,11 @@ export async function fetchClobTokenBalance(tokenId: string): Promise<ClobBalanc
 }
 
 /**
- * Redeem winning outcome tokens for USDC.e on-chain.
+ * Redeem winning outcome tokens for pUSD on-chain.
+ *
+ * Post-V2 migration: new positions use pUSD as collateral (PUSD_ADDRESS).
+ * Pre-migration positions (USDC.e collateral) are handled by Polymarket's
+ * auto-redeem path and should not reach this function.
  *
  * Supports both standard EOA wallets (sigType 0) and Proxy/Gnosis Safe wallets (sigType 1).
  */
