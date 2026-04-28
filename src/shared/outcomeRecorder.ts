@@ -128,7 +128,15 @@ export function inferCategory(question: string): string {
   if (/\bnfl\b|american football|super bowl|quarterback/.test(q)) {
     return 'sports-nfl';
   }
-  if (/soccer|fifa|champions league|premier league|epl|la liga/.test(q)) {
+  // "Team A vs. Team B: O/U X.X" is an unambiguous sports over/under market
+  if (/\bvs\.?\s/i.test(q) && /\bo\/u\b/i.test(q)) {
+    return 'sports-soccer';
+  }
+  if (
+    /soccer|fifa|world cup|champions league|europa league|premier league|epl|la liga|bundesliga|serie a|ligue 1|\bmls\b|liga mx|dortmund|leverkusen|wolfsburg|hoffenheim|köln|\bkoln\b|münchen|\bmunich\b|arsenal|tottenham|chelsea|liverpool|manchester|barcelona|real madrid|atletico|juventus|inter milan|ac milan|\bajax\b|\bpsg\b/.test(
+      q,
+    )
+  ) {
     return 'sports-soccer';
   }
   if (/\bf1\b|formula[ -]?1|formula[ -]?one|grand prix/.test(q)) {

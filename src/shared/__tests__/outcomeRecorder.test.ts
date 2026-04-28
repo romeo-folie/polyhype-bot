@@ -406,6 +406,17 @@ describe('inferCategory', () => {
     expect(inferCategory('NVIDIA announces new GPU')).toBe('ai-tech');
   });
 
+  it('detects soccer markets — leagues, clubs, and O/U format', () => {
+    // The exact market that bypassed COPYTRADE_SPORTS_NOTIFY_ONLY on 2026-04-28
+    expect(inferCategory('TSG 1899 Hoffenheim vs. VfB Stuttgart: O/U 3.5')).toBe('sports-soccer');
+    expect(inferCategory('Borussia Dortmund vs. Bayern München: O/U 2.5')).toBe('sports-soccer');
+    expect(inferCategory('Will Arsenal win on 2026-05-01?')).toBe('sports-soccer');
+    expect(inferCategory('Bundesliga matchday 30 winner')).toBe('sports-soccer');
+    expect(inferCategory('Champions League final result')).toBe('sports-soccer');
+    expect(inferCategory('Europa League quarterfinal')).toBe('sports-soccer');
+    expect(inferCategory('PSG vs. Liverpool: total goals O/U 3.5')).toBe('sports-soccer');
+  });
+
   it('returns sports-f1 for Formula 1 markets', () => {
     expect(inferCategory('Will Max Verstappen win the Spanish Grand Prix?')).toBe('sports-f1');
     expect(inferCategory('F1 2024 drivers championship winner')).toBe('sports-f1');
