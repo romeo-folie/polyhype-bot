@@ -28,7 +28,7 @@ vi.mock('../config.js', () => ({
   get loadConfig() {
     return mockLoadConfig;
   },
-  USDC_E_ADDRESS: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
+  PUSD_ADDRESS: '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB',
   POLYGON_FALLBACK_RPCS: ['https://polygon-rpc.com'],
 }));
 
@@ -258,7 +258,7 @@ describe('getOnChainUsdcBalance', () => {
     const balance = await getOnChainUsdcBalance();
     expect(balance).toBe(0);
     expect(mockLogger.warn).toHaveBeenCalledWith(
-      '[bankroll] all RPCs failed for on-chain USDC.e balance — returning 0',
+      '[bankroll] all RPCs failed for on-chain pUSD balance — returning 0',
     );
   });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { OrderBookSummary } from '@polymarket/clob-client';
+import type { OrderBookSummary } from '@polymarket/clob-client-v2';
 
 // ---------------------------------------------------------------------------
 // Mocks

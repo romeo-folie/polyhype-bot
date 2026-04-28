@@ -11,7 +11,7 @@
  */
 
 import { Wallet } from '@ethersproject/wallet';
-import { AssetType } from '@polymarket/clob-client';
+import { AssetType } from '@polymarket/clob-client-v2';
 import { loadConfig } from './config.js';
 import { logger } from './logger.js';
 import { getClobClient } from './clob.js';

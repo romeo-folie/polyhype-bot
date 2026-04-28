@@ -55,7 +55,7 @@ vi.mock('../../shared/config.js', () => ({
   }),
   POLYGON_FALLBACK_RPCS: ['https://mock-rpc.polygon.test'],
   CTF_ADDRESS: '0x4d97dcd97ec945f40cf65f87097ace5ea0476045',
-  USDC_E_ADDRESS: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
+  PUSD_ADDRESS: '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB',
 }));
 
 vi.mock('../../shared/clob.js', () => ({

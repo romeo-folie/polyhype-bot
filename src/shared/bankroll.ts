@@ -1,8 +1,8 @@
 /**
- * Live bankroll tracker — Simmer portfolio + on-chain USDC.e as source of truth.
+ * Live bankroll tracker — Simmer portfolio + on-chain pUSD as source of truth.
  *
  * getBankroll() fetches both the Simmer portfolio balance and the on-chain
- * USDC.e balance held in the Polygon wallet, returning their sum.
+ * pUSD balance held in the Polygon wallet, returning their sum.
  *
  * On-chain balance is checked in parallel with Simmer. If the RPC call fails,
  * we degrade gracefully to Simmer-only (a failed on-chain check should never
@@ -20,7 +20,7 @@ import type { Redis } from 'ioredis';
 import { Contract, JsonRpcProvider, Network, FetchRequest, Wallet } from 'ethers';
 import { createHash } from 'node:crypto';
 import { getPortfolio } from './simmer.js';
-import { loadConfig, USDC_E_ADDRESS, POLYGON_FALLBACK_RPCS } from './config.js';
+import { loadConfig, PUSD_ADDRESS, POLYGON_FALLBACK_RPCS } from './config.js';
 import { logger } from './logger.js';
 
 /** ERC-20 minimal ABI — only balanceOf needed. */
@@ -35,7 +35,7 @@ let _cachedWalletAddress: string | null = null;
 let _cachedWalletKeyHash: string | null = null;
 
 /**
- * Fetch the USDC.e balance held in the Polygon wallet.
+ * Fetch the pUSD balance held in the Polygon wallet.
  *
  * Returns 0 on any error (RPC failure, missing key, etc.) so callers
  * can treat it as additive — a fetch failure is non-fatal.
@@ -77,20 +77,20 @@ export async function getOnChainUsdcBalance(): Promise<number> {
         staticNetwork: polygonNetwork,
       });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const usdc = new Contract(USDC_E_ADDRESS, ERC20_BALANCE_ABI, provider) as any;
+      const usdc = new Contract(PUSD_ADDRESS, ERC20_BALANCE_ABI, provider) as any;
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       const raw: bigint = await usdc.balanceOf(walletAddress);
-      // USDC.e has 6 decimals
+      // pUSD has 6 decimals
       return Number(raw) / 1_000_000;
     } catch (err) {
-      logger.warn('[bankroll] on-chain USDC.e balance fetch failed — trying next RPC', {
+      logger.warn('[bankroll] on-chain pUSD balance fetch failed — trying next RPC', {
         rpcUrl,
         error: err instanceof Error ? err.message : String(err),
       });
     }
   }
 
-  logger.warn('[bankroll] all RPCs failed for on-chain USDC.e balance — returning 0');
+  logger.warn('[bankroll] all RPCs failed for on-chain pUSD balance — returning 0');
   return 0;
 }
 
@@ -113,7 +113,7 @@ export function _resetCacheForTests(): void {
 }
 
 /**
- * Get the current bankroll (Simmer portfolio + on-chain USDC.e).
+ * Get the current bankroll (Simmer portfolio + on-chain pUSD).
  *
  * Fetches both sources in parallel and returns their sum. If the on-chain
  * call fails, degrades gracefully to Simmer-only. Caches the result for

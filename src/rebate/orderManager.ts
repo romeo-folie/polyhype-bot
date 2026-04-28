@@ -10,7 +10,7 @@
  */
 
 import type { Redis } from 'ioredis';
-import type { TickSize } from '@polymarket/clob-client';
+import type { TickSize } from '@polymarket/clob-client-v2';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import {

@@ -30,7 +30,7 @@ import {
   type ClobTradeResult,
   CLOB_MIN_ORDER_USD,
 } from '../shared/clob.js';
-import type { TickSize } from '@polymarket/clob-client';
+import type { TickSize } from '@polymarket/clob-client-v2';
 import {
   closePosition,
   getPosition,

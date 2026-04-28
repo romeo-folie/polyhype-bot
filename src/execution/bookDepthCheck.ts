@@ -8,7 +8,7 @@
  * drive it without mocking the CLOB network call.
  */
 
-import type { OrderBookSummary } from '@polymarket/clob-client';
+import type { OrderBookSummary } from '@polymarket/clob-client-v2';
 import { getClobOrderBook } from '../shared/clob.js';
 
 export interface BookDepthCheckInput {
