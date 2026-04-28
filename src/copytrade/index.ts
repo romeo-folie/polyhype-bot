@@ -681,9 +681,13 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       }
 
       // Category Filter — keyword-first, Gamma-tag fallback on miss.
+      // tagSlugs is hoisted so the notify-only gate below can also check it for
+      // sports markets whose questions contain no sports keywords (e.g. ATP matches
+      // formatted as "[City]: [Player] vs [Player]" that pass scope via tag rescue).
       const scanText = `${trade.title} ${market.question}`;
       const keywordHit = matchesCategory(scanText, market.description, cfg.COPYTRADE_MARKET_SCOPE);
       let scopePassed = keywordHit;
+      let marketTagSlugs: string[] = [];
 
       if (!keywordHit && cfg.COPYTRADE_SCOPE_TAG_FALLBACK) {
         const eventIds = Array.isArray(market.events)
@@ -691,12 +695,12 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
           : [];
         if (eventIds.length > 0) {
           const tagArrays = await Promise.all(eventIds.map((id) => getEventTagSlugs(id)));
-          const tagSlugs = [...new Set(tagArrays.flat())];
-          if (matchesCategory(scanText, market.description, cfg.COPYTRADE_MARKET_SCOPE, tagSlugs)) {
+          marketTagSlugs = [...new Set(tagArrays.flat())];
+          if (matchesCategory(scanText, market.description, cfg.COPYTRADE_MARKET_SCOPE, marketTagSlugs)) {
             scopePassed = true;
             logger.debug('[copytrade] scope matched via event tags', {
               marketId: market.id,
-              tags: tagSlugs,
+              tags: marketTagSlugs,
             });
             await recordCopytradeFilter(redis, 'scope_tag_rescue').catch(() => {
               /* ignore telemetry errors */
@@ -1035,11 +1039,13 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       };
 
       const signalCategory = inferCategory(signal.question);
-      if (cfg.COPYTRADE_SPORTS_NOTIFY_ONLY && signalCategory.startsWith('sports')) {
+      const isTaggedSports = marketTagSlugs.includes('sports');
+      if (cfg.COPYTRADE_SPORTS_NOTIFY_ONLY && (signalCategory.startsWith('sports') || isTaggedSports)) {
         logger.info('[copytrade] sports signal suppressed — notify-only mode', {
           wallet,
           question: signal.question,
           category: signalCategory,
+          taggedSports: isTaggedSports,
           direction,
           outcomePrice: currentOutcomePrice,
           stakeUsd,

@@ -374,6 +374,42 @@ describe('runCopytrade', () => {
     expect(mockNotify).toHaveBeenCalledWith(expect.stringContaining('suppressed'));
   });
 
+  it('suppresses sports signals that pass scope via tag rescue (no keyword match)', async () => {
+    // ATP match "Ostrava: Zdenek Kolar vs Filip Jianu" — no sports keywords in question,
+    // passes scope via tag fallback but was bypassing notify-only gate (bug 2026-04-28).
+    configOverride = {
+      ...configOverride,
+      COPYTRADE_SPORTS_NOTIFY_ONLY: true,
+      COPYTRADE_MARKET_SCOPE: ['sports-tennis'],
+      COPYTRADE_SCOPE_TAG_FALLBACK: true,
+    };
+
+    const trade = makeTrade({
+      title: 'Ostrava: Zdenek Kolar vs Filip Jianu',
+      price: 0.5,
+      side: 'BUY',
+      outcomeIndex: 0,
+    });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({
+        question: 'Ostrava: Zdenek Kolar vs Filip Jianu',
+        outcomePrices: '["0.5","0.5"]',
+        events: [{ id: 'evt-atp', slug: 'ostrava-atp' }],
+      }),
+    );
+    mockGetEventTagSlugs.mockResolvedValue(['sports', 'tennis', 'atp']);
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
+    expect(result.signals).toHaveLength(0);
+    expect(mockNotify).toHaveBeenCalledWith(expect.stringContaining('suppressed'));
+  });
+
   it('exits copytrade position when whale sells in rules mode', async () => {
     configOverride = { ...configOverride, COPYTRADE_EXIT_MODE: 'rules' };
 
