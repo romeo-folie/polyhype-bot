@@ -37,11 +37,12 @@ Each has its own SIGTERM handler that releases Redis locks before exiting:
 
 ## Commands
 ```bash
-npx tsc --noEmit          # type-check
-npx vitest run            # run all tests
-npx eslint src/           # lint
-docker compose up -d --build  # deploy all containers
-redis-cli KEYS '*lock*'       # verify no stale locks after restart
+npx tsc --noEmit                 # type-check
+npx vitest run                   # run all tests
+npx eslint src/                  # lint
+scripts/deploy.sh pga-futures    # deploy only the changed service(s)
+scripts/deploy.sh --all          # explicit full-stack deploy when required
+redis-cli KEYS '*lock*'          # verify no stale locks after restart
 ```
 
 ## Important Patterns

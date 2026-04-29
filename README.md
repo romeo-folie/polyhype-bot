@@ -538,7 +538,7 @@ npm run cron:shortlist
 | `npm run cron:calibrate` | Recompute calibration stats per category (weekly) |
 | `npm run cron:watchlist` | Refresh dynamic watchlist from active markets |
 | `npm run sync-env` | Append missing keys from `.env.example` to `.env` |
-| `scripts/deploy.sh` | Pull from main, `docker compose up -d --build`, prune images |
+| `scripts/deploy.sh` | Pull from main, deploy named services by default, `--all` for full stack, prune images |
 | `scripts/diagnose.sh` | System health diagnostic |
 | `scripts/monitor-dashboard.sh` | tmux-based log dashboard |
 | `scripts/rotate-logs.sh` | Rotate logs > 5MB (keeps 1 backup) |
