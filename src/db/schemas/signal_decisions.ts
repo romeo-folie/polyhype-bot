@@ -15,6 +15,10 @@ const SKIP_REASON = [
   'insufficient_equity', 'global_margin_cap', 'global_governor', 'maker_not_filled',
   'taker_edge_below_min', 'liquidity_gate', 'simmer_position_exists', 'market_resolved',
   'spread_too_wide', 'one_sided_book', 'no_clob_book',
+  // hl-momentum-specific (added 2026-04-29)
+  'score_below_min', 'anti_chase_rsi', 'anti_chase_vwap',
+  'loss_cooldown', 'momentum_cooldown', 'scanner_dark',
+  'long_hl_confirmation_missing', 'oi_divergence_veto', 'weighted_total_score_low',
   'other',
 ] as const;
 

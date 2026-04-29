@@ -95,8 +95,8 @@ export function isMemeSymbol(symbol: string, memeList: string): boolean {
  * Shadow-logs to shadow_observations regardless of HL_MOMENTUM_ENABLED so the
  * first period of deployment can be reviewed before flipping the live flag.
  *
- * Logs every evaluated candidate (including skips) to signal_decisions so future
- * audits can correlate stretch metrics, voter state, and skip reasons.
+ * Logs every evaluated candidate (including all skips) to signal_decisions with a
+ * stable decisionId per scan so rows can be joined to execution_events and outcomes.
  */
 export async function scanHlMomentum(
   tick: BinancePriceTick,
@@ -179,6 +179,10 @@ export async function scanHlMomentum(
   const absScore = Math.abs(score);
   const isWeighted = cfg.HL_MOMENTUM_MTF_SCORING_MODE === 'weighted';
 
+  // One stable UUID per scan: used in signal_decisions row AND returned in the
+  // TradeSignal so callers can join signal_decisions → execution_events → outcomes.
+  const decisionId = randomUUID();
+
   // Hoist MTF context variables so logDecision can read their current values at any
   // gate exit point (captures whatever has been computed up to that moment).
   let fourHBiasOk: boolean | null = null;
@@ -200,7 +204,7 @@ export async function scanHlMomentum(
   /** Enqueue one signal_decisions row for this hl-momentum candidate evaluation. */
   const logDecision = (hasTrade: boolean, skipReason?: string, skipDetail?: string): void => {
     void enqueueWrite('signal_decisions', {
-      decisionId: randomUUID(),
+      decisionId,
       source: 'hl-momentum' as const,
       marketId: hlSymbol,
       question: `HL momentum ${direction} ${hlSymbol}`,
@@ -238,7 +242,7 @@ export async function scanHlMomentum(
       score,
       min: cfg.HL_MOMENTUM_MIN_SCORE,
     });
-    logDecision(false, 'other', 'score_below_min');
+    logDecision(false, 'score_below_min');
     return null;
   }
 
@@ -273,7 +277,7 @@ export async function scanHlMomentum(
     (direction === 'SHORT' && voters.oiDivergence === 'UP')
   ) {
     logger.debug('[hl-momentum] OI divergence veto', { symbol: hlSymbol, direction, oiPctChange, pricePctChange });
-    logDecision(false, 'other', 'oi_divergence_veto');
+    logDecision(false, 'oi_divergence_veto');
     return null;
   }
   if (direction === 'LONG' && cfg.HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION) {
@@ -286,7 +290,7 @@ export async function scanHlMomentum(
         fundingContraVote: voters.fundingContra ?? null,
         oiDivergenceVote: voters.oiDivergence ?? null,
       });
-      logDecision(false, 'other', 'long_hl_confirmation_missing');
+      logDecision(false, 'long_hl_confirmation_missing');
       return null;
     }
   }
@@ -302,14 +306,14 @@ export async function scanHlMomentum(
         logger.debug('[hl-momentum] anti-chase: RSI overbought on LONG', {
           symbol: hlSymbol, direction, rsi: rsi.toFixed(1), threshold: cfg.HL_MOMENTUM_RSI_OVERBOUGHT,
         });
-        logDecision(false, 'other', `anti_chase_rsi:${rsi.toFixed(1)}`);
+        logDecision(false, 'anti_chase_rsi', rsi.toFixed(1));
         return null;
       }
       if (direction === 'SHORT' && rsi <= cfg.HL_MOMENTUM_RSI_OVERSOLD) {
         logger.debug('[hl-momentum] anti-chase: RSI oversold on SHORT', {
           symbol: hlSymbol, direction, rsi: rsi.toFixed(1), threshold: cfg.HL_MOMENTUM_RSI_OVERSOLD,
         });
-        logDecision(false, 'other', `anti_chase_rsi:${rsi.toFixed(1)}`);
+        logDecision(false, 'anti_chase_rsi', rsi.toFixed(1));
         return null;
       }
     }
@@ -318,14 +322,14 @@ export async function scanHlMomentum(
         logger.debug('[hl-momentum] anti-chase: price too far above VWAP', {
           symbol: hlSymbol, direction, vwapDistPct: vwapDistPct.toFixed(2), threshold: cfg.HL_MOMENTUM_VWAP_MAX_DIST_PCT,
         });
-        logDecision(false, 'other', `anti_chase_vwap:${vwapDistPct.toFixed(2)}`);
+        logDecision(false, 'anti_chase_vwap', vwapDistPct.toFixed(2));
         return null;
       }
       if (direction === 'SHORT' && vwapDistPct < -cfg.HL_MOMENTUM_VWAP_MAX_DIST_PCT) {
         logger.debug('[hl-momentum] anti-chase: price too far below VWAP', {
           symbol: hlSymbol, direction, vwapDistPct: vwapDistPct.toFixed(2), threshold: cfg.HL_MOMENTUM_VWAP_MAX_DIST_PCT,
         });
-        logDecision(false, 'other', `anti_chase_vwap:${vwapDistPct.toFixed(2)}`);
+        logDecision(false, 'anti_chase_vwap', vwapDistPct.toFixed(2));
         return null;
       }
     }
@@ -429,7 +433,7 @@ export async function scanHlMomentum(
       totalScore,
       threshold: cfg.HL_MOMENTUM_MIN_TOTAL_SCORE,
     });
-    logDecision(false, 'other', 'weighted_total_score_low');
+    logDecision(false, 'weighted_total_score_low');
     return null;
   }
 
@@ -439,7 +443,7 @@ export async function scanHlMomentum(
   const lossCooldown = await redis.get(`futures:loss-cooldown:${hlSymbol}`);
   if (lossCooldown) {
     logger.debug('[hl-momentum] loss cooldown active', { symbol: hlSymbol });
-    logDecision(false, 'other', 'loss_cooldown');
+    logDecision(false, 'loss_cooldown');
     return null;
   }
 
@@ -447,7 +451,7 @@ export async function scanHlMomentum(
   const mCooldown = await redis.get(momentumCooldownKey(hlSymbol, direction));
   if (mCooldown) {
     logger.debug('[hl-momentum] momentum cooldown active', { symbol: hlSymbol, direction });
-    logDecision(false, 'other', 'momentum_cooldown');
+    logDecision(false, 'momentum_cooldown');
     return null;
   }
 
@@ -515,6 +519,7 @@ export async function scanHlMomentum(
         vwapDistPct: vwapDistPct !== null ? vwapDistPct.toFixed(2) : null,
       },
     );
+    logDecision(false, 'scanner_dark');
     return null;
   }
 
@@ -556,5 +561,6 @@ export async function scanHlMomentum(
     isFutures: true,
     source: 'hl-momentum',
     eventTs,
+    decisionId,
   };
 }
