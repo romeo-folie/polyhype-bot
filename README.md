@@ -95,7 +95,9 @@ Everything runs via **Docker Compose** on a Hetzner CAX11 ARM box. No PM2.
 
 ```bash
 # Deploy / redeploy
-docker compose up -d --build
+scripts/deploy.sh pga-futures
+scripts/deploy.sh pga-arb pga-spot-feed
+scripts/deploy.sh --all   # only for intentional full-stack deploys
 
 # Verify
 docker compose ps

@@ -30,6 +30,12 @@ fi
 
 declare -a services
 if [ "$1" = "--all" ]; then
+  if [ "$#" -ne 1 ]; then
+    echo "error: --all does not accept additional service arguments" >&2
+    echo "" >&2
+    usage >&2
+    exit 1
+  fi
   services=()
   full_stack=true
 else
@@ -64,6 +70,10 @@ docker builder prune -f --filter "until=24h"
 
 echo ""
 echo "Deployment complete."
-echo "View logs:      docker compose logs -f ${services[*]:-}"
+if [ "$full_stack" = true ]; then
+  echo "View logs:      docker compose logs -f"
+else
+  echo "View logs:      docker compose logs -f ${services[*]}"
+fi
 echo "View status:    docker compose ps"
 echo "Dashboard:      npm run monitor:dashboard"
