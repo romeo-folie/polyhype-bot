@@ -540,19 +540,8 @@ describe('futuresMonitor', () => {
           position: {
             szi: '0.1',
             entryPx: '50000',
-            unrealizedPnl: '50', // +1.0% notional, +5% ROE @ 5x — below tp=3? actually +5% > 3. Use lower below-tp value.
-            marginUsed: '500', // makes ROE = 50/500*100 = 10% — too high. Use marginUsed=2500 → ROE=2%.
-          },
-        },
-      ]);
-      mockGetOpenPositions.mockResolvedValue([
-        {
-          symbol: 'BTC',
-          position: {
-            szi: '0.1',
-            entryPx: '50000',
-            unrealizedPnl: '50',
-            marginUsed: '2500', // ROE = 50/2500*100 = 2% (below tp=3)
+            unrealizedPnl: '50', // ROE = 50 / 2500 * 100 = 2% (below tp=3)
+            marginUsed: '2500',
           },
         },
       ]);
@@ -567,7 +556,7 @@ describe('futuresMonitor', () => {
         expect.anything(),
         'BTC',
         'LONG',
-        2, // gatePct ≈ 2%
+        2,
       );
       // Below TP arm — should not fire trailing exit.
       expect(mockClosePosition).not.toHaveBeenCalled();

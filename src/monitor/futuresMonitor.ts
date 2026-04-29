@@ -546,7 +546,13 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           // gatePct, and the trailing floor collapses onto current price (the
           // floor moves up and down with the position instead of ratcheting).
           if (priorHwm === undefined || hwm > priorHwm) {
-            updateHighWaterMark(redis, symbol, direction, hwm).catch(() => {});
+            updateHighWaterMark(redis, symbol, direction, hwm).catch((err: unknown) => {
+              logger.debug('[futures-monitor] updateHighWaterMark failed (non-fatal)', {
+                symbol,
+                direction,
+                error: String(err),
+              });
+            });
           }
           trailingArmed = hwm >= tpPct;
           if (!shouldExit && trailingArmed) {
