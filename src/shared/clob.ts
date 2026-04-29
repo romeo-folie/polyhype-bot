@@ -821,7 +821,11 @@ async function redeemClobOutcomeWithRpc(
       conditionId: input.conditionId,
       address: balCheckAddress,
     });
-    return { success: false, error: 'balance_is_zero' };
+    // Error string MUST contain the substring "balance is 0" — the redeemer's
+    // post-CLOB-failure handler in resolutionRedeemer.ts (4 call-sites) uses
+    // includes('balance is 0') to trigger markFallbackStale and prevent the same
+    // zero-balance position from being retried every cycle.
+    return { success: false, error: 'on-chain balance is 0' };
   }
 
   const ctfInterface = new Interface(CTF_ABI);

@@ -261,17 +261,21 @@ describe('redeemClobOutcome', () => {
     expect(mockProxy).not.toHaveBeenCalled();
   });
 
-  it('returns balance_is_zero and submits no transaction when wallet holds no CTF tokens', async () => {
+  it('returns "balance is 0" error and submits no transaction when wallet holds no CTF tokens', async () => {
     // Both indexSets [1, 2] return zero balance — the wallet has no winning tokens to redeem.
     // This is the regression bug PR #357 targets: redeemPositions is a no-op (not a revert)
     // for zero-balance redemptions, so without this pre-flight the V2 relayer always reports
     // success and the redeemer credits phantom proceeds + fires spurious notifications.
+    //
+    // Error string MUST contain the substring "balance is 0" so the redeemer's
+    // post-CLOB-failure handler triggers markFallbackStale (6h dedup) instead of
+    // retrying every cycle.
     mockCtfBalanceOf.mockResolvedValue(0n);
 
     const result = await redeemClobOutcome({ conditionId: 'cond-empty', direction: 'YES' });
 
     expect(result.success).toBe(false);
-    expect(result.error).toBe('balance_is_zero');
+    expect(result.error).toContain('balance is 0');
     expect(mockSendTransaction).not.toHaveBeenCalled();
     expect(mockProxy).not.toHaveBeenCalled();
   });
