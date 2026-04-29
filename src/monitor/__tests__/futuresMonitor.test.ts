@@ -696,6 +696,164 @@ describe('futuresMonitor', () => {
     });
   });
 
+  describe('FUTURES_MAX_LOSS_ROE_PCT backstop', () => {
+    // Leverage-invariant ROE cap that fires on top of any path-derived SL.
+    // Meme path's notional clamp of 8% would let -29% ROE positions ride at
+    // 5x leverage; the backstop catches them at the user-configured ROE limit.
+    const makeLedgerMemePos = (opts: { symbol: string; memeAtrSlPct: number; memeAtrTpPct: number }) => ({
+      marketId: opts.symbol,
+      symbol: opts.symbol,
+      direction: 'LONG' as const,
+      isFutures: true,
+      question: `${opts.symbol} perpetual`,
+      entryPrice: 0.001,
+      stakeUsd: 10,
+      edgeMagnitude: 0,
+      sourcedFrom: 'hl-momentum',
+      openedAt: new Date().toISOString(),
+      executionVenue: 'hyperliquid' as const,
+      memeAtrSlPct: opts.memeAtrSlPct,
+      memeAtrTpPct: opts.memeAtrTpPct,
+    });
+
+    // 5x leverage scenario: szi=100, entryPx=1 → notional 100, marginUsed 20.
+    // pnlUsd directly equals roe% × 0.2 (since margin=20). pnlUsd=-5 → roe=-25%.
+    const make5xPos = (symbol: string, pnlUsd: number) => ({
+      symbol,
+      position: {
+        szi: '100',
+        entryPx: '1',
+        unrealizedPnl: String(pnlUsd),
+        marginUsed: '20',
+      },
+    });
+
+    it('fires at the configured ROE cap on a meme position whose notional SL is wider', async () => {
+      // WIF case: meme floor=8% notional → -40% ROE at 5x. Backstop set to 25
+      // should fire at -5% notional move (-25% ROE) before the meme SL.
+      loadConfigMock.mockReturnValue({
+        ...baseCfg,
+        FUTURES_MAX_LOSS_ROE_PCT: 25,
+        HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: true,
+      });
+      // pnlUsd=-5 on margin=20 → roe=-25%, exactly at cap.
+      mockGetOpenPositions.mockResolvedValue([make5xPos('WIF', -5)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerMemePos({ symbol: 'WIF', memeAtrSlPct: 8, memeAtrTpPct: 24 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('WIF');
+    });
+
+    it('does NOT fire when ROE is shallower than the cap', async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseCfg,
+        FUTURES_MAX_LOSS_ROE_PCT: 25,
+        HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: true,
+      });
+      // pnlUsd=-4 → roe=-20%, above the -25% cap and below meme SL=-8% notional.
+      mockGetOpenPositions.mockResolvedValue([make5xPos('WIF', -4)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerMemePos({ symbol: 'WIF', memeAtrSlPct: 8, memeAtrTpPct: 24 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+
+    it('disabled when set to 0 — falls through to existing path-derived SL', async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseCfg,
+        FUTURES_MAX_LOSS_ROE_PCT: 0,
+        HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: true,
+      });
+      // -25% ROE (-5% notional) — meme SL=-8% notional NOT hit, backstop disabled.
+      mockGetOpenPositions.mockResolvedValue([make5xPos('WIF', -5)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerMemePos({ symbol: 'WIF', memeAtrSlPct: 8, memeAtrTpPct: 24 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+
+    it('survives leverage change — same cap value behaves identically at 10x', async () => {
+      // 10x leverage: szi=100, entryPx=1 → notional 100, marginUsed 10.
+      // pnlUsd=-2.5 on margin=10 → roe=-25%. Same cap, fires at half the notional move.
+      loadConfigMock.mockReturnValue({
+        ...baseCfg,
+        FUTURES_MAX_LOSS_ROE_PCT: 25,
+        HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: true,
+      });
+      mockGetOpenPositions.mockResolvedValue([
+        {
+          symbol: 'WIF',
+          position: {
+            szi: '100',
+            entryPx: '1',
+            unrealizedPnl: '-2.5',
+            marginUsed: '10',
+          },
+        },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerMemePos({ symbol: 'WIF', memeAtrSlPct: 8, memeAtrTpPct: 24 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('WIF');
+    });
+
+    it('does not preempt a tighter per-source SL on hl-momentum non-meme positions', async () => {
+      // BTC sourced from hl-momentum → per-source HL_MOMENTUM_STOP_LOSS_PCT=5 (ROE) applies.
+      // At roe=-10%, the per-source SL fires first (5 < 25); the backstop must NOT preempt it
+      // and the close reason must reflect the per-source SL, not roe_max_loss.
+      const { notifyTakeProfitExecuted: mockNotify } = await import('../../execution/telegram.js');
+      loadConfigMock.mockReturnValue({
+        ...baseCfg,
+        FUTURES_MAX_LOSS_ROE_PCT: 25,
+      });
+      mockGetOpenPositions.mockResolvedValue([
+        {
+          symbol: 'BTC',
+          position: {
+            szi: '0.1',
+            entryPx: '50000',
+            unrealizedPnl: '-100',  // notional 5000, margin 1000 → roe=-10%
+            marginUsed: '1000',
+          },
+        },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([
+        {
+          marketId: 'BTC',
+          isFutures: true,
+          direction: 'LONG',
+          question: 'BTC perpetual',
+          entryPrice: 50000,
+          stakeUsd: 10,
+          openedAt: new Date().toISOString(),
+          executionVenue: 'hyperliquid',
+          sourcedFrom: 'hl-momentum',
+        },
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('BTC');
+      const call = (mockNotify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as
+        | { mechanismDetail?: string }
+        | undefined;
+      expect(call?.mechanismDetail).toBeDefined();
+      expect(call?.mechanismDetail).not.toContain('roe_max_loss');
+    });
+  });
+
   describe('global ATR bypass for hl-momentum (2026-04-22 WIF fix)', () => {
     // Global ATR path (FUTURES_ATR_SLTP_ENABLED=true) is calibrated for 1m
     // crypto-arb scalps with a 1% SL floor. hl-momentum is a 15m swing strategy

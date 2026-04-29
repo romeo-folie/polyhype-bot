@@ -1157,6 +1157,13 @@ const envSchema = z.object({
     .number()
     .min(0.01, 'FUTURES_TAKE_PROFIT_PCT must be positive')
     .default(15),
+  // ROE-denominated max-loss backstop — leverage-invariant safety net that fires
+  // on top of any path-derived SL (fixed-pct, meme-ATR, global-ATR). Expressed
+  // in ROE % (matches HL UI). Set to 0 to disable. When enabled, exits when
+  // roePct <= -FUTURES_MAX_LOSS_ROE_PCT regardless of which path computed the
+  // notional/ROE SL. Survives leverage changes by construction: −25% ROE means
+  // −25% ROE whether running at 5x or 20x.
+  FUTURES_MAX_LOSS_ROE_PCT: z.coerce.number().min(0).optional().default(0),
   // Trailing stop — activates after position reaches ACTIVATION_PCT, then exits if it drops TRAILING_STOP_PCT from peak.
   FUTURES_TRAILING_STOP_ENABLED: boolFromEnv.optional().default(true),
   FUTURES_TRAILING_STOP_PCT: z.coerce.number().min(0.1).optional().default(7.5),
