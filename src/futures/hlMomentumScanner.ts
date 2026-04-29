@@ -43,6 +43,11 @@ export function momentumCooldownKey(hlSymbol: string, direction: 'LONG' | 'SHORT
   return `futures:momentum:cooldown:${hlSymbol}:${direction}`;
 }
 
+/** Redis key for one-bar persistence on borderline stretched momentum setups. */
+export function momentumStretchConfirmationKey(hlSymbol: string, direction: 'LONG' | 'SHORT'): string {
+  return `futures:momentum:stretch-confirm:${hlSymbol}:${direction}`;
+}
+
 /**
  * Strip the `usdt` suffix (Binance pair form) and, only for actual Hyperliquid
  * 1000× unit markers (literal lowercase `k` followed by an uppercase base asset
@@ -89,7 +94,9 @@ export function isMemeSymbol(symbol: string, memeList: string): boolean {
  *     in weighted mode — MTF signals are always computed when candle data is
  *     available, gracefully treating missing data as 0 contribution.
  *
- * Pure-read: does not write to Redis. The caller (arb worker) sets the momentum
+ * Mostly read-only. The only scanner-owned write is the borderline-stretch
+ * confirmation key used to require one additional closed 15m bar before entering
+ * near anti-chase thresholds. The caller (arb worker) still sets the momentum
  * cooldown key and calls executeAndRecordSignal after receiving a non-null signal.
  *
  * Shadow-logs to shadow_observations regardless of HL_MOMENTUM_ENABLED so the
@@ -191,10 +198,16 @@ export async function scanHlMomentum(
   let oneHBonus = 0;
   let mtfBonus = 0;
   let totalScore = absScore;
+  let softConfirmationRequired = false;
+  let softConfirmationPassed = false;
+  let softConfirmationReasons: string[] = [];
+  let softConfirmationAnchorOpenTime: number | null = null;
 
   // Compute RSI and VWAP distance on primary candles. Used by the anti-chase gate and
   // included in every signal_decisions row for future stretch-metric audits.
-  const lastClose = primaryCandles[primaryCandles.length - 1]!.close;
+  const latestClosedPrimaryCandle = [...primaryCandles].reverse().find((c) => c.closed !== false)
+    ?? primaryCandles[primaryCandles.length - 1]!;
+  const lastClose = latestClosedPrimaryCandle.close;
   const rsi = computeRSIFromCandles(primaryCandles, cfg.HL_MOMENTUM_RSI_PERIOD);
   const vwapVal = computeVWAP(primaryCandles);
   const vwapDistPct = (vwapVal !== null && vwapVal > 0)
@@ -231,6 +244,10 @@ export async function scanHlMomentum(
         binancePrice: tick.price,
         rsi,
         vwapDistPct,
+        softConfirmationRequired,
+        softConfirmationPassed,
+        softConfirmationReasons,
+        softConfirmationAnchorOpenTime,
       },
     }).catch(() => {});
   };
@@ -333,6 +350,25 @@ export async function scanHlMomentum(
         return null;
       }
     }
+  }
+
+  if (cfg.HL_MOMENTUM_SOFT_CONFIRM_ENABLED) {
+    const rsiLongBand = cfg.HL_MOMENTUM_RSI_OVERBOUGHT - cfg.HL_MOMENTUM_SOFT_CONFIRM_RSI_BUFFER;
+    const rsiShortBand = cfg.HL_MOMENTUM_RSI_OVERSOLD + cfg.HL_MOMENTUM_SOFT_CONFIRM_RSI_BUFFER;
+    const vwapBand = Math.min(
+      cfg.HL_MOMENTUM_SOFT_CONFIRM_VWAP_DIST_PCT,
+      cfg.HL_MOMENTUM_VWAP_MAX_DIST_PCT,
+    );
+
+    if (rsi !== null) {
+      if (direction === 'LONG' && rsi >= rsiLongBand) softConfirmationReasons.push('rsi');
+      if (direction === 'SHORT' && rsi <= rsiShortBand) softConfirmationReasons.push('rsi');
+    }
+    if (vwapDistPct !== null) {
+      if (direction === 'LONG' && vwapDistPct >= vwapBand) softConfirmationReasons.push('vwap');
+      if (direction === 'SHORT' && vwapDistPct <= -vwapBand) softConfirmationReasons.push('vwap');
+    }
+    softConfirmationRequired = softConfirmationReasons.length > 0;
   }
 
   // ── Multi-timeframe signals ──────────────────────────────────────────────
@@ -467,6 +503,36 @@ export async function scanHlMomentum(
     return null;
   }
 
+  if (cfg.HL_MOMENTUM_SOFT_CONFIRM_ENABLED) {
+    softConfirmationAnchorOpenTime = latestClosedPrimaryCandle.openTime;
+    const confirmKey = momentumStretchConfirmationKey(hlSymbol, direction);
+    const pendingRaw = await redis.get(confirmKey);
+    const pendingOpenTime = pendingRaw ? parseInt(pendingRaw, 10) : NaN;
+    const hasPending = Number.isFinite(pendingOpenTime);
+
+    if (hasPending && pendingOpenTime < latestClosedPrimaryCandle.openTime) {
+      softConfirmationPassed = true;
+      void redis.del(confirmKey).catch(() => {});
+    } else if (softConfirmationRequired || (hasPending && pendingOpenTime === latestClosedPrimaryCandle.openTime)) {
+      if (!hasPending || pendingOpenTime !== latestClosedPrimaryCandle.openTime) {
+        void redis.set(
+          confirmKey,
+          String(latestClosedPrimaryCandle.openTime),
+          'EX',
+          cfg.HL_MOMENTUM_SOFT_CONFIRM_TTL_SEC,
+        ).catch(() => {});
+      }
+      logger.debug('[hl-momentum] stretch confirmation pending', {
+        symbol: hlSymbol,
+        direction,
+        barOpenTime: latestClosedPrimaryCandle.openTime,
+        reasons: softConfirmationReasons,
+      });
+      logDecision(false, 'stretch_confirmation_pending', softConfirmationReasons.join(','));
+      return null;
+    }
+  }
+
   // spot:price_moved timestamp comes from Binance kline close time (T), which can be
   // slightly in the future for in-progress bars. Clamp to now to keep latency metrics sane.
   const now = Date.now();
@@ -501,6 +567,10 @@ export async function scanHlMomentum(
       oiDivergenceVote: voters.oiDivergence ?? null,
       rsi,
       vwapDistPct,
+      softConfirmationRequired,
+      softConfirmationPassed,
+      softConfirmationReasons,
+      softConfirmationAnchorOpenTime,
     },
   }).catch(() => {});
 
@@ -517,6 +587,9 @@ export async function scanHlMomentum(
         ...(isWeighted ? { mtfBonus, totalScore } : {}),
         rsi: rsi !== null ? rsi.toFixed(1) : null,
         vwapDistPct: vwapDistPct !== null ? vwapDistPct.toFixed(2) : null,
+        softConfirmationRequired,
+        softConfirmationPassed,
+        softConfirmationReasons,
       },
     );
     logDecision(false, 'scanner_dark');
@@ -541,6 +614,9 @@ export async function scanHlMomentum(
     binancePrice: tick.price,
     rsi: rsi !== null ? rsi.toFixed(1) : null,
     vwapDistPct: vwapDistPct !== null ? vwapDistPct.toFixed(2) : null,
+    softConfirmationRequired,
+    softConfirmationPassed,
+    softConfirmationReasons,
   });
 
   logDecision(true);

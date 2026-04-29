@@ -115,6 +115,26 @@ describe('Telegram notifications', () => {
 
       await expect(notifyTradeExecuted(makeSignal(), undefined)).resolves.not.toThrow();
     });
+
+    it('formats Hyperliquid meme entries with higher precision', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+      await notifyTradeExecuted(
+        makeSignal({
+          question: 'HL momentum LONG kPEPE',
+          direction: 'LONG',
+          isFutures: true,
+          outcomePrice: 0.003879,
+        }),
+        '0xhl',
+        { venue: 'hyperliquid', entryPrice: 0.003879 },
+      );
+
+      const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(opts.body as string) as { text: string };
+      expect(body.text).toContain('$0.00387900');
+      expect(body.text).not.toContain('0.003 (0.4% implied)');
+    });
   });
 
   describe('notifyTradeError', () => {
@@ -178,6 +198,28 @@ describe('Telegram notifications', () => {
       expect(body.text).toContain('&lt;X&gt;');
       expect(body.text).toContain('&amp;');
       expect(body.text).not.toContain('<X>');
+    });
+
+    it('formats Hyperliquid exits with higher precision for meme prices', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+      await notifyTakeProfitExecuted({
+        position: makePosition({
+          question: 'HL momentum LONG kPEPE',
+          direction: 'LONG',
+          entryPrice: 0.003879,
+          executionVenue: 'hyperliquid',
+          isFutures: true,
+        }),
+        currentPrice: 0.004125,
+        returnPct: 6.34,
+        reason: 'trailing_stop',
+      });
+
+      const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(opts.body as string) as { text: string };
+      expect(body.text).toContain('$0.00387900');
+      expect(body.text).toContain('$0.00412500');
     });
   });
 });

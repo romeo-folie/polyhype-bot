@@ -1322,6 +1322,18 @@ const envSchema = z.object({
   HL_MOMENTUM_RSI_OVERSOLD: z.coerce.number().min(0).max(50).optional().default(30),
   // Maximum allowed % distance of price from VWAP in the trade direction before blocking.
   HL_MOMENTUM_VWAP_MAX_DIST_PCT: z.coerce.number().min(0).optional().default(3.0),
+  // Soft confirmation layer for borderline stretched setups. Clean entries still fire
+  // immediately; only setups near the anti-chase thresholds must persist for one more
+  // closed 15m bar before the scanner returns a live signal.
+  HL_MOMENTUM_SOFT_CONFIRM_ENABLED: boolFromEnv.optional().default(true),
+  HL_MOMENTUM_SOFT_CONFIRM_TTL_SEC: z.coerce.number().int().min(60).optional().default(7200),
+  // Borderline VWAP stretch threshold that triggers a one-bar persistence check. Must
+  // remain below HL_MOMENTUM_VWAP_MAX_DIST_PCT to avoid collapsing into the hard veto.
+  HL_MOMENTUM_SOFT_CONFIRM_VWAP_DIST_PCT: z.coerce.number().min(0).optional().default(2.0),
+  // Distance in RSI points below the hard overbought / above the hard oversold level
+  // that enters the soft-confirm band. Example with defaults: LONG needs confirmation
+  // at RSI >= 64, but is hard-blocked only at RSI >= 70.
+  HL_MOMENTUM_SOFT_CONFIRM_RSI_BUFFER: z.coerce.number().min(0).max(25).optional().default(6),
 
   // ── HL-native signals (issue #265) ──
   // Sub-PR 1: Funding-rate contra voter. HL settles perp funding hourly at
