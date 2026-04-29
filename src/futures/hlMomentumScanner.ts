@@ -376,7 +376,7 @@ export async function scanHlMomentum(
           ema4hFast: fastLast.toFixed(4),
           ema4hSlow: slowLast.toFixed(4),
         });
-        logDecision(false, 'confluence_block', '4h_ema_bias_mismatch');
+        logDecision(false, '4h_ema_bias_mismatch');
         return null;
       }
     } else {
@@ -409,7 +409,7 @@ export async function scanHlMomentum(
           macdLine: macd1h.macdLine.toFixed(6),
           signalLine: macd1h.signalLine.toFixed(6),
         });
-        logDecision(false, 'confluence_block', '1h_macd_mismatch');
+        logDecision(false, '1h_macd_mismatch');
         return null;
       }
     } else {

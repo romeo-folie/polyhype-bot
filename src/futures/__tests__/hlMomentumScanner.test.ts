@@ -1439,18 +1439,18 @@ describe('scanHlMomentum — anti-chase gate', () => {
   });
 
   it('includes rsi and vwapDistPct in signal_decisions raw payload', async () => {
+    // RSI within bounds, VWAP within bounds → anti-chase passes; scanner logs signal_decisions
+    // with rsi and vwapDistPct in raw (dark-mode path because HL_MOMENTUM_ENABLED=false).
     mockComputeRSIFromCandles.mockReturnValue(65);
-    mockComputeVWAP.mockReturnValue(98); // price=70000 → dist ≈ +71%… but gate disabled by RSI<70
+    mockComputeVWAP.mockReturnValue(69500); // price=70000 → dist ≈ +0.72%
     const { enqueueWrite } = await import('../../db/writeQueue.js');
     vi.mocked(enqueueWrite).mockClear();
     const redis = makeRedis();
-    // Set VWAP to be within bounds so gate doesn't fire (we just want to check payload)
-    mockComputeVWAP.mockReturnValue(69500); // price=70000 → dist ≈ +0.72%
     await scanHlMomentum(makeTick(), redis as never);
     expect(enqueueWrite).toHaveBeenCalledWith(
-      'shadow_observations',
+      'signal_decisions',
       expect.objectContaining({
-        payload: expect.objectContaining({ rsi: 65, vwapDistPct: expect.any(Number) }),
+        raw: expect.objectContaining({ rsi: 65, vwapDistPct: expect.any(Number) }),
       }),
     );
   });

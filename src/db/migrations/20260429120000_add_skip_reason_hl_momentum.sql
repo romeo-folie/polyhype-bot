@@ -15,3 +15,5 @@ ALTER TYPE skip_reason_t ADD VALUE IF NOT EXISTS 'scanner_dark';
 ALTER TYPE skip_reason_t ADD VALUE IF NOT EXISTS 'long_hl_confirmation_missing';
 ALTER TYPE skip_reason_t ADD VALUE IF NOT EXISTS 'oi_divergence_veto';
 ALTER TYPE skip_reason_t ADD VALUE IF NOT EXISTS 'weighted_total_score_low';
+ALTER TYPE skip_reason_t ADD VALUE IF NOT EXISTS '4h_ema_bias_mismatch';
+ALTER TYPE skip_reason_t ADD VALUE IF NOT EXISTS '1h_macd_mismatch';

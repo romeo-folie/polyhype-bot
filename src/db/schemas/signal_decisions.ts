@@ -19,6 +19,7 @@ const SKIP_REASON = [
   'score_below_min', 'anti_chase_rsi', 'anti_chase_vwap',
   'loss_cooldown', 'momentum_cooldown', 'scanner_dark',
   'long_hl_confirmation_missing', 'oi_divergence_veto', 'weighted_total_score_low',
+  '4h_ema_bias_mismatch', '1h_macd_mismatch',
   'other',
 ] as const;
 
