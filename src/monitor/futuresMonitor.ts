@@ -487,7 +487,20 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           }
         }
 
-        if (gatePct <= slPct) {
+        // ROE max-loss backstop — leverage-invariant cap that fires before any
+        // path-derived SL when configured. Set FUTURES_MAX_LOSS_ROE_PCT=0 to
+        // disable. Compares roePct (already leverage-scaled) directly against
+        // the configured cap, so the same value behaves identically at 5x/10x/20x.
+        // Existing notional clamps (meme floor/ceil, ATR min/max) remain in
+        // place as price-action sanity bounds; this overlay just catches them
+        // before they'd let losses exceed user comfort.
+        if (
+          cfg.FUTURES_MAX_LOSS_ROE_PCT > 0 &&
+          roePct <= -cfg.FUTURES_MAX_LOSS_ROE_PCT
+        ) {
+          shouldExit = true;
+          reason = `Stop-Loss triggered (roe_max_loss roe=${roePct.toFixed(2)}% cap=-${cfg.FUTURES_MAX_LOSS_ROE_PCT.toFixed(2)}%)`;
+        } else if (gatePct <= slPct) {
           shouldExit = true;
           const slTag = usingAtrMode
             ? ` atr_sl=${slPct.toFixed(2)}`
