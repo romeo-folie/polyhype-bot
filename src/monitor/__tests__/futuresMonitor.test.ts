@@ -514,6 +514,163 @@ describe('futuresMonitor', () => {
     });
   });
 
+  describe('trailing HWM persistence (first-observation bootstrap)', () => {
+    const trailingCfg = {
+      ...baseCfg,
+      FUTURES_TRAILING_STOP_ENABLED: true,
+    };
+
+    const makeLedgerNoHwm = (symbol: string) => ({
+      marketId: symbol,
+      openedAt: new Date(Date.now() - 60_000).toISOString(),
+      isFutures: true,
+      direction: 'LONG' as const,
+      question: `News Futures: ${symbol} LONG`,
+      entryPrice: 50000,
+      stakeUsd: 10,
+      // Intentionally no highWaterMarkPct — represents a fresh position whose
+      // HWM has not yet been persisted (the bug this PR fixes).
+    });
+
+    it('persists HWM on first tick when prior HWM is missing (below TP arm)', async () => {
+      loadConfigMock.mockReturnValue(trailingCfg);
+      mockGetOpenPositions.mockResolvedValue([
+        {
+          symbol: 'BTC',
+          position: {
+            szi: '0.1',
+            entryPx: '50000',
+            unrealizedPnl: '50', // +1.0% notional, +5% ROE @ 5x — below tp=3? actually +5% > 3. Use lower below-tp value.
+            marginUsed: '500', // makes ROE = 50/500*100 = 10% — too high. Use marginUsed=2500 → ROE=2%.
+          },
+        },
+      ]);
+      mockGetOpenPositions.mockResolvedValue([
+        {
+          symbol: 'BTC',
+          position: {
+            szi: '0.1',
+            entryPx: '50000',
+            unrealizedPnl: '50',
+            marginUsed: '2500', // ROE = 50/2500*100 = 2% (below tp=3)
+          },
+        },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerNoHwm('BTC')]);
+
+      await runTick();
+
+      // Bug repro: under the broken condition (gatePct > hwm strict-greater),
+      // priorHwm undefined → hwm = gatePct → check is false → no write.
+      // Fixed: persist on first observation regardless of arming.
+      expect(mockUpdateHighWaterMark).toHaveBeenCalledWith(
+        expect.anything(),
+        'BTC',
+        'LONG',
+        2, // gatePct ≈ 2%
+      );
+      // Below TP arm — should not fire trailing exit.
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+
+    it('persists HWM on first tick when prior HWM is missing (above TP arm)', async () => {
+      loadConfigMock.mockReturnValue(trailingCfg);
+      mockGetOpenPositions.mockResolvedValue([
+        {
+          symbol: 'ETH',
+          position: {
+            szi: '1.0',
+            entryPx: '3000',
+            unrealizedPnl: '300', // +10% notional → at 5x ROE = 50%
+            marginUsed: '600', // ROE = 300/600*100 = 50%
+          },
+        },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerNoHwm('ETH')]);
+
+      await runTick();
+
+      expect(mockUpdateHighWaterMark).toHaveBeenCalledWith(
+        expect.anything(),
+        'ETH',
+        'LONG',
+        50, // gatePct = roePct = 50%
+      );
+    });
+
+    it('does NOT re-persist when current is below an already-persisted peak', async () => {
+      loadConfigMock.mockReturnValue(trailingCfg);
+      mockGetOpenPositions.mockResolvedValue([
+        {
+          symbol: 'SOL',
+          position: {
+            szi: '10',
+            entryPx: '100',
+            unrealizedPnl: '20', // +2% notional, ROE = 20/200*100 = 10%
+            marginUsed: '200',
+          },
+        },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([
+        { ...makeLedgerNoHwm('SOL'), highWaterMarkPct: 25 }, // peaked higher earlier
+      ]);
+
+      await runTick();
+
+      expect(mockUpdateHighWaterMark).not.toHaveBeenCalled();
+    });
+
+    it('ratchets HWM upward when current exceeds the prior peak', async () => {
+      loadConfigMock.mockReturnValue(trailingCfg);
+      mockGetOpenPositions.mockResolvedValue([
+        {
+          symbol: 'XRP',
+          position: {
+            szi: '100',
+            entryPx: '0.5',
+            unrealizedPnl: '5', // +10% notional → ROE 50%
+            marginUsed: '10',
+          },
+        },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([
+        { ...makeLedgerNoHwm('XRP'), highWaterMarkPct: 30 }, // prior peak
+      ]);
+
+      await runTick();
+
+      expect(mockUpdateHighWaterMark).toHaveBeenCalledWith(
+        expect.anything(),
+        'XRP',
+        'LONG',
+        50,
+      );
+    });
+
+    it('trailing fires when current falls below floor after ratcheted peak', async () => {
+      loadConfigMock.mockReturnValue(trailingCfg);
+      mockGetOpenPositions.mockResolvedValue([
+        {
+          symbol: 'WIF',
+          position: {
+            szi: '100',
+            entryPx: '1.0',
+            unrealizedPnl: '4', // +4% notional → ROE 20%
+            marginUsed: '20',
+          },
+        },
+      ]);
+      // Prior peak 30 → floor = max(tp=3, 30 - trailStop=1.5) = 28.5. Current ROE 20 ≤ 28.5 → trailing fires.
+      mockGetLedgerPositions.mockResolvedValue([
+        { ...makeLedgerNoHwm('WIF'), highWaterMarkPct: 30 },
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('WIF');
+    });
+  });
+
   describe('meme ATR SL/TP (issue #264)', () => {
     // Meme config: ATR SL/TP active + HL momentum per-source override in place.
     const memeCfg = {
