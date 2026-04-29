@@ -55,7 +55,7 @@ if [ "$full_stack" = true ]; then
   docker compose up -d --build
 else
   echo "Deploy scope: ${services[*]}"
-  docker compose up -d --build "${services[@]}"
+  docker compose up -d --build --no-deps "${services[@]}"
 fi
 
 # 4. Post-build cleanup of any newly dangling images and residual cache.

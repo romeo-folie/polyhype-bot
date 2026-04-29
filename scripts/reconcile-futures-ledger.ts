@@ -25,7 +25,15 @@ async function run(): Promise<void> {
     ]);
 
     const ledgerFutures = ledgerPositions.filter(isLedgerFutures);
-    const liveHl = hlPositions.filter((p) => Math.abs(parseFloat(p.position.szi)) > 0.0001);
+    const invalidHlData: string[] = [];
+    const liveHl = hlPositions.filter((p) => {
+      const szi = parseFloat(p.position.szi);
+      if (!Number.isFinite(szi)) {
+        invalidHlData.push(`${p.symbol}: invalid szi=${p.position.szi}`);
+        return false;
+      }
+      return Math.abs(szi) > 0.0001;
+    });
 
     const ledgerMap = new Map(
       ledgerFutures.map((p) => [keyFor(p.symbol ?? p.marketId, p.direction as 'LONG' | 'SHORT'), p]),
@@ -48,10 +56,12 @@ async function run(): Promise<void> {
         continue;
       }
       const hlEntry = parseFloat(hlPos.position.entryPx);
-      const driftPct = hlEntry > 0
-        ? Math.abs(ledgerPos.entryPrice - hlEntry) / hlEntry * 100
-        : 0;
-      if (driftPct > 1) {
+      if (!Number.isFinite(hlEntry) || hlEntry <= 0) {
+        invalidHlData.push(`${key}: invalid entryPx=${hlPos.position.entryPx}`);
+        continue;
+      }
+      const driftPct = Math.abs(ledgerPos.entryPrice - hlEntry) / hlEntry * 100;
+      if (!Number.isFinite(driftPct) || driftPct > 1) {
         entryDrift.push(
           `${key} ledger=${ledgerPos.entryPrice.toFixed(6)} hl=${hlEntry.toFixed(6)} drift=${driftPct.toFixed(2)}%`,
         );
@@ -66,7 +76,12 @@ async function run(): Promise<void> {
     console.log(`Ledger futures: ${ledgerMap.size}`);
     console.log(`Hyperliquid live: ${hlMap.size}`);
 
-    if (missingInLedger.length === 0 && missingOnHl.length === 0 && entryDrift.length === 0) {
+    if (
+      missingInLedger.length === 0 &&
+      missingOnHl.length === 0 &&
+      entryDrift.length === 0 &&
+      invalidHlData.length === 0
+    ) {
       console.log('Status: OK');
       return;
     }
@@ -83,6 +98,10 @@ async function run(): Promise<void> {
     if (entryDrift.length > 0) {
       console.log('\nEntry drift > 1%:');
       for (const line of entryDrift) console.log(`- ${line}`);
+    }
+    if (invalidHlData.length > 0) {
+      console.log('\nInvalid Hyperliquid numeric data:');
+      for (const line of invalidHlData) console.log(`- ${line}`);
     }
 
     process.exitCode = 1;
