@@ -1,29 +1,79 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# PGA Automated Deployment Script for Raspberry Pi
-echo "🚀 Starting Automated Agent Deployment..."
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/deploy.sh <service> [service...]
+  scripts/deploy.sh --all
 
-# 1. Pull latest code from main
-# Note: This assumes you are on the main branch on the Pi
+Examples:
+  scripts/deploy.sh pga-futures
+  scripts/deploy.sh pga-arb pga-spot-feed
+  scripts/deploy.sh --all
+
+Notes:
+  - Targeted service deploys are the default and safest option.
+  - `--all` is the explicit full-stack path and will include Redis/Postgres.
+EOF
+}
+
+if [ "$#" -eq 0 ]; then
+  usage
+  exit 1
+fi
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  usage
+  exit 0
+fi
+
+declare -a services
+if [ "$1" = "--all" ]; then
+  if [ "$#" -ne 1 ]; then
+    echo "error: --all does not accept additional service arguments" >&2
+    echo "" >&2
+    usage >&2
+    exit 1
+  fi
+  services=()
+  full_stack=true
+else
+  services=("$@")
+  full_stack=false
+fi
+
+echo "Starting automated agent deployment..."
+
+# 1. Pull latest code from main.
 git pull origin main
 
 # 2. Pre-build prune: free space before parallel image extraction.
-# Without this, building all services simultaneously can exhaust disk during
-# the containerd layer-unpack phase even when df shows headroom (burned 2026-04-28).
+# Without this, building many services simultaneously can exhaust disk during
+# the containerd layer-unpack phase even when df shows headroom.
 docker image prune -f
 docker builder prune -f --filter "until=24h"
 
-# 3. Rebuild and restart services in detached mode
-# Docker Compose will only restart services whose code has changed.
-docker compose up -d --build
+# 3. Rebuild and restart only the requested services unless the caller
+# explicitly opted into a full-stack deploy.
+if [ "$full_stack" = true ]; then
+  echo "Deploy scope: full stack"
+  docker compose up -d --build
+else
+  echo "Deploy scope: ${services[*]}"
+  docker compose up -d --build "${services[@]}"
+fi
 
 # 4. Post-build cleanup of any newly dangling images and residual cache.
 docker image prune -f
 docker builder prune -f --filter "until=24h"
 
 echo ""
-echo "✅ Deployment Complete! Your agent workers are running in the background."
-echo "💡 View logs:      docker compose logs -f"
-echo "💡 View status:    docker compose ps"
-echo "💡 Dashboard:     npm run monitor:dashboard"
+echo "Deployment complete."
+if [ "$full_stack" = true ]; then
+  echo "View logs:      docker compose logs -f"
+else
+  echo "View logs:      docker compose logs -f ${services[*]}"
+fi
+echo "View status:    docker compose ps"
+echo "Dashboard:      npm run monitor:dashboard"
