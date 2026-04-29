@@ -134,6 +134,7 @@ describe('Telegram notifications', () => {
       const body = JSON.parse(opts.body as string) as { text: string };
       expect(body.text).toContain('$0.00387900');
       expect(body.text).not.toContain('0.003 (0.4% implied)');
+      expect(body.text).not.toContain('Our P:');
     });
   });
 

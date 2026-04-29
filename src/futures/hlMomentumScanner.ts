@@ -205,11 +205,12 @@ export async function scanHlMomentum(
 
   // Compute RSI and VWAP distance on primary candles. Used by the anti-chase gate and
   // included in every signal_decisions row for future stretch-metric audits.
-  const latestClosedPrimaryCandle = [...primaryCandles].reverse().find((c) => c.closed !== false)
-    ?? primaryCandles[primaryCandles.length - 1]!;
+  const closedPrimaryCandles = primaryCandles.filter((c) => c.closed !== false);
+  const indicatorCandles = closedPrimaryCandles.length > 0 ? closedPrimaryCandles : primaryCandles;
+  const latestClosedPrimaryCandle = indicatorCandles[indicatorCandles.length - 1]!;
   const lastClose = latestClosedPrimaryCandle.close;
-  const rsi = computeRSIFromCandles(primaryCandles, cfg.HL_MOMENTUM_RSI_PERIOD);
-  const vwapVal = computeVWAP(primaryCandles);
+  const rsi = computeRSIFromCandles(indicatorCandles, cfg.HL_MOMENTUM_RSI_PERIOD);
+  const vwapVal = computeVWAP(indicatorCandles);
   const vwapDistPct = (vwapVal !== null && vwapVal > 0)
     ? (lastClose - vwapVal) / vwapVal * 100
     : null;
