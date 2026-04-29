@@ -440,8 +440,37 @@ describe('inferCategory', () => {
     expect(inferCategory('Mixed martial arts bout winner')).toBe('sports-mma');
   });
 
-  it('defaults to geopolitical', () => {
-    expect(inferCategory('Unknown topic signal')).toBe('geopolitical');
+  it('returns geopolitical only when explicit keywords match', () => {
     expect(inferCategory('War breaks out in region')).toBe('geopolitical');
+    expect(inferCategory('Russia announces ceasefire with Ukraine')).toBe('geopolitical');
+    expect(inferCategory('Iran nuclear deal reinstated')).toBe('geopolitical');
+    expect(inferCategory('Strait of Hormuz traffic returns to normal by end of June?')).toBe(
+      'geopolitical',
+    );
+    expect(inferCategory('NATO summit ends with no agreement')).toBe('geopolitical');
+  });
+
+  it('returns unknown when no category keywords match', () => {
+    // Generic / uncategorizable strings must NOT silently fall back to geopolitical.
+    // Callers (copytrade entry path) treat 'unknown' as a skip signal so that
+    // foreign-language soccer leagues etc. don't bypass category-aware gates.
+    expect(inferCategory('Unknown topic signal')).toBe('unknown');
+    expect(inferCategory('Will the project ship next month?')).toBe('unknown');
+    expect(inferCategory('Random untagged market')).toBe('unknown');
+  });
+
+  it('detects obscure soccer leagues via league/club patterns', () => {
+    // The exact Saudi market that bypassed COPYTRADE_SPORTS_NOTIFY_ONLY on 2026-04-29.
+    expect(inferCategory('Will Al Taawoun Saudi Club win on 2026-04-29?')).toBe('sports-soccer');
+    expect(inferCategory('Al Hilal vs Al Nassr: O/U 2.5')).toBe('sports-soccer');
+    expect(inferCategory('Al Ittihad to win Saudi Pro League?')).toBe('sports-soccer');
+    expect(inferCategory('J1 League winner 2026?')).toBe('sports-soccer');
+    expect(inferCategory('Brasileirao top scorer')).toBe('sports-soccer');
+  });
+
+  it('routes generic "Will X win on YYYY-MM-DD?" to sports, not unknown', () => {
+    // Match-day question shape with no club/league keyword still classifies as
+    // sports so the soccer-specific tag-based check in copytrade can then run.
+    expect(inferCategory('Will Some Obscure FC win on 2026-05-15?')).toBe('sports');
   });
 });

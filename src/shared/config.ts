@@ -854,9 +854,26 @@ const envSchema = z.object({
   // we'd actually pay (currentOutcomePrice), not the whale's fill.
   COPYTRADE_MIN_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.08),
   COPYTRADE_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.92),
-  // When true, sports copytrades (any category starting with 'sports') fire a Telegram
-  // alert but are NOT executed. Lets you review whale sports signals without risking capital.
-  COPYTRADE_SPORTS_NOTIFY_ONLY: boolFromEnv.optional().default(true),
+  // Per-category notify-only list. Copytrade signals whose inferred category is
+  // in this list fire a Telegram alert but are NOT executed. Default ships
+  // 'sports-soccer' only — other sports categories (tennis, F1, MMA, etc.) are
+  // executed as normal. Set to empty string to execute all categories.
+  COPYTRADE_NOTIFY_ONLY_CATEGORIES: z
+    .string()
+    .optional()
+    .default('sports-soccer')
+    .transform((v) =>
+      v
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  // Notify-only Telegram dedup window: suppress repeated pings for the same
+  // (wallet, market, direction) tuple within this window. Whales often slice a
+  // single intent into N rapid transactions; without this, each transaction
+  // produced its own Telegram fire. Must be ≥1 — Redis SET … EX 0 is invalid
+  // and would cause the notify-only path to silently drop every alert.
+  COPYTRADE_NOTIFY_DEDUP_TTL_SEC: z.coerce.number().int().min(1).optional().default(1800),
   // Directional slippage gate: reject only ADVERSE drift vs. whale fill.
   // Symmetric COPYTRADE_MAX_SLIPPAGE_BPS treats a favorable move (better fill for us)
   // identically to an adverse move (already underwater at entry). This caps adverse

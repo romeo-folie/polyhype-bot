@@ -129,7 +129,7 @@ export function inferCategory(question: string): string {
     return 'sports-nfl';
   }
   if (
-    /soccer|fifa|world cup|champions league|europa league|premier league|epl|la liga|bundesliga|serie a|ligue 1|\bmls\b|liga mx|dortmund|leverkusen|wolfsburg|hoffenheim|stuttgart|köln|\bkoln\b|münchen|\bmunich\b|arsenal|tottenham|chelsea|liverpool|manchester|barcelona|real madrid|atletico|juventus|inter milan|ac milan|\bajax\b|\bpsg\b/.test(
+    /soccer|\bfifa\b|world cup|champions league|europa league|premier league|\bepl\b|la liga|bundesliga|serie a|ligue 1|\bmls\b|liga mx|saudi pro league|saudi club|j[123][- ]?league|k[12][- ]?league|brasileirao|eredivisie|primeira liga|super lig|a-league|dortmund|leverkusen|wolfsburg|hoffenheim|stuttgart|köln|\bkoln\b|münchen|\bmunich\b|arsenal|tottenham|chelsea|liverpool|manchester|barcelona|real madrid|atl[eé]tico|juventus|inter milan|ac milan|\bajax\b|\bpsg\b|al[- ](hilal|nassr|ittihad|taawoun|ahli|fateh|fayha|raed|riyadh|wehda|orobah|kholood|khaleej|akhdoud|qadsiah|shabab|ettifaq)/.test(
       q,
     )
   ) {
@@ -157,13 +157,44 @@ export function inferCategory(question: string): string {
   if (/\bvs\.?\s/i.test(q) && /\bo\/u\b/i.test(q)) {
     return 'sports';
   }
+  // "Will <X> win on YYYY-MM-DD?" — match-day question pattern is almost
+  // exclusively used for soccer (occasionally MLB/NHL but those have keyword
+  // matches above). Catches obscure clubs (Saudi/J-League/Liga MX) that don't
+  // hit the named-club regex.
+  if (/\bwill\b.+\bwin on \d{4}-\d{2}-\d{2}/.test(q)) {
+    return 'sports';
+  }
   if (/mention|say|tweet|post|transcript|phrase|word|quoted/.test(q)) {
     return 'mentions';
   }
   if (/highest temperature|lowest temperature|\bweather\b|\bsnow\b|\brainfall\b|hurricane/.test(q)) {
     return 'weather';
   }
-  return 'geopolitical';
+  // Explicit geopolitical regex — country/conflict/diplomacy keywords.
+  // This is the LAST positive match before fallback so generic terms don't
+  // pre-empt more specific buckets above.
+  // NOTE on election terms: bare `election` is matched earlier by the
+  // us-politics check, so any foreign election question containing that
+  // exact word (e.g. "Will Hungary's election be free and fair?") still
+  // routes there. The added forms here — `elect`/`elects`/`elected`/
+  // `referendum`/`coalition government` — cover phrasings that don't trip
+  // us-politics, plus they let governance markets that hit none of the
+  // earlier buckets ("Will Hungary elect TISZA?") classify as geopolitical
+  // instead of falling through to `'unknown'`.
+  if (
+    /\b(war|conflict|invasion|ceasefire|nuclear|military|sanctions|treaty|embargo|coup|troops|airstrike|missile|drone strike|occupation|hostage|prisoner swap|diplomacy|diplomatic|peace deal|peace talks|sovereignty|annexation|prime minister|foreign minister|secretary of state|chancellor|united nations|iaea|icc|g7|g20|uranium|enrichment|warhead|ballistic|iran|russia|ukraine|china|taiwan|israel|hamas|hezbollah|nato|north korea|gaza|venezuela|myanmar|syria|lebanon|yemen|afghanistan|saudi arabia|qatar|turkey|hungary|hormuz|red sea|south china sea|elect|elects|elected|election|referendum|coalition government)\b/.test(
+      q,
+    )
+  ) {
+    return 'geopolitical';
+  }
+  // No category could be determined. Callers should treat 'unknown' as a
+  // signal NOT to enter — uncategorized markets bypass our category-aware
+  // gates (slippage caps, age windows, notify-only filters). Previously we
+  // returned 'geopolitical' as a fallback, which silently mis-bucketed Saudi
+  // Pro League, J-League, Mexican Liga MX, etc. as geopolitical and let
+  // soccer trades through the COPYTRADE_NOTIFY_ONLY_CATEGORIES gate.
+  return 'unknown';
 }
 
 /**
