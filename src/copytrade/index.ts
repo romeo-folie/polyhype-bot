@@ -501,6 +501,22 @@ const SOCCER_TAG_SLUGS = new Set([
   'australian-a-league',
 ]);
 
+// Strict soccer-detection regex. Re-uses the `sports-soccer` keyword set used
+// for SCOPE filtering, but DROPS the generic `"win on"` phrase: that phrase is
+// fine as an OR scope filter (paired with a soccer-scope intent already), but
+// is too weak as a positive *detection* signal — questions like
+// "Will the Yankees win on 2026-05-01?" would otherwise be misclassified as
+// soccer and incorrectly suppressed by the notify-only gate.
+const SOCCER_DETECT_REGEX = (() => {
+  const kws = (CATEGORY_KEYWORDS['sports-soccer'] ?? []).filter((kw) => kw !== 'win on');
+  const parts = kws.map((kw) =>
+    kw.includes(' ')
+      ? kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      : `\\b${kw}\\b`,
+  );
+  return new RegExp(parts.join('|'));
+})();
+
 // Per-category icons for the notify-only Telegram payload. Falls back to a
 // neutral 📣 for any category that hasn't been given a specific icon — the
 // suppressed-category name is also rendered in the message body, so the icon
@@ -531,8 +547,11 @@ function notifyIconFor(category: string): string {
 
 /**
  * Decide whether a market is a soccer market, using Gamma tags as primary
- * signal and the keyword regex as fallback. Tags are the venue's own
- * classification — far more reliable than chasing every league/club name.
+ * signal and a stricter soccer-only keyword regex as fallback. Tags are the
+ * venue's own classification — far more reliable than chasing every league
+ * or club name. The keyword fallback intentionally excludes the generic
+ * `"win on"` phrase (see SOCCER_DETECT_REGEX) so non-soccer match-day
+ * questions don't false-positive into the soccer notify-only gate.
  */
 export function isSoccerMarket(
   question: string,
@@ -541,7 +560,7 @@ export function isSoccerMarket(
 ): boolean {
   if (tagSlugs.some((slug) => SOCCER_TAG_SLUGS.has(slug))) return true;
   const text = `${question} ${description ?? ''}`.toLowerCase();
-  return CATEGORY_REGEXES.get('sports-soccer')?.test(text) ?? false;
+  return SOCCER_DETECT_REGEX.test(text);
 }
 
 /**

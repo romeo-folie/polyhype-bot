@@ -186,6 +186,25 @@ describe('copytrade helpers', () => {
     // Wrong scope — tags don't match
     expect(matchesCategory(title, null, ['weather'], ['nhl', 'hockey'])).toBe(false);
   });
+
+  it('isSoccerMarket: tag-first, then strict keyword fallback (no "win on" false-positive)', async () => {
+    const { isSoccerMarket } = await import('../index.js');
+    // Tag path — soccer slugs trigger true
+    expect(isSoccerMarket('Some random title', null, ['soccer'])).toBe(true);
+    expect(isSoccerMarket('Some random title', null, ['japan-j2-league'])).toBe(true);
+    expect(isSoccerMarket('Some random title', null, ['saudi-pro-league'])).toBe(true);
+    // Keyword path — soccer-specific terms trigger true
+    expect(isSoccerMarket('Will Bayer 04 Leverkusen win on 2026-05-02?', null, [])).toBe(true);
+    expect(isSoccerMarket('PSG vs. Liverpool: total goals O/U 3.5', null, [])).toBe(true);
+    expect(isSoccerMarket('Bundesliga matchday 30 winner', null, [])).toBe(true);
+    // The false-positive that motivated the strict regex: "win on YYYY-MM-DD"
+    // alone (no soccer-specific token) must NOT classify as soccer, otherwise
+    // MLB/NHL match-day questions get suppressed by the soccer notify gate.
+    expect(isSoccerMarket('Will the Yankees win on 2026-05-01?', null, [])).toBe(false);
+    expect(isSoccerMarket('Will the Maple Leafs win on 2026-05-15?', null, [])).toBe(false);
+    // Empty input → false
+    expect(isSoccerMarket('Totally unrelated question', null, [])).toBe(false);
+  });
 });
 
 describe('runCopytrade', () => {
