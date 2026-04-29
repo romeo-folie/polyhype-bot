@@ -172,9 +172,15 @@ export function inferCategory(question: string): string {
   }
   // Explicit geopolitical regex — country/conflict/diplomacy keywords.
   // This is the LAST positive match before fallback so generic terms don't
-  // pre-empt more specific buckets above. Foreign-election terms (`elect`,
-  // `referendum`) live here because US elections are already routed by the
-  // us-politics check earlier.
+  // pre-empt more specific buckets above.
+  // NOTE on election terms: bare `election` is matched earlier by the
+  // us-politics check, so any foreign election question containing that
+  // exact word (e.g. "Will Hungary's election be free and fair?") still
+  // routes there. The added forms here — `elect`/`elects`/`elected`/
+  // `referendum`/`coalition government` — cover phrasings that don't trip
+  // us-politics, plus they let governance markets that hit none of the
+  // earlier buckets ("Will Hungary elect TISZA?") classify as geopolitical
+  // instead of falling through to `'unknown'`.
   if (
     /\b(war|conflict|invasion|ceasefire|nuclear|military|sanctions|treaty|embargo|coup|troops|airstrike|missile|drone strike|occupation|hostage|prisoner swap|diplomacy|diplomatic|peace deal|peace talks|sovereignty|annexation|prime minister|foreign minister|secretary of state|chancellor|united nations|iaea|icc|g7|g20|uranium|enrichment|warhead|ballistic|iran|russia|ukraine|china|taiwan|israel|hamas|hezbollah|nato|north korea|gaza|venezuela|myanmar|syria|lebanon|yemen|afghanistan|saudi arabia|qatar|turkey|hungary|hormuz|red sea|south china sea|elect|elects|elected|election|referendum|coalition government)\b/.test(
       q,

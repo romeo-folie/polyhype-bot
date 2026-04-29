@@ -501,6 +501,34 @@ const SOCCER_TAG_SLUGS = new Set([
   'australian-a-league',
 ]);
 
+// Per-category icons for the notify-only Telegram payload. Falls back to a
+// neutral 📣 for any category that hasn't been given a specific icon — the
+// suppressed-category name is also rendered in the message body, so the icon
+// is decorative rather than informational.
+const NOTIFY_CATEGORY_ICONS: Record<string, string> = {
+  'sports-soccer': '⚽',
+  'sports-nba': '🏀',
+  'sports-nfl': '🏈',
+  'sports-nhl': '🏒',
+  'sports-mlb': '⚾',
+  'sports-tennis': '🎾',
+  'sports-f1': '🏎️',
+  'sports-mma': '🥊',
+  sports: '🏟️',
+  weather: '⛅',
+  'crypto-regulatory': '🪙',
+  'crypto-updown': '🪙',
+  macro: '📈',
+  'us-politics': '🗳️',
+  geopolitical: '🌐',
+  'ai-tech': '🤖',
+  mentions: '💬',
+};
+
+function notifyIconFor(category: string): string {
+  return NOTIFY_CATEGORY_ICONS[category] ?? '📣';
+}
+
 /**
  * Decide whether a market is a soccer market, using Gamma tags as primary
  * signal and the keyword regex as fallback. Tags are the venue's own
@@ -551,8 +579,11 @@ export function refineCategoryFromTags(category: string, tagSlugs: string[]): st
  * Keywords are matched as whole words (primary path — zero HTTP cost).
  *
  * Pass `tagSlugs` from `getEventTagSlugs()` to enable the tag-based fallback layer.
- * Tags are only checked when the keyword pass returns false — callers should
- * fetch tags lazily rather than unconditionally.
+ * Tags are checked only when the keyword pass returns false. The copytrade
+ * pipeline now fetches tags up-front for every scope-pass market (24h cached)
+ * so downstream gates such as `isSoccerMarket()` and `refineCategoryFromTags()`
+ * can use them; this function still treats them as a fallback for the scope
+ * decision itself.
  */
 export function matchesCategory(
   title: string,
@@ -1189,7 +1220,7 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
           .catch(() => null);
         if (claim === 'OK') {
           void notify(
-            `⚽ <b>Copytrade ${signalCategory} signal (suppressed)</b>\n` +
+            `${notifyIconFor(signalCategory)} <b>Copytrade ${signalCategory} signal (suppressed)</b>\n` +
               `Wallet: <code>${wallet.slice(0, 10)}…</code>\n` +
               `Market: ${signal.question}\n` +
               `Side: ${direction} @ ${currentOutcomePrice.toFixed(3)}\n` +

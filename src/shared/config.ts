@@ -871,8 +871,9 @@ const envSchema = z.object({
   // Notify-only Telegram dedup window: suppress repeated pings for the same
   // (wallet, market, direction) tuple within this window. Whales often slice a
   // single intent into N rapid transactions; without this, each transaction
-  // produced its own Telegram fire.
-  COPYTRADE_NOTIFY_DEDUP_TTL_SEC: z.coerce.number().int().min(0).optional().default(1800),
+  // produced its own Telegram fire. Must be ≥1 — Redis SET … EX 0 is invalid
+  // and would cause the notify-only path to silently drop every alert.
+  COPYTRADE_NOTIFY_DEDUP_TTL_SEC: z.coerce.number().int().min(1).optional().default(1800),
   // Directional slippage gate: reject only ADVERSE drift vs. whale fill.
   // Symmetric COPYTRADE_MAX_SLIPPAGE_BPS treats a favorable move (better fill for us)
   // identically to an adverse move (already underwater at entry). This caps adverse
