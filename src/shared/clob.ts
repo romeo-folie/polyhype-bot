@@ -746,30 +746,80 @@ async function redeemClobOutcomeWithRpc(
   const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;
   const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
 
+  // Credential availability — used both for the early sigType=1 gate and later
+  // by the relayer auth path. Computed once at function scope.
+  const hasRelayerKey = !!(
+    cfg.POLYMARKET_RELAYER_API_KEY && cfg.POLYMARKET_RELAYER_API_KEY_ADDRESS
+  );
+  const hasBuilderKey = !!(
+    cfg.POLYMARKET_BUILDER_API_KEY &&
+    cfg.POLYMARKET_BUILDER_SECRET &&
+    cfg.POLYMARKET_BUILDER_PASSPHRASE
+  );
+
+  // Early exit for sigType=1 with no relayer/builder creds — we'd return
+  // MAGIC_PROXY_MANUAL_REDEEM_REQUIRED regardless, so skip the pre-flight balance
+  // check (avoids 4 wasted RPC calls per attempt).
+  if (sigType === 1 && !hasRelayerKey && !hasBuilderKey) {
+    logger.warn(
+      '[clob] sigType=1: no relayer or builder credentials configured — manual redemption required',
+      {
+        conditionId: input.conditionId,
+        instruction:
+          'Set POLYMARKET_RELAYER_API_KEY + POLYMARKET_RELAYER_API_KEY_ADDRESS in .env',
+      },
+    );
+    return { success: false, error: 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED' };
+  }
+
   // Pre-flight: check on-chain CTF token balance before submitting.
   // redeemPositions([1,2]) is a no-op (not a revert) when the wallet holds zero tokens —
   // the V2 relayer always returns success:true for such calls, causing spurious
-  // notifications and false bankroll credits. Bail early if nothing to redeem.
-  const balAbi = ['function balanceOf(address account, uint256 id) view returns (uint256)'];
-  const ctfBalCheck = new Contract(CTF_ADDRESS, balAbi, provider);
-  const toPositionId = (indexSet: number): bigint => {
-    // CTF formula: collectionId = keccak256(abi.encodePacked(conditionId, indexSet))
-    // (parentCollectionId is bytes32(0) — XOR with 0 is identity)
-    const collectionId = solidityPackedKeccak256(
-      ['bytes32', 'uint256'],
-      [input.conditionId, BigInt(indexSet)],
-    );
-    // positionId = uint256(keccak256(abi.encodePacked(collateralToken, collectionId)))
-    return BigInt(solidityPackedKeccak256(['address', 'bytes32'], [PUSD_ADDRESS, collectionId]));
-  };
-  const balanceOf = ctfBalCheck['balanceOf'] as (acc: string, id: bigint) => Promise<bigint>;
+  // notifications and false bankroll credits.
+  //
+  // Position ID derivation: the standard Gnosis ConditionalTokens contract uses
+  // alt_bn128 elliptic curve point arithmetic for getCollectionId (NOT simple keccak),
+  // so we must call the on-chain view function. The second step (positionId from
+  // collectionId) is a plain keccak we can compute locally.
+  //
+  // Balance check address depends on sigType:
+  //   - sigType=0 (EOA):         tokens held at signer.address (the redemption sender)
+  //   - sigType=1 (Magic Proxy): tokens held at funderAddress (the proxy wallet)
+  //
+  // Errors propagate so the outer RPC failover loop can retry on the next URL.
+  const balCheckAddress = sigType === 1 ? funderAddress : signer.address;
+  const ctfReadAbi = [
+    'function getCollectionId(bytes32 parentCollectionId, bytes32 conditionId, uint indexSet) view returns (bytes32)',
+    'function balanceOf(address account, uint256 id) view returns (uint256)',
+  ];
+  const ctfRead = new Contract(CTF_ADDRESS, ctfReadAbi, provider);
+  const getCollectionIdFn = ctfRead['getCollectionId'] as (
+    parent: string,
+    cond: string,
+    indexSet: bigint,
+  ) => Promise<string>;
+  const balanceOfFn = ctfRead['balanceOf'] as (acc: string, id: bigint) => Promise<bigint>;
+  const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000';
+
+  const [collId1, collId2] = await Promise.all([
+    getCollectionIdFn(ZERO_BYTES32, input.conditionId, 1n),
+    getCollectionIdFn(ZERO_BYTES32, input.conditionId, 2n),
+  ]);
+  // positionId = uint256(keccak256(abi.encodePacked(collateralToken, collectionId)))
+  const posId1 = BigInt(
+    solidityPackedKeccak256(['address', 'bytes32'], [PUSD_ADDRESS, collId1]),
+  );
+  const posId2 = BigInt(
+    solidityPackedKeccak256(['address', 'bytes32'], [PUSD_ADDRESS, collId2]),
+  );
   const [bal1, bal2] = await Promise.all([
-    balanceOf(funderAddress, toPositionId(1)).catch(() => 0n),
-    balanceOf(funderAddress, toPositionId(2)).catch(() => 0n),
+    balanceOfFn(balCheckAddress, posId1),
+    balanceOfFn(balCheckAddress, posId2),
   ]);
   if (bal1 === 0n && bal2 === 0n) {
     logger.debug('[clob] redemption pre-flight: zero CTF token balance — skipping', {
       conditionId: input.conditionId,
+      address: balCheckAddress,
     });
     return { success: false, error: 'balance_is_zero' };
   }
@@ -791,24 +841,7 @@ async function redeemClobOutcomeWithRpc(
     // Auth: RELAYER_API_KEY + RELAYER_API_KEY_ADDRESS headers (simplest path)
     //    or Builder API Key HMAC headers (POLY_BUILDER_* headers)
     // Signing: GSN-style struct hash over (from, to, data, txFee, gasPrice, gasLimit, nonce, relayHub, relay)
-
-    const hasRelayerKey = cfg.POLYMARKET_RELAYER_API_KEY && cfg.POLYMARKET_RELAYER_API_KEY_ADDRESS;
-    const hasBuilderKey =
-      cfg.POLYMARKET_BUILDER_API_KEY &&
-      cfg.POLYMARKET_BUILDER_SECRET &&
-      cfg.POLYMARKET_BUILDER_PASSPHRASE;
-
-    if (!hasRelayerKey && !hasBuilderKey) {
-      logger.warn(
-        '[clob] sigType=1: no relayer or builder credentials configured — manual redemption required',
-        {
-          conditionId: input.conditionId,
-          instruction:
-            'Set POLYMARKET_RELAYER_API_KEY + POLYMARKET_RELAYER_API_KEY_ADDRESS in .env',
-        },
-      );
-      return { success: false, error: 'MAGIC_PROXY_MANUAL_REDEEM_REQUIRED' };
-    }
+    // (Credential gate handled at function entry to avoid wasted pre-flight RPC calls.)
 
     const { RelayClient, RelayerTxType } = await import('@polymarket/builder-relayer-client');
     const { privateKeyToAccount } = await import('viem/accounts');
