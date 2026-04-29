@@ -532,11 +532,27 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         let trailingArmed = false;
         if (cfg.FUTURES_TRAILING_STOP_ENABLED) {
           const ledgerPos = futuresLedger.find((p) => p.marketId === symbol);
-          const priorHwm = ledgerPos?.highWaterMarkPct;
-          hwm = typeof priorHwm === 'number' && Number.isFinite(priorHwm) ? priorHwm : gatePct;
-          if (gatePct > hwm) {
-            hwm = gatePct;
-            updateHighWaterMark(redis, symbol, direction, hwm).catch(() => {});
+          const priorHwmRaw = ledgerPos?.highWaterMarkPct;
+          const priorHwm =
+            typeof priorHwmRaw === 'number' && Number.isFinite(priorHwmRaw)
+              ? priorHwmRaw
+              : undefined;
+          hwm = priorHwm !== undefined ? Math.max(priorHwm, gatePct) : gatePct;
+          // Persist on first observation (priorHwm undefined) OR when ratcheting
+          // above the prior peak. The first-observation branch is load-bearing:
+          // without it, the strict-greater check below never fires on tick 1
+          // (priorHwm undefined → hwm = gatePct → gatePct > hwm is false), so
+          // HWM never gets persisted, every subsequent tick re-derives hwm from
+          // gatePct, and the trailing floor collapses onto current price (the
+          // floor moves up and down with the position instead of ratcheting).
+          if (priorHwm === undefined || hwm > priorHwm) {
+            updateHighWaterMark(redis, symbol, direction, hwm).catch((err: unknown) => {
+              logger.debug('[futures-monitor] updateHighWaterMark failed (non-fatal)', {
+                symbol,
+                direction,
+                error: String(err),
+              });
+            });
           }
           trailingArmed = hwm >= tpPct;
           if (!shouldExit && trailingArmed) {
