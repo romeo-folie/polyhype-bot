@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { scanHlMomentum, momentumCooldownKey, isMemeSymbol } from '../hlMomentumScanner.js';
+import {
+  scanHlMomentum,
+  momentumCooldownKey,
+  momentumStretchConfirmationKey,
+  isMemeSymbol,
+} from '../hlMomentumScanner.js';
 import type { BinancePriceTick } from '../hlMomentumScanner.js';
 
 // ---------------------------------------------------------------------------
@@ -46,6 +51,10 @@ const baseConfig = {
   HL_MOMENTUM_RSI_OVERBOUGHT: 70,
   HL_MOMENTUM_RSI_OVERSOLD: 30,
   HL_MOMENTUM_VWAP_MAX_DIST_PCT: 3.0,
+  HL_MOMENTUM_SOFT_CONFIRM_ENABLED: true,
+  HL_MOMENTUM_SOFT_CONFIRM_TTL_SEC: 7200,
+  HL_MOMENTUM_SOFT_CONFIRM_VWAP_DIST_PCT: 2.0,
+  HL_MOMENTUM_SOFT_CONFIRM_RSI_BUFFER: 6,
 };
 
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
@@ -101,9 +110,20 @@ function makeTick(symbol = 'btcusdt', price = 70_000): BinancePriceTick {
 
 function makeRedis(overrides: Record<string, string | null> = {}): {
   get: ReturnType<typeof vi.fn>;
+  set: ReturnType<typeof vi.fn>;
+  del: ReturnType<typeof vi.fn>;
 } {
+  const store = new Map<string, string | null>(Object.entries(overrides));
   return {
-    get: vi.fn((key: string) => Promise.resolve(overrides[key] ?? null)),
+    get: vi.fn((key: string) => Promise.resolve(store.get(key) ?? null)),
+    set: vi.fn((key: string, value: string) => {
+      store.set(key, value);
+      return Promise.resolve('OK');
+    }),
+    del: vi.fn((key: string) => {
+      store.delete(key);
+      return Promise.resolve(1);
+    }),
   };
 }
 
@@ -1325,6 +1345,7 @@ describe('scanHlMomentum — anti-chase gate', () => {
   const antiChaseConfig = {
     ...baseConfig,
     HL_MOMENTUM_ANTI_CHASE_ENABLED: true,
+    HL_MOMENTUM_SOFT_CONFIRM_ENABLED: false,
     HL_MOMENTUM_RSI_OVERBOUGHT: 70,
     HL_MOMENTUM_RSI_OVERSOLD: 30,
     HL_MOMENTUM_VWAP_MAX_DIST_PCT: 3.0,
@@ -1453,6 +1474,73 @@ describe('scanHlMomentum — anti-chase gate', () => {
         raw: expect.objectContaining({ rsi: 65, vwapDistPct: expect.any(Number) }),
       }),
     );
+  });
+});
+
+describe('scanHlMomentum — borderline stretch confirmation', () => {
+  beforeEach(() => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_ANTI_CHASE_ENABLED: true,
+      HL_MOMENTUM_SOFT_CONFIRM_ENABLED: true,
+    });
+    mockScoreHlTrend.mockReturnValue(bullishResult);
+    mockHasOpenPosition.mockResolvedValue(false);
+    mockComputeEMA.mockReturnValue(null);
+    mockComputeMACDFromCandles.mockReturnValue(null);
+    mockComputeRSIFromCandles.mockReturnValue(65); // borderline: below hard 70, above soft 64
+    mockComputeVWAP.mockReturnValue(99); // inside hard gate
+  });
+
+  it('requires one more closed 15m bar for borderline stretched setups', async () => {
+    mockBuildCandles.mockResolvedValue([
+      { openTime: 1_000, close: 100, closed: true },
+    ]);
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).toBeNull();
+    expect(redis.set).toHaveBeenCalledWith(
+      momentumStretchConfirmationKey('BTC', 'LONG'),
+      '1000',
+      'EX',
+      7200,
+    );
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ hasTrade: false, skipReason: 'stretch_confirmation_pending' }),
+    );
+  });
+
+  it('enters on the next closed 15m bar when the signal persists', async () => {
+    mockBuildCandles
+      .mockResolvedValueOnce([{ openTime: 1_000, close: 100, closed: true }])
+      .mockResolvedValueOnce([{ openTime: 1_900, close: 101, closed: true }]);
+    const redis = makeRedis();
+
+    const first = await scanHlMomentum(makeTick(), redis as never);
+    const second = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(first).toBeNull();
+    expect(second).not.toBeNull();
+    expect(second!.marketId).toBe('BTC');
+    expect(redis.del).toHaveBeenCalledWith(momentumStretchConfirmationKey('BTC', 'LONG'));
+  });
+
+  it('does not delay clean setups that are outside the soft-confirm band', async () => {
+    mockBuildCandles.mockResolvedValue([{ openTime: 1_000, close: 100, closed: true }]);
+    mockComputeRSIFromCandles.mockReturnValue(55);
+    mockComputeVWAP.mockReturnValue(99.5);
+    const redis = makeRedis();
+
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).not.toBeNull();
+    expect(redis.set).not.toHaveBeenCalled();
   });
 });
 

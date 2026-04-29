@@ -70,7 +70,12 @@ function fmtProb(price: number): string {
  * Format a futures/perp price as a plain dollar value.
  */
 function fmtFiat(price: number): string {
-  return `$${price.toFixed(2)}`;
+  const abs = Math.abs(price);
+  if (abs >= 1000) return `$${price.toFixed(2)}`;
+  if (abs >= 1) return `$${price.toFixed(4)}`;
+  if (abs >= 0.1) return `$${price.toFixed(5)}`;
+  if (abs >= 0.01) return `$${price.toFixed(6)}`;
+  return `$${price.toFixed(8)}`;
 }
 
 /**
@@ -100,12 +105,12 @@ function fmtVenue(venue: string): string {
 export async function notifyTradeExecuted(
   signal: TradeSignal,
   txHash: string | undefined,
-  opts?: { venue?: string; sharesFilled?: number },
+  opts?: { venue?: string; sharesFilled?: number; entryPrice?: number | null },
 ): Promise<void> {
   const edgePct = (signal.edgeMagnitude * 100).toFixed(1);
-  const consensusPct = ((signal.consensusProbability ?? 0.5) * 100).toFixed(1);
-  const outcomePct = (signal.outcomePrice * 100).toFixed(1);
   const venue = fmtVenue(opts?.venue ?? 'clob');
+  const isFutures = opts?.venue === 'hyperliquid' || signal.isFutures === true;
+  const entryPrice = opts?.entryPrice ?? signal.outcomePrice;
 
   const sharesLine =
     opts?.sharesFilled != null && opts.sharesFilled > 0
@@ -121,15 +126,19 @@ export async function notifyTradeExecuted(
     metaLine = `\n<code>[${parts.join(' | ')}]</code>\n`;
   }
 
+  const marketContextLine = isFutures
+    ? `\n<b>Edge:</b> ${edgePct}%\n`
+    : `\n<b>Edge:</b> ${edgePct}%  |  <b>Our P:</b> ${((signal.consensusProbability ?? 0.5) * 100).toFixed(1)}% vs market ${(signal.outcomePrice * 100).toFixed(1)}%\n`;
+
   const text =
     `🟢 <b>Trade Executed</b>\n\n` +
     `<b>Market:</b> ${escapeHtml(signal.question)}\n` +
     `<b>Direction:</b> ${signal.direction}  |  <b>Venue:</b> ${venue}\n` +
-    `<b>Entry price:</b> ${fmtProb(signal.outcomePrice)}\n` +
+    `<b>Entry price:</b> ${isFutures ? fmtFiat(entryPrice) : fmtProb(signal.outcomePrice)}\n` +
     `<b>Stake:</b> $${signal.stakeUsd.toFixed(2)} USDC\n` +
     sharesLine +
     metaLine +
-    `\n<b>Edge:</b> ${edgePct}%  |  <b>Our P:</b> ${consensusPct}% vs market ${outcomePct}%\n` +
+    marketContextLine +
     `<b>Source:</b> ${escapeHtml(signal.sourcedFrom)}\n` +
     `<b>Reasoning:</b> ${escapeHtml(signal.reasoning)}\n` +
     (txHash ? `\n<b>Tx:</b> <code>${escapeHtml(txHash)}</code>` : '');

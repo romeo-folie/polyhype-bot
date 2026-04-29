@@ -1379,7 +1379,10 @@ async function executeHyperliquidSignal(
       if (memeAtrSlPct !== undefined) result.memeAtrSlPct = memeAtrSlPct;
       if (memeAtrTpPct !== undefined) result.memeAtrTpPct = memeAtrTpPct;
 
-      void notifyTradeExecuted(signal, tradeResult.txHash, { venue: 'hyperliquid' }).catch(() => {});
+      void notifyTradeExecuted(signal, tradeResult.txHash, {
+        venue: 'hyperliquid',
+        entryPrice: tradeResult.price ?? signal.outcomePrice,
+      }).catch(() => {});
 
       return result;
     }
