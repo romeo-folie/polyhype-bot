@@ -5,6 +5,7 @@ dist
 .npm
 redis-data
 tdlib-data
+pgdata
 *.log
 npm-debug.log
 .DS_Store

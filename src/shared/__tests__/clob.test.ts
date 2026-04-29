@@ -11,6 +11,13 @@ const mockWait = vi.fn();
 const mockProxy = vi.fn();
 
 // Mock ethers v6
+// CTF read mocks for the redemption pre-flight (getCollectionId returns the bytes32
+// collectionId; balanceOf returns the wallet's ERC-1155 token balance for that position).
+// Default to non-zero so the pre-flight passes; tests override mockCtfBalanceOf to assert
+// the balance_is_zero early-exit branch.
+const mockCtfBalanceOf = vi.fn().mockResolvedValue(5_000_000n); // 5 shares (6 decimals)
+const mockCtfGetCollectionId = vi.fn().mockResolvedValue('0x' + 'cd'.repeat(32));
+
 vi.mock('ethers', () => ({
   Wallet: vi.fn(() => ({
     address: '0xtest',
@@ -22,6 +29,8 @@ vi.mock('ethers', () => ({
   })),
   Contract: vi.fn(() => ({
     proxy: mockProxy,
+    balanceOf: mockCtfBalanceOf,
+    getCollectionId: mockCtfGetCollectionId,
   })),
   Interface: vi.fn(() => ({
     encodeFunctionData: vi.fn(() => '0xencodeddata'),
@@ -30,6 +39,7 @@ vi.mock('ethers', () => ({
   Network: vi.fn(() => ({})),
   FetchRequest: vi.fn(() => ({ timeout: 0 })),
   getBytes: vi.fn((val) => val),
+  solidityPackedKeccak256: vi.fn(() => '0x' + 'ab'.repeat(32)),
 }));
 
 vi.mock('@polymarket/clob-client-v2', () => ({
@@ -236,6 +246,10 @@ describe('redeemClobOutcome', () => {
     mockWait.mockResolvedValue({ hash: '0xredeemhash' });
     mockSendTransaction.mockResolvedValue({ wait: mockWait });
     mockProxy.mockResolvedValue({ wait: mockWait });
+    // Reset pre-flight mocks to passing defaults (clearAllMocks preserves implementations
+    // but tests below override with mockResolvedValueOnce, so reset to be explicit).
+    mockCtfBalanceOf.mockResolvedValue(5_000_000n);
+    mockCtfGetCollectionId.mockResolvedValue('0x' + 'cd'.repeat(32));
   });
 
   it('executes via EOA when sigType=0', async () => {
@@ -247,7 +261,26 @@ describe('redeemClobOutcome', () => {
     expect(mockProxy).not.toHaveBeenCalled();
   });
 
-  it('returns MAGIC_PROXY_MANUAL_REDEEM_REQUIRED when sigType=1', async () => {
+  it('returns "balance is 0" error and submits no transaction when wallet holds no CTF tokens', async () => {
+    // Both indexSets [1, 2] return zero balance — the wallet has no winning tokens to redeem.
+    // This is the regression bug PR #357 targets: redeemPositions is a no-op (not a revert)
+    // for zero-balance redemptions, so without this pre-flight the V2 relayer always reports
+    // success and the redeemer credits phantom proceeds + fires spurious notifications.
+    //
+    // Error string MUST contain the substring "balance is 0" so the redeemer's
+    // post-CLOB-failure handler triggers markFallbackStale (6h dedup) instead of
+    // retrying every cycle.
+    mockCtfBalanceOf.mockResolvedValue(0n);
+
+    const result = await redeemClobOutcome({ conditionId: 'cond-empty', direction: 'YES' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('balance is 0');
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+    expect(mockProxy).not.toHaveBeenCalled();
+  });
+
+  it('returns MAGIC_PROXY_MANUAL_REDEEM_REQUIRED when sigType=1 with no creds (skips pre-flight)', async () => {
     const { loadConfig } = await import('../config.js');
     vi.mocked(loadConfig).mockReturnValue({
       POLYGON_WALLET_PRIVATE_KEY:
@@ -263,7 +296,9 @@ describe('redeemClobOutcome', () => {
     // sigType=1 (Magic Proxy) cannot auto-redeem — must be done manually on polymarket.com
     expect(result.success).toBe(false);
     expect(result.error).toBe('MAGIC_PROXY_MANUAL_REDEEM_REQUIRED');
-    // No on-chain calls should be made
+    // Credential gate runs BEFORE the pre-flight balance check, so no on-chain reads either.
+    expect(mockCtfGetCollectionId).not.toHaveBeenCalled();
+    expect(mockCtfBalanceOf).not.toHaveBeenCalled();
     expect(mockProxy).not.toHaveBeenCalled();
     expect(mockSendTransaction).not.toHaveBeenCalled();
   });
