@@ -14,6 +14,8 @@ let configOverride = {
   COPYTRADE_MIN_LIQUIDITY: 1000,
   COPYTRADE_MAX_TRADE_AGE_MIN: 30,
   COPYTRADE_EXIT_MODE: 'rules',
+  COPYTRADE_NOTIFY_ONLY_CATEGORIES: ['sports-soccer'] as string[],
+  COPYTRADE_NOTIFY_DEDUP_TTL_SEC: 1800,
   MAX_BET_FRACTION: 0.1,
   COPYTRADE_MAX_BET_FRACTION: 0.1,
   TAKER_MIN_EDGE_CATEGORIES: {} as Record<string, number>,
@@ -120,6 +122,8 @@ beforeEach(() => {
     COPYTRADE_MIN_LIQUIDITY: 1000,
     COPYTRADE_MAX_TRADE_AGE_MIN: 30,
     COPYTRADE_EXIT_MODE: 'rules',
+    COPYTRADE_NOTIFY_ONLY_CATEGORIES: ['sports-soccer'],
+    COPYTRADE_NOTIFY_DEDUP_TTL_SEC: 1800,
     MAX_BET_FRACTION: 0.1,
     COPYTRADE_MAX_BET_FRACTION: 0.1,
     TAKER_MIN_EDGE_CATEGORIES: {},
@@ -342,25 +346,27 @@ describe('runCopytrade', () => {
     expect(result.signals[0]?.stakeUsd).toBe(25);
   });
 
-  it('suppresses sports signals and sends Telegram notification when COPYTRADE_SPORTS_NOTIFY_ONLY=true', async () => {
+  it('suppresses soccer signals and sends Telegram notification (notify-only category)', async () => {
     configOverride = {
       ...configOverride,
-      COPYTRADE_SPORTS_NOTIFY_ONLY: true,
+      COPYTRADE_NOTIFY_ONLY_CATEGORIES: ['sports-soccer'],
+      COPYTRADE_NOTIFY_DEDUP_TTL_SEC: 1800,
       COPYTRADE_MARKET_SCOPE: ['all'],
+      COPYTRADE_SCOPE_TAG_FALLBACK: true,
     };
 
-    // Lakers/NBA title → inferCategory returns 'sports-nba' → starts with 'sports'
+    // Bundesliga match → inferCategory returns 'sports-soccer' directly via club regex
     const trade = makeTrade({
-      title: 'Will the Lakers win the NBA Finals?',
-      price: 0.4,
+      title: 'Will Bayer 04 Leverkusen win on 2026-05-02?',
+      price: 0.55,
       side: 'BUY',
       outcomeIndex: 0,
     });
     mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
     mockGetMarketBySlug.mockResolvedValue(
       makeMarket({
-        question: 'Will the Lakers win the NBA Finals?',
-        outcomePrices: '["0.4","0.6"]',
+        question: 'Will Bayer 04 Leverkusen win on 2026-05-02?',
+        outcomePrices: '["0.55","0.45"]',
       }),
     );
 
@@ -374,12 +380,13 @@ describe('runCopytrade', () => {
     expect(mockNotify).toHaveBeenCalledWith(expect.stringContaining('suppressed'));
   });
 
-  it('suppresses sports signals that pass scope via tag rescue (no keyword match)', async () => {
-    // ATP match "Ostrava: Zdenek Kolar vs Filip Jianu" — no sports keywords in question,
-    // passes scope via tag fallback but was bypassing notify-only gate (bug 2026-04-28).
+  it('executes tennis signals (not in COPYTRADE_NOTIFY_ONLY_CATEGORIES)', async () => {
+    // ATP match — was previously suppressed by blanket sports filter; should
+    // now execute because COPYTRADE_NOTIFY_ONLY_CATEGORIES defaults to soccer only.
     configOverride = {
       ...configOverride,
-      COPYTRADE_SPORTS_NOTIFY_ONLY: true,
+      COPYTRADE_NOTIFY_ONLY_CATEGORIES: ['sports-soccer'],
+      COPYTRADE_NOTIFY_DEDUP_TTL_SEC: 1800,
       COPYTRADE_MARKET_SCOPE: ['sports-tennis'],
       COPYTRADE_SCOPE_TAG_FALLBACK: true,
     };
@@ -406,8 +413,132 @@ describe('runCopytrade', () => {
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis, 1000);
 
+    expect(result.signals).toHaveLength(1);
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  it('suppresses obscure soccer leagues via Gamma tag (Saudi/J-League)', async () => {
+    // The exact 2026-04-29 leak: "Will Al Taawoun Saudi Club win on 2026-04-29?"
+    // inferCategory now classifies via the Saudi-club regex, but this test
+    // asserts the tag-based fallback path also catches it.
+    configOverride = {
+      ...configOverride,
+      COPYTRADE_NOTIFY_ONLY_CATEGORIES: ['sports-soccer'],
+      COPYTRADE_NOTIFY_DEDUP_TTL_SEC: 1800,
+      COPYTRADE_MARKET_SCOPE: ['all'],
+      COPYTRADE_SCOPE_TAG_FALLBACK: true,
+    };
+
+    const trade = makeTrade({
+      title: 'Some unfamiliar foreign-league match',
+      price: 0.55,
+      side: 'BUY',
+      outcomeIndex: 0,
+    });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({
+        question: 'Some unfamiliar foreign-league match',
+        outcomePrices: '["0.55","0.45"]',
+        events: [{ id: 'evt-jp', slug: 'jp-foo' }],
+      }),
+    );
+    mockGetEventTagSlugs.mockResolvedValue(['sports', 'japan-j2-league', 'soccer']);
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
     expect(result.signals).toHaveLength(0);
     expect(mockNotify).toHaveBeenCalledWith(expect.stringContaining('suppressed'));
+  });
+
+  it('skips entirely when category is unknown (no notify, no signal)', async () => {
+    // Strict-categorization gate: the previous geopolitical fallback let
+    // anything that didn't match a regex through. Now uncategorizable markets
+    // are dropped silently (still markDedup'd so the cursor advances).
+    configOverride = {
+      ...configOverride,
+      COPYTRADE_MARKET_SCOPE: ['all'],
+      COPYTRADE_NOTIFY_ONLY_CATEGORIES: ['sports-soccer'],
+      COPYTRADE_NOTIFY_DEDUP_TTL_SEC: 1800,
+      COPYTRADE_SCOPE_TAG_FALLBACK: true,
+    };
+
+    const trade = makeTrade({
+      title: 'Some completely uncategorized question?',
+      price: 0.5,
+      side: 'BUY',
+      outcomeIndex: 0,
+    });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({
+        question: 'Some completely uncategorized question?',
+        description: null,
+        outcomePrices: '["0.5","0.5"]',
+        events: [{ id: 'evt-x', slug: 'x' }],
+      }),
+    );
+    mockGetEventTagSlugs.mockResolvedValue([]);
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
+    expect(result.signals).toHaveLength(0);
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  it('dedups notify-only Telegram pings within window for same (wallet, market, direction)', async () => {
+    // Whales slice large positions into many sequential transactions on the
+    // same market; previously each tx fired its own Telegram alert. The
+    // (wallet, market, direction) dedup lock should claim only once.
+    configOverride = {
+      ...configOverride,
+      COPYTRADE_NOTIFY_ONLY_CATEGORIES: ['sports-soccer'],
+      COPYTRADE_NOTIFY_DEDUP_TTL_SEC: 1800,
+      COPYTRADE_MARKET_SCOPE: ['all'],
+    };
+
+    const baseTs = Math.floor(Date.now() / 1000) - 1;
+    const trades = [0, 1, 2].map((i) =>
+      makeTrade({
+        title: 'Will Bayer 04 Leverkusen win on 2026-05-02?',
+        transactionHash: `0xtx${i.toString()}`,
+        timestamp: baseTs + i,
+        outcomeIndex: 0,
+        price: 0.55,
+      }),
+    );
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => trades } as Response);
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({
+        question: 'Will Bayer 04 Leverkusen win on 2026-05-02?',
+        outcomePrices: '["0.55","0.45"]',
+      }),
+    );
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    // First SETNX wins; subsequent ones return null (key already set).
+    let notifClaims = 0;
+    redis.set.mockImplementation((key: string, _v: unknown, ..._rest: unknown[]) => {
+      if (key.startsWith('copytrade:notif:')) {
+        notifClaims++;
+        return Promise.resolve(notifClaims === 1 ? 'OK' : null);
+      }
+      return Promise.resolve('OK');
+    });
+
+    await runCopytrade(redis, 1000);
+
+    expect(mockNotify).toHaveBeenCalledTimes(1);
   });
 
   it('exits copytrade position when whale sells in rules mode', async () => {
@@ -590,13 +721,20 @@ describe('runCopytrade', () => {
     expect(result.signals).toHaveLength(1);
   });
 
-  it('does not fetch event tags when keyword already matches', async () => {
-    // "rain" triggers the weather keyword — tag fetch must be skipped
-    const trade = makeTrade({ title: 'Will it rain in NYC?' });
+  it('always fetches event tags when scope-tag fallback is enabled', async () => {
+    // Tags are now fetched up-front for every scope-pass market (24h cached,
+    // ~free after first hit) so the soccer notify-only gate has the venue's
+    // own classification available even when keyword scope matched.
+    const trade = makeTrade({ title: 'Will the highest temperature in NYC exceed 28°C?' });
     mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
     mockGetMarketBySlug.mockResolvedValue(
-      makeMarket({ question: 'Will it rain in NYC?', outcomePrices: '["0.6","0.4"]' }),
+      makeMarket({
+        question: 'Will the highest temperature in NYC exceed 28°C?',
+        outcomePrices: '["0.6","0.4"]',
+        events: [{ id: 'evt-w', slug: 'weather' }],
+      }),
     );
+    mockGetEventTagSlugs.mockResolvedValue(['weather']);
 
     configOverride = {
       ...configOverride,
@@ -610,7 +748,7 @@ describe('runCopytrade', () => {
     redis.set.mockResolvedValue('OK');
     const result = await runCopytrade(redis, 1000);
 
-    expect(mockGetEventTagSlugs).not.toHaveBeenCalled();
+    expect(mockGetEventTagSlugs).toHaveBeenCalledWith('evt-w');
     expect(result.signals).toHaveLength(1);
   });
 

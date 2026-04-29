@@ -455,6 +455,97 @@ const SCOPE_TAG_ALIASES: Record<string, string[]> = {
   geopolitical: ['geopolitics', 'middle-east', 'russia', 'ukraine', 'china', 'israel', 'iran'],
 };
 
+// Soccer-specific Gamma tag slugs. Used by isSoccerMarket() to detect markets
+// the venue itself classifies as soccer, regardless of question wording. Keeps
+// the soccer notify-only filter robust against obscure leagues (Saudi Pro,
+// J-League, Liga MX, etc.) that won't appear in any practical keyword list.
+const SOCCER_TAG_SLUGS = new Set([
+  'soccer',
+  'football',
+  'bundesliga',
+  'german-bundesliga',
+  'premier-league',
+  'english-premier-league',
+  'la-liga',
+  'spanish-la-liga',
+  'serie-a',
+  'italian-serie-a',
+  'ligue-1',
+  'french-ligue-1',
+  'mls',
+  'major-league-soccer',
+  'liga-mx',
+  'mexican-liga-mx',
+  'champions-league',
+  'uefa-champions-league',
+  'europa-league',
+  'uefa-europa-league',
+  'world-cup',
+  'fifa-world-cup',
+  'saudi-pro-league',
+  'j-league',
+  'j1-league',
+  'j2-league',
+  'japan-j1-league',
+  'japan-j2-league',
+  'k-league',
+  'korean-k-league',
+  'brasileirao',
+  'brazilian-serie-a',
+  'argentine-primera',
+  'eredivisie',
+  'primeira-liga',
+  'super-lig',
+  'turkish-super-lig',
+  'a-league',
+  'australian-a-league',
+]);
+
+/**
+ * Decide whether a market is a soccer market, using Gamma tags as primary
+ * signal and the keyword regex as fallback. Tags are the venue's own
+ * classification — far more reliable than chasing every league/club name.
+ */
+export function isSoccerMarket(
+  question: string,
+  description: string | null,
+  tagSlugs: string[],
+): boolean {
+  if (tagSlugs.some((slug) => SOCCER_TAG_SLUGS.has(slug))) return true;
+  const text = `${question} ${description ?? ''}`.toLowerCase();
+  return CATEGORY_REGEXES.get('sports-soccer')?.test(text) ?? false;
+}
+
+/**
+ * Refine an `inferCategory` result using Gamma event tags. Used to rescue
+ * categories that the regex missed because the question text was thin
+ * (e.g. "Eastern Conference Playoff Series" — no NHL keywords, but the
+ * event is tagged 'nhl'). Soccer tags take precedence so the soccer
+ * notify-only gate fires even when the market also has the generic
+ * `'sports'` tag.
+ */
+export function refineCategoryFromTags(category: string, tagSlugs: string[]): string {
+  if (category !== 'unknown' && category !== 'sports') return category;
+  if (tagSlugs.length === 0) return category;
+
+  if (tagSlugs.some((s) => SOCCER_TAG_SLUGS.has(s))) return 'sports-soccer';
+  if (tagSlugs.some((s) => s === 'nhl' || s === 'hockey')) return 'sports-nhl';
+  if (tagSlugs.some((s) => s === 'nba' || s === 'basketball')) return 'sports-nba';
+  if (tagSlugs.some((s) => s === 'nfl' || s === 'american-football')) return 'sports-nfl';
+  if (tagSlugs.some((s) => s === 'mlb' || s === 'baseball')) return 'sports-mlb';
+  if (tagSlugs.some((s) => s === 'tennis' || s === 'atp' || s === 'wta')) {
+    return 'sports-tennis';
+  }
+  if (tagSlugs.some((s) => s === 'f1' || s === 'formula-1' || s === 'formula-one')) {
+    return 'sports-f1';
+  }
+  if (tagSlugs.some((s) => s === 'mma' || s === 'ufc' || s === 'bellator')) {
+    return 'sports-mma';
+  }
+  if (tagSlugs.includes('sports')) return 'sports';
+  return category;
+}
+
 /**
  * Check if a market title or description matches any keyword from the allowed categories.
  * Keywords are matched as whole words (primary path — zero HTTP cost).
@@ -681,22 +772,26 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
       }
 
       // Category Filter — keyword-first, Gamma-tag fallback on miss.
-      // tagSlugs is hoisted so the notify-only gate below can also check it for
-      // sports markets whose questions contain no sports keywords (e.g. ATP matches
-      // formatted as "[City]: [Player] vs [Player]" that pass scope via tag rescue).
+      // We fetch event tags up-front (24h-cached, ~free after first hit) so the
+      // soccer notify-only gate below can use Gamma's own classification —
+      // most reliable signal for obscure leagues (Saudi Pro, J-League, Liga MX)
+      // that no practical keyword list will cover.
       const scanText = `${trade.title} ${market.question}`;
       const keywordHit = matchesCategory(scanText, market.description, cfg.COPYTRADE_MARKET_SCOPE);
       let scopePassed = keywordHit;
       let marketTagSlugs: string[] = [];
 
-      if (!keywordHit && cfg.COPYTRADE_SCOPE_TAG_FALLBACK) {
+      if (cfg.COPYTRADE_SCOPE_TAG_FALLBACK) {
         const eventIds = Array.isArray(market.events)
           ? market.events.map((e) => e.id).filter(Boolean)
           : [];
         if (eventIds.length > 0) {
           const tagArrays = await Promise.all(eventIds.map((id) => getEventTagSlugs(id)));
           marketTagSlugs = [...new Set(tagArrays.flat())];
-          if (matchesCategory(scanText, market.description, cfg.COPYTRADE_MARKET_SCOPE, marketTagSlugs)) {
+          if (
+            !keywordHit &&
+            matchesCategory(scanText, market.description, cfg.COPYTRADE_MARKET_SCOPE, marketTagSlugs)
+          ) {
             scopePassed = true;
             logger.debug('[copytrade] scope matched via event tags', {
               marketId: market.id,
@@ -1038,27 +1133,71 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         source: 'copytrade',
       };
 
-      const signalCategory = inferCategory(signal.question);
-      const isTaggedSports = marketTagSlugs.includes('sports');
-      if (cfg.COPYTRADE_SPORTS_NOTIFY_ONLY && (signalCategory.startsWith('sports') || isTaggedSports)) {
-        logger.info('[copytrade] sports signal suppressed — notify-only mode', {
+      // Refine the inferred category using Gamma tags before the notify-only
+      // and unknown gates. inferCategory only sees the question text; tags
+      // rescue obscure markets (Saudi/Asian/Latin-American soccer leagues,
+      // playoff-series titles with no team-name keywords, etc.) that no
+      // practical keyword list can cover.
+      const rawCategory = inferCategory(signal.question);
+      let signalCategory = refineCategoryFromTags(rawCategory, marketTagSlugs);
+      // Keyword-fallback for soccer when the venue tag is missing — the
+      // keyword regex catches "Will <X> win on YYYY-MM-DD?" and named clubs
+      // even on events the venue forgot to tag.
+      if (
+        signalCategory !== 'sports-soccer' &&
+        (signalCategory === 'sports' || signalCategory === 'unknown') &&
+        isSoccerMarket(signal.question, market.description, marketTagSlugs)
+      ) {
+        signalCategory = 'sports-soccer';
+      }
+
+      // Strict-categorization gate: refuse to enter trades whose category is
+      // unknown after both inferCategory and the Gamma-tag refinement above.
+      // Previously these silently bucketed as 'geopolitical' and bypassed
+      // category-aware caps (slippage, stale-exit windows, notify-only).
+      if (signalCategory === 'unknown') {
+        logger.info('[copytrade] skipped uncategorized market', {
+          wallet,
+          marketId: market.id,
+          question: signal.question,
+          tags: marketTagSlugs,
+        });
+        await recordCopytradeFilter(redis, 'category_unknown').catch(() => {});
+        await markDedup();
+        continue;
+      }
+
+      // Per-category notify-only gate (default: ['sports-soccer']). Replaces
+      // the prior blanket COPYTRADE_SPORTS_NOTIFY_ONLY behavior so tennis/F1/
+      // MMA execute normally while soccer fires Telegram alerts only.
+      // Telegram dedup at (wallet, market, direction) suppresses repeat pings
+      // when whales slice one intent into N rapid transactions.
+      if (cfg.COPYTRADE_NOTIFY_ONLY_CATEGORIES.includes(signalCategory)) {
+        logger.info('[copytrade] signal suppressed — notify-only category', {
           wallet,
           question: signal.question,
           category: signalCategory,
-          taggedSports: isTaggedSports,
+          tags: marketTagSlugs,
           direction,
           outcomePrice: currentOutcomePrice,
           stakeUsd,
         });
-        void notify(
-          `⚽ <b>Copytrade sports signal (suppressed)</b>\n` +
-          `Wallet: <code>${wallet.slice(0, 10)}…</code>\n` +
-          `Market: ${signal.question}\n` +
-          `Side: ${direction} @ ${currentOutcomePrice.toFixed(3)}\n` +
-          `Would-be stake: $${stakeUsd.toFixed(2)}\n` +
-          `<i>Set COPYTRADE_SPORTS_NOTIFY_ONLY=false to execute</i>`
-        ).catch(() => {});
-        await recordCopytradeFilter(redis, 'sports_notify_only').catch(() => {});
+
+        const notifKey = `copytrade:notif:${wallet}:${market.id}:${direction}`;
+        const claim = await redis
+          .set(notifKey, '1', 'EX', cfg.COPYTRADE_NOTIFY_DEDUP_TTL_SEC, 'NX')
+          .catch(() => null);
+        if (claim === 'OK') {
+          void notify(
+            `⚽ <b>Copytrade ${signalCategory} signal (suppressed)</b>\n` +
+              `Wallet: <code>${wallet.slice(0, 10)}…</code>\n` +
+              `Market: ${signal.question}\n` +
+              `Side: ${direction} @ ${currentOutcomePrice.toFixed(3)}\n` +
+              `Would-be stake: $${stakeUsd.toFixed(2)}\n` +
+              `<i>Remove ${signalCategory} from COPYTRADE_NOTIFY_ONLY_CATEGORIES to execute</i>`,
+          ).catch(() => {});
+        }
+        await recordCopytradeFilter(redis, `notify_only:${signalCategory}`).catch(() => {});
         await markDedup();
         continue;
       }
