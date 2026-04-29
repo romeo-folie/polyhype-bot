@@ -11,6 +11,9 @@ const mockWait = vi.fn();
 const mockProxy = vi.fn();
 
 // Mock ethers v6
+// Non-zero bigint returned from balanceOf so the redemption pre-flight check passes.
+const mockCtfBalanceOf = vi.fn().mockResolvedValue(5_000_000n); // 5 shares (6 decimals)
+
 vi.mock('ethers', () => ({
   Wallet: vi.fn(() => ({
     address: '0xtest',
@@ -22,6 +25,7 @@ vi.mock('ethers', () => ({
   })),
   Contract: vi.fn(() => ({
     proxy: mockProxy,
+    balanceOf: mockCtfBalanceOf,
   })),
   Interface: vi.fn(() => ({
     encodeFunctionData: vi.fn(() => '0xencodeddata'),
@@ -30,6 +34,7 @@ vi.mock('ethers', () => ({
   Network: vi.fn(() => ({})),
   FetchRequest: vi.fn(() => ({ timeout: 0 })),
   getBytes: vi.fn((val) => val),
+  solidityPackedKeccak256: vi.fn(() => '0x' + 'ab'.repeat(32)),
 }));
 
 vi.mock('@polymarket/clob-client-v2', () => ({

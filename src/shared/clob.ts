@@ -20,7 +20,7 @@
 
 import { ClobClient, OrderType, Side, AssetType, Chain } from '@polymarket/clob-client-v2';
 import type { OrderBookSummary, OpenOrder, TickSize } from '@polymarket/clob-client-v2';
-import { Wallet, Contract, Interface, JsonRpcProvider, Network, FetchRequest } from 'ethers';
+import { Wallet, Contract, Interface, JsonRpcProvider, Network, FetchRequest, solidityPackedKeccak256 } from 'ethers';
 import { loadConfig, CTF_ADDRESS, PUSD_ADDRESS, POLYGON_FALLBACK_RPCS } from './config.js';
 import { logger } from './logger.js';
 import { getRedis } from './redis.js';
@@ -745,6 +745,34 @@ async function redeemClobOutcomeWithRpc(
   const signer = new Wallet(privateKey, provider);
   const sigType = cfg.POLYMARKET_SIGNATURE_TYPE;
   const funderAddress = cfg.POLYMARKET_FUNDER_ADDRESS ?? signer.address;
+
+  // Pre-flight: check on-chain CTF token balance before submitting.
+  // redeemPositions([1,2]) is a no-op (not a revert) when the wallet holds zero tokens —
+  // the V2 relayer always returns success:true for such calls, causing spurious
+  // notifications and false bankroll credits. Bail early if nothing to redeem.
+  const balAbi = ['function balanceOf(address account, uint256 id) view returns (uint256)'];
+  const ctfBalCheck = new Contract(CTF_ADDRESS, balAbi, provider);
+  const toPositionId = (indexSet: number): bigint => {
+    // CTF formula: collectionId = keccak256(abi.encodePacked(conditionId, indexSet))
+    // (parentCollectionId is bytes32(0) — XOR with 0 is identity)
+    const collectionId = solidityPackedKeccak256(
+      ['bytes32', 'uint256'],
+      [input.conditionId, BigInt(indexSet)],
+    );
+    // positionId = uint256(keccak256(abi.encodePacked(collateralToken, collectionId)))
+    return BigInt(solidityPackedKeccak256(['address', 'bytes32'], [PUSD_ADDRESS, collectionId]));
+  };
+  const balanceOf = ctfBalCheck['balanceOf'] as (acc: string, id: bigint) => Promise<bigint>;
+  const [bal1, bal2] = await Promise.all([
+    balanceOf(funderAddress, toPositionId(1)).catch(() => 0n),
+    balanceOf(funderAddress, toPositionId(2)).catch(() => 0n),
+  ]);
+  if (bal1 === 0n && bal2 === 0n) {
+    logger.debug('[clob] redemption pre-flight: zero CTF token balance — skipping', {
+      conditionId: input.conditionId,
+    });
+    return { success: false, error: 'balance_is_zero' };
+  }
 
   const ctfInterface = new Interface(CTF_ABI);
   // Pass both indexSets [1, 2] — the CTF contract redeems whichever outcome tokens
