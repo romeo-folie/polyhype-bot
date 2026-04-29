@@ -39,6 +39,13 @@ const baseConfig = {
   HL_OI_DIVERGENCE_ENABLED: false,
   HL_OI_DIVERGENCE_THRESHOLD_PCT: 5,
   HL_OI_BASELINE_TTL_SEC: 900,
+  // Anti-chase gate — disabled in base config so existing tests are unaffected.
+  // Enable per-suite where gate behaviour is under test.
+  HL_MOMENTUM_ANTI_CHASE_ENABLED: false,
+  HL_MOMENTUM_RSI_PERIOD: 14,
+  HL_MOMENTUM_RSI_OVERBOUGHT: 70,
+  HL_MOMENTUM_RSI_OVERSOLD: 30,
+  HL_MOMENTUM_VWAP_MAX_DIST_PCT: 3.0,
 };
 
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
@@ -60,12 +67,16 @@ vi.mock('../../execution/positionLedger.js', () => ({
   hasOpenPosition: (...args: unknown[]) => mockHasOpenPosition(...args),
 }));
 
-// indicators — controlled per test for MTF gates.
+// indicators — controlled per test for MTF gates and anti-chase.
 const mockComputeEMA = vi.fn();
 const mockComputeMACDFromCandles = vi.fn();
+const mockComputeRSIFromCandles = vi.fn().mockReturnValue(null);   // null = insufficient data → gate skipped
+const mockComputeVWAP = vi.fn().mockReturnValue(null);             // null = no VWAP → gate skipped
 vi.mock('../../arb/indicators.js', () => ({
   computeEMA: (...args: unknown[]) => mockComputeEMA(...args),
   computeMACDFromCandles: (...args: unknown[]) => mockComputeMACDFromCandles(...args),
+  computeRSIFromCandles: (...args: unknown[]) => mockComputeRSIFromCandles(...args),
+  computeVWAP: (...args: unknown[]) => mockComputeVWAP(...args),
 }));
 
 // HL asset-ctx cache — controlled per test for both HL-native voters.
@@ -716,8 +727,9 @@ describe('scanHlMomentum — weighted MTF scoring', () => {
     const result = await scanHlMomentum(makeTick(), redis as never);
 
     expect(result).toBeNull();
-    // Blocked before shadow log (matches existing MIN_SCORE/ADX/hard-MTF pattern).
-    expect(enqueueWrite).not.toHaveBeenCalled();
+    // signal_decisions logged (gate fired); shadow_observations never reached.
+    expect(enqueueWrite).toHaveBeenCalledWith('signal_decisions', expect.objectContaining({ hasTrade: false }));
+    expect(enqueueWrite).not.toHaveBeenCalledWith('shadow_observations', expect.anything());
   });
 
   it('blocks when score=4 + 4h null + 1h null = 4 (no MTF data) < 5', async () => {
@@ -732,7 +744,8 @@ describe('scanHlMomentum — weighted MTF scoring', () => {
     const result = await scanHlMomentum(makeTick(), redis as never);
 
     expect(result).toBeNull();
-    expect(enqueueWrite).not.toHaveBeenCalled();
+    expect(enqueueWrite).toHaveBeenCalledWith('signal_decisions', expect.objectContaining({ hasTrade: false }));
+    expect(enqueueWrite).not.toHaveBeenCalledWith('shadow_observations', expect.anything());
   });
 
   it('passes when score=5 + neutral (0) + neutral (0) = 5 (strong 15m alone)', async () => {
@@ -1281,7 +1294,9 @@ describe('scanHlMomentum — HL-native voter veto gates', () => {
     const { enqueueWrite } = await import('../../db/writeQueue.js');
     vi.mocked(enqueueWrite).mockClear();
     await scanHlMomentum(makeTick(), makeRedis() as never);
-    expect(enqueueWrite).not.toHaveBeenCalled();
+    // signal_decisions row written (veto logged); shadow_observations never reached.
+    expect(enqueueWrite).toHaveBeenCalledWith('signal_decisions', expect.objectContaining({ hasTrade: false }));
+    expect(enqueueWrite).not.toHaveBeenCalledWith('shadow_observations', expect.anything());
   });
 
   it('is a no-op when both HL-native voters are disabled (voters absent from result)', async () => {
@@ -1301,6 +1316,202 @@ describe('scanHlMomentum — HL-native voter veto gates', () => {
 // ---------------------------------------------------------------------------
 // momentumCooldownKey helper
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Anti-chase stretch gate (RSI + VWAP distance)
+// ---------------------------------------------------------------------------
+
+describe('scanHlMomentum — anti-chase gate', () => {
+  const antiChaseConfig = {
+    ...baseConfig,
+    HL_MOMENTUM_ANTI_CHASE_ENABLED: true,
+    HL_MOMENTUM_RSI_OVERBOUGHT: 70,
+    HL_MOMENTUM_RSI_OVERSOLD: 30,
+    HL_MOMENTUM_VWAP_MAX_DIST_PCT: 3.0,
+  };
+
+  beforeEach(() => {
+    mockLoadConfig.mockReturnValue({ ...antiChaseConfig });
+    mockBuildCandles.mockResolvedValue([{ close: 100 }]);
+    mockScoreHlTrend.mockReturnValue(bullishResult); // LONG signal
+    mockHasOpenPosition.mockResolvedValue(false);
+    mockComputeEMA.mockReturnValue(null);
+    mockComputeMACDFromCandles.mockReturnValue(null);
+    mockComputeRSIFromCandles.mockReturnValue(null);  // default: insufficient data → gate skips RSI check
+    mockComputeVWAP.mockReturnValue(null);             // default: no VWAP → gate skips distance check
+  });
+
+  it('blocks a LONG when RSI ≥ overbought threshold', async () => {
+    mockComputeRSIFromCandles.mockReturnValue(75); // overbought
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ hasTrade: false, skipReason: 'anti_chase_rsi' }),
+    );
+  });
+
+  it('blocks a SHORT when RSI ≤ oversold threshold', async () => {
+    mockScoreHlTrend.mockReturnValue(bearishResult); // SHORT signal
+    mockComputeRSIFromCandles.mockReturnValue(25); // oversold
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ hasTrade: false, skipReason: 'anti_chase_rsi' }),
+    );
+  });
+
+  it('does NOT block a LONG when RSI is below overbought threshold', async () => {
+    mockComputeRSIFromCandles.mockReturnValue(65); // below 70 — ok
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    // RSI gate did not fire — shadow_observations reached (dark mode)
+    expect(enqueueWrite).toHaveBeenCalledWith('shadow_observations', expect.objectContaining({ kind: 'hl_momentum_signal' }));
+  });
+
+  it('blocks a LONG when price is >3% above VWAP', async () => {
+    mockComputeRSIFromCandles.mockReturnValue(55);  // neutral RSI
+    // price=100, VWAP=96 → distPct ≈ +4.17% > 3% → block
+    mockComputeVWAP.mockReturnValue(96);
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick('btcusdt', 100), redis as never);
+    expect(result).toBeNull();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ hasTrade: false, skipReason: 'anti_chase_vwap' }),
+    );
+  });
+
+  it('blocks a SHORT when price is >3% below VWAP', async () => {
+    mockScoreHlTrend.mockReturnValue(bearishResult);
+    mockComputeRSIFromCandles.mockReturnValue(45); // neutral
+    // price=100, VWAP=104 → distPct ≈ -3.85% < -3% → block SHORT
+    mockComputeVWAP.mockReturnValue(104);
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick('btcusdt', 100), redis as never);
+    expect(result).toBeNull();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ hasTrade: false, skipReason: 'anti_chase_vwap' }),
+    );
+  });
+
+  it('does NOT block when both RSI and VWAP distance are within bounds', async () => {
+    mockComputeRSIFromCandles.mockReturnValue(55);  // neutral
+    // price=100, VWAP=98 → distPct ≈ +2.04% < 3% → ok
+    mockComputeVWAP.mockReturnValue(98);
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick('btcusdt', 100), redis as never);
+    expect(enqueueWrite).toHaveBeenCalledWith('shadow_observations', expect.objectContaining({ kind: 'hl_momentum_signal' }));
+  });
+
+  it('skips the RSI check gracefully when RSI returns null (insufficient candles)', async () => {
+    mockComputeRSIFromCandles.mockReturnValue(null); // not enough data
+    mockComputeVWAP.mockReturnValue(null);
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    // Gate did not block — shadow_observations reached
+    expect(enqueueWrite).toHaveBeenCalledWith('shadow_observations', expect.objectContaining({ kind: 'hl_momentum_signal' }));
+  });
+
+  it('is a no-op when HL_MOMENTUM_ANTI_CHASE_ENABLED=false', async () => {
+    mockLoadConfig.mockReturnValue({ ...antiChaseConfig, HL_MOMENTUM_ANTI_CHASE_ENABLED: false });
+    mockComputeRSIFromCandles.mockReturnValue(90); // would block if gate were active
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    // Gate disabled → shadow_observations reached despite extreme RSI
+    expect(enqueueWrite).toHaveBeenCalledWith('shadow_observations', expect.objectContaining({ kind: 'hl_momentum_signal' }));
+  });
+
+  it('includes rsi and vwapDistPct in signal_decisions raw payload', async () => {
+    // RSI within bounds, VWAP within bounds → anti-chase passes; scanner logs signal_decisions
+    // with rsi and vwapDistPct in raw (dark-mode path because HL_MOMENTUM_ENABLED=false).
+    mockComputeRSIFromCandles.mockReturnValue(65);
+    mockComputeVWAP.mockReturnValue(69500); // price=70000 → dist ≈ +0.72%
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({
+        raw: expect.objectContaining({ rsi: 65, vwapDistPct: expect.any(Number) }),
+      }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// signal_decisions logging — stable decisionId
+// ---------------------------------------------------------------------------
+
+describe('scanHlMomentum — signal_decisions decisionId stability', () => {
+  beforeEach(() => {
+    mockLoadConfig.mockReturnValue({ ...baseConfig, HL_MOMENTUM_ENABLED: true });
+    mockBuildCandles.mockResolvedValue([{}]);
+    mockHasOpenPosition.mockResolvedValue(false);
+    mockComputeEMA.mockReturnValue(null);
+    mockComputeMACDFromCandles.mockReturnValue(null);
+    mockComputeRSIFromCandles.mockReturnValue(null);
+    mockComputeVWAP.mockReturnValue(null);
+  });
+
+  it('returns the same decisionId in the TradeSignal that was written to signal_decisions', async () => {
+    mockScoreHlTrend.mockReturnValue(bullishResult);
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).not.toBeNull();
+    const sdCall = vi.mocked(enqueueWrite).mock.calls.find(([table]) => table === 'signal_decisions');
+    expect(sdCall).toBeDefined();
+    const sdRow = sdCall![1] as { decisionId: string };
+    expect(result!.decisionId).toBe(sdRow.decisionId);
+  });
+
+  it('logs hasTrade=false with a stable decisionId when a gate fires', async () => {
+    mockScoreHlTrend.mockReturnValue({ score: 2, adx: 40, voters: {}, voterCount: 6 }); // below MIN_SCORE=4
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull();
+    const sdCall = vi.mocked(enqueueWrite).mock.calls.find(([table]) => table === 'signal_decisions');
+    expect(sdCall).toBeDefined();
+    const sdRow = sdCall![1] as { hasTrade: boolean; skipReason: string };
+    expect(sdRow.hasTrade).toBe(false);
+    expect(sdRow.skipReason).toBe('score_below_min');
+  });
+
+  it('logs hasTrade=false with skipReason=scanner_dark in dark mode', async () => {
+    mockLoadConfig.mockReturnValue({ ...baseConfig, HL_MOMENTUM_ENABLED: false });
+    mockScoreHlTrend.mockReturnValue(bullishResult);
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    const sdCall = vi.mocked(enqueueWrite).mock.calls.find(([table]) => table === 'signal_decisions');
+    expect(sdCall).toBeDefined();
+    const sdRow = sdCall![1] as { hasTrade: boolean; skipReason: string };
+    expect(sdRow.hasTrade).toBe(false);
+    expect(sdRow.skipReason).toBe('scanner_dark');
+  });
+});
 
 describe('momentumCooldownKey', () => {
   it('encodes symbol and direction', () => {

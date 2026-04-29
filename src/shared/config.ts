@@ -1290,6 +1290,15 @@ const envSchema = z.object({
   HL_MOMENTUM_MEME_SL_FLOOR_PCT: z.coerce.number().min(0).optional().default(8),
   HL_MOMENTUM_MEME_SL_CEIL_PCT: z.coerce.number().min(0).optional().default(20),
 
+  // Anti-chase stretch gate — blocks entries when the primary-TF RSI is overheated/
+  // washed-out or when price is too far from VWAP, reducing exhaustion-peak entries.
+  HL_MOMENTUM_ANTI_CHASE_ENABLED: boolFromEnv.optional().default(true),
+  HL_MOMENTUM_RSI_PERIOD: z.coerce.number().int().min(2).optional().default(14),
+  HL_MOMENTUM_RSI_OVERBOUGHT: z.coerce.number().min(50).max(100).optional().default(70),
+  HL_MOMENTUM_RSI_OVERSOLD: z.coerce.number().min(0).max(50).optional().default(30),
+  // Maximum allowed % distance of price from VWAP in the trade direction before blocking.
+  HL_MOMENTUM_VWAP_MAX_DIST_PCT: z.coerce.number().min(0).optional().default(3.0),
+
   // ── HL-native signals (issue #265) ──
   // Sub-PR 1: Funding-rate contra voter. HL settles perp funding hourly at
   // 1/8 of the computed 8h rate, so APR = hourlyFundingRate × 24 × 365.
