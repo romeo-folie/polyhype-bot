@@ -809,10 +809,11 @@ describe('futuresMonitor', () => {
       expect(mockClosePosition).toHaveBeenCalledWith('WIF');
     });
 
-    it('applies to non-meme paths too — fixed-pct hl-momentum positions', async () => {
-      // BTC at -25% ROE: per-source HL SL is configured at -5% ROE in baseCfg
-      // (HL_MOMENTUM_STOP_LOSS_PCT=5), which fires first anyway. Backstop is
-      // a no-op here but the test confirms it doesn't break the existing path.
+    it('does not preempt a tighter per-source SL on hl-momentum non-meme positions', async () => {
+      // BTC sourced from hl-momentum → per-source HL_MOMENTUM_STOP_LOSS_PCT=5 (ROE) applies.
+      // At roe=-10%, the per-source SL fires first (5 < 25); the backstop must NOT preempt it
+      // and the close reason must reflect the per-source SL, not roe_max_loss.
+      const { notifyTakeProfitExecuted: mockNotify } = await import('../../execution/telegram.js');
       loadConfigMock.mockReturnValue({
         ...baseCfg,
         FUTURES_MAX_LOSS_ROE_PCT: 25,
@@ -823,15 +824,33 @@ describe('futuresMonitor', () => {
           position: {
             szi: '0.1',
             entryPx: '50000',
-            unrealizedPnl: '-250',  // notional 5000, margin 1000 → roe=-25%
+            unrealizedPnl: '-100',  // notional 5000, margin 1000 → roe=-10%
             marginUsed: '1000',
           },
+        },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([
+        {
+          marketId: 'BTC',
+          isFutures: true,
+          direction: 'LONG',
+          question: 'BTC perpetual',
+          entryPrice: 50000,
+          stakeUsd: 10,
+          openedAt: new Date().toISOString(),
+          executionVenue: 'hyperliquid',
+          sourcedFrom: 'hl-momentum',
         },
       ]);
 
       await runTick();
 
       expect(mockClosePosition).toHaveBeenCalledWith('BTC');
+      const call = (mockNotify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as
+        | { mechanismDetail?: string }
+        | undefined;
+      expect(call?.mechanismDetail).toBeDefined();
+      expect(call?.mechanismDetail).not.toContain('roe_max_loss');
     });
   });
 
