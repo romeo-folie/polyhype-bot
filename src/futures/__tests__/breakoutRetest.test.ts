@@ -16,13 +16,16 @@ function makeCandle(openTime: number, open: number, high: number, low: number, c
  * Layout (oldest → newest):
  *   [0..11]  swing-high baseline bars (flat at basePrice, high = basePrice)
  *   [12]     breakout bar: close = basePrice * (1 + breakoutPct/100)
- *   [13]     retest bar:  low = basePrice * (1 + retestDropPct/100)  (touches level)
+ *   [13]     retest bar:  low = basePrice * (1 + retestTolPct/100)   (within tol above level)
  *   [14]     hold bar:    close = basePrice * (1 + holdPct/100)      (above level)
+ *
+ * retestTolPct is a small positive offset so the retest low sits just above level
+ * (within tolerance band), simulating a price dip that touches but holds the broken level.
  */
 function buildLongPattern(
   basePrice = 100,
   breakoutPct = 1.0,
-  retestDropPct = 0.1,
+  retestTolPct = 0.1,
   holdPct = 0.8,
 ): OHLCVCandle[] {
   const candles: OHLCVCandle[] = [];
@@ -33,7 +36,7 @@ function buildLongPattern(
   const level = basePrice; // max(high[0..11]) = basePrice
   const breakoutClose = level * (1 + breakoutPct / 100);
   candles.push(makeCandle(12 * 900_000, level, breakoutClose, level, breakoutClose)); // breakout
-  const retestLow = level * (1 + retestDropPct / 100); // slightly above level (within tol)
+  const retestLow = level * (1 + retestTolPct / 100); // just above level, within tolerance band
   candles.push(makeCandle(13 * 900_000, breakoutClose, breakoutClose, retestLow, level * 1.005)); // retest
   const holdClose = level * (1 + holdPct / 100);
   candles.push(makeCandle(14 * 900_000, level * 1.005, holdClose, level * 1.003, holdClose)); // hold

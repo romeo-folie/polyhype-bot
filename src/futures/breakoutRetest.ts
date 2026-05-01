@@ -12,9 +12,9 @@ export interface BreakoutRetestOpts {
   lookbackBars?: number;
   /** Maximum age (in bars) of the breakout bar relative to the hold bar. */
   freshBars?: number;
-  /** Retest tolerance as a % of the level (floor when ATR is also provided). */
+  /** Retest tolerance as a % of the level; acts as a floor when ATR is also provided. */
   retestPct?: number;
-  /** Retest tolerance as an ATR multiple (primary when ATR is not null). */
+  /** Retest tolerance as an ATR multiple; combined with retestPct as max(atrMult×ATR, pct×level). */
   retestAtrMult?: number;
   /** Pre-computed ATR value; null falls back to pct-only tolerance. */
   atr?: number | null;
@@ -25,10 +25,10 @@ export interface BreakoutRetestOpts {
  *
  * Pattern for LONG:
  *   1. Breakout bar: close > max(high[bIdx-lookbackBars .. bIdx-1])
- *   2. Retest bar:   low ≤ that level + tolerance  (in bars after breakout, before hold)
+ *   2. Retest bar:   low within [level − tol, level + tol]  (touches but does not break the level)
  *   3. Hold bar:     close > level  (the most recent closed bar)
  *
- * SHORT is the mirror (min of lows, close < level, high ≥ level - tol).
+ * SHORT is the mirror (min of lows, close < level, high within [level − tol, level + tol]).
  *
  * Returns the first (most-recent) valid pattern, or null if none exists.
  * Stateless — no Redis required.
