@@ -148,9 +148,10 @@ services:
           memory: 256M
     healthcheck:
       # Passes if the spot-feed heartbeat was written within the last 120s.
-      # Exec form (CMD) skips the `sh -c` wrapper — when the worker is near its
-      # cgroup memory cap the extra ~5MiB sh+node startup pushes the probe over
-      # and the kernel SIGABRTs the new node before process.exit(0) runs.
+      # Exec form (CMD) avoids the extra `sh -c` process and its transient
+      # ~5MiB overhead — near a tight cgroup cap the added pressure can push
+      # V8 into an allocation failure, causing node to abort() (exit 134)
+      # before process.exit(0) runs.
       test:
         - "CMD"
         - "node"
@@ -284,13 +285,15 @@ services:
     deploy:
       resources:
         limits:
-          # Writer baseline is ~140MiB; 160M left no headroom for the
-          # healthcheck's transient node spawn → cgroup OOM → SIGABRT.
+          # Writer baseline is ~140MiB; 160M left too little headroom for the
+          # healthcheck's transient Node spawn — V8 hit allocation failure and
+          # the probe aborted (exit 134) before it could report success.
           memory: 256M
     healthcheck:
       # Reads heartbeat:writer (unix seconds) from Redis using a tiny Node one-liner —
       # avoids installing redis-cli inside the app image. Stale > 30s = unhealthy.
-      # Exec form (CMD) skips the `sh -c` wrapper — see pga-spot-feed comment above.
+      # Exec form (CMD) avoids the extra `sh -c` process and its transient memory
+      # overhead — see pga-spot-feed comment above.
       test:
         - "CMD"
         - "node"
