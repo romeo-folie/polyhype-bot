@@ -83,11 +83,14 @@ export function detectBreakoutRetestHold(
 
     let retestBar: OHLCVCandle | null = null;
     for (const bar of retestSlice) {
-      if (direction === 'LONG' && bar.low <= level + tol) {
+      // Retest must touch within the tolerance band on both sides of the level —
+      // a deep overshoot (far breakdown below level on LONG, far breakout above on SHORT)
+      // is not a valid retest; it signals the level failed, not held.
+      if (direction === 'LONG' && bar.low >= level - tol && bar.low <= level + tol) {
         retestBar = bar;
         break;
       }
-      if (direction === 'SHORT' && bar.high >= level - tol) {
+      if (direction === 'SHORT' && bar.high <= level + tol && bar.high >= level - tol) {
         retestBar = bar;
         break;
       }

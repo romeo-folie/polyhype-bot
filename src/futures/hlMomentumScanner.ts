@@ -357,11 +357,11 @@ export async function scanHlMomentum(
     }
   }
 
-  // Gate: breakout-retest-hold structure required before entry.
-  // Checks that recent 15m candles show a swing-level breakout, a price pullback to that
-  // level, and a hold close above it (LONG) / below it (SHORT). Additive with soft-confirm.
-  if (cfg.HL_MOMENTUM_REQUIRE_BREAKOUT_RETEST) {
-    const atrResult = computeATRFromCandles(indicatorCandles, cfg.HL_MOMENTUM_RSI_PERIOD);
+  // Breakout-retest-hold detection — always computed so shadow_observations shows
+  // hit-rate even while HL_MOMENTUM_REQUIRE_BREAKOUT_RETEST=false (dark mode).
+  // Gate enforcement is conditional on the flag.
+  {
+    const atrResult = computeATRFromCandles(indicatorCandles, cfg.FUTURES_ATR_PERIOD);
     breakoutRetestMatch = detectBreakoutRetestHold(indicatorCandles, direction, {
       lookbackBars: cfg.HL_MOMENTUM_BREAKOUT_LOOKBACK_BARS,
       freshBars: cfg.HL_MOMENTUM_BREAKOUT_FRESH_BARS,
@@ -369,7 +369,7 @@ export async function scanHlMomentum(
       retestAtrMult: cfg.HL_MOMENTUM_RETEST_TOL_ATR_MULT,
       atr: atrResult?.atr ?? null,
     });
-    if (breakoutRetestMatch === null) {
+    if (cfg.HL_MOMENTUM_REQUIRE_BREAKOUT_RETEST && breakoutRetestMatch === null) {
       logger.debug('[hl-momentum] breakout-retest-hold pattern not found', {
         symbol: hlSymbol,
         direction,

@@ -161,6 +161,24 @@ describe('detectBreakoutRetestHold', () => {
     expect(result).toBeNull();
   });
 
+  it('returns null when retest bar overshoots far below the level (LONG)', () => {
+    // Retest bar's low is well below level - tol, i.e. the level failed — not a valid hold.
+    const basePrice = 100;
+    const candles: OHLCVCandle[] = [];
+    for (let i = 0; i < 12; i++) {
+      candles.push(makeCandle(i * 900_000, basePrice, basePrice, basePrice * 0.99, basePrice));
+    }
+    const level = basePrice;
+    candles.push(makeCandle(12 * 900_000, level, level * 1.02, level, level * 1.02)); // breakout
+    // retest bar low = 98.5, which is 1.5 below level (>> tol of 0.3)
+    candles.push(makeCandle(13 * 900_000, level * 1.01, level * 1.01, 98.5, level * 1.01));
+    candles.push(makeCandle(14 * 900_000, level * 1.01, level * 1.02, level * 1.005, level * 1.015)); // hold
+    const result = detectBreakoutRetestHold(candles, 'LONG', {
+      lookbackBars: 12, freshBars: 6, retestPct: 0.3, retestAtrMult: 0.5, atr: null,
+    });
+    expect(result).toBeNull();
+  });
+
   it('uses ATR-mult tolerance when ATR is large (ATR-mult > pct-floor)', () => {
     // Build pattern where the retest low is 0.6 ATR above the level (would fail pct-only 0.3%)
     const basePrice = 100;
