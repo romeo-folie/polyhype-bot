@@ -2300,18 +2300,22 @@ describe('empty-book maker route', () => {
     });
   });
 
-  describe('global entry price cap (MAX_ENTRY_PRICE)', () => {
+  describe('entry price cap (per-source override + global fallback)', () => {
     beforeEach(() => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockConfig as any).MAX_ENTRY_PRICE = 0.55;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).FV_MAX_ENTRY_PRICE = 0.98;
     });
 
     afterEach(() => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       delete (mockConfig as any).MAX_ENTRY_PRICE;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (mockConfig as any).FV_MAX_ENTRY_PRICE;
     });
 
-    it('skips a non-futures signal when outcomePrice exceeds the cap', async () => {
+    it('skips a non-futures signal when outcomePrice exceeds the global cap', async () => {
       const redis = makeRedis();
       const result = await executeSignal(
         makeSignal({ outcomePrice: 0.60 }),
@@ -2323,7 +2327,7 @@ describe('empty-book maker route', () => {
       expect(mockSubmit).not.toHaveBeenCalled();
     });
 
-    it('does not skip when outcomePrice is at the cap', async () => {
+    it('does not skip when outcomePrice is at the global cap', async () => {
       const redis = makeRedis();
       const result = await executeSignal(
         makeSignal({ outcomePrice: 0.55 }),
@@ -2354,6 +2358,43 @@ describe('empty-book maker route', () => {
       const redis = makeRedis();
       const result = await executeSignal(
         makeSignal({ outcomePrice: 0.99 }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipReason).not.toBe('entry_price_above_global_cap');
+    });
+
+    it('fv-scanner uses FV_MAX_ENTRY_PRICE instead of global cap', async () => {
+      // global cap = 0.55, fv cap = 0.98 — price of 0.90 must pass
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({ source: 'fv-scanner', outcomePrice: 0.90 }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipReason).not.toBe('entry_price_above_global_cap');
+    });
+
+    it('fv-scanner is still blocked when outcomePrice exceeds FV_MAX_ENTRY_PRICE', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).FV_MAX_ENTRY_PRICE = 0.95;
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({ source: 'fv-scanner', outcomePrice: 0.97 }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipped).toBe(true);
+      expect(result.skipReason).toBe('entry_price_above_global_cap');
+    });
+
+    it('weather uses WEATHER_MAX_ENTRY_PRICE instead of global cap', async () => {
+      // global cap = 0.55, weather cap = 0.65 (set in beforeEach) — price of 0.62 must pass
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).WEATHER_MAX_ENTRY_PRICE = 0.65;
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({ source: 'weather', outcomePrice: 0.62 }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         redis as any,
       );

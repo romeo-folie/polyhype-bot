@@ -1593,12 +1593,22 @@ export async function executeSignal(
     }
   }
 
-  if (!signal.isFutures && cfg.MAX_ENTRY_PRICE > 0 && (signal.outcomePrice ?? 0) > cfg.MAX_ENTRY_PRICE) {
-    logger.info('[executor] skipping — entry price above global cap', {
+  // Per-source price cap overrides the global MAX_ENTRY_PRICE for sources that trade in
+  // structurally different price ranges (e.g. fv-scanner targets 0.80–0.98 by design).
+  // Returns undefined → fall through to global cap. 0 → no cap for that source.
+  const effectivePriceCap = ((): number => {
+    switch (signal.source) {
+      case 'fv-scanner': return cfg.FV_MAX_ENTRY_PRICE;
+      case 'weather':    return cfg.WEATHER_MAX_ENTRY_PRICE;
+      default:           return cfg.MAX_ENTRY_PRICE;
+    }
+  })();
+  if (!signal.isFutures && effectivePriceCap > 0 && (signal.outcomePrice ?? 0) > effectivePriceCap) {
+    logger.info('[executor] skipping — entry price above cap', {
       marketId: signal.marketId,
       source: signal.source,
       outcomePrice: signal.outcomePrice,
-      maxEntryPrice: cfg.MAX_ENTRY_PRICE,
+      effectivePriceCap,
     });
     return { signal, skipped: true, skipReason: 'entry_price_above_global_cap' };
   }
