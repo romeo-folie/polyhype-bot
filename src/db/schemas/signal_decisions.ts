@@ -17,7 +17,7 @@ const SKIP_REASON = [
   'spread_too_wide', 'one_sided_book', 'no_clob_book',
   // hl-momentum-specific (added 2026-04-29)
   'score_below_min', 'anti_chase_rsi', 'anti_chase_vwap',
-  'stretch_confirmation_pending',
+  'stretch_confirmation_pending', 'breakout_retest_missing',
   'loss_cooldown', 'momentum_cooldown', 'scanner_dark',
   'long_hl_confirmation_missing', 'oi_divergence_veto', 'weighted_total_score_low',
   '4h_ema_bias_mismatch', '1h_macd_mismatch',

@@ -3,8 +3,10 @@ import type { Redis } from 'ioredis';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { buildCandles } from '../arb/candleAggregator.js';
-import { computeEMA, computeMACDFromCandles, computeRSIFromCandles, computeVWAP } from '../arb/indicators.js';
+import { computeATRFromCandles, computeEMA, computeMACDFromCandles, computeRSIFromCandles, computeVWAP } from '../arb/indicators.js';
 import { scoreHlTrend } from './hlTrendScorer.js';
+import { detectBreakoutRetestHold } from './breakoutRetest.js';
+import type { BreakoutRetestMatch } from './breakoutRetest.js';
 import { fundingRateToApr, getCachedAssetCtx, getOrSetOiBaseline } from './hlAssetCtxCache.js';
 import type { CachedAssetCtx } from './hlAssetCtxCache.js';
 import { hasOpenPosition } from '../execution/positionLedger.js';
@@ -202,6 +204,7 @@ export async function scanHlMomentum(
   let softConfirmationPassed = false;
   let softConfirmationReasons: string[] = [];
   let softConfirmationAnchorOpenTime: number | null = null;
+  let breakoutRetestMatch: BreakoutRetestMatch | null = null;
 
   // Compute RSI and VWAP distance on primary candles. Used by the anti-chase gate and
   // included in every signal_decisions row for future stretch-metric audits.
@@ -249,6 +252,7 @@ export async function scanHlMomentum(
         softConfirmationPassed,
         softConfirmationReasons,
         softConfirmationAnchorOpenTime,
+        breakoutRetestMatch,
       },
     }).catch(() => {});
   };
@@ -350,6 +354,30 @@ export async function scanHlMomentum(
         logDecision(false, 'anti_chase_vwap', vwapDistPct.toFixed(2));
         return null;
       }
+    }
+  }
+
+  // Breakout-retest-hold detection — always computed so shadow_observations shows
+  // hit-rate even while HL_MOMENTUM_REQUIRE_BREAKOUT_RETEST=false (dark mode).
+  // Gate enforcement is conditional on the flag.
+  {
+    const atrResult = computeATRFromCandles(indicatorCandles, cfg.FUTURES_ATR_PERIOD);
+    breakoutRetestMatch = detectBreakoutRetestHold(indicatorCandles, direction, {
+      lookbackBars: cfg.HL_MOMENTUM_BREAKOUT_LOOKBACK_BARS,
+      freshBars: cfg.HL_MOMENTUM_BREAKOUT_FRESH_BARS,
+      retestPct: cfg.HL_MOMENTUM_RETEST_TOL_PCT,
+      retestAtrMult: cfg.HL_MOMENTUM_RETEST_TOL_ATR_MULT,
+      atr: atrResult?.atr ?? null,
+    });
+    if (cfg.HL_MOMENTUM_REQUIRE_BREAKOUT_RETEST && breakoutRetestMatch === null) {
+      logger.debug('[hl-momentum] breakout-retest-hold pattern not found', {
+        symbol: hlSymbol,
+        direction,
+        lookbackBars: cfg.HL_MOMENTUM_BREAKOUT_LOOKBACK_BARS,
+        freshBars: cfg.HL_MOMENTUM_BREAKOUT_FRESH_BARS,
+      });
+      logDecision(false, 'breakout_retest_missing');
+      return null;
     }
   }
 
@@ -572,6 +600,7 @@ export async function scanHlMomentum(
       softConfirmationPassed,
       softConfirmationReasons,
       softConfirmationAnchorOpenTime,
+      breakoutRetestMatch,
     },
   }).catch(() => {});
 

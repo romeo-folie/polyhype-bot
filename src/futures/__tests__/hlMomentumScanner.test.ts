@@ -86,6 +86,7 @@ vi.mock('../../arb/indicators.js', () => ({
   computeMACDFromCandles: (...args: unknown[]) => mockComputeMACDFromCandles(...args),
   computeRSIFromCandles: (...args: unknown[]) => mockComputeRSIFromCandles(...args),
   computeVWAP: (...args: unknown[]) => mockComputeVWAP(...args),
+  computeATRFromCandles: () => null, // breakoutRetest uses this; null → pct-only tolerance fallback
 }));
 
 // HL asset-ctx cache — controlled per test for both HL-native voters.
