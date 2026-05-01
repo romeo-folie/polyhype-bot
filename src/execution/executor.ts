@@ -1593,9 +1593,9 @@ export async function executeSignal(
     }
   }
 
-  // Per-source price cap overrides the global MAX_ENTRY_PRICE for sources that trade in
-  // structurally different price ranges (e.g. fv-scanner targets 0.80–0.98 by design).
-  // Returns undefined → fall through to global cap. 0 → no cap for that source.
+  // Per-source price cap: fv-scanner and weather declare their own caps that override
+  // the global MAX_ENTRY_PRICE for their signals only. All other sources use MAX_ENTRY_PRICE.
+  // Set any cap to 0 to disable it for that source.
   const effectivePriceCap = ((): number => {
     switch (signal.source) {
       case 'fv-scanner': return cfg.FV_MAX_ENTRY_PRICE;
@@ -1610,7 +1610,7 @@ export async function executeSignal(
       outcomePrice: signal.outcomePrice,
       effectivePriceCap,
     });
-    return { signal, skipped: true, skipReason: 'entry_price_above_global_cap' };
+    return { signal, skipped: true, skipReason: 'entry_price_above_cap' };
   }
 
   const executionId = createHash('sha256')

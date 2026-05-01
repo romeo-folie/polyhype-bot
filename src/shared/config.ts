@@ -101,8 +101,9 @@ const envSchema = z.object({
     .transform((v: string) => !['false', '0'].includes(v.trim().toLowerCase())),
   CLOB_ORDER_TYPE: z.enum(['FOK', 'FAK']).optional().default('FAK'),
   // Global ceiling on any non-futures entry price (outcomePrice). Applied in the executor
-  // before any order is placed. Set to 0 to disable. Sources that declare their own cap
-  // (FV_MAX_ENTRY_PRICE, WEATHER_MAX_ENTRY_PRICE) override this for their signals only.
+  // before any order is placed. Set to 0 to disable. Two sources override this with their
+  // own cap: fv-scanner uses FV_MAX_ENTRY_PRICE; weather uses WEATHER_MAX_ENTRY_PRICE.
+  // All other sources (oracle-lag, sports, copytrade, etc.) use this value directly.
   MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.55),
   // YYYY-MM-DD. When set, new entries into markets resolving on/after this date are blocked.
   // Use before an API migration cutover to avoid accumulating positions that need post-cutover management.

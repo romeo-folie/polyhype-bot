@@ -2313,6 +2313,8 @@ describe('empty-book maker route', () => {
       delete (mockConfig as any).MAX_ENTRY_PRICE;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       delete (mockConfig as any).FV_MAX_ENTRY_PRICE;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (mockConfig as any).WEATHER_MAX_ENTRY_PRICE;
     });
 
     it('skips a non-futures signal when outcomePrice exceeds the global cap', async () => {
@@ -2323,7 +2325,7 @@ describe('empty-book maker route', () => {
         redis as any,
       );
       expect(result.skipped).toBe(true);
-      expect(result.skipReason).toBe('entry_price_above_global_cap');
+      expect(result.skipReason).toBe('entry_price_above_cap');
       expect(mockSubmit).not.toHaveBeenCalled();
     });
 
@@ -2334,7 +2336,7 @@ describe('empty-book maker route', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         redis as any,
       );
-      expect(result.skipReason).not.toBe('entry_price_above_global_cap');
+      expect(result.skipReason).not.toBe('entry_price_above_cap');
     });
 
     it('does not gate futures signals regardless of outcomePrice', async () => {
@@ -2345,10 +2347,10 @@ describe('empty-book maker route', () => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           redis as any,
         );
-        expect(result.skipReason).not.toBe('entry_price_above_global_cap');
+        expect(result.skipReason).not.toBe('entry_price_above_cap');
       } catch (err) {
         // HL client throws in test env — confirm the cap gate was not the cause
-        expect((err as Error).message).not.toContain('entry_price_above_global_cap');
+        expect((err as Error).message).not.toContain('entry_price_above_cap');
       }
     });
 
@@ -2361,7 +2363,7 @@ describe('empty-book maker route', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         redis as any,
       );
-      expect(result.skipReason).not.toBe('entry_price_above_global_cap');
+      expect(result.skipReason).not.toBe('entry_price_above_cap');
     });
 
     it('fv-scanner uses FV_MAX_ENTRY_PRICE instead of global cap', async () => {
@@ -2372,7 +2374,7 @@ describe('empty-book maker route', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         redis as any,
       );
-      expect(result.skipReason).not.toBe('entry_price_above_global_cap');
+      expect(result.skipReason).not.toBe('entry_price_above_cap');
     });
 
     it('fv-scanner is still blocked when outcomePrice exceeds FV_MAX_ENTRY_PRICE', async () => {
@@ -2385,7 +2387,7 @@ describe('empty-book maker route', () => {
         redis as any,
       );
       expect(result.skipped).toBe(true);
-      expect(result.skipReason).toBe('entry_price_above_global_cap');
+      expect(result.skipReason).toBe('entry_price_above_cap');
     });
 
     it('weather uses WEATHER_MAX_ENTRY_PRICE instead of global cap', async () => {
@@ -2398,7 +2400,7 @@ describe('empty-book maker route', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         redis as any,
       );
-      expect(result.skipReason).not.toBe('entry_price_above_global_cap');
+      expect(result.skipReason).not.toBe('entry_price_above_cap');
     });
   });
 });
