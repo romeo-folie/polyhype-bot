@@ -2314,7 +2314,7 @@ describe('empty-book maker route', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       delete (mockConfig as any).FV_MAX_ENTRY_PRICE;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      delete (mockConfig as any).WEATHER_MAX_ENTRY_PRICE;
+      (mockConfig as any).WEATHER_MAX_ENTRY_PRICE = 0; // restore to top-level mockConfig default
     });
 
     it('skips a non-futures signal when outcomePrice exceeds the global cap', async () => {
