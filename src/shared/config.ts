@@ -100,9 +100,10 @@ const envSchema = z.object({
     })
     .transform((v: string) => !['false', '0'].includes(v.trim().toLowerCase())),
   CLOB_ORDER_TYPE: z.enum(['FOK', 'FAK']).optional().default('FAK'),
-  // Global ceiling on any non-futures entry price (outcomePrice). Applies across all sources
-  // in the executor before any order is placed. Set to 0 to disable. Per-source caps
-  // (WEATHER_MAX_ENTRY_PRICE, ORACLE_LAG_MAX_ENTRY_PRICE, etc.) still apply independently.
+  // Global ceiling on any non-futures entry price (outcomePrice). Applied in the executor
+  // before any order is placed. Set to 0 to disable. Two sources override this with their
+  // own cap: fv-scanner uses FV_MAX_ENTRY_PRICE; weather uses WEATHER_MAX_ENTRY_PRICE.
+  // All other sources (oracle-lag, sports, copytrade, etc.) use this value directly.
   MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.55),
   // YYYY-MM-DD. When set, new entries into markets resolving on/after this date are blocked.
   // Use before an API migration cutover to avoid accumulating positions that need post-cutover management.
@@ -1392,6 +1393,10 @@ const envSchema = z.object({
   FV_NO_P_MODEL_MAX: z.coerce.number().min(0).max(1).optional().default(0.10),
   // Edge thresholds: YES edge = pYes − yesMid; NO edge = pNo − noMid. Both must be positive.
   // NO minimum is wider than YES due to σ-floor distortion inflating pNo.
+  // Per-source entry price cap — overrides MAX_ENTRY_PRICE for fv-scanner signals only.
+  // FV scanner intentionally enters high-probability outcomes (YES 0.80–0.95, NO token
+  // 0.88–0.99), so the global cap would block all valid signals. Set to 0 to disable.
+  FV_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.98),
   FV_YES_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.02),
   FV_NO_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   FV_NO_MAX_EDGE: z.coerce.number().min(0).max(1).optional().default(0.10),

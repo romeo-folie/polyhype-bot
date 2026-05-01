@@ -21,6 +21,7 @@ const SKIP_REASON = [
   'loss_cooldown', 'momentum_cooldown', 'scanner_dark',
   'long_hl_confirmation_missing', 'oi_divergence_veto', 'weighted_total_score_low',
   '4h_ema_bias_mismatch', '1h_macd_mismatch',
+  'entry_price_above_cap',
   'other',
 ] as const;
 

@@ -17,6 +17,7 @@ const SKIP_REASON = [
   'insufficient_equity', 'global_margin_cap', 'global_governor', 'maker_not_filled',
   'taker_edge_below_min', 'liquidity_gate', 'simmer_position_exists', 'market_resolved',
   'spread_too_wide', 'one_sided_book', 'no_clob_book',
+  'entry_price_above_cap',
   'other',
 ] as const;
 
