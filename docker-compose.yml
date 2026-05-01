@@ -148,10 +148,14 @@ services:
           memory: 256M
     healthcheck:
       # Passes if the spot-feed heartbeat was written within the last 120s.
+      # Exec form (CMD) skips the `sh -c` wrapper — when the worker is near its
+      # cgroup memory cap the extra ~5MiB sh+node startup pushes the probe over
+      # and the kernel SIGABRTs the new node before process.exit(0) runs.
       test:
-        - "CMD-SHELL"
-        - >
-          node -e "const{Redis}=require('ioredis');const r=new Redis('redis://redis:6379');r.get('heartbeat:spot-feed').then(v=>{const age=Math.floor(Date.now()/1000)-Number(v||0);process.exit(age<120?0:1)}).catch(()=>process.exit(1)).finally(()=>r.disconnect());"
+        - "CMD"
+        - "node"
+        - "-e"
+        - "const{Redis}=require('ioredis');const r=new Redis('redis://redis:6379');r.get('heartbeat:spot-feed').then(v=>{const age=Math.floor(Date.now()/1000)-Number(v||0);process.exit(age<120?0:1)}).catch(()=>process.exit(1)).finally(()=>r.disconnect());"
       interval: 60s
       timeout: 5s
       retries: 2
@@ -280,14 +284,18 @@ services:
     deploy:
       resources:
         limits:
-          memory: 160M
+          # Writer baseline is ~140MiB; 160M left no headroom for the
+          # healthcheck's transient node spawn → cgroup OOM → SIGABRT.
+          memory: 256M
     healthcheck:
       # Reads heartbeat:writer (unix seconds) from Redis using a tiny Node one-liner —
       # avoids installing redis-cli inside the app image. Stale > 30s = unhealthy.
+      # Exec form (CMD) skips the `sh -c` wrapper — see pga-spot-feed comment above.
       test:
-        - "CMD-SHELL"
-        - >
-          node -e "const{Redis}=require('ioredis');const r=new Redis('redis://redis:6379');r.get('heartbeat:writer').then(v=>{const age=Math.floor(Date.now()/1000)-Number(v||0);process.exit(age<30?0:1)}).catch(()=>process.exit(1)).finally(()=>r.disconnect());"
+        - "CMD"
+        - "node"
+        - "-e"
+        - "const{Redis}=require('ioredis');const r=new Redis('redis://redis:6379');r.get('heartbeat:writer').then(v=>{const age=Math.floor(Date.now()/1000)-Number(v||0);process.exit(age<30?0:1)}).catch(()=>process.exit(1)).finally(()=>r.disconnect());"
       interval: 10s
       timeout: 5s
       retries: 3
