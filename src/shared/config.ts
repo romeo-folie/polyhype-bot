@@ -1335,6 +1335,20 @@ const envSchema = z.object({
   // at RSI >= 64, but is hard-blocked only at RSI >= 70.
   HL_MOMENTUM_SOFT_CONFIRM_RSI_BUFFER: z.coerce.number().min(0).max(25).optional().default(6),
 
+  // ── Breakout-retest-hold gate ──
+  // Requires a visible breakout → retest → hold pattern in recent 15m candles before
+  // allowing entry. Ships dark (false) — flip after shadow review.
+  HL_MOMENTUM_REQUIRE_BREAKOUT_RETEST: boolFromEnv.optional().default(false),
+  // Number of closed 15m bars before the breakout bar used to compute the swing high/low.
+  HL_MOMENTUM_BREAKOUT_LOOKBACK_BARS: z.coerce.number().int().min(3).optional().default(12),
+  // Maximum age of the breakout bar in bars (relative to the current hold bar).
+  // Breakouts older than this are considered stale and ignored.
+  HL_MOMENTUM_BREAKOUT_FRESH_BARS: z.coerce.number().int().min(1).optional().default(6),
+  // Retest tolerance as % of the broken level (floor when ATR is available).
+  HL_MOMENTUM_RETEST_TOL_PCT: z.coerce.number().min(0).optional().default(0.3),
+  // Retest tolerance as an ATR multiple (primary; takes precedence over pct when larger).
+  HL_MOMENTUM_RETEST_TOL_ATR_MULT: z.coerce.number().min(0).optional().default(0.5),
+
   // ── HL-native signals (issue #265) ──
   // Sub-PR 1: Funding-rate contra voter. HL settles perp funding hourly at
   // 1/8 of the computed 8h rate, so APR = hourlyFundingRate × 24 × 365.
