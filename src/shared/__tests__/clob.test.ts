@@ -168,21 +168,25 @@ describe('submitClobSell', () => {
   });
 
   it('returns success on a successful sell', async () => {
+    // For a SELL: takingAmount = USDC received, makingAmount = YES shares sold.
+    // The corrected parser normalises: shares_bought = YES shares, cost = USDC, price = USDC/YES.
     mockCreateAndPostMarketOrder.mockResolvedValue({
       success: true,
       errorMsg: '',
       orderID: 'order-456',
       transactionsHashes: ['0xselltx'],
       status: 'matched',
-      takingAmount: '8.0',
-      makingAmount: '10',
+      takingAmount: '8.0',  // USDC received
+      makingAmount: '10',   // YES shares sold
     });
 
     const result = await submitClobSell({ tokenId: 'tok-yes', shares: 10 });
 
     expect(result.success).toBe(true);
     expect(result.tx_hash).toBe('0xselltx');
-    expect(result.shares_bought).toBeCloseTo(8.0);
+    expect(result.shares_bought).toBeCloseTo(10);   // YES shares sold
+    expect(result.cost).toBeCloseTo(8.0);            // USDC proceeds
+    expect(result.price).toBeCloseTo(0.8);           // 8 USDC / 10 shares
   });
 
   it('returns error when sell order fails', async () => {
