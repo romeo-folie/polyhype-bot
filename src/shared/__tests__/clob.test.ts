@@ -2,6 +2,7 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import type * as ClobModule from '../clob.js';
 
 const mockCreateAndPostMarketOrder = vi.fn();
+const mockCreateAndPostOrder = vi.fn();
 const mockGetTickSize = vi.fn();
 const mockGetNegRisk = vi.fn();
 const mockGetBalanceAllowance = vi.fn();
@@ -45,6 +46,7 @@ vi.mock('ethers', () => ({
 vi.mock('@polymarket/clob-client-v2', () => ({
   ClobClient: vi.fn(() => ({
     createAndPostMarketOrder: mockCreateAndPostMarketOrder,
+    createAndPostOrder: mockCreateAndPostOrder,
     getTickSize: mockGetTickSize,
     getNegRisk: mockGetNegRisk,
     getBalanceAllowance: mockGetBalanceAllowance,
@@ -88,7 +90,7 @@ vi.mock('../redis.js', () => ({
   })),
 }));
 
-const { submitClobBuy, submitClobSell, getClobBalance, redeemClobOutcome } =
+const { submitClobBuy, submitClobSell, submitClobLimitSell, getClobBalance, redeemClobOutcome } =
   await import('../clob.js');
 
 describe('submitClobBuy', () => {
@@ -168,21 +170,25 @@ describe('submitClobSell', () => {
   });
 
   it('returns success on a successful sell', async () => {
+    // For a SELL: takingAmount = USDC received, makingAmount = YES shares sold.
+    // The corrected parser normalises: shares_bought = YES shares, cost = USDC, price = USDC/YES.
     mockCreateAndPostMarketOrder.mockResolvedValue({
       success: true,
       errorMsg: '',
       orderID: 'order-456',
       transactionsHashes: ['0xselltx'],
       status: 'matched',
-      takingAmount: '8.0',
-      makingAmount: '10',
+      takingAmount: '8.0',  // USDC received
+      makingAmount: '10',   // YES shares sold
     });
 
     const result = await submitClobSell({ tokenId: 'tok-yes', shares: 10 });
 
     expect(result.success).toBe(true);
     expect(result.tx_hash).toBe('0xselltx');
-    expect(result.shares_bought).toBeCloseTo(8.0);
+    expect(result.shares_bought).toBeCloseTo(10);   // YES shares sold
+    expect(result.cost).toBeCloseTo(8.0);            // USDC proceeds
+    expect(result.price).toBeCloseTo(0.8);           // 8 USDC / 10 shares
   });
 
   it('returns error when sell order fails', async () => {
@@ -215,6 +221,42 @@ describe('submitClobSell', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('timed out');
   }, 35_000);
+});
+
+describe('submitClobLimitSell', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetTickSize.mockResolvedValue('0.01');
+    mockGetNegRisk.mockResolvedValue(false);
+  });
+
+  it('applies sell-side field normalisation (makingAmount=shares, takingAmount=USDC)', async () => {
+    // Maker-exit path: createAndPostOrder with Side.SELL.
+    // Same takingAmount/makingAmount inversion as submitClobSell — isSell=true must be passed.
+    mockCreateAndPostOrder.mockResolvedValue({
+      success: true,
+      errorMsg: '',
+      orderID: 'order-limit-sell',
+      transactionsHashes: ['0xlimittx'],
+      status: 'matched',
+      takingAmount: '4.20',  // USDC received
+      makingAmount: '6.00',  // YES shares sold
+    });
+
+    const result = await submitClobLimitSell({
+      tokenId: 'tok-yes',
+      price: 0.70,
+      size: 6,
+      tickSize: '0.01',
+      negRisk: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.tx_hash).toBe('0xlimittx');
+    expect(result.shares_bought).toBeCloseTo(6.0);   // YES shares sold (makingAmount)
+    expect(result.cost).toBeCloseTo(4.20);            // USDC proceeds (takingAmount)
+    expect(result.price).toBeCloseTo(0.7);            // 4.20 / 6.00
+  });
 });
 
 describe('getClobBalance', () => {

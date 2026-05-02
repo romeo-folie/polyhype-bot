@@ -339,7 +339,7 @@ function orderWithTimeout<T>(promise: Promise<T>): Promise<T> {
   });
 }
 
-function parseOrderResponse(raw: unknown): ClobTradeResult {
+function parseOrderResponse(raw: unknown, isSell = false): ClobTradeResult {
   if (raw == null || typeof raw !== 'object') {
     return {
       success: false,
@@ -361,15 +361,21 @@ function parseOrderResponse(raw: unknown): ClobTradeResult {
   const txHash = Array.isArray(resp.transactionsHashes) ? resp.transactionsHashes[0] : undefined;
   const takingAmount = parseFloat(resp.takingAmount);
   const makingAmount = parseFloat(resp.makingAmount);
-  const price = takingAmount > 0 ? makingAmount / takingAmount : undefined;
+
+  // For BUY:  takingAmount = YES shares received, makingAmount = USDC spent
+  // For SELL: takingAmount = USDC received,       makingAmount = YES shares sold
+  // Normalise so sharesAmount is always the YES side and usdcAmount is always USDC.
+  const sharesAmount = isSell ? makingAmount : takingAmount;
+  const usdcAmount   = isSell ? takingAmount : makingAmount;
+  const price = sharesAmount > 0 ? usdcAmount / sharesAmount : undefined;
 
   return {
     success: true,
     ...(txHash ? { tx_hash: txHash } : {}),
     ...(resp.orderID ? { order_id: resp.orderID } : {}),
-    ...(isFinite(takingAmount) && takingAmount > 0 ? { shares_bought: takingAmount } : {}),
+    ...(isFinite(sharesAmount) && sharesAmount > 0 ? { shares_bought: sharesAmount } : {}),
     ...(price !== undefined && isFinite(price) ? { price } : {}),
-    ...(isFinite(makingAmount) && makingAmount > 0 ? { cost: makingAmount } : {}),
+    ...(isFinite(usdcAmount) && usdcAmount > 0 ? { cost: usdcAmount } : {}),
     raw,
   };
 }
@@ -513,7 +519,7 @@ export async function submitClobLimitSell(input: ClobLimitBuyInput): Promise<Clo
       ),
     );
 
-    return parseOrderResponse(raw);
+    return parseOrderResponse(raw, true);
   } catch (err) {
     return { success: false, error: normaliseError(err) };
   }
@@ -596,7 +602,7 @@ export async function submitClobSell(input: ClobSellInput): Promise<ClobTradeRes
       ),
     );
 
-    return parseOrderResponse(raw);
+    return parseOrderResponse(raw, true);
   } catch (err) {
     return { success: false, error: normaliseError(err) };
   }
