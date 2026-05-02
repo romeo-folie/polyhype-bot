@@ -222,5 +222,37 @@ describe('Telegram notifications', () => {
       expect(body.text).toContain('$0.00387900');
       expect(body.text).toContain('$0.00412500');
     });
+
+    it('trailing_stop label says "gains locked in" when returnPct is positive', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+      await notifyTakeProfitExecuted({
+        position: makePosition({ entryPrice: 0.45, executionVenue: 'clob' }),
+        currentPrice: 0.55,
+        returnPct: 22.22,
+        reason: 'trailing_stop',
+      });
+
+      const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(opts.body as string) as { text: string };
+      expect(body.text).toContain('gains locked in');
+      expect(body.text).not.toContain('reversal below entry');
+    });
+
+    it('trailing_stop label says "reversal below entry" when returnPct is negative', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+      await notifyTakeProfitExecuted({
+        position: makePosition({ entryPrice: 0.45, executionVenue: 'clob' }),
+        currentPrice: 0.415,
+        returnPct: -7.78,
+        reason: 'trailing_stop',
+      });
+
+      const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(opts.body as string) as { text: string };
+      expect(body.text).toContain('reversal below entry');
+      expect(body.text).not.toContain('gains locked in');
+    });
   });
 });
