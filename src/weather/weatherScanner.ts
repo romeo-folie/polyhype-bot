@@ -46,6 +46,7 @@ import type { CityBias } from './cityBias.js';
 const GAMMA_BASE = 'https://gamma-api.polymarket.com';
 const GAMMA_TIMEOUT_MS = 15_000;
 const DEDUP_KEY_PREFIX = 'weather:event:';
+const MARKET_STATE_KEY_PREFIX = 'weather:market_state:';
 
 /**
  * Resolve the `WEATHER_TRADE_SIDES` config value into a set the scanner
@@ -397,6 +398,12 @@ interface ForecastResult {
    * provenance of stdDev.
    */
   ensembleModel: 'gfs' | 'ecmwf' | 'none';
+  /** Optional shadow ensemble for side-by-side calibration comparison. */
+  shadowEnsemble?: {
+    stdDev: number;
+    ensembleMembers: number;
+    ensembleModel: 'gfs' | 'ecmwf';
+  } | null;
 }
 
 /**
@@ -411,6 +418,7 @@ export async function fetchForecast(
   stddevMinFraction = 0.7,
   useEcmwf = false,
   useHrrr = false,
+  dualEnsembleShadow = false,
 ): Promise<ForecastResult | null> {
   const { coords, targetDate, unit } = event;
   const month = parseInt(targetDate.slice(5, 7), 10);
@@ -421,11 +429,18 @@ export async function fetchForecast(
     defaultStd = defaultStd * 5 / 9;
   }
 
-  // Try ensemble first (works for both US and international)
-  const ensemble = await fetchEnsembleForecast(
-    coords.lat, coords.lon, targetDate, unit, fetchFn, useEcmwf,
-  );
+  // Try ensemble first (works for both US and international).
+  // Both fetches are submitted to Promise.all, but when fetchFn is the
+  // production rate-limited queue they are still serialized by the limiter —
+  // the shadow fetch adds one extra rate-limit slot per event when enabled.
+  const [ensemble, shadowEnsembleRaw] = await Promise.all([
+    fetchEnsembleForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, useEcmwf),
+    dualEnsembleShadow
+      ? fetchEnsembleForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, !useEcmwf)
+      : Promise.resolve(null),
+  ]);
   const ensembleModel: ForecastResult['ensembleModel'] = ensemble?.ensembleModel ?? 'none';
+  const shadowEnsembleModel = shadowEnsembleRaw?.ensembleModel ?? null;
 
   if (coords.noaaCoverage) {
     // US city: fetch NOAA, Open-Meteo, and (when enabled at 1-day) HRRR in parallel.
@@ -465,8 +480,26 @@ export async function fetchForecast(
     const stdDev = availableHighs.length === 1
       ? Math.max(ensemble?.stddevHigh ?? defaultStd, defaultStd * stddevMinFraction)
       : Math.max(ensemble?.stddevHigh ?? 0, spread, defaultStd * stddevMinFraction);
+    const shadowStdDev = shadowEnsembleRaw
+      ? (availableHighs.length === 1
+        ? Math.max(shadowEnsembleRaw.stddevHigh, defaultStd * stddevMinFraction)
+        : Math.max(shadowEnsembleRaw.stddevHigh, spread, defaultStd * stddevMinFraction))
+      : null;
 
-    return { forecastHigh, stdDev, source, ensembleMembers: ensemble?.memberCount ?? 0, ensembleModel };
+    return {
+      forecastHigh,
+      stdDev,
+      source,
+      ensembleMembers: ensemble?.memberCount ?? 0,
+      ensembleModel,
+      shadowEnsemble: shadowStdDev != null && shadowEnsembleModel
+        ? {
+          stdDev: shadowStdDev,
+          ensembleMembers: shadowEnsembleRaw?.memberCount ?? 0,
+          ensembleModel: shadowEnsembleModel,
+        }
+        : null,
+    };
   }
 
   // International city: Open-Meteo only (HRRR is US-only)
@@ -474,12 +507,22 @@ export async function fetchForecast(
   if (!omForecast) return null;
 
   const stdDev = Math.max(ensemble?.stddevHigh ?? defaultStd, defaultStd * stddevMinFraction);
+  const shadowStdDev = shadowEnsembleRaw
+    ? Math.max(shadowEnsembleRaw.stddevHigh, defaultStd * stddevMinFraction)
+    : null;
   return {
     forecastHigh: omForecast.highTemp,
     stdDev,
     source: 'open-meteo',
     ensembleMembers: ensemble?.memberCount ?? 0,
     ensembleModel,
+    shadowEnsemble: shadowStdDev != null && shadowEnsembleModel
+      ? {
+        stdDev: shadowStdDev,
+        ensembleMembers: shadowEnsembleRaw?.memberCount ?? 0,
+        ensembleModel: shadowEnsembleModel,
+      }
+      : null,
   };
 }
 
@@ -529,7 +572,7 @@ export interface WeatherBracketOpportunity {
    * so the executor layer (and shadow observations) can gate cleanly.
    */
   allowedByConfig: boolean;
-  /** Raw forecast high before any bias correction was applied. Equal to forecastHigh when biasApplied=false. */
+  /** Raw forecast high before any bias correction was applied. Equal to forecastHigh when meanShiftApplied=false. */
   rawForecastHigh: number;
   /** Forecast high after subtracting cityMeanBias, or same as rawForecastHigh if correction was not applied. */
   correctedForecastHigh: number;
@@ -539,8 +582,8 @@ export interface WeatherBracketOpportunity {
   cityEmpiricalStddev: number | null;
   /** Number of samples used for this city's bias estimate. Null when no bias data available. */
   citySampleSize: number | null;
-  /** True when full bias correction (mean shift + empirical σ overlay) was applied. */
-  biasApplied: boolean;
+  /** True when the mean-bias shift was applied to the forecast centre (requires biasMode=full AND meanShiftHelpful). The empirical σ overlay runs whenever biasMode=full regardless of this flag. */
+  meanShiftApplied: boolean;
   /**
    * Which tier of bias handling ran for this opportunity:
    *   - `none` — no bias data trusted (either disabled, missing, or sampleSize < min)
@@ -550,6 +593,108 @@ export interface WeatherBracketOpportunity {
   biasMode: 'none' | 'weak' | 'full';
   /** Market end date from Gamma — used by the near-res entry gate. */
   endDate: string | null;
+  /** Alternate shadow-model bracket probability (same event, alternate ensemble model). */
+  shadowModelProbability?: number | null;
+  /** Alternate shadow-model edge on the selected trade side. */
+  shadowEdge?: number | null;
+  /** Alternate shadow-model ensemble identifier. */
+  shadowEnsembleModel?: 'gfs' | 'ecmwf' | null;
+  /** Alternate shadow-model effective stddev. */
+  shadowEffectiveStdDev?: number | null;
+  /** Alternate shadow-model member count. */
+  shadowEnsembleMembers?: number | null;
+  /** True when blocked because the market repriced against the thesis without enough model improvement. */
+  blockedByMarketDisagreement?: boolean;
+  /** Prior side-relative price used by the disagreement gate. */
+  previousOutcomePrice?: number | null;
+  /** Prior win probability used by the disagreement gate. */
+  previousWinProbability?: number | null;
+}
+
+interface WeatherMarketState {
+  tradeSide: 'YES' | 'NO';
+  outcomePrice: number;
+  winProbability: number;
+  observedAt: string;
+}
+
+function weatherMarketStateKey(marketId: string, side: 'YES' | 'NO'): string {
+  return `${MARKET_STATE_KEY_PREFIX}${marketId}:${side}`;
+}
+
+function weatherWinProbability(opp: WeatherBracketOpportunity): number {
+  return opp.tradeSide === 'YES' ? opp.modelProbability : 1 - opp.modelProbability;
+}
+
+async function applyMarketDisagreementGate(
+  redis: Redis,
+  opps: WeatherBracketOpportunity[],
+  cfg: ReturnType<typeof loadConfig>,
+): Promise<WeatherBracketOpportunity[]> {
+  if (!cfg.WEATHER_MARKET_DISAGREEMENT_ENABLED || opps.length === 0) return opps;
+
+  const keys = opps.map((opp) => weatherMarketStateKey(opp.marketId, opp.tradeSide));
+  const priorRaws = await redis.mget(...keys);
+
+  const gated: WeatherBracketOpportunity[] = [];
+  const pipeline = redis.pipeline();
+
+  for (let i = 0; i < opps.length; i++) {
+    const opp = opps[i]!;
+    const priorRaw = priorRaws[i];
+    let previousOutcomePrice: number | null = null;
+    let previousWinProbability: number | null = null;
+    let blockedByMarketDisagreement = false;
+
+    if (priorRaw) {
+      try {
+        const prior = JSON.parse(priorRaw) as WeatherMarketState;
+        previousOutcomePrice = Number.isFinite(prior.outcomePrice) ? prior.outcomePrice : null;
+        previousWinProbability = Number.isFinite(prior.winProbability) ? prior.winProbability : null;
+        const currentWinProbability = weatherWinProbability(opp);
+        const adverseMove =
+          previousOutcomePrice != null ? opp.outcomePrice - previousOutcomePrice : 0;
+        const winProbImprovement =
+          previousWinProbability != null ? currentWinProbability - previousWinProbability : Number.POSITIVE_INFINITY;
+        blockedByMarketDisagreement =
+          adverseMove >= cfg.WEATHER_MARKET_DISAGREEMENT_MIN_ADVERSE_MOVE
+          && winProbImprovement <= cfg.WEATHER_MARKET_DISAGREEMENT_MAX_WINPROB_IMPROVEMENT;
+      } catch {
+        // Ignore malformed prior state and overwrite below.
+      }
+    }
+
+    if (blockedByMarketDisagreement) {
+      logger.info('[weather] blocking stale thesis after adverse repricing', {
+        marketId: opp.marketId,
+        city: opp.city,
+        bracket: opp.bracketLabel,
+        tradeSide: opp.tradeSide,
+        previousOutcomePrice,
+        currentOutcomePrice: opp.outcomePrice,
+        previousWinProbability,
+        currentWinProbability: weatherWinProbability(opp),
+      });
+    }
+
+    gated.push({
+      ...opp,
+      blockedByMarketDisagreement,
+      previousOutcomePrice,
+      previousWinProbability,
+    });
+
+    const nextState: WeatherMarketState = {
+      tradeSide: opp.tradeSide,
+      outcomePrice: opp.outcomePrice,
+      winProbability: weatherWinProbability(opp),
+      observedAt: new Date().toISOString(),
+    };
+    pipeline.set(keys[i]!, JSON.stringify(nextState), 'EX', cfg.WEATHER_MARKET_DISAGREEMENT_TTL_S);
+  }
+
+  await pipeline.exec();
+  return gated;
 }
 
 /**
@@ -575,8 +720,8 @@ export interface FindMispricedResult {
   opportunities: WeatherBracketOpportunity[];
   /** Sum of all bracket model probabilities — used for coverage check and shadow logging. */
   modelSum: number;
-  /** True when full bias correction was applied (regardless of whether any bracket cleared minEdge). */
-  biasApplied: boolean;
+  /** True when the mean-bias shift was applied to the forecast centre (biasMode=full AND meanShiftHelpful). */
+  meanShiftApplied: boolean;
   /** Tri-state tier of bias handling for this invocation (`none` | `weak` | `full`). */
   biasMode: 'none' | 'weak' | 'full';
   /**
@@ -645,12 +790,14 @@ export function findMispricedBrackets(
       biasMode = 'weak';
     }
   }
-  const applyBias = biasMode === 'full';
+  const meanShiftHelpful = cityBias?.meanShiftHelpful === true;
+  const meanShiftApplied = biasMode === 'full' && meanShiftHelpful;
 
   const rawForecastHigh = forecast.forecastHigh;
   // Only the trusted tier subtracts meanBias — weak-band samples are too noisy
-  // to justify shifting the forecast centre.
-  const correctedForecastHigh = applyBias ? rawForecastHigh - cityBias!.meanBias : rawForecastHigh;
+  // to justify shifting the forecast centre. The empirical σ overlay still runs
+  // whenever biasMode=full regardless of whether the mean shift is applied.
+  const correctedForecastHigh = meanShiftApplied ? rawForecastHigh - cityBias!.meanBias : rawForecastHigh;
   const forecastHighForCalc = correctedForecastHigh;
 
   // Effective stddev:
@@ -671,6 +818,7 @@ export function findMispricedBrackets(
 
   // Compute model probability for each bracket
   const modelProbs: number[] = [];
+  const shadowModelProbs: Array<number | null> = [];
   for (const bracket of event.brackets) {
     const prob = estimateBracketProbability(
       forecastHighForCalc,
@@ -680,6 +828,19 @@ export function findMispricedBrackets(
       effectiveStdDev,
     );
     modelProbs.push(prob);
+    if (forecast.shadowEnsemble) {
+      shadowModelProbs.push(
+        estimateBracketProbability(
+          forecastHighForCalc,
+          bracket.low,
+          bracket.high,
+          daysOut,
+          forecast.shadowEnsemble.stdDev,
+        ),
+      );
+    } else {
+      shadowModelProbs.push(null);
+    }
   }
 
   // Coverage guard: model probs must sum to ≥ minModelCoverage.
@@ -694,7 +855,7 @@ export function findMispricedBrackets(
       bracketCount: event.brackets.length,
       threshold: minModelCoverage,
     });
-    return { opportunities: [], modelSum, biasApplied: applyBias, biasMode, effectiveStdDev };
+    return { opportunities: [], modelSum, meanShiftApplied, biasMode, effectiveStdDev };
   }
 
   // Compute overround (diagnostic): sum of all market YES prices.
@@ -716,6 +877,7 @@ export function findMispricedBrackets(
     // NO edge: model says bracket is less likely than (1 - noPrice) implies
     const edgeYes = modelProb - bracket.yesPrice;
     const edgeNo = (1 - modelProb) - bracket.noPrice;
+    const shadowModelProb = shadowModelProbs[i] ?? null;
 
     let tradeSide: 'YES' | 'NO';
     let edge: number;
@@ -781,13 +943,22 @@ export function findMispricedBrackets(
       cityMeanBias: cityBias?.meanBias ?? null,
       cityEmpiricalStddev: cityBias?.empiricalStddev ?? null,
       citySampleSize: cityBias?.sampleSize ?? null,
-      biasApplied: applyBias,
+      meanShiftApplied,
       biasMode,
       endDate: event.endDate,
+      shadowModelProbability: shadowModelProb,
+      shadowEdge: shadowModelProb == null
+        ? null
+        : (tradeSide === 'YES'
+          ? shadowModelProb - bracket.yesPrice
+          : (1 - shadowModelProb) - bracket.noPrice),
+      shadowEnsembleModel: forecast.shadowEnsemble?.ensembleModel ?? null,
+      shadowEffectiveStdDev: forecast.shadowEnsemble?.stdDev ?? null,
+      shadowEnsembleMembers: forecast.shadowEnsemble?.ensembleMembers ?? null,
     });
   }
 
-  return { opportunities, modelSum, biasApplied: applyBias, biasMode, effectiveStdDev };
+  return { opportunities, modelSum, meanShiftApplied, biasMode, effectiveStdDev };
 }
 
 // ── Main scanner ─────────────────────────────────────────────────────────
@@ -827,6 +998,7 @@ export async function scanWeatherMarkets(
   let noForecast = 0;
   let horizonSkipped = 0;
   let eventsWithOpportunities = 0;
+  let totalDisagreementBlocked = 0;
 
   for (const rawEvent of rawEvents) {
     // Step 2: Parse the event
@@ -851,7 +1023,15 @@ export async function scanWeatherMarkets(
     }
 
     // Step 3: Fetch forecast
-    const forecast = await fetchForecast(event, daysOut, fetchFn, cfg.WEATHER_STDDEV_MIN_FRACTION, cfg.WEATHER_MODEL_ECMWF_ENABLED, cfg.WEATHER_HRRR_ENABLED);
+    const forecast = await fetchForecast(
+      event,
+      daysOut,
+      fetchFn,
+      cfg.WEATHER_STDDEV_MIN_FRACTION,
+      cfg.WEATHER_MODEL_ECMWF_ENABLED,
+      cfg.WEATHER_HRRR_ENABLED,
+      cfg.WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED,
+    );
     if (!forecast) {
       noForecast++;
       continue;
@@ -869,7 +1049,7 @@ export async function scanWeatherMarkets(
     const {
       opportunities,
       modelSum,
-      biasApplied: biasCorrectionApplied,
+      meanShiftApplied: meanShiftApplied,
       biasMode: eventBiasMode,
       effectiveStdDev,
     } = findMispricedBrackets(
@@ -889,6 +1069,7 @@ export async function scanWeatherMarkets(
         maxTailNoBetModelProb: cfg.WEATHER_THRESHOLD_NO_BET_MAX_PROB,
       },
     );
+    const gatedOpportunities = await applyMarketDisagreementGate(redis, opportunities, cfg);
     // `effectiveStdDev` above is the post-bias σ actually used by
     // estimateBracketProbability (weak-band inflator or full-tier empirical-σ
     // overlay already applied). Surfaced up from findMispricedBrackets so the
@@ -897,10 +1078,12 @@ export async function scanWeatherMarkets(
 
     // Step 6: Shadow-log every evaluated event
     const overround = event.brackets.reduce((s, b) => s + b.yesPrice, 0);
-    const bestEdge = opportunities.length > 0
-      ? Math.max(...opportunities.map((o) => o.edge))
+    const bestEdge = gatedOpportunities.length > 0
+      ? Math.max(...gatedOpportunities.map((o) => o.edge))
       : 0;
-    const allowedInEvent = opportunities.filter((o) => o.allowedByConfig).length;
+    const allowedInEvent = gatedOpportunities.filter((o) => o.allowedByConfig && !o.blockedByMarketDisagreement).length;
+    const disagreementBlocked = gatedOpportunities.filter((o) => o.blockedByMarketDisagreement).length;
+    totalDisagreementBlocked += disagreementBlocked;
 
     logger.info('[weather] event evaluated', {
       eventId: event.eventId,
@@ -917,11 +1100,15 @@ export async function scanWeatherMarkets(
       forecastSource: forecast.source,
       ensembleMembers: forecast.ensembleMembers,
       ensembleModel: forecast.ensembleModel,
+      shadowEnsembleModel: forecast.shadowEnsemble?.ensembleModel ?? null,
+      shadowEnsembleMembers: forecast.shadowEnsemble?.ensembleMembers ?? null,
+      shadowForecastStdDev: forecast.shadowEnsemble?.stdDev?.toFixed(2) ?? null,
       overround: overround.toFixed(3),
       modelSum: modelSum.toFixed(4),
       coverageStatus,
-      opportunitiesFound: opportunities.length,
+      opportunitiesFound: gatedOpportunities.length,
       allowedInEvent,
+      disagreementBlocked,
       tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
       bestEdge: bestEdge.toFixed(3),
       enabled: cfg.WEATHER_SCANNER_ENABLED,
@@ -935,7 +1122,7 @@ export async function scanWeatherMarkets(
       // consistent with bracket-level `wouldTrade` counts.
       wouldBlock:
         !cfg.WEATHER_SCANNER_ENABLED ||
-        opportunities.length === 0 ||
+        gatedOpportunities.length === 0 ||
         allowedInEvent === 0,
       metricValue: bestEdge,
       threshold: cfg.WEATHER_MIN_EDGE,
@@ -957,18 +1144,25 @@ export async function scanWeatherMarkets(
         forecastSource: forecast.source,
         ensembleMembers: forecast.ensembleMembers,
         ensembleModel: forecast.ensembleModel,
+        shadowEnsembleModel: forecast.shadowEnsemble?.ensembleModel ?? null,
+        shadowEnsembleMembers: forecast.shadowEnsemble?.ensembleMembers ?? null,
+        shadowForecastStdDev: forecast.shadowEnsemble?.stdDev ?? null,
         overround,
         modelSum: parseFloat(modelSum.toFixed(4)),
         status: coverageStatus,
-        opportunitiesFound: opportunities.length,
+        opportunitiesFound: gatedOpportunities.length,
         allowedInEvent,
+        disagreementBlocked,
         tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
         scannerEnabled: cfg.WEATHER_SCANNER_ENABLED,
         cityMeanBias: cityBias?.meanBias ?? null,
         cityEmpiricalStddev: cityBias?.empiricalStddev ?? null,
         citySampleSize: cityBias?.sampleSize ?? null,
-        biasApplied: biasCorrectionApplied,
+        meanShiftApplied: meanShiftApplied,
         biasMode: eventBiasMode,
+        meanShiftHelpful: cityBias?.meanShiftHelpful ?? false,
+        cityRawMae: cityBias?.rawMae ?? null,
+        cityCorrectedMae: cityBias?.correctedMae ?? null,
         biasMinSamples: cfg.WEATHER_BIAS_MIN_SAMPLES,
         biasTrustedSamples: cfg.WEATHER_BIAS_TRUSTED_SAMPLES,
         weakBiasStddevMultiplier: cfg.WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER,
@@ -978,8 +1172,8 @@ export async function scanWeatherMarkets(
     // Log each opportunity individually for shadow analysis.
     // Shadow still records disallowed-side opps so calibration analysis keeps
     // accruing validation data for the gated side — only wouldTrade flips.
-    for (const opp of opportunities) {
-      const wouldTrade = cfg.WEATHER_SCANNER_ENABLED && opp.allowedByConfig;
+    for (const opp of gatedOpportunities) {
+      const wouldTrade = cfg.WEATHER_SCANNER_ENABLED && opp.allowedByConfig && !opp.blockedByMarketDisagreement;
       logger.info('[weather] bracket opportunity', {
         marketId: opp.marketId,
         eventSlug: opp.eventSlug,
@@ -994,9 +1188,17 @@ export async function scanWeatherMarkets(
         outcomePrice: opp.outcomePrice.toFixed(3),
         forecastHigh: opp.forecastHigh.toFixed(1),
         ensembleModel: forecast.ensembleModel,
+        shadowEnsembleModel: forecast.shadowEnsemble?.ensembleModel ?? null,
+        shadowEnsembleMembers: forecast.shadowEnsemble?.ensembleMembers ?? null,
+        shadowModelProb: opp.shadowModelProbability ?? null,
+        shadowEdge: opp.shadowEdge ?? null,
+        shadowEffectiveStdDev: opp.shadowEffectiveStdDev ?? null,
         daysOut: opp.daysOut,
         tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
         allowedByConfig: opp.allowedByConfig,
+        blockedByMarketDisagreement: opp.blockedByMarketDisagreement ?? false,
+        previousOutcomePrice: opp.previousOutcomePrice ?? null,
+        previousWinProbability: opp.previousWinProbability ?? null,
         wouldTrade,
       });
       void enqueueWrite('shadow_observations', {
@@ -1028,8 +1230,16 @@ export async function scanWeatherMarkets(
           ensembleModel: forecast.ensembleModel,
           forecastSource: forecast.source,
           ensembleMembers: forecast.ensembleMembers,
+          shadowEnsembleModel: forecast.shadowEnsemble?.ensembleModel ?? null,
+          shadowEnsembleMembers: forecast.shadowEnsemble?.ensembleMembers ?? null,
+          shadowModelProb: opp.shadowModelProbability ?? null,
+          shadowEdge: opp.shadowEdge ?? null,
+          shadowEffectiveStdDev: opp.shadowEffectiveStdDev ?? null,
           tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
           allowedByConfig: opp.allowedByConfig,
+          blockedByMarketDisagreement: opp.blockedByMarketDisagreement ?? false,
+          previousOutcomePrice: opp.previousOutcomePrice ?? null,
+          previousWinProbability: opp.previousWinProbability ?? null,
           daysOut: opp.daysOut,
           wouldTrade,
           rawForecastHigh: opp.rawForecastHigh,
@@ -1037,19 +1247,22 @@ export async function scanWeatherMarkets(
           cityMeanBias: opp.cityMeanBias,
           cityEmpiricalStddev: opp.cityEmpiricalStddev,
           citySampleSize: opp.citySampleSize,
-          biasApplied: opp.biasApplied,
+          meanShiftApplied: opp.meanShiftApplied,
           biasMode: opp.biasMode,
+          meanShiftHelpful: cityBias?.meanShiftHelpful ?? false,
+          cityRawMae: cityBias?.rawMae ?? null,
+          cityCorrectedMae: cityBias?.correctedMae ?? null,
         },
       });
     }
 
-    if (opportunities.length > 0) {
+    if (gatedOpportunities.length > 0) {
       eventsWithOpportunities++;
-      allOpportunities.push(...opportunities);
+      allOpportunities.push(...gatedOpportunities);
     }
   }
 
-  const allowedOpportunities = allOpportunities.filter((o) => o.allowedByConfig);
+  const allowedOpportunities = allOpportunities.filter((o) => o.allowedByConfig && !o.blockedByMarketDisagreement);
   logger.info('[weather] scan summary', {
     totalEvents: rawEvents.length,
     parsedEvents: parsedCount,
@@ -1059,7 +1272,8 @@ export async function scanWeatherMarkets(
     eventsWithOpportunities,
     totalOpportunities: allOpportunities.length,
     allowedOpportunities: allowedOpportunities.length,
-    sideFiltered: allOpportunities.length - allowedOpportunities.length,
+    sideFiltered: allOpportunities.length - allowedOpportunities.length - totalDisagreementBlocked,
+    totalDisagreementBlocked,
     tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
     enabled: cfg.WEATHER_SCANNER_ENABLED,
   });
@@ -1141,7 +1355,7 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
   // Filter by WEATHER_TRADE_SIDES and excluded-city list. Excluded-city opps
   // remain in shadow records (wouldTrade=true) so calibration data stays clean.
   let tradable = opportunities.filter(
-    (o) => o.allowedByConfig && !excludedCities.has(o.city.toLowerCase()),
+    (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !excludedCities.has(o.city.toLowerCase()),
   );
 
   if (excludedCities.size > 0) {

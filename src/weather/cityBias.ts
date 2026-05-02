@@ -30,6 +30,12 @@ export interface CityBias {
   meanBias: number;
   /** Standard deviation of forecast errors across paired samples. */
   empiricalStddev: number;
+  /** Weighted MAE before any city-mean correction is applied. */
+  rawMae?: number;
+  /** Weighted MAE after subtracting meanBias from the forecast. */
+  correctedMae?: number;
+  /** True when recent out-of-sample error improved after mean shifting. */
+  meanShiftHelpful?: boolean;
   /** Number of paired samples used. */
   sampleSize: number;
   updatedAt: string;
@@ -62,6 +68,8 @@ export async function computeCityBias(
       sample_size: number;
       mean_bias: number;
       empirical_stddev: number;
+      raw_mae: number;
+      corrected_mae: number;
     }[]>`
       WITH weighted AS (
         SELECT
@@ -83,7 +91,8 @@ export async function computeCityBias(
         WHERE so.kind = 'weather_event'
           AND so.observed_at >= NOW() - ${EWMA_LOOKBACK_DAYS} * INTERVAL '1 day'
           AND (so.payload->>'forecastHigh') IS NOT NULL
-      )
+      ),
+      stats AS (
       SELECT
         city,
         COUNT(*)::int                                                AS sample_size,
@@ -98,6 +107,18 @@ export async function computeCityBias(
       FROM weighted
       GROUP BY city
       HAVING COUNT(*) >= ${minSamples}
+      )
+      SELECT
+        s.city,
+        s.sample_size,
+        s.mean_bias,
+        s.empirical_stddev,
+        SUM(ABS(w.error) * w.w) / NULLIF(SUM(w.w), 0)               AS raw_mae,
+        SUM(ABS(w.error - s.mean_bias) * w.w) / NULLIF(SUM(w.w), 0) AS corrected_mae
+      FROM stats s
+      JOIN weighted w
+        ON w.city = s.city
+      GROUP BY s.city, s.sample_size, s.mean_bias, s.empirical_stddev
     `;
 
     if (rows.length === 0) {
@@ -110,6 +131,9 @@ export async function computeCityBias(
       const bias: CityBias = {
         meanBias: Math.round(row.mean_bias * 1000) / 1000,
         empiricalStddev: Math.round((row.empirical_stddev ?? 0) * 1000) / 1000,
+        rawMae: Math.round((row.raw_mae ?? 0) * 1000) / 1000,
+        correctedMae: Math.round((row.corrected_mae ?? 0) * 1000) / 1000,
+        meanShiftHelpful: (row.corrected_mae ?? Number.POSITIVE_INFINITY) < (row.raw_mae ?? 0) * 0.98,
         sampleSize: row.sample_size,
         updatedAt: now,
       };
@@ -118,6 +142,9 @@ export async function computeCityBias(
         city: row.city,
         meanBias: bias.meanBias,
         empiricalStddev: bias.empiricalStddev,
+        rawMae: bias.rawMae,
+        correctedMae: bias.correctedMae,
+        meanShiftHelpful: bias.meanShiftHelpful,
         sampleSize: bias.sampleSize,
       });
     }
@@ -139,7 +166,10 @@ export async function getCityBias(redis: Redis, city: string): Promise<CityBias 
     if (typeof parsed.meanBias !== 'number' || typeof parsed.empiricalStddev !== 'number') {
       return null;
     }
-    return parsed;
+    return {
+      ...parsed,
+      meanShiftHelpful: parsed.meanShiftHelpful === true,
+    };
   } catch {
     return null;
   }

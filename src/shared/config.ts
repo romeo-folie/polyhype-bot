@@ -1539,6 +1539,10 @@ const envSchema = z.object({
   // Use ECMWF IFS 0.25° 51-member ensemble instead of GFS 31-member for stddev estimation.
   // ECMWF has ~0.2-0.5°C lower Tmax MAE at 1-day lead globally. Ships dark.
   WEATHER_MODEL_ECMWF_ENABLED: boolFromEnv.optional().default(false),
+  // Shadow both ensemble models on each scan: keep one primary model for live
+  // trading, but also fetch the alternate ensemble and log its implied bracket
+  // probabilities/edges alongside the primary path for calibration comparison.
+  WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: boolFromEnv.optional().default(true),
   // Use HRRR (3km, hourly-updating, radar-assimilated) as 3rd voter for US cities at daysOut≤1.
   // HRRR is the highest-accuracy US model at 0–18h lead. Ships dark.
   WEATHER_HRRR_ENABLED: boolFromEnv.optional().default(false),
@@ -1614,6 +1618,13 @@ const envSchema = z.object({
   // resolveMakerPrice would otherwise lift the post price above the cap; the
   // executor refuses to post in that case (maker_price_above_cap).
   WEATHER_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.65),
+  // Relative-to-quote ceiling for weather maker entries. WEATHER_MAX_ENTRY_PRICE
+  // prevents absurd absolute prices, but a ghost book can still produce a post
+  // materially above the scanner's observed side quote (e.g. quote=0.44, post=0.63)
+  // while staying under the absolute cap. This knob bounds that drift directly.
+  // 0 disables the guard. Default 0.08 means: never post more than 8 cents above
+  // the side-relative price that generated the weather signal.
+  WEATHER_MAX_SIGNAL_PRICE_DRIFT: z.coerce.number().min(0).max(1).optional().default(0.08),
   // Patient real-book entry: on markets with a live order book, post a GTC
   // limit order this many bps below the current side-ask instead of buying at
   // the ask. The order rests indefinitely (no taker fallback); re-posts on the
@@ -1650,6 +1661,13 @@ const envSchema = z.object({
   // Ships enabled=true (pure entry guard; no position closures).
   WEATHER_NEAR_RES_ENTRY_ENABLED: boolFromEnv.optional().default(true),
   WEATHER_NEAR_RES_ENTRY_HOURS: z.coerce.number().min(0).optional().default(10),
+  // Market-disagreement gate: when the side price moves materially against the
+  // weather thesis across scans but the model's win probability barely improves,
+  // treat the "extra edge" as likely model error instead of free value.
+  WEATHER_MARKET_DISAGREEMENT_ENABLED: boolFromEnv.optional().default(true),
+  WEATHER_MARKET_DISAGREEMENT_MIN_ADVERSE_MOVE: z.coerce.number().min(0).max(1).optional().default(0.10),
+  WEATHER_MARKET_DISAGREEMENT_MAX_WINPROB_IMPROVEMENT: z.coerce.number().min(0).max(1).optional().default(0.03),
+  WEATHER_MARKET_DISAGREEMENT_TTL_S: z.coerce.number().int().min(60).optional().default(48 * 60 * 60),
   // ── PM-activity reconciler (src/cron/polymarketActivityReconciler.ts) ──
   // Every-15min cron that catches auto-redeemed wins our local redeemer missed:
   //   (a) positions closed via SL/TP leaving residual shares that auto-redeemed

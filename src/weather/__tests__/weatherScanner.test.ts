@@ -23,11 +23,16 @@ const baseConfig = {
   WEATHER_MAX_SCAN_EXPOSURE_USD: 30,
   WEATHER_KELLY_FRACTION: 0.25,
   WEATHER_MODEL_ECMWF_ENABLED: false,
+  WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
   WEATHER_HRRR_ENABLED: false,
   WEATHER_BIAS_CORRECTION_ENABLED: false,
   WEATHER_BIAS_MIN_SAMPLES: 14,
   WEATHER_BIAS_TRUSTED_SAMPLES: 14,
   WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER: 1.2,
+  WEATHER_MARKET_DISAGREEMENT_ENABLED: true,
+  WEATHER_MARKET_DISAGREEMENT_MIN_ADVERSE_MOVE: 0.10,
+  WEATHER_MARKET_DISAGREEMENT_MAX_WINPROB_IMPROVEMENT: 0.03,
+  WEATHER_MARKET_DISAGREEMENT_TTL_S: 172800,
   WEATHER_EXCLUDED_CITIES: '',
   MIN_BET_USD: 5,
 };
@@ -121,13 +126,26 @@ const { logger } = await import('../../shared/logger.js');
 // Minimal Redis mock
 function createRedisMock() {
   const store = new Map<string, string>();
+  const pipelineOps: Array<() => void> = [];
+  const pipelineMock = {
+    set: vi.fn((key: string, value: string, _ex?: string, _ttl?: number) => {
+      pipelineOps.push(() => store.set(key, value));
+      return pipelineMock;
+    }),
+    exec: vi.fn(() => {
+      for (const op of pipelineOps.splice(0)) op();
+      return Promise.resolve([]);
+    }),
+  };
   return {
     get: vi.fn((key: string) => Promise.resolve(store.get(key) ?? null)),
+    mget: vi.fn((...keys: string[]) => Promise.resolve(keys.map((k) => store.get(k) ?? null))),
     set: vi.fn((key: string, value: string, _ex?: string, _ttl?: number, nx?: string) => {
       if (nx === 'NX' && store.has(key)) return Promise.resolve(null);
       store.set(key, value);
       return Promise.resolve('OK');
     }),
+    pipeline: vi.fn(() => pipelineMock),
     _store: store,
   };
 }
@@ -855,15 +873,15 @@ describe('findMispricedBrackets - city bias correction', () => {
     ensembleModel: 'gfs' as const,
   };
 
-  it('bias disabled → forecastHigh unchanged, biasApplied=false on result and opps', () => {
-    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 20, updatedAt: '' };
+  it('bias disabled → forecastHigh unchanged, meanShiftApplied=false on result and opps', () => {
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, meanShiftHelpful: true, sampleSize: 20, updatedAt: '' };
     const result = findMispricedBrackets(
       biasEvent, biasBaseForecast, 1, 0.01,
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: false },
     );
-    expect(result.biasApplied).toBe(false);
+    expect(result.meanShiftApplied).toBe(false);
     for (const opp of result.opportunities) {
-      expect(opp.biasApplied).toBe(false);
+      expect(opp.meanShiftApplied).toBe(false);
       expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
       expect(opp.effectiveStdDev).toBeCloseTo(3, 5); // stdDev * multiplier, no empirical floor
     }
@@ -871,15 +889,15 @@ describe('findMispricedBrackets - city bias correction', () => {
 
   it('bias enabled + sampleSize ≥ threshold → forecastHigh shifts by -meanBias, effectiveStdDev takes max', () => {
     // empiricalStddev=2.5 < stdDev=3 → effectiveStdDev stays at 3 (max wins)
-    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 20, updatedAt: '' };
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, meanShiftHelpful: true, sampleSize: 20, updatedAt: '' };
     const result = findMispricedBrackets(
       biasEvent, biasBaseForecast, 1, 0.01,
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
     );
-    expect(result.biasApplied).toBe(true);
+    expect(result.meanShiftApplied).toBe(true);
     expect(result.opportunities.length).toBeGreaterThan(0);
     for (const opp of result.opportunities) {
-      expect(opp.biasApplied).toBe(true);
+      expect(opp.meanShiftApplied).toBe(true);
       // correctedForecastHigh = 52 - 2 = 50
       expect(opp.correctedForecastHigh).toBeCloseTo(50, 4);
       expect(opp.cityMeanBias).toBeCloseTo(2.0, 4);
@@ -891,43 +909,57 @@ describe('findMispricedBrackets - city bias correction', () => {
 
   it('bias enabled + empiricalStddev > forecast stdDev → effectiveStdDev elevated', () => {
     // empiricalStddev=5 > stdDev=3 → effectiveStdDev should be 5
-    const cityBias = { meanBias: 2.0, empiricalStddev: 5.0, sampleSize: 20, updatedAt: '' };
+    const cityBias = { meanBias: 2.0, empiricalStddev: 5.0, meanShiftHelpful: true, sampleSize: 20, updatedAt: '' };
     const result = findMispricedBrackets(
       biasEvent, biasBaseForecast, 1, 0.01,
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
     );
-    expect(result.biasApplied).toBe(true);
+    expect(result.meanShiftApplied).toBe(true);
     for (const opp of result.opportunities) {
       expect(opp.effectiveStdDev).toBeCloseTo(5.0, 5);
     }
   });
 
-  it('bias enabled + sampleSize < threshold → correction not applied, result.biasApplied=false', () => {
+  it('full-tier bias keeps sigma overlay but does not shift the mean when recent calibration is not helpful', () => {
+    const cityBias = { meanBias: 2.0, empiricalStddev: 5.0, meanShiftHelpful: false, sampleSize: 20, updatedAt: '' };
+    const result = findMispricedBrackets(
+      biasEvent, biasBaseForecast, 1, 0.01,
+      { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
+    );
+    expect(result.biasMode).toBe('full');
+    expect(result.meanShiftApplied).toBe(false);
+    for (const opp of result.opportunities) {
+      expect(opp.correctedForecastHigh).toBeCloseTo(52, 4);
+      expect(opp.effectiveStdDev).toBeCloseTo(5.0, 5);
+    }
+  });
+
+  it('bias enabled + sampleSize < threshold → correction not applied, result.meanShiftApplied=false', () => {
     const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 10, updatedAt: '' };
     const result = findMispricedBrackets(
       biasEvent, biasBaseForecast, 1, 0.01,
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true, biasMinSamples: 14 }, // sampleSize=10 < 14 → no correction
     );
-    expect(result.biasApplied).toBe(false);
+    expect(result.meanShiftApplied).toBe(false);
     for (const opp of result.opportunities) {
-      expect(opp.biasApplied).toBe(false);
+      expect(opp.meanShiftApplied).toBe(false);
       expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
     }
   });
 
-  it('result.biasApplied=true even when no brackets clear minEdge', () => {
+  it('result.meanShiftApplied=true even when no brackets clear minEdge', () => {
     // High minEdge so no brackets pass, but bias was still applied internally
-    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 20, updatedAt: '' };
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, meanShiftHelpful: true, sampleSize: 20, updatedAt: '' };
     const result = findMispricedBrackets(
       biasEvent, biasBaseForecast, 1, 0.99,
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
     );
     expect(result.opportunities).toHaveLength(0);
-    expect(result.biasApplied).toBe(true); // was applied even though no opps returned
+    expect(result.meanShiftApplied).toBe(true); // was applied even though no opps returned
   });
 
   it('shadow payload contains rawForecastHigh, correctedForecastHigh, and effectiveStdDev', () => {
-    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 20, updatedAt: '' };
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, meanShiftHelpful: true, sampleSize: 20, updatedAt: '' };
     const { opportunities } = findMispricedBrackets(
       biasEvent, biasBaseForecast, 1, 0.01,
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
@@ -936,13 +968,13 @@ describe('findMispricedBrackets - city bias correction', () => {
     const opp = opportunities[0]!;
     expect(opp.rawForecastHigh).toBeCloseTo(52, 4);
     expect(opp.correctedForecastHigh).toBeCloseTo(50, 4);
-    expect(opp.biasApplied).toBe(true);
+    expect(opp.meanShiftApplied).toBe(true);
     expect(opp.biasMode).toBe('full');
     expect(opp.effectiveStdDev).toBeCloseTo(3, 5); // max(3, 2.5) = 3
   });
 
   // ── Weak-band (min ≤ sampleSize < trusted): widen σ, no mean shift ────────
-  it('weak-band → mean NOT shifted, biasApplied=false, biasMode=weak', () => {
+  it('weak-band → mean NOT shifted, meanShiftApplied=false, biasMode=weak', () => {
     const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 10, updatedAt: '' };
     const result = findMispricedBrackets(
       biasEvent, biasBaseForecast, 1, 0.01,
@@ -956,10 +988,10 @@ describe('findMispricedBrackets - city bias correction', () => {
       },
     );
     expect(result.biasMode).toBe('weak');
-    expect(result.biasApplied).toBe(false);
+    expect(result.meanShiftApplied).toBe(false);
     expect(result.opportunities.length).toBeGreaterThan(0);
     for (const opp of result.opportunities) {
-      expect(opp.biasApplied).toBe(false);
+      expect(opp.meanShiftApplied).toBe(false);
       expect(opp.biasMode).toBe('weak');
       // Mean unchanged: corrected === raw
       expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
@@ -1014,7 +1046,7 @@ describe('findMispricedBrackets - city bias correction', () => {
 
   it('sampleSize at biasTrustedSamples boundary → full correction', () => {
     // sampleSize exactly equals biasTrustedSamples → full tier
-    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 14, updatedAt: '' };
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, meanShiftHelpful: true, sampleSize: 14, updatedAt: '' };
     const result = findMispricedBrackets(
       biasEvent, biasBaseForecast, 1, 0.01,
       {
@@ -1026,7 +1058,7 @@ describe('findMispricedBrackets - city bias correction', () => {
       },
     );
     expect(result.biasMode).toBe('full');
-    expect(result.biasApplied).toBe(true);
+    expect(result.meanShiftApplied).toBe(true);
     for (const opp of result.opportunities) {
       expect(opp.correctedForecastHigh).toBeCloseTo(50, 4); // 52 - 2
       expect(opp.biasMode).toBe('full');
@@ -1047,7 +1079,7 @@ describe('findMispricedBrackets - city bias correction', () => {
       },
     );
     expect(result.biasMode).toBe('none');
-    expect(result.biasApplied).toBe(false);
+    expect(result.meanShiftApplied).toBe(false);
     for (const opp of result.opportunities) {
       expect(opp.biasMode).toBe('none');
       expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
@@ -1072,7 +1104,7 @@ describe('findMispricedBrackets - city bias correction', () => {
     const opp = opportunities[0]!;
     expect(opp.rawForecastHigh).toBeCloseTo(52, 4);
     expect(opp.correctedForecastHigh).toBeCloseTo(52, 4); // no shift in weak band
-    expect(opp.biasApplied).toBe(false);
+    expect(opp.meanShiftApplied).toBe(false);
     expect(opp.biasMode).toBe('weak');
     expect(opp.citySampleSize).toBe(10);
     expect(opp.effectiveStdDev).toBeCloseTo(3.6, 5);
@@ -1104,7 +1136,7 @@ describe('findMispricedBrackets - city bias correction', () => {
     for (const opp of weak.opportunities) expect(opp.effectiveStdDev).toBeCloseTo(weak.effectiveStdDev, 5);
 
     // 'full' with empirical σ that dominates
-    const fullBias = { meanBias: 2.0, empiricalStddev: 5.0, sampleSize: 20, updatedAt: '' };
+    const fullBias = { meanBias: 2.0, empiricalStddev: 5.0, meanShiftHelpful: true, sampleSize: 20, updatedAt: '' };
     const full = findMispricedBrackets(
       biasEvent, biasBaseForecast, 1, 0.01,
       { minModelCoverage: 0, cityBias: fullBias, biasCorrectionEnabled: true },
@@ -1130,7 +1162,7 @@ describe('findMispricedBrackets - city bias correction', () => {
       },
     );
     expect(result.biasMode).toBe('none');
-    expect(result.biasApplied).toBe(false);
+    expect(result.meanShiftApplied).toBe(false);
     for (const opp of result.opportunities) {
       expect(opp.biasMode).toBe('none');
       expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
@@ -1214,6 +1246,77 @@ describe('fetchForecast - stddev floor', () => {
 // ---------------------------------------------------------------------------
 
 describe('fetchForecast - ECMWF flag wiring', () => {
+  it('dual shadow logging fetches both ensemble models and keeps alternate model in shadowEnsemble', async () => {
+    const londonCoords = lookupCity('london');
+    expect(londonCoords).not.toBeNull();
+
+    mockFetchEnsemble.mockReset();
+    mockFetchOpenMeteo.mockReset();
+    mockFetchEnsemble
+      .mockResolvedValueOnce({
+        meanHigh: 15,
+        stddevHigh: 1.5,
+        meanLow: 9,
+        stddevLow: 0.9,
+        memberCount: 31,
+        forecastDate: '2026-04-20',
+        ensembleModel: 'gfs',
+      })
+      .mockResolvedValueOnce({
+        meanHigh: 15,
+        stddevHigh: 1.1,
+        meanLow: 9,
+        stddevLow: 0.7,
+        memberCount: 51,
+        forecastDate: '2026-04-20',
+        ensembleModel: 'ecmwf',
+      });
+    mockFetchOpenMeteo.mockResolvedValueOnce({
+      highTemp: 15,
+      lowTemp: 9,
+      precipProbability: 50,
+      forecastDate: '2026-04-20',
+    });
+
+    const mockEvent = {
+      eventId: 'lon-dual',
+      slug: 'london-dual-test',
+      city: 'london',
+      coords: londonCoords!,
+      targetDate: '2026-04-20',
+      unit: 'celsius' as const,
+      brackets: [],
+      endDate: '2026-04-20T12:00:00Z',
+    };
+
+    const result = await fetchForecast(mockEvent, 1, undefined, 0.7, false, false, true);
+    expect(result).not.toBeNull();
+    expect(result!.ensembleModel).toBe('gfs');
+    expect(result!.shadowEnsemble).toEqual({
+      stdDev: 1.361111111111111, // floored by stddevMinFraction for Celsius 1-day default
+      ensembleMembers: 51,
+      ensembleModel: 'ecmwf',
+    });
+    expect(mockFetchEnsemble).toHaveBeenNthCalledWith(
+      1,
+      londonCoords!.lat,
+      londonCoords!.lon,
+      '2026-04-20',
+      'celsius',
+      undefined,
+      false,
+    );
+    expect(mockFetchEnsemble).toHaveBeenNthCalledWith(
+      2,
+      londonCoords!.lat,
+      londonCoords!.lon,
+      '2026-04-20',
+      'celsius',
+      undefined,
+      true,
+    );
+  });
+
   it('passes useEcmwf=true to fetchEnsembleForecast and propagates ensembleModel=ecmwf', async () => {
     const shenzhenCoords = lookupCity('shenzhen');
     expect(shenzhenCoords).not.toBeNull();
@@ -1600,6 +1703,59 @@ describe('scanWeatherMarkets', () => {
     expect(mockFetchNwsForecast).not.toHaveBeenCalled();
     expect(mockFetchOpenMeteo).not.toHaveBeenCalled();
     expect(mockFetchEnsemble).not.toHaveBeenCalled();
+  });
+
+  it('blocks stale weather theses after adverse repricing with little model improvement', async () => {
+    const gammaEvent = makeMockGammaEvent();
+    // Make the top tradable bracket the high tail so tradeSide=NO on market m10.
+    gammaEvent.markets[10]!.outcomePrices = '["0.45","0.55"]';
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([gammaEvent]),
+    }) as unknown as typeof fetch;
+
+    mockFetchNwsForecast.mockResolvedValue({
+      highF: 52,
+      lowF: 38,
+      precipProbability: 10,
+      forecastDate: targetIso,
+      shortForecast: 'Mostly Cloudy',
+    });
+    mockFetchOpenMeteo.mockResolvedValue({
+      highTemp: 52,
+      lowTemp: 38,
+      precipProbability: 10,
+      forecastDate: targetIso,
+    });
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52,
+      stddevHigh: 3.2,
+      meanLow: 38,
+      stddevLow: 2.8,
+      memberCount: 31,
+      forecastDate: targetIso,
+    });
+
+    // Adverse repricing: NO price moved UP from 0.40 → 0.55 (+0.15 ≥ MIN_ADVERSE_MOVE=0.10)
+    // while model win-probability barely changed (0.92 → ~0.94, improvement ≤ 0.03).
+    redisMock._store.set(
+      'weather:market_state:m10:NO',
+      JSON.stringify({
+        tradeSide: 'NO',
+        outcomePrice: 0.40,
+        winProbability: 0.92,
+        observedAt: new Date().toISOString(),
+      }),
+    );
+
+    const results = await scanWeatherMarkets(redisMock as never);
+    const blocked = results.find((o) => o.marketId === 'm10');
+    expect(blocked).toBeDefined();
+    expect(blocked!.blockedByMarketDisagreement).toBe(true);
+    expect(blocked!.previousOutcomePrice).toBe(0.40);
+    expect(blocked!.previousWinProbability).toBe(0.92);
   });
 
   // -------------------------------------------------------------------------

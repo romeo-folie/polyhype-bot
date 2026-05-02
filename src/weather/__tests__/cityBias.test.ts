@@ -42,8 +42,8 @@ function makeRedis() {
 describe('computeCityBias', () => {
   it('writes bias to Redis for cities with enough samples', async () => {
     const sql = makeSql([
-      { city: 'chicago', sample_size: 20, mean_bias: 1.5, empirical_stddev: 2.3 },
-      { city: 'miami',   sample_size: 16, mean_bias: -0.8, empirical_stddev: 1.7 },
+      { city: 'chicago', sample_size: 20, mean_bias: 1.5, empirical_stddev: 2.3, raw_mae: 2.0, corrected_mae: 1.4 },
+      { city: 'miami',   sample_size: 16, mean_bias: -0.8, empirical_stddev: 1.7, raw_mae: 1.2, corrected_mae: 1.25 },
     ]);
     const redis = makeRedis();
 
@@ -53,16 +53,19 @@ describe('computeCityBias', () => {
     const chicagoCall = redis.set.mock.calls.find((c) => (c[0] as string).includes('chicago'));
     expect(chicagoCall).toBeDefined();
     const payload = JSON.parse(chicagoCall![1] as string) as {
-      meanBias: number; empiricalStddev: number; sampleSize: number;
+      meanBias: number; empiricalStddev: number; rawMae: number; correctedMae: number; meanShiftHelpful: boolean; sampleSize: number;
     };
     expect(payload.meanBias).toBeCloseTo(1.5, 2);
     expect(payload.empiricalStddev).toBeCloseTo(2.3, 2);
+    expect(payload.rawMae).toBeCloseTo(2.0, 2);
+    expect(payload.correctedMae).toBeCloseTo(1.4, 2);
+    expect(payload.meanShiftHelpful).toBe(true);
     expect(payload.sampleSize).toBe(20);
   });
 
   it('applies 7-day TTL when writing to Redis', async () => {
     const sql = makeSql([
-      { city: 'nyc', sample_size: 15, mean_bias: 0.5, empirical_stddev: 1.1 },
+      { city: 'nyc', sample_size: 15, mean_bias: 0.5, empirical_stddev: 1.1, raw_mae: 1.0, corrected_mae: 0.7 },
     ]);
     const redis = makeRedis();
 
@@ -93,7 +96,7 @@ describe('computeCityBias', () => {
 
   it('uses canonical city key in Redis key', async () => {
     const sql = makeSql([
-      { city: 'new york', sample_size: 20, mean_bias: 1.0, empirical_stddev: 1.5 },
+      { city: 'new york', sample_size: 20, mean_bias: 1.0, empirical_stddev: 1.5, raw_mae: 1.5, corrected_mae: 1.0 },
     ]);
     const redis = makeRedis();
 
@@ -129,6 +132,9 @@ describe('getCityBias', () => {
     const bias = {
       meanBias: 1.5,
       empiricalStddev: 2.3,
+      rawMae: 2.0,
+      correctedMae: 1.4,
+      meanShiftHelpful: true,
       sampleSize: 20,
       updatedAt: '2026-04-19T00:00:00Z',
     };
@@ -138,7 +144,22 @@ describe('getCityBias', () => {
     expect(result).not.toBeNull();
     expect(result!.meanBias).toBeCloseTo(1.5, 2);
     expect(result!.empiricalStddev).toBeCloseTo(2.3, 2);
+    expect(result!.meanShiftHelpful).toBe(true);
     expect(result!.sampleSize).toBe(20);
+  });
+
+  it('treats legacy cached payloads without meanShiftHelpful as non-helpful', async () => {
+    const bias = {
+      meanBias: 1.5,
+      empiricalStddev: 2.3,
+      sampleSize: 20,
+      updatedAt: '2026-04-19T00:00:00Z',
+    };
+    redis._store.set('weather:city_bias:chicago', { value: JSON.stringify(bias), ttl: 604800 });
+
+    const result = await getCityBias(redis as never, 'chicago');
+    expect(result).not.toBeNull();
+    expect(result!.meanShiftHelpful).toBe(false);
   });
 
   it('returns null when stored JSON is malformed', async () => {
