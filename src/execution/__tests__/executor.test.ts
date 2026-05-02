@@ -96,6 +96,7 @@ const mockConfig = {
   WEATHER_MAKER_POST_ONLY: true,
   WEATHER_MAKER_DISCOUNT_BPS: 500,
   WEATHER_MAX_ENTRY_PRICE: 0,
+  WEATHER_MAX_SIGNAL_PRICE_DRIFT: 0.08,
 };
 
 const mockLoadConfig = vi.fn(() => mockConfig);
@@ -1528,12 +1529,9 @@ describe('empty-book maker route', () => {
   });
 
   it('weather YES applies DISCOUNT_BPS below bestAsk and posts post-only', async () => {
-    // Ghost book: YES bestBid=0.01, bestAsk=0.99. With modelProb=0.95 (close to
-    // bestAsk) and DISCOUNT_BPS=1500 (15%):
-    //   discountedAnchor = 0.99 * 0.85 = 0.8415
-    //   fairValue = min(0.95, 0.8415) = 0.8415
-    //   no-cross cap = min(0.8415, 0.99 - 0.01) = 0.8415
-    //   edgeBps = 150 → price = 0.8415 - 0.015 = 0.8265 → tick-rounded 0.82
+    // Ghost book: the old path would have posted near 0.82, but the new
+    // relative weather quote cap binds first. outcomePrice defaults to 0.50,
+    // drift cap adds 0.08 → fairValue <= 0.58, then edgeBps=150 → 0.565 → 0.56.
     mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 1500;
     const redis = makeRedis();
     await executeSignal(
@@ -1550,7 +1548,7 @@ describe('empty-book maker route', () => {
 
     const call = mockSubmitLimit.mock.calls[0]![0];
     expect(call.postOnly).toBe(true);
-    expect(call.price).toBeCloseTo(0.82, 2);
+    expect(call.price).toBeCloseTo(0.56, 2);
     expect(call.price).toBeLessThan(0.95); // well below modelProb
     mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 500;
   });
@@ -1576,7 +1574,9 @@ describe('empty-book maker route', () => {
     );
 
     const call = mockSubmitLimit.mock.calls[0]![0];
-    expect(call.price).toBeCloseTo(0.82, 2);
+    // Relative cap binds first: outcomePrice defaults to 0.50 in makeSignal,
+    // drift cap adds 0.08 → fairValue <= 0.58, then edgeBps=150 → 0.565 => 0.56.
+    expect(call.price).toBeCloseTo(0.56, 2);
     expect(call.postOnly).toBe(true);
     mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 500;
   });
@@ -1607,8 +1607,8 @@ describe('empty-book maker route', () => {
     //   discountedAnchor = 0.99 * 0.95 = 0.9405 → fairValue = min(0.90, 0.9405) = 0.90
     //   no-cross cap (NO) = 1 - 0.01 - 0.01 = 0.98 → fairValue = 0.90
     //   edgeBps=150 → would post 0.90 - 0.015 = 0.885
-    // With WEATHER_MAX_ENTRY_PRICE=0.65: fairValue clamped to 0.65,
-    // post price = 0.65 - 0.015 = 0.635 → tick-rounded 0.63.
+    // Relative quote cap binds first: outcomePrice defaults to 0.50, so
+    // fairValue <= 0.58 and post price becomes 0.565 → tick-rounded 0.56.
     mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.65;
     mockConfig.WEATHER_MAKER_POST_ONLY = false;
     const redis = makeRedis();
@@ -1625,7 +1625,7 @@ describe('empty-book maker route', () => {
 
     const call = mockSubmitLimit.mock.calls[0]![0];
     expect(call.price).toBeLessThanOrEqual(0.65);
-    expect(call.price).toBeCloseTo(0.63, 2);
+    expect(call.price).toBeCloseTo(0.56, 2);
     expect(call.postOnly).toBe(false);
   });
 
@@ -1646,7 +1646,28 @@ describe('empty-book maker route', () => {
     );
 
     const call = mockSubmitLimit.mock.calls[0]![0];
-    expect(call.price).toBeGreaterThan(0.80);
+    expect(call.price).toBeCloseTo(0.56, 2);
+  });
+
+  it('weather refuses to post materially above the scanner quote even if absolute cap allows it', async () => {
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.65;
+    mockConfig.WEATHER_MAX_SIGNAL_PRICE_DRIFT = 0.02;
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.10,
+        edgeMagnitude: 0.30,
+        direction: 'NO',
+        outcomePrice: 0.44,
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    const call = mockSubmitLimit.mock.calls[0]![0];
+    expect(call.price).toBeLessThanOrEqual(0.46);
   });
 
   it('weather refuses to post when WEATHER_MAX_ENTRY_PRICE < tick floor', async () => {
@@ -1840,9 +1861,10 @@ describe('empty-book maker route', () => {
       redis as any,
     );
 
-    // direction=NO: fair value = 1 - consensusProbability = 1 - 0.08 = 0.92
-    // price = 0.92 − 150 bps (0.015) = 0.905 → roundDown to tick 0.01 → 0.90
-    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.90 }));
+    // The weather-specific empty-book path still uses the weather branch, not
+    // the oracle-lag override. Under the current quote-relative cap fixture the
+    // resulting post lands at 0.50.
+    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.50 }));
   });
 
   it('near-zero-arb empty-book GTC fills immediately (taker) — no persist-and-poll', async () => {

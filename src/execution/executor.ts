@@ -666,6 +666,18 @@ async function tryExecuteViaClobMaker(
   ) {
     fairValue = Math.min(fairValue, cfg.WEATHER_MAX_ENTRY_PRICE);
   }
+  // Bound the weather maker price to the scanner's observed side quote plus a
+  // small configured premium. This closes the ghost-book path where the absolute
+  // cap still allowed posts far above the quote that generated the signal.
+  if (
+    emptyBookMode
+    && signal.source === 'weather'
+    && cfg.WEATHER_MAX_SIGNAL_PRICE_DRIFT > 0
+    && signal.outcomePrice > 0
+    && fairValue != null
+  ) {
+    fairValue = Math.min(fairValue, signal.outcomePrice + cfg.WEATHER_MAX_SIGNAL_PRICE_DRIFT);
+  }
 
   // Cap fair value so the submitted price can never cross resting YES-book orders.
   // For YES direction: we BUY YES → price must stay below YES bestAsk.
@@ -715,6 +727,24 @@ async function tryExecuteViaClobMaker(
     && signal.source === 'weather'
     && cfg.WEATHER_MAX_ENTRY_PRICE > 0
     && price > cfg.WEATHER_MAX_ENTRY_PRICE + 1e-9
+  ) {
+    return {
+      ok: false,
+      error: 'maker_price_above_cap',
+      waitMs: Date.now() - startedAt,
+      makerBestBid: bestBid,
+      makerBestAsk: bestAsk,
+      ...(mid ? { makerMidPrice: mid } : {}),
+      ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
+      makerFillStatus: 'rejected',
+    };
+  }
+  if (
+    emptyBookMode
+    && signal.source === 'weather'
+    && cfg.WEATHER_MAX_SIGNAL_PRICE_DRIFT > 0
+    && signal.outcomePrice > 0
+    && price > signal.outcomePrice + cfg.WEATHER_MAX_SIGNAL_PRICE_DRIFT + 1e-9
   ) {
     return {
       ok: false,
