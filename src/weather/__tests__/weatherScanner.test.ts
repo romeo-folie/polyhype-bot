@@ -126,13 +126,26 @@ const { logger } = await import('../../shared/logger.js');
 // Minimal Redis mock
 function createRedisMock() {
   const store = new Map<string, string>();
+  const pipelineOps: Array<() => void> = [];
+  const pipelineMock = {
+    set: vi.fn((key: string, value: string, _ex?: string, _ttl?: number) => {
+      pipelineOps.push(() => store.set(key, value));
+      return pipelineMock;
+    }),
+    exec: vi.fn(() => {
+      for (const op of pipelineOps.splice(0)) op();
+      return Promise.resolve([]);
+    }),
+  };
   return {
     get: vi.fn((key: string) => Promise.resolve(store.get(key) ?? null)),
+    mget: vi.fn((...keys: string[]) => Promise.resolve(keys.map((k) => store.get(k) ?? null))),
     set: vi.fn((key: string, value: string, _ex?: string, _ttl?: number, nx?: string) => {
       if (nx === 'NX' && store.has(key)) return Promise.resolve(null);
       store.set(key, value);
       return Promise.resolve('OK');
     }),
+    pipeline: vi.fn(() => pipelineMock),
     _store: store,
   };
 }
@@ -860,15 +873,15 @@ describe('findMispricedBrackets - city bias correction', () => {
     ensembleModel: 'gfs' as const,
   };
 
-  it('bias disabled → forecastHigh unchanged, biasApplied=false on result and opps', () => {
+  it('bias disabled → forecastHigh unchanged, meanShiftApplied=false on result and opps', () => {
     const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, meanShiftHelpful: true, sampleSize: 20, updatedAt: '' };
     const result = findMispricedBrackets(
       biasEvent, biasBaseForecast, 1, 0.01,
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: false },
     );
-    expect(result.biasApplied).toBe(false);
+    expect(result.meanShiftApplied).toBe(false);
     for (const opp of result.opportunities) {
-      expect(opp.biasApplied).toBe(false);
+      expect(opp.meanShiftApplied).toBe(false);
       expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
       expect(opp.effectiveStdDev).toBeCloseTo(3, 5); // stdDev * multiplier, no empirical floor
     }
@@ -881,10 +894,10 @@ describe('findMispricedBrackets - city bias correction', () => {
       biasEvent, biasBaseForecast, 1, 0.01,
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
     );
-    expect(result.biasApplied).toBe(true);
+    expect(result.meanShiftApplied).toBe(true);
     expect(result.opportunities.length).toBeGreaterThan(0);
     for (const opp of result.opportunities) {
-      expect(opp.biasApplied).toBe(true);
+      expect(opp.meanShiftApplied).toBe(true);
       // correctedForecastHigh = 52 - 2 = 50
       expect(opp.correctedForecastHigh).toBeCloseTo(50, 4);
       expect(opp.cityMeanBias).toBeCloseTo(2.0, 4);
@@ -901,7 +914,7 @@ describe('findMispricedBrackets - city bias correction', () => {
       biasEvent, biasBaseForecast, 1, 0.01,
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
     );
-    expect(result.biasApplied).toBe(true);
+    expect(result.meanShiftApplied).toBe(true);
     for (const opp of result.opportunities) {
       expect(opp.effectiveStdDev).toBeCloseTo(5.0, 5);
     }
@@ -914,27 +927,27 @@ describe('findMispricedBrackets - city bias correction', () => {
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
     );
     expect(result.biasMode).toBe('full');
-    expect(result.biasApplied).toBe(false);
+    expect(result.meanShiftApplied).toBe(false);
     for (const opp of result.opportunities) {
       expect(opp.correctedForecastHigh).toBeCloseTo(52, 4);
       expect(opp.effectiveStdDev).toBeCloseTo(5.0, 5);
     }
   });
 
-  it('bias enabled + sampleSize < threshold → correction not applied, result.biasApplied=false', () => {
+  it('bias enabled + sampleSize < threshold → correction not applied, result.meanShiftApplied=false', () => {
     const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 10, updatedAt: '' };
     const result = findMispricedBrackets(
       biasEvent, biasBaseForecast, 1, 0.01,
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true, biasMinSamples: 14 }, // sampleSize=10 < 14 → no correction
     );
-    expect(result.biasApplied).toBe(false);
+    expect(result.meanShiftApplied).toBe(false);
     for (const opp of result.opportunities) {
-      expect(opp.biasApplied).toBe(false);
+      expect(opp.meanShiftApplied).toBe(false);
       expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
     }
   });
 
-  it('result.biasApplied=true even when no brackets clear minEdge', () => {
+  it('result.meanShiftApplied=true even when no brackets clear minEdge', () => {
     // High minEdge so no brackets pass, but bias was still applied internally
     const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, meanShiftHelpful: true, sampleSize: 20, updatedAt: '' };
     const result = findMispricedBrackets(
@@ -942,7 +955,7 @@ describe('findMispricedBrackets - city bias correction', () => {
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
     );
     expect(result.opportunities).toHaveLength(0);
-    expect(result.biasApplied).toBe(true); // was applied even though no opps returned
+    expect(result.meanShiftApplied).toBe(true); // was applied even though no opps returned
   });
 
   it('shadow payload contains rawForecastHigh, correctedForecastHigh, and effectiveStdDev', () => {
@@ -955,13 +968,13 @@ describe('findMispricedBrackets - city bias correction', () => {
     const opp = opportunities[0]!;
     expect(opp.rawForecastHigh).toBeCloseTo(52, 4);
     expect(opp.correctedForecastHigh).toBeCloseTo(50, 4);
-    expect(opp.biasApplied).toBe(true);
+    expect(opp.meanShiftApplied).toBe(true);
     expect(opp.biasMode).toBe('full');
     expect(opp.effectiveStdDev).toBeCloseTo(3, 5); // max(3, 2.5) = 3
   });
 
   // ── Weak-band (min ≤ sampleSize < trusted): widen σ, no mean shift ────────
-  it('weak-band → mean NOT shifted, biasApplied=false, biasMode=weak', () => {
+  it('weak-band → mean NOT shifted, meanShiftApplied=false, biasMode=weak', () => {
     const cityBias = { meanBias: 2.0, empiricalStddev: 2.5, sampleSize: 10, updatedAt: '' };
     const result = findMispricedBrackets(
       biasEvent, biasBaseForecast, 1, 0.01,
@@ -975,10 +988,10 @@ describe('findMispricedBrackets - city bias correction', () => {
       },
     );
     expect(result.biasMode).toBe('weak');
-    expect(result.biasApplied).toBe(false);
+    expect(result.meanShiftApplied).toBe(false);
     expect(result.opportunities.length).toBeGreaterThan(0);
     for (const opp of result.opportunities) {
-      expect(opp.biasApplied).toBe(false);
+      expect(opp.meanShiftApplied).toBe(false);
       expect(opp.biasMode).toBe('weak');
       // Mean unchanged: corrected === raw
       expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
@@ -1045,7 +1058,7 @@ describe('findMispricedBrackets - city bias correction', () => {
       },
     );
     expect(result.biasMode).toBe('full');
-    expect(result.biasApplied).toBe(true);
+    expect(result.meanShiftApplied).toBe(true);
     for (const opp of result.opportunities) {
       expect(opp.correctedForecastHigh).toBeCloseTo(50, 4); // 52 - 2
       expect(opp.biasMode).toBe('full');
@@ -1066,7 +1079,7 @@ describe('findMispricedBrackets - city bias correction', () => {
       },
     );
     expect(result.biasMode).toBe('none');
-    expect(result.biasApplied).toBe(false);
+    expect(result.meanShiftApplied).toBe(false);
     for (const opp of result.opportunities) {
       expect(opp.biasMode).toBe('none');
       expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);
@@ -1091,7 +1104,7 @@ describe('findMispricedBrackets - city bias correction', () => {
     const opp = opportunities[0]!;
     expect(opp.rawForecastHigh).toBeCloseTo(52, 4);
     expect(opp.correctedForecastHigh).toBeCloseTo(52, 4); // no shift in weak band
-    expect(opp.biasApplied).toBe(false);
+    expect(opp.meanShiftApplied).toBe(false);
     expect(opp.biasMode).toBe('weak');
     expect(opp.citySampleSize).toBe(10);
     expect(opp.effectiveStdDev).toBeCloseTo(3.6, 5);
@@ -1149,7 +1162,7 @@ describe('findMispricedBrackets - city bias correction', () => {
       },
     );
     expect(result.biasMode).toBe('none');
-    expect(result.biasApplied).toBe(false);
+    expect(result.meanShiftApplied).toBe(false);
     for (const opp of result.opportunities) {
       expect(opp.biasMode).toBe('none');
       expect(opp.correctedForecastHigh).toBeCloseTo(opp.rawForecastHigh, 5);

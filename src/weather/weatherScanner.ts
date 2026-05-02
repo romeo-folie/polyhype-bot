@@ -429,7 +429,10 @@ export async function fetchForecast(
     defaultStd = defaultStd * 5 / 9;
   }
 
-  // Try ensemble first (works for both US and international)
+  // Try ensemble first (works for both US and international).
+  // Both fetches are submitted to Promise.all, but when fetchFn is the
+  // production rate-limited queue they are still serialized by the limiter —
+  // the shadow fetch adds one extra rate-limit slot per event when enabled.
   const [ensemble, shadowEnsembleRaw] = await Promise.all([
     fetchEnsembleForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, useEcmwf),
     dualEnsembleShadow
@@ -569,7 +572,7 @@ export interface WeatherBracketOpportunity {
    * so the executor layer (and shadow observations) can gate cleanly.
    */
   allowedByConfig: boolean;
-  /** Raw forecast high before any bias correction was applied. Equal to forecastHigh when biasApplied=false. */
+  /** Raw forecast high before any bias correction was applied. Equal to forecastHigh when meanShiftApplied=false. */
   rawForecastHigh: number;
   /** Forecast high after subtracting cityMeanBias, or same as rawForecastHigh if correction was not applied. */
   correctedForecastHigh: number;
@@ -579,8 +582,8 @@ export interface WeatherBracketOpportunity {
   cityEmpiricalStddev: number | null;
   /** Number of samples used for this city's bias estimate. Null when no bias data available. */
   citySampleSize: number | null;
-  /** True when full bias correction (mean shift + empirical σ overlay) was applied. */
-  biasApplied: boolean;
+  /** True when the mean-bias shift was applied to the forecast centre (requires biasMode=full AND meanShiftHelpful). The empirical σ overlay runs whenever biasMode=full regardless of this flag. */
+  meanShiftApplied: boolean;
   /**
    * Which tier of bias handling ran for this opportunity:
    *   - `none` — no bias data trusted (either disabled, missing, or sampleSize < min)
@@ -630,10 +633,15 @@ async function applyMarketDisagreementGate(
 ): Promise<WeatherBracketOpportunity[]> {
   if (!cfg.WEATHER_MARKET_DISAGREEMENT_ENABLED || opps.length === 0) return opps;
 
+  const keys = opps.map((opp) => weatherMarketStateKey(opp.marketId, opp.tradeSide));
+  const priorRaws = await redis.mget(...keys);
+
   const gated: WeatherBracketOpportunity[] = [];
-  for (const opp of opps) {
-    const key = weatherMarketStateKey(opp.marketId, opp.tradeSide);
-    const priorRaw = await redis.get(key);
+  const pipeline = redis.pipeline();
+
+  for (let i = 0; i < opps.length; i++) {
+    const opp = opps[i]!;
+    const priorRaw = priorRaws[i];
     let previousOutcomePrice: number | null = null;
     let previousWinProbability: number | null = null;
     let blockedByMarketDisagreement = false;
@@ -682,9 +690,10 @@ async function applyMarketDisagreementGate(
       winProbability: weatherWinProbability(opp),
       observedAt: new Date().toISOString(),
     };
-    await redis.set(key, JSON.stringify(nextState), 'EX', cfg.WEATHER_MARKET_DISAGREEMENT_TTL_S);
+    pipeline.set(keys[i]!, JSON.stringify(nextState), 'EX', cfg.WEATHER_MARKET_DISAGREEMENT_TTL_S);
   }
 
+  await pipeline.exec();
   return gated;
 }
 
@@ -711,8 +720,8 @@ export interface FindMispricedResult {
   opportunities: WeatherBracketOpportunity[];
   /** Sum of all bracket model probabilities — used for coverage check and shadow logging. */
   modelSum: number;
-  /** True when full bias correction was applied (regardless of whether any bracket cleared minEdge). */
-  biasApplied: boolean;
+  /** True when the mean-bias shift was applied to the forecast centre (biasMode=full AND meanShiftHelpful). */
+  meanShiftApplied: boolean;
   /** Tri-state tier of bias handling for this invocation (`none` | `weak` | `full`). */
   biasMode: 'none' | 'weak' | 'full';
   /**
@@ -782,12 +791,13 @@ export function findMispricedBrackets(
     }
   }
   const meanShiftHelpful = cityBias?.meanShiftHelpful === true;
-  const applyBias = biasMode === 'full' && meanShiftHelpful;
+  const meanShiftApplied = biasMode === 'full' && meanShiftHelpful;
 
   const rawForecastHigh = forecast.forecastHigh;
   // Only the trusted tier subtracts meanBias — weak-band samples are too noisy
-  // to justify shifting the forecast centre.
-  const correctedForecastHigh = applyBias ? rawForecastHigh - cityBias!.meanBias : rawForecastHigh;
+  // to justify shifting the forecast centre. The empirical σ overlay still runs
+  // whenever biasMode=full regardless of whether the mean shift is applied.
+  const correctedForecastHigh = meanShiftApplied ? rawForecastHigh - cityBias!.meanBias : rawForecastHigh;
   const forecastHighForCalc = correctedForecastHigh;
 
   // Effective stddev:
@@ -845,7 +855,7 @@ export function findMispricedBrackets(
       bracketCount: event.brackets.length,
       threshold: minModelCoverage,
     });
-    return { opportunities: [], modelSum, biasApplied: applyBias, biasMode, effectiveStdDev };
+    return { opportunities: [], modelSum, meanShiftApplied, biasMode, effectiveStdDev };
   }
 
   // Compute overround (diagnostic): sum of all market YES prices.
@@ -933,7 +943,7 @@ export function findMispricedBrackets(
       cityMeanBias: cityBias?.meanBias ?? null,
       cityEmpiricalStddev: cityBias?.empiricalStddev ?? null,
       citySampleSize: cityBias?.sampleSize ?? null,
-      biasApplied: applyBias,
+      meanShiftApplied,
       biasMode,
       endDate: event.endDate,
       shadowModelProbability: shadowModelProb,
@@ -948,7 +958,7 @@ export function findMispricedBrackets(
     });
   }
 
-  return { opportunities, modelSum, biasApplied: applyBias, biasMode, effectiveStdDev };
+  return { opportunities, modelSum, meanShiftApplied, biasMode, effectiveStdDev };
 }
 
 // ── Main scanner ─────────────────────────────────────────────────────────
@@ -988,6 +998,7 @@ export async function scanWeatherMarkets(
   let noForecast = 0;
   let horizonSkipped = 0;
   let eventsWithOpportunities = 0;
+  let totalDisagreementBlocked = 0;
 
   for (const rawEvent of rawEvents) {
     // Step 2: Parse the event
@@ -1038,7 +1049,7 @@ export async function scanWeatherMarkets(
     const {
       opportunities,
       modelSum,
-      biasApplied: biasCorrectionApplied,
+      meanShiftApplied: meanShiftApplied,
       biasMode: eventBiasMode,
       effectiveStdDev,
     } = findMispricedBrackets(
@@ -1072,6 +1083,7 @@ export async function scanWeatherMarkets(
       : 0;
     const allowedInEvent = gatedOpportunities.filter((o) => o.allowedByConfig && !o.blockedByMarketDisagreement).length;
     const disagreementBlocked = gatedOpportunities.filter((o) => o.blockedByMarketDisagreement).length;
+    totalDisagreementBlocked += disagreementBlocked;
 
     logger.info('[weather] event evaluated', {
       eventId: event.eventId,
@@ -1146,7 +1158,7 @@ export async function scanWeatherMarkets(
         cityMeanBias: cityBias?.meanBias ?? null,
         cityEmpiricalStddev: cityBias?.empiricalStddev ?? null,
         citySampleSize: cityBias?.sampleSize ?? null,
-        biasApplied: biasCorrectionApplied,
+        meanShiftApplied: meanShiftApplied,
         biasMode: eventBiasMode,
         meanShiftHelpful: cityBias?.meanShiftHelpful ?? false,
         cityRawMae: cityBias?.rawMae ?? null,
@@ -1235,7 +1247,7 @@ export async function scanWeatherMarkets(
           cityMeanBias: opp.cityMeanBias,
           cityEmpiricalStddev: opp.cityEmpiricalStddev,
           citySampleSize: opp.citySampleSize,
-          biasApplied: opp.biasApplied,
+          meanShiftApplied: opp.meanShiftApplied,
           biasMode: opp.biasMode,
           meanShiftHelpful: cityBias?.meanShiftHelpful ?? false,
           cityRawMae: cityBias?.rawMae ?? null,
@@ -1250,7 +1262,7 @@ export async function scanWeatherMarkets(
     }
   }
 
-  const allowedOpportunities = allOpportunities.filter((o) => o.allowedByConfig);
+  const allowedOpportunities = allOpportunities.filter((o) => o.allowedByConfig && !o.blockedByMarketDisagreement);
   logger.info('[weather] scan summary', {
     totalEvents: rawEvents.length,
     parsedEvents: parsedCount,
@@ -1260,7 +1272,8 @@ export async function scanWeatherMarkets(
     eventsWithOpportunities,
     totalOpportunities: allOpportunities.length,
     allowedOpportunities: allowedOpportunities.length,
-    sideFiltered: allOpportunities.length - allowedOpportunities.length,
+    sideFiltered: allOpportunities.length - allowedOpportunities.length - totalDisagreementBlocked,
+    totalDisagreementBlocked,
     tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
     enabled: cfg.WEATHER_SCANNER_ENABLED,
   });
