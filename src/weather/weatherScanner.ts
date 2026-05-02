@@ -653,7 +653,7 @@ async function applyMarketDisagreementGate(
         previousWinProbability = Number.isFinite(prior.winProbability) ? prior.winProbability : null;
         const currentWinProbability = weatherWinProbability(opp);
         const adverseMove =
-          previousOutcomePrice != null ? previousOutcomePrice - opp.outcomePrice : 0;
+          previousOutcomePrice != null ? opp.outcomePrice - previousOutcomePrice : 0;
         const winProbImprovement =
           previousWinProbability != null ? currentWinProbability - previousWinProbability : Number.POSITIVE_INFINITY;
         blockedByMarketDisagreement =
