@@ -236,7 +236,9 @@ export async function scanLiveSportsArb(
     // updated model probs even after the edge narrows below MIN_EDGE.
     await redis
       .set(`sports:live_prob:${market.id}`, modelYesProb.toFixed(6), 'EX', cfg.SPORTS_LIVE_PROB_TTL_S)
-      .catch(() => undefined);
+      .catch((err: unknown) =>
+        logger.warn('[sports-arb] failed to publish live prob to Redis', { marketId: market.id, err: String(err) }),
+      );
 
     if (edge < cfg.SPORTS_MIN_EDGE) continue;
 

@@ -1470,9 +1470,10 @@ const envSchema = z.object({
   // Set false to revert to the old behaviour (post maker into ghost book).
   SPORTS_REQUIRE_REAL_BOOK: boolFromEnv.optional().default(true),
   // TTL (seconds) for Redis live-prob keys written by the scanner on every poll tick.
-  // 4 hours covers the longest MLB extra-inning games with margin; keys auto-expire
-  // so stale game probs don't linger after resolution.
-  SPORTS_LIVE_PROB_TTL_S: z.coerce.number().int().min(60).optional().default(14_400),
+  // 10 minutes: scanner refreshes every ~8s, so 600s survives ~75 missed polls before
+  // the key expires. Short enough that keys don't linger hours after a game ends or
+  // the scanner goes down — monitor falls back to entry-time consensus on expiry.
+  SPORTS_LIVE_PROB_TTL_S: z.coerce.number().int().min(60).optional().default(600),
   // Purely informational — documents which TELEGRAM_CHANNELS entries are
   // sports-primary. Not used by runtime; channels are added directly to
   // TELEGRAM_CHANNELS and auto-classified by the category classifier.

@@ -2149,7 +2149,12 @@ export async function executeSignal(
     signal.source === 'oracle-lag' && cfg.ORACLE_LAG_MAX_ENTRY_SPREAD_BPS >= 0
       ? cfg.ORACLE_LAG_MAX_ENTRY_SPREAD_BPS
       : cfg.MAX_ENTRY_SPREAD_BPS;
-  if (effectiveSpreadCeiling > 0 && signal.source !== 'copytrade') {
+  // Sports ghost-book check requires a live book read even when spread gating is
+  // off (effectiveSpreadCeiling === 0). Include sports in the book-fetch condition
+  // so SPORTS_REQUIRE_REAL_BOOK cannot be bypassed by setting MAX_ENTRY_SPREAD_BPS=0.
+  const needsBookCheck =
+    effectiveSpreadCeiling > 0 || (signal.source === 'sports' && cfg.SPORTS_REQUIRE_REAL_BOOK);
+  if (needsBookCheck && signal.source !== 'copytrade') {
     const { book, benchmark } = await fetchBookAndBenchmark(signal);
     prefetchedClobBook = book;
     takerDecisionBenchmarkPromise = Promise.resolve(benchmark);
@@ -2206,20 +2211,22 @@ export async function executeSignal(
       });
       return recordSkip('one_sided_book', 'skipped', guardrailDiagnostic);
     }
-    if (emptyBook && !canEmptyBookMaker) {
-      // Ghost book but can't use maker (taker mode or ineligible source)
-      logger.info('[executor] skipping — empty CLOB book, cannot route to maker', {
+    // Sports arb relies on mid-game price discovery to close the divergence — both
+    // the divergence-close exit and the TP require an active counterparty repricing
+    // the market. On a ghost book there is no such counterparty: the position can
+    // only exit at resolution, converting a price-arb into a pure outcome bet.
+    // Checked before the generic canEmptyBookMaker path so the explicit log message
+    // fires even if sports is later added back to MAKER_EMPTY_BOOK_ALLOWED_SOURCES.
+    if (emptyBook && signal.source === 'sports' && cfg.SPORTS_REQUIRE_REAL_BOOK) {
+      logger.info('[executor] skipping sports signal — ghost book (mid-game exit requires active price discovery)', {
         marketId: signal.marketId,
         ...guardrailDiagnostic,
       });
       return recordSkip('no_clob_book', 'skipped', guardrailDiagnostic);
     }
-    // Sports arb relies on mid-game price discovery to close the divergence — both
-    // the divergence-close exit and the TP require an active counterparty repricing
-    // the market. On a ghost book there is no such counterparty: the position can
-    // only exit at resolution, converting a price-arb into a pure outcome bet.
-    if (emptyBook && signal.source === 'sports' && cfg.SPORTS_REQUIRE_REAL_BOOK) {
-      logger.info('[executor] skipping sports signal — ghost book (mid-game exit requires active price discovery)', {
+    if (emptyBook && !canEmptyBookMaker) {
+      // Ghost book but can't use maker (taker mode or ineligible source)
+      logger.info('[executor] skipping — empty CLOB book, cannot route to maker', {
         marketId: signal.marketId,
         ...guardrailDiagnostic,
       });

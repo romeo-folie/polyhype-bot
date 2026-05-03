@@ -19,7 +19,7 @@ const baseCfg: Partial<AppConfig> = {
   SPORTS_POLL_INTERVAL_S: 8,
   SPORTS_MLB_MIN_INNING: 6,
   SPORTS_MAKER_PREMIUM_PCT: 0.02,
-  SPORTS_LIVE_PROB_TTL_S: 14_400,
+  SPORTS_LIVE_PROB_TTL_S: 600,
 };
 
 function mkCfg(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -377,7 +377,7 @@ describe('scanLiveSportsArb', () => {
       'sports:live_prob:mkt-live',
       expect.stringMatching(/^0\.\d+$/),
       'EX',
-      14_400,
+      600,
     );
   });
 
@@ -391,7 +391,7 @@ describe('scanLiveSportsArb', () => {
       'sports:live_prob:mkt-trade',
       expect.stringMatching(/^0\.\d+$/),
       'EX',
-      14_400,
+      600,
     );
   });
 });

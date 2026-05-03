@@ -310,14 +310,25 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     // current market price — e.g. the scanner now says YES=0.08 but the market
     // still quotes 0.095 → divergence_closed triggers and we exit cleanly on an
     // active book rather than riding the position to resolution.
+    // Redis errors fall back to stored consensus so a transient GET failure never
+    // aborts the entire monitor cycle for the remaining positions.
     let evalPosition = position;
+    let liveModelProb: number | null = null;
     if (inferSource(position.sourcedFrom ?? '') === 'sports') {
-      const rawLiveProb = await redis.get(`sports:live_prob:${position.marketId}`);
-      if (rawLiveProb !== null) {
-        const liveProb = parseFloat(rawLiveProb);
-        if (isFinite(liveProb)) {
-          evalPosition = { ...position, consensusProbability: liveProb };
+      try {
+        const rawLiveProb = await redis.get(`sports:live_prob:${position.marketId}`);
+        if (rawLiveProb !== null) {
+          const parsed = parseFloat(rawLiveProb);
+          if (isFinite(parsed)) {
+            liveModelProb = parsed;
+            evalPosition = { ...position, consensusProbability: parsed };
+          }
         }
+      } catch (err) {
+        logger.warn('[monitor] failed to read sports live prob from Redis — using stored consensus', {
+          marketId: position.marketId,
+          err: String(err),
+        });
       }
     }
 
@@ -372,6 +383,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       returnPct: decision.returnPct.toFixed(2),
       shouldExit: decision.shouldExit,
       reason: decision.reason,
+      ...(liveModelProb !== null ? { liveModelProb: liveModelProb.toFixed(6) } : {}),
       ...(suppressTpExit ? { suppressedByTrailing: true } : {}),
     });
 
