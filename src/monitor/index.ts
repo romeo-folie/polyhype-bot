@@ -319,7 +319,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
         const rawLiveProb = await redis.get(`sports:live_prob:${position.marketId}`);
         if (rawLiveProb !== null) {
           const parsed = parseFloat(rawLiveProb);
-          if (isFinite(parsed)) {
+          if (isFinite(parsed) && parsed >= 0 && parsed <= 1) {
             liveModelProb = parsed;
             evalPosition = { ...position, consensusProbability: parsed };
           }
@@ -460,7 +460,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
 
     if (decision.shouldExit && decision.reason && !suppressTpExit) {
       const result = await executeTakeProfit({
-        position,
+        position: evalPosition,
         currentPrice: currentPrice.currentOutcomePrice,
         returnPct: decision.returnPct,
         reason: decision.reason,

@@ -1884,6 +1884,24 @@ describe('empty-book maker route', () => {
     expect(mockSubmitLimit).not.toHaveBeenCalled();
   });
 
+  it('blocks sports signal when book fetch fails (getClobOrderBook returns null)', async () => {
+    // fetchBookAndBenchmark returns {} when the CLOB call fails, leaving
+    // decisionBestBid/Ask as undefined — neither emptyBook nor oneSidedBook
+    // detects this. The sports-specific check blocks on !isFinite(bid|ask).
+    mockConfig.SPORTS_REQUIRE_REAL_BOOK = true;
+    mockGetOrderBook.mockResolvedValue(null); // simulate fetch failure
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeSignal({ source: 'sports', consensusProbability: 0.65, direction: 'YES' }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('no_clob_book');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
   it('weather uses MAKER_EMPTY_BOOK_EDGE_BPS (150), not oracle-lag override', async () => {
     const redis = makeRedis();
     await executeSignal(
