@@ -2162,6 +2162,9 @@ export async function executeSignal(
     // `=== null` distinguishes "book fetched, side missing" (null) from "book
     // not fetched at all" (undefined — e.g. no CLOB token); only the former
     // should trigger the gate.
+    // `=== null` catches "book fetched but side absent"; `undefined` means the
+    // book fetch failed entirely (fetchBookAndBenchmark returned {}). Sports
+    // signals block on undefined too — handled below in the sports-specific check.
     const oneSidedBook =
       benchmark.decisionBestBid === null || benchmark.decisionBestAsk === null;
     const spreadTooWide = spreadBps != null && spreadBps > effectiveSpreadCeiling;
@@ -2217,12 +2220,20 @@ export async function executeSignal(
     // only exit at resolution, converting a price-arb into a pure outcome bet.
     // Checked before the generic canEmptyBookMaker path so the explicit log message
     // fires even if sports is later added back to MAKER_EMPTY_BOOK_ALLOWED_SOURCES.
-    if (emptyBook && signal.source === 'sports' && cfg.SPORTS_REQUIRE_REAL_BOOK) {
-      logger.info('[executor] skipping sports signal — ghost book (mid-game exit requires active price discovery)', {
-        marketId: signal.marketId,
-        ...guardrailDiagnostic,
-      });
-      return recordSkip('no_clob_book', 'skipped', guardrailDiagnostic);
+    // Also blocks when the book fetch failed entirely (benchmark returns {} with
+    // undefined bid/ask) — undefined doesn't satisfy the `emptyBook` check but we
+    // should not allow sports through on an unverifiable book.
+    if (signal.source === 'sports' && cfg.SPORTS_REQUIRE_REAL_BOOK) {
+      const bidOk = Number.isFinite(benchmark.decisionBestBid as number);
+      const askOk = Number.isFinite(benchmark.decisionBestAsk as number);
+      if (emptyBook || !bidOk || !askOk) {
+        logger.info('[executor] skipping sports signal — ghost book or book unavailable (mid-game exit requires active price discovery)', {
+          marketId: signal.marketId,
+          bookStatus: emptyBook ? 'ghost' : !bidOk || !askOk ? 'unavailable' : 'ok',
+          ...guardrailDiagnostic,
+        });
+        return recordSkip('no_clob_book', 'skipped', guardrailDiagnostic);
+      }
     }
     if (emptyBook && !canEmptyBookMaker) {
       // Ghost book but can't use maker (taker mode or ineligible source)

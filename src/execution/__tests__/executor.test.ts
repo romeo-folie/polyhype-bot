@@ -1867,6 +1867,23 @@ describe('empty-book maker route', () => {
     expect(mockSubmitLimit).not.toHaveBeenCalled();
   });
 
+  it('blocks sports signal on ghost book even when MAX_ENTRY_SPREAD_BPS=0 (spread gating off)', async () => {
+    // Regression guard: needsBookCheck includes sports when SPORTS_REQUIRE_REAL_BOOK=true,
+    // so setting MAX_ENTRY_SPREAD_BPS=0 cannot bypass the ghost-book gate.
+    mockConfig.SPORTS_REQUIRE_REAL_BOOK = true;
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeSignal({ source: 'sports', consensusProbability: 0.595, direction: 'YES' }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('no_clob_book');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
   it('weather uses MAKER_EMPTY_BOOK_EDGE_BPS (150), not oracle-lag override', async () => {
     const redis = makeRedis();
     await executeSignal(

@@ -1467,7 +1467,8 @@ const envSchema = z.object({
   // mid-game price-discovery play — divergence-close and TP both require an active
   // book to fire before resolution. On ghost books the only exit is resolution,
   // converting the arb into a pure outcome bet on a trailing team.
-  // Set false to revert to the old behaviour (post maker into ghost book).
+  // Set false only if sports is also re-added to MAKER_EMPTY_BOOK_ALLOWED_SOURCES;
+  // without that, ghost-book entries are blocked by the generic empty-book gate anyway.
   SPORTS_REQUIRE_REAL_BOOK: boolFromEnv.optional().default(true),
   // TTL (seconds) for Redis live-prob keys written by the scanner on every poll tick.
   // 10 minutes: scanner refreshes every ~8s, so 600s survives ~75 missed polls before

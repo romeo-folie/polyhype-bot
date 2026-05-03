@@ -54,13 +54,6 @@ vi.mock('../takeProfitExecutor.js', () => ({
   executeTakeProfit: mockExecuteTakeProfit,
 }));
 
-vi.mock('./staleExit.js', () => ({
-  evaluateStale: vi.fn(() => ({ shouldExit: false })),
-  recordStaleSample: vi.fn().mockResolvedValue(undefined),
-  computePnlRangePct: vi.fn(() => 0),
-  markStaleCooldown: vi.fn().mockResolvedValue(undefined),
-}));
-
 vi.mock('../staleExit.js', () => ({
   evaluateStale: vi.fn(() => ({ shouldExit: false })),
   recordStaleSample: vi.fn().mockResolvedValue(undefined),
@@ -244,6 +237,46 @@ describe('sports live-prob Redis substitution in runMonitorInner', () => {
     await runMonitorInner(redis as any);
 
     expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+  });
+
+  it('triggers divergence_closed for a NO position when live prob rises above current YES price', async () => {
+    // consensusProbability is always P(YES) — invariant must hold for NO positions.
+    // NO position: we hold NO tokens because model said P(YES)=0.30.
+    // entryPrice=0.62 (NO price at entry; YES was 0.38), currentYesPrice=0.35 → currentNOPrice=0.65.
+    // Return = (0.65-0.62)/0.62 ≈ 4.8% — below 25% TP, no stop-loss.
+    // Stored consensus P(YES)=0.30 → divergence_closed: 0.35 ≤ 0.30 → false (no exit).
+    // Live prob P(YES)=0.38 → divergence_closed: 0.35 ≤ 0.38 → true (exit!).
+    const position = makePosition({
+      direction: 'NO',
+      entryPrice: 0.62,
+      consensusProbability: 0.30,
+      sourcedFrom: 'sports:nba:game1',
+    });
+    const currentYesPrice = 0.35;
+    const currentNoPrice = 1 - currentYesPrice;
+
+    mockGetOpenPositions.mockResolvedValue([position]);
+    mockFetchAllCurrentPrices.mockResolvedValue(
+      new Map([['m1:NO', {
+        marketId: 'm1',
+        direction: 'NO',
+        currentOutcomePrice: currentNoPrice,
+        currentYesPrice,
+      }]]),
+    );
+
+    const redis = makeRedis({
+      get: (key: string) => {
+        if (key === 'sports:live_prob:m1') return '0.38';
+        return null;
+      },
+    });
+
+    await runMonitorInner(redis as any);
+
+    expect(mockExecuteTakeProfit).toHaveBeenCalledOnce();
+    const call = mockExecuteTakeProfit.mock.calls[0]![0];
+    expect(call.reason).toBe('divergence_closed');
   });
 
   it('does not read sports:live_prob for non-sports positions', async () => {
