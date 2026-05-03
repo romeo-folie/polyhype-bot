@@ -1387,6 +1387,9 @@ describe('empty-book maker route', () => {
     mockConfig.WEATHER_MAKER_POST_ONLY = true;
     mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 500;
     mockConfig.WEATHER_MAX_ENTRY_PRICE = 0;
+    // Sports: default to false in this describe block so existing ghost-book tests
+    // remain valid; individual tests can override to true to verify the gate.
+    mockConfig.SPORTS_REQUIRE_REAL_BOOK = false;
 
     mockGetOrderBook.mockResolvedValue(makeGhostBook());
     mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-eb' });
@@ -1846,6 +1849,22 @@ describe('empty-book maker route', () => {
     );
 
     expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.60 }));
+  });
+
+  it('blocks sports signal on ghost book when SPORTS_REQUIRE_REAL_BOOK=true', async () => {
+    // Ghost book + sports + SPORTS_REQUIRE_REAL_BOOK=true → no_clob_book skip.
+    // The bot should not enter a position it can only exit at resolution.
+    mockConfig.SPORTS_REQUIRE_REAL_BOOK = true;
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeSignal({ source: 'sports', consensusProbability: 0.595, direction: 'YES' }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('no_clob_book');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
   });
 
   it('weather uses MAKER_EMPTY_BOOK_EDGE_BPS (150), not oracle-lag override', async () => {

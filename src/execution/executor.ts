@@ -2214,6 +2214,17 @@ export async function executeSignal(
       });
       return recordSkip('no_clob_book', 'skipped', guardrailDiagnostic);
     }
+    // Sports arb relies on mid-game price discovery to close the divergence — both
+    // the divergence-close exit and the TP require an active counterparty repricing
+    // the market. On a ghost book there is no such counterparty: the position can
+    // only exit at resolution, converting a price-arb into a pure outcome bet.
+    if (emptyBook && signal.source === 'sports' && cfg.SPORTS_REQUIRE_REAL_BOOK) {
+      logger.info('[executor] skipping sports signal — ghost book (mid-game exit requires active price discovery)', {
+        marketId: signal.marketId,
+        ...guardrailDiagnostic,
+      });
+      return recordSkip('no_clob_book', 'skipped', guardrailDiagnostic);
+    }
     if (!emptyBook && spreadTooWide) {
       logger.info('[executor] skipping — entry spread too wide', {
         marketId: signal.marketId,

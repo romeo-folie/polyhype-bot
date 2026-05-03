@@ -304,8 +304,25 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       }
     }
 
+    // For sports positions, replace the entry-time consensus probability with the
+    // live model probability that the scanner writes to Redis every poll tick.
+    // This makes divergence-close fire the moment the model reverses past the
+    // current market price — e.g. the scanner now says YES=0.08 but the market
+    // still quotes 0.095 → divergence_closed triggers and we exit cleanly on an
+    // active book rather than riding the position to resolution.
+    let evalPosition = position;
+    if (inferSource(position.sourcedFrom ?? '') === 'sports') {
+      const rawLiveProb = await redis.get(`sports:live_prob:${position.marketId}`);
+      if (rawLiveProb !== null) {
+        const liveProb = parseFloat(rawLiveProb);
+        if (isFinite(liveProb)) {
+          evalPosition = { ...position, consensusProbability: liveProb };
+        }
+      }
+    }
+
     const decision = evaluateTakeProfit(
-      position,
+      evalPosition,
       currentPrice,
       tpThreshold,
       slThreshold,
