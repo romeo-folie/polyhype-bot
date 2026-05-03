@@ -230,6 +230,16 @@ export async function scanLiveSportsArb(
       direction,
     });
 
+    // Publish the live model probability to Redis so the monitor can update
+    // divergence-close comparisons in real time. Written for every matched game
+    // (not just those passing the edge floor) so open positions continue to get
+    // updated model probs even after the edge narrows below MIN_EDGE.
+    await redis
+      .set(`sports:live_prob:${market.id}`, modelYesProb.toFixed(6), 'EX', cfg.SPORTS_LIVE_PROB_TTL_S)
+      .catch((err: unknown) =>
+        logger.warn('[sports-arb] failed to publish live prob to Redis', { marketId: market.id, err: String(err) }),
+      );
+
     if (edge < cfg.SPORTS_MIN_EDGE) continue;
 
     candidates.push({

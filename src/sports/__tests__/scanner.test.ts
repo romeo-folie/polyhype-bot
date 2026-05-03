@@ -19,13 +19,15 @@ const baseCfg: Partial<AppConfig> = {
   SPORTS_POLL_INTERVAL_S: 8,
   SPORTS_MLB_MIN_INNING: 6,
   SPORTS_MAKER_PREMIUM_PCT: 0.02,
+  SPORTS_LIVE_PROB_TTL_S: 600,
 };
 
 function mkCfg(overrides: Partial<AppConfig> = {}): AppConfig {
   return { ...baseCfg, ...overrides } as AppConfig;
 }
 
-const fakeRedis = {} as any;
+const mockRedisSet = vi.fn().mockResolvedValue('OK');
+const fakeRedis = { set: mockRedisSet } as any;
 
 function mkGame(overrides: Partial<LiveGame> = {}): LiveGame {
   return {
@@ -73,6 +75,7 @@ function mkMarket(overrides: Partial<GammaMarket> = {}): GammaMarket {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockRedisSet.mockResolvedValue('OK');
 });
 
 describe('scanLiveSportsArb', () => {
@@ -358,5 +361,37 @@ describe('scanLiveSportsArb', () => {
       getMarkets: async () => [market],
     });
     expect(signals).toHaveLength(0);
+  });
+
+  it('writes live model prob to Redis for every matched game, including sub-edge ones', async () => {
+    // Sub-edge game: model ≈ 0.55, market 0.55 → no signal, but Redis must still
+    // be updated so the monitor can close any open position once the edge reverses.
+    const game = mkGame({ homeScore: 100, awayScore: 100, secondsRemaining: 1200, period: 2 });
+    const market = mkMarket({ id: 'mkt-live', outcomePrices: '["0.55","0.45"]' });
+    await scanLiveSportsArb(fakeRedis, mkCfg(), {
+      fetchLive: async () => [game],
+      getMarkets: async () => [market],
+    });
+
+    expect(mockRedisSet).toHaveBeenCalledWith(
+      'sports:live_prob:mkt-live',
+      expect.stringMatching(/^0\.\d+$/),
+      'EX',
+      600,
+    );
+  });
+
+  it('writes live model prob to Redis even for games that do produce a trade signal', async () => {
+    const { signals } = await scanLiveSportsArb(fakeRedis, mkCfg(), {
+      fetchLive: async () => [mkGame()],
+      getMarkets: async () => [mkMarket({ id: 'mkt-trade' })],
+    });
+    expect(signals).toHaveLength(1);
+    expect(mockRedisSet).toHaveBeenCalledWith(
+      'sports:live_prob:mkt-trade',
+      expect.stringMatching(/^0\.\d+$/),
+      'EX',
+      600,
+    );
   });
 });

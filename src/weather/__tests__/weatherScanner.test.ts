@@ -1739,13 +1739,14 @@ describe('scanWeatherMarkets', () => {
     });
 
     // Adverse repricing: NO price moved UP from 0.40 → 0.55 (+0.15 ≥ MIN_ADVERSE_MOVE=0.10)
-    // while model win-probability barely changed (0.92 → ~0.94, improvement ≤ 0.03).
+    // while model win-probability barely changed. Model computes P(NO for "≥58°F" | forecast=52°F,
+    // σ=3.2) ≈ 0.957 via normalCdf((57.5-52)/3.2). Prior=0.95 → improvement≈0.007 ≤ 0.03.
     redisMock._store.set(
       'weather:market_state:m10:NO',
       JSON.stringify({
         tradeSide: 'NO',
         outcomePrice: 0.40,
-        winProbability: 0.92,
+        winProbability: 0.95,
         observedAt: new Date().toISOString(),
       }),
     );
@@ -1755,7 +1756,7 @@ describe('scanWeatherMarkets', () => {
     expect(blocked).toBeDefined();
     expect(blocked!.blockedByMarketDisagreement).toBe(true);
     expect(blocked!.previousOutcomePrice).toBe(0.40);
-    expect(blocked!.previousWinProbability).toBe(0.92);
+    expect(blocked!.previousWinProbability).toBe(0.95);
   });
 
   // -------------------------------------------------------------------------

@@ -1463,6 +1463,16 @@ const envSchema = z.object({
   // monitor tick. Near-market anchoring eliminates adverse selection while
   // keeping the model probability for divergence-closed exit checks.
   SPORTS_MAKER_PREMIUM_PCT: z.coerce.number().min(0).max(0.5).optional().default(0.02),
+  // Block sports signals on ghost books (bid≈0.01/ask≈0.99). Sports arb is a
+  // mid-game price-discovery play — divergence-close and TP both require an active
+  // book to fire before resolution. On ghost books the only exit is resolution,
+  // converting the arb into a pure outcome bet on a trailing team.
+  SPORTS_REQUIRE_REAL_BOOK: boolFromEnv.optional().default(true),
+  // TTL (seconds) for Redis live-prob keys written by the scanner on every poll tick.
+  // 10 minutes: scanner refreshes every ~8s, so 600s survives ~75 missed polls before
+  // the key expires. Short enough that keys don't linger hours after a game ends or
+  // the scanner goes down — monitor falls back to entry-time consensus on expiry.
+  SPORTS_LIVE_PROB_TTL_S: z.coerce.number().int().min(60).optional().default(600),
   // Purely informational — documents which TELEGRAM_CHANNELS entries are
   // sports-primary. Not used by runtime; channels are added directly to
   // TELEGRAM_CHANNELS and auto-classified by the category classifier.
