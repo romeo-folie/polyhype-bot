@@ -1257,7 +1257,7 @@ const envSchema = z.object({
   HL_MOMENTUM_ENABLED: boolFromEnv.optional().default(false),
   // Comma-separated Binance USDT pairs to watch (symbols must match the <sym> portion of
   // spot:klines:<sym>:<timeframe> keys, e.g. spot:klines:ethusdt:1m).
-  HL_MOMENTUM_SYMBOLS: z.string().optional().default('ethusdt,solusdt,xrpusdt,dogeusdt,pepeusdt,wifusdt,bonkusdt,penguusdt'),
+  HL_MOMENTUM_SYMBOLS: z.string().optional().default('btcusdt,ethusdt,solusdt,xrpusdt,dogeusdt,bnbusdt,suiusdt,avaxusdt,linkusdt,tonusdt,aptusdt,pepeusdt,wifusdt,bonkusdt,penguusdt'),
   // Minimum trend-scorer confluence score (|upVotes - downVotes|) to open a position. Range [0,8] (up to 8 voters when both HL-native voters active).
   HL_MOMENTUM_MIN_SCORE: z.coerce.number().int().min(0).max(8).optional().default(6),
   // Minimum ADX to require a trending regime before acting on the direction vote.
