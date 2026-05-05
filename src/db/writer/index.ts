@@ -219,7 +219,9 @@ async function runWriter(): Promise<void> {
       )) as [string, [string, string[]][]][] | null;
 
       // When reading PEL ('0') and nothing comes back, PEL is empty — flip to '>'.
-      if (streamReadId !== '>' && (!res || res[0]?.[1].length === 0)) {
+      // res[0]?.[1] can be null (not just undefined) when ioredis returns the
+      // empty-PEL response as [[streamKey, null]], so use ?. all the way through.
+      if (streamReadId !== '>' && (!res || (res[0]?.[1]?.length ?? 0) === 0)) {
         logger.info('[writer] PEL drain complete — switching to live stream');
         streamReadId = '>';
         continue;
@@ -236,6 +238,10 @@ async function runWriter(): Promise<void> {
         const malformed: string[] = [];
 
         for (const [id, fields] of batch) {
+          if (!fields || !Array.isArray(fields)) {
+            malformed.push(id);
+            continue;
+          }
           const kv: Record<string, string> = {};
           for (let i = 0; i + 1 < fields.length; i += 2) {
             kv[fields[i]!] = fields[i + 1]!;
