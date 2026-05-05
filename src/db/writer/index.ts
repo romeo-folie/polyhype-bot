@@ -216,7 +216,7 @@ async function runWriter(): Promise<void> {
 
       const res = (await (redis.xreadgroup as (...a: unknown[]) => Promise<unknown>)(
         ...readArgs,
-      )) as [string, [string, string[]][]][] | null;
+      )) as [string, [string, string[] | null][] | null][] | null;
 
       // When reading PEL ('0') and nothing comes back, PEL is empty — flip to '>'.
       // res[0]?.[1] can be null (not just undefined) when ioredis returns the
