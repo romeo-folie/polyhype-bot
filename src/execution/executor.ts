@@ -2275,7 +2275,7 @@ export async function executeSignal(
       //     edgeMagnitude is the raw model-vs-market gap — neither is LLM-derived.
       // The source whitelist (MAKER_EMPTY_BOOK_ALLOWED_SOURCES) is the primary gate;
       // this flag only bypasses the secondary conviction guards.
-      const hasStructuralEdge = signalSource === 'oracle-lag' || signalSource === 'weather' || signalSource === 'sports';
+      const hasStructuralEdge = signalSource === 'oracle-lag' || signalSource === 'weather' || signalSource === 'sports' || signalSource === 'fv-scanner';
       if (!hasStructuralEdge) {
         const consensusP = signal.consensusProbability ?? 0.5;
         const minStrength = cfg.MAKER_EMPTY_BOOK_MIN_CONSENSUS;
