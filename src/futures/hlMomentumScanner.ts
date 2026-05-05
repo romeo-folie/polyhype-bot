@@ -33,6 +33,12 @@ const BINANCE_TO_HL: Record<string, string> = {
   xrpusdt:  'XRP',
   dogeusdt: 'DOGE',
   bnbusdt:  'BNB',
+  // Alt L1s / ecosystem
+  suiusdt:  'SUI',
+  avaxusdt: 'AVAX',
+  linkusdt: 'LINK',
+  tonusdt:  'TON',
+  aptusdt:  'APT',
   // Meme / political
   pepeusdt: 'kPEPE',   // HL trades 1000× units; same direction as Binance PEPEUSDT
   wifusdt:  'WIF',
