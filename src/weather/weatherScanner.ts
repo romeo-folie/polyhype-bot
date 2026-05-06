@@ -610,9 +610,11 @@ export interface WeatherBracketOpportunity {
   /** Prior win probability used by the disagreement gate. */
   previousWinProbability?: number | null;
   /**
-   * True when the shadow ensemble (ECMWF) disagrees with the primary model (GFS)
-   * and WEATHER_DUAL_ENSEMBLE_VETO_ENABLED is on. Fires when shadowEdge is
-   * available but ≤ 0 — the alternate model sees no edge on this side.
+   * True when the shadow ensemble disagrees with the primary model and
+   * WEATHER_DUAL_ENSEMBLE_VETO_ENABLED is on. Fires when shadowEdge is
+   * available but ≤ 0 — whichever model is in shadow sees no edge on this side.
+   * Shadow model identity is whichever is not primary: ECMWF when
+   * WEATHER_MODEL_ECMWF_ENABLED=false (GFS primary), GFS when =true.
    */
   blockedByEnsembleVeto?: boolean;
 }
@@ -1301,7 +1303,7 @@ export async function scanWeatherMarkets(
     eventsWithOpportunities,
     totalOpportunities: allOpportunities.length,
     allowedOpportunities: allowedOpportunities.length,
-    sideFiltered: allOpportunities.length - allowedOpportunities.length - totalDisagreementBlocked - totalEnsembleVetoBlocked,
+    sideFiltered: allOpportunities.filter((o) => !o.allowedByConfig).length,
     totalDisagreementBlocked,
     totalEnsembleVetoBlocked,
     tradeSidesMode: cfg.WEATHER_TRADE_SIDES,

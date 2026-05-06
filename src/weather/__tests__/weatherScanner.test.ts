@@ -1850,6 +1850,38 @@ describe('scanWeatherMarkets', () => {
     expect(bracket!.blockedByEnsembleVeto).toBe(false);
   });
 
+  it('veto fires when ECMWF is primary and GFS shadow sees no edge (roles swapped)', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_MODEL_ECMWF_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: true,
+    });
+
+    const gammaEvent = makeMockGammaEvent();
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([gammaEvent]),
+    }) as unknown as typeof fetch;
+
+    mockFetchNwsForecast.mockResolvedValue({ highF: 52, lowF: 38, precipProbability: 10, forecastDate: targetIso, shortForecast: 'Sunny' });
+    mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: targetIso });
+
+    // ECMWF primary (tight stddev → positive edge); GFS shadow (wide stddev → edge collapses)
+    mockFetchEnsemble
+      .mockResolvedValueOnce({ meanHigh: 52, stddevHigh: 3.0, meanLow: 38, stddevLow: 2.5, memberCount: 51, forecastDate: targetIso, ensembleModel: 'ecmwf' })
+      .mockResolvedValueOnce({ meanHigh: 52, stddevHigh: 8.0, meanLow: 38, stddevLow: 5.0, memberCount: 31, forecastDate: targetIso, ensembleModel: 'gfs' });
+
+    const results = await scanWeatherMarkets(redisMock as never);
+    const bracket = results.find((o) => o.bracketLabel === '52-53°F');
+    expect(bracket).toBeDefined();
+    // Shadow is GFS (roles swapped: ECMWF primary, GFS shadow)
+    expect(bracket!.shadowEnsembleModel).toBe('gfs');
+    expect(bracket!.shadowEdge!).toBeLessThanOrEqual(0);
+    expect(bracket!.blockedByEnsembleVeto).toBe(true);
+  });
+
   // -------------------------------------------------------------------------
   // runWeatherScan — execution gating, caps, signal construction
   // -------------------------------------------------------------------------
