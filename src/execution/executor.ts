@@ -758,6 +758,42 @@ async function tryExecuteViaClobMaker(
     };
   }
 
+  // FV scanner: re-validate edge at the actual discounted fill price. signal.outcomePrice
+  // is the stale Gamma mid at scan time; the CLOB may have already repriced 30+ cents
+  // higher, wiping the modeled edge. Fills at 0.88 against pModel=0.90 leave only 2pp
+  // edge and a 5:1 downside — the gate upstream checked the wrong price (Gamma mid).
+  if (
+    !emptyBookMode
+    && signal.source === 'fv-scanner'
+    && signal.consensusProbability != null
+  ) {
+    const isYesDir = signal.direction === 'YES' || signal.direction === 'UP';
+    const pModel = signal.consensusProbability; // always P(YES)
+    const edgeAtFill = isYesDir ? pModel - price : (1 - pModel) - price;
+    const minEdge = isYesDir ? cfg.FV_YES_MIN_EDGE : cfg.FV_NO_MIN_EDGE;
+    if (edgeAtFill < minEdge) {
+      logger.info('[executor] fv-scanner: edge killed by slippage, skipping', {
+        marketId: signal.marketId,
+        direction: signal.direction,
+        pModel,
+        fillPrice: price,
+        edgeAtFill,
+        minEdge,
+        bestAsk,
+      });
+      return {
+        ok: false,
+        error: 'liquidity_gate:fv_edge_killed_by_slippage',
+        waitMs: Date.now() - startedAt,
+        makerBestBid: bestBid,
+        makerBestAsk: bestAsk,
+        ...(mid ? { makerMidPrice: mid } : {}),
+        ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
+        makerFillStatus: 'rejected',
+      };
+    }
+  }
+
   let size = signal.stakeUsd / price;
   const minOrderSize = parseFloat(book.min_order_size ?? '0');
   if (isFinite(minOrderSize) && minOrderSize > 0 && size < minOrderSize) {

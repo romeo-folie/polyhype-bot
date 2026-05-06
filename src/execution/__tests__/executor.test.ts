@@ -2391,6 +2391,13 @@ describe('empty-book maker route', () => {
       delete (mockConfig as any).FV_MAX_ENTRY_PRICE;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockConfig as any).WEATHER_MAX_ENTRY_PRICE = 0; // restore to top-level mockConfig default
+      // Restore keys mutated by fv-scanner edge-at-fill tests
+      mockConfig.EXECUTION_MODE = 'taker';
+      mockConfig.MAKER_MAX_WAIT_MS = 0;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (mockConfig as any).FV_REAL_BOOK_DISCOUNT_BPS;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (mockConfig as any).FV_YES_MIN_EDGE;
     });
 
     it('skips a non-futures signal when outcomePrice exceeds the global cap', async () => {
@@ -2464,6 +2471,103 @@ describe('empty-book maker route', () => {
       );
       expect(result.skipped).toBe(true);
       expect(result.skipReason).toBe('entry_price_above_cap');
+    });
+
+    it('fv-scanner: blocks when CLOB ask has repriced above pModel − minEdge', async () => {
+      // Gamma mid at scan time was 0.505, but CLOB bestAsk is now 0.90.
+      // raw fill = 0.90 * (1 − 200bps) = 0.882 → tick-rounded down to 0.88;
+      // edge at fill = 0.90 − 0.88 = 0.02 < 0.10 → reject
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).EXECUTION_MODE = 'maker';
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).MAKER_MAX_WAIT_MS = 10;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).FV_REAL_BOOK_DISCOUNT_BPS = 200;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).FV_YES_MIN_EDGE = 0.10;
+      mockGetOrderBook.mockResolvedValue({
+        market: 'mkt-test',
+        asset_id: 'tok-yes',
+        timestamp: new Date().toISOString(),
+        bids: [{ price: '0.88', size: '100' }],
+        asks: [{ price: '0.90', size: '100' }],
+        min_order_size: '1',
+        tick_size: '0.01',
+        neg_risk: false,
+        last_trade_price: '0.89',
+        hash: 'hash',
+      });
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({
+          source: 'fv-scanner',
+          outcomePrice: 0.505, // stale Gamma mid
+          consensusProbability: 0.90,
+          direction: 'YES',
+        }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipped).toBe(true);
+      // skipReason is the raw compound string; normalizeSkipReason splits it into
+      // enum='liquidity_gate' + detail='fv_edge_killed_by_slippage' for DB storage
+      expect(result.skipReason).toBe('liquidity_gate:fv_edge_killed_by_slippage');
+    });
+
+    it('fv-scanner: allows entry when CLOB ask is low enough to preserve edge', async () => {
+      // bestAsk=0.78; raw fill = 0.78 * 0.98 = 0.7644 → tick-rounded down to 0.76;
+      // edge at fill = 0.90 − 0.76 = 0.14 ≥ 0.10 → proceed
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).EXECUTION_MODE = 'maker';
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).MAKER_MAX_WAIT_MS = 10;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).FV_REAL_BOOK_DISCOUNT_BPS = 200;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockConfig as any).FV_YES_MIN_EDGE = 0.10;
+      mockGetOrderBook.mockResolvedValue({
+        market: 'mkt-test',
+        asset_id: 'tok-yes',
+        timestamp: new Date().toISOString(),
+        bids: [{ price: '0.76', size: '100' }],
+        asks: [{ price: '0.78', size: '100' }],
+        min_order_size: '1',
+        tick_size: '0.01',
+        neg_risk: false,
+        last_trade_price: '0.77',
+        hash: 'hash',
+      });
+      mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-fv-1' });
+      mockGetOrder.mockResolvedValue({
+        id: 'order-fv-1',
+        status: 'filled',
+        owner: '0x1',
+        maker_address: '0x1',
+        market: 'mkt-test',
+        asset_id: 'tok-yes',
+        side: 'BUY',
+        original_size: '6',
+        size_matched: '6',
+        price: '0.7644',
+        associate_trades: [],
+        outcome: 'YES',
+        created_at: Date.now(),
+        expiration: '',
+        order_type: 'GTC',
+      });
+      const redis = makeRedis();
+      const result = await executeSignal(
+        makeSignal({
+          source: 'fv-scanner',
+          outcomePrice: 0.505,
+          consensusProbability: 0.90,
+          direction: 'YES',
+        }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        redis as any,
+      );
+      expect(result.skipped).toBe(false);
+      expect(result.skipReason).not.toBe('liquidity_gate:fv_edge_killed_by_slippage');
     });
 
     it('weather uses WEATHER_MAX_ENTRY_PRICE instead of global cap', async () => {
