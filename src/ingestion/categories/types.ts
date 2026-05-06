@@ -10,4 +10,5 @@ export interface CategoryConfig {
   scorerPrompt: string;
   scoreThreshold: number;
   entityContext: string;
+  dedupNamespace?: string;
 }

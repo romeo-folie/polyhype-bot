@@ -1216,7 +1216,16 @@ const envSchema = z.object({
 
   // ── Phase 2: Volume-aware confluence (default off — ship-then-flip) ──
   // Hard volume-spike gate before futures entry (current vol must exceed SMA × MULT).
+  // Applied to HL-momentum path. Spot and news paths have independent overrides below.
   VOLUME_SPIKE_GATE_ENABLED: boolFromEnv.optional().default(false),
+  // Spot-path override: volume spike gate for CEX-impulse triggered entries.
+  // Defaults false — the CEX price move itself is the volume confirmation.
+  SPOT_VOLUME_SPIKE_GATE_ENABLED: boolFromEnv.optional().default(false),
+  // News-path override: when false, all three regime gates (volume/ADX/choppiness)
+  // are bypassed for OSINT-triggered futures entries. Breaking news causes regime
+  // changes rather than occurring within them, so gating on regime state is
+  // backward causal. Defaults false.
+  NEWS_FUTURES_REGIME_GATES_ENABLED: boolFromEnv.optional().default(false),
   VOLUME_SPIKE_PERIOD: z.coerce.number().int().min(2).optional().default(20),
   VOLUME_SPIKE_MULT: z.coerce.number().min(0.1).optional().default(2.0),
   // OBV slope voter

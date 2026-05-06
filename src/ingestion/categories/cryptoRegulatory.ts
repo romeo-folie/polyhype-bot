@@ -19,4 +19,5 @@ export const cryptoRegulatory: CategoryConfig = {
   scorerPrompt: CRYPTO_PROMPT,
   scoreThreshold: 6,
   entityContext: 'cryptocurrency, regulatory body, financial regulator',
+  dedupNamespace: 'crypto-regulatory',
 };

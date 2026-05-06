@@ -37,6 +37,10 @@ const ENTITY_FIXTURES: Record<string, { headline: string; entities: string[] }> 
     headline: 'SEC approves spot Ethereum ETF for three major asset managers',
     entities: ['SEC', 'Ethereum', 'ETF'],
   },
+  'crypto-futures': {
+    headline: 'Major crypto exchange suffers $200M exploit — withdrawals halted',
+    entities: ['crypto exchange', 'exploit', 'withdrawals'],
+  },
   'ai-tech': {
     headline: 'OpenAI releases GPT-5 with claimed PhD-level reasoning across all domains',
     entities: ['OpenAI', 'GPT-5', 'model release'],
