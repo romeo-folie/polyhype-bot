@@ -1397,7 +1397,7 @@ const envSchema = z.object({
   // FV scanner intentionally enters high-probability outcomes (YES 0.80–0.95, NO token
   // 0.88–0.99), so the global cap would block all valid signals. Set to 0 to disable.
   FV_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.98),
-  FV_YES_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.02),
+  FV_YES_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.10),
   FV_NO_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   FV_NO_MAX_EDGE: z.coerce.number().min(0).max(1).optional().default(0.10),
   // Momentum suppression: signed log-return threshold over the last N seconds.
