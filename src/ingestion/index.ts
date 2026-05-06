@@ -26,7 +26,7 @@ async function runCategoryPipeline(category: CategoryConfig, redis: Redis): Prom
   ]);
 
   const all = [...rssItems, ...scraped];
-  const newItems = await filterSeen(all, redis);
+  const newItems = await filterSeen(all, redis, category.dedupNamespace);
 
   // Dynamic Watchlist Gate: Only score items that contain keywords from active markets.
   // This drastically reduces LLM costs and noise from unrelated world news.

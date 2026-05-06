@@ -63,6 +63,11 @@ const HEADLINES: Record<string, [string, string, string]> = {
     'UK regulator opens consultation on crypto exchange capital rules',
     'CFTC issues guidance on crypto derivatives reporting requirements',
   ],
+  'crypto-futures': [
+    'Major crypto exchange suffers $200M exploit — withdrawals halted',
+    'Ethereum Pectra upgrade activates on mainnet, network congestion spikes',
+    'Coinbase lists new token in routine monthly review',
+  ],
   'ai-tech': [
     'OpenAI releases GPT-5 with claimed PhD-level reasoning across all domains',
     'NVIDIA launches new AI accelerator lineup for data centers',
@@ -84,6 +89,7 @@ const SCORES: Record<string, number[]> = {
   geopolitical: [9, 8, 2],
   macro: [9, 8, 3],
   'crypto-regulatory': [9, 8, 2],
+  'crypto-futures': [9, 7, 2],
   'ai-tech': [9, 7, 2],
   'us-politics': [9, 7, 2],
   sports: [9, 7, 2],

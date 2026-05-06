@@ -18,13 +18,18 @@ function itemKey(item: RssItem): string {
 /**
  * Filters out items that have already been seen within the TTL window.
  * Marks new items as seen in Redis before returning them.
+ *
+ * Pass a `namespace` to give a category its own dedup keyspace — useful when
+ * two categories share the same RSS feeds and both need to score each item
+ * independently (e.g. crypto-regulatory vs crypto-futures).
  */
-export async function filterSeen(items: RssItem[], redis: Redis): Promise<RssItem[]> {
+export async function filterSeen(items: RssItem[], redis: Redis, namespace?: string): Promise<RssItem[]> {
   if (items.length === 0) return [];
 
+  const prefix = namespace ? `dedup:${namespace}:` : 'dedup:';
   const results = await Promise.allSettled(
     items.map((item) => {
-      const key = `dedup:${itemKey(item)}`;
+      const key = `${prefix}${itemKey(item)}`;
       return redis.set(key, '1', 'EX', DEDUP_TTL, 'NX');
     }),
   );

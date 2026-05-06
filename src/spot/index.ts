@@ -133,7 +133,7 @@ async function runSpotMonitorInner(
           // confluence evaluation, not just the rare ones that pass. Each
           // shadow only fires when its corresponding hard gate is disabled.
           if (confluence.volume?.ratio !== null && confluence.volume?.ratio !== undefined) {
-            if (!cfg.VOLUME_SPIKE_GATE_ENABLED) {
+            if (!cfg.SPOT_VOLUME_SPIKE_GATE_ENABLED) {
               const ratio = confluence.volume.ratio;
               const passed = ratio >= cfg.VOLUME_SPIKE_MULT;
               logger.info('[spot] volume_spike shadow', {
@@ -198,7 +198,7 @@ async function runSpotMonitorInner(
             continue;
           }
           if (
-            cfg.VOLUME_SPIKE_GATE_ENABLED &&
+            cfg.SPOT_VOLUME_SPIKE_GATE_ENABLED &&
             confluence.volume?.ratio !== null && confluence.volume?.ratio !== undefined &&
             confluence.volume.ratio < cfg.VOLUME_SPIKE_MULT
           ) {
