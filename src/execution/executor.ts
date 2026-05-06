@@ -783,7 +783,7 @@ async function tryExecuteViaClobMaker(
       });
       return {
         ok: false,
-        error: 'fv_edge_killed_by_slippage',
+        error: 'liquidity_gate:fv_edge_killed_by_slippage',
         waitMs: Date.now() - startedAt,
         makerBestBid: bestBid,
         makerBestAsk: bestAsk,

@@ -2391,6 +2391,13 @@ describe('empty-book maker route', () => {
       delete (mockConfig as any).FV_MAX_ENTRY_PRICE;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockConfig as any).WEATHER_MAX_ENTRY_PRICE = 0; // restore to top-level mockConfig default
+      // Restore keys mutated by fv-scanner edge-at-fill tests
+      mockConfig.EXECUTION_MODE = 'taker';
+      mockConfig.MAKER_MAX_WAIT_MS = 0;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (mockConfig as any).FV_REAL_BOOK_DISCOUNT_BPS;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (mockConfig as any).FV_YES_MIN_EDGE;
     });
 
     it('skips a non-futures signal when outcomePrice exceeds the global cap', async () => {
@@ -2468,7 +2475,8 @@ describe('empty-book maker route', () => {
 
     it('fv-scanner: blocks when CLOB ask has repriced above pModel − minEdge', async () => {
       // Gamma mid at scan time was 0.505, but CLOB bestAsk is now 0.90.
-      // fill price = 0.90 * (1 − 200bps) = 0.882; edge at fill = 0.90 − 0.882 = 0.018 < 0.10 → reject
+      // raw fill = 0.90 * (1 − 200bps) = 0.882 → tick-rounded down to 0.88;
+      // edge at fill = 0.90 − 0.88 = 0.02 < 0.10 → reject
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockConfig as any).EXECUTION_MODE = 'maker';
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2501,11 +2509,14 @@ describe('empty-book maker route', () => {
         redis as any,
       );
       expect(result.skipped).toBe(true);
-      expect(result.skipReason).toBe('fv_edge_killed_by_slippage');
+      // skipReason is the raw compound string; normalizeSkipReason splits it into
+      // enum='liquidity_gate' + detail='fv_edge_killed_by_slippage' for DB storage
+      expect(result.skipReason).toBe('liquidity_gate:fv_edge_killed_by_slippage');
     });
 
     it('fv-scanner: allows entry when CLOB ask is low enough to preserve edge', async () => {
-      // bestAsk=0.78; fill price = 0.78 * 0.98 = 0.7644; edge at fill = 0.90 − 0.7644 = 0.1356 ≥ 0.10 → proceed
+      // bestAsk=0.78; raw fill = 0.78 * 0.98 = 0.7644 → tick-rounded down to 0.76;
+      // edge at fill = 0.90 − 0.76 = 0.14 ≥ 0.10 → proceed
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mockConfig as any).EXECUTION_MODE = 'maker';
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2556,7 +2567,7 @@ describe('empty-book maker route', () => {
         redis as any,
       );
       expect(result.skipped).toBe(false);
-      expect(result.skipReason).not.toBe('fv_edge_killed_by_slippage');
+      expect(result.skipReason).not.toBe('liquidity_gate:fv_edge_killed_by_slippage');
     });
 
     it('weather uses WEATHER_MAX_ENTRY_PRICE instead of global cap', async () => {
