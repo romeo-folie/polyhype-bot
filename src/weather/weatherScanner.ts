@@ -609,6 +609,14 @@ export interface WeatherBracketOpportunity {
   previousOutcomePrice?: number | null;
   /** Prior win probability used by the disagreement gate. */
   previousWinProbability?: number | null;
+  /**
+   * True when the shadow ensemble disagrees with the primary model and
+   * WEATHER_DUAL_ENSEMBLE_VETO_ENABLED is on. Fires when shadowEdge is
+   * available but ≤ 0 — whichever model is in shadow sees no edge on this side.
+   * Shadow model identity is whichever is not primary: ECMWF when
+   * WEATHER_MODEL_ECMWF_ENABLED=false (GFS primary), GFS when =true.
+   */
+  blockedByEnsembleVeto?: boolean;
 }
 
 interface WeatherMarketState {
@@ -955,6 +963,8 @@ export function findMispricedBrackets(
       shadowEnsembleModel: forecast.shadowEnsemble?.ensembleModel ?? null,
       shadowEffectiveStdDev: forecast.shadowEnsemble?.stdDev ?? null,
       shadowEnsembleMembers: forecast.shadowEnsemble?.ensembleMembers ?? null,
+      // Veto is evaluated later in scanWeatherMarkets once cfg is available.
+      blockedByEnsembleVeto: false,
     });
   }
 
@@ -1069,7 +1079,14 @@ export async function scanWeatherMarkets(
         maxTailNoBetModelProb: cfg.WEATHER_THRESHOLD_NO_BET_MAX_PROB,
       },
     );
-    const gatedOpportunities = await applyMarketDisagreementGate(redis, opportunities, cfg);
+    const afterMarketGate = await applyMarketDisagreementGate(redis, opportunities, cfg);
+    const gatedOpportunities = afterMarketGate.map((opp) => ({
+      ...opp,
+      blockedByEnsembleVeto:
+        cfg.WEATHER_DUAL_ENSEMBLE_VETO_ENABLED &&
+        opp.shadowEdge != null &&
+        opp.shadowEdge <= 0,
+    }));
     // `effectiveStdDev` above is the post-bias σ actually used by
     // estimateBracketProbability (weak-band inflator or full-tier empirical-σ
     // overlay already applied). Surfaced up from findMispricedBrackets so the
@@ -1081,8 +1098,11 @@ export async function scanWeatherMarkets(
     const bestEdge = gatedOpportunities.length > 0
       ? Math.max(...gatedOpportunities.map((o) => o.edge))
       : 0;
-    const allowedInEvent = gatedOpportunities.filter((o) => o.allowedByConfig && !o.blockedByMarketDisagreement).length;
+    const allowedInEvent = gatedOpportunities.filter(
+      (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto,
+    ).length;
     const disagreementBlocked = gatedOpportunities.filter((o) => o.blockedByMarketDisagreement).length;
+    const ensembleVetoBlocked = gatedOpportunities.filter((o) => o.blockedByEnsembleVeto).length;
     totalDisagreementBlocked += disagreementBlocked;
 
     logger.info('[weather] event evaluated', {
@@ -1109,6 +1129,7 @@ export async function scanWeatherMarkets(
       opportunitiesFound: gatedOpportunities.length,
       allowedInEvent,
       disagreementBlocked,
+      ensembleVetoBlocked,
       tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
       bestEdge: bestEdge.toFixed(3),
       enabled: cfg.WEATHER_SCANNER_ENABLED,
@@ -1153,6 +1174,7 @@ export async function scanWeatherMarkets(
         opportunitiesFound: gatedOpportunities.length,
         allowedInEvent,
         disagreementBlocked,
+        ensembleVetoBlocked,
         tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
         scannerEnabled: cfg.WEATHER_SCANNER_ENABLED,
         cityMeanBias: cityBias?.meanBias ?? null,
@@ -1173,7 +1195,11 @@ export async function scanWeatherMarkets(
     // Shadow still records disallowed-side opps so calibration analysis keeps
     // accruing validation data for the gated side — only wouldTrade flips.
     for (const opp of gatedOpportunities) {
-      const wouldTrade = cfg.WEATHER_SCANNER_ENABLED && opp.allowedByConfig && !opp.blockedByMarketDisagreement;
+      const wouldTrade =
+        cfg.WEATHER_SCANNER_ENABLED &&
+        opp.allowedByConfig &&
+        !opp.blockedByMarketDisagreement &&
+        !opp.blockedByEnsembleVeto;
       logger.info('[weather] bracket opportunity', {
         marketId: opp.marketId,
         eventSlug: opp.eventSlug,
@@ -1197,6 +1223,7 @@ export async function scanWeatherMarkets(
         tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
         allowedByConfig: opp.allowedByConfig,
         blockedByMarketDisagreement: opp.blockedByMarketDisagreement ?? false,
+        blockedByEnsembleVeto: opp.blockedByEnsembleVeto ?? false,
         previousOutcomePrice: opp.previousOutcomePrice ?? null,
         previousWinProbability: opp.previousWinProbability ?? null,
         wouldTrade,
@@ -1238,6 +1265,7 @@ export async function scanWeatherMarkets(
           tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
           allowedByConfig: opp.allowedByConfig,
           blockedByMarketDisagreement: opp.blockedByMarketDisagreement ?? false,
+          blockedByEnsembleVeto: opp.blockedByEnsembleVeto ?? false,
           previousOutcomePrice: opp.previousOutcomePrice ?? null,
           previousWinProbability: opp.previousWinProbability ?? null,
           daysOut: opp.daysOut,
@@ -1262,7 +1290,10 @@ export async function scanWeatherMarkets(
     }
   }
 
-  const allowedOpportunities = allOpportunities.filter((o) => o.allowedByConfig && !o.blockedByMarketDisagreement);
+  const totalEnsembleVetoBlocked = allOpportunities.filter((o) => o.blockedByEnsembleVeto).length;
+  const allowedOpportunities = allOpportunities.filter(
+    (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto,
+  );
   logger.info('[weather] scan summary', {
     totalEvents: rawEvents.length,
     parsedEvents: parsedCount,
@@ -1272,8 +1303,9 @@ export async function scanWeatherMarkets(
     eventsWithOpportunities,
     totalOpportunities: allOpportunities.length,
     allowedOpportunities: allowedOpportunities.length,
-    sideFiltered: allOpportunities.length - allowedOpportunities.length - totalDisagreementBlocked,
+    sideFiltered: allOpportunities.filter((o) => !o.allowedByConfig).length,
     totalDisagreementBlocked,
+    totalEnsembleVetoBlocked,
     tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
     enabled: cfg.WEATHER_SCANNER_ENABLED,
   });
@@ -1352,10 +1384,15 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     excludedCities.add(canonical);
   }
 
-  // Filter by WEATHER_TRADE_SIDES and excluded-city list. Excluded-city opps
-  // remain in shadow records (wouldTrade=true) so calibration data stays clean.
+  // Filter by WEATHER_TRADE_SIDES, market-disagreement gate, ensemble-veto gate,
+  // and excluded-city list. Excluded-city opps remain in shadow records so
+  // calibration data stays clean.
   let tradable = opportunities.filter(
-    (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !excludedCities.has(o.city.toLowerCase()),
+    (o) =>
+      o.allowedByConfig &&
+      !o.blockedByMarketDisagreement &&
+      !o.blockedByEnsembleVeto &&
+      !excludedCities.has(o.city.toLowerCase()),
   );
 
   if (excludedCities.size > 0) {
