@@ -24,6 +24,7 @@ const baseConfig = {
   WEATHER_KELLY_FRACTION: 0.25,
   WEATHER_MODEL_ECMWF_ENABLED: false,
   WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+  WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
   WEATHER_HRRR_ENABLED: false,
   WEATHER_BIAS_CORRECTION_ENABLED: false,
   WEATHER_BIAS_MIN_SAMPLES: 14,
@@ -1757,6 +1758,96 @@ describe('scanWeatherMarkets', () => {
     expect(blocked!.blockedByMarketDisagreement).toBe(true);
     expect(blocked!.previousOutcomePrice).toBe(0.40);
     expect(blocked!.previousWinProbability).toBe(0.95);
+  });
+
+  it('sets blockedByEnsembleVeto when ECMWF shadow sees no edge and veto is enabled', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: true,
+    });
+
+    const gammaEvent = makeMockGammaEvent();
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([gammaEvent]),
+    }) as unknown as typeof fetch;
+
+    // Forecast: 52°F — GFS sees a YES edge on the 52-53°F bracket (market=0.12, modelProb≈0.25).
+    mockFetchNwsForecast.mockResolvedValue({ highF: 52, lowF: 38, precipProbability: 10, forecastDate: targetIso, shortForecast: 'Sunny' });
+    mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: targetIso });
+
+    // GFS: stddev 3.2 → P(52-53°F) ≈ 0.25 → edge on YES ≈ 0.13
+    // ECMWF shadow: stddev 8.0 (very wide) → P(52-53°F) collapses, shadow edge goes negative
+    mockFetchEnsemble
+      .mockResolvedValueOnce({ meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: targetIso, ensembleModel: 'gfs' })
+      .mockResolvedValueOnce({ meanHigh: 52, stddevHigh: 8.0, meanLow: 38, stddevLow: 5.0, memberCount: 51, forecastDate: targetIso, ensembleModel: 'ecmwf' });
+
+    const results = await scanWeatherMarkets(redisMock as never);
+    // The 52-53°F bracket should have positive GFS edge but ECMWF vetoes it
+    const vetoed = results.find((o) => o.bracketLabel === '52-53°F');
+    expect(vetoed).toBeDefined();
+    expect(vetoed!.shadowEdge).toBeDefined();
+    expect(vetoed!.shadowEdge!).toBeLessThanOrEqual(0);
+    expect(vetoed!.blockedByEnsembleVeto).toBe(true);
+  });
+
+  it('does not set blockedByEnsembleVeto when ECMWF also sees positive edge', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: true,
+    });
+
+    const gammaEvent = makeMockGammaEvent();
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([gammaEvent]),
+    }) as unknown as typeof fetch;
+
+    mockFetchNwsForecast.mockResolvedValue({ highF: 52, lowF: 38, precipProbability: 10, forecastDate: targetIso, shortForecast: 'Sunny' });
+    mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: targetIso });
+
+    // Both GFS and ECMWF agree: stddev ≈ 3, forecast 52°F → P(52-53°F) ≈ 0.25 → positive edge
+    mockFetchEnsemble
+      .mockResolvedValueOnce({ meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: targetIso, ensembleModel: 'gfs' })
+      .mockResolvedValueOnce({ meanHigh: 52, stddevHigh: 3.0, meanLow: 38, stddevLow: 2.5, memberCount: 51, forecastDate: targetIso, ensembleModel: 'ecmwf' });
+
+    const results = await scanWeatherMarkets(redisMock as never);
+    const bracket = results.find((o) => o.bracketLabel === '52-53°F');
+    expect(bracket).toBeDefined();
+    expect(bracket!.shadowEdge!).toBeGreaterThan(0);
+    expect(bracket!.blockedByEnsembleVeto).toBe(false);
+  });
+
+  it('does not veto when WEATHER_DUAL_ENSEMBLE_VETO_ENABLED is false even if ECMWF edge is negative', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
+    });
+
+    const gammaEvent = makeMockGammaEvent();
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([gammaEvent]),
+    }) as unknown as typeof fetch;
+
+    mockFetchNwsForecast.mockResolvedValue({ highF: 52, lowF: 38, precipProbability: 10, forecastDate: targetIso, shortForecast: 'Sunny' });
+    mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: targetIso });
+
+    // GFS sees edge; ECMWF wide stddev → negative shadow edge — but veto flag is off
+    mockFetchEnsemble
+      .mockResolvedValueOnce({ meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: targetIso, ensembleModel: 'gfs' })
+      .mockResolvedValueOnce({ meanHigh: 52, stddevHigh: 8.0, meanLow: 38, stddevLow: 5.0, memberCount: 51, forecastDate: targetIso, ensembleModel: 'ecmwf' });
+
+    const results = await scanWeatherMarkets(redisMock as never);
+    const bracket = results.find((o) => o.bracketLabel === '52-53°F');
+    expect(bracket).toBeDefined();
+    expect(bracket!.blockedByEnsembleVeto).toBe(false);
   });
 
   // -------------------------------------------------------------------------

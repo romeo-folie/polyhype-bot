@@ -1553,6 +1553,10 @@ const envSchema = z.object({
   // trading, but also fetch the alternate ensemble and log its implied bracket
   // probabilities/edges alongside the primary path for calibration comparison.
   WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: boolFromEnv.optional().default(true),
+  // Mutual-veto gate: when ECMWF shadow is available and sees no edge (shadowEdge ≤ 0)
+  // on a bracket that GFS wants to trade, block it. Both models must agree there
+  // is an edge on the same side before the trade is allowed. Ships dark.
+  WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: boolFromEnv.optional().default(false),
   // Use HRRR (3km, hourly-updating, radar-assimilated) as 3rd voter for US cities at daysOut≤1.
   // HRRR is the highest-accuracy US model at 0–18h lead. Ships dark.
   WEATHER_HRRR_ENABLED: boolFromEnv.optional().default(false),
