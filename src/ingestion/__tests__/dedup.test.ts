@@ -58,4 +58,32 @@ describe('filterSeen', () => {
     expect(result).toEqual([]);
     expect(mockSet).not.toHaveBeenCalled();
   });
+
+  it('uses namespace prefix in Redis key when namespace is provided', async () => {
+    mockSet.mockResolvedValue('OK');
+
+    const items = [makeItem({ url: 'https://example.com/article-1' })];
+    await filterSeen(items, fakeRedis, 'crypto-futures');
+
+    const call = mockSet.mock.calls[0]!;
+    expect(call[0]).toMatch(/^dedup:crypto-futures:/);
+  });
+
+  it('treats the same URL as new in a different namespace (dedup is isolated per category)', async () => {
+    // Both calls return 'OK' — SET NX succeeds in each namespace independently
+    mockSet.mockResolvedValue('OK');
+
+    const item = makeItem({ url: 'https://example.com/shared-article' });
+
+    const globalResult = await filterSeen([item], fakeRedis);
+    const namespacedResult = await filterSeen([item], fakeRedis, 'crypto-futures');
+
+    expect(globalResult).toHaveLength(1);
+    expect(namespacedResult).toHaveLength(1);
+
+    const [globalCall, namespacedCall] = mockSet.mock.calls;
+    expect(globalCall![0]).toMatch(/^dedup:[^:]+$/);          // no extra colon segment
+    expect(namespacedCall![0]).toMatch(/^dedup:crypto-futures:/);
+    expect(globalCall![0]).not.toBe(namespacedCall![0]);      // different Redis keys
+  });
 });

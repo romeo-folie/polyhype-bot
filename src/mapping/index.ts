@@ -623,8 +623,9 @@ export async function mapNewsToFutures(
       const expectedDir = direction === 'LONG' ? 'UP' : 'DOWN';
 
       // === Shadow logs (Phase 2/3 validation) ===
-      // Hoisted above the score gate so they accumulate samples on every
-      // confluence evaluation, not just the rare ones that pass.
+      // Only active when NEWS_FUTURES_REGIME_GATES_ENABLED=true (regime gates
+      // re-enabled for news path). When bypassed (the default), no shadow rows
+      // are written — the gates don't apply to this path so the data is meaningless.
       if (cfg.NEWS_FUTURES_REGIME_GATES_ENABLED) {
         if (confluence.volume?.ratio !== null && confluence.volume?.ratio !== undefined) {
           if (!cfg.VOLUME_SPIKE_GATE_ENABLED) {
