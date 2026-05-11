@@ -31,6 +31,12 @@ describe('parseWhaleAlert', () => {
     expect(result).toBeNull();
   });
 
+  it('skips unknown→unknown transfers (non-directional)', () => {
+    const text = '🔄 2,000 #ETH (60,000,000 USD) transferred from unknown wallet to unknown wallet';
+    const result = parseWhaleAlert(text, BASE.source, BASE.url, BASE.publishedAt, 20);
+    expect(result).toBeNull();
+  });
+
   it('skips transfers below the USD threshold', () => {
     const text = '⚠️ 100 #BTC (8,500,000 USD) transferred from unknown wallet to #Binance';
     const result = parseWhaleAlert(text, BASE.source, BASE.url, BASE.publishedAt, 20);

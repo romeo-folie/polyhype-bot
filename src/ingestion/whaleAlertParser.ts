@@ -49,7 +49,9 @@ export function parseWhaleAlert(
   const fromType = classifyEndpoint(fromRaw);
   const toType = classifyEndpoint(toRaw);
 
+  // Skip exchange↔exchange (internal settlement) and unknown↔unknown (non-directional)
   if (fromType === 'exchange' && toType === 'exchange') return null;
+  if (fromType === 'unknown' && toType === 'unknown') return null;
 
   const usdM = (usdValue / 1_000_000).toFixed(0);
 

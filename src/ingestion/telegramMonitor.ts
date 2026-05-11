@@ -27,6 +27,7 @@ import { cryptoFutures } from './categories/index.js';
 
 // Channels whose messages are parsed as structured whale flow events.
 // These bypass the watchlist gate, urgency scorer, and category classifier.
+// All entries lowercase — matched against channelName.toLowerCase().
 const WHALE_ALERT_CHANNELS = new Set([
   'whale_alert_io',
   'whalebotalerts',
@@ -41,15 +42,16 @@ const CRYPTOQUANT_ALERT_CHANNELS = new Set([
 
 // Channels pre-assigned to the crypto-futures category.
 // Skip classifyCategory (LLM + keyword overhead) and use the category directly.
+// All entries lowercase — matched against channelName.toLowerCase().
 const CRYPTO_CHANNEL_OVERRIDES = new Set([
   'cryptoquant_official',
-  'WatcherGuru',
+  'watcherguru',
   'bloombergcrypto',
   'wublockchainenglish',
   'arkhamintelligence',
-  'AICryptoDailyBrief',
+  'aicryptodailybrief',
   'infinityhedge',
-  'CoinMarketCapAnnouncements',
+  'coinmarketcapannouncements',
   'binance_announcements',
   'cointelegraph',
 ]);
@@ -205,7 +207,8 @@ async function handleNewMessage(message: any) {
   messageCount++;
   const arrivalTs = Date.now();
   const channelName = channelNameMap.get(message.chat_id) || 'unknown';
-  
+  const channelKey = channelName.toLowerCase(); // normalized for set lookups
+
   // Latency calculation: TDLib message.date is Unix timestamp (seconds)
   const telegramLatency = arrivalTs - (Number(message.date) * 1000);
 
@@ -230,7 +233,7 @@ async function handleNewMessage(message: any) {
     };
 
     // ── Path A: Whale alert channels (structured flow parser) ──────────────
-    if (WHALE_ALERT_CHANNELS.has(channelName)) {
+    if (WHALE_ALERT_CHANNELS.has(channelKey)) {
       const parsed = parseWhaleAlert(
         trimmedText,
         baseItem.source,
@@ -253,7 +256,7 @@ async function handleNewMessage(message: any) {
     }
 
     // ── Path B: CryptoQuant alert channels (on-chain signal parser) ────────
-    if (CRYPTOQUANT_ALERT_CHANNELS.has(channelName)) {
+    if (CRYPTOQUANT_ALERT_CHANNELS.has(channelKey)) {
       const parsed = parseCryptoQuantAlert(
         trimmedText,
         baseItem.source,
@@ -285,11 +288,11 @@ async function handleNewMessage(message: any) {
 
     // ── Path C: Channel override → skip classifyCategory, use crypto-futures ─
     // ── Path D: Normal classifier ──────────────────────────────────────────
-    const category = CRYPTO_CHANNEL_OVERRIDES.has(channelName) || CRYPTOQUANT_ALERT_CHANNELS.has(channelName)
+    const category = CRYPTO_CHANNEL_OVERRIDES.has(channelKey) || CRYPTOQUANT_ALERT_CHANNELS.has(channelKey)
       ? cryptoFutures
       : await classifyCategory(item.title);
 
-    if (CRYPTO_CHANNEL_OVERRIDES.has(channelName)) {
+    if (CRYPTO_CHANNEL_OVERRIDES.has(channelKey)) {
       logger.info('[telegram] channel override → crypto-futures', { from: channelName });
     } else {
       logger.info('[telegram] classified category', { category: category.id, from: channelName });
