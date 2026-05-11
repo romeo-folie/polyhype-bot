@@ -23,7 +23,7 @@ const SKIP_REASON = [
   '4h_ema_bias_mismatch', '1h_macd_mismatch',
   'entry_price_above_cap',
   // hl-funding-specific (added 2026-05-11)
-  'denylist', 'apr_below_threshold', 'funding_cooldown', 'same_side_position_open',
+  'denylist', 'apr_below_threshold', 'funding_cooldown',
   'other',
 ] as const;
 

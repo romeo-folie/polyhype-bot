@@ -79,11 +79,16 @@ export async function scanHlFunding(redis: Redis): Promise<TradeSignal[]> {
       continue;
     }
 
-    // Same-side dedup: skip if any position (any source) is open on this side.
-    // Opposite-side is allowed — HL nets at position level.
-    const sideOpen = await hasOpenPosition(redis, symbol, direction);
-    if (sideOpen) {
-      logDecision(decisionId, symbol, direction, false, 'same_side_position_open');
+    // HL executor blocks both same-side and opposite-side stacking to prevent
+    // double-funded margin with net-zero exposure. Pre-gate here to avoid
+    // emitting signals that will always be dropped downstream.
+    const opposite: 'LONG' | 'SHORT' = direction === 'LONG' ? 'SHORT' : 'LONG';
+    const [sideOpen, oppositeSideOpen] = await Promise.all([
+      hasOpenPosition(redis, symbol, direction),
+      hasOpenPosition(redis, symbol, opposite),
+    ]);
+    if (sideOpen || oppositeSideOpen) {
+      logDecision(decisionId, symbol, direction, false, 'position_already_open');
       continue;
     }
 

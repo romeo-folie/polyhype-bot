@@ -138,19 +138,18 @@ describe('scanHlFunding', () => {
     expect(signals).toHaveLength(0);
   });
 
-  it('allows entry when opposite-side position exists (hl-momentum LONG vs hl-funding SHORT)', async () => {
+  it('skips symbol when opposite-side position exists (executor blocks both sides to avoid fee-burn)', async () => {
     mockLoadConfig.mockReturnValue({ ...baseConfig, HL_FUNDING_SCANNER_ENABLED: true });
     mockGetAllCachedAssetCtxs.mockResolvedValue({
       BTC: { fundingRate: aprToHourly(150), markPrice: 70000, openInterest: 1000 },
     });
-    // hl-momentum holds LONG; hl-funding wants SHORT — opposite side → allowed
+    // hl-momentum holds LONG; hl-funding wants SHORT — executor blocks opposite-side stacking
     mockHasOpenPosition.mockImplementation((_redis: unknown, _sym: string, dir: string) =>
       Promise.resolve(dir === 'LONG'),
     );
     const redis = makeRedis();
     const signals = await scanHlFunding(redis as never);
-    expect(signals).toHaveLength(1);
-    expect(signals[0].direction).toBe('SHORT');
+    expect(signals).toHaveLength(0);
   });
 
   it('skips symbol when denylist contains it', async () => {
