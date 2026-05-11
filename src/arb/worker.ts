@@ -27,6 +27,7 @@ import { FvScanner } from './fvScanner.js';
 import { ChainlinkFeed, ORACLE_PRICE_MOVED_CHANNEL } from '../spot/feeds/chainlinkFeed.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { scanHlMomentum, momentumCooldownKey } from '../futures/hlMomentumScanner.js';
+import { scanHlFunding, fundingCooldownKey } from '../futures/hlFundingScanner.js';
 import type { SpotMove } from '../spot/thresholdDetector.js';
 import type { TradeSignal } from '../mapping/index.js';
 import type { ChainlinkTick } from '../spot/feeds/chainlinkFeed.js';
@@ -73,8 +74,10 @@ export class ArbitrageWorker {
   private isCryptoArbRunning = false;
   private isNegRiskArbRunning = false;
   private isHlMomentumRunning = false;
+  private isHlFundingRunning = false;
   private timer: NodeJS.Timeout | null = null;
   private negRiskTimer: NodeJS.Timeout | null = null;
+  private hlFundingTimer: NodeJS.Timeout | null = null;
   private negRiskScanIntervalMs = 30000;
   private warmer: ArbMarketWarmer | null = null;
   private chainlinkFeed: ChainlinkFeed | null = null;
@@ -352,6 +355,13 @@ export class ArbitrageWorker {
     logger.info('[arb-worker] NegRisk arb scanner scheduled', {
       intervalMs: this.negRiskScanIntervalMs,
       enabled: cfg.NEGRISK_ARB_ENABLED,
+    });
+
+    // 4. Start HL funding-rate mean-reversion scanner (periodic, not tick-driven)
+    this.scheduleHlFundingScan();
+    logger.info('[arb-worker] HL funding scanner scheduled', {
+      intervalSec: cfg.HL_FUNDING_SCANNER_POLL_INTERVAL_SEC,
+      enabled: cfg.HL_FUNDING_SCANNER_ENABLED,
     });
   }
 
@@ -726,6 +736,82 @@ export class ArbitrageWorker {
     }
   }
 
+  private scheduleHlFundingScan(): void {
+    const cfg = loadConfig();
+    this.hlFundingTimer = setTimeout(async () => {
+      await this.triggerHlFundingScan();
+      this.scheduleHlFundingScan();
+    }, cfg.HL_FUNDING_SCANNER_POLL_INTERVAL_SEC * 1000);
+  }
+
+  private async triggerHlFundingScan(): Promise<void> {
+    if (this.isHlFundingRunning) return;
+    this.isHlFundingRunning = true;
+    const redis = getRedis();
+    try {
+      const cfg = loadConfig();
+      const signals = await scanHlFunding(redis);
+      for (const signal of signals) {
+        const direction = signal.direction as 'LONG' | 'SHORT';
+        const cooldownKey = fundingCooldownKey(signal.marketId, direction);
+        // Atomic NX claim prevents double-fire across concurrent worker instances.
+        const claimed = await redis.set(cooldownKey, 'in-flight', 'EX', 30, 'NX');
+        if (!claimed) {
+          logger.debug('[hl-funding] cooldown claim lost (race)', {
+            symbol: signal.marketId,
+            direction,
+          });
+          continue;
+        }
+        let result;
+        try {
+          result = await executeAndRecordSignal(signal, redis);
+        } catch (execErr) {
+          await redis.del(cooldownKey);
+          logger.warn('[hl-funding] execution error', {
+            symbol: signal.marketId,
+            error: execErr instanceof Error ? execErr.message : String(execErr),
+          });
+          continue;
+        }
+        if (result.tradeResult?.success) {
+          await redis.set(cooldownKey, '1', 'EX', cfg.HL_FUNDING_SCANNER_COOLDOWN_SEC);
+          logger.info('[hl-funding] trade executed', {
+            symbol: signal.marketId,
+            direction: signal.direction,
+            stakeUsd: signal.stakeUsd,
+            executionId: result.signal.executionId,
+          });
+          await recordGlobalTrade(redis, 'hyperliquid');
+        } else if (result.skipped) {
+          if (result.skipReason === 'stake_below_hl_minimum') {
+            await redis.set(cooldownKey, 'skip', 'EX', cfg.HL_FUNDING_SCANNER_MIN_SKIP_COOLDOWN_SEC);
+          } else if (result.skipReason === 'already_executed') {
+            await redis.set(cooldownKey, 'skip', 'EX', cfg.HL_FUNDING_SCANNER_COOLDOWN_SEC);
+          } else {
+            await redis.del(cooldownKey);
+          }
+          logger.debug('[hl-funding] signal skipped by executor', {
+            symbol: signal.marketId,
+            reason: result.skipReason,
+          });
+        } else if (result.error) {
+          await redis.del(cooldownKey);
+          logger.warn('[hl-funding] execution error', {
+            symbol: signal.marketId,
+            error: result.error,
+          });
+        }
+      }
+    } catch (err) {
+      logger.error('[hl-funding] triggerHlFundingScan failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      this.isHlFundingRunning = false;
+    }
+  }
+
   public stop(): void {
     if (this.timer) {
       clearTimeout(this.timer);
@@ -734,6 +820,10 @@ export class ArbitrageWorker {
     if (this.negRiskTimer) {
       clearTimeout(this.negRiskTimer);
       this.negRiskTimer = null;
+    }
+    if (this.hlFundingTimer) {
+      clearTimeout(this.hlFundingTimer);
+      this.hlFundingTimer = null;
     }
     const subscriber = getSubscriberRedis();
     void subscriber.unsubscribe('spot:price_moved', ORACLE_PRICE_MOVED_CHANNEL).catch((e: unknown) => {

@@ -29,6 +29,7 @@ import { scoreConfluence } from '../arb/confluenceScorer.js';
 import { recordPositionOutcome } from '../shared/positionOutcomeRecorder.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { isMemeSymbol } from '../futures/hlMomentumScanner.js';
+import { getAllCachedAssetCtxs, fundingRateToApr } from '../futures/hlAssetCtxCache.js';
 
 const POLL_INTERVAL_MS = 5000; // 5 seconds — safe for rate limits, fast enough for intraday
 const MONITOR_LOCK_KEY = 'futures-monitor:lock';
@@ -254,6 +255,19 @@ export async function runFuturesMonitorWorker(): Promise<void> {
       // Refresh futuresLedger so the exit loop below only sees live positions
       futuresLedger = (await getOpenPositions(redis)).filter((p) => p.isFutures);
 
+      // Pre-fetch bulk HL asset-ctx once per tick for hl-funding exit checks.
+      // Avoids a separate Redis GET (and possible HL HTTP fetch) per position.
+      let hlFundingCtxMap: Record<string, { fundingRate: number; openInterest: number; markPrice: number }> = {};
+      if (futuresLedger.some((p) => p.sourcedFrom === 'hl-funding')) {
+        try {
+          hlFundingCtxMap = await getAllCachedAssetCtxs(redis, cfg.HL_FUNDING_SCANNER_BULK_CTX_TTL_SEC);
+        } catch (err) {
+          logger.warn('[futures-monitor] hl-funding bulk ctx pre-fetch failed (non-fatal)', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
       for (const pos of positions) {
         const symbol = pos.symbol;
         const entryPx = parseFloat(pos.position.entryPx);
@@ -305,6 +319,11 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           slPct = -cfg.HL_MOMENTUM_STOP_LOSS_PCT;
           tpPct = cfg.HL_MOMENTUM_TAKE_PROFIT_PCT;
         }
+        // hl-funding uses its own fixed SL/TP — fading momentum needs wider stops.
+        if (ledgerPosForAtr?.sourcedFrom === 'hl-funding') {
+          slPct = -cfg.HL_FUNDING_SCANNER_STOP_LOSS_PCT;
+          tpPct = cfg.HL_FUNDING_SCANNER_TAKE_PROFIT_PCT;
+        }
 
         // Issue #264: meme ATR-scaled SL/TP. Frozen entry-time values; the monitor
         // only consumes them — never re-derives from current ATR. Sits between the
@@ -337,6 +356,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         if (
           cfg.FUTURES_ATR_SLTP_ENABLED &&
           ledgerPosForAtr?.sourcedFrom !== 'hl-momentum' &&
+          ledgerPosForAtr?.sourcedFrom !== 'hl-funding' &&
           ledgerPosForAtr?.entryAtrPct !== undefined &&
           Number.isFinite(ledgerPosForAtr.entryAtrPct) &&
           ledgerPosForAtr.entryAtrPct > 0
@@ -568,13 +588,34 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           }
         }
 
+        // 2c. Funding-normalized + sign-flip exit (hl-funding positions only).
+        // Uses the map pre-fetched once per tick (above the loop) to avoid
+        // a Redis GET + possible HL HTTP call per position per tick.
+        if (!shouldExit && ledgerPosForAtr?.sourcedFrom === 'hl-funding') {
+          const fundingCtx = hlFundingCtxMap[symbol];
+          if (fundingCtx) {
+            const currentApr = fundingRateToApr(fundingCtx.fundingRate);
+            const entryApr = ledgerPosForAtr.entryFundingApr ?? 0;
+            if (Math.abs(currentApr) < cfg.HL_FUNDING_SCANNER_EXIT_APR_THRESHOLD) {
+              shouldExit = true;
+              reason = `Funding normalized (|APR|=${Math.abs(currentApr).toFixed(1)}% < ${cfg.HL_FUNDING_SCANNER_EXIT_APR_THRESHOLD}%)`;
+            } else if (entryApr !== 0 && Math.sign(currentApr) !== Math.sign(entryApr)) {
+              shouldExit = true;
+              reason = `Funding sign flip (entry=${entryApr.toFixed(1)}% current=${currentApr.toFixed(1)}%)`;
+            }
+          }
+        }
+
         if (!shouldExit) {
           // 3. Time-based max-hold exit using ledger 'openedAt'
           const ledgerPos = futuresLedger.find((p) => p.marketId === symbol);
           const openedAt = ledgerPos ? new Date(ledgerPos.openedAt).getTime() : Date.now();
 
           const ageHours = (Date.now() - openedAt) / (1000 * 3600);
-          if (ageHours >= cfg.FUTURES_MAX_HOLD_HOURS) {
+          const maxHoldHours = ledgerPosForAtr?.sourcedFrom === 'hl-funding'
+            ? cfg.HL_FUNDING_SCANNER_MAX_HOLD_HOURS
+            : cfg.FUTURES_MAX_HOLD_HOURS;
+          if (ageHours >= maxHoldHours) {
             let bypassed = false;
             // Loser guard: max-hold never kicks a position that's underwater.
             // Observed failure mode: ETH LONG at -2.16% cut at 24h; had it held
@@ -653,7 +694,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             }
             if (!bypassed) {
               shouldExit = true;
-              reason = `Max hold hours reached (${ageHours.toFixed(1).toString()}h >= ${cfg.FUTURES_MAX_HOLD_HOURS.toString()}h)`;
+              reason = `Max hold hours reached (${ageHours.toFixed(1).toString()}h >= ${maxHoldHours.toString()}h)`;
             }
           }
 
@@ -709,7 +750,11 @@ export async function runFuturesMonitorWorker(): Promise<void> {
                     ? 'signal_reeval'
                     : reason.startsWith('Max hold')
                       ? 'futures_max_hold'
-                      : 'stop_loss';
+                      : reason.startsWith('Funding normalized')
+                        ? 'funding_normalized'
+                        : reason.startsWith('Funding sign flip')
+                          ? 'funding_sign_flip'
+                          : 'stop_loss';
             await notifyTakeProfitExecuted({
               position: ledgerPos ?? {
                 marketId: symbol,

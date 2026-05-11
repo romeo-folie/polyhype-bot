@@ -99,6 +99,8 @@ export interface Position {
   memeAtrTpPct?: number | undefined;
   /** Price-zone classification (Change 3 telemetry) */
   priceZone?: 1 | 2 | 3 | 4 | 5 | undefined;
+  /** Entry-time funding APR (%) for hl-funding positions — used for sign-flip exit */
+  entryFundingApr?: number | undefined;
 }
 
 function canonicalDirection(direction: Position['direction']): Position['direction'] {
@@ -226,6 +228,7 @@ export async function recordPosition(redis: Redis, positionIn: Position): Promis
     memeAtrSlPct: position.memeAtrSlPct !== undefined ? String(position.memeAtrSlPct) : '',
     memeAtrTpPct: position.memeAtrTpPct !== undefined ? String(position.memeAtrTpPct) : '',
     priceZone: position.priceZone !== undefined ? String(position.priceZone) : '',
+    entryFundingApr: position.entryFundingApr !== undefined ? String(position.entryFundingApr) : '',
   });
 
   // Add to sorted index (score = openedAt ms for chronological retrieval)
@@ -476,6 +479,8 @@ function deserialisePosition(raw: Record<string, string>): Position {
     const z = Number(raw.priceZone);
     if (z >= 1 && z <= 5) pos.priceZone = z as 1 | 2 | 3 | 4 | 5;
   }
+  if (raw.entryFundingApr !== undefined && raw.entryFundingApr !== '')
+    pos.entryFundingApr = parseFloat(raw.entryFundingApr);
 
   return pos;
 }

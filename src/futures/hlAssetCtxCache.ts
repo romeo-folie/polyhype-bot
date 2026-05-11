@@ -90,6 +90,64 @@ export function fundingRateToApr(hourlyFundingRate: number): number {
   return hourlyFundingRate * HL_FUNDING_SETTLEMENTS_PER_YEAR * 100;
 }
 
+// ── Bulk asset-context cache (hl-funding scanner) ────────────────────────────
+
+const BULK_CTX_KEY = 'hl:asset-ctx:all';
+
+/**
+ * Fetch and cache asset context for ALL HL perps in one round-trip.
+ * Used by the funding-rate scanner (which scans ~230 symbols per tick)
+ * to avoid 230 individual HTTP calls.
+ *
+ * Stale-on-error: returns {} if the HL fetch fails and nothing is cached.
+ * The scanner treats an empty map as "no signals this tick".
+ */
+export async function getAllCachedAssetCtxs(
+  redis: Redis,
+  ttlSec: number,
+): Promise<Record<string, CachedAssetCtx>> {
+  let cached: string | null = null;
+  try {
+    cached = await redis.get(BULK_CTX_KEY);
+  } catch (err) {
+    logger.warn('[hl-asset-ctx] bulk redis get failed', {
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+  if (cached) {
+    try {
+      return JSON.parse(cached) as Record<string, CachedAssetCtx>;
+    } catch (err) {
+      logger.warn('[hl-asset-ctx] malformed bulk cache entry, invalidating', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+      try {
+        await redis.del(BULK_CTX_KEY);
+      } catch (deleteErr) {
+        logger.warn('[hl-asset-ctx] failed to delete malformed bulk cache entry', {
+          err: deleteErr instanceof Error ? deleteErr.message : String(deleteErr),
+        });
+      }
+    }
+  }
+  try {
+    const all = await getHyperliquid().getAllAssetContexts();
+    try {
+      await redis.setex(BULK_CTX_KEY, ttlSec, JSON.stringify(all));
+    } catch (err) {
+      logger.warn('[hl-asset-ctx] bulk redis setex failed', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return all;
+  } catch (err) {
+    logger.warn('[hl-asset-ctx] bulk fetch failed', {
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return {};
+  }
+}
+
 // ── OI divergence baseline (issue #265 Sub-PR 2) ────────────────────────────
 
 /** Snapshot of OI + mark price at a fixed point in time for divergence comparison. */

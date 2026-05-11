@@ -58,6 +58,7 @@ export async function handlePositions(sql: Sql, payloads: unknown[]): Promise<vo
       entry_atr:                          d.entryAtr ?? null,
       entry_atr_pct:                      d.entryAtrPct ?? null,
       price_zone:                         d.priceZone ?? null,
+      entry_funding_apr:                  d.entryFundingApr ?? null,
       consensus_probability:              d.consensusProbability ?? null,
       consensus_stddev:                   d.consensusStddev ?? null,
       question:                           d.question,
@@ -77,7 +78,7 @@ export async function handlePositions(sql: Sql, payloads: unknown[]): Promise<vo
       'counterfactual_taker_price', 'counterfactual_taker_shares', 'counterfactual_taker_cost',
       'maker_price_improvement_bps', 'maker_price_improvement_usd',
       'mapping_confidence', 'relevance_class', 'edge_class', 'sizing_reason',
-      'is_futures', 'symbol', 'leverage', 'entry_atr', 'entry_atr_pct', 'price_zone',
+      'is_futures', 'symbol', 'leverage', 'entry_atr', 'entry_atr_pct', 'price_zone', 'entry_funding_apr',
       'consensus_probability', 'consensus_stddev', 'question', 'sourced_from',
       'updated_at', 'raw'
     )}
