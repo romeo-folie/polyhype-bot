@@ -1146,6 +1146,8 @@ const envSchema = z.object({
   // Minimum urgency score (1-10) for news items to trigger a futures signal.
   // Lowered from 8 to 6 to increase signal frequency; combined with stake scaling.
   FUTURES_URGENCY_THRESHOLD: z.coerce.number().int().min(1).max(10).optional().default(6),
+  // Minimum transfer value (USD millions) for a whale alert to generate a futures signal.
+  WHALE_ALERT_MIN_USD_M: z.coerce.number().min(1).optional().default(20),
   // Notional-based SL/TP thresholds (percentage of margin used, NOT account equity).
   // Values are in ROE % (pnl / margin, leverage-scaled) — matches the HL UI.
   // ATR-mode positions use notional % internally; these fixed-pct defaults apply

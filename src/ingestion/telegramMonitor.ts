@@ -21,6 +21,38 @@ import { scoreItems } from './scorer.js';
 import { processScoredItems } from '../execution/index.js';
 import { matchesWatchlist } from '../shared/watchlist.js';
 import { classifyCategory } from './categoryClassifier.js';
+import { parseWhaleAlert } from './whaleAlertParser.js';
+import { parseCryptoQuantAlert } from './cryptoQuantParser.js';
+import { cryptoFutures } from './categories/index.js';
+
+// Channels whose messages are parsed as structured whale flow events.
+// These bypass the watchlist gate, urgency scorer, and category classifier.
+const WHALE_ALERT_CHANNELS = new Set([
+  'whale_alert_io',
+  'whalebotalerts',
+]);
+
+// Channels whose messages are parsed as structured on-chain data alerts.
+// Matched messages bypass the watchlist gate and urgency scorer.
+// Unmatched messages fall through to the normal scorer as crypto-futures.
+const CRYPTOQUANT_ALERT_CHANNELS = new Set([
+  'cryptoquant_alert',
+]);
+
+// Channels pre-assigned to the crypto-futures category.
+// Skip classifyCategory (LLM + keyword overhead) and use the category directly.
+const CRYPTO_CHANNEL_OVERRIDES = new Set([
+  'cryptoquant_official',
+  'WatcherGuru',
+  'bloombergcrypto',
+  'wublockchainenglish',
+  'arkhamintelligence',
+  'AICryptoDailyBrief',
+  'infinityhedge',
+  'CoinMarketCapAnnouncements',
+  'binance_announcements',
+  'cointelegraph',
+]);
 
 // Global state
 let client: Client | null = null;
@@ -185,31 +217,83 @@ async function handleNewMessage(message: any) {
   });
 
   try {
+    const cfg = loadConfig();
     const redis = getRedis();
 
-    // 1. Build OSINT Item
-    // Note: TDLib message IDs are different from Bot API, but we keep link format
     const url = `https://t.me/${channelName}/${message.id}`;
-    const item = {
-      title: text.trim(),
+    const trimmedText = text.trim();
+    const baseItem = {
       url,
       publishedAt: new Date(message.date * 1000),
       source: `telegram:${channelName}`,
       latencyMs: telegramLatency,
     };
 
-    // 2. Watchlist Gate
+    // ── Path A: Whale alert channels (structured flow parser) ──────────────
+    if (WHALE_ALERT_CHANNELS.has(channelName)) {
+      const parsed = parseWhaleAlert(
+        trimmedText,
+        baseItem.source,
+        url,
+        baseItem.publishedAt,
+        cfg.WHALE_ALERT_MIN_USD_M,
+      );
+      if (!parsed) {
+        logger.debug('[telegram] whale alert below threshold or unrecognised', { from: channelName });
+        return;
+      }
+      logger.info('[telegram] whale alert parsed', {
+        from: channelName,
+        title: parsed.title,
+        urgency: parsed.urgencyScore,
+        latencyMs: Date.now() - arrivalTs,
+      });
+      await processScoredItems([parsed], redis, { wait: true });
+      return;
+    }
+
+    // ── Path B: CryptoQuant alert channels (on-chain signal parser) ────────
+    if (CRYPTOQUANT_ALERT_CHANNELS.has(channelName)) {
+      const parsed = parseCryptoQuantAlert(
+        trimmedText,
+        baseItem.source,
+        url,
+        baseItem.publishedAt,
+      );
+      if (parsed) {
+        logger.info('[telegram] cryptoquant alert parsed', {
+          from: channelName,
+          title: parsed.title,
+          urgency: parsed.urgencyScore,
+          latencyMs: Date.now() - arrivalTs,
+        });
+        await processScoredItems([parsed], redis, { wait: true });
+        return;
+      }
+      // Unrecognised CQ message — fall through to normal scorer as crypto-futures
+      logger.debug('[telegram] cryptoquant alert unrecognised, scoring normally', { from: channelName });
+    }
+
+    // ── Path C/D: Standard item construction ───────────────────────────────
+    const item = { title: trimmedText, ...baseItem };
+
+    // Watchlist gate — only for non-structured channels
     if (!(await matchesWatchlist(item.title, redis))) {
       logger.debug('[telegram] skipped - no match', { from: channelName });
       return;
     }
 
-    // 3. Classify category & score urgency
-    const category = await classifyCategory(item.title);
-    logger.info('[telegram] classified category', {
-      category: category.id,
-      from: channelName,
-    });
+    // ── Path C: Channel override → skip classifyCategory, use crypto-futures ─
+    // ── Path D: Normal classifier ──────────────────────────────────────────
+    const category = CRYPTO_CHANNEL_OVERRIDES.has(channelName) || CRYPTOQUANT_ALERT_CHANNELS.has(channelName)
+      ? cryptoFutures
+      : await classifyCategory(item.title);
+
+    if (CRYPTO_CHANNEL_OVERRIDES.has(channelName)) {
+      logger.info('[telegram] channel override → crypto-futures', { from: channelName });
+    } else {
+      logger.info('[telegram] classified category', { category: category.id, from: channelName });
+    }
 
     const scored = await scoreItems([item], {
       systemPrompt: category.scorerPrompt,
@@ -224,10 +308,9 @@ async function handleNewMessage(message: any) {
     if (highUrgency.length > 0) {
       logger.info('[telegram] high-urgency message triggering execution', {
         urgency: highUrgency[0]?.urgencyScore,
+        category: category.id,
         latencyMs: Date.now() - arrivalTs,
       });
-
-      // 4. Trigger Execution
       await processScoredItems(highUrgency, redis, { wait: true });
     } else {
       logger.debug('[telegram] ignored (low score)', { score: scored[0]?.urgencyScore });
