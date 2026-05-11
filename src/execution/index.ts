@@ -13,7 +13,6 @@ import 'dotenv/config';
 import process from 'node:process';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
-import { loadConfig } from '../shared/config.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping, mapNewsToFutures } from '../mapping/index.js';
 import { executeAndRecordSignal } from './executor.js';
@@ -47,10 +46,13 @@ export async function runExecution(): Promise<void> {
 
 async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<void> {
   logger.info('[execution] pipeline starting');
-  const cfg = loadConfig();
+
+  // Read directly from process.env to avoid triggering loadConfig() validation
+  // (which requires LLM keys + SIMMER_API_KEY) on a path that may be a no-op.
+  const rssEnabled = process.env.OSINT_RSS_INGESTION_ENABLED === 'true';
 
   let highUrgencyItems: ScoredItem[] = [];
-  if (cfg.OSINT_RSS_INGESTION_ENABLED) {
+  if (rssEnabled) {
     try {
       highUrgencyItems = await runIngestion();
     } catch (err) {
