@@ -74,6 +74,9 @@ const envSchema = z.object({
   TELEGRAM_API_ID: z.coerce.number().optional(),
   TELEGRAM_API_HASH: z.string().optional(),
   TELEGRAM_MONITOR_ENABLED: boolFromEnv.optional().default(false),
+  // Gate for RSS-based batch ingestion (LLM scoring every 5 min).
+  // Set false to skip runIngestion() entirely; Telegram path is unaffected.
+  OSINT_RSS_INGESTION_ENABLED: boolFromEnv.optional().default(false),
   TELEGRAM_CHANNELS: z.string().optional().default('dbot_alerts,osint_intel'),
   TELEGRAM_DB_PATH: z.string().optional().default('./tdlib-data'),
 

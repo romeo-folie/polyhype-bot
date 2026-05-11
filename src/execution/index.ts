@@ -48,14 +48,19 @@ export async function runExecution(): Promise<void> {
 async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<void> {
   logger.info('[execution] pipeline starting');
 
+  // Read directly from process.env to avoid triggering loadConfig() validation
+  // (which requires LLM keys + SIMMER_API_KEY) on a path that may be a no-op.
+  const rssEnabled = process.env.OSINT_RSS_INGESTION_ENABLED === 'true';
+
   let highUrgencyItems: ScoredItem[] = [];
-  try {
-    highUrgencyItems = await runIngestion();
-  } catch (err) {
-    logger.error('[execution] ingestion failed — continuing', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    highUrgencyItems = [];
+  if (rssEnabled) {
+    try {
+      highUrgencyItems = await runIngestion();
+    } catch (err) {
+      logger.error('[execution] ingestion failed — continuing', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   if (highUrgencyItems.length > 0) {
