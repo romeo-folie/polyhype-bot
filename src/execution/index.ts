@@ -13,6 +13,7 @@ import 'dotenv/config';
 import process from 'node:process';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
+import { loadConfig } from '../shared/config.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping, mapNewsToFutures } from '../mapping/index.js';
 import { executeAndRecordSignal } from './executor.js';
@@ -46,15 +47,17 @@ export async function runExecution(): Promise<void> {
 
 async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<void> {
   logger.info('[execution] pipeline starting');
+  const cfg = loadConfig();
 
   let highUrgencyItems: ScoredItem[] = [];
-  try {
-    highUrgencyItems = await runIngestion();
-  } catch (err) {
-    logger.error('[execution] ingestion failed — continuing', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    highUrgencyItems = [];
+  if (cfg.OSINT_RSS_INGESTION_ENABLED) {
+    try {
+      highUrgencyItems = await runIngestion();
+    } catch (err) {
+      logger.error('[execution] ingestion failed — continuing', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   if (highUrgencyItems.length > 0) {
