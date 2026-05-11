@@ -1388,6 +1388,13 @@ const envSchema = z.object({
   // Requires CHAINLINK_REDIS_PUBLISH_ENABLED=true. Ships dark.
   CHAINLINK_CRYPTO_ARB_ENABLED: boolFromEnv.optional().default(false),
 
+  // ── OSINT → Polymarket market trading ──
+  // When false, ingestion still runs (Telegram monitor + mapNewsToFutures remain active)
+  // but runMapping (PM market entry from news) is suppressed. 2026-05-11: disabled after
+  // 234 trades at 11% WR / -55% avg return — probable category-attribution noise in early
+  // data but P&L is negative regardless.
+  OSINT_PM_TRADING_ENABLED: boolFromEnv.optional().default(false),
+
   // ── FV scanner (Black-Scholes fair-value vs book mid on 15m BTC/ETH Up/Down) ──
   // Ships dark: FV_SCANNER_ENABLED=false. Empirical data (n=14,134, 87.6% WR) from
   // sister bot confirms FV is the correct signal family; OL on 15m is 21.1% WR.

@@ -13,6 +13,7 @@ import 'dotenv/config';
 import process from 'node:process';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { logger } from '../shared/logger.js';
+import { loadConfig } from '../shared/config.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping, mapNewsToFutures } from '../mapping/index.js';
 import { executeAndRecordSignal } from './executor.js';
@@ -116,6 +117,7 @@ async function processScoredItemsInner(
   highUrgencyItems: ScoredItem[],
   redis: ReturnType<typeof getRedis>,
 ): Promise<void> {
+  const cfg = loadConfig();
   const bankrollUsd = await getBankroll(redis);
 
   if (highUrgencyItems.length > 0) {
@@ -152,8 +154,10 @@ async function processScoredItemsInner(
       }
 
       // b) Standard Polymarket Mapping (entity extraction + comparison)
-      const pmSignals = await runMapping(highUrgencyItems, bankrollUsd);
-      signals.push(...pmSignals);
+      if (cfg.OSINT_PM_TRADING_ENABLED) {
+        const pmSignals = await runMapping(highUrgencyItems, bankrollUsd);
+        signals.push(...pmSignals);
+      }
     } catch (err) {
       logger.error('[execution] mapping failed — continuing', {
         error: err instanceof Error ? err.message : String(err),
