@@ -190,7 +190,9 @@ export type TakeProfitReason =
   | 'oracle_lag_timeout'
   | 'oracle_lag_near_resolution'
   | 'oracle_lag_stop_loss'
-  | 'weather_near_resolution';
+  | 'weather_near_resolution'
+  | 'funding_normalized'
+  | 'funding_sign_flip';
 
 export async function notifyTakeProfitExecuted(opts: {
   position: Position;

@@ -1386,6 +1386,36 @@ const envSchema = z.object({
   // At expiry the key is refreshed (one neutral tick per cycle).
   HL_OI_BASELINE_TTL_SEC: z.coerce.number().int().min(30).optional().default(900),
 
+  // ── HL Funding-Rate Mean-Reversion Scanner ──
+  // Standalone signal path: when |fundingAPR| > ENTRY_APR_THRESHOLD on any perp,
+  // open a contra position (SHORT if APR>0, LONG if APR<0). Two return streams:
+  // price mean-reversion + funding carry collected while holding.
+  // Ships dark: flip HL_FUNDING_SCANNER_ENABLED=true after ≥48h shadow review.
+  HL_FUNDING_SCANNER_ENABLED: boolFromEnv.optional().default(false),
+  // Poll cadence in seconds. Funding settles hourly so 5min is ample.
+  HL_FUNDING_SCANNER_POLL_INTERVAL_SEC: z.coerce.number().int().min(60).optional().default(300),
+  // TTL for the hl:asset-ctx:all bulk Redis cache. Must be ≤ POLL_INTERVAL_SEC.
+  HL_FUNDING_SCANNER_BULK_CTX_TTL_SEC: z.coerce.number().int().min(10).optional().default(120),
+  // Enter contra when |APR| exceeds this threshold (percent, annualized).
+  HL_FUNDING_SCANNER_ENTRY_APR_THRESHOLD: z.coerce.number().min(0).optional().default(100),
+  // Exit when |APR| drops below this threshold (funding normalized). Must be < ENTRY.
+  HL_FUNDING_SCANNER_EXIT_APR_THRESHOLD: z.coerce.number().min(0).optional().default(20),
+  // USD per entry; capped to FUTURES_MAX_PER_TRADE_USD.
+  HL_FUNDING_SCANNER_STAKE_USD: z.coerce.number().min(1).optional().default(15),
+  // Stop-loss magnitude as ROE %. Wider than hl-momentum (8.5%) because we fade momentum.
+  HL_FUNDING_SCANNER_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(15),
+  // Take-profit magnitude as ROE %.
+  HL_FUNDING_SCANNER_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(20),
+  // Hard time cap per position in hours. Funding squeezes rarely persist beyond 48h.
+  HL_FUNDING_SCANNER_MAX_HOLD_HOURS: z.coerce.number().min(0).optional().default(48),
+  // Per-(symbol, side) cooldown after a successful entry. 1h prevents back-to-back
+  // re-entry while funding stays extreme but position is still open.
+  HL_FUNDING_SCANNER_COOLDOWN_SEC: z.coerce.number().int().min(60).optional().default(3600),
+  // Short cooldown for stake_below_hl_minimum skips (transient, price-dependent).
+  HL_FUNDING_SCANNER_MIN_SKIP_COOLDOWN_SEC: z.coerce.number().int().min(10).optional().default(60),
+  // Comma-separated HL tickers to never enter via the funding scanner (escape hatch).
+  HL_FUNDING_SCANNER_SYMBOL_DENYLIST: z.string().optional().default(''),
+
   // ── Chainlink → PM crypto-arb trigger ──
   // When true, oracle:price_moved ticks also fan into the PM crypto-arb scanner
   // alongside the Binance spot:price_moved path. Edge = Chainlink oracle lead over
@@ -1803,6 +1833,15 @@ export function loadConfig(forceReload = false): AppConfig {
   // HL momentum meme ATR: floor must be ≤ ceiling so the clamp interval is non-empty.
   if (cfg.HL_MOMENTUM_MEME_SL_FLOOR_PCT > cfg.HL_MOMENTUM_MEME_SL_CEIL_PCT) {
     throw new Error('HL_MOMENTUM_MEME_SL_FLOOR_PCT must be ≤ HL_MOMENTUM_MEME_SL_CEIL_PCT');
+  }
+
+  // HL funding scanner: exit APR must be below entry APR (or the exit condition fires immediately).
+  if (cfg.HL_FUNDING_SCANNER_EXIT_APR_THRESHOLD >= cfg.HL_FUNDING_SCANNER_ENTRY_APR_THRESHOLD) {
+    throw new Error('HL_FUNDING_SCANNER_EXIT_APR_THRESHOLD must be less than HL_FUNDING_SCANNER_ENTRY_APR_THRESHOLD');
+  }
+  // Bulk cache TTL must be ≤ poll interval (cache refreshes at least once per scan).
+  if (cfg.HL_FUNDING_SCANNER_BULK_CTX_TTL_SEC > cfg.HL_FUNDING_SCANNER_POLL_INTERVAL_SEC) {
+    throw new Error('HL_FUNDING_SCANNER_BULK_CTX_TTL_SEC must be ≤ HL_FUNDING_SCANNER_POLL_INTERVAL_SEC');
   }
 
   // Oracle-lag price band must be non-inverted.

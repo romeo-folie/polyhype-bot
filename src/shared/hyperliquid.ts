@@ -653,6 +653,41 @@ class HyperliquidClient {
   }
 
   /**
+   * Fetch asset context (funding, OI, mark) for ALL perps in one HTTP call.
+   * Returns a record keyed by HL symbol name (e.g. 'BTC', 'ETH').
+   * Also refreshes the internal metaCache as a side effect.
+   */
+  async getAllAssetContexts(): Promise<Record<string, { fundingRate: number; openInterest: number; markPrice: number }>> {
+    const response = await axios.post(
+      `${this.baseUrl}/info`,
+      { type: 'metaAndAssetCtxs' },
+      { timeout: HL_REQUEST_TIMEOUT_MS },
+    );
+    const data = response.data as [{ universe: { name: string; szDecimals: number }[] }, { funding?: string; openInterest?: string; markPx?: string }[]];
+    const universe = Array.isArray(data) && data[0]?.universe ? data[0].universe : [];
+    const ctxs = Array.isArray(data) && Array.isArray(data[1]) ? data[1] : [];
+
+    // Refresh meta cache as a side effect so single-symbol callers benefit.
+    if (universe.length > 0) {
+      this.metaCache = data[0] as unknown as HlMeta;
+      this.metaCacheTime = Date.now();
+    }
+
+    const out: Record<string, { fundingRate: number; openInterest: number; markPrice: number }> = {};
+    for (let i = 0; i < universe.length; i++) {
+      const name = universe[i]?.name;
+      const ctx = ctxs[i];
+      if (!name || !ctx) continue;
+      out[name] = {
+        fundingRate: parseFloat(ctx.funding ?? '0') || 0,
+        openInterest: parseFloat(ctx.openInterest ?? '0') || 0,
+        markPrice: parseFloat(ctx.markPx ?? '0') || 0,
+      };
+    }
+    return out;
+  }
+
+  /**
    * Fetch mid prices for all assets and return the full map.
    * Uses the same 30s cache as getMidPrice.
    */

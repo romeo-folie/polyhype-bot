@@ -76,7 +76,9 @@ export interface TradeSignal {
   /** True when the Gamma market has fees enabled — executor skips CLOB for these */
   feesEnabled?: boolean;
   /** Origin of the signal, used for execution routing (e.g. bypassing Simmer for arb) */
-  source?: 'osint' | 'crypto-arb' | 'futures' | 'copytrade' | 'spot' | 'sports' | 'clob-flow' | 'arb' | 'near-zero-arb' | 'oracle-lag' | 'longshot-bias' | 'correlation-arb' | 'hl-momentum' | 'weather' | 'fv-scanner';
+  source?: 'osint' | 'crypto-arb' | 'futures' | 'copytrade' | 'spot' | 'sports' | 'clob-flow' | 'arb' | 'near-zero-arb' | 'oracle-lag' | 'longshot-bias' | 'correlation-arb' | 'hl-momentum' | 'hl-funding' | 'weather' | 'fv-scanner';
+  /** Entry-time funding APR (%) — persisted for hl-funding sign-flip exit comparison */
+  entryFundingApr?: number | undefined;
   /** Origin event timestamp (e.g. Binance kline event time) — used for end-to-end latency tracking */
   eventTs?: number | undefined;
   /** Operational metadata for alerts/telemetry */

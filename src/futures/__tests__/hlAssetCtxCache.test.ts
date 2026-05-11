@@ -216,3 +216,65 @@ describe('getOrSetOiBaseline — baseline mechanics', () => {
     expect(result).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// getAllCachedAssetCtxs — bulk cache
+// ---------------------------------------------------------------------------
+
+const mockGetAllAssetContexts = vi.fn();
+// Override the mock for bulk tests to expose getAllAssetContexts.
+vi.mock('../../shared/hyperliquid.js', () => ({
+  getHyperliquid: () => ({
+    getAssetContext: mockGetAssetContext,
+    getAllAssetContexts: mockGetAllAssetContexts,
+  }),
+}));
+
+import { getAllCachedAssetCtxs } from '../hlAssetCtxCache.js';
+
+const bulkMap = {
+  BTC: { fundingRate: 0.0001, openInterest: 1_000_000, markPrice: 70_000 },
+  ETH: { fundingRate: -0.00005, openInterest: 500_000, markPrice: 3_500 },
+};
+
+describe('getAllCachedAssetCtxs — cache hit', () => {
+  it('returns parsed map from cache without calling HL', async () => {
+    const redis = makeRedis({ get: () => Promise.resolve(JSON.stringify(bulkMap)) });
+    const result = await getAllCachedAssetCtxs(redis as never, 120);
+    expect(result).toEqual(bulkMap);
+    expect(mockGetAllAssetContexts).not.toHaveBeenCalled();
+  });
+});
+
+describe('getAllCachedAssetCtxs — cache miss', () => {
+  beforeEach(() => { mockGetAllAssetContexts.mockReset(); });
+
+  it('fetches from HL, caches, and returns result', async () => {
+    mockGetAllAssetContexts.mockResolvedValue(bulkMap);
+    const redis = makeRedis();
+    const result = await getAllCachedAssetCtxs(redis as never, 120);
+    expect(result).toEqual(bulkMap);
+    expect(mockGetAllAssetContexts).toHaveBeenCalledOnce();
+    expect(redis.setex).toHaveBeenCalledWith('hl:asset-ctx:all', 120, JSON.stringify(bulkMap));
+  });
+
+  it('returns {} and does not throw when HL fetch fails', async () => {
+    mockGetAllAssetContexts.mockRejectedValue(new Error('network error'));
+    const redis = makeRedis();
+    const result = await getAllCachedAssetCtxs(redis as never, 120);
+    expect(result).toEqual({});
+  });
+});
+
+describe('getAllCachedAssetCtxs — malformed cache entry', () => {
+  beforeEach(() => { mockGetAllAssetContexts.mockReset(); });
+
+  it('deletes malformed entry, refetches, and returns fresh map', async () => {
+    mockGetAllAssetContexts.mockResolvedValue(bulkMap);
+    const redis = makeRedis({ get: () => Promise.resolve('not valid json{{{') });
+    const result = await getAllCachedAssetCtxs(redis as never, 120);
+    expect(result).toEqual(bulkMap);
+    expect(redis.del).toHaveBeenCalledWith('hl:asset-ctx:all');
+    expect(mockGetAllAssetContexts).toHaveBeenCalledOnce();
+  });
+});
