@@ -48,12 +48,12 @@ export async function scanHlFunding(redis: Redis): Promise<TradeSignal[]> {
       direction,
       wouldBlock: !cfg.HL_FUNDING_SCANNER_ENABLED || belowThreshold,
       metricValue: apr,
+      threshold: cfg.HL_FUNDING_SCANNER_ENTRY_APR_THRESHOLD,
       payload: {
         apr,
         fundingRate: ctx.fundingRate,
         markPrice: ctx.markPrice,
         openInterest: ctx.openInterest,
-        threshold: cfg.HL_FUNDING_SCANNER_ENTRY_APR_THRESHOLD,
       },
     }).catch(() => {});
 

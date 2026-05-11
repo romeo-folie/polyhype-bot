@@ -255,6 +255,19 @@ export async function runFuturesMonitorWorker(): Promise<void> {
       // Refresh futuresLedger so the exit loop below only sees live positions
       futuresLedger = (await getOpenPositions(redis)).filter((p) => p.isFutures);
 
+      // Pre-fetch bulk HL asset-ctx once per tick for hl-funding exit checks.
+      // Avoids a separate Redis GET (and possible HL HTTP fetch) per position.
+      let hlFundingCtxMap: Record<string, { fundingRate: number; openInterest: number; markPrice: number }> = {};
+      if (futuresLedger.some((p) => p.sourcedFrom === 'hl-funding')) {
+        try {
+          hlFundingCtxMap = await getAllCachedAssetCtxs(redis, cfg.HL_FUNDING_SCANNER_BULK_CTX_TTL_SEC);
+        } catch (err) {
+          logger.warn('[futures-monitor] hl-funding bulk ctx pre-fetch failed (non-fatal)', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
       for (const pos of positions) {
         const symbol = pos.symbol;
         const entryPx = parseFloat(pos.position.entryPx);
@@ -576,28 +589,20 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         }
 
         // 2c. Funding-normalized + sign-flip exit (hl-funding positions only).
-        // Fetches the bulk asset-ctx cache (populated by the scanner) to avoid
-        // a separate HTTP call on every 5s monitor tick.
+        // Uses the map pre-fetched once per tick (above the loop) to avoid
+        // a Redis GET + possible HL HTTP call per position per tick.
         if (!shouldExit && ledgerPosForAtr?.sourcedFrom === 'hl-funding') {
-          try {
-            const allCtx = await getAllCachedAssetCtxs(redis, cfg.HL_FUNDING_SCANNER_BULK_CTX_TTL_SEC);
-            const fundingCtx = allCtx[symbol];
-            if (fundingCtx) {
-              const currentApr = fundingRateToApr(fundingCtx.fundingRate);
-              const entryApr = ledgerPosForAtr.entryFundingApr ?? 0;
-              if (Math.abs(currentApr) < cfg.HL_FUNDING_SCANNER_EXIT_APR_THRESHOLD) {
-                shouldExit = true;
-                reason = `Funding normalized (|APR|=${Math.abs(currentApr).toFixed(1)}% < ${cfg.HL_FUNDING_SCANNER_EXIT_APR_THRESHOLD}%)`;
-              } else if (entryApr !== 0 && Math.sign(currentApr) !== Math.sign(entryApr)) {
-                shouldExit = true;
-                reason = `Funding sign flip (entry=${entryApr.toFixed(1)}% current=${currentApr.toFixed(1)}%)`;
-              }
+          const fundingCtx = hlFundingCtxMap[symbol];
+          if (fundingCtx) {
+            const currentApr = fundingRateToApr(fundingCtx.fundingRate);
+            const entryApr = ledgerPosForAtr.entryFundingApr ?? 0;
+            if (Math.abs(currentApr) < cfg.HL_FUNDING_SCANNER_EXIT_APR_THRESHOLD) {
+              shouldExit = true;
+              reason = `Funding normalized (|APR|=${Math.abs(currentApr).toFixed(1)}% < ${cfg.HL_FUNDING_SCANNER_EXIT_APR_THRESHOLD}%)`;
+            } else if (entryApr !== 0 && Math.sign(currentApr) !== Math.sign(entryApr)) {
+              shouldExit = true;
+              reason = `Funding sign flip (entry=${entryApr.toFixed(1)}% current=${currentApr.toFixed(1)}%)`;
             }
-          } catch (err) {
-            logger.warn('[futures-monitor] hl-funding ctx fetch failed (non-fatal)', {
-              symbol,
-              error: err instanceof Error ? err.message : String(err),
-            });
           }
         }
 
@@ -689,7 +694,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             }
             if (!bypassed) {
               shouldExit = true;
-              reason = `Max hold hours reached (${ageHours.toFixed(1).toString()}h >= ${cfg.FUTURES_MAX_HOLD_HOURS.toString()}h)`;
+              reason = `Max hold hours reached (${ageHours.toFixed(1).toString()}h >= ${maxHoldHours.toString()}h)`;
             }
           }
 

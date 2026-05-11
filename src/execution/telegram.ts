@@ -221,6 +221,8 @@ export async function notifyTakeProfitExecuted(opts: {
     oracle_lag_near_resolution: '🔒 Oracle-lag — near-resolution profit lock',
     oracle_lag_stop_loss: '🛑 Oracle-lag — stop-loss triggered',
     weather_near_resolution: '⏱️ Weather — near-resolution loss cut',
+    funding_normalized: '📊 Funding normalized — mean-reversion exit',
+    funding_sign_flip: '🔀 Funding sign flip — crowd reversed',
   };
   let reasonLabel = reasonLabels[reason] ?? reason;
   if (mechanismDetail) reasonLabel = `${reasonLabel} [${mechanismDetail}]`;

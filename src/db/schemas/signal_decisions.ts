@@ -3,7 +3,7 @@ import { z } from 'zod';
 const SIGNAL_SOURCE = [
   'osint', 'copytrade', 'spot', 'arb', 'crypto-arb', 'futures', 'sports', 'clob-flow',
   'oracle-lag', 'near-zero-arb', 'longshot-bias', 'correlation-arb', 'hl-momentum', 'weather',
-  'fv-scanner',
+  'fv-scanner', 'hl-funding',
 ] as const;
 const DIRECTION = ['YES', 'NO', 'UP', 'DOWN', 'LONG', 'SHORT'] as const;
 const SKIP_REASON = [
@@ -22,6 +22,8 @@ const SKIP_REASON = [
   'long_hl_confirmation_missing', 'oi_divergence_veto', 'weighted_total_score_low',
   '4h_ema_bias_mismatch', '1h_macd_mismatch',
   'entry_price_above_cap',
+  // hl-funding-specific (added 2026-05-11)
+  'denylist', 'apr_below_threshold', 'funding_cooldown', 'same_side_position_open',
   'other',
 ] as const;
 
