@@ -17,7 +17,7 @@
 
 import type { Redis } from 'ioredis';
 
-export const RECENTLY_CLOSED_TTL_S = 7 * 24 * 3600; // 7 days
+export const RECENTLY_CLOSED_TTL_S = 30 * 24 * 3600; // 30 days
 export const RECENTLY_CLOSED_PREFIX = 'redeemer:closed:';
 
 // Legacy key — kept only for backward-compat reads during migration
