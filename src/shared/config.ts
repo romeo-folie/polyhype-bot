@@ -1415,6 +1415,13 @@ const envSchema = z.object({
   HL_FUNDING_SCANNER_MIN_SKIP_COOLDOWN_SEC: z.coerce.number().int().min(10).optional().default(60),
   // Comma-separated HL tickers to never enter via the funding scanner (escape hatch).
   HL_FUNDING_SCANNER_SYMBOL_DENYLIST: z.string().optional().default(''),
+  // Minimum open interest in USD (markPrice × OI contracts) to qualify for entry.
+  // Filters out low-liquidity tokens (VINE, TURBO, kLUNC) whose funding extremes
+  // are often structural/manipulation-driven rather than mean-reverting.
+  HL_FUNDING_SCANNER_MIN_OI_USD: z.coerce.number().min(0).optional().default(5_000_000),
+  // Maximum number of concurrently open funding-scanner positions. Hard cap to
+  // prevent a single scan from opening many positions when a funding spike is broad.
+  HL_FUNDING_SCANNER_MAX_POSITIONS: z.coerce.number().int().min(1).optional().default(3),
 
   // ── Chainlink → PM crypto-arb trigger ──
   // When true, oracle:price_moved ticks also fan into the PM crypto-arb scanner

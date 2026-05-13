@@ -5,10 +5,23 @@ import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { hasOpenPosition } from '../execution/positionLedger.js';
 import { getAllCachedAssetCtxs, fundingRateToApr } from './hlAssetCtxCache.js';
+import { getSql } from '../db/client.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 export function fundingCooldownKey(symbol: string, direction: 'LONG' | 'SHORT'): string {
   return `hl-funding:cooldown:${symbol}:${direction}`;
+}
+
+async function countOpenFundingPositions(): Promise<number> {
+  const sql = getSql();
+  const rows = await sql<[{ count: string }]>`
+    SELECT COUNT(*) AS count
+    FROM positions
+    WHERE is_futures = true
+      AND closed_at IS NULL
+      AND entry_funding_apr IS NOT NULL
+  `;
+  return parseInt(rows[0]?.count ?? '0', 10);
 }
 
 /**
@@ -29,6 +42,19 @@ export async function scanHlFunding(redis: Redis): Promise<TradeSignal[]> {
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean);
 
+  // Check portfolio cap before iterating — avoids DB query per symbol.
+  let openCount = 0;
+  if (cfg.HL_FUNDING_SCANNER_ENABLED) {
+    openCount = await countOpenFundingPositions();
+    if (openCount >= cfg.HL_FUNDING_SCANNER_MAX_POSITIONS) {
+      logger.debug('[hl-funding] max positions reached, skipping scan', {
+        openCount,
+        max: cfg.HL_FUNDING_SCANNER_MAX_POSITIONS,
+      });
+      return [];
+    }
+  }
+
   const signals: TradeSignal[] = [];
 
   for (const [symbol, ctx] of Object.entries(all)) {
@@ -38,15 +64,17 @@ export async function scanHlFunding(redis: Redis): Promise<TradeSignal[]> {
     const decisionId = randomUUID();
 
     const belowThreshold = absApr <= cfg.HL_FUNDING_SCANNER_ENTRY_APR_THRESHOLD;
+    const oiUsd = ctx.openInterest * ctx.markPrice;
+    const belowMinOi = oiUsd < cfg.HL_FUNDING_SCANNER_MIN_OI_USD;
 
     // Always shadow-log every symbol so we can analyse signal distribution
-    // without enabling live entries (kind=hl_funding_scan, would_block=true when dark).
+    // without enabling live entries.
     void enqueueWrite('shadow_observations', {
       kind: 'hl_funding_scan',
       source: 'hl-funding',
       symbol,
       direction,
-      wouldBlock: !cfg.HL_FUNDING_SCANNER_ENABLED || belowThreshold,
+      wouldBlock: !cfg.HL_FUNDING_SCANNER_ENABLED || belowThreshold || belowMinOi,
       metricValue: apr,
       threshold: cfg.HL_FUNDING_SCANNER_ENTRY_APR_THRESHOLD,
       payload: {
@@ -54,11 +82,17 @@ export async function scanHlFunding(redis: Redis): Promise<TradeSignal[]> {
         fundingRate: ctx.fundingRate,
         markPrice: ctx.markPrice,
         openInterest: ctx.openInterest,
+        oiUsd,
       },
     }).catch(() => {});
 
     if (denylist.includes(symbol.toUpperCase())) {
       logDecision(decisionId, symbol, direction, false, 'denylist');
+      continue;
+    }
+
+    if (belowMinOi) {
+      logDecision(decisionId, symbol, direction, false, 'oi_below_minimum');
       continue;
     }
 
@@ -97,12 +131,19 @@ export async function scanHlFunding(redis: Redis): Promise<TradeSignal[]> {
       continue;
     }
 
+    // Enforce per-scan cap: stop emitting once we'd hit the limit.
+    if (openCount + signals.length >= cfg.HL_FUNDING_SCANNER_MAX_POSITIONS) {
+      logDecision(decisionId, symbol, direction, false, 'max_positions_reached');
+      continue;
+    }
+
     const stakeUsd = Math.min(cfg.HL_FUNDING_SCANNER_STAKE_USD, cfg.FUTURES_MAX_PER_TRADE_USD);
 
     logger.info('[hl-funding] signal', {
       symbol,
       direction,
       apr: apr.toFixed(2),
+      oiUsd: Math.round(oiUsd),
       stakeUsd,
     });
 
@@ -116,7 +157,7 @@ export async function scanHlFunding(redis: Redis): Promise<TradeSignal[]> {
       edgeMagnitude: Math.min(1, absApr / 400),
       outcomePrice: ctx.markPrice,
       sourcedFrom: 'hl-funding',
-      reasoning: `Funding APR=${apr.toFixed(1)}% (threshold=${cfg.HL_FUNDING_SCANNER_ENTRY_APR_THRESHOLD}%); contra ${direction}`,
+      reasoning: `Funding APR=${apr.toFixed(1)}% (threshold=${cfg.HL_FUNDING_SCANNER_ENTRY_APR_THRESHOLD}%); OI=$${Math.round(oiUsd / 1e6)}M; contra ${direction}`,
       isFutures: true,
       source: 'hl-funding',
       eventTs: Date.now(),
