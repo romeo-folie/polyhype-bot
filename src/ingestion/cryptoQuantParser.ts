@@ -26,13 +26,14 @@ interface CqPattern {
 
 const CQ_PATTERNS: CqPattern[] = [
   {
-    regex: /exchange\s+inflow/i,
+    // Matches "exchange inflow" and CQ's "aggregated inflows" format
+    regex: /(?:exchange\s+inflow|aggregated\s+inflow)/i,
     direction: 'SHORT',
     urgency: 7,
     label: 'exchange inflow',
   },
   {
-    regex: /exchange\s+outflow/i,
+    regex: /(?:exchange\s+outflow|aggregated\s+outflow)/i,
     direction: 'LONG',
     urgency: 7,
     label: 'exchange outflow',
@@ -70,10 +71,12 @@ const CQ_PATTERNS: CqPattern[] = [
 ];
 
 // Extracts an asset symbol from CryptoQuant alert text.
-// CQ uses patterns like: "Exchange Inflow (BTC)" or "(BTC/USDT)" or "BTC:"
+// CQ uses patterns like: "Exchange Inflow (BTC)", "(BTC/USDT)", "BTC:", or "#BTC"
 function extractSymbol(text: string): string {
   const parenMatch = /\(([A-Z]{2,6})(?:\/\w+)?\)/.exec(text);
   if (parenMatch) return parenMatch[1]!;
+  const hashMatch = /#([A-Z]{2,6})\b/.exec(text);
+  if (hashMatch) return hashMatch[1]!;
   const colonMatch = /^([A-Z]{2,6}):/.exec(text.trim());
   if (colonMatch) return colonMatch[1]!;
   // Default: BTC — CryptoQuant is predominantly BTC-focused

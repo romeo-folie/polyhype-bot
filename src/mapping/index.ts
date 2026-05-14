@@ -17,7 +17,7 @@ import { scoreMarketRelevance } from './relevanceGate.js';
 import { estimateConsensusProbability, estimateSentiment } from './consensusCalculator.js';
 import { computeDivergence, checkTimeToResolution } from './divergenceCalculator.js';
 import { resolveYesPrice, resolveNoPrice } from '../shared/priceCache.js';
-import { resolveHlSymbol } from '../shared/hyperliquid.js';
+import { resolveHlSymbol, getHyperliquid } from '../shared/hyperliquid.js';
 import { getRedis } from '../shared/redis.js';
 import { priceZoneOf } from '../shared/zones.js';
 import { scoreConfluence } from '../arb/confluenceScorer.js';
@@ -591,6 +591,18 @@ export async function mapNewsToFutures(
   const cfg = loadConfig();
   if (!cfg.FUTURES_ENABLED) return [];
 
+  // Use HL account equity for stake sizing — Polymarket bankroll is unrelated to HL margin.
+  let hlEquityUsd = bankrollUsd;
+  try {
+    const state = await getHyperliquid().getClearinghouseState();
+    const equity = parseFloat(state?.marginSummary?.accountValue || '0');
+    if (equity > 0) hlEquityUsd = equity;
+  } catch (err) {
+    logger.warn('[mapping] failed to fetch HL equity for sizing — falling back to Polymarket bankroll', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   const signals: TradeSignal[] = [];
 
   for (const item of items) {
@@ -737,7 +749,7 @@ export async function mapNewsToFutures(
     }
 
     // Scale stakeUsd based on urgency (e.g. 6/10 urgency = 60% of max allowed stake).
-    const maxStake = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, bankrollUsd * cfg.MAX_BET_FRACTION);
+    const maxStake = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, hlEquityUsd * cfg.MAX_BET_FRACTION);
     let stakeUsd = maxStake * (item.urgencyScore / 10);
 
     // Volatility-adjusted sizing: scale stake inversely with ATR
