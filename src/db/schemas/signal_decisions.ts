@@ -24,6 +24,7 @@ const SKIP_REASON = [
   'entry_price_above_cap',
   // hl-funding-specific (added 2026-05-11)
   'denylist', 'apr_below_threshold', 'funding_cooldown',
+  'oi_below_minimum', 'max_positions_reached',
   // executor guard (added 2026-05-15)
   'recently_resolved',
   'other',
