@@ -17,13 +17,15 @@
 
 import type { Redis } from 'ioredis';
 
-export const RECENTLY_CLOSED_TTL_S = 30 * 24 * 3600; // 30 days
+export const RECENTLY_CLOSED_TTL_S = 7 * 24 * 3600; // 7 days
 export const RECENTLY_CLOSED_PREFIX = 'redeemer:closed:';
 
 // Legacy key — kept only for backward-compat reads during migration
 export const RECENTLY_CLOSED_KEY = 'redeemer:recently-closed';
 
 // Per-market keys for markets confirmed resolved on-chain (distinct from our own TP/SL closes).
+// Longer TTL than generic closed so scanners don't re-enter terminal markets after expiry.
+export const RECENTLY_RESOLVED_TTL_S = 30 * 24 * 3600; // 30 days
 export const RECENTLY_RESOLVED_PREFIX = 'redeemer:resolved:';
 
 export async function markRecentlyClosed(redis: Redis, marketId: string): Promise<void> {
@@ -41,7 +43,7 @@ export async function isRecentlyClosed(redis: Redis, marketId: string): Promise<
 
 export async function markRecentlyResolved(redis: Redis, marketId: string): Promise<void> {
   if (!marketId) return;
-  await redis.set(`${RECENTLY_RESOLVED_PREFIX}${marketId}`, '1', 'EX', RECENTLY_CLOSED_TTL_S);
+  await redis.set(`${RECENTLY_RESOLVED_PREFIX}${marketId}`, '1', 'EX', RECENTLY_RESOLVED_TTL_S);
 }
 
 export async function isRecentlyResolved(redis: Redis, marketId: string): Promise<boolean> {
