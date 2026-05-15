@@ -70,4 +70,27 @@ describe('parseCryptoQuantAlert', () => {
     const result = parseCryptoQuantAlert(text, BASE.source, BASE.url, BASE.publishedAt);
     expect(result!.keywords).toContain('BTC');
   });
+
+  it('parses CQ aggregated inflows format as SHORT', () => {
+    const text = '🐳 1,390.79 #BTC ($113,404,082) aggregated inflows to all exchanges in the last 1 hour';
+    const result = parseCryptoQuantAlert(text, BASE.source, BASE.url, BASE.publishedAt);
+    expect(result).not.toBeNull();
+    expect(result!.title).toContain('bearish');
+    expect(result!.keywords).toContain('BTC');
+  });
+
+  it('extracts symbol from #HASH format', () => {
+    const text = '🐳 500 #ETH ($1,200,000) aggregated inflows to all exchanges';
+    const result = parseCryptoQuantAlert(text, BASE.source, BASE.url, BASE.publishedAt);
+    expect(result).not.toBeNull();
+    expect(result!.keywords).toContain('ETH');
+  });
+
+  it('parses CQ aggregated outflows format as LONG', () => {
+    const text = '🟢 2,100 #BTC ($172,000,000) aggregated outflows from all exchanges in the last 1 hour';
+    const result = parseCryptoQuantAlert(text, BASE.source, BASE.url, BASE.publishedAt);
+    expect(result).not.toBeNull();
+    expect(result!.title).toContain('bullish');
+    expect(result!.keywords).toContain('BTC');
+  });
 });
