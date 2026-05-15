@@ -591,14 +591,28 @@ export async function mapNewsToFutures(
   const cfg = loadConfig();
   if (!cfg.FUTURES_ENABLED) return [];
 
-  // Use HL account equity for stake sizing — Polymarket bankroll is unrelated to HL margin.
-  let hlEquityUsd = bankrollUsd;
+  // Use HL free collateral for stake sizing — accountValue is mark-to-market and
+  // inflates with unrealised PnL, producing larger stakes exactly when margin is
+  // tighter. Free collateral = accountValue − totalMarginUsed is the actual
+  // deployable amount. Falls back to Polymarket bankrollUsd if the HL API fails.
+  let hlFreeCollateralUsd = bankrollUsd;
   try {
     const state = await getHyperliquid().getClearinghouseState();
-    const equity = parseFloat(state?.marginSummary?.accountValue || '0');
-    if (equity > 0) hlEquityUsd = equity;
+    const accountValue = parseFloat(state?.marginSummary?.accountValue || '0');
+    if (accountValue > 0) {
+      const totalMarginUsed = (state.assetPositions ?? []).reduce(
+        (sum: number, p) => sum + parseFloat(p.position.marginUsed || '0'),
+        0,
+      );
+      hlFreeCollateralUsd = Math.max(0, accountValue - totalMarginUsed);
+      logger.info('[mapping] HL free collateral for sizing', {
+        accountValue: accountValue.toFixed(2),
+        totalMarginUsed: totalMarginUsed.toFixed(2),
+        freeCollateral: hlFreeCollateralUsd.toFixed(2),
+      });
+    }
   } catch (err) {
-    logger.warn('[mapping] failed to fetch HL equity for sizing — falling back to Polymarket bankroll', {
+    logger.warn('[mapping] failed to fetch HL state for sizing — falling back to Polymarket bankroll', {
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -749,7 +763,7 @@ export async function mapNewsToFutures(
     }
 
     // Scale stakeUsd based on urgency (e.g. 6/10 urgency = 60% of max allowed stake).
-    const maxStake = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, hlEquityUsd * cfg.MAX_BET_FRACTION);
+    const maxStake = Math.min(cfg.FUTURES_MAX_PER_TRADE_USD, hlFreeCollateralUsd * cfg.MAX_BET_FRACTION);
     let stakeUsd = maxStake * (item.urgencyScore / 10);
 
     // Volatility-adjusted sizing: scale stake inversely with ATR
