@@ -3,25 +3,17 @@ import type { Redis } from 'ioredis';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
-import { hasOpenPosition } from '../execution/positionLedger.js';
+import { hasOpenPosition, getOpenPositions } from '../execution/positionLedger.js';
 import { getAllCachedAssetCtxs, fundingRateToApr } from './hlAssetCtxCache.js';
-import { getSql } from '../db/client.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 export function fundingCooldownKey(symbol: string, direction: 'LONG' | 'SHORT'): string {
   return `hl-funding:cooldown:${symbol}:${direction}`;
 }
 
-async function countOpenFundingPositions(): Promise<number> {
-  const sql = getSql();
-  const rows = await sql<[{ count: string }]>`
-    SELECT COUNT(*) AS count
-    FROM positions
-    WHERE is_futures = true
-      AND closed_at IS NULL
-      AND entry_funding_apr IS NOT NULL
-  `;
-  return parseInt(rows[0]?.count ?? '0', 10);
+async function countOpenFundingPositions(redis: Redis): Promise<number> {
+  const positions = await getOpenPositions(redis);
+  return positions.filter((p) => p.sourcedFrom === 'hl-funding').length;
 }
 
 /**
@@ -42,18 +34,9 @@ export async function scanHlFunding(redis: Redis): Promise<TradeSignal[]> {
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean);
 
-  // Check portfolio cap before iterating — avoids DB query per symbol.
-  let openCount = 0;
-  if (cfg.HL_FUNDING_SCANNER_ENABLED) {
-    openCount = await countOpenFundingPositions();
-    if (openCount >= cfg.HL_FUNDING_SCANNER_MAX_POSITIONS) {
-      logger.debug('[hl-funding] max positions reached, skipping scan', {
-        openCount,
-        max: cfg.HL_FUNDING_SCANNER_MAX_POSITIONS,
-      });
-      return [];
-    }
-  }
+  // Count open funding positions via Redis ledger (fail open so a Redis hiccup
+  // doesn't suppress shadow logs for the whole scan).
+  const openCount = await countOpenFundingPositions(redis).catch(() => 0);
 
   const signals: TradeSignal[] = [];
 
