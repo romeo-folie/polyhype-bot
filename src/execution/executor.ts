@@ -29,6 +29,7 @@ import {
   CLOB_MIN_ORDER_USD,
 } from '../shared/clob.js';
 import { hasOpenPosition, recordPosition } from './positionLedger.js';
+import { isRecentlyResolved } from '../shared/closedGuard.js';
 import { deductStake } from '../shared/bankroll.js';
 import { isStaleCooldownActive } from '../monitor/staleExit.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
@@ -2057,7 +2058,20 @@ export async function executeSignal(
     return recordSkip('position_already_open');
   }
 
-  // 4b) Stale-exit re-entry cooldown — block re-entry into a market we recently
+  // 4b) Recently-resolved guard — block re-entry into a market that resolved or
+  // expired on-chain within the last 30 days. Without this, a fresh signal
+  // re-enters a terminal market after the 7-day generic-closed TTL expires,
+  // causing the redeemer to immediately close the position and fire a duplicate
+  // redemption notification.
+  if (!signal.isFutures && (await isRecentlyResolved(redis, signal.marketId).catch(() => false))) {
+    logger.info('[executor] skipping — market recently resolved/expired', {
+      marketId: signal.marketId,
+      direction: signal.direction,
+    });
+    return recordSkip('recently_resolved');
+  }
+
+  // 4c) Stale-exit re-entry cooldown — block re-entry into a market we recently
   // exited for staleness. Prevents immediate round-trip after a stale exit.
   // Applies to PM-style signals only; futures skip this path.
   if (!signal.isFutures) {
