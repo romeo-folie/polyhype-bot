@@ -827,6 +827,10 @@ export async function runFuturesMonitorWorker(): Promise<void> {
 
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
+
+  // Loop exited via break (lock stolen or unrecoverable expiry) — exit so Docker
+  // restarts the container rather than leaving a zombie process.
+  process.exit(1);
 }
 
 // CLI entrypoint
