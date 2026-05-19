@@ -8,7 +8,7 @@ import { fetchMarketByConditionId, fetchMarketByQuestion, type GammaMarket } fro
 
 import { recordRedemptionOutcome } from '../shared/positionOutcomeRecorder.js';
 import { creditProceeds } from '../shared/bankroll.js';
-import { isRecentlyClosed } from '../shared/closedGuard.js';
+import { isRecentlyClosed, isRecentlyResolved } from '../shared/closedGuard.js';
 import { getPendingOrder, deletePendingOrder } from '../execution/pendingMakerOrders.js';
 import { notifyTradeExecuted } from '../execution/telegram.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -505,7 +505,7 @@ async function importSimmerOrphan(
     // Guard: skip positions that were recently redeemed/ghost-closed.
     // Check both the Simmer UUID and the resolved numeric ID — ghost-close marks the
     // numeric ID, but the orphan importer sees the UUID, so one check alone misses it.
-    if (await isRecentlyClosed(redis, pos.market_id)) {
+    if (await isRecentlyClosed(redis, pos.market_id) || await isRecentlyResolved(redis, pos.market_id)) {
       logger.info('[reconcile] skipping recently-closed Simmer orphan', {
         marketId: pos.market_id,
       });
@@ -522,7 +522,7 @@ async function importSimmerOrphan(
 
     // Secondary guard: ghost-close marks the numeric ID; check it too so a ghost→orphan
     // reimport loop can't occur when the UUID and numeric ID differ.
-    if (await isRecentlyClosed(redis, metadata.id)) {
+    if (await isRecentlyClosed(redis, metadata.id) || await isRecentlyResolved(redis, metadata.id)) {
       logger.info('[reconcile] skipping recently-closed Simmer orphan (numeric ID match)', {
         simmerUuid: pos.market_id,
         numericId: metadata.id,
@@ -626,7 +626,7 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
       return false;
     }
 
-    if (await isRecentlyClosed(redis, market.id)) {
+    if (await isRecentlyClosed(redis, market.id) || await isRecentlyResolved(redis, market.id)) {
       logger.debug('[reconcile] skipping recently-closed CLOB orphan', {
         marketId: market.id,
         conditionId: pos.conditionId,
