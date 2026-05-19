@@ -25,7 +25,7 @@ export const RECENTLY_CLOSED_KEY = 'redeemer:recently-closed';
 
 // Per-market keys for markets confirmed resolved on-chain (distinct from our own TP/SL closes).
 // Longer TTL than generic closed so scanners don't re-enter terminal markets after expiry.
-export const RECENTLY_RESOLVED_TTL_S = 30 * 24 * 3600; // 30 days
+export const RECENTLY_RESOLVED_TTL_S = 180 * 24 * 3600; // 180 days
 export const RECENTLY_RESOLVED_PREFIX = 'redeemer:resolved:';
 
 export async function markRecentlyClosed(redis: Redis, marketId: string): Promise<void> {

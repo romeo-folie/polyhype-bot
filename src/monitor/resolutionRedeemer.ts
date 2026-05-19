@@ -289,7 +289,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
       // Fast guard: if this market was already closed (by any path), skip entirely.
       // The recently-closed set persists 7 days and survives container restarts,
       // unlike the condition-id dedup keys which have a shorter TTL.
-      if (await isRecentlyClosed(redis, pos.market_id)) {
+      if (await isRecentlyClosed(redis, pos.market_id) || await isRecentlyResolved(redis, pos.market_id)) {
         logger.debug('[redeemer] skipping — market already in recently-closed set', {
           marketId: pos.market_id,
         });
@@ -548,7 +548,11 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
                 });
               }
             }
-            // Both Simmer and CLOB failed (or no condition_id) — mark stale
+            // Both Simmer and CLOB failed (or no condition_id) — mark stale and resolved
+            // so the position is not retried indefinitely (e.g. old weather Simmer positions
+            // with no on-chain balance that Simmer never clears from its share count).
+            await markRecentlyClosed(redis, pos.market_id);
+            await markRecentlyResolved(redis, pos.market_id);
             await markFallbackStale(redis, dedupeConditionId, side, cfg);
             logRedeemerSkip('stale_no_balance', dedupeConditionId, {
               marketId: pos.market_id,
@@ -1726,7 +1730,7 @@ async function redeemSimmerLedgerFallback(
     if (alreadyRedeemed.has(pos.marketId) || (conditionId && alreadyRedeemed.has(conditionId)))
       continue;
 
-    if (await isRecentlyClosed(redis, pos.marketId)) {
+    if (await isRecentlyClosed(redis, pos.marketId) || await isRecentlyResolved(redis, pos.marketId)) {
       logger.debug('[redeemer] Simmer fallback: skipping — market already in recently-closed set', {
         marketId: pos.marketId,
       });
