@@ -67,6 +67,7 @@ const REDEEMER_SUCCESS_PREFIX = 'redeemer:recent-success:';
 const REDEEMER_FALLBACK_STALE_PREFIX = 'redeemer:stale-fallback:';
 const REDEEMER_MANUAL_NOTIFY_KEY = 'redeemer:manual-notified';
 const REDEEMER_MANUAL_NOTIFY_TTL_S = 30 * 24 * 3600;
+const STALE_EXPIRED_NOTICE_SUPPRESS_AFTER_MS = 24 * 3600 * 1000;
 type RedeemerSkipReason = 'skipped_recent_success' | 'skipped_dust' | 'stale_no_balance';
 
 interface RedemptionState {
@@ -85,6 +86,13 @@ const staleKey = (conditionId: string, side: RedeemSide) =>
 function parseNumber(value: string | undefined): number {
   const parsed = Number.parseFloat(value ?? '0');
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function shouldNotifyExpiredResolution(endDate: string | undefined): boolean {
+  if (!endDate) return true;
+  const endMs = Date.parse(endDate);
+  if (!Number.isFinite(endMs)) return true;
+  return Date.now() - endMs <= STALE_EXPIRED_NOTICE_SUPPRESS_AFTER_MS;
 }
 
 async function getRedeemerState(
@@ -974,13 +982,22 @@ async function redeemClobPositions(
               { ...pos, question: q, direction: pmDirection },
               { result: 'lost', returnPct: -100, executionVenueOverride: 'clob', exitReason: 'expired_unresolvable' },
             );
-            void notifyMarketResolved({
-              question: q,
-              direction: displayDir,
-              result: 'lost',
-              stakeUsd: pos.stakeUsd,
-              reason: 'expired (Gamma unresolvable)',
-            }).catch(() => {});
+            if (shouldNotifyExpiredResolution(pos.endDate)) {
+              void notifyMarketResolved({
+                question: q,
+                direction: displayDir,
+                result: 'lost',
+                stakeUsd: pos.stakeUsd,
+                reason: 'expired (Gamma unresolvable)',
+              }).catch(() => {});
+            } else {
+              logger.info('[redeemer] suppressed stale expired-resolution notification', {
+                marketId: pos.marketId,
+                direction: pos.direction,
+                endDate: pos.endDate,
+                exitReason: 'expired_unresolvable',
+              });
+            }
             results.push({ marketId: pos.marketId, side, success: false, error: 'expired_unresolvable' });
             continue;
           }

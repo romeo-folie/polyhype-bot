@@ -296,6 +296,47 @@ describe('redeemResolvedPositions', () => {
     expect(results[0].error).toBe('redemption_rpc_error');
   });
 
+  it('old expired Gamma-unresolvable loss closes without notifying', async () => {
+    const oldDate = new Date(Date.now() - 2 * 24 * 3600_000).toISOString();
+    mockGetOpenPositions.mockResolvedValue([
+      {
+        marketId: 'old-gamma-loss',
+        conditionId: 'cond-old-gamma-loss',
+        clobTokenIds: ['token-yes-old-loss', 'token-no-old-loss'],
+        direction: 'NO',
+        executionVenue: 'clob',
+        question: 'Old already-ended market',
+        sharesHeld: 10,
+        entryPrice: 0.5,
+        stakeUsd: 5,
+        endDate: oldDate,
+      },
+    ]);
+    global.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any),
+    );
+    // On-chain: YES won, so our NO position lost.
+    mockCtfContract.payoutDenominator.mockResolvedValue(1n);
+    mockCtfContract.payoutNumerators.mockImplementation(async (_: string, index: number) =>
+      index === 0 ? 1n : 0n,
+    );
+    const { fetchClobTokenBalance: mockFetchBalance } = await import('../../shared/clob.js');
+    vi.mocked(mockFetchBalance).mockResolvedValueOnce({ ok: true, balance: 10 } as any);
+    const { notifyMarketResolved: mockNotifyMarketResolved } = await import('../../execution/telegram.js');
+
+    const results = await redeemResolvedPositions(mockRedis);
+
+    expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'old-gamma-loss', 'NO');
+    expect(mockRecordPositionOutcome).toHaveBeenCalledWith(
+      mockRedis,
+      expect.objectContaining({ marketId: 'old-gamma-loss' }),
+      expect.objectContaining({ result: 'lost', exitReason: 'expired_unresolvable' }),
+    );
+    expect(vi.mocked(mockNotifyMarketResolved)).not.toHaveBeenCalled();
+    expect(results).toHaveLength(1);
+    expect(results[0].error).toBe('expired_unresolvable');
+  });
+
   it('expired Gamma-unresolvable position: redemption succeeds but proceeds unknown → logs error and retries', async () => {
     const pastDate = new Date(Date.now() - 60_000).toISOString();
     mockGetOpenPositions.mockResolvedValue([
