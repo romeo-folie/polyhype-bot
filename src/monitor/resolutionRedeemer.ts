@@ -528,6 +528,7 @@ export async function redeemResolvedPositions(redis: Redis): Promise<RedemptionR
                   }
                   // Close ledger so we don't re-alert or stale-loop every cycle
                   await closePosition(redis, pos.market_id, normalizedDir);
+                  await markRecentlyResolved(redis, pos.market_id);
                   results.push({
                     marketId: pos.market_id,
                     side,
@@ -650,6 +651,7 @@ async function redeemClobPositions(
         direction: pos.direction,
       });
       await closePosition(redis, pos.marketId, pos.direction);
+      await markRecentlyResolved(redis, pos.marketId);
       const q = pos.question || pos.marketId;
       await recordPositionOutcome(
         redis,
@@ -1357,6 +1359,7 @@ async function redeemClobPositions(
           outcome: resolved.outcome,
         });
         await closePosition(redis, pos.marketId, pos.direction);
+        await markRecentlyResolved(redis, pos.marketId);
         await recordPositionOutcome(
           redis,
           { ...pos, question: resolvedQuestion, direction: pmDirection },
@@ -1408,6 +1411,7 @@ async function redeemClobPositions(
           }
           // Close the ledger entry so we don't re-alert every cycle
           await closePosition(redis, pos.marketId, pos.direction);
+          await markRecentlyResolved(redis, pos.marketId);
         } else {
           logger.warn('[redeemer] on-chain CLOB redemption failed — will retry next cycle', {
             marketId: pos.marketId,
@@ -1437,6 +1441,7 @@ async function redeemClobPositions(
 
       // Close the position in Redis after successful redemption
       await closePosition(redis, pos.marketId, pos.direction);
+      await markRecentlyResolved(redis, pos.marketId);
 
       // Credit shares as USDC (each winning share = $1) — losses already handled above
       const entryPriceSafe = pos.entryPrice > 0 && Number.isFinite(pos.entryPrice);
@@ -1779,6 +1784,7 @@ async function redeemSimmerLedgerFallback(
           outcome: resolved.outcome,
         });
         await closePosition(redis, pos.marketId, pos.direction);
+        await markRecentlyResolved(redis, pos.marketId);
         await recordPositionOutcome(
           redis,
           { ...pos, question: resolvedQuestion, direction: pmDirection },
@@ -1831,6 +1837,7 @@ async function redeemSimmerLedgerFallback(
           alreadyRedeemed.add(pos.marketId);
           alreadyRedeemed.add(conditionId);
           await closePosition(redis, pos.marketId, pos.direction);
+          await markRecentlyResolved(redis, pos.marketId);
           const proceedsUsdc =
             pos.sharesHeld ?? (pos.entryPrice > 0 ? pos.stakeUsd / pos.entryPrice : 0);
           if (proceedsUsdc > 0) await creditProceeds(redis, proceedsUsdc);
@@ -1896,6 +1903,7 @@ async function redeemSimmerLedgerFallback(
             }).catch(() => {});
           }
           await closePosition(redis, pos.marketId, pos.direction);
+          await markRecentlyResolved(redis, pos.marketId);
           results.push({
             marketId: pos.marketId,
             side,
@@ -1958,6 +1966,7 @@ async function redeemSimmerLedgerFallback(
         alreadyRedeemed.add(pos.marketId);
         alreadyRedeemed.add(conditionId);
         await closePosition(redis, pos.marketId, pos.direction);
+        await markRecentlyResolved(redis, pos.marketId);
 
         const entryPriceSafe = pos.entryPrice > 0 && Number.isFinite(pos.entryPrice);
         if (!entryPriceSafe && pos.sharesHeld == null) {
@@ -2182,6 +2191,7 @@ async function redeemOrphanClobPositions(
             direction: ledgerEntry.direction,
           });
           await closePosition(redis, ledgerEntry.marketId, ledgerEntry.direction);
+          await markRecentlyResolved(redis, ledgerEntry.marketId);
           await recordPositionOutcome(
             redis,
             { ...ledgerEntry, question: resolvedQuestion, direction },

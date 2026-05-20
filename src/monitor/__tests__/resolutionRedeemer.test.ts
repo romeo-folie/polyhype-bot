@@ -8,6 +8,8 @@ const mockRedeemClobOutcome = vi.fn<(...args: any[]) => Promise<any>>();
 const mockCreditProceeds = vi.fn<(...args: any[]) => Promise<void>>();
 const mockNotifyRedemptionExecuted = vi.fn<(...args: any[]) => Promise<void>>();
 const mockRecordPositionOutcome = vi.fn<(...args: any[]) => Promise<void>>();
+const mockMarkRecentlyClosed = vi.fn<(...args: any[]) => Promise<void>>();
+const mockMarkRecentlyResolved = vi.fn<(...args: any[]) => Promise<void>>();
 
 // Shared mock for the CTF contract used by checkOnChainResolution
 const mockCtfContract = {
@@ -44,6 +46,13 @@ vi.mock('../../shared/outcomeRecorder.js', () => ({
 vi.mock('../../shared/positionOutcomeRecorder.js', () => ({
   recordPositionOutcome: mockRecordPositionOutcome.mockResolvedValue(undefined),
   recordRedemptionOutcome: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../../shared/closedGuard.js', () => ({
+  isRecentlyClosed: vi.fn().mockResolvedValue(false),
+  isRecentlyResolved: vi.fn().mockResolvedValue(false),
+  markRecentlyClosed: mockMarkRecentlyClosed.mockResolvedValue(undefined),
+  markRecentlyResolved: mockMarkRecentlyResolved.mockResolvedValue(undefined),
 }));
 
 vi.mock('../../shared/config.js', () => ({
@@ -211,6 +220,7 @@ describe('redeemResolvedPositions', () => {
       expect.objectContaining({ marketId: 'ol-market-1', side: 'yes', valueUsdc: 10 }),
     );
     expect(mockClosePosition).toHaveBeenCalledWith(mockRedis, 'ol-market-1', 'YES');
+    expect(mockMarkRecentlyResolved).toHaveBeenCalledWith(mockRedis, 'ol-market-1');
     expect(results).toHaveLength(1);
     expect(results[0].success).toBe(true);
   });
