@@ -1402,6 +1402,150 @@ describe('scanHlMomentum — contrarian mode', () => {
     );
   });
 
+  it('still requires momentum-side stretch confirmation in contrarian mode', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_ENABLED: true,
+      HL_MOMENTUM_SOFT_CONFIRM_ENABLED: true,
+      HL_MOMENTUM_ANTI_CHASE_ENABLED: false,
+      HL_FUNDING_CONTRA_ENABLED: false,
+      HL_OI_DIVERGENCE_ENABLED: false,
+    });
+    mockScoreHlTrend.mockReturnValue({
+      score: -6,
+      adx: 35,
+      voters: {
+        vwap: 'DOWN',
+        emaFastVsSlow: 'DOWN',
+        macdLine: 'DOWN',
+        obv: 'DOWN',
+        cmf: 'DOWN',
+        adxDI: 'neutral',
+      },
+      voterCount: 6,
+    });
+    mockComputeRSIFromCandles.mockReturnValue(25);
+    mockComputeVWAP.mockReturnValue(100);
+    mockBuildCandles.mockResolvedValue([{ openTime: 1_000, close: 100, closed: true }]);
+
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).toBeNull();
+    expect(redis.set).toHaveBeenCalledWith(
+      momentumStretchConfirmationKey('BTC', 'SHORT'),
+      '1000',
+      'EX',
+      7200,
+    );
+  });
+
+  it('blocks contrarian entries when the momentum side is overextended', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_ENABLED: true,
+      HL_MOMENTUM_SOFT_CONFIRM_ENABLED: false,
+      HL_MOMENTUM_ANTI_CHASE_ENABLED: true,
+      HL_FUNDING_CONTRA_ENABLED: false,
+      HL_OI_DIVERGENCE_ENABLED: false,
+    });
+    mockScoreHlTrend.mockReturnValue({
+      score: -6,
+      adx: 35,
+      voters: {
+        vwap: 'DOWN',
+        emaFastVsSlow: 'DOWN',
+        macdLine: 'DOWN',
+        obv: 'DOWN',
+        cmf: 'DOWN',
+        adxDI: 'neutral',
+      },
+      voterCount: 6,
+    });
+    mockComputeRSIFromCandles.mockReturnValue(25);
+    mockComputeVWAP.mockReturnValue(null);
+
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).toBeNull();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ hasTrade: false, skipReason: 'anti_chase_rsi' }),
+    );
+  });
+
+  it('still applies the 4h bias gate to the momentum side in contrarian mode', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_ENABLED: true,
+      HL_MOMENTUM_MTF_4H_GATE_ENABLED: true,
+      HL_MOMENTUM_MTF_1H_GATE_ENABLED: false,
+      HL_MOMENTUM_SOFT_CONFIRM_ENABLED: false,
+      HL_MOMENTUM_ANTI_CHASE_ENABLED: false,
+      HL_FUNDING_CONTRA_ENABLED: false,
+      HL_OI_DIVERGENCE_ENABLED: false,
+    });
+    mockScoreHlTrend.mockReturnValue({
+      score: -6,
+      adx: 35,
+      voters: {
+        vwap: 'DOWN',
+        emaFastVsSlow: 'DOWN',
+        macdLine: 'DOWN',
+        obv: 'DOWN',
+        cmf: 'DOWN',
+        adxDI: 'neutral',
+      },
+      voterCount: 6,
+    });
+    mockComputeEMA
+      .mockReturnValueOnce([110])
+      .mockReturnValueOnce([100]);
+
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).toBeNull();
+  });
+
+  it('still applies the 1h MACD gate to the momentum side in contrarian mode', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_ENABLED: true,
+      HL_MOMENTUM_MTF_4H_GATE_ENABLED: false,
+      HL_MOMENTUM_MTF_1H_GATE_ENABLED: true,
+      HL_MOMENTUM_SOFT_CONFIRM_ENABLED: false,
+      HL_MOMENTUM_ANTI_CHASE_ENABLED: false,
+      HL_FUNDING_CONTRA_ENABLED: false,
+      HL_OI_DIVERGENCE_ENABLED: false,
+    });
+    mockScoreHlTrend.mockReturnValue({
+      score: -6,
+      adx: 35,
+      voters: {
+        vwap: 'DOWN',
+        emaFastVsSlow: 'DOWN',
+        macdLine: 'DOWN',
+        obv: 'DOWN',
+        cmf: 'DOWN',
+        adxDI: 'neutral',
+      },
+      voterCount: 6,
+    });
+    mockComputeMACDFromCandles.mockReturnValue({ macdLine: 0.5, signalLine: 0.2, histogram: 0.3 });
+
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).toBeNull();
+  });
+
   it('does not let funding or OI vetoes block a contrarian trade', async () => {
     mockScoreHlTrend.mockReturnValue({
       score: 6,

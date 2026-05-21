@@ -423,12 +423,12 @@ export async function scanHlMomentum(
     );
 
     if (rsi !== null) {
-      if (tradeDirection === 'LONG' && rsi >= rsiLongBand) softConfirmationReasons.push('rsi');
-      if (tradeDirection === 'SHORT' && rsi <= rsiShortBand) softConfirmationReasons.push('rsi');
+      if (momentumDirection === 'LONG' && rsi >= rsiLongBand) softConfirmationReasons.push('rsi');
+      if (momentumDirection === 'SHORT' && rsi <= rsiShortBand) softConfirmationReasons.push('rsi');
     }
     if (vwapDistPct !== null) {
-      if (tradeDirection === 'LONG' && vwapDistPct >= vwapBand) softConfirmationReasons.push('vwap');
-      if (tradeDirection === 'SHORT' && vwapDistPct <= -vwapBand) softConfirmationReasons.push('vwap');
+      if (momentumDirection === 'LONG' && vwapDistPct >= vwapBand) softConfirmationReasons.push('vwap');
+      if (momentumDirection === 'SHORT' && vwapDistPct <= -vwapBand) softConfirmationReasons.push('vwap');
     }
     softConfirmationRequired = softConfirmationReasons.length > 0;
   }
@@ -571,7 +571,7 @@ export async function scanHlMomentum(
 
   if (cfg.HL_MOMENTUM_SOFT_CONFIRM_ENABLED) {
     softConfirmationAnchorOpenTime = latestClosedPrimaryCandle.openTime;
-    const confirmKey = momentumStretchConfirmationKey(hlSymbol, tradeDirection);
+    const confirmKey = momentumStretchConfirmationKey(hlSymbol, momentumDirection);
     const pendingRaw = await redis.get(confirmKey);
     const pendingOpenTime = pendingRaw ? parseInt(pendingRaw, 10) : NaN;
     const hasPending = Number.isFinite(pendingOpenTime);
