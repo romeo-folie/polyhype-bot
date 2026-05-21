@@ -308,17 +308,20 @@ export async function scanHlMomentum(
     logDecision(false, 'oi_divergence_veto');
     return null;
   }
-  if (direction === 'LONG' && cfg.HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION) {
-    const longConfirmationVotes = [voters.fundingContra, voters.oiDivergence].filter(
+  if (cfg.HL_MOMENTUM_REQUIRE_HL_CONFIRMATION_AT_MIN_SCORE && absScore === cfg.HL_MOMENTUM_MIN_SCORE) {
+    const confirmationVotes = [voters.fundingContra, voters.oiDivergence].filter(
       (vote): vote is 'UP' | 'DOWN' | 'neutral' => vote !== undefined,
     );
-    if (longConfirmationVotes.length > 0 && !longConfirmationVotes.includes('UP')) {
-      logger.debug('[hl-momentum] long HL confirmation missing', {
+    const requiredVote = direction === 'LONG' ? 'UP' : 'DOWN';
+    if (confirmationVotes.length > 0 && !confirmationVotes.includes(requiredVote)) {
+      logger.debug('[hl-momentum] HL confirmation missing at minimum score', {
         symbol: hlSymbol,
+        direction,
+        score,
         fundingContraVote: voters.fundingContra ?? null,
         oiDivergenceVote: voters.oiDivergence ?? null,
       });
-      logDecision(false, 'long_hl_confirmation_missing');
+      logDecision(false, 'hl_confirmation_missing_at_min_score');
       return null;
     }
   }
@@ -373,6 +376,8 @@ export async function scanHlMomentum(
       freshBars: cfg.HL_MOMENTUM_BREAKOUT_FRESH_BARS,
       retestPct: cfg.HL_MOMENTUM_RETEST_TOL_PCT,
       retestAtrMult: cfg.HL_MOMENTUM_RETEST_TOL_ATR_MULT,
+      holdMinAtrMult: cfg.HL_MOMENTUM_HOLD_MIN_ATR_MULT,
+      holdMinPct: cfg.HL_MOMENTUM_HOLD_MIN_PCT,
       atr: atrResult?.atr ?? null,
     });
     if (cfg.HL_MOMENTUM_REQUIRE_BREAKOUT_RETEST && breakoutRetestMatch === null) {

@@ -35,9 +35,13 @@ const baseConfig = {
   HL_MOMENTUM_STAKE_USD: 10,
   FUTURES_MAX_PER_TRADE_USD: 15,
   HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION: false,
+  HL_MOMENTUM_REQUIRE_HL_CONFIRMATION_AT_MIN_SCORE: true,
   HL_MOMENTUM_MTF_SCORING_MODE: 'hard' as 'hard' | 'weighted',
   HL_MOMENTUM_4H_NEUTRAL_BAND_PCT: 0.5,
   HL_MOMENTUM_MIN_TOTAL_SCORE: 5,
+  HL_MOMENTUM_HOLD_MIN_ATR_MULT: 0.25,
+  HL_MOMENTUM_HOLD_MIN_PCT: 0.1,
+  HL_MOMENTUM_POST_ONLY_WAIT_MS: 90_000,
   HL_FUNDING_CONTRA_ENABLED: false,
   HL_FUNDING_CONTRA_APR_THRESHOLD: 100,
   HL_FUNDING_CONTRA_CACHE_TTL_SEC: 60,
@@ -449,12 +453,11 @@ describe('scanHlMomentum — cooldown and position gates', () => {
   });
 });
 
-describe('scanHlMomentum — long HL confirmation gate', () => {
+describe('scanHlMomentum — minimum-score HL confirmation gate', () => {
   beforeEach(() => {
     mockLoadConfig.mockReturnValue({
       ...baseConfig,
       HL_MOMENTUM_ENABLED: true,
-      HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION: true,
       HL_FUNDING_CONTRA_ENABLED: true,
       HL_OI_DIVERGENCE_ENABLED: true,
     });
@@ -464,9 +467,10 @@ describe('scanHlMomentum — long HL confirmation gate', () => {
     mockComputeMACDFromCandles.mockReturnValue(null);
   });
 
-  it('blocks a LONG when present HL-native votes are neutral', async () => {
+  it('blocks a LONG when present HL-native votes are neutral at the minimum score', async () => {
     mockScoreHlTrend.mockReturnValue({
       ...bullishResult,
+      score: 4,
       voters: {
         ...bullishResult.voters,
         fundingContra: 'neutral',
@@ -479,9 +483,10 @@ describe('scanHlMomentum — long HL confirmation gate', () => {
     expect(result).toBeNull();
   });
 
-  it('allows a LONG when OI divergence actively confirms UP', async () => {
+  it('allows a LONG when OI divergence actively confirms UP at the minimum score', async () => {
     mockScoreHlTrend.mockReturnValue({
       ...bullishResult,
+      score: 4,
       voters: {
         ...bullishResult.voters,
         fundingContra: 'neutral',
@@ -495,12 +500,29 @@ describe('scanHlMomentum — long HL confirmation gate', () => {
     expect(result!.direction).toBe('LONG');
   });
 
-  it('does not apply the confirmation gate to SHORT signals', async () => {
+  it('blocks a SHORT when present HL-native votes are neutral at the minimum score', async () => {
     mockScoreHlTrend.mockReturnValue({
       ...bearishResult,
+      score: -4,
       voters: {
         ...bearishResult.voters,
         fundingContra: 'neutral',
+        oiDivergence: 'neutral',
+      },
+      voterCount: 8,
+    });
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull();
+  });
+
+  it('allows a SHORT when fundingContra actively confirms DOWN at the minimum score', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      ...bearishResult,
+      score: -4,
+      voters: {
+        ...bearishResult.voters,
+        fundingContra: 'DOWN',
         oiDivergence: 'neutral',
       },
       voterCount: 8,

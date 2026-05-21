@@ -1275,7 +1275,7 @@ const envSchema = z.object({
   // Minimum trend-scorer confluence score (|upVotes - downVotes|) to open a position. Range [0,8] (up to 8 voters when both HL-native voters active).
   HL_MOMENTUM_MIN_SCORE: z.coerce.number().int().min(0).max(8).optional().default(6),
   // Minimum ADX to require a trending regime before acting on the direction vote.
-  HL_MOMENTUM_MIN_ADX: z.coerce.number().min(0).optional().default(20),
+  HL_MOMENTUM_MIN_ADX: z.coerce.number().min(0).optional().default(28),
   // Per-side cooldown in seconds after a momentum entry (prevents rapid re-entry on same side).
   HL_MOMENTUM_COOLDOWN_SEC: z.coerce.number().int().min(60).optional().default(600),
   // Short cooldown for transient executor skips (stake_below_hl_minimum) — price fluctuation
@@ -1304,6 +1304,9 @@ const envSchema = z.object({
   // least one present HL-native voter (funding contra / OI divergence) actively confirms UP.
   // Missing HL-native data is not treated as a veto; the gate only acts on present votes.
   HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION: boolFromEnv.optional().default(true),
+  // At the minimum confluence score, require a present HL-native voter to actively
+  // confirm the direction before taking the trade. Stronger scores bypass the gate.
+  HL_MOMENTUM_REQUIRE_HL_CONFIRMATION_AT_MIN_SCORE: boolFromEnv.optional().default(true),
   // MTF scoring mode. 'hard' = AND-stack (current — both MTF gates must pass);
   // 'weighted' = each MTF signal becomes a score boost, trade if total ≥ MIN_TOTAL_SCORE.
   // Ships with 'hard' default → zero behavior change at merge.
@@ -1363,6 +1366,11 @@ const envSchema = z.object({
   HL_MOMENTUM_RETEST_TOL_PCT: z.coerce.number().min(0).optional().default(0.3),
   // Retest tolerance as an ATR multiple (primary; takes precedence over pct when larger).
   HL_MOMENTUM_RETEST_TOL_ATR_MULT: z.coerce.number().min(0).optional().default(0.5),
+  // Hold bar must close this far beyond the broken level before the pattern is considered mature.
+  HL_MOMENTUM_HOLD_MIN_ATR_MULT: z.coerce.number().min(0).optional().default(0.25),
+  HL_MOMENTUM_HOLD_MIN_PCT: z.coerce.number().min(0).optional().default(0.10),
+  // Post-only HL momentum entries wait briefly for a fill before giving up.
+  HL_MOMENTUM_POST_ONLY_WAIT_MS: z.coerce.number().int().min(5_000).optional().default(90_000),
 
   // ── HL-native signals (issue #265) ──
   // Sub-PR 1: Funding-rate contra voter. HL settles perp funding hourly at

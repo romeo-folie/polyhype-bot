@@ -13,6 +13,7 @@ vi.mock('../config.js', () => ({
     HYPERLIQUID_TESTNET: true,
     HL_DRY_RUN: false,
     FUTURES_IOC_SLIPPAGE: 0.002,
+    HL_MOMENTUM_POST_ONLY_WAIT_MS: 1000,
   }),
 }));
 
@@ -147,6 +148,46 @@ describe('HyperliquidClient', () => {
     expect(result.success).toBe(true);
     expect(result.txHash).toBe('99999');
     expect(mockedAxiosPost).toHaveBeenCalledTimes(6);
+  });
+
+  it('placePatientLimitOrder submits a post-only order and returns a filled result', async () => {
+    const client = getHyperliquid();
+
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { universe: [{ name: 'BTC', szDecimals: 3, index: 0 }] },
+    });
+    mockedAxiosPost.mockResolvedValueOnce({ data: { status: 'ok' } }); // updateLeverage
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { coin: 'BTC', levels: [[{ px: '50000', sz: '1' }], [{ px: '50010', sz: '1' }]] },
+    }); // getL2Book
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: {
+        status: 'ok',
+        response: { type: 'order', data: { statuses: [{ filled: { oid: 777, avgPx: '50000' } }] } },
+      },
+    });
+
+    const result = await client.placePatientLimitOrder({
+      symbol: 'BTC',
+      isBuy: true,
+      sizeUsd: 100,
+      leverage: 5,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.txHash).toBe('777');
+    expect(result.price).toBe(50000);
+    expect(mockedAxiosPost).toHaveBeenCalledTimes(4);
+    const exchangeCall = mockedAxiosPost.mock.calls[3];
+    expect(exchangeCall?.[1]).toMatchObject({
+      action: {
+        orders: [
+          {
+            t: { limit: { tif: 'Alo' } },
+          },
+        ],
+      },
+    });
   });
 
   it('placeMarketOrder does not retry a second time on repeated nonce error', async () => {

@@ -1328,12 +1328,20 @@ async function executeHyperliquidSignal(
       leverage: signal.leverage || cfg.FUTURES_DEFAULT_LEVERAGE,
     });
 
-    const tradeResult = await hl.placeMarketOrder({
-      symbol: signal.marketId,
-      isBuy: signal.direction === 'LONG',
-      sizeUsd: signal.stakeUsd,
-      leverage: signal.leverage || cfg.FUTURES_DEFAULT_LEVERAGE,
-    });
+    const tradeResult =
+      signal.sourcedFrom === 'hl-momentum'
+        ? await hl.placePatientLimitOrder({
+            symbol: signal.marketId,
+            isBuy: signal.direction === 'LONG',
+            sizeUsd: signal.stakeUsd,
+            leverage: signal.leverage || cfg.FUTURES_DEFAULT_LEVERAGE,
+          })
+        : await hl.placeMarketOrder({
+            symbol: signal.marketId,
+            isBuy: signal.direction === 'LONG',
+            sizeUsd: signal.stakeUsd,
+            leverage: signal.leverage || cfg.FUTURES_DEFAULT_LEVERAGE,
+          });
 
     if (tradeResult.success) {
       // Atomically add this trade's stake to the pending counter.
@@ -1437,8 +1445,8 @@ async function executeHyperliquidSignal(
         tradeResult: { success: true, tx_hash: tradeResult.txHash, shares_bought: 0 },
         executionVenue: 'hyperliquid',
         modeConfigured: cfg.EXECUTION_MODE,
-        entryExecutionPath: 'hyperliquid_fill',
-        entryOrderType: 'taker',
+        entryExecutionPath: signal.sourcedFrom === 'hl-momentum' ? 'hyperliquid_post_only_fill' : 'hyperliquid_fill',
+        entryOrderType: signal.sourcedFrom === 'hl-momentum' ? 'maker' : 'taker',
         entryPrice: tradeResult.price ?? null,
       };
       if (entryAtr !== undefined) result.entryAtr = entryAtr;
@@ -1457,6 +1465,13 @@ async function executeHyperliquidSignal(
     // Treat "too small" as a skip (not an error) — don't send noisy notifications
     // for expected low-stake rejections from Half-Kelly sizing.
     const errMsg = tradeResult.error || 'Hyperliquid order failed';
+    if (
+      tradeResult.error === 'patient_limit_not_filled' ||
+      tradeResult.error === 'patient_limit_not_filled:cancel_failed' ||
+      /HL post-only order (?:badAloPxRejected|canceled|rejected|marginCanceled|reduceOnlyRejected|iocCancelRejected|minTradeNtlRejected|perpMarginRejected)/.test(errMsg)
+    ) {
+      return { signal, skipped: true, skipReason: 'hl_patient_limit_not_filled' };
+    }
     if (errMsg.includes('too small for HL minimum') || errMsg.includes('minimum value of')) {
       return { signal, skipped: true, skipReason: 'stake_below_hl_minimum' };
     }

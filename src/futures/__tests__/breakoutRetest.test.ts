@@ -129,6 +129,14 @@ describe('detectBreakoutRetestHold', () => {
     expect(result).toBeNull();
   });
 
+  it('returns null when the hold bar is above the level but not far enough beyond it', () => {
+    const candles = buildLongPattern(100, 1.0, 0.1, 0.05);
+    const result = detectBreakoutRetestHold(candles, 'LONG', {
+      lookbackBars: 12, freshBars: 6, retestPct: 0.3, retestAtrMult: 0.5, atr: null,
+    });
+    expect(result).toBeNull();
+  });
+
   it('returns null when breakout is older than freshBars', () => {
     // Pattern: 12 baseline + breakout + retest + 5 middle + hold = 20 bars.
     // Breakout bar is at index 12; with n=20 and freshBars=6, it sits at offset 6 — just

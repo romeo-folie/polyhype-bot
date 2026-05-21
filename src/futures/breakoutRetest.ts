@@ -16,6 +16,10 @@ export interface BreakoutRetestOpts {
   retestPct?: number;
   /** Retest tolerance as an ATR multiple; combined with retestPct as max(atrMult×ATR, pct×level). */
   retestAtrMult?: number;
+  /** Hold bar minimum distance beyond the broken level as an ATR multiple. */
+  holdMinAtrMult?: number;
+  /** Hold bar minimum distance beyond the broken level as a % of the level. */
+  holdMinPct?: number;
   /** Pre-computed ATR value; null falls back to pct-only tolerance. */
   atr?: number | null;
 }
@@ -43,6 +47,8 @@ export function detectBreakoutRetestHold(
     freshBars = 6,
     retestPct = 0.3,
     retestAtrMult = 0.5,
+    holdMinAtrMult = 0.25,
+    holdMinPct = 0.1,
     atr = null,
   } = opts;
 
@@ -68,14 +74,18 @@ export function detectBreakoutRetestHold(
       if (breakoutBar.close >= level) continue;
     }
 
-    // Hold check — most recent bar must close on the right side of the level.
-    if (direction === 'LONG' && holdBar.close <= level) continue;
-    if (direction === 'SHORT' && holdBar.close >= level) continue;
-
     // Tolerance: ATR-mult primary, %-of-price floor.
     const tol = atr !== null
       ? Math.max(retestAtrMult * atr, (retestPct / 100) * level)
       : (retestPct / 100) * level;
+
+    const holdMinDist = atr !== null
+      ? Math.max(holdMinAtrMult * atr, (holdMinPct / 100) * level)
+      : (holdMinPct / 100) * level;
+
+    // Hold check — the most recent bar must close meaningfully beyond the level.
+    if (direction === 'LONG' && holdBar.close < level + holdMinDist) continue;
+    if (direction === 'SHORT' && holdBar.close > level - holdMinDist) continue;
 
     // Retest: any bar strictly between breakout bar and hold bar.
     const retestSlice = candles.slice(bIdx + 1, n - 1);

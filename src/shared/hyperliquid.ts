@@ -181,6 +181,24 @@ interface HlExchangeResponse {
       };
 }
 
+interface HlOrderStatusResponse {
+  status?: string;
+  response?:
+    | string
+    | {
+        status?: string;
+        data?: unknown;
+      };
+}
+
+interface HlL2BookResponse {
+  coin?: string;
+  levels?: [
+    { px: string; sz: string; n?: number }[],
+    { px: string; sz: string; n?: number }[],
+  ];
+}
+
 interface HlClearinghouseState {
   marginSummary: { accountValue: string };
   assetPositions: {
@@ -421,6 +439,182 @@ class HyperliquidClient {
   }
 
   /**
+   * Place a patient post-only limit order on Hyperliquid and wait briefly for a fill.
+   * If the order does not fill within the configured wait window, it is canceled and
+   * reported back as a skip rather than a hard execution failure.
+   */
+  async placePatientLimitOrder(
+    opts: {
+      symbol: string;
+      isBuy: boolean;
+      sizeUsd: number;
+      leverage: number;
+      reduceOnly?: boolean;
+      sizeBase?: number;
+    },
+    _retrying = false,
+  ): Promise<{ success: boolean; txHash?: string; price?: number; error?: string }> {
+    if (loadConfig().HL_DRY_RUN) {
+      logger.info('[hyperliquid] DRY RUN — post-only order not submitted', {
+        symbol: opts.symbol,
+        isBuy: opts.isBuy,
+        sizeUsd: opts.sizeUsd,
+        leverage: opts.leverage,
+        reduceOnly: opts.reduceOnly ?? false,
+      });
+      return { success: true, txHash: 'dry-run' };
+    }
+
+    try {
+      if (!opts.reduceOnly && !opts.sizeBase && opts.sizeUsd < HL_MIN_ORDER_USD) {
+        if (opts.sizeUsd >= HL_MIN_ORDER_USD * 0.6) {
+          logger.info('[hyperliquid] bumping stake to HL minimum', {
+            original: opts.sizeUsd.toFixed(2),
+            bumped: HL_MIN_ORDER_USD,
+            symbol: opts.symbol,
+          });
+          opts.sizeUsd = HL_MIN_ORDER_USD;
+        } else {
+          return {
+            success: false,
+            error: `Stake $${opts.sizeUsd.toFixed(2)} too small for HL minimum ($${HL_MIN_ORDER_USD}); skipped`,
+          };
+        }
+      }
+
+      const { index, szDecimals } = await this.getAssetMeta(opts.symbol);
+      if (index === -1) throw new Error(`Symbol ${opts.symbol} not found on Hyperliquid`);
+
+      const leverageOk = await this.updateLeverage(opts.symbol, opts.leverage);
+      if (!leverageOk) {
+        return {
+          success: false,
+          error: `updateLeverage failed for ${opts.symbol} — order aborted to avoid wrong-leverage trade`,
+        };
+      }
+
+      const book = await this.getL2Book(opts.symbol);
+      if (!book) {
+        return {
+          success: false,
+          error: `getL2Book returned no data for ${opts.symbol} — order aborted`,
+        };
+      }
+
+      const limitPrice = this.resolvePatientLimitPrice(book.bestBid, book.bestAsk, opts.isBuy, szDecimals);
+      if (!limitPrice || !isFinite(limitPrice) || limitPrice <= 0) {
+        return {
+          success: false,
+          error: `resolvePatientLimitPrice returned invalid value (${String(limitPrice)}) for ${opts.symbol} — order aborted`,
+        };
+      }
+
+      const sizeBase = opts.sizeBase ?? opts.sizeUsd / limitPrice;
+      const action = {
+        type: 'order',
+        orders: [
+          {
+            a: index,
+            b: opts.isBuy,
+            p: String(this.roundPrice(limitPrice, szDecimals)),
+            s: String(this.roundSize(sizeBase, szDecimals)),
+            r: opts.reduceOnly ?? false,
+            t: { limit: { tif: 'Alo' } },
+          },
+        ],
+        grouping: 'na',
+      };
+
+      const nonce = nextHlNonce();
+      const signature = await this.signAction(action, nonce);
+      const payload = {
+        action,
+        nonce,
+        signature,
+        vaultAddress: this.vaultAddress,
+      };
+
+      const response = await axios.post<HlExchangeResponse>(`${this.baseUrl}/exchange`, payload, {
+        timeout: HL_REQUEST_TIMEOUT_MS,
+      });
+
+      if (response.data.status === 'ok') {
+        const responseObj = typeof response.data.response === 'object' ? response.data.response : undefined;
+        const statuses = responseObj?.data && Array.isArray((responseObj.data as { statuses?: unknown[] }).statuses)
+          ? (responseObj.data as { statuses: unknown[] }).statuses
+          : undefined;
+        if (!Array.isArray(statuses) || statuses.length === 0) {
+          return { success: false, error: 'HL response missing statuses array' };
+        }
+        const result = statuses[0] as Record<string, unknown> | undefined;
+        if (!result) {
+          return { success: false, error: 'HL statuses[0] is undefined' };
+        }
+        const filled = result.filled as { oid?: unknown; avgPx?: unknown } | undefined;
+        const resting = result.resting as { oid?: unknown } | undefined;
+        const errorMsg = result.error as string | undefined;
+        if (filled?.oid != null) {
+          return {
+            success: true,
+            txHash: String(filled.oid),
+            price: typeof filled.avgPx === 'string' || typeof filled.avgPx === 'number'
+              ? Number(filled.avgPx)
+              : limitPrice,
+          };
+        }
+        if (resting?.oid != null) {
+          return await this.awaitPatientLimitFill({
+            symbol: opts.symbol,
+            orderId: Number(resting.oid),
+            limitPrice,
+            waitMs: loadConfig().HL_MOMENTUM_POST_ONLY_WAIT_MS,
+          });
+        }
+        if (errorMsg) {
+          return { success: false, error: errorMsg };
+        }
+      }
+
+      const errorResponse: unknown = response.data.response;
+      if (!_retrying && typeof errorResponse === 'string') {
+        const m = /nonce too low \d+ < (\d+)/.exec(errorResponse);
+        if (m?.[1]) {
+          const required = Number(m[1]);
+          _hlNonce = Math.max(Date.now(), required);
+          logger.warn('[hyperliquid] nonce too low — bumping and retrying', { required, newNonce: _hlNonce });
+          return this.placePatientLimitOrder(opts, true);
+        }
+      }
+
+      return { success: false, error: JSON.stringify(response.data) };
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
+      const responseBody = axiosErr.response?.data
+        ? JSON.stringify(axiosErr.response.data).slice(0, 500)
+        : undefined;
+      const msg = axiosErr.message ?? String(err);
+
+      if (!_retrying && typeof responseBody === 'string') {
+        const m = /nonce too low \d+ < (\d+)/.exec(responseBody);
+        if (m?.[1]) {
+          const required = Number(m[1]);
+          _hlNonce = Math.max(Date.now(), required);
+          logger.warn('[hyperliquid] nonce too low (http error) — bumping and retrying', { required, newNonce: _hlNonce });
+          return this.placePatientLimitOrder(opts, true);
+        }
+      }
+
+      if (responseBody) {
+        logger.error('[hyperliquid] post-only order rejected', {
+          status: axiosErr.response?.status,
+          body: responseBody,
+        });
+      }
+      return { success: false, error: responseBody ? `${msg}: ${responseBody}` : msg };
+    }
+  }
+
+  /**
    * Set leverage for an asset. Must be called before placing an order if leverage differs from default.
    */
   async updateLeverage(symbol: string, leverage: number): Promise<boolean> {
@@ -624,6 +818,126 @@ class HyperliquidClient {
     const idx = (this.metaCache.universe).findIndex((u) => u.name === symbol);
     const szDecimals = this.metaCache.universe[idx]?.szDecimals ?? 4;
     return { index: idx, szDecimals };
+  }
+
+  private async getL2Book(symbol: string): Promise<{ bestBid: number; bestAsk: number } | null> {
+    const response = await axios.post<HlL2BookResponse>(
+      `${this.baseUrl}/info`,
+      {
+        type: 'l2Book',
+        coin: symbol,
+      },
+      { timeout: HL_REQUEST_TIMEOUT_MS },
+    );
+
+    const bestBid = parseFloat(response.data?.levels?.[0]?.[0]?.px ?? '0');
+    const bestAsk = parseFloat(response.data?.levels?.[1]?.[0]?.px ?? '0');
+    if (!isFinite(bestBid) || !isFinite(bestAsk) || bestBid <= 0 || bestAsk <= 0) return null;
+    return { bestBid, bestAsk };
+  }
+
+  private async getOrderStatus(orderId: number): Promise<string | null> {
+    const response = await axios.post<HlOrderStatusResponse>(
+      `${this.baseUrl}/info`,
+      {
+        type: 'orderStatus',
+        user: this.mainWalletAddress,
+        oid: orderId,
+      },
+      { timeout: HL_REQUEST_TIMEOUT_MS },
+    );
+
+    const body = response.data?.response;
+    if (typeof body === 'string') return body;
+    if (body && typeof body.status === 'string') return body.status;
+    if (typeof response.data?.status === 'string') return response.data.status;
+    return null;
+  }
+
+  private async cancelOrder(symbol: string, orderId: number): Promise<boolean> {
+    try {
+      const { index } = await this.getAssetMeta(symbol);
+      const action = {
+        type: 'cancel',
+        cancels: [
+          {
+            a: index,
+            o: orderId,
+          },
+        ],
+      };
+      const nonce = nextHlNonce();
+      const signature = await this.signAction(action, nonce);
+      const response = await axios.post<HlExchangeResponse>(
+        `${this.baseUrl}/exchange`,
+        { action, nonce, signature, vaultAddress: this.vaultAddress },
+        { timeout: HL_REQUEST_TIMEOUT_MS },
+      );
+      return response.data.status === 'ok';
+    } catch (err) {
+      logger.warn('[hyperliquid] cancelOrder failed', {
+        symbol,
+        orderId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
+  private resolvePatientLimitPrice(
+    bestBid: number,
+    bestAsk: number,
+    isBuy: boolean,
+    szDecimals: number,
+  ): number | null {
+    const decimals = Math.max(0, 6 - szDecimals);
+    const step = 10 ** -decimals;
+    const mid = (bestBid + bestAsk) / 2;
+    const offset = mid * 0.001;
+    const candidate = isBuy ? mid - offset : mid + offset;
+
+    let price: number;
+    if (isBuy) {
+      price = Math.min(candidate, bestBid);
+      if (bestAsk <= bestBid + step) {
+        price = Math.max(step, bestBid - step);
+      }
+    } else {
+      price = Math.max(candidate, bestAsk);
+      if (bestAsk <= bestBid + step) {
+        price = bestAsk + step;
+      }
+    }
+
+    price = this.roundPrice(price, szDecimals);
+    if (!isFinite(price) || price <= 0) return null;
+    return price;
+  }
+
+  private async awaitPatientLimitFill(opts: {
+    symbol: string;
+    orderId: number;
+    limitPrice: number;
+    waitMs: number;
+  }): Promise<{ success: boolean; txHash?: string; price?: number; error?: string }> {
+    const startedAt = Date.now();
+    const pollEveryMs = 5_000;
+    while (Date.now() - startedAt < opts.waitMs) {
+      const status = await this.getOrderStatus(opts.orderId);
+      if (status === 'filled') {
+        return { success: true, txHash: String(opts.orderId), price: opts.limitPrice };
+      }
+      if (status && ['canceled', 'rejected', 'marginCanceled', 'reduceOnlyRejected', 'badAloPxRejected', 'iocCancelRejected', 'minTradeNtlRejected', 'perpMarginRejected'].includes(status)) {
+        return { success: false, error: `HL post-only order ${status}` };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollEveryMs));
+    }
+
+    const cancelled = await this.cancelOrder(opts.symbol, opts.orderId);
+    return {
+      success: false,
+      error: cancelled ? 'patient_limit_not_filled' : 'patient_limit_not_filled:cancel_failed',
+    };
   }
 
   /**
