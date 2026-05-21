@@ -25,6 +25,7 @@ const baseConfig = {
   HL_MOMENTUM_MIN_ADX: 20,
   HL_MOMENTUM_COOLDOWN_SEC: 600,
   HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC: 60,
+  HL_MOMENTUM_CONTRARIAN_ENABLED: false,
   HL_MOMENTUM_PRIMARY_LOOKBACK_MS: 54_000_000,
   HL_MOMENTUM_1H_LOOKBACK_MS: 180_000_000,
   HL_MOMENTUM_4H_LOOKBACK_MS: 864_000_000,
@@ -871,7 +872,8 @@ describe('scanHlMomentum — weighted MTF scoring', () => {
       '[hl-momentum] shadow signal (weighted dark)',
       expect.objectContaining({
         symbol: 'BTC',
-        direction: 'LONG',
+        momentumDirection: 'LONG',
+        tradeDirection: 'LONG',
         mtfBonus: 3,
         totalScore: 8,
       }),
@@ -1331,6 +1333,121 @@ describe('scanHlMomentum — HL-native voter veto gates', () => {
     vi.mocked(enqueueWrite).mockClear();
     await scanHlMomentum(makeTick(), makeRedis() as never);
     expect(enqueueWrite).toHaveBeenCalledWith('shadow_observations', expect.objectContaining({ kind: 'hl_momentum_signal' }));
+  });
+});
+
+describe('scanHlMomentum — contrarian mode', () => {
+  beforeEach(() => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_ENABLED: true,
+      HL_MOMENTUM_SOFT_CONFIRM_ENABLED: false,
+      HL_MOMENTUM_ANTI_CHASE_ENABLED: false,
+      HL_FUNDING_CONTRA_ENABLED: true,
+      HL_OI_DIVERGENCE_ENABLED: true,
+    });
+    mockBuildCandles.mockResolvedValue([{}]);
+    mockHasOpenPosition.mockResolvedValue(false);
+    mockComputeEMA.mockReturnValue(null);
+    mockComputeMACDFromCandles.mockReturnValue(null);
+    mockGetCachedAssetCtx.mockResolvedValue({
+      fundingRate: 0.0002,
+      openInterest: 1_000_000,
+      markPrice: 70_000,
+    });
+    mockGetOrSetOiBaseline.mockResolvedValue({
+      oi: 1_000_000,
+      markPrice: 70_000,
+      ts: Date.now() - 60_000,
+    });
+  });
+
+  it('returns the opposite trade side when contrarian mode is enabled', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: -6,
+      adx: 35,
+      voters: {
+        vwap: 'DOWN',
+        emaFastVsSlow: 'DOWN',
+        macdLine: 'DOWN',
+        obv: 'DOWN',
+        cmf: 'DOWN',
+        adxDI: 'neutral',
+      },
+      voterCount: 6,
+    });
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).not.toBeNull();
+    expect(result!.direction).toBe('LONG');
+    expect(result!.question).toBe('HL momentum LONG BTC');
+    expect(result!.reasoning).toContain('momentum=SHORT');
+    expect(result!.reasoning).toContain('trade=LONG');
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({
+        direction: 'LONG',
+        confluenceDirection: 'SHORT',
+        raw: expect.objectContaining({
+          momentumDirection: 'SHORT',
+          tradeDirection: 'LONG',
+          contrarianEnabled: true,
+        }),
+      }),
+    );
+  });
+
+  it('does not let funding or OI vetoes block a contrarian trade', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: 6,
+      adx: 35,
+      voters: {
+        vwap: 'UP',
+        emaFastVsSlow: 'UP',
+        macdLine: 'UP',
+        obv: 'UP',
+        cmf: 'UP',
+        adxDI: 'neutral',
+        fundingContra: 'DOWN',
+        oiDivergence: 'DOWN',
+      },
+      voterCount: 8,
+    });
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).not.toBeNull();
+    expect(result!.direction).toBe('SHORT');
+    expect(result!.reasoning).toContain('momentum=LONG');
+    expect(result!.reasoning).toContain('trade=SHORT');
+  });
+
+  it('keys the cooldown off the final trade side, not the momentum side', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: -6,
+      adx: 35,
+      voters: {
+        vwap: 'DOWN',
+        emaFastVsSlow: 'DOWN',
+        macdLine: 'DOWN',
+        obv: 'DOWN',
+        cmf: 'DOWN',
+        adxDI: 'neutral',
+      },
+      voterCount: 6,
+    });
+    const redis = makeRedis({ [momentumCooldownKey('BTC', 'LONG')]: '1' });
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).toBeNull();
+    const getCalls = redis.get.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(getCalls).toContain('futures:momentum:cooldown:BTC:LONG');
+    expect(getCalls).not.toContain('futures:momentum:cooldown:BTC:SHORT');
   });
 });
 

@@ -56,6 +56,10 @@ export function momentumStretchConfirmationKey(hlSymbol: string, direction: 'LON
   return `futures:momentum:stretch-confirm:${hlSymbol}:${direction}`;
 }
 
+function oppositeDirection(direction: 'LONG' | 'SHORT'): 'LONG' | 'SHORT' {
+  return direction === 'LONG' ? 'SHORT' : 'LONG';
+}
+
 /**
  * Strip the `usdt` suffix (Binance pair form) and, only for actual Hyperliquid
  * 1000× unit markers (literal lowercase `k` followed by an uppercase base asset
@@ -190,7 +194,10 @@ export async function scanHlMomentum(
   const { score, adx, voters, voterCount } = trendResult;
   if (score === 0) return null;
 
-  const direction: 'LONG' | 'SHORT' = score > 0 ? 'LONG' : 'SHORT';
+  const momentumDirection: 'LONG' | 'SHORT' = score > 0 ? 'LONG' : 'SHORT';
+  const tradeDirection: 'LONG' | 'SHORT' = cfg.HL_MOMENTUM_CONTRARIAN_ENABLED
+    ? oppositeDirection(momentumDirection)
+    : momentumDirection;
   const absScore = Math.abs(score);
   const isWeighted = cfg.HL_MOMENTUM_MTF_SCORING_MODE === 'weighted';
 
@@ -230,9 +237,10 @@ export async function scanHlMomentum(
       decisionId,
       source: 'hl-momentum' as const,
       marketId: hlSymbol,
-      question: `HL momentum ${direction} ${hlSymbol}`,
+      question: `HL momentum ${tradeDirection} ${hlSymbol}`,
       category: 'futures',
-      direction,
+      direction: tradeDirection,
+      confluenceDirection: momentumDirection,
       hasTrade,
       skipReason: skipReason ?? (hasTrade ? undefined : 'other'),
       skipDetail,
@@ -243,6 +251,9 @@ export async function scanHlMomentum(
         adx,
         voters,
         voterCount,
+        momentumDirection,
+        tradeDirection,
+        contrarianEnabled: cfg.HL_MOMENTUM_CONTRARIAN_ENABLED,
         scoringMode: cfg.HL_MOMENTUM_MTF_SCORING_MODE,
         fourHBiasOk,
         oneHMacdOk,
@@ -285,41 +296,56 @@ export async function scanHlMomentum(
     return null;
   }
 
-  // Gate: HL-native voters must not actively contradict the trade direction.
+  // Gate: HL-native voters must not actively contradict the momentum direction.
   // fundingContra DOWN on a LONG = longs already crowded, APR at ceiling — mean-reversion
   // risk that the correlated price-lag voters cannot outweigh.
   // oiDivergence DOWN on a LONG = OI contracting while price rises — short covering only,
   // not real buying; the breakout is likely fake.
   // Both checks are naturally no-ops when the voter is disabled (voter key absent from
   // `voters`, so the === comparison is false).
-  if (
-    (direction === 'LONG' && voters.fundingContra === 'DOWN') ||
-    (direction === 'SHORT' && voters.fundingContra === 'UP')
-  ) {
-    logger.debug('[hl-momentum] funding contra veto', { symbol: hlSymbol, direction, fundingApr });
-    logDecision(false, 'funding_adverse');
-    return null;
-  }
-  if (
-    (direction === 'LONG' && voters.oiDivergence === 'DOWN') ||
-    (direction === 'SHORT' && voters.oiDivergence === 'UP')
-  ) {
-    logger.debug('[hl-momentum] OI divergence veto', { symbol: hlSymbol, direction, oiPctChange, pricePctChange });
-    logDecision(false, 'oi_divergence_veto');
-    return null;
-  }
-  if (direction === 'LONG' && cfg.HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION) {
-    const longConfirmationVotes = [voters.fundingContra, voters.oiDivergence].filter(
-      (vote): vote is 'UP' | 'DOWN' | 'neutral' => vote !== undefined,
-    );
-    if (longConfirmationVotes.length > 0 && !longConfirmationVotes.includes('UP')) {
-      logger.debug('[hl-momentum] long HL confirmation missing', {
+  if (!cfg.HL_MOMENTUM_CONTRARIAN_ENABLED) {
+    if (
+      (momentumDirection === 'LONG' && voters.fundingContra === 'DOWN') ||
+      (momentumDirection === 'SHORT' && voters.fundingContra === 'UP')
+    ) {
+      logger.debug('[hl-momentum] funding contra veto', {
         symbol: hlSymbol,
-        fundingContraVote: voters.fundingContra ?? null,
-        oiDivergenceVote: voters.oiDivergence ?? null,
+        momentumDirection,
+        tradeDirection,
+        fundingApr,
       });
-      logDecision(false, 'long_hl_confirmation_missing');
+      logDecision(false, 'funding_adverse');
       return null;
+    }
+    if (
+      (momentumDirection === 'LONG' && voters.oiDivergence === 'DOWN') ||
+      (momentumDirection === 'SHORT' && voters.oiDivergence === 'UP')
+    ) {
+      logger.debug('[hl-momentum] OI divergence veto', {
+        symbol: hlSymbol,
+        momentumDirection,
+        tradeDirection,
+        oiPctChange,
+        pricePctChange,
+      });
+      logDecision(false, 'oi_divergence_veto');
+      return null;
+    }
+    if (momentumDirection === 'LONG' && cfg.HL_MOMENTUM_LONG_REQUIRE_HL_CONFIRMATION) {
+      const longConfirmationVotes = [voters.fundingContra, voters.oiDivergence].filter(
+        (vote): vote is 'UP' | 'DOWN' | 'neutral' => vote !== undefined,
+      );
+      if (longConfirmationVotes.length > 0 && !longConfirmationVotes.includes('UP')) {
+        logger.debug('[hl-momentum] long HL confirmation missing', {
+          symbol: hlSymbol,
+          momentumDirection,
+          tradeDirection,
+          fundingContraVote: voters.fundingContra ?? null,
+          oiDivergenceVote: voters.oiDivergence ?? null,
+        });
+        logDecision(false, 'long_hl_confirmation_missing');
+        return null;
+      }
     }
   }
 
@@ -327,35 +353,35 @@ export async function scanHlMomentum(
   // overextended, reducing the chance of buying/selling exhaustion peaks or troughs.
   // RSI ≥ overbought on LONG = momentum indicator showing overheated buying.
   // RSI ≤ oversold on SHORT = momentum indicator showing washed-out selling.
-  // VWAP distance > threshold in trade direction = price stretched too far from fair value.
+  // VWAP distance > threshold in momentum direction = price stretched too far from fair value.
   if (cfg.HL_MOMENTUM_ANTI_CHASE_ENABLED) {
     if (rsi !== null) {
-      if (direction === 'LONG' && rsi >= cfg.HL_MOMENTUM_RSI_OVERBOUGHT) {
+      if (momentumDirection === 'LONG' && rsi >= cfg.HL_MOMENTUM_RSI_OVERBOUGHT) {
         logger.debug('[hl-momentum] anti-chase: RSI overbought on LONG', {
-          symbol: hlSymbol, direction, rsi: rsi.toFixed(1), threshold: cfg.HL_MOMENTUM_RSI_OVERBOUGHT,
+          symbol: hlSymbol, momentumDirection, tradeDirection, rsi: rsi.toFixed(1), threshold: cfg.HL_MOMENTUM_RSI_OVERBOUGHT,
         });
         logDecision(false, 'anti_chase_rsi', rsi.toFixed(1));
         return null;
       }
-      if (direction === 'SHORT' && rsi <= cfg.HL_MOMENTUM_RSI_OVERSOLD) {
+      if (momentumDirection === 'SHORT' && rsi <= cfg.HL_MOMENTUM_RSI_OVERSOLD) {
         logger.debug('[hl-momentum] anti-chase: RSI oversold on SHORT', {
-          symbol: hlSymbol, direction, rsi: rsi.toFixed(1), threshold: cfg.HL_MOMENTUM_RSI_OVERSOLD,
+          symbol: hlSymbol, momentumDirection, tradeDirection, rsi: rsi.toFixed(1), threshold: cfg.HL_MOMENTUM_RSI_OVERSOLD,
         });
         logDecision(false, 'anti_chase_rsi', rsi.toFixed(1));
         return null;
       }
     }
     if (vwapDistPct !== null) {
-      if (direction === 'LONG' && vwapDistPct > cfg.HL_MOMENTUM_VWAP_MAX_DIST_PCT) {
+      if (momentumDirection === 'LONG' && vwapDistPct > cfg.HL_MOMENTUM_VWAP_MAX_DIST_PCT) {
         logger.debug('[hl-momentum] anti-chase: price too far above VWAP', {
-          symbol: hlSymbol, direction, vwapDistPct: vwapDistPct.toFixed(2), threshold: cfg.HL_MOMENTUM_VWAP_MAX_DIST_PCT,
+          symbol: hlSymbol, momentumDirection, tradeDirection, vwapDistPct: vwapDistPct.toFixed(2), threshold: cfg.HL_MOMENTUM_VWAP_MAX_DIST_PCT,
         });
         logDecision(false, 'anti_chase_vwap', vwapDistPct.toFixed(2));
         return null;
       }
-      if (direction === 'SHORT' && vwapDistPct < -cfg.HL_MOMENTUM_VWAP_MAX_DIST_PCT) {
+      if (momentumDirection === 'SHORT' && vwapDistPct < -cfg.HL_MOMENTUM_VWAP_MAX_DIST_PCT) {
         logger.debug('[hl-momentum] anti-chase: price too far below VWAP', {
-          symbol: hlSymbol, direction, vwapDistPct: vwapDistPct.toFixed(2), threshold: cfg.HL_MOMENTUM_VWAP_MAX_DIST_PCT,
+          symbol: hlSymbol, momentumDirection, tradeDirection, vwapDistPct: vwapDistPct.toFixed(2), threshold: cfg.HL_MOMENTUM_VWAP_MAX_DIST_PCT,
         });
         logDecision(false, 'anti_chase_vwap', vwapDistPct.toFixed(2));
         return null;
@@ -368,7 +394,7 @@ export async function scanHlMomentum(
   // Gate enforcement is conditional on the flag.
   {
     const atrResult = computeATRFromCandles(indicatorCandles, cfg.FUTURES_ATR_PERIOD);
-    breakoutRetestMatch = detectBreakoutRetestHold(indicatorCandles, direction, {
+    breakoutRetestMatch = detectBreakoutRetestHold(indicatorCandles, momentumDirection, {
       lookbackBars: cfg.HL_MOMENTUM_BREAKOUT_LOOKBACK_BARS,
       freshBars: cfg.HL_MOMENTUM_BREAKOUT_FRESH_BARS,
       retestPct: cfg.HL_MOMENTUM_RETEST_TOL_PCT,
@@ -378,7 +404,8 @@ export async function scanHlMomentum(
     if (cfg.HL_MOMENTUM_REQUIRE_BREAKOUT_RETEST && breakoutRetestMatch === null) {
       logger.debug('[hl-momentum] breakout-retest-hold pattern not found', {
         symbol: hlSymbol,
-        direction,
+        momentumDirection,
+        tradeDirection,
         lookbackBars: cfg.HL_MOMENTUM_BREAKOUT_LOOKBACK_BARS,
         freshBars: cfg.HL_MOMENTUM_BREAKOUT_FRESH_BARS,
       });
@@ -396,12 +423,12 @@ export async function scanHlMomentum(
     );
 
     if (rsi !== null) {
-      if (direction === 'LONG' && rsi >= rsiLongBand) softConfirmationReasons.push('rsi');
-      if (direction === 'SHORT' && rsi <= rsiShortBand) softConfirmationReasons.push('rsi');
+      if (tradeDirection === 'LONG' && rsi >= rsiLongBand) softConfirmationReasons.push('rsi');
+      if (tradeDirection === 'SHORT' && rsi <= rsiShortBand) softConfirmationReasons.push('rsi');
     }
     if (vwapDistPct !== null) {
-      if (direction === 'LONG' && vwapDistPct >= vwapBand) softConfirmationReasons.push('vwap');
-      if (direction === 'SHORT' && vwapDistPct <= -vwapBand) softConfirmationReasons.push('vwap');
+      if (tradeDirection === 'LONG' && vwapDistPct >= vwapBand) softConfirmationReasons.push('vwap');
+      if (tradeDirection === 'SHORT' && vwapDistPct <= -vwapBand) softConfirmationReasons.push('vwap');
     }
     softConfirmationRequired = softConfirmationReasons.length > 0;
   }
@@ -422,7 +449,7 @@ export async function scanHlMomentum(
     if (ema4hFast && ema4hSlow) {
       const fastLast = ema4hFast[ema4hFast.length - 1]!;
       const slowLast = ema4hSlow[ema4hSlow.length - 1]!;
-      fourHBiasOk = direction === 'LONG' ? fastLast > slowLast : fastLast < slowLast;
+      fourHBiasOk = momentumDirection === 'LONG' ? fastLast > slowLast : fastLast < slowLast;
       fourHSpreadPct = ((fastLast - slowLast) / slowLast) * 100;
 
       if (isWeighted) {
@@ -435,7 +462,8 @@ export async function scanHlMomentum(
           fourHBonus = -2;
           logger.debug('[hl-momentum] weighted mode: 4h headwind penalty applied', {
             symbol: hlSymbol,
-            direction,
+            momentumDirection,
+            tradeDirection,
             spreadPct: fourHSpreadPct.toFixed(3),
             neutralBandPct: cfg.HL_MOMENTUM_4H_NEUTRAL_BAND_PCT,
           });
@@ -443,7 +471,8 @@ export async function scanHlMomentum(
       } else if (cfg.HL_MOMENTUM_MTF_4H_GATE_ENABLED && !fourHBiasOk) {
         logger.debug('[hl-momentum] 4h bias mismatch', {
           symbol: hlSymbol,
-          direction,
+          momentumDirection,
+          tradeDirection,
           ema4hFast: fastLast.toFixed(4),
           ema4hSlow: slowLast.toFixed(4),
         });
@@ -467,7 +496,7 @@ export async function scanHlMomentum(
     });
     const macd1h = computeMACDFromCandles(oneHCandles, 12, 26, 9);
     if (macd1h) {
-      oneHMacdOk = direction === 'LONG'
+      oneHMacdOk = momentumDirection === 'LONG'
         ? macd1h.macdLine > macd1h.signalLine
         : macd1h.macdLine < macd1h.signalLine;
 
@@ -476,7 +505,8 @@ export async function scanHlMomentum(
       } else if (cfg.HL_MOMENTUM_MTF_1H_GATE_ENABLED && !oneHMacdOk) {
         logger.debug('[hl-momentum] 1h MACD mismatch', {
           symbol: hlSymbol,
-          direction,
+          momentumDirection,
+          tradeDirection,
           macdLine: macd1h.macdLine.toFixed(6),
           signalLine: macd1h.signalLine.toFixed(6),
         });
@@ -498,7 +528,8 @@ export async function scanHlMomentum(
   if (isWeighted && totalScore < cfg.HL_MOMENTUM_MIN_TOTAL_SCORE) {
     logger.debug('[hl-momentum] weighted mode: totalScore below threshold', {
       symbol: hlSymbol,
-      direction,
+      momentumDirection,
+      tradeDirection,
       absScore,
       mtfBonus,
       totalScore,
@@ -519,9 +550,9 @@ export async function scanHlMomentum(
   }
 
   // Gate: per-side momentum cooldown (prevents re-entering the same thesis immediately).
-  const mCooldown = await redis.get(momentumCooldownKey(hlSymbol, direction));
+  const mCooldown = await redis.get(momentumCooldownKey(hlSymbol, tradeDirection));
   if (mCooldown) {
-    logger.debug('[hl-momentum] momentum cooldown active', { symbol: hlSymbol, direction });
+    logger.debug('[hl-momentum] momentum cooldown active', { symbol: hlSymbol, momentumDirection, tradeDirection });
     logDecision(false, 'momentum_cooldown');
     return null;
   }
@@ -533,14 +564,14 @@ export async function scanHlMomentum(
     hasOpenPosition(redis, hlSymbol, 'SHORT'),
   ]);
   if (longOpen || shortOpen) {
-    logger.debug('[hl-momentum] position already open', { symbol: hlSymbol, direction });
+    logger.debug('[hl-momentum] position already open', { symbol: hlSymbol, momentumDirection, tradeDirection });
     logDecision(false, 'position_already_open');
     return null;
   }
 
   if (cfg.HL_MOMENTUM_SOFT_CONFIRM_ENABLED) {
     softConfirmationAnchorOpenTime = latestClosedPrimaryCandle.openTime;
-    const confirmKey = momentumStretchConfirmationKey(hlSymbol, direction);
+    const confirmKey = momentumStretchConfirmationKey(hlSymbol, tradeDirection);
     const pendingRaw = await redis.get(confirmKey);
     const pendingOpenTime = pendingRaw ? parseInt(pendingRaw, 10) : NaN;
     const hasPending = Number.isFinite(pendingOpenTime);
@@ -559,7 +590,8 @@ export async function scanHlMomentum(
       }
       logger.debug('[hl-momentum] stretch confirmation pending', {
         symbol: hlSymbol,
-        direction,
+        momentumDirection,
+        tradeDirection,
         barOpenTime: latestClosedPrimaryCandle.openTime,
         reasons: softConfirmationReasons,
       });
@@ -579,7 +611,7 @@ export async function scanHlMomentum(
     kind: 'hl_momentum_signal',
     source: 'hl-momentum',
     symbol: hlSymbol,
-    direction,
+    direction: tradeDirection,
     wouldBlock: !cfg.HL_MOMENTUM_ENABLED,
     metricValue: isWeighted ? totalScore : score,
     payload: {
@@ -587,6 +619,9 @@ export async function scanHlMomentum(
       adx,
       voters,
       voterCount,
+      momentumDirection,
+      tradeDirection,
+      contrarianEnabled: cfg.HL_MOMENTUM_CONTRARIAN_ENABLED,
       binancePrice: tick.price,
       candleCount: primaryCandles.length,
       fourHBiasOk,
@@ -615,7 +650,8 @@ export async function scanHlMomentum(
       isWeighted ? '[hl-momentum] shadow signal (weighted dark)' : '[hl-momentum] shadow signal (dark)',
       {
         symbol: hlSymbol,
-        direction,
+        momentumDirection,
+        tradeDirection,
         score,
         adx: adx.toFixed(1),
         voters,
@@ -640,7 +676,8 @@ export async function scanHlMomentum(
 
   logger.info('[hl-momentum] signal', {
     symbol: hlSymbol,
-    direction,
+    momentumDirection,
+    tradeDirection,
     score,
     scoringMode: cfg.HL_MOMENTUM_MTF_SCORING_MODE,
     ...(isWeighted ? { mtfBonus, totalScore } : {}),
@@ -663,13 +700,13 @@ export async function scanHlMomentum(
 
   return {
     marketId: hlSymbol,
-    question: `HL momentum ${direction} ${hlSymbol}`,
-    direction,
+    question: `HL momentum ${tradeDirection} ${hlSymbol}`,
+    direction: tradeDirection,
     stakeUsd,
     edgeMagnitude,
     outcomePrice: tick.price,
     sourcedFrom: 'hl-momentum',
-    reasoning: `HL trend scorer (15m): score=${score.toString()}, ADX=${adx.toFixed(1)}, voters=${JSON.stringify(voters)}${reasoningSuffix}`,
+    reasoning: `HL trend scorer (15m): momentum=${momentumDirection}, trade=${tradeDirection}, contrarian=${cfg.HL_MOMENTUM_CONTRARIAN_ENABLED ? 'true' : 'false'}, score=${score.toString()}, ADX=${adx.toFixed(1)}, voters=${JSON.stringify(voters)}${reasoningSuffix}`,
     isFutures: true,
     source: 'hl-momentum',
     eventTs,
