@@ -1276,6 +1276,8 @@ const envSchema = z.object({
   HL_MOMENTUM_MIN_SCORE: z.coerce.number().int().min(0).max(8).optional().default(6),
   // Minimum ADX to require a trending regime before acting on the direction vote.
   HL_MOMENTUM_MIN_ADX: z.coerce.number().min(0).optional().default(20),
+  // Contrarian mode: validate the momentum setup as usual, then execute the opposite side.
+  HL_MOMENTUM_CONTRARIAN_ENABLED: boolFromEnv.optional().default(false),
   // Per-side cooldown in seconds after a momentum entry (prevents rapid re-entry on same side).
   HL_MOMENTUM_COOLDOWN_SEC: z.coerce.number().int().min(60).optional().default(600),
   // Short cooldown for transient executor skips (stake_below_hl_minimum) — price fluctuation
