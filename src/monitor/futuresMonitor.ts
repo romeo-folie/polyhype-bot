@@ -346,6 +346,17 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           usingMemeAtr = true;
         }
 
+        // Contrarian arm override — non-meme hl-momentum only. Meme positions keep their
+        // ATR-derived tpPct; the snap-back logic doesn't apply to high-volatility meme coins
+        // where the ATR arm is already the right reference point.
+        if (
+          cfg.HL_MOMENTUM_CONTRARIAN_ENABLED &&
+          ledgerPosForAtr?.sourcedFrom === 'hl-momentum' &&
+          !usingMemeAtr
+        ) {
+          tpPct = cfg.HL_MOMENTUM_CONTRARIAN_TAKE_PROFIT_PCT;
+        }
+
         // Global ATR overlay is calibrated for 1m crypto-arb scalps (SL floor 1%,
         // TP floor 2%). Applying it to hl-momentum 15m swing positions produces
         // absurdly tight stops that SL every entry on intraday noise (burned on
