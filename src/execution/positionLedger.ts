@@ -101,6 +101,9 @@ export interface Position {
   priceZone?: 1 | 2 | 3 | 4 | 5 | undefined;
   /** Entry-time funding APR (%) for hl-funding positions — used for sign-flip exit */
   entryFundingApr?: number | undefined;
+  /** True when opened in contrarian (mean-reversion) mode — keyed at entry so the monitor
+   *  can skip TA-fade re-eval independently of later config changes. */
+  isContrarian?: boolean | undefined;
 }
 
 function canonicalDirection(direction: Position['direction']): Position['direction'] {
@@ -229,6 +232,7 @@ export async function recordPosition(redis: Redis, positionIn: Position): Promis
     memeAtrTpPct: position.memeAtrTpPct !== undefined ? String(position.memeAtrTpPct) : '',
     priceZone: position.priceZone !== undefined ? String(position.priceZone) : '',
     entryFundingApr: position.entryFundingApr !== undefined ? String(position.entryFundingApr) : '',
+    isContrarian: position.isContrarian ? 'true' : '',
   });
 
   // Add to sorted index (score = openedAt ms for chronological retrieval)
@@ -481,6 +485,7 @@ function deserialisePosition(raw: Record<string, string>): Position {
   }
   if (raw.entryFundingApr !== undefined && raw.entryFundingApr !== '')
     pos.entryFundingApr = parseFloat(raw.entryFundingApr);
+  if (raw.isContrarian === 'true') pos.isContrarian = true;
 
   return pos;
 }

@@ -1122,5 +1122,35 @@ describe('futuresMonitor', () => {
 
       expect(mockClosePosition).not.toHaveBeenCalled();
     });
+
+    it('does NOT fire re-eval for contrarian hl-momentum position — opposing momentum is the entry condition', async () => {
+      loadConfigMock.mockReturnValue(fadeCfg);
+      // -2.5% ROE: flat/losing (priceChangePct < 0 satisfies re-eval guard), but above
+      // HL_MOMENTUM_STOP_LOSS_PCT (-5%) so SL does NOT fire — only re-eval would.
+      // szi=100, entryPx=1, positionValue=100, margin=20 → leverage=5x
+      // unrealizedPnl=-0.5 → priceChangePct=-0.5%, roePct=-2.5%
+      mockGetOpenPositions.mockResolvedValue([
+        { symbol: 'ETH', position: { szi: '100', entryPx: '1', unrealizedPnl: '-0.5', marginUsed: '20' } },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([
+        {
+          marketId: 'ETH',
+          openedAt: oldEnough(),
+          isFutures: true,
+          direction: 'LONG',
+          question: 'ETH perpetual',
+          entryPrice: 1,
+          stakeUsd: 20,
+          sourcedFrom: 'hl-momentum',
+          isContrarian: true,
+        },
+      ]);
+      // Confluence still DOWN — same signal that triggered the contrarian LONG entry
+      mockScoreConfluence.mockResolvedValue({ direction: 'DOWN', score: 5, signals: {} });
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
   });
 });

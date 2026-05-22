@@ -3171,5 +3171,6 @@ async function finalizeSuccessfulExecution(
     memeAtrTpPct: result.memeAtrTpPct,
     priceZone: result.signal.priceZone,
     entryFundingApr: result.signal.entryFundingApr,
+    isContrarian: result.signal.isContrarian,
   });
 }
