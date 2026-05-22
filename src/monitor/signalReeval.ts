@@ -64,7 +64,14 @@ export async function reEvaluatePositions(
   let errors = 0;
 
   for (const position of positions) {
-    // 1. Category Guard: Only re-evaluate positions that belong to the same domain 
+    // Copytrades are entered on whale intent, not LLM edge — reeval is irrelevant
+    // and counterproductive. TP/SL and whale-exit handle these positions.
+    if (position.sourcedFrom?.startsWith('copytrade:')) {
+      held++;
+      continue;
+    }
+
+    // 1. Category Guard: Only re-evaluate positions that belong to the same domain
     // as the news items being processed. This prevents Geopolitical news from
     // accidentally triggering exits on Sports or Entertainment trades (e.g. via copytrading).
     const positionCategory = inferCategory(position.question);

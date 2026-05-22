@@ -92,6 +92,21 @@ describe('keyword relevance matching', () => {
   });
 });
 
+// ── Copytrade guard tests ────────────────────────────────────────────────────
+
+describe('copytrade guard logic', () => {
+  it('identifies copytrade positions by sourcedFrom prefix', () => {
+    const isCopytrade = (sourcedFrom: string | undefined) =>
+      sourcedFrom?.startsWith('copytrade:') ?? false;
+
+    expect(isCopytrade('copytrade:0xabc123')).toBe(true);
+    expect(isCopytrade('copytrade:')).toBe(true);
+    expect(isCopytrade('osint')).toBe(false);
+    expect(isCopytrade('sports:nba:game1')).toBe(false);
+    expect(isCopytrade(undefined)).toBe(false);
+  });
+});
+
 // ── ITM guard tests ─────────────────────────────────────────────────────────
 
 describe('ITM guard logic', () => {
