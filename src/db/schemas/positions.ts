@@ -57,8 +57,11 @@ export const positionRowSchema = z.object({
   leverage:                         z.number().optional(),
   entryAtr:                         z.number().optional(),
   entryAtrPct:                      z.number().optional(),
+  memeAtrSlPct:                     z.number().optional(),
+  memeAtrTpPct:                     z.number().optional(),
   priceZone:                        z.number().int().min(1).max(5).optional(),
   entryFundingApr:                  z.number().optional(),
+  isContrarian:                     z.boolean().optional(),
   // Consensus snapshot
   consensusProbability:             z.number().optional(),
   consensusStddev:                  z.number().optional(),
