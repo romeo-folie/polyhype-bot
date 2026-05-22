@@ -130,10 +130,14 @@ export async function notifyTradeExecuted(
     ? `\n<b>Edge:</b> ${edgePct}%\n`
     : `\n<b>Edge:</b> ${edgePct}%  |  <b>Our P:</b> ${((signal.consensusProbability ?? 0.5) * 100).toFixed(1)}% vs market ${(signal.outcomePrice * 100).toFixed(1)}%\n`;
 
+  const directionLabel = signal.isContrarian
+    ? `${signal.direction} ↩️ contrarian`
+    : signal.direction;
+
   const text =
     `🟢 <b>Trade Executed</b>\n\n` +
     `<b>Market:</b> ${escapeHtml(signal.question)}\n` +
-    `<b>Direction:</b> ${signal.direction}  |  <b>Venue:</b> ${venue}\n` +
+    `<b>Direction:</b> ${directionLabel}  |  <b>Venue:</b> ${venue}\n` +
     `<b>Entry price:</b> ${isFutures ? fmtFiat(entryPrice) : fmtProb(signal.outcomePrice)}\n` +
     `<b>Stake:</b> $${signal.stakeUsd.toFixed(2)} USDC\n` +
     sharesLine +
@@ -242,10 +246,14 @@ export async function notifyTakeProfitExecuted(opts: {
   const entryFmt = isFutures ? fmtFiat(position.entryPrice) : fmtProb(position.entryPrice);
   const exitFmt = isFutures ? fmtFiat(currentPrice) : fmtProb(currentPrice);
 
+  const closedDirectionLabel = position.isContrarian
+    ? `${position.direction} ↩️ contrarian`
+    : position.direction;
+
   const text =
     `💰 <b>Position Closed</b>\n\n` +
     `<b>Market:</b> ${escapeHtml(position.question)}\n` +
-    `<b>Direction:</b> ${position.direction}  |  <b>Venue:</b> ${venue}\n` +
+    `<b>Direction:</b> ${closedDirectionLabel}  |  <b>Venue:</b> ${venue}\n` +
     `<b>Entry:</b> ${entryFmt}  →  <b>Exit:</b> ${exitFmt}\n` +
     sharesLine +
     `<b>Stake:</b> $${position.stakeUsd.toFixed(2)} USDC\n` +

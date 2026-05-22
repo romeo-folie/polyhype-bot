@@ -254,5 +254,46 @@ describe('Telegram notifications', () => {
       expect(body.text).toContain('reversal below entry');
       expect(body.text).not.toContain('gains locked in');
     });
+
+    it('appends contrarian tag on close when position.isContrarian is true', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+      await notifyTakeProfitExecuted({
+        position: makePosition({ direction: 'LONG', isFutures: true, executionVenue: 'hyperliquid', isContrarian: true }),
+        currentPrice: 2100,
+        returnPct: 5,
+        reason: 'futures_tp',
+      });
+
+      const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(opts.body as string) as { text: string };
+      expect(body.text).toContain('LONG ↩️ contrarian');
+    });
+  });
+
+  describe('notifyTradeExecuted contrarian label', () => {
+    it('appends contrarian tag on entry when signal.isContrarian is true', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+      await notifyTradeExecuted(
+        makeSignal({ direction: 'LONG', isFutures: true, isContrarian: true }),
+        '0xhl',
+        { venue: 'hyperliquid' },
+      );
+
+      const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(opts.body as string) as { text: string };
+      expect(body.text).toContain('LONG ↩️ contrarian');
+    });
+
+    it('does NOT append contrarian tag when isContrarian is false', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+      await notifyTradeExecuted(makeSignal({ direction: 'LONG' }), '0xhl');
+
+      const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(opts.body as string) as { text: string };
+      expect(body.text).not.toContain('contrarian');
+    });
   });
 });
