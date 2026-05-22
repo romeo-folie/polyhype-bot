@@ -317,7 +317,9 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         // Per-source override: hl-momentum uses wider 15m-appropriate SL/TP.
         if (ledgerPosForAtr?.sourcedFrom === 'hl-momentum') {
           slPct = -cfg.HL_MOMENTUM_STOP_LOSS_PCT;
-          tpPct = cfg.HL_MOMENTUM_TAKE_PROFIT_PCT;
+          tpPct = cfg.HL_MOMENTUM_CONTRARIAN_ENABLED
+            ? cfg.HL_MOMENTUM_CONTRARIAN_TAKE_PROFIT_PCT
+            : cfg.HL_MOMENTUM_TAKE_PROFIT_PCT;
         }
         // hl-funding uses its own fixed SL/TP — fading momentum needs wider stops.
         if (ledgerPosForAtr?.sourcedFrom === 'hl-funding') {

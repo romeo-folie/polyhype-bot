@@ -1278,6 +1278,9 @@ const envSchema = z.object({
   HL_MOMENTUM_MIN_ADX: z.coerce.number().min(0).optional().default(20),
   // Contrarian mode: validate the momentum setup as usual, then execute the opposite side.
   HL_MOMENTUM_CONTRARIAN_ENABLED: boolFromEnv.optional().default(false),
+  // When contrarian mode is on, arm the trailing stop earlier (mean-reversion snap-back is
+  // front-loaded; waiting for the standard TP arm leaves too much on the table).
+  HL_MOMENTUM_CONTRARIAN_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(10),
   // Per-side cooldown in seconds after a momentum entry (prevents rapid re-entry on same side).
   HL_MOMENTUM_COOLDOWN_SEC: z.coerce.number().int().min(60).optional().default(600),
   // Short cooldown for transient executor skips (stake_below_hl_minimum) — price fluctuation
