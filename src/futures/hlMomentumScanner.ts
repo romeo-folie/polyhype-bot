@@ -711,5 +711,6 @@ export async function scanHlMomentum(
     source: 'hl-momentum',
     eventTs,
     decisionId,
+    isContrarian: cfg.HL_MOMENTUM_CONTRARIAN_ENABLED || undefined,
   };
 }

@@ -714,10 +714,9 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           // skip this TA-fade check so a short-term blip doesn't cut a live winner.
           // Contrarian hl-momentum positions are exempt: momentum opposing our direction
           // is the entry condition (not a reversal), so the check fires spuriously every
-          // time after the min-age window.
-          const isContrarianMomentum =
-            cfg.HL_MOMENTUM_CONTRARIAN_ENABLED &&
-            ledgerPosForAtr?.sourcedFrom === 'hl-momentum';
+          // time after the min-age window. Keyed off the per-position flag (set at entry)
+          // so toggling the global config mid-trade doesn't affect open positions.
+          const isContrarianMomentum = ledgerPosForAtr?.isContrarian === true;
           if (!shouldExit && cfg.FUTURES_EXIT_ON_SIGNAL_FADE && priceChangePct <= 0 && !isContrarianMomentum) {
             const ageSec = (Date.now() - openedAt) / 1000;
             const lastCheck = lastRevalCheck.get(symbol) ?? 0;

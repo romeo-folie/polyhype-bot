@@ -79,6 +79,9 @@ export interface TradeSignal {
   source?: 'osint' | 'crypto-arb' | 'futures' | 'copytrade' | 'spot' | 'sports' | 'clob-flow' | 'arb' | 'near-zero-arb' | 'oracle-lag' | 'longshot-bias' | 'correlation-arb' | 'hl-momentum' | 'hl-funding' | 'weather' | 'fv-scanner';
   /** Entry-time funding APR (%) — persisted for hl-funding sign-flip exit comparison */
   entryFundingApr?: number | undefined;
+  /** True when the position was entered in contrarian (mean-reversion) mode — persisted so
+   *  the monitor can skip TA-fade re-eval regardless of later config changes. */
+  isContrarian?: boolean | undefined;
   /** Origin event timestamp (e.g. Binance kline event time) — used for end-to-end latency tracking */
   eventTs?: number | undefined;
   /** Operational metadata for alerts/telemetry */

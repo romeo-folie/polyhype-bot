@@ -1124,11 +1124,7 @@ describe('futuresMonitor', () => {
     });
 
     it('does NOT fire re-eval for contrarian hl-momentum position — opposing momentum is the entry condition', async () => {
-      loadConfigMock.mockReturnValue({
-        ...fadeCfg,
-        HL_MOMENTUM_CONTRARIAN_ENABLED: true,
-        HL_MOMENTUM_CONTRARIAN_TAKE_PROFIT_PCT: 10,
-      });
+      loadConfigMock.mockReturnValue(fadeCfg);
       // -2.5% ROE: flat/losing (priceChangePct < 0 satisfies re-eval guard), but above
       // HL_MOMENTUM_STOP_LOSS_PCT (-5%) so SL does NOT fire — only re-eval would.
       // szi=100, entryPx=1, positionValue=100, margin=20 → leverage=5x
@@ -1146,6 +1142,7 @@ describe('futuresMonitor', () => {
           entryPrice: 1,
           stakeUsd: 20,
           sourcedFrom: 'hl-momentum',
+          isContrarian: true,
         },
       ]);
       // Confluence still DOWN — same signal that triggered the contrarian LONG entry
