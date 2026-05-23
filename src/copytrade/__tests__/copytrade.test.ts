@@ -845,6 +845,42 @@ describe('runCopytrade', () => {
     expect(mockNotify).not.toHaveBeenCalled();
   });
 
+  it('blocks Team A vs Team B: O/U sports markets that pass keyword scope gate', async () => {
+    // "Team A vs. Team B: O/U 2.5" questions contain no obvious sports keyword but
+    // inferCategory catches them via the vs+O/U pattern (returns 'sports'). However
+    // their descriptions often mention macro terms (e.g. "total points") that can
+    // pass matchesCategory. The category gate must block them when sports is out of scope.
+    // We simulate a macro keyword hit by setting scope=['macro'] and giving the
+    // market a description that contains 'rate' to trigger the first keyword pass.
+    configOverride = {
+      ...configOverride,
+      COPYTRADE_MARKET_SCOPE: ['macro'],
+      COPYTRADE_NOTIFY_ONLY_CATEGORIES: [],
+      COPYTRADE_SCOPE_TAG_FALLBACK: false,
+    } as any;
+
+    const question = 'Denver Nuggets vs. Minnesota Timberwolves: O/U 215.5';
+    const trade = makeTrade({ title: question, price: 0.5, side: 'BUY', outcomeIndex: 0 });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({
+        question,
+        // description contains a macro keyword so the first scope gate passes
+        description: 'Total points scored; the current over rate favors the over.',
+        outcomePrices: '["0.5","0.5"]',
+      }),
+    );
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
+    expect(result.signals).toHaveLength(0);
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
   it('polls multiple wallets in parallel', async () => {
     configOverride = { ...configOverride, COPYTRADE_WALLETS: '0x1,0x2,0x3' };
     mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [] } as Response);
