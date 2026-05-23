@@ -1201,6 +1201,30 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         signalCategory = 'sports-soccer';
       }
 
+      // Category-level scope gate: the keyword-based matchesCategory() pass above
+      // is intentionally fuzzy (it must match obscure phrasing) and can false-
+      // positive on sports markets that mention broad macro/geo terms ("win rate",
+      // "war chest", "summit"). Once we have a reliable inferred category we apply
+      // a second, stricter check: the inferred category must match an allowed scope
+      // by exact name or by prefix (e.g. scope 'sports' covers 'sports-soccer').
+      // 'all' in the scope list bypasses this gate entirely.
+      if (!cfg.COPYTRADE_MARKET_SCOPE.includes('all')) {
+        const categoryAllowed = cfg.COPYTRADE_MARKET_SCOPE.some(
+          (s) => signalCategory === s || signalCategory.startsWith(`${s}-`),
+        );
+        if (!categoryAllowed) {
+          logger.info('[copytrade] skipped market — inferred category outside scope', {
+            wallet,
+            question: signal.question,
+            signalCategory,
+            scope: cfg.COPYTRADE_MARKET_SCOPE,
+          });
+          await recordCopytradeFilter(redis, 'category_scope_mismatch').catch(() => {});
+          await markDedup();
+          continue;
+        }
+      }
+
       // Strict-categorization gate: refuse to enter trades whose category is
       // unknown after both inferCategory and the Gamma-tag refinement above.
       // Previously these silently bucketed as 'geopolitical' and bypassed
