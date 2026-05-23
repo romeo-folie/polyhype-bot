@@ -1278,6 +1278,10 @@ const envSchema = z.object({
   HL_MOMENTUM_MIN_ADX: z.coerce.number().min(0).optional().default(20),
   // Contrarian mode: validate the momentum setup as usual, then execute the opposite side.
   HL_MOMENTUM_CONTRARIAN_ENABLED: boolFromEnv.optional().default(false),
+  // When ADX is at or above this ceiling, momentum is genuinely trending and contrarian is
+  // suppressed per-signal even when CONTRARIAN_ENABLED=true. Data shows ADX 40-50 bucket
+  // has 60% WR / 25% SL rate trading with momentum vs ~47% WR trading against it.
+  HL_MOMENTUM_CONTRARIAN_ADX_CEILING: z.coerce.number().min(20).optional().default(40),
   // When contrarian mode is on, arm the trailing stop earlier (mean-reversion snap-back is
   // front-loaded; waiting for the standard TP arm leaves too much on the table).
   HL_MOMENTUM_CONTRARIAN_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(10),

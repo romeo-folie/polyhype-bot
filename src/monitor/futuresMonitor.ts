@@ -346,11 +346,11 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           usingMemeAtr = true;
         }
 
-        // Contrarian arm override — non-meme hl-momentum only. Meme positions keep their
-        // ATR-derived tpPct; the snap-back logic doesn't apply to high-volatility meme coins
-        // where the ATR arm is already the right reference point.
+        // Contrarian arm override — non-meme hl-momentum only. Uses the per-position flag
+        // (set at entry) so toggling the global config or ADX ceiling mid-trade doesn't
+        // reprice open positions. Meme positions keep their ATR-derived tpPct.
         if (
-          cfg.HL_MOMENTUM_CONTRARIAN_ENABLED &&
+          ledgerPosForAtr?.isContrarian === true &&
           ledgerPosForAtr?.sourcedFrom === 'hl-momentum' &&
           !usingMemeAtr
         ) {
