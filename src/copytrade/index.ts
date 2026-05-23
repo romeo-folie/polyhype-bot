@@ -455,6 +455,15 @@ const SCOPE_TAG_ALIASES: Record<string, string[]> = {
   geopolitical: ['geopolitics', 'middle-east', 'russia', 'ukraine', 'china', 'israel', 'iran'],
 };
 
+// Maps scope labels (as used in COPYTRADE_MARKET_SCOPE) to additional inferCategory
+// labels that the scope should cover. Needed where inferCategory intentionally
+// returns a sub-type that doesn't share the scope's prefix — e.g. 'crypto-updown'
+// is a crypto market that resolves from the 'crypto-regulatory' scope but uses a
+// distinct stale-exit bucket, so it won't match the default exact/prefix check.
+const SCOPE_INFERRED_CATEGORY_ALIASES: Record<string, string[]> = {
+  'crypto-regulatory': ['crypto-updown'],
+};
+
 // Soccer-specific Gamma tag slugs. Used by isSoccerMarket() to detect markets
 // the venue itself classifies as soccer, regardless of question wording. Keeps
 // the soccer notify-only filter robust against obscure leagues (Saudi Pro,
@@ -1199,6 +1208,35 @@ export async function runCopytrade(redis: Redis, bankrollUsd: number): Promise<C
         isSoccerMarket(signal.question, market.description, marketTagSlugs)
       ) {
         signalCategory = 'sports-soccer';
+      }
+
+      // Category-level scope gate: the keyword-based matchesCategory() pass above
+      // is intentionally fuzzy (it must match obscure phrasing) and can false-
+      // positive on sports markets that mention broad macro/geo terms ("win rate",
+      // "war chest", "summit"). Once we have a reliable inferred category we apply
+      // a second, stricter check: the inferred category must match an allowed scope
+      // by exact name, by prefix (e.g. scope 'sports' covers 'sports-soccer'), or
+      // via SCOPE_INFERRED_CATEGORY_ALIASES (e.g. 'crypto-regulatory' covers
+      // 'crypto-updown' which uses a different stale-exit bucket but is the same
+      // scope intent). 'all' in the scope list bypasses this gate entirely.
+      if (!cfg.COPYTRADE_MARKET_SCOPE.includes('all')) {
+        const categoryAllowed = cfg.COPYTRADE_MARKET_SCOPE.some(
+          (s) =>
+            signalCategory === s ||
+            signalCategory.startsWith(`${s}-`) ||
+            (SCOPE_INFERRED_CATEGORY_ALIASES[s] ?? []).includes(signalCategory),
+        );
+        if (!categoryAllowed) {
+          logger.info('[copytrade] skipped market — inferred category outside scope', {
+            wallet,
+            question: signal.question,
+            signalCategory,
+            scope: cfg.COPYTRADE_MARKET_SCOPE,
+          });
+          await recordCopytradeFilter(redis, 'category_scope_mismatch').catch(() => {});
+          await markDedup();
+          continue;
+        }
       }
 
       // Strict-categorization gate: refuse to enter trades whose category is
