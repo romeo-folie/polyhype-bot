@@ -771,6 +771,80 @@ describe('runCopytrade', () => {
     expect(result.signals).toHaveLength(1);
   });
 
+  it('allows crypto-updown markets when scope includes crypto-regulatory', async () => {
+    // Regression: inferCategory returns 'crypto-updown' for "Bitcoin Up or Down"
+    // markets (intentional — they need a different stale-exit window), but the
+    // scope config uses 'crypto-regulatory'. The alias map must bridge the two so
+    // these copytrades are not spuriously blocked by the category-level scope gate.
+    configOverride = {
+      ...configOverride,
+      COPYTRADE_MARKET_SCOPE: ['crypto-regulatory'],
+      COPYTRADE_NOTIFY_ONLY_CATEGORIES: [],
+      COPYTRADE_SCOPE_TAG_FALLBACK: false,
+    } as any;
+
+    const trade = makeTrade({
+      title: 'Will Bitcoin be up or down on May 24?',
+      price: 0.5,
+      side: 'BUY',
+      outcomeIndex: 0,
+    });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({
+        question: 'Will Bitcoin be up or down on May 24?',
+        description: null,
+        outcomePrices: '["0.5","0.5"]',
+      }),
+    );
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
+    expect(result.signals).toHaveLength(1);
+  });
+
+  it('blocks sports markets that sneak through keyword scope via category gate', async () => {
+    // The keyword-based matchesCategory() can false-positive on sports markets
+    // whose text contains a geopolitical keyword (e.g. a country name). inferCategory
+    // checks sports keywords before geopolitical, so "Russia's national hockey team"
+    // → sports; but matchesCategory(['geopolitical']) passes it on the 'russia'
+    // keyword. The category-level gate must catch the mismatch and drop the signal.
+    configOverride = {
+      ...configOverride,
+      COPYTRADE_MARKET_SCOPE: ['geopolitical'],
+      COPYTRADE_NOTIFY_ONLY_CATEGORIES: [],
+      COPYTRADE_SCOPE_TAG_FALLBACK: false,
+    } as any;
+
+    const trade = makeTrade({
+      title: "Will Russia's national hockey team win the World Championship?",
+      price: 0.5,
+      side: 'BUY',
+      outcomeIndex: 0,
+    });
+    mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [trade] } as Response);
+    mockGetMarketBySlug.mockResolvedValue(
+      makeMarket({
+        question: "Will Russia's national hockey team win the World Championship?",
+        description: null,
+        outcomePrices: '["0.5","0.5"]',
+      }),
+    );
+
+    const { runCopytrade } = await import('../index.js');
+    const redis = { get: vi.fn(), set: vi.fn() } as any;
+    redis.get.mockResolvedValue(null);
+    redis.set.mockResolvedValue('OK');
+    const result = await runCopytrade(redis, 1000);
+
+    expect(result.signals).toHaveLength(0);
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
   it('polls multiple wallets in parallel', async () => {
     configOverride = { ...configOverride, COPYTRADE_WALLETS: '0x1,0x2,0x3' };
     mockFetchWithTimeout.mockResolvedValue({ ok: true, json: async () => [] } as Response);
