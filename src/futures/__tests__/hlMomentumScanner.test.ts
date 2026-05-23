@@ -26,6 +26,7 @@ const baseConfig = {
   HL_MOMENTUM_COOLDOWN_SEC: 600,
   HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC: 60,
   HL_MOMENTUM_CONTRARIAN_ENABLED: false,
+  HL_MOMENTUM_CONTRARIAN_ADX_CEILING: 40,
   HL_MOMENTUM_PRIMARY_LOOKBACK_MS: 54_000_000,
   HL_MOMENTUM_1H_LOOKBACK_MS: 180_000_000,
   HL_MOMENTUM_4H_LOOKBACK_MS: 864_000_000,
@@ -1592,6 +1593,80 @@ describe('scanHlMomentum — contrarian mode', () => {
     const getCalls = redis.get.mock.calls.map((c: unknown[]) => String(c[0]));
     expect(getCalls).toContain('futures:momentum:cooldown:BTC:LONG');
     expect(getCalls).not.toContain('futures:momentum:cooldown:BTC:SHORT');
+  });
+
+  it('suppresses contrarian and trades with momentum when ADX is at or above the ceiling', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_ADX_CEILING: 40,
+      HL_MOMENTUM_SOFT_CONFIRM_ENABLED: false,
+      HL_MOMENTUM_ANTI_CHASE_ENABLED: false,
+      HL_FUNDING_CONTRA_ENABLED: false,
+      HL_OI_DIVERGENCE_ENABLED: false,
+    });
+    mockScoreHlTrend.mockReturnValue({
+      score: -6,
+      adx: 42, // above ceiling — strong trend, trade with momentum (SHORT)
+      voters: {
+        vwap: 'DOWN',
+        emaFastVsSlow: 'DOWN',
+        macdLine: 'DOWN',
+        obv: 'DOWN',
+        cmf: 'DOWN',
+        adxDI: 'neutral',
+      },
+      voterCount: 6,
+    });
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).not.toBeNull();
+    expect(result!.direction).toBe('SHORT'); // with momentum, not contrarian LONG
+    expect(result!.isContrarian).toBeUndefined();
+    expect(result!.reasoning).toContain('contrarian=false');
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({ contrarianEnabled: false }),
+      }),
+    );
+  });
+
+  it('keeps contrarian active when ADX is below the ceiling', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_ADX_CEILING: 40,
+      HL_MOMENTUM_SOFT_CONFIRM_ENABLED: false,
+      HL_MOMENTUM_ANTI_CHASE_ENABLED: false,
+      HL_FUNDING_CONTRA_ENABLED: false,
+      HL_OI_DIVERGENCE_ENABLED: false,
+    });
+    mockScoreHlTrend.mockReturnValue({
+      score: -6,
+      adx: 35, // below ceiling — mean-reversion zone, contrarian applies
+      voters: {
+        vwap: 'DOWN',
+        emaFastVsSlow: 'DOWN',
+        macdLine: 'DOWN',
+        obv: 'DOWN',
+        cmf: 'DOWN',
+        adxDI: 'neutral',
+      },
+      voterCount: 6,
+    });
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).not.toBeNull();
+    expect(result!.direction).toBe('LONG'); // contrarian: opposite of SHORT momentum
+    expect(result!.isContrarian).toBe(true);
+    expect(result!.reasoning).toContain('contrarian=true');
   });
 });
 

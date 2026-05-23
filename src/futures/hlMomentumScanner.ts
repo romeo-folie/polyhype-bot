@@ -195,7 +195,13 @@ export async function scanHlMomentum(
   if (score === 0) return null;
 
   const momentumDirection: 'LONG' | 'SHORT' = score > 0 ? 'LONG' : 'SHORT';
-  const tradeDirection: 'LONG' | 'SHORT' = cfg.HL_MOMENTUM_CONTRARIAN_ENABLED
+  // Contrarian is active only when globally enabled AND ADX is below the strong-trend ceiling.
+  // Above the ceiling momentum is genuinely trending — trade with it rather than against it.
+  const isContrarian =
+    cfg.HL_MOMENTUM_CONTRARIAN_ENABLED &&
+    adx !== null &&
+    adx < cfg.HL_MOMENTUM_CONTRARIAN_ADX_CEILING;
+  const tradeDirection: 'LONG' | 'SHORT' = isContrarian
     ? oppositeDirection(momentumDirection)
     : momentumDirection;
   const absScore = Math.abs(score);
@@ -253,7 +259,7 @@ export async function scanHlMomentum(
         voterCount,
         momentumDirection,
         tradeDirection,
-        contrarianEnabled: cfg.HL_MOMENTUM_CONTRARIAN_ENABLED,
+        contrarianEnabled: isContrarian,
         scoringMode: cfg.HL_MOMENTUM_MTF_SCORING_MODE,
         fourHBiasOk,
         oneHMacdOk,
@@ -303,7 +309,7 @@ export async function scanHlMomentum(
   // not real buying; the breakout is likely fake.
   // Both checks are naturally no-ops when the voter is disabled (voter key absent from
   // `voters`, so the === comparison is false).
-  if (!cfg.HL_MOMENTUM_CONTRARIAN_ENABLED) {
+  if (!isContrarian) {
     if (
       (momentumDirection === 'LONG' && voters.fundingContra === 'DOWN') ||
       (momentumDirection === 'SHORT' && voters.fundingContra === 'UP')
@@ -621,7 +627,7 @@ export async function scanHlMomentum(
       voterCount,
       momentumDirection,
       tradeDirection,
-      contrarianEnabled: cfg.HL_MOMENTUM_CONTRARIAN_ENABLED,
+      contrarianEnabled: isContrarian,
       binancePrice: tick.price,
       candleCount: primaryCandles.length,
       fourHBiasOk,
@@ -706,11 +712,11 @@ export async function scanHlMomentum(
     edgeMagnitude,
     outcomePrice: tick.price,
     sourcedFrom: 'hl-momentum',
-    reasoning: `HL trend scorer (15m): momentum=${momentumDirection}, trade=${tradeDirection}, contrarian=${cfg.HL_MOMENTUM_CONTRARIAN_ENABLED ? 'true' : 'false'}, score=${score.toString()}, ADX=${adx.toFixed(1)}, voters=${JSON.stringify(voters)}${reasoningSuffix}`,
+    reasoning: `HL trend scorer (15m): momentum=${momentumDirection}, trade=${tradeDirection}, contrarian=${isContrarian ? 'true' : 'false'}, score=${score.toString()}, ADX=${adx.toFixed(1)}, voters=${JSON.stringify(voters)}${reasoningSuffix}`,
     isFutures: true,
     source: 'hl-momentum',
     eventTs,
     decisionId,
-    isContrarian: cfg.HL_MOMENTUM_CONTRARIAN_ENABLED || undefined,
+    isContrarian: isContrarian || undefined,
   };
 }
