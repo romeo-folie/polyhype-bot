@@ -27,6 +27,8 @@ const baseConfig = {
   HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC: 60,
   HL_MOMENTUM_CONTRARIAN_ENABLED: false,
   HL_MOMENTUM_CONTRARIAN_ADX_CEILING: 40,
+  HL_MOMENTUM_CONTRARIAN_RSI_OVERSOLD: 30,
+  HL_MOMENTUM_CONTRARIAN_RSI_OVERBOUGHT: 70,
   HL_MOMENTUM_PRIMARY_LOOKBACK_MS: 54_000_000,
   HL_MOMENTUM_1H_LOOKBACK_MS: 180_000_000,
   HL_MOMENTUM_4H_LOOKBACK_MS: 864_000_000,
@@ -1362,6 +1364,10 @@ describe('scanHlMomentum — contrarian mode', () => {
       markPrice: 70_000,
       ts: Date.now() - 60_000,
     });
+    // RSI must be in exhaustion zone for contrarian gate to pass.
+    // Default to 25 (oversold) which covers all contrarian LONG tests (score < 0).
+    // Individual tests that use score > 0 (contrarian SHORT) override to ≥ 70.
+    mockComputeRSIFromCandles.mockReturnValue(25);
   });
 
   it('returns the opposite trade side when contrarian mode is enabled', async () => {
@@ -1563,6 +1569,7 @@ describe('scanHlMomentum — contrarian mode', () => {
       },
       voterCount: 8,
     });
+    mockComputeRSIFromCandles.mockReturnValue(75); // contrarian SHORT needs RSI ≥ 70
     const redis = makeRedis();
     const result = await scanHlMomentum(makeTick(), redis as never);
 
@@ -1593,6 +1600,82 @@ describe('scanHlMomentum — contrarian mode', () => {
     const getCalls = redis.get.mock.calls.map((c: unknown[]) => String(c[0]));
     expect(getCalls).toContain('futures:momentum:cooldown:BTC:LONG');
     expect(getCalls).not.toContain('futures:momentum:cooldown:BTC:SHORT');
+  });
+
+  it('blocks a contrarian LONG when RSI is above oversold threshold', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: -6,
+      adx: 35,
+      voters: { vwap: 'DOWN', emaFastVsSlow: 'DOWN', macdLine: 'DOWN', obv: 'DOWN', cmf: 'DOWN', adxDI: 'neutral' },
+      voterCount: 6,
+    });
+    mockComputeRSIFromCandles.mockReturnValue(35); // above oversold threshold of 30
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).toBeNull();
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ hasTrade: false, skipReason: 'contrarian_rsi_not_exhausted' }),
+    );
+  });
+
+  it('blocks a contrarian SHORT when RSI is below overbought threshold', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: 6,
+      adx: 35,
+      voters: { vwap: 'UP', emaFastVsSlow: 'UP', macdLine: 'UP', obv: 'UP', cmf: 'UP', adxDI: 'neutral' },
+      voterCount: 6,
+    });
+    mockComputeRSIFromCandles.mockReturnValue(65); // below overbought threshold of 70
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).toBeNull();
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ hasTrade: false, skipReason: 'contrarian_rsi_not_exhausted' }),
+    );
+  });
+
+  it('blocks a contrarian entry when RSI is null (insufficient candle history)', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: -6,
+      adx: 35,
+      voters: { vwap: 'DOWN', emaFastVsSlow: 'DOWN', macdLine: 'DOWN', obv: 'DOWN', cmf: 'DOWN', adxDI: 'neutral' },
+      voterCount: 6,
+    });
+    mockComputeRSIFromCandles.mockReturnValue(null);
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).toBeNull();
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ hasTrade: false, skipReason: 'contrarian_rsi_not_exhausted' }),
+    );
+  });
+
+  it('allows a contrarian LONG exactly at the oversold threshold', async () => {
+    mockScoreHlTrend.mockReturnValue({
+      score: -6,
+      adx: 35,
+      voters: { vwap: 'DOWN', emaFastVsSlow: 'DOWN', macdLine: 'DOWN', obv: 'DOWN', cmf: 'DOWN', adxDI: 'neutral' },
+      voterCount: 6,
+    });
+    mockComputeRSIFromCandles.mockReturnValue(30); // exactly at threshold — should pass
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+
+    expect(result).not.toBeNull();
+    expect(result!.direction).toBe('LONG');
+    expect(result!.isContrarian).toBe(true);
   });
 
   it('suppresses contrarian and trades with momentum when ADX is at or above the ceiling', async () => {
