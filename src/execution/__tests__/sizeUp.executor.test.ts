@@ -158,6 +158,7 @@ const mockConfig = {
   SIZE_UP_ELIGIBLE_SOURCES: 'weather',
   SIZE_UP_MAX_TOPUPS: 1,
   SIZE_UP_MIN_EDGE: 0,
+  SIZE_UP_MAX_ENTRY_DRIFT: 0.15,
 };
 
 const mockLoadConfig = vi.fn(() => mockConfig);
@@ -270,6 +271,34 @@ describe('evaluateSizeUp via executeAndRecordSignal — executor path', () => {
     expect(result.skipReason).toBe('size_up_ineligible');
     expect(mockSizeUpPos).not.toHaveBeenCalled();
     expect(mockSubmitClob).not.toHaveBeenCalled();
+  });
+
+  it('entry_drift_too_high: returns size_up_ineligible when current price drifted > SIZE_UP_MAX_ENTRY_DRIFT above entry', async () => {
+    // entryPrice=0.30, outcomePrice=0.50 → drift=0.20, exceeds SIZE_UP_MAX_ENTRY_DRIFT=0.15
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ entryPrice: 0.30, stakeUsd: 5, sharesHeld: 11 }));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ outcomePrice: 0.50 }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('size_up_ineligible');
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+  });
+
+  it('entry_drift_within_limit: allows size-up when drift is at or below SIZE_UP_MAX_ENTRY_DRIFT', async () => {
+    // entryPrice=0.40, outcomePrice=0.50 → drift=0.10, within SIZE_UP_MAX_ENTRY_DRIFT=0.15
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ entryPrice: 0.40, stakeUsd: 5, sharesHeld: 11 }));
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob', shares_bought: 10 });
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ outcomePrice: 0.50 }), redis as any);
+
+    expect(result.skipped).toBeFalsy();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((result as any).isSizeUp).toBe(true);
   });
 
   it('happy path: clamps stake to topUpStakeCap and returns isSizeUp=true', async () => {

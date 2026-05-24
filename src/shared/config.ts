@@ -732,6 +732,8 @@ const envSchema = z.object({
   SIZE_UP_MAX_TOPUPS: z.coerce.number().int().min(1).optional().default(1),
   // Minimum edge required for a size-up (defaults to 0 = use source edge floor).
   SIZE_UP_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0),
+  // Max allowed drift between original entry price and current price for a size-up (0 = disabled).
+  SIZE_UP_MAX_ENTRY_DRIFT: z.coerce.number().min(0).max(1).optional().default(0),
 
   // OSINT sibling fan-out
   OSINT_SIBLING_FANOUT_ENABLED: boolFromEnv.optional().default(false),

@@ -3141,6 +3141,17 @@ async function evaluateSizeUp(
     return { eligible: false, reason: 'no_share_count' };
   }
 
+  // Gate 5c: entry price drift — block if the market has already moved too far from
+  // our original entry. Prevents chasing a position that's run most of its course.
+  // Only fires when SIZE_UP_MAX_ENTRY_DRIFT > 0.
+  const maxDrift = cfg.SIZE_UP_MAX_ENTRY_DRIFT ?? 0;
+  if (maxDrift > 0 && existing.entryPrice != null) {
+    const drift = (signal.outcomePrice ?? 0) - existing.entryPrice;
+    if (drift > maxDrift) {
+      return { eligible: false, reason: 'entry_drift_too_high' };
+    }
+  }
+
   // Gate 6: top-up count
   const currentTopUps = existing.topUpCount ?? 0;
   if (currentTopUps >= cfg.SIZE_UP_MAX_TOPUPS) {
