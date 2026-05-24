@@ -104,6 +104,8 @@ export interface Position {
   /** True when opened in contrarian (mean-reversion) mode — keyed at entry so the monitor
    *  can skip TA-fade re-eval independently of later config changes. */
   isContrarian?: boolean | undefined;
+  /** Number of size-up top-ups added to this position (0 = never topped up). */
+  topUpCount?: number | undefined;
 }
 
 function canonicalDirection(direction: Position['direction']): Position['direction'] {
@@ -233,6 +235,7 @@ export async function recordPosition(redis: Redis, positionIn: Position): Promis
     priceZone: position.priceZone !== undefined ? String(position.priceZone) : '',
     entryFundingApr: position.entryFundingApr !== undefined ? String(position.entryFundingApr) : '',
     isContrarian: position.isContrarian ? 'true' : '',
+    topUpCount: position.topUpCount !== undefined ? String(position.topUpCount) : '0',
   });
 
   // Add to sorted index (score = openedAt ms for chronological retrieval)
@@ -398,6 +401,66 @@ export async function hasOpenPosition(
   return exists === 1;
 }
 
+/**
+ * Merge a top-up fill into an existing open position.
+ * Updates sharesHeld, stakeUsd, entryPrice (weighted avg), and topUpCount.
+ */
+export async function sizeUpPosition(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+  additionalShares: number,
+  additionalStake: number,
+  topUpEntryPrice: number,
+): Promise<void> {
+  const canonDir = canonicalDirection(direction);
+  const key = positionKey(marketId, canonDir);
+  const existing = await getPosition(redis, marketId, canonDir);
+  if (!existing) {
+    throw new Error(`[ledger] sizeUpPosition: no open position for ${marketId}:${canonDir}`);
+  }
+
+  const existingShares = existing.sharesHeld ?? 0;
+  let newShares: number;
+  let newEntryPrice: number;
+
+  if (existingShares === 0) {
+    // Edge case: existing position has no share count — use additionalShares only
+    // and topUpEntryPrice as the entry price to avoid divide-by-zero.
+    newShares = additionalShares;
+    newEntryPrice = topUpEntryPrice;
+  } else {
+    newShares = existingShares + additionalShares;
+    const newStakeForAvg = existing.stakeUsd + additionalStake;
+    newEntryPrice = newShares > 0 ? newStakeForAvg / newShares : topUpEntryPrice;
+  }
+
+  const newStake = existing.stakeUsd + additionalStake;
+  const newTopUpCount = (existing.topUpCount ?? 0) + 1;
+
+  await redis.hset(key, {
+    sharesHeld: String(newShares),
+    stakeUsd: String(newStake),
+    entryPrice: String(newEntryPrice),
+    topUpCount: String(newTopUpCount),
+  });
+
+  const updated = await getPosition(redis, marketId, canonDir);
+  if (updated) void enqueueWrite('positions', updated as unknown as Record<string, unknown>);
+
+  logger.info('[ledger] position sized up', {
+    marketId,
+    direction: canonDir,
+    additionalShares,
+    additionalStake,
+    topUpEntryPrice,
+    newShares,
+    newStake,
+    newEntryPrice: newEntryPrice.toFixed(4),
+    topUpCount: newTopUpCount,
+  });
+}
+
 // ── Deserialisation ────────────────────────────────────────────────────────
 
 function deserialisePosition(raw: Record<string, string>): Position {
@@ -486,6 +549,8 @@ function deserialisePosition(raw: Record<string, string>): Position {
   if (raw.entryFundingApr !== undefined && raw.entryFundingApr !== '')
     pos.entryFundingApr = parseFloat(raw.entryFundingApr);
   if (raw.isContrarian === 'true') pos.isContrarian = true;
+  if (raw.topUpCount !== undefined && raw.topUpCount !== '')
+    pos.topUpCount = parseInt(raw.topUpCount, 10);
 
   return pos;
 }

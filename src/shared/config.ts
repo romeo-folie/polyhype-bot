@@ -724,6 +724,15 @@ const envSchema = z.object({
   CONVICTION_MAX_MULTIPLIER: z.coerce.number().min(1).max(3).optional().default(1.5),
   CONVICTION_SIGNAL_TTL_S: z.coerce.number().int().positive().optional().default(1800),
 
+  // Position size-up (pyramid) — add to an existing open position when fresh edge still exists.
+  SIZE_UP_ENABLED: boolFromEnv.optional().default(false),
+  // Comma-separated signal sources eligible for position size-up.
+  SIZE_UP_ELIGIBLE_SOURCES: z.string().optional().default('weather'),
+  // Maximum number of size-up top-ups allowed per open position.
+  SIZE_UP_MAX_TOPUPS: z.coerce.number().int().min(1).optional().default(1),
+  // Minimum edge required for a size-up (defaults to 0 = use source edge floor).
+  SIZE_UP_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0),
+
   // OSINT sibling fan-out
   OSINT_SIBLING_FANOUT_ENABLED: boolFromEnv.optional().default(false),
   OSINT_SIBLING_MIN_FIT_SCORE: z.coerce.number().min(0).max(1).optional().default(0.6),
