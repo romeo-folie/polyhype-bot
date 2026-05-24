@@ -1448,7 +1448,11 @@ describe('scanHlMomentum — contrarian mode', () => {
     );
   });
 
-  it('blocks contrarian entries when the momentum side is overextended', async () => {
+  it('allows contrarian LONG when anti-chase is on and RSI is in the exhaustion zone (anti-chase bypassed)', async () => {
+    // Pre-fix this test expected anti_chase_rsi to block here. With the fix, anti-chase is
+    // skipped entirely for contrarian entries — overextension in the momentum direction is
+    // exactly the condition that makes a contrarian snap-back plausible. The contrarian RSI
+    // exhaustion gate (RSI ≤ 30) already gates on confirmed exhaustion.
     mockLoadConfig.mockReturnValue({
       ...baseConfig,
       HL_MOMENTUM_ENABLED: true,
@@ -1471,18 +1475,15 @@ describe('scanHlMomentum — contrarian mode', () => {
       },
       voterCount: 6,
     });
-    mockComputeRSIFromCandles.mockReturnValue(25);
+    mockComputeRSIFromCandles.mockReturnValue(25); // oversold — passes contrarian RSI gate, anti-chase bypassed
     mockComputeVWAP.mockReturnValue(null);
 
     const redis = makeRedis();
     const result = await scanHlMomentum(makeTick(), redis as never);
 
-    expect(result).toBeNull();
-    const { enqueueWrite } = await import('../../db/writeQueue.js');
-    expect(enqueueWrite).toHaveBeenCalledWith(
-      'signal_decisions',
-      expect.objectContaining({ hasTrade: false, skipReason: 'anti_chase_rsi' }),
-    );
+    expect(result).not.toBeNull();
+    expect(result!.direction).toBe('LONG');
+    expect(result!.isContrarian).toBe(true);
   });
 
   it('still applies the 4h bias gate to the momentum side in contrarian mode', async () => {
@@ -1877,6 +1878,87 @@ describe('scanHlMomentum — anti-chase gate', () => {
     await scanHlMomentum(makeTick(), redis as never);
     // Gate did not block — shadow_observations reached
     expect(enqueueWrite).toHaveBeenCalledWith('shadow_observations', expect.objectContaining({ kind: 'hl_momentum_signal' }));
+  });
+
+  it('bypasses RSI anti-chase for a contrarian LONG when RSI is in the oversold exhaustion zone', async () => {
+    // Without this fix: anti-chase blocks SHORT momentum at RSI ≤ 30, but the contrarian
+    // RSI exhaustion gate *requires* RSI ≤ 30 for a contrarian LONG to fire. The two gates
+    // were mutually exclusive — no contrarian LONG could ever pass both.
+    mockLoadConfig.mockReturnValue({
+      ...antiChaseConfig,
+      HL_MOMENTUM_CONTRARIAN_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_RSI_OVERSOLD: 30,
+      HL_MOMENTUM_CONTRARIAN_RSI_OVERBOUGHT: 70,
+    });
+    mockScoreHlTrend.mockReturnValue(bearishResult); // momentum SHORT → contrarian LONG
+    mockComputeRSIFromCandles.mockReturnValue(25);   // oversold: anti-chase would block, contrarian gate should allow
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    // Anti-chase bypassed → shadow_observations reached
+    expect(enqueueWrite).toHaveBeenCalledWith('shadow_observations', expect.objectContaining({ kind: 'hl_momentum_signal' }));
+    expect(enqueueWrite).not.toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ skipReason: 'anti_chase_rsi' }),
+    );
+  });
+
+  it('bypasses RSI anti-chase for a contrarian SHORT when RSI is in the overbought exhaustion zone', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...antiChaseConfig,
+      HL_MOMENTUM_CONTRARIAN_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_RSI_OVERSOLD: 30,
+      HL_MOMENTUM_CONTRARIAN_RSI_OVERBOUGHT: 70,
+    });
+    mockScoreHlTrend.mockReturnValue(bullishResult); // momentum LONG → contrarian SHORT
+    mockComputeRSIFromCandles.mockReturnValue(75);   // overbought: anti-chase would block, contrarian gate should allow
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(enqueueWrite).toHaveBeenCalledWith('shadow_observations', expect.objectContaining({ kind: 'hl_momentum_signal' }));
+    expect(enqueueWrite).not.toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ skipReason: 'anti_chase_rsi' }),
+    );
+  });
+
+  it('bypasses VWAP anti-chase for a contrarian LONG when price is stretched below VWAP', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...antiChaseConfig,
+      HL_MOMENTUM_CONTRARIAN_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_RSI_OVERSOLD: 30,
+      HL_MOMENTUM_CONTRARIAN_RSI_OVERBOUGHT: 70,
+    });
+    mockScoreHlTrend.mockReturnValue(bearishResult); // momentum SHORT → contrarian LONG
+    mockComputeRSIFromCandles.mockReturnValue(25);   // passes contrarian RSI gate
+    // price=100, VWAP=104 → dist ≈ -3.85% — anti-chase would block SHORT momentum, bypass for contrarian
+    mockComputeVWAP.mockReturnValue(104);
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick('btcusdt', 100), redis as never);
+    expect(enqueueWrite).toHaveBeenCalledWith('shadow_observations', expect.objectContaining({ kind: 'hl_momentum_signal' }));
+    expect(enqueueWrite).not.toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ skipReason: 'anti_chase_vwap' }),
+    );
+  });
+
+  it('still blocks a non-contrarian SHORT via RSI anti-chase when RSI is oversold', async () => {
+    // Confirm the fix does not weaken anti-chase for non-contrarian entries.
+    mockLoadConfig.mockReturnValue({ ...antiChaseConfig, HL_MOMENTUM_CONTRARIAN_ENABLED: false });
+    mockScoreHlTrend.mockReturnValue(bearishResult); // momentum SHORT, non-contrarian
+    mockComputeRSIFromCandles.mockReturnValue(25);   // oversold → anti-chase fires
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull();
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ hasTrade: false, skipReason: 'anti_chase_rsi' }),
+    );
   });
 
   it('is a no-op when HL_MOMENTUM_ANTI_CHASE_ENABLED=false', async () => {
