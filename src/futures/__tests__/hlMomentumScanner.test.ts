@@ -1663,6 +1663,17 @@ describe('scanHlMomentum — contrarian mode', () => {
   });
 
   it('allows a contrarian LONG exactly at the oversold threshold', async () => {
+    // Explicit config: RSI=30 is within the soft-confirm short band (rsiShortBand=30+6=36),
+    // so this boundary test requires soft-confirm to be off to avoid a 1-bar delay null return.
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_CONTRARIAN_ENABLED: true,
+      HL_MOMENTUM_SOFT_CONFIRM_ENABLED: false,
+      HL_MOMENTUM_ANTI_CHASE_ENABLED: false,
+      HL_FUNDING_CONTRA_ENABLED: true,
+      HL_OI_DIVERGENCE_ENABLED: true,
+    });
     mockScoreHlTrend.mockReturnValue({
       score: -6,
       adx: 35,
