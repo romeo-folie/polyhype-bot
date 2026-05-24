@@ -1403,7 +1403,7 @@ describe('scanHlMomentum — contrarian mode', () => {
         raw: expect.objectContaining({
           momentumDirection: 'SHORT',
           tradeDirection: 'LONG',
-          contrarianEnabled: true,
+          isContrarian: true,
         }),
       }),
     );
@@ -1725,7 +1725,7 @@ describe('scanHlMomentum — contrarian mode', () => {
     expect(enqueueWrite).toHaveBeenCalledWith(
       'shadow_observations',
       expect.objectContaining({
-        payload: expect.objectContaining({ contrarianEnabled: false }),
+        payload: expect.objectContaining({ isContrarian: false }),
       }),
     );
   });
