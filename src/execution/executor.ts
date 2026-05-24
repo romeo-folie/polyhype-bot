@@ -28,9 +28,9 @@ import {
   cancelClobOrder,
   CLOB_MIN_ORDER_USD,
 } from '../shared/clob.js';
-import { hasOpenPosition, recordPosition } from './positionLedger.js';
+import { hasOpenPosition, recordPosition, getPosition, sizeUpPosition } from './positionLedger.js';
 import { isRecentlyResolved } from '../shared/closedGuard.js';
-import { deductStake } from '../shared/bankroll.js';
+import { deductStake, getBankroll } from '../shared/bankroll.js';
 import { isStaleCooldownActive } from '../monitor/staleExit.js';
 import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
 import { computeATR } from '../arb/indicators.js';
@@ -196,6 +196,8 @@ export interface ExecutionResult {
   /** Frozen meme ATR-derived SL/TP magnitudes (issue #264). */
   memeAtrSlPct?: number;
   memeAtrTpPct?: number;
+  /** True if this execution was a size-up (pyramid top-up) into an existing position. */
+  isSizeUp?: boolean;
 }
 
 interface DecisionBenchmark {
@@ -2048,14 +2050,69 @@ export async function executeSignal(
     hasOpenPosition(redis, signal.marketId, currentSide),
     hasOpenPosition(redis, signal.marketId, oppositeDir),
   ]);
-  if (alreadyHolding || holdingOpposite) {
-    logger.info('[executor] skipping — already holding position in this market', {
+  if (holdingOpposite) {
+    logger.info('[executor] skipping — already holding opposite side', {
       marketId: signal.marketId,
       direction: signal.direction,
-      holdingSameSide: alreadyHolding,
-      holdingOppositeSide: holdingOpposite,
     });
     return recordSkip('position_already_open');
+  }
+
+  if (alreadyHolding) {
+    // Size-up gate: only evaluate for sources in SIZE_UP_ELIGIBLE_SOURCES.
+    // All other sources fall back to position_already_open to preserve existing behaviour.
+    const eligibleSources = new Set(
+      cfg.SIZE_UP_ELIGIBLE_SOURCES.split(',').map((s) => s.trim()).filter(Boolean),
+    );
+    if (!signal.source || !eligibleSources.has(signal.source)) {
+      logger.info('[executor] skipping — already holding position in this market', {
+        marketId: signal.marketId,
+        direction: signal.direction,
+        holdingSameSide: true,
+        holdingOppositeSide: false,
+      });
+      return recordSkip('position_already_open');
+    }
+
+    const sizeUpResult = await evaluateSizeUp(signal, redis, cfg);
+    if (sizeUpResult.eligible) {
+      logger.info('[executor] size-up eligible — proceeding with top-up', {
+        marketId: signal.marketId,
+        source: signal.source,
+        existingStake: sizeUpResult.existingStake,
+        topUpStakeCap: sizeUpResult.topUpStakeCap,
+      });
+      // Clamp signal stake to the remaining room under the path cap.
+      signal = { ...signal, stakeUsd: Math.min(signal.stakeUsd, sizeUpResult.topUpStakeCap!) };
+      // Tag the signal so post-execution ledger update calls sizeUpPosition instead of recordPosition.
+      signal = { ...signal, _isSizeUp: true } as TradeSignal & { _isSizeUp: boolean };
+    } else {
+      logger.info('[executor] skipping size-up — ineligible', {
+        marketId: signal.marketId,
+        source: signal.source,
+        reason: sizeUpResult.reason,
+      });
+      // Shadow-log when the feature is off so we can observe would-have-fired opportunities.
+      // Only emitted when reason is feature_disabled — meaning all other gates passed.
+      if (!cfg.SIZE_UP_ENABLED && sizeUpResult.reason === 'feature_disabled') {
+        void enqueueWrite('shadow_observations', {
+          kind: 'would_size_up',
+          source: signal.source ?? 'osint',
+          marketId: signal.marketId,
+          direction: signal.direction,
+          wouldBlock: false,
+          metricValue: signal.edgeMagnitude ?? 0,
+          threshold: cfg.SIZE_UP_MIN_EDGE,
+          payload: {
+            existingStake: sizeUpResult.existingStake,
+            topUpStakeCap: sizeUpResult.topUpStakeCap,
+            source: signal.source,
+            outcomePrice: signal.outcomePrice,
+          },
+        });
+      }
+      return recordSkip('size_up_ineligible');
+    }
   }
 
   // 4b) Recently-resolved guard — block re-entry into a market that resolved or
@@ -3028,6 +3085,80 @@ export async function executeSignals(
   return results;
 }
 
+interface SizeUpEvaluation {
+  eligible: boolean;
+  reason?: string;
+  existingStake?: number;
+  topUpStakeCap?: number;
+}
+
+async function evaluateSizeUp(
+  signal: TradeSignal,
+  redis: Redis,
+  cfg: ReturnType<typeof loadConfig>,
+): Promise<SizeUpEvaluation> {
+  // Gate 1: not a futures position
+  if (signal.isFutures) {
+    return { eligible: false, reason: 'futures_not_eligible' };
+  }
+
+  // Gate 2: price must still be below per-source cap
+  const effectivePriceCap = (() => {
+    switch (signal.source) {
+      case 'fv-scanner': return cfg.FV_MAX_ENTRY_PRICE;
+      case 'weather':    return cfg.WEATHER_MAX_ENTRY_PRICE;
+      default:           return cfg.MAX_ENTRY_PRICE;
+    }
+  })();
+  if (effectivePriceCap > 0 && (signal.outcomePrice ?? 0) > effectivePriceCap) {
+    return { eligible: false, reason: 'price_above_cap' };
+  }
+
+  // Gate 3: edge floor
+  const minEdge = cfg.SIZE_UP_MIN_EDGE > 0 ? cfg.SIZE_UP_MIN_EDGE : 0;
+  if (minEdge > 0 && (signal.edgeMagnitude ?? 0) < minEdge) {
+    return { eligible: false, reason: 'edge_below_floor' };
+  }
+
+  // Gate 4: load existing position to check topUpCount + existing stake
+  const canonDir: 'YES' | 'NO' =
+    signal.direction === 'YES' || signal.direction === 'UP' ? 'YES' : 'NO';
+  const existing = await getPosition(redis, signal.marketId, canonDir);
+  if (!existing) {
+    // Race: position disappeared between hasOpenPosition check and here
+    return { eligible: false, reason: 'position_not_found' };
+  }
+
+  // Gate 5: pending settlement — never size up into a settling position
+  if (existing.pendingSettlement) {
+    return { eligible: false, reason: 'pending_settlement' };
+  }
+
+  // Gate 6: top-up count
+  const currentTopUps = existing.topUpCount ?? 0;
+  if (currentTopUps >= cfg.SIZE_UP_MAX_TOPUPS) {
+    return { eligible: false, reason: 'max_topups_reached' };
+  }
+
+  // Gate 7: remaining stake room under path cap
+  // Path cap = bankroll × WEATHER_MAX_STAKE_FRACTION (weather-specific for now).
+  // For other sources we could add per-source fraction config later.
+  const pathMaxStakeFraction = cfg.WEATHER_MAX_STAKE_FRACTION;
+  const bankroll = await getBankroll(redis);
+  const pathMaxStake = bankroll * pathMaxStakeFraction;
+  const topUpStakeCap = pathMaxStake - existing.stakeUsd;
+  if (topUpStakeCap <= 0) {
+    return { eligible: false, reason: 'stake_cap_reached', existingStake: existing.stakeUsd };
+  }
+
+  // Only proceed if SIZE_UP_ENABLED; otherwise shadow caller will handle logging
+  if (!cfg.SIZE_UP_ENABLED) {
+    return { eligible: false, reason: 'feature_disabled', existingStake: existing.stakeUsd, topUpStakeCap };
+  }
+
+  return { eligible: true, existingStake: existing.stakeUsd, topUpStakeCap };
+}
+
 /**
  * Single entry point for scanners/workers that should record positions after
  * a successful fill. Wraps executeSignal and, on success, deducts the stake
@@ -3123,54 +3254,81 @@ async function finalizeSuccessfulExecution(
     );
   }
 
-  await recordPosition(redis, {
-    marketId: result.signal.marketId,
-    executionId: result.signal.executionId,
-    conditionId: result.signal.conditionId,
-    clobTokenIds: result.signal.clobTokenIds,
-    question: result.signal.question,
-    direction: result.signal.direction,
-    entryPrice: result.entryPrice ?? result.signal.outcomePrice,
-    stakeUsd: result.signal.stakeUsd,
-    consensusProbability: result.signal.consensusProbability ?? 0.5,
-    consensusStddev: result.signal.consensusStddev,
-    edgeMagnitude: result.signal.edgeMagnitude,
-    sourcedFrom: result.signal.sourcedFrom,
-    openedAt: new Date().toISOString(),
-    txHash: result.tradeResult?.tx_hash,
-    sharesHeld,
-    executionVenue: result.executionVenue ?? 'simmer',
-    modeConfigured: result.modeConfigured,
-    entryExecutionPath: result.entryExecutionPath,
-    entryOrderType: result.entryOrderType,
-    decisionBestBid: result.decisionBenchmark?.decisionBestBid ?? undefined,
-    decisionBestAsk: result.decisionBenchmark?.decisionBestAsk ?? undefined,
-    decisionMidPrice: result.decisionBenchmark?.decisionMidPrice ?? undefined,
-    decisionSpreadBps: result.decisionBenchmark?.decisionSpreadBps ?? undefined,
-    counterfactualImmediateTakerPrice:
-      result.decisionBenchmark?.counterfactualImmediateTakerPrice ?? undefined,
-    counterfactualImmediateTakerShares:
-      result.decisionBenchmark?.counterfactualImmediateTakerShares ?? undefined,
-    counterfactualImmediateTakerCostUsd:
-      result.decisionBenchmark?.counterfactualImmediateTakerCostUsd ?? undefined,
-    makerPriceImprovementBps:
-      result.decisionBenchmark?.makerPriceImprovementBps ?? undefined,
-    makerPriceImprovementUsd:
-      result.decisionBenchmark?.makerPriceImprovementUsd ?? undefined,
-    fallbackReason: result.fallbackReason,
-    isFutures: result.signal.isFutures,
-    leverage: result.signal.leverage,
-    symbol:
-      result.signal.symbol ||
-      (result.signal.isFutures ? result.signal.marketId : undefined),
-    assetId: result.signal.assetId,
-    endDate: result.signal.endDate,
-    entryAtr: result.entryAtr,
-    entryAtrPct: result.entryAtrPct,
-    memeAtrSlPct: result.memeAtrSlPct,
-    memeAtrTpPct: result.memeAtrTpPct,
-    priceZone: result.signal.priceZone,
-    entryFundingApr: result.signal.entryFundingApr,
-    isContrarian: result.signal.isContrarian,
-  });
+  const isSizeUp = !!(result.signal as TradeSignal & { _isSizeUp?: boolean })._isSizeUp;
+
+  if (isSizeUp) {
+    if (sharesHeld != null && result.signal.stakeUsd > 0) {
+      const fillPrice = result.entryPrice ?? result.signal.outcomePrice;
+      await sizeUpPosition(
+        redis,
+        result.signal.marketId,
+        result.signal.direction,
+        sharesHeld,
+        result.signal.stakeUsd,
+        fillPrice,
+      );
+      // Mutate result so callers (e.g. weatherScanner) can detect size-up
+      (result as ExecutionResult & { isSizeUp: boolean }).isSizeUp = true;
+    } else {
+      // Fill succeeded but venue returned no share count. Do NOT call recordPosition —
+      // that would overwrite the existing position and reset topUpCount. Log for manual review.
+      logger.warn('[executor] size-up fill missing share count — ledger not updated', {
+        marketId: result.signal.marketId,
+        direction: result.signal.direction,
+        stakeUsd: result.signal.stakeUsd,
+        sharesHeld,
+      });
+    }
+  } else {
+    await recordPosition(redis, {
+      marketId: result.signal.marketId,
+      executionId: result.signal.executionId,
+      conditionId: result.signal.conditionId,
+      clobTokenIds: result.signal.clobTokenIds,
+      question: result.signal.question,
+      direction: result.signal.direction,
+      entryPrice: result.entryPrice ?? result.signal.outcomePrice,
+      stakeUsd: result.signal.stakeUsd,
+      consensusProbability: result.signal.consensusProbability ?? 0.5,
+      consensusStddev: result.signal.consensusStddev,
+      edgeMagnitude: result.signal.edgeMagnitude,
+      sourcedFrom: result.signal.sourcedFrom,
+      openedAt: new Date().toISOString(),
+      txHash: result.tradeResult?.tx_hash,
+      sharesHeld,
+      executionVenue: result.executionVenue ?? 'simmer',
+      modeConfigured: result.modeConfigured,
+      entryExecutionPath: result.entryExecutionPath,
+      entryOrderType: result.entryOrderType,
+      decisionBestBid: result.decisionBenchmark?.decisionBestBid ?? undefined,
+      decisionBestAsk: result.decisionBenchmark?.decisionBestAsk ?? undefined,
+      decisionMidPrice: result.decisionBenchmark?.decisionMidPrice ?? undefined,
+      decisionSpreadBps: result.decisionBenchmark?.decisionSpreadBps ?? undefined,
+      counterfactualImmediateTakerPrice:
+        result.decisionBenchmark?.counterfactualImmediateTakerPrice ?? undefined,
+      counterfactualImmediateTakerShares:
+        result.decisionBenchmark?.counterfactualImmediateTakerShares ?? undefined,
+      counterfactualImmediateTakerCostUsd:
+        result.decisionBenchmark?.counterfactualImmediateTakerCostUsd ?? undefined,
+      makerPriceImprovementBps:
+        result.decisionBenchmark?.makerPriceImprovementBps ?? undefined,
+      makerPriceImprovementUsd:
+        result.decisionBenchmark?.makerPriceImprovementUsd ?? undefined,
+      fallbackReason: result.fallbackReason,
+      isFutures: result.signal.isFutures,
+      leverage: result.signal.leverage,
+      symbol:
+        result.signal.symbol ||
+        (result.signal.isFutures ? result.signal.marketId : undefined),
+      assetId: result.signal.assetId,
+      endDate: result.signal.endDate,
+      entryAtr: result.entryAtr,
+      entryAtrPct: result.entryAtrPct,
+      memeAtrSlPct: result.memeAtrSlPct,
+      memeAtrTpPct: result.memeAtrTpPct,
+      priceZone: result.signal.priceZone,
+      entryFundingApr: result.signal.entryFundingApr,
+      isContrarian: result.signal.isContrarian,
+    });
+  }
 }

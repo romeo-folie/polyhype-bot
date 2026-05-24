@@ -1590,9 +1590,13 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       });
       // Only count as executed when the executor actually opened a position.
       // A skipped result (dedup, spread too wide, etc.) should not burn caps.
+      // Size-ups still consume real capital so they count toward exposure but
+      // not toward the per-city or per-scan position count caps.
       if (!result.skipped) {
-        executed++;
-        perCityCount.set(opp.city, cityCount + 1);
+        if (!result.isSizeUp) {
+          executed++;
+          perCityCount.set(opp.city, cityCount + 1);
+        }
         cumulativeStakeUsd += filledStakeUsd;
       }
     } catch (err) {
