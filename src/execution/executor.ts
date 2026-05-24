@@ -3134,6 +3134,13 @@ async function evaluateSizeUp(
     return { eligible: false, reason: 'pending_settlement' };
   }
 
+  // Gate 5b: existing share count must be positive so the exit path sells the
+  // correct combined share count. A zero/missing share count means we can't
+  // form a consistent post-top-up (sharesHeld, stakeUsd, entryPrice) triple.
+  if (!existing.sharesHeld || existing.sharesHeld <= 0) {
+    return { eligible: false, reason: 'no_share_count' };
+  }
+
   // Gate 6: top-up count
   const currentTopUps = existing.topUpCount ?? 0;
   if (currentTopUps >= cfg.SIZE_UP_MAX_TOPUPS) {
@@ -3149,6 +3156,12 @@ async function evaluateSizeUp(
   const topUpStakeCap = pathMaxStake - existing.stakeUsd;
   if (topUpStakeCap <= 0) {
     return { eligible: false, reason: 'stake_cap_reached', existingStake: existing.stakeUsd };
+  }
+  // Gate 7b: remaining room must be at least MIN_BET_USD so the clamped stake
+  // is executable without needing a floor-bump that would exceed the path cap.
+  const minBet = cfg.MIN_BET_USD;
+  if (topUpStakeCap < minBet) {
+    return { eligible: false, reason: 'stake_cap_too_small', existingStake: existing.stakeUsd, topUpStakeCap };
   }
 
   // Only proceed if SIZE_UP_ENABLED; otherwise shadow caller will handle logging

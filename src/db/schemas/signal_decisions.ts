@@ -27,6 +27,8 @@ const SKIP_REASON = [
   'oi_below_minimum', 'max_positions_reached',
   // executor guard (added 2026-05-15)
   'recently_resolved',
+  // size-up gate (added 2026-05-24)
+  'size_up_ineligible',
   'other',
 ] as const;
 
