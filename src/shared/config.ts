@@ -1282,6 +1282,13 @@ const envSchema = z.object({
   // suppressed per-signal even when CONTRARIAN_ENABLED=true. Data shows ADX 40-50 bucket
   // has 60% WR / 25% SL rate trading with momentum vs ~47% WR trading against it.
   HL_MOMENTUM_CONTRARIAN_ADX_CEILING: z.coerce.number().min(20).optional().default(40),
+  // RSI exhaustion gates for contrarian entries. Contrarian LONG requires RSI ≤ oversold
+  // (momentum genuinely exhausted down); contrarian SHORT requires RSI ≥ overbought.
+  // All 10 historical contrarian losses had RSI 30–40/60–70 — never in true exhaustion zone.
+  // Bounds capped at 45/55 to guarantee a ≥10-point gap and prevent the gate from
+  // becoming a no-op if both thresholds are set to neutral (50).
+  HL_MOMENTUM_CONTRARIAN_RSI_OVERSOLD: z.coerce.number().min(0).max(45).optional().default(30),
+  HL_MOMENTUM_CONTRARIAN_RSI_OVERBOUGHT: z.coerce.number().min(55).max(100).optional().default(70),
   // When contrarian mode is on, arm the trailing stop earlier (mean-reversion snap-back is
   // front-loaded; waiting for the standard TP arm leaves too much on the table).
   HL_MOMENTUM_CONTRARIAN_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(10),

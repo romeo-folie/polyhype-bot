@@ -302,6 +302,30 @@ export async function scanHlMomentum(
     return null;
   }
 
+  // Gate: contrarian entries require RSI to confirm genuine exhaustion.
+  // Contrarian LONG (momentum DOWN) needs RSI ≤ oversold threshold — the down move must be
+  // stretched enough that a snap-back is plausible. Contrarian SHORT (momentum UP) needs
+  // RSI ≥ overbought. All 10 historical contrarian losses had RSI 30-40/60-70, never in
+  // the true exhaustion zone. rsi===null means insufficient candle history → skip.
+  if (isContrarian) {
+    const rsiOk =
+      rsi !== null &&
+      (tradeDirection === 'LONG'
+        ? rsi <= cfg.HL_MOMENTUM_CONTRARIAN_RSI_OVERSOLD
+        : rsi >= cfg.HL_MOMENTUM_CONTRARIAN_RSI_OVERBOUGHT);
+    if (!rsiOk) {
+      logger.debug('[hl-momentum] contrarian RSI exhaustion gate failed', {
+        symbol: hlSymbol,
+        tradeDirection,
+        rsi,
+        oversold: cfg.HL_MOMENTUM_CONTRARIAN_RSI_OVERSOLD,
+        overbought: cfg.HL_MOMENTUM_CONTRARIAN_RSI_OVERBOUGHT,
+      });
+      logDecision(false, 'contrarian_rsi_not_exhausted');
+      return null;
+    }
+  }
+
   // Gate: HL-native voters must not actively contradict the momentum direction.
   // fundingContra DOWN on a LONG = longs already crowded, APR at ceiling — mean-reversion
   // risk that the correlated price-lag voters cannot outweigh.

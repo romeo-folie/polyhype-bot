@@ -21,7 +21,7 @@ const SKIP_REASON = [
   'loss_cooldown', 'momentum_cooldown', 'scanner_dark',
   'long_hl_confirmation_missing', 'oi_divergence_veto', 'weighted_total_score_low',
   '4h_ema_bias_mismatch', '1h_macd_mismatch',
-  'entry_price_above_cap',
+  'entry_price_above_cap', 'contrarian_rsi_not_exhausted',
   // hl-funding-specific (added 2026-05-11)
   'denylist', 'apr_below_threshold', 'funding_cooldown',
   'oi_below_minimum', 'max_positions_reached',
