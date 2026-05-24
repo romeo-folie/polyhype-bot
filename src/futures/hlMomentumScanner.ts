@@ -384,7 +384,10 @@ export async function scanHlMomentum(
   // RSI ≥ overbought on LONG = momentum indicator showing overheated buying.
   // RSI ≤ oversold on SHORT = momentum indicator showing washed-out selling.
   // VWAP distance > threshold in momentum direction = price stretched too far from fair value.
-  if (cfg.HL_MOMENTUM_ANTI_CHASE_ENABLED) {
+  // Skipped for contrarian entries: overextension in the momentum direction is a *favourable*
+  // condition for a mean-reversion snap-back. The contrarian RSI exhaustion gate (above)
+  // already requires confirmed exhaustion before allowing contrarian entries.
+  if (cfg.HL_MOMENTUM_ANTI_CHASE_ENABLED && !isContrarian) {
     if (rsi !== null) {
       if (momentumDirection === 'LONG' && rsi >= cfg.HL_MOMENTUM_RSI_OVERBOUGHT) {
         logger.debug('[hl-momentum] anti-chase: RSI overbought on LONG', {
