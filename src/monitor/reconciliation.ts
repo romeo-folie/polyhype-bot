@@ -19,13 +19,21 @@ async function closeGhostPositionWithHedge(
   marketId: string,
   direction: Position['direction'],
 ): Promise<void> {
-  await closePosition(redis, marketId, direction);
+  try {
+    await closePosition(redis, marketId, direction);
+  } catch (err) {
+    logger.warn('[reconcile] ledger close failed; skipping HL hedge close', {
+      marketId, error: String(err),
+    });
+    return;
+  }
   const hlSymbol = await redis.get(`hedge:link:${marketId}`).catch(() => null);
   if (hlSymbol) {
     try {
       const result = await getHyperliquid().closePosition(hlSymbol);
       if (result.success) {
         logger.info('[reconcile] closed linked HL hedge for ghost position', { marketId, hlSymbol });
+        await redis.del(`hedge:link:${marketId}`).catch(() => {});
       } else {
         logger.warn('[reconcile] failed to close linked HL hedge for ghost position', {
           marketId, hlSymbol, error: result.error,
@@ -36,7 +44,6 @@ async function closeGhostPositionWithHedge(
         marketId, hlSymbol, error: String(err),
       });
     }
-    await redis.del(`hedge:link:${marketId}`).catch(() => {});
   }
 }
 

@@ -73,13 +73,26 @@ async function closePositionWithHedge(
   marketId: string,
   direction: Position['direction'],
 ): Promise<void> {
-  await closePosition(redis, marketId, direction);
+  // C5: wrap in try-catch — if Redis throws mid-close the HL leg must not be touched
+  // (state is uncertain; redeemer will retry PM close on the next cycle).
+  try {
+    await closePosition(redis, marketId, direction);
+  } catch (err) {
+    logger.warn('[redeemer] ledger close failed; skipping HL hedge close', {
+      marketId, error: String(err),
+    });
+    return;
+  }
   const hlSymbol = await redis.get(`hedge:link:${marketId}`).catch(() => null);
   if (hlSymbol) {
     try {
       const result = await getHyperliquid().closePosition(hlSymbol);
       if (result.success) {
         logger.info('[redeemer] closed linked HL hedge on PM resolution', { marketId, hlSymbol });
+        // C2: only delete the key when the HL close actually succeeded — on failure the key
+        // persists so the futuresMonitor continues to exempt the hedge from max-hold and
+        // the position remains visible for manual inspection or retry.
+        await redis.del(`hedge:link:${marketId}`).catch(() => {});
       } else {
         logger.warn('[redeemer] failed to close linked HL hedge on PM resolution', {
           marketId, hlSymbol, error: result.error,
@@ -90,7 +103,6 @@ async function closePositionWithHedge(
         marketId, hlSymbol, error: String(err),
       });
     }
-    await redis.del(`hedge:link:${marketId}`).catch(() => {});
   }
 }
 const REDEEMER_MANUAL_NOTIFY_TTL_S = 30 * 24 * 3600;

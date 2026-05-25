@@ -1515,7 +1515,7 @@ async function attemptSyntheticExit(opts: {
 
   if (result.success) {
     // Persist the hedge link so the redeemer can find and close the HL leg at settlement.
-    await redis.set(`hedge:link:${position.marketId}`, hlSymbol, 'EX', 7 * 24 * 3600);
+    await redis.set(`hedge:link:${position.marketId}`, hlSymbol, 'EX', 90 * 24 * 3600);
     logger.info('[take-profit-executor] synthetic exit: hedge link persisted', {
       marketId: position.marketId,
       hlSymbol,

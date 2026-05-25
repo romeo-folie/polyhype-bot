@@ -635,7 +635,14 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           const hedgeSource = ledgerPosForAtr?.sourcedFrom;
           const hedgePmId = hedgeSource?.startsWith('hedge:pm:') ? hedgeSource.slice('hedge:pm:'.length) : null;
           const isActiveHedge = hedgePmId
-            ? (await redis.exists(`hedge:link:${hedgePmId}`).catch(() => 0)) > 0
+            ? (await redis.exists(`hedge:link:${hedgePmId}`).catch((err) => {
+                // Fail safe: treat hedge as active on Redis error so a transient
+                // blip doesn't cause the max-hold timer to fire unexpectedly.
+                logger.warn('[futures-monitor] hedge:link check failed; treating as active', {
+                  hedgePmId, error: err instanceof Error ? err.message : String(err),
+                });
+                return 1;
+              })) > 0
             : false;
 
           if (!isActiveHedge && ageHours >= maxHoldHours) {
@@ -729,7 +736,9 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           // time after the min-age window. Keyed off the per-position flag (set at entry)
           // so toggling the global config mid-trade doesn't affect open positions.
           const isContrarianMomentum = ledgerPosForAtr?.isContrarian === true;
-          if (!shouldExit && cfg.FUTURES_EXIT_ON_SIGNAL_FADE && priceChangePct <= 0 && !isContrarianMomentum) {
+          // Delta hedges are exempt from TA-fade for the same reason as max-hold:
+          // they should only exit on PM resolution, not on a confluence flip.
+          if (!shouldExit && cfg.FUTURES_EXIT_ON_SIGNAL_FADE && priceChangePct <= 0 && !isContrarianMomentum && !isActiveHedge) {
             const ageSec = (Date.now() - openedAt) / 1000;
             const lastCheck = lastRevalCheck.get(symbol) ?? 0;
             const secSinceCheck = (Date.now() - lastCheck) / 1000;
@@ -825,6 +834,14 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             }
 
             await closeLedgerPosition(redis, symbol, direction);
+
+            // C3: if this was a delta-hedge position, delete the hedge:link key so the
+            // redeemer's closePositionWithHedge doesn't attempt a second HL close later.
+            const closedSrc = ledgerPos?.sourcedFrom;
+            const closedHedgePmId = closedSrc?.startsWith('hedge:pm:') ? closedSrc.slice('hedge:pm:'.length) : null;
+            if (closedHedgePmId) {
+              await redis.del(`hedge:link:${closedHedgePmId}`).catch(() => {});
+            }
 
             // Set a per-symbol cooldown on losses so the entry path can't immediately
             // re-enter the same symbol and create a cascade of small losing trades.
