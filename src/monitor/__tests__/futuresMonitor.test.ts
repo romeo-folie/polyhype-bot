@@ -1087,6 +1087,95 @@ describe('futuresMonitor', () => {
     });
   });
 
+  describe('contrarian SL override (HL_MOMENTUM_CONTRARIAN_STOP_LOSS_PCT)', () => {
+    // Contrarian hl-momentum positions use a wider SL than standard momentum positions.
+    // The baseCfg has HL_MOMENTUM_STOP_LOSS_PCT=5; here we add CONTRARIAN_STOP_LOSS_PCT=15
+    // so a position at -10% ROE is inside the contrarian SL but outside the standard SL.
+    const contrarianSlCfg = {
+      ...baseCfg,
+      HL_MOMENTUM_STOP_LOSS_PCT: 5,
+      HL_MOMENTUM_CONTRARIAN_STOP_LOSS_PCT: 15,
+    };
+    const makeLedgerPos = (isContrarian: boolean, memeAtrSlPct?: number) => ({
+      marketId: 'ETH',
+      isFutures: true,
+      direction: 'LONG' as const,
+      question: 'ETH perpetual',
+      entryPrice: 1,
+      stakeUsd: 20,
+      openedAt: new Date().toISOString(),
+      executionVenue: 'hyperliquid' as const,
+      sourcedFrom: 'hl-momentum',
+      isContrarian,
+      ...(memeAtrSlPct !== undefined ? { memeAtrSlPct, memeAtrTpPct: 20 } : {}),
+    });
+    // szi=100, entryPx=1 → notional=100, margin=20 → leverage=5x, roe=-10%
+    const posAt10PctLoss = {
+      symbol: 'ETH',
+      position: { szi: '100', entryPx: '1', unrealizedPnl: '-2', marginUsed: '20' },
+    };
+    // roe=-16% — beyond contrarian SL of 15%
+    const posAt16PctLoss = {
+      symbol: 'ETH',
+      position: { szi: '100', entryPx: '1', unrealizedPnl: '-3.2', marginUsed: '20' },
+    };
+
+    it('does not stop out a contrarian position at -10% ROE when contrarian SL is 15%', async () => {
+      loadConfigMock.mockReturnValue(contrarianSlCfg);
+      mockGetOpenPositions.mockResolvedValue([posAt10PctLoss]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerPos(true)]);
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+
+    it('stops out a contrarian position at -16% ROE when contrarian SL is 15%', async () => {
+      loadConfigMock.mockReturnValue(contrarianSlCfg);
+      mockGetOpenPositions.mockResolvedValue([posAt16PctLoss]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerPos(true)]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('ETH');
+    });
+
+    it('stops out a non-contrarian hl-momentum position at -10% ROE (standard SL=5% applies)', async () => {
+      loadConfigMock.mockReturnValue(contrarianSlCfg);
+      mockGetOpenPositions.mockResolvedValue([posAt10PctLoss]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerPos(false)]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('ETH');
+    });
+
+    it('does not apply contrarian SL override to meme positions (they keep ATR-derived SL)', async () => {
+      // Meme-ATR SL is 8% price change (notional). Position is down 8.5% price change
+      // → should SL even though isContrarian=true, because ATR path takes precedence.
+      // Note: meme ATR uses priceChangePct (notional), not roePct, so at 5x leverage
+      // a -8.5% price move = -42.5% ROE but only -8.5% notional — that's what fires the meme SL.
+      loadConfigMock.mockReturnValue({
+        ...contrarianSlCfg,
+        HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: true,
+        HL_MOMENTUM_MEME_SYMBOLS: 'wifusdt,pepeusdt,bonkusdt,penguusdt',
+      });
+      // szi=100, entryPx=1 → notional=100; unrealizedPnl=-8.5 → priceChangePct=-8.5% (> meme SL -8%)
+      const posAtMemeSlBreach = {
+        symbol: 'WIF',
+        position: { szi: '100', entryPx: '1', unrealizedPnl: '-8.5', marginUsed: '20' },
+      };
+      mockGetOpenPositions.mockResolvedValue([posAtMemeSlBreach]);
+      mockGetLedgerPositions.mockResolvedValue([
+        { ...makeLedgerPos(true, 8), marketId: 'WIF' },
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('WIF');
+    });
+  });
+
   describe('signal-fade exit gate', () => {
     const fadeCfg = { ...baseCfg, FUTURES_EXIT_ON_SIGNAL_FADE: true };
     const oldEnough = () => new Date(Date.now() - 20 * 60 * 1000).toISOString();
