@@ -1,6 +1,7 @@
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 import { getOpenPositions, closePosition, recordPosition, updatePositionShares, type Position } from '../execution/positionLedger.js';
+import { getHyperliquid } from '../shared/hyperliquid.js';
 import { getSimmerPositions, type SimmerPosition } from '../shared/simmer.js';
 import { fetchClobTokenBalance } from '../shared/clob.js';
 import { fetchPolymarketPositions, type PolymarketPosition } from '../shared/polymarketData.js';
@@ -12,6 +13,32 @@ import { isRecentlyClosed, isRecentlyResolved } from '../shared/closedGuard.js';
 import { getPendingOrder, deletePendingOrder } from '../execution/pendingMakerOrders.js';
 import { notifyTradeExecuted } from '../execution/telegram.js';
 import type { TradeSignal } from '../mapping/index.js';
+
+async function closeGhostPositionWithHedge(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+): Promise<void> {
+  await closePosition(redis, marketId, direction);
+  const hlSymbol = await redis.get(`hedge:link:${marketId}`).catch(() => null);
+  if (hlSymbol) {
+    try {
+      const result = await getHyperliquid().closePosition(hlSymbol);
+      if (result.success) {
+        logger.info('[reconcile] closed linked HL hedge for ghost position', { marketId, hlSymbol });
+      } else {
+        logger.warn('[reconcile] failed to close linked HL hedge for ghost position', {
+          marketId, hlSymbol, error: result.error,
+        });
+      }
+    } catch (err) {
+      logger.warn('[reconcile] error closing linked HL hedge for ghost position', {
+        marketId, hlSymbol, error: String(err),
+      });
+    }
+    await redis.del(`hedge:link:${marketId}`).catch(() => {});
+  }
+}
 
 interface ReconciliationDetail {
   type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded' | 'recovered_outcome';
@@ -289,7 +316,7 @@ export async function runReconciliation(
         });
         
         if (forceFix) {
-          await closePosition(redis, ledgerPos.marketId, ledgerPos.direction);
+          await closeGhostPositionWithHedge(redis, ledgerPos.marketId, ledgerPos.direction);
           ghostsFixed++;
         }
         details.push({

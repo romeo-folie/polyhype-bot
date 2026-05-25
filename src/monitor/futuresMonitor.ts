@@ -627,7 +627,18 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           const maxHoldHours = ledgerPosForAtr?.sourcedFrom === 'hl-funding'
             ? cfg.HL_FUNDING_SCANNER_MAX_HOLD_HOURS
             : cfg.FUTURES_MAX_HOLD_HOURS;
-          if (ageHours >= maxHoldHours) {
+
+          // Delta hedges are closed on PM resolution, not on a time cap.
+          // Exempt while hedge:link is alive (PM market still open). Once the
+          // redeemer settles the PM position it deletes the key, and the next
+          // tick falls through to normal max-hold behaviour as a backstop.
+          const hedgeSource = ledgerPosForAtr?.sourcedFrom;
+          const hedgePmId = hedgeSource?.startsWith('hedge:pm:') ? hedgeSource.slice('hedge:pm:'.length) : null;
+          const isActiveHedge = hedgePmId
+            ? (await redis.exists(`hedge:link:${hedgePmId}`).catch(() => 0)) > 0
+            : false;
+
+          if (!isActiveHedge && ageHours >= maxHoldHours) {
             let bypassed = false;
             // Loser guard: max-hold never kicks a position that's underwater.
             // Observed failure mode: ETH LONG at -2.16% cut at 24h; had it held
