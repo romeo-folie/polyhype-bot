@@ -1533,7 +1533,7 @@ async function attemptSyntheticExit(opts: {
     await recordPosition(redis, {
       marketId: hlSymbol,
       question: `${hlSymbol} synthetic-exit hedge for PM:${position.marketId}`,
-      direction: isBuy ? 'YES' : 'NO',
+      direction: isBuy ? 'LONG' : 'SHORT',
       entryPrice: result.price ?? 0,
       stakeUsd: hedgeStakeUsd,
       edgeMagnitude: 0,
