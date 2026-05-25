@@ -38,7 +38,7 @@ import {
   markPositionPendingSettlement,
   updatePositionShares,
 } from '../execution/positionLedger.js';
-import { notifyTakeProfitExecuted } from '../execution/telegram.js';
+import { notifyTakeProfitExecuted, notify } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
 import { recordPositionOutcome } from '../shared/positionOutcomeRecorder.js';
@@ -103,26 +103,30 @@ async function closePositionWithHedge(
       const result = await hl.closePosition(hlSymbol);
       if (result.success) {
         logger.info('[take-profit-executor] closed linked HL hedge', { marketId, hlSymbol });
+        // Only delete the key on success — a failed close leaves it alive so
+        // futuresMonitor keeps the position exempt from max-hold and the open
+        // HL leg remains visible for manual inspection or retry.
+        await redis.del(`hedge:link:${marketId}`).catch((e: unknown) => {
+          logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', {
+            marketId, error: String(e),
+          });
+        });
       } else {
         logger.warn('[take-profit-executor] failed to close linked HL hedge', {
-          marketId,
-          hlSymbol,
-          error: result.error,
+          marketId, hlSymbol, error: result.error,
         });
+        void notify(
+          `⚠️ HL hedge close failed — manual action needed\nPM market: ${marketId}\nHL symbol: ${hlSymbol}\nError: ${result.error ?? 'unknown'}`,
+        ).catch(() => {});
       }
     } catch (err: unknown) {
       logger.warn('[take-profit-executor] error closing linked HL hedge', {
-        marketId,
-        hlSymbol,
-        error: String(err),
+        marketId, hlSymbol, error: String(err),
       });
+      void notify(
+        `⚠️ HL hedge close error — manual action needed\nPM market: ${marketId}\nHL symbol: ${hlSymbol}\nError: ${String(err)}`,
+      ).catch(() => {});
     }
-    await redis.del(`hedge:link:${marketId}`).catch((e: unknown) => {
-      logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', {
-        marketId,
-        error: String(e),
-      });
-    });
   }
 }
 

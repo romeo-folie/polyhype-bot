@@ -11,7 +11,7 @@ import { recordRedemptionOutcome } from '../shared/positionOutcomeRecorder.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { isRecentlyClosed, isRecentlyResolved } from '../shared/closedGuard.js';
 import { getPendingOrder, deletePendingOrder } from '../execution/pendingMakerOrders.js';
-import { notifyTradeExecuted } from '../execution/telegram.js';
+import { notifyTradeExecuted, notify } from '../execution/telegram.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 async function closeGhostPositionWithHedge(
@@ -38,11 +38,13 @@ async function closeGhostPositionWithHedge(
         logger.warn('[reconcile] failed to close linked HL hedge for ghost position', {
           marketId, hlSymbol, error: result.error,
         });
+        void notify(`⚠️ HL hedge close failed — manual action needed\nPM market: ${marketId}\nHL symbol: ${hlSymbol}\nError: ${result.error ?? 'unknown'}`).catch(() => {});
       }
     } catch (err) {
       logger.warn('[reconcile] error closing linked HL hedge for ghost position', {
         marketId, hlSymbol, error: String(err),
       });
+      void notify(`⚠️ HL hedge close error — manual action needed\nPM market: ${marketId}\nHL symbol: ${hlSymbol}\nError: ${String(err)}`).catch(() => {});
     }
   }
 }

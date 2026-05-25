@@ -38,7 +38,7 @@ import { markRecentlyClosed, isRecentlyClosed, markRecentlyResolved, isRecentlyR
 
 /** @deprecated Use isRecentlyClosed from shared/closedGuard.js. Kept for external callers. */
 export const isRecentlyRedeemed = isRecentlyClosed;
-import { notifyRedemptionExecuted, notifyManualRedemptionRequired, notifyMarketResolved } from '../execution/telegram.js';
+import { notifyRedemptionExecuted, notifyManualRedemptionRequired, notifyMarketResolved, notify } from '../execution/telegram.js';
 import {
   recordPositionOutcome,
   recordRedemptionOutcome,
@@ -97,11 +97,17 @@ async function closePositionWithHedge(
         logger.warn('[redeemer] failed to close linked HL hedge on PM resolution', {
           marketId, hlSymbol, error: result.error,
         });
+        void notify(
+          `⚠️ HL hedge close failed — manual action needed\nPM market: ${marketId}\nHL symbol: ${hlSymbol}\nError: ${result.error ?? 'unknown'}`,
+        ).catch(() => {});
       }
     } catch (err) {
       logger.warn('[redeemer] error closing linked HL hedge on PM resolution', {
         marketId, hlSymbol, error: String(err),
       });
+      void notify(
+        `⚠️ HL hedge close error — manual action needed\nPM market: ${marketId}\nHL symbol: ${hlSymbol}\nError: ${String(err)}`,
+      ).catch(() => {});
     }
   }
 }
