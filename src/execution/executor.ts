@@ -32,7 +32,7 @@ import { hasOpenPosition, recordPosition, getPosition, sizeUpPosition } from './
 import { isRecentlyResolved } from '../shared/closedGuard.js';
 import { deductStake, getBankroll } from '../shared/bankroll.js';
 import { isStaleCooldownActive } from '../monitor/staleExit.js';
-import { getHyperliquid, resolveHlSymbol } from '../shared/hyperliquid.js';
+import { getHyperliquid, resolveHlSymbol, type HlPosition } from '../shared/hyperliquid.js';
 import { computeATR } from '../arb/indicators.js';
 import { isMemeSymbol } from '../futures/hlMomentumScanner.js';
 import { loadConfig } from '../shared/config.js';
@@ -1493,11 +1493,23 @@ async function triggerDeltaHedge(
   const cfg = loadConfig();
   if (!cfg.FUTURES_ENABLED || pmSignal.isFutures) return false;
 
+  // Only price-target questions ("Will BTC be above $X on date Y?") carry the directional
+  // exposure that a 1:1 HL hedge offsets. Regulatory, adoption, or event markets that
+  // mention BTC/ETH incidentally don't move 1:1 with spot and should not trigger a hedge.
+  const PRICE_TARGET_RE = /\b(?:above|below|over|under|exceed|reach)\s+\$[\d,.]+k?\b/i;
+  if (!PRICE_TARGET_RE.test(pmSignal.question)) {
+    logger.debug('[executor] skipping delta hedge — question is not a price-target market', {
+      question: pmSignal.question,
+    });
+    return false;
+  }
+
   const hl = getHyperliquid();
 
-  // 1. Margin Check (Added guard)
+  // 1. Margin check — hoist positions so the existing-position guard (step 3) can reuse them
+  let positions: HlPosition[] = [];
   try {
-    const positions = await hl.getOpenPositions();
+    positions = await hl.getOpenPositions();
     const totalCurrentMargin = positions.reduce(
       (sum, p) => sum + parseFloat(p.position.marginUsed || '0'),
       0,
@@ -1537,9 +1549,11 @@ async function triggerDeltaHedge(
   }
 
   // 3. Execute 1:1 Delta Hedge — direction opposes the PM position's market exposure.
-  //    PM YES on a bullish market → hedge SHORT (protect against drop).
-  //    PM NO  on a bullish market → hedge LONG  (protect against rip).
-  const isBuyHedge = pmSignal.direction === 'NO';
+  //    Bullish question ("above/over/exceed/reach"): YES = long PM exposure → hedge SHORT; NO → hedge LONG.
+  //    Bearish question ("below/under"): YES = short PM exposure → hedge LONG; NO → hedge SHORT.
+  const bearishQuestionRE = /\b(?:below|under)\b/i;
+  const questionIsBearish = bearishQuestionRE.test(pmSignal.question);
+  const isBuyHedge = questionIsBearish ? pmSignal.direction === 'YES' : pmSignal.direction === 'NO';
   const hedgeDirection: 'LONG' | 'SHORT' = isBuyHedge ? 'LONG' : 'SHORT';
   const hedgeStakeUsd = pmSignal.stakeUsd;
 
@@ -1550,6 +1564,25 @@ async function triggerDeltaHedge(
     logger.info('[executor] skipping delta hedge — stake below HL minimum notional', {
       stakeUsd: hedgeStakeUsd,
       minUsd: HL_MIN_ORDER_USD,
+    });
+    return false;
+  }
+
+  // 4. Existing-position guard — if HL already has any real open position for this symbol
+  //    (same or opposite direction), skip. Same direction would stack unintended size;
+  //    opposite direction would flip/close the existing hedge, which is worse.
+  //    Exclude zero-size stale entries the API sometimes returns for recently-closed positions.
+  const existingHlPos = positions.find(
+    p => p.symbol === hlSymbol && parseFloat(p.position.szi) !== 0,
+  );
+  if (existingHlPos) {
+    const existingSzi = existingHlPos.position.szi;
+    const existingDir = parseFloat(existingSzi) > 0 ? 'LONG' : 'SHORT';
+    logger.info('[executor] skipping delta hedge — existing HL position for symbol', {
+      hlSymbol,
+      existingDirection: existingDir,
+      existingSzi,
+      hedgeDirection,
     });
     return false;
   }

@@ -57,6 +57,7 @@ redis-cli KEYS '*lock*'          # verify no stale locks after restart
 - **Always create a PR. Never push directly to main unless the user explicitly asks.**
   Branch naming: `feat/<slug>`, `fix/<slug>`, `chore/<slug>`. Open PR, wait for merge.
   After creating a PR, start a Monitor task to watch for comments and status. When the PR status shows `merged=true`, stop the monitor task with `TaskStop`.
+- **Before opening a PR, run `/code-review --effort high` on the branch diff and fix any CONFIRMED or PLAUSIBLE findings before pushing.**
 - **After a PR merges into `main`, redeploy the affected container(s).** Claude Code runs on the Hetzner prod server — merging does not restart running workers. Pull `main`, then run `scripts/deploy.sh <service...>` for the service(s) whose source changed (e.g. `pga-sports` for `src/sports/*`, `pga-arb` for `src/arb/*`, `pga-monitor` for `src/monitor/*`). Use `scripts/deploy.sh --all` only for explicit full-stack work such as shared infrastructure changes. Confirm the container restarted and verify logs.
 - **Always branch from `main`** unless explicitly told to branch from a specific feature branch.
 - Prefer editing existing files over creating new ones.
