@@ -1504,27 +1504,6 @@ async function triggerDeltaHedge(
     return false;
   }
 
-  // Source gate: defense-in-depth. Even if a question pattern matches, only sources that
-  // trade price-correlated PM markets should open a hedge.
-  const hedgeEligibleSources = cfg.DELTA_HEDGE_ELIGIBLE_SOURCES
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (hedgeEligibleSources.length === 0) {
-    logger.warn('[executor] DELTA_HEDGE_ELIGIBLE_SOURCES is empty — delta hedging suppressed');
-    return false;
-  }
-  const isEligibleSource = hedgeEligibleSources.some((prefix) =>
-    (pmSignal.sourcedFrom ?? '').startsWith(prefix),
-  );
-  if (!isEligibleSource) {
-    logger.debug('[executor] skipping delta hedge — source not hedge-eligible', {
-      sourcedFrom: pmSignal.sourcedFrom,
-      eligible: hedgeEligibleSources,
-    });
-    return false;
-  }
-
   const hl = getHyperliquid();
 
   // 1. Margin check — hoist positions so the existing-position guard (step 3) can reuse them

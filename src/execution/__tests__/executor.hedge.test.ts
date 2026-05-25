@@ -13,7 +13,6 @@ vi.mock('../../shared/config.js', () => ({
     FUTURES_MAX_PER_TRADE_USD: 10,
     FUTURES_DEFAULT_LEVERAGE: 5,
     SIZE_UP_ELIGIBLE_SOURCES: 'weather',
-    DELTA_HEDGE_ELIGIBLE_SOURCES: 'oracle-lag,crypto-arb',
     EXECUTION_MODE: 'taker',
     TAKER_MIN_EDGE: 0,
     TAIL_TAKER_BLOCK: false,
@@ -80,11 +79,13 @@ describe('Delta Hedging Integration', () => {
     exists: vi.fn(),
   } as unknown as Redis;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
-    // clearAllMocks resets call records but not implementations. Restore the position
-    // ledger default so tests that set a custom implementation don't leak into later tests.
+    // clearAllMocks resets call records but not implementations. Explicitly restore the
+    // defaults that guard tests override so they don't bleed into later tests.
     (hasOpenPosition as Mock).mockResolvedValue(false);
+    const { getHyperliquid } = await import('../../shared/hyperliquid.js');
+    (getHyperliquid as Mock)().getOpenPositions.mockResolvedValue([]);
   });
 
   it('triggers a 1:1 delta hedge on HL after a successful PM buy', async () => {
@@ -270,10 +271,10 @@ describe('Delta Hedging Integration', () => {
     expect(mockPlaceMarketOrder).not.toHaveBeenCalled();
   });
 
-  it('skips hedge for price-target questions from ineligible sources', async () => {
-    // OSINT/copytrade may produce price-target-looking questions; source gate is defense-in-depth
+  it('opens hedge for price-target questions from any source (source gate removed)', async () => {
+    // The regex+resolveHlSymbol combination is the gate — any scanner can produce a hedgeable trade
     const signal = {
-      marketId: 'pm-osint-btc',
+      marketId: 'pm-copytrade-btc',
       question: 'Will Bitcoin be above $100,000 by year end?',
       direction: 'YES' as const,
       stakeUsd: 10,
@@ -287,7 +288,9 @@ describe('Delta Hedging Integration', () => {
     await executeSignal(signal as any, mockRedis);
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(mockPlaceMarketOrder).not.toHaveBeenCalled();
+    expect(mockPlaceMarketOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ symbol: 'BTC', isBuy: false, sizeUsd: 10 }),
+    );
   });
 
   it('does NOT trigger hedge for non-correlated markets', async () => {
