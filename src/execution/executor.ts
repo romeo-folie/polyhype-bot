@@ -1549,9 +1549,11 @@ async function triggerDeltaHedge(
   }
 
   // 3. Execute 1:1 Delta Hedge — direction opposes the PM position's market exposure.
-  //    PM YES on a bullish market → hedge SHORT (protect against drop).
-  //    PM NO  on a bullish market → hedge LONG  (protect against rip).
-  const isBuyHedge = pmSignal.direction === 'NO';
+  //    Bullish question ("above/over/exceed/reach"): YES = long PM exposure → hedge SHORT; NO → hedge LONG.
+  //    Bearish question ("below/under"): YES = short PM exposure → hedge LONG; NO → hedge SHORT.
+  const bearishQuestionRE = /\b(?:below|under)\b/i;
+  const questionIsBearish = bearishQuestionRE.test(pmSignal.question);
+  const isBuyHedge = questionIsBearish ? pmSignal.direction === 'YES' : pmSignal.direction === 'NO';
   const hedgeDirection: 'LONG' | 'SHORT' = isBuyHedge ? 'LONG' : 'SHORT';
   const hedgeStakeUsd = pmSignal.stakeUsd;
 

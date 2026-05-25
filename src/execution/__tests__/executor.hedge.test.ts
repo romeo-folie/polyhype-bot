@@ -293,6 +293,28 @@ describe('Delta Hedging Integration', () => {
     );
   });
 
+  it('opens LONG hedge for bearish-framed question with YES direction', async () => {
+    // "Will ETH be below $2000?" + YES: trader profits if ETH drops → short PM exposure → offset with LONG
+    const signal = {
+      marketId: 'pm-eth-below',
+      question: 'Will Ethereum be below $2000 by end of month?',
+      direction: 'YES' as const,
+      stakeUsd: 10,
+      outcomePrice: 0.5,
+      edgeMagnitude: 0.2,
+      sourcedFrom: 'oracle-lag:eth:2pct:300s',
+      isFutures: false,
+    };
+
+    mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '0x-hedge-eth-below' });
+    await executeSignal(signal as any, mockRedis);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(mockPlaceMarketOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ symbol: 'ETH', isBuy: true, sizeUsd: 10 }),
+    );
+  });
+
   it('does NOT trigger hedge for non-correlated markets', async () => {
     const signal = {
       marketId: 'pm-politics',
