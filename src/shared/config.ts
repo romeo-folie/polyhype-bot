@@ -1301,6 +1301,10 @@ const envSchema = z.object({
   // When contrarian mode is on, arm the trailing stop earlier (mean-reversion snap-back is
   // front-loaded; waiting for the standard TP arm leaves too much on the table).
   HL_MOMENTUM_CONTRARIAN_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(10),
+  // Wider SL for contrarian positions. Mean-reversion entries need room for the initial
+  // momentum continuation before the snap-back; 8.5% (0.85% spot at 10x) was too tight.
+  // 15% = 1.5% spot at 10x. Meme positions using ATR-derived SL are unaffected.
+  HL_MOMENTUM_CONTRARIAN_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(15),
   // Per-side cooldown in seconds after a momentum entry (prevents rapid re-entry on same side).
   HL_MOMENTUM_COOLDOWN_SEC: z.coerce.number().int().min(60).optional().default(600),
   // Short cooldown for transient executor skips (stake_below_hl_minimum) — price fluctuation
