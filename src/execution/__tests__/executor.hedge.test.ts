@@ -12,6 +12,8 @@ vi.mock('../../shared/config.js', () => ({
     MIN_BET_USD: 5,
     FUTURES_MAX_PER_TRADE_USD: 10,
     FUTURES_DEFAULT_LEVERAGE: 5,
+    SIZE_UP_ELIGIBLE_SOURCES: 'weather',
+    DELTA_HEDGE_ELIGIBLE_SOURCES: 'oracle-lag,crypto-arb',
     EXECUTION_MODE: 'taker',
     TAKER_MIN_EDGE: 0,
     TAIL_TAKER_BLOCK: false,
@@ -80,6 +82,9 @@ describe('Delta Hedging Integration', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // clearAllMocks resets call records but not implementations. Restore the position
+    // ledger default so tests that set a custom implementation don't leak into later tests.
+    (hasOpenPosition as Mock).mockResolvedValue(false);
   });
 
   it('triggers a 1:1 delta hedge on HL after a successful PM buy', async () => {
@@ -90,7 +95,7 @@ describe('Delta Hedging Integration', () => {
       stakeUsd: 10,
       outcomePrice: 0.5,
       edgeMagnitude: 0.2,
-      sourcedFrom: 'OSINT',
+      sourcedFrom: 'oracle-lag:btc:1.5pct:300s',
       isFutures: false,
     };
 
@@ -167,6 +172,122 @@ describe('Delta Hedging Integration', () => {
 
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('position_already_open');
+  });
+
+  it('skips hedge when an HL position for the same symbol already exists (same direction)', async () => {
+    const { getHyperliquid } = await import('../../shared/hyperliquid.js');
+    // Use mockResolvedValue (not Once) so both the margin check and the guard receive the BTC position
+    (getHyperliquid as Mock)().getOpenPositions.mockResolvedValue([
+      { symbol: 'BTC', position: { szi: '0.01', entryPx: '60000', leverage: { type: 'cross', value: 1 }, unrealizedPnl: '0', marginUsed: '10', coin: 'BTC' } },
+    ]);
+
+    const signal = {
+      marketId: 'pm-btc-2',
+      question: 'Will Bitcoin exceed $70k?',
+      direction: 'YES' as const,
+      stakeUsd: 10,
+      outcomePrice: 0.5,
+      edgeMagnitude: 0.2,
+      sourcedFrom: 'oracle-lag:btc:1.5pct:300s',
+      isFutures: false,
+    };
+
+    mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '0x-hedge-tx-2' });
+    await executeSignal(signal as any, mockRedis);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(mockPlaceMarketOrder).not.toHaveBeenCalled();
+  });
+
+  it('skips hedge when an HL position for the same symbol already exists (opposite direction — prevents flip)', async () => {
+    const { getHyperliquid } = await import('../../shared/hyperliquid.js');
+    (getHyperliquid as Mock)().getOpenPositions.mockResolvedValue([
+      { symbol: 'BTC', position: { szi: '-0.01', entryPx: '60000', leverage: { type: 'cross', value: 1 }, unrealizedPnl: '0', marginUsed: '10', coin: 'BTC' } },
+    ]);
+
+    const signal = {
+      marketId: 'pm-btc-3',
+      question: 'Will Bitcoin price drop below $50k?',
+      direction: 'NO' as const,
+      stakeUsd: 10,
+      outcomePrice: 0.5,
+      edgeMagnitude: 0.2,
+      sourcedFrom: 'oracle-lag:btc:1.5pct:300s',
+      isFutures: false,
+    };
+
+    mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '0x-hedge-tx-3' });
+    await executeSignal(signal as any, mockRedis);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(mockPlaceMarketOrder).not.toHaveBeenCalled();
+  });
+
+  it('does NOT skip hedge when HL has a zero-size stale entry for the symbol', async () => {
+    const { getHyperliquid } = await import('../../shared/hyperliquid.js');
+    // szi='0' — recently-closed position the API hasn't cleared yet; should not block the hedge
+    (getHyperliquid as Mock)().getOpenPositions.mockResolvedValue([
+      { symbol: 'BTC', position: { szi: '0', entryPx: '0', leverage: { type: 'cross', value: 1 }, unrealizedPnl: '0', marginUsed: '0', coin: 'BTC' } },
+    ]);
+
+    const signal = {
+      marketId: 'pm-btc-stale',
+      question: 'Will Bitcoin be above $80k?',
+      direction: 'YES' as const,
+      stakeUsd: 10,
+      outcomePrice: 0.5,
+      edgeMagnitude: 0.2,
+      sourcedFrom: 'oracle-lag:btc:1.5pct:300s',
+      isFutures: false,
+    };
+
+    mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '0x-hedge-stale' });
+    await executeSignal(signal as any, mockRedis);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(mockPlaceMarketOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ symbol: 'BTC', isBuy: false, sizeUsd: 10 }),
+    );
+  });
+
+  it('skips hedge for non-price-target questions even from eligible sources', async () => {
+    // Regulatory/adoption markets mention BTC but PM payout doesn't track spot price
+    const signal = {
+      marketId: 'pm-btc-etf',
+      question: 'Will the US approve a Bitcoin ETF?',
+      direction: 'YES' as const,
+      stakeUsd: 10,
+      outcomePrice: 0.5,
+      edgeMagnitude: 0.2,
+      sourcedFrom: 'oracle-lag:btc:1.5pct:300s',
+      isFutures: false,
+    };
+
+    mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '0x-hedge-etf' });
+    await executeSignal(signal as any, mockRedis);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(mockPlaceMarketOrder).not.toHaveBeenCalled();
+  });
+
+  it('skips hedge for price-target questions from ineligible sources', async () => {
+    // OSINT/copytrade may produce price-target-looking questions; source gate is defense-in-depth
+    const signal = {
+      marketId: 'pm-osint-btc',
+      question: 'Will Bitcoin be above $100,000 by year end?',
+      direction: 'YES' as const,
+      stakeUsd: 10,
+      outcomePrice: 0.5,
+      edgeMagnitude: 0.2,
+      sourcedFrom: 'copytrade:0xwallet',
+      isFutures: false,
+    };
+
+    mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '0x-hedge-copytrade' });
+    await executeSignal(signal as any, mockRedis);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(mockPlaceMarketOrder).not.toHaveBeenCalled();
   });
 
   it('does NOT trigger hedge for non-correlated markets', async () => {

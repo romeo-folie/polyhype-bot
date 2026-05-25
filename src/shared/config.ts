@@ -1139,6 +1139,10 @@ const envSchema = z.object({
   HYPERLIQUID_MAIN_WALLET: z.string().optional(),
   HYPERLIQUID_TESTNET: boolFromEnv.optional().default(false),
 
+  // Delta hedge: comma-separated sourcedFrom prefixes whose PM trades may open an HL hedge.
+  // Only price-correlated sources (oracle-lag, crypto-arb) should be eligible.
+  DELTA_HEDGE_ELIGIBLE_SOURCES: z.string().optional().default('oracle-lag,crypto-arb'),
+
   // Risk & Control
   FUTURES_GLOBAL_MAX_MARGIN_USD: z.coerce.number().min(0).optional().default(200),
   FUTURES_MAX_PER_TRADE_USD: z.coerce.number().min(0).optional().default(10),
