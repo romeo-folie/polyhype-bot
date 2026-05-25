@@ -1592,12 +1592,16 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       // A skipped result (dedup, spread too wide, etc.) should not burn caps.
       // Size-ups still consume real capital so they count toward exposure but
       // not toward the per-city or per-scan position count caps.
+      // Exception: size_up_ineligible means an existing position already occupies
+      // this city — burn the city slot so correlated brackets can't sneak through.
       if (!result.skipped) {
         if (!result.isSizeUp) {
           executed++;
           perCityCount.set(opp.city, cityCount + 1);
         }
         cumulativeStakeUsd += filledStakeUsd;
+      } else if (result.skipReason === 'size_up_ineligible') {
+        perCityCount.set(opp.city, cityCount + 1);
       }
     } catch (err) {
       logger.error('[weather] execution threw', {

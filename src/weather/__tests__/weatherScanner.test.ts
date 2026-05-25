@@ -1996,6 +1996,38 @@ describe('scanWeatherMarkets', () => {
       expect(mockExecuteAndRecordSignal.mock.calls.length).toBeLessThanOrEqual(1);
     });
 
+    it('size_up_ineligible skip burns the city slot to block correlated bracket entries', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_PER_CITY: 1,
+        WEATHER_EXCLUDED_CITIES: 'NYC', // doesn't exclude fixture city (Chicago)
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+      // First call: size_up_ineligible (existing position, size-up blocked).
+      // Second call: would be a fresh bracket in the same city — must NOT fire.
+      mockExecuteAndRecordSignal
+        .mockResolvedValueOnce({
+          signal: { stakeUsd: 5 } as never,
+          skipped: true,
+          skipReason: 'size_up_ineligible',
+        })
+        .mockResolvedValue({
+          signal: { stakeUsd: 5 } as never,
+          skipped: false,
+          executionVenue: 'clob',
+          entryPrice: 0.4,
+          sharesFilled: 12,
+        });
+
+      await runWeatherScan(redisMock as never);
+
+      // City slot consumed by the size_up_ineligible skip — only 1 call total.
+      expect(mockExecuteAndRecordSignal).toHaveBeenCalledTimes(1);
+    });
+
     it('respects WEATHER_MAX_SCAN_EXPOSURE_USD cap', async () => {
       mockLoadConfig.mockReturnValue({
         ...baseConfig,
