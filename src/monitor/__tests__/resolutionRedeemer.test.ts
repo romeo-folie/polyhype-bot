@@ -94,6 +94,7 @@ const { redeemResolvedPositions } = await import('../resolutionRedeemer.js');
 describe('redeemResolvedPositions', () => {
   const mockRedis = {
     exists: vi.fn().mockResolvedValue(0),
+    get: vi.fn().mockResolvedValue(null),
     hgetall: vi.fn().mockResolvedValue({}),
     hset: vi.fn().mockResolvedValue('OK'),
     expire: vi.fn().mockResolvedValue(1),

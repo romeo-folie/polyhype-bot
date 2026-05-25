@@ -358,6 +358,22 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           tpPct = cfg.HL_MOMENTUM_CONTRARIAN_TAKE_PROFIT_PCT;
         }
 
+        // Detect active delta-hedge early — needed by trailing-stop, fixed-TP,
+        // max-hold, and TA-fade blocks. A position is an active hedge while the
+        // hedge:link key exists (redeemer deletes it on PM resolution).
+        // Fail-safe: treat as active on Redis error so a transient blip doesn't
+        // prematurely close the HL leg.
+        const hedgeSource = ledgerPosForAtr?.sourcedFrom;
+        const hedgePmId = hedgeSource?.startsWith('hedge:pm:') ? hedgeSource.slice('hedge:pm:'.length) : null;
+        const isActiveHedge = hedgePmId
+          ? (await redis.exists(`hedge:link:${hedgePmId}`).catch((err) => {
+              logger.warn('[futures-monitor] hedge:link check failed; treating as active', {
+                hedgePmId, error: err instanceof Error ? err.message : String(err),
+              });
+              return 1;
+            })) > 0
+          : false;
+
         // Global ATR overlay is calibrated for 1m crypto-arb scalps (SL floor 1%,
         // TP floor 2%). Applying it to hl-momentum 15m swing positions produces
         // absurdly tight stops that SL every entry on intraday noise (burned on
@@ -540,11 +556,13 @@ export async function runFuturesMonitorWorker(): Promise<void> {
               ? ` meme_atr_sl=${slPct.toFixed(2)}`
               : '';
           reason = `Stop-Loss triggered (${gatePct.toFixed(2)}%${slTag})`;
-        } else if (!cfg.FUTURES_TRAILING_STOP_ENABLED && gatePct >= tpPct) {
+        } else if (!cfg.FUTURES_TRAILING_STOP_ENABLED && !isActiveHedge && gatePct >= tpPct) {
           // Fixed TP only when trailing is disabled. When trailing is on, it
           // supersedes fixed TP so winners can run beyond the TP line; the
           // floor is clamped to TP below so the worst case at the TP line is
           // identical to fixed-TP behavior.
+          // Active hedges skip TP: locking in the HL gain while the PM side is
+          // still open unhedges the PM position prematurely.
           shouldExit = true;
           const tpTag = usingAtrMode
             ? ` atr_tp=${tpPct.toFixed(2)}`
@@ -587,7 +605,9 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             });
           }
           trailingArmed = hwm >= tpPct;
-          if (!shouldExit && trailingArmed) {
+          // Active hedges skip trailing-stop for the same reason as fixed-TP:
+          // prematurely locking in the HL gain leaves the PM position unhedged.
+          if (!shouldExit && !isActiveHedge && trailingArmed) {
             const floorPct = Math.max(tpPct, hwm - trailStopPct);
             if (gatePct <= floorPct) {
               shouldExit = true;
@@ -627,7 +647,11 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           const maxHoldHours = ledgerPosForAtr?.sourcedFrom === 'hl-funding'
             ? cfg.HL_FUNDING_SCANNER_MAX_HOLD_HOURS
             : cfg.FUTURES_MAX_HOLD_HOURS;
-          if (ageHours >= maxHoldHours) {
+
+          // isActiveHedge computed above (before SL/TP blocks) so it is also
+          // available here and in the TA-fade block. Active hedges are exempt
+          // from the time cap — they exit on PM resolution, not on max-hold.
+          if (!isActiveHedge && ageHours >= maxHoldHours) {
             let bypassed = false;
             // Loser guard: max-hold never kicks a position that's underwater.
             // Observed failure mode: ETH LONG at -2.16% cut at 24h; had it held
@@ -718,7 +742,9 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           // time after the min-age window. Keyed off the per-position flag (set at entry)
           // so toggling the global config mid-trade doesn't affect open positions.
           const isContrarianMomentum = ledgerPosForAtr?.isContrarian === true;
-          if (!shouldExit && cfg.FUTURES_EXIT_ON_SIGNAL_FADE && priceChangePct <= 0 && !isContrarianMomentum) {
+          // Delta hedges are exempt from TA-fade for the same reason as max-hold:
+          // they should only exit on PM resolution, not on a confluence flip.
+          if (!shouldExit && cfg.FUTURES_EXIT_ON_SIGNAL_FADE && priceChangePct <= 0 && !isContrarianMomentum && !isActiveHedge) {
             const ageSec = (Date.now() - openedAt) / 1000;
             const lastCheck = lastRevalCheck.get(symbol) ?? 0;
             const secSinceCheck = (Date.now() - lastCheck) / 1000;
@@ -814,6 +840,14 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             }
 
             await closeLedgerPosition(redis, symbol, direction);
+
+            // C3: if this was a delta-hedge position, delete the hedge:link key so the
+            // redeemer's closePositionWithHedge doesn't attempt a second HL close later.
+            const closedSrc = ledgerPos?.sourcedFrom;
+            const closedHedgePmId = closedSrc?.startsWith('hedge:pm:') ? closedSrc.slice('hedge:pm:'.length) : null;
+            if (closedHedgePmId) {
+              await redis.del(`hedge:link:${closedHedgePmId}`).catch(() => {});
+            }
 
             // Set a per-symbol cooldown on losses so the entry path can't immediately
             // re-enter the same symbol and create a cascade of small losing trades.

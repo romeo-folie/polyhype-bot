@@ -34,11 +34,12 @@ import type { TickSize } from '@polymarket/clob-client-v2';
 import {
   closePosition,
   getPosition,
+  recordPosition,
   markPositionSynthHedged,
   markPositionPendingSettlement,
   updatePositionShares,
 } from '../execution/positionLedger.js';
-import { notifyTakeProfitExecuted } from '../execution/telegram.js';
+import { notifyTakeProfitExecuted, notify } from '../execution/telegram.js';
 import { creditProceeds } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
 import { recordPositionOutcome } from '../shared/positionOutcomeRecorder.js';
@@ -103,26 +104,30 @@ async function closePositionWithHedge(
       const result = await hl.closePosition(hlSymbol);
       if (result.success) {
         logger.info('[take-profit-executor] closed linked HL hedge', { marketId, hlSymbol });
+        // Only delete the key on success — a failed close leaves it alive so
+        // futuresMonitor keeps the position exempt from max-hold and the open
+        // HL leg remains visible for manual inspection or retry.
+        await redis.del(`hedge:link:${marketId}`).catch((e: unknown) => {
+          logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', {
+            marketId, error: String(e),
+          });
+        });
       } else {
         logger.warn('[take-profit-executor] failed to close linked HL hedge', {
-          marketId,
-          hlSymbol,
-          error: result.error,
+          marketId, hlSymbol, error: result.error,
         });
+        void notify(
+          `⚠️ HL hedge close failed — manual action needed\nPM market: ${marketId}\nHL symbol: ${hlSymbol}\nError: ${result.error ?? 'unknown'}`,
+        ).catch(() => {});
       }
     } catch (err: unknown) {
       logger.warn('[take-profit-executor] error closing linked HL hedge', {
-        marketId,
-        hlSymbol,
-        error: String(err),
+        marketId, hlSymbol, error: String(err),
       });
+      void notify(
+        `⚠️ HL hedge close error — manual action needed\nPM market: ${marketId}\nHL symbol: ${hlSymbol}\nError: ${String(err)}`,
+      ).catch(() => {});
     }
-    await redis.del(`hedge:link:${marketId}`).catch((e: unknown) => {
-      logger.debug('[take-profit-executor] hedge:link del failed (non-fatal)', {
-        marketId,
-        error: String(e),
-      });
-    });
   }
 }
 
@@ -1515,10 +1520,35 @@ async function attemptSyntheticExit(opts: {
 
   if (result.success) {
     // Persist the hedge link so the redeemer can find and close the HL leg at settlement.
-    await redis.set(`hedge:link:${position.marketId}`, hlSymbol, 'EX', 7 * 24 * 3600);
+    await redis.set(`hedge:link:${position.marketId}`, hlSymbol, 'EX', 90 * 24 * 3600);
     logger.info('[take-profit-executor] synthetic exit: hedge link persisted', {
       marketId: position.marketId,
       hlSymbol,
+    });
+
+    // Write a futures ledger row with sourcedFrom='hedge:pm:...' so the futures
+    // monitor's isActiveHedge check can exempt this position from max-hold and
+    // TA-fade. Without this the backfill path overwrites sourcedFrom with
+    // 'backfill:futures-monitor' and the exemption is silently lost.
+    await recordPosition(redis, {
+      marketId: hlSymbol,
+      question: `${hlSymbol} synthetic-exit hedge for PM:${position.marketId}`,
+      direction: isBuy ? 'LONG' : 'SHORT',
+      entryPrice: result.price ?? 0,
+      stakeUsd: hedgeStakeUsd,
+      edgeMagnitude: 0,
+      sourcedFrom: `hedge:pm:${position.marketId}`,
+      openedAt: new Date().toISOString(),
+      txHash: result.txHash,
+      executionVenue: 'hyperliquid',
+      isFutures: true,
+      symbol: hlSymbol,
+      synthHedged: true,
+    }).catch((err: unknown) => {
+      logger.error(
+        '[take-profit-executor] failed to record synthetic-exit hedge in ledger — max-hold exemption will not apply',
+        { marketId: position.marketId, hlSymbol, error: String(err) },
+      );
     });
 
     // Mark the PM position as synthetically hedged rather than removing it.

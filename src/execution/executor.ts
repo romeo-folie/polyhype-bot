@@ -1638,7 +1638,7 @@ async function triggerDeltaHedge(
     }).catch(() => { /* best-effort */ });
 
     // Link the hedge in Redis for tracking
-    await redis.set(`hedge:link:${pmSignal.marketId}`, hlSymbol, 'EX', 7 * 24 * 3600);
+    await redis.set(`hedge:link:${pmSignal.marketId}`, hlSymbol, 'EX', 90 * 24 * 3600);
     return true;
   } else {
     const errMsg = result.error ?? 'unknown error';
