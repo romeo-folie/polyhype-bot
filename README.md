@@ -6,7 +6,7 @@ Autonomous multi-signal trading agent for Polymarket prediction markets. Combine
 
 ## Architecture Overview
 
-The system runs as **13 Docker Compose services** — eight persistent workers, one bootstrap container, and four infrastructure services (Redis, Postgres/TimescaleDB, DB migrator, DB writer) — plus host-level cron jobs for periodic pipelines. All signals route through a shared execution layer with a continuous improvement feedback loop.
+The system runs as **15 Docker Compose services** — ten persistent workers, one bootstrap container, and four infrastructure services (Redis, Postgres/TimescaleDB, DB migrator, DB writer) — plus host-level cron jobs for periodic pipelines. All signals route through a shared execution layer with a continuous improvement feedback loop.
 
 ```mermaid
 graph TD
@@ -136,13 +136,16 @@ Periodic pipelines run via host crontab (not Docker). See [Crontab](#crontab) be
 | `* * * * *` | Spot price monitor (`src/spot/index.ts`) | `~/logs/pga/spot.log` |
 | `*/30 * * * *` | Watchlist refresh (`src/cron/refreshWatchlist.ts`) | `~/logs/pga/watchlist.log` |
 | `*/30 * * * *` | Near-zero entry scanner (`src/cron/nearZeroScanner.ts`) | `~/logs/pga/near-zero.log` |
+| `15 * * * *` | Near-zero OSINT injector (`src/cron/nearZeroOsintInjector.ts`) | `~/logs/pga/nz-injector.log` |
 | `* * * * *` | Settlement arb scanner (`src/cron/settlement.ts`) | `~/logs/pga/settlement.log` |
 | `0 */2 * * *` | Longshot bias scanner (`src/cron/longshotScanner.ts`) | `~/logs/pga/longshot.log` |
-| `30 */6 * * *` | Weather scanner (`src/weather/weatherScanner.ts`) | `~/logs/pga/weather.log` |
+| `*/30 * * * *` | Weather scanner (`src/weather/weatherScanner.ts`) | `~/logs/pga/weather.log` |
 | `*/5 * * * *` | Rebate farmer (`src/cron/rebateFarmer.ts`) | `~/logs/pga/rebate.log` |
 | `*/30 * * * *` | Residual sweep (`scripts/sweep-residuals.ts`) | `~/logs/pga/sweep-residuals.log` |
-| `0 */6 * * *` | Health check (`scripts/health-check.ts`) | `~/logs/pga/health-check.log` |
-| `0 6 * * *` | Copytrade shortlist refresh (`src/copytrade/shortlist.ts`) | `~/logs/pga/copytrade-shortlist.log` |
+| `0 */2 * * *` | Copytrade shortlist refresh (`src/copytrade/shortlist.ts`) | `~/logs/pga/copytrade-shortlist.log` |
+| `15 */6 * * *` | Correlation discovery (`src/cron/correlationDiscovery.ts`) | `~/logs/pga/correlation.log` |
+| `*/15 * * * *` | Correlation violation scanner (`src/cron/correlationScanner.ts`) | `~/logs/pga/correlation.log` |
+| `*/15 * * * *` | PM-activity reconciler (`src/cron/polymarketActivityReconciler.ts`) | `~/logs/pga/pm-reconciler.log` |
 | `0 3 * * MON` | Calibration stats (`src/cron/calibrate.ts`) | `~/logs/pga/calibrate.log` |
 | `0 4 * * *` | Log rotation (`scripts/rotate-logs.sh`) | — |
 
@@ -381,10 +384,10 @@ CLOB signature modes:
 
 ### 14. Hyperliquid Futures & Delta Hedging
 
-After a successful Polymarket YES fill, the executor optionally opens an offsetting SHORT on Hyperliquid Perpetuals:
+After a Polymarket fill on a price-correlated market, the executor optionally opens an offsetting position on Hyperliquid Perpetuals. Direction is question-aware: bullish questions ("above $X?") hedge with a SHORT; bearish questions ("below $X?") hedge with a LONG, so the net delta is always neutral regardless of which PM side was bought.
 
-- **Delta hedge**: 1:1 SHORT at entry, sized to match PM stake. Neutralises directional exposure while retaining the geopolitical headline alpha.
-- **Synthetic exit**: If PM liquidity is too thin to exit, `takeProfitExecutor` opens an equal-and-opposite HL position to freeze P&L. PM side closes in the Redis ledger; HL side is managed independently by the futures monitor.
+- **Delta hedge**: 1:1 opposing perp at entry, sized to match PM stake. Neutralises directional exposure while retaining the geopolitical headline alpha. Exempt from the max-hold timer and TP/trailing exits — closes only when the linked PM market resolves.
+- **Synthetic exit**: If PM liquidity is too thin to exit, `takeProfitExecutor` opens an equal-and-opposite HL position to freeze P&L. PM side stays in the ledger until on-chain resolution; HL side is managed by the futures monitor with the same hedge exemptions.
 - **Risk limits**: Global margin cap (`FUTURES_GLOBAL_MAX_MARGIN_USD`, default $200) and per-trade cap (`FUTURES_MAX_PER_TRADE_USD`, default $10).
 - **Urgency gating**: Futures signals from news (OSINT) only fire if urgency > `FUTURES_URGENCY_THRESHOLD` (default 6).
 - **Confluence gate**: Pre-entry TA gate (RSI/MACD/Stochastic/OBV/MFI/VWAP/CMF + ADX/Choppiness) blocks trades below `FUTURES_MIN_CONFLUENCE_SCORE`.
@@ -392,10 +395,14 @@ After a successful Polymarket YES fill, the executor optionally opens an offsett
 **Futures Monitor** (`pga-futures`, 5s poll):
 - Tracks all open HL perp positions
 - Fixed SL/TP thresholds (`FUTURES_STOP_LOSS_PCT`, `FUTURES_TAKE_PROFIT_PCT`)
+- **ROE backstop** (`FUTURES_MAX_LOSS_ROE_PCT`): leverage-invariant hard stop before path-derived SL
 - **Trailing stop** (`FUTURES_TRAILING_STOP_ENABLED`): arms at TP line, ratchets floor up with HWM, exits on `FUTURES_TRAILING_STOP_PCT` giveback from peak
 - **ATR-based SL/TP** (`FUTURES_ATR_SLTP_ENABLED`): derives thresholds from entry-time ATR snapshot, clamped to min/max bounds (shadow-logged when disabled)
 - **TA re-evaluation** (`FUTURES_EXIT_ON_SIGNAL_FADE`): periodic confluence re-check, exits on full directional reversal
-- Max hold time enforced (`FUTURES_MAX_HOLD_HOURS`)
+- **Contrarian mode**: per-position flag (`isContrarian`) selects wider SL/TP and skips TA-fade
+- **Funding-rate mean-reversion** (`hl-funding` source): exits when |APR| normalises or flips sign
+- **Delta-hedge exemptions**: positions with `sourcedFrom='hedge:pm:...'` skip max-hold, TP, trailing, and TA-fade — they exit only when the linked PM market resolves (hedge:link key deleted by redeemer)
+- Max hold time enforced (`FUTURES_MAX_HOLD_HOURS`) — not applied to active hedges
 - Heartbeat logging (every 2 minutes) for health monitoring
 
 ### 15. Position Monitor (`pga-monitor`, persistent worker)
