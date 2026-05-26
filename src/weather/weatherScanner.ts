@@ -419,6 +419,7 @@ export async function fetchForecast(
   useEcmwf = false,
   useHrrr = false,
   dualEnsembleShadow = false,
+  maxCrossSourceSpread = Infinity,
 ): Promise<ForecastResult | null> {
   const { coords, targetDate, unit } = event;
   const month = parseInt(targetDate.slice(5, 7), 10);
@@ -463,6 +464,26 @@ export async function fetchForecast(
 
     const availableHighs = [noaaHigh, omHigh, hrrrHigh].filter((v): v is number => v !== null);
     if (availableHighs.length === 0) return null;
+
+    // Cross-source spread gate: only fires when HRRR contributed at least one value.
+    // Normal NOAA/OM disagreement is already absorbed by the spread-driven stdDev inflation
+    // below; this gate is specifically designed to catch glitchy HRRR batches that return
+    // physically-impossible temperatures (e.g. 24°F in late-May Chicago).
+    if (hrrrHigh !== null && availableHighs.length > 1) {
+      const rawSpread = Math.max(...availableHighs) - Math.min(...availableHighs);
+      if (rawSpread > maxCrossSourceSpread) {
+        logger.warn('[weather] cross-source spread too large — skipping forecast', {
+          city: event.city,
+          targetDate,
+          rawSpread: Math.round(rawSpread * 10) / 10,
+          maxCrossSourceSpread,
+          noaaHigh,
+          omHigh,
+          hrrrHigh,
+        });
+        return null;
+      }
+    }
 
     const forecastHigh = availableHighs.reduce((s, v) => s + v, 0) / availableHighs.length;
     const hrrrContributed = hrrrHigh !== null;
@@ -1099,6 +1120,7 @@ export async function scanWeatherMarkets(
       cfg.WEATHER_MODEL_ECMWF_ENABLED,
       cfg.WEATHER_HRRR_ENABLED,
       cfg.WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED,
+      cfg.WEATHER_HRRR_MAX_CROSS_SOURCE_SPREAD,
     );
     if (!forecast) {
       noForecast++;
@@ -1578,7 +1600,20 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     return;
   }
 
-  const maxStakeCap = bankrollUsd * cfg.WEATHER_MAX_STAKE_FRACTION;
+  // Warn early if WEATHER_MAX_STAKE_USD is set below the executor's floor-bump threshold.
+  // Trades with stake < MIN_BET_USD*0.6 are silently dropped by the executor, so a USD cap
+  // below that value would kill all weather executions without any obvious error log.
+  if (cfg.WEATHER_MAX_STAKE_USD > 0 && cfg.WEATHER_MAX_STAKE_USD < cfg.MIN_BET_USD) {
+    logger.warn('[weather] WEATHER_MAX_STAKE_USD is below MIN_BET_USD — trades may be silently dropped by executor floor', {
+      WEATHER_MAX_STAKE_USD: cfg.WEATHER_MAX_STAKE_USD,
+      MIN_BET_USD: cfg.MIN_BET_USD,
+    });
+  }
+
+  const fractionCap = bankrollUsd * cfg.WEATHER_MAX_STAKE_FRACTION;
+  const maxStakeCap = cfg.WEATHER_MAX_STAKE_USD > 0
+    ? Math.min(fractionCap, cfg.WEATHER_MAX_STAKE_USD)
+    : fractionCap;
   const perCityCount = new Map<string, number>();
   let executed = 0;
   let cumulativeStakeUsd = 0;

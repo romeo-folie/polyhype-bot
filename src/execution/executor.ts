@@ -3192,11 +3192,14 @@ async function evaluateSizeUp(
   }
 
   // Gate 7: remaining stake room under path cap
-  // Path cap = bankroll × WEATHER_MAX_STAKE_FRACTION (weather-specific for now).
-  // For other sources we could add per-source fraction config later.
+  // Path cap = min(bankroll × WEATHER_MAX_STAKE_FRACTION, WEATHER_MAX_STAKE_USD)
+  // — mirrors the same dual-cap applied to fresh entries in runWeatherScan.
   const pathMaxStakeFraction = cfg.WEATHER_MAX_STAKE_FRACTION;
   const bankroll = await getBankroll(redis);
-  const pathMaxStake = bankroll * pathMaxStakeFraction;
+  const fractionCap = bankroll * pathMaxStakeFraction;
+  const pathMaxStake = cfg.WEATHER_MAX_STAKE_USD > 0
+    ? Math.min(fractionCap, cfg.WEATHER_MAX_STAKE_USD)
+    : fractionCap;
   const topUpStakeCap = pathMaxStake - existing.stakeUsd;
   if (topUpStakeCap <= 0) {
     return { eligible: false, reason: 'stake_cap_reached', existingStake: existing.stakeUsd };
