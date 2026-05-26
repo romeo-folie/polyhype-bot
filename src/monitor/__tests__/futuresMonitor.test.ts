@@ -51,6 +51,7 @@ vi.mock('../../shared/logger.js', () => ({
 const mockRedis = {
   get: vi.fn().mockResolvedValue(null),
   set: vi.fn().mockResolvedValue('OK'),
+  setex: vi.fn().mockResolvedValue('OK'),
   del: vi.fn().mockResolvedValue(1),
   eval: vi.fn().mockResolvedValue(1),
 };
@@ -88,8 +89,8 @@ vi.mock('../../execution/positionLedger.js', () => ({
 
 // Mock Telegram
 vi.mock('../../execution/telegram.js', () => ({
-  notifyTradeError: vi.fn(),
-  notifyTakeProfitExecuted: vi.fn(),
+  notifyTradeError: vi.fn().mockResolvedValue(undefined),
+  notifyTakeProfitExecuted: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Mock outcome recorder
@@ -364,8 +365,9 @@ describe('futuresMonitor', () => {
       // HL has ETH open, but not SOL
       mockGetOpenPositions.mockResolvedValue([
         {
+          // ROE = 9/600*100 = 1.5% — within FUTURES_TAKE_PROFIT_PCT=3.0, no exit fires
           symbol: 'ETH',
-          position: { szi: '1.0', entryPx: '3000', unrealizedPnl: '30', marginUsed: '600' },
+          position: { szi: '1.0', entryPx: '3000', unrealizedPnl: '9', marginUsed: '600' },
         },
       ]);
       mockGetLedgerPositions.mockResolvedValue([
@@ -1240,6 +1242,141 @@ describe('futuresMonitor', () => {
       await runTick();
 
       expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('post-TP momentum cooldown', () => {
+    // szi=100, entryPx=1, marginUsed=10 (10x leverage) → positionValue=100, margin=10
+    // roePct = (pnlUsd / 10) * 100
+    // hl-momentum TP = 12% ROE → pnlUsd=1.2 triggers TP
+    // hl-momentum SL = -5% ROE → pnlUsd=-0.5 triggers SL
+    const cooldownCfg = {
+      ...baseCfg,
+      HL_MOMENTUM_POST_TP_COOLDOWN_SEC: 1800,
+    };
+
+    const makeLedgerPos = (symbol: string, sourcedFrom = 'hl-momentum') => ({
+      marketId: symbol,
+      symbol,
+      direction: 'LONG' as const,
+      isFutures: true,
+      question: `${symbol} perpetual`,
+      entryPrice: 1,
+      stakeUsd: 10,
+      edgeMagnitude: 0,
+      sourcedFrom,
+      openedAt: new Date().toISOString(),
+      executionVenue: 'hyperliquid' as const,
+    });
+
+    const makeTpPos = (symbol: string) => ({
+      symbol,
+      position: { szi: '100', entryPx: '1', unrealizedPnl: '1.2', marginUsed: '10' },
+    });
+
+    const makeSlPos = (symbol: string) => ({
+      symbol,
+      position: { szi: '100', entryPx: '1', unrealizedPnl: '-0.5', marginUsed: '10' },
+    });
+
+    it('sets per-side momentum cooldown after hl-momentum TP exit', async () => {
+      loadConfigMock.mockReturnValue(cooldownCfg);
+      mockGetOpenPositions.mockResolvedValue([makeTpPos('TAO')]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerPos('TAO')]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('TAO');
+      expect(mockRedis.set).toHaveBeenCalledWith(
+        'futures:momentum:cooldown:TAO:LONG',
+        '1',
+        'EX',
+        1800,
+      );
+    });
+
+    it('does NOT set momentum cooldown after hl-momentum SL exit (loss-cooldown covers it)', async () => {
+      loadConfigMock.mockReturnValue(cooldownCfg);
+      mockGetOpenPositions.mockResolvedValue([makeSlPos('TAO')]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerPos('TAO')]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('TAO');
+      expect(mockRedis.set).not.toHaveBeenCalledWith(
+        'futures:momentum:cooldown:TAO:LONG',
+        '1',
+        'EX',
+        expect.any(Number),
+      );
+    });
+
+    it('does NOT set momentum cooldown when sourcedFrom is not hl-momentum', async () => {
+      loadConfigMock.mockReturnValue(cooldownCfg);
+      mockGetOpenPositions.mockResolvedValue([makeTpPos('TAO')]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerPos('TAO', 'crypto-arb')]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('TAO');
+      expect(mockRedis.set).not.toHaveBeenCalledWith(
+        'futures:momentum:cooldown:TAO:LONG',
+        '1',
+        'EX',
+        expect.any(Number),
+      );
+    });
+
+    it('does NOT set momentum cooldown after hl-momentum loss exit via signal_reeval (pnlUsd < 0)', async () => {
+      // TA-reversal exit on a losing hl-momentum position. tpReason='signal_reeval'
+      // (not 'futures_sl'), but pnlUsd=-0.3 → the pnlUsd >= 0 guard prevents the
+      // cooldown from being set. Loss-cooldown handles re-entry blocking for losses.
+      // unrealizedPnl=-0.3 → roePct=-3% (above -5% HL momentum SL, TA reversal fires first)
+      loadConfigMock.mockReturnValue({
+        ...cooldownCfg,
+        FUTURES_EXIT_ON_SIGNAL_FADE: true,
+        FUTURES_REEVAL_INTERVAL_S: 0,
+        FUTURES_REEVAL_MIN_AGE_S: 0,
+      });
+      // Use a distinct symbol to avoid lastRevalCheck Map collision with other tests
+      mockGetOpenPositions.mockResolvedValue([
+        { symbol: 'APT', position: { szi: '100', entryPx: '1', unrealizedPnl: '-0.3', marginUsed: '10' } },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerPos('APT')]);
+      mockScoreConfluence.mockResolvedValue({ direction: 'DOWN', score: 5, signals: {} });
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('APT');
+      expect(mockRedis.set).not.toHaveBeenCalledWith(
+        'futures:momentum:cooldown:APT:LONG',
+        '1',
+        'EX',
+        expect.any(Number),
+      );
+    });
+
+    it('sets momentum cooldown after hl-momentum profitable max-hold exit', async () => {
+      // tpReason='futures_max_hold', pnlUsd=0.5 (profitable) → cooldown should be set.
+      // roePct=5% is above 0 but below HL_MOMENTUM_TAKE_PROFIT_PCT=12, so TP doesn't
+      // fire first — max-hold fires after 25h exceeds FUTURES_MAX_HOLD_HOURS=24.
+      // Distinct symbol 'LINK' avoids lastRevalCheck Map collision with other tests.
+      const longAgo = () => new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+      loadConfigMock.mockReturnValue(cooldownCfg);
+      mockGetOpenPositions.mockResolvedValue([
+        { symbol: 'LINK', position: { szi: '100', entryPx: '1', unrealizedPnl: '0.5', marginUsed: '10' } },
+      ]);
+      mockGetLedgerPositions.mockResolvedValue([{ ...makeLedgerPos('LINK'), openedAt: longAgo() }]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('LINK');
+      expect(mockRedis.set).toHaveBeenCalledWith(
+        'futures:momentum:cooldown:LINK:LONG',
+        '1',
+        'EX',
+        1800,
+      );
     });
   });
 });
