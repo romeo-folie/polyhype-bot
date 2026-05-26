@@ -835,6 +835,48 @@ describe('Position Reconciliation Healer', () => {
     }));
   });
 
+  it('blocks weather CLOB import when pending order exists but token/direction mismatches the fill', async () => {
+    // A stale pending YES key exists but the fill landed on the NO token —
+    // pendingOrder is null after validation; the guard must still block the import.
+    const weatherClobPosition = {
+      conditionId: 'cond-weather-mismatch',
+      asset: 'tok-w-no',   // NO fill
+      avgPrice: 0.38,
+      size: 50,
+    };
+
+    const weatherGammaMarket = {
+      id: 'numeric-weather-mismatch',
+      question: 'Will the highest temperature in London be 34°C or above on May 30?',
+      conditionId: 'cond-weather-mismatch',
+      clobTokenIds: ['tok-w-yes', 'tok-w-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([weatherClobPosition]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(weatherGammaMarket);
+    // Pending order is for YES token — does not match the NO fill
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-weather-mismatch',
+      tokenId: 'tok-w-yes',   // wrong token for this fill
+      price: 0.62,
+      size: 50,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 60_000,
+      direction: 'YES',       // wrong direction
+      edgeMagnitude: 0.10,
+      bestAskAtPosting: 0.63,
+      intendedStakeUsd: 5,
+      sourcedFrom: 'weather:london:2026-05-30:34°C',
+    });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Mismatch → pendingOrder is null → weather guard blocks import
+    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
+  });
+
   it('still imports non-weather CLOB orphans normally', async () => {
     const normalClobPosition = {
       conditionId: 'cond-normal',

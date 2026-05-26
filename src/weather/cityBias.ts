@@ -201,7 +201,7 @@ export async function computeCityBaseRates(
         ) AS highs,
         COUNT(*)::int AS sample_size
       FROM weather_ground_truth
-      WHERE observed_at >= NOW() - ${lookbackDays} * INTERVAL '1 day'
+      WHERE target_date >= CURRENT_DATE - ${lookbackDays}
         AND COALESCE(resolution_high, observed_high) IS NOT NULL
       GROUP BY city, unit
     `;
@@ -261,7 +261,7 @@ export async function getCityActuals(redis: Redis, city: string): Promise<CityAc
     const raw = await redis.get(actualsRedisKey(city));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as CityActuals;
-    if (!Array.isArray(parsed.highs) || typeof parsed.unit !== 'string') {
+    if (!Array.isArray(parsed.highs) || parsed.highs.length === 0 || typeof parsed.unit !== 'string') {
       return null;
     }
     return parsed;
