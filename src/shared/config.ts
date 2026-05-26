@@ -1615,6 +1615,9 @@ const envSchema = z.object({
   // Maximum bankroll fraction per weather trade — conservative because forecast
   // uncertainty grows with horizon and model error is correlated across brackets.
   WEATHER_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.02),
+  // Hard USD ceiling per weather trade (applied after fraction cap). 0 = disabled.
+  // Use to prevent large bankrolls from sizing into outsized weather positions.
+  WEATHER_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(0),
   // Dedup TTL — one evaluation per event per scan cycle. 4h between re-evaluations
   // to allow for forecast updates.
   WEATHER_DEDUP_TTL_S: z.coerce.number().int().min(1).optional().default(14400),
@@ -1653,6 +1656,10 @@ const envSchema = z.object({
   // Use HRRR (3km, hourly-updating, radar-assimilated) as 3rd voter for US cities at daysOut≤1.
   // HRRR is the highest-accuracy US model at 0–18h lead. Ships dark.
   WEATHER_HRRR_ENABLED: boolFromEnv.optional().default(false),
+  // Maximum raw spread (°F) across NOAA/OM/HRRR before the forecast is rejected.
+  // Protects against a single-source API glitch contaminating the ensemble mean.
+  // At daysOut=1 normal US spread is 2–8°F; 15°F rejects only clear outliers.
+  WEATHER_HRRR_MAX_CROSS_SOURCE_SPREAD: z.coerce.number().min(1).optional().default(15),
   // Apply per-city mean-bias subtraction and empirical σ overlay. Requires Redis cache
   // to be populated by the reconciler (runs automatically, no extra cron needed). Ships dark.
   WEATHER_BIAS_CORRECTION_ENABLED: boolFromEnv.optional().default(false),

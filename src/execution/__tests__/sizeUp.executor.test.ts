@@ -148,6 +148,7 @@ const mockConfig = {
   WEATHER_MAX_ENTRY_PRICE: 0.65,
   WEATHER_MAX_SIGNAL_PRICE_DRIFT: 0.08,
   WEATHER_MAX_STAKE_FRACTION: 0.02,
+  WEATHER_MAX_STAKE_USD: 0,
   MAX_ENTRY_PRICE: 0.65,
   FV_MAX_ENTRY_PRICE: 0,
   CONVICTION_MULTIPLIER_ENABLED: false,
@@ -318,5 +319,40 @@ describe('evaluateSizeUp via executeAndRecordSignal — executor path', () => {
     // sizeUpPosition(redis, marketId, direction, additionalShares, additionalStake, fillPrice)
     const additionalStakeArg = mockSizeUpPos.mock.calls[0]![4];
     expect(additionalStakeArg).toBe(5);
+  });
+
+  it('WEATHER_MAX_STAKE_USD hard cap: topUpStakeCap reduced when USD cap tighter than fraction cap', async () => {
+    // bankroll=500, WEATHER_MAX_STAKE_FRACTION=0.02 → fractionCap=10
+    // WEATHER_MAX_STAKE_USD=8 → pathMaxStake=min(10,8)=8
+    // existingStake=3 → topUpStakeCap=8-3=5, which ≥ MIN_BET_USD=5 → eligible
+    mockLoadConfig.mockReturnValueOnce({ ...mockConfig, WEATHER_MAX_STAKE_USD: 8 });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ stakeUsd: 3, sharesHeld: 7 }));
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob', shares_bought: 10 });
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal(), redis as any);
+
+    expect(result.skipped).toBeFalsy();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((result as any).isSizeUp).toBe(true);
+    // topUpStakeCap=5; signal.stakeUsd=8 clamped to 5
+    const additionalStakeArg = mockSizeUpPos.mock.calls[0]![4];
+    expect(additionalStakeArg).toBe(5);
+  });
+
+  it('WEATHER_MAX_STAKE_USD hard cap: stake_cap_too_small when USD cap leaves < MIN_BET_USD room', async () => {
+    // WEATHER_MAX_STAKE_USD=8 → pathMaxStake=8
+    // existingStake=5 → topUpStakeCap=8-5=3, which < MIN_BET_USD=5 → ineligible
+    mockLoadConfig.mockReturnValueOnce({ ...mockConfig, WEATHER_MAX_STAKE_USD: 8 });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ stakeUsd: 5, sharesHeld: 11 }));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('size_up_ineligible');
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
   });
 });

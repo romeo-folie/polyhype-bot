@@ -35,6 +35,8 @@ const baseConfig = {
   WEATHER_MARKET_DISAGREEMENT_MAX_WINPROB_IMPROVEMENT: 0.03,
   WEATHER_MARKET_DISAGREEMENT_TTL_S: 172800,
   WEATHER_EXCLUDED_CITIES: '',
+  WEATHER_MAX_STAKE_USD: 0,
+  WEATHER_HRRR_MAX_CROSS_SOURCE_SPREAD: Infinity,
   MIN_BET_USD: 5,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
@@ -1738,6 +1740,90 @@ describe('fetchForecast - HRRR flag wiring', () => {
     expect(result).not.toBeNull();
     expect(result!.source).toBe('open-meteo');
     expect(mockFetchHrrr).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchForecast — cross-source spread gate
+// ---------------------------------------------------------------------------
+
+describe('fetchForecast - cross-source spread gate', () => {
+  function makeUsEvent(city: string, targetDate: string) {
+    const coords = lookupCity(city);
+    expect(coords).not.toBeNull();
+    return {
+      eventId: `${city}-spread-test`,
+      slug: `${city}-spread-test`,
+      city,
+      coords: coords!,
+      targetDate,
+      unit: 'fahrenheit' as const,
+      brackets: [],
+      endDate: `${targetDate}T12:00:00Z`,
+    };
+  }
+
+  const ensembleMock = {
+    meanHigh: 72,
+    stddevHigh: 2.0,
+    meanLow: 58,
+    stddevLow: 1.5,
+    memberCount: 31,
+    forecastDate: '2026-04-20',
+    ensembleModel: 'gfs',
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetchEnsemble.mockResolvedValue(ensembleMock);
+  });
+
+  it('returns null when spread exceeds maxCrossSourceSpread (HRRR outlier)', async () => {
+    // NOAA=70°F, OM=72°F, HRRR=10°F (garbage) → spread=62 > 15
+    const mockEvent = makeUsEvent('chicago', '2026-04-20');
+    mockFetchNwsForecast.mockResolvedValueOnce({ highF: 70, lowF: 55, forecastDate: '2026-04-20' });
+    mockFetchOpenMeteo.mockResolvedValueOnce({ highTemp: 72, lowTemp: 57, precipProbability: 20, forecastDate: '2026-04-20' });
+    mockFetchHrrr.mockResolvedValueOnce({ highTemp: 10, lowTemp: 5, precipProbability: 0, forecastDate: '2026-04-20' });
+
+    const result = await fetchForecast(mockEvent, 1, undefined, 0.7, false, true, false, 15);
+    expect(result).toBeNull();
+  });
+
+  it('returns forecast when spread is within maxCrossSourceSpread', async () => {
+    // NOAA=70°F, OM=72°F, HRRR=74°F → spread=4 ≤ 15
+    const mockEvent = makeUsEvent('chicago', '2026-04-20');
+    mockFetchNwsForecast.mockResolvedValueOnce({ highF: 70, lowF: 55, forecastDate: '2026-04-20' });
+    mockFetchOpenMeteo.mockResolvedValueOnce({ highTemp: 72, lowTemp: 57, precipProbability: 20, forecastDate: '2026-04-20' });
+    mockFetchHrrr.mockResolvedValueOnce({ highTemp: 74, lowTemp: 58, precipProbability: 18, forecastDate: '2026-04-20' });
+
+    const result = await fetchForecast(mockEvent, 1, undefined, 0.7, false, true, false, 15);
+    expect(result).not.toBeNull();
+    expect(result!.forecastHigh).toBeCloseTo(72, 1);
+    expect(result!.source).toBe('hrrr-combined');
+  });
+
+  it('spread gate disabled when no maxCrossSourceSpread passed (Infinity default)', async () => {
+    // Default maxCrossSourceSpread=Infinity: gate is inactive regardless of HRRR value
+    const mockEvent = makeUsEvent('chicago', '2026-04-20');
+    mockFetchNwsForecast.mockResolvedValueOnce({ highF: 70, lowF: 55, forecastDate: '2026-04-20' });
+    mockFetchOpenMeteo.mockResolvedValueOnce({ highTemp: 72, lowTemp: 57, precipProbability: 20, forecastDate: '2026-04-20' });
+    mockFetchHrrr.mockResolvedValueOnce({ highTemp: 74, lowTemp: 58, precipProbability: 18, forecastDate: '2026-04-20' });
+
+    const result = await fetchForecast(mockEvent, 1, undefined, 0.7, false, true, false);
+    expect(result).not.toBeNull();
+    expect(result!.forecastHigh).toBeCloseTo(72, 1); // (70+72+74)/3
+  });
+
+  it('spread gate not applied when HRRR is null (NOAA+OM only path)', async () => {
+    // Gate is HRRR-specific — skipped entirely when HRRR did not contribute
+    const mockEvent = makeUsEvent('chicago', '2026-04-20');
+    mockFetchNwsForecast.mockResolvedValueOnce({ highF: 70, lowF: 55, forecastDate: '2026-04-20' });
+    mockFetchOpenMeteo.mockResolvedValueOnce({ highTemp: 72, lowTemp: 57, precipProbability: 20, forecastDate: '2026-04-20' });
+    mockFetchHrrr.mockResolvedValueOnce(null);
+
+    const result = await fetchForecast(mockEvent, 1, undefined, 0.7, false, true, false, 15);
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('combined');
   });
 });
 
