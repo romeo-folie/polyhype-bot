@@ -1600,14 +1600,15 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     return;
   }
 
-  // Warn early if WEATHER_MAX_STAKE_USD is set below the executor's floor-bump threshold.
-  // Trades with stake < MIN_BET_USD*0.6 are silently dropped by the executor, so a USD cap
-  // below that value would kill all weather executions without any obvious error log.
+  // Guard: WEATHER_MAX_STAKE_USD below MIN_BET_USD means the executor's floor-bump
+  // would raise the stake above the configured ceiling (e.g. cap=$4, bump to $5).
+  // Skip execution entirely rather than silently violate the hard cap.
   if (cfg.WEATHER_MAX_STAKE_USD > 0 && cfg.WEATHER_MAX_STAKE_USD < cfg.MIN_BET_USD) {
-    logger.warn('[weather] WEATHER_MAX_STAKE_USD is below MIN_BET_USD — trades may be silently dropped by executor floor', {
+    logger.warn('[weather] WEATHER_MAX_STAKE_USD is below MIN_BET_USD — skipping execution to preserve hard cap', {
       WEATHER_MAX_STAKE_USD: cfg.WEATHER_MAX_STAKE_USD,
       MIN_BET_USD: cfg.MIN_BET_USD,
     });
+    return;
   }
 
   const fractionCap = bankrollUsd * cfg.WEATHER_MAX_STAKE_FRACTION;
