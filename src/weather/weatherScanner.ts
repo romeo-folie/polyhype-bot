@@ -1628,6 +1628,9 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
   const perCityCount = new Map<string, number>();
   let executed = 0;
   let cumulativeStakeUsd = 0;
+  // Set to true after any non-skipped execution (including size-ups) so the
+  // next attempt can pause long enough for the global governor to reset.
+  let needsGovernorPause = false;
 
   for (let i = 0; i < tradable.length; i++) {
     const opp = tradable[i]!;
@@ -1681,6 +1684,15 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       break;
     }
 
+    // Pause here — after all caps are checked so we only wait when an execution
+    // is actually going to be attempted. Avoids burning scan time when caps
+    // have already exhausted the remaining opportunities.
+    if (needsGovernorPause) {
+      const minIntervalMs = Math.ceil(60_000 / cfg.ARB_GLOBAL_MAX_TRADES_PER_MIN);
+      await new Promise((r) => setTimeout(r, minIntervalMs + 200));
+      needsGovernorPause = false;
+    }
+
     const signal = buildWeatherSignal(opp, stakeUsd);
     try {
       const result = await executeAndRecordSignal(signal, redis);
@@ -1709,17 +1721,9 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
           perCityCount.set(opp.city, cityCount + 1);
         }
         cumulativeStakeUsd += filledStakeUsd;
-        // Wait for the global governor cooldown to reset before the next
-        // bracket execution. Weather trades are a deliberate slow batch
-        // (scanner runs every 30m), but the governor's last-trade-at check
-        // fires within milliseconds of the previous fill, blocking all
-        // subsequent brackets in the same scan. Sleeping here gives the
-        // governor window time to expire without any per-scan cap waste.
-        // Size-ups also record a governor trade, so they need the same pause.
-        if (i < tradable.length - 1) {
-          const minIntervalMs = Math.ceil(60_000 / cfg.ARB_GLOBAL_MAX_TRADES_PER_MIN);
-          await new Promise((r) => setTimeout(r, minIntervalMs + 200));
-        }
+        // Any non-skipped Polymarket execution records a governor trade; the
+        // next attempt must wait for the cooldown to reset.
+        needsGovernorPause = true;
       }
     } catch (err) {
       logger.error('[weather] execution threw', {

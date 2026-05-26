@@ -1907,6 +1907,15 @@ export async function executeSignal(
         error: err instanceof Error ? err.message : String(err),
       });
     }
+    // Re-apply weather hard cap: calibration may have pushed the stake above
+    // WEATHER_MAX_STAKE_USD via a correctionFactor > 1.
+    if (signal.source === 'weather' && cfg.WEATHER_MAX_STAKE_USD > 0 && signal.stakeUsd > cfg.WEATHER_MAX_STAKE_USD) {
+      logger.info('[executor] clamping weather stake to hard cap after calibration', {
+        original: signal.stakeUsd,
+        cap: cfg.WEATHER_MAX_STAKE_USD,
+      });
+      signal = { ...signal, stakeUsd: cfg.WEATHER_MAX_STAKE_USD };
+    }
   }
 
   // 1b) Multi-signal conviction multiplier — scale stake when independent sources agree.
