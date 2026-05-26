@@ -465,11 +465,21 @@ export async function fetchForecast(
     const availableHighs = [noaaHigh, omHigh, hrrrHigh].filter((v): v is number => v !== null);
     if (availableHighs.length === 0) return null;
 
-    // Cross-source spread gate: only fires when HRRR contributed at least one value.
+    // Cross-source spread gate: only fires when HRRR contributed a value.
     // Normal NOAA/OM disagreement is already absorbed by the spread-driven stdDev inflation
     // below; this gate is specifically designed to catch glitchy HRRR batches that return
     // physically-impossible temperatures (e.g. 24°F in late-May Chicago).
-    if (hrrrHigh !== null && availableHighs.length > 1) {
+    if (hrrrHigh !== null) {
+      if (availableHighs.length === 1) {
+        // HRRR is the sole source — no other model to cross-validate against.
+        // A glitch would be undetectable, so skip rather than trust it blindly.
+        logger.warn('[weather] HRRR is sole forecast source — skipping (cannot cross-validate)', {
+          city: event.city,
+          targetDate,
+          hrrrHigh,
+        });
+        return null;
+      }
       const rawSpread = Math.max(...availableHighs) - Math.min(...availableHighs);
       if (rawSpread > maxCrossSourceSpread) {
         logger.warn('[weather] cross-source spread too large — skipping forecast', {
@@ -1699,6 +1709,17 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
           perCityCount.set(opp.city, cityCount + 1);
         }
         cumulativeStakeUsd += filledStakeUsd;
+        // Wait for the global governor cooldown to reset before the next
+        // bracket execution. Weather trades are a deliberate slow batch
+        // (scanner runs every 30m), but the governor's last-trade-at check
+        // fires within milliseconds of the previous fill, blocking all
+        // subsequent brackets in the same scan. Sleeping here gives the
+        // governor window time to expire without any per-scan cap waste.
+        // Size-ups also record a governor trade, so they need the same pause.
+        if (i < tradable.length - 1) {
+          const minIntervalMs = Math.ceil(60_000 / cfg.ARB_GLOBAL_MAX_TRADES_PER_MIN);
+          await new Promise((r) => setTimeout(r, minIntervalMs + 200));
+        }
       }
     } catch (err) {
       logger.error('[weather] execution threw', {
