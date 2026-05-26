@@ -15,6 +15,7 @@ import { logger } from '../shared/logger.js';
 import { canonicalCityKey } from './noaaClient.js';
 
 const REDIS_TTL_S = 7 * 24 * 60 * 60; // 7 days
+const ACTUALS_REDIS_TTL_S = 24 * 60 * 60; // 24 hours — reconciler runs every 30 min
 // Recency half-life for EWMA weighting: samples N days old receive 2^(-N/7) weight.
 // 7 days means last week's data counts 2× more than data from 2 weeks ago, so
 // seasonal drift (e.g. spring marine-layer bias for KLAX) shows up in ~5 days
@@ -44,6 +45,21 @@ export interface CityBias {
 function redisKey(city: string): string {
   const canonical = canonicalCityKey(city) ?? city.toLowerCase().trim();
   return `weather:city_bias:${canonical}`;
+}
+
+function actualsRedisKey(city: string): string {
+  const canonical = canonicalCityKey(city) ?? city.toLowerCase().trim();
+  return `weather:actuals:${canonical}`;
+}
+
+export interface CityActuals {
+  /** Recent WU daily high temperatures (COALESCE(resolution_high, observed_high)), sorted newest-first. */
+  highs: number[];
+  /** Unit of the values ('celsius' | 'fahrenheit'). */
+  unit: string;
+  /** Number of valid rows used. */
+  sampleSize: number;
+  updatedAt: string;
 }
 
 /**
@@ -156,6 +172,68 @@ export async function computeCityBias(
 }
 
 /**
+ * Compute per-city recent WU actuals and write sorted highs arrays to Redis.
+ *
+ * Queries weather_ground_truth for COALESCE(resolution_high, observed_high) per
+ * city over the last lookbackDays days, then caches the sorted array in Redis so
+ * the scanner can compute tail-bracket YES base rates without DB access.
+ *
+ * Log marker: [weather-bias]
+ */
+export async function computeCityBaseRates(
+  sql: Sql,
+  redis: Redis,
+  lookbackDays = 14,
+): Promise<void> {
+  try {
+    const rows = await sql<{
+      city: string;
+      unit: string;
+      highs: number[];
+      sample_size: number;
+    }[]>`
+      SELECT
+        city,
+        unit,
+        ARRAY_AGG(
+          COALESCE(resolution_high, observed_high)
+          ORDER BY target_date DESC
+        ) AS highs,
+        COUNT(*)::int AS sample_size
+      FROM weather_ground_truth
+      WHERE observed_at >= NOW() - ${lookbackDays} * INTERVAL '1 day'
+        AND COALESCE(resolution_high, observed_high) IS NOT NULL
+      GROUP BY city, unit
+    `;
+
+    if (rows.length === 0) {
+      logger.info('[weather-bias] no city actuals to cache', { lookbackDays });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    for (const row of rows) {
+      const actuals: CityActuals = {
+        highs: row.highs,
+        unit: row.unit,
+        sampleSize: row.sample_size,
+        updatedAt: now,
+      };
+      await redis.set(actualsRedisKey(row.city), JSON.stringify(actuals), 'EX', ACTUALS_REDIS_TTL_S);
+      logger.info('[weather-bias] city actuals updated', {
+        city: row.city,
+        unit: row.unit,
+        sampleSize: row.sample_size,
+      });
+    }
+  } catch (err) {
+    logger.warn('[weather-bias] computeCityBaseRates failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
  * Read a city's cached bias from Redis. Returns null if absent or unparseable.
  */
 export async function getCityBias(redis: Redis, city: string): Promise<CityBias | null> {
@@ -170,6 +248,23 @@ export async function getCityBias(redis: Redis, city: string): Promise<CityBias 
       ...parsed,
       meanShiftHelpful: parsed.meanShiftHelpful === true,
     };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read a city's cached actuals from Redis. Returns null if absent or unparseable.
+ */
+export async function getCityActuals(redis: Redis, city: string): Promise<CityActuals | null> {
+  try {
+    const raw = await redis.get(actualsRedisKey(city));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as CityActuals;
+    if (!Array.isArray(parsed.highs) || typeof parsed.unit !== 'string') {
+      return null;
+    }
+    return parsed;
   } catch {
     return null;
   }

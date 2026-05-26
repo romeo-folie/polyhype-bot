@@ -701,6 +701,19 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
         fillDirection: direction,
       });
     }
+
+    // Block weather market CLOB imports unless a bot-posted maker order is waiting.
+    // Temperature bracket positions must enter via the scanner (which applies
+    // bias/rounding/tail gates); importing without a pending order would bypass all
+    // scanner validation. When rawPending is non-null the position was placed by
+    // our scanner — allow it through so the fill gets properly enriched and notified.
+    if (!rawPending && /highest\s+temperature/i.test(market.question ?? '')) {
+      logger.info('[reconcile] skipping untracked weather market CLOB import', {
+        marketId: market.id,
+        question: market.question,
+      });
+      return false;
+    }
     if (pendingOrder) {
       logger.info('[reconcile] linked CLOB orphan to pending maker order', {
         marketId: market.id,

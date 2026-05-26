@@ -36,7 +36,7 @@ import {
 import { fetchWuHistoricalHigh } from './wuClient.js';
 import { fetchMetarDailyHigh } from './metarClient.js';
 import { fetchHkoDailyHigh } from './hkoClient.js';
-import { computeCityBias } from './cityBias.js';
+import { computeCityBias, computeCityBaseRates } from './cityBias.js';
 
 /** One unresolved (city, target_date) tuple to reconcile. */
 export interface UnresolvedTarget {
@@ -272,6 +272,7 @@ export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
       lookbackDays: cfg.WEATHER_RECONCILER_LOOKBACK_DAYS,
     });
     await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES);
+    await computeCityBaseRates(sql, redis, cfg.WEATHER_BASE_RATE_LOOKBACK_DAYS);
     return;
   }
 
@@ -286,10 +287,10 @@ export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
     ...summary,
   });
 
-  // After ground-truth upserts, refresh per-city bias cache in Redis.
-  // This runs unconditionally regardless of WEATHER_BIAS_CORRECTION_ENABLED so
-  // the cache is warm by the time the flag is flipped.
+  // After ground-truth upserts, refresh per-city bias cache and actuals cache in
+  // Redis. Run unconditionally so caches are warm before flags are flipped.
   await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES);
+  await computeCityBaseRates(sql, redis, cfg.WEATHER_BASE_RATE_LOOKBACK_DAYS);
 }
 
 // ── Standalone entrypoint (cron) ──────────────────────────────────────────

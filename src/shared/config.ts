@@ -1742,6 +1742,15 @@ const envSchema = z.object({
   // own P(YES) exceeds this threshold. Prevents betting against the model's directional
   // call — edgeNo can be spuriously positive even when modelProb is 0.80+ for YES.
   WEATHER_THRESHOLD_NO_BET_MAX_PROB: z.coerce.number().min(0).max(1).optional().default(0.5),
+  // Base-rate guard for tail NO bets: block when recent WU actuals show the YES
+  // outcome has occurred at least WEATHER_BASE_RATE_NO_BLOCK_THRESHOLD fraction of
+  // the last WEATHER_BASE_RATE_LOOKBACK_DAYS days. Requires at least
+  // WEATHER_BASE_RATE_MIN_SAMPLES valid actuals rows to fire; gate is skipped
+  // (fail open) below that threshold. Actuals are cached by the reconciler cron
+  // with a 24h TTL; scanner reads Redis — no DB access at scan time.
+  WEATHER_BASE_RATE_LOOKBACK_DAYS: z.coerce.number().int().min(1).optional().default(14),
+  WEATHER_BASE_RATE_MIN_SAMPLES: z.coerce.number().int().min(1).optional().default(7),
+  WEATHER_BASE_RATE_NO_BLOCK_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.70),
   // --- WEATHER EXIT RULES (monitor) ---
   // Weather brackets resolve at end-of-day of their target date; realized hold
   // times run ~17–26h when entering 0–1 day out. Stale-exit (STALE_MIN_AGE_H_WEATHER=6h)
