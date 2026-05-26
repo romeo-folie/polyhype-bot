@@ -465,11 +465,21 @@ export async function fetchForecast(
     const availableHighs = [noaaHigh, omHigh, hrrrHigh].filter((v): v is number => v !== null);
     if (availableHighs.length === 0) return null;
 
-    // Cross-source spread gate: only fires when HRRR contributed at least one value.
+    // Cross-source spread gate: only fires when HRRR contributed a value.
     // Normal NOAA/OM disagreement is already absorbed by the spread-driven stdDev inflation
     // below; this gate is specifically designed to catch glitchy HRRR batches that return
     // physically-impossible temperatures (e.g. 24°F in late-May Chicago).
-    if (hrrrHigh !== null && availableHighs.length > 1) {
+    if (hrrrHigh !== null) {
+      if (availableHighs.length === 1) {
+        // HRRR is the sole source — no other model to cross-validate against.
+        // A glitch would be undetectable, so skip rather than trust it blindly.
+        logger.warn('[weather] HRRR is sole forecast source — skipping (cannot cross-validate)', {
+          city: event.city,
+          targetDate,
+          hrrrHigh,
+        });
+        return null;
+      }
       const rawSpread = Math.max(...availableHighs) - Math.min(...availableHighs);
       if (rawSpread > maxCrossSourceSpread) {
         logger.warn('[weather] cross-source spread too large — skipping forecast', {
@@ -1618,6 +1628,9 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
   const perCityCount = new Map<string, number>();
   let executed = 0;
   let cumulativeStakeUsd = 0;
+  // Set to true after any non-skipped execution (including size-ups) so the
+  // next attempt can pause long enough for the global governor to reset.
+  let needsGovernorPause = false;
 
   for (let i = 0; i < tradable.length; i++) {
     const opp = tradable[i]!;
@@ -1671,6 +1684,15 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       break;
     }
 
+    // Pause here — after all caps are checked so we only wait when an execution
+    // is actually going to be attempted. Avoids burning scan time when caps
+    // have already exhausted the remaining opportunities.
+    if (needsGovernorPause) {
+      const minIntervalMs = Math.ceil(60_000 / cfg.ARB_GLOBAL_MAX_TRADES_PER_MIN);
+      await new Promise((r) => setTimeout(r, minIntervalMs + 200));
+      needsGovernorPause = false;
+    }
+
     const signal = buildWeatherSignal(opp, stakeUsd);
     try {
       const result = await executeAndRecordSignal(signal, redis);
@@ -1699,6 +1721,9 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
           perCityCount.set(opp.city, cityCount + 1);
         }
         cumulativeStakeUsd += filledStakeUsd;
+        // Any non-skipped Polymarket execution records a governor trade; the
+        // next attempt must wait for the cooldown to reset.
+        needsGovernorPause = true;
       }
     } catch (err) {
       logger.error('[weather] execution threw', {
