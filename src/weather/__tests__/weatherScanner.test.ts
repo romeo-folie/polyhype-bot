@@ -825,9 +825,9 @@ describe('findMispricedBrackets', () => {
 
   it('does NOT block NO bet on an interior bracket even when modelProb > 0.5', () => {
     // Interior bracket (low=50, high=51): NOT a tail bracket.
-    // Forecast 50°F, stdDev=0.5 → modelProb ≈ 0.84 for this bracket.
-    // yesPrice=0.90 means edgeYes<0; noPrice=0.05 means edgeNo≈0.11 → tradeSide=NO.
-    // Gate must only fire for tail brackets, not interior ones.
+    // Forecast 53°F → rounds to 53, NOT inside [50, 51] → rounding gate does not fire.
+    // modelProb for [50-51] at forecast=53 is near 0; noPrice=0.05 → edgeNo≈0.95 → tradeSide=NO.
+    // Tail NO gate must only fire for tail brackets, not interior ones.
     const event = {
       eventId: 'e-interior-no', slug: 'interior-no', city: 'chicago', coords: lookupCity('chicago')!,
       targetDate: '2026-04-14', unit: 'fahrenheit' as const,
@@ -838,10 +838,246 @@ describe('findMispricedBrackets', () => {
       ],
       endDate: '2026-04-14T12:00:00Z',
     };
-    const forecast = { forecastHigh: 50, stdDev: 0.5, source: 'noaa' as const, ensembleMembers: 0 };
+    const forecast = { forecastHigh: 53, stdDev: 0.5, source: 'noaa' as const, ensembleMembers: 0 };
 
     const { opportunities: opps } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0, maxTailNoBetModelProb: 0.5 });
     const noOpps = opps.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findMispricedBrackets — interior NO rounding gate
+// ---------------------------------------------------------------------------
+
+describe('findMispricedBrackets - interior NO rounding gate', () => {
+  it('blocks interior NO when Math.round(correctedForecastHigh) falls inside bracket', () => {
+    // "32°C" bracket (low=32, high=32). Forecast 31.59°C → rounds to 32 → inside bracket → blocked.
+    // This is the Hong Kong failure case: model says 31.59°C but WU rounds to 32 → YES.
+    const event = {
+      eventId: 'e-hk-32', slug: 'hk-32', city: 'hong kong',
+      coords: lookupCity('hong kong') ?? { lat: 22.39, lon: 114.11 },
+      targetDate: '2026-05-22', unit: 'celsius' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: 32, high: 32, label: '32°C',
+          yesPrice: 0.25, noPrice: 0.72 },
+      ],
+      endDate: '2026-05-22T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 31.59, stdDev: 2, source: 'combined' as const, ensembleMembers: 31 };
+
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0 });
+    expect(opportunities.filter((o) => o.tradeSide === 'NO')).toHaveLength(0);
+  });
+
+  it('allows interior NO when rounded forecast is clearly outside bracket', () => {
+    // "32°C" bracket (low=32, high=32). Forecast 29°C → rounds to 29 → outside bracket.
+    // yesPrice=0.90 (overpriced) → edgeYes < 0; noPrice=0.05 → edgeNo > 0 → tradeSide=NO.
+    // Rounding gate must NOT fire: Math.round(29)=29 is not in [32, 32].
+    const event = {
+      eventId: 'e-hk-32-safe', slug: 'hk-32-safe', city: 'hong kong',
+      coords: lookupCity('hong kong') ?? { lat: 22.39, lon: 114.11 },
+      targetDate: '2026-05-22', unit: 'celsius' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: 32, high: 32, label: '32°C',
+          yesPrice: 0.90, noPrice: 0.05 },
+      ],
+      endDate: '2026-05-22T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 29, stdDev: 2, source: 'combined' as const, ensembleMembers: 31 };
+
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0 });
+    const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps.length).toBeGreaterThan(0);
+  });
+
+  it('blocks interior NO with bias-corrected forecast that rounds into bracket', () => {
+    // Raw forecast 34°C, bias +2°C → corrected = 32°C → rounds to 32 → inside bracket → blocked.
+    const event = {
+      eventId: 'e-bias-round', slug: 'bias-round', city: 'hong kong',
+      coords: lookupCity('hong kong') ?? { lat: 22.39, lon: 114.11 },
+      targetDate: '2026-05-22', unit: 'celsius' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: 32, high: 32, label: '32°C',
+          yesPrice: 0.20, noPrice: 0.77 },
+      ],
+      endDate: '2026-05-22T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 34, stdDev: 2, source: 'combined' as const, ensembleMembers: 31 };
+    const cityBias = { meanBias: 2.0, empiricalStddev: 2.0, meanShiftHelpful: true, sampleSize: 20, updatedAt: '' };
+
+    const { opportunities } = findMispricedBrackets(
+      event, forecast, 1, 0.0,
+      { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
+    );
+    expect(opportunities.filter((o) => o.tradeSide === 'NO')).toHaveLength(0);
+  });
+
+  it('does not block tail brackets via rounding gate', () => {
+    // "32°C or higher" (low=32, high=null): tail bracket. Forecast 29°C rounds to 29.
+    // Rounding gate is interior-only (requires both bounds non-null); high=null → gate must not fire.
+    // yesPrice=0.90 → edgeYes<0; noPrice=0.05 → edgeNo>0. modelProb≈0.11<0.5 → tail gate passes.
+    const event = {
+      eventId: 'e-tail-round', slug: 'tail-round', city: 'hong kong',
+      coords: lookupCity('hong kong') ?? { lat: 22.39, lon: 114.11 },
+      targetDate: '2026-05-22', unit: 'celsius' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: 32, high: null, label: '32°C or higher',
+          yesPrice: 0.90, noPrice: 0.05 },
+      ],
+      endDate: '2026-05-22T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 29, stdDev: 2, source: 'combined' as const, ensembleMembers: 31 };
+
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0 });
+    const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findMispricedBrackets — tail NO base-rate gate
+// ---------------------------------------------------------------------------
+
+describe('findMispricedBrackets - tail NO base-rate gate', () => {
+  // "25°C or higher" (low=25, high=null): high-tail bracket.
+  // Forecast 22°C → modelProb ≈ 0.07 (model says NO). noPrice=0.10 gives strong
+  // apparent edgeNo. But WU shows city hit ≥25°C 13/14 recent days (93%).
+  const highTailEvent = {
+    eventId: 'e-high-tail', slug: 'mexico-city', city: 'mexico city',
+    coords: lookupCity('mexico city') ?? { lat: 19.43, lon: -99.13 },
+    targetDate: '2026-05-20', unit: 'celsius' as const,
+    brackets: [
+      { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+        threshold: 0, low: 25, high: null, label: '25°C or higher',
+        yesPrice: 0.88, noPrice: 0.10 },
+    ],
+    endDate: '2026-05-20T12:00:00Z',
+  };
+  const coldForecast = { forecastHigh: 22, stdDev: 3, source: 'combined' as const, ensembleMembers: 31 };
+
+  const highYesActuals = {
+    highs: [26, 25, 27, 25, 26, 25, 28, 25, 26, 27, 25, 26, 25, 22], // 13/14 ≥ 25
+    unit: 'celsius',
+    sampleSize: 14,
+    updatedAt: '2026-05-20T00:00:00Z',
+  };
+
+  it('blocks high-tail NO when recent WU base rate ≥ threshold', () => {
+    const { opportunities } = findMispricedBrackets(
+      highTailEvent, coldForecast, 1, 0.0,
+      { minModelCoverage: 0, cityActuals: highYesActuals, baseRateMinSamples: 7, baseRateNoBlockThreshold: 0.70 },
+    );
+    expect(opportunities.filter((o) => o.tradeSide === 'NO')).toHaveLength(0);
+  });
+
+  it('allows high-tail NO when base rate is below threshold', () => {
+    const lowYesActuals = {
+      highs: [22, 21, 20, 23, 22, 21, 20, 22, 21, 19, 22, 20, 21, 22], // 0/14 ≥ 25
+      unit: 'celsius',
+      sampleSize: 14,
+      updatedAt: '2026-05-20T00:00:00Z',
+    };
+    const { opportunities } = findMispricedBrackets(
+      highTailEvent, coldForecast, 1, 0.0,
+      { minModelCoverage: 0, cityActuals: lowYesActuals, baseRateMinSamples: 7, baseRateNoBlockThreshold: 0.70 },
+    );
+    const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps.length).toBeGreaterThan(0);
+  });
+
+  it('fails open (allows NO) when cityActuals is null (cache miss)', () => {
+    const { opportunities } = findMispricedBrackets(
+      highTailEvent, coldForecast, 1, 0.0,
+      { minModelCoverage: 0, cityActuals: null, baseRateMinSamples: 7, baseRateNoBlockThreshold: 0.70 },
+    );
+    const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps.length).toBeGreaterThan(0);
+  });
+
+  it('fails open when sampleSize < baseRateMinSamples', () => {
+    const thinActuals = {
+      highs: [26, 25, 27], // 3/3 ≥ 25 but sample too thin
+      unit: 'celsius',
+      sampleSize: 3,
+      updatedAt: '2026-05-20T00:00:00Z',
+    };
+    const { opportunities } = findMispricedBrackets(
+      highTailEvent, coldForecast, 1, 0.0,
+      { minModelCoverage: 0, cityActuals: thinActuals, baseRateMinSamples: 7, baseRateNoBlockThreshold: 0.70 },
+    );
+    const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps.length).toBeGreaterThan(0);
+  });
+
+  it('fails open when unit does not match event unit', () => {
+    const wrongUnitActuals = {
+      highs: [77, 79, 81, 77, 78, 79, 80, 77, 78, 79, 77, 79, 77, 80], // Fahrenheit values ≥ 25 trivially
+      unit: 'fahrenheit', // event is celsius
+      sampleSize: 14,
+      updatedAt: '2026-05-20T00:00:00Z',
+    };
+    const { opportunities } = findMispricedBrackets(
+      highTailEvent, coldForecast, 1, 0.0,
+      { minModelCoverage: 0, cityActuals: wrongUnitActuals, baseRateMinSamples: 7, baseRateNoBlockThreshold: 0.70 },
+    );
+    const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps.length).toBeGreaterThan(0);
+  });
+
+  it('blocks low-tail NO when recent WU base rate of ≤ threshold is high', () => {
+    // "39°F or below" (low=null, high=39). Forecast 52°F → modelProb near 0 → strong edgeNo.
+    // But WU shows 13/14 days ≤ 39°F → gate blocks it.
+    const lowTailEvent = {
+      eventId: 'e-low-tail', slug: 'low-tail', city: 'chicago',
+      coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14', unit: 'fahrenheit' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: null, high: 39, label: '39°F or below',
+          yesPrice: 0.88, noPrice: 0.10 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const warmForecast = { forecastHigh: 52, stdDev: 3, source: 'noaa' as const, ensembleMembers: 0 };
+    const coldActuals = {
+      highs: [35, 37, 38, 36, 39, 35, 37, 38, 36, 35, 38, 37, 36, 52], // 13/14 ≤ 39
+      unit: 'fahrenheit',
+      sampleSize: 14,
+      updatedAt: '2026-04-14T00:00:00Z',
+    };
+    const { opportunities } = findMispricedBrackets(
+      lowTailEvent, warmForecast, 1, 0.0,
+      { minModelCoverage: 0, cityActuals: coldActuals, baseRateMinSamples: 7, baseRateNoBlockThreshold: 0.70 },
+    );
+    expect(opportunities.filter((o) => o.tradeSide === 'NO')).toHaveLength(0);
+  });
+
+  it('does not block interior bracket NO bets via base-rate gate', () => {
+    // Interior bracket (low=20, high=25). Base-rate gate is tail-only.
+    // Forecast 28°C → rounds to 28, NOT inside [20, 25] → rounding gate does not fire.
+    // modelProb for [20-25] at 28°C is near 0; noPrice=0.05 → edgeNo≈0.95 → tradeSide=NO.
+    const interiorEvent = {
+      eventId: 'e-interior', slug: 'interior', city: 'chicago',
+      coords: lookupCity('chicago')!,
+      targetDate: '2026-04-14', unit: 'celsius' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+          threshold: 0, low: 20, high: 25, label: '20-25°C',
+          yesPrice: 0.90, noPrice: 0.05 },
+      ],
+      endDate: '2026-04-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 28, stdDev: 0.5, source: 'combined' as const, ensembleMembers: 31 };
+    const { opportunities } = findMispricedBrackets(
+      interiorEvent, forecast, 1, 0.0,
+      { minModelCoverage: 0, cityActuals: highYesActuals, baseRateMinSamples: 7, baseRateNoBlockThreshold: 0.70 },
+    );
+    const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
     expect(noOpps.length).toBeGreaterThan(0);
   });
 });

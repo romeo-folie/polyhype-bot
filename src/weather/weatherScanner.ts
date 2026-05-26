@@ -40,8 +40,8 @@ import {
 } from './noaaClient.js';
 import type { CityCoordinates, FetchFn } from './noaaClient.js';
 import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast } from './openMeteoClient.js';
-import { getCityBias } from './cityBias.js';
-import type { CityBias } from './cityBias.js';
+import { getCityBias, getCityActuals } from './cityBias.js';
+import type { CityBias, CityActuals } from './cityBias.js';
 
 const GAMMA_BASE = 'https://gamma-api.polymarket.com';
 const GAMMA_TIMEOUT_MS = 15_000;
@@ -756,6 +756,12 @@ export interface FindMispricedOptions {
   weakBiasStddevMultiplier?: number;
   /** Skip NO bets on tail brackets when modelProb exceeds this (default 0.5). */
   maxTailNoBetModelProb?: number;
+  /** Recent WU daily highs for base-rate gate on tail NO bets. */
+  cityActuals?: CityActuals | null;
+  /** Minimum actuals samples before base-rate gate fires (default 7). Fail open below. */
+  baseRateMinSamples?: number;
+  /** Block tail NO when WU base-rate YES fraction ≥ this threshold (default 0.70). */
+  baseRateNoBlockThreshold?: number;
 }
 
 export function findMispricedBrackets(
@@ -775,6 +781,9 @@ export function findMispricedBrackets(
     biasTrustedSamples: biasTrustedSamplesRaw = 14,
     weakBiasStddevMultiplier = 1.2,
     maxTailNoBetModelProb = 0.5,
+    cityActuals = null,
+    baseRateMinSamples = 7,
+    baseRateNoBlockThreshold = 0.70,
   } = options;
   // Defense-in-depth clamp: loadConfig() cross-validates trusted ≥ min, but this
   // helper is also called directly from tests and could accept arbitrary values.
@@ -916,6 +925,55 @@ export function findMispricedBrackets(
       continue;
     }
 
+    // Gate: tail NO bets where recent WU actuals strongly favour YES.
+    // The GFS model can drift cold relative to WU (the resolution source), so even
+    // a low modelProb on YES doesn't mean NO is safe if the city historically hits
+    // this threshold most days. Fail open when cache is absent or sample is thin.
+    if (
+      tradeSide === 'NO' &&
+      (bracket.low === null || bracket.high === null) &&
+      cityActuals !== null &&
+      cityActuals.unit === event.unit &&
+      cityActuals.sampleSize >= baseRateMinSamples
+    ) {
+      const threshold = bracket.high === null ? bracket.low! : bracket.high!;
+      const yesFraction =
+        bracket.high === null
+          ? cityActuals.highs.filter((h) => h >= threshold).length / cityActuals.highs.length
+          : cityActuals.highs.filter((h) => h <= threshold).length / cityActuals.highs.length;
+      if (yesFraction >= baseRateNoBlockThreshold) {
+        logger.info('[weather] skipping tail NO — base rate strongly favors YES', {
+          city: event.city,
+          bracket: bracket.label,
+          threshold,
+          yesFraction: Math.round(yesFraction * 1000) / 1000,
+          sampleSize: cityActuals.sampleSize,
+          baseRateNoBlockThreshold,
+        });
+        continue;
+      }
+    }
+
+    // Gate: interior NO bets where the corrected forecast itself rounds into this
+    // bracket. The model's central estimate resolves YES, so we'd be betting against
+    // our own best guess — skip regardless of apparent edge.
+    if (
+      tradeSide === 'NO' &&
+      bracket.low !== null &&
+      bracket.high !== null
+    ) {
+      const roundedForecast = Math.round(correctedForecastHigh);
+      if (roundedForecast >= bracket.low && roundedForecast <= bracket.high) {
+        logger.debug('[weather] skipping interior NO — forecast rounds into bracket', {
+          city: event.city,
+          bracket: bracket.label,
+          correctedForecastHigh,
+          roundedForecast,
+        });
+        continue;
+      }
+    }
+
     // Skip near-zero markets where liquidity is negligible
     if (bracket.yesPrice < 0.005 && tradeSide === 'YES') continue;
     if (bracket.noPrice < 0.005 && tradeSide === 'NO') continue;
@@ -1052,6 +1110,10 @@ export async function scanWeatherMarkets(
       ? await getCityBias(redis, event.city)
       : null;
 
+    // Fetch per-city WU actuals for tail NO base-rate gate (always, regardless of
+    // bias correction flag — this gate is independent of the mean-shift correction).
+    const cityActuals = await getCityActuals(redis, event.city);
+
     // Step 4: Find mispriced brackets (coverage guard inside; returns empty opportunities
     // when bracket data is incomplete — e.g. late-day thinning from 11 → 4 brackets).
     // modelSum is returned by findMispricedBrackets so shadow logging reuses the exact
@@ -1077,6 +1139,9 @@ export async function scanWeatherMarkets(
         biasTrustedSamples: cfg.WEATHER_BIAS_TRUSTED_SAMPLES,
         weakBiasStddevMultiplier: cfg.WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER,
         maxTailNoBetModelProb: cfg.WEATHER_THRESHOLD_NO_BET_MAX_PROB,
+        cityActuals,
+        baseRateMinSamples: cfg.WEATHER_BASE_RATE_MIN_SAMPLES,
+        baseRateNoBlockThreshold: cfg.WEATHER_BASE_RATE_NO_BLOCK_THRESHOLD,
       },
     );
     const afterMarketGate = await applyMarketDisagreementGate(redis, opportunities, cfg);

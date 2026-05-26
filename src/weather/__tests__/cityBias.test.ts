@@ -10,7 +10,7 @@ vi.mock('../noaaClient.js', async () => {
   return { ...actual };
 });
 
-const { computeCityBias, getCityBias } = await import('../cityBias.js');
+const { computeCityBias, getCityBias, computeCityBaseRates, getCityActuals } = await import('../cityBias.js');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -174,6 +174,120 @@ describe('getCityBias', () => {
       { value: JSON.stringify({ empiricalStddev: 1.5, sampleSize: 10, updatedAt: '2026-04-19T00:00:00Z' }), ttl: 604800 },
     );
     const result = await getCityBias(redis as never, 'miami');
+    expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeCityBaseRates
+// ---------------------------------------------------------------------------
+
+describe('computeCityBaseRates', () => {
+  it('writes actuals to Redis for cities with rows', async () => {
+    const sql = makeSql([
+      { city: 'chicago', unit: 'fahrenheit', highs: [72, 68, 75, 70, 71], sample_size: 5 },
+      { city: 'paris',   unit: 'celsius',    highs: [28, 30, 29, 27, 31], sample_size: 5 },
+    ]);
+    const redis = makeRedis();
+
+    await computeCityBaseRates(sql as never, redis as never, 14);
+
+    expect(redis.set).toHaveBeenCalledTimes(2);
+    const chicagoCall = redis.set.mock.calls.find((c) => (c[0] as string).includes('chicago'));
+    expect(chicagoCall).toBeDefined();
+    const payload = JSON.parse(chicagoCall![1] as string) as { highs: number[]; unit: string; sampleSize: number };
+    expect(payload.highs).toEqual([72, 68, 75, 70, 71]);
+    expect(payload.unit).toBe('fahrenheit');
+    expect(payload.sampleSize).toBe(5);
+  });
+
+  it('applies 24h TTL when writing to Redis', async () => {
+    const sql = makeSql([
+      { city: 'nyc', unit: 'fahrenheit', highs: [68, 72], sample_size: 2 },
+    ]);
+    const redis = makeRedis();
+
+    await computeCityBaseRates(sql as never, redis as never, 14);
+
+    const call = redis.set.mock.calls[0];
+    expect(call).toBeDefined();
+    expect(call![3]).toBe(24 * 60 * 60);
+  });
+
+  it('does not write when SQL returns no rows', async () => {
+    const sql = makeSql([]);
+    const redis = makeRedis();
+
+    await computeCityBaseRates(sql as never, redis as never, 14);
+
+    expect(redis.set).not.toHaveBeenCalled();
+  });
+
+  it('handles SQL error gracefully — does not throw', async () => {
+    const sql = vi.fn().mockRejectedValue(new Error('DB down'));
+    const redis = makeRedis();
+
+    await expect(computeCityBaseRates(sql as never, redis as never)).resolves.not.toThrow();
+    expect(redis.set).not.toHaveBeenCalled();
+  });
+
+  it('uses weather:actuals: key prefix', async () => {
+    const sql = makeSql([
+      { city: 'chicago', unit: 'fahrenheit', highs: [70], sample_size: 1 },
+    ]);
+    const redis = makeRedis();
+
+    await computeCityBaseRates(sql as never, redis as never, 14);
+
+    const key = redis.set.mock.calls[0]![0] as string;
+    expect(key).toMatch(/^weather:actuals:/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getCityActuals
+// ---------------------------------------------------------------------------
+
+describe('getCityActuals', () => {
+  let redis: ReturnType<typeof makeRedis>;
+
+  beforeEach(() => {
+    redis = makeRedis();
+  });
+
+  it('returns null when key is absent', async () => {
+    const result = await getCityActuals(redis as never, 'chicago');
+    expect(result).toBeNull();
+  });
+
+  it('returns parsed CityActuals when key exists', async () => {
+    const actuals = {
+      highs: [72, 68, 75],
+      unit: 'fahrenheit',
+      sampleSize: 3,
+      updatedAt: '2026-05-26T00:00:00Z',
+    };
+    redis._store.set('weather:actuals:chicago', { value: JSON.stringify(actuals), ttl: 86400 });
+
+    const result = await getCityActuals(redis as never, 'chicago');
+    expect(result).not.toBeNull();
+    expect(result!.highs).toEqual([72, 68, 75]);
+    expect(result!.unit).toBe('fahrenheit');
+    expect(result!.sampleSize).toBe(3);
+  });
+
+  it('returns null when stored JSON is malformed', async () => {
+    redis._store.set('weather:actuals:chicago', { value: 'not-json', ttl: 86400 });
+    const result = await getCityActuals(redis as never, 'chicago');
+    expect(result).toBeNull();
+  });
+
+  it('returns null when highs field is not an array', async () => {
+    redis._store.set(
+      'weather:actuals:miami',
+      { value: JSON.stringify({ highs: 'bad', unit: 'celsius', sampleSize: 5 }), ttl: 86400 },
+    );
+    const result = await getCityActuals(redis as never, 'miami');
     expect(result).toBeNull();
   });
 });

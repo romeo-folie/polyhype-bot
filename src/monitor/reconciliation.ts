@@ -701,6 +701,18 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
         fillDirection: direction,
       });
     }
+
+    // Block weather market CLOB imports unless a bot-posted maker order is waiting
+    // AND it matches the fill's token + direction. A rawPending with a mismatched
+    // token/direction means pendingOrder is null — treat that the same as no pending
+    // order so a stale key cannot smuggle an unrelated fill past scanner validation.
+    if (!pendingOrder && /highest\s+temperature/i.test(market.question ?? '')) {
+      logger.info('[reconcile] skipping untracked weather market CLOB import', {
+        marketId: market.id,
+        question: market.question,
+      });
+      return false;
+    }
     if (pendingOrder) {
       logger.info('[reconcile] linked CLOB orphan to pending maker order', {
         marketId: market.id,

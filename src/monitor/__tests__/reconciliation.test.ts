@@ -761,4 +761,146 @@ describe('Position Reconciliation Healer', () => {
       marketId: 'numeric-888'
     }));
   });
+
+  it('blocks CLOB import of weather temperature bracket markets when no pending order exists', async () => {
+    const weatherClobPosition = {
+      conditionId: 'cond-weather-1',
+      asset: 'tok-yes',
+      avgPrice: 0.55,
+      size: 100,
+    };
+
+    const weatherGammaMarket = {
+      id: 'numeric-weather',
+      question: 'Will the highest temperature in London be 34°C or above on May 27?',
+      conditionId: 'cond-weather-1',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([weatherClobPosition]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(weatherGammaMarket);
+    // No pending order — external/unknown weather fill that bypassed the scanner
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue(null);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // No pending order → block: weather market must not be imported unless placed by our scanner
+    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
+  });
+
+  it('allows CLOB import of weather markets when a bot-posted pending maker order exists', async () => {
+    // Scanner placed a GTC maker order on a weather bracket; it filled on CLOB.
+    // The pending order in Redis proves our scanner placed it — allow the import.
+    const weatherClobPosition = {
+      conditionId: 'cond-weather-2',
+      asset: 'tok-w-yes',
+      avgPrice: 0.62,
+      size: 50,
+    };
+
+    const weatherGammaMarket = {
+      id: 'numeric-weather-2',
+      question: 'Will the highest temperature in Chicago exceed 85°F on May 28?',
+      conditionId: 'cond-weather-2',
+      clobTokenIds: ['tok-w-yes', 'tok-w-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([weatherClobPosition]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(weatherGammaMarket);
+    // Scanner-placed pending order — this fill came from our own system
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-weather-1',
+      tokenId: 'tok-w-yes',
+      price: 0.62,
+      size: 50,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 60_000,
+      direction: 'YES',
+      edgeMagnitude: 0.10,
+      bestAskAtPosting: 0.63,
+      intendedStakeUsd: 5,
+      sourcedFrom: 'weather:chicago:2026-05-28:85°F',
+    });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Pending order present → scanner-placed fill → allow import and enrich with metadata
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-weather-2',
+      sourcedFrom: 'weather:chicago:2026-05-28:85°F',
+    }));
+  });
+
+  it('blocks weather CLOB import when pending order exists but token/direction mismatches the fill', async () => {
+    // A stale pending YES key exists but the fill landed on the NO token —
+    // pendingOrder is null after validation; the guard must still block the import.
+    const weatherClobPosition = {
+      conditionId: 'cond-weather-mismatch',
+      asset: 'tok-w-no',   // NO fill
+      avgPrice: 0.38,
+      size: 50,
+    };
+
+    const weatherGammaMarket = {
+      id: 'numeric-weather-mismatch',
+      question: 'Will the highest temperature in London be 34°C or above on May 30?',
+      conditionId: 'cond-weather-mismatch',
+      clobTokenIds: ['tok-w-yes', 'tok-w-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([weatherClobPosition]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(weatherGammaMarket);
+    // Pending order is for YES token — does not match the NO fill
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-weather-mismatch',
+      tokenId: 'tok-w-yes',   // wrong token for this fill
+      price: 0.62,
+      size: 50,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 60_000,
+      direction: 'YES',       // wrong direction
+      edgeMagnitude: 0.10,
+      bestAskAtPosting: 0.63,
+      intendedStakeUsd: 5,
+      sourcedFrom: 'weather:london:2026-05-30:34°C',
+    });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Mismatch → pendingOrder is null → weather guard blocks import
+    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
+  });
+
+  it('still imports non-weather CLOB orphans normally', async () => {
+    const normalClobPosition = {
+      conditionId: 'cond-normal',
+      asset: 'tok-yes',
+      avgPrice: 0.45,
+      size: 50,
+    };
+
+    const normalGammaMarket = {
+      id: 'numeric-normal',
+      question: 'Will Bitcoin exceed $100k by end of 2026?',
+      conditionId: 'cond-normal',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (simmer.getSimmerPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([normalClobPosition]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(normalGammaMarket);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-normal',
+    }));
+  });
 });
