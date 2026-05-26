@@ -51,6 +51,46 @@ const lastRevalCheck = new Map<string, number>();
 // throttle scoreConfluence calls).
 const lastMaxHoldLoserLog = new Map<string, number>();
 
+// Sends a Telegram notification and deletes the hedge:link key for an orphaned
+// hedge position that was closed outside the normal exit path (PM resolution,
+// external close, liquidation). Called by both prune paths before closeLedgerPosition.
+async function pruneOrphanedHedge(
+  redis: ReturnType<typeof getRedis>,
+  lp: Position,
+): Promise<void> {
+  const hedgePmId = lp.sourcedFrom?.startsWith('hedge:pm:')
+    ? lp.sourcedFrom.slice('hedge:pm:'.length)
+    : null;
+  if (!hedgePmId) return;
+
+  await redis.del(`hedge:link:${hedgePmId}`).catch(() => {});
+
+  await recordPositionOutcome(redis, lp, {
+    result: 'pushed',
+    returnPct: 0,
+    executionVenueOverride: 'hyperliquid',
+    exitReason: 'hedge_pm_resolved',
+  }).catch((e: unknown) => {
+    logger.warn('[futures-monitor] hedge orphan recordPositionOutcome failed (non-fatal)', {
+      symbol: lp.symbol ?? lp.marketId,
+      error: String(e),
+    });
+  });
+
+  await notifyTakeProfitExecuted({
+    position: lp,
+    currentPrice: 0,
+    returnPct: 0,
+    reason: 'hedge_pm_resolved',
+    mechanismDetail: 'HL position gone — closed externally or via PM resolution',
+  }).catch((e: unknown) => {
+    logger.warn('[futures-monitor] hedge orphan notification failed', {
+      symbol: lp.symbol ?? lp.marketId,
+      error: String(e),
+    });
+  });
+}
+
 export async function runFuturesMonitorWorker(): Promise<void> {
   const cfg = loadConfig();
   const redis = getRedis();
@@ -182,6 +222,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             symbol: lp.symbol ?? lp.marketId,
             direction: lp.direction,
           });
+          await pruneOrphanedHedge(redis, lp);
           await closeLedgerPosition(redis, lp.marketId, lp.direction);
         }
         await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
@@ -249,6 +290,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             symbol: lp.symbol ?? lp.marketId,
             direction: lp.direction,
           });
+          await pruneOrphanedHedge(redis, lp);
           await closeLedgerPosition(redis, lp.marketId, lp.direction);
         }
       }

@@ -196,7 +196,8 @@ export type TakeProfitReason =
   | 'oracle_lag_stop_loss'
   | 'weather_near_resolution'
   | 'funding_normalized'
-  | 'funding_sign_flip';
+  | 'funding_sign_flip'
+  | 'hedge_pm_resolved';
 
 export async function notifyTakeProfitExecuted(opts: {
   position: Position;
@@ -227,6 +228,7 @@ export async function notifyTakeProfitExecuted(opts: {
     weather_near_resolution: '⏱️ Weather — near-resolution loss cut',
     funding_normalized: '📊 Funding normalized — mean-reversion exit',
     funding_sign_flip: '🔀 Funding sign flip — crowd reversed',
+    hedge_pm_resolved: '🔗 Delta-hedge closed — PM market resolved',
   };
   let reasonLabel = reasonLabels[reason] ?? reason;
   if (mechanismDetail) reasonLabel = `${reasonLabel} [${mechanismDetail}]`;
