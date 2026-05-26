@@ -1312,6 +1312,9 @@ const envSchema = z.object({
   // Short cooldown for transient executor skips (stake_below_hl_minimum) — price fluctuation
   // can push order size above the HL minimum, so 60s is enough to allow a retry.
   HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC: z.coerce.number().int().min(10).optional().default(60),
+  // Per-side cooldown after a TP/non-SL exit from an hl-momentum position. Prevents
+  // re-entering the same thesis immediately after a profitable close.
+  HL_MOMENTUM_POST_TP_COOLDOWN_SEC: z.coerce.number().int().min(60).optional().default(1800),
   // Lookback windows for each scoring timeframe.
   // 15m primary: 54h (194,400,000ms) → ~216 bars (covers MACD 35-bar warmup with room to spare).
   HL_MOMENTUM_PRIMARY_LOOKBACK_MS: z.coerce.number().int().min(60_000).optional().default(194_400_000),

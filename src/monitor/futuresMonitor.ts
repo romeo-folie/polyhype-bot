@@ -28,7 +28,7 @@ import {
 import { scoreConfluence } from '../arb/confluenceScorer.js';
 import { recordPositionOutcome } from '../shared/positionOutcomeRecorder.js';
 import { enqueueWrite } from '../db/writeQueue.js';
-import { isMemeSymbol } from '../futures/hlMomentumScanner.js';
+import { isMemeSymbol, momentumCooldownKey } from '../futures/hlMomentumScanner.js';
 import { getAllCachedAssetCtxs, fundingRateToApr } from '../futures/hlAssetCtxCache.js';
 
 const POLL_INTERVAL_MS = 5000; // 5 seconds — safe for rate limits, fast enough for intraday
@@ -855,6 +855,29 @@ export async function runFuturesMonitorWorker(): Promise<void> {
               const cooldownKey = `futures:loss-cooldown:${symbol}`;
               await redis.setex(cooldownKey, 1800, '1');
               logger.info('[futures-monitor] loss cooldown set', { symbol, ttlSec: 1800 });
+            }
+
+            // Set a per-side momentum cooldown after a profitable TP/non-SL exit from
+            // an hl-momentum position. The loss-cooldown above covers both directions on
+            // any losing close; here we only need to block the same direction after a
+            // profitable close so the scanner can't immediately re-enter the same thesis.
+            // pnlUsd >= 0: skip on losses (loss-cooldown handles those).
+            // tpReason exclusions: 'futures_sl' catches all Stop-Loss prefixes;
+            // 'stop_loss' catches the default fallback so an unknown reason string
+            // can't silently bypass the gate.
+            if (
+              ledgerPos?.sourcedFrom === 'hl-momentum' &&
+              tpReason !== 'futures_sl' &&
+              tpReason !== 'stop_loss' &&
+              pnlUsd >= 0
+            ) {
+              const mCooldownKey = momentumCooldownKey(symbol, direction);
+              await redis.set(mCooldownKey, '1', 'EX', cfg.HL_MOMENTUM_POST_TP_COOLDOWN_SEC);
+              logger.info('[futures-monitor] post-TP momentum cooldown set', {
+                symbol,
+                direction,
+                ttlSec: cfg.HL_MOMENTUM_POST_TP_COOLDOWN_SEC,
+              });
             }
           } else {
             logger.error('[futures-monitor] exit failed', { symbol, error: result.error });
