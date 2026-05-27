@@ -332,18 +332,19 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       }
     }
 
-    const decision = evaluateTakeProfit(
-      evalPosition,
-      currentPrice,
-      tpThreshold,
-      slThreshold,
-      {
-        enabled: cfg.ZONE_AWARE_SL_ENABLED,
-        extremeLow: cfg.ZONE_AWARE_SL_EXTREME_LOW,
-        extremeHigh: cfg.ZONE_AWARE_SL_EXTREME_HIGH,
-        minAbsoluteMove: cfg.ZONE_AWARE_SL_MIN_ABS_MOVE,
-      },
-    );
+    const returnDecimal =
+      evalPosition.entryPrice > 0
+        ? (currentPrice.currentOutcomePrice - evalPosition.entryPrice) / evalPosition.entryPrice
+        : 0;
+
+    const decision = cfg.POLYMARKET_TP_SL_ENABLED
+      ? evaluateTakeProfit(evalPosition, currentPrice, tpThreshold, slThreshold, {
+          enabled: cfg.ZONE_AWARE_SL_ENABLED,
+          extremeLow: cfg.ZONE_AWARE_SL_EXTREME_LOW,
+          extremeHigh: cfg.ZONE_AWARE_SL_EXTREME_HIGH,
+          minAbsoluteMove: cfg.ZONE_AWARE_SL_MIN_ABS_MOVE,
+        })
+      : { shouldExit: false, returnDecimal, returnPct: returnDecimal * 100 };
 
     // Trailing-stop suppression: when enabled, a fixed-TP exit is SUPPRESSED
     // so the trailing block below can take over. SL and divergence_closed still
