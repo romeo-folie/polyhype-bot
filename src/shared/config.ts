@@ -1748,7 +1748,7 @@ const envSchema = z.object({
   // Gate: skip NO bets on tail brackets ("or higher" / "or below") when the model's
   // own P(YES) exceeds this threshold. Prevents betting against the model's directional
   // call — edgeNo can be spuriously positive even when modelProb is 0.80+ for YES.
-  WEATHER_THRESHOLD_NO_BET_MAX_PROB: z.coerce.number().min(0).max(1).optional().default(0.5),
+  WEATHER_THRESHOLD_NO_BET_MAX_PROB: z.coerce.number().min(0).max(1).optional().default(0.35),
   // Base-rate guard for tail NO bets: block when recent WU actuals show the YES
   // outcome has occurred at least WEATHER_BASE_RATE_NO_BLOCK_THRESHOLD fraction of
   // the last WEATHER_BASE_RATE_LOOKBACK_DAYS days. Requires at least
