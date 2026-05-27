@@ -1456,6 +1456,11 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
 export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<void> {
   const cfg = loadConfig();
 
+  // Lock-in scan protects existing NO positions independently of new-entry
+  // scanning — run first so it fires regardless of scan state (zero opps,
+  // disabled scanner, execution off, bankroll zero, etc.).
+  await runWeatherLockInScan(redis);
+
   const opportunities = await scanWeatherMarkets(redis, fetchFn);
 
   if (opportunities.length === 0) return;
@@ -1464,7 +1469,6 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     logger.info('[weather] scanner disabled — shadow-logged only', {
       opportunities: opportunities.length,
     });
-    await runWeatherLockInScan(redis);
     return;
   }
 
@@ -1740,9 +1744,6 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     cumulativeStakeUsd: cumulativeStakeUsd.toFixed(2),
     tradableOpportunities: tradable.length,
   });
-
-  // Lock-in scan: run after main scan completes
-  await runWeatherLockInScan(redis);
 }
 
 // ── Standalone entrypoint (cron) ──────────────────────────────────────────

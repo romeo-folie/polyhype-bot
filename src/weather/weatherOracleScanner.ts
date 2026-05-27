@@ -49,7 +49,7 @@ async function fetchYesterdayGroundTruth(): Promise<GroundTruthRow[]> {
  * Determine whether YES or NO wins for a bracket given the actual observed high.
  * Returns 'YES', 'NO', or null when the bracket type is unrecognised.
  */
-function winningDirection(
+export function winningDirection(
   actualHigh: number,
   low: number | null,
   high: number | null,

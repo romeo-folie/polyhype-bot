@@ -19,6 +19,9 @@ import { enqueueWrite } from '../db/writeQueue.js';
 import { getSql } from '../db/client.js';
 import { getMarket, parseClobTokenIds } from '../mapping/gamma.js';
 import { getClobOrderBook, submitClobBuy } from '../shared/clob.js';
+import { deductStake } from '../shared/bankroll.js';
+
+const LOCK_IN_MIN_FILL_RATIO = 0.9;
 
 const LOCK_KEY_PREFIX = 'weather:locked:';
 const LOCK_TTL_S = 14 * 24 * 3600;
@@ -156,13 +159,29 @@ export async function runWeatherLockInScan(redis: Redis): Promise<void> {
       const result = await submitClobBuy({ tokenId: yesTokenId, amountUsd, orderType: 'FAK' });
 
       if (result.success) {
+        const sharesBought = result.shares_bought ?? 0;
+        const fillRatio = pos.sharesHeld > 0 ? sharesBought / pos.sharesHeld : 0;
+        if (fillRatio < LOCK_IN_MIN_FILL_RATIO) {
+          logger.warn('[weather-lock-in] partial fill below threshold — lock not set, will retry', {
+            positionId: pos.id,
+            marketId: pos.marketId,
+            sharesNeeded: pos.sharesHeld,
+            sharesBought,
+            fillRatio: fillRatio.toFixed(3),
+            minFillRatio: LOCK_IN_MIN_FILL_RATIO,
+          });
+          // Still deduct what was spent to keep bankroll cache accurate.
+          await deductStake(redis, result.cost ?? amountUsd * fillRatio);
+          continue;
+        }
         await redis.set(lockKey, '1', 'EX', LOCK_TTL_S);
+        await deductStake(redis, result.cost ?? amountUsd);
         logger.info('[weather-lock-in] YES lock-in executed', {
           positionId: pos.id,
           marketId: pos.marketId,
           yesAsk,
           amountUsd: amountUsd.toFixed(2),
-          sharesBought: result.shares_bought,
+          sharesBought,
           cost: result.cost,
         });
       } else {
