@@ -1754,7 +1754,7 @@ const envSchema = z.object({
   // the last WEATHER_BASE_RATE_LOOKBACK_DAYS days. Requires at least
   // WEATHER_BASE_RATE_MIN_SAMPLES valid actuals rows to fire; gate is skipped
   // (fail open) below that threshold. Actuals are cached by the reconciler cron
-  // with a 24h TTL; scanner reads Redis — no DB access at scan time.
+  // with a 36h TTL; scanner reads Redis — no DB access at scan time.
   WEATHER_BASE_RATE_LOOKBACK_DAYS: z.coerce.number().int().min(1).optional().default(14),
   WEATHER_BASE_RATE_MIN_SAMPLES: z.coerce.number().int().min(1).optional().default(7),
   WEATHER_BASE_RATE_NO_BLOCK_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.70),

@@ -242,6 +242,19 @@ describe('computeCityBaseRates', () => {
     const key = redis.set.mock.calls[0]![0] as string;
     expect(key).toMatch(/^weather:actuals:/);
   });
+
+  it('uses postgres cast (CURRENT_DATE - $n::int)::date in the actuals query', async () => {
+    // Regression guard: the query previously used `CURRENT_DATE - ${lookbackDays}` without
+    // an explicit cast, which caused a type error on some postgres versions.
+    // Verify the template strings surrounding the interpolated lookbackDays contain the cast.
+    const sql = makeSql([]);
+    await computeCityBaseRates(sql as never, makeRedis() as never, 14);
+
+    const [strings, lookbackArg] = sql.mock.calls[0] as [TemplateStringsArray, number];
+    expect(strings[0]).toContain('(CURRENT_DATE - ');
+    expect(strings[1]).toContain('::int)::date');
+    expect(lookbackArg).toBe(14);
+  });
 });
 
 // ---------------------------------------------------------------------------
