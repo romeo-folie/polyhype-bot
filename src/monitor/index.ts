@@ -369,7 +369,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     // protection. If gap-down losses become a concern again, the right
     // mitigation is additive (a HARD_TAKE_PROFIT_THRESHOLD ceiling), not
     // re-enabling the dead zone.
-    const trailingActive = cfg.TRAILING_STOP_ENABLED;
+    const trailingActive = cfg.TRAILING_STOP_ENABLED && cfg.POLYMARKET_TP_SL_ENABLED;
 
     const suppressTpExit =
       trailingActive &&
