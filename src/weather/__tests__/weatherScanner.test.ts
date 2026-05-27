@@ -606,8 +606,10 @@ describe('findMispricedBrackets', () => {
 
     // Pass minModelCoverage=0 to disable the coverage guard — this test focuses
     // on multiplier behaviour with an intentionally minimal 2-bracket event.
-    const { opportunities: baselineOpps } = findMispricedBrackets(event, forecast, 1, 0, { stddevMultiplier: 1.0, minModelCoverage: 0 });
-    const { opportunities: widenedOpps }  = findMispricedBrackets(event, forecast, 1, 0, { stddevMultiplier: 1.5, minModelCoverage: 0 });
+    // cityActuals with 0% YES rate for ≥60°F so fail-closed gate doesn't block tail NO.
+    const lowActuals = { highs: Array(14).fill(50) as number[], unit: 'fahrenheit' as const, sampleSize: 14, updatedAt: '2026-01-01T00:00:00Z' };
+    const { opportunities: baselineOpps } = findMispricedBrackets(event, forecast, 1, 0, { stddevMultiplier: 1.0, minModelCoverage: 0, cityActuals: lowActuals });
+    const { opportunities: widenedOpps }  = findMispricedBrackets(event, forecast, 1, 0, { stddevMultiplier: 1.5, minModelCoverage: 0, cityActuals: lowActuals });
 
     const centralBase = baselineOpps.find((o) => o.bracketLabel === 'central')!;
     const centralWide = widenedOpps.find((o) => o.bracketLabel === 'central')!;
@@ -820,7 +822,9 @@ describe('findMispricedBrackets', () => {
     };
     const forecast = { forecastHigh: 52, stdDev: 3, source: 'noaa' as const, ensembleMembers: 0 };
 
-    const { opportunities: opps } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0, maxTailNoBetModelProb: 0.5 });
+    // cityActuals with 0% YES rate for ≤39°F so fail-closed gate doesn't block tail NO.
+    const highActuals = { highs: Array(14).fill(52) as number[], unit: 'fahrenheit' as const, sampleSize: 14, updatedAt: '2026-01-01T00:00:00Z' };
+    const { opportunities: opps } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0, maxTailNoBetModelProb: 0.5, cityActuals: highActuals });
     const noOpps = opps.filter((o) => o.tradeSide === 'NO');
     expect(noOpps.length).toBeGreaterThan(0);
   });
@@ -935,7 +939,9 @@ describe('findMispricedBrackets - interior NO rounding gate', () => {
     };
     const forecast = { forecastHigh: 29, stdDev: 2, source: 'combined' as const, ensembleMembers: 31 };
 
-    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0 });
+    // cityActuals with 0% YES rate for ≥32°C so fail-closed gate doesn't block tail NO.
+    const coolActuals = { highs: Array(14).fill(28) as number[], unit: 'celsius' as const, sampleSize: 14, updatedAt: '2026-01-01T00:00:00Z' };
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0, cityActuals: coolActuals });
     const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
     expect(noOpps.length).toBeGreaterThan(0);
   });
@@ -992,13 +998,13 @@ describe('findMispricedBrackets - tail NO base-rate gate', () => {
     expect(noOpps.length).toBeGreaterThan(0);
   });
 
-  it('fails open (allows NO) when cityActuals is null (cache miss)', () => {
+  it('fails CLOSED (blocks NO) when cityActuals is null (cache miss)', () => {
     const { opportunities } = findMispricedBrackets(
       highTailEvent, coldForecast, 1, 0.0,
       { minModelCoverage: 0, cityActuals: null, baseRateMinSamples: 7, baseRateNoBlockThreshold: 0.70 },
     );
     const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
-    expect(noOpps.length).toBeGreaterThan(0);
+    expect(noOpps.length).toBe(0);
   });
 
   it('fails open when sampleSize < baseRateMinSamples', () => {
@@ -2032,6 +2038,13 @@ describe('scanWeatherMarkets', () => {
     const gammaEvent = makeMockGammaEvent();
     // Make the top tradable bracket the high tail so tradeSide=NO on market m10.
     gammaEvent.markets[10]!.outcomePrices = '["0.45","0.55"]';
+
+    // Seed actuals with all highs well below the 58°F threshold (0% YES rate)
+    // so the base-rate fail-closed gate passes, and the adverseMove gate can fire.
+    redisMock._store.set(
+      'weather:actuals:chicago',
+      JSON.stringify({ highs: Array(14).fill(50), unit: 'fahrenheit', sampleSize: 14, updatedAt: new Date().toISOString() }),
+    );
 
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
