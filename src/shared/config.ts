@@ -279,6 +279,10 @@ const envSchema = z.object({
         .map((s) => s.trim())
         .filter((s) => s.length > 0),
     ),
+  // When false, skips TP, SL, and divergence-closed evaluation for all PM positions.
+  // Near-res gate (0.95 → redeemer), copytrade mirror exits, and stale/trend exits are unaffected.
+  // Hyperliquid futures use a separate evaluator and are never affected by this flag.
+  POLYMARKET_TP_SL_ENABLED: boolFromEnv.optional().default(true),
   // Trailing stop for PM positions — activation is TAKE_PROFIT_THRESHOLD (not a new knob).
   TRAILING_STOP_ENABLED: boolFromEnv.optional().default(false),
   TRAILING_GIVEBACK_PCT: z.coerce.number().min(0).optional().default(10),

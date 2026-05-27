@@ -119,6 +119,7 @@ function makeCurrentPrice(yesPrice: number) {
 
 function makeBaseConfig() {
   return {
+    POLYMARKET_TP_SL_ENABLED: true,
     TIERED_LOGIC_ENABLED: true,
     TRAILING_STOP_ENABLED: false,
     TAKE_PROFIT_THRESHOLD: 0.25,
