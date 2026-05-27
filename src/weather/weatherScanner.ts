@@ -27,6 +27,7 @@ import { enqueueWrite } from '../db/writeQueue.js';
 import { evaluateWeatherNearResEntry } from './nearResEntry.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
+import { runWeatherLockInScan } from './weatherLockIn.js';
 import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -1454,6 +1455,11 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
  */
 export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<void> {
   const cfg = loadConfig();
+
+  // Lock-in scan protects existing NO positions independently of new-entry
+  // scanning — run first so it fires regardless of scan state (zero opps,
+  // disabled scanner, execution off, bankroll zero, etc.).
+  await runWeatherLockInScan(redis);
 
   const opportunities = await scanWeatherMarkets(redis, fetchFn);
 

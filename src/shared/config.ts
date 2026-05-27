@@ -1823,6 +1823,31 @@ const envSchema = z.object({
   WEATHER_RECONCILER_LOOKBACK_DAYS: z.coerce.number().int().min(1).optional().default(30),
   // Cap archive API calls per run to stay within Open-Meteo fair-use limits.
   WEATHER_RECONCILER_MAX_PER_RUN: z.coerce.number().int().min(1).optional().default(50),
+
+  // ── Weather lock-in scanner ────────────────────────────────────────────────
+  // Buys YES on open weather NO positions when YES drops to cheap (near-zero)
+  // levels, guaranteeing a profit regardless of outcome. Bypasses the executor's
+  // opposite-side gate since this is intentionally a hedge.
+  // Ships dark. Set true to execute; false shadow-logs only.
+  WEATHER_LOCK_IN_ENABLED: boolFromEnv.optional().default(false),
+  // Maximum YES price at which to lock in. At 0.10 we buy YES ≤ 10¢/share.
+  WEATHER_LOCK_IN_MAX_YES_PRICE: z.coerce.number().min(0).max(1).optional().default(0.10),
+  // Total cost ceiling: entry_no_price + yes_ask must be ≤ this to lock in.
+  // At 0.92 we guarantee at least 8¢/share profit before fees.
+  WEATHER_LOCK_IN_COST_CEILING: z.coerce.number().min(0).max(1).optional().default(0.92),
+
+  // ── Weather oracle scanner ─────────────────────────────────────────────────
+  // After the reconciler writes WU actuals for yesterday, scans active weather
+  // markets for brackets whose outcome is now known but price hasn't fully
+  // adjusted. Buys the winning side. Ships dark.
+  WEATHER_ORACLE_ENABLED: boolFromEnv.optional().default(false),
+  // Maximum price to pay for the winning-side token. Above this, the discount
+  // is too small to overcome spread + fees (1 - price < MIN_DISCOUNT).
+  WEATHER_ORACLE_MAX_BUY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.93),
+  // Minimum required discount from $1 payout. Skip if (1 - winningAsk) < this.
+  WEATHER_ORACLE_MIN_DISCOUNT: z.coerce.number().min(0).max(1).optional().default(0.05),
+  // Hard stake cap per oracle trade (USD).
+  WEATHER_ORACLE_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(20),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
