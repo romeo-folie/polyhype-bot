@@ -201,7 +201,7 @@ describe('computeCityBaseRates', () => {
     expect(payload.sampleSize).toBe(5);
   });
 
-  it('applies 24h TTL when writing to Redis', async () => {
+  it('applies 36h TTL when writing to Redis', async () => {
     const sql = makeSql([
       { city: 'nyc', unit: 'fahrenheit', highs: [68, 72], sample_size: 2 },
     ]);
@@ -211,7 +211,7 @@ describe('computeCityBaseRates', () => {
 
     const call = redis.set.mock.calls[0];
     expect(call).toBeDefined();
-    expect(call![3]).toBe(24 * 60 * 60);
+    expect(call![3]).toBe(36 * 60 * 60);
   });
 
   it('does not write when SQL returns no rows', async () => {
