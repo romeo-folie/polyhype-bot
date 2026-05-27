@@ -201,7 +201,7 @@ describe('computeCityBaseRates', () => {
     expect(payload.sampleSize).toBe(5);
   });
 
-  it('applies 24h TTL when writing to Redis', async () => {
+  it('applies 36h TTL when writing to Redis', async () => {
     const sql = makeSql([
       { city: 'nyc', unit: 'fahrenheit', highs: [68, 72], sample_size: 2 },
     ]);
@@ -211,7 +211,7 @@ describe('computeCityBaseRates', () => {
 
     const call = redis.set.mock.calls[0];
     expect(call).toBeDefined();
-    expect(call![3]).toBe(24 * 60 * 60);
+    expect(call![3]).toBe(36 * 60 * 60);
   });
 
   it('does not write when SQL returns no rows', async () => {
@@ -241,6 +241,19 @@ describe('computeCityBaseRates', () => {
 
     const key = redis.set.mock.calls[0]![0] as string;
     expect(key).toMatch(/^weather:actuals:/);
+  });
+
+  it('uses postgres cast (CURRENT_DATE - $n::int)::date in the actuals query', async () => {
+    // Regression guard: the query previously used `CURRENT_DATE - ${lookbackDays}` without
+    // an explicit cast, which caused a type error on some postgres versions.
+    // Verify the template strings surrounding the interpolated lookbackDays contain the cast.
+    const sql = makeSql([]);
+    await computeCityBaseRates(sql as never, makeRedis() as never, 14);
+
+    const [strings, lookbackArg] = sql.mock.calls[0] as [TemplateStringsArray, number];
+    expect(strings[0]).toContain('(CURRENT_DATE - ');
+    expect(strings[1]).toContain('::int)::date');
+    expect(lookbackArg).toBe(14);
   });
 });
 

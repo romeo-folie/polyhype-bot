@@ -15,7 +15,7 @@ import { logger } from '../shared/logger.js';
 import { canonicalCityKey } from './noaaClient.js';
 
 const REDIS_TTL_S = 7 * 24 * 60 * 60; // 7 days
-const ACTUALS_REDIS_TTL_S = 24 * 60 * 60; // 24 hours — reconciler runs every 30 min
+const ACTUALS_REDIS_TTL_S = 36 * 60 * 60; // 36 hours — reconciler runs every 24h; extra 12h guards against jitter/delay
 // Recency half-life for EWMA weighting: samples N days old receive 2^(-N/7) weight.
 // 7 days means last week's data counts 2× more than data from 2 weeks ago, so
 // seasonal drift (e.g. spring marine-layer bias for KLAX) shows up in ~5 days
@@ -201,7 +201,7 @@ export async function computeCityBaseRates(
         ) AS highs,
         COUNT(*)::int AS sample_size
       FROM weather_ground_truth
-      WHERE target_date >= CURRENT_DATE - ${lookbackDays}
+      WHERE target_date >= (CURRENT_DATE - ${lookbackDays}::int)::date
         AND COALESCE(resolution_high, observed_high) IS NOT NULL
       GROUP BY city, unit
     `;
