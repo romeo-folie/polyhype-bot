@@ -960,29 +960,40 @@ export function findMispricedBrackets(
     // Gate: tail NO bets where recent WU actuals strongly favour YES.
     // The GFS model can drift cold relative to WU (the resolution source), so even
     // a low modelProb on YES doesn't mean NO is safe if the city historically hits
-    // this threshold most days. Fail open when cache is absent or sample is thin.
-    if (
-      tradeSide === 'NO' &&
-      (bracket.low === null || bracket.high === null) &&
-      cityActuals !== null &&
-      cityActuals.unit === event.unit &&
-      cityActuals.sampleSize >= baseRateMinSamples
-    ) {
-      const threshold = bracket.high === null ? bracket.low! : bracket.high!;
-      const yesFraction =
-        bracket.high === null
-          ? cityActuals.highs.filter((h) => h >= threshold).length / cityActuals.highs.length
-          : cityActuals.highs.filter((h) => h <= threshold).length / cityActuals.highs.length;
-      if (yesFraction >= baseRateNoBlockThreshold) {
-        logger.info('[weather] skipping tail NO — base rate strongly favors YES', {
+    // this threshold most days.
+    // Cache miss → fail CLOSED: no actuals means we can't verify the base rate,
+    // and entering a tail NO blind is the high-risk direction. Skip the scan cycle;
+    // the cache will populate within hours.
+    // Thin sample → fail open: some data exists, just not enough to be confident
+    // either way, so let the model probability decide.
+    if (tradeSide === 'NO' && (bracket.low === null || bracket.high === null)) {
+      if (cityActuals === null) {
+        logger.info('[weather] skipping tail NO — actuals cache absent, failing closed', {
           city: event.city,
           bracket: bracket.label,
-          threshold,
-          yesFraction: Math.round(yesFraction * 1000) / 1000,
-          sampleSize: cityActuals.sampleSize,
-          baseRateNoBlockThreshold,
         });
         continue;
+      }
+      if (
+        cityActuals.unit === event.unit &&
+        cityActuals.sampleSize >= baseRateMinSamples
+      ) {
+        const threshold = bracket.high === null ? bracket.low! : bracket.high!;
+        const yesFraction =
+          bracket.high === null
+            ? cityActuals.highs.filter((h) => h >= threshold).length / cityActuals.highs.length
+            : cityActuals.highs.filter((h) => h <= threshold).length / cityActuals.highs.length;
+        if (yesFraction >= baseRateNoBlockThreshold) {
+          logger.info('[weather] skipping tail NO — base rate strongly favors YES', {
+            city: event.city,
+            bracket: bracket.label,
+            threshold,
+            yesFraction: Math.round(yesFraction * 1000) / 1000,
+            sampleSize: cityActuals.sampleSize,
+            baseRateNoBlockThreshold,
+          });
+          continue;
+        }
       }
     }
 
