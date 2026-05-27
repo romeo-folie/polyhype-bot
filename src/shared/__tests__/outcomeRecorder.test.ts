@@ -398,7 +398,12 @@ describe('inferCategory', () => {
   it('detects US politics keywords', () => {
     expect(inferCategory('Trump announces candidacy')).toBe('us-politics');
     expect(inferCategory('Senate passes new bill')).toBe('us-politics');
-    expect(inferCategory('Election results are in')).toBe('us-politics');
+    expect(inferCategory('Will Democrats win the midterms?')).toBe('us-politics');
+    expect(inferCategory('Will the midterm election flip the House?')).toBe('us-politics');
+    // bare "election" without US-specific context routes to geopolitical, not us-politics
+    expect(inferCategory('Election results are in')).toBe('geopolitical');
+    expect(inferCategory("Will the UK general election result in a Conservative majority?")).toBe('geopolitical');
+    expect(inferCategory("Will Canada's election result in a Liberal majority?")).toBe('geopolitical');
   });
 
   it('detects AI/tech keywords', () => {

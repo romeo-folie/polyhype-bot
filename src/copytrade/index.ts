@@ -388,7 +388,6 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   ],
   'ai-tech': ['openai', 'nvidia', 'gemini', 'anthropic', 'gpu', 'llm', 'silicon'],
   'us-politics': [
-    'election',
     'biden',
     'trump',
     'senate',
@@ -396,6 +395,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     'white house',
     'democrat',
     'republican',
+    'midterm',
   ],
   mentions: [
     'mention',
