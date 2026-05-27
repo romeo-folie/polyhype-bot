@@ -27,6 +27,7 @@ import { enqueueWrite } from '../db/writeQueue.js';
 import { evaluateWeatherNearResEntry } from './nearResEntry.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
+import { runWeatherLockInScan } from './weatherLockIn.js';
 import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -1463,6 +1464,7 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     logger.info('[weather] scanner disabled — shadow-logged only', {
       opportunities: opportunities.length,
     });
+    await runWeatherLockInScan(redis);
     return;
   }
 
@@ -1738,6 +1740,9 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     cumulativeStakeUsd: cumulativeStakeUsd.toFixed(2),
     tradableOpportunities: tradable.length,
   });
+
+  // Lock-in scan: run after main scan completes
+  await runWeatherLockInScan(redis);
 }
 
 // ── Standalone entrypoint (cron) ──────────────────────────────────────────

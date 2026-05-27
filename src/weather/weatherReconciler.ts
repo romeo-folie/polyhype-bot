@@ -37,6 +37,7 @@ import { fetchWuHistoricalHigh } from './wuClient.js';
 import { fetchMetarDailyHigh } from './metarClient.js';
 import { fetchHkoDailyHigh } from './hkoClient.js';
 import { computeCityBias, computeCityBaseRates } from './cityBias.js';
+import { runWeatherOracleScan } from './weatherOracleScanner.js';
 
 /** One unresolved (city, target_date) tuple to reconcile. */
 export interface UnresolvedTarget {
@@ -273,6 +274,11 @@ export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
     });
     await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES);
     await computeCityBaseRates(sql, redis, cfg.WEATHER_BASE_RATE_LOOKBACK_DAYS);
+    await runWeatherOracleScan(redis).catch((err: unknown) => {
+      logger.warn('[weather-reconciler] oracle scan failed — continuing', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
     return;
   }
 
@@ -291,6 +297,11 @@ export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
   // Redis. Run unconditionally so caches are warm before flags are flipped.
   await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES);
   await computeCityBaseRates(sql, redis, cfg.WEATHER_BASE_RATE_LOOKBACK_DAYS);
+  await runWeatherOracleScan(redis).catch((err: unknown) => {
+    logger.warn('[weather-reconciler] oracle scan failed — continuing', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
 }
 
 // ── Standalone entrypoint (cron) ──────────────────────────────────────────
