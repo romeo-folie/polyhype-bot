@@ -30,6 +30,7 @@ import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import { runWeatherLockInScan } from './weatherLockIn.js';
 import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
+import { hasOpenPosition } from '../execution/positionLedger.js';
 import type { TradeSignal } from '../mapping/index.js';
 import { getBankroll } from '../shared/bankroll.js';
 import {
@@ -48,6 +49,9 @@ const GAMMA_BASE = 'https://gamma-api.polymarket.com';
 const GAMMA_TIMEOUT_MS = 15_000;
 const DEDUP_KEY_PREFIX = 'weather:event:';
 const MARKET_STATE_KEY_PREFIX = 'weather:market_state:';
+// Set after a successful new entry; lets subsequent scans bypass the event-level dedup for size-up re-evaluation.
+const ACTIVE_EVENT_KEY_PREFIX = 'weather:active_event:';
+const ACTIVE_EVENT_TTL_S = 72 * 3600;
 
 /**
  * Resolve the `WEATHER_TRADE_SIDES` config value into a set the scanner
@@ -649,6 +653,12 @@ export interface WeatherBracketOpportunity {
    * WEATHER_MODEL_ECMWF_ENABLED=false (GFS primary), GFS when =true.
    */
   blockedByEnsembleVeto?: boolean;
+  /**
+   * True when this opportunity was generated because the event-level dedup was bypassed
+   * for size-up re-evaluation. Execution must verify an open position exists before
+   * proceeding; the executor will treat it as a size-up if one is found.
+   */
+  sizeUpScanOnly?: boolean;
 }
 
 interface WeatherMarketState {
@@ -1106,6 +1116,7 @@ export async function scanWeatherMarkets(
 
   let parsedCount = 0;
   let dedupSkipped = 0;
+  let sizeUpRescanned = 0;
   let noForecast = 0;
   let horizonSkipped = 0;
   let eventsWithOpportunities = 0;
@@ -1125,12 +1136,29 @@ export async function scanWeatherMarkets(
     }
     if (daysOut === 0) continue; // Already resolved or resolving today
 
-    // Step 5: Dedup by event slug (covers all brackets in the event)
+    // Step 5: Dedup by event slug (covers all brackets in the event).
+    // When SIZE_UP_ENABLED, bypass for events with an active position so the
+    // executor can add to the position even within the 4-hour dedup window.
+    // Fresh-entry prevention is delegated to hasOpenPosition checks in the
+    // execution phase — only markets with existing positions will execute.
     const dedupKey = `${DEDUP_KEY_PREFIX}${event.slug}`;
     const claimed = await redis.set(dedupKey, '1', 'EX', cfg.WEATHER_DEDUP_TTL_S, 'NX');
+    let isSizeUpScan = false;
     if (!claimed) {
-      dedupSkipped++;
-      continue;
+      if (
+        cfg.SIZE_UP_ENABLED &&
+        (await redis.exists(`${ACTIVE_EVENT_KEY_PREFIX}${event.slug}`).catch(() => 0)) > 0
+      ) {
+        isSizeUpScan = true;
+        sizeUpRescanned++;
+        logger.debug('[weather] event dedup bypassed for size-up re-evaluation', {
+          eventSlug: event.slug,
+          city: event.city,
+        });
+      } else {
+        dedupSkipped++;
+        continue;
+      }
     }
 
     // Step 3: Fetch forecast
@@ -1395,6 +1423,9 @@ export async function scanWeatherMarkets(
 
     if (gatedOpportunities.length > 0) {
       eventsWithOpportunities++;
+      if (isSizeUpScan) {
+        for (const opp of gatedOpportunities) opp.sizeUpScanOnly = true;
+      }
       allOpportunities.push(...gatedOpportunities);
     }
   }
@@ -1407,6 +1438,7 @@ export async function scanWeatherMarkets(
     totalEvents: rawEvents.length,
     parsedEvents: parsedCount,
     dedupSkipped,
+    sizeUpRescanned,
     horizonSkipped,
     noForecast,
     eventsWithOpportunities,
@@ -1660,8 +1692,23 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       break;
     }
 
+    // Size-up scan: skip markets where we have no open position — the event-level
+    // dedup was bypassed solely to allow top-ups, not fresh entries.
+    if (opp.sizeUpScanOnly) {
+      const held = await hasOpenPosition(redis, opp.marketId, opp.tradeSide);
+      if (!held) {
+        logger.debug('[weather] size-up scan: skipping — no open position', {
+          marketId: opp.marketId,
+          city: opp.city,
+          bracket: opp.bracketLabel,
+        });
+        continue;
+      }
+    }
+
     const cityCount = perCityCount.get(opp.city) ?? 0;
-    if (cityCount >= cfg.WEATHER_MAX_PER_CITY) {
+    // Size-ups are additive to an existing position, not new city entries.
+    if (!opp.sizeUpScanOnly && cityCount >= cfg.WEATHER_MAX_PER_CITY) {
       logger.info('[weather] per-city cap reached — skipping opp', {
         city: opp.city,
         cap: cfg.WEATHER_MAX_PER_CITY,
@@ -1736,6 +1783,11 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         if (!result.isSizeUp) {
           executed++;
           perCityCount.set(opp.city, cityCount + 1);
+          // Mark the event as active so future scans within the dedup window
+          // can bypass the event-level dedup for size-up re-evaluation.
+          await redis
+            .set(`${ACTIVE_EVENT_KEY_PREFIX}${opp.eventSlug}`, '1', 'EX', ACTIVE_EVENT_TTL_S)
+            .catch(() => {});
         }
         cumulativeStakeUsd += filledStakeUsd;
         // Any non-skipped Polymarket execution records a governor trade; the
