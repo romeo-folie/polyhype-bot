@@ -2473,10 +2473,10 @@ describe('resolution-day size-up and near-res gate bypass', () => {
   let redisMock: ReturnType<typeof createRedisMock>;
   let originalFetch: typeof globalThis.fetch;
 
-  // Use yesterday's UTC date so daysOut === 0 regardless of time of day.
-  // daysUntil anchors the target at noon UTC; using today would return 1 before
-  // noon UTC on any CI run, putting the scanner into the dedup-key branch instead.
-  const todayIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  // Use today's UTC date. The scanner now uses a calendar-date comparison
+  // (event.targetDate === todayUtcDate) rather than daysUntil()===0, so the
+  // resolution-day branch fires from midnight UTC regardless of the noon anchor.
+  const todayIso = new Date().toISOString().slice(0, 10);
   const [yyyy, mm, dd] = todayIso.split('-') as [string, string, string];
   const MONTH_NAMES2 = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -2578,7 +2578,7 @@ describe('resolution-day size-up and near-res gate bypass', () => {
   });
 
   it('skips resolution-day event when no active position exists', async () => {
-    // No activeEventKey set in Redis
+    // No activeEventKey set in Redis, no position keys — both fallback paths return false.
     mockLoadConfig.mockReturnValue({
       ...baseConfig,
       WEATHER_SCANNER_ENABLED: true,
@@ -2593,6 +2593,33 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     await runWeatherScan(redisMock as never);
 
     expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+  });
+
+  it('fires size-up on resolution day via position fallback when active event marker is absent', async () => {
+    // No activeEventKey — marker may have expired or was never set. Positions exist
+    // in the ledger. The hasAnyOpenWeatherPosition fallback should still allow size-up.
+    for (let i = 0; i < 11; i++) {
+      redisMock._store.set(`position:mt${i}:NO`, '1');
+    }
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayMocks();
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false, isSizeUp: true,
+      executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
   });
 
   it('near-res gate does not block sizeUpScanOnly opportunities', async () => {

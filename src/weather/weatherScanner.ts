@@ -48,6 +48,7 @@ import type { CityBias, CityActuals } from './cityBias.js';
 const GAMMA_BASE = 'https://gamma-api.polymarket.com';
 const GAMMA_TIMEOUT_MS = 15_000;
 const DEDUP_KEY_PREFIX = 'weather:event:';
+const RES_DAY_DEDUP_KEY_PREFIX = 'weather:event_resday:';
 const MARKET_STATE_KEY_PREFIX = 'weather:market_state:';
 // Set after a successful new entry; lets subsequent scans bypass the event-level dedup for size-up re-evaluation.
 const ACTIVE_EVENT_KEY_PREFIX = 'weather:active_event:';
@@ -126,6 +127,9 @@ export interface ParsedWeatherEvent {
   unit: 'fahrenheit' | 'celsius';
   /** Parsed brackets sorted by threshold ascending. */
   brackets: ParsedBracket[];
+  /** All market IDs in the event including closed/inactive ones — used for
+   *  position-fallback checks where the held bracket may already be closed. */
+  allMarketIds: string[];
   /** Event end date. */
   endDate: string | null;
 }
@@ -381,6 +385,7 @@ export function parseWeatherEvent(event: WeatherGammaEvent): ParsedWeatherEvent 
     targetDate,
     unit: coords.unit,
     brackets,
+    allMarketIds: event.markets.map((m) => m.id),
     endDate: event.endDate ?? null,
   };
 }
@@ -1085,6 +1090,21 @@ export function findMispricedBrackets(
 // ── Main scanner ─────────────────────────────────────────────────────────
 
 /**
+ * Returns true if any of the given market IDs has an open YES or NO position
+ * in the ledger. Accepts allMarketIds (not just active brackets) so a held
+ * bracket whose market was closed/inactive in the Gamma API response is not
+ * missed.
+ */
+async function hasAnyOpenWeatherPosition(redis: Redis, marketIds: string[]): Promise<boolean> {
+  const checks = marketIds.flatMap((id) => [
+    hasOpenPosition(redis, id, 'YES'),
+    hasOpenPosition(redis, id, 'NO'),
+  ]);
+  const results = await Promise.all(checks);
+  return results.some(Boolean);
+}
+
+/**
  * Scan Polymarket for weather bracket events and find mispriced brackets.
  *
  * Steps:
@@ -1110,9 +1130,10 @@ export async function scanWeatherMarkets(
     return [];
   }
 
-  // Hoisted out of the per-event loop — the mode is a static config read, so
-  // reparsing per event is wasted work and makes the read point less obvious.
+  // Hoisted out of the per-event loop — static per scan so all events see the
+  // same date even if the loop straddles a UTC midnight boundary.
   const allowedSides = parseAllowedSides(cfg.WEATHER_TRADE_SIDES);
+  const todayUtcDate = new Date().toISOString().slice(0, 10);
 
   let parsedCount = 0;
   let dedupSkipped = 0;
@@ -1134,55 +1155,103 @@ export async function scanWeatherMarkets(
       horizonSkipped++;
       continue;
     }
+    // Use calendar-date comparison (not daysUntil===0) so the resolution-day
+    // guard fires from midnight UTC, not only after noon. daysUntil anchors at
+    // noon UTC and returns 1 before noon on the target date via Math.ceil.
+    // todayUtcDate is hoisted before the loop so all events in a single scan see
+    // the same date even if the loop straddles a UTC midnight boundary.
+    const isResolutionDay = event.targetDate === todayUtcDate;
+    // Gamma can lag resolution by minutes-to-hours and keep returning yesterday's
+    // event as active=true. daysUntil floors at 0 for both today-post-noon and
+    // past dates, so use the calendar check to distinguish: if daysOut===0 but
+    // it's not today, the market has already resolved — skip it.
+    if (!isResolutionDay && daysOut === 0) {
+      horizonSkipped++;
+      continue;
+    }
     // Step 5: Dedup by event slug (covers all brackets in the event).
     // When SIZE_UP_ENABLED, bypass for events with an active position so the
     // executor can add to the position even within the 4-hour dedup window or
-    // on resolution day (daysOut === 0). Fresh-entry prevention is delegated to
-    // hasOpenPosition checks in the execution phase.
+    // on resolution day. Fresh-entry prevention is delegated to hasOpenPosition
+    // checks in the execution phase.
     const dedupKey = `${DEDUP_KEY_PREFIX}${event.slug}`;
     let isSizeUpScan = false;
-    if (daysOut === 0) {
+    if (isResolutionDay) {
       // On resolution day only allow size-ups — no fresh entries once the
       // observation window has opened.
-      if (
-        cfg.SIZE_UP_ENABLED &&
-        (await redis.exists(`${ACTIVE_EVENT_KEY_PREFIX}${event.slug}`).catch(() => 0)) > 0
-      ) {
-        // Claim the dedup key first. If it was already set on a prior cron tick
-        // this window, skip to avoid redundant forecast-API calls and shadow rows.
-        const claimed = await redis.set(dedupKey, '1', 'EX', cfg.WEATHER_DEDUP_TTL_S, 'NX').catch(() => null);
-        if (!claimed) {
+      if (cfg.SIZE_UP_ENABLED) {
+        // Primary check: active-event marker. Fallback: scan ALL market IDs for
+        // this event (including closed brackets Gamma may have pruned from the
+        // active list) to cover expired markers and pre-marker positions.
+        const activeMarker =
+          (await redis.exists(`${ACTIVE_EVENT_KEY_PREFIX}${event.slug}`).catch(() => 0)) > 0;
+        const hasPosition =
+          activeMarker ||
+          (await hasAnyOpenWeatherPosition(redis, event.allMarketIds).catch(() => false));
+        if (hasPosition) {
+          // Use a resolution-day-specific dedup key so a pre-noon scan that already
+          // claimed the normal dedup key doesn't block the first post-noon size-up.
+          // TTL covers the remainder of the target day (not just DEDUP_TTL_S) so
+          // the slot is held for the full resolution day — at most one size-up fires
+          // per event per day regardless of SIZE_UP_MAX_TOPUPS.
+          const rdKey = `${RES_DAY_DEDUP_KEY_PREFIX}${event.slug}`;
+          const endOfTargetDayMs =
+            new Date(event.targetDate + 'T00:00:00Z').getTime() + 24 * 3600 * 1000;
+          const rdTtlS = Math.max(
+            cfg.WEATHER_DEDUP_TTL_S,
+            Math.ceil((endOfTargetDayMs - Date.now()) / 1000),
+          );
+          const claimed = await redis.set(rdKey, '1', 'EX', rdTtlS, 'NX').catch(() => null);
+          if (!claimed) {
+            dedupSkipped++;
+            continue;
+          }
+          isSizeUpScan = true;
+          sizeUpRescanned++;
+          logger.debug('[weather] resolution-day size-up re-evaluation', {
+            eventSlug: event.slug,
+            city: event.city,
+          });
+        } else {
           dedupSkipped++;
+          logger.debug('[weather] resolution-day skip', {
+            eventSlug: event.slug,
+            city: event.city,
+            reason: 'no_active_position',
+          });
           continue;
         }
-        isSizeUpScan = true;
-        sizeUpRescanned++;
-        logger.debug('[weather] resolution-day size-up re-evaluation', {
-          eventSlug: event.slug,
-          city: event.city,
-        });
       } else {
         dedupSkipped++;
         logger.debug('[weather] resolution-day skip', {
           eventSlug: event.slug,
           city: event.city,
-          reason: cfg.SIZE_UP_ENABLED ? 'no_active_position' : 'size_up_disabled',
+          reason: 'size_up_disabled',
         });
         continue;
       }
     } else {
       const claimed = await redis.set(dedupKey, '1', 'EX', cfg.WEATHER_DEDUP_TTL_S, 'NX').catch(() => null);
       if (!claimed) {
-        if (
-          cfg.SIZE_UP_ENABLED &&
-          (await redis.exists(`${ACTIVE_EVENT_KEY_PREFIX}${event.slug}`).catch(() => 0)) > 0
-        ) {
-          isSizeUpScan = true;
-          sizeUpRescanned++;
-          logger.debug('[weather] event dedup bypassed for size-up re-evaluation', {
-            eventSlug: event.slug,
-            city: event.city,
-          });
+        if (cfg.SIZE_UP_ENABLED) {
+          // Primary check: active-event marker. Fallback: bracket position scan
+          // covers pre-deploy positions and markers that expired before this scan.
+          const activeMarker =
+            (await redis.exists(`${ACTIVE_EVENT_KEY_PREFIX}${event.slug}`).catch(() => 0)) > 0;
+          const hasPosition =
+            activeMarker ||
+            (await hasAnyOpenWeatherPosition(redis, event.allMarketIds).catch(() => false));
+          if (hasPosition) {
+            isSizeUpScan = true;
+            sizeUpRescanned++;
+            logger.debug('[weather] event dedup bypassed for size-up re-evaluation', {
+              eventSlug: event.slug,
+              city: event.city,
+            });
+          } else {
+            dedupSkipped++;
+            continue;
+          }
         } else {
           dedupSkipped++;
           continue;
@@ -1567,7 +1636,7 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       (o.sizeUpScanOnly || o.allowedByConfig) &&
       (o.sizeUpScanOnly || !o.blockedByMarketDisagreement) &&
       (o.sizeUpScanOnly || !o.blockedByEnsembleVeto) &&
-      (o.sizeUpScanOnly || !excludedCities.has(o.city.toLowerCase())),
+      !excludedCities.has(o.city.toLowerCase()),
   );
 
   if (excludedCities.size > 0) {
@@ -1578,6 +1647,15 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       logger.info('[weather] excluded cities suppressed tradable opportunities', {
         excludedCities: [...excludedCities],
         suppressed,
+      });
+    }
+    const sizeUpSuppressed = opportunities.filter(
+      (o) => o.sizeUpScanOnly && excludedCities.has(o.city.toLowerCase()),
+    ).length;
+    if (sizeUpSuppressed > 0) {
+      logger.info('[weather] excluded cities blocked size-up on existing position', {
+        excludedCities: [...excludedCities],
+        sizeUpSuppressed,
       });
     }
   }
@@ -1820,8 +1898,14 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         // the dedup window must still be able to bypass it (e.g. for a second
         // top-up when SIZE_UP_MAX_TOPUPS > 1, or for pre-existing positions
         // that first sized-up on a normal post-dedup scan).
+        // TTL must cover the full remaining horizon so the marker outlasts the
+        // position. Use max(72h, (maxHorizonDays+1)*24h) to handle any config.
+        const activeTtlS = Math.max(
+          ACTIVE_EVENT_TTL_S,
+          (cfg.WEATHER_MAX_HORIZON_DAYS + 1) * 24 * 3600,
+        );
         await redis
-          .set(`${ACTIVE_EVENT_KEY_PREFIX}${opp.eventSlug}`, '1', 'EX', ACTIVE_EVENT_TTL_S)
+          .set(`${ACTIVE_EVENT_KEY_PREFIX}${opp.eventSlug}`, '1', 'EX', activeTtlS)
           .catch(() => {});
         cumulativeStakeUsd += filledStakeUsd;
         // Any non-skipped Polymarket execution records a governor trade; the
