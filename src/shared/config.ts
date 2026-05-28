@@ -916,6 +916,21 @@ const envSchema = z.object({
   // Set to 0 to disable.
   COPYTRADE_SHORTLIST_MIN_VOL_PNL_RATIO: z.coerce.number().min(0).optional().default(2),
 
+  // ── Copytrade hedge scanner ─────────────────────────────────────────────────
+  // Monitors open copytrade positions on binary markets and buys the opposite
+  // side when the math supports it. Two tiers:
+  //   Tier 1 (arb): entry_price + hedge_ask < 0.985 → guaranteed profit both ways.
+  //   Tier 2 (damage control): hedge_ask < q_max → caps loss at max_loss_fraction.
+  // Ships dark. Set true to execute live; false shadow-logs only.
+  COPYTRADE_HEDGE_ENABLED: boolFromEnv.optional().default(false),
+  // Tier 2: target maximum loss fraction of stake when the hedge wins.
+  // 0.40 = lose at most 40% of original stake instead of 100%.
+  COPYTRADE_HEDGE_MAX_LOSS_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.40),
+  // Cap additional hedge stake at this multiple of the original position stake.
+  COPYTRADE_HEDGE_MAX_STAKE_MULTIPLIER: z.coerce.number().min(0).optional().default(1.5),
+  // How often the hedge scanner runs inside the monitor loop (ms).
+  COPYTRADE_HEDGE_INTERVAL_MS: z.coerce.number().int().min(5_000).optional().default(60_000),
+
   // Payout ratio gate: skip BUY entries where potential upside is too small.
   // payoutRatio = (1 - currentOutcomePrice) / currentOutcomePrice
   // Default 0.20 = skip if currentPrice > ~0.83 (only 20% gain headroom).

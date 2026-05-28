@@ -44,6 +44,7 @@ import { runClobProbe } from '../shared/clobProbe.js';
 import { setAgentAutoRedeem } from '../shared/simmer.js';
 import { runMonitorInner } from './index.js';
 import { rebuildNearZeroThemeSets } from '../shared/themeExtractor.js';
+import { runCopytradeHedgeScan } from '../copytrade/hedgeScanner.js';
 
 const MONITOR_LOCK_KEY = 'monitor:lock';
 // TTL must be comfortably larger than the worst-case cycle (Simmer latency,
@@ -143,6 +144,8 @@ export async function runMonitorWorker(): Promise<void> {
   let lastHeartbeat = 0;
   let lastNearZeroReconcile = 0;
   let nearZeroReconcileInFlight = false;
+  let lastCopytradeHedgeScan = 0;
+  let copytradeHedgeScanInFlight = false;
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -210,6 +213,23 @@ export async function runMonitorWorker(): Promise<void> {
         })
         .finally(() => {
           nearZeroReconcileInFlight = false;
+        });
+    }
+
+    if (
+      !copytradeHedgeScanInFlight &&
+      nowMs - lastCopytradeHedgeScan >= cfg.COPYTRADE_HEDGE_INTERVAL_MS
+    ) {
+      lastCopytradeHedgeScan = nowMs; // set before async so interval is measured from start
+      copytradeHedgeScanInFlight = true;
+      runCopytradeHedgeScan(redis)
+        .catch((err: unknown) => {
+          logger.warn('[monitor-worker] copytrade hedge scan failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => {
+          copytradeHedgeScanInFlight = false;
         });
     }
 
