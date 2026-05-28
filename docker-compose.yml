@@ -183,10 +183,11 @@ services:
   pga-db:
     image: timescale/timescaledb-ha:pg16
     restart: unless-stopped
-    # 5432 is intentionally NOT exposed to the host. From the host use
-    # `docker compose exec pga-db psql -U pga -d pga`.
-    expose:
-      - "5432"
+    # Bound to localhost only so host-side cron jobs (e.g. weather scanner) can
+    # reach the DB without exposing it to external networks.
+    # From the host: psql postgres://pga@127.0.0.1:5432/pga or use PG_URL from .env.
+    ports:
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: pga
       POSTGRES_DB: pga
