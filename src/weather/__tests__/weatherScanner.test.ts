@@ -148,6 +148,9 @@ function createRedisMock() {
       store.set(key, value);
       return Promise.resolve('OK');
     }),
+    exists: vi.fn((...keys: string[]) =>
+      Promise.resolve(keys.filter((k) => store.has(k)).length),
+    ),
     pipeline: vi.fn(() => pipelineMock),
     _store: store,
   };
@@ -2459,6 +2462,208 @@ describe('scanWeatherMarkets', () => {
 
       expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resolution-day size-up + near-res gate bypass
+// ---------------------------------------------------------------------------
+
+describe('resolution-day size-up and near-res gate bypass', () => {
+  let redisMock: ReturnType<typeof createRedisMock>;
+  let originalFetch: typeof globalThis.fetch;
+
+  // Use yesterday's UTC date so daysOut === 0 regardless of time of day.
+  // daysUntil anchors the target at noon UTC; using today would return 1 before
+  // noon UTC on any CI run, putting the scanner into the dedup-key branch instead.
+  const todayIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const [yyyy, mm, dd] = todayIso.split('-') as [string, string, string];
+  const MONTH_NAMES2 = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  const monthName2 = MONTH_NAMES2[parseInt(mm, 10) - 1] ?? 'May';
+  const titleDate2 = `${monthName2} ${parseInt(dd, 10).toString()}`;
+  const slugDate2 = `${monthName2.toLowerCase()}-${parseInt(dd, 10).toString()}-${yyyy}`;
+  const endDateIso2 = `${todayIso}T12:00:00Z`;
+  const activeEventKey = `weather:active_event:highest-temperature-in-chicago-on-${slugDate2}`;
+
+  function makeTodayGammaEvent() {
+    return {
+      id: 'event-today',
+      title: `Highest temperature in Chicago on ${titleDate2}?`,
+      slug: `highest-temperature-in-chicago-on-${slugDate2}`,
+      active: true,
+      closed: false,
+      negRisk: true,
+      endDate: endDateIso2,
+      markets: Array.from({ length: 11 }, (_, i) => {
+        const labels = [
+          '39°F or below', '40-41°F', '42-43°F', '44-45°F', '46-47°F',
+          '48-49°F', '50-51°F', '52-53°F', '54-55°F', '56-57°F', '58°F or higher',
+        ];
+        const yesPrices = [0.01, 0.03, 0.05, 0.10, 0.15, 0.20, 0.18, 0.12, 0.08, 0.05, 0.03];
+        return {
+          id: `mt${i}`,
+          question: `Will the highest temperature in Chicago be ${labels[i]} on ${titleDate2}?`,
+          conditionId: `cond-t${i}`,
+          clobTokenIds: `["tt${i}y","tt${i}n"]`,
+          outcomePrices: `["${(yesPrices[i] ?? 0).toFixed(2)}","${(1 - (yesPrices[i] ?? 0)).toFixed(2)}"]`,
+          outcomes: '["Yes","No"]',
+          active: true,
+          closed: false,
+          volume: '10000',
+          liquidity: '5000',
+          endDate: endDateIso2,
+          description: null,
+          groupItemTitle: labels[i],
+          groupItemThreshold: i.toString(),
+        };
+      }),
+    };
+  }
+
+  function wireTodayMocks() {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve([makeTodayGammaEvent()]),
+    }) as unknown as typeof fetch;
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: todayIso,
+    });
+    mockFetchOpenMeteo.mockResolvedValue({
+      highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: todayIso,
+    });
+    mockFetchNwsForecast.mockResolvedValue({
+      highF: 52, lowF: 38, precipProbability: 10, forecastDate: todayIso, shortForecast: 'Cloudy',
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    redisMock = createRedisMock();
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('fires size-up on resolution day when active event key is present', async () => {
+    redisMock._store.set(activeEventKey, '1');
+    // Satisfy hasOpenPosition check for whichever bracket(s) the scanner evaluates
+    for (let i = 0; i < 11; i++) {
+      redisMock._store.set(`position:mt${i}:NO`, '1');
+      redisMock._store.set(`position:mt${i}:YES`, '1');
+    }
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0, // disable far-out gate
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayMocks();
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false, isSizeUp: true,
+      executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+  });
+
+  it('skips resolution-day event when no active position exists', async () => {
+    // No activeEventKey set in Redis
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayMocks();
+    mockGetBankroll.mockResolvedValue(1000);
+
+    await runWeatherScan(redisMock as never);
+
+    expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+  });
+
+  it('near-res gate does not block sizeUpScanOnly opportunities', async () => {
+    // Use tomorrow's event (daysOut=1) but with endDate only 5h away so the
+    // near-res gate (threshold=10h) would normally block it. The dedup key is
+    // already set and the active event key is present, so it enters as a size-up.
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const tomorrowIso = tomorrow.toISOString().slice(0, 10);
+    const [ty, tm, tdStr] = tomorrowIso.split('-') as [string, string, string];
+    const tMonthName = MONTH_NAMES2[parseInt(tm, 10) - 1] ?? 'May';
+    const tSlugDate = `${tMonthName.toLowerCase()}-${parseInt(tdStr, 10).toString()}-${ty}`;
+    const tEndDate = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString(); // 5h from now
+    const tSlug = `highest-temperature-in-chicago-on-${tSlugDate}`;
+    const tActiveKey = `weather:active_event:${tSlug}`;
+    const tDedupKey = `weather:event:${tSlug}`;
+
+    redisMock._store.set(tActiveKey, '1');
+    redisMock._store.set(tDedupKey, '1'); // dedup already claimed → triggers size-up bypass
+    for (let i = 0; i < 11; i++) {
+      redisMock._store.set(`position:mnr${i}:NO`, '1');
+      redisMock._store.set(`position:mnr${i}:YES`, '1');
+    }
+
+    const tTitleDate = `${tMonthName} ${parseInt(tdStr, 10).toString()}`;
+    const tMarkets = Array.from({ length: 11 }, (_, i) => {
+      const labels = [
+        '39°F or below', '40-41°F', '42-43°F', '44-45°F', '46-47°F',
+        '48-49°F', '50-51°F', '52-53°F', '54-55°F', '56-57°F', '58°F or higher',
+      ];
+      const yesPrices = [0.01, 0.03, 0.05, 0.10, 0.15, 0.20, 0.18, 0.12, 0.08, 0.05, 0.03];
+      return {
+        id: `mnr${i}`, question: `Will the highest temperature in Chicago be ${labels[i]} on ${tTitleDate}?`,
+        conditionId: `cond-nr${i}`, clobTokenIds: `["tnr${i}y","tnr${i}n"]`,
+        outcomePrices: `["${(yesPrices[i] ?? 0).toFixed(2)}","${(1 - (yesPrices[i] ?? 0)).toFixed(2)}"]`,
+        outcomes: '["Yes","No"]', active: true, closed: false, volume: '10000', liquidity: '5000',
+        endDate: tEndDate, description: null,
+        groupItemTitle: labels[i], groupItemThreshold: i.toString(),
+      };
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve([{
+        id: 'event-nr', title: `Highest temperature in Chicago on ${tTitleDate}?`,
+        slug: tSlug, active: true, closed: false, negRisk: true, endDate: tEndDate, markets: tMarkets,
+      }]),
+    }) as unknown as typeof fetch;
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: tomorrowIso,
+    });
+    mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: tomorrowIso });
+    mockFetchNwsForecast.mockResolvedValue({ highF: 52, lowF: 38, precipProbability: 10, forecastDate: tomorrowIso, shortForecast: 'Cloudy' });
+
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: true,
+      WEATHER_NEAR_RES_ENTRY_HOURS: 10,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false, isSizeUp: true,
+      executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
   });
 });
 

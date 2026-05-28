@@ -1134,30 +1134,59 @@ export async function scanWeatherMarkets(
       horizonSkipped++;
       continue;
     }
-    if (daysOut === 0) continue; // Already resolved or resolving today
-
     // Step 5: Dedup by event slug (covers all brackets in the event).
     // When SIZE_UP_ENABLED, bypass for events with an active position so the
-    // executor can add to the position even within the 4-hour dedup window.
-    // Fresh-entry prevention is delegated to hasOpenPosition checks in the
-    // execution phase — only markets with existing positions will execute.
+    // executor can add to the position even within the 4-hour dedup window or
+    // on resolution day (daysOut === 0). Fresh-entry prevention is delegated to
+    // hasOpenPosition checks in the execution phase.
     const dedupKey = `${DEDUP_KEY_PREFIX}${event.slug}`;
-    const claimed = await redis.set(dedupKey, '1', 'EX', cfg.WEATHER_DEDUP_TTL_S, 'NX');
     let isSizeUpScan = false;
-    if (!claimed) {
+    if (daysOut === 0) {
+      // On resolution day only allow size-ups — no fresh entries once the
+      // observation window has opened.
       if (
         cfg.SIZE_UP_ENABLED &&
         (await redis.exists(`${ACTIVE_EVENT_KEY_PREFIX}${event.slug}`).catch(() => 0)) > 0
       ) {
+        // Claim the dedup key first. If it was already set on a prior cron tick
+        // this window, skip to avoid redundant forecast-API calls and shadow rows.
+        const claimed = await redis.set(dedupKey, '1', 'EX', cfg.WEATHER_DEDUP_TTL_S, 'NX').catch(() => null);
+        if (!claimed) {
+          dedupSkipped++;
+          continue;
+        }
         isSizeUpScan = true;
         sizeUpRescanned++;
-        logger.debug('[weather] event dedup bypassed for size-up re-evaluation', {
+        logger.debug('[weather] resolution-day size-up re-evaluation', {
           eventSlug: event.slug,
           city: event.city,
         });
       } else {
         dedupSkipped++;
+        logger.debug('[weather] resolution-day skip', {
+          eventSlug: event.slug,
+          city: event.city,
+          reason: cfg.SIZE_UP_ENABLED ? 'no_active_position' : 'size_up_disabled',
+        });
         continue;
+      }
+    } else {
+      const claimed = await redis.set(dedupKey, '1', 'EX', cfg.WEATHER_DEDUP_TTL_S, 'NX').catch(() => null);
+      if (!claimed) {
+        if (
+          cfg.SIZE_UP_ENABLED &&
+          (await redis.exists(`${ACTIVE_EVENT_KEY_PREFIX}${event.slug}`).catch(() => 0)) > 0
+        ) {
+          isSizeUpScan = true;
+          sizeUpRescanned++;
+          logger.debug('[weather] event dedup bypassed for size-up re-evaluation', {
+            eventSlug: event.slug,
+            city: event.city,
+          });
+        } else {
+          dedupSkipped++;
+          continue;
+        }
       }
     }
 
@@ -1535,10 +1564,10 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
   // calibration data stays clean.
   let tradable = opportunities.filter(
     (o) =>
-      o.allowedByConfig &&
-      !o.blockedByMarketDisagreement &&
-      !o.blockedByEnsembleVeto &&
-      !excludedCities.has(o.city.toLowerCase()),
+      (o.sizeUpScanOnly || o.allowedByConfig) &&
+      (o.sizeUpScanOnly || !o.blockedByMarketDisagreement) &&
+      (o.sizeUpScanOnly || !o.blockedByEnsembleVeto) &&
+      (o.sizeUpScanOnly || !excludedCities.has(o.city.toLowerCase())),
   );
 
   if (excludedCities.size > 0) {
@@ -1566,6 +1595,7 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     const nowMs = Date.now();
     const before = tradable.length;
     tradable = tradable.filter((opp) => {
+      if (opp.sizeUpScanOnly) return true; // size-ups bypass max-lookahead gate
       if (!opp.endDate) return true;
       const endMs = new Date(opp.endDate).getTime();
       if (!Number.isFinite(endMs)) return true;
@@ -1603,6 +1633,7 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
   if (cfg.WEATHER_NEAR_RES_ENTRY_ENABLED) {
     const before = tradable.length;
     tradable = tradable.filter((opp) => {
+      if (opp.sizeUpScanOnly) return true; // size-ups bypass near-res gate
       const eval_ = evaluateWeatherNearResEntry(
         opp.endDate ?? undefined,
         cfg.WEATHER_NEAR_RES_ENTRY_HOURS,
