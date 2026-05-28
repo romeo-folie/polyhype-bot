@@ -1783,12 +1783,15 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         if (!result.isSizeUp) {
           executed++;
           perCityCount.set(opp.city, cityCount + 1);
-          // Mark the event as active so future scans within the dedup window
-          // can bypass the event-level dedup for size-up re-evaluation.
-          await redis
-            .set(`${ACTIVE_EVENT_KEY_PREFIX}${opp.eventSlug}`, '1', 'EX', ACTIVE_EVENT_TTL_S)
-            .catch(() => {});
         }
+        // Refresh the active-event marker on both fresh entries and size-ups.
+        // A size-up also leaves an open position, so subsequent scans within
+        // the dedup window must still be able to bypass it (e.g. for a second
+        // top-up when SIZE_UP_MAX_TOPUPS > 1, or for pre-existing positions
+        // that first sized-up on a normal post-dedup scan).
+        await redis
+          .set(`${ACTIVE_EVENT_KEY_PREFIX}${opp.eventSlug}`, '1', 'EX', ACTIVE_EVENT_TTL_S)
+          .catch(() => {});
         cumulativeStakeUsd += filledStakeUsd;
         // Any non-skipped Polymarket execution records a governor trade; the
         // next attempt must wait for the cooldown to reset.
