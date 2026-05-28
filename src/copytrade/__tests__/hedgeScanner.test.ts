@@ -187,9 +187,9 @@ describe('runCopytradeHedgeScan', () => {
   });
 
   it('does not execute when COPYTRADE_HEDGE_ENABLED=false but still shadow-logs', async () => {
-    // The early-return for disabled state lives in the worker call site (worker.ts),
-    // not in the function itself — so direct calls to runCopytradeHedgeScan still
-    // shadow-log, allowing dark-mode observation.
+    // The worker always runs the scan regardless of COPYTRADE_HEDGE_ENABLED so
+    // shadow_observations rows are produced in dark mode. Execution is suppressed
+    // inside the function when the flag is false.
     const { enqueueWrite } = await import('../../db/writeQueue.js');
     mockSql.mockResolvedValue([makePosition()]);
     mockLoadConfig.mockReturnValue(makeConfig({ COPYTRADE_HEDGE_ENABLED: false }));
@@ -272,6 +272,17 @@ describe('runCopytradeHedgeScan', () => {
     expect(mockDeductStake).toHaveBeenCalledWith(redis, 3.70);
     expect(mockNotify).toHaveBeenCalledOnce();
     expect(mockNotify).toHaveBeenCalledWith(expect.stringContaining('Tier 1'));
+  });
+
+  it('queries positions using LIKE copytrade:% prefix (not exact match)', async () => {
+    // Real rows are written as sourced_from = 'copytrade:<wallet>' by index.ts:1190.
+    // Verify the SQL tag in the mock is called with a template literal containing LIKE.
+    mockSql.mockResolvedValue([]);
+    const redis = makeRedis();
+    await runCopytradeHedgeScan(redis as any);
+    // mockSql is called as a tagged template; the first arg is the strings array.
+    const [strings] = mockSql.mock.calls[0] as [TemplateStringsArray];
+    expect(strings.join('').toLowerCase()).toContain("like 'copytrade:%'");
   });
 
   it('buys YES when position direction is NO', async () => {

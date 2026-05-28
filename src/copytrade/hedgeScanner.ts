@@ -62,7 +62,7 @@ async function fetchOpenCopytradePositions(): Promise<OpenCopytradePosition[]> {
       stake_usd::float8    AS "stakeUsd",
       shares_held::float8  AS "sharesHeld"
     FROM positions
-    WHERE sourced_from = 'copytrade'
+    WHERE sourced_from LIKE 'copytrade:%'
       AND pending_settlement = false
       AND closed_at IS NULL
       AND shares_held > 0

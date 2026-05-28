@@ -217,7 +217,6 @@ export async function runMonitorWorker(): Promise<void> {
     }
 
     if (
-      cfg.COPYTRADE_HEDGE_ENABLED &&
       !copytradeHedgeScanInFlight &&
       nowMs - lastCopytradeHedgeScan >= cfg.COPYTRADE_HEDGE_INTERVAL_MS
     ) {
