@@ -762,6 +762,36 @@ function cityLocalDate(tz: string): string {
 }
 
 /**
+ * Return the UTC millisecond timestamp for the end of `targetDate` in `tz`
+ * (i.e. local midnight of the following day). Used to anchor the resolution-day
+ * dedup TTL so it expires precisely when the city's local day rolls over, not at
+ * UTC midnight (which is up to 14h early for western cities).
+ */
+function cityDayEndUtcMs(targetDate: string, tz: string): number {
+  const parts0 = targetDate.split('-');
+  const y = parseInt(parts0[0] ?? '2000', 10);
+  const m = parseInt(parts0[1] ?? '1', 10);
+  const d = parseInt(parts0[2] ?? '1', 10);
+  const utcMidnight = Date.UTC(y, m - 1, d + 1);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+    hourCycle: 'h23',
+  }).formatToParts(utcMidnight);
+  const h   = parseInt(parts.find(p => p.type === 'hour')?.value   ?? '0', 10);
+  const min = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10);
+  const sec = parseInt(parts.find(p => p.type === 'second')?.value ?? '0', 10);
+  const localMs = h * 3_600_000 + min * 60_000 + sec * 1000;
+  // UTC+ cities: local time at utcMidnight is in the morning → subtract to reach local midnight
+  // UTC- cities: local time is in the afternoon/evening → add the remaining hours to midnight
+  return localMs <= 12 * 3_600_000
+    ? utcMidnight - localMs
+    : utcMidnight + (86_400_000 - localMs);
+}
+
+/**
  * Compute the days between now and a target date string (YYYY-MM-DD).
  */
 export function daysUntil(targetDate: string, now?: Date): number {
@@ -1200,8 +1230,7 @@ export async function scanWeatherMarkets(
           // the slot is held for the full resolution day — at most one size-up fires
           // per event per day regardless of SIZE_UP_MAX_TOPUPS.
           const rdKey = `${RES_DAY_DEDUP_KEY_PREFIX}${event.slug}`;
-          const endOfTargetDayMs =
-            new Date(event.targetDate + 'T00:00:00Z').getTime() + 24 * 3600 * 1000;
+          const endOfTargetDayMs = cityDayEndUtcMs(event.targetDate, event.coords.tz);
           const rdTtlS = Math.max(
             cfg.WEATHER_DEDUP_TTL_S,
             Math.ceil((endOfTargetDayMs - Date.now()) / 1000),
