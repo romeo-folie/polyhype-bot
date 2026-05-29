@@ -2473,10 +2473,10 @@ describe('resolution-day size-up and near-res gate bypass', () => {
   let redisMock: ReturnType<typeof createRedisMock>;
   let originalFetch: typeof globalThis.fetch;
 
-  // Use today's UTC date. The scanner now uses a calendar-date comparison
-  // (event.targetDate === todayUtcDate) rather than daysUntil()===0, so the
-  // resolution-day branch fires from midnight UTC regardless of the noon anchor.
-  const todayIso = new Date().toISOString().slice(0, 10);
+  // Use Chicago's local date. The scanner compares event.targetDate against
+  // cityLocalDate(event.coords.tz), so the event slug must match the city's
+  // local calendar date — not UTC — for the resolution-day branch to fire.
+  const todayIso = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago' }).format(new Date());
   const [yyyy, mm, dd] = todayIso.split('-') as [string, string, string];
   const MONTH_NAMES2 = [
     'January', 'February', 'March', 'April', 'May', 'June',

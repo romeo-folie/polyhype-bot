@@ -753,6 +753,45 @@ async function applyMarketDisagreementGate(
 }
 
 /**
+ * Return the current calendar date (YYYY-MM-DD) in a given IANA timezone.
+ * Used to determine whether a city is on its resolution day, since midnight
+ * UTC does not coincide with midnight local time.
+ */
+function cityLocalDate(tz: string): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
+}
+
+/**
+ * Return the UTC millisecond timestamp for the end of `targetDate` in `tz`
+ * (i.e. local midnight of the following day). Used to anchor the resolution-day
+ * dedup TTL so it expires precisely when the city's local day rolls over, not at
+ * UTC midnight (which is up to 14h early for western cities).
+ */
+function cityDayEndUtcMs(targetDate: string, tz: string): number {
+  const parts0 = targetDate.split('-');
+  const y = parseInt(parts0[0] ?? '2000', 10);
+  const m = parseInt(parts0[1] ?? '1', 10);
+  const d = parseInt(parts0[2] ?? '1', 10);
+  const utcMidnight = Date.UTC(y, m - 1, d + 1);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+    hourCycle: 'h23',
+  }).formatToParts(utcMidnight);
+  const h   = parseInt(parts.find(p => p.type === 'hour')?.value   ?? '0', 10);
+  const min = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10);
+  const sec = parseInt(parts.find(p => p.type === 'second')?.value ?? '0', 10);
+  const localMs = h * 3_600_000 + min * 60_000 + sec * 1000;
+  // UTC+ cities: local time at utcMidnight is in the morning → subtract to reach local midnight
+  // UTC- cities: local time is in the afternoon/evening → add the remaining hours to midnight
+  return localMs <= 12 * 3_600_000
+    ? utcMidnight - localMs
+    : utcMidnight + (86_400_000 - localMs);
+}
+
+/**
  * Compute the days between now and a target date string (YYYY-MM-DD).
  */
 export function daysUntil(targetDate: string, now?: Date): number {
@@ -1130,10 +1169,7 @@ export async function scanWeatherMarkets(
     return [];
   }
 
-  // Hoisted out of the per-event loop — static per scan so all events see the
-  // same date even if the loop straddles a UTC midnight boundary.
   const allowedSides = parseAllowedSides(cfg.WEATHER_TRADE_SIDES);
-  const todayUtcDate = new Date().toISOString().slice(0, 10);
 
   let parsedCount = 0;
   let dedupSkipped = 0;
@@ -1155,12 +1191,11 @@ export async function scanWeatherMarkets(
       horizonSkipped++;
       continue;
     }
-    // Use calendar-date comparison (not daysUntil===0) so the resolution-day
-    // guard fires from midnight UTC, not only after noon. daysUntil anchors at
-    // noon UTC and returns 1 before noon on the target date via Math.ceil.
-    // todayUtcDate is hoisted before the loop so all events in a single scan see
-    // the same date even if the loop straddles a UTC midnight boundary.
-    const isResolutionDay = event.targetDate === todayUtcDate;
+    // Use the city's local calendar date, not UTC. daysUntil anchors at noon
+    // UTC and returns 1 before noon on the target date via Math.ceil; the
+    // calendar comparison fires the guard precisely at local midnight so western
+    // cities (e.g. Houston, UTC-5) aren't blocked 5 hours before their day starts.
+    const isResolutionDay = event.targetDate === cityLocalDate(event.coords.tz);
     // Gamma can lag resolution by minutes-to-hours and keep returning yesterday's
     // event as active=true. daysUntil floors at 0 for both today-post-noon and
     // past dates, so use the calendar check to distinguish: if daysOut===0 but
@@ -1195,8 +1230,7 @@ export async function scanWeatherMarkets(
           // the slot is held for the full resolution day — at most one size-up fires
           // per event per day regardless of SIZE_UP_MAX_TOPUPS.
           const rdKey = `${RES_DAY_DEDUP_KEY_PREFIX}${event.slug}`;
-          const endOfTargetDayMs =
-            new Date(event.targetDate + 'T00:00:00Z').getTime() + 24 * 3600 * 1000;
+          const endOfTargetDayMs = cityDayEndUtcMs(event.targetDate, event.coords.tz);
           const rdTtlS = Math.max(
             cfg.WEATHER_DEDUP_TTL_S,
             Math.ceil((endOfTargetDayMs - Date.now()) / 1000),
