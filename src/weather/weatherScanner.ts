@@ -753,6 +753,15 @@ async function applyMarketDisagreementGate(
 }
 
 /**
+ * Return the current calendar date (YYYY-MM-DD) in a given IANA timezone.
+ * Used to determine whether a city is on its resolution day, since midnight
+ * UTC does not coincide with midnight local time.
+ */
+function cityLocalDate(tz: string): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
+}
+
+/**
  * Compute the days between now and a target date string (YYYY-MM-DD).
  */
 export function daysUntil(targetDate: string, now?: Date): number {
@@ -1130,10 +1139,7 @@ export async function scanWeatherMarkets(
     return [];
   }
 
-  // Hoisted out of the per-event loop — static per scan so all events see the
-  // same date even if the loop straddles a UTC midnight boundary.
   const allowedSides = parseAllowedSides(cfg.WEATHER_TRADE_SIDES);
-  const todayUtcDate = new Date().toISOString().slice(0, 10);
 
   let parsedCount = 0;
   let dedupSkipped = 0;
@@ -1155,12 +1161,11 @@ export async function scanWeatherMarkets(
       horizonSkipped++;
       continue;
     }
-    // Use calendar-date comparison (not daysUntil===0) so the resolution-day
-    // guard fires from midnight UTC, not only after noon. daysUntil anchors at
-    // noon UTC and returns 1 before noon on the target date via Math.ceil.
-    // todayUtcDate is hoisted before the loop so all events in a single scan see
-    // the same date even if the loop straddles a UTC midnight boundary.
-    const isResolutionDay = event.targetDate === todayUtcDate;
+    // Use the city's local calendar date, not UTC. daysUntil anchors at noon
+    // UTC and returns 1 before noon on the target date via Math.ceil; the
+    // calendar comparison fires the guard precisely at local midnight so western
+    // cities (e.g. Houston, UTC-5) aren't blocked 5 hours before their day starts.
+    const isResolutionDay = event.targetDate === cityLocalDate(event.coords.tz);
     // Gamma can lag resolution by minutes-to-hours and keep returning yesterday's
     // event as active=true. daysUntil floors at 0 for both today-post-noon and
     // past dates, so use the calendar check to distinguish: if daysOut===0 but
