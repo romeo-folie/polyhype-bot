@@ -17,9 +17,18 @@ const KNOWN_EXCHANGES = new Set([
   'deribit', 'phemex', 'lbank', 'bitmart',
 ]);
 
-// Matches: "5,000 #BTC (421,000,000 USD) transferred from #Binance to unknown wallet"
+// Stablecoins — transfers are not directional price signals; skip them.
+const STABLECOINS = new Set(['USDC', 'USDT', 'DAI', 'BUSD', 'TUSD', 'USDE', 'FDUSD', 'PYUSD']);
+
+// Handles two live channel formats:
+//   whale_alert_io:   "5,000 $BTC (421,000,000 USD) transferred from Unknown to Binance"
+//   whalebotalerts:   "5,000 BTC ($421,000,000) transfered from Unknown wallet to Binance"
+//   legacy/original:  "5,000 #BTC (421,000,000 USD) transferred from #Binance to unknown wallet"
+// The USD suffix is optional to support the whalebotalerts dollar-prefix format.
+// Protection against capturing the wrong parenthetical (e.g. a block count) is provided
+// by the minUsdM threshold — both channels always put the dollar amount first after the symbol.
 const TRANSFER_REGEX =
-  /([\d,]+)\s+#?(\w+)[\s\S]*?\(([\d,]+(?:\.\d+)?)\s*(?:USD|USDT)[\s\S]*?\)[\s\S]*?from\s+(#?\w+)[\s\S]*?to\s+(#?\w+)/i;
+  /([\d,]+)\s+[$#]?(\w+)[\s\S]*?\(\$?([\d,]+(?:\.\d+)?)\s*(?:USD|USDT)?\)[\s\S]*?from\s+(#?\w+)[\s\S]*?to\s+(#?\w+)/i;
 
 function classifyEndpoint(name: string): 'exchange' | 'unknown' {
   const normalized = name.replace(/^#/, '').toLowerCase().replace(/[._\-\s]/g, '');
@@ -46,6 +55,8 @@ export function parseWhaleAlert(
   if (isNaN(usdValue) || usdValue < minUsdM * 1_000_000) return null;
 
   const symbol = rawSymbol.toUpperCase();
+  if (STABLECOINS.has(symbol)) return null;
+
   const fromType = classifyEndpoint(fromRaw);
   const toType = classifyEndpoint(toRaw);
 

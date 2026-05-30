@@ -55,6 +55,51 @@ describe('parseWhaleAlert', () => {
     expect(result!.urgencyScore).toBe(8);
   });
 
+  it('parses whale_alert_io $SYMBOL format (dollar prefix on symbol, USD suffix on amount)', () => {
+    const text = '🚨 🚨 🚨  717 $BTC (54,253,234 USD) transferred from Unknown to Binance';
+    const result = parseWhaleAlert(text, BASE.source, BASE.url, BASE.publishedAt, 20);
+    expect(result).not.toBeNull();
+    expect(result!.title).toContain('BTC');
+    expect(result!.title).toContain('bearish');
+    expect(result!.urgencyScore).toBe(8); // $54M → tier 8
+  });
+
+  it('parses whalebotalerts ($USD) format (no USD suffix, dollar prefix on amount)', () => {
+    const text = '🚨🚨🚨🚨🚨 717 BTC ($53,928,972) transfered from Unknown to Binance';
+    const result = parseWhaleAlert(text, BASE.source, BASE.url, BASE.publishedAt, 20);
+    expect(result).not.toBeNull();
+    expect(result!.title).toContain('BTC');
+    expect(result!.title).toContain('bearish');
+    expect(result!.urgencyScore).toBe(8); // $53.9M → tier 8
+  });
+
+  it('parses whalebotalerts ($USD) format as bullish when from exchange to unknown', () => {
+    const text = '🚨🚨🚨🚨🚨 717 BTC ($53,928,972) transfered from Binance to Unknown';
+    const result = parseWhaleAlert(text, BASE.source, BASE.url, BASE.publishedAt, 20);
+    expect(result).not.toBeNull();
+    expect(result!.title).toContain('BTC');
+    expect(result!.title).toContain('bullish');
+    expect(result!.urgencyScore).toBe(8); // $54M → tier 8
+  });
+
+  it('skips stablecoin transfers (USDC) in whalebotalerts format — not directional', () => {
+    const text = '🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨 300,028,500 USDC ($301,762,620) transfered from Unknown to Binance';
+    const result = parseWhaleAlert(text, BASE.source, BASE.url, BASE.publishedAt, 20);
+    expect(result).toBeNull();
+  });
+
+  it('skips stablecoin transfers (USDT) in whale_alert_io format — not directional', () => {
+    const text = '🚨 🚨 🚨 🚨 🚨 🚨  140,000,000 $USDT (139,938,400 USD) transferred from Unknown to Binance';
+    const result = parseWhaleAlert(text, BASE.source, BASE.url, BASE.publishedAt, 20);
+    expect(result).toBeNull();
+  });
+
+  it('scores whalebotalerts ($USD) format at urgency 9 for $100M+', () => {
+    const text = '🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨 1,393 BTC ($102,462,020) transfered from Unknown to Binance';
+    const result = parseWhaleAlert(text, BASE.source, BASE.url, BASE.publishedAt, 20);
+    expect(result!.urgencyScore).toBe(9); // $102M → tier 9
+  });
+
   it('returns null for unrecognised message format', () => {
     const result = parseWhaleAlert('Bitcoin is looking bullish today!', BASE.source, BASE.url, BASE.publishedAt, 20);
     expect(result).toBeNull();
