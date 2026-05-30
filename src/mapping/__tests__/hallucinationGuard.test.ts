@@ -48,6 +48,7 @@ const mockSearchEvents = vi.mocked(searchEvents);
 describe('Hallucination Guard Regression Tests', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.REDIS_URL = 'redis://localhost:6379';
     process.env.OPENAI_API_KEY = 'test';
     process.env.GEMINI_API_KEY = 'test';
   });

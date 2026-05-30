@@ -41,7 +41,6 @@ import {
 } from '../shared/redis.js';
 import { destroyPriceFeed } from '../shared/feedSingleton.js';
 import { runClobProbe } from '../shared/clobProbe.js';
-import { setAgentAutoRedeem } from '../shared/simmer.js';
 import { runMonitorInner } from './index.js';
 import { rebuildNearZeroThemeSets } from '../shared/themeExtractor.js';
 import { runCopytradeHedgeScan } from '../copytrade/hedgeScanner.js';
@@ -53,6 +52,7 @@ const MONITOR_LOCK_KEY = 'monitor:lock';
 // See memory/recurring-worker-deaths.md — Bug A history on this choice.
 const MONITOR_LOCK_TTL_SEC = 270;
 const HEARTBEAT_INTERVAL_MS = 120_000;
+
 
 // Module-level releaseLock reference so the shutdown handler can call it.
 let _releaseLock: (() => Promise<void>) | null = null;
@@ -120,14 +120,8 @@ export async function runMonitorWorker(): Promise<void> {
     heavyIntervalMin: cfg.MONITOR_HEAVY_INTERVAL_MIN,
   });
 
-  // One-shot startup tasks (mirror the CLI entrypoint in index.ts):
-  //   1. Sync Simmer agent auto-redeem setting
-  //   2. Warm up the CLOB probe (10s timeout, fire-and-forget)
-  void setAgentAutoRedeem(cfg.SIMMER_AUTO_REDEEM_ENABLED).catch((err: unknown) => {
-    logger.warn('[monitor-worker] failed to set Simmer auto-redeem — continuing', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  });
+  // One-shot startup tasks:
+  //   1. Warm up the CLOB probe (10s timeout, fire-and-forget)
   void Promise.race([
     runClobProbe(),
     new Promise<void>((_, reject) =>

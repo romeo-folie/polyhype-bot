@@ -7,7 +7,6 @@ import { scanCryptoArb, scanUpDownArb } from './cryptoArbScanner.js';
 import { BINANCE_SYMBOL_TO_ASSET } from '../shared/assets.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
 import { priceZoneOf } from '../shared/zones.js';
-import { setAgentAutoRedeem } from '../shared/simmer.js';
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
 import {
   countRecentUpDownTrades,
@@ -146,20 +145,12 @@ export class ArbitrageWorker {
       });
     }
 
-    // Sync Simmer agent auto-redeem setting at startup
-    void setAgentAutoRedeem(cfg.SIMMER_AUTO_REDEEM_ENABLED).catch((err) => {
-      logger.warn('[arb-worker] failed to set Simmer auto-redeem — continuing', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-
     logger.info('[arb-worker] starting long-running worker', {
       baselineIntervalMs: this.baselineIntervalMs,
       globalMaxTradesPerMin: this.globalMaxTradesPerMin,
       arbMaxTradesPerMin: this.arbMaxTradesPerMin,
       cryptoArbMaxTradesPerMin: this.cryptoArbMaxTradesPerMin,
       cryptoArbEnabled: cfg.CRYPTO_ARB_ENABLED,
-      simmerAutoRedeem: cfg.SIMMER_AUTO_REDEEM_ENABLED,
     });
 
     // 0. Start Market Warmer (Pre-discovery WebSocket warmup)
@@ -603,7 +594,7 @@ export class ArbitrageWorker {
           // executeAndRecordSignal handles deductStake + recordPosition on success.
           const result = await executeAndRecordSignal(signal, redis);
 
-          if (result.tradeResult?.success) {
+          if (!result.skipped && !result.error && result.entryExecutionPath !== 'maker_pending') {
             const executedStake = result.signal.stakeUsd;
             logger.info('[crypto-arb] trade executed', {
               marketId: opp.marketId,
@@ -695,7 +686,7 @@ export class ArbitrageWorker {
         throw execErr;
       }
 
-      if (result.tradeResult?.success) {
+      if (!result.skipped && !result.error) {
         await redis.set(cooldownKey, '1', 'EX', cfg.HL_MOMENTUM_COOLDOWN_SEC);
         logger.info('[hl-momentum] trade executed', {
           symbol: signal.marketId,
@@ -774,7 +765,7 @@ export class ArbitrageWorker {
           });
           continue;
         }
-        if (result.tradeResult?.success) {
+        if (!result.skipped && !result.error) {
           await redis.set(cooldownKey, '1', 'EX', cfg.HL_FUNDING_SCANNER_COOLDOWN_SEC);
           logger.info('[hl-funding] trade executed', {
             symbol: signal.marketId,

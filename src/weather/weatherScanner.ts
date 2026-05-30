@@ -1920,9 +1920,12 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       });
       // Only count as executed when the executor actually opened a position.
       // A skipped result (dedup, spread too wide, etc.) should not burn caps.
+      // A maker_pending result means a GTC was posted but not yet filled —
+      // the reconciler will confirm the fill and record the position; don't
+      // burn city/scan caps or set the active-event marker prematurely.
       // Size-ups still consume real capital so they count toward exposure but
       // not toward the per-city or per-scan position count caps.
-      if (!result.skipped) {
+      if (!result.skipped && result.entryExecutionPath !== 'maker_pending') {
         if (!result.isSizeUp) {
           executed++;
           perCityCount.set(opp.city, cityCount + 1);

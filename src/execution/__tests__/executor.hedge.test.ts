@@ -19,8 +19,7 @@ vi.mock('../../shared/config.js', () => ({
     TAIL_PRICE_THRESHOLD: 0.2,
     TAIL_TAKER_OVERRIDE_EDGE: 0.2,
     TAKER_MIN_EDGE_CATEGORIES: {},
-    CLOB_FALLBACK_ENABLED: false,
-    SIMMER_VENUE_ENABLED: true,
+    CLOB_FALLBACK_ENABLED: true,
   }),
 }));
 
@@ -40,17 +39,14 @@ vi.mock('../positionLedger.js', () => ({
   recordPosition: vi.fn(),
 }));
 
-// Mock Simmer
-vi.mock('../../shared/simmer.js', () => ({
-  submitTrade: vi.fn().mockResolvedValue({ success: true, tx_hash: '0xabc' }),
-  resolveSimmerMarketId: vi.fn().mockResolvedValue('simmer-abc'),
-  getMarketContext: vi
-    .fn()
-    .mockResolvedValue({
-      market: { status: 'open' },
-      position: { has_position: false },
-      discipline: { warning_level: 'none' },
-    }),
+// Mock CLOB
+vi.mock('../../shared/clob.js', () => ({
+  submitClobBuy: vi.fn().mockResolvedValue({ success: true, tx_hash: '0xabc', shares_bought: 10 }),
+  getClobOrderBook: vi.fn().mockResolvedValue(null),
+  submitClobLimitBuy: vi.fn().mockResolvedValue({ success: false }),
+  getClobOrder: vi.fn().mockResolvedValue(null),
+  cancelClobOrder: vi.fn().mockResolvedValue(true),
+  CLOB_MIN_ORDER_USD: 1.0,
 }));
 
 // Mock Hyperliquid Client
@@ -91,6 +87,8 @@ describe('Delta Hedging Integration', () => {
   it('triggers a 1:1 delta hedge on HL after a successful PM buy', async () => {
     const signal = {
       marketId: 'pm-123',
+      conditionId: 'cond-123',
+      clobTokenIds: ['tok-yes-123', 'tok-no-123'],
       question: 'Will Bitcoin reach $100k?',
       direction: 'YES' as const,
       stakeUsd: 10,
@@ -105,7 +103,7 @@ describe('Delta Hedging Integration', () => {
     const result = await executeSignal(signal as any, mockRedis);
 
     expect(result.skipped).toBe(false);
-    expect(result.executionVenue).toBe('simmer');
+    expect(result.executionVenue).toBe('clob');
 
     // The delta hedge is fire-and-forget (void triggerDeltaHedge), so give it a tick to resolve
     await new Promise((r) => setTimeout(r, 50));
@@ -184,6 +182,8 @@ describe('Delta Hedging Integration', () => {
 
     const signal = {
       marketId: 'pm-btc-2',
+      conditionId: 'cond-btc-2',
+      clobTokenIds: ['tok-yes-btc-2', 'tok-no-btc-2'],
       question: 'Will Bitcoin exceed $70k?',
       direction: 'YES' as const,
       stakeUsd: 10,
@@ -208,6 +208,8 @@ describe('Delta Hedging Integration', () => {
 
     const signal = {
       marketId: 'pm-btc-3',
+      conditionId: 'cond-btc-3',
+      clobTokenIds: ['tok-yes-btc-3', 'tok-no-btc-3'],
       question: 'Will Bitcoin price drop below $50k?',
       direction: 'NO' as const,
       stakeUsd: 10,
@@ -233,6 +235,8 @@ describe('Delta Hedging Integration', () => {
 
     const signal = {
       marketId: 'pm-btc-stale',
+      conditionId: 'cond-btc-stale',
+      clobTokenIds: ['tok-yes-btc-stale', 'tok-no-btc-stale'],
       question: 'Will Bitcoin be above $80k?',
       direction: 'YES' as const,
       stakeUsd: 10,
@@ -255,6 +259,8 @@ describe('Delta Hedging Integration', () => {
     // Regulatory/adoption markets mention BTC but PM payout doesn't track spot price
     const signal = {
       marketId: 'pm-btc-etf',
+      conditionId: 'cond-btc-etf',
+      clobTokenIds: ['tok-yes-btc-etf', 'tok-no-btc-etf'],
       question: 'Will the US approve a Bitcoin ETF?',
       direction: 'YES' as const,
       stakeUsd: 10,
@@ -275,6 +281,8 @@ describe('Delta Hedging Integration', () => {
     // The regex+resolveHlSymbol combination is the gate — any scanner can produce a hedgeable trade
     const signal = {
       marketId: 'pm-copytrade-btc',
+      conditionId: 'cond-copytrade-btc',
+      clobTokenIds: ['tok-yes-copytrade-btc', 'tok-no-copytrade-btc'],
       question: 'Will Bitcoin be above $100,000 by year end?',
       direction: 'YES' as const,
       stakeUsd: 10,
@@ -297,6 +305,8 @@ describe('Delta Hedging Integration', () => {
     // "Will ETH be below $2000?" + YES: trader profits if ETH drops → short PM exposure → offset with LONG
     const signal = {
       marketId: 'pm-eth-below',
+      conditionId: 'cond-eth-below',
+      clobTokenIds: ['tok-yes-eth-below', 'tok-no-eth-below'],
       question: 'Will Ethereum be below $2000 by end of month?',
       direction: 'YES' as const,
       stakeUsd: 10,
@@ -318,6 +328,8 @@ describe('Delta Hedging Integration', () => {
   it('does NOT trigger hedge for non-correlated markets', async () => {
     const signal = {
       marketId: 'pm-politics',
+      conditionId: 'cond-politics',
+      clobTokenIds: ['tok-yes-politics', 'tok-no-politics'],
       question: 'Will the US election happen in 2024?',
       direction: 'YES' as const,
       stakeUsd: 10,

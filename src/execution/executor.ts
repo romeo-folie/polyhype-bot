@@ -2,8 +2,7 @@
  * Trade executor.
  *
  * Execution flow:
- * 1) Try Simmer first (primary venue)
- * 2) If market is unavailable in Simmer, fall back to direct Polymarket CLOB
+ * 1) Direct Polymarket CLOB execution
  *
  * Shared controls:
  * - Stake floor check
@@ -14,12 +13,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
-import {
-  submitTrade,
-  resolveSimmerMarketId,
-  getMarketContext,
-  SimmerError,
-} from '../shared/simmer.js';
 import {
   submitClobBuy,
   getClobOrderBook,
@@ -47,11 +40,28 @@ import {
 import { notifyTradeError, notifyTradeExecuted, notifyHedgeOpened } from './telegram.js';
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
 import { getRedis } from '../shared/redis.js';
-import type { SimmerTradeResult } from '../shared/simmer.js';
 import type { OrderBookSummary, TickSize } from '@polymarket/clob-client-v2';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
 import { getPendingOrder, setPendingOrder, deletePendingOrder } from './pendingMakerOrders.js';
+
+/**
+ * Normalised trade result shape used internally across CLOB and HL paths.
+ * Mirrors the fields previously coming from TradeResult.
+ */
+interface TradeResult {
+  success: boolean;
+  tx_hash?: string | null;
+  shares_bought?: number;
+  shares_sold?: number;
+  shares_requested?: number;
+  fill_status?: 'filled' | 'submitted' | 'failed' | 'unconfirmed' | null;
+  cost?: number;
+  price?: number;
+  warnings?: string[];
+  error?: string | null;
+  raw?: unknown;
+}
 
 const IDEMPOTENCY_TTL_SECONDS = 3600; // 1 hour
 // MIN_STAKE_USD is loaded from config (MIN_BET_USD, default $5).
@@ -178,9 +188,8 @@ export interface ExecutionResult {
   signal: TradeSignal;
   skipped: boolean;
   skipReason?: string;
-  tradeResult?: SimmerTradeResult;
   error?: string;
-  executionVenue?: 'simmer' | 'clob' | 'hyperliquid';
+  executionVenue?: 'clob' | 'hyperliquid';
   modeConfigured?: 'hybrid' | 'maker' | 'taker';
   entryExecutionPath?: string;
   entryOrderType?: 'maker' | 'taker' | 'none';
@@ -262,20 +271,6 @@ function netOfFeesEdge(
 ): number {
   const bps = feeBps != null && isFinite(feeBps) && feeBps > 0 ? feeBps : fallbackBps;
   return grossEdge - bps / 10_000;
-}
-
-function isMarketNotFoundMessage(msg: string | null | undefined): boolean {
-  if (!msg) return false;
-  return /market\s+not\s+found/i.test(msg);
-}
-
-/**
- * Returns true for Simmer rejections that should fall through to CLOB.
- * "Order too small" = Simmer's 5-share minimum; CLOB has no share minimum.
- */
-function shouldFallbackToClob(msg: string | null | undefined): boolean {
-  if (!msg) return false;
-  return isMarketNotFoundMessage(msg) || /order too small/i.test(msg);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -478,7 +473,7 @@ async function tryExecuteViaClobMaker(
   redis?: Redis,
 ): Promise<{
   ok: boolean;
-  tradeResult?: SimmerTradeResult;
+  tradeResult?: TradeResult;
   error?: string;
   filledStakeUsd?: number;
   waitMs: number;
@@ -958,7 +953,7 @@ async function tryExecuteViaClobMaker(
     await recordGlobalTrade(getRedis(), 'polymarket');
     return {
       ok: true,
-      tradeResult: { success: true, shares_bought: result.shares_bought },
+      tradeResult: { success: true, ...(result.shares_bought != null ? { shares_bought: result.shares_bought } : {}) },
       // Use reported cost (actual USDC spent at taker price) when available;
       // fall back to shares * posted price which may overstate on price improvement.
       filledStakeUsd: result.cost ?? (result.shares_bought ?? 0) * price,
@@ -1110,7 +1105,7 @@ async function tryExecuteViaClobMaker(
 
       if ((emptyBookMode || isWeatherPatient) && redis) await deletePendingOrder(redis, signal.marketId);
       const filledStakeUsd = matched * price;
-      const tradeResult: SimmerTradeResult = {
+      const tradeResult: TradeResult = {
         success: true,
         shares_bought: matched,
       };
@@ -1168,7 +1163,7 @@ async function tryExecuteViaClobMaker(
 
 async function tryExecuteViaClob(signal: TradeSignal): Promise<{
   ok: boolean;
-  tradeResult?: SimmerTradeResult;
+  tradeResult?: TradeResult;
   error?: string;
 }> {
   const tokenId = clobTokenForSignal(signal);
@@ -1188,13 +1183,13 @@ async function tryExecuteViaClob(signal: TradeSignal): Promise<{
     amountUsd: signal.stakeUsd,
   });
 
-  const tradeResult: SimmerTradeResult = {
+  const tradeResult: TradeResult = {
     success: clobResult.success,
-    tx_hash: clobResult.tx_hash,
-    shares_bought: clobResult.shares_bought,
-    price: clobResult.price,
-    cost: clobResult.cost,
-    error: clobResult.error,
+    ...(clobResult.tx_hash != null ? { tx_hash: clobResult.tx_hash } : {}),
+    ...(clobResult.shares_bought != null ? { shares_bought: clobResult.shares_bought } : {}),
+    ...(clobResult.price != null ? { price: clobResult.price } : {}),
+    ...(clobResult.cost != null ? { cost: clobResult.cost } : {}),
+    ...(clobResult.error != null ? { error: clobResult.error } : {}),
     raw: clobResult.raw,
   };
 
@@ -1436,7 +1431,6 @@ async function executeHyperliquidSignal(
       const result: ExecutionResult = {
         signal,
         skipped: false,
-        tradeResult: { success: true, tx_hash: tradeResult.txHash, shares_bought: 0 },
         executionVenue: 'hyperliquid',
         modeConfigured: cfg.EXECUTION_MODE,
         entryExecutionPath: 'hyperliquid_fill',
@@ -1782,7 +1776,7 @@ export async function executeSignal(
   });
   const finalizeAttempt = (payload: {
     finalExecutionPath: string;
-    finalVenue: 'simmer' | 'clob' | 'hyperliquid' | 'none';
+    finalVenue: 'clob' | 'hyperliquid' | 'none';
     finalOrderType: 'maker' | 'taker' | 'none';
     executionSucceeded: boolean;
     executionPath?: string;
@@ -1860,7 +1854,7 @@ export async function executeSignal(
     reason: string,
     finalExecutionPath = 'skipped',
     extra?: Record<string, unknown>,
-    finalVenue: 'simmer' | 'clob' | 'hyperliquid' | 'none' = 'none',
+    finalVenue: 'clob' | 'hyperliquid' | 'none' = 'none',
     finalOrderType: 'maker' | 'taker' | 'none' = 'none',
   ) => {
     safeRecordExecutionMetric('skipped', reason);
@@ -2028,14 +2022,14 @@ export async function executeSignal(
       return recordSkip('position_already_open');
     }
     const result = await executeHyperliquidSignal(signal, redis, knownSessionExposureUsd);
-    if (result.tradeResult?.success) {
+    if (!result.skipped && !result.error) {
       await redis.set(futuresDedup, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
       finalizeAttempt({
         finalExecutionPath: 'hyperliquid_fill',
         finalVenue: 'hyperliquid',
         finalOrderType: 'taker',
         executionSucceeded: true,
-        finalSharesFilled: result.tradeResult.shares_bought ?? null,
+        finalSharesFilled: result.sharesFilled ?? null,
         finalStakeUsdExecuted: signal.stakeUsd,
       });
       return { ...result, entryPrice: result.entryPrice ?? signal.outcomePrice };
@@ -2208,79 +2202,16 @@ export async function executeSignal(
   }
 
   const executionMode = cfg.EXECUTION_MODE;
-  const simmerId =
-    signal.source === 'crypto-arb' || signal.source === 'weather' || !cfg.SIMMER_VENUE_ENABLED
-      ? null
-      : await resolveSimmerMarketId(signal.question);
 
-  // Tracks fee-market state across the routing pipeline. Set when Simmer context
-  // reports fees > 0, or inferred from signal.feesEnabled. Used to:
-  //   1) skip the Simmer/CLOB taker submit if net-of-fee edge is below threshold
+  // Tracks fee-market state across the routing pipeline. Used to:
+  //   1) skip the CLOB taker submit if net-of-fee edge is below threshold
   //   2) preserve maker reachability — maker fills bypass fees and SHOULD be tried
   let feeMarketBpsObserved: number | null = null;
-
-  if (simmerId) {
-    // Context safeguard check — flip-flop detection, resolution criteria, market status
-    const ctx = await getMarketContext(simmerId, signal.consensusProbability ?? 0.5);
-    if (ctx) {
-      // Gate 1: market already resolved or closed
-      if (ctx.market.status === 'resolved' || ctx.market.status === 'closed') {
-        logger.info('[executor] skipping — market already resolved/closed', {
-          marketId: signal.marketId,
-          status: ctx.market.status,
-        });
-        return recordSkip(`market_${ctx.market.status}`);
-      }
-
-      // Gate 2: Simmer already knows we have a position on this side
-      if (ctx.position.has_position && ctx.position.side === signal.direction.toLowerCase()) {
-        logger.info('[executor] skipping — Simmer reports existing position', {
-          marketId: signal.marketId,
-          side: ctx.position.side,
-        });
-        return recordSkip('simmer_position_exists');
-      }
-
-      // Gate 3: severe flip-flop warning — we've been reversing too much on this market
-      if (ctx.discipline.warning_level === 'severe') {
-        logger.warn('[executor] skipping — severe flip-flop warning from Simmer', {
-          marketId: signal.marketId,
-          flipFlopWarning: ctx.discipline.flip_flop_warning,
-          directionChanges24h: ctx.discipline.direction_changes_24h,
-        });
-        return recordSkip('flip_flop_severe');
-      }
-
-      // Gate 4: detect fee market — DO NOT skip here. Maker fills bypass fees,
-      // so we still want to attempt the maker path on fee markets. The fee gate
-      // is now applied later, only against the taker fallback (see below).
-      if (ctx.market.fee_rate_bps > 0) {
-        feeMarketBpsObserved = ctx.market.fee_rate_bps;
-        logger.info('[executor] fee market detected — maker still eligible', {
-          marketId: signal.marketId,
-          feeRateBps: ctx.market.fee_rate_bps,
-        });
-      }
-
-      logger.info('[executor] context check passed', {
-        marketId: signal.marketId,
-        warnings: ctx.warnings,
-        flipFlopLevel: ctx.discipline.warning_level,
-        resolutionCriteria: ctx.market.resolution_criteria?.slice(0, 80),
-      });
-    } else {
-      logger.warn('[executor] context check unavailable — proceeding without safeguards', {
-        marketId: signal.marketId,
-        simmerId,
-      });
-    }
-  }
 
   let makerAttempted = false;
   let makerFilled = false;
   let takerPath: 'taker_direct' | 'hybrid_taker_fallback' | null = null;
   let decisionSubmitted = false;
-  let clobFallbackReason: string | null = null;
   let takerDecisionBenchmarkPromise: Promise<DecisionBenchmark> | null = null;
   // Prefetched CLOB book: populated by the entry spread guardrail below when
   // active, then handed to the maker path so we don't double-fetch the book.
@@ -2684,7 +2615,6 @@ export async function executeSignal(
       return {
         signal,
         skipped: false,
-        tradeResult: makerAttempt.tradeResult,
         executionVenue: 'clob',
         modeConfigured: cfg.EXECUTION_MODE,
         entryExecutionPath:
@@ -2815,191 +2745,8 @@ export async function executeSignal(
     }
   }
 
-  // 5) Try Simmer first (gated by SIMMER_VENUE_ENABLED — when off, simmerId is
-  // null upstream so we route directly to CLOB below)
-
-  if (simmerId) {
-    takerPath =
-      executionMode === 'taker'
-        ? 'taker_direct'
-        : makerAttempted && !makerFilled
-          ? 'hybrid_taker_fallback'
-          : 'taker_direct';
-    takerDecisionBenchmarkPromise ??= captureDecisionBenchmark(signal);
-    if (takerPath === 'taker_direct') {
-      safeRecordExecutionMetric('taker_direct');
-    } else {
-      safeRecordExecutionMetric('taker_fallback');
-    }
-    logger.info('[executor] submitting trade via Simmer', {
-      marketId: signal.marketId,
-      simmerId,
-      direction: signal.direction,
-      stakeUsd: signal.stakeUsd,
-      edgeMagnitude: signal.edgeMagnitude,
-      consensusP: signal.consensusProbability,
-    });
-
-    if (!decisionSubmitted) {
-      decisionSubmitted = true;
-      safeRecordExecutionTiming('decision_to_submit_ms', Date.now() - decisionStartedAt);
-    }
-    try {
-      const tradeResult = await submitTrade({
-        market_id: simmerId,
-        side: signal.direction === 'YES' || signal.direction === 'UP' ? 'yes' : 'no',
-        amount: signal.stakeUsd,
-        reasoning: `OSINT signal: "${signal.sourcedFrom}" — consensus P=${signal.consensusProbability?.toFixed(2) ?? 'N/A'}, market P=${signal.outcomePrice.toFixed(2)}, edge=${signal.edgeMagnitude.toFixed(2)}. ${signal.reasoning}`,
-      });
-
-      if (tradeResult.success) {
-        // Record trade in governor (Polymarket order bucket)
-        await recordGlobalTrade(redis, 'polymarket');
-        makerTelemetry = { ...makerTelemetry, ...(await takerDecisionBenchmarkPromise) };
-        await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
-        finalizeAttempt({
-          executionPath: takerPath ?? 'taker_direct',
-          finalExecutionPath: takerPath ?? 'taker_direct',
-          finalVenue: 'simmer',
-          finalOrderType: 'taker',
-          finalSharesFilled: tradeResult.shares_bought ?? null,
-          finalStakeUsdExecuted: signal.stakeUsd,
-          executionSucceeded: true,
-          hedgeTriggered: true,
-        });
-        logger.info('[executor] trade submitted successfully via Simmer', {
-          marketId: signal.marketId,
-          txHash: tradeResult.tx_hash,
-        });
-        void notifyTradeExecuted(signal, tradeResult.tx_hash, {
-          venue: 'simmer',
-          ...(tradeResult.shares_bought != null && { sharesFilled: tradeResult.shares_bought }),
-        }).catch(() => {});
-
-        // Fire-and-forget the delta hedge — do not block PM trade confirmation on HL latency.
-        // hedgeDispatched is reported as true optimistically; errors are logged inside triggerDeltaHedge.
-        void triggerDeltaHedge(signal, redis, knownSessionExposureUsd).catch((err: unknown) => {
-          logger.warn('[executor] delta hedge async error (non-fatal)', {
-            marketId: signal.marketId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-        const exeResult: ExecutionResult = {
-          signal,
-          skipped: false,
-          tradeResult,
-          executionVenue: 'simmer',
-          modeConfigured: cfg.EXECUTION_MODE,
-          entryExecutionPath: takerPath ?? 'taker_direct',
-          entryOrderType: 'taker',
-          entryPrice: tradeResult.price ?? signal.outcomePrice,
-          sharesFilled: tradeResult.shares_bought ?? null,
-          decisionBenchmark: makerTelemetry as DecisionBenchmark,
-          hedgeDispatched: true,
-        };
-        return exeResult;
-      }
-
-      // Simmer returned success=false — fall back to CLOB for recoverable rejections
-      // (market not found, order too small for Simmer's 5-share minimum)
-      if (!shouldFallbackToClob(tradeResult.error)) {
-        makerTelemetry = { ...makerTelemetry, ...(await takerDecisionBenchmarkPromise) };
-        logger.warn('[executor] Simmer trade returned success=false', {
-          marketId: signal.marketId,
-          error: tradeResult.error,
-        });
-        safeRecordExecutionMetric('errors', 'simmer_trade_failed');
-        finalizeAttempt({
-          executionPath: takerPath ?? 'taker_direct',
-          finalExecutionPath: 'error',
-          finalVenue: 'simmer',
-          finalOrderType: 'taker',
-          executionSucceeded: false,
-          errorClass: 'simmer_trade_failed',
-          errorMessage: tradeResult.error ?? 'Simmer trade failed',
-        });
-        return {
-          signal,
-          skipped: false,
-          tradeResult,
-          executionVenue: 'simmer',
-          modeConfigured: cfg.EXECUTION_MODE,
-          entryExecutionPath: takerPath ?? 'taker_direct',
-          entryOrderType: 'taker',
-          decisionBenchmark: makerTelemetry as DecisionBenchmark,
-        };
-      }
-
-      logger.warn('[executor] Simmer rejected — attempting CLOB fallback', {
-        marketId: signal.marketId,
-        error: tradeResult.error,
-      });
-      clobFallbackReason = isMarketNotFoundMessage(tradeResult.error)
-        ? 'simmer_market_not_found'
-        : 'simmer_order_too_small';
-    } catch (err: unknown) {
-      const message =
-        err instanceof SimmerError
-          ? `HTTP ${err.statusCode.toString()}: ${err.message}`
-          : err instanceof Error
-            ? err.message
-            : String(err);
-
-      // Only fall back on recoverable Simmer failures
-      if (!shouldFallbackToClob(message)) {
-        makerTelemetry = { ...makerTelemetry, ...(await takerDecisionBenchmarkPromise) };
-        logger.error('[executor] Simmer submission failed', {
-          marketId: signal.marketId,
-          error: message,
-        });
-        safeRecordExecutionMetric('errors', 'simmer_submit_failed');
-        finalizeAttempt({
-          executionPath: takerPath ?? 'taker_direct',
-          finalExecutionPath: 'error',
-          finalVenue: 'simmer',
-          finalOrderType: 'taker',
-          executionSucceeded: false,
-          errorClass: 'simmer_submit_failed',
-          errorMessage: message,
-        });
-        return {
-          signal,
-          skipped: false,
-          error: message,
-          executionVenue: 'simmer',
-          modeConfigured: cfg.EXECUTION_MODE,
-          entryExecutionPath: takerPath ?? 'taker_direct',
-          entryOrderType: 'taker',
-          decisionBenchmark: makerTelemetry as DecisionBenchmark,
-        };
-      }
-
-      logger.warn('[executor] Simmer market unavailable (exception); attempting CLOB fallback', {
-        marketId: signal.marketId,
-        error: message,
-      });
-      clobFallbackReason = isMarketNotFoundMessage(message)
-        ? 'simmer_market_not_found'
-        : 'simmer_order_too_small';
-    }
-  } else if (!cfg.SIMMER_VENUE_ENABLED && signal.source !== 'crypto-arb') {
-    logger.info('[executor] SIMMER_VENUE_ENABLED=false; routing direct to CLOB', {
-      marketId: signal.marketId,
-    });
-    safeRecordExecutionMetric('venue_skipped', 'simmer_disabled');
-    clobFallbackReason = 'simmer_disabled';
-  } else {
-    logger.info('[executor] market not in Simmer catalogue; attempting CLOB fallback', {
-      marketId: signal.marketId,
-      question: signal.question,
-    });
-    clobFallbackReason = 'simmer_market_missing';
-  }
-
-  // 6) Fee gate for CLOB fallback — already enforced by the earlier net-edge
-  // gate when feeMarketBpsObserved was set via Simmer context. This check covers
-  // the case where the signal carries `feesEnabled=true` but Simmer context was
-  // unavailable (so feeMarketBpsObserved is null and the earlier gate didn't fire).
+  // 5) Fee gate for CLOB — check when signal carries feesEnabled=true and
+  // feeMarketBpsObserved was not already set via an earlier gate.
   if (signal.feesEnabled === true && feeMarketBpsObserved == null) {
     const grossEdge = signal.edgeMagnitude ?? 0;
     const netEdge = netOfFeesEdge(grossEdge, null, cfg.FEE_MARKET_DEFAULT_BPS);
@@ -3014,15 +2761,12 @@ export async function executeSignal(
     }
   }
 
-  // 7) CLOB fallback
+  // 6) CLOB execution
   if (!decisionSubmitted) {
     decisionSubmitted = true;
     safeRecordExecutionTiming('decision_to_submit_ms', Date.now() - decisionStartedAt);
   }
   takerDecisionBenchmarkPromise ??= captureDecisionBenchmark(signal);
-  if (clobFallbackReason) {
-    safeRecordExecutionMetric('clob_fallback', clobFallbackReason);
-  }
   const clob = await tryExecuteViaClob(signal);
   makerTelemetry = { ...makerTelemetry, ...(await takerDecisionBenchmarkPromise) };
   if (clob.ok && clob.tradeResult?.success) {
@@ -3030,23 +2774,22 @@ export async function executeSignal(
     // Record trade in governor (Polymarket order bucket)
     await recordGlobalTrade(redis, 'polymarket');
     await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
-    safeRecordExecutionMetric('clob_fallback_success', clobFallbackReason ?? 'direct');
+    safeRecordExecutionMetric('clob_success', 'direct');
     finalizeAttempt({
-      executionPath: clobFallbackReason ? 'clob_fallback' : 'clob_direct',
-      finalExecutionPath: 'clob_fallback',
+      executionPath: 'clob_direct',
+      finalExecutionPath: 'clob_direct',
       finalVenue: 'clob',
       finalOrderType: 'taker',
       finalSharesFilled: tradeResult.shares_bought ?? null,
       finalStakeUsdExecuted: signal.stakeUsd,
       executionSucceeded: true,
       hedgeTriggered: true,
-      ...(clobFallbackReason ? { extra: { fallbackReason: clobFallbackReason } } : {}),
     });
-    logger.info('[executor] trade submitted successfully via CLOB fallback', {
+    logger.info('[executor] trade submitted successfully via CLOB', {
       marketId: signal.marketId,
       txHash: tradeResult.tx_hash,
     });
-    void notifyTradeExecuted(signal, tradeResult.tx_hash, {
+    void notifyTradeExecuted(signal, tradeResult.tx_hash ?? undefined, {
       venue: 'clob',
       ...(tradeResult.shares_bought != null && { sharesFilled: tradeResult.shares_bought }),
     }).catch(() => {});
@@ -3060,32 +2803,29 @@ export async function executeSignal(
     return {
       signal,
       skipped: false,
-      tradeResult,
       executionVenue: 'clob',
       modeConfigured: cfg.EXECUTION_MODE,
-      entryExecutionPath: clobFallbackReason ? 'clob_fallback' : 'clob_direct',
+      entryExecutionPath: 'clob_direct',
       entryOrderType: 'taker',
       decisionBenchmark: makerTelemetry as DecisionBenchmark,
-      fallbackReason: clobFallbackReason ?? null,
       hedgeDispatched: true,
       entryPrice: tradeResult.price ?? signal.outcomePrice,
       sharesFilled: tradeResult.shares_bought ?? null,
     };
   }
 
-  const fallbackError = clob.error ?? 'CLOB fallback failed';
-  safeRecordExecutionMetric('errors', 'clob_fallback_failed');
+  const fallbackError = clob.error ?? 'CLOB execution failed';
+  safeRecordExecutionMetric('errors', 'clob_failed');
   finalizeAttempt({
-    executionPath: clobFallbackReason ? 'clob_fallback' : 'clob_direct',
+    executionPath: 'clob_direct',
     finalExecutionPath: 'error',
     finalVenue: 'clob',
     finalOrderType: 'taker',
     executionSucceeded: false,
-    errorClass: 'clob_fallback_failed',
+    errorClass: 'clob_failed',
     errorMessage: fallbackError,
-    ...(clobFallbackReason ? { extra: { fallbackReason: clobFallbackReason } } : {}),
   });
-  logger.error('[executor] CLOB fallback failed', {
+  logger.error('[executor] CLOB execution failed', {
     marketId: signal.marketId,
     error: fallbackError,
   });
@@ -3093,14 +2833,12 @@ export async function executeSignal(
   return {
     signal,
     skipped: false,
-    ...(clob.tradeResult ? { tradeResult: clob.tradeResult } : {}),
     error: fallbackError,
     executionVenue: 'clob',
     modeConfigured: cfg.EXECUTION_MODE,
-    entryExecutionPath: clobFallbackReason ? 'clob_fallback' : 'clob_direct',
+    entryExecutionPath: 'clob_direct',
     entryOrderType: 'taker',
     decisionBenchmark: makerTelemetry as DecisionBenchmark,
-    fallbackReason: clobFallbackReason ?? undefined,
   };
 }
 
@@ -3118,7 +2856,7 @@ export async function executeSignals(
     // Do NOT add hedgeDispatched to session exposure — the hedge is fire-and-forget and may
     // not have executed; adding it optimistically would cause false margin-cap rejections.
     // The hedge's margin will appear in the next cycle's live positions from HL.
-    if (result.tradeResult?.success && result.executionVenue === 'hyperliquid') {
+    if (!result.skipped && !result.error && result.executionVenue === 'hyperliquid') {
       sessionExposureUsd += result.signal.stakeUsd;
     }
 
@@ -3248,7 +2986,10 @@ export async function executeAndRecordSignal(
   knownSessionExposureUsd = 0,
 ): Promise<ExecutionResult> {
   const result = await executeSignal(signal, redis, knownSessionExposureUsd);
-  if (result.tradeResult?.success) {
+  // maker_pending means a GTC order was posted but not yet filled — skip ledger write
+  // until the reconciler confirms a fill. The old guard (result.tradeResult?.success)
+  // was falsy for pending orders because no tradeResult was set; replicate that here.
+  if (!result.skipped && !result.error && result.entryExecutionPath !== 'maker_pending') {
     // Ledger-write failures must NOT propagate out. The trade is already live
     // on the venue and the idempotency key is set, so throwing here would
     // turn a successful fill into an apparent caller error — and the
@@ -3267,7 +3008,6 @@ export async function executeAndRecordSignal(
           direction: result.signal.direction,
           stakeUsd: result.signal.stakeUsd,
           executionVenue: result.executionVenue,
-          txHash: result.tradeResult?.tx_hash,
           error: errorMessage,
         },
       );
@@ -3303,11 +3043,6 @@ async function finalizeSuccessfulExecution(
   let sharesHeld: number | undefined;
   if (result.sharesFilled != null && result.sharesFilled > 0) {
     sharesHeld = result.sharesFilled;
-  } else if (
-    result.tradeResult?.shares_bought != null &&
-    result.tradeResult.shares_bought > 0
-  ) {
-    sharesHeld = result.tradeResult.shares_bought;
   } else if (!result.signal.isFutures && result.signal.outcomePrice > 0) {
     estimatedShares = result.signal.stakeUsd / result.signal.outcomePrice;
     sharesHeld = estimatedShares;
@@ -3363,9 +3098,8 @@ async function finalizeSuccessfulExecution(
       edgeMagnitude: result.signal.edgeMagnitude,
       sourcedFrom: result.signal.sourcedFrom,
       openedAt: new Date().toISOString(),
-      txHash: result.tradeResult?.tx_hash,
       sharesHeld,
-      executionVenue: result.executionVenue ?? 'simmer',
+      executionVenue: result.executionVenue ?? 'clob',
       modeConfigured: result.modeConfigured,
       entryExecutionPath: result.entryExecutionPath,
       entryOrderType: result.entryOrderType,

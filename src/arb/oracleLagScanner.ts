@@ -691,7 +691,7 @@ export class OracleLagScanner {
       // executeAndRecordSignal handles deductStake + recordPosition on success.
       const result = await executeAndRecordSignal(signal, this.redis);
 
-      if (result.tradeResult?.success) {
+      if (!result.skipped && !result.error) {
         // Use result.signal for post-execution state — the executor reassigns
         // internally (bumping the stake, stamping executionId). This is the
         // documented footgun from CLAUDE.md lessons learned.

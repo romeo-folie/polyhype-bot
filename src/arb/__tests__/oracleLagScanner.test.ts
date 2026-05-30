@@ -550,6 +550,7 @@ describe('loadConfig cross-validation: oracle-lag time window', () => {
     POLYMARKET_API_KEY: 'test-key',
     POLYMARKET_API_SECRET: 'test-secret',
     POLYMARKET_API_PASSPHRASE: 'test-pass',
+    OPENAI_API_KEY: 'test-openai-key',
   };
 
   beforeEach(() => {

@@ -22,7 +22,6 @@ vi.mock('../shared/config.js', () => ({
     CRYPTO_ARB_MAX_TRADES_PER_MIN: 45,
     NEGRISK_ARB_ENABLED: false,
     NEGRISK_ARB_SCAN_INTERVAL_MS: 30_000,
-    SIMMER_AUTO_REDEEM_ENABLED: false,
     BINANCE_WS_ENABLED: false,
     CHAINLINK_REDIS_PUBLISH_ENABLED: false,
     HL_MOMENTUM_ENABLED: false,
@@ -75,11 +74,6 @@ vi.mock('../shared/telemetry.js', () => ({
   recordCopytradeFilter: vi.fn().mockResolvedValue(undefined),
   recordCopytradeMalformed: vi.fn().mockResolvedValue(undefined),
   recordCopytradeMetric: vi.fn().mockResolvedValue(undefined),
-}));
-
-// Mock simmer (auto-redeem setting)
-vi.mock('../shared/simmer.js', () => ({
-  setAgentAutoRedeem: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Mock Redis with Pub/Sub listeners
@@ -241,7 +235,7 @@ describe('ArbitrageWorker', () => {
       signal: {},
       skipped: false,
       tradeResult: { success: true, tx_hash: '0xabc' },
-      executionVenue: 'simmer',
+      executionVenue: 'clob',
     });
 
     // Use a very high maxTradesPerMin so the shared governor doesn't throttle the
@@ -312,7 +306,7 @@ describe('ArbitrageWorker', () => {
       signal: {},
       skipped: false,
       tradeResult: { success: true, tx_hash: '0xabc' },
-      executionVenue: 'simmer',
+      executionVenue: 'clob',
     });
 
     // Stub latest Binance price for reference: oracle=65000, binance=64000

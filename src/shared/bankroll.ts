@@ -1,17 +1,14 @@
 /**
- * Live bankroll tracker — Simmer portfolio + on-chain pUSD as source of truth.
+ * Live bankroll tracker — on-chain pUSD balance as source of truth.
  *
- * getBankroll() fetches both the Simmer portfolio balance and the on-chain
- * pUSD balance held in the Polygon wallet, returning their sum.
- *
- * On-chain balance is checked in parallel with Simmer. If the RPC call fails,
- * we degrade gracefully to Simmer-only (a failed on-chain check should never
- * block trading).
+ * getBankroll() fetches the on-chain pUSD balance held in the Polygon wallet.
+ * If the RPC call fails it degrades gracefully to the last known cached value
+ * (a failed on-chain check should never block trading).
  *
  * deductStake() immediately adjusts the in-memory cache so consecutive
  * signals in the same cycle size against the post-trade balance.
- * creditProceeds() adds back to the cache for CLOB exits (Simmer tracks
- * its own wallet; CLOB proceeds are on-chain and not visible to Simmer).
+ * creditProceeds() adds back to the cache for CLOB exits so position sizing
+ * stays accurate until the next on-chain refresh.
  *
  * The Redis parameter is kept in signatures for backward compatibility with
  * existing callers but is not used.
@@ -19,7 +16,6 @@
 import type { Redis } from 'ioredis';
 import { Contract, JsonRpcProvider, Network, FetchRequest, Wallet } from 'ethers';
 import { createHash } from 'node:crypto';
-import { getPortfolio } from './simmer.js';
 import { loadConfig, PUSD_ADDRESS, POLYGON_FALLBACK_RPCS } from './config.js';
 import { logger } from './logger.js';
 
@@ -97,7 +93,7 @@ export async function getOnChainUsdcBalance(): Promise<number> {
 /** Warn when live balance drops below this threshold. */
 const LOW_BALANCE_WARN_USD = 1.0;
 
-/** TTL for the in-process balance cache — avoids hammering Simmer on every position-sizing call. */
+/** TTL for the in-process balance cache — avoids hammering the RPC on every position-sizing call. */
 const CACHE_TTL_MS = 15_000;
 
 /** In-memory fallback: last successfully fetched balance. */
@@ -113,12 +109,11 @@ export function _resetCacheForTests(): void {
 }
 
 /**
- * Get the current bankroll (Simmer portfolio + on-chain pUSD).
+ * Get the current bankroll (on-chain pUSD balance).
  *
- * Fetches both sources in parallel and returns their sum. If the on-chain
- * call fails, degrades gracefully to Simmer-only. Caches the result for
- * CACHE_TTL_MS (15s) so rapid calls within a single pipeline cycle reuse
- * the same value.
+ * Fetches the on-chain pUSD balance and caches it for CACHE_TTL_MS (15s)
+ * so rapid calls within a single pipeline cycle reuse the same value.
+ * Degrades gracefully to the last known balance on RPC failure.
  */
 export async function getBankroll(_redis?: Redis): Promise<number> {
   const now = Date.now();
@@ -127,17 +122,13 @@ export async function getBankroll(_redis?: Redis): Promise<number> {
   }
 
   try {
-    const [portfolio, onChainUsdc] = await Promise.all([getPortfolio(), getOnChainUsdcBalance()]);
-    const simmerUsdc = portfolio.balance_usdc;
-    const totalUsdc = simmerUsdc + onChainUsdc;
+    const totalUsdc = await getOnChainUsdcBalance();
 
     lastKnownBalance = totalUsdc;
     lastFetchTime = now;
 
-    logger.info('[bankroll] combined balance', {
-      simmerUsdc,
-      onChainUsdc,
-      totalUsdc,
+    logger.info('[bankroll] on-chain balance', {
+      onChainUsdc: totalUsdc,
     });
 
     if (totalUsdc <= 0) {
@@ -161,18 +152,16 @@ export async function getBankroll(_redis?: Redis): Promise<number> {
   }
 }
 
-/** @deprecated No-op — Simmer tracks the wallet balance directly. */
+/** @deprecated No-op — kept for backward compatibility with existing callers. */
 export async function setBankroll(_redis: Redis, _amount: number): Promise<void> {
-  logger.info('[bankroll] setBankroll is deprecated — Simmer tracks the wallet balance');
+  logger.info('[bankroll] setBankroll is a no-op');
 }
 
 /**
  * Deduct a stake from the in-memory bankroll cache.
  *
- * Simmer deducts from the actual wallet on execution, but the in-process
- * cache needs updating immediately — otherwise the next signal in the same
- * cycle sizes against the full pre-trade balance and Simmer rejects it for
- * insufficient funds.
+ * The in-process cache needs updating immediately — otherwise the next signal
+ * in the same cycle sizes against the full pre-trade balance.
  */
 export async function deductStake(_redis: Redis, stakeUsd: number): Promise<void> {
   if (lastKnownBalance !== null) {
@@ -187,9 +176,8 @@ export async function deductStake(_redis: Redis, stakeUsd: number): Promise<void
 /**
  * Credit proceeds back to the in-memory bankroll cache.
  *
- * For Simmer positions, Simmer tracks the wallet directly. For CLOB positions,
- * proceeds are on-chain — updating the cache here keeps position sizing accurate
- * until the next Simmer portfolio refresh.
+ * CLOB proceeds are on-chain — updating the cache here keeps position sizing
+ * accurate until the next on-chain balance refresh.
  */
 export async function creditProceeds(_redis: Redis, proceedsUsd: number): Promise<void> {
   if (lastKnownBalance !== null) {

@@ -6,7 +6,6 @@ beforeEach(() => {
   _savedEnv = { ...process.env };
   process.env.NODE_ENV = 'test';
   process.env.REDIS_URL = 'redis://localhost:6379';
-  process.env.SIMMER_API_KEY = 'test-simmer-key';
   process.env.GEMINI_API_KEY = 'test-gemini-key';
 });
 afterEach(() => {
@@ -31,7 +30,6 @@ vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => ({
     COPYTRADE_WALLETS: '0x1',
     COPYTRADE_MARKET_SCOPE: ['all'],
-    SIMMER_API_KEY: 'test-simmer-key',
     COPYTRADE_POLL_INTERVAL_MS: 0,
   })),
 }));
@@ -74,7 +72,7 @@ describe('copytrade worker', () => {
     mockExecuteSignal.mockResolvedValue({
       signal,
       tradeResult: { success: true, tx_hash: '0x123', shares_bought: 20 },
-      executionVenue: 'simmer',
+      executionVenue: 'clob',
     });
 
     const { runWorker } = await import('../worker.js');

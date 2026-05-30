@@ -9,7 +9,6 @@ import { getRedis, refreshLock, reacquireLockAfterExpiry } from '../shared/redis
 import { runCopytrade } from './index.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
 import { getBankroll } from '../shared/bankroll.js';
-import { SimmerError } from '../shared/simmer.js';
 import { recordCopytradeFilter, recordCopytradeMetric } from '../shared/telemetry.js';
 
 /**
@@ -215,7 +214,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
 
           // executeAndRecordSignal handles deductStake + recordPosition on success.
           const result = await executeAndRecordSignal(signal, redis, sessionExposureUsd);
-          if (result.tradeResult?.success) {
+          if (!result.skipped && !result.error && result.entryExecutionPath !== 'maker_pending') {
             await recordCopytradeMetric(redis, 'executed').catch(() => {
               /* ignore telemetry errors */
             });
@@ -246,17 +245,7 @@ export async function runWorker(maxCycles?: number): Promise<void> {
         consecutiveFailures,
       });
 
-      // 429: Simmer is rate-limiting — back off immediately with exponential delay
-      // (cap at 5 minutes) and do NOT count towards the circuit breaker since this
-      // is an expected transient condition, not a code/config failure.
-      if (err instanceof SimmerError && err.statusCode === 429) {
-        const rateLimitBackoffMs = Math.min(5_000 * Math.pow(2, consecutiveFailures - 1), 300_000);
-        logger.warn('[copytrade-worker] rate-limited by Simmer — backing off', {
-          backoffMs: rateLimitBackoffMs,
-        });
-        await new Promise((resolve) => setTimeout(resolve, rateLimitBackoffMs));
-        consecutiveFailures--; // 429 is not a real failure — don't advance the circuit breaker
-      } else if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         const backoffMs = Math.min(
           1000 * Math.pow(2, consecutiveFailures - MAX_CONSECUTIVE_FAILURES),
           60_000,

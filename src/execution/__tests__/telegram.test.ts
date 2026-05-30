@@ -11,7 +11,6 @@ vi.mock('../../shared/logger.js', () => ({
 vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => ({
     REDIS_URL: 'redis://localhost:6379',
-    SIMMER_API_KEY: 'test-key',
     OPENAI_API_KEY: 'test-openai',
     TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID,
@@ -56,7 +55,7 @@ function makePosition(overrides: Partial<Position> = {}): Position {
     edgeMagnitude: 0.2,
     sourcedFrom: 'Breaking news',
     openedAt: new Date('2026-03-18T12:00:00Z').toISOString(),
-    executionVenue: 'simmer',
+    executionVenue: 'clob',
     ...overrides,
   };
 }
