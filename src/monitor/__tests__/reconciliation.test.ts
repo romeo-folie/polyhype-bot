@@ -58,6 +58,7 @@ describe('Position Reconciliation Healer', () => {
     vi.clearAllMocks();
     mockRedis = {
       get: vi.fn().mockResolvedValue(null),
+      set: vi.fn().mockResolvedValue('OK'),
       hset: vi.fn().mockResolvedValue(1),
       incr: vi.fn().mockResolvedValue(1),
       sismember: vi.fn().mockResolvedValue(0),
@@ -440,7 +441,7 @@ describe('Position Reconciliation Healer', () => {
     expect(positionLedger.closePosition).not.toHaveBeenCalled();
   });
 
-  it('blocks CLOB import of weather temperature bracket markets when no pending order exists', async () => {
+  it('imports weather CLOB orphan without pending order as reconciled:weather and seeds market state', async () => {
     const weatherClobPosition = {
       conditionId: 'cond-weather-1',
       asset: 'tok-yes',
@@ -458,13 +459,24 @@ describe('Position Reconciliation Healer', () => {
     (positionLedger.getOpenPositions as any).mockResolvedValue([]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([weatherClobPosition]);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(weatherGammaMarket);
-    // No pending order — external/unknown weather fill that bypassed the scanner
     (pendingMakerOrders.getPendingOrder as any).mockResolvedValue(null);
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    // No pending order → block: weather market must not be imported unless placed by our scanner
-    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
+    // No pending order → import as reconciled:weather so monitor + size-up can track it
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-weather',
+      direction: 'YES',
+      sourcedFrom: 'reconciled:weather',
+      entryPrice: 0.55,
+    }));
+    // Market state key must be seeded for the weather scanner's adverseMove gate
+    expect(mockRedis.set).toHaveBeenCalledWith(
+      'weather:market_state:numeric-weather:YES',
+      expect.stringContaining('"outcomePrice":0.55'),
+      'EX',
+      48 * 60 * 60,
+    );
   });
 
   it('allows CLOB import of weather markets when a bot-posted pending maker order exists', async () => {
@@ -507,7 +519,7 @@ describe('Position Reconciliation Healer', () => {
     }));
   });
 
-  it('blocks weather CLOB import when pending order exists but token/direction mismatches the fill', async () => {
+  it('imports weather CLOB fill as reconciled:weather when pending order token/direction mismatches', async () => {
     const weatherClobPosition = {
       conditionId: 'cond-weather-mismatch',
       asset: 'tok-w-no',   // NO fill
@@ -525,15 +537,15 @@ describe('Position Reconciliation Healer', () => {
     (positionLedger.getOpenPositions as any).mockResolvedValue([]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([weatherClobPosition]);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(weatherGammaMarket);
-    // Pending order is for YES token — does not match the NO fill
+    // Pending order is for YES token — does not match the NO fill → pendingOrder = null
     (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
       orderId: 'order-weather-mismatch',
-      tokenId: 'tok-w-yes',   // wrong token for this fill
+      tokenId: 'tok-w-yes',
       price: 0.62,
       size: 50,
       postedAt: Date.now() - 60_000,
       expiresAt: Date.now() + 60_000,
-      direction: 'YES',       // wrong direction
+      direction: 'YES',
       edgeMagnitude: 0.10,
       bestAskAtPosting: 0.63,
       intendedStakeUsd: 5,
@@ -542,8 +554,19 @@ describe('Position Reconciliation Healer', () => {
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    // Mismatch → pendingOrder is null → weather guard blocks import
-    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
+    // Mismatch → pendingOrder is null → still imported as reconciled:weather for monitor/size-up tracking
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-weather-mismatch',
+      direction: 'NO',
+      sourcedFrom: 'reconciled:weather',
+      entryPrice: 0.38,
+    }));
+    expect(mockRedis.set).toHaveBeenCalledWith(
+      'weather:market_state:numeric-weather-mismatch:NO',
+      expect.stringContaining('"outcomePrice":0.38'),
+      'EX',
+      48 * 60 * 60,
+    );
   });
 
   it('still imports non-weather CLOB orphans normally', async () => {
