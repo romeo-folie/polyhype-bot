@@ -89,6 +89,7 @@ function makePosition(overrides = {}) {
   return {
     id: 'pos-1',
     marketId: 'mkt-1',
+    direction: 'NO' as const,
     entryPrice: 0.62,
     sharesHeld: 10,
     ...overrides,
@@ -97,13 +98,18 @@ function makePosition(overrides = {}) {
 
 function makeRedis(lockExists = false) {
   const store = new Map<string, string>();
+  if (lockExists) {
+    // Pre-populate the lock key so mget returns a hit for pos-1
+    store.set('weather:locked:pos-1', '1');
+  }
   return {
-    exists: vi.fn().mockResolvedValue(lockExists ? 1 : 0),
+    exists: vi.fn(async (key: string) => (store.has(key) ? 1 : 0)),
     set: vi.fn(async (key: string, value: string) => {
       store.set(key, value);
       return 'OK';
     }),
     get: vi.fn().mockResolvedValue(null),
+    mget: vi.fn(async (...keys: string[]) => keys.map((k) => store.get(k) ?? null)),
     _store: store,
   };
 }
@@ -129,7 +135,7 @@ describe('runWeatherLockInScan', () => {
     expect(mockSubmitClobBuy).not.toHaveBeenCalled();
   });
 
-  it('skips when YES ask exceeds WEATHER_LOCK_IN_MAX_YES_PRICE', async () => {
+  it('skips when opposite ask exceeds WEATHER_LOCK_IN_MAX_YES_PRICE', async () => {
     mockSql.mockResolvedValue([makePosition()]);
     mockGetClobOrderBook.mockResolvedValue({ asks: [{ price: '0.10' }] }); // > 0.05 max
     const redis = makeRedis();
@@ -140,7 +146,6 @@ describe('runWeatherLockInScan', () => {
   });
 
   it('skips when cost ceiling would be exceeded', async () => {
-    // entryPrice=0.62 + yesAsk=0.05 = 0.67 — within ceiling; but set ceiling low
     mockSql.mockResolvedValue([makePosition({ entryPrice: 1.02 })]);
     mockGetClobOrderBook.mockResolvedValue({ asks: [{ price: '0.04' }] });
     // costTotal = 1.02 + 0.04 = 1.06 > WEATHER_LOCK_IN_COST_CEILING 1.05
@@ -149,6 +154,29 @@ describe('runWeatherLockInScan', () => {
     await runWeatherLockInScan(redis as any);
 
     expect(mockSubmitClobBuy).not.toHaveBeenCalled();
+  });
+
+  it('buys YES (tokenIds[0]) when locking in a NO position', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' as const })]);
+    const redis = makeRedis();
+
+    await runWeatherLockInScan(redis as any);
+
+    expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-yes' }),
+    );
+  });
+
+  it('buys NO (tokenIds[1]) when locking in a YES position', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'YES' as const })]);
+    const redis = makeRedis();
+
+    await runWeatherLockInScan(redis as any);
+
+    // YES position → buy NO → tokenIds[1]
+    expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-no' }),
+    );
   });
 
   it('does not execute when WEATHER_LOCK_IN_ENABLED=false but still shadow-logs', async () => {

@@ -1849,6 +1849,28 @@ const envSchema = z.object({
   // At 0.92 we guarantee at least 8¢/share profit before fees.
   WEATHER_LOCK_IN_COST_CEILING: z.coerce.number().min(0).max(1).optional().default(0.92),
 
+  // ── Weather forecast invalidation ─────────────────────────────────────────
+  // Revalidates open weather positions against the latest forecast. Ships dark.
+  // Phase 2: shadow logging (WEATHER_FORECAST_INVALIDATION_SHADOW_ENABLED=true).
+  // Phase 3: size-up blocking (WEATHER_FORECAST_INVALIDATION_ENABLED=true).
+  // Phase 4: live hedge (WEATHER_FORECAST_INVALIDATION_HEDGE_ENABLED=true).
+  WEATHER_FORECAST_INVALIDATION_ENABLED: boolFromEnv.optional().default(false),
+  WEATHER_FORECAST_INVALIDATION_SHADOW_ENABLED: boolFromEnv.optional().default(true),
+  // Held-side probability must fall by at least this much from entry to mark invalidated.
+  WEATHER_FORECAST_INVALIDATION_MIN_DROP: z.coerce.number().min(0).max(1).optional().default(0.20),
+  // Only mark invalidated when current held-side probability is below this (severity filter).
+  WEATHER_FORECAST_INVALIDATION_MIN_CURRENT_HELD_PROB: z.coerce.number().min(0).max(1).optional().default(0.50),
+  // TTL (seconds) for the Redis invalidation key that blocks size-ups (6 hours).
+  WEATHER_FORECAST_INVALIDATION_TTL_S: z.coerce.number().int().min(0).optional().default(21600),
+  // Hedge: buy opposite token when the position is invalidated and opposite is cheap.
+  WEATHER_FORECAST_INVALIDATION_HEDGE_ENABLED: boolFromEnv.optional().default(false),
+  // Maximum price to pay for the opposite (hedge) token.
+  WEATHER_FORECAST_INVALIDATION_MAX_HEDGE_PRICE: z.coerce.number().min(0).max(1).optional().default(0.25),
+  // entry_price + opposite_ask must be ≤ this to hedge.
+  WEATHER_FORECAST_INVALIDATION_MAX_TOTAL_COST: z.coerce.number().min(0).max(2).optional().default(1.05),
+  // Minimum fill ratio for hedge order — below this, no marker set and will retry.
+  WEATHER_FORECAST_INVALIDATION_MIN_FILL_RATIO: z.coerce.number().min(0).max(1).optional().default(0.90),
+
   // ── Weather oracle scanner ─────────────────────────────────────────────────
   // After the reconciler writes WU actuals for yesterday, scans active weather
   // markets for brackets whose outcome is now known but price hasn't fully

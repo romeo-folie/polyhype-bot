@@ -28,6 +28,7 @@ import { evaluateWeatherNearResEntry } from './nearResEntry.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import { runWeatherLockInScan } from './weatherLockIn.js';
+import { runWeatherInvalidationScan, FORECAST_INVALIDATED_KEY_PREFIX } from './weatherInvalidation.js';
 import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
 import { hasOpenPosition } from '../execution/positionLedger.js';
@@ -820,6 +821,70 @@ export interface FindMispricedOptions {
   baseRateMinSamples?: number;
   /** Block tail NO when WU base-rate YES fraction ≥ this threshold (default 0.70). */
   baseRateNoBlockThreshold?: number;
+}
+
+export interface BiasedProbResult {
+  modelProbability: number;
+  effectiveStdDev: number;
+  correctedForecastHigh: number;
+  biasMode: 'none' | 'weak' | 'full';
+}
+
+/**
+ * Compute the model probability for a single bracket given a forecast and bias options.
+ * Shared by findMispricedBrackets and the forecast-invalidation revaluation scanner.
+ */
+export function computeBiasedProb(
+  bracketLow: number | null,
+  bracketHigh: number | null,
+  daysOut: number,
+  forecast: ForecastResult,
+  options: Pick<FindMispricedOptions,
+    'stddevMultiplier' | 'cityBias' | 'biasCorrectionEnabled' |
+    'biasMinSamples' | 'biasTrustedSamples' | 'weakBiasStddevMultiplier'
+  > = {},
+): BiasedProbResult {
+  const {
+    stddevMultiplier = 1.0,
+    cityBias = null,
+    biasCorrectionEnabled = false,
+    biasMinSamples = 14,
+    biasTrustedSamples: biasTrustedSamplesRaw = 14,
+    weakBiasStddevMultiplier = 1.2,
+  } = options;
+  const biasTrustedSamples = Math.max(biasTrustedSamplesRaw, biasMinSamples);
+
+  let biasMode: 'none' | 'weak' | 'full' = 'none';
+  if (biasCorrectionEnabled && cityBias !== null) {
+    if (cityBias.sampleSize >= biasTrustedSamples) {
+      biasMode = 'full';
+    } else if (cityBias.sampleSize >= biasMinSamples) {
+      biasMode = 'weak';
+    }
+  }
+  const meanShiftHelpful = cityBias?.meanShiftHelpful === true;
+  const meanShiftApplied = biasMode === 'full' && meanShiftHelpful;
+  const rawForecastHigh = forecast.forecastHigh;
+  const correctedForecastHigh = meanShiftApplied
+    ? rawForecastHigh - cityBias!.meanBias
+    : rawForecastHigh;
+  const rawEffectiveStdDev = forecast.stdDev * stddevMultiplier;
+  let effectiveStdDev: number;
+  if (biasMode === 'full') {
+    effectiveStdDev = Math.max(rawEffectiveStdDev, cityBias!.empiricalStddev * stddevMultiplier);
+  } else if (biasMode === 'weak') {
+    effectiveStdDev = rawEffectiveStdDev * weakBiasStddevMultiplier;
+  } else {
+    effectiveStdDev = rawEffectiveStdDev;
+  }
+  const modelProbability = estimateBracketProbability(
+    correctedForecastHigh,
+    bracketLow,
+    bracketHigh,
+    daysOut,
+    effectiveStdDev,
+  );
+  return { modelProbability, effectiveStdDev, correctedForecastHigh, biasMode };
 }
 
 export function findMispricedBrackets(
@@ -1644,12 +1709,17 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
 export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<void> {
   const cfg = loadConfig();
 
-  // Lock-in scan protects existing NO positions independently of new-entry
-  // scanning — run first so it fires regardless of scan state (zero opps,
-  // disabled scanner, execution off, bankroll zero, etc.).
+  // Lock-in scan protects existing positions independently of new-entry
+  // scanning — run first so it fires regardless of scan state.
   await runWeatherLockInScan(redis);
 
   const opportunities = await scanWeatherMarkets(redis, fetchFn);
+
+  // Forecast-invalidation scan runs AFTER scanWeatherMarkets so its Gamma call
+  // does not trigger the shared 429 circuit breaker before the main scanner can
+  // fetch events. Keys set here are checked by the execution loop below (same
+  // cycle), so size-up blocking still applies within the current scan.
+  await runWeatherInvalidationScan(redis, fetchFn);
 
   if (opportunities.length === 0) return;
 
@@ -1864,6 +1934,20 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
           bracket: opp.bracketLabel,
         });
         continue;
+      }
+      // Phase 3: block size-up when forecast invalidation has degraded the thesis.
+      if (cfg.WEATHER_FORECAST_INVALIDATION_ENABLED) {
+        const invalidKey = `${FORECAST_INVALIDATED_KEY_PREFIX}${opp.marketId}:${opp.tradeSide}`;
+        const isInvalidated = (await redis.exists(invalidKey).catch(() => 0)) > 0;
+        if (isInvalidated) {
+          logger.info('[weather] size-up blocked by forecast invalidation', {
+            marketId: opp.marketId,
+            city: opp.city,
+            bracket: opp.bracketLabel,
+            tradeSide: opp.tradeSide,
+          });
+          continue;
+        }
       }
     }
 
