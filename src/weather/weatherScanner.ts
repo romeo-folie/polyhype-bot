@@ -1645,6 +1645,7 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
     source: 'weather',
     sourcedFrom: `weather:${opp.city}:${opp.targetDate}:${opp.bracketLabel}`,
     reasoning: `Forecast high ${opp.forecastHigh.toFixed(1)}°, model P=${opp.modelProbability.toFixed(3)} vs market ${opp.outcomePrice.toFixed(3)}; ${opp.tradeSide} bracket "${opp.bracketLabel}" daysOut=${opp.daysOut}`,
+    ...(opp.endDate ? { endDate: opp.endDate } : {}),
   };
 }
 
