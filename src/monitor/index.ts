@@ -270,7 +270,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       }
 
       // Both gates passed — genuine near-resolution.
-      await redis.del(persistKey).catch(() => null);
+      if (cfg.MONITOR_NEAR_RES_PERSIST_S > 0) await redis.del(persistKey).catch(() => null);
       logger.info('[monitor] near-resolution detected — routing to redeemer', {
         marketId: position.marketId,
         direction: position.direction,
@@ -288,6 +288,11 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       );
       held++;
       continue;
+    } else if (cfg.MONITOR_NEAR_RES_PERSIST_S > 0) {
+      // Price is below threshold — reset the persistence window so any future
+      // spike must sustain for a full PERSIST_S before firing. Without this,
+      // elapsed time accumulates across non-continuous crossings.
+      await redis.del(`near_res_seen:${position.marketId}:${position.direction}`).catch(() => null);
     }
 
     // 3b. Tiered thresholds calculation
