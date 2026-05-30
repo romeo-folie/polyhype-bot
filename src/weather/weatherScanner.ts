@@ -1218,15 +1218,45 @@ export async function scanWeatherMarkets(
     if (isResolutionDay) {
       const endOfTargetDayMs = cityDayEndUtcMs(event.targetDate, event.coords.tz);
       const hoursRemaining = (endOfTargetDayMs - Date.now()) / 3_600_000;
-      // Early-entry window: allow fresh entries before the local-morning cutoff.
-      // Ensemble agreement is enforced per-opportunity below (shadowEdge > 0, fail
-      // closed when ECMWF data is absent). This lets us act on good forecast edges
-      // before any actual temperature observations exist for the day.
-      const allowEarlyEntry =
-        cfg.WEATHER_RES_DAY_EARLY_ENTRY_ENABLED &&
-        hoursRemaining >= cfg.WEATHER_RES_DAY_MIN_HOURS_REMAINING;
 
-      if (allowEarlyEntry) {
+      // Check for an existing position first — size-up always takes priority over
+      // fresh entry so existing positions are never accidentally routed through the
+      // early-entry path and stripped of their sizeUpScanOnly flag.
+      const activeMarker =
+        (await redis.exists(`${ACTIVE_EVENT_KEY_PREFIX}${event.slug}`).catch(() => 0)) > 0;
+      const hasPosition =
+        activeMarker ||
+        (await hasAnyOpenWeatherPosition(redis, event.allMarketIds).catch(() => false));
+
+      if (cfg.SIZE_UP_ENABLED && hasPosition) {
+        // Existing position → size-up path. Use a resolution-day-specific dedup key
+        // so a pre-noon scan that already claimed the normal dedup key doesn't block
+        // the first post-noon size-up. TTL covers the remainder of the target day so
+        // at most one size-up fires per event per day.
+        const rdKey = `${RES_DAY_DEDUP_KEY_PREFIX}${event.slug}`;
+        const rdTtlS = Math.max(
+          cfg.WEATHER_DEDUP_TTL_S,
+          Math.ceil((endOfTargetDayMs - Date.now()) / 1000),
+        );
+        const claimed = await redis.set(rdKey, '1', 'EX', rdTtlS, 'NX').catch(() => null);
+        if (!claimed) {
+          dedupSkipped++;
+          continue;
+        }
+        isSizeUpScan = true;
+        sizeUpRescanned++;
+        logger.debug('[weather] resolution-day size-up re-evaluation', {
+          eventSlug: event.slug,
+          city: event.city,
+        });
+      } else if (
+        !hasPosition &&
+        cfg.WEATHER_RES_DAY_EARLY_ENTRY_ENABLED &&
+        hoursRemaining >= cfg.WEATHER_RES_DAY_MIN_HOURS_REMAINING
+      ) {
+        // Early-entry window: no existing position, enough hours remain before the
+        // local daily high is observed. Ensemble agreement enforced per-opportunity
+        // below (shadowEdge > 0; null also blocks — fail closed).
         earlyEntryKey = `${RES_DAY_EARLY_KEY_PREFIX}${event.slug}`;
         const rdEarlyTtlS = Math.max(
           cfg.WEATHER_DEDUP_TTL_S,
@@ -1245,55 +1275,16 @@ export async function scanWeatherMarkets(
           hoursRemaining: +hoursRemaining.toFixed(1),
         });
         // Fall through to forecast + bracket evaluation.
-        // Ensemble veto below enforces positive model agreement (fail closed on null).
-      } else if (cfg.SIZE_UP_ENABLED) {
-        // On resolution day only allow size-ups — no fresh entries once the
-        // observation window has opened.
-        // Primary check: active-event marker. Fallback: scan ALL market IDs for
-        // this event (including closed brackets Gamma may have pruned from the
-        // active list) to cover expired markers and pre-marker positions.
-        const activeMarker =
-          (await redis.exists(`${ACTIVE_EVENT_KEY_PREFIX}${event.slug}`).catch(() => 0)) > 0;
-        const hasPosition =
-          activeMarker ||
-          (await hasAnyOpenWeatherPosition(redis, event.allMarketIds).catch(() => false));
-        if (hasPosition) {
-          // Use a resolution-day-specific dedup key so a pre-noon scan that already
-          // claimed the normal dedup key doesn't block the first post-noon size-up.
-          // TTL covers the remainder of the target day (not just DEDUP_TTL_S) so
-          // the slot is held for the full resolution day — at most one size-up fires
-          // per event per day regardless of SIZE_UP_MAX_TOPUPS.
-          const rdKey = `${RES_DAY_DEDUP_KEY_PREFIX}${event.slug}`;
-          const rdTtlS = Math.max(
-            cfg.WEATHER_DEDUP_TTL_S,
-            Math.ceil((endOfTargetDayMs - Date.now()) / 1000),
-          );
-          const claimed = await redis.set(rdKey, '1', 'EX', rdTtlS, 'NX').catch(() => null);
-          if (!claimed) {
-            dedupSkipped++;
-            continue;
-          }
-          isSizeUpScan = true;
-          sizeUpRescanned++;
-          logger.debug('[weather] resolution-day size-up re-evaluation', {
-            eventSlug: event.slug,
-            city: event.city,
-          });
-        } else {
-          dedupSkipped++;
-          logger.debug('[weather] resolution-day skip', {
-            eventSlug: event.slug,
-            city: event.city,
-            reason: 'no_active_position',
-          });
-          continue;
-        }
       } else {
         dedupSkipped++;
+        // Covers: SIZE_UP_ENABLED=false with a position; SIZE_UP_ENABLED=true but
+        // no position and early-entry disabled/threshold-not-met; or early-entry
+        // disabled with no position and size-up disabled.
+        const reason = cfg.SIZE_UP_ENABLED ? 'no_active_position' : 'size_up_disabled';
         logger.debug('[weather] resolution-day skip', {
           eventSlug: event.slug,
           city: event.city,
-          reason: 'size_up_disabled',
+          reason,
         });
         continue;
       }
