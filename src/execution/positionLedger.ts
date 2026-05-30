@@ -350,7 +350,8 @@ export async function markPositionPendingSettlement(
   await redis.hset(key, { pendingSettlement: 'true' });
   const pos = await getPosition(redis, marketId, direction);
   if (pos) void enqueueWrite('positions', pos as unknown as Record<string, unknown>);
-  logger.info('[ledger] position marked pendingSettlement', { marketId, direction });
+  const stack = new Error().stack?.split('\n').slice(1, 4).join(' ← ').replace(/\s+/g, ' ') ?? 'unknown';
+  logger.info('[ledger] position marked pendingSettlement', { marketId, direction, caller: stack });
 }
 
 export async function updateHighWaterMark(
