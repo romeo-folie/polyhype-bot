@@ -9,6 +9,7 @@ import { isRecentlyClosed, isRecentlyResolved } from '../shared/closedGuard.js';
 import { getPendingOrder, deletePendingOrder } from '../execution/pendingMakerOrders.js';
 import { notifyTradeExecuted, notify } from '../execution/telegram.js';
 import type { TradeSignal } from '../mapping/index.js';
+import { weatherEndDateFromQuestion } from '../weather/resolutionTime.js';
 
 async function closeGhostPositionWithHedge(
   redis: Redis,
@@ -328,7 +329,14 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
       executionVenue: 'clob',
       sourcedFrom: pendingOrder?.sourcedFrom ?? (isWeatherMarket ? 'reconciled:weather' : 'reconciled:clob'),
       edgeMagnitude: pendingOrder?.edgeMagnitude ?? 0,
-      ...(market.endDate && { endDate: market.endDate }),
+      // For weather markets use the city-local midnight as endDate rather than
+      // Gamma's value, which is 24h late for UTC+ cities (e.g. Hong Kong).
+      ...(() => {
+        const rawEnd = isWeatherMarket
+          ? (weatherEndDateFromQuestion(market.question ?? '', market.endDate ?? undefined) ?? market.endDate)
+          : market.endDate;
+        return rawEnd ? { endDate: rawEnd } : {};
+      })(),
       ...(pendingOrder?.consensusP != null && { consensusProbability: pendingOrder.consensusP }),
       ...(pendingOrder != null && {
         entryExecutionPath: 'maker_fill',
