@@ -665,6 +665,11 @@ export interface WeatherBracketOpportunity {
    * proceeding; the executor will treat it as a size-up if one is found.
    */
   sizeUpScanOnly?: boolean;
+  /** True when this opportunity came through the resolution-day early-entry path.
+   *  The early-entry gate already verified sufficient local time remains, so the
+   *  near-res entry gate (which uses Gamma's endDate, not local midnight) should
+   *  be bypassed to avoid a double-gate conflict. */
+  earlyResolutionDayEntry?: boolean;
 }
 
 interface WeatherMarketState {
@@ -1589,6 +1594,9 @@ export async function scanWeatherMarkets(
       if (isSizeUpScan) {
         for (const opp of gatedOpportunities) opp.sizeUpScanOnly = true;
       }
+      if (isEarlyResolutionDayEntry) {
+        for (const opp of gatedOpportunities) opp.earlyResolutionDayEntry = true;
+      }
       allOpportunities.push(...gatedOpportunities);
     }
   }
@@ -1779,6 +1787,11 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     const before = tradable.length;
     tradable = tradable.filter((opp) => {
       if (opp.sizeUpScanOnly) return true; // size-ups bypass near-res gate
+      // Early resolution-day entries already passed the cityDayEndUtcMs time gate
+      // (WEATHER_RES_DAY_MIN_HOURS_REMAINING). Gamma's endDate is set to noon UTC
+      // which can be only a few hours away for western cities at 02:00-06:00 local,
+      // causing a false positive here — the market is nowhere near closing for trading.
+      if (opp.earlyResolutionDayEntry) return true;
       const eval_ = evaluateWeatherNearResEntry(
         opp.endDate ?? undefined,
         cfg.WEATHER_NEAR_RES_ENTRY_HOURS,
