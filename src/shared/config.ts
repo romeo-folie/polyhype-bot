@@ -1655,6 +1655,13 @@ const envSchema = z.object({
   // the same side before a trade fires. Shadow is ECMWF when WEATHER_MODEL_ECMWF_ENABLED
   // =false (GFS primary), and GFS when =true. Ships dark.
   WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: boolFromEnv.optional().default(false),
+  // Allow fresh entries on resolution day when enough local time remains before the
+  // daily high is observed. Entry requires positive ensemble agreement (shadowEdge > 0);
+  // null shadowEdge (no ECMWF data) also blocks — fail closed.
+  WEATHER_RES_DAY_EARLY_ENTRY_ENABLED: boolFromEnv.optional().default(false),
+  // Hours until local city midnight that must remain for a resolution-day fresh entry
+  // to be considered. 15h ≈ before 09:00 local — no temperature readings exist yet.
+  WEATHER_RES_DAY_MIN_HOURS_REMAINING: z.coerce.number().min(0).max(24).optional().default(15),
   // Use HRRR (3km, hourly-updating, radar-assimilated) as 3rd voter for US cities at daysOut≤1.
   // HRRR is the highest-accuracy US model at 0–18h lead. Ships dark.
   WEATHER_HRRR_ENABLED: boolFromEnv.optional().default(false),
