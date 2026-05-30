@@ -352,8 +352,9 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
         tpThreshold = cfg.CRYPTO_UPDOWN_TAKE_PROFIT;
         slThreshold = cfg.CRYPTO_UPDOWN_STOP_LOSS;
       } else if (isWeather) {
-        tpThreshold = cfg.WEATHER_TAKE_PROFIT;
-        slThreshold = cfg.WEATHER_STOP_LOSS;
+        // 0 = disabled (hold to resolution). Use Infinity so the evaluator never fires.
+        tpThreshold = cfg.WEATHER_TAKE_PROFIT > 0 ? cfg.WEATHER_TAKE_PROFIT : Number.POSITIVE_INFINITY;
+        slThreshold = cfg.WEATHER_STOP_LOSS > 0 ? cfg.WEATHER_STOP_LOSS : Number.POSITIVE_INFINITY;
       } else if (isSports) {
         tpThreshold = cfg.SPORTS_TAKE_PROFIT;
         slThreshold = cfg.SPORTS_STOP_LOSS;
