@@ -126,26 +126,29 @@ async function main(): Promise<void> {
     // produces a sub-dollar notional that looks like dust but is a liquidity
     // artifact. Only the zero-balance path above (bal.balance ≤ 0.001) is safe
     // to act on for weather.
+    // Weather positions with real balance: never classify as dust based on a
+    // thin bid. A $0.01 bid on a weather token is a liquidity artifact (no
+    // sellers) at any point before on-chain settlement — not evidence of dust.
+    // This applies inside the near-res window too: the monitor's own gate
+    // handles near-res exits; the sweep must not preempt it by marking a
+    // full-balance position pendingSettlement while the market is still live.
+    // Only the zero-balance path above (bal.balance ≤ 0.001) is safe to act on.
     const isWeatherPos =
       pos.sourcedFrom?.startsWith('weather:') ||
       pos.sourcedFrom?.startsWith('reconciled:weather');
     if (isWeatherPos && bal.balance > 0.1) {
       const resMs = weatherResolutionEndMs(pos.sourcedFrom ?? '', pos.question, pos.endDate);
       const hoursToRes = resMs !== null ? (resMs - Date.now()) / 3_600_000 : null;
-      // Only skip the dust check when resolution is still meaningfully far away.
-      // If we're within the near-res window the redeemer should handle it.
-      if (hoursToRes === null || hoursToRes > cfg.MONITOR_NEAR_RES_MIN_HOURS_TO_RES) {
-        logger.info('[sweep-residuals] skipping weather position — full balance, thin bid is liquidity artifact', {
-          marketId: pos.marketId,
-          direction: pos.direction,
-          onChain: bal.balance.toFixed(4),
-          currentPrice: currentPrice.toFixed(4),
-          notional: notional.toFixed(4),
-          hoursToRes: hoursToRes !== null ? hoursToRes.toFixed(1) : 'unknown',
-          execute,
-        });
-        continue;
-      }
+      logger.info('[sweep-residuals] skipping weather position — full balance, thin bid is liquidity artifact', {
+        marketId: pos.marketId,
+        direction: pos.direction,
+        onChain: bal.balance.toFixed(4),
+        currentPrice: currentPrice.toFixed(4),
+        notional: notional.toFixed(4),
+        hoursToRes: hoursToRes !== null ? hoursToRes.toFixed(1) : 'unknown',
+        execute,
+      });
+      continue;
     }
 
     if (notional > 0 && notional < Math.max(cfg.RESIDUAL_SWEEP_MIN_NOTIONAL_USD, CLOB_MIN_ORDER_USD)) {
