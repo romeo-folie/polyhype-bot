@@ -27,6 +27,7 @@ import { getOpenPositions, markPositionPendingSettlement } from '../src/executio
 import { fetchClobTokenBalance, getClobOrderBook, CLOB_MIN_ORDER_USD } from '../src/shared/clob.js';
 import { loadConfig } from '../src/shared/config.js';
 import { logger } from '../src/shared/logger.js';
+import { weatherResolutionEndMs } from '../src/weather/resolutionTime.js';
 
 async function main(): Promise<void> {
   const execute = process.argv.includes('--execute');
@@ -117,6 +118,34 @@ async function main(): Promise<void> {
         mutated++;
       }
       continue;
+    }
+
+    // Weather positions: do not classify as dust based on a thin bid.
+    // On live weather brackets, the winning token can sit at a $0.01 bid (no
+    // sellers) while the position is healthy. Multiplying full shares × $0.01
+    // produces a sub-dollar notional that looks like dust but is a liquidity
+    // artifact. Only the zero-balance path above (bal.balance ≤ 0.001) is safe
+    // to act on for weather.
+    const isWeatherPos =
+      pos.sourcedFrom?.startsWith('weather:') ||
+      pos.sourcedFrom?.startsWith('reconciled:weather');
+    if (isWeatherPos && bal.balance > 0.1) {
+      const resMs = weatherResolutionEndMs(pos.sourcedFrom ?? '', pos.question, pos.endDate);
+      const hoursToRes = resMs !== null ? (resMs - Date.now()) / 3_600_000 : null;
+      // Only skip the dust check when resolution is still meaningfully far away.
+      // If we're within the near-res window the redeemer should handle it.
+      if (hoursToRes === null || hoursToRes > cfg.MONITOR_NEAR_RES_MIN_HOURS_TO_RES) {
+        logger.info('[sweep-residuals] skipping weather position — full balance, thin bid is liquidity artifact', {
+          marketId: pos.marketId,
+          direction: pos.direction,
+          onChain: bal.balance.toFixed(4),
+          currentPrice: currentPrice.toFixed(4),
+          notional: notional.toFixed(4),
+          hoursToRes: hoursToRes !== null ? hoursToRes.toFixed(1) : 'unknown',
+          execute,
+        });
+        continue;
+      }
     }
 
     if (notional > 0 && notional < Math.max(cfg.RESIDUAL_SWEEP_MIN_NOTIONAL_USD, CLOB_MIN_ORDER_USD)) {

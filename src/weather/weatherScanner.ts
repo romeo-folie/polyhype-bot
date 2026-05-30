@@ -41,6 +41,7 @@ import {
   getDefaultStdDev,
 } from './noaaClient.js';
 import type { CityCoordinates, FetchFn } from './noaaClient.js';
+import { cityLocalDate, cityDayEndUtcMs } from './resolutionTime.js';
 import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast } from './openMeteoClient.js';
 import { getCityBias, getCityActuals } from './cityBias.js';
 import type { CityBias, CityActuals } from './cityBias.js';
@@ -759,43 +760,8 @@ async function applyMarketDisagreementGate(
 }
 
 /**
- * Return the current calendar date (YYYY-MM-DD) in a given IANA timezone.
- * Used to determine whether a city is on its resolution day, since midnight
- * UTC does not coincide with midnight local time.
- */
-function cityLocalDate(tz: string): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
-}
-
-/**
- * Return the UTC millisecond timestamp for the end of `targetDate` in `tz`
- * (i.e. local midnight of the following day). Used to anchor the resolution-day
- * dedup TTL so it expires precisely when the city's local day rolls over, not at
- * UTC midnight (which is up to 14h early for western cities).
- */
-function cityDayEndUtcMs(targetDate: string, tz: string): number {
-  const parts0 = targetDate.split('-');
-  const y = parseInt(parts0[0] ?? '2000', 10);
-  const m = parseInt(parts0[1] ?? '1', 10);
-  const d = parseInt(parts0[2] ?? '1', 10);
-  const utcMidnight = Date.UTC(y, m - 1, d + 1);
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz,
-    hour: 'numeric',
-    minute: 'numeric',
-    second: 'numeric',
-    hourCycle: 'h23',
-  }).formatToParts(utcMidnight);
-  const h   = parseInt(parts.find(p => p.type === 'hour')?.value   ?? '0', 10);
-  const min = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10);
-  const sec = parseInt(parts.find(p => p.type === 'second')?.value ?? '0', 10);
-  const localMs = h * 3_600_000 + min * 60_000 + sec * 1000;
-  // UTC+ cities: local time at utcMidnight is in the morning → subtract to reach local midnight
-  // UTC- cities: local time is in the afternoon/evening → add the remaining hours to midnight
-  return localMs <= 12 * 3_600_000
-    ? utcMidnight - localMs
-    : utcMidnight + (86_400_000 - localMs);
-}
+// cityLocalDate and cityDayEndUtcMs are imported from resolutionTime.ts —
+// the single source of truth for city-local weather resolution boundaries.
 
 /**
  * Compute the days between now and a target date string (YYYY-MM-DD).
@@ -1640,6 +1606,12 @@ export async function scanWeatherMarkets(
  *     is already constructed that way.
  */
 function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): TradeSignal {
+  // Compute the city-local resolution end time rather than using Gamma's endDate,
+  // which is 24h late for UTC+ cities (HK, Taipei, etc.).
+  const coords = lookupCity(opp.city);
+  const correctEndDate = coords
+    ? new Date(cityDayEndUtcMs(opp.targetDate, coords.tz)).toISOString()
+    : (opp.endDate ?? undefined);
   return {
     marketId: opp.marketId,
     conditionId: opp.conditionId,
@@ -1653,7 +1625,7 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
     source: 'weather',
     sourcedFrom: `weather:${opp.city}:${opp.targetDate}:${opp.bracketLabel}`,
     reasoning: `Forecast high ${opp.forecastHigh.toFixed(1)}°, model P=${opp.modelProbability.toFixed(3)} vs market ${opp.outcomePrice.toFixed(3)}; ${opp.tradeSide} bracket "${opp.bracketLabel}" daysOut=${opp.daysOut}`,
-    ...(opp.endDate ? { endDate: opp.endDate } : {}),
+    ...(correctEndDate ? { endDate: correctEndDate } : {}),
   };
 }
 
