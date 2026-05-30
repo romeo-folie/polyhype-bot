@@ -29,10 +29,11 @@
  * releases.
  */
 
-import 'dotenv/config';
+import dotenv from 'dotenv';
+import { promises as fsPromises } from 'node:fs';
 import { hostname } from 'node:os';
 import { logger } from '../shared/logger.js';
-import { loadConfig } from '../shared/config.js';
+import { loadConfig, type AppConfig } from '../shared/config.js';
 import {
   getRedis,
   closeRedis,
@@ -52,13 +53,53 @@ const MONITOR_LOCK_KEY = 'monitor:lock';
 // See memory/recurring-worker-deaths.md — Bug A history on this choice.
 const MONITOR_LOCK_TTL_SEC = 270;
 const HEARTBEAT_INTERVAL_MS = 120_000;
+const ENV_RELOAD_SETTLE_MS = 2_000;
 
 
 // Module-level releaseLock reference so the shutdown handler can call it.
 let _releaseLock: (() => Promise<void>) | null = null;
 
+async function refreshMonitorConfig(lastEnvMtimeMs: number): Promise<{
+  cfg: AppConfig;
+  envMtimeMs: number;
+}> {
+  let envStat;
+  try {
+    envStat = await fsPromises.stat('.env');
+  } catch (err) {
+    logger.debug('[monitor-worker] .env stat check failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { cfg: loadConfig(), envMtimeMs: lastEnvMtimeMs };
+  }
+
+  const envChanged = envStat.mtimeMs !== lastEnvMtimeMs;
+  const envSettled = Date.now() - envStat.mtimeMs > ENV_RELOAD_SETTLE_MS;
+
+  if (envChanged && envSettled) {
+    dotenv.config({ override: true });
+    const cfg = loadConfig(true);
+    logger.info('[monitor-worker] configuration refreshed from .env', {
+      trendExitEnabled: cfg.TREND_EXIT_ENABLED,
+      staleExitEnabled: cfg.STALE_EXIT_ENABLED,
+      polymarketTpSlEnabled: cfg.POLYMARKET_TP_SL_ENABLED,
+      trailingStopEnabled: cfg.TRAILING_STOP_ENABLED,
+    });
+    return { cfg, envMtimeMs: envStat.mtimeMs };
+  }
+
+  return { cfg: loadConfig(), envMtimeMs: lastEnvMtimeMs };
+}
+
 export async function runMonitorWorker(): Promise<void> {
-  const cfg = loadConfig();
+  dotenv.config();
+  let envMtimeMs = 0;
+  try {
+    envMtimeMs = (await fsPromises.stat('.env')).mtimeMs;
+  } catch {
+    // loadConfig() below will report missing required environment if .env was needed.
+  }
+  let cfg = loadConfig();
   const redis = getRedis();
 
   const myHostname = hostname();
@@ -118,6 +159,10 @@ export async function runMonitorWorker(): Promise<void> {
     loopIntervalMs: cfg.MONITOR_LOOP_INTERVAL_MS,
     lockTtlSec: MONITOR_LOCK_TTL_SEC,
     heavyIntervalMin: cfg.MONITOR_HEAVY_INTERVAL_MIN,
+    trendExitEnabled: cfg.TREND_EXIT_ENABLED,
+    staleExitEnabled: cfg.STALE_EXIT_ENABLED,
+    polymarketTpSlEnabled: cfg.POLYMARKET_TP_SL_ENABLED,
+    trailingStopEnabled: cfg.TRAILING_STOP_ENABLED,
   });
 
   // One-shot startup tasks:
@@ -143,6 +188,16 @@ export async function runMonitorWorker(): Promise<void> {
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    try {
+      const refreshed = await refreshMonitorConfig(envMtimeMs);
+      cfg = refreshed.cfg;
+      envMtimeMs = refreshed.envMtimeMs;
+    } catch (configErr) {
+      logger.warn('[monitor-worker] config validation failed during reload — keeping previous config', {
+        error: configErr instanceof Error ? configErr.message : String(configErr),
+      });
+    }
+
     // Tri-state refresh, identical to futuresMonitor.ts pattern.
     let refreshState: 'refreshed' | 'expired' | 'stolen';
     try {
