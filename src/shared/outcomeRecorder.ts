@@ -71,7 +71,7 @@ export function inferSource(sourcedFrom: string): PositionOutcome['source'] {
   if (s.startsWith('near-zero-arb')) return 'near-zero-arb';
   if (s.startsWith('longshot-bias')) return 'longshot-bias';
   if (s.startsWith('correlation-arb')) return 'correlation-arb';
-  if (s.startsWith('weather:')) return 'weather';
+  if (s.startsWith('weather:') || s.startsWith('reconciled:weather')) return 'weather';
   // Futures origin markers (monitor-driven, backfill, and HL hedges) — these
   // are futures decisions, not OSINT. OSINT-triggered futures trades still
   // label 'osint' by design: the decision source was news, HL is only the venue.

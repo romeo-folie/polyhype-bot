@@ -305,17 +305,8 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
       });
     }
 
-    // Block weather market CLOB imports unless a bot-posted maker order is waiting
-    // AND it matches the fill's token + direction. A rawPending with a mismatched
-    // token/direction means pendingOrder is null — treat that the same as no pending
-    // order so a stale key cannot smuggle an unrelated fill past scanner validation.
-    if (!pendingOrder && /highest\s+temperature/i.test(market.question ?? '')) {
-      logger.info('[reconcile] skipping untracked weather market CLOB import', {
-        marketId: market.id,
-        question: market.question,
-      });
-      return false;
-    }
+    const isWeatherMarket = /highest\s+temperature/i.test(market.question ?? '');
+
     if (pendingOrder) {
       logger.info('[reconcile] linked CLOB orphan to pending maker order', {
         marketId: market.id,
@@ -335,7 +326,7 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
       sharesHeld: shares,
       openedAt: new Date().toISOString(),
       executionVenue: 'clob',
-      sourcedFrom: pendingOrder?.sourcedFrom ?? 'reconciled:clob',
+      sourcedFrom: pendingOrder?.sourcedFrom ?? (isWeatherMarket ? 'reconciled:weather' : 'reconciled:clob'),
       edgeMagnitude: pendingOrder?.edgeMagnitude ?? 0,
       ...(market.endDate && { endDate: market.endDate }),
       ...(pendingOrder?.consensusP != null && { consensusProbability: pendingOrder.consensusP }),
@@ -351,6 +342,26 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
     };
 
     await recordPosition(redis, newPos);
+
+    // Seed the weather market-state key so the scanner can compute adverseMove and
+    // winProbImprovement for size_up eligibility. winProbability is omitted so the
+    // scanner treats it as null on the first post-import scan (probMove = Infinity →
+    // disagreement gate passes leniently); subsequent scans overwrite with real values.
+    if (isWeatherMarket && !pendingOrder) {
+      const marketStateKey = `weather:market_state:${market.id}:${direction}`;
+      const marketState = JSON.stringify({
+        tradeSide: direction,
+        outcomePrice: pos.avgPrice,
+        observedAt: new Date().toISOString(),
+      });
+      await redis.set(marketStateKey, marketState, 'EX', 48 * 60 * 60);
+      logger.info('[reconcile] seeded weather market state for manual import', {
+        marketId: market.id,
+        direction,
+        entryPrice: pos.avgPrice,
+      });
+    }
+
     // Delete the pending order key only after the position is durably recorded.
     if (pendingOrder) {
       await deletePendingOrder(redis, market.id);

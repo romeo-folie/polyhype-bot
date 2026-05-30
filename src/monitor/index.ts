@@ -213,7 +213,7 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       // spike on a market resolving tomorrow cannot be genuine near-resolution.
       // Non-weather markets are excluded: their endDate may not match actual
       // resolution time (markets can resolve early before their stated endDate).
-      const isWeatherSource = (position.sourcedFrom?.startsWith('weather:') || position.sourcedFrom?.startsWith('weather-oracle:')) ?? false;
+      const isWeatherSource = (position.sourcedFrom?.startsWith('weather:') || position.sourcedFrom?.startsWith('weather-oracle:') || position.sourcedFrom?.startsWith('reconciled:weather')) ?? false;
       if (isWeatherSource && position.endDate && cfg.MONITOR_NEAR_RES_MIN_HOURS_TO_RES > 0) {
         const hoursToEnd = (new Date(position.endDate).getTime() - Date.now()) / 3_600_000;
         if (hoursToEnd > cfg.MONITOR_NEAR_RES_MIN_HOURS_TO_RES) {
