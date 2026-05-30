@@ -1,9 +1,14 @@
 /**
  * Weather Lock-In Scanner
  *
- * When a weather NO position is deeply in profit (YES has dropped to near zero),
- * buys YES at a cheap price to guarantee payout regardless of outcome. This
- * bypasses the executor's opposite-side gate by calling submitClobBuy directly.
+ * When a weather position is deeply in profit (the opposite side has dropped
+ * to near zero), buys the opposite token cheaply to guarantee payout regardless
+ * of outcome. This bypasses the executor's opposite-side gate by calling
+ * submitClobBuy directly.
+ *
+ * Supports both YES and NO positions:
+ *   - Held NO: buys YES when YES is cheap (≤ WEATHER_LOCK_IN_MAX_YES_PRICE).
+ *   - Held YES: buys NO when NO is cheap (≤ WEATHER_LOCK_IN_MAX_YES_PRICE).
  *
  * Ships dark (WEATHER_LOCK_IN_ENABLED=false). Shadow-logs all opportunities
  * regardless of enabled state.
@@ -26,24 +31,26 @@ const LOCK_IN_MIN_FILL_RATIO = 0.9;
 const LOCK_KEY_PREFIX = 'weather:locked:';
 const LOCK_TTL_S = 14 * 24 * 3600;
 
-interface OpenWeatherNoPosition {
+interface OpenWeatherPosition {
   id: string;
   marketId: string;
+  direction: 'YES' | 'NO';
   entryPrice: number;
   sharesHeld: number;
 }
 
-async function fetchOpenWeatherNoPositions(): Promise<OpenWeatherNoPosition[]> {
+async function fetchOpenWeatherPositions(): Promise<OpenWeatherPosition[]> {
   const sql = getSql();
-  return sql<OpenWeatherNoPosition[]>`
+  return sql<OpenWeatherPosition[]>`
     SELECT
       id::text             AS id,
       market_id            AS "marketId",
+      direction            AS direction,
       entry_price::float8  AS "entryPrice",
       shares_held::float8  AS "sharesHeld"
     FROM positions
-    WHERE sourced_from = 'weather'
-      AND direction = 'NO'
+    WHERE sourced_from LIKE 'weather:%'
+      AND direction IN ('YES', 'NO')
       AND pending_settlement = false
       AND closed_at IS NULL
       AND shares_held > 0
@@ -55,9 +62,9 @@ async function fetchOpenWeatherNoPositions(): Promise<OpenWeatherNoPosition[]> {
 export async function runWeatherLockInScan(redis: Redis): Promise<void> {
   const cfg = loadConfig();
 
-  let positions: OpenWeatherNoPosition[];
+  let positions: OpenWeatherPosition[];
   try {
-    positions = await fetchOpenWeatherNoPositions();
+    positions = await fetchOpenWeatherPositions();
   } catch (err) {
     logger.warn('[weather-lock-in] DB query failed — aborting scan', {
       error: err instanceof Error ? err.message : String(err),
@@ -85,15 +92,20 @@ export async function runWeatherLockInScan(redis: Redis): Promise<void> {
         continue;
       }
 
-      let yesTokenId: string;
+      // tokenIds[0]=YES, tokenIds[1]=NO; buy the opposite of our held side.
+      let oppositeTokenId: string;
       try {
         const tokenIds = parseClobTokenIds(market.clobTokenIds);
-        const id = tokenIds[0];
+        const idx = pos.direction === 'YES' ? 1 : 0;
+        const id = tokenIds[idx];
         if (!id) {
-          logger.warn('[weather-lock-in] no YES tokenId found — skipping', { marketId: pos.marketId });
+          logger.warn('[weather-lock-in] opposite tokenId not found — skipping', {
+            marketId: pos.marketId,
+            direction: pos.direction,
+          });
           continue;
         }
-        yesTokenId = id;
+        oppositeTokenId = id;
       } catch (err) {
         logger.warn('[weather-lock-in] failed to parse clobTokenIds — skipping', {
           marketId: pos.marketId,
@@ -102,30 +114,36 @@ export async function runWeatherLockInScan(redis: Redis): Promise<void> {
         continue;
       }
 
-      const book = await getClobOrderBook(yesTokenId);
+      const oppositeDirection = pos.direction === 'YES' ? 'NO' : 'YES';
+      const book = await getClobOrderBook(oppositeTokenId);
       if (!book || !book.asks || book.asks.length === 0) {
-        logger.debug('[weather-lock-in] no asks on YES side — skipping', { marketId: pos.marketId });
+        logger.debug('[weather-lock-in] no asks on opposite side — skipping', {
+          marketId: pos.marketId,
+          direction: pos.direction,
+        });
         continue;
       }
 
       const bestAsk = book.asks[0];
       if (!bestAsk) continue;
-      const yesAsk = parseFloat(String(bestAsk.price));
-      if (!isFinite(yesAsk) || yesAsk <= 0) continue;
+      const oppositeAsk = parseFloat(String(bestAsk.price));
+      if (!isFinite(oppositeAsk) || oppositeAsk <= 0) continue;
 
-      const costTotal = pos.entryPrice + yesAsk;
-      const meetsYesPrice = yesAsk <= cfg.WEATHER_LOCK_IN_MAX_YES_PRICE;
+      const costTotal = pos.entryPrice + oppositeAsk;
+      const meetsOppositePrice = oppositeAsk <= cfg.WEATHER_LOCK_IN_MAX_YES_PRICE;
       const meetsCostCeiling = costTotal <= cfg.WEATHER_LOCK_IN_COST_CEILING;
-      const wouldLockIn = meetsYesPrice && meetsCostCeiling;
+      const wouldLockIn = meetsOppositePrice && meetsCostCeiling;
 
       logger.info('[weather-lock-in] opportunity evaluated', {
         positionId: pos.id,
         marketId: pos.marketId,
+        direction: pos.direction,
+        oppositeDirection,
         entryPrice: pos.entryPrice,
         sharesHeld: pos.sharesHeld,
-        yesAsk,
+        oppositeAsk,
         costTotal: costTotal.toFixed(4),
-        meetsYesPrice,
+        meetsOppositePrice,
         meetsCostCeiling,
         wouldLockIn,
         enabled: cfg.WEATHER_LOCK_IN_ENABLED,
@@ -135,19 +153,21 @@ export async function runWeatherLockInScan(redis: Redis): Promise<void> {
         kind: 'weather_lock_in',
         source: 'arb',
         marketId: pos.marketId,
-        direction: 'YES',
+        direction: oppositeDirection,
         wouldBlock: !wouldLockIn || !cfg.WEATHER_LOCK_IN_ENABLED,
-        metricValue: yesAsk,
+        metricValue: oppositeAsk,
         threshold: cfg.WEATHER_LOCK_IN_MAX_YES_PRICE,
         payload: {
           positionId: pos.id,
+          direction: pos.direction,
+          oppositeDirection,
           entryPrice: pos.entryPrice,
           sharesHeld: pos.sharesHeld,
-          yesAsk,
+          oppositeAsk,
           costTotal,
-          meetsYesPrice,
+          meetsOppositePrice,
           meetsCostCeiling,
-          maxYesPrice: cfg.WEATHER_LOCK_IN_MAX_YES_PRICE,
+          maxOppositePrice: cfg.WEATHER_LOCK_IN_MAX_YES_PRICE,
           costCeiling: cfg.WEATHER_LOCK_IN_COST_CEILING,
           enabled: cfg.WEATHER_LOCK_IN_ENABLED,
         },
@@ -155,8 +175,8 @@ export async function runWeatherLockInScan(redis: Redis): Promise<void> {
 
       if (!wouldLockIn || !cfg.WEATHER_LOCK_IN_ENABLED) continue;
 
-      const amountUsd = pos.sharesHeld * yesAsk;
-      const result = await submitClobBuy({ tokenId: yesTokenId, amountUsd, orderType: 'FAK' });
+      const amountUsd = pos.sharesHeld * oppositeAsk;
+      const result = await submitClobBuy({ tokenId: oppositeTokenId, amountUsd, orderType: 'FAK' });
 
       if (result.success) {
         const sharesBought = result.shares_bought ?? 0;
@@ -170,16 +190,17 @@ export async function runWeatherLockInScan(redis: Redis): Promise<void> {
             fillRatio: fillRatio.toFixed(3),
             minFillRatio: LOCK_IN_MIN_FILL_RATIO,
           });
-          // Still deduct what was spent to keep bankroll cache accurate.
           await deductStake(redis, result.cost ?? amountUsd * fillRatio);
           continue;
         }
         await redis.set(lockKey, '1', 'EX', LOCK_TTL_S);
         await deductStake(redis, result.cost ?? amountUsd);
-        logger.info('[weather-lock-in] YES lock-in executed', {
+        logger.info('[weather-lock-in] lock-in executed', {
           positionId: pos.id,
           marketId: pos.marketId,
-          yesAsk,
+          direction: pos.direction,
+          oppositeDirection,
+          oppositeAsk,
           amountUsd: amountUsd.toFixed(2),
           sharesBought,
           cost: result.cost,
@@ -188,7 +209,8 @@ export async function runWeatherLockInScan(redis: Redis): Promise<void> {
         logger.warn('[weather-lock-in] CLOB buy failed', {
           positionId: pos.id,
           marketId: pos.marketId,
-          yesAsk,
+          direction: pos.direction,
+          oppositeAsk,
           error: result.error,
         });
       }
