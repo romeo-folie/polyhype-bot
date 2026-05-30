@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 ## Project
-Autonomous trading agent for Polymarket prediction markets. Monitors OSINT sources (RSS, Telegram), spot prices (Binance WebSocket), and whale wallets to discover and execute trades. Primary venue is Simmer API with direct CLOB fallback. Also trades crypto futures on Hyperliquid.
+Autonomous trading agent for Polymarket prediction markets. Monitors OSINT sources (RSS, Telegram), spot prices (Binance WebSocket), and whale wallets to discover and execute trades. Executes on Polymarket CLOB directly. Also trades crypto futures on Hyperliquid.
 
 ## Tech Stack
 TypeScript, Node.js, ioredis, Zod, Vitest, Docker Compose. Deployed on Raspberry Pi.
@@ -12,7 +12,7 @@ src/
   arb/           # Arbitrage scanner (pure arb + crypto arb + Up/Down BTC markets)
   copytrade/     # Whale copytrade mirroring
   cron/          # Scheduled jobs: OSINT ingestion, spot scans, rebalancing, redemption
-  execution/     # Trade sizing (Half-Kelly), venue routing (Simmer → CLOB → Hyperliquid)
+  execution/     # Trade sizing (Half-Kelly), venue routing (CLOB → Hyperliquid)
   ingestion/     # RSS feeds, Telegram TDLib monitor, scoring
   mapping/       # LLM consensus probability estimation, divergence calculation, Gamma API
   monitor/       # Position monitoring, futures monitor, take-profit/stop-loss, reconciliation

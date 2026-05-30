@@ -4,7 +4,7 @@
  * End-to-end cron entrypoint:
  *   1. Run ingestion (Phase 1) to get high-urgency OSINT items
  *   2. Run mapping (Phase 2) to produce TradeSignal[]
- *   3. Execute each signal via the Simmer SDK (with idempotency)
+ *   3. Execute each signal via the CLOB (with idempotency)
  *   4. Record open positions in Redis ledger
  *   5. Send Telegram notifications
  */
@@ -17,7 +17,6 @@ import { loadConfig } from '../shared/config.js';
 import { runIngestion } from '../ingestion/index.js';
 import { runMapping, mapNewsToFutures } from '../mapping/index.js';
 import { executeAndRecordSignal } from './executor.js';
-import { resolveSimmerMarketId, getSimmerPositions } from '../shared/simmer.js';
 import { notifyTradeError } from './telegram.js';
 import { reEvaluatePositions } from '../monitor/signalReeval.js';
 import { getBankroll } from '../shared/bankroll.js';
@@ -49,7 +48,7 @@ async function runExecutionInner(redis: ReturnType<typeof getRedis>): Promise<vo
   logger.info('[execution] pipeline starting');
 
   // Read directly from process.env to avoid triggering loadConfig() validation
-  // (which requires LLM keys + SIMMER_API_KEY) on a path that may be a no-op.
+  // (which requires LLM keys) on a path that may be a no-op.
   const rssEnabled = process.env.OSINT_RSS_INGESTION_ENABLED === 'true';
 
   let highUrgencyItems: ScoredItem[] = [];
@@ -202,65 +201,8 @@ async function processScoredItemsInner(
       continue;
     }
 
-    if (result.tradeResult?.success) {
+    if (!result.skipped && !result.error) {
       executed++;
-
-      // sharesHeld was recorded by the executor; derive the same value here for
-      // the Simmer reconciliation setTimeout below (uses estimate only if venue
-      // omitted shares_bought).
-      let estimatedShares: number | undefined;
-      if (
-        result.sharesFilled == null &&
-        result.tradeResult.shares_bought == null &&
-        result.signal.outcomePrice > 0
-      ) {
-        estimatedShares = result.signal.stakeUsd / result.signal.outcomePrice;
-      }
-
-      // Simmer fill reconciliation: if shares_bought was unavailable and we used an
-      // estimate, query Simmer after a short delay to get the confirmed fill amount.
-      // Capture result.signal.stakeUsd BEFORE the setTimeout — the executor may have
-      // bumped the stake internally (floor bump, calibration scaling), so the loop
-      // variable `signal.stakeUsd` is stale. Use the executed stake when falling
-      // back to `stakeUsd / shares` for entry price.
-      const executedStakeUsd = result.signal.stakeUsd;
-      if (!result.tradeResult.shares_bought && result.executionVenue === 'simmer') {
-        setTimeout(async () => {
-          try {
-            const simmerId = await resolveSimmerMarketId(signal.question);
-            if (!simmerId) return;
-            const livePositions = await getSimmerPositions({ status: 'active' });
-            const side = signal.direction.toLowerCase() as 'yes' | 'no';
-            const match = livePositions.find((p) => p.market_id === simmerId && p.side === side);
-            if (match?.shares && match.shares > 0 && match.shares !== estimatedShares) {
-              // Prefer Simmer's reported average_price (actual fill price) over
-              // computing stakeUsd / shares, which assumes the fill matched the
-              // requested stake ratio and can be wrong when Simmer fills at a
-              // different price due to slippage or partial fills.
-              const actualEntryPrice = (match.average_price && match.average_price > 0)
-                ? match.average_price
-                : executedStakeUsd / match.shares;
-              // Update Redis ledger with actual fill and actual entry price
-              await redis.hset(`position:${signal.marketId}:${signal.direction}`,
-                'sharesHeld', String(match.shares),
-                'entryPrice', String(Number(actualEntryPrice).toFixed(6))
-              );
-              logger.info('[execution] reconciled sharesHeld and entryPrice with Simmer actual fill', {
-                marketId: signal.marketId,
-                estimated: estimatedShares,
-                actual: match.shares,
-                oldPrice: result.signal.outcomePrice,
-                newPrice: actualEntryPrice,
-                source: (match.average_price && match.average_price > 0) ? 'simmer_avg_price' : 'computed',
-              });
-            }
-          } catch (err) {
-            logger.warn('[execution] Simmer fill reconciliation failed (non-fatal)', {
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        }, 10000);
-      }
 
       // Track HL margin consumed for accurate margin cap checks in subsequent signals.
       // Only count confirmed HL executions — hedgeDispatched is fire-and-forget and may
@@ -271,9 +213,9 @@ async function processScoredItemsInner(
       if (result.executionVenue === 'hyperliquid') {
         sessionExposureUsd += result.signal.stakeUsd;
       }
-    } else if (result.tradeResult && !result.tradeResult.success) {
+    } else if (result.error && !result.skipped) {
       failed++;
-      await notifyTradeError(result.signal, result.tradeResult.error ?? 'unknown error');
+      await notifyTradeError(result.signal, result.error);
     }
   }
 

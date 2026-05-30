@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { runReconciliation } from '../reconciliation.js';
 import * as positionLedger from '../../execution/positionLedger.js';
-import * as simmer from '../../shared/simmer.js';
 import * as polymarketData from '../../shared/polymarketData.js';
 import * as polymarketGamma from '../../shared/polymarketGamma.js';
 import * as pendingMakerOrders from '../../execution/pendingMakerOrders.js';
@@ -15,12 +14,8 @@ vi.mock('../../execution/positionLedger.js', () => ({
   recordPosition: vi.fn(),
 }));
 
-vi.mock('../../shared/simmer.js', () => ({
-  getSimmerPositions: vi.fn(),
-}));
-
 vi.mock('../../shared/clob.js', () => ({
-  fetchClobTokenBalance: vi.fn(),
+  fetchClobTokenBalance: vi.fn().mockResolvedValue({ ok: false, error: 'not found' }),
 }));
 
 vi.mock('../../shared/polymarketData.js', () => ({
@@ -41,12 +36,28 @@ vi.mock('../../execution/telegram.js', () => ({
   notifyTradeExecuted: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../../shared/hyperliquid.js', () => ({
+  getHyperliquid: vi.fn().mockReturnValue({
+    closePosition: vi.fn().mockResolvedValue({ success: true }),
+  }),
+}));
+
+vi.mock('../../shared/logger.js', () => ({
+  logger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
+}));
+
 describe('Position Reconciliation Healer', () => {
   let mockRedis: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockRedis = {
+      get: vi.fn().mockResolvedValue(null),
       hset: vi.fn().mockResolvedValue(1),
       incr: vi.fn().mockResolvedValue(1),
       sismember: vi.fn().mockResolvedValue(0),
@@ -59,26 +70,29 @@ describe('Position Reconciliation Healer', () => {
     (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(null);
   });
 
-  it('detects and heals a cost-basis/share mismatch for Simmer', async () => {
+  it('detects and heals a share mismatch for CLOB position', async () => {
     const stalePosition = {
       marketId: 'mkt-1',
+      conditionId: 'cond-1',
       direction: 'YES',
-      executionVenue: 'simmer',
+      executionVenue: 'clob',
       stakeUsd: 100,
-      entryPrice: 0.40, // Stale price
-      sharesHeld: 250,   // Stale shares (100 / 0.40)
+      entryPrice: 0.40,
+      sharesHeld: 250,
+      clobTokenIds: ['tok-yes', 'tok-no'],
     };
 
-    // Actual state on Simmer: 200 shares (true price 100/200 = 0.50)
-    const actualSimmerPosition = {
-      market_id: 'mkt-1',
-      side: 'yes',
-      shares: 200,
-      average_price: 0.50,
-    };
+    const clobPositions = [
+      {
+        conditionId: 'cond-1',
+        asset: 'tok-yes',
+        size: 200,
+        avgPrice: 0.50,
+      },
+    ];
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([stalePosition]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([actualSimmerPosition]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
 
     await runReconciliation(mockRedis, { forceFix: true });
 
@@ -93,152 +107,33 @@ describe('Position Reconciliation Healer', () => {
     );
   });
 
-  it('detects and closes a ghost position (in ledger but missing from venue)', async () => {
+  it('detects and closes a ghost position (in ledger but missing from CLOB venue)', async () => {
     const ghostPosition = {
       marketId: 'ghost-1',
+      conditionId: 'cond-ghost',
       direction: 'NO',
-      executionVenue: 'simmer',
+      executionVenue: 'clob',
       sharesHeld: 100,
+      clobTokenIds: ['tok-ghost-yes', 'tok-ghost-no'],
     };
 
-    // Simmer returns a position for a different market (so the empty-venue guard
-    // doesn't abort), but nothing for ghost-1 — making it a true ghost.
-    const otherSimmerPosition = {
-      market_id: 'other-mkt',
-      side: 'yes',
-      shares: 50,
-      average_price: 0.30,
-    };
+    // CLOB returns a position for a different market — non-zero total prevents the abort guard.
+    const clobPositions = [
+      {
+        conditionId: 'cond-other',
+        asset: 'tok-other',
+        size: 50,
+        avgPrice: 0.30,
+      },
+    ];
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([ghostPosition]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([otherSimmerPosition]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
 
     await runReconciliation(mockRedis, { forceFix: true });
 
     // Expecting Ghost Cleanup
     expect(positionLedger.closePosition).toHaveBeenCalledWith(mockRedis, 'ghost-1', 'NO');
-  });
-
-  it('automatically re-imports an orphan position from Simmer with metadata resolution', async () => {
-    const orphanSimmerPosition = {
-      market_id: 'orphan-uuid-1',
-      side: 'yes',
-      shares: 500,
-      average_price: 0.20,
-      question: 'Will it rain?',
-    };
-
-    const mockGammaMarket = {
-      id: 'numeric-123',
-      question: 'Will it rain?',
-      conditionId: 'cond-123',
-      clobTokenIds: ['tok-yes', 'tok-no'],
-    };
-
-    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([orphanSimmerPosition]);
-    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(mockGammaMarket);
-
-    await runReconciliation(mockRedis, { forceFix: true });
-
-    // Expecting auto-import with RESOLVED numeric ID, not the UUID
-    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
-      marketId: 'numeric-123',
-      direction: 'YES',
-      entryPrice: 0.20,
-      sharesHeld: 500,
-      executionVenue: 'simmer'
-    }));
-  });
-
-  it('skips Simmer orphan import if metadata resolution fails (prevents 422 errors)', async () => {
-    const orphanSimmerPosition = {
-      market_id: 'orphan-uuid-2',
-      side: 'no',
-      shares: 100,
-      question: 'Unknown Question',
-    };
-
-    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([orphanSimmerPosition]);
-    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(null); // Resolution fails
-
-    await runReconciliation(mockRedis, { forceFix: true });
-
-    // Should NOT record any position (would cause 422 later)
-    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
-  });
-
-  it('uses authoritative CLOB price for Simmer orphans when available to avoid 0% PnL bug', async () => {
-    const orphanSimmerPosition = {
-      market_id: 'orphan-uuid-3',
-      side: 'yes',
-      shares: 100,
-      question: 'Will BTC hit 100k?',
-      average_price: 0.50, // This might be current price (0% PnL bug)
-    };
-
-    const mockGammaMarket = {
-      id: 'numeric-btc',
-      question: 'Will BTC hit 100k?',
-      conditionId: 'cond-btc',
-      clobTokenIds: ['tok-btc-yes', 'tok-btc-no'],
-    };
-
-    const clobPositions = [
-      {
-        conditionId: 'cond-btc',
-        asset: 'tok-btc-yes',
-        avgPrice: 0.35, // Authoritative entry price from Data API
-        size: 100,
-      }
-    ];
-
-    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([orphanSimmerPosition]);
-    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(mockGammaMarket);
-    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
-
-    await runReconciliation(mockRedis, { forceFix: true });
-
-    // Should use 0.35 from clobPositions instead of 0.50 from Simmer
-    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
-      marketId: 'numeric-btc',
-      entryPrice: 0.35,
-      stakeUsd: 35, // 100 * 0.35
-    }));
-  });
-
-  it('imports a sub-$1 Simmer orphan (dust guard was removed — small positions are legitimate)', async () => {
-    const subDollarOrphan = {
-      market_id: 'orphan-tiny',
-      side: 'yes',
-      shares: 0.77,
-      average_price: 0.45,
-      value_usdc: 0.35,
-      question: 'Will something small happen?',
-    };
-
-    const mockGammaMarket = {
-      id: 'numeric-tiny',
-      question: 'Will something small happen?',
-      conditionId: 'cond-tiny',
-      clobTokenIds: ['tok-tiny-yes', 'tok-tiny-no'],
-    };
-
-    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([subDollarOrphan]);
-    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(mockGammaMarket);
-
-    await runReconciliation(mockRedis, { forceFix: true });
-
-    // Before the dust-guard removal this would have been silently skipped (shares*avgPrice = 0.35 < $1).
-    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
-      marketId: 'numeric-tiny',
-      direction: 'YES',
-      entryPrice: 0.45,
-      sharesHeld: 0.77,
-    }));
   });
 
   it('automatically re-imports an orphan position from CLOB using Data & Gamma APIs', async () => {
@@ -257,7 +152,6 @@ describe('Position Reconciliation Healer', () => {
     };
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([]); // Ledger empty
-    (simmer.getSimmerPositions as any).mockResolvedValue([]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([orphanClobPosition]);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
 
@@ -270,7 +164,7 @@ describe('Position Reconciliation Healer', () => {
       entryPrice: 0.60,
       sharesHeld: 1000,
       stakeUsd: 600,
-      executionVenue: 'clob'
+      executionVenue: 'clob',
     }));
   });
 
@@ -290,7 +184,6 @@ describe('Position Reconciliation Healer', () => {
     };
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([orphanClobPosition]);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
     (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
@@ -350,7 +243,6 @@ describe('Position Reconciliation Healer', () => {
     };
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([orphanClobPosition]);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
     (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
@@ -392,7 +284,6 @@ describe('Position Reconciliation Healer', () => {
     };
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([orphanClobPosition]);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
     (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
@@ -454,7 +345,6 @@ describe('Position Reconciliation Healer', () => {
     };
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
 
@@ -469,28 +359,29 @@ describe('Position Reconciliation Healer', () => {
       expect.stringContaining('healed_mismatch'),
       625,
     );
-    
+
     // The 'NO' token (which was also on venue but not in ledger) should be imported as an orphan
     expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
       marketId: 'numeric-99',
       direction: 'NO',
       sharesHeld: 250,
-      executionVenue: 'clob'
+      executionVenue: 'clob',
     }));
   });
 
-  it('aborts reconciliation when both venues return empty but ledger has positions (API outage guard)', async () => {
+  it('aborts reconciliation when CLOB returns empty but ledger has positions (API outage guard)', async () => {
     const ledgerPosition = {
       marketId: 'mkt-1',
+      conditionId: 'cond-1',
       direction: 'YES',
-      executionVenue: 'simmer',
+      executionVenue: 'clob',
       stakeUsd: 100,
       entryPrice: 0.40,
       sharesHeld: 250,
+      clobTokenIds: ['tok-yes', 'tok-no'],
     };
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([]); // Empty!
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([]); // Empty!
 
     await runReconciliation(mockRedis, { forceFix: true });
@@ -501,165 +392,7 @@ describe('Position Reconciliation Healer', () => {
     expect(positionLedger.updatePositionShares).not.toHaveBeenCalled();
   });
 
-  it('upgrades a legacy Simmer UUID marketId back to a numeric Polymarket ID using the Correlation Matrix', async () => {
-    const legacyPosition = {
-      marketId: 'cb0e1515-16ba-4f74-858b-cfd2d1988ccf', // REAL UUID
-      question: 'Will it rain?',
-      direction: 'YES',
-      sharesHeld: 100,
-      stakeUsd: 50,
-      entryPrice: 0.50,
-      executionVenue: 'simmer',
-    };
-
-    // Venue state matches exactly, but marketId is different
-    const simmerPositions = [
-      {
-        market_id: 'cb0e1515-16ba-4f74-858b-cfd2d1988ccf',
-        side: 'yes',
-        shares: 100,
-        average_price: 0.50,
-        question: 'Will it rain?',
-      },
-    ];
-
-    // Data API + Gamma matrix provides the bridge
-    const clobPositions = [
-      {
-        conditionId: 'cond-abc',
-        asset: 'tok-yes',
-        size: 1000,
-        avgPrice: 0.5,
-      }
-    ];
-
-    const mockGammaMarket = {
-      id: 'numeric-777', // The correct numeric ID
-      question: 'Will it rain?',
-      conditionId: 'cond-abc',
-      clobTokenIds: ['tok-yes', 'tok-no'],
-    };
-
-    (positionLedger.getOpenPositions as any).mockResolvedValue([legacyPosition]);
-    (simmer.getSimmerPositions as any).mockResolvedValue(simmerPositions);
-    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
-    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
-
-    await runReconciliation(mockRedis, { forceFix: true });
-
-    // Expecting legacy entry to be closed
-    expect(positionLedger.closePosition).toHaveBeenCalledWith(mockRedis, 'cb0e1515-16ba-4f74-858b-cfd2d1988ccf', 'YES');
-
-    // Expecting new numeric entry to be recorded
-    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
-      marketId: 'numeric-777',
-      conditionId: 'cond-abc',
-      clobTokenIds: ['tok-yes', 'tok-no'],
-      reconciliationStatus: expect.stringContaining('upgraded')
-    }));
-  });
-
-  it('bridges Simmer UUID to numeric ID via condition_id and matches ledger correctly (no ghost, no orphan)', async () => {
-    // Ledger has numeric ID; Simmer returns a completely different UUID
-    const ledgerPosition = {
-      marketId: 'numeric-500',
-      conditionId: 'cond-bridge',
-      direction: 'YES',
-      sharesHeld: 100,
-      stakeUsd: 50,
-      entryPrice: 0.50,
-      executionVenue: 'simmer',
-      clobTokenIds: ['tok-bridge-yes', 'tok-bridge-no'],
-      question: 'Will the bridge work?',
-    };
-
-    // Simmer returns its own UUID, NOT the numeric ID
-    const simmerPositions = [
-      {
-        market_id: 'simmer-uuid-999',
-        side: 'yes',
-        shares: 120, // Different from ledger (will heal)
-        average_price: 0.50,
-        condition_id: 'cond-bridge',
-        question: 'Will the bridge work?',
-      },
-    ];
-
-    const mockGammaMarket = {
-      id: 'numeric-500',
-      question: 'Will the bridge work?',
-      conditionId: 'cond-bridge',
-      clobTokenIds: ['tok-bridge-yes', 'tok-bridge-no'],
-    };
-
-    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
-    (simmer.getSimmerPositions as any).mockResolvedValue(simmerPositions);
-    // Re-indexing resolves via fetchMarketByConditionId API fallback (step 3)
-    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
-
-    await runReconciliation(mockRedis, { forceFix: true });
-
-    // Should NOT ghost-delete (position was found on venue after bridging)
-    expect(positionLedger.closePosition).not.toHaveBeenCalled();
-
-    // Should heal the share mismatch (100 → 120), stakeUsd = 120 * 0.50 = 60
-    expect(positionLedger.updatePositionShares).toHaveBeenCalledWith(
-      mockRedis,
-      'numeric-500',
-      'YES',
-      120,
-      expect.stringContaining('healed_mismatch'),
-      60,
-    );
-
-    // Should NOT import as orphan
-    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
-  });
-
-  it('bridges Simmer UUID to numeric ID via question when condition_id is missing', async () => {
-    const ledgerPosition = {
-      marketId: 'numeric-600',
-      direction: 'NO',
-      sharesHeld: 50,
-      stakeUsd: 25,
-      entryPrice: 0.50,
-      executionVenue: 'simmer',
-      question: 'Will it snow tomorrow?',
-    };
-
-    // Simmer returns UUID, NO condition_id
-    const simmerPositions = [
-      {
-        market_id: 'simmer-uuid-abc',
-        side: 'no',
-        shares: 50,
-        average_price: 0.50,
-        question: 'Will it snow tomorrow?',
-      },
-    ];
-
-    const mockGammaMarket = {
-      id: 'numeric-600',
-      question: 'Will it snow tomorrow?',
-      conditionId: 'cond-snow',
-      clobTokenIds: ['tok-snow-yes', 'tok-snow-no'],
-    };
-
-    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
-    (simmer.getSimmerPositions as any).mockResolvedValue(simmerPositions);
-    // Re-indexing resolves via fetchMarketByQuestion API fallback (step 5)
-    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(mockGammaMarket);
-
-    await runReconciliation(mockRedis, { forceFix: true });
-
-    // Should NOT ghost-delete
-    expect(positionLedger.closePosition).not.toHaveBeenCalled();
-    // Should NOT import as orphan (shares match exactly)
-    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
-  });
-
-  it('CLOB reconciliation is unaffected by Simmer re-indexing', async () => {
-    // CLOB position in ledger + matching CLOB Data API + unrelated Simmer position
+  it('heals a CLOB share mismatch correctly', async () => {
     const clobLedgerPosition = {
       marketId: 'numeric-700',
       conditionId: 'cond-clob',
@@ -680,16 +413,6 @@ describe('Position Reconciliation Healer', () => {
       },
     ];
 
-    // Unrelated Simmer position that shouldn't interfere
-    const simmerPositions = [
-      {
-        market_id: 'simmer-unrelated',
-        side: 'yes',
-        shares: 10,
-        average_price: 0.30,
-      },
-    ];
-
     const mockGammaMarket = {
       id: 'numeric-700',
       question: 'CLOB only question',
@@ -698,7 +421,6 @@ describe('Position Reconciliation Healer', () => {
     };
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([clobLedgerPosition]);
-    (simmer.getSimmerPositions as any).mockResolvedValue(simmerPositions);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
 
@@ -718,50 +440,6 @@ describe('Position Reconciliation Healer', () => {
     expect(positionLedger.closePosition).not.toHaveBeenCalled();
   });
 
-  it('upgrades a legacy Simmer UUID marketId via fuzzy question match when Data API matrix is empty', async () => {
-    const legacyPosition = {
-      marketId: 'cb0e1515-16ba-4f74-858b-cfd2d1988ccf',
-      question: 'Will it rain?',
-      direction: 'YES',
-      sharesHeld: 100,
-      stakeUsd: 50,
-      entryPrice: 0.50,
-      executionVenue: 'simmer',
-    };
-
-    const simmerPositions = [
-      {
-        market_id: 'cb0e1515-16ba-4f74-858b-cfd2d1988ccf',
-        side: 'yes',
-        shares: 100,
-        average_price: 0.50,
-        question: 'Will it rain?',
-      },
-    ];
-
-    const mockGammaMarket = {
-      id: 'numeric-888',
-      question: 'Will it rain?',
-      conditionId: 'cond-xyz',
-      clobTokenIds: ['tok-y', 'tok-n'],
-    };
-
-    (positionLedger.getOpenPositions as any).mockResolvedValue([legacyPosition]);
-    (simmer.getSimmerPositions as any).mockResolvedValue(simmerPositions);
-    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([]); // Data API is empty!
-    (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(mockGammaMarket);
-
-    await runReconciliation(mockRedis, { forceFix: true });
-
-    // Expecting fuzzy match to have been called
-    expect(polymarketGamma.fetchMarketByQuestion).toHaveBeenCalledWith('Will it rain?');
-
-    // Expecting new numeric entry to be recorded
-    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
-      marketId: 'numeric-888'
-    }));
-  });
-
   it('blocks CLOB import of weather temperature bracket markets when no pending order exists', async () => {
     const weatherClobPosition = {
       conditionId: 'cond-weather-1',
@@ -778,7 +456,6 @@ describe('Position Reconciliation Healer', () => {
     };
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([weatherClobPosition]);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(weatherGammaMarket);
     // No pending order — external/unknown weather fill that bypassed the scanner
@@ -791,8 +468,6 @@ describe('Position Reconciliation Healer', () => {
   });
 
   it('allows CLOB import of weather markets when a bot-posted pending maker order exists', async () => {
-    // Scanner placed a GTC maker order on a weather bracket; it filled on CLOB.
-    // The pending order in Redis proves our scanner placed it — allow the import.
     const weatherClobPosition = {
       conditionId: 'cond-weather-2',
       asset: 'tok-w-yes',
@@ -808,10 +483,8 @@ describe('Position Reconciliation Healer', () => {
     };
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([weatherClobPosition]);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(weatherGammaMarket);
-    // Scanner-placed pending order — this fill came from our own system
     (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
       orderId: 'order-weather-1',
       tokenId: 'tok-w-yes',
@@ -828,7 +501,6 @@ describe('Position Reconciliation Healer', () => {
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    // Pending order present → scanner-placed fill → allow import and enrich with metadata
     expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
       marketId: 'numeric-weather-2',
       sourcedFrom: 'weather:chicago:2026-05-28:85°F',
@@ -836,8 +508,6 @@ describe('Position Reconciliation Healer', () => {
   });
 
   it('blocks weather CLOB import when pending order exists but token/direction mismatches the fill', async () => {
-    // A stale pending YES key exists but the fill landed on the NO token —
-    // pendingOrder is null after validation; the guard must still block the import.
     const weatherClobPosition = {
       conditionId: 'cond-weather-mismatch',
       asset: 'tok-w-no',   // NO fill
@@ -853,7 +523,6 @@ describe('Position Reconciliation Healer', () => {
     };
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([weatherClobPosition]);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(weatherGammaMarket);
     // Pending order is for YES token — does not match the NO fill
@@ -893,7 +562,6 @@ describe('Position Reconciliation Healer', () => {
     };
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([]);
-    (simmer.getSimmerPositions as any).mockResolvedValue([]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([normalClobPosition]);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(normalGammaMarket);
 

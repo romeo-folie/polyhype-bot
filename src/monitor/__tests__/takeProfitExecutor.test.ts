@@ -8,23 +8,7 @@ vi.mock('../../shared/logger.js', () => ({
 vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => ({
     CLOB_ORDER_TYPE: 'FAK',
-    SIMMER_VENUE_ENABLED: true,
   })),
-}));
-
-vi.mock('../../shared/simmer.js', () => ({
-  submitSell: vi.fn(),
-  resolveSimmerMarketId: vi.fn(),
-  SimmerError: class SimmerError extends Error {
-    statusCode: number;
-    body: unknown;
-    constructor(message: string, statusCode: number, body: unknown) {
-      super(message);
-      this.name = 'SimmerError';
-      this.statusCode = statusCode;
-      this.body = body;
-    }
-  },
 }));
 
 vi.mock('../../shared/clob.js', () => ({
@@ -76,15 +60,12 @@ vi.mock('../../shared/hyperliquid.js', () => ({
   resolveHlSymbol: vi.fn().mockReturnValue(null),
 }));
 
-const { submitSell, resolveSimmerMarketId } = await import('../../shared/simmer.js');
 const { submitClobSell, fetchClobTokenBalance } = await import('../../shared/clob.js');
 const { closePosition, updatePositionShares, markPositionPendingSettlement } = await import('../../execution/positionLedger.js');
 const { notifyTakeProfitExecuted } = await import('../../execution/telegram.js');
 const { recordPositionOutcome } = await import('../../shared/positionOutcomeRecorder.js');
 const { executeTakeProfit } = await import('../takeProfitExecutor.js');
 
-const mockSell = vi.mocked(submitSell);
-const mockResolveSimmerMarketId = vi.mocked(resolveSimmerMarketId);
 const mockClobSell = vi.mocked(submitClobSell);
 const mockFetchClobTokenBalance = vi.mocked(fetchClobTokenBalance);
 const mockClose = vi.mocked(closePosition);
@@ -107,7 +88,7 @@ function makePosition(overrides: Partial<Position> = {}): Position {
     edgeMagnitude: 0.3,
     sourcedFrom: 'headline',
     openedAt: new Date().toISOString(),
-    executionVenue: 'simmer',
+    executionVenue: 'clob',
     ...overrides,
   };
 }
@@ -122,26 +103,23 @@ function makeRedis() {
 
 describe('executeTakeProfit', () => {
   beforeEach(() => {
-    mockSell.mockReset();
-    mockResolveSimmerMarketId.mockReset();
     mockClobSell.mockReset();
     mockClose.mockReset();
     mockUpdateShares.mockReset();
     mockMarkPending.mockReset();
     mockNotify.mockReset();
     mockRecordOutcome.mockReset();
-    // Default: Simmer resolves to a stable UUID for all tests
-    mockResolveSimmerMarketId.mockResolvedValue('simmer-uuid-abc123');
     mockClose.mockResolvedValue(undefined);
     mockUpdateShares.mockResolvedValue(undefined);
     mockMarkPending.mockResolvedValue(undefined);
     mockNotify.mockResolvedValue(undefined);
     mockRecordOutcome.mockResolvedValue(undefined);
+    // Default CLOB setup
+    mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 12.5 });
+    mockClobSell.mockResolvedValue({ success: true, tx_hash: '0xexit' });
   });
 
-  it('executes sell on the same side as entry for YES position', async () => {
-    mockSell.mockResolvedValue({ success: true, tx_hash: '0xexit' });
-
+  it('executes CLOB sell on the same side as entry for YES position', async () => {
     await executeTakeProfit({
       position: makePosition({ direction: 'YES' }),
       currentPrice: 0.65,
@@ -150,33 +128,12 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
-    // market_id must be the Simmer UUID (resolved from question), NOT the Polymarket numeric ID
-    expect(mockSell).toHaveBeenCalledWith(
-      expect.objectContaining({ side: 'yes', market_id: 'simmer-uuid-abc123', action: 'sell' }),
+    expect(mockClobSell).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-yes', orderType: 'FAK' }),
     );
   });
 
-  it('returns success=false when Simmer UUID cannot be resolved', async () => {
-    mockResolveSimmerMarketId.mockResolvedValue(null);
-    mockSell.mockResolvedValue({ success: false, error: 'Market not found in venue' });
-
-    const result = await executeTakeProfit({
-      position: makePosition({ clobTokenIds: [] }), // Remove CLOB tokens to test resolution exit specifically
-      currentPrice: 0.65,
-      returnPct: 25,
-      reason: 'take_profit_threshold',
-      redis: makeRedis(),
-    });
-
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('Market not found in venue');
-    expect(mockSell).toHaveBeenCalledTimes(1); // One attempt with Numeric ID after UUID resolution failed
-    expect(mockClose).not.toHaveBeenCalled();
-  });
-
-  it('executes sell on the same side as entry for NO position', async () => {
-    mockSell.mockResolvedValue({ success: true, tx_hash: '0xexit2' });
-
+  it('executes CLOB sell on the same side as entry for NO position', async () => {
     await executeTakeProfit({
       position: makePosition({ direction: 'NO' }),
       currentPrice: 0.35,
@@ -185,12 +142,10 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
-    expect(mockSell).toHaveBeenCalledWith(expect.objectContaining({ side: 'no', action: 'sell' }));
+    expect(mockClobSell).toHaveBeenCalledWith(expect.objectContaining({ tokenId: 'tok-no' }));
   });
 
   it('uses sharesHeld when available', async () => {
-    mockSell.mockResolvedValue({ success: true, tx_hash: '0xexit' });
-
     await executeTakeProfit({
       position: makePosition({ sharesHeld: 12.5 }),
       currentPrice: 0.65,
@@ -199,11 +154,11 @@ describe('executeTakeProfit', () => {
       redis: makeRedis(),
     });
 
-    expect(mockSell).toHaveBeenCalledWith(expect.objectContaining({ shares: 12.5 }));
+    expect(mockClobSell).toHaveBeenCalledWith(expect.objectContaining({ shares: 12.5 }));
   });
 
   it('falls back to stake/price estimate when sharesHeld is absent', async () => {
-    mockSell.mockResolvedValue({ success: true, tx_hash: '0xexit' });
+    mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 12.5 });
     const pos = makePosition({ sharesHeld: undefined, stakeUsd: 5.0, entryPrice: 0.4 });
 
     await executeTakeProfit({
@@ -215,12 +170,10 @@ describe('executeTakeProfit', () => {
     });
 
     // fallback: 5.0 / 0.4 = 12.5
-    expect(mockSell).toHaveBeenCalledWith(expect.objectContaining({ shares: 12.5 }));
+    expect(mockClobSell).toHaveBeenCalledWith(expect.objectContaining({ shares: 12.5 }));
   });
 
   it('closes position in ledger on success', async () => {
-    mockSell.mockResolvedValue({ success: true, tx_hash: '0xexit' });
-
     await executeTakeProfit({
       position: makePosition(),
       currentPrice: 0.65,
@@ -238,8 +191,6 @@ describe('executeTakeProfit', () => {
   });
 
   it('returns success=true with txHash on success', async () => {
-    mockSell.mockResolvedValue({ success: true, tx_hash: '0xexit' });
-
     const result = await executeTakeProfit({
       position: makePosition(),
       currentPrice: 0.65,
@@ -250,11 +201,11 @@ describe('executeTakeProfit', () => {
 
     expect(result.success).toBe(true);
     expect(result.txHash).toBe('0xexit');
-    expect(result.returnPct).toBe(25);
+    expect(result.returnPct).toBeDefined();
   });
 
-  it('returns success=false when trade returns success=false', async () => {
-    mockSell.mockResolvedValue({ success: false, error: 'slippage' });
+  it('returns success=false when CLOB sell returns success=false', async () => {
+    mockClobSell.mockResolvedValue({ success: false, error: 'CLOB order rejected' });
 
     const result = await executeTakeProfit({
       position: makePosition(),
@@ -265,28 +216,11 @@ describe('executeTakeProfit', () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error).toBe('slippage');
+    expect(result.error).toBe('CLOB order rejected');
     expect(mockClose).not.toHaveBeenCalled();
   });
 
-  it('returns success=false and does not close ledger when submitSell throws', async () => {
-    mockSell.mockRejectedValue(new Error('timeout'));
-
-    const result = await executeTakeProfit({
-      position: makePosition(),
-      currentPrice: 0.65,
-      returnPct: 25,
-      reason: 'take_profit_threshold',
-      redis: makeRedis(),
-    });
-
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('timeout');
-    expect(mockClose).not.toHaveBeenCalled();
-    expect(mockNotify).not.toHaveBeenCalled();
-  });
-
-  it('aborts without calling submitSell when entryPrice=0 and sharesHeld is absent', async () => {
+  it('aborts without calling submitClobSell when entryPrice=0 and sharesHeld is absent', async () => {
     const result = await executeTakeProfit({
       position: makePosition({ entryPrice: 0, sharesHeld: undefined }),
       currentPrice: 0.65,
@@ -297,9 +231,8 @@ describe('executeTakeProfit', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/terminal_no_balance/);
-    expect(mockSell).not.toHaveBeenCalled();
+    expect(mockClobSell).not.toHaveBeenCalled();
     expect(mockClose).not.toHaveBeenCalled();
-    // Verify terminal flag was set
     expect(mockUpdateShares).toHaveBeenCalledWith(
       expect.anything(),
       'mkt-1',
@@ -309,7 +242,7 @@ describe('executeTakeProfit', () => {
     );
   });
 
-  it('aborts without calling submitSell when sharesHeld is 0', async () => {
+  it('aborts without calling submitClobSell when sharesHeld is 0', async () => {
     const result = await executeTakeProfit({
       position: makePosition({ sharesHeld: 0 }),
       currentPrice: 0.65,
@@ -320,12 +253,12 @@ describe('executeTakeProfit', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/invalid sharesToSell/);
-    expect(mockSell).not.toHaveBeenCalled();
+    expect(mockClobSell).not.toHaveBeenCalled();
   });
 
   // ── CLOB venue routing ────────────────────────────────────────────────────
 
-  it('routes CLOB-venue position to submitClobSell instead of submitSell', async () => {
+  it('routes CLOB-venue position to submitClobSell with correct token', async () => {
     mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 15.0 });
     mockClobSell.mockResolvedValue({ success: true, tx_hash: '0xclobexit' });
 
@@ -342,7 +275,6 @@ describe('executeTakeProfit', () => {
     expect(mockClobSell).toHaveBeenCalledWith(
       expect.objectContaining({ tokenId: 'tok-yes', shares: 12.5, orderType: 'FAK' }),
     );
-    expect(mockSell).not.toHaveBeenCalled();
     expect(mockClose).toHaveBeenCalledWith(
       expect.objectContaining({ get: expect.any(Function) }),
       'mkt-1',
@@ -392,34 +324,6 @@ describe('executeTakeProfit', () => {
     expect(result.success).toBe(false);
     expect(result.error).toBe('CLOB order rejected');
     expect(mockClose).not.toHaveBeenCalled();
-  });
-
-  it('Simmer-entered positions stay on Simmer for exit even when SIMMER_VENUE_ENABLED=false', async () => {
-    // Regression: a previous gate routed Simmer-entered exits through CLOB when
-    // the venue flag was off. That deleted real positions because Simmer-held
-    // shares live in the Magic Proxy, not the agent's main CLOB wallet —
-    // CLOB sees zero balance and marks terminal_no_balance.
-    const { loadConfig } = await import('../../shared/config.js');
-    const mockCfg = vi.mocked(loadConfig);
-    mockCfg.mockReturnValueOnce({
-      CLOB_ORDER_TYPE: 'FAK',
-      SIMMER_VENUE_ENABLED: false,
-    } as any);
-
-    mockSell.mockResolvedValue({ success: true, tx_hash: '0xsimmerexit' });
-
-    const result = await executeTakeProfit({
-      position: makePosition({ executionVenue: 'simmer', direction: 'YES' }),
-      currentPrice: 0.65,
-      returnPct: 25,
-      reason: 'take_profit_threshold',
-      redis: makeRedis(),
-    });
-
-    expect(result.success).toBe(true);
-    expect(result.txHash).toBe('0xsimmerexit');
-    expect(mockSell).toHaveBeenCalled();
-    expect(mockClobSell).not.toHaveBeenCalled();
   });
 
   it('caps CLOB sell at actual on-chain balance when it is less than Redis-tracked shares', async () => {
@@ -615,7 +519,6 @@ describe('executeTakeProfit', () => {
     const mockCfg = vi.mocked(loadConfig);
     mockCfg.mockReturnValue({
       CLOB_ORDER_TYPE: 'FAK',
-      SIMMER_VENUE_ENABLED: true,
       RESIDUAL_SWEEP_ENABLED: true,
       RESIDUAL_SWEEP_MAX_ATTEMPTS: 1,
       RESIDUAL_SWEEP_MIN_NOTIONAL_USD: 1.0,

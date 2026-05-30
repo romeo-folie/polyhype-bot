@@ -25,7 +25,6 @@ vi.mock('../../shared/feedSingleton.js', () => ({
   destroyPriceFeed: vi.fn(),
 }));
 vi.mock('../../shared/clobProbe.js', () => ({ runClobProbe: vi.fn() }));
-vi.mock('../../shared/simmer.js', () => ({ setAgentAutoRedeem: vi.fn() }));
 vi.mock('../../db/writeQueue.js', () => ({ enqueueWrite: vi.fn() }));
 
 vi.mock('../reconciliation.js', () => ({

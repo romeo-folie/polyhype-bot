@@ -6,29 +6,12 @@
  * executeAndRecordSignal so evaluateSizeUp is exercised end-to-end rather
  * than as isolated arithmetic assertions.
  *
- * Weather signals bypass Simmer (simmerId=null) and route to CLOB taker,
- * so submitClobBuy is the venue mock for the happy-path execution.
+ * All signals route to CLOB; submitClobBuy is the venue mock for the happy-path execution.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { TradeSignal } from '../../mapping/index.js';
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
-
-vi.mock('../../shared/simmer.js', () => ({
-  submitTrade: vi.fn(),
-  resolveSimmerMarketId: vi.fn(),
-  getMarketContext: vi.fn<() => Promise<null>>().mockResolvedValue(null),
-  SimmerError: class SimmerError extends Error {
-    statusCode: number;
-    body: unknown;
-    constructor(message: string, statusCode: number, body: unknown) {
-      super(message);
-      this.name = 'SimmerError';
-      this.statusCode = statusCode;
-      this.body = body;
-    }
-  },
-}));
 
 vi.mock('../../shared/clob.js', () => ({
   submitClobBuy: vi.fn(),
@@ -109,7 +92,6 @@ vi.mock('../../shared/closedGuard.js', () => ({
 
 const mockConfig = {
   REDIS_URL: 'redis://localhost:6379',
-  SIMMER_API_KEY: 'test-key',
   DIVERGENCE_THRESHOLD: 0.1,
   OPENAI_API_KEY: 'test-openai',
   FUTURES_ENABLED: false,
@@ -133,7 +115,6 @@ const mockConfig = {
   MAX_ENTRY_SPREAD_BPS: 0,
   ORACLE_LAG_MAX_ENTRY_SPREAD_BPS: -1,
   CLOB_FALLBACK_ENABLED: true,
-  SIMMER_VENUE_ENABLED: true,
   MAKER_EMPTY_BOOK_MIN_CONSENSUS: 0.65,
   MAKER_EMPTY_BOOK_MIN_EDGE: 0.20,
   MAKER_EMPTY_BOOK_MAX_STDDEV: 0.12,

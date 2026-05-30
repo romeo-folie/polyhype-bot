@@ -626,7 +626,7 @@ export async function runNearZeroScan(redis: Redis): Promise<void> {
     };
 
     const result = await executeAndRecordSignal(signal, redis);
-    if (!result.skipped) {
+    if (!result.skipped && result.entryExecutionPath !== 'maker_pending') {
       logger.info('[near-zero] trade executed', {
         marketId: candidate.market.id,
         direction: candidate.direction,

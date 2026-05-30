@@ -1,12 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type * as EthersModule from 'ethers';
 
-const mockGetPortfolio = vi.fn<() => Promise<{ balance_usdc: number }>>();
-
-vi.mock('../simmer.js', () => ({
-  getPortfolio: mockGetPortfolio,
-}));
-
 const mockLogger = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -58,7 +52,6 @@ describe('bankroll', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetCacheForTests();
-    mockGetPortfolio.mockResolvedValue({ balance_usdc: 100 });
     // Default: wallet key not set → on-chain returns 0
     mockLoadConfig.mockReturnValue({
       POLYGON_WALLET_PRIVATE_KEY: undefined,
@@ -67,23 +60,22 @@ describe('bankroll', () => {
     mockBalanceOf.mockResolvedValue(0n);
   });
 
-  it('returns Simmer balance only when no wallet key configured', async () => {
+  it('returns 0 when no wallet key configured', async () => {
     const result = await getBankroll();
-    expect(result).toBe(100);
-    expect(mockGetPortfolio).toHaveBeenCalledTimes(1);
+    expect(result).toBe(0);
   });
 
-  it('returns Simmer + on-chain balance combined when wallet key is set', async () => {
+  it('returns on-chain balance when wallet key is set', async () => {
     mockLoadConfig.mockReturnValue({
       POLYGON_WALLET_PRIVATE_KEY: 'test-key',
       POLYGON_RPC_URL: 'https://polygon-rpc.com',
     });
     mockBalanceOf.mockResolvedValue(40_000_000n); // 40 USDC.e (6 decimals)
     const result = await getBankroll();
-    expect(result).toBe(140);
+    expect(result).toBe(40);
   });
 
-  it('logs combined balance with all three components', async () => {
+  it('logs on-chain balance', async () => {
     mockLoadConfig.mockReturnValue({
       POLYGON_WALLET_PRIVATE_KEY: 'test-key',
       POLYGON_RPC_URL: 'https://polygon-rpc.com',
@@ -91,19 +83,18 @@ describe('bankroll', () => {
     mockBalanceOf.mockResolvedValue(40_000_000n);
     await getBankroll();
     expect(mockLogger.info).toHaveBeenCalledWith(
-      '[bankroll] combined balance',
-      expect.objectContaining({ simmerUsdc: 100, onChainUsdc: 40, totalUsdc: 140 }),
+      '[bankroll] on-chain balance',
+      expect.objectContaining({ onChainUsdc: 40 }),
     );
   });
 
   it('accepts optional redis parameter for backward compat', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await getBankroll({} as any);
-    expect(result).toBe(100);
+    expect(result).toBe(0);
   });
 
   it('logs error when total balance is zero', async () => {
-    mockGetPortfolio.mockResolvedValue({ balance_usdc: 0 });
     const result = await getBankroll();
     expect(result).toBe(0);
     expect(mockLogger.error).toHaveBeenCalledWith(
@@ -113,7 +104,11 @@ describe('bankroll', () => {
   });
 
   it('logs warning when total balance is suspiciously low', async () => {
-    mockGetPortfolio.mockResolvedValue({ balance_usdc: 0.5 });
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+    });
+    mockBalanceOf.mockResolvedValue(500_000n); // 0.5 USDC
     const result = await getBankroll();
     expect(result).toBeCloseTo(0.5);
     expect(mockLogger.warn).toHaveBeenCalledWith(
@@ -122,47 +117,47 @@ describe('bankroll', () => {
     );
   });
 
-  it('caches combined balance within TTL', async () => {
-    await getBankroll();
-    await getBankroll();
-    await getBankroll();
-    expect(mockGetPortfolio).toHaveBeenCalledTimes(1);
-  });
-
-  it('refreshes balance after TTL expires', async () => {
-    await getBankroll();
-    _resetCacheForTests();
-
-    mockGetPortfolio.mockResolvedValue({ balance_usdc: 200 });
+  it('caches balance within TTL', async () => {
     mockLoadConfig.mockReturnValue({
       POLYGON_WALLET_PRIVATE_KEY: 'test-key',
       POLYGON_RPC_URL: 'https://polygon-rpc.com',
     });
-    mockBalanceOf.mockResolvedValue(20_000_000n); // 20 USDC.e
+    mockBalanceOf.mockResolvedValue(100_000_000n); // 100 USDC
+    await getBankroll();
+    await getBankroll();
+    await getBankroll();
+    // Contract mock should only be called once due to caching
+    expect(mockBalanceOf).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes balance after TTL expires', async () => {
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+    });
+    mockBalanceOf.mockResolvedValue(100_000_000n); // 100 USDC
+    await getBankroll();
+    _resetCacheForTests();
+
+    mockBalanceOf.mockResolvedValue(220_000_000n); // 220 USDC
     const result = await getBankroll();
     expect(result).toBe(220);
   });
 
-  it('falls back to last known balance when Simmer fails', async () => {
-    await getBankroll(); // cache = 100
-
-    const realDateNow = Date.now;
-    Date.now = () => realDateNow() + 20_000;
-
-    try {
-      mockGetPortfolio.mockRejectedValue(new Error('Simmer API returned HTTP 503'));
-      const result = await getBankroll();
-      expect(result).toBe(100);
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        '[bankroll] balance fetch failed — using last known balance',
-        expect.objectContaining({ lastKnownBalance: 100 }),
-      );
-    } finally {
-      Date.now = realDateNow;
-    }
+  it('returns 0 gracefully when all RPCs fail (on-chain degraded)', async () => {
+    // When all RPCs fail, getOnChainUsdcBalance returns 0 gracefully (never throws).
+    // getBankroll then caches 0 and returns 0 — no last-known-balance fallback needed
+    // since the degraded state is a valid (zero) balance, not an error.
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+    });
+    mockBalanceOf.mockRejectedValue(new Error('RPC error'));
+    const result = await getBankroll();
+    expect(result).toBe(0);
   });
 
-  it('degrades to Simmer-only when on-chain RPC fails', async () => {
+  it('returns 0 when all RPCs fail (on-chain degraded to 0)', async () => {
     mockLoadConfig.mockReturnValue({
       POLYGON_WALLET_PRIVATE_KEY: 'test-key',
       POLYGON_RPC_URL: 'https://polygon-rpc.com',
@@ -170,7 +165,7 @@ describe('bankroll', () => {
     // All RPC attempts fail — getOnChainUsdcBalance returns 0
     mockBalanceOf.mockRejectedValue(new Error('RPC timeout'));
     const result = await getBankroll();
-    expect(result).toBe(100); // Simmer only
+    expect(result).toBe(0);
     expect(mockLogger.warn).toHaveBeenCalledWith(
       expect.stringContaining('[bankroll]'),
       expect.any(Object),
@@ -183,6 +178,11 @@ describe('bankroll', () => {
   });
 
   it('deductStake subtracts from cached balance', async () => {
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+    });
+    mockBalanceOf.mockResolvedValue(100_000_000n); // 100 USDC
     await getBankroll(); // cache = 100
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -190,11 +190,15 @@ describe('bankroll', () => {
 
     const after = await getBankroll();
     expect(after).toBe(70);
-    expect(mockGetPortfolio).toHaveBeenCalledTimes(1); // still cached
+    expect(mockBalanceOf).toHaveBeenCalledTimes(1); // still cached
   });
 
   it('deductStake does not go below zero', async () => {
-    mockGetPortfolio.mockResolvedValue({ balance_usdc: 10 });
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+    });
+    mockBalanceOf.mockResolvedValue(10_000_000n); // 10 USDC
     await getBankroll(); // cache = 10
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -210,6 +214,11 @@ describe('bankroll', () => {
   });
 
   it('creditProceeds adds to cached balance', async () => {
+    mockLoadConfig.mockReturnValue({
+      POLYGON_WALLET_PRIVATE_KEY: 'test-key',
+      POLYGON_RPC_URL: 'https://polygon-rpc.com',
+    });
+    mockBalanceOf.mockResolvedValue(100_000_000n); // 100 USDC
     await getBankroll(); // cache = 100
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

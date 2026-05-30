@@ -6,12 +6,6 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 
-const mockGetPortfolio = vi.fn<() => Promise<never>>();
-
-vi.mock('../simmer.js', () => ({
-  getPortfolio: mockGetPortfolio,
-}));
-
 vi.mock('../logger.js', () => ({
   logger: {
     info: vi.fn(),
@@ -33,9 +27,10 @@ vi.mock('../config.js', () => ({
 // Fresh import — lastKnownBalance is null in this file's module instance.
 const { getBankroll } = await import('../bankroll.js');
 
-describe('bankroll — cold-start error propagation', () => {
-  it('throws when Simmer fails and no prior balance has been cached', async () => {
-    mockGetPortfolio.mockRejectedValue(new Error('Simmer API returned HTTP 503'));
-    await expect(getBankroll()).rejects.toThrow('Simmer API returned HTTP 503');
+describe('bankroll — cold-start with no wallet key', () => {
+  it('returns 0 when no wallet key configured (no prior balance cached)', async () => {
+    // With no wallet key and no prior cache, getBankroll returns 0 (on-chain returns 0)
+    const result = await getBankroll();
+    expect(result).toBe(0);
   });
 });

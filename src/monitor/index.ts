@@ -32,13 +32,12 @@ import { evaluateTrend, fetchTrendSamples } from './trendExit.js';
 import { evaluateWeatherNearRes } from './weatherNearResExit.js';
 import { redeemResolvedPositions } from './resolutionRedeemer.js';
 import { runClobProbe } from '../shared/clobProbe.js';
-import { setAgentAutoRedeem } from '../shared/simmer.js';
 import { runReconciliation } from './reconciliation.js';
 
 export async function runMonitor(): Promise<void> {
   const redis = getRedis();
 
-  // Prevent overlapping runs — a slow cycle (many positions, Simmer API latency)
+  // Prevent overlapping runs — a slow cycle (many positions, CLOB API latency)
   // can exceed the 5-min cron interval and stack processes on low-memory hosts.
   // Token-based: only the acquiring run can release the lock (safe if TTL expires
   // and a newer run reacquires before the older run finishes).
@@ -709,14 +708,6 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
 // Entrypoint when run directly (npx tsx src/monitor/index.ts)
 const isMain = process.argv[1]?.endsWith('monitor/index.ts') ?? false;
 if (isMain) {
-  // Sync Simmer agent auto-redeem setting at startup
-  const cfg = loadConfig();
-  void setAgentAutoRedeem(cfg.SIMMER_AUTO_REDEEM_ENABLED).catch((err) => {
-    logger.warn('[monitor] failed to set Simmer auto-redeem — continuing', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  });
-
   runMonitor()
     .catch((err: unknown) => {
       logger.error('[monitor] fatal error', {

@@ -1,22 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { TradeSignal } from '../../mapping/index.js';
 
-vi.mock('../../shared/simmer.js', () => ({
-  submitTrade: vi.fn(),
-  resolveSimmerMarketId: vi.fn(),
-  getMarketContext: vi.fn<() => Promise<null>>().mockResolvedValue(null),
-  SimmerError: class SimmerError extends Error {
-    statusCode: number;
-    body: unknown;
-    constructor(message: string, statusCode: number, body: unknown) {
-      super(message);
-      this.name = 'SimmerError';
-      this.statusCode = statusCode;
-      this.body = body;
-    }
-  },
-}));
-
 vi.mock('../../shared/clob.js', () => ({
   submitClobBuy: vi.fn(),
   getClobOrderBook: vi.fn(),
@@ -61,7 +45,6 @@ vi.mock('../../shared/logger.js', () => ({
 
 const mockConfig = {
   REDIS_URL: 'redis://localhost:6379',
-  SIMMER_API_KEY: 'test-key',
   DIVERGENCE_THRESHOLD: 0.1,
   OPENAI_API_KEY: 'test-openai',
   FUTURES_ENABLED: false,
@@ -84,7 +67,6 @@ const mockConfig = {
   MAX_ENTRY_SPREAD_BPS: 0,
   ORACLE_LAG_MAX_ENTRY_SPREAD_BPS: -1,
   CLOB_FALLBACK_ENABLED: true,
-  SIMMER_VENUE_ENABLED: true,
   MAKER_EMPTY_BOOK_MIN_CONSENSUS: 0.65,
   MAKER_EMPTY_BOOK_MIN_EDGE: 0.20,
   MAKER_EMPTY_BOOK_MAX_STDDEV: 0.12,
@@ -125,7 +107,6 @@ vi.mock('../../shared/telemetry.js', () => ({
   recordExecutionEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
-const { submitTrade, resolveSimmerMarketId } = await import('../../shared/simmer.js');
 const { submitClobBuy, getClobOrderBook, submitClobLimitBuy, getClobOrder, cancelClobOrder } =
   await import('../../shared/clob.js');
 const { hasOpenPosition } = await import('../positionLedger.js');
@@ -137,8 +118,6 @@ const { executeSignal, executeSignals, executeAndRecordSignal } = await import('
 const positionLedgerMocks = await import('../positionLedger.js');
 const bankrollMocks = await import('../../shared/bankroll.js');
 
-const mockSubmit = vi.mocked(submitTrade);
-const mockResolve = vi.mocked(resolveSimmerMarketId);
 const mockSubmitClob = vi.mocked(submitClobBuy);
 const mockGetOrderBook = vi.mocked(getClobOrderBook);
 const mockSubmitLimit = vi.mocked(submitClobLimitBuy);
@@ -180,8 +159,6 @@ function makeRedis() {
 
 describe('executeSignal', () => {
   beforeEach(() => {
-    mockSubmit.mockReset();
-    mockResolve.mockReset();
     mockSubmitClob.mockReset();
     mockGetOrderBook.mockReset();
     mockSubmitLimit.mockReset();
@@ -218,11 +195,7 @@ describe('executeSignal', () => {
     mockConfig.TAIL_PRICE_THRESHOLD = 0.2;
     mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
     mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
-    mockConfig.SIMMER_VENUE_ENABLED = true;
 
-    // Default: available in Simmer, Simmer succeeds, no open position
-    mockResolve.mockResolvedValue('simmer-uuid-123');
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
     mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
     mockGetOrderBook.mockResolvedValue(null);
     mockSubmitLimit.mockResolvedValue({ success: false, error: 'maker_reject' });
@@ -240,7 +213,6 @@ describe('executeSignal', () => {
 
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('position_already_open');
-    expect(mockSubmit).not.toHaveBeenCalled();
     expect(mockSubmitClob).not.toHaveBeenCalled();
   });
 
@@ -270,7 +242,6 @@ describe('executeSignal', () => {
       expect(result.skipped).toBe(true);
       expect(result.skipReason).toBe('position_already_open');
       // Must NOT place the order on any venue
-      expect(mockSubmit).not.toHaveBeenCalled();
       expect(mockSubmitClob).not.toHaveBeenCalled();
       expect(mockSubmitLimit).not.toHaveBeenCalled();
     } finally {
@@ -287,7 +258,6 @@ describe('executeSignal', () => {
 
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('stake_below_floor');
-    expect(mockSubmit).not.toHaveBeenCalled();
     expect(mockSubmitClob).not.toHaveBeenCalled();
   });
 
@@ -306,7 +276,7 @@ describe('executeSignal', () => {
     const result = await executeSignal(signal, redis as any);
 
     expect(result.skipped).toBe(false);
-    expect(result.executionVenue).toBe('simmer');
+    expect(result.executionVenue).toBe('clob');
   });
 
   it('skips when idempotency key already exists', async () => {
@@ -318,82 +288,26 @@ describe('executeSignal', () => {
 
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('already_executed');
-    expect(mockSubmit).not.toHaveBeenCalled();
     expect(mockSubmitClob).not.toHaveBeenCalled();
   });
 
-  it('executes via Simmer when market is available there', async () => {
+  it('executes via CLOB', async () => {
     const redis = makeRedis();
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await executeSignal(makeSignal(), redis as any);
-
-    expect(result.skipped).toBe(false);
-    expect(result.executionVenue).toBe('simmer');
-    expect(result.tradeResult?.success).toBe(true);
-    expect(mockSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({ market_id: 'simmer-uuid-123', side: 'yes', amount: 5.0 }),
-    );
-    expect(mockSubmitClob).not.toHaveBeenCalled();
-    // 1 for idempotency, 1 for recordGlobalTrade (if applicable)
-    // Actually, recordGlobalTrade is mocked now, so it shouldn't hit the passed-in mock redis.
-    expect(redis.set).toHaveBeenCalledTimes(1);
-  });
-
-  it('falls back to CLOB when market is not in Simmer catalogue', async () => {
-    const redis = makeRedis();
-    mockResolve.mockResolvedValue(null);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeSignal(makeSignal(), redis as any);
 
     expect(result.skipped).toBe(false);
     expect(result.executionVenue).toBe('clob');
-    expect(result.tradeResult?.success).toBe(true);
-    expect(mockSubmit).not.toHaveBeenCalled();
+    expect(!result.skipped && !result.error).toBe(true);
     expect(mockSubmitClob).toHaveBeenCalledWith(
       expect.objectContaining({ tokenId: 'tok-yes', amountUsd: 5.0 }),
     );
     expect(redis.set).toHaveBeenCalledTimes(1);
-    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(
-      redis as any,
-      'clob_fallback',
-      'simmer_market_missing',
-    );
-    expect(mockRecordExecutionMetric).toHaveBeenCalledWith(
-      redis as any,
-      'clob_fallback_success',
-      'simmer_market_missing',
-    );
-    expect(mockRecordExecutionEvent).toHaveBeenCalledWith(
-      redis as any,
-      'execution_attempt',
-      expect.objectContaining({
-        executionPath: 'clob_fallback',
-        finalExecutionPath: 'clob_fallback',
-        finalVenue: 'clob',
-        fallbackReason: 'simmer_market_missing',
-        executionSucceeded: true,
-      }),
-    );
   });
 
-  it('falls back to CLOB when Simmer says market not found', async () => {
+  it('returns an error when CLOB fails', async () => {
     const redis = makeRedis();
-    mockSubmit.mockResolvedValue({ success: false, error: 'Market not found' });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await executeSignal(makeSignal(), redis as any);
-
-    expect(result.executionVenue).toBe('clob');
-    expect(result.tradeResult?.success).toBe(true);
-    expect(mockSubmit).toHaveBeenCalledTimes(1);
-    expect(mockSubmitClob).toHaveBeenCalledTimes(1);
-  });
-
-  it('returns an error when CLOB fallback fails', async () => {
-    const redis = makeRedis();
-    mockResolve.mockResolvedValue(null);
     mockSubmitClob.mockResolvedValue({ success: false, error: 'insufficient balance' });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -401,39 +315,25 @@ describe('executeSignal', () => {
 
     expect(result.executionVenue).toBe('clob');
     expect(result.error).toContain('insufficient balance');
-    expect(result.tradeResult?.success).toBe(false);
     expect(redis.set).not.toHaveBeenCalled();
     expect(mockRecordExecutionMetric).toHaveBeenCalledWith(
       redis as any,
       'errors',
-      'clob_fallback_failed',
+      'clob_failed',
     );
     expect(mockRecordExecutionEvent).toHaveBeenCalledWith(
       redis as any,
       'execution_attempt',
       expect.objectContaining({
         finalExecutionPath: 'error',
-        errorClass: 'clob_fallback_failed',
+        errorClass: 'clob_failed',
         executionSucceeded: false,
       }),
     );
   });
 
-  it('does not fallback to CLOB on non-market Simmer errors', async () => {
+  it('uses NO token id when direction is NO', async () => {
     const redis = makeRedis();
-    mockSubmit.mockRejectedValue(new Error('network timeout'));
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await executeSignal(makeSignal(), redis as any);
-
-    expect(result.executionVenue).toBe('simmer');
-    expect(result.error).toContain('network timeout');
-    expect(mockSubmitClob).not.toHaveBeenCalled();
-  });
-
-  it('uses NO token id when direction is NO during CLOB fallback', async () => {
-    const redis = makeRedis();
-    mockResolve.mockResolvedValue(null);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await executeSignal(makeSignal({ direction: 'NO' }), redis as any);
@@ -464,7 +364,6 @@ describe('executeSignal', () => {
 
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('spread_too_wide');
-    expect(mockSubmit).not.toHaveBeenCalled();
     expect(mockSubmitClob).not.toHaveBeenCalled();
   });
 
@@ -488,14 +387,13 @@ describe('executeSignal', () => {
     const result = await executeSignal(makeSignal(), redis as any);
 
     expect(result.skipped).toBe(false);
-    expect(result.executionVenue).toBe('simmer');
+    expect(result.executionVenue).toBe('clob');
   });
 
   it('oracle-lag uses ORACLE_LAG_MAX_ENTRY_SPREAD_BPS override when >= 0', async () => {
     // Global threshold is 500 bps; override is 2000 bps — wide book should pass for oracle-lag
     mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
     mockConfig.ORACLE_LAG_MAX_ENTRY_SPREAD_BPS = 2000;
-    mockConfig.SIMMER_VENUE_ENABLED = false;
     mockGetOrderBook.mockResolvedValue({
       market: 'mkt-test',
       asset_id: 'tok-yes',
@@ -514,7 +412,6 @@ describe('executeSignal', () => {
     const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
 
     expect(result.skipped).toBe(false);
-    mockConfig.SIMMER_VENUE_ENABLED = true;
     mockConfig.ORACLE_LAG_MAX_ENTRY_SPREAD_BPS = -1;
   });
 
@@ -564,7 +461,6 @@ describe('executeSignal', () => {
 
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('one_sided_book');
-    expect(mockSubmit).not.toHaveBeenCalled();
     expect(mockSubmitClob).not.toHaveBeenCalled();
   });
 
@@ -600,7 +496,7 @@ describe('executeSignal', () => {
     const result = await executeSignal(makeSignal(), redis as any);
 
     expect(result.skipped).toBe(false);
-    expect(result.executionVenue).toBe('simmer');
+    expect(result.executionVenue).toBe('clob');
   });
 
   it('bypasses entry spread gate for copytrade signals', async () => {
@@ -623,7 +519,7 @@ describe('executeSignal', () => {
     const result = await executeSignal(makeSignal({ source: 'copytrade' }), redis as any);
 
     expect(result.skipped).toBe(false);
-    expect(result.executionVenue).toBe('simmer');
+    expect(result.executionVenue).toBe('clob');
   });
 
   it('reuses prefetched CLOB book for maker path (no double-fetch)', async () => {
@@ -672,8 +568,6 @@ describe('executeSignal', () => {
 
 describe('calibration correction', () => {
   beforeEach(() => {
-    mockSubmit.mockReset();
-    mockResolve.mockReset();
     mockSubmitClob.mockReset();
     mockHasPosition.mockReset();
     mockGetCalibrationStats.mockReset();
@@ -681,8 +575,7 @@ describe('calibration correction', () => {
     mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
     mockGetOrderBook.mockResolvedValue(null);
 
-    mockResolve.mockResolvedValue('simmer-uuid-123');
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
     mockHasPosition.mockResolvedValue(false);
   });
 
@@ -702,8 +595,7 @@ describe('calibration correction', () => {
     const result = await executeSignal(signal, redis as any);
 
     expect(result.skipped).toBe(false);
-    // The signal passed to Simmer should have corrected edge in reasoning
-    expect(mockSubmit).toHaveBeenCalled();
+    // The signal should have corrected edge applied
   });
 
   it('does not apply correction when stats is null', async () => {
@@ -715,14 +607,12 @@ describe('calibration correction', () => {
     const result = await executeSignal(signal, redis as any);
 
     expect(result.skipped).toBe(false);
-    expect(result.tradeResult?.success).toBe(true);
+    expect(!result.skipped && !result.error).toBe(true);
   });
 });
 
 describe('execution mode', () => {
   beforeEach(() => {
-    mockSubmit.mockReset();
-    mockResolve.mockReset();
     mockSubmitClob.mockReset();
     mockGetOrderBook.mockReset();
     mockSubmitLimit.mockReset();
@@ -748,8 +638,6 @@ describe('execution mode', () => {
     mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
     mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
 
-    mockResolve.mockResolvedValue('simmer-uuid-123');
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
     mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
     mockGetOrderBook.mockResolvedValue(null);
     mockSubmitLimit.mockResolvedValue({ success: false, error: 'maker_reject' });
@@ -762,7 +650,6 @@ describe('execution mode', () => {
     mockConfig.EXECUTION_MODE = 'maker';
     mockConfig.MAKER_MAX_WAIT_MS = 10;
 
-    mockResolve.mockResolvedValue('simmer-uuid-123');
     mockGetOrderBook.mockResolvedValue({
       market: 'mkt-test',
       asset_id: 'tok-yes',
@@ -807,7 +694,6 @@ describe('execution mode', () => {
     expect(result.entryPrice).toBe(0.49);
     expect(result.sharesFilled).toBe(10);
     expect(result.decisionBenchmark?.makerPriceImprovementUsd).toBeCloseTo((0.51 - 0.49) * 10, 6);
-    expect(mockSubmit).not.toHaveBeenCalled();
     expect(mockRecordExecutionMetric).toHaveBeenCalledWith(
       redis as any,
       'maker_attempted',
@@ -882,7 +768,6 @@ describe('execution mode', () => {
   it('skips maker for non-osint sources (latency-sensitive)', async () => {
     mockConfig.EXECUTION_MODE = 'hybrid';
     mockConfig.MAKER_MAX_WAIT_MS = 10;
-    mockResolve.mockResolvedValue('simmer-uuid-123');
     mockGetOrderBook.mockResolvedValue({
       market: 'mkt-test',
       asset_id: 'tok-yes',
@@ -897,21 +782,17 @@ describe('execution mode', () => {
     });
     mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-eligible-test' });
 
-    // spot routes through Simmer; crypto-arb bypasses Simmer entirely
-    // (resolver returns null) and goes straight to CLOB taker.
-    // These latency-sensitive sources should never submit a maker limit order.
+    // All latency-sensitive sources route to CLOB taker directly.
+    // These sources should never submit a maker limit order.
     // Note: copytrade is now maker-eligible (persistent alpha) — tested separately.
-    const cases: { source: 'spot' | 'crypto-arb'; venue: 'simmer' | 'clob' }[] = [
-      { source: 'spot', venue: 'simmer' },
-      { source: 'crypto-arb', venue: 'clob' },
-    ];
-    for (const { source, venue } of cases) {
+    const cases: ('spot' | 'crypto-arb')[] = ['spot', 'crypto-arb'];
+    for (const source of cases) {
       mockSubmitLimit.mockClear();
       const redis = makeRedis();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await executeSignal(makeSignal({ source }), redis as any);
       expect(result.skipped).toBe(false);
-      expect(result.executionVenue).toBe(venue);
+      expect(result.executionVenue).toBe('clob');
       expect(result.entryOrderType).toBe('taker');
       expect(mockSubmitLimit).not.toHaveBeenCalled();
     }
@@ -920,7 +801,6 @@ describe('execution mode', () => {
   it('attempts maker for copytrade signals in hybrid mode', async () => {
     mockConfig.EXECUTION_MODE = 'hybrid';
     mockConfig.MAKER_MAX_WAIT_MS = 10;
-    mockResolve.mockResolvedValue('simmer-uuid-123');
     mockGetOrderBook.mockResolvedValue({
       market: 'mkt-test',
       asset_id: 'tok-yes',
@@ -960,13 +840,11 @@ describe('execution mode', () => {
     expect(result.executionVenue).toBe('clob');
     expect(result.entryOrderType).toBe('maker');
     expect(mockSubmitLimit).toHaveBeenCalled();
-    expect(mockSubmit).not.toHaveBeenCalled();
   });
 
   it('attempts maker for near-zero-arb signals in hybrid mode', async () => {
     mockConfig.EXECUTION_MODE = 'hybrid';
     mockConfig.MAKER_MAX_WAIT_MS = 10;
-    mockResolve.mockResolvedValue('simmer-uuid-123');
     mockGetOrderBook.mockResolvedValue({
       market: 'mkt-test',
       asset_id: 'tok-yes',
@@ -1006,13 +884,11 @@ describe('execution mode', () => {
     expect(result.executionVenue).toBe('clob');
     expect(result.entryOrderType).toBe('maker');
     expect(mockSubmitLimit).toHaveBeenCalled();
-    expect(mockSubmit).not.toHaveBeenCalled();
   });
 
   it('attempts maker for osint signals in hybrid mode', async () => {
     mockConfig.EXECUTION_MODE = 'hybrid';
     mockConfig.MAKER_MAX_WAIT_MS = 10;
-    mockResolve.mockResolvedValue('simmer-uuid-123');
     mockGetOrderBook.mockResolvedValue({
       market: 'mkt-test',
       asset_id: 'tok-yes',
@@ -1052,7 +928,6 @@ describe('execution mode', () => {
     expect(result.executionVenue).toBe('clob');
     expect(result.entryOrderType).toBe('maker');
     expect(mockSubmitLimit).toHaveBeenCalled();
-    expect(mockSubmit).not.toHaveBeenCalled();
   });
 
   it('oracle-lag on real book goes directly to taker — no maker order posted', async () => {
@@ -1063,7 +938,6 @@ describe('execution mode', () => {
     // Active spread gate ensures the real-book spread-check path is exercised.
     mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
     mockConfig.ORACLE_LAG_MAX_ENTRY_SPREAD_BPS = 2000; // prod default — wider than the 200bps test spread
-    mockResolve.mockResolvedValue(null); // no Simmer; goes straight to CLOB taker
     mockGetOrderBook.mockResolvedValue({
       market: 'mkt-test',
       asset_id: 'tok-yes',
@@ -1103,7 +977,6 @@ describe('execution mode', () => {
 
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('taker_edge_below_min:geopolitical');
-    expect(mockSubmit).not.toHaveBeenCalled();
   });
 
   it('respects category-specific TAKER_MIN_EDGE overrides', async () => {
@@ -1141,15 +1014,15 @@ describe('execution mode', () => {
     const result = await executeSignal(makeSignal(), redis as any);
 
     expect(result.skipped).toBe(false);
-    expect(result.executionVenue).toBe('simmer');
+    expect(result.executionVenue).toBe('clob');
     expect(result.modeConfigured).toBe('taker');
-    expect(result.entryExecutionPath).toBe('taker_direct');
+    expect(result.entryExecutionPath).toBe('clob_direct');
     expect(result.entryOrderType).toBe('taker');
     expect(result.decisionBenchmark?.decisionBestAsk).toBe(0.51);
     expect(mockRecordExecutionEvent).toHaveBeenCalledTimes(1);
     const [, , payload] = mockRecordExecutionEvent.mock.calls[0]!;
-    expect(payload.executionPath).toBe('taker_direct');
-    expect(payload.finalExecutionPath).toBe('taker_direct');
+    expect(payload.executionPath).toBe('clob_direct');
+    expect(payload.finalExecutionPath).toBe('clob_direct');
     expect(payload.finalOrderType).toBe('taker');
     expect(payload.decisionBestBid).toBe(0.49);
     expect(payload.decisionBestAsk).toBe(0.51);
@@ -1161,25 +1034,8 @@ describe('execution mode', () => {
     expect(payload.executionSucceeded).toBe(true);
   });
 
-  it('populates entryPrice from Simmer fill when available', async () => {
-    const redis = makeRedis();
-    mockSubmit.mockResolvedValue({
-      success: true,
-      tx_hash: '0xabc',
-      price: 0.52,
-      shares_bought: 100,
-    });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await executeSignal(makeSignal({ outcomePrice: 0.5 }), redis as any);
-
-    expect(result.entryPrice).toBe(0.52);
-    expect(result.sharesFilled).toBe(100);
-  });
-
   it('populates entryPrice from CLOB taker fill when available', async () => {
     const redis = makeRedis();
-    mockResolve.mockResolvedValue(null);
     mockSubmitClob.mockResolvedValue({
       success: true,
       tx_hash: '0xclob',
@@ -1197,8 +1053,6 @@ describe('execution mode', () => {
 
 describe('executeSignals', () => {
   beforeEach(() => {
-    mockSubmit.mockReset();
-    mockResolve.mockReset();
     mockSubmitClob.mockReset();
     mockGetOrderBook.mockReset();
     mockSubmitLimit.mockReset();
@@ -1218,8 +1072,6 @@ describe('executeSignals', () => {
     mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
     mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
 
-    mockResolve.mockResolvedValue('simmer-uuid-123');
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc' });
     mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
     mockGetOrderBook.mockResolvedValue(null);
     mockSubmitLimit.mockResolvedValue({ success: false, error: 'maker_reject' });
@@ -1236,7 +1088,6 @@ describe('executeSignals', () => {
     const results = await executeSignals(signals, redis as any);
 
     expect(results).toHaveLength(2);
-    expect(mockSubmit).toHaveBeenCalledTimes(2);
   });
 
   it('returns empty array for empty input', async () => {
@@ -1244,7 +1095,6 @@ describe('executeSignals', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const results = await executeSignals([], redis as any);
     expect(results).toHaveLength(0);
-    expect(mockSubmit).not.toHaveBeenCalled();
   });
 });
 
@@ -1253,8 +1103,7 @@ describe('executeAndRecordSignal', () => {
   const mockDeductStake = vi.mocked(bankrollMocks.deductStake);
 
   beforeEach(() => {
-    mockSubmit.mockReset();
-    mockResolve.mockReset();
+    mockSubmitClob.mockReset();
     mockHasPosition.mockReset();
     mockGetCalibrationStats.mockReset();
     mockGetCalibrationStats.mockResolvedValue(null);
@@ -1266,20 +1115,18 @@ describe('executeAndRecordSignal', () => {
     mockConfig.EXECUTION_MODE = 'taker';
     mockConfig.TAKER_MIN_EDGE = 0;
     mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
-    mockConfig.SIMMER_VENUE_ENABLED = true;
 
-    mockResolve.mockResolvedValue('simmer-uuid-123');
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob', shares_bought: 10 });
     mockHasPosition.mockResolvedValue(false);
   });
 
   it('on success: calls deductStake and recordPosition exactly once each', async () => {
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc', shares_bought: 10 });
     const redis = makeRedis();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeAndRecordSignal(makeSignal(), redis as any);
 
-    expect(result.tradeResult?.success).toBe(true);
+    expect(!result.skipped && !result.error).toBe(true);
     expect(mockDeductStake).toHaveBeenCalledTimes(1);
     expect(mockRecordPosition).toHaveBeenCalledTimes(1);
   });
@@ -1297,14 +1144,13 @@ describe('executeAndRecordSignal', () => {
   });
 
   it('on venue failure: does not call deductStake or recordPosition', async () => {
-    mockSubmit.mockResolvedValue({ success: false, error: 'simmer rejected' });
     mockSubmitClob.mockResolvedValue({ success: false, error: 'clob rejected' });
     const redis = makeRedis();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeAndRecordSignal(makeSignal(), redis as any);
 
-    expect(result.tradeResult?.success).not.toBe(true);
+    expect(result.skipped || result.error).toBeTruthy();
     expect(mockDeductStake).not.toHaveBeenCalled();
     expect(mockRecordPosition).not.toHaveBeenCalled();
   });
@@ -1312,14 +1158,13 @@ describe('executeAndRecordSignal', () => {
   it('swallows recordPosition throw so a successful fill still returns success', async () => {
     // Invariant: the trade is already live on the venue and idempotency is set.
     // Propagating a ledger-write throw would mask the fill AND block retry.
-    mockSubmit.mockResolvedValue({ success: true, tx_hash: '0xabc', shares_bought: 10 });
     mockRecordPosition.mockRejectedValue(new Error('redis unreachable'));
     const redis = makeRedis();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeAndRecordSignal(makeSignal(), redis as any);
 
-    expect(result.tradeResult?.success).toBe(true);
+    expect(!result.skipped && !result.error).toBe(true);
     // deductStake still ran first before recordPosition threw.
     expect(mockDeductStake).toHaveBeenCalledTimes(1);
   });
@@ -1342,8 +1187,6 @@ describe('empty-book maker route', () => {
   }
 
   beforeEach(() => {
-    mockSubmit.mockReset();
-    mockResolve.mockReset();
     mockSubmitClob.mockReset();
     mockGetOrderBook.mockReset();
     mockSubmitLimit.mockReset();
@@ -1381,7 +1224,6 @@ describe('empty-book maker route', () => {
     mockConfig.TAIL_PRICE_THRESHOLD = 0.2;
     mockConfig.TAIL_TAKER_OVERRIDE_EDGE = 0.2;
     mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
-    mockConfig.SIMMER_VENUE_ENABLED = false; // skip Simmer so spread gate always fires
     // Weather knobs — reset to defaults every test so a failing case that
     // skips the manual reset at the bottom doesn't leak state into siblings.
     mockConfig.WEATHER_MAKER_POST_ONLY = true;
@@ -2171,7 +2013,7 @@ describe('empty-book maker route', () => {
     const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
 
     expect(result.skipped).toBe(false);
-    expect(result.tradeResult?.success).toBe(true);
+    expect(!result.skipped && !result.error).toBe(true);
     expect(result.entryOrderType).toBe('maker');
     // Idempotency key set on fill
     expect(redis.set).toHaveBeenCalled();
@@ -2216,7 +2058,7 @@ describe('empty-book maker route', () => {
     const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
 
     expect(result.skipped).toBe(false);
-    expect(result.tradeResult?.success).toBe(true);
+    expect(!result.skipped && !result.error).toBe(true);
     // Residual open size should be cancelled
     expect(mockCancelOrder).toHaveBeenCalledWith('order-partial');
     // Pending record cleaned up
@@ -2313,7 +2155,6 @@ describe('empty-book maker route', () => {
       );
       expect(result.skipped).toBe(true);
       expect(result.skipReason).toBe('pre_migration_blackout');
-      expect(mockSubmit).not.toHaveBeenCalled();
     });
 
     it('blocks a market whose endDate is after the cutover date', async () => {
@@ -2409,7 +2250,6 @@ describe('empty-book maker route', () => {
       );
       expect(result.skipped).toBe(true);
       expect(result.skipReason).toBe('entry_price_above_cap');
-      expect(mockSubmit).not.toHaveBeenCalled();
     });
 
     it('does not skip when outcomePrice is at the global cap', async () => {

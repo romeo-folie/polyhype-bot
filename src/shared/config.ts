@@ -43,23 +43,6 @@ const boolFromEnv = z
 
 const envSchema = z.object({
   REDIS_URL: z.string().url('REDIS_URL must be a valid URL'),
-  SIMMER_API_KEY: z.string().min(1, 'SIMMER_API_KEY is required'),
-
-  // Simmer — auto-redeem
-  SIMMER_AUTO_REDEEM_ENABLED: z
-    .string()
-    .optional()
-    .default('true')
-    .transform((v) => !['false', '0', ''].includes(v.trim().toLowerCase())),
-
-  // Simmer — venue gate. When false, new entries skip Simmer and go straight
-  // to CLOB; exits on Simmer-entered positions route through CLOB submitClobSell.
-  // Redemption + orphan reconciliation continue to use Simmer APIs.
-  SIMMER_VENUE_ENABLED: z
-    .string()
-    .optional()
-    .default('false')
-    .transform((v) => !['false', '0', ''].includes(v.trim().toLowerCase())),
 
   // LLM — at least one must be set (validated below)
   OPENAI_API_KEY: z.string().optional(),
@@ -752,7 +735,7 @@ const envSchema = z.object({
     .optional()
     .default(30 * 24 * 3600),
   REDEEMER_DUST_THRESHOLD_USDC: z.coerce.number().min(0).optional().default(0.25),
-  /** Minimum notional (shares * avgPrice) for a reconciled Simmer orphan to be imported. Below this, skip as dust. */
+  /** Minimum notional (shares * avgPrice) for a reconciled CLOB orphan to be imported. Below this, skip as dust. */
   RECONCILE_IMPORT_MIN_USD: z.coerce.number().min(0).optional().default(1),
   /** Post-exit sweep: after a partial fill, resell the residual up to N times. */
   RESIDUAL_SWEEP_ENABLED: boolFromEnv.optional().default(true),
