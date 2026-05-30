@@ -98,13 +98,18 @@ function makePosition(overrides = {}) {
 
 function makeRedis(lockExists = false) {
   const store = new Map<string, string>();
+  if (lockExists) {
+    // Pre-populate the lock key so mget returns a hit for pos-1
+    store.set('weather:locked:pos-1', '1');
+  }
   return {
-    exists: vi.fn().mockResolvedValue(lockExists ? 1 : 0),
+    exists: vi.fn(async (key: string) => (store.has(key) ? 1 : 0)),
     set: vi.fn(async (key: string, value: string) => {
       store.set(key, value);
       return 'OK';
     }),
     get: vi.fn().mockResolvedValue(null),
+    mget: vi.fn(async (...keys: string[]) => keys.map((k) => store.get(k) ?? null)),
     _store: store,
   };
 }

@@ -152,7 +152,7 @@ function makeRedis(store: Map<string, string> = new Map()) {
       return 'OK';
     }),
     get: vi.fn().mockResolvedValue(null),
-    mget: vi.fn().mockResolvedValue([]),
+    mget: vi.fn(async (...keys: string[]) => keys.map((k) => store.get(k) ?? null)),
     pipeline: vi.fn(() => ({ exec: vi.fn().mockResolvedValue([]) })),
     _store: store,
   };

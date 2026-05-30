@@ -39,6 +39,9 @@ import {
 
 export const FORECAST_INVALIDATED_KEY_PREFIX = 'weather:forecast_invalidated:';
 const HEDGE_KEY_PREFIX = 'weather:forecast_hedged:';
+// Must match LOCK_KEY_PREFIX in weatherLockIn.ts — both scanners check both
+// markers so a position is not double-hedged on the same opposite token.
+const LOCK_IN_KEY_PREFIX = 'weather:locked:';
 // Cooldown key set on partial hedge fill: suppresses retry for 30 min so
 // the bankroll isn't decremented on every scan cycle for the same position.
 const HEDGE_PARTIAL_COOLDOWN_KEY_PREFIX = 'weather:forecast_hedge_partial_cooldown:';
@@ -149,24 +152,34 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
         continue;
       }
 
-      // Check hedge state BEFORE forecast fetch so we can still refresh the
-      // invalidation key even for already-hedged positions (C2 fix).
+      // Check both hedge markers in one round-trip: the invalidation-hedge marker
+      // and the lock-in marker (set by weatherLockIn). Neither scanner should
+      // submit a second opposite-side buy when the other has already done so.
       const hedgeKey = `${HEDGE_KEY_PREFIX}${pos.id}`;
-      const alreadyHedged = (await redis.exists(hedgeKey).catch(() => 0)) > 0;
-      // Skip if hedge partial-fill cooldown is active (C5 fix).
+      const lockInKey = `${LOCK_IN_KEY_PREFIX}${pos.id}`;
       const hedgeCooldownKey = `${HEDGE_PARTIAL_COOLDOWN_KEY_PREFIX}${pos.id}`;
-      if ((await redis.exists(hedgeCooldownKey).catch(() => 0)) > 0) continue;
+      const [hedgeMarkerRaw, lockInMarkerRaw, cooldownMarkerRaw] = await redis
+        .mget(hedgeKey, lockInKey, hedgeCooldownKey)
+        .catch((): [null, null, null] => [null, null, null]);
+      const alreadyHedged = !!(hedgeMarkerRaw || lockInMarkerRaw);
+      // Skip if hedge partial-fill cooldown is active (C5 fix).
+      if (cooldownMarkerRaw) continue;
 
       const daysOut = daysUntil(targetDate);
 
+      // Use the same forecast stack as the main scanner so the probability we
+      // compare against the entry thesis is derived from identical model inputs.
+      // In particular, HRRR must be enabled for same-day US markets when
+      // WEATHER_HRRR_ENABLED=true, otherwise the invalidation guard would use a
+      // different (and weaker) deterministic base than the entry/size-up scanner.
       const forecast = await fetchForecast(
         event,
         daysOut,
         fetchFn,
         cfg.WEATHER_STDDEV_MIN_FRACTION,
         cfg.WEATHER_MODEL_ECMWF_ENABLED,
-        false, // HRRR not needed for revaluation
-        false, // no dual-ensemble shadow
+        cfg.WEATHER_HRRR_ENABLED,
+        cfg.WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED,
         cfg.WEATHER_HRRR_MAX_CROSS_SOURCE_SPREAD,
       );
       if (!forecast) {

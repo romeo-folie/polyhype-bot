@@ -29,6 +29,9 @@ import { deductStake } from '../shared/bankroll.js';
 const LOCK_IN_MIN_FILL_RATIO = 0.9;
 
 const LOCK_KEY_PREFIX = 'weather:locked:';
+// Must match HEDGE_KEY_PREFIX in weatherInvalidation.ts — both scanners check
+// both markers so a position is not double-hedged on the same opposite token.
+const INVALIDATION_HEDGE_KEY_PREFIX = 'weather:forecast_hedged:';
 const LOCK_TTL_S = 14 * 24 * 3600;
 
 interface OpenWeatherPosition {
@@ -77,8 +80,12 @@ export async function runWeatherLockInScan(redis: Redis): Promise<void> {
   for (const pos of positions) {
     try {
       const lockKey = `${LOCK_KEY_PREFIX}${pos.id}`;
-      const alreadyLocked = await redis.exists(lockKey);
-      if (alreadyLocked) continue;
+      const invalidationHedgeKey = `${INVALIDATION_HEDGE_KEY_PREFIX}${pos.id}`;
+      // Check both markers in one round-trip: skip if locked by either scanner.
+      const [lockedMarkerRaw, hedgedMarkerRaw] = await redis
+        .mget(lockKey, invalidationHedgeKey)
+        .catch((): [null, null] => [null, null]);
+      if (lockedMarkerRaw || hedgedMarkerRaw) continue;
 
       let market;
       try {
