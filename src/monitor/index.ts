@@ -208,6 +208,69 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
     // side winning is ≤5%; a CLOB exit at that point would capture far less than
     // the settlement payout.
     if (currentPrice.currentOutcomePrice >= cfg.MONITOR_NEAR_RES_PRICE_THRESHOLD) {
+      // Gate A — time gate (weather only): block pendingSettlement when the market's
+      // endDate is more than MONITOR_NEAR_RES_MIN_HOURS_TO_RES away. A thin-book
+      // spike on a market resolving tomorrow cannot be genuine near-resolution.
+      // Non-weather markets are excluded: their endDate may not match actual
+      // resolution time (markets can resolve early before their stated endDate).
+      const isWeatherSource = (position.sourcedFrom?.startsWith('weather:') || position.sourcedFrom?.startsWith('weather-oracle:')) ?? false;
+      if (isWeatherSource && position.endDate && cfg.MONITOR_NEAR_RES_MIN_HOURS_TO_RES > 0) {
+        const hoursToEnd = (new Date(position.endDate).getTime() - Date.now()) / 3_600_000;
+        if (hoursToEnd > cfg.MONITOR_NEAR_RES_MIN_HOURS_TO_RES) {
+          logger.debug('[monitor] near-res: price spike on weather market — too far from resolution, ignoring', {
+            marketId: position.marketId,
+            direction: position.direction,
+            currentOutcomePrice: currentPrice.currentOutcomePrice.toFixed(3),
+            hoursToEnd: hoursToEnd.toFixed(1),
+            minHoursToRes: cfg.MONITOR_NEAR_RES_MIN_HOURS_TO_RES,
+          });
+          held++;
+          continue;
+        }
+      }
+
+      // Gate B — persistence gate: require the price to have been above threshold
+      // for at least MONITOR_NEAR_RES_PERSIST_S seconds. A spike that lasts one
+      // monitor tick (~5s) never fires; a genuinely settled market at 0.99 fires
+      // after the configured window elapses.
+      const persistKey = `near_res_seen:${position.marketId}:${position.direction}`;
+      if (cfg.MONITOR_NEAR_RES_PERSIST_S > 0) {
+        const firstSeenRaw = await redis.get(persistKey).catch(() => null);
+        const now = Date.now();
+        if (!firstSeenRaw) {
+          // First observation above threshold — record timestamp and skip this tick.
+          await redis.set(persistKey, String(now), 'EX', cfg.MONITOR_NEAR_RES_PERSIST_S * 2 + 60).catch(() => null);
+          logger.debug('[monitor] near-res: price above threshold — waiting for persistence window', {
+            marketId: position.marketId,
+            direction: position.direction,
+            currentOutcomePrice: currentPrice.currentOutcomePrice.toFixed(3),
+            persistWindowS: cfg.MONITOR_NEAR_RES_PERSIST_S,
+          });
+          held++;
+          continue;
+        }
+        const firstSeen = parseInt(firstSeenRaw, 10);
+        if (!Number.isFinite(firstSeen)) {
+          // Corrupted value — treat as first observation and overwrite.
+          await redis.set(persistKey, String(now), 'EX', cfg.MONITOR_NEAR_RES_PERSIST_S * 2 + 60).catch(() => null);
+          held++;
+          continue;
+        }
+        const elapsedS = (now - firstSeen) / 1000;
+        if (elapsedS < cfg.MONITOR_NEAR_RES_PERSIST_S) {
+          logger.debug('[monitor] near-res: persistence window not yet met', {
+            marketId: position.marketId,
+            direction: position.direction,
+            elapsedS: elapsedS.toFixed(0),
+            requiredS: cfg.MONITOR_NEAR_RES_PERSIST_S,
+          });
+          held++;
+          continue;
+        }
+      }
+
+      // Both gates passed — genuine near-resolution.
+      if (cfg.MONITOR_NEAR_RES_PERSIST_S > 0) await redis.del(persistKey).catch(() => null);
       logger.info('[monitor] near-resolution detected — routing to redeemer', {
         marketId: position.marketId,
         direction: position.direction,
@@ -225,6 +288,11 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       );
       held++;
       continue;
+    } else if (cfg.MONITOR_NEAR_RES_PERSIST_S > 0) {
+      // Price is below threshold — reset the persistence window so any future
+      // spike must sustain for a full PERSIST_S before firing. Without this,
+      // elapsed time accumulates across non-continuous crossings.
+      await redis.del(`near_res_seen:${position.marketId}:${position.direction}`).catch(() => null);
     }
 
     // 3b. Tiered thresholds calculation
@@ -289,8 +357,9 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
         tpThreshold = cfg.CRYPTO_UPDOWN_TAKE_PROFIT;
         slThreshold = cfg.CRYPTO_UPDOWN_STOP_LOSS;
       } else if (isWeather) {
-        tpThreshold = cfg.WEATHER_TAKE_PROFIT;
-        slThreshold = cfg.WEATHER_STOP_LOSS;
+        // 0 = disabled (hold to resolution). Use Infinity so the evaluator never fires.
+        tpThreshold = cfg.WEATHER_TAKE_PROFIT > 0 ? cfg.WEATHER_TAKE_PROFIT : Number.POSITIVE_INFINITY;
+        slThreshold = cfg.WEATHER_STOP_LOSS > 0 ? cfg.WEATHER_STOP_LOSS : Number.POSITIVE_INFINITY;
       } else if (isSports) {
         tpThreshold = cfg.SPORTS_TAKE_PROFIT;
         slThreshold = cfg.SPORTS_STOP_LOSS;

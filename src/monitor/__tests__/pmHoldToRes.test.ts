@@ -154,6 +154,7 @@ function makeRedis() {
       return null;
     }),
     set: vi.fn().mockResolvedValue('OK'),
+    del: vi.fn().mockResolvedValue(1),
     hgetall: vi.fn().mockResolvedValue(null),
   };
 }

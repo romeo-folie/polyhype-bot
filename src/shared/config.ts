@@ -277,6 +277,14 @@ const envSchema = z.object({
   // CLOB prices are returned (burned 2026-04-24: Feldbausch/Tabur NO exit at -6.5%
   // instead of redemption at +59%).
   MONITOR_NEAR_RES_PRICE_THRESHOLD: z.coerce.number().min(0.5).max(1).optional().default(0.95),
+  // Seconds the price must continuously stay ≥ MONITOR_NEAR_RES_PRICE_THRESHOLD before
+  // pendingSettlement is marked. Prevents thin-book spikes from permanently locking a position.
+  // 0 = fire immediately (original behaviour).
+  MONITOR_NEAR_RES_PERSIST_S: z.coerce.number().min(0).optional().default(60),
+  // For weather positions only: minimum hours remaining until the market's endDate before
+  // the near-res gate is allowed to fire. A May 31 market cannot be near-settlement at
+  // 08:49 on May 30. 0 = no time gate. Non-weather markets are unaffected.
+  MONITOR_NEAR_RES_MIN_HOURS_TO_RES: z.coerce.number().min(0).optional().default(6),
   TAKER_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
   TAKER_MIN_EDGE_CATEGORIES: z
     .string()
