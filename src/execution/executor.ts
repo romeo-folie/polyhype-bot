@@ -2184,8 +2184,15 @@ export async function executeSignal(
       });
       // Clamp signal stake to the remaining room under the path cap.
       signal = { ...signal, stakeUsd: Math.min(signal.stakeUsd, sizeUpResult.topUpStakeCap!) };
-      // Tag the signal so post-execution ledger update calls sizeUpPosition instead of recordPosition.
-      signal = { ...signal, _isSizeUp: true } as TradeSignal & { _isSizeUp: boolean };
+      // Tag the signal so post-execution ledger update calls sizeUpPosition instead of
+      // recordPosition, and so the fill notification renders a distinct size-up message.
+      // _sizeUpExistingStake is the pre-top-up stake; _sizeUpTopUpNumber is 1-based.
+      signal = {
+        ...signal,
+        _isSizeUp: true,
+        ...(sizeUpResult.existingStake != null && { _sizeUpExistingStake: sizeUpResult.existingStake }),
+        _sizeUpTopUpNumber: (sizeUpResult.existingTopUps ?? 0) + 1,
+      };
     } else {
       logger.info('[executor] skipping size-up — ineligible', {
         marketId: signal.marketId,
@@ -2949,6 +2956,8 @@ interface SizeUpEvaluation {
   reason?: string;
   existingStake?: number;
   topUpStakeCap?: number;
+  /** Number of top-ups already applied to the existing position (0 on first top-up). */
+  existingTopUps?: number;
 }
 
 async function evaluateSizeUp(
@@ -3042,7 +3051,7 @@ async function evaluateSizeUp(
     return { eligible: false, reason: 'feature_disabled', existingStake: existing.stakeUsd, topUpStakeCap };
   }
 
-  return { eligible: true, existingStake: existing.stakeUsd, topUpStakeCap };
+  return { eligible: true, existingStake: existing.stakeUsd, topUpStakeCap, existingTopUps: currentTopUps };
 }
 
 /**
@@ -3137,7 +3146,7 @@ async function finalizeSuccessfulExecution(
     );
   }
 
-  const isSizeUp = !!(result.signal as TradeSignal & { _isSizeUp?: boolean })._isSizeUp;
+  const isSizeUp = result.signal._isSizeUp === true;
 
   if (isSizeUp) {
     if (sharesHeld != null && result.signal.stakeUsd > 0) {

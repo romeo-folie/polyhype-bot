@@ -92,6 +92,14 @@ export interface TradeSignal {
   endDate?: string | undefined;
   /** Price-zone classification for the entry outcome price (Change 3 telemetry). */
   priceZone?: 1 | 2 | 3 | 4 | 5;
+  /** Internal size-up (pyramid top-up) metadata, set by the executor/reconciler so
+   *  notifyTradeExecuted can render a distinct message and the ledger update routes
+   *  through sizeUpPosition. Not persisted — transient display/routing only. */
+  _isSizeUp?: boolean;
+  /** Existing stake before this top-up (for the "new total" line in the notification). */
+  _sizeUpExistingStake?: number;
+  /** 1-based top-up number (existing topUpCount + 1). */
+  _sizeUpTopUpNumber?: number;
 }
 
 /**

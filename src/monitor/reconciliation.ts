@@ -1,8 +1,9 @@
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
-import { getOpenPositions, closePosition, recordPosition, updatePositionShares, type Position } from '../execution/positionLedger.js';
+import { getOpenPositions, closePosition, recordPosition, updatePositionShares, sizeUpPosition, type Position } from '../execution/positionLedger.js';
 import { getHyperliquid } from '../shared/hyperliquid.js';
-import { fetchClobTokenBalance } from '../shared/clob.js';
+import { fetchClobTokenBalance, cancelClobOrder } from '../shared/clob.js';
+import { loadConfig } from '../shared/config.js';
 import { fetchPolymarketPositions, type PolymarketPosition } from '../shared/polymarketData.js';
 import { fetchMarketByConditionId, type GammaMarket } from '../shared/polymarketGamma.js';
 import { isRecentlyClosed, isRecentlyResolved } from '../shared/closedGuard.js';
@@ -65,6 +66,7 @@ export async function runReconciliation(
   opts: { forceFix?: boolean } = {},
 ): Promise<void> {
   const forceFix = opts.forceFix === true;
+  const cfg = loadConfig();
   logger.info('[reconcile] starting reconciliation pass', { forceFix });
 
   try {
@@ -159,6 +161,28 @@ export async function runReconciliation(
       const relDiff = ledgerShares > 0 ? absDiff / ledgerShares : 0;
 
       if (absDiff > 0.01 && relDiff > 0.01) {
+        // Async size-up fill: the on-chain share count grew on a position already
+        // in the ledger and a bot-posted maker order is linked. Route it through
+        // proper top-up accounting + the size-up notification before falling back
+        // to the generic share heal. The inline executor path can't notify here
+        // because the maker order filled after it returned `maker_pending`.
+        if (
+          forceFix &&
+          venueShares > ledgerShares &&
+          (await tryReconcileSizeUpFill(redis, cfg, ledgerPos, tokenId, venueShares, ledgerShares))
+        ) {
+          healedCount++;
+          details.push({
+            type: 'healed',
+            marketId: ledgerPos.marketId,
+            direction: ledgerPos.direction,
+            venue: venueName,
+            ledgerShares,
+            venueShares,
+            reason: `async size-up fill reconciled: ${ledgerShares.toFixed(2)} → ${venueShares.toFixed(2)}`,
+          });
+          continue;
+        }
           logger.info('[reconcile] mismatch detected — healing shares (preserving entryPrice)', {
           marketId: ledgerPos.marketId,
           direction: ledgerPos.direction,
@@ -399,5 +423,141 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
   } catch (err) {
     logger.warn('[reconcile] failed to import CLOB orphan', { error: String(err) });
     return false;
+  }
+}
+
+/**
+ * Reconcile an async size-up (top-up) maker fill detected during share-mismatch
+ * healing: the on-chain share count for a position already in the ledger has
+ * grown AND a bot-posted, size-up-eligible maker order is linked for this exact
+ * token + direction.
+ *
+ * Applies proper top-up accounting (weighted-average entry + topUpCount via
+ * sizeUpPosition) and emits the size-up Telegram notification that the inline
+ * executor path could not send — on resolution day the scanner's per-day dedup
+ * key blocks it from re-emitting the signal, so the executor never resume-polls
+ * its own pending order and the fill only ever surfaces here.
+ *
+ * Returns true when handled, or false to fall through to the generic share heal
+ * (no linked/eligible maker order, feature disabled, or any error — failing
+ * closed so a transient fault can't abort the whole reconciliation cycle).
+ */
+async function tryReconcileSizeUpFill(
+  redis: Redis,
+  cfg: ReturnType<typeof loadConfig>,
+  ledgerPos: Position,
+  tokenId: string | undefined,
+  venueShares: number,
+  ledgerShares: number,
+): Promise<boolean> {
+  let committed = false;
+  try {
+    if (!tokenId || !cfg.SIZE_UP_ENABLED) return false;
+    const additionalShares = venueShares - ledgerShares;
+    if (additionalShares <= 0.01) return false;
+
+    // Require a bot-posted maker order linked to this exact token + direction.
+    // Without one, this is an unrelated mismatch and the generic heal should run.
+    const rawPending = await getPendingOrder(redis, ledgerPos.marketId);
+    if (!rawPending) return false;
+    const ledgerDirNorm =
+      ledgerPos.direction === 'UP' ? 'YES' : ledgerPos.direction === 'DOWN' ? 'NO' : ledgerPos.direction;
+    const pendingDirNorm =
+      rawPending.direction === 'UP' ? 'YES' : rawPending.direction === 'DOWN' ? 'NO' : rawPending.direction;
+    if (rawPending.tokenId !== tokenId || pendingDirNorm !== ledgerDirNorm) return false;
+
+    // Size-up is restricted to configured sources (weather). Mirror the executor's
+    // SIZE_UP_ELIGIBLE_SOURCES gate so an unrelated strategy's maker fill on an
+    // already-held position is never misclassified as a pyramid top-up.
+    const eligibleSources = cfg.SIZE_UP_ELIGIBLE_SOURCES.split(',').map((s) => s.trim()).filter(Boolean);
+    const src = rawPending.sourcedFrom ?? ledgerPos.sourcedFrom ?? '';
+    if (!eligibleSources.some((s) => src.startsWith(s))) return false;
+
+    // Maker orders fill at their posted limit price, so the marginal cost of the
+    // newly filled shares is exactly additionalShares * price — no need to derive
+    // it from the on-chain blended average.
+    const fillPrice = rawPending.price;
+    const additionalStake = additionalShares * fillPrice;
+    // Defensive: a corrupt/zero stored price would write NaN/0 cost basis. Bail to
+    // the generic heal (which has its own finite-stake guard) rather than corrupt.
+    if (!(fillPrice > 0) || !Number.isFinite(additionalStake)) return false;
+
+    // Partial fill: cancel the residual resting size so it can't keep filling
+    // untracked on a later cycle (mirrors the executor's own resume path).
+    const isPartial = additionalShares + 0.01 < rawPending.size;
+    let residualResolved = true; // full fills have no residual to cancel
+    if (isPartial) {
+      residualResolved = await cancelClobOrder(rawPending.orderId).catch(() => false);
+    }
+
+    // Past this point the ledger is being mutated: if a later step throws we must
+    // report handled (return true in the catch) so the caller does NOT run the
+    // generic heal on top, which would clobber the weighted-average stake/entry
+    // sizeUpPosition wrote and double-apply the top-up.
+    committed = true;
+    await sizeUpPosition(
+      redis,
+      ledgerPos.marketId,
+      ledgerPos.direction,
+      additionalShares,
+      additionalStake,
+      fillPrice,
+    );
+    // Only clear the pending record once the order is fully resolved: a full fill,
+    // or a partial fill whose residual cancel was CONFIRMED. If the residual cancel
+    // failed/was unconfirmed, keep the key so a later fill of the still-resting
+    // residual is re-attributed as a size-up (sizeUpPosition) rather than clobbered
+    // by the generic heal. The pending key's TTL is the backstop for cleanup.
+    if (residualResolved) {
+      await deletePendingOrder(redis, ledgerPos.marketId);
+    } else {
+      logger.warn('[reconcile] size-up residual cancel unconfirmed — keeping pending key for re-attribution', {
+        marketId: ledgerPos.marketId,
+        orderId: rawPending.orderId,
+      });
+    }
+
+    logger.info('[reconcile] async size-up maker fill reconciled', {
+      marketId: ledgerPos.marketId,
+      direction: ledgerPos.direction,
+      additionalShares: +additionalShares.toFixed(4),
+      additionalStake: +additionalStake.toFixed(2),
+      fillPrice: +fillPrice.toFixed(4),
+      newTotalShares: +venueShares.toFixed(4),
+    });
+
+    const signalLike: TradeSignal = {
+      marketId: ledgerPos.marketId,
+      ...(ledgerPos.conditionId != null && { conditionId: ledgerPos.conditionId }),
+      ...(ledgerPos.clobTokenIds != null && { clobTokenIds: ledgerPos.clobTokenIds }),
+      question: ledgerPos.question,
+      direction: ledgerPos.direction,
+      stakeUsd: additionalStake,
+      edgeMagnitude: rawPending.edgeMagnitude ?? ledgerPos.edgeMagnitude ?? 0,
+      ...(rawPending.consensusP != null && { consensusProbability: rawPending.consensusP }),
+      outcomePrice: fillPrice,
+      sourcedFrom: rawPending.sourcedFrom ?? ledgerPos.sourcedFrom ?? 'reconciled:weather',
+      reasoning: rawPending.reasoning ?? 'Async maker size-up fill reconciled from CLOB position snapshot.',
+      _isSizeUp: true,
+      _sizeUpExistingStake: ledgerPos.stakeUsd,
+      _sizeUpTopUpNumber: (ledgerPos.topUpCount ?? 0) + 1,
+    };
+    void notifyTradeExecuted(signalLike, undefined, {
+      venue: 'clob',
+      sharesFilled: additionalShares,
+      entryPrice: fillPrice,
+    }).catch(() => {});
+
+    return true;
+  } catch (err) {
+    logger.warn('[reconcile] size-up reconciliation failed (non-fatal)', {
+      marketId: ledgerPos.marketId,
+      direction: ledgerPos.direction,
+      committed,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    // If the ledger mutation already started, report handled so the caller skips
+    // the generic heal (avoids double-apply). A pre-commit failure falls through.
+    return committed;
   }
 }

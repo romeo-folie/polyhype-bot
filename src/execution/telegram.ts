@@ -134,12 +134,27 @@ export async function notifyTradeExecuted(
     ? `${signal.direction} ↩️ contrarian`
     : signal.direction;
 
+  // Size-up (pyramid) fills carry _isSizeUp + display fields set by the executor.
+  // Render a distinct header and stake line so a top-up is never mistaken for a
+  // fresh entry. signal.stakeUsd here is the ADDED stake; new total = existing + added.
+  const isSizeUp = signal._isSizeUp === true;
+  const header = isSizeUp
+    ? `📈 <b>Position Sized Up${signal._sizeUpTopUpNumber != null ? ` (top-up ${signal._sizeUpTopUpNumber})` : ''}</b>`
+    : `🟢 <b>Trade Executed</b>`;
+  const stakeLine = isSizeUp
+    ? `<b>Added stake:</b> $${signal.stakeUsd.toFixed(2)} USDC` +
+      (signal._sizeUpExistingStake != null
+        ? `  |  <b>New total:</b> $${(signal._sizeUpExistingStake + signal.stakeUsd).toFixed(2)} USDC`
+        : '') +
+      `\n`
+    : `<b>Stake:</b> $${signal.stakeUsd.toFixed(2)} USDC\n`;
+
   const text =
-    `🟢 <b>Trade Executed</b>\n\n` +
+    `${header}\n\n` +
     `<b>Market:</b> ${escapeHtml(signal.question)}\n` +
     `<b>Direction:</b> ${directionLabel}  |  <b>Venue:</b> ${venue}\n` +
     `<b>Entry price:</b> ${isFutures ? fmtFiat(entryPrice) : fmtProb(signal.outcomePrice)}\n` +
-    `<b>Stake:</b> $${signal.stakeUsd.toFixed(2)} USDC\n` +
+    stakeLine +
     sharesLine +
     metaLine +
     marketContextLine +

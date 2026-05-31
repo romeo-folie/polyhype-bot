@@ -1315,10 +1315,12 @@ export async function scanWeatherMarkets(
       continue;
     }
     // Step 5: Dedup by event slug (covers all brackets in the event).
-    // When SIZE_UP_ENABLED, bypass for events with an active position so the
-    // executor can add to the position even within the 4-hour dedup window or
-    // on resolution day. Fresh-entry prevention is delegated to hasOpenPosition
-    // checks in the execution phase.
+    // When SIZE_UP_ENABLED, bypass for events with an active position ONLY on the
+    // target/resolution day, so the executor can add to the position once the
+    // forecast for that day is effectively locked in. Off-day top-ups are
+    // intentionally not allowed — they would chase a forecast that can still drift.
+    // Fresh-entry prevention is delegated to hasOpenPosition checks in the
+    // execution phase.
     const dedupKey = `${DEDUP_KEY_PREFIX}${event.slug}`;
     let isSizeUpScan = false;
     let isEarlyResolutionDayEntry = false;
@@ -1397,31 +1399,14 @@ export async function scanWeatherMarkets(
         continue;
       }
     } else {
+      // Non-resolution day: size-ups are gated to the target/resolution day only,
+      // so there is no dedup bypass here — a claimed key means this event was
+      // already evaluated in the current window and we skip it. Top-ups resume on
+      // the target day via the isResolutionDay branch above.
       const claimed = await redis.set(dedupKey, '1', 'EX', cfg.WEATHER_DEDUP_TTL_S, 'NX').catch(() => null);
       if (!claimed) {
-        if (cfg.SIZE_UP_ENABLED) {
-          // Primary check: active-event marker. Fallback: bracket position scan
-          // covers pre-deploy positions and markers that expired before this scan.
-          const activeMarker =
-            (await redis.exists(`${ACTIVE_EVENT_KEY_PREFIX}${event.slug}`).catch(() => 0)) > 0;
-          const hasPosition =
-            activeMarker ||
-            (await hasAnyOpenWeatherPosition(redis, event.allMarketIds).catch(() => false));
-          if (hasPosition) {
-            isSizeUpScan = true;
-            sizeUpRescanned++;
-            logger.debug('[weather] event dedup bypassed for size-up re-evaluation', {
-              eventSlug: event.slug,
-              city: event.city,
-            });
-          } else {
-            dedupSkipped++;
-            continue;
-          }
-        } else {
-          dedupSkipped++;
-          continue;
-        }
+        dedupSkipped++;
+        continue;
       }
     }
 
