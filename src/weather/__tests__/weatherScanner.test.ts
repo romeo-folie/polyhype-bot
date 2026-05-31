@@ -2455,7 +2455,7 @@ describe('scanWeatherMarkets', () => {
       wireMockGammaAndForecast();
       mockGetBankroll.mockResolvedValue(1000);
       mockExecuteAndRecordSignal.mockResolvedValue({
-        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true, entryPrice: 0.9, sharesFilled: 10,
       });
 
       await runWeatherScan(redisMock as never);
@@ -2486,7 +2486,7 @@ describe('scanWeatherMarkets', () => {
       wireMockGammaAndForecast();
       mockGetBankroll.mockResolvedValue(10000);
       mockExecuteAndRecordSignal.mockResolvedValue({
-        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true,
       });
 
       await runWeatherScan(redisMock as never);
@@ -2505,7 +2505,7 @@ describe('scanWeatherMarkets', () => {
       wireMockGammaAndForecast();
       mockGetBankroll.mockResolvedValue(10000);
       mockExecuteAndRecordSignal.mockResolvedValue({
-        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true,
       });
 
       await runWeatherScan(redisMock as never);
@@ -2526,7 +2526,7 @@ describe('scanWeatherMarkets', () => {
       wireMockGammaAndForecast();
       mockGetBankroll.mockResolvedValue(10000); // large bankroll → each Kelly stake > $5
       mockExecuteAndRecordSignal.mockResolvedValue({
-        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true,
       });
 
       await runWeatherScan(redisMock as never);
@@ -2548,6 +2548,89 @@ describe('scanWeatherMarkets', () => {
       await runWeatherScan(redisMock as never);
 
       expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+    });
+
+    it('does NOT set the active-event marker for a maker_pending placement (preserves cross-scan retry)', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+      // A fresh maker GTC: governor stamped on acceptance, but not yet a position.
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never,
+        skipped: false,
+        executionVenue: 'clob',
+        entryExecutionPath: 'maker_pending',
+        governorStamped: true,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+      const activeEventSets = redisMock.set.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && (c[0] as string).startsWith('weather:active_event:'),
+      );
+      expect(activeEventSets).toHaveLength(0);
+    });
+
+    it('sets the active-event marker for a confirmed fill', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never,
+        skipped: false,
+        executionVenue: 'clob',
+        entryExecutionPath: 'clob_direct',
+        entryPrice: 0.9,
+        sharesFilled: 10,
+        governorStamped: true,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+      const activeEventSets = redisMock.set.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && (c[0] as string).startsWith('weather:active_event:'),
+      );
+      expect(activeEventSets.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('sets the active-event marker for a fill that lands on a resume cycle (governorStamped=false)', async () => {
+      // A maker GTC posted on an earlier scan that FILLS on this resume cycle:
+      // the executor does not re-stamp the governor (governorStamped=false), but
+      // it is a real position now, so the marker must still be set.
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never,
+        skipped: false,
+        executionVenue: 'clob',
+        entryExecutionPath: 'maker_fill',
+        entryPrice: 0.9,
+        sharesFilled: 10,
+        governorStamped: false,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+      const activeEventSets = redisMock.set.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && (c[0] as string).startsWith('weather:active_event:'),
+      );
+      expect(activeEventSets.length).toBeGreaterThanOrEqual(1);
     });
 
     it('suppresses execution for cities listed in WEATHER_EXCLUDED_CITIES', async () => {
@@ -2580,7 +2663,7 @@ describe('scanWeatherMarkets', () => {
       wireMockGammaAndForecast();
       mockGetBankroll.mockResolvedValue(1000);
       mockExecuteAndRecordSignal.mockResolvedValue({
-        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true, entryPrice: 0.9, sharesFilled: 10,
       });
 
       await runWeatherScan(redisMock as never);
@@ -2616,7 +2699,7 @@ describe('scanWeatherMarkets', () => {
       wireMockGammaAndForecast();
       mockGetBankroll.mockResolvedValue(1000);
       mockExecuteAndRecordSignal.mockResolvedValue({
-        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true, entryPrice: 0.9, sharesFilled: 10,
       });
 
       await runWeatherScan(redisMock as never);
@@ -2635,7 +2718,7 @@ describe('scanWeatherMarkets', () => {
       wireMockGammaAndForecast();
       mockGetBankroll.mockResolvedValue(1000);
       mockExecuteAndRecordSignal.mockResolvedValue({
-        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true, entryPrice: 0.9, sharesFilled: 10,
       });
 
       await runWeatherScan(redisMock as never);
@@ -2749,7 +2832,7 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     mockGetBankroll.mockResolvedValue(1000);
     mockExecuteAndRecordSignal.mockResolvedValue({
       signal: { stakeUsd: 5 } as never, skipped: false, isSizeUp: true,
-      executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+      executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10, governorStamped: true,
     });
 
     await runWeatherScan(redisMock as never);
@@ -2794,7 +2877,7 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     mockGetBankroll.mockResolvedValue(1000);
     mockExecuteAndRecordSignal.mockResolvedValue({
       signal: { stakeUsd: 5 } as never, skipped: false, isSizeUp: true,
-      executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+      executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10, governorStamped: true,
     });
 
     await runWeatherScan(redisMock as never);
@@ -2865,7 +2948,7 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     mockGetBankroll.mockResolvedValue(1000);
     mockExecuteAndRecordSignal.mockResolvedValue({
       signal: { stakeUsd: 5 } as never, skipped: false, isSizeUp: true,
-      executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10,
+      executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10, governorStamped: true,
     });
 
     await runWeatherScan(redisMock as never);

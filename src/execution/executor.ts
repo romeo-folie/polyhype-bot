@@ -207,6 +207,17 @@ export interface ExecutionResult {
   memeAtrTpPct?: number;
   /** True if this execution was a size-up (pyramid top-up) into an existing position. */
   isSizeUp?: boolean;
+  /**
+   * True iff this invocation actually stamped the shared global governor
+   * (i.e. recordGlobalTrade(...,'polymarket') ran because a NEW order was
+   * accepted on this call). False for skips, rejects, and — critically —
+   * resumes of an already-posted pending maker order (which poll an existing
+   * order without consuming fresh rate-limit budget). Callers that pace
+   * themselves against the governor must read this rather than infer it from
+   * entryExecutionPath, since a fresh post and a resumed poll share the same
+   * 'maker_pending' path string.
+   */
+  governorStamped?: boolean;
 }
 
 interface DecisionBenchmark {
@@ -486,8 +497,15 @@ async function tryExecuteViaClobMaker(
   makerSpreadBps?: number;
   makerFillStatus?: 'none' | 'partial' | 'full' | 'timeout' | 'rejected' | 'cancel_unconfirmed' | 'pending';
   makerSharesFilled?: number;
+  /** True iff a NEW order was accepted on this call and the global governor was
+   * stamped (recordGlobalTrade ran). False on the pending-order resume path. */
+  governorStamped?: boolean;
 }> {
   const startedAt = Date.now();
+  // Set to true the moment recordGlobalTrade() is called for a freshly accepted
+  // order, so every post-stamp return can report it. The resume path (top of
+  // this function) returns before any stamp, leaving this false.
+  let governorStamped = false;
   if (!cfg.CLOB_FALLBACK_ENABLED) {
     return { ok: false, error: 'clob_disabled', waitMs: Date.now() - startedAt };
   }
@@ -951,6 +969,7 @@ async function tryExecuteViaClobMaker(
       sharesFilled: result.shares_bought,
     });
     await recordGlobalTrade(getRedis(), 'polymarket');
+    governorStamped = true;
     return {
       ok: true,
       tradeResult: { success: true, ...(result.shares_bought != null ? { shares_bought: result.shares_bought } : {}) },
@@ -968,6 +987,7 @@ async function tryExecuteViaClobMaker(
       ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
       makerFillStatus: 'full',
       ...(result.shares_bought != null ? { makerSharesFilled: result.shares_bought } : {}),
+      governorStamped,
     };
   }
 
@@ -989,6 +1009,7 @@ async function tryExecuteViaClobMaker(
 
   // Record trade in governor immediately upon order acceptance (limit orders consume budget)
   await recordGlobalTrade(getRedis(), 'polymarket');
+  governorStamped = true;
 
   // Empty-book mode or weather patient real-book: persist the order and return
   // immediately (non-blocking). The next cron cycle resumes via the pending-order
@@ -1035,6 +1056,7 @@ async function tryExecuteViaClobMaker(
       ...(mid ? { makerMidPrice: mid } : {}),
       ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
       makerFillStatus: 'pending',
+      governorStamped,
     };
   }
 
@@ -1059,6 +1081,7 @@ async function tryExecuteViaClobMaker(
         ...(mid ? { makerMidPrice: mid } : {}),
         ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
         makerFillStatus: 'cancel_unconfirmed',
+        governorStamped,
       };
     }
     return {
@@ -1073,6 +1096,7 @@ async function tryExecuteViaClobMaker(
       ...(mid ? { makerMidPrice: mid } : {}),
       ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
       makerFillStatus: 'timeout',
+      governorStamped,
     };
   }
 
@@ -1099,6 +1123,7 @@ async function tryExecuteViaClobMaker(
             ...(mid ? { makerMidPrice: mid } : {}),
             ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
             makerFillStatus: 'cancel_unconfirmed',
+            governorStamped,
           };
         }
       }
@@ -1123,6 +1148,7 @@ async function tryExecuteViaClobMaker(
         ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
         makerFillStatus: matched + 1e-9 < original ? 'partial' : 'full',
         makerSharesFilled: matched,
+        governorStamped,
       };
     }
 
@@ -1144,6 +1170,7 @@ async function tryExecuteViaClobMaker(
       ...(mid ? { makerMidPrice: mid } : {}),
       ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
       makerFillStatus: 'cancel_unconfirmed',
+      governorStamped,
     };
   }
   return {
@@ -1158,6 +1185,7 @@ async function tryExecuteViaClobMaker(
     ...(mid ? { makerMidPrice: mid } : {}),
     ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
     makerFillStatus: 'timeout',
+    governorStamped,
   };
 }
 
@@ -2210,6 +2238,11 @@ export async function executeSignal(
 
   let makerAttempted = false;
   let makerFilled = false;
+  // True once any Polymarket order has been accepted on this call (maker post or
+  // taker fill), i.e. recordGlobalTrade ran. Used to report governorStamped on
+  // the clob_direct returns, where a hybrid maker post may have already stamped
+  // the governor before the taker fallback.
+  let governorStampedThisCall = false;
   let takerPath: 'taker_direct' | 'hybrid_taker_fallback' | null = null;
   let decisionSubmitted = false;
   let takerDecisionBenchmarkPromise: Promise<DecisionBenchmark> | null = null;
@@ -2440,6 +2473,7 @@ export async function executeSignal(
       emptyBookMakerRoute,
       redis,
     );
+    if (makerAttempt.governorStamped === true) governorStampedThisCall = true;
     safeRecordExecutionTiming('maker_wait_ms', makerAttempt.waitMs);
     const makerBenchmark: DecisionBenchmark = {
       decisionBestBid: makerAttempt.makerBestBid ?? null,
@@ -2497,6 +2531,7 @@ export async function executeSignal(
         sharesFilled: null,
         decisionBenchmark: makerTelemetry as DecisionBenchmark,
         hedgeDispatched: false,
+        governorStamped: makerAttempt.governorStamped ?? false,
       };
     }
 
@@ -2624,6 +2659,7 @@ export async function executeSignal(
         sharesFilled: makerAttempt.makerSharesFilled ?? null,
         decisionBenchmark: makerTelemetry as DecisionBenchmark,
         hedgeDispatched: true,
+        governorStamped: makerAttempt.governorStamped ?? false,
       };
     }
 
@@ -2773,6 +2809,7 @@ export async function executeSignal(
     const tradeResult = clob.tradeResult;
     // Record trade in governor (Polymarket order bucket)
     await recordGlobalTrade(redis, 'polymarket');
+    governorStampedThisCall = true;
     await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
     safeRecordExecutionMetric('clob_success', 'direct');
     finalizeAttempt({
@@ -2811,6 +2848,8 @@ export async function executeSignal(
       hedgeDispatched: true,
       entryPrice: tradeResult.price ?? signal.outcomePrice,
       sharesFilled: tradeResult.shares_bought ?? null,
+      // recordGlobalTrade ran above on this successful taker fill.
+      governorStamped: true,
     };
   }
 
@@ -2839,6 +2878,10 @@ export async function executeSignal(
     entryExecutionPath: 'clob_direct',
     entryOrderType: 'taker',
     decisionBenchmark: makerTelemetry as DecisionBenchmark,
+    // A failed taker buy does NOT stamp the governor (recordGlobalTrade only runs
+    // on success above). But a hybrid maker post earlier in this call may have —
+    // so report whether any order was actually accepted this call.
+    governorStamped: governorStampedThisCall,
   };
 }
 
