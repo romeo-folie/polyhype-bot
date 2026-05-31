@@ -484,8 +484,10 @@ async function tryReconcileSizeUpFill(
 
     // Partial fill: cancel the residual resting size so it can't keep filling
     // untracked on a later cycle (mirrors the executor's own resume path).
-    if (additionalShares + 0.01 < rawPending.size) {
-      await cancelClobOrder(rawPending.orderId).catch(() => false);
+    const isPartial = additionalShares + 0.01 < rawPending.size;
+    let residualResolved = true; // full fills have no residual to cancel
+    if (isPartial) {
+      residualResolved = await cancelClobOrder(rawPending.orderId).catch(() => false);
     }
 
     // Past this point the ledger is being mutated: if a later step throws we must
@@ -501,7 +503,19 @@ async function tryReconcileSizeUpFill(
       additionalStake,
       fillPrice,
     );
-    await deletePendingOrder(redis, ledgerPos.marketId);
+    // Only clear the pending record once the order is fully resolved: a full fill,
+    // or a partial fill whose residual cancel was CONFIRMED. If the residual cancel
+    // failed/was unconfirmed, keep the key so a later fill of the still-resting
+    // residual is re-attributed as a size-up (sizeUpPosition) rather than clobbered
+    // by the generic heal. The pending key's TTL is the backstop for cleanup.
+    if (residualResolved) {
+      await deletePendingOrder(redis, ledgerPos.marketId);
+    } else {
+      logger.warn('[reconcile] size-up residual cancel unconfirmed — keeping pending key for re-attribution', {
+        marketId: ledgerPos.marketId,
+        orderId: rawPending.orderId,
+      });
+    }
 
     logger.info('[reconcile] async size-up maker fill reconciled', {
       marketId: ledgerPos.marketId,

@@ -489,11 +489,56 @@ describe('Position Reconciliation Healer', () => {
       mockRedis, 'numeric-su2', 'YES',
       expect.closeTo(60, 5), expect.closeTo(37.2, 5), expect.closeTo(0.62, 5),
     );
+    // Residual cancel confirmed (mock returns true) → pending key cleared.
+    expect(pendingMakerOrders.deletePendingOrder).toHaveBeenCalledWith(mockRedis, 'numeric-su2');
     expect(telegram.notifyTradeExecuted).toHaveBeenCalledWith(
       expect.objectContaining({ _isSizeUp: true, _sizeUpTopUpNumber: 2 }),
       undefined,
       expect.anything(),
     );
+  });
+
+  it('keeps the pending order key when a partial size-up residual cancel is unconfirmed', async () => {
+    // Same partial-fill setup, but cancelClobOrder fails (returns false). The
+    // matched portion must still be recorded, but the pending key must be RETAINED
+    // so a later fill of the still-resting residual is re-attributed as a size-up
+    // rather than clobbered by the generic heal.
+    const ledgerPosition = {
+      marketId: 'numeric-su3',
+      conditionId: 'cond-su3',
+      direction: 'YES',
+      sharesHeld: 100,
+      stakeUsd: 50,
+      entryPrice: 0.50,
+      executionVenue: 'clob',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+      topUpCount: 0,
+    };
+    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([
+      { conditionId: 'cond-su3', asset: 'tok-yes', avgPrice: 0.55, size: 160 },
+    ]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue({
+      id: 'numeric-su3', question: 'Highest temperature in Chicago today?',
+      conditionId: 'cond-su3', clobTokenIds: ['tok-yes', 'tok-no'],
+    });
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-su3-1', tokenId: 'tok-yes', price: 0.62, size: 100,
+      postedAt: Date.now() - 60_000, expiresAt: Date.now() + 60_000,
+      consensusP: 0.7, direction: 'YES', sourcedFrom: 'weather:chicago',
+    });
+    (clob.cancelClobOrder as any).mockResolvedValueOnce(false); // cancel unconfirmed
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Matched portion still recorded as a top-up...
+    expect(positionLedger.sizeUpPosition).toHaveBeenCalledWith(
+      mockRedis, 'numeric-su3', 'YES',
+      expect.closeTo(60, 5), expect.closeTo(37.2, 5), expect.closeTo(0.62, 5),
+    );
+    // ...but the pending key is NOT deleted, and the generic heal does not run.
+    expect(pendingMakerOrders.deletePendingOrder).not.toHaveBeenCalled();
+    expect(positionLedger.updatePositionShares).not.toHaveBeenCalled();
   });
 
   it('aborts reconciliation when CLOB returns empty but ledger has positions (API outage guard)', async () => {
