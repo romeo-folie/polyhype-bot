@@ -1775,6 +1775,17 @@ const envSchema = z.object({
   WEATHER_BASE_RATE_LOOKBACK_DAYS: z.coerce.number().int().min(1).optional().default(14),
   WEATHER_BASE_RATE_MIN_SAMPLES: z.coerce.number().int().min(1).optional().default(7),
   WEATHER_BASE_RATE_NO_BLOCK_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.70),
+  // ── YES-bet quality gates (NO bets are unaffected) ────────────────────────
+  // Interior brackets (e.g. "24°C", "74-75°F") require the temperature to land
+  // in a 1-2° band. The market incorporates intraday data we can't access, so
+  // interior YES bets win only 4-14% historically. Allow only tail brackets by
+  // default. Set true to re-enable (for shadow analysis only).
+  WEATHER_YES_ALLOW_INTERIOR_BRACKETS: boolFromEnv.optional().default(false),
+  // Minimum market price for YES entries. Below 0.30 the market is pricing us
+  // out with information we don't have; win rates collapse to <5%.
+  WEATHER_YES_MIN_MARKET_PRICE: z.coerce.number().min(0).max(0.99).optional().default(0.30),
+  // Minimum model probability for YES entries. Ensures directional confidence.
+  WEATHER_YES_MIN_MODEL_PROB: z.coerce.number().min(0).max(1).optional().default(0.50),
   // --- WEATHER EXIT RULES (monitor) ---
   // Weather brackets resolve at end-of-day of their target date; realized hold
   // times run ~17–26h when entering 0–1 day out. Stale-exit (STALE_MIN_AGE_H_WEATHER=6h)
