@@ -786,6 +786,29 @@ async function tryExecuteViaClobMaker(
       makerFillStatus: 'rejected',
     };
   }
+  // Defense-in-depth for the stricter empty-book cap. Capping fairValue above is
+  // not enough: when WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE is set below the book tick,
+  // resolveMakerPrice's tick floor lifts the final price back up to one tick, which
+  // would slip through the WEATHER_MAX_ENTRY_PRICE guard above (that cap is higher).
+  // Refuse to post rather than silently overpay — same below-tick handling as
+  // WEATHER_MAX_ENTRY_PRICE. Empty-book only; real-book entries use WEATHER_MAX_ENTRY_PRICE.
+  if (
+    emptyBookMode
+    && signal.source === 'weather'
+    && cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE > 0
+    && price > cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE + 1e-9
+  ) {
+    return {
+      ok: false,
+      error: 'maker_price_above_cap',
+      waitMs: Date.now() - startedAt,
+      makerBestBid: bestBid,
+      makerBestAsk: bestAsk,
+      ...(mid ? { makerMidPrice: mid } : {}),
+      ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
+      makerFillStatus: 'rejected',
+    };
+  }
 
   // FV scanner: re-validate edge at the actual discounted fill price. signal.outcomePrice
   // is the stale Gamma mid at scan time; the CLOB may have already repriced 30+ cents

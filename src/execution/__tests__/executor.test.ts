@@ -1588,6 +1588,30 @@ describe('empty-book maker route', () => {
     expect(mockSubmitLimit).not.toHaveBeenCalled();
   });
 
+  it('weather refuses to post when WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE < tick floor', async () => {
+    // Sub-tick empty-book cap: resolveMakerPrice's tick floor would lift the price
+    // back to 0.01, above the 0.005 cap, and the WEATHER_MAX_ENTRY_PRICE guard
+    // (set higher here) would let it through. The empty-book defense-in-depth guard
+    // must refuse to post rather than silently overpay.
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.65;
+    mockConfig.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE = 0.005;
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.10,
+        edgeMagnitude: 0.30,
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
   it('non-weather source does not apply the weather entry-price cap', async () => {
     // near-zero-arb with same high-conviction setup should NOT be clamped to 0.65.
     mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.65;
