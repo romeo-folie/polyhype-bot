@@ -5,6 +5,7 @@ import * as polymarketData from '../../shared/polymarketData.js';
 import * as polymarketGamma from '../../shared/polymarketGamma.js';
 import * as pendingMakerOrders from '../../execution/pendingMakerOrders.js';
 import * as telegram from '../../execution/telegram.js';
+import * as clob from '../../shared/clob.js';
 import type { Redis } from 'ioredis';
 
 vi.mock('../../execution/positionLedger.js', () => ({
@@ -12,10 +13,12 @@ vi.mock('../../execution/positionLedger.js', () => ({
   updatePositionShares: vi.fn(),
   closePosition: vi.fn(),
   recordPosition: vi.fn(),
+  sizeUpPosition: vi.fn(),
 }));
 
 vi.mock('../../shared/clob.js', () => ({
   fetchClobTokenBalance: vi.fn().mockResolvedValue({ ok: false, error: 'not found' }),
+  cancelClobOrder: vi.fn().mockResolvedValue(true),
 }));
 
 vi.mock('../../shared/polymarketData.js', () => ({
@@ -30,6 +33,10 @@ vi.mock('../../shared/polymarketGamma.js', () => ({
 vi.mock('../../execution/pendingMakerOrders.js', () => ({
   getPendingOrder: vi.fn().mockResolvedValue(null),
   deletePendingOrder: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: vi.fn(() => ({ SIZE_UP_ENABLED: true, SIZE_UP_ELIGIBLE_SOURCES: 'weather' })),
 }));
 
 vi.mock('../../execution/telegram.js', () => ({
@@ -348,6 +355,8 @@ describe('Position Reconciliation Healer', () => {
     (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
+    // No linked maker order → a generic share-mismatch heal, not an async size-up.
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue(null);
 
     await runReconciliation(mockRedis, { forceFix: true });
 
@@ -368,6 +377,123 @@ describe('Position Reconciliation Healer', () => {
       sharesHeld: 250,
       executionVenue: 'clob',
     }));
+  });
+
+  it('reconciles an async size-up maker fill as a top-up (not a generic heal) and notifies', async () => {
+    // Ledger holds 100 shares; on-chain shows 160 (a +60 share top-up) and a
+    // bot-posted maker order is linked for the YES token. This must route through
+    // sizeUpPosition (weighted-avg + topUpCount), delete the pending order, and
+    // emit a size-up notification — NOT the silent generic share heal.
+    const ledgerPosition = {
+      marketId: 'numeric-su',
+      conditionId: 'cond-su',
+      direction: 'YES',
+      sharesHeld: 100,
+      stakeUsd: 50, // entryPrice 0.50
+      entryPrice: 0.50,
+      executionVenue: 'clob',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+      topUpCount: 0,
+    };
+    const clobPositions = [
+      { conditionId: 'cond-su', asset: 'tok-yes', avgPrice: 0.55, size: 160 },
+    ];
+    const mockGammaMarket = {
+      id: 'numeric-su',
+      question: 'Highest temperature in Chicago today?',
+      conditionId: 'cond-su',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(mockGammaMarket);
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-su-1',
+      tokenId: 'tok-yes',
+      price: 0.62,
+      size: 60,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 60_000,
+      consensusP: 0.7,
+      direction: 'YES',
+      edgeMagnitude: 0.12,
+      sourcedFrom: 'weather:chicago',
+      reasoning: 'Resolution-day top-up.',
+    });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Routed through size-up accounting at the maker order's posted price (0.62):
+    // +60 shares, additional stake = 60 * 0.62 = 37.2.
+    expect(positionLedger.sizeUpPosition).toHaveBeenCalledWith(
+      mockRedis,
+      'numeric-su',
+      'YES',
+      expect.closeTo(60, 5),
+      expect.closeTo(37.2, 5),
+      expect.closeTo(0.62, 5),
+    );
+    // The generic heal must NOT run for a recognised size-up.
+    expect(positionLedger.updatePositionShares).not.toHaveBeenCalled();
+    // Pending order cleared and a size-up notification emitted.
+    expect(pendingMakerOrders.deletePendingOrder).toHaveBeenCalledWith(mockRedis, 'numeric-su');
+    expect(telegram.notifyTradeExecuted).toHaveBeenCalledWith(
+      expect.objectContaining({ _isSizeUp: true, _sizeUpTopUpNumber: 1 }),
+      undefined,
+      expect.anything(),
+    );
+  });
+
+  it('cancels the residual resting order when an async size-up fills only partially', async () => {
+    // Posted 100-share top-up order; only 60 filled (venueShares 160 vs ledger 100).
+    // The residual 40 shares are still resting → must be cancelled so they don't
+    // keep filling untracked.
+    const ledgerPosition = {
+      marketId: 'numeric-su2',
+      conditionId: 'cond-su2',
+      direction: 'YES',
+      sharesHeld: 100,
+      stakeUsd: 50,
+      entryPrice: 0.50,
+      executionVenue: 'clob',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+      topUpCount: 1,
+    };
+    const clobPositions = [
+      { conditionId: 'cond-su2', asset: 'tok-yes', avgPrice: 0.55, size: 160 },
+    ];
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue({
+      id: 'numeric-su2', question: 'Highest temperature in Chicago today?',
+      conditionId: 'cond-su2', clobTokenIds: ['tok-yes', 'tok-no'],
+    });
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-su2-1',
+      tokenId: 'tok-yes',
+      price: 0.62,
+      size: 100, // posted 100, only 60 filled
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 60_000,
+      consensusP: 0.7,
+      direction: 'YES',
+      sourcedFrom: 'weather:chicago',
+    });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(clob.cancelClobOrder).toHaveBeenCalledWith('order-su2-1');
+    expect(positionLedger.sizeUpPosition).toHaveBeenCalledWith(
+      mockRedis, 'numeric-su2', 'YES',
+      expect.closeTo(60, 5), expect.closeTo(37.2, 5), expect.closeTo(0.62, 5),
+    );
+    expect(telegram.notifyTradeExecuted).toHaveBeenCalledWith(
+      expect.objectContaining({ _isSizeUp: true, _sizeUpTopUpNumber: 2 }),
+      undefined,
+      expect.anything(),
+    );
   });
 
   it('aborts reconciliation when CLOB returns empty but ledger has positions (API outage guard)', async () => {

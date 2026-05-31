@@ -2885,22 +2885,23 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
   });
 
-  it('near-res gate does not block sizeUpScanOnly opportunities', async () => {
-    // Use tomorrow's event (daysOut=1) but with endDate only 5h away so the
-    // near-res gate (threshold=10h) would normally block it. The dedup key is
-    // already set and the active event key is present, so it enters as a size-up.
+  it('does NOT size up on a non-resolution day (off-day top-ups gated out)', async () => {
+    // Tomorrow's event (daysOut=1) with the normal dedup key already claimed and a
+    // position present. Before resolution-day gating this triggered an off-day
+    // size-up; size-ups are now restricted to the target/resolution day, so the
+    // dedup-claimed off-day scan must skip rather than re-evaluate for a top-up.
     const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
     const tomorrowIso = tomorrow.toISOString().slice(0, 10);
     const [ty, tm, tdStr] = tomorrowIso.split('-') as [string, string, string];
     const tMonthName = MONTH_NAMES2[parseInt(tm, 10) - 1] ?? 'May';
     const tSlugDate = `${tMonthName.toLowerCase()}-${parseInt(tdStr, 10).toString()}-${ty}`;
-    const tEndDate = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString(); // 5h from now
+    const tEndDate = `${tomorrowIso}T12:00:00Z`; // noon tomorrow → genuine off-day
     const tSlug = `highest-temperature-in-chicago-on-${tSlugDate}`;
     const tActiveKey = `weather:active_event:${tSlug}`;
     const tDedupKey = `weather:event:${tSlug}`;
 
     redisMock._store.set(tActiveKey, '1');
-    redisMock._store.set(tDedupKey, '1'); // dedup already claimed → triggers size-up bypass
+    redisMock._store.set(tDedupKey, '1'); // dedup already claimed
     for (let i = 0; i < 11; i++) {
       redisMock._store.set(`position:mnr${i}:NO`, '1');
       redisMock._store.set(`position:mnr${i}:YES`, '1');
@@ -2934,6 +2935,53 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     });
     mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: tomorrowIso });
     mockFetchNwsForecast.mockResolvedValue({ highF: 52, lowF: 38, precipProbability: 10, forecastDate: tomorrowIso, shortForecast: 'Cloudy' });
+
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false, isSizeUp: true,
+      executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10, governorStamped: true,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+  });
+
+  it('near-res gate does not block resolution-day size-up opportunities', async () => {
+    // Resolution day (today) with endDate only 5h away so the near-res entry gate
+    // (threshold=10h) would block a FRESH entry. A position is present, so the scan
+    // enters the resolution-day size-up path, which must bypass the near-res gate
+    // (sizeUpScanOnly) and still fire — this is where same-day top-ups land.
+    const nearEndDate = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString();
+    const baseEvent = makeTodayGammaEvent();
+
+    redisMock._store.set(activeEventKey, '1');
+    for (let i = 0; i < 11; i++) {
+      redisMock._store.set(`position:mt${i}:NO`, '1');
+      redisMock._store.set(`position:mt${i}:YES`, '1');
+    }
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve([{
+        ...baseEvent,
+        endDate: nearEndDate,
+        markets: baseEvent.markets.map((m) => ({ ...m, endDate: nearEndDate })),
+      }]),
+    }) as unknown as typeof fetch;
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: todayIso,
+    });
+    mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: todayIso });
+    mockFetchNwsForecast.mockResolvedValue({ highF: 52, lowF: 38, precipProbability: 10, forecastDate: todayIso, shortForecast: 'Cloudy' });
 
     mockLoadConfig.mockReturnValue({
       ...baseConfig,
