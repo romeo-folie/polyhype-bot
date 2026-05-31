@@ -2571,7 +2571,7 @@ describe('scanWeatherMarkets', () => {
 
       expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
       const activeEventSets = redisMock.set.mock.calls.filter(
-        (c) => typeof c[0] === 'string' && (c[0] as string).startsWith('weather:active_event:'),
+        (c) => typeof c[0] === 'string' && c[0].startsWith('weather:active_event:'),
       );
       expect(activeEventSets).toHaveLength(0);
     });
@@ -2598,7 +2598,7 @@ describe('scanWeatherMarkets', () => {
 
       expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
       const activeEventSets = redisMock.set.mock.calls.filter(
-        (c) => typeof c[0] === 'string' && (c[0] as string).startsWith('weather:active_event:'),
+        (c) => typeof c[0] === 'string' && c[0].startsWith('weather:active_event:'),
       );
       expect(activeEventSets.length).toBeGreaterThanOrEqual(1);
     });
@@ -2628,7 +2628,7 @@ describe('scanWeatherMarkets', () => {
 
       expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
       const activeEventSets = redisMock.set.mock.calls.filter(
-        (c) => typeof c[0] === 'string' && (c[0] as string).startsWith('weather:active_event:'),
+        (c) => typeof c[0] === 'string' && c[0].startsWith('weather:active_event:'),
       );
       expect(activeEventSets.length).toBeGreaterThanOrEqual(1);
     });
