@@ -72,6 +72,9 @@ vi.mock('../weatherScanner.js', () => ({
   computeBiasedProb: mockComputeBiasedProb,
   parseBracketLabel: mockParseBracketLabel,
   daysUntil: mockDaysUntil,
+  // Real predicate (pure) — mirrors weatherScanner's exported helper.
+  forecastRoundsIntoBracket: (h: number, low: number | null, high: number | null) =>
+    low === null || high === null ? false : Math.round(h) >= low && Math.round(h) <= high,
   // Also export the key prefix so weatherScanner tests can import it
   FORECAST_INVALIDATED_KEY_PREFIX: 'weather:forecast_invalidated:',
 }));
@@ -88,6 +91,8 @@ function makeConfig(overrides = {}) {
   return {
     WEATHER_FORECAST_INVALIDATION_ENABLED: false,
     WEATHER_FORECAST_INVALIDATION_SHADOW_ENABLED: true,
+    WEATHER_FORECAST_INVALIDATION_MODAL_ENABLED: true,
+    WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: 1, // base: no debounce; hysteresis tests override to 2
     WEATHER_FORECAST_INVALIDATION_MIN_DROP: 0.20,
     WEATHER_FORECAST_INVALIDATION_MIN_CURRENT_HELD_PROB: 0.50,
     WEATHER_FORECAST_INVALIDATION_TTL_S: 21600,
@@ -151,6 +156,7 @@ function makeRedis(store: Map<string, string> = new Map()) {
       store.set(key, value);
       return 'OK';
     }),
+    del: vi.fn(async (key: string) => (store.delete(key) ? 1 : 0)),
     get: vi.fn().mockResolvedValue(null),
     mget: vi.fn(async (...keys: string[]) => keys.map((k) => store.get(k) ?? null)),
     pipeline: vi.fn(() => ({ exec: vi.fn().mockResolvedValue([]) })),
@@ -403,6 +409,251 @@ describe('runWeatherInvalidationScan', () => {
     await runWeatherInvalidationScan(redis as any);
 
     expect(mockFetchForecast).not.toHaveBeenCalled();
+  });
+});
+
+describe('runWeatherInvalidationScan — modal inversion', () => {
+  // Bounded interior bracket (74-75°F) — the Atlanta case. low/high both set.
+  const boundedEvent = () =>
+    makeParsedEvent({
+      city: 'atlanta',
+      brackets: [{ label: '74-75°F', low: 74, high: 75, marketId: 'mkt-1' }],
+    });
+  const atlantaNoPos = (overrides = {}) =>
+    makePosition({ sourcedFrom: 'weather:atlanta:2026-05-31:74-75°F', ...overrides });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockLoadConfig.mockReturnValue(makeConfig());
+    mockFetchWeatherEvents.mockResolvedValue([{}]);
+    mockParseWeatherEvent.mockReturnValue(boundedEvent());
+    mockFetchForecast.mockResolvedValue(makeForecast());
+  });
+
+  it('invalidates a NO hold when the forecast rounds INTO the bracket (no held-prob drop)', async () => {
+    // entryHeldProb(NO)=0.70; currentModelProb=0.22 → currentHeldProb(NO)=0.78 → drop=-0.08 (no drop)
+    // correctedForecastHigh 75.45 → round 75 ∈ [74,75] → modal inversion fires.
+    mockSql.mockResolvedValue([atlantaNoPos()]);
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.22,
+      effectiveStdDev: 3.45,
+      correctedForecastHigh: 75.45,
+      biasMode: 'full',
+    });
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        kind: 'weather_forecast_invalidation',
+        payload: expect.objectContaining({
+          invalidated: true,
+          invalidationReason: 'modal_inversion',
+          modalInvalidated: true,
+          roundedForecast: 75,
+        }),
+      }),
+    );
+  });
+
+  it('does NOT invalidate a NO hold when the forecast rounds outside the bracket', async () => {
+    // correctedForecastHigh 76.6 → round 77 ∉ [74,75]; no drop → not invalidated.
+    mockSql.mockResolvedValue([atlantaNoPos()]);
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.22,
+      effectiveStdDev: 3.45,
+      correctedForecastHigh: 76.6,
+      biasMode: 'full',
+    });
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({ invalidated: false, modalInvalidated: false }),
+      }),
+    );
+  });
+
+  it('invalidates a YES hold when the forecast rounds OUT of the bracket', async () => {
+    // YES thesis = high WILL be 74-75. correctedForecastHigh 72.4 → round 72 ∉ [74,75] → inverted.
+    // entryHeldProb(YES)=0.55; currentModelProb=0.50 → drop=0.05 (below threshold) so modal is the sole trigger.
+    mockSql.mockResolvedValue([
+      atlantaNoPos({ direction: 'YES' as const, consensusProbability: 0.55 }),
+    ]);
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.50,
+      effectiveStdDev: 3.45,
+      correctedForecastHigh: 72.4,
+      biasMode: 'full',
+    });
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        direction: 'YES',
+        payload: expect.objectContaining({
+          invalidated: true,
+          invalidationReason: 'modal_inversion',
+          modalInvalidated: true,
+        }),
+      }),
+    );
+  });
+
+  it('reports reason "both" when held-prob drop and modal inversion fire together', async () => {
+    // currentModelProb=0.80 → held(NO)=0.20, drop=0.50 (drop fires); forecast 74.5 → round 75 ∈ bracket (modal fires).
+    mockSql.mockResolvedValue([atlantaNoPos()]);
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.80,
+      effectiveStdDev: 3.45,
+      correctedForecastHigh: 74.5,
+      biasMode: 'full',
+    });
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({ invalidated: true, invalidationReason: 'both' }),
+      }),
+    );
+  });
+
+  it('does not apply modal inversion when MODAL_ENABLED=false', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_FORECAST_INVALIDATION_MODAL_ENABLED: false }));
+    mockSql.mockResolvedValue([atlantaNoPos()]);
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.22, // no drop
+      effectiveStdDev: 3.45,
+      correctedForecastHigh: 75.45, // would round into bracket, but flag is off
+      biasMode: 'full',
+    });
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({ invalidated: false, modalInvalidated: false, roundedForecast: null }),
+      }),
+    );
+  });
+
+  it('debounce: does NOT fire on the first inverting run when MIN_RUNS=2', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: 2 }));
+    mockSql.mockResolvedValue([atlantaNoPos()]);
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.22, // no held-prob drop
+      effectiveStdDev: 3.45,
+      correctedForecastHigh: 75.45, // rounds into bracket → raw inversion
+      biasMode: 'full',
+    });
+    const redis = makeRedis(); // no prior streak
+
+    await runWeatherInvalidationScan(redis as any);
+
+    // Raw inversion seen, streak now 1 (< 2) → not yet invalidated.
+    expect(redis.set).toHaveBeenCalledWith(
+      'weather:forecast_modal_streak:pos-1',
+      '1',
+      'EX',
+      expect.any(Number),
+    );
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          invalidated: false,
+          modalInvalidated: false,
+          modalInversionRaw: true,
+          modalStreak: 1,
+        }),
+      }),
+    );
+  });
+
+  it('debounce: fires on the second consecutive inverting run when MIN_RUNS=2', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: 2 }));
+    mockSql.mockResolvedValue([atlantaNoPos()]);
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.22,
+      effectiveStdDev: 3.45,
+      correctedForecastHigh: 75.45,
+      biasMode: 'full',
+    });
+    // Pre-seed streak from a prior inverting run.
+    const store = new Map([['weather:forecast_modal_streak:pos-1', '1']]);
+    const redis = makeRedis(store);
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          invalidated: true,
+          invalidationReason: 'modal_inversion',
+          modalInvalidated: true,
+          modalStreak: 2,
+        }),
+      }),
+    );
+  });
+
+  it('debounce: resets the streak when the forecast rounds back to the supporting side', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: 2 }));
+    mockSql.mockResolvedValue([atlantaNoPos()]);
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.22, // no drop
+      effectiveStdDev: 3.45,
+      correctedForecastHigh: 76.6, // rounds to 77, outside bracket → raw inversion false
+      biasMode: 'full',
+    });
+    const store = new Map([['weather:forecast_modal_streak:pos-1', '1']]);
+    const redis = makeRedis(store);
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(redis.del).toHaveBeenCalledWith('weather:forecast_modal_streak:pos-1');
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({ invalidated: false, modalInversionRaw: false }),
+      }),
+    );
+  });
+
+  it('skips modal inversion for tail brackets (open-ended side)', async () => {
+    // Tail bracket "39°F or below" (low=null): cannot round "out of" an open side.
+    mockParseWeatherEvent.mockReturnValue(makeParsedEvent()); // default tail bracket, city chicago
+    mockSql.mockResolvedValue([makePosition()]); // sourcedFrom chicago tail, no drop
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.30, // held(NO)=0.70, drop=0 → no drop trigger
+      effectiveStdDev: 5,
+      correctedForecastHigh: 30, // numerically ≤39 but bracket.low is null → modal skipped
+      biasMode: 'none',
+    });
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({ invalidated: false, modalInvalidated: false, roundedForecast: null }),
+      }),
+    );
   });
 });
 

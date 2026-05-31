@@ -1867,6 +1867,17 @@ const envSchema = z.object({
   // Phase 4: live hedge (WEATHER_FORECAST_INVALIDATION_HEDGE_ENABLED=true).
   WEATHER_FORECAST_INVALIDATION_ENABLED: boolFromEnv.optional().default(false),
   WEATHER_FORECAST_INVALIDATION_SHADOW_ENABLED: boolFromEnv.optional().default(true),
+  // Modal-inversion trigger: invalidate when the corrected forecast's central
+  // estimate crosses the rounding boundary into (NO holds) or out of (YES holds)
+  // our bracket — the same predicate the entry scanner uses to refuse interior-NO
+  // bets. Catches inversions the held-prob drop misses when a wide stddev keeps the
+  // continuous held-prob high while the modal outcome flips against us. OR'd with
+  // the drop rule; only applies to bounded brackets (tails have an open side).
+  WEATHER_FORECAST_INVALIDATION_MODAL_ENABLED: boolFromEnv.optional().default(true),
+  // Debounce: modal inversion must persist this many consecutive scans before it
+  // counts, so a forecast straddling a half-degree rounding boundary can't flap the
+  // trigger on/off run-to-run. 1 = fire immediately (no debounce).
+  WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: z.coerce.number().int().min(1).optional().default(2),
   // Held-side probability must fall by at least this much from entry to mark invalidated.
   WEATHER_FORECAST_INVALIDATION_MIN_DROP: z.coerce.number().min(0).max(1).optional().default(0.20),
   // Only mark invalidated when current held-side probability is below this (severity filter).

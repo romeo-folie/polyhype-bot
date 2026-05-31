@@ -783,6 +783,23 @@ export function daysUntil(targetDate: string, now?: Date): number {
 }
 
 /**
+ * True when the corrected forecast's central estimate rounds into [low, high].
+ * Single source of truth shared by the entry scanner's interior-NO guard and the
+ * forecast-invalidation modal-inversion trigger, so the two can never drift. Only
+ * bounded brackets carry the signal — a tail (null bound) has an open side the
+ * forecast cannot round out of, so it returns false.
+ */
+export function forecastRoundsIntoBracket(
+  correctedForecastHigh: number,
+  low: number | null,
+  high: number | null,
+): boolean {
+  if (low === null || high === null) return false;
+  const rounded = Math.round(correctedForecastHigh);
+  return rounded >= low && rounded <= high;
+}
+
+/**
  * Analyze a single weather event and find mispriced brackets.
  *
  * `stddevMultiplier` (default 1.0) widens or tightens the forecast distribution
@@ -1138,21 +1155,14 @@ export function findMispricedBrackets(
     // Gate: interior NO bets where the corrected forecast itself rounds into this
     // bracket. The model's central estimate resolves YES, so we'd be betting against
     // our own best guess — skip regardless of apparent edge.
-    if (
-      tradeSide === 'NO' &&
-      bracket.low !== null &&
-      bracket.high !== null
-    ) {
-      const roundedForecast = Math.round(correctedForecastHigh);
-      if (roundedForecast >= bracket.low && roundedForecast <= bracket.high) {
-        logger.debug('[weather] skipping interior NO — forecast rounds into bracket', {
-          city: event.city,
-          bracket: bracket.label,
-          correctedForecastHigh,
-          roundedForecast,
-        });
-        continue;
-      }
+    if (tradeSide === 'NO' && forecastRoundsIntoBracket(correctedForecastHigh, bracket.low, bracket.high)) {
+      logger.debug('[weather] skipping interior NO — forecast rounds into bracket', {
+        city: event.city,
+        bracket: bracket.label,
+        correctedForecastHigh,
+        roundedForecast: Math.round(correctedForecastHigh),
+      });
+      continue;
     }
 
     // Skip near-zero markets where liquidity is negligible. Hard floor on both
