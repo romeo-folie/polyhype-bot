@@ -1,4 +1,4 @@
-# Polymarket Geopolitical Trading Agent
+# Polymarket General Agent
 
 Autonomous multi-signal trading agent for Polymarket prediction markets. Combines OSINT pipelines, whale wallet mirroring, real-time spot price arbitrage, crypto latency arbitrage, sports in-play arbitrage, CME settlement arb, longshot bias exploitation, NOAA weather arb, cross-market correlation arb, Hyperliquid futures hedging, and continuous self-improvement (outcome tracking, context injection, calibration) into a single risk-managed system.
 
