@@ -951,6 +951,186 @@ describe('findMispricedBrackets - interior NO rounding gate', () => {
 });
 
 // ---------------------------------------------------------------------------
+// findMispricedBrackets — YES-bet quality gates
+// ---------------------------------------------------------------------------
+
+describe('findMispricedBrackets - YES quality gates', () => {
+  const baseEvent = {
+    eventId: 'e1', slug: 's1', city: 'paris',
+    coords: lookupCity('paris') ?? { lat: 48.85, lon: 2.35, unit: 'celsius' as const, tz: 'Europe/Paris', noaaCoverage: false },
+    targetDate: '2026-05-31', unit: 'celsius' as const,
+    endDate: '2026-05-31T12:00:00Z',
+    allMarketIds: ['m1'],
+  };
+  // Explicit gate options: restrictive (production-like) vs permissive (gate disabled)
+  const GATES_ON = { yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50 };
+  const NO_GATES = { yesAllowInteriorBrackets: true, yesMinMarketPrice: 0, yesMinModelProb: 0 };
+
+  // Interior bracket with forecast 24.1°C; modelProb ≈ 0.286.
+  // yesPrice must be < modelProb for YES to have edge (e.g. 0.10).
+  function makeInteriorBracket(yesPrice = 0.10) {
+    return [{
+      marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
+      threshold: 0, low: 24, high: 24, label: '24°C',
+      yesPrice, noPrice: 1 - yesPrice,
+    }];
+  }
+
+  function makeHighTailBracket(yesPrice = 0.40) {
+    return [{
+      marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
+      threshold: 0, low: 24, high: null, label: '24°C or higher',
+      yesPrice, noPrice: 1 - yesPrice,
+    }];
+  }
+
+  // Interior bracket far from forecast so interior-NO rounding gate doesn't fire;
+  // yesPrice high so tradeSide=NO and YES gates don't interfere.
+  function makeInteriorNoBracket() {
+    return [{
+      marketId: 'm2', conditionId: 'c2', clobTokenIds: ['ty2', 'tn2'],
+      threshold: 0, low: 28, high: 28, label: '28°C',
+      yesPrice: 0.90, noPrice: 0.08,
+    }];
+  }
+
+  const forecast = { forecastHigh: 24.1, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
+
+  it('blocks interior YES when gates are enabled (yesAllowInteriorBrackets=false)', () => {
+    const event = { ...baseEvent, brackets: makeInteriorBracket(0.40) };
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON,
+    });
+    expect(opportunities.filter((o) => o.tradeSide === 'YES')).toHaveLength(0);
+  });
+
+  it('allows interior YES when yesAllowInteriorBrackets=true and other gates disabled', () => {
+    // yesPrice=0.10 < modelProb≈0.286 → edgeYes > 0 → tradeSide=YES
+    const event = { ...baseEvent, brackets: makeInteriorBracket(0.10) };
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, ...NO_GATES,
+    });
+    expect(opportunities.filter((o) => o.tradeSide === 'YES')).toHaveLength(1);
+  });
+
+  it('does not block NO bets on interior brackets via YES gate', () => {
+    // Bracket "28°C" is far from forecast 24.1°C: rounds to 24 ≠ 28, so interior-NO
+    // rounding gate doesn't fire. High yesPrice → edgeNo > 0 → tradeSide=NO.
+    // YES gates must not affect NO-side bets.
+    const event = { ...baseEvent, brackets: makeInteriorNoBracket() };
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON,
+    });
+    expect(opportunities.filter((o) => o.tradeSide === 'NO')).toHaveLength(1);
+  });
+
+  it('blocks YES when market price is below yesMinMarketPrice', () => {
+    // High-tail bracket passes interior gate, but yesPrice=0.10 < 0.30 threshold
+    const event = { ...baseEvent, brackets: makeHighTailBracket(0.10) };
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON,
+    });
+    expect(opportunities.filter((o) => o.tradeSide === 'YES')).toHaveLength(0);
+  });
+
+  it('allows YES when market price meets yesMinMarketPrice', () => {
+    // High-tail "24°C or higher", forecastHigh=28°C → modelProb ~0.97 > 0.50; yesPrice=0.35 > 0.30
+    const highForecast = { forecastHigh: 28, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
+    const event = { ...baseEvent, brackets: makeHighTailBracket(0.35) };
+    const { opportunities } = findMispricedBrackets(event, highForecast, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON,
+    });
+    expect(opportunities.filter((o) => o.tradeSide === 'YES')).toHaveLength(1);
+  });
+
+  it('blocks YES when model probability is below yesMinModelProb', () => {
+    // Use threshold 0.99 to force block even on a high-tail bracket
+    const event = { ...baseEvent, brackets: makeHighTailBracket(0.35) };
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0, yesMinModelProb: 0.99,
+    });
+    expect(opportunities.filter((o) => o.tradeSide === 'YES')).toHaveLength(0);
+  });
+
+  it('falls back to NO when YES is gated but NO has positive edge', () => {
+    // Interior "25°C", forecast 24.4°C → modelProb ≈ 0.261.
+    // yesPrice=0.10 → edgeYes=0.161 wins the raw comparison over edgeNo=0.089.
+    // YES gate fires (interior, gates on) → must fall back to NO (edge 0.089), not drop.
+    const brackets = [{
+      marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
+      threshold: 0, low: 25, high: 25, label: '25°C',
+      yesPrice: 0.10, noPrice: 0.65,
+    }];
+    const forecast24 = { forecastHigh: 24.4, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
+    const event = { ...baseEvent, brackets };
+    const { opportunities } = findMispricedBrackets(event, forecast24, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON,
+    });
+    // YES is gated; NO survives (interior-NO rounding gate: Math.round(24.4)=24 ≠ 25)
+    expect(opportunities).toHaveLength(1);
+    expect(opportunities[0]!.tradeSide).toBe('NO');
+  });
+
+  it('skips the bracket entirely when YES is gated and NO has no positive edge', () => {
+    // Interior "25°C", forecast 24.4°C → modelProb ≈ 0.261, edgeYes=0.161 (>edgeNo).
+    // noPrice=0.95 → edgeNo = (1-0.261) - 0.95 = -0.211 < 0. YES gated (interior) and
+    // NO has no edge → must skip entirely (the terminal else/continue branch).
+    const brackets = [{
+      marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
+      threshold: 0, low: 25, high: 25, label: '25°C',
+      yesPrice: 0.10, noPrice: 0.95,
+    }];
+    const forecast24 = { forecastHigh: 24.4, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
+    const event = { ...baseEvent, brackets };
+    const { opportunities } = findMispricedBrackets(event, forecast24, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON,
+    });
+    expect(opportunities).toHaveLength(0);
+  });
+
+  it('tags a YES-gate fallback NO with yesFellBackToNo + yesGateReason', () => {
+    const brackets = [{
+      marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
+      threshold: 0, low: 25, high: 25, label: '25°C',
+      yesPrice: 0.10, noPrice: 0.65,
+    }];
+    const forecast24 = { forecastHigh: 24.4, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
+    const event = { ...baseEvent, brackets };
+    const { opportunities } = findMispricedBrackets(event, forecast24, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON,
+    });
+    expect(opportunities).toHaveLength(1);
+    expect(opportunities[0]!.tradeSide).toBe('NO');
+    expect(opportunities[0]!.yesFellBackToNo).toBe(true);
+    expect(opportunities[0]!.yesGateReason).toBe('interior_bracket');
+  });
+
+  it('does not tag a native NO (YES never had edge) as a fallback', () => {
+    // Bracket "28°C" far from forecast 24.1°C: edgeYes negative → native NO, not a fallback.
+    const event = { ...baseEvent, brackets: makeInteriorNoBracket() };
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON,
+    });
+    expect(opportunities).toHaveLength(1);
+    expect(opportunities[0]!.tradeSide).toBe('NO');
+    expect(opportunities[0]!.yesFellBackToNo).toBe(false);
+    // Native NO must stay untagged even though the interior gate would trip on a
+    // YES candidate — keeps the native-NO cohort clean for shadow analysis.
+    expect(opportunities[0]!.yesGateReason).toBeNull();
+  });
+
+  it('allows high-tail YES when all gates pass', () => {
+    // forecastHigh=28°C, "24°C or higher" → modelProb ~0.97; yesPrice=0.50 > 0.30; model > 0.50
+    const highForecast = { forecastHigh: 28, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
+    const event = { ...baseEvent, brackets: makeHighTailBracket(0.50) };
+    const { opportunities } = findMispricedBrackets(event, highForecast, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON,
+    });
+    expect(opportunities.filter((o) => o.tradeSide === 'YES')).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // findMispricedBrackets — tail NO base-rate gate
 // ---------------------------------------------------------------------------
 

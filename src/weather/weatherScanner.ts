@@ -672,6 +672,14 @@ export interface WeatherBracketOpportunity {
    *  near-res entry gate (which uses Gamma's endDate, not local midnight) should
    *  be bypassed to avoid a double-gate conflict. */
   earlyResolutionDayEntry?: boolean;
+  /** Reason a YES candidate was gated off (interior_bracket / market_price_below_min /
+   *  model_prob_below_min), or null when YES was not gated. Set even on NO opportunities
+   *  that arose because the model preferred YES but the YES gate blocked it. */
+  yesGateReason?: string | null;
+  /** True when this NO opportunity is a fallback from a gated YES (the model's
+   *  preferred side was YES but it was gated off). Lets shadow analysis exclude
+   *  these from the "native NO" cohort so YES-gate win-rate study stays clean. */
+  yesFellBackToNo?: boolean;
 }
 
 interface WeatherMarketState {
@@ -821,6 +829,15 @@ export interface FindMispricedOptions {
   baseRateMinSamples?: number;
   /** Block tail NO when WU base-rate YES fraction ≥ this threshold (default 0.70). */
   baseRateNoBlockThreshold?: number;
+  // ── YES-bet quality gates (NO bets unaffected) ────────────────────────────
+  /** Allow interior-bracket YES bets (e.g. "24°C"). Default false — interior YES
+   *  wins only 4-14% historically; tail brackets have genuine directional edge. */
+  yesAllowInteriorBrackets?: boolean;
+  /** Minimum market (outcome) price for YES entries. Below 0.30 the market has
+   *  better information (intraday temps); win rate collapses. Default 0.30. */
+  yesMinMarketPrice?: number;
+  /** Minimum model probability for YES entries. Default 0.50. */
+  yesMinModelProb?: number;
 }
 
 export interface BiasedProbResult {
@@ -907,6 +924,12 @@ export function findMispricedBrackets(
     cityActuals = null,
     baseRateMinSamples = 7,
     baseRateNoBlockThreshold = 0.70,
+    // YES gate defaults are "off" at the function level so tests that don't
+    // explicitly configure them are unaffected. scanWeatherMarkets always passes
+    // the live config values which enforce the restrictive thresholds.
+    yesAllowInteriorBrackets = true,
+    yesMinMarketPrice = 0,
+    yesMinModelProb = 0,
   } = options;
   // Defense-in-depth clamp: loadConfig() cross-validates trusted ≥ min, but this
   // helper is also called directly from tests and could accept arbitrary values.
@@ -1019,17 +1042,41 @@ export function findMispricedBrackets(
     const edgeNo = (1 - modelProb) - bracket.noPrice;
     const shadowModelProb = shadowModelProbs[i] ?? null;
 
+    // YES quality gate: evaluate BEFORE side selection so that a gated YES
+    // falls back to the NO candidate rather than suppressing the bracket entirely.
+    // "NO bets are unaffected" holds only when the gate runs pre-selection.
+    let yesGateReason: string | null = null;
+    if (bracket.low !== null && bracket.high !== null && !yesAllowInteriorBrackets) {
+      yesGateReason = 'interior_bracket';
+    } else if (bracket.yesPrice < yesMinMarketPrice) {
+      yesGateReason = 'market_price_below_min';
+    } else if (modelProb < yesMinModelProb) {
+      yesGateReason = 'model_prob_below_min';
+    }
+    const yesGateBlocked = yesGateReason !== null;
+
     let tradeSide: 'YES' | 'NO';
     let edge: number;
 
-    if (edgeYes >= edgeNo && edgeYes > 0) {
+    if (!yesGateBlocked && edgeYes >= edgeNo && edgeYes > 0) {
       tradeSide = 'YES';
       edge = edgeYes;
     } else if (edgeNo > 0) {
+      if (yesGateBlocked && edgeYes > 0) {
+        logger.debug('[weather] YES gated — falling back to NO', {
+          city: event.city, bracket: bracket.label, reason: yesGateReason,
+          edgeYes: edgeYes.toFixed(3), edgeNo: edgeNo.toFixed(3),
+        });
+      }
       tradeSide = 'NO';
       edge = edgeNo;
     } else {
-      continue; // No positive edge on either side
+      if (yesGateBlocked && edgeYes > 0) {
+        logger.debug('[weather] YES gated — no NO fallback, skipping', {
+          city: event.city, bracket: bracket.label, reason: yesGateReason,
+        });
+      }
+      continue; // No eligible positive edge on either side
     }
 
     if (edge < minEdge) continue;
@@ -1108,9 +1155,19 @@ export function findMispricedBrackets(
       }
     }
 
-    // Skip near-zero markets where liquidity is negligible
+    // Skip near-zero markets where liquidity is negligible. Hard floor on both
+    // sides, independent of the configurable yesMinMarketPrice gate — otherwise
+    // WEATHER_YES_MIN_MARKET_PRICE=0 would re-expose thin near-zero YES books.
     if (bracket.yesPrice < 0.005 && tradeSide === 'YES') continue;
     if (bracket.noPrice < 0.005 && tradeSide === 'NO') continue;
+
+    // A YES-gate fallback: the model's preferred side was YES (edgeYes >= edgeNo,
+    // edgeYes > 0) but the YES gate blocked it, so this NO exists only because YES
+    // was gated. yesGateReason is persisted ONLY in this case — a native NO (YES
+    // never had edge, or NO was genuinely better) must stay untagged so shadow
+    // analysis can segment fallback-NO out of the native-NO cohort.
+    const yesFellBackToNo =
+      yesGateBlocked && tradeSide === 'NO' && edgeYes >= edgeNo && edgeYes > 0;
 
     opportunities.push({
       marketId: bracket.marketId,
@@ -1157,6 +1214,11 @@ export function findMispricedBrackets(
       shadowEnsembleMembers: forecast.shadowEnsemble?.ensembleMembers ?? null,
       // Veto is evaluated later in scanWeatherMarkets once cfg is available.
       blockedByEnsembleVeto: false,
+      // Only tag the reason when YES actually got gated into this NO fallback —
+      // a native NO must keep yesGateReason=null even if e.g. the interior gate
+      // would have tripped, so the native-NO cohort stays clean.
+      yesGateReason: yesFellBackToNo ? yesGateReason : null,
+      yesFellBackToNo,
     });
   }
 
@@ -1410,6 +1472,9 @@ export async function scanWeatherMarkets(
         cityActuals,
         baseRateMinSamples: cfg.WEATHER_BASE_RATE_MIN_SAMPLES,
         baseRateNoBlockThreshold: cfg.WEATHER_BASE_RATE_NO_BLOCK_THRESHOLD,
+        yesAllowInteriorBrackets: cfg.WEATHER_YES_ALLOW_INTERIOR_BRACKETS,
+        yesMinMarketPrice: cfg.WEATHER_YES_MIN_MARKET_PRICE,
+        yesMinModelProb: cfg.WEATHER_YES_MIN_MODEL_PROB,
       },
     );
     const afterMarketGate = await applyMarketDisagreementGate(redis, opportunities, cfg);
@@ -1616,6 +1681,10 @@ export async function scanWeatherMarkets(
           meanShiftHelpful: cityBias?.meanShiftHelpful ?? false,
           cityRawMae: cityBias?.rawMae ?? null,
           cityCorrectedMae: cityBias?.correctedMae ?? null,
+          // YES-gate provenance: lets shadow analysis segment fallback-NO rows
+          // out of the native-NO cohort when studying YES-gate win rates.
+          yesGateReason: opp.yesGateReason ?? null,
+          yesFellBackToNo: opp.yesFellBackToNo ?? false,
         },
       });
     }
