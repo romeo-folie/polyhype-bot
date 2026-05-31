@@ -35,6 +35,7 @@ import {
   fetchForecast,
   daysUntil,
   computeBiasedProb,
+  forecastRoundsIntoBracket,
 } from './weatherScanner.js';
 
 export const FORECAST_INVALIDATED_KEY_PREFIX = 'weather:forecast_invalidated:';
@@ -47,6 +48,11 @@ const LOCK_IN_KEY_PREFIX = 'weather:locked:';
 const HEDGE_PARTIAL_COOLDOWN_KEY_PREFIX = 'weather:forecast_hedge_partial_cooldown:';
 const HEDGE_PARTIAL_COOLDOWN_S = 30 * 60;
 const HEDGE_TTL_S = 14 * 24 * 3600;
+// Consecutive-run counter for the modal-inversion debounce. TTL spans several
+// 30-min scan intervals so a single missed run doesn't reset a building streak,
+// while a position that resolves or drifts away expires on its own.
+const MODAL_STREAK_KEY_PREFIX = 'weather:forecast_modal_streak:';
+const MODAL_STREAK_TTL_S = 2 * 3600;
 
 // Matches: weather:<city>:<YYYY-MM-DD>:<bracketLabel>
 const SOURCED_FROM_RE = /^weather:(.+):(\d{4}-\d{2}-\d{2}):(.+)$/;
@@ -158,9 +164,15 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
       const hedgeKey = `${HEDGE_KEY_PREFIX}${pos.id}`;
       const lockInKey = `${LOCK_IN_KEY_PREFIX}${pos.id}`;
       const hedgeCooldownKey = `${HEDGE_PARTIAL_COOLDOWN_KEY_PREFIX}${pos.id}`;
-      const [hedgeMarkerRaw, lockInMarkerRaw, cooldownMarkerRaw] = await redis
-        .mget(hedgeKey, lockInKey, hedgeCooldownKey)
-        .catch((): [null, null, null] => [null, null, null]);
+      // Modal-inversion streak: consecutive runs the corrected forecast has been on
+      // the inverting side of the bracket boundary. Debounces half-degree flapping
+      // (e.g. 75.45→76.0) so a single boundary-straddling run can't trip the trigger.
+      // Keyed by pos.id (like the hedge/cooldown markers) so two open rows on the same
+      // market+direction can't double-increment one shared counter within a scan.
+      const modalStreakKey = `${MODAL_STREAK_KEY_PREFIX}${pos.id}`;
+      const [hedgeMarkerRaw, lockInMarkerRaw, cooldownMarkerRaw, modalStreakRaw] = await redis
+        .mget(hedgeKey, lockInKey, hedgeCooldownKey, modalStreakKey)
+        .catch((): [null, null, null, null] => [null, null, null, null]);
       const alreadyHedged = !!(hedgeMarkerRaw || lockInMarkerRaw);
       // Skip if hedge partial-fill cooldown is active (C5 fix).
       if (cooldownMarkerRaw) continue;
@@ -216,9 +228,60 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
         pos.direction === 'YES' ? currentModelProb : 1 - currentModelProb;
 
       const drop = entryHeldProb - currentHeldProb;
-      const invalidated =
+
+      // Held-prob degradation: the whole distribution shifted away from our side.
+      const dropInvalidated =
         drop >= cfg.WEATHER_FORECAST_INVALIDATION_MIN_DROP &&
         currentHeldProb <= cfg.WEATHER_FORECAST_INVALIDATION_MIN_CURRENT_HELD_PROB;
+
+      // Modal inversion: the corrected forecast's central estimate has crossed the
+      // rounding boundary relative to our bracket — the same predicate the entry
+      // scanner uses to refuse interior-NO bets (weatherScanner interior guard). A
+      // wide stddev can keep the continuous held-prob high even as the modal outcome
+      // flips against us, so this catches inversions dropInvalidated misses. Only
+      // bounded brackets carry the signal — tails have an open side the forecast
+      // cannot "round out of".
+      let modalInversionRaw = false;
+      let roundedForecast: number | null = null;
+      if (
+        cfg.WEATHER_FORECAST_INVALIDATION_MODAL_ENABLED &&
+        bracket.low !== null &&
+        bracket.high !== null
+      ) {
+        roundedForecast = Math.round(correctedForecastHigh);
+        const forecastInBracket = forecastRoundsIntoBracket(
+          correctedForecastHigh,
+          bracket.low,
+          bracket.high,
+        );
+        // NO thesis = "high will NOT land in bracket": inverted when forecast rounds in.
+        // YES thesis = "high WILL land in bracket": inverted when forecast rounds out.
+        modalInversionRaw = pos.direction === 'NO' ? forecastInBracket : !forecastInBracket;
+      }
+
+      // Debounce: require the inversion to persist for MIN_RUNS consecutive scans
+      // before it counts. Increment the streak on an inverting run, reset it (delete
+      // the key) the moment the forecast rounds back to the supporting side.
+      let modalStreak = 0;
+      if (modalInversionRaw) {
+        modalStreak = (parseInt(modalStreakRaw ?? '0', 10) || 0) + 1;
+        await redis
+          .set(modalStreakKey, String(modalStreak), 'EX', MODAL_STREAK_TTL_S)
+          .catch(() => {});
+      } else if (modalStreakRaw) {
+        await redis.del(modalStreakKey).catch(() => {});
+      }
+      const modalInvalidated =
+        modalInversionRaw && modalStreak >= cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS;
+
+      const invalidated = dropInvalidated || modalInvalidated;
+      const invalidationReason = !invalidated
+        ? null
+        : dropInvalidated && modalInvalidated
+          ? 'both'
+          : dropInvalidated
+            ? 'held_prob_drop'
+            : 'modal_inversion';
 
       const invalidKey = `${FORECAST_INVALIDATED_KEY_PREFIX}${pos.marketId}:${pos.direction}`;
 
@@ -235,6 +298,12 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
         currentHeldProb: +currentHeldProb.toFixed(3),
         drop: +drop.toFixed(3),
         invalidated,
+        invalidationReason,
+        modalInvalidated,
+        modalInversionRaw,
+        modalStreak,
+        modalMinRuns: cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS,
+        roundedForecast,
         invalidationEnabled: cfg.WEATHER_FORECAST_INVALIDATION_ENABLED,
         minDrop: cfg.WEATHER_FORECAST_INVALIDATION_MIN_DROP,
         minCurrentHeldProb: cfg.WEATHER_FORECAST_INVALIDATION_MIN_CURRENT_HELD_PROB,
@@ -262,6 +331,12 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
           currentHeldProb,
           drop,
           invalidated,
+          invalidationReason,
+          modalInvalidated,
+          modalInversionRaw,
+          modalStreak,
+          modalMinRuns: cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS,
+          roundedForecast,
           forecastHigh: forecast.forecastHigh,
           correctedForecastHigh,
           effectiveStdDev,
