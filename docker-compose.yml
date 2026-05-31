@@ -37,6 +37,10 @@ services:
   pga-telegram:
     build: .
     restart: unless-stopped
+    # Off-scope strategy worker. Gated behind the `off-scope` profile so a plain
+    # `docker compose up -d` skips it (current focus: weather + Hyperliquid only).
+    # Re-enable the whole group with: docker compose --profile off-scope up -d
+    profiles: ["off-scope"]
     # Interactive mode for initial authentication (run: docker compose run --rm pga-telegram)
     stdin_open: true
     tty: true
@@ -54,6 +58,7 @@ services:
   pga-copytrade:
     build: .
     restart: unless-stopped
+    profiles: ["off-scope"]  # off-scope; see pga-telegram note
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379
@@ -111,6 +116,7 @@ services:
   pga-clob-flow:
     build: .
     restart: unless-stopped
+    profiles: ["off-scope"]  # off-scope; see pga-telegram note
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379
@@ -123,6 +129,7 @@ services:
   pga-sports:
     build: .
     restart: unless-stopped
+    profiles: ["off-scope"]  # off-scope; see pga-telegram note
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379
