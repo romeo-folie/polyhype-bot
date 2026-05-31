@@ -682,6 +682,19 @@ async function tryExecuteViaClobMaker(
   ) {
     fairValue = Math.min(fairValue, cfg.WEATHER_MAX_ENTRY_PRICE);
   }
+  // Stricter ceiling for EMPTY/ghost-book weather entries. These books carry no
+  // real liquidity (only far-off rebate-farmer orders) and no reliable price, and
+  // we can't exit them, so we only ever rest at a clear value discount rather than
+  // posting near the model fair value. Caps the post (we still rest as maker at the
+  // cap); does not skip. Binds on top of WEATHER_MAX_ENTRY_PRICE; 0 disables.
+  if (
+    emptyBookMode
+    && signal.source === 'weather'
+    && cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE > 0
+    && fairValue != null
+  ) {
+    fairValue = Math.min(fairValue, cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE);
+  }
   // Bound the weather maker price to the scanner's observed side quote plus a
   // small configured premium. This closes the ghost-book path where the absolute
   // cap still allowed posts far above the quote that generated the signal.

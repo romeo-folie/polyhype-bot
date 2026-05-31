@@ -78,6 +78,7 @@ const mockConfig = {
   WEATHER_MAKER_POST_ONLY: true,
   WEATHER_MAKER_DISCOUNT_BPS: 500,
   WEATHER_MAX_ENTRY_PRICE: 0,
+  WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE: 0,
   WEATHER_MAX_SIGNAL_PRICE_DRIFT: 0.08,
 };
 
@@ -1229,6 +1230,7 @@ describe('empty-book maker route', () => {
     mockConfig.WEATHER_MAKER_POST_ONLY = true;
     mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 500;
     mockConfig.WEATHER_MAX_ENTRY_PRICE = 0;
+    mockConfig.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE = 0;
     // Sports: default to false in this describe block so existing ghost-book tests
     // remain valid; individual tests can override to true to verify the gate.
     mockConfig.SPORTS_REQUIRE_REAL_BOOK = false;
@@ -1472,6 +1474,55 @@ describe('empty-book maker route', () => {
     expect(call.price).toBeLessThanOrEqual(0.65);
     expect(call.price).toBeCloseTo(0.56, 2);
     expect(call.postOnly).toBe(false);
+  });
+
+  it('weather caps empty-book post at WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE below WEATHER_MAX_ENTRY_PRICE', async () => {
+    // Same ghost-book high-conviction NO as the WEATHER_MAX_ENTRY_PRICE test
+    // (consensusP=0.10 → NO fairValue 0.90). WEATHER_MAX_ENTRY_PRICE=0.65 alone
+    // would allow ~0.56 (after the relative-quote cap), but the stricter empty-book
+    // cap of 0.45 binds first: post becomes 0.45 - edgeBps(1.5%) ≈ 0.443, tick-rounded
+    // down to 0.43.
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.65;
+    mockConfig.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE = 0.45;
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.10,
+        edgeMagnitude: 0.30,
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    const call = mockSubmitLimit.mock.calls[0]![0];
+    expect(call.price).toBeLessThanOrEqual(0.45);
+    expect(call.price).toBeCloseTo(0.43, 2);
+  });
+
+  it('weather WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE=0 disables the empty-book cap (falls back to WEATHER_MAX_ENTRY_PRICE)', async () => {
+    // With the empty-book cap disabled, the post reverts to the WEATHER_MAX_ENTRY_PRICE
+    // path's ~0.56 (relative-quote cap), confirming the new cap is the only thing
+    // pulling the price down to 0.44 in the test above.
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.65;
+    mockConfig.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE = 0;
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.10,
+        edgeMagnitude: 0.30,
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    const call = mockSubmitLimit.mock.calls[0]![0];
+    expect(call.price).toBeCloseTo(0.56, 2);
   });
 
   it('weather WEATHER_MAX_ENTRY_PRICE=0 disables the cap (no-op)', async () => {

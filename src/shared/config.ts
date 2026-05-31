@@ -1749,6 +1749,14 @@ const envSchema = z.object({
   // resolveMakerPrice would otherwise lift the post price above the cap; the
   // executor refuses to post in that case (maker_price_above_cap).
   WEATHER_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.65),
+  // Stricter post-price ceiling for weather entries on an EMPTY/ghost book (no
+  // real liquidity — only far-off rebate-farmer orders, e.g. bid 0.01 / ask 0.99).
+  // Such markets have no reliable price and we can't exit them, so we only ever
+  // rest at a clear value discount instead of paying near the model fair value.
+  // Binds on TOP of WEATHER_MAX_ENTRY_PRICE for empty-book entries only — real
+  // (live-book) entries keep using WEATHER_MAX_ENTRY_PRICE. Caps the post price
+  // (we still rest as maker at the cap); it does not skip the entry. 0 disables.
+  WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.45),
   // Relative-to-quote ceiling for weather maker entries. WEATHER_MAX_ENTRY_PRICE
   // prevents absurd absolute prices, but a ghost book can still produce a post
   // materially above the scanner's observed side quote (e.g. quote=0.44, post=0.63)
