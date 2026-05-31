@@ -682,6 +682,19 @@ async function tryExecuteViaClobMaker(
   ) {
     fairValue = Math.min(fairValue, cfg.WEATHER_MAX_ENTRY_PRICE);
   }
+  // Stricter ceiling for EMPTY/ghost-book weather entries. These books carry no
+  // real liquidity (only far-off rebate-farmer orders) and no reliable price, and
+  // we can't exit them, so we only ever rest at a clear value discount rather than
+  // posting near the model fair value. Caps the post (we still rest as maker at the
+  // cap); does not skip. Binds on top of WEATHER_MAX_ENTRY_PRICE; 0 disables.
+  if (
+    emptyBookMode
+    && signal.source === 'weather'
+    && cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE > 0
+    && fairValue != null
+  ) {
+    fairValue = Math.min(fairValue, cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE);
+  }
   // Bound the weather maker price to the scanner's observed side quote plus a
   // small configured premium. This closes the ghost-book path where the absolute
   // cap still allowed posts far above the quote that generated the signal.
@@ -761,6 +774,29 @@ async function tryExecuteViaClobMaker(
     && cfg.WEATHER_MAX_SIGNAL_PRICE_DRIFT > 0
     && signal.outcomePrice > 0
     && price > signal.outcomePrice + cfg.WEATHER_MAX_SIGNAL_PRICE_DRIFT + 1e-9
+  ) {
+    return {
+      ok: false,
+      error: 'maker_price_above_cap',
+      waitMs: Date.now() - startedAt,
+      makerBestBid: bestBid,
+      makerBestAsk: bestAsk,
+      ...(mid ? { makerMidPrice: mid } : {}),
+      ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
+      makerFillStatus: 'rejected',
+    };
+  }
+  // Defense-in-depth for the stricter empty-book cap. Capping fairValue above is
+  // not enough: when WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE is set below the book tick,
+  // resolveMakerPrice's tick floor lifts the final price back up to one tick, which
+  // would slip through the WEATHER_MAX_ENTRY_PRICE guard above (that cap is higher).
+  // Refuse to post rather than silently overpay — same below-tick handling as
+  // WEATHER_MAX_ENTRY_PRICE. Empty-book only; real-book entries use WEATHER_MAX_ENTRY_PRICE.
+  if (
+    emptyBookMode
+    && signal.source === 'weather'
+    && cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE > 0
+    && price > cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE + 1e-9
   ) {
     return {
       ok: false,
