@@ -2099,25 +2099,63 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         entryPrice: result.entryPrice,
         sharesFilled: result.sharesFilled,
       });
-      // Only count as executed when the executor actually opened a position.
-      // A skipped result (dedup, spread too wide, etc.) should not burn caps.
-      // A maker_pending result means a GTC was posted but not yet filled —
-      // the reconciler will confirm the fill and record the position; don't
-      // burn city/scan caps or set the active-event marker prematurely.
-      // Size-ups still consume real capital so they count toward exposure but
-      // not toward the per-city or per-scan position count caps.
-      if (!result.skipped && result.entryExecutionPath !== 'maker_pending') {
-        if (!result.isSizeUp) {
+      // `governorStamped` is true iff THIS call accepted a new Polymarket order
+      // and stamped the shared global governor — including a fresh maker_pending
+      // GTC (the executor stamps on order *acceptance*, not only on fill). It is
+      // false for skips, and crucially for a resumed poll of an already-posted
+      // pending order (which consumes no fresh rate-limit budget and was already
+      // counted on the scan that first posted it). We rely on this explicit
+      // signal rather than inferring from entryExecutionPath, because a fresh
+      // post and a resumed poll share the same 'maker_pending' path string.
+      //
+      // Arm the pause whenever the governor was stamped — even on the CLOB
+      // taker-failure path (which stamps before the buy, then errors), since the
+      // rate-limit budget was still consumed. Previously maker_pending neither
+      // armed the pause (so the next opp skipped on `global_governor` and the
+      // whole scan cascaded) nor was bounded by the per-scan caps.
+      if (result.governorStamped === true) {
+        needsGovernorPause = true;
+      }
+      // Count toward per-scan caps/exposure only when a new order was actually
+      // committed: governor stamped AND no error. The taker-failure path stamps
+      // but errors (no position), so excluding errors keeps it from burning caps
+      // or setting the active-event marker. Resumed polls have governorStamped
+      // false and so are naturally excluded from re-counting across scans.
+      const orderCommitted = result.governorStamped === true && !result.error;
+      if (orderCommitted) {
+        // Size-up determination: result.isSizeUp is only set by the executor on
+        // a confirmed FILL, so a maker_pending size-up would read as undefined.
+        // opp.sizeUpScanOnly is the scanner-side source of truth (size-ups only
+        // reach execution via the size-up re-evaluation bypass), so prefer it.
+        const isSizeUp = opp.sizeUpScanOnly === true || result.isSizeUp === true;
+        // Per-city / per-scan COUNT caps track fresh new positions only.
+        // Size-ups top up an existing position, so they consume exposure
+        // budget but not a new-position slot.
+        if (!isSizeUp) {
           executed++;
           perCityCount.set(opp.city, cityCount + 1);
         }
-        // Refresh the active-event marker on both fresh entries and size-ups.
-        // A size-up also leaves an open position, so subsequent scans within
-        // the dedup window must still be able to bypass it (e.g. for a second
-        // top-up when SIZE_UP_MAX_TOPUPS > 1, or for pre-existing positions
-        // that first sized-up on a normal post-dedup scan).
-        // TTL must cover the full remaining horizon so the marker outlasts the
-        // position. Use max(72h, (maxHorizonDays+1)*24h) to handle any config.
+        // All committed orders — fills and resting maker GTCs, fresh entries and
+        // size-ups — commit capital, so they all count toward per-scan exposure.
+        cumulativeStakeUsd += filledStakeUsd;
+      }
+
+      // The cross-scan active-event marker tracks whether a position now exists
+      // for this event, so it is set on any CONFIRMED fill — fresh OR resumed.
+      // It is decoupled from `orderCommitted` (which gates per-scan caps on
+      // governorStamped to avoid re-counting a resumed order): a maker GTC that
+      // FILLS on a later resume cycle does not re-stamp the governor, but it IS
+      // a real position and must still mark the event. Excludes maker_pending
+      // (not yet a position — the reconciler records it on a later cycle, the
+      // executor's per-market pending tracking prevents duplicate posts, and
+      // leaving it unmarked preserves sibling-bracket entry and retry) and the
+      // errored taker-failure path (no position opened). Refreshing on size-up
+      // fills lets subsequent scans bypass dedup for further top-ups.
+      // TTL must cover the full remaining horizon so the marker outlasts the
+      // position. Use max(72h, (maxHorizonDays+1)*24h) to handle any config.
+      const positionConfirmed =
+        !result.skipped && !result.error && result.entryExecutionPath !== 'maker_pending';
+      if (positionConfirmed) {
         const activeTtlS = Math.max(
           ACTIVE_EVENT_TTL_S,
           (cfg.WEATHER_MAX_HORIZON_DAYS + 1) * 24 * 3600,
@@ -2125,10 +2163,6 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         await redis
           .set(`${ACTIVE_EVENT_KEY_PREFIX}${opp.eventSlug}`, '1', 'EX', activeTtlS)
           .catch(() => {});
-        cumulativeStakeUsd += filledStakeUsd;
-        // Any non-skipped Polymarket execution records a governor trade; the
-        // next attempt must wait for the cooldown to reset.
-        needsGovernorPause = true;
       }
     } catch (err) {
       logger.error('[weather] execution threw', {
