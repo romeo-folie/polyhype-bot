@@ -672,6 +672,10 @@ export interface WeatherBracketOpportunity {
    *  near-res entry gate (which uses Gamma's endDate, not local midnight) should
    *  be bypassed to avoid a double-gate conflict. */
   earlyResolutionDayEntry?: boolean;
+  /** True when the scanner ran on the market's resolution day (city-local timezone).
+   *  Propagated to TradeSignal._isResolutionDay so the executor can apply the
+   *  WEATHER_EARLY_ENTRY_MAX_PRICE cap only on pre-resolution-day entries. */
+  isResolutionDay?: boolean;
   /** Reason a YES candidate was gated off (interior_bracket / market_price_below_min /
    *  model_prob_below_min), or null when YES was not gated. Set even on NO opportunities
    *  that arose because the model preferred YES but the YES gate blocked it. */
@@ -1692,6 +1696,7 @@ export async function scanWeatherMarkets(
       if (isEarlyResolutionDayEntry) {
         for (const opp of gatedOpportunities) opp.earlyResolutionDayEntry = true;
       }
+      for (const opp of gatedOpportunities) opp.isResolutionDay = isResolutionDay;
       allOpportunities.push(...gatedOpportunities);
     }
   }
@@ -1758,6 +1763,7 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
     // came from the resolution-day size-up re-evaluation (sizeUpScanOnly). On any
     // other (off-day) scan the executor must not top up a held bracket.
     ...(opp.sizeUpScanOnly === true ? { sizeUpSanctioned: true } : {}),
+    _isResolutionDay: opp.isResolutionDay ?? false,
     ...(correctEndDate ? { endDate: correctEndDate } : {}),
   };
 }

@@ -105,6 +105,10 @@ export interface TradeSignal {
   _sizeUpExistingStake?: number;
   /** 1-based top-up number (existing topUpCount + 1). */
   _sizeUpTopUpNumber?: number;
+  /** True when the weather scanner evaluated this signal on the market's resolution day
+   *  (city-local timezone). False for pre-resolution-day entries. Used by the executor
+   *  to apply WEATHER_EARLY_ENTRY_MAX_PRICE on off-day weather entries only. */
+  _isResolutionDay?: boolean;
 }
 
 /**

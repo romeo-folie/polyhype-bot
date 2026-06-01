@@ -1757,6 +1757,12 @@ const envSchema = z.object({
   // (live-book) entries keep using WEATHER_MAX_ENTRY_PRICE. Caps the post price
   // (we still rest as maker at the cap); it does not skip the entry. 0 disables.
   WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.45),
+  // Stricter entry-price ceiling for weather entries placed BEFORE the resolution day.
+  // On resolution day the forecast is effectively locked in, so the normal
+  // WEATHER_MAX_ENTRY_PRICE applies. For earlier entries the forecast can still drift
+  // significantly (flip risk). Applies at the pre-execution skip gate (outcomePrice >
+  // cap → entry_price_above_cap) and to the maker fairValue clamp. 0 disables.
+  WEATHER_EARLY_ENTRY_MAX_PRICE: z.coerce.number().min(0).max(1).optional().default(0.50),
   // Relative-to-quote ceiling for weather maker entries. WEATHER_MAX_ENTRY_PRICE
   // prevents absurd absolute prices, but a ghost book can still produce a post
   // materially above the scanner's observed side quote (e.g. quote=0.44, post=0.63)
