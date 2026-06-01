@@ -1365,7 +1365,7 @@ const envSchema = z.object({
   // entry using 15m ATR × multiplier, frozen on the position. TP is unbounded — trailing stop
   // rides the upside. Ships dark; flip per-symbol after shadow review.
   HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: boolFromEnv.optional().default(false),
-  HL_MOMENTUM_MEME_SYMBOLS: z.string().optional().default('pepeusdt,wifusdt,bonkusdt,penguusdt'),
+  HL_MOMENTUM_MEME_SYMBOLS: z.string().optional().default('wifusdt,bonkusdt,penguusdt'),
   HL_MOMENTUM_MEME_SL_ATR_MULT: z.coerce.number().min(0).optional().default(1.5),
   HL_MOMENTUM_MEME_TP_ATR_MULT: z.coerce.number().min(0).optional().default(3.0),
   // Floor + ceiling on the SL magnitude — protects against pathological ATR readings.
