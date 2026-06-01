@@ -195,12 +195,14 @@ export async function scanHlMomentum(
   if (score === 0) return null;
 
   const momentumDirection: 'LONG' | 'SHORT' = score > 0 ? 'LONG' : 'SHORT';
-  // Contrarian is active only when globally enabled AND ADX is below the strong-trend ceiling.
-  // Above the ceiling momentum is genuinely trending — trade with it rather than against it.
+  // Contrarian is active only when globally enabled AND ADX is below the strong-trend ceiling
+  // AND the symbol is not a meme coin. Meme coins rely on ATR-scaled SL/TP sized for
+  // their high-volatility regime; contrarian mean-reversion logic degrades their win rate.
   const isContrarian =
     cfg.HL_MOMENTUM_CONTRARIAN_ENABLED &&
     adx !== null &&
-    adx < cfg.HL_MOMENTUM_CONTRARIAN_ADX_CEILING;
+    adx < cfg.HL_MOMENTUM_CONTRARIAN_ADX_CEILING &&
+    !isMemeSymbol(hlSymbol, cfg.HL_MOMENTUM_MEME_SYMBOLS);
   const tradeDirection: 'LONG' | 'SHORT' = isContrarian
     ? oppositeDirection(momentumDirection)
     : momentumDirection;
