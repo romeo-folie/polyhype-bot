@@ -1122,6 +1122,8 @@ async function tryExecuteViaClobMaker(
         intendedStakeUsd: signal.stakeUsd,
         sourcedFrom: signal.sourcedFrom,
         reasoning: signal.reasoning,
+        ...(signal.executionId && { executionId: signal.executionId }),
+        ...(signal.source && { source: signal.source }),
       },
       pendingTtlS,
     );
