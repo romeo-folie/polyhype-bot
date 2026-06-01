@@ -514,24 +514,34 @@ async function tryExecuteViaClobMaker(
   // GTC limit order below the current side-ask rather than near the bid.
   // Weather: post-and-leave (no taker fallback, same pending-order lifecycle as
   // empty-book). fv-scanner / near-zero-arb: discounted price + taker fallback.
-  const patientDiscountBps = emptyBookMode ? 0 : getPatientRealBookDiscountBps(signal.source, cfg);
+  const patientDiscountBps = emptyBookMode
+    ? 0
+    : signal._isBracketOpposite
+      ? cfg.WEATHER_BRACKET_OPPOSITE_DISCOUNT_BPS
+      : getPatientRealBookDiscountBps(signal.source, cfg);
   const isPatientRealBook = patientDiscountBps > 0;
   const isWeatherPatient = isPatientRealBook && signal.source === 'weather';
 
   // --- Pending order handling (empty-book + weather patient real-book) ---
   // On each cron cycle, resume polling an existing open order rather than re-posting.
   if ((emptyBookMode || isWeatherPatient) && redis) {
-    const pending = await getPendingOrder(redis, signal.marketId);
+    const pending = await getPendingOrder(redis, signal.marketId, signal.direction);
     if (pending) {
-      if (pending.direction && pending.direction !== signal.direction) {
+      // Normalize both sides before comparing: oracle-lag stores 'UP'/'DOWN' in the
+      // blob while weather signals use 'YES'/'NO'. Both normalize to the same pending
+      // key, so a raw string mismatch would falsely cancel a valid resting order.
+      const pendingDirCanon = pending.direction === 'UP' || pending.direction === 'YES' ? 'YES' : 'NO';
+      const signalDirCanon = signal.direction === 'UP' || signal.direction === 'YES' ? 'YES' : 'NO';
+      if (pending.direction && pendingDirCanon !== signalDirCanon) {
         // Stale order from a different side — cancel and re-post for new direction.
+        // (With direction-aware keys this shouldn't occur, but guard defensively.)
         logger.info('[executor] pending order direction mismatch — cancelling stale order', {
           marketId: signal.marketId,
           pendingDirection: pending.direction,
           signalDirection: signal.direction,
         });
         await confirmMakerCancel(pending.orderId);
-        await deletePendingOrder(redis, signal.marketId);
+        await deletePendingOrder(redis, signal.marketId, pending.direction);
       } else if (Date.now() < pending.expiresAt) {
         // Active order from a previous cycle — poll it once and return.
         const order = await getClobOrder(pending.orderId);
@@ -551,7 +561,7 @@ async function tryExecuteViaClobMaker(
               });
               await confirmMakerCancel(pending.orderId);
             }
-            await deletePendingOrder(redis, signal.marketId);
+            await deletePendingOrder(redis, signal.marketId, pending.direction);
             const filledStakeUsd = matched * pending.price;
             return {
               ok: true,
@@ -583,7 +593,7 @@ async function tryExecuteViaClobMaker(
           orderId: pending.orderId,
         });
         await confirmMakerCancel(pending.orderId);
-        await deletePendingOrder(redis, signal.marketId);
+        await deletePendingOrder(redis, signal.marketId, pending.direction);
       }
     }
   }
@@ -682,12 +692,14 @@ async function tryExecuteViaClobMaker(
   ) {
     fairValue = Math.min(fairValue, cfg.WEATHER_MAX_ENTRY_PRICE);
   }
-  // Stricter ceiling for pre-resolution-day weather entries. Matches the pre-execution
-  // skip gate so the posted price never exceeds the early-entry cap on the maker path.
+  // Stricter ceiling for pre-resolution-day weather entries. Bracket opposite legs
+  // are exempt — they provide liquidity as makers at a discount; the early-entry cap
+  // targets directional taker-style overpayment, not spread-capture GTC posts.
   if (
     emptyBookMode
     && signal.source === 'weather'
     && !signal._isResolutionDay
+    && !signal._isBracketOpposite
     && cfg.WEATHER_EARLY_ENTRY_MAX_PRICE > 0
     && fairValue != null
   ) {
@@ -779,13 +791,13 @@ async function tryExecuteViaClobMaker(
       makerFillStatus: 'rejected',
     };
   }
-  // Defense-in-depth for WEATHER_EARLY_ENTRY_MAX_PRICE. The fairValue clamp above
-  // covers the empty-book path; this guard catches the patient real-book path where
-  // price is derived from side-ask and the clamp doesn't bind.
+  // Defense-in-depth for WEATHER_EARLY_ENTRY_MAX_PRICE. Bracket opposite legs are
+  // exempt — same reasoning as the fairValue clamp above.
   if (
     (emptyBookMode || isWeatherPatient)
     && signal.source === 'weather'
     && !signal._isResolutionDay
+    && !signal._isBracketOpposite
     && cfg.WEATHER_EARLY_ENTRY_MAX_PRICE > 0
     && price > cfg.WEATHER_EARLY_ENTRY_MAX_PRICE + 1e-9
   ) {
@@ -1108,6 +1120,7 @@ async function tryExecuteViaClobMaker(
     await setPendingOrder(
       redis,
       signal.marketId,
+      signal.direction,
       {
         orderId: result.order_id,
         tokenId,
@@ -1116,7 +1129,7 @@ async function tryExecuteViaClobMaker(
         postedAt: startedAt,
         expiresAt,
         consensusP: signal.consensusProbability ?? 0.5,
-        direction: signal.direction,
+        direction: signal.direction === 'UP' || signal.direction === 'YES' ? 'YES' : 'NO',
         edgeMagnitude: signal.edgeMagnitude,
         ...(bestAsk > 0 && { bestAskAtPosting: bestAsk }),
         intendedStakeUsd: signal.stakeUsd,
@@ -1219,7 +1232,7 @@ async function tryExecuteViaClobMaker(
         }
       }
 
-      if ((emptyBookMode || isWeatherPatient) && redis) await deletePendingOrder(redis, signal.marketId);
+      if ((emptyBookMode || isWeatherPatient) && redis) await deletePendingOrder(redis, signal.marketId, signal.direction);
       const filledStakeUsd = matched * price;
       const tradeResult: TradeResult = {
         success: true,
@@ -1246,7 +1259,7 @@ async function tryExecuteViaClobMaker(
     await sleep(pollIntervalMs);
   }
 
-  if ((emptyBookMode || isWeatherPatient) && redis) await deletePendingOrder(redis, signal.marketId);
+  if ((emptyBookMode || isWeatherPatient) && redis) await deletePendingOrder(redis, signal.marketId, signal.direction);
   const cancelled = await confirmMakerCancel(result.order_id);
   if (!cancelled) {
     return {
@@ -1826,7 +1839,7 @@ export async function executeSignal(
       default:           return cfg.MAX_ENTRY_PRICE;
     }
   })();
-  if (!signal.isFutures && effectivePriceCap > 0 && (signal.outcomePrice ?? 0) > effectivePriceCap) {
+  if (!signal.isFutures && !signal._isBracketOpposite && effectivePriceCap > 0 && (signal.outcomePrice ?? 0) > effectivePriceCap) {
     logger.info('[executor] skipping — entry price above cap', {
       marketId: signal.marketId,
       source: signal.source,
@@ -2213,7 +2226,7 @@ export async function executeSignal(
     hasOpenPosition(redis, signal.marketId, currentSide),
     hasOpenPosition(redis, signal.marketId, oppositeDir),
   ]);
-  if (holdingOpposite) {
+  if (holdingOpposite && !signal._isBracketOpposite) {
     logger.info('[executor] skipping — already holding opposite side', {
       marketId: signal.marketId,
       direction: signal.direction,
@@ -2332,7 +2345,7 @@ export async function executeSignal(
   // Must run before the spread gate so we don't accidentally try to resume
   // an order whose expiresAt window has already passed.
   {
-    const expiredPending = await getPendingOrder(redis, signal.marketId);
+    const expiredPending = await getPendingOrder(redis, signal.marketId, signal.direction);
     if (expiredPending && Date.now() >= expiredPending.expiresAt) {
       logger.info('[executor] cleaning up expired empty-book maker order before cycle', {
         marketId: signal.marketId,
@@ -2345,7 +2358,7 @@ export async function executeSignal(
       } catch {
         // Non-fatal — order may already be cancelled or filled
       }
-      await deletePendingOrder(redis, signal.marketId);
+      await deletePendingOrder(redis, signal.marketId, expiredPending.direction);
     }
   }
 

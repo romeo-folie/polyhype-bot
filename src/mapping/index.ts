@@ -109,6 +109,11 @@ export interface TradeSignal {
    *  (city-local timezone). False for pre-resolution-day entries. Used by the executor
    *  to apply WEATHER_EARLY_ENTRY_MAX_PRICE on off-day weather entries only. */
   _isResolutionDay?: boolean;
+  /** True when this is the bracket-strategy opposite-side leg of a primary weather
+   *  signal. The executor bypasses the opposite-side entry gate and applies
+   *  WEATHER_BRACKET_OPPOSITE_DISCOUNT_BPS for real-book pricing instead of the
+   *  normal WEATHER_REAL_BOOK_DISCOUNT_BPS. */
+  _isBracketOpposite?: boolean;
 }
 
 /**

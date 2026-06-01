@@ -223,7 +223,7 @@ describe('Position Reconciliation Healer', () => {
       entryOrderType: 'maker',
       counterfactualImmediateTakerPrice: 0.50,
     }));
-    expect(pendingMakerOrders.deletePendingOrder).toHaveBeenCalledWith(mockRedis, 'numeric-oracle');
+    expect(pendingMakerOrders.deletePendingOrder).toHaveBeenCalledWith(mockRedis, 'numeric-oracle', 'YES');
     // Async maker fill confirmation → user is notified once here (not at posting time).
     expect(telegram.notifyTradeExecuted).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -437,7 +437,7 @@ describe('Position Reconciliation Healer', () => {
     // The generic heal must NOT run for a recognised size-up.
     expect(positionLedger.updatePositionShares).not.toHaveBeenCalled();
     // Pending order cleared and a size-up notification emitted.
-    expect(pendingMakerOrders.deletePendingOrder).toHaveBeenCalledWith(mockRedis, 'numeric-su');
+    expect(pendingMakerOrders.deletePendingOrder).toHaveBeenCalledWith(mockRedis, 'numeric-su', 'YES');
     expect(telegram.notifyTradeExecuted).toHaveBeenCalledWith(
       expect.objectContaining({ _isSizeUp: true, _sizeUpTopUpNumber: 1 }),
       undefined,
@@ -490,7 +490,7 @@ describe('Position Reconciliation Healer', () => {
       expect.closeTo(60, 5), expect.closeTo(37.2, 5), expect.closeTo(0.62, 5),
     );
     // Residual cancel confirmed (mock returns true) → pending key cleared.
-    expect(pendingMakerOrders.deletePendingOrder).toHaveBeenCalledWith(mockRedis, 'numeric-su2');
+    expect(pendingMakerOrders.deletePendingOrder).toHaveBeenCalledWith(mockRedis, 'numeric-su2', 'YES');
     expect(telegram.notifyTradeExecuted).toHaveBeenCalledWith(
       expect.objectContaining({ _isSizeUp: true, _sizeUpTopUpNumber: 2 }),
       undefined,

@@ -1347,7 +1347,7 @@ describe('empty-book maker route', () => {
       redis as any,
     );
     expect(mockSetPendingOrder).toHaveBeenCalledOnce();
-    const ttl = mockSetPendingOrder.mock.calls[0]![3] as number;
+    const ttl = mockSetPendingOrder.mock.calls[0]![4] as number;
     // baseTtl = ceil(900000/1000)+300 = 1200s; endDate ~2d out must dominate.
     expect(ttl).toBeGreaterThan(150_000);
     expect(ttl).toBeLessThanOrEqual(4 * 24 * 3600); // safety cap
@@ -1362,7 +1362,7 @@ describe('empty-book maker route', () => {
     );
     expect(mockSetPendingOrder).toHaveBeenCalledOnce();
     // ceil(MAKER_EMPTY_BOOK_MAX_WAIT_MS/1000) + 300 = 900 + 300.
-    expect(mockSetPendingOrder.mock.calls[0]![3] as number).toBe(1200);
+    expect(mockSetPendingOrder.mock.calls[0]![4] as number).toBe(1200);
   });
 
   it('near-zero-arb still subject to consensus/edge/stddev gates (non-structural source)', async () => {
@@ -1994,6 +1994,7 @@ describe('empty-book maker route', () => {
     expect(mockSetPendingOrder).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
+      expect.any(String),
       expect.objectContaining({ orderId: 'order-retry-1', price: 0.48 }),
       expect.any(Number),
     );

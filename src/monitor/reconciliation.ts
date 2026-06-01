@@ -307,7 +307,9 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
     // from a stale key or a concurrent fill in a different direction on the same
     // market. Key is deleted AFTER recordPosition() succeeds so a transient write
     // failure can't permanently lose the benchmark metadata.
-    const rawPending = await getPendingOrder(redis, market.id);
+    // direction is derived from the fill token index ('YES'/'NO'). pendingKey
+    // normalises UP/DOWN→YES/NO so the lookup always hits the correct slot.
+    const rawPending = await getPendingOrder(redis, market.id, direction);
     // Oracle-lag signals store direction as 'UP'/'DOWN' on the pending order,
     // but reconciler derives 'YES'/'NO' from token index. Normalize the
     // pending direction for the equivalence check (UP↔YES, DOWN↔NO) so
@@ -401,7 +403,7 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
 
     // Delete the pending order key only after the position is durably recorded.
     if (pendingOrder) {
-      await deletePendingOrder(redis, market.id);
+      await deletePendingOrder(redis, market.id, direction);
       // Write the fill-confirmed execution_events row. The pending row written
       // at post-time has executionSucceeded: false (order resting, not yet filled).
       // This row is the authoritative "fill confirmed" record that the outcome
@@ -494,10 +496,10 @@ async function tryReconcileSizeUpFill(
 
     // Require a bot-posted maker order linked to this exact token + direction.
     // Without one, this is an unrelated mismatch and the generic heal should run.
-    const rawPending = await getPendingOrder(redis, ledgerPos.marketId);
-    if (!rawPending) return false;
     const ledgerDirNorm =
       ledgerPos.direction === 'UP' ? 'YES' : ledgerPos.direction === 'DOWN' ? 'NO' : ledgerPos.direction;
+    const rawPending = await getPendingOrder(redis, ledgerPos.marketId, ledgerDirNorm);
+    if (!rawPending) return false;
     const pendingDirNorm =
       rawPending.direction === 'UP' ? 'YES' : rawPending.direction === 'DOWN' ? 'NO' : rawPending.direction;
     if (rawPending.tokenId !== tokenId || pendingDirNorm !== ledgerDirNorm) return false;
@@ -545,7 +547,7 @@ async function tryReconcileSizeUpFill(
     // residual is re-attributed as a size-up (sizeUpPosition) rather than clobbered
     // by the generic heal. The pending key's TTL is the backstop for cleanup.
     if (residualResolved) {
-      await deletePendingOrder(redis, ledgerPos.marketId);
+      await deletePendingOrder(redis, ledgerPos.marketId, rawPending.direction);
     } else {
       logger.warn('[reconcile] size-up residual cancel unconfirmed — keeping pending key for re-attribution', {
         marketId: ledgerPos.marketId,

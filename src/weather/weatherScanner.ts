@@ -1789,6 +1789,45 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
 }
 
 /**
+ * Build the bracket-strategy opposite-side TradeSignal for a weather opportunity.
+ * The primary signal bets on the model-favoured side; this leg rests on the other
+ * side as a GTC maker at a wider discount. If both legs fill the position is a
+ * guaranteed $1 payout (free arb). Neither leg requires the other to fill first.
+ */
+function buildBracketOppositeSignal(
+  opp: WeatherBracketOpportunity,
+  stakeUsd: number,
+): TradeSignal | null {
+  const oppositeDir: 'YES' | 'NO' = opp.tradeSide === 'YES' ? 'NO' : 'YES';
+  // oppositePrice is the Gamma mid for the side we are NOT primarily trading.
+  const oppositePrice = opp.tradeSide === 'YES' ? opp.noPrice : opp.yesPrice;
+  // Bail if the opposite-side price is missing or degenerate — the scanner only
+  // guards the primary side's price against < 0.005, not the opposite side's.
+  if (!Number.isFinite(oppositePrice) || oppositePrice < 0.005) return null;
+  const coords = lookupCity(opp.city);
+  const correctEndDate = coords
+    ? new Date(cityDayEndUtcMs(opp.targetDate, coords.tz)).toISOString()
+    : (opp.endDate ?? undefined);
+  return {
+    marketId: opp.marketId,
+    conditionId: opp.conditionId,
+    clobTokenIds: opp.clobTokenIds,
+    direction: oppositeDir,
+    stakeUsd,
+    edgeMagnitude: 0,
+    consensusProbability: opp.modelProbability,
+    outcomePrice: oppositePrice,
+    question: opp.question,
+    source: 'weather',
+    sourcedFrom: `weather:${opp.city}:${opp.targetDate}:${opp.bracketLabel}`,
+    reasoning: `Bracket opposite of ${opp.tradeSide}; primary edge=${opp.edge.toFixed(3)} daysOut=${opp.daysOut}`,
+    _isBracketOpposite: true,
+    _isResolutionDay: opp.isResolutionDay ?? false,
+    ...(correctEndDate ? { endDate: correctEndDate } : {}),
+  };
+}
+
+/**
  * Orchestrator: run a full weather scan cycle.
  *
  * Always shadow-logs. Real trades fire only when both `WEATHER_SCANNER_ENABLED`
@@ -2178,6 +2217,49 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         await redis
           .set(`${ACTIVE_EVENT_KEY_PREFIX}${opp.eventSlug}`, '1', 'EX', activeTtlS)
           .catch(() => {});
+      }
+      // Bracket strategy: post opposite-side GTC at a wider maker discount.
+      // Guards: fresh entries only (not size-ups), AND the primary must have
+      // committed a new order — if the primary was skipped the bracket would
+      // become a naked directional bet opposite to the model's conviction.
+      if (
+        cfg.WEATHER_BRACKET_ENABLED
+        && !opp.sizeUpScanOnly
+        && orderCommitted
+        && cumulativeStakeUsd + stakeUsd <= cfg.WEATHER_MAX_SCAN_EXPOSURE_USD
+      ) {
+        const bracketSignal = buildBracketOppositeSignal(opp, stakeUsd);
+        if (!bracketSignal) {
+          logger.debug('[weather] bracket opposite skipped — opposite-side price degenerate', {
+            marketId: opp.marketId, city: opp.city, bracket: opp.bracketLabel,
+          });
+        } else
+        try {
+          if (needsGovernorPause) {
+            const minIntervalMs = Math.ceil(60_000 / cfg.ARB_GLOBAL_MAX_TRADES_PER_MIN);
+            await new Promise((r) => setTimeout(r, minIntervalMs + 200));
+            needsGovernorPause = false;
+          }
+          const bracketResult = await executeAndRecordSignal(bracketSignal, redis);
+          logger.info('[weather] bracket opposite result', {
+            marketId: opp.marketId,
+            city: opp.city,
+            bracket: opp.bracketLabel,
+            oppositeSide: bracketSignal.direction,
+            skipped: bracketResult.skipped,
+            skipReason: bracketResult.skipReason,
+            entryPrice: bracketResult.entryPrice,
+          });
+          if (bracketResult.governorStamped === true) needsGovernorPause = true;
+          if (bracketResult.governorStamped === true && !bracketResult.error) {
+            cumulativeStakeUsd += bracketResult.signal.stakeUsd;
+          }
+        } catch (err) {
+          logger.warn('[weather] bracket opposite execution threw', {
+            marketId: opp.marketId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     } catch (err) {
       logger.error('[weather] execution threw', {
