@@ -92,6 +92,11 @@ export interface TradeSignal {
   endDate?: string | undefined;
   /** Price-zone classification for the entry outcome price (Change 3 telemetry). */
   priceZone?: 1 | 2 | 3 | 4 | 5;
+  /** Set by the producing scanner to authorise sizing up an already-held position
+   *  for this signal. For weather this is true ONLY on the target/resolution day;
+   *  the executor refuses to top up a held position unless this is true, so an
+   *  off-day fresh-entry scan that hits a held bracket can't trigger a size-up. */
+  sizeUpSanctioned?: boolean;
   /** Internal size-up (pyramid top-up) metadata, set by the executor/reconciler so
    *  notifyTradeExecuted can render a distinct message and the ledger update routes
    *  through sizeUpPosition. Not persisted — transient display/routing only. */

@@ -1754,6 +1754,10 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
     source: 'weather',
     sourcedFrom: `weather:${opp.city}:${opp.targetDate}:${opp.bracketLabel}`,
     reasoning: `Forecast high ${opp.forecastHigh.toFixed(1)}°, model P=${opp.modelProbability.toFixed(3)} vs market ${opp.outcomePrice.toFixed(3)}; ${opp.tradeSide} bracket "${opp.bracketLabel}" daysOut=${opp.daysOut}`,
+    // Authorise a size-up of an already-held position ONLY when this opportunity
+    // came from the resolution-day size-up re-evaluation (sizeUpScanOnly). On any
+    // other (off-day) scan the executor must not top up a held bracket.
+    ...(opp.sizeUpScanOnly === true ? { sizeUpSanctioned: true } : {}),
     ...(correctEndDate ? { endDate: correctEndDate } : {}),
   };
 }

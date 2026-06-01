@@ -177,6 +177,8 @@ function makeWeatherSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
     sourcedFrom: 'weather-forecast',
     reasoning: 'High edge',
     source: 'weather',
+    // These exercise the resolution-day size-up path, which the scanner sanctions.
+    sizeUpSanctioned: true,
     ...overrides,
   };
 }
@@ -226,6 +228,22 @@ describe('evaluateSizeUp via executeAndRecordSignal — executor path', () => {
     mockHasPosition.mockImplementation(
       async (_redis: unknown, _marketId: string, dir: string) => dir === 'YES',
     );
+  });
+
+  it('off resolution day: unsanctioned size-up skips as position_already_open (never reaches evaluateSizeUp)', async () => {
+    // sizeUpSanctioned=false simulates an off-day fresh-entry scan hitting an
+    // already-held bracket. The gate must skip BEFORE evaluateSizeUp/getPosition.
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ sharesHeld: 20, stakeUsd: 5 }));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ sizeUpSanctioned: false }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('position_already_open');
+    expect(mockGetPosition).not.toHaveBeenCalled();
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
   });
 
   it('no_share_count: returns size_up_ineligible when existing position has sharesHeld=0', async () => {
