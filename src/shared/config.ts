@@ -1897,7 +1897,7 @@ const envSchema = z.object({
   // Only mark invalidated when current held-side probability is below this (severity filter).
   WEATHER_FORECAST_INVALIDATION_MIN_CURRENT_HELD_PROB: z.coerce.number().min(0).max(1).optional().default(0.50),
   // TTL (seconds) for the Redis invalidation key that blocks size-ups (6 hours).
-  WEATHER_FORECAST_INVALIDATION_TTL_S: z.coerce.number().int().min(0).optional().default(21600),
+  WEATHER_FORECAST_INVALIDATION_TTL_S: z.coerce.number().int().min(1).optional().default(21600),
   // Hedge: buy opposite token when the position is invalidated and opposite is cheap.
   WEATHER_FORECAST_INVALIDATION_HEDGE_ENABLED: boolFromEnv.optional().default(false),
   // Maximum price to pay for the opposite (hedge) token.

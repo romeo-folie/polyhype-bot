@@ -472,6 +472,56 @@ export async function notifyHedgeOpened(opts: {
   await notify(text);
 }
 
+/**
+ * Notify when a weather position is invalidated but no automatic hedge can be
+ * placed due to market conditions (empty book or ask exceeds configured ceiling).
+ */
+export async function notifyWeatherInvalidationNoHedge(opts: {
+  positionId: string;
+  marketId: string;
+  city: string;
+  targetDate: string;
+  bracketLabel: string;
+  direction: 'YES' | 'NO';
+  entryPrice: number;
+  sharesHeld: number;
+  invalidationReason: string;
+  drop: number;
+  currentHeldProb: number;
+  hedgeBarrier: 'no_book' | 'price_too_high' | 'cost_ceiling';
+  oppositeAsk?: number;
+  maxHedgePrice?: number;
+  maxTotalCost?: number;
+  costTotal?: number;
+}): Promise<void> {
+  const {
+    positionId, marketId, city, targetDate, bracketLabel,
+    direction, entryPrice, sharesHeld, invalidationReason,
+    drop, currentHeldProb, hedgeBarrier, oppositeAsk, maxHedgePrice,
+    maxTotalCost, costTotal,
+  } = opts;
+
+  const barrierDetail =
+    hedgeBarrier === 'no_book'
+      ? 'No asks on opposite side'
+      : hedgeBarrier === 'price_too_high'
+      ? `Ask ${oppositeAsk?.toFixed(3) ?? '?'} > max ${maxHedgePrice?.toFixed(3) ?? '?'}`
+      : `Cost ceiling: ${costTotal?.toFixed(3) ?? '?'} > ${maxTotalCost?.toFixed(3) ?? '?'}`;
+
+  const reasonLabel = invalidationReason.replace(/_/g, ' ');
+  const text =
+    `🌧️ <b>Weather Position Invalidated — Manual Action Needed</b>\n\n` +
+    `<b>City:</b> ${escapeHtml(city)}  <b>Date:</b> ${escapeHtml(targetDate)}  <b>Bracket:</b> ${escapeHtml(bracketLabel)}\n` +
+    `<b>Position:</b> ${direction} @ ${entryPrice.toFixed(3)} (${sharesHeld.toFixed(2)} shares)\n` +
+    `<b>Market:</b> <code>${escapeHtml(marketId)}</code>\n\n` +
+    `<b>Reason:</b> ${escapeHtml(reasonLabel)}\n` +
+    `<b>Held-prob drop:</b> ${(drop * 100).toFixed(1)}% → now ${(currentHeldProb * 100).toFixed(1)}%\n\n` +
+    `⚠️ <b>No auto-hedge:</b> ${escapeHtml(barrierDetail)}\n` +
+    `<b>Position ID:</b> <code>${escapeHtml(positionId)}</code>`;
+
+  await notify(text);
+}
+
 // ── Utility ─────────────────────────────────────────────────────────────────
 
 function escapeHtml(str: string): string {

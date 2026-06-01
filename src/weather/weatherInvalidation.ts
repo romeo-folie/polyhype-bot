@@ -24,8 +24,10 @@ import { getSql } from '../db/client.js';
 import { getMarket, parseClobTokenIds } from '../mapping/gamma.js';
 import { getClobOrderBook, submitClobBuy } from '../shared/clob.js';
 import { deductStake } from '../shared/bankroll.js';
+import { dedup } from '../shared/redis.js';
 import type { FetchFn } from './noaaClient.js';
 import { getCityBias } from './cityBias.js';
+import { notifyWeatherInvalidationNoHedge } from '../execution/telegram.js';
 // Circular-safe: these are only called at runtime (inside async functions),
 // never at module-initialisation time, so the live bindings are fully resolved
 // before any function body executes.
@@ -423,6 +425,33 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
           marketId: pos.marketId,
           direction: pos.direction,
         });
+        if (!alreadyHedged) {
+          const isFirst = await dedup(
+            `weather:forecast_invalidation_alert:${pos.id}:no_book`,
+            cfg.WEATHER_FORECAST_INVALIDATION_TTL_S,
+          ).catch(() => false);
+          if (isFirst) {
+            await notifyWeatherInvalidationNoHedge({
+              positionId: pos.id,
+              marketId: pos.marketId,
+              city,
+              targetDate,
+              bracketLabel,
+              direction: pos.direction,
+              entryPrice: pos.entryPrice,
+              sharesHeld: pos.sharesHeld,
+              invalidationReason: invalidationReason!,
+              drop,
+              currentHeldProb,
+              hedgeBarrier: 'no_book',
+            }).catch((err: unknown) => {
+              logger.warn('[weather-invalidation] alert notification failed', {
+                positionId: pos.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          }
+        }
         continue;
       }
 
@@ -476,7 +505,44 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
         },
       });
 
-      if (!wouldHedge || alreadyHedged || !cfg.WEATHER_FORECAST_INVALIDATION_HEDGE_ENABLED) continue;
+      if (alreadyHedged) continue;
+      if (!wouldHedge || !cfg.WEATHER_FORECAST_INVALIDATION_HEDGE_ENABLED) {
+        // Only alert for market-condition barriers (price too high / cost ceiling),
+        // not when the feature is intentionally disabled.
+        if (!wouldHedge) {
+          const barrier = !meetsHedgePrice ? 'price_too_high' : 'cost_ceiling';
+          const isFirst = await dedup(
+            `weather:forecast_invalidation_alert:${pos.id}:${barrier}`,
+            cfg.WEATHER_FORECAST_INVALIDATION_TTL_S,
+          ).catch(() => false);
+          if (isFirst) {
+            await notifyWeatherInvalidationNoHedge({
+              positionId: pos.id,
+              marketId: pos.marketId,
+              city,
+              targetDate,
+              bracketLabel,
+              direction: pos.direction,
+              entryPrice: pos.entryPrice,
+              sharesHeld: pos.sharesHeld,
+              invalidationReason: invalidationReason!,
+              drop,
+              currentHeldProb,
+              hedgeBarrier: barrier,
+              oppositeAsk,
+              maxHedgePrice: cfg.WEATHER_FORECAST_INVALIDATION_MAX_HEDGE_PRICE,
+              maxTotalCost: cfg.WEATHER_FORECAST_INVALIDATION_MAX_TOTAL_COST,
+              costTotal,
+            }).catch((err: unknown) => {
+              logger.warn('[weather-invalidation] alert notification failed', {
+                positionId: pos.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          }
+        }
+        continue;
+      }
 
       const amountUsd = pos.sharesHeld * oppositeAsk;
       const result = await submitClobBuy({ tokenId: oppositeTokenId, amountUsd, orderType: 'FAK' });
