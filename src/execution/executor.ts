@@ -2836,6 +2836,16 @@ export async function executeSignal(
       return recordSkip('no_clob_book', finalExecutionPath, makerTelemetry, 'clob', 'maker');
     }
 
+    // Weather entries whose live maker price exceeded the entry-price ceiling must
+    // not fall through to a taker buy — a market order would pay above the cap.
+    if (signal.source === 'weather' && makerAttempt.error === 'maker_price_above_cap') {
+      logger.info('[executor] weather maker price above cap — no taker fallback', {
+        marketId: signal.marketId,
+        error: makerAttempt.error,
+      });
+      return recordSkip('entry_price_above_cap', 'maker_rejected', makerTelemetry, 'clob', 'maker');
+    }
+
     if (executionMode === 'hybrid') {
       logger.info('[executor] maker did not fill — taker fallback', {
         marketId: signal.marketId,
