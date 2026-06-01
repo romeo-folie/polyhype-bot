@@ -1,5 +1,7 @@
+import { randomUUID } from 'crypto';
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import { getOpenPositions, closePosition, recordPosition, updatePositionShares, sizeUpPosition, type Position } from '../execution/positionLedger.js';
 import { getHyperliquid } from '../shared/hyperliquid.js';
 import { fetchClobTokenBalance, cancelClobOrder } from '../shared/clob.js';
@@ -369,6 +371,9 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
         // placed — the correct counterfactual for "what would an immediate taker fill
         // have cost?" (consistent with buildDecisionBenchmark() in executor.ts).
         counterfactualImmediateTakerPrice: pendingOrder.bestAskAtPosting,
+        // Thread the executionId minted at post-time so the position links back to
+        // the original execution_events row and the outcome pipeline can write returns.
+        ...(pendingOrder.executionId && { executionId: pendingOrder.executionId }),
       }),
       reconciliationStatus: `imported:${new Date().toISOString()}`
     };
@@ -397,6 +402,37 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
     // Delete the pending order key only after the position is durably recorded.
     if (pendingOrder) {
       await deletePendingOrder(redis, market.id);
+      // Write the fill-confirmed execution_events row. The pending row written
+      // at post-time has executionSucceeded: false (order resting, not yet filled).
+      // This row is the authoritative "fill confirmed" record that the outcome
+      // pipeline uses to link positions → returns. Only written when executionId
+      // is available; positions imported without a pending order retain no link.
+      if (pendingOrder.executionId) {
+        void enqueueWrite('execution_events', {
+          attemptId: randomUUID(),
+          executionId: pendingOrder.executionId,
+          // source is set on pending orders written after this fix. For legacy
+          // keys written before it, derive from the sourcedFrom prefix (format
+          // is always "<source>:<rest>" matching the SIGNAL_SOURCE enum).
+          source: pendingOrder.source ?? pendingOrder.sourcedFrom?.split(':')[0] ?? 'weather',
+          marketId: market.id,
+          direction,
+          finalExecutionPath: 'maker_fill',
+          finalVenue: 'clob',
+          finalOrderType: 'maker',
+          executionSucceeded: true,
+          sharesFilled: shares,
+          stakeUsdExecuted: newPos.stakeUsd,
+          entryPrice: pos.avgPrice,
+          makerAttempted: true,
+          makerFillStatus: 'full',
+          makerPostedPrice: pendingOrder.price,
+          ...(pendingOrder.bestAskAtPosting && {
+            counterfactualTakerPrice: pendingOrder.bestAskAtPosting,
+            counterfactualTakerCost: shares * pendingOrder.bestAskAtPosting,
+          }),
+        });
+      }
       // Bot-originated maker fill (async path). Emit the one-and-only Telegram
       // notification for this trade — we intentionally don't notify at post time
       // so the user only sees confirmed entries.

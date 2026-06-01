@@ -34,6 +34,10 @@ export interface PendingMakerOrder {
   intendedStakeUsd?: number;
   sourcedFrom?: string;
   reasoning?: string;
+  // Carried forward so the reconciler can link the async fill back to the
+  // original execution attempt and write a confirmed execution_events row.
+  executionId?: string;
+  source?: string;
 }
 
 function pendingKey(marketId: string): string {
