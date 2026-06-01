@@ -80,6 +80,7 @@ const mockConfig = {
   WEATHER_MAX_ENTRY_PRICE: 0,
   WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE: 0,
   WEATHER_MAX_SIGNAL_PRICE_DRIFT: 0.08,
+  WEATHER_MAX_HORIZON_DAYS: 7,
 };
 
 const mockLoadConfig = vi.fn(() => mockConfig);
@@ -1331,6 +1332,37 @@ describe('empty-book maker route', () => {
     expect(result.skipped).toBe(false);
     expect(result.entryExecutionPath).toBe('maker_pending');
     expect(mockSubmitLimit).toHaveBeenCalledOnce();
+  });
+
+  it('extends the pending-key TTL to cover market resolution (endDate), not just the wait window', async () => {
+    // Regression: a GTC empty-book order rests until filled/cancelled, but the
+    // tracking key used to expire after only wait+grace (~1200s here). Once it
+    // lapsed, a later re-emission could no longer find the resting order to
+    // cancel + replace, so it posted a DUPLICATE and orphaned the original.
+    const redis = makeRedis();
+    const twoDaysOut = new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString();
+    await executeSignal(
+      makeSignal({ source: 'oracle-lag', consensusProbability: 0.5012, direction: 'UP', endDate: twoDaysOut }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+    expect(mockSetPendingOrder).toHaveBeenCalledOnce();
+    const ttl = mockSetPendingOrder.mock.calls[0]![3] as number;
+    // baseTtl = ceil(900000/1000)+300 = 1200s; endDate ~2d out must dominate.
+    expect(ttl).toBeGreaterThan(150_000);
+    expect(ttl).toBeLessThanOrEqual(4 * 24 * 3600); // safety cap
+  });
+
+  it('falls back to the wait-window TTL when the signal has no endDate', async () => {
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({ source: 'oracle-lag', consensusProbability: 0.5012, direction: 'UP' }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+    expect(mockSetPendingOrder).toHaveBeenCalledOnce();
+    // ceil(MAKER_EMPTY_BOOK_MAX_WAIT_MS/1000) + 300 = 900 + 300.
+    expect(mockSetPendingOrder.mock.calls[0]![3] as number).toBe(1200);
   });
 
   it('near-zero-arb still subject to consensus/edge/stddev gates (non-structural source)', async () => {
