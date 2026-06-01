@@ -1780,7 +1780,7 @@ const envSchema = z.object({
   // paired with a simultaneous GTC on the opposite side at a wider discount. Both
   // orders rest until one fills; the other expires worthless at resolution. If both
   // fill the position is a guaranteed $1 payout (free arb). Off by default; dark.
-  WEATHER_BRACKET_ENABLED: z.coerce.boolean().optional().default(false),
+  WEATHER_BRACKET_ENABLED: boolFromEnv.optional().default(false),
   // Discount (bps) applied to the opposite-side ask when posting the bracket leg.
   // Wider than WEATHER_REAL_BOOK_DISCOUNT_BPS since the bracket leg has no model
   // edge — we demand a bigger cushion to compensate.

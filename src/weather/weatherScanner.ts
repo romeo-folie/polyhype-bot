@@ -2219,6 +2219,19 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
           .catch(() => {});
       }
       // Bracket strategy: post opposite-side GTC at a wider maker discount.
+      // Bracket stake: target the same share count as the primary so that
+      // YES+NO together pay exactly $1 per pair regardless of which side resolves.
+      //   shares  = stakeUsd / opp.outcomePrice (primary side price)
+      //   bracketStake = shares × oppositePrice
+      // This makes the pair riskless when both legs fill (total cost < $1/share).
+      const bracketOppositePrice = opp.tradeSide === 'YES' ? opp.noPrice : opp.yesPrice;
+      const bracketShares = opp.outcomePrice > 0 ? stakeUsd / opp.outcomePrice : 0;
+      const bracketStakeUsd =
+        bracketShares > 0 && bracketOppositePrice > 0
+          ? bracketShares * bracketOppositePrice
+          : stakeUsd;
+      const bracketWorstCase = Math.max(bracketStakeUsd, cfg.MIN_BET_USD);
+
       // Guards: fresh entries only (not size-ups), AND the primary must have
       // committed a new order — if the primary was skipped the bracket would
       // become a naked directional bet opposite to the model's conviction.
@@ -2226,9 +2239,9 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         cfg.WEATHER_BRACKET_ENABLED
         && !opp.sizeUpScanOnly
         && orderCommitted
-        && cumulativeStakeUsd + stakeUsd <= cfg.WEATHER_MAX_SCAN_EXPOSURE_USD
+        && cumulativeStakeUsd + bracketWorstCase <= cfg.WEATHER_MAX_SCAN_EXPOSURE_USD
       ) {
-        const bracketSignal = buildBracketOppositeSignal(opp, stakeUsd);
+        const bracketSignal = buildBracketOppositeSignal(opp, bracketStakeUsd);
         if (!bracketSignal) {
           logger.debug('[weather] bracket opposite skipped — opposite-side price degenerate', {
             marketId: opp.marketId, city: opp.city, bracket: opp.bracketLabel,
@@ -2252,7 +2265,7 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
           });
           if (bracketResult.governorStamped === true) needsGovernorPause = true;
           if (bracketResult.governorStamped === true && !bracketResult.error) {
-            cumulativeStakeUsd += bracketResult.signal.stakeUsd;
+            cumulativeStakeUsd += bracketWorstCase;
           }
         } catch (err) {
           logger.warn('[weather] bracket opposite execution threw', {
