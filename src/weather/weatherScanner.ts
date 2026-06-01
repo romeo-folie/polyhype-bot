@@ -443,6 +443,14 @@ export async function fetchForecast(
     defaultStd = defaultStd * 5 / 9;
   }
 
+  // The stddevMinFraction floor guards against pathologically under-dispersed
+  // short-range ensembles. Cap its reference at the day-7 stddev so that
+  // extending the horizon to 14 days doesn't inflate the floor and suppress
+  // tight ensemble signals that are genuinely informative at extended range.
+  const floorStd = unit === 'celsius'
+    ? getDefaultStdDev(Math.min(daysOut, 7), month) * 5 / 9
+    : getDefaultStdDev(Math.min(daysOut, 7), month);
+
   // Try ensemble first (works for both US and international).
   // Both fetches are submitted to Promise.all, but when fetchFn is the
   // production rate-limited queue they are still serialized by the limiter —
@@ -476,7 +484,19 @@ export async function fetchForecast(
     const omHigh = omForecast?.highTemp ?? null;
 
     const availableHighs = [noaaHigh, omHigh, hrrrHigh].filter((v): v is number => v !== null);
-    if (availableHighs.length === 0) return null;
+    if (availableHighs.length === 0) {
+      // NWS covers only ~7 days; at daysOut > 7 noaaHigh is always null by design.
+      // If Open-Meteo also failed here, the only deterministic source for US cities
+      // is absent — warn so the gap is visible in logs.
+      if (daysOut > 7) {
+        logger.warn('[weather] US forecast null at extended horizon — NWS capped at 7 days, Open-Meteo unavailable', {
+          city: event.city,
+          targetDate,
+          daysOut,
+        });
+      }
+      return null;
+    }
 
     // Cross-source spread gate: only fires when HRRR contributed a value.
     // Normal NOAA/OM disagreement is already absorbed by the spread-driven stdDev inflation
@@ -522,12 +542,12 @@ export async function fetchForecast(
     // (only NOAA responds, ensemble null) doesn't silently tighten uncertainty to the
     // stddevMinFraction floor. Multi-source: spread already adds variance, so 0 fallback is fine.
     const stdDev = availableHighs.length === 1
-      ? Math.max(ensemble?.stddevHigh ?? defaultStd, defaultStd * stddevMinFraction)
-      : Math.max(ensemble?.stddevHigh ?? 0, spread, defaultStd * stddevMinFraction);
+      ? Math.max(ensemble?.stddevHigh ?? defaultStd, floorStd * stddevMinFraction)
+      : Math.max(ensemble?.stddevHigh ?? 0, spread, floorStd * stddevMinFraction);
     const shadowStdDev = shadowEnsembleRaw
       ? (availableHighs.length === 1
-        ? Math.max(shadowEnsembleRaw.stddevHigh, defaultStd * stddevMinFraction)
-        : Math.max(shadowEnsembleRaw.stddevHigh, spread, defaultStd * stddevMinFraction))
+        ? Math.max(shadowEnsembleRaw.stddevHigh, floorStd * stddevMinFraction)
+        : Math.max(shadowEnsembleRaw.stddevHigh, spread, floorStd * stddevMinFraction))
       : null;
 
     return {
@@ -550,9 +570,9 @@ export async function fetchForecast(
   const omForecast = await fetchOpenMeteoForecast(coords.lat, coords.lon, targetDate, unit, fetchFn);
   if (!omForecast) return null;
 
-  const stdDev = Math.max(ensemble?.stddevHigh ?? defaultStd, defaultStd * stddevMinFraction);
+  const stdDev = Math.max(ensemble?.stddevHigh ?? defaultStd, floorStd * stddevMinFraction);
   const shadowStdDev = shadowEnsembleRaw
-    ? Math.max(shadowEnsembleRaw.stddevHigh, defaultStd * stddevMinFraction)
+    ? Math.max(shadowEnsembleRaw.stddevHigh, floorStd * stddevMinFraction)
     : null;
   return {
     forecastHigh: omForecast.highTemp,
