@@ -2174,6 +2174,20 @@ export async function executeSignal(
       return recordSkip('position_already_open');
     }
 
+    // Size-up must be sanctioned by the producing scanner. For weather this is set
+    // only on the target/resolution-day re-evaluation, so an off-day fresh-entry
+    // scan that happens to hit an already-held bracket cannot top it up (the
+    // forecast can still drift before resolution day). Without this gate the
+    // source check alone would size up any already-held weather position on any day.
+    if (signal.sizeUpSanctioned !== true) {
+      logger.info('[executor] skipping — already holding; size-up not sanctioned (e.g. off resolution day)', {
+        marketId: signal.marketId,
+        direction: signal.direction,
+        source: signal.source,
+      });
+      return recordSkip('position_already_open');
+    }
+
     const sizeUpResult = await evaluateSizeUp(signal, redis, cfg);
     if (sizeUpResult.eligible) {
       logger.info('[executor] size-up eligible — proceeding with top-up', {
