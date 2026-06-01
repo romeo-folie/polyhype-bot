@@ -1052,6 +1052,27 @@ async function tryExecuteViaClobMaker(
   // check at the top of this function.
   if ((emptyBookMode || isWeatherPatient) && redis) {
     const expiresAt = startedAt + cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS;
+    // The posted order is GTC — it rests on-chain until filled or explicitly
+    // cancelled, which only happens via the resume path on a later scanner
+    // re-emission. The tracking key must therefore outlive the order's full
+    // resting life, NOT just the per-attempt wait window: if the key expires
+    // first (the old `wait + 300s` TTL), a re-emission can no longer find the
+    // resting order to cancel + replace it, so it posts a DUPLICATE and orphans
+    // the original (it never auto-expires). Keep the key alive until the market
+    // can plausibly still be live — its resolution (endDate) + grace — so the
+    // "expired → cancel + re-post" resume logic dedupes instead of orphaning.
+    // `expiresAt` above remains the re-post trigger; this only widens tracking.
+    const baseTtlS = Math.ceil(cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS / 1000) + 300;
+    const endMs = signal.endDate ? Date.parse(signal.endDate) : NaN;
+    const untilResolutionS = Number.isFinite(endMs)
+      ? Math.ceil((endMs - startedAt) / 1000) + 300
+      : 0;
+    // Safety cap against a garbage/far-future endDate, but it MUST exceed the
+    // longest legitimate horizon (weather entries post up to WEATHER_MAX_HORIZON_DAYS
+    // ahead) — otherwise an early entry's key could lapse before resolution and
+    // re-introduce the duplicate-orphan this fix prevents.
+    const maxPendingTtlS = (cfg.WEATHER_MAX_HORIZON_DAYS + 1) * 24 * 3600;
+    const pendingTtlS = Math.min(maxPendingTtlS, Math.max(baseTtlS, untilResolutionS));
     await setPendingOrder(
       redis,
       signal.marketId,
@@ -1070,7 +1091,7 @@ async function tryExecuteViaClobMaker(
         sourcedFrom: signal.sourcedFrom,
         reasoning: signal.reasoning,
       },
-      Math.ceil(cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS / 1000) + 300,
+      pendingTtlS,
     );
     logger.info('[executor] maker order posted — returning pending', {
       marketId: signal.marketId,
