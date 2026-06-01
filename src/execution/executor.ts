@@ -682,6 +682,17 @@ async function tryExecuteViaClobMaker(
   ) {
     fairValue = Math.min(fairValue, cfg.WEATHER_MAX_ENTRY_PRICE);
   }
+  // Stricter ceiling for pre-resolution-day weather entries. Matches the pre-execution
+  // skip gate so the posted price never exceeds the early-entry cap on the maker path.
+  if (
+    emptyBookMode
+    && signal.source === 'weather'
+    && !signal._isResolutionDay
+    && cfg.WEATHER_EARLY_ENTRY_MAX_PRICE > 0
+    && fairValue != null
+  ) {
+    fairValue = Math.min(fairValue, cfg.WEATHER_EARLY_ENTRY_MAX_PRICE);
+  }
   // Stricter ceiling for EMPTY/ghost-book weather entries. These books carry no
   // real liquidity (only far-off rebate-farmer orders) and no reliable price, and
   // we can't exit them, so we only ever rest at a clear value discount rather than
@@ -756,6 +767,27 @@ async function tryExecuteViaClobMaker(
     && signal.source === 'weather'
     && cfg.WEATHER_MAX_ENTRY_PRICE > 0
     && price > cfg.WEATHER_MAX_ENTRY_PRICE + 1e-9
+  ) {
+    return {
+      ok: false,
+      error: 'maker_price_above_cap',
+      waitMs: Date.now() - startedAt,
+      makerBestBid: bestBid,
+      makerBestAsk: bestAsk,
+      ...(mid ? { makerMidPrice: mid } : {}),
+      ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
+      makerFillStatus: 'rejected',
+    };
+  }
+  // Defense-in-depth for WEATHER_EARLY_ENTRY_MAX_PRICE. The fairValue clamp above
+  // covers the empty-book path; this guard catches the patient real-book path where
+  // price is derived from side-ask and the clamp doesn't bind.
+  if (
+    (emptyBookMode || isWeatherPatient)
+    && signal.source === 'weather'
+    && !signal._isResolutionDay
+    && cfg.WEATHER_EARLY_ENTRY_MAX_PRICE > 0
+    && price > cfg.WEATHER_EARLY_ENTRY_MAX_PRICE + 1e-9
   ) {
     return {
       ok: false,
@@ -1780,7 +1812,15 @@ export async function executeSignal(
   const effectivePriceCap = ((): number => {
     switch (signal.source) {
       case 'fv-scanner': return cfg.FV_MAX_ENTRY_PRICE;
-      case 'weather':    return cfg.WEATHER_MAX_ENTRY_PRICE;
+      case 'weather': {
+        // Pre-resolution-day entries use a stricter ceiling: forecast drift risk is
+        // higher when the observation day hasn't started yet. On resolution day the
+        // forecast is locked in and the normal cap applies.
+        if (!signal._isResolutionDay && cfg.WEATHER_EARLY_ENTRY_MAX_PRICE > 0) {
+          return Math.min(cfg.WEATHER_EARLY_ENTRY_MAX_PRICE, cfg.WEATHER_MAX_ENTRY_PRICE);
+        }
+        return cfg.WEATHER_MAX_ENTRY_PRICE;
+      }
       default:           return cfg.MAX_ENTRY_PRICE;
     }
   })();

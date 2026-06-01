@@ -222,6 +222,10 @@ export async function runWeatherOracleScan(redis: Redis): Promise<void> {
           source: 'weather',
           sourcedFrom: `weather-oracle:${event.city}:${event.targetDate}:${bracket.label}`,
           reasoning: `Known outcome: actual_high=${actualHigh.toFixed(1)} ${event.unit}; bracket "${bracket.label}" resolves ${direction}; winningAsk=${winningAsk.toFixed(3)}`,
+          // Oracle signals always target a resolved (yesterday's) market — treat as
+          // resolution-day so the executor applies WEATHER_MAX_ENTRY_PRICE, not the
+          // stricter WEATHER_EARLY_ENTRY_MAX_PRICE reserved for pre-res-day entries.
+          _isResolutionDay: true,
         };
 
         try {
