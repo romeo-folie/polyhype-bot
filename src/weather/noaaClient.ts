@@ -363,10 +363,14 @@ export async function fetchNwsForecast(
 
 /**
  * Get the default forecast standard deviation for a given forecast horizon.
- * Calibrated from NWS MOS verification studies.
+ * Calibrated from NWS MOS verification studies extended with ECMWF ensemble
+ * verification data for the 8-14 day range.
  *
  * Returned values are calibrated in degrees Fahrenheit (°F).
  * For Celsius markets, convert the returned value by multiplying by 5/9.
+ *
+ * Days 1-7: NWS MOS verification (short/medium range)
+ * Days 8-14: ECMWF ensemble verification (~10°F at day 10, ~12.5°F at day 14)
  *
  * @param daysOut - Number of days until the target date (0 = today)
  * @param month - Optional month (1-12) for seasonal adjustment
@@ -378,7 +382,9 @@ export function getDefaultStdDev(daysOut: number, month?: number): number {
   else if (daysOut <= 2) base = 4.5;
   else if (daysOut <= 3) base = 5.0;
   else if (daysOut <= 5) base = 6.5;
-  else base = 8.0;
+  else if (daysOut <= 7) base = 8.0;
+  else if (daysOut <= 10) base = 10.0;
+  else base = 12.5; // days 11-14
 
   // Seasonal adjustment: winter forecasts have ~25% more error,
   // summer forecasts ~15% less (NWS verification data)
