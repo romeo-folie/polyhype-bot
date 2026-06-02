@@ -3082,6 +3082,51 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     expect(bracketCall).toBeDefined();
   });
 
+  it('bracket leg carries _bracketTargetShares equal to the primary filled share count', async () => {
+    // Regression for the bracket oversizing bug: the leg must target the primary's
+    // SHARE count (1:1 pairing) rather than a dollar stake the executor would re-divide
+    // by the discounted post price. With an explicit primary fill of 12 shares, the
+    // bracket signal must carry _bracketTargetShares === 12.
+    makeTomorrowEventFixture();
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_BRACKET_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    mockGetBankroll.mockResolvedValue(1000);
+    // Primary result: empty-book commit with an explicit filled share count.
+    mockExecuteAndRecordSignal.mockResolvedValueOnce({
+      signal: { stakeUsd: 5 } as never,
+      skipped: false,
+      executionVenue: 'clob',
+      entryPrice: 0.43,
+      sharesFilled: 12,
+      governorStamped: true,
+      wasEmptyBook: true,
+    });
+    // Bracket result (second call)
+    mockExecuteAndRecordSignal.mockResolvedValueOnce({
+      signal: { stakeUsd: 3 } as never,
+      skipped: false,
+      executionVenue: 'clob',
+      entryPrice: 0.12,
+      sharesFilled: null,
+      governorStamped: true,
+      wasEmptyBook: true,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    const bracketCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => (c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite === true,
+    );
+    expect(bracketCall).toBeDefined();
+    expect((bracketCall![0] as { _bracketTargetShares?: number })._bracketTargetShares).toBe(12);
+  });
+
   it('bracket does NOT fire when primary was a real-book entry (wasEmptyBook=false)', async () => {
     makeTomorrowEventFixture();
     mockLoadConfig.mockReturnValue({

@@ -1798,6 +1798,7 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
 function buildBracketOppositeSignal(
   opp: WeatherBracketOpportunity,
   stakeUsd: number,
+  targetShares: number,
 ): TradeSignal | null {
   const oppositeDir: 'YES' | 'NO' = opp.tradeSide === 'YES' ? 'NO' : 'YES';
   // oppositePrice is the Gamma mid for the side we are NOT primarily trading.
@@ -1824,6 +1825,9 @@ function buildBracketOppositeSignal(
     reasoning: `Bracket opposite of ${opp.tradeSide}; primary edge=${opp.edge.toFixed(3)} daysOut=${opp.daysOut}`,
     _isBracketOpposite: true,
     _isResolutionDay: opp.isResolutionDay ?? false,
+    // Size the leg by the primary's share count (1:1 pairing), not by stakeUsd
+    // divided by the discounted post price — see executor sizing for the rationale.
+    ...(targetShares > 0 ? { _bracketTargetShares: targetShares } : {}),
     ...(correctEndDate ? { endDate: correctEndDate } : {}),
   };
 }
@@ -2341,8 +2345,12 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
           .catch(() => {});
       }
       // Bracket strategy: post opposite-side GTC at a wider maker discount.
-      // Bracket stake: target the same share count as the primary so that
-      // YES+NO together pay exactly $1 per pair regardless of which side resolves.
+      // The leg targets the same share count as the primary (passed to the executor
+      // as _bracketTargetShares) so YES+NO together pay exactly $1 per pair regardless
+      // of which side resolves. bracketStakeUsd below does NOT size the order — the
+      // executor sizes by the target share count. It is only a conservative exposure
+      // estimate for the scan cap: primaryShares × gammaMid is an upper bound on the
+      // leg's cost because the leg actually posts below the Gamma mid.
       // Use the executor's actual outputs rather than pre-executor inputs:
       //   - result.signal.stakeUsd reflects any MIN_BET_USD floor-bump
       //   - result.entryPrice is the real posted maker price (may differ from opp.outcomePrice)
@@ -2377,7 +2385,7 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         && !opp.isResolutionDay
         && cumulativeStakeUsd + bracketWorstCase <= cfg.WEATHER_MAX_SCAN_EXPOSURE_USD
       ) {
-        const bracketSignal = buildBracketOppositeSignal(opp, bracketStakeUsd);
+        const bracketSignal = buildBracketOppositeSignal(opp, bracketStakeUsd, primaryShares);
         if (!bracketSignal) {
           logger.debug('[weather] bracket opposite skipped — opposite-side price degenerate', {
             marketId: opp.marketId, city: opp.city, bracket: opp.bracketLabel,
