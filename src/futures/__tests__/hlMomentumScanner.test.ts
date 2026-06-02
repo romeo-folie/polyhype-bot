@@ -29,6 +29,10 @@ const baseConfig = {
   HL_MOMENTUM_CONTRARIAN_ADX_CEILING: 40,
   HL_MOMENTUM_CONTRARIAN_RSI_OVERSOLD: 30,
   HL_MOMENTUM_CONTRARIAN_RSI_OVERBOUGHT: 70,
+  // Meme perps excluded from contrarian mode (forced momentum); read at line 205
+  // of the scanner whenever the contrarian gate is evaluated. Matches the config.ts
+  // default. Omitting it makes isMemeSymbol(symbol, undefined) throw on `.split`.
+  HL_MOMENTUM_MEME_SYMBOLS: 'wifusdt,bonkusdt,penguusdt',
   HL_MOMENTUM_PRIMARY_LOOKBACK_MS: 54_000_000,
   HL_MOMENTUM_1H_LOOKBACK_MS: 180_000_000,
   HL_MOMENTUM_4H_LOOKBACK_MS: 864_000_000,
