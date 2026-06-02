@@ -659,6 +659,24 @@ async function tryExecuteViaClobMaker(
     fairValue = Math.min(marketSide + cfg.SPORTS_MAKER_PREMIUM_PCT, fairValue);
   }
 
+  // Weather empty-book: conviction-proportional discount off the model fair value.
+  // Ghost books can't be exited, so we rest below fair value — but the discount scales
+  // WITH conviction rather than pinning every entry to a flat absolute floor (the old
+  // behaviour, which left high-conviction NO bets resting ~0.40 below fair value where
+  // nothing ever filled). A NO the model values at 0.85 rests near the WEATHER_MAX_ENTRY_PRICE
+  // ceiling; a NO worth 0.55 rests proportionally lower. Applied to the raw model fair
+  // value BEFORE the side-ask and absolute ceilings so high conviction lands near the cap.
+  // When set to 0 this is a no-op and the legacy flat-cap + signal-drift guards below
+  // take over (they are gated on the same knob).
+  if (
+    emptyBookMode
+    && signal.source === 'weather'
+    && cfg.WEATHER_EMPTY_BOOK_DISCOUNT_BPS > 0
+    && fairValue != null
+  ) {
+    fairValue *= 1 - cfg.WEATHER_EMPTY_BOOK_DISCOUNT_BPS / 10_000;
+  }
+
   // Weather empty-book: aggressive price improvement below current side-ask.
   // Weather brackets have days-scale edges, not seconds-scale — missing a fill is
   // far cheaper than overpaying by a wide margin, and we've observed entries at
@@ -709,25 +727,29 @@ async function tryExecuteViaClobMaker(
   ) {
     fairValue = Math.min(fairValue, cfg.WEATHER_EARLY_ENTRY_MAX_PRICE);
   }
-  // Stricter ceiling for EMPTY/ghost-book weather entries. These books carry no
-  // real liquidity (only far-off rebate-farmer orders) and no reliable price, and
-  // we can't exit them, so we only ever rest at a clear value discount rather than
-  // posting near the model fair value. Caps the post (we still rest as maker at the
-  // cap); does not skip. Binds on top of WEATHER_MAX_ENTRY_PRICE; 0 disables.
+  // LEGACY flat ceiling for EMPTY/ghost-book weather entries — conviction-blind.
+  // Superseded by WEATHER_EMPTY_BOOK_DISCOUNT_BPS (applied above): when conviction
+  // pricing is active this clamp is skipped, because pinning every entry to the same
+  // absolute floor regardless of conviction is exactly what starved fills. Active only
+  // when the discount is disabled (WEATHER_EMPTY_BOOK_DISCOUNT_BPS=0). 0 disables.
   if (
     emptyBookMode
     && signal.source === 'weather'
+    && cfg.WEATHER_EMPTY_BOOK_DISCOUNT_BPS <= 0
     && cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE > 0
     && fairValue != null
   ) {
     fairValue = Math.min(fairValue, cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE);
   }
-  // Bound the weather maker price to the scanner's observed side quote plus a
-  // small configured premium. This closes the ghost-book path where the absolute
-  // cap still allowed posts far above the quote that generated the signal.
+  // LEGACY: bound the weather maker price to the scanner's observed side quote plus a
+  // small premium. This re-anchors the post to the stale ghost quote, which directly
+  // contradicts conviction pricing (the edge IS that the model disagrees with that
+  // quote). Skipped when WEATHER_EMPTY_BOOK_DISCOUNT_BPS is active; the absolute
+  // WEATHER_MAX_ENTRY_PRICE ceiling still bounds overpay in conviction mode.
   if (
     emptyBookMode
     && signal.source === 'weather'
+    && cfg.WEATHER_EMPTY_BOOK_DISCOUNT_BPS <= 0
     && cfg.WEATHER_MAX_SIGNAL_PRICE_DRIFT > 0
     && signal.outcomePrice > 0
     && fairValue != null
@@ -816,9 +838,12 @@ async function tryExecuteViaClobMaker(
       makerFillStatus: 'rejected',
     };
   }
+  // LEGACY signal-drift reject — see the fairValue clamp above. Gated off when
+  // conviction pricing is active (it re-anchors to the stale ghost quote).
   if (
     emptyBookMode
     && signal.source === 'weather'
+    && cfg.WEATHER_EMPTY_BOOK_DISCOUNT_BPS <= 0
     && cfg.WEATHER_MAX_SIGNAL_PRICE_DRIFT > 0
     && signal.outcomePrice > 0
     && price > signal.outcomePrice + cfg.WEATHER_MAX_SIGNAL_PRICE_DRIFT + 1e-9
@@ -834,15 +859,16 @@ async function tryExecuteViaClobMaker(
       makerFillStatus: 'rejected',
     };
   }
-  // Defense-in-depth for the stricter empty-book cap. Capping fairValue above is
+  // LEGACY defense-in-depth for the flat empty-book cap. Capping fairValue above is
   // not enough: when WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE is set below the book tick,
   // resolveMakerPrice's tick floor lifts the final price back up to one tick, which
   // would slip through the WEATHER_MAX_ENTRY_PRICE guard above (that cap is higher).
-  // Refuse to post rather than silently overpay — same below-tick handling as
-  // WEATHER_MAX_ENTRY_PRICE. Empty-book only; real-book entries use WEATHER_MAX_ENTRY_PRICE.
+  // Refuse to post rather than silently overpay. Gated off when conviction pricing is
+  // active (WEATHER_EMPTY_BOOK_DISCOUNT_BPS>0); WEATHER_MAX_ENTRY_PRICE still applies.
   if (
     emptyBookMode
     && signal.source === 'weather'
+    && cfg.WEATHER_EMPTY_BOOK_DISCOUNT_BPS <= 0
     && cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE > 0
     && price > cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE + 1e-9
   ) {

@@ -1749,13 +1749,24 @@ const envSchema = z.object({
   // resolveMakerPrice would otherwise lift the post price above the cap; the
   // executor refuses to post in that case (maker_price_above_cap).
   WEATHER_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.65),
-  // Stricter post-price ceiling for weather entries on an EMPTY/ghost book (no
-  // real liquidity — only far-off rebate-farmer orders, e.g. bid 0.01 / ask 0.99).
-  // Such markets have no reliable price and we can't exit them, so we only ever
-  // rest at a clear value discount instead of paying near the model fair value.
-  // Binds on TOP of WEATHER_MAX_ENTRY_PRICE for empty-book entries only — real
-  // (live-book) entries keep using WEATHER_MAX_ENTRY_PRICE. Caps the post price
-  // (we still rest as maker at the cap); it does not skip the entry. 0 disables.
+  // Conviction-proportional discount for weather entries on an EMPTY/ghost book.
+  // Ghost books carry no real liquidity (only far-off rebate-farmer orders) and we
+  // can't exit them, so we rest only at a value discount below the model fair value.
+  // The discount scales WITH conviction: post price = modelFairValue * (1 - BPS/10000),
+  // then ceiling'd by WEATHER_MAX_ENTRY_PRICE (and the pre-resolution-day early cap).
+  // A NO the model values at 0.85 rests near the WEATHER_MAX_ENTRY_PRICE ceiling; a
+  // NO worth 0.55 rests proportionally lower. This SUPERSEDES the legacy market-anchored
+  // caps (WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE flat floor + WEATHER_MAX_SIGNAL_PRICE_DRIFT)
+  // which pinned EVERY empty-book entry to roughly the same price regardless of
+  // conviction, starving fills (high-conviction NO bets rested ~0.40 below fair value
+  // and never filled). Set to 0 to disable conviction pricing and fall back to the
+  // legacy flat-cap + signal-drift behaviour.
+  WEATHER_EMPTY_BOOK_DISCOUNT_BPS: z.coerce.number().min(0).max(9000).optional().default(2000),
+  // LEGACY empty-book ceiling. Active ONLY when WEATHER_EMPTY_BOOK_DISCOUNT_BPS=0
+  // (conviction pricing disabled). A flat absolute cap on the empty-book post price:
+  // binds on TOP of WEATHER_MAX_ENTRY_PRICE, caps the post (does not skip). It is
+  // conviction-blind — the reason it was replaced by WEATHER_EMPTY_BOOK_DISCOUNT_BPS.
+  // 0 disables.
   WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.45),
   // Stricter entry-price ceiling for weather entries placed BEFORE the resolution day.
   // On resolution day the forecast is effectively locked in, so the normal
@@ -1763,12 +1774,13 @@ const envSchema = z.object({
   // significantly (flip risk). Applies at the pre-execution skip gate (outcomePrice >
   // cap → entry_price_above_cap) and to the maker fairValue clamp. 0 disables.
   WEATHER_EARLY_ENTRY_MAX_PRICE: z.coerce.number().min(0).max(1).optional().default(0.50),
-  // Relative-to-quote ceiling for weather maker entries. WEATHER_MAX_ENTRY_PRICE
-  // prevents absurd absolute prices, but a ghost book can still produce a post
-  // materially above the scanner's observed side quote (e.g. quote=0.44, post=0.63)
-  // while staying under the absolute cap. This knob bounds that drift directly.
-  // 0 disables the guard. Default 0.08 means: never post more than 8 cents above
-  // the side-relative price that generated the weather signal.
+  // LEGACY relative-to-quote ceiling for weather maker entries. Active ONLY when
+  // WEATHER_EMPTY_BOOK_DISCOUNT_BPS=0 (conviction pricing disabled). It bounds the
+  // post to within this much of the scanner's observed side quote (e.g. quote=0.44,
+  // post≤0.52). That directly contradicts conviction pricing — the whole edge is
+  // that the model disagrees with the stale ghost quote — so it is bypassed when
+  // the conviction discount is active. 0 disables the guard. Default 0.08 means:
+  // never post more than 8 cents above the side-relative price that generated the signal.
   WEATHER_MAX_SIGNAL_PRICE_DRIFT: z.coerce.number().min(0).max(1).optional().default(0.08),
   // Patient real-book entry: on markets with a live order book, post a GTC
   // limit order this many bps below the current side-ask instead of buying at

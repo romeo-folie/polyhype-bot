@@ -78,6 +78,7 @@ const mockConfig = {
   WEATHER_MAKER_POST_ONLY: true,
   WEATHER_MAKER_DISCOUNT_BPS: 500,
   WEATHER_MAX_ENTRY_PRICE: 0,
+  WEATHER_EMPTY_BOOK_DISCOUNT_BPS: 0,
   WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE: 0,
   WEATHER_MAX_SIGNAL_PRICE_DRIFT: 0.08,
   WEATHER_MAX_HORIZON_DAYS: 7,
@@ -1231,7 +1232,9 @@ describe('empty-book maker route', () => {
     mockConfig.WEATHER_MAKER_POST_ONLY = true;
     mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 500;
     mockConfig.WEATHER_MAX_ENTRY_PRICE = 0;
+    mockConfig.WEATHER_EMPTY_BOOK_DISCOUNT_BPS = 0;
     mockConfig.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE = 0;
+    mockConfig.WEATHER_MAX_SIGNAL_PRICE_DRIFT = 0.08;
     // Sports: default to false in this describe block so existing ghost-book tests
     // remain valid; individual tests can override to true to verify the gate.
     mockConfig.SPORTS_REQUIRE_REAL_BOOK = false;
@@ -1598,6 +1601,153 @@ describe('empty-book maker route', () => {
     expect(call.price).toBeLessThanOrEqual(0.46);
   });
 
+  it('weather conviction discount posts proportional to fair value, bypassing the flat empty-book cap', async () => {
+    // High-conviction NO: consensusP=0.10 → NO fairValue 0.90. With conviction pricing
+    // active (2000 bps = 20% off model FV), post = 0.90*(1-0.20) - edge(1.5%) ≈ 0.705 → 0.70.
+    // The legacy WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE=0.45 is set but MUST be ignored — the
+    // old flat cap pinned this same signal to ~0.43 (see the legacy cap test above), which
+    // is exactly the conviction-blind behaviour that starved fills.
+    mockConfig.WEATHER_EMPTY_BOOK_DISCOUNT_BPS = 2000;
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.75;
+    mockConfig.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE = 0.45;
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.10,
+        edgeMagnitude: 0.30,
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    const call = mockSubmitLimit.mock.calls[0]![0];
+    expect(call.price).toBeCloseTo(0.70, 2);
+    expect(call.price).toBeGreaterThan(0.45); // legacy flat cap bypassed
+  });
+
+  it('weather conviction discount scales the post price WITH conviction', async () => {
+    // The headline behavioural change: two NO entries with different model conviction
+    // must rest at different prices (the old flat cap pinned both to the same ~0.43).
+    //   high conviction: NO fv 0.90 → 0.90*0.80 - 0.015 ≈ 0.70
+    //   low  conviction: NO fv 0.70 → 0.70*0.80 - 0.015 ≈ 0.54
+    mockConfig.WEATHER_EMPTY_BOOK_DISCOUNT_BPS = 2000;
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.75;
+    mockConfig.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE = 0.45;
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+
+    const redisHigh = makeRedis();
+    await executeSignal(
+      makeSignal({
+        marketId: 'mkt-high',
+        clobTokenIds: ['tok-yes-h', 'tok-no-h'],
+        source: 'weather',
+        consensusProbability: 0.10,
+        edgeMagnitude: 0.30,
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redisHigh as any,
+    );
+    const priceHigh = mockSubmitLimit.mock.calls[0]![0].price;
+    mockSubmitLimit.mockClear();
+
+    const redisLow = makeRedis();
+    await executeSignal(
+      makeSignal({
+        marketId: 'mkt-low',
+        clobTokenIds: ['tok-yes-l', 'tok-no-l'],
+        source: 'weather',
+        consensusProbability: 0.30,
+        edgeMagnitude: 0.30,
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redisLow as any,
+    );
+    const priceLow = mockSubmitLimit.mock.calls[0]![0].price;
+
+    expect(priceHigh).toBeGreaterThan(priceLow);
+    expect(priceHigh).toBeCloseTo(0.70, 2);
+    expect(priceLow).toBeCloseTo(0.54, 2);
+  });
+
+  it('weather WEATHER_MAX_ENTRY_PRICE ceiling still binds under conviction pricing', async () => {
+    // Very high conviction (NO fv 0.95). 0.95*0.80 = 0.76 would exceed the absolute
+    // ceiling, so WEATHER_MAX_ENTRY_PRICE=0.65 caps it: 0.65 - edge(1.5%) ≈ 0.635 → 0.63.
+    mockConfig.WEATHER_EMPTY_BOOK_DISCOUNT_BPS = 2000;
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.65;
+    mockConfig.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE = 0.45;
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.05,
+        edgeMagnitude: 0.30,
+        direction: 'NO',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    const call = mockSubmitLimit.mock.calls[0]![0];
+    expect(call.price).toBeCloseTo(0.63, 2);
+    expect(call.price).toBeLessThanOrEqual(0.65);
+  });
+
+  it('weather conviction pricing bypasses the signal-drift cap (model edge over stale quote)', async () => {
+    // outcomePrice=0.20 (stale ghost quote) with NO fv 0.90. Legacy mode would clamp to
+    // outcomePrice + WEATHER_MAX_SIGNAL_PRICE_DRIFT = 0.28; conviction pricing bets the
+    // model edge instead → ≈0.70, bounded only by WEATHER_MAX_ENTRY_PRICE.
+    mockConfig.WEATHER_EMPTY_BOOK_DISCOUNT_BPS = 2000;
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.75;
+    mockConfig.WEATHER_MAX_SIGNAL_PRICE_DRIFT = 0.08;
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.10,
+        edgeMagnitude: 0.30,
+        direction: 'NO',
+        outcomePrice: 0.20,
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    const call = mockSubmitLimit.mock.calls[0]![0];
+    expect(call.price).toBeCloseTo(0.70, 2);
+    expect(call.price).toBeGreaterThan(0.28); // drift cap bypassed
+  });
+
+  it('weather conviction discount applies to YES entries too', async () => {
+    // Symmetry check: high-conviction YES (consensusP=0.90 → YES fv 0.90) rests at the
+    // same conviction-discounted ~0.70 as the NO case.
+    mockConfig.WEATHER_EMPTY_BOOK_DISCOUNT_BPS = 2000;
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.75;
+    mockConfig.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE = 0.45;
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        consensusProbability: 0.90,
+        edgeMagnitude: 0.30,
+        direction: 'YES',
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    const call = mockSubmitLimit.mock.calls[0]![0];
+    expect(call.price).toBeCloseTo(0.70, 2);
+    expect(call.price).toBeGreaterThan(0.45);
+  });
+
   it('weather refuses to post when WEATHER_MAX_ENTRY_PRICE < tick floor', async () => {
     // Tick floor inside resolveMakerPrice would lift a sub-tick price above the
     // cap; defense-in-depth branch refuses to post in that case rather than
@@ -1865,9 +2015,10 @@ describe('empty-book maker route', () => {
     );
 
     // The weather-specific empty-book path still uses the weather branch, not
-    // the oracle-lag override. Under the current quote-relative cap fixture the
-    // resulting post lands at 0.50.
-    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.50 }));
+    // the oracle-lag override. In legacy mode (conviction discount off) the
+    // WEATHER_MAX_SIGNAL_PRICE_DRIFT=0.08 quote-relative cap binds: outcomePrice 0.50
+    // + 0.08 = 0.58, minus the 150bps (1.5%) empty-book edge ≈ 0.565 → 0.56.
+    expect(mockSubmitLimit).toHaveBeenCalledWith(expect.objectContaining({ price: 0.56 }));
   });
 
   it('near-zero-arb empty-book GTC fills immediately (taker) — no persist-and-poll', async () => {
