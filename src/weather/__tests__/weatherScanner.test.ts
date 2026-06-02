@@ -3112,11 +3112,12 @@ describe('resolution-day size-up and near-res gate bypass', () => {
   });
 
   it('bracket does NOT fire on resolution-day entries (isResolutionDay=true)', async () => {
-    // wireTodayMocks sets up resolution-day events; use early-entry path for a fresh entry.
-    redisMock._store.set(activeEventKey, '1');
-    for (let i = 0; i < 11; i++) {
-      redisMock._store.set(`position:mt${i}:NO`, '1');
-    }
+    // No existing positions — with SIZE_UP_ENABLED=true but hasPosition=false, the scanner
+    // falls through to the early fresh-entry path (WEATHER_RES_DAY_EARLY_ENTRY_ENABLED=true),
+    // producing sizeUpScanOnly=false opportunities with isResolutionDay=true.
+    // The bracket gate !opp.isResolutionDay must suppress the bracket here;
+    // removing it while wasEmptyBook=true would cause the bracket to fire.
+    (redisMock as any).del = vi.fn().mockResolvedValue(1); // scanner calls del on forecast fail
     mockLoadConfig.mockReturnValue({
       ...baseConfig,
       WEATHER_SCANNER_ENABLED: true,
@@ -3125,9 +3126,25 @@ describe('resolution-day size-up and near-res gate bypass', () => {
       SIZE_UP_ENABLED: true,
       WEATHER_MAX_LOOKAHEAD_HOURS: 0,
       WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      WEATHER_RES_DAY_EARLY_ENTRY_ENABLED: true,
+      WEATHER_RES_DAY_MIN_HOURS_REMAINING: -100, // always pass regardless of clock
+      // Shadow MUST be enabled: early-entry uses fail-closed shadowEdge check
+      // (shadowEdge==null also blocks). Both mocks return meanHigh=52 so
+      // shadow and primary agree → shadowEdge>0 → blockedByEnsembleVeto=false.
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
+      WEATHER_MARKET_DISAGREEMENT_ENABLED: false,
       ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
     });
-    wireTodayMocks(); // resolution-day events → opp.isResolutionDay=true
+    wireTodayMocks();
+    // Override ensemble mock to include ensembleModel so the shadow ensemble is
+    // populated (forecast.shadowEnsemble requires shadowEnsembleModel). Without a
+    // shadow ensemble, shadowEdge=null and the early-entry fail-closed veto blocks
+    // every opportunity before execution.
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8,
+      memberCount: 31, forecastDate: todayIso, ensembleModel: 'gfs',
+    });
     mockGetBankroll.mockResolvedValue(1000);
     mockExecuteAndRecordSignal.mockResolvedValue({
       signal: { stakeUsd: 5 } as never,
@@ -3137,12 +3154,21 @@ describe('resolution-day size-up and near-res gate bypass', () => {
       sharesFilled: null,
       governorStamped: true,
       wasEmptyBook: true,
-      isSizeUp: true,
     });
 
     await runWeatherScan(redisMock as never);
 
-    // Bracket must not fire — all opportunities are resolution-day
+    // getBankroll is called only after opportunities are found — if this fails,
+    // the scanner found no tradable opportunities through the early-entry path.
+    expect(mockGetBankroll).toHaveBeenCalled();
+    // Primary must have executed (sizeUpScanOnly=false, isResolutionDay=true)
+    expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+    const primaryCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => !(c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite,
+    );
+    expect(primaryCall).toBeDefined();
+    // Bracket must NOT fire — blocked by !opp.isResolutionDay (wasEmptyBook=true passes,
+    // sizeUpScanOnly=false passes, orderCommitted=true passes)
     const bracketCall = mockExecuteAndRecordSignal.mock.calls.find(
       (c) => (c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite === true,
     );
