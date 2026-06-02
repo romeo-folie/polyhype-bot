@@ -57,6 +57,7 @@ redis-cli KEYS '*lock*'          # verify no stale locks after restart
 - **Always create a PR. Never push directly to main unless the user explicitly asks.**
   Branch naming: `feat/<slug>`, `fix/<slug>`, `chore/<slug>`. Open PR, wait for merge.
   After creating a PR, start a Monitor task to watch for comments and status. When the PR status shows `merged=true`, stop the monitor task with `TaskStop`.
+- **Every new feature or behavioural change must include Vitest tests** that verify the new behaviour. Updating tests to match changed signatures is not sufficient — tests must assert the actual new behaviour (e.g. that a bracket signal is not emitted on a skipped primary, that a direction-aware key is used, etc.). Never submit a PR without new or updated tests covering the change.
 - **Before opening a PR, pushing new commits to an existing PR, or pushing directly to `main`: run `/code-review --effort high` on the diff, fix every CONFIRMED and PLAUSIBLE finding, then re-run the review. Repeat until the review returns `[]`. Only then push/open the PR.**
 - **After a PR merges into `main`, redeploy the affected container(s).** Claude Code runs on the Hetzner prod server — merging does not restart running workers. Pull `main`, then run `scripts/deploy.sh <service...>` for the service(s) whose source changed:
   - `pga-arb` → `src/arb/*`
