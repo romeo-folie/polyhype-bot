@@ -7,14 +7,27 @@
  * same order rather than re-posting a duplicate.
  *
  * Key schema:
- *   maker:open:{marketId}  →  JSON<PendingMakerOrder>
+ *   maker:open:{marketId}:{direction}  →  JSON<PendingMakerOrder>
  *   TTL:  ceil(MAKER_EMPTY_BOOK_MAX_WAIT_MS / 1000) + 300  (5-min grace)
+ *
+ * Direction is normalised to 'YES' / 'NO' so oracle-lag signals ('UP'/'DOWN')
+ * and weather signals ('YES'/'NO') share the same key space.  This allows two
+ * simultaneous resting orders on a single market (bracket strategy) as long as
+ * they are on different sides.
  */
 
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 
 const KEY_PREFIX = 'maker:open:';
+
+function normalizeDirection(direction: string): 'YES' | 'NO' {
+  return direction === 'YES' || direction === 'UP' ? 'YES' : 'NO';
+}
+
+function pendingKey(marketId: string, direction: string): string {
+  return `${KEY_PREFIX}${marketId}:${normalizeDirection(direction)}`;
+}
 
 export interface PendingMakerOrder {
   orderId: string;
@@ -40,20 +53,17 @@ export interface PendingMakerOrder {
   source?: string;
 }
 
-function pendingKey(marketId: string): string {
-  return `${KEY_PREFIX}${marketId}`;
-}
-
 /**
- * Returns the pending maker order for a market, or null if none exists / key
- * is missing / JSON is corrupt.
+ * Returns the pending maker order for a market+direction, or null if none
+ * exists / key is missing / JSON is corrupt.
  */
 export async function getPendingOrder(
   redis: Redis,
   marketId: string,
+  direction: string,
 ): Promise<PendingMakerOrder | null> {
   try {
-    const raw = await redis.get(pendingKey(marketId));
+    const raw = await redis.get(pendingKey(marketId, direction));
     if (!raw) return null;
     return JSON.parse(raw) as PendingMakerOrder;
   } catch {
@@ -68,11 +78,12 @@ export async function getPendingOrder(
 export async function setPendingOrder(
   redis: Redis,
   marketId: string,
+  direction: string,
   order: PendingMakerOrder,
   ttlSeconds: number,
 ): Promise<void> {
   try {
-    await redis.set(pendingKey(marketId), JSON.stringify(order), 'EX', ttlSeconds);
+    await redis.set(pendingKey(marketId, direction), JSON.stringify(order), 'EX', ttlSeconds);
   } catch (err) {
     logger.warn('[pendingMakerOrders] failed to persist pending order (non-fatal)', {
       marketId,
@@ -82,15 +93,16 @@ export async function setPendingOrder(
 }
 
 /**
- * Removes the pending order key for a market. Called on fill, cancel, or
- * expiry cleanup. Safe to call even if the key doesn't exist.
+ * Removes the pending order key for a market+direction. Called on fill,
+ * cancel, or expiry cleanup. Safe to call even if the key doesn't exist.
  */
 export async function deletePendingOrder(
   redis: Redis,
   marketId: string,
+  direction: string,
 ): Promise<void> {
   try {
-    await redis.del(pendingKey(marketId));
+    await redis.del(pendingKey(marketId, direction));
   } catch (err) {
     logger.warn('[pendingMakerOrders] failed to delete pending order (non-fatal)', {
       marketId,
