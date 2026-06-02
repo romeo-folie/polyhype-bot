@@ -31,6 +31,7 @@ import { runWeatherLockInScan } from './weatherLockIn.js';
 import { runWeatherInvalidationScan, FORECAST_INVALIDATED_KEY_PREFIX } from './weatherInvalidation.js';
 import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
+import type { ExecutionResult } from '../execution/executor.js';
 import { hasOpenPosition } from '../execution/positionLedger.js';
 import type { TradeSignal } from '../mapping/index.js';
 import { getBankroll } from '../shared/bankroll.js';
@@ -1828,6 +1829,116 @@ function buildBracketOppositeSignal(
 }
 
 /**
+ * Structured shadow-log payload comparing each weather maker leg's posted price
+ * against the market for the side we posted on. Emitted (never gates) for both
+ * the primary and the bracket-opposite leg so we can later analyse why some legs
+ * fill and others rest — the working hypothesis being that fills are driven by
+ * how far the posted price sits below the side's market, not by direction.
+ *
+ * Two market references, both side-relative and directly comparable to
+ * `postedPrice`:
+ *   - `clobSideMid` — the live CLOB book mid at DECISION (post) time; this is the
+ *     "current side-mid". The executor reads the YES-token book in empty-book mode
+ *     regardless of leg direction, so a NO leg's raw mid is YES-relative and is
+ *     flipped to (1 − mid) here. ≈0.5 on a true ghost book (no real liquidity),
+ *     informative on real books. Null when no live book was captured (resume/skip).
+ *   - `gammaSideMid` — the Gamma side price captured at SCAN time (seconds–minutes
+ *     before the post, before governor pacing). Not live, but the only market
+ *     reference available on a ghost book where `clobSideMid` is degenerate.
+ *
+ * `gapVsClobBps` / `gapVsGammaBps` are (postedPrice − ref) in bps of ref: negative
+ * means the order rests BELOW that reference (less likely to fill).
+ */
+export interface WeatherFillShadow {
+  leg: 'primary' | 'bracket';
+  marketId: string;
+  city: string;
+  bracket: string;
+  side: 'YES' | 'NO';
+  daysOut: number;
+  isResolutionDay: boolean;
+  wasEmptyBook: boolean | null;
+  postedPrice: number | null;
+  clobSideMid: number | null;
+  gammaSideMid: number | null;
+  gapVsClobBps: number | null;
+  gapVsGammaBps: number | null;
+  skipped: boolean;
+  skipReason: string | null;
+  entryExecutionPath: string | null;
+  sharesFilled: number | null;
+  edge: number;
+}
+
+export function buildWeatherFillShadow(input: {
+  leg: 'primary' | 'bracket';
+  side: 'YES' | 'NO';
+  /** Side-relative Gamma price for this leg's side, captured at scan time. */
+  gammaSideMid: number | null | undefined;
+  /** Primary leg's raw edge; the bracket leg carries no directional edge (0). */
+  edge: number;
+  opp: Pick<
+    WeatherBracketOpportunity,
+    'marketId' | 'city' | 'bracketLabel' | 'daysOut' | 'isResolutionDay'
+  >;
+  result: Pick<
+    ExecutionResult,
+    | 'entryPrice'
+    | 'skipped'
+    | 'skipReason'
+    | 'entryExecutionPath'
+    | 'sharesFilled'
+    | 'wasEmptyBook'
+    | 'decisionBenchmark'
+  >;
+}): WeatherFillShadow {
+  const { leg, side, edge, opp, result } = input;
+  const finite = (n: number | null | undefined): number | null =>
+    n != null && Number.isFinite(n) ? n : null;
+  const round4 = (n: number | null): number | null => (n != null ? Number(n.toFixed(4)) : null);
+  const bpsBelow = (posted: number | null, ref: number | null): number | null =>
+    posted != null && ref != null && ref > 0
+      ? Math.round(((posted - ref) / ref) * 10_000)
+      : null;
+
+  const postedPrice = finite(result.entryPrice);
+  const gammaSideMid = finite(input.gammaSideMid);
+
+  // decisionMidPrice is the executor's book mid at post time. It is side-relative
+  // on real books (the executor reads the signal's own-side token) but YES-relative
+  // in empty-book mode (it always reads clobTokenIds[0] there, executor.ts:621), so
+  // only an empty-book NO leg needs the (1 − mid) flip to become side-relative.
+  const rawClobMid = finite(result.decisionBenchmark?.decisionMidPrice);
+  const clobSideMid =
+    rawClobMid == null
+      ? null
+      : result.wasEmptyBook === true && side === 'NO'
+        ? 1 - rawClobMid
+        : rawClobMid;
+
+  return {
+    leg,
+    marketId: opp.marketId,
+    city: opp.city,
+    bracket: opp.bracketLabel,
+    side,
+    daysOut: opp.daysOut,
+    isResolutionDay: opp.isResolutionDay ?? false,
+    wasEmptyBook: result.wasEmptyBook ?? null,
+    postedPrice,
+    clobSideMid: round4(clobSideMid),
+    gammaSideMid: round4(gammaSideMid),
+    gapVsClobBps: bpsBelow(postedPrice, clobSideMid),
+    gapVsGammaBps: bpsBelow(postedPrice, gammaSideMid),
+    skipped: result.skipped,
+    skipReason: result.skipReason ?? null,
+    entryExecutionPath: result.entryExecutionPath ?? null,
+    sharesFilled: result.sharesFilled ?? null,
+    edge: Number(edge.toFixed(3)),
+  };
+}
+
+/**
  * Orchestrator: run a full weather scan cycle.
  *
  * Always shadow-logs. Real trades fire only when both `WEATHER_SCANNER_ENABLED`
@@ -2153,6 +2264,17 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         entryPrice: result.entryPrice,
         sharesFilled: result.sharesFilled,
       });
+      // Shadow-only: posted price vs the side's market for the primary leg.
+      logger.info('[weather-fill-shadow]', {
+        ...buildWeatherFillShadow({
+          leg: 'primary',
+          side: opp.tradeSide,
+          gammaSideMid: opp.outcomePrice,
+          edge: opp.edge,
+          opp,
+          result,
+        }),
+      });
       // `governorStamped` is true iff THIS call accepted a new Polymarket order
       // and stamped the shared global governor — including a fresh maker_pending
       // GTC (the executor stamps on order *acceptance*, not only on fill). It is
@@ -2276,6 +2398,17 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
             skipped: bracketResult.skipped,
             skipReason: bracketResult.skipReason,
             entryPrice: bracketResult.entryPrice,
+          });
+          // Shadow-only: posted price vs the side's market for the bracket leg.
+          logger.info('[weather-fill-shadow]', {
+            ...buildWeatherFillShadow({
+              leg: 'bracket',
+              side: bracketSignal.direction === 'YES' ? 'YES' : 'NO',
+              gammaSideMid: bracketOppositePrice,
+              edge: 0,
+              opp,
+              result: bracketResult,
+            }),
           });
           if (bracketResult.governorStamped === true) needsGovernorPause = true;
           if (bracketResult.governorStamped === true && !bracketResult.error) {
