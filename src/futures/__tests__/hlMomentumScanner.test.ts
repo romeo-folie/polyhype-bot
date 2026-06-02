@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { z } from 'zod';
 import {
   scanHlMomentum,
   momentumCooldownKey,
@@ -17,8 +18,29 @@ vi.mock('../../shared/logger.js', () => ({
 
 vi.mock('../../db/writeQueue.js', () => ({ enqueueWrite: vi.fn().mockResolvedValue(undefined) }));
 
-// Default config — most tests override HL_MOMENTUM_ENABLED / other fields.
+// Build the test config foundation from the REAL Zod schema defaults so the mock
+// can never silently drift from src/shared/config.ts. vi.importActual bypasses the
+// loadConfig mock below to read the actual schema; every field declared with a
+// `.default()` is included automatically (required secrets with no default — e.g.
+// REDIS_URL — fail safeParse(undefined) and are skipped). New defaulted config
+// fields are therefore present without manual mock upkeep, closing the gap that
+// left HL_MOMENTUM_MEME_SYMBOLS undefined and crashed 15 contrarian-path tests.
+const { envSchema } = await vi.importActual<typeof import('../../shared/config.js')>(
+  '../../shared/config.js',
+);
+function schemaDefaults(schema: z.AnyZodObject): Record<string, unknown> {
+  const defaults: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(schema.shape)) {
+    const parsed = field.safeParse(undefined);
+    if (parsed.success && parsed.data !== undefined) defaults[key] = parsed.data;
+  }
+  return defaults;
+}
+
+// Schema defaults as the foundation; the explicit values below OVERRIDE them where
+// tests need a specific value (e.g. HL_MOMENTUM_MIN_SCORE=4 vs the schema default 6).
 const baseConfig = {
+  ...schemaDefaults(envSchema),
   HL_MOMENTUM_ENABLED: false,
   HL_MOMENTUM_SYMBOLS: 'btcusdt,ethusdt,solusdt,xrpusdt,dogeusdt,pepeusdt,wifusdt,bonkusdt,penguusdt',
   HL_MOMENTUM_MIN_SCORE: 4,
@@ -29,10 +51,9 @@ const baseConfig = {
   HL_MOMENTUM_CONTRARIAN_ADX_CEILING: 40,
   HL_MOMENTUM_CONTRARIAN_RSI_OVERSOLD: 30,
   HL_MOMENTUM_CONTRARIAN_RSI_OVERBOUGHT: 70,
-  // Meme perps excluded from contrarian mode (forced momentum); read at line 205
-  // of the scanner whenever the contrarian gate is evaluated. Matches the config.ts
-  // default. Omitting it makes isMemeSymbol(symbol, undefined) throw on `.split`.
-  HL_MOMENTUM_MEME_SYMBOLS: 'wifusdt,bonkusdt,penguusdt',
+  // HL_MOMENTUM_MEME_SYMBOLS intentionally NOT set here — it now comes from
+  // schemaDefaults(envSchema) above. Its presence proves the foundation supplies
+  // every defaulted field (this is the field whose absence crashed 15 tests).
   HL_MOMENTUM_PRIMARY_LOOKBACK_MS: 54_000_000,
   HL_MOMENTUM_1H_LOOKBACK_MS: 180_000_000,
   HL_MOMENTUM_4H_LOOKBACK_MS: 864_000_000,
