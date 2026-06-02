@@ -112,6 +112,7 @@ const {
   daysUntil,
   parseAllowedSides,
   runWeatherScan,
+  buildWeatherFillShadow,
 } = await import('../weatherScanner.js');
 
 const { inferCategory } = await import('../../shared/outcomeRecorder.js');
@@ -3189,5 +3190,155 @@ describe('weather category wiring', () => {
   });
   it('normalizeCategory passes weather through', () => {
     expect(normalizeCategory('weather')).toBe('weather');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildWeatherFillShadow — posted-price-vs-side-market shadow payload
+// ---------------------------------------------------------------------------
+
+describe('buildWeatherFillShadow', () => {
+  const baseOpp = {
+    marketId: '2406929',
+    city: 'paris',
+    bracketLabel: '20°C',
+    daysOut: 1,
+    isResolutionDay: false,
+  };
+
+  it('reports negative gap-vs-gamma when the leg rests below the scan-time Gamma price', () => {
+    const shadow = buildWeatherFillShadow({
+      leg: 'primary',
+      side: 'NO',
+      gammaSideMid: 0.65,
+      edge: 0.2071,
+      opp: baseOpp,
+      result: {
+        entryPrice: 0.52,
+        skipped: false,
+        skipReason: undefined,
+        entryExecutionPath: 'maker_pending',
+        sharesFilled: null,
+        wasEmptyBook: true,
+        // empty-book ⇒ decisionMidPrice is the YES-book mid (≈0.5 on a ghost book)
+        decisionBenchmark: { decisionMidPrice: 0.5 },
+      },
+    });
+    expect(shadow.leg).toBe('primary');
+    expect(shadow.side).toBe('NO');
+    expect(shadow.postedPrice).toBe(0.52);
+    expect(shadow.gammaSideMid).toBe(0.65);
+    // posted 0.52 vs Gamma 0.65 ⇒ (0.52-0.65)/0.65 = -2000 bps
+    expect(shadow.gapVsGammaBps).toBe(-2000);
+    expect(shadow.edge).toBe(0.207);
+    expect(shadow.wasEmptyBook).toBe(true);
+    expect(shadow.entryExecutionPath).toBe('maker_pending');
+  });
+
+  it('flips the empty-book YES-book mid to a side-relative clobSideMid for a NO leg', () => {
+    // Empty-book NO leg: executor reports the YES-book mid (0.30). The NO side mid
+    // is 1 - 0.30 = 0.70, and posted 0.52 sits (0.52-0.70)/0.70 = -2571 bps below it.
+    const shadow = buildWeatherFillShadow({
+      leg: 'primary',
+      side: 'NO',
+      gammaSideMid: 0.65,
+      edge: 0.2,
+      opp: baseOpp,
+      result: {
+        entryPrice: 0.52,
+        skipped: false,
+        sharesFilled: null,
+        wasEmptyBook: true,
+        decisionBenchmark: { decisionMidPrice: 0.3 },
+      },
+    });
+    expect(shadow.clobSideMid).toBeCloseTo(0.7, 5);
+    expect(shadow.gapVsClobBps).toBe(-2571);
+  });
+
+  it('does NOT flip the mid on a YES leg or on a real-book (non-empty) NO leg', () => {
+    const yesEmpty = buildWeatherFillShadow({
+      leg: 'bracket',
+      side: 'YES',
+      gammaSideMid: 0.2,
+      edge: 0,
+      opp: baseOpp,
+      result: {
+        entryPrice: 0.2,
+        skipped: false,
+        wasEmptyBook: true,
+        decisionBenchmark: { decisionMidPrice: 0.2 },
+      },
+    });
+    expect(yesEmpty.clobSideMid).toBe(0.2); // YES leg uses the YES-book mid directly
+
+    const noRealBook = buildWeatherFillShadow({
+      leg: 'primary',
+      side: 'NO',
+      gammaSideMid: 0.55,
+      edge: 0.1,
+      opp: baseOpp,
+      // real book ⇒ executor read the NO-side token, so the mid is already side-relative
+      result: {
+        entryPrice: 0.55,
+        skipped: false,
+        wasEmptyBook: false,
+        decisionBenchmark: { decisionMidPrice: 0.55 },
+      },
+    });
+    expect(noRealBook.clobSideMid).toBe(0.55); // no flip
+    expect(noRealBook.gapVsClobBps).toBe(0);
+  });
+
+  it('labels the bracket leg, carries zero edge, and is crash-safe with a null posted price', () => {
+    const shadow = buildWeatherFillShadow({
+      leg: 'bracket',
+      side: 'YES',
+      gammaSideMid: 0.2,
+      edge: 0,
+      opp: { ...baseOpp, isResolutionDay: true, daysOut: 0 },
+      result: {
+        entryPrice: null,
+        skipped: true,
+        skipReason: 'entry_price_above_cap',
+        entryExecutionPath: undefined,
+        sharesFilled: undefined,
+        wasEmptyBook: undefined,
+        decisionBenchmark: undefined,
+      },
+    });
+    expect(shadow.leg).toBe('bracket');
+    expect(shadow.edge).toBe(0);
+    expect(shadow.isResolutionDay).toBe(true);
+    // null posted price / missing benchmark must not produce gaps or throw
+    expect(shadow.postedPrice).toBeNull();
+    expect(shadow.clobSideMid).toBeNull();
+    expect(shadow.gapVsClobBps).toBeNull();
+    expect(shadow.gapVsGammaBps).toBeNull();
+    // missing path/shares normalise to null, not undefined
+    expect(shadow.entryExecutionPath).toBeNull();
+    expect(shadow.sharesFilled).toBeNull();
+    expect(shadow.skipReason).toBe('entry_price_above_cap');
+    expect(shadow.skipped).toBe(true);
+  });
+
+  it('emits a positive gap when the leg posts above the reference (likely immediate fill)', () => {
+    const shadow = buildWeatherFillShadow({
+      leg: 'primary',
+      side: 'NO',
+      gammaSideMid: 0.5,
+      edge: 0.3,
+      opp: baseOpp,
+      result: {
+        entryPrice: 0.55,
+        skipped: false,
+        sharesFilled: 20,
+        wasEmptyBook: false,
+        decisionBenchmark: { decisionMidPrice: 0.5 },
+      },
+    });
+    expect(shadow.gapVsGammaBps).toBe(1000);
+    expect(shadow.gapVsClobBps).toBe(1000);
+    expect(shadow.sharesFilled).toBe(20);
   });
 });
