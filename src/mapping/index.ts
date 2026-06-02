@@ -114,6 +114,13 @@ export interface TradeSignal {
    *  WEATHER_BRACKET_OPPOSITE_DISCOUNT_BPS for real-book pricing instead of the
    *  normal WEATHER_REAL_BOOK_DISCOUNT_BPS. */
   _isBracketOpposite?: boolean;
+  /** Target maker order size in SHARES, set only for bracket-opposite legs. The
+   *  bracket's purpose is to hold the same share count as the primary so YES+NO
+   *  form 1:1 pairs. When set, the executor sizes the maker order at exactly this
+   *  share count instead of `stakeUsd / postedPrice` — otherwise the deep maker
+   *  discount (model-FV conviction discount or WEATHER_BRACKET_OPPOSITE_DISCOUNT_BPS)
+   *  inflates the share count by `gammaMid / postedPrice` (observed 2.5–6.7×). */
+  _bracketTargetShares?: number;
 }
 
 /**

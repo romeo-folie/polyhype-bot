@@ -1628,6 +1628,55 @@ describe('empty-book maker route', () => {
     expect(call.price).toBeGreaterThan(0.45); // legacy flat cap bypassed
   });
 
+  it('bracket-opposite leg posts the target SHARE count, not stakeUsd/discounted-price', async () => {
+    // Regression for the bracket oversizing bug: the scanner sizes the leg's dollar
+    // stake at the Gamma mid, but the executor posts at a deeply discounted maker
+    // price. Dividing stakeUsd by that price inflated the share count by
+    // gammaMid/postedPrice (2.5–6.7× in shadow logs). With _bracketTargetShares the
+    // leg must post exactly the primary's share count regardless of the post price.
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        direction: 'NO',
+        consensusProbability: 0.10, // NO fair value 0.90 → posts ≈ 0.88
+        edgeMagnitude: 0.30,
+        stakeUsd: 5, // dollar exposure estimate (gammaMid-derived), NOT the sizer
+        _isBracketOpposite: true,
+        _bracketTargetShares: 12,
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    const call = mockSubmitLimit.mock.calls[0]![0];
+    expect(call.size).toBe(12);
+    // Prove the size is NOT stake-derived: 5 / ~0.88 ≈ 5.7, far from 12.
+    expect(call.size).not.toBeCloseTo(5 / call.price, 1);
+  });
+
+  it('non-bracket weather leg still sizes by stakeUsd / posted price', async () => {
+    // Control: without _bracketTargetShares the maker order size is the usual
+    // stakeUsd/price, so the share-count override is the only thing that changes sizing.
+    mockConfig.WEATHER_MAKER_POST_ONLY = false;
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({
+        source: 'weather',
+        direction: 'NO',
+        consensusProbability: 0.10,
+        edgeMagnitude: 0.30,
+        stakeUsd: 5,
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    const call = mockSubmitLimit.mock.calls[0]![0];
+    expect(call.size).toBeCloseTo(5 / call.price, 6);
+  });
+
   it('weather conviction discount scales the post price WITH conviction', async () => {
     // The headline behavioural change: two NO entries with different model conviction
     // must rest at different prices (the old flat cap pinned both to the same ~0.43).

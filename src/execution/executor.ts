@@ -920,7 +920,13 @@ async function tryExecuteViaClobMaker(
     }
   }
 
-  let size = signal.stakeUsd / price;
+  // Bracket-opposite legs size by a fixed target SHARE count (matching the primary
+  // leg 1:1), not by stakeUsd/price. The posted maker price is deeply discounted
+  // below the Gamma mid used to compute stakeUsd, so dividing the dollar stake by
+  // the discounted price would inflate the share count by gammaMid/postedPrice.
+  let size = signal._bracketTargetShares != null && signal._bracketTargetShares > 0
+    ? signal._bracketTargetShares
+    : signal.stakeUsd / price;
   const minOrderSize = parseFloat(book.min_order_size ?? '0');
   if (isFinite(minOrderSize) && minOrderSize > 0 && size < minOrderSize) {
     return {
