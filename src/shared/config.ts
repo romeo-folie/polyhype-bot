@@ -41,7 +41,7 @@ const boolFromEnv = z
     return true;
   });
 
-const envSchema = z.object({
+export const envSchema = z.object({
   REDIS_URL: z.string().url('REDIS_URL must be a valid URL'),
 
   // LLM — at least one must be set (validated below)
