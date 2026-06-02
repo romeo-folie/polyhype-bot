@@ -3003,6 +3003,151 @@ describe('resolution-day size-up and near-res gate bypass', () => {
 
     expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
   });
+
+  // ---------------------------------------------------------------------------
+  // Bracket-maker strategy gate tests
+  // ---------------------------------------------------------------------------
+
+  // Helper: build a proper non-resolution-day event (tomorrow slug) for bracket tests.
+  function makeTomorrowEventFixture() {
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const tomorrowIso = tomorrow.toISOString().slice(0, 10);
+    const [ty, tm, tdStr] = tomorrowIso.split('-') as [string, string, string];
+    const tMonthName = MONTH_NAMES2[parseInt(tm, 10) - 1] ?? 'May';
+    const tSlugDate = `${tMonthName.toLowerCase()}-${parseInt(tdStr, 10).toString()}-${ty}`;
+    const tTitleDate = `${tMonthName} ${parseInt(tdStr, 10).toString()}`;
+    const tEndDate = `${tomorrowIso}T12:00:00Z`;
+    const tSlug = `highest-temperature-in-chicago-on-${tSlugDate}`;
+    const labels = [
+      '39°F or below', '40-41°F', '42-43°F', '44-45°F', '46-47°F',
+      '48-49°F', '50-51°F', '52-53°F', '54-55°F', '56-57°F', '58°F or higher',
+    ];
+    const yesPrices = [0.01, 0.03, 0.05, 0.10, 0.15, 0.20, 0.18, 0.12, 0.08, 0.05, 0.03];
+    const tMarkets = Array.from({ length: 11 }, (_, i) => ({
+      id: `mbkt${i}`, question: `Will the highest temperature in Chicago be ${labels[i]} on ${tTitleDate}?`,
+      conditionId: `cond-bkt${i}`, clobTokenIds: `["tbkt${i}y","tbkt${i}n"]`,
+      outcomePrices: `["${(yesPrices[i] ?? 0).toFixed(2)}","${(1 - (yesPrices[i] ?? 0)).toFixed(2)}"]`,
+      outcomes: '["Yes","No"]', active: true, closed: false, volume: '10000', liquidity: '5000',
+      endDate: tEndDate, description: null, groupItemTitle: labels[i], groupItemThreshold: i.toString(),
+    }));
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve([{ id: 'event-bkt', title: `Highest temperature in Chicago on ${tTitleDate}?`, slug: tSlug, active: true, closed: false, negRisk: true, endDate: tEndDate, markets: tMarkets }]),
+    }) as unknown as typeof fetch;
+    mockFetchEnsemble.mockResolvedValue({ meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: tomorrowIso });
+    mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: tomorrowIso });
+    mockFetchNwsForecast.mockResolvedValue({ highF: 52, lowF: 38, precipProbability: 10, forecastDate: tomorrowIso, shortForecast: 'Cloudy' });
+  }
+
+  it('bracket fires on empty-book pre-resolution-day primary (positive path)', async () => {
+    makeTomorrowEventFixture();
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_BRACKET_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    mockGetBankroll.mockResolvedValue(1000);
+    // Primary result: empty-book commit
+    mockExecuteAndRecordSignal.mockResolvedValueOnce({
+      signal: { stakeUsd: 5 } as never,
+      skipped: false,
+      executionVenue: 'clob',
+      entryPrice: 0.43,
+      sharesFilled: null,
+      governorStamped: true,
+      wasEmptyBook: true,
+    });
+    // Bracket result (second call)
+    mockExecuteAndRecordSignal.mockResolvedValueOnce({
+      signal: { stakeUsd: 3 } as never,
+      skipped: false,
+      executionVenue: 'clob',
+      entryPrice: 0.12,
+      sharesFilled: null,
+      governorStamped: true,
+      wasEmptyBook: true,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    // executeAndRecordSignal called at least twice: primary + bracket opposite
+    expect(mockExecuteAndRecordSignal.mock.calls.length).toBeGreaterThanOrEqual(2);
+    const bracketCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => (c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite === true,
+    );
+    expect(bracketCall).toBeDefined();
+  });
+
+  it('bracket does NOT fire when primary was a real-book entry (wasEmptyBook=false)', async () => {
+    makeTomorrowEventFixture();
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_BRACKET_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    mockGetBankroll.mockResolvedValue(1000);
+    // Primary result: real-book commit (wasEmptyBook=false/absent)
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never,
+      skipped: false,
+      executionVenue: 'clob',
+      entryPrice: 0.43,
+      sharesFilled: null,
+      governorStamped: true,
+      wasEmptyBook: false,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    const bracketCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => (c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite === true,
+    );
+    expect(bracketCall).toBeUndefined();
+  });
+
+  it('bracket does NOT fire on resolution-day entries (isResolutionDay=true)', async () => {
+    // wireTodayMocks sets up resolution-day events; use early-entry path for a fresh entry.
+    redisMock._store.set(activeEventKey, '1');
+    for (let i = 0; i < 11; i++) {
+      redisMock._store.set(`position:mt${i}:NO`, '1');
+    }
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_BRACKET_ENABLED: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayMocks(); // resolution-day events → opp.isResolutionDay=true
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never,
+      skipped: false,
+      executionVenue: 'clob',
+      entryPrice: 0.43,
+      sharesFilled: null,
+      governorStamped: true,
+      wasEmptyBook: true,
+      isSizeUp: true,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    // Bracket must not fire — all opportunities are resolution-day
+    const bracketCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => (c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite === true,
+    );
+    expect(bracketCall).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

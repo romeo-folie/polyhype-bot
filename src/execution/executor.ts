@@ -207,6 +207,10 @@ export interface ExecutionResult {
   memeAtrTpPct?: number;
   /** True if this execution was a size-up (pyramid top-up) into an existing position. */
   isSizeUp?: boolean;
+  /** True when the entry routed through the empty-book maker path (ghost/no-liquidity book).
+   *  Used by the weather bracket strategy to gate opposite-side GTC posts to empty-book
+   *  primaries only, avoiding bracket legs on patient real-book entries. */
+  wasEmptyBook?: boolean;
   /**
    * True iff this invocation actually stamped the shared global governor
    * (i.e. recordGlobalTrade(...,'polymarket') ran because a NEW order was
@@ -2665,6 +2669,7 @@ export async function executeSignal(
         decisionBenchmark: makerTelemetry as DecisionBenchmark,
         hedgeDispatched: false,
         governorStamped: makerAttempt.governorStamped ?? false,
+        wasEmptyBook: emptyBookMakerRoute,
       };
     }
 
@@ -2793,6 +2798,7 @@ export async function executeSignal(
         decisionBenchmark: makerTelemetry as DecisionBenchmark,
         hedgeDispatched: true,
         governorStamped: makerAttempt.governorStamped ?? false,
+        wasEmptyBook: emptyBookMakerRoute,
       };
     }
 

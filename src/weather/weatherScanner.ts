@@ -2238,13 +2238,21 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
           : primaryStake;
       const bracketWorstCase = Math.max(bracketStakeUsd, cfg.MIN_BET_USD);
 
-      // Guards: fresh entries only (not size-ups), AND the primary must have
-      // committed a new order — if the primary was skipped the bracket would
-      // become a naked directional bet opposite to the model's conviction.
+      // Guards:
+      //   - fresh entries only (not size-ups)
+      //   - primary must have committed a new order (no bracket on skipped primaries)
+      //   - primary must have been an empty/ghost-book entry: on real books the opposite
+      //     token is efficiently priced and the bracket would pay up for the low-probability
+      //     side without the structural sub-$1 cost guarantee
+      //   - pre-resolution-day only: on resolution day one side has already collapsed in
+      //     price (distressed sellers at 0.11) so the bracket becomes a tail bet, not the
+      //     liquidity-provision mechanism it was designed to be
       if (
         cfg.WEATHER_BRACKET_ENABLED
         && !opp.sizeUpScanOnly
         && orderCommitted
+        && result.wasEmptyBook === true
+        && !opp.isResolutionDay
         && cumulativeStakeUsd + bracketWorstCase <= cfg.WEATHER_MAX_SCAN_EXPOSURE_USD
       ) {
         const bracketSignal = buildBracketOppositeSignal(opp, bracketStakeUsd);
