@@ -2221,15 +2221,21 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       // Bracket strategy: post opposite-side GTC at a wider maker discount.
       // Bracket stake: target the same share count as the primary so that
       // YES+NO together pay exactly $1 per pair regardless of which side resolves.
-      //   shares  = stakeUsd / opp.outcomePrice (primary side price)
-      //   bracketStake = shares × oppositePrice
-      // This makes the pair riskless when both legs fill (total cost < $1/share).
+      // Use the executor's actual outputs rather than pre-executor inputs:
+      //   - result.signal.stakeUsd reflects any MIN_BET_USD floor-bump
+      //   - result.entryPrice is the real posted maker price (may differ from opp.outcomePrice)
+      //   - result.sharesFilled is authoritative when the primary filled immediately
       const bracketOppositePrice = opp.tradeSide === 'YES' ? opp.noPrice : opp.yesPrice;
-      const bracketShares = opp.outcomePrice > 0 ? stakeUsd / opp.outcomePrice : 0;
+      const primaryStake = result.signal.stakeUsd;
+      const primaryPrice = result.entryPrice ?? opp.outcomePrice;
+      const primaryShares =
+        result.sharesFilled != null
+          ? result.sharesFilled
+          : primaryPrice > 0 ? primaryStake / primaryPrice : 0;
       const bracketStakeUsd =
-        bracketShares > 0 && bracketOppositePrice > 0
-          ? bracketShares * bracketOppositePrice
-          : stakeUsd;
+        primaryShares > 0 && bracketOppositePrice > 0
+          ? primaryShares * bracketOppositePrice
+          : primaryStake;
       const bracketWorstCase = Math.max(bracketStakeUsd, cfg.MIN_BET_USD);
 
       // Guards: fresh entries only (not size-ups), AND the primary must have
