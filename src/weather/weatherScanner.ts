@@ -817,7 +817,9 @@ export function daysUntil(targetDate: string, now?: Date): number {
  * raw model prob oversizes the edge ~2×. Shrinking toward the better-calibrated
  * market price right-sizes the stake. Sign-invariant: for w∈(0,1],
  * `sizingProb > price ⟺ modelProb > price`, so it never flips a positive-edge entry
- * to a skip — it only reduces stake magnitude. w=1 → no shrink, w=0 → fully market.
+ * to a skip — it only reduces stake magnitude. w=1 → no shrink. (w=0 → fully market,
+ * which zeroes the Kelly edge; the weather config restricts to (0,1] so that degenerate
+ * value can't silently skip every entry — see WEATHER_KELLY_SHRINK_WEIGHT.)
  *
  * @param modelProb   model P(side wins), 0–1
  * @param marketPrice price of the side we buy (= market-implied P(side)), 0–1
