@@ -193,7 +193,7 @@ async function exitOrNotifyOnInvalidation(opts: ExitOrNotifyOpts): Promise<void>
  * notifies instead.
  */
 async function tryInvalidationExit(opts: ExitOrNotifyOpts): Promise<boolean> {
-  const { redis, cfg, pos, heldTokenId, isResolutionDay, currentHeldProb, hedgeBarrier } = opts;
+  const { redis, cfg, pos, heldTokenId, isResolutionDay, currentHeldProb, hedgeBarrier, invalidationReason } = opts;
 
   if (!cfg.WEATHER_FORECAST_INVALIDATION_EXIT_ENABLED) return false;
   // Only on resolution day — before then we let the position ride in case the
@@ -226,13 +226,25 @@ async function tryInvalidationExit(opts: ExitOrNotifyOpts): Promise<boolean> {
 
   const minExitPrice = cfg.WEATHER_FORECAST_INVALIDATION_MIN_EXIT_PRICE;
   const slippageFloor = currentHeldProb - cfg.WEATHER_FORECAST_INVALIDATION_MAX_EXIT_SLIPPAGE;
-  // Combined floor: never let the sell fill below this price.
-  const exitFloor = Math.max(minExitPrice, slippageFloor);
+  // Floor anchoring. For a pure modal-inversion the continuous held-prob is the very
+  // number the modal signal flags as untrustworthy — closed-bet calibration shows the
+  // model's ~0.67 hold-prob realizes ~0.33, i.e. it is systematically overconfident
+  // because σ is wider than the 1°C bracket. Anchoring the slippage floor to that prob
+  // would block exactly the exits the data says to take, so modal-only exits use just
+  // the absolute air-pocket floor (sell at the market bid; the market is better
+  // calibrated). held_prob_drop / both keep the slippage floor — the drop already
+  // confirms a low, model-and-market-agreed value.
+  const useMarketFloor =
+    invalidationReason === 'modal_inversion' &&
+    cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MARKET_FLOOR;
+  const exitFloor = useMarketFloor ? minExitPrice : Math.max(minExitPrice, slippageFloor);
   if (bestBid < exitFloor) {
     logger.info('[weather-invalidation] exit declined — bid below floor', {
       positionId: pos.id,
       marketId: pos.marketId,
       hedgeBarrier,
+      invalidationReason,
+      floorMode: useMarketFloor ? 'market' : 'slippage',
       bestBid: +bestBid.toFixed(4),
       minExitPrice,
       slippageFloor: +slippageFloor.toFixed(4),

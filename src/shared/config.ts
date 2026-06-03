@@ -1940,6 +1940,13 @@ export const envSchema = z.object({
   // bestBid ≥ currentHeldProb − this. Caps how far below the model's held-side
   // value we'll dump; if the bid is worse, fall back to the manual-action notify.
   WEATHER_FORECAST_INVALIDATION_MAX_EXIT_SLIPPAGE: z.coerce.number().min(0).max(1).optional().default(0.15),
+  // Floor anchoring for modal-inversion exits. The continuous held-prob is the number
+  // the modal signal flags as untrustworthy — closed-bet calibration shows the model's
+  // ~0.67 hold-prob realizes ~0.33 (σ wider than the 1°C bracket → overconfident NO).
+  // When true, modal-only invalidation exits skip the held-prob slippage floor and use
+  // just the absolute MIN_EXIT_PRICE floor (market-anchored — sell at the best bid).
+  // held_prob_drop / both invalidations keep the slippage floor.
+  WEATHER_FORECAST_INVALIDATION_MODAL_MARKET_FLOOR: boolFromEnv.optional().default(true),
 
   // ── Weather oracle scanner ─────────────────────────────────────────────────
   // After the reconciler writes WU actuals for yesterday, scans active weather
