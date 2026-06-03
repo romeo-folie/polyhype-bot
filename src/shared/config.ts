@@ -1924,6 +1924,14 @@ export const envSchema = z.object({
   // counts, so a forecast straddling a half-degree rounding boundary can't flap the
   // trigger on/off run-to-run. 1 = fire immediately (no debounce).
   WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: z.coerce.number().int().min(1).optional().default(2),
+  // Modal-inversion held-prob ceiling (guard A). A modal flip only counts as an
+  // invalidation when the continuous held-prob has ALSO fallen to/below this. A wide
+  // stddev can keep the held-prob high (e.g. 0.69) while the rounded central estimate
+  // straddles a bracket boundary — a 0.1°C wobble flips 18.4↔18.6 — so a bare modal
+  // flip there is noise, not a real inversion. Above this ceiling the model still
+  // favours our side, so we ride. (Amsterdam 19°C NO, 2026-06-03: modal flipped at
+  // held-prob 0.686 and NO still won at $1.) Set to 1 to disable the ceiling.
+  WEATHER_FORECAST_INVALIDATION_MODAL_MAX_HELD_PROB: z.coerce.number().min(0).max(1).optional().default(0.55),
   // Held-side probability must fall by at least this much from entry to mark invalidated.
   WEATHER_FORECAST_INVALIDATION_MIN_DROP: z.coerce.number().min(0).max(1).optional().default(0.20),
   // Only mark invalidated when current held-side probability is below this (severity filter).
