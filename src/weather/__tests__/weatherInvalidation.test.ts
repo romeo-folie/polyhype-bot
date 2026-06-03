@@ -124,6 +124,7 @@ function makeConfig(overrides = {}) {
     WEATHER_FORECAST_INVALIDATION_MIN_EXIT_PRICE: 0.05,
     WEATHER_FORECAST_INVALIDATION_MAX_EXIT_SLIPPAGE: 0.15,
     WEATHER_FORECAST_INVALIDATION_MODAL_MARKET_FLOOR: true,
+    WEATHER_FORECAST_INVALIDATION_DROP_MARKET_FLOOR: true,
     WEATHER_MAX_EVENTS: 50,
     WEATHER_STDDEV_MIN_FRACTION: 0.7,
     WEATHER_MODEL_ECMWF_ENABLED: false,
@@ -990,13 +991,40 @@ describe('runWeatherInvalidationScan — Phase 5 resolution-day exit', () => {
     expect(mockNotifyWeatherInvalidationNoHedge).toHaveBeenCalled();
   });
 
-  it('does NOT exit a held_prob_drop case when the bid is below the max-slippage floor — notifies', async () => {
-    // held(NO)=0.45 → slippageFloor = 0.45 - 0.15 = 0.30; held bid 0.20 ≥ abs floor but < 0.30.
-    // Tail bracket (low=null) → no modal inversion, so reason is held_prob_drop and the
-    // slippage floor still applies (model and market agree the side is cheap).
+  it('held_prob_drop exits at the market bid below the slippage floor (DROP_MARKET_FLOOR=true, default)', async () => {
+    // held(NO)=0.45 → slippageFloor 0.30; bid 0.20 is below that but above MIN_EXIT_PRICE.
+    // Tail bracket → reason is held_prob_drop. Under the market floor (default) we anchor to
+    // the market and exit anyway — the model's 0.45 is overconfident vs the 0.20 the market
+    // will pay (the mexico-city "model 0.37 vs market 0.01" class).
     mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
     mockComputeBiasedProb.mockReturnValue({
       modelProbability: 0.55, // held(NO)=0.45; drop 0.70-0.45=0.25 ≥0.20, prob ≤0.50 → invalidated
+      effectiveStdDev: 5,
+      correctedForecastHigh: 60,
+      biasMode: 'none',
+    });
+    mockGetClobOrderBook.mockImplementation(books({ asks: [{ price: '0.30' }] }, { bids: [{ price: '0.20', size: '50' }] }));
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'weather_invalidation', currentPrice: 0.20 }),
+    );
+    expect(mockNotifyWeatherInvalidationNoHedge).not.toHaveBeenCalled();
+  });
+
+  it('held_prob_drop honors the slippage floor when DROP_MARKET_FLOOR=false — notifies', async () => {
+    mockLoadConfig.mockReturnValue(
+      makeConfig({
+        WEATHER_FORECAST_INVALIDATION_ENABLED: true,
+        WEATHER_FORECAST_INVALIDATION_EXIT_ENABLED: true,
+        WEATHER_FORECAST_INVALIDATION_DROP_MARKET_FLOOR: false,
+      }),
+    );
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.55, // held(NO)=0.45 → slippageFloor 0.30 > bid 0.20
       effectiveStdDev: 5,
       correctedForecastHigh: 60,
       biasMode: 'none',
