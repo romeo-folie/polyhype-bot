@@ -113,6 +113,7 @@ function makeConfig(overrides = {}) {
     WEATHER_FORECAST_INVALIDATION_SHADOW_ENABLED: true,
     WEATHER_FORECAST_INVALIDATION_MODAL_ENABLED: true,
     WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: 1, // base: no debounce; hysteresis tests override to 2
+    WEATHER_FORECAST_INVALIDATION_MODAL_MAX_HELD_PROB: 0.55, // guard A: modal flip ignored above this held-prob
     WEATHER_FORECAST_INVALIDATION_MIN_DROP: 0.20,
     WEATHER_FORECAST_INVALIDATION_MIN_CURRENT_HELD_PROB: 0.50,
     WEATHER_FORECAST_INVALIDATION_TTL_S: 21600,
@@ -457,17 +458,18 @@ describe('runWeatherInvalidationScan — modal inversion', () => {
     mockFetchForecast.mockResolvedValue(makeForecast());
   });
 
-  it('invalidates a NO hold when the forecast rounds INTO the bracket (no held-prob drop)', async () => {
-    // entryHeldProb(NO)=0.70; currentModelProb=0.22 → currentHeldProb(NO)=0.78 → drop=-0.08 (no drop)
-    // correctedForecastHigh 75.45 → round 75 ∈ [74,75] → modal inversion fires.
+  it('invalidates a NO hold when the modal flips and held-prob is below the ceiling (no held-prob drop)', async () => {
+    // entryHeldProb(NO)=0.70; currentModelProb=0.48 → currentHeldProb(NO)=0.52 (≤ ceiling 0.55,
+    // drop 0.18 < 0.20 so modal is the sole trigger). correctedForecastHigh 75.45 → round 75 ∈ [74,75].
+    // The modal was supporting on an earlier scan (seeded marker) → a genuine flip, not born-inverted.
     mockSql.mockResolvedValue([atlantaNoPos()]);
     mockComputeBiasedProb.mockReturnValue({
-      modelProbability: 0.22,
+      modelProbability: 0.48,
       effectiveStdDev: 3.45,
       correctedForecastHigh: 75.45,
       biasMode: 'full',
     });
-    const redis = makeRedis();
+    const redis = makeRedis(new Map([['weather:forecast_modal_supported:pos-1', '1']]));
 
     await runWeatherInvalidationScan(redis as any);
 
@@ -479,6 +481,7 @@ describe('runWeatherInvalidationScan — modal inversion', () => {
           invalidated: true,
           invalidationReason: 'modal_inversion',
           modalInvalidated: true,
+          modalWasEverSupported: true,
           roundedForecast: 75,
         }),
       }),
@@ -508,7 +511,8 @@ describe('runWeatherInvalidationScan — modal inversion', () => {
 
   it('invalidates a YES hold when the forecast rounds OUT of the bracket', async () => {
     // YES thesis = high WILL be 74-75. correctedForecastHigh 72.4 → round 72 ∉ [74,75] → inverted.
-    // entryHeldProb(YES)=0.55; currentModelProb=0.50 → drop=0.05 (below threshold) so modal is the sole trigger.
+    // entryHeldProb(YES)=0.55; currentModelProb=0.50 → held(YES)=0.50 (≤ ceiling), drop=0.05 (below
+    // threshold) so modal is the sole trigger. Modal supported earlier (seeded) → a genuine flip.
     mockSql.mockResolvedValue([
       atlantaNoPos({ direction: 'YES' as const, consensusProbability: 0.55 }),
     ]);
@@ -518,7 +522,7 @@ describe('runWeatherInvalidationScan — modal inversion', () => {
       correctedForecastHigh: 72.4,
       biasMode: 'full',
     });
-    const redis = makeRedis();
+    const redis = makeRedis(new Map([['weather:forecast_modal_supported:pos-1', '1']]));
 
     await runWeatherInvalidationScan(redis as any);
 
@@ -536,7 +540,8 @@ describe('runWeatherInvalidationScan — modal inversion', () => {
   });
 
   it('reports reason "both" when held-prob drop and modal inversion fire together', async () => {
-    // currentModelProb=0.80 → held(NO)=0.20, drop=0.50 (drop fires); forecast 74.5 → round 75 ∈ bracket (modal fires).
+    // currentModelProb=0.80 → held(NO)=0.20 (drop=0.50, ≤ ceiling); forecast 74.5 → round 75 ∈ bracket
+    // (modal fires). Modal supported earlier (seeded marker) → genuine flip, so both reasons apply.
     mockSql.mockResolvedValue([atlantaNoPos()]);
     mockComputeBiasedProb.mockReturnValue({
       modelProbability: 0.80,
@@ -544,7 +549,7 @@ describe('runWeatherInvalidationScan — modal inversion', () => {
       correctedForecastHigh: 74.5,
       biasMode: 'full',
     });
-    const redis = makeRedis();
+    const redis = makeRedis(new Map([['weather:forecast_modal_supported:pos-1', '1']]));
 
     await runWeatherInvalidationScan(redis as any);
 
@@ -614,13 +619,16 @@ describe('runWeatherInvalidationScan — modal inversion', () => {
     mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: 2 }));
     mockSql.mockResolvedValue([atlantaNoPos()]);
     mockComputeBiasedProb.mockReturnValue({
-      modelProbability: 0.22,
+      modelProbability: 0.48, // held(NO)=0.52 ≤ ceiling 0.55; drop 0.18 < 0.20 → modal-only
       effectiveStdDev: 3.45,
       correctedForecastHigh: 75.45,
       biasMode: 'full',
     });
-    // Pre-seed streak from a prior inverting run.
-    const store = new Map([['weather:forecast_modal_streak:pos-1', '1']]);
+    // Pre-seed streak from a prior inverting run AND the supporting marker from before the flip.
+    const store = new Map([
+      ['weather:forecast_modal_streak:pos-1', '1'],
+      ['weather:forecast_modal_supported:pos-1', '1'],
+    ]);
     const redis = makeRedis(store);
 
     await runWeatherInvalidationScan(redis as any);
@@ -680,6 +688,98 @@ describe('runWeatherInvalidationScan — modal inversion', () => {
       expect.objectContaining({
         payload: expect.objectContaining({ invalidated: false, modalInvalidated: false, roundedForecast: null }),
       }),
+    );
+  });
+
+  // ── Guard A: held-prob ceiling (the Amsterdam 2026-06-03 false positive) ─────
+  it('does NOT invalidate when the modal flips but held-prob is still above the ceiling (Amsterdam case)', async () => {
+    // Amsterdam 19°C NO: a transient forecast spike (18.6 → rounds to 19 ∈ bracket) flips the modal,
+    // but a wide stddev keeps held(NO) at 0.686 (> ceiling 0.55) — a boundary-straddling noise spike,
+    // not a real inversion. The modal was supporting earlier (seeded), so ONLY guard A blocks it.
+    // (drop here is 0.892-0.686=0.206 ≥ MIN_DROP but held 0.686 > 0.50 → held_prob_drop also stays off.)
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: 1 }));
+    mockSql.mockResolvedValue([atlantaNoPos({ consensusProbability: 0.108 })]); // entryHeld(NO)=0.892
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.314, // held(NO)=0.686 > ceiling 0.55
+      effectiveStdDev: 1.16,
+      correctedForecastHigh: 75.45, // rounds INTO bracket → raw inversion seen
+      biasMode: 'full',
+    });
+    const redis = makeRedis(new Map([['weather:forecast_modal_supported:pos-1', '1']]));
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          invalidated: false, // guard A: held-prob above ceiling → ride
+          invalidationReason: null,
+          modalInvalidated: false,
+          modalInversionRaw: true, // raw flip WAS seen...
+          modalWasEverSupported: true, // ...and it was a genuine flip...
+          modalStreak: 1, // ...and the streak cleared MIN_RUNS — only the ceiling held it back
+        }),
+      }),
+    );
+  });
+
+  // ── Guard B: transition-only (the Houston 2026-06-03 longshot YES) ───────────
+  it('does NOT invalidate a longshot YES whose modal was never on our side (Houston case)', async () => {
+    // Houston 86-87°F YES entered at 0.293 (sub-modal longshot): the forecast (~84) was never inside
+    // the narrow bracket, so the modal never supported the thesis — it was born inverted, not flipped.
+    // No supporting marker was ever set, so guard B blocks it even though the streak (2) and the
+    // held-prob ceiling (held 0.176 ≤ 0.55) would otherwise pass.
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: 2 }));
+    mockSql.mockResolvedValue([
+      atlantaNoPos({ direction: 'YES' as const, consensusProbability: 0.293 }), // entryHeld(YES)=0.293
+    ]);
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.176, // held(YES)=0.176 (≤ ceiling); drop 0.117 < 0.20 → drop stays off
+      effectiveStdDev: 2.78,
+      correctedForecastHigh: 72.4, // round 72 ∉ [74,75] → raw inversion for YES
+      biasMode: 'full',
+    });
+    // Streak already at 1 from a prior inverting run, but NO supporting marker was ever set.
+    const redis = makeRedis(new Map([['weather:forecast_modal_streak:pos-1', '1']]));
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        direction: 'YES',
+        payload: expect.objectContaining({
+          invalidated: false, // guard B: never supported → never inverted
+          invalidationReason: null,
+          modalInvalidated: false,
+          modalInversionRaw: true,
+          modalStreak: 2, // streak DID reach the threshold...
+          modalWasEverSupported: false, // ...but B blocks: modal never supported the thesis
+        }),
+      }),
+    );
+  });
+
+  it('records the "ever supported" marker while the modal is on our side (guard B bookkeeping)', async () => {
+    // NO hold, forecast 76.6 → round 77 ∉ [74,75] → modal supports the NO thesis. Persist the marker
+    // so a later flip can be recognised as a genuine inversion rather than born-inverted.
+    mockSql.mockResolvedValue([atlantaNoPos()]);
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.22, // held(NO)=0.78, no drop, modal not inverted
+      effectiveStdDev: 3.45,
+      correctedForecastHigh: 76.6,
+      biasMode: 'full',
+    });
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(redis.set).toHaveBeenCalledWith(
+      'weather:forecast_modal_supported:pos-1',
+      '1',
+      'EX',
+      expect.any(Number),
     );
   });
 });
@@ -1040,10 +1140,11 @@ describe('runWeatherInvalidationScan — Phase 5 resolution-day exit', () => {
 
   it('modal-inversion exit uses the MARKET floor — sells below the slippage floor (option B)', async () => {
     // Atlanta/Paris analog: NO on a bounded bracket, forecast rounds INTO it (modal
-    // inversion) while the continuous held-prob is still high (0.78 → slippage floor
-    // 0.63). Held bid 0.20 is below that floor but above MIN_EXIT_PRICE — because the
-    // model prob is the overconfident number the modal signal distrusts, we anchor to
-    // the market and exit at the bid anyway.
+    // inversion) while the continuous held-prob is at 0.52 → slippage floor 0.37. Held bid
+    // 0.20 is below that floor but above MIN_EXIT_PRICE — because the model prob is the
+    // overconfident number the modal signal distrusts, we anchor to the market and exit at
+    // the bid anyway. Held 0.52 ≤ ceiling 0.55 and the modal was supporting earlier (seeded
+    // marker) so guards A+B both pass and the modal inversion fires.
     mockParseWeatherEvent.mockReturnValue(
       makeParsedEvent({ city: 'atlanta', brackets: [{ label: '74-75°F', low: 74, high: 75, marketId: 'mkt-1' }] }),
     );
@@ -1051,7 +1152,7 @@ describe('runWeatherInvalidationScan — Phase 5 resolution-day exit', () => {
       makePosition({ direction: 'NO', sourcedFrom: 'weather:atlanta:2026-05-31:74-75°F', consensusProbability: 0.30 }),
     ]);
     mockComputeBiasedProb.mockReturnValue({
-      modelProbability: 0.22, // held(NO)=0.78; entryHeld 0.70 → drop −0.08 (no drop) ⇒ reason modal_inversion
+      modelProbability: 0.48, // held(NO)=0.52; entryHeld 0.70 → drop 0.18 (no drop) ⇒ reason modal_inversion
       effectiveStdDev: 1.16,
       correctedForecastHigh: 75.45, // rounds to 75 ∈ [74,75] → modal inversion for NO
       biasMode: 'full',
@@ -1067,7 +1168,7 @@ describe('runWeatherInvalidationScan — Phase 5 resolution-day exit', () => {
       question: 'q',
       executionVenue: 'clob',
     });
-    const redis = makeRedis();
+    const redis = makeRedis(new Map([['weather:forecast_modal_supported:pos-1', '1']]));
 
     await runWeatherInvalidationScan(redis as any);
 
@@ -1092,13 +1193,13 @@ describe('runWeatherInvalidationScan — Phase 5 resolution-day exit', () => {
       makePosition({ direction: 'NO', sourcedFrom: 'weather:atlanta:2026-05-31:74-75°F', consensusProbability: 0.30 }),
     ]);
     mockComputeBiasedProb.mockReturnValue({
-      modelProbability: 0.22, // held(NO)=0.78 → slippage floor 0.63 > bid 0.20
+      modelProbability: 0.48, // held(NO)=0.52 (≤ ceiling, modal fires) → slippage floor 0.37 > bid 0.20
       effectiveStdDev: 1.16,
       correctedForecastHigh: 75.45,
       biasMode: 'full',
     });
     mockGetClobOrderBook.mockImplementation(books({ asks: [{ price: '0.99' }] }, { bids: [{ price: '0.20', size: '50' }] }));
-    const redis = makeRedis();
+    const redis = makeRedis(new Map([['weather:forecast_modal_supported:pos-1', '1']]));
 
     await runWeatherInvalidationScan(redis as any);
 
