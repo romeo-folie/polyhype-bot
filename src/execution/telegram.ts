@@ -210,6 +210,7 @@ export type TakeProfitReason =
   | 'oracle_lag_near_resolution'
   | 'oracle_lag_stop_loss'
   | 'weather_near_resolution'
+  | 'weather_invalidation'
   | 'funding_normalized'
   | 'funding_sign_flip'
   | 'hedge_pm_resolved';
@@ -241,6 +242,7 @@ export async function notifyTakeProfitExecuted(opts: {
     oracle_lag_near_resolution: '🔒 Oracle-lag — near-resolution profit lock',
     oracle_lag_stop_loss: '🛑 Oracle-lag — stop-loss triggered',
     weather_near_resolution: '⏱️ Weather — near-resolution loss cut',
+    weather_invalidation: '🌧️ Weather — forecast invalidated, exited',
     funding_normalized: '📊 Funding normalized — mean-reversion exit',
     funding_sign_flip: '🔀 Funding sign flip — crowd reversed',
     hedge_pm_resolved: '🔗 Delta-hedge closed — PM market resolved',
