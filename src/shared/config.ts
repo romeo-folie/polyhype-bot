@@ -1956,8 +1956,14 @@ export const envSchema = z.object({
   // ~0.67 hold-prob realizes ~0.33 (σ wider than the 1°C bracket → overconfident NO).
   // When true, modal-only invalidation exits skip the held-prob slippage floor and use
   // just the absolute MIN_EXIT_PRICE floor (market-anchored — sell at the best bid).
-  // held_prob_drop / both invalidations keep the slippage floor.
   WEATHER_FORECAST_INVALIDATION_MODAL_MARKET_FLOOR: boolFromEnv.optional().default(true),
+  // Same, for held_prob_drop / both invalidations. The drop can land the model at a
+  // "low" held-prob (e.g. 0.37) while the market prices the side far lower (e.g. a 0.01
+  // bid) — they do NOT always agree, so a slippage floor anchored to the model blocks
+  // exiting at the better-calibrated market price. When true, drop/both exits also use
+  // just the absolute MIN_EXIT_PRICE floor. (Market beats model as a forecaster — see
+  // the calibration finding — so anchoring exits to the model is the wrong default.)
+  WEATHER_FORECAST_INVALIDATION_DROP_MARKET_FLOOR: boolFromEnv.optional().default(true),
 
   // ── Weather oracle scanner ─────────────────────────────────────────────────
   // After the reconciler writes WU actuals for yesterday, scans active weather

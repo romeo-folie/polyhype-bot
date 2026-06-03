@@ -226,17 +226,17 @@ async function tryInvalidationExit(opts: ExitOrNotifyOpts): Promise<boolean> {
 
   const minExitPrice = cfg.WEATHER_FORECAST_INVALIDATION_MIN_EXIT_PRICE;
   const slippageFloor = currentHeldProb - cfg.WEATHER_FORECAST_INVALIDATION_MAX_EXIT_SLIPPAGE;
-  // Floor anchoring. For a pure modal-inversion the continuous held-prob is the very
-  // number the modal signal flags as untrustworthy — closed-bet calibration shows the
-  // model's ~0.67 hold-prob realizes ~0.33, i.e. it is systematically overconfident
-  // because σ is wider than the 1°C bracket. Anchoring the slippage floor to that prob
-  // would block exactly the exits the data says to take, so modal-only exits use just
-  // the absolute air-pocket floor (sell at the market bid; the market is better
-  // calibrated). held_prob_drop / both keep the slippage floor — the drop already
-  // confirms a low, model-and-market-agreed value.
+  // Floor anchoring. The continuous held-prob is systematically overconfident (the model
+  // is a worse forecaster than the market — closed-bet calibration), so a slippage floor
+  // anchored to it guards model-fantasy value: e.g. a held_prob_drop to 0.37 while the
+  // market bid is 0.01. So we anchor the exit to the market (absolute MIN_EXIT_PRICE floor
+  // only — sell at the best bid) rather than the model prob, gated per invalidation reason:
+  // modal_inversion → MODAL_MARKET_FLOOR; held_prob_drop / both → DROP_MARKET_FLOOR. When a
+  // gate is off, that reason falls back to the model-anchored slippage floor.
   const useMarketFloor =
-    invalidationReason === 'modal_inversion' &&
-    cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MARKET_FLOOR;
+    invalidationReason === 'modal_inversion'
+      ? cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MARKET_FLOOR
+      : cfg.WEATHER_FORECAST_INVALIDATION_DROP_MARKET_FLOOR;
   const exitFloor = useMarketFloor ? minExitPrice : Math.max(minExitPrice, slippageFloor);
   if (bestBid < exitFloor) {
     logger.info('[weather-invalidation] exit declined — bid below floor', {
