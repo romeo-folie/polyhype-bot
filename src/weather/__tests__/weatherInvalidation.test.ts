@@ -57,6 +57,26 @@ vi.mock('../../shared/bankroll.js', () => ({
 const mockGetCityBias = vi.fn().mockResolvedValue(null);
 vi.mock('../cityBias.js', () => ({ getCityBias: mockGetCityBias }));
 
+// Phase 5 exit dependencies — controllable so we can assert exit-vs-notify routing.
+const mockNotifyWeatherInvalidationNoHedge = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../execution/telegram.js', () => ({
+  notifyWeatherInvalidationNoHedge: mockNotifyWeatherInvalidationNoHedge,
+}));
+
+const mockGetPosition = vi.fn();
+vi.mock('../../execution/positionLedger.js', () => ({ getPosition: mockGetPosition }));
+
+const mockExecuteTakeProfit = vi.fn();
+vi.mock('../../monitor/takeProfitExecutor.js', () => ({ executeTakeProfit: mockExecuteTakeProfit }));
+
+// Resolution-day predicate input: event.targetDate === cityLocalDate(tz).
+const mockCityLocalDate = vi.fn().mockReturnValue('2026-05-31');
+vi.mock('../resolutionTime.js', () => ({ cityLocalDate: mockCityLocalDate }));
+
+// dedup gates the manual-action notify; default true so the fallback fires in tests.
+const mockDedup = vi.fn().mockResolvedValue(true);
+vi.mock('../../shared/redis.js', () => ({ dedup: mockDedup }));
+
 // Controlled scanner exports — avoids fetching real events or forecasts
 const mockFetchWeatherEvents = vi.fn();
 const mockParseWeatherEvent = vi.fn();
@@ -100,6 +120,9 @@ function makeConfig(overrides = {}) {
     WEATHER_FORECAST_INVALIDATION_MAX_HEDGE_PRICE: 0.25,
     WEATHER_FORECAST_INVALIDATION_MAX_TOTAL_COST: 1.05,
     WEATHER_FORECAST_INVALIDATION_MIN_FILL_RATIO: 0.90,
+    WEATHER_FORECAST_INVALIDATION_EXIT_ENABLED: false,
+    WEATHER_FORECAST_INVALIDATION_MIN_EXIT_PRICE: 0.05,
+    WEATHER_FORECAST_INVALIDATION_MAX_EXIT_SLIPPAGE: 0.15,
     WEATHER_MAX_EVENTS: 50,
     WEATHER_STDDEV_MIN_FRACTION: 0.7,
     WEATHER_MODEL_ECMWF_ENABLED: false,
@@ -131,6 +154,8 @@ function makeParsedEvent(overrides = {}) {
   return {
     city: 'chicago',
     targetDate: '2026-05-31',
+    // coords.tz feeds the resolution-day predicate (event.targetDate === cityLocalDate(tz)).
+    coords: { tz: 'America/Chicago' },
     brackets: [
       { label: '39°F or below', low: null, high: 39, marketId: 'mkt-1' },
     ],
@@ -149,7 +174,7 @@ function makeForecast() {
   };
 }
 
-function makeRedis(store: Map<string, string> = new Map()) {
+function makeRedis(store = new Map<string, string>()) {
   return {
     exists: vi.fn(async (key: string) => (store.has(key) ? 1 : 0)),
     set: vi.fn(async (key: string, value: string) => {
@@ -157,7 +182,7 @@ function makeRedis(store: Map<string, string> = new Map()) {
       return 'OK';
     }),
     del: vi.fn(async (key: string) => (store.delete(key) ? 1 : 0)),
-    get: vi.fn().mockResolvedValue(null),
+    get: vi.fn(async (key: string) => store.get(key) ?? null),
     mget: vi.fn(async (...keys: string[]) => keys.map((k) => store.get(k) ?? null)),
     pipeline: vi.fn(() => ({ exec: vi.fn().mockResolvedValue([]) })),
     _store: store,
@@ -828,5 +853,264 @@ describe('runWeatherInvalidationScan — hedge (Phase 4)', () => {
       expect.any(String),
       expect.any(Number),
     );
+  });
+});
+
+describe('runWeatherInvalidationScan — Phase 5 resolution-day exit', () => {
+  // Default: exit enabled, invalidated NO position (held(NO) prob 0.20), resolution
+  // day, ledger position present, executeTakeProfit succeeds. Each test tweaks one
+  // axis to assert the exit-vs-notify routing.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockLoadConfig.mockReturnValue(
+      makeConfig({
+        WEATHER_FORECAST_INVALIDATION_ENABLED: true,
+        WEATHER_FORECAST_INVALIDATION_HEDGE_ENABLED: false,
+        WEATHER_FORECAST_INVALIDATION_EXIT_ENABLED: true,
+      }),
+    );
+    mockFetchWeatherEvents.mockResolvedValue([{}]);
+    mockParseWeatherEvent.mockReturnValue(makeParsedEvent());
+    mockFetchForecast.mockResolvedValue(makeForecast());
+    mockParseBracketLabel.mockReturnValue({ low: null, high: 39, unit: 'fahrenheit' });
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.80, // held(NO)=0.20 → invalidated (drop 0.50, prob ≤0.50)
+      effectiveStdDev: 5,
+      correctedForecastHigh: 65,
+      biasMode: 'none',
+    });
+    mockGetMarket.mockResolvedValue({ clobTokenIds: '["tok-yes","tok-no"]' });
+    mockParseClobTokenIds.mockReturnValue(['tok-yes', 'tok-no']);
+    mockCityLocalDate.mockReturnValue('2026-05-31'); // == targetDate → resolution day
+    mockGetPosition.mockResolvedValue({
+      marketId: 'mkt-1',
+      direction: 'NO',
+      entryPrice: 0.65,
+      sharesHeld: 10,
+      clobTokenIds: ['tok-yes', 'tok-no'],
+      question: 'Chicago high 39°F or below?',
+      executionVenue: 'clob',
+    });
+    mockExecuteTakeProfit.mockResolvedValue({
+      marketId: 'mkt-1',
+      success: true,
+      returnPct: -72.3,
+      reason: 'weather_invalidation',
+    });
+  });
+
+  // For a NO hold: opposite (hedge) token = tok-yes; held token (we sell) = tok-no.
+  const books =
+    (opposite: unknown, held: unknown) =>
+    async (tokenId: string) =>
+      tokenId === 'tok-yes' ? opposite : tokenId === 'tok-no' ? held : null;
+
+  it('exits via executeTakeProfit on a price_too_high barrier when the bid clears both floors', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    // opposite ask 0.30 > MAX_HEDGE_PRICE 0.25 → price_too_high; held bid 0.18 clears floors.
+    mockGetClobOrderBook.mockImplementation(books({ asks: [{ price: '0.30' }] }, { bids: [{ price: '0.18', size: '50' }] }));
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'weather_invalidation',
+        currentPrice: 0.18,
+        // (bestBid 0.18 − entry 0.65) / 0.65 × 100 ≈ −72.3% — guards the return math.
+        returnPct: expect.closeTo(-72.31, 1),
+        position: expect.objectContaining({ marketId: 'mkt-1', direction: 'NO' }),
+      }),
+    );
+    expect(redis.set).toHaveBeenCalledWith('weather:forecast_exited:pos-1', '1', 'EX', expect.any(Number));
+    expect(mockNotifyWeatherInvalidationNoHedge).not.toHaveBeenCalled();
+  });
+
+  it('exits using held-side bids even on a no_book barrier (empty opposite asks)', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    // opposite has NO asks → no_book; held bid 0.18 still lets us sell out.
+    mockGetClobOrderBook.mockImplementation(books({ asks: [] }, { bids: [{ price: '0.18', size: '50' }] }));
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'weather_invalidation', currentPrice: 0.18 }),
+    );
+    expect(mockNotifyWeatherInvalidationNoHedge).not.toHaveBeenCalled();
+  });
+
+  it('exits on a cost_ceiling barrier', async () => {
+    // entry 0.90 + opposite ask 0.20 = 1.10 > MAX_TOTAL_COST 1.05 → cost_ceiling.
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO', entryPrice: 0.90 })]);
+    mockGetClobOrderBook.mockImplementation(books({ asks: [{ price: '0.20' }] }, { bids: [{ price: '0.18', size: '50' }] }));
+    mockGetPosition.mockResolvedValue({
+      marketId: 'mkt-1',
+      direction: 'NO',
+      entryPrice: 0.90,
+      sharesHeld: 10,
+      clobTokenIds: ['tok-yes', 'tok-no'],
+      question: 'q',
+      executionVenue: 'clob',
+    });
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'weather_invalidation' }),
+    );
+    expect(mockNotifyWeatherInvalidationNoHedge).not.toHaveBeenCalled();
+  });
+
+  it('does NOT exit before resolution day — notifies instead and lets the position ride', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    mockGetClobOrderBook.mockImplementation(books({ asks: [{ price: '0.30' }] }, { bids: [{ price: '0.18', size: '50' }] }));
+    mockCityLocalDate.mockReturnValue('2026-06-02'); // != targetDate → NOT resolution day
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+    expect(mockNotifyWeatherInvalidationNoHedge).toHaveBeenCalledWith(
+      expect.objectContaining({ hedgeBarrier: 'price_too_high' }),
+    );
+  });
+
+  it('does NOT exit when the held-side bid is below the absolute floor — notifies', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    // held bid 0.02 < MIN_EXIT_PRICE 0.05.
+    mockGetClobOrderBook.mockImplementation(books({ asks: [{ price: '0.30' }] }, { bids: [{ price: '0.02', size: '50' }] }));
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+    expect(mockNotifyWeatherInvalidationNoHedge).toHaveBeenCalled();
+  });
+
+  it('does NOT exit when the bid is below the max-slippage floor — notifies', async () => {
+    // held(NO)=0.45 → slippageFloor = 0.45 - 0.15 = 0.30; held bid 0.20 ≥ abs floor but < 0.30.
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.55, // held(NO)=0.45; drop 0.70-0.45=0.25 ≥0.20, prob ≤0.50 → invalidated
+      effectiveStdDev: 5,
+      correctedForecastHigh: 60,
+      biasMode: 'none',
+    });
+    mockGetClobOrderBook.mockImplementation(books({ asks: [{ price: '0.30' }] }, { bids: [{ price: '0.20', size: '50' }] }));
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+    expect(mockNotifyWeatherInvalidationNoHedge).toHaveBeenCalled();
+  });
+
+  it('does NOT exit when EXIT_ENABLED=false — preserves the notify-only behaviour and skips the held-book fetch', async () => {
+    mockLoadConfig.mockReturnValue(
+      makeConfig({
+        WEATHER_FORECAST_INVALIDATION_ENABLED: true,
+        WEATHER_FORECAST_INVALIDATION_EXIT_ENABLED: false,
+      }),
+    );
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    mockGetClobOrderBook.mockImplementation(books({ asks: [{ price: '0.30' }] }, { bids: [{ price: '0.18', size: '50' }] }));
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+    expect(mockGetPosition).not.toHaveBeenCalled();
+    // Held-book fetch is skipped (the EXIT_ENABLED guard precedes it); only the
+    // opposite/hedge book (tok-yes) is fetched.
+    expect(mockGetClobOrderBook).not.toHaveBeenCalledWith('tok-no');
+    expect(mockNotifyWeatherInvalidationNoHedge).toHaveBeenCalledWith(
+      expect.objectContaining({ hedgeBarrier: 'price_too_high' }),
+    );
+  });
+
+  it('does NOT exit when there is no held-side bid — notifies', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    mockGetClobOrderBook.mockImplementation(books({ asks: [] }, { bids: [] }));
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+    expect(mockNotifyWeatherInvalidationNoHedge).toHaveBeenCalledWith(
+      expect.objectContaining({ hedgeBarrier: 'no_book' }),
+    );
+  });
+
+  it('falls back to notify (no exited marker, sets a cooldown) when executeTakeProfit fails', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    mockGetClobOrderBook.mockImplementation(books({ asks: [{ price: '0.30' }] }, { bids: [{ price: '0.18', size: '50' }] }));
+    mockExecuteTakeProfit.mockResolvedValue({
+      marketId: 'mkt-1',
+      success: false,
+      error: 'clob error',
+      returnPct: 0,
+      reason: 'weather_invalidation',
+    });
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).toHaveBeenCalled();
+    expect(redis.set).not.toHaveBeenCalledWith(
+      'weather:forecast_exited:pos-1',
+      '1',
+      'EX',
+      expect.any(Number),
+    );
+    // Cooldown set so the next scan doesn't re-submit a market sell immediately.
+    expect(redis.set).toHaveBeenCalledWith(
+      'weather:forecast_exit_cooldown:pos-1',
+      '1',
+      'EX',
+      expect.any(Number),
+    );
+    expect(mockNotifyWeatherInvalidationNoHedge).toHaveBeenCalled();
+  });
+
+  it('does NOT exit when bid depth above the floor cannot absorb the position — notifies', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO', sharesHeld: 10 })]);
+    // Top bid clears the floor but only 3 shares sit there (< 10 held) — a market sell
+    // would sweep below the floor, so we decline and notify.
+    mockGetClobOrderBook.mockImplementation(books({ asks: [{ price: '0.30' }] }, { bids: [{ price: '0.18', size: '3' }] }));
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+    expect(mockNotifyWeatherInvalidationNoHedge).toHaveBeenCalled();
+  });
+
+  it('defers the sell (notifies) when a prior exit failure left a cooldown marker', async () => {
+    const store = new Map([['weather:forecast_exit_cooldown:pos-1', '1']]);
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    mockGetClobOrderBook.mockImplementation(books({ asks: [{ price: '0.30' }] }, { bids: [{ price: '0.18', size: '50' }] }));
+    const redis = makeRedis(store);
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+    expect(mockNotifyWeatherInvalidationNoHedge).toHaveBeenCalledWith(
+      expect.objectContaining({ hedgeBarrier: 'price_too_high' }),
+    );
+  });
+
+  it('short-circuits a position that already carries the exited marker', async () => {
+    const store = new Map([['weather:forecast_exited:pos-1', '1']]);
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    const redis = makeRedis(store);
+
+    await runWeatherInvalidationScan(redis as any);
+
+    // Returns before the forecast fetch / exit / notify.
+    expect(mockFetchForecast).not.toHaveBeenCalled();
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+    expect(mockNotifyWeatherInvalidationNoHedge).not.toHaveBeenCalled();
   });
 });

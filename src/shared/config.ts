@@ -1927,6 +1927,19 @@ export const envSchema = z.object({
   WEATHER_FORECAST_INVALIDATION_MAX_TOTAL_COST: z.coerce.number().min(0).max(2).optional().default(1.05),
   // Minimum fill ratio for hedge order — below this, no marker set and will retry.
   WEATHER_FORECAST_INVALIDATION_MIN_FILL_RATIO: z.coerce.number().min(0).max(1).optional().default(0.90),
+  // Phase 5: live exit. On resolution day, when a position is invalidated and the
+  // opposite (hedge) book is unavailable/too expensive, sell the held side at the
+  // bid instead of only notifying. Gated to resolution day (event.targetDate ===
+  // cityLocalDate(tz)) so a pre-resolution invalidation still lets the position
+  // ride in case the forecast swings back before the day is reached. Ships dark.
+  WEATHER_FORECAST_INVALIDATION_EXIT_ENABLED: boolFromEnv.optional().default(false),
+  // Absolute floor on the held-side best bid: never market-sell into an air-pocket
+  // book below this price (e.g. a $0.01 liquidity-artifact bid on a weather token).
+  WEATHER_FORECAST_INVALIDATION_MIN_EXIT_PRICE: z.coerce.number().min(0).max(1).optional().default(0.05),
+  // Max slippage below current model fair value tolerated on the exit: require
+  // bestBid ≥ currentHeldProb − this. Caps how far below the model's held-side
+  // value we'll dump; if the bid is worse, fall back to the manual-action notify.
+  WEATHER_FORECAST_INVALIDATION_MAX_EXIT_SLIPPAGE: z.coerce.number().min(0).max(1).optional().default(0.15),
 
   // ── Weather oracle scanner ─────────────────────────────────────────────────
   // After the reconciler writes WU actuals for yesterday, scans active weather
