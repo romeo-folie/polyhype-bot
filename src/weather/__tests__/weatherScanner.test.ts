@@ -22,6 +22,7 @@ const baseConfig = {
   WEATHER_MAX_PER_CITY: 1,
   WEATHER_MAX_SCAN_EXPOSURE_USD: 30,
   WEATHER_KELLY_FRACTION: 0.25,
+  WEATHER_KELLY_SHRINK_WEIGHT: 0.5,
   WEATHER_MODEL_ECMWF_ENABLED: false,
   WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
   WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
@@ -113,8 +114,10 @@ const {
   parseAllowedSides,
   runWeatherScan,
   buildWeatherFillShadow,
+  shrinkTowardMarket,
 } = await import('../weatherScanner.js');
 
+const { computeHalfKelly } = await import('../../mapping/divergenceCalculator.js');
 const { inferCategory } = await import('../../shared/outcomeRecorder.js');
 const { normalizeCategory } = await import('../../monitor/staleExit.js');
 
@@ -130,7 +133,7 @@ const { logger } = await import('../../shared/logger.js');
 // Minimal Redis mock
 function createRedisMock() {
   const store = new Map<string, string>();
-  const pipelineOps: Array<() => void> = [];
+  const pipelineOps: (() => void)[] = [];
   const pipelineMock = {
     set: vi.fn((key: string, value: string, _ex?: string, _ttl?: number) => {
       pipelineOps.push(() => store.set(key, value));
@@ -3385,5 +3388,54 @@ describe('buildWeatherFillShadow', () => {
     expect(shadow.gapVsGammaBps).toBe(1000);
     expect(shadow.gapVsClobBps).toBe(1000);
     expect(shadow.sharesFilled).toBe(20);
+  });
+});
+
+describe('shrinkTowardMarket', () => {
+  it('w=1 is the identity (no shrink — legacy behavior)', () => {
+    expect(shrinkTowardMarket(0.65, 0.43, 1)).toBeCloseTo(0.65, 10);
+  });
+
+  it('w=0 returns the market price (fully market)', () => {
+    expect(shrinkTowardMarket(0.65, 0.43, 0)).toBeCloseTo(0.43, 10);
+  });
+
+  it('w=0.5 is the midpoint (the configured default)', () => {
+    expect(shrinkTowardMarket(0.65, 0.43, 0.5)).toBeCloseTo(0.54, 10);
+  });
+
+  it('clamps the weight to [0,1]', () => {
+    expect(shrinkTowardMarket(0.65, 0.43, 2)).toBeCloseTo(0.65, 10); // >1 → 1 (identity)
+    expect(shrinkTowardMarket(0.65, 0.43, -1)).toBeCloseTo(0.43, 10); // <0 → 0 (market)
+  });
+
+  it('clamps the output to [0,1]', () => {
+    expect(shrinkTowardMarket(1.2, 0.9, 1)).toBe(1);
+    expect(shrinkTowardMarket(-0.2, 0.1, 1)).toBe(0);
+  });
+
+  it('is sign-invariant about the price: shrunk vs price matches model vs price', () => {
+    // model > price → shrunk still > price (positive edge preserved)
+    expect(shrinkTowardMarket(0.65, 0.43, 0.5)).toBeGreaterThan(0.43);
+    // model < price → shrunk still < price (negative edge preserved)
+    expect(shrinkTowardMarket(0.30, 0.43, 0.5)).toBeLessThan(0.43);
+    // model == price → shrunk == price
+    expect(shrinkTowardMarket(0.43, 0.43, 0.5)).toBeCloseTo(0.43, 10);
+  });
+
+  it('reduces the Kelly stake but never flips a positive-edge entry to a skip', () => {
+    // Overconfident model 0.65, market price 0.43 — the calibration case.
+    const winProb = 0.65;
+    const price = 0.43;
+    const rawKelly = computeHalfKelly(winProb, price, 0.25);
+    const shrunkKelly = computeHalfKelly(shrinkTowardMarket(winProb, price, 0.5), price, 0.25);
+    expect(rawKelly).toBeGreaterThan(0);
+    expect(shrunkKelly).toBeGreaterThan(0); // still a trade, not skipped
+    expect(shrunkKelly).toBeLessThan(rawKelly); // but a smaller stake
+  });
+
+  it('a model prob at/below the price still yields a zero Kelly under the shrink (no synthetic edge)', () => {
+    expect(computeHalfKelly(shrinkTowardMarket(0.43, 0.43, 0.5), 0.43, 0.25)).toBe(0);
+    expect(computeHalfKelly(shrinkTowardMarket(0.40, 0.43, 0.5), 0.43, 0.25)).toBe(0);
   });
 });

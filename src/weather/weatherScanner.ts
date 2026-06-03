@@ -808,6 +808,32 @@ export function daysUntil(targetDate: string, now?: Date): number {
 }
 
 /**
+ * Shrink a model win-probability toward the market price before Kelly sizing:
+ *
+ *   sizingProb = w·modelProb + (1−w)·marketPrice
+ *
+ * Closed-bet calibration shows the weather model is overconfident (model ~0.65 →
+ * realized ~0.52) and only ties the market as a forecaster, so Half-Kelly on the
+ * raw model prob oversizes the edge ~2×. Shrinking toward the better-calibrated
+ * market price right-sizes the stake. Sign-invariant: for w∈(0,1],
+ * `sizingProb > price ⟺ modelProb > price`, so it never flips a positive-edge entry
+ * to a skip — it only reduces stake magnitude. w=1 → no shrink. (w=0 → fully market,
+ * which zeroes the Kelly edge; the weather config restricts to (0,1] so that degenerate
+ * value can't silently skip every entry — see WEATHER_KELLY_SHRINK_WEIGHT.)
+ *
+ * @param modelProb   model P(side wins), 0–1
+ * @param marketPrice price of the side we buy (= market-implied P(side)), 0–1
+ * @param weight      shrink weight w∈[0,1] (clamped)
+ */
+export function shrinkTowardMarket(modelProb: number, marketPrice: number, weight: number): number {
+  // Non-finite weight (e.g. an unset config) falls back to no shrink (legacy behavior)
+  // rather than poisoning the stake with NaN.
+  const w = Number.isFinite(weight) ? Math.min(1, Math.max(0, weight)) : 1;
+  const shrunk = w * modelProb + (1 - w) * marketPrice;
+  return Math.min(1, Math.max(0, shrunk));
+}
+
+/**
  * True when the corrected forecast's central estimate rounds into [low, high].
  * Single source of truth shared by the entry scanner's interior-NO guard and the
  * forecast-invalidation modal-inversion trigger, so the two can never drift. Only
@@ -925,7 +951,7 @@ export function computeBiasedProb(
   const meanShiftApplied = biasMode === 'full' && meanShiftHelpful;
   const rawForecastHigh = forecast.forecastHigh;
   const correctedForecastHigh = meanShiftApplied
-    ? rawForecastHigh - cityBias!.meanBias
+    ? rawForecastHigh - cityBias.meanBias
     : rawForecastHigh;
   const rawEffectiveStdDev = forecast.stdDev * stddevMultiplier;
   let effectiveStdDev: number;
@@ -1002,7 +1028,7 @@ export function findMispricedBrackets(
   // Only the trusted tier subtracts meanBias — weak-band samples are too noisy
   // to justify shifting the forecast centre. The empirical σ overlay still runs
   // whenever biasMode=full regardless of whether the mean shift is applied.
-  const correctedForecastHigh = meanShiftApplied ? rawForecastHigh - cityBias!.meanBias : rawForecastHigh;
+  const correctedForecastHigh = meanShiftApplied ? rawForecastHigh - cityBias.meanBias : rawForecastHigh;
   const forecastHighForCalc = correctedForecastHigh;
 
   // Effective stddev:
@@ -1023,7 +1049,7 @@ export function findMispricedBrackets(
 
   // Compute model probability for each bracket
   const modelProbs: number[] = [];
-  const shadowModelProbs: Array<number | null> = [];
+  const shadowModelProbs: (number | null)[] = [];
   for (const bracket of event.brackets) {
     const prob = estimateBracketProbability(
       forecastHighForCalc,
@@ -1158,7 +1184,7 @@ export function findMispricedBrackets(
         cityActuals.unit === event.unit &&
         cityActuals.sampleSize >= baseRateMinSamples
       ) {
-        const threshold = bracket.high === null ? bracket.low! : bracket.high!;
+        const threshold = bracket.high === null ? bracket.low! : bracket.high;
         const yesFraction =
           bracket.high === null
             ? cityActuals.highs.filter((h) => h >= threshold).length / cityActuals.highs.length
@@ -2215,17 +2241,39 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     // For NO:  p = P(NO)  = 1 - modelProbability, price = noPrice (= outcomePrice for NO).
     // opp.outcomePrice is already side-relative so it covers both.
     const winProb = opp.tradeSide === 'YES' ? opp.modelProbability : 1 - opp.modelProbability;
-    const kellyFraction = computeHalfKelly(winProb, opp.outcomePrice, cfg.WEATHER_KELLY_FRACTION);
+    // Shrink the (overconfident) model prob toward the market price before Kelly so
+    // we don't oversize on a fantasy edge. Sign-invariant — only reduces stake.
+    const sizingProb = shrinkTowardMarket(winProb, opp.outcomePrice, cfg.WEATHER_KELLY_SHRINK_WEIGHT);
+    const kellyFraction = computeHalfKelly(sizingProb, opp.outcomePrice, cfg.WEATHER_KELLY_FRACTION);
     if (kellyFraction <= 0) {
       logger.info('[weather] skipping — kelly non-positive', {
         marketId: opp.marketId,
         tradeSide: opp.tradeSide,
         winProb: winProb.toFixed(3),
+        sizingProb: sizingProb.toFixed(3),
         outcomePrice: opp.outcomePrice.toFixed(3),
       });
       continue;
     }
     const stakeUsd = Math.min(bankrollUsd * kellyFraction, maxStakeCap);
+    // Comparison log: quantify how much the shrink reduced the Kelly stake vs the
+    // raw (unshrunk) model prob, so the impact is visible the moment weather resumes.
+    const rawKellyFraction = computeHalfKelly(winProb, opp.outcomePrice, cfg.WEATHER_KELLY_FRACTION);
+    const rawStakeUsd = Math.min(bankrollUsd * rawKellyFraction, maxStakeCap);
+    logger.info('[weather-kelly-shrink]', {
+      marketId: opp.marketId,
+      city: opp.city,
+      bracket: opp.bracketLabel,
+      tradeSide: opp.tradeSide,
+      winProb: +winProb.toFixed(4),
+      outcomePrice: +opp.outcomePrice.toFixed(4),
+      shrinkWeight: cfg.WEATHER_KELLY_SHRINK_WEIGHT,
+      sizingProb: +sizingProb.toFixed(4),
+      kellyFraction: +kellyFraction.toFixed(5),
+      stakeUsd: +stakeUsd.toFixed(2),
+      rawStakeUsd: +rawStakeUsd.toFixed(2),
+      stakeReductionUsd: +(rawStakeUsd - stakeUsd).toFixed(2),
+    });
     // Gate on the worst-case filled amount: executor bumps stakes ≥60% of
     // MIN_BET_USD up to the floor, so the actual committed amount may be higher
     // than the Kelly-derived stakeUsd. Using max(stakeUsd, MIN_BET_USD) keeps

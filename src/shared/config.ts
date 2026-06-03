@@ -1724,6 +1724,17 @@ export const envSchema = z.object({
   // default because bracket model uncertainty is structurally larger and the side
   // bias (YES 11.5% vs NO 73.7%) argues for lighter sizing.
   WEATHER_KELLY_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.25),
+  // Shrink the model win-prob toward the market price before Kelly sizing:
+  //   sizingProb = w·modelProb + (1−w)·marketPrice.
+  // Closed-bet calibration shows the weather model is overconfident (model ~0.65 →
+  // realized ~0.52) and only ties the market as a forecaster, so Half-Kelly on the
+  // raw model prob oversizes ~2×. Shrinking toward the (better-calibrated) market
+  // price right-sizes the edge. Sign-invariant — never flips an entry to a skip,
+  // only reduces stake. w=1.0 → no shrink (legacy); w=0.5 → halfway to market.
+  // Range is (0,1]: w=0 would shrink fully to the market price (Kelly edge → 0 →
+  // every entry skipped), which breaks the sign-invariance contract and is not a
+  // sizing config — disable weather via WEATHER_SCANNER_ENABLED instead. Hence .gt(0).
+  WEATHER_KELLY_SHRINK_WEIGHT: z.coerce.number().gt(0).max(1).optional().default(0.5),
   // --- WEATHER ENTRY PRICE OPTIMIZATION ---
   // Post-only GTC vs plain GTC for weather empty-book entries.
   //   true  → strict post-only; rejections drop straight to no_clob_book. Safer
