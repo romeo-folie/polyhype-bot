@@ -19,6 +19,8 @@ vi.mock('../../execution/positionLedger.js', () => ({
 vi.mock('../../shared/clob.js', () => ({
   fetchClobTokenBalance: vi.fn().mockResolvedValue({ ok: false, error: 'not found' }),
   cancelClobOrder: vi.fn().mockResolvedValue(true),
+  // Default: fills unattributable → size-up heal falls back to the posted price.
+  getOrderFillVwap: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../../shared/polymarketData.js', () => ({
@@ -443,6 +445,88 @@ describe('Position Reconciliation Healer', () => {
       undefined,
       expect.anything(),
     );
+  });
+
+  it('prices an async size-up heal at the actual fill VWAP when attributable', async () => {
+    // The GTC top-up posted at 0.62 but crossed the book and actually filled at
+    // 0.55 — the heal must record the ACTUAL cost (60 × 0.55 = 33), not the
+    // posted-limit cost (60 × 0.62 = 37.2) that inflates the position's basis.
+    const ledgerPosition = {
+      marketId: 'numeric-su-vwap',
+      conditionId: 'cond-su-vwap',
+      direction: 'YES',
+      sharesHeld: 100,
+      stakeUsd: 50,
+      entryPrice: 0.50,
+      executionVenue: 'clob',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+      topUpCount: 0,
+    };
+    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([
+      { conditionId: 'cond-su-vwap', asset: 'tok-yes', avgPrice: 0.52, size: 160 },
+    ]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue({
+      id: 'numeric-su-vwap', question: 'Highest temperature in Chicago today?',
+      conditionId: 'cond-su-vwap', clobTokenIds: ['tok-yes', 'tok-no'],
+    });
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-su-vwap', tokenId: 'tok-yes', price: 0.62, size: 60,
+      postedAt: Date.now() - 60_000, expiresAt: Date.now() + 60_000,
+      consensusP: 0.7, direction: 'YES', sourcedFrom: 'weather:chicago',
+    });
+    (clob.getOrderFillVwap as any).mockResolvedValueOnce({ sharesFilled: 60, avgFillPrice: 0.55 });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Trades query scoped by the ledger position's conditionId + the order's token.
+    expect(clob.getOrderFillVwap).toHaveBeenCalledWith(
+      'order-su-vwap', 'cond-su-vwap', 'tok-yes', expect.closeTo(60, 5),
+    );
+    // Top-up recorded at the ACTUAL fill price, not the posted 0.62.
+    expect(positionLedger.sizeUpPosition).toHaveBeenCalledWith(
+      mockRedis, 'numeric-su-vwap', 'YES',
+      expect.closeTo(60, 5), expect.closeTo(33, 5), expect.closeTo(0.55, 5),
+    );
+    expect(positionLedger.updatePositionShares).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the posted price for an async size-up heal when the VWAP fetch rejects', async () => {
+    const ledgerPosition = {
+      marketId: 'numeric-su-fb',
+      conditionId: 'cond-su-fb',
+      direction: 'YES',
+      sharesHeld: 100,
+      stakeUsd: 50,
+      entryPrice: 0.50,
+      executionVenue: 'clob',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+      topUpCount: 0,
+    };
+    (positionLedger.getOpenPositions as any).mockResolvedValue([ledgerPosition]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([
+      { conditionId: 'cond-su-fb', asset: 'tok-yes', avgPrice: 0.55, size: 160 },
+    ]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue({
+      id: 'numeric-su-fb', question: 'Highest temperature in Chicago today?',
+      conditionId: 'cond-su-fb', clobTokenIds: ['tok-yes', 'tok-no'],
+    });
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-su-fb', tokenId: 'tok-yes', price: 0.62, size: 60,
+      postedAt: Date.now() - 60_000, expiresAt: Date.now() + 60_000,
+      consensusP: 0.7, direction: 'YES', sourcedFrom: 'weather:chicago',
+    });
+    (clob.getOrderFillVwap as any).mockRejectedValueOnce(new Error('clob timeout'));
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // VWAP unavailable → posted price basis (60 × 0.62 = 37.2), still a size-up
+    // heal rather than a generic share heal.
+    expect(positionLedger.sizeUpPosition).toHaveBeenCalledWith(
+      mockRedis, 'numeric-su-fb', 'YES',
+      expect.closeTo(60, 5), expect.closeTo(37.2, 5), expect.closeTo(0.62, 5),
+    );
+    expect(positionLedger.updatePositionShares).not.toHaveBeenCalled();
   });
 
   it('cancels the residual resting order when an async size-up fills only partially', async () => {

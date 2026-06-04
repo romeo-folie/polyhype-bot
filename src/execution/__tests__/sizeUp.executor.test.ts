@@ -18,6 +18,7 @@ vi.mock('../../shared/clob.js', () => ({
   getClobOrderBook: vi.fn().mockResolvedValue(null),
   submitClobLimitBuy: vi.fn(),
   getClobOrder: vi.fn(),
+  getOrderFillVwap: vi.fn().mockResolvedValue(null),
   cancelClobOrder: vi.fn(),
   CLOB_MIN_ORDER_USD: 1.0,
 }));
@@ -285,6 +286,27 @@ describe('evaluateSizeUp via executeAndRecordSignal — executor path', () => {
     expect(result.skipReason).toBe('size_up_ineligible');
     expect(mockSizeUpPos).not.toHaveBeenCalled();
     expect(mockSubmitClob).not.toHaveBeenCalled();
+  });
+
+  it('zero entry price: drift gate is skipped for zero-basis healed positions (no false positive)', async () => {
+    // A position healed with no recoverable cost basis (entryPrice=0, e.g. Ankara
+    // 2416074) must NOT be drift-blocked: drift against a 0 basis is just
+    // outcomePrice, which exceeds any sane SIZE_UP_MAX_ENTRY_DRIFT and would
+    // permanently block every top-up of that position.
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ entryPrice: 0, stakeUsd: 5, sharesHeld: 11 }));
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob', shares_bought: 10 });
+    const redis = makeRedis();
+
+    // outcomePrice 0.50 − entry 0 = 0.50 > SIZE_UP_MAX_ENTRY_DRIFT=0.15: the old
+    // gate returned entry_drift_too_high here; the zero-basis guard must proceed.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ outcomePrice: 0.50 }), redis as any);
+
+    expect(result.skipped).toBeFalsy();
+    expect(result.skipReason).not.toBe('size_up_ineligible');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((result as any).isSizeUp).toBe(true);
+    expect(mockSizeUpPos).toHaveBeenCalledOnce();
   });
 
   it('entry_drift_within_limit: allows size-up when drift is at or below SIZE_UP_MAX_ENTRY_DRIFT', async () => {

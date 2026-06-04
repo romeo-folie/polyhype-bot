@@ -6,6 +6,8 @@ vi.mock('../../shared/clob.js', () => ({
   getClobOrderBook: vi.fn(),
   submitClobLimitBuy: vi.fn(),
   getClobOrder: vi.fn(),
+  // Default null → callers fall back to the posted price (pre-VWAP behaviour).
+  getOrderFillVwap: vi.fn().mockResolvedValue(null),
   cancelClobOrder: vi.fn(),
   CLOB_MIN_ORDER_USD: 1.0,
 }));
@@ -110,7 +112,7 @@ vi.mock('../../shared/telemetry.js', () => ({
   recordExecutionEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
-const { submitClobBuy, getClobOrderBook, submitClobLimitBuy, getClobOrder, cancelClobOrder } =
+const { submitClobBuy, getClobOrderBook, submitClobLimitBuy, getClobOrder, getOrderFillVwap, cancelClobOrder } =
   await import('../../shared/clob.js');
 const { hasOpenPosition } = await import('../positionLedger.js');
 const { recordExecutionMetric, recordExecutionTiming, recordExecutionEvent } =
@@ -125,6 +127,7 @@ const mockSubmitClob = vi.mocked(submitClobBuy);
 const mockGetOrderBook = vi.mocked(getClobOrderBook);
 const mockSubmitLimit = vi.mocked(submitClobLimitBuy);
 const mockGetOrder = vi.mocked(getClobOrder);
+const mockGetOrderFillVwap = vi.mocked(getOrderFillVwap);
 const mockCancelOrder = vi.mocked(cancelClobOrder);
 const mockHasPosition = vi.mocked(hasOpenPosition);
 const mockRecordExecutionMetric = vi.mocked(recordExecutionMetric);
@@ -1242,6 +1245,10 @@ describe('empty-book maker route', () => {
     mockGetOrderBook.mockResolvedValue(makeGhostBook());
     mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-eb' });
     mockGetOrder.mockResolvedValue(null);
+    // Default: no attributable fills — callers fall back to the posted price
+    // (pre-VWAP behaviour), keeping the existing expectations valid.
+    mockGetOrderFillVwap.mockReset();
+    mockGetOrderFillVwap.mockResolvedValue(null);
     mockCancelOrder.mockResolvedValue(true);
     mockHasPosition.mockResolvedValue(false);
     mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob' });
@@ -2373,6 +2380,131 @@ describe('empty-book maker route', () => {
     expect(mockDeletePendingOrder).toHaveBeenCalled();
     // Idempotency key set (partial fill counts as a real fill)
     expect(redis.set).toHaveBeenCalled();
+  });
+
+  it('prices a resumed fill at the trade VWAP, not the posted limit price', async () => {
+    // GTC posted at 0.63 crossed the book at post time and actually filled at
+    // 0.55 — the recorded stake and entryPrice must reflect the actual cost.
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'order-vwap',
+      tokenId: 'tok-yes',
+      price: 0.63,
+      size: 7.94,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 600_000,
+      consensusP: 0.65,
+      direction: 'YES',
+    });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-vwap',
+      status: 'filled',
+      owner: '0x1',
+      maker_address: '0x1',
+      // Distinct from the signal's conditionId ('cond-test') to assert the
+      // trades query is scoped by the ORDER's market field.
+      market: 'cond-from-order',
+      asset_id: 'tok-yes',
+      side: 'BUY',
+      original_size: '7.94',
+      size_matched: '7.94',
+      price: '0.63',
+      associate_trades: ['trade-1'],
+      outcome: 'YES',
+      created_at: Date.now() - 60_000,
+      expiration: '',
+      order_type: 'GTC',
+    });
+    mockGetOrderFillVwap.mockResolvedValue({ sharesFilled: 7.94, avgFillPrice: 0.55 });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
+
+    expect(result.skipped).toBe(false);
+    // Scoped by the order's condition id (OpenOrder.market) and the order's asset.
+    expect(mockGetOrderFillVwap).toHaveBeenCalledWith('order-vwap', 'cond-from-order', 'tok-yes', 7.94);
+    // entryPrice = actual VWAP, NOT the posted 0.63
+    expect(result.entryPrice).toBe(0.55);
+    // stake = matched × VWAP (7.94 × 0.55 = 4.367), NOT matched × posted (5.0022)
+    expect(result.signal.stakeUsd).toBeCloseTo(7.94 * 0.55, 6);
+  });
+
+  it('falls back to the posted price when fill VWAP is unattributable', async () => {
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'order-noattr',
+      tokenId: 'tok-yes',
+      price: 0.63,
+      size: 7.94,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 600_000,
+      consensusP: 0.65,
+      direction: 'YES',
+    });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-noattr',
+      status: 'filled',
+      owner: '0x1',
+      maker_address: '0x1',
+      market: 'cond-test',
+      asset_id: 'tok-yes',
+      side: 'BUY',
+      original_size: '7.94',
+      size_matched: '7.94',
+      price: '0.63',
+      associate_trades: [],
+      outcome: 'YES',
+      created_at: Date.now() - 60_000,
+      expiration: '',
+      order_type: 'GTC',
+    });
+    mockGetOrderFillVwap.mockResolvedValue(null);
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.entryPrice).toBe(0.63);
+    expect(result.signal.stakeUsd).toBeCloseTo(7.94 * 0.63, 6);
+  });
+
+  it('falls back to the posted price when the fill VWAP fetch rejects', async () => {
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'order-vwap-err',
+      tokenId: 'tok-yes',
+      price: 0.63,
+      size: 7.94,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 600_000,
+      consensusP: 0.65,
+      direction: 'YES',
+    });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-vwap-err',
+      status: 'filled',
+      owner: '0x1',
+      maker_address: '0x1',
+      market: 'cond-test',
+      asset_id: 'tok-yes',
+      side: 'BUY',
+      original_size: '7.94',
+      size_matched: '7.94',
+      price: '0.63',
+      associate_trades: [],
+      outcome: 'YES',
+      created_at: Date.now() - 60_000,
+      expiration: '',
+      order_type: 'GTC',
+    });
+    mockGetOrderFillVwap.mockRejectedValue(new Error('clob timeout'));
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'oracle-lag' }), redis as any);
+
+    expect(result.skipped).toBe(false);
+    expect(result.entryPrice).toBe(0.63);
+    expect(result.signal.stakeUsd).toBeCloseTo(7.94 * 0.63, 6);
   });
 
   it('cycle-start cleanup cancels expired pending order and re-posts new order', async () => {

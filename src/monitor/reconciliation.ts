@@ -4,7 +4,7 @@ import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { getOpenPositions, closePosition, recordPosition, updatePositionShares, sizeUpPosition, type Position } from '../execution/positionLedger.js';
 import { getHyperliquid } from '../shared/hyperliquid.js';
-import { fetchClobTokenBalance, cancelClobOrder } from '../shared/clob.js';
+import { fetchClobTokenBalance, cancelClobOrder, getOrderFillVwap } from '../shared/clob.js';
 import { loadConfig } from '../shared/config.js';
 import { fetchPolymarketPositions, type PolymarketPosition } from '../shared/polymarketData.js';
 import { fetchMarketByConditionId, type GammaMarket } from '../shared/polymarketGamma.js';
@@ -511,10 +511,22 @@ async function tryReconcileSizeUpFill(
     const src = rawPending.sourcedFrom ?? ledgerPos.sourcedFrom ?? '';
     if (!eligibleSources.some((s) => src.startsWith(s))) return false;
 
-    // Maker orders fill at their posted limit price, so the marginal cost of the
-    // newly filled shares is exactly additionalShares * price — no need to derive
-    // it from the on-chain blended average.
-    const fillPrice = rawPending.price;
+    // Price the top-up at the actual fill VWAP from CLOB trade records. The
+    // posted limit price is only an upper bound: a GTC that crosses the book at
+    // post time fills at the resting orders' (better) prices, and pricing the
+    // heal at the posted limit inflates the position's cost basis — observed
+    // healed entries at exactly the posted price (0.53) while on-chain fills
+    // were cheaper, eating size-up headroom under the path stake cap.
+    // Falls back to the posted price when fills can't be attributed.
+    const fillVwap = ledgerPos.conditionId
+      ? await getOrderFillVwap(
+          rawPending.orderId,
+          ledgerPos.conditionId,
+          rawPending.tokenId,
+          additionalShares,
+        ).catch(() => null)
+      : null;
+    const fillPrice = fillVwap?.avgFillPrice ?? rawPending.price;
     const additionalStake = additionalShares * fillPrice;
     // Defensive: a corrupt/zero stored price would write NaN/0 cost basis. Bail to
     // the generic heal (which has its own finite-stake guard) rather than corrupt.
