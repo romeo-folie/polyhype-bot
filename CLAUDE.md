@@ -58,7 +58,10 @@ redis-cli KEYS '*lock*'          # verify no stale locks after restart
   Branch naming: `feat/<slug>`, `fix/<slug>`, `chore/<slug>`. Open PR, wait for merge.
   After creating a PR, start a Monitor task to watch for comments and status. When the PR status shows `merged=true`, stop the monitor task with `TaskStop`.
 - **Every new feature or behavioural change must include Vitest tests** that verify the new behaviour. Updating tests to match changed signatures is not sufficient — tests must assert the actual new behaviour (e.g. that a bracket signal is not emitted on a skipped primary, that a direction-aware key is used, etc.). Never submit a PR without new or updated tests covering the change.
-- **Before opening a PR, pushing new commits to an existing PR, or pushing directly to `main`: run `/code-review --effort high` on the diff, fix every CONFIRMED and PLAUSIBLE finding, then re-run the review. Repeat until the review returns `[]`. Only then push/open the PR.**
+- **Review loop before any push** (new PRs, new commits to an existing PR, direct pushes to `main`): review the diff, fix every CONFIRMED and PLAUSIBLE finding, re-run the review. Repeat until the review returns `[]`. Only then push/open the PR.
+  - **"The code reviewer" = the feature-dev plugin's `code-reviewer` agent** (launch via the Agent tool, `subagent_type: feature-dev:code-reviewer`). Use it for the iterative review rounds — it's a single agent per round and cheap to repeat.
+  - The standalone **`/code-review` skill** (e.g. `--effort high`) fans out many subagents and is **expensive** — reserve it for one final pass on a substantial change, or a genuinely large/risky diff. Never use it for repeated fix-verify rounds.
+  - If feature-dev isn't installed or fails to load, repair/install it (`claude plugin marketplace add anthropics/claude-plugins-official`, then `claude plugin install feature-dev@claude-plugins-official`) rather than falling back to repeated `/code-review` runs.
 - **After a PR merges into `main`, redeploy the affected container(s).** Claude Code runs on the Hetzner prod server — merging does not restart running workers. Pull `main`, then run `scripts/deploy.sh <service...>` for the service(s) whose source changed:
   - `pga-arb` → `src/arb/*`
   - `pga-monitor` → `src/monitor/*` **except** `src/monitor/futuresMonitor.ts`

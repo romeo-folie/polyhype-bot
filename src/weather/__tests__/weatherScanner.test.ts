@@ -3254,6 +3254,51 @@ describe('buildWeatherFillShadow', () => {
     isResolutionDay: false,
   };
 
+  it('sources postedPrice from the benchmark makerPostedPrice on fills, not the VWAP entryPrice', () => {
+    // On maker FILLS, result.entryPrice is the actual fill VWAP (can sit below
+    // the posted limit when the GTC crossed at post time). The shadow compares
+    // the POSTED price against the side market, so it must read the benchmark's
+    // makerPostedPrice — logging the VWAP here would corrupt the fill-priority
+    // analytics this shadow exists for.
+    const shadow = buildWeatherFillShadow({
+      leg: 'primary',
+      side: 'NO',
+      gammaSideMid: 0.65,
+      edge: 0.2,
+      opp: baseOpp,
+      result: {
+        entryPrice: 0.55, // actual fill VWAP
+        skipped: false,
+        entryExecutionPath: 'maker_fill',
+        sharesFilled: 7.94,
+        wasEmptyBook: true,
+        decisionBenchmark: { decisionMidPrice: 0.5, makerPostedPrice: 0.63 },
+      },
+    });
+    expect(shadow.postedPrice).toBe(0.63);
+    // gap computed off the posted price: (0.63-0.65)/0.65 ≈ -308 bps
+    expect(shadow.gapVsGammaBps).toBe(-308);
+  });
+
+  it('falls back to entryPrice for postedPrice when no maker benchmark exists', () => {
+    const shadow = buildWeatherFillShadow({
+      leg: 'primary',
+      side: 'NO',
+      gammaSideMid: 0.65,
+      edge: 0.2,
+      opp: baseOpp,
+      result: {
+        entryPrice: 0.52,
+        skipped: false,
+        entryExecutionPath: 'clob_direct',
+        sharesFilled: 10,
+        wasEmptyBook: false,
+        decisionBenchmark: undefined,
+      },
+    });
+    expect(shadow.postedPrice).toBe(0.52);
+  });
+
   it('reports negative gap-vs-gamma when the leg rests below the scan-time Gamma price', () => {
     const shadow = buildWeatherFillShadow({
       leg: 'primary',

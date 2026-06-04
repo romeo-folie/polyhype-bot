@@ -19,7 +19,7 @@
  */
 
 import { ClobClient, OrderType, Side, AssetType, Chain } from '@polymarket/clob-client-v2';
-import type { OrderBookSummary, OpenOrder, TickSize } from '@polymarket/clob-client-v2';
+import type { OrderBookSummary, OpenOrder, TickSize, Trade } from '@polymarket/clob-client-v2';
 import { Wallet, Contract, Interface, JsonRpcProvider, Network, FetchRequest, solidityPackedKeccak256 } from 'ethers';
 import { loadConfig, CTF_ADDRESS, PUSD_ADDRESS, POLYGON_FALLBACK_RPCS } from './config.js';
 import { logger } from './logger.js';
@@ -539,6 +539,167 @@ export async function getClobOrder(orderId: string): Promise<OpenOrder | null> {
       error: err instanceof Error ? err.message : String(err),
     });
     return null;
+  }
+}
+
+export interface OrderFillVwap {
+  /** Total shares attributed to the order across its trades. */
+  sharesFilled: number;
+  /** Volume-weighted average fill price in the ORDER's asset terms. */
+  avgFillPrice: number;
+}
+
+/**
+ * Compute the volume-weighted average fill price for one of our orders from
+ * the authenticated CLOB trade history.
+ *
+ * GTC limit orders can fill at BETTER-than-posted prices: at post time the
+ * matching engine converts e.g. BUY NO @ P into SELL YES @ (1-P) and crosses
+ * any resting complementary orders, executing at the resting orders' prices.
+ * Pricing such fills at the posted limit overstates cost basis (observed:
+ * posted 0.26 → filled 0.2178), which inflates ledger stake/entryPrice and
+ * eats size-up headroom under the path stake cap.
+ *
+ * Attribution covers both sides of a match:
+ *   - taker fills: `trade.taker_order_id === orderId` → each maker_orders[]
+ *     entry contributes matched_amount @ its price, flipped to (1 - p) when
+ *     the maker's asset is the complementary token (mint match).
+ *   - maker fills: a maker_orders[] entry with `order_id === orderId`
+ *     contributes matched_amount @ its own posted price.
+ *
+ * getTrades is L2-authenticated and returns only OUR trades in the condition,
+ * so the full-pagination walk is over a handful of records, not the market's
+ * whole tape. Fees are not modelled: maker fills are fee-free, and Polymarket
+ * taker fees are currently 0% — revisit if fee markets ever apply here.
+ *
+ * Returns null (caller falls back to the posted price) when trades can't be
+ * fetched (including the shared CLOB timeout), nothing is attributable, the
+ * attributed share count diverges from `expectedShares`, or the resulting
+ * VWAP is not a sane (0, 1) price.
+ */
+export async function getOrderFillVwap(
+  orderId: string,
+  conditionId: string,
+  orderAssetId: string,
+  expectedShares?: number,
+): Promise<OrderFillVwap | null> {
+  if (!orderId || !conditionId) return null;
+  let trades: Trade[];
+  try {
+    const client = await getClobClient();
+    trades = (await orderWithTimeout(client.getTrades({ market: conditionId }))) ?? [];
+  } catch (err) {
+    logger.warn('[clob] failed to fetch trades for fill VWAP', {
+      orderId,
+      conditionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+
+  let shares = 0;
+  let cost = 0;
+  for (const trade of trades) {
+    // Trade lifecycle is MATCHED → MINED → CONFIRMED, with RETRYING/FAILED on
+    // on-chain failure. A FAILED match never settled (and may coexist with a
+    // re-emitted retry record), so counting it would inject phantom fills the
+    // lower-bound coverage check below cannot catch. Skip both failure states;
+    // an unknown/missing status is treated as countable.
+    const status = String(trade.status ?? '').toUpperCase();
+    if (status === 'FAILED' || status === 'RETRYING') continue;
+    const makerOrders = trade.maker_orders ?? [];
+    if (trade.taker_order_id === orderId) {
+      // We were the taker — fills executed at each resting maker order's price.
+      for (const mo of makerOrders) {
+        const sz = parseFloat(mo.matched_amount);
+        const p = parseFloat(mo.price);
+        if (!Number.isFinite(sz) || sz <= 0 || !Number.isFinite(p) || p <= 0) continue;
+        // Same-asset match (e.g. our BUY NO crossed a SELL NO) fills at p;
+        // complementary-asset match (our BUY NO crossed a BUY YES mint) fills
+        // at (1 - p) in our token's terms. Share counts are equal on both
+        // sides of a mint, so sz needs no conversion. Every CLOB condition is
+        // a 2-token binary (neg-risk is an event-level construct), so the only
+        // foreign asset inside one conditionId is the strict complement.
+        const priceOurs = mo.asset_id === orderAssetId ? p : 1 - p;
+        if (priceOurs <= 0 || priceOurs >= 1) continue;
+        shares += sz;
+        cost += sz * priceOurs;
+      }
+    } else {
+      // We may have been a maker in this trade — resting fills execute at our
+      // own posted price, already in our asset's terms. One trade lists each
+      // distinct maker order at most once (chunked maker fills arrive as
+      // separate trades, summed by the outer loop).
+      const mo = makerOrders.find((m) => m.order_id === orderId);
+      if (!mo) continue;
+      const sz = parseFloat(mo.matched_amount);
+      const p = parseFloat(mo.price);
+      if (!Number.isFinite(sz) || sz <= 0 || !Number.isFinite(p) || p <= 0 || p >= 1) continue;
+      shares += sz;
+      cost += sz * p;
+    }
+  }
+
+  if (shares <= 0 || cost <= 0) return null;
+  // Coverage check: if the trades we attributed don't account for (almost) all
+  // of the order's known matched size, the VWAP is computed on a subset and
+  // could skew either way — fall back to the posted price instead.
+  if (expectedShares != null && expectedShares > 0 && shares < expectedShares * 0.99) {
+    logger.warn('[clob] fill VWAP coverage below matched size — falling back to posted price', {
+      orderId,
+      attributedShares: +shares.toFixed(4),
+      expectedShares: +expectedShares.toFixed(4),
+    });
+    return null;
+  }
+  const avgFillPrice = cost / shares;
+  if (!Number.isFinite(avgFillPrice) || avgFillPrice <= 0 || avgFillPrice >= 1) return null;
+  return { sharesFilled: shares, avgFillPrice };
+}
+
+/**
+ * Resolve the price to record for a filled maker order: the actual fill VWAP
+ * when attributable from CLOB trade records, otherwise the posted limit price.
+ *
+ * Single choke point for the "VWAP with posted-price fallback" contract shared
+ * by the executor's resume-poll and wait-poll paths and the reconciler's
+ * size-up heal — so the attribution/fallback rule (and its observability)
+ * can't drift between call sites. Never throws.
+ */
+export async function resolveOrderFillPrice(
+  orderId: string,
+  conditionId: string | undefined,
+  orderAssetId: string,
+  matchedShares: number,
+  postedPrice: number,
+): Promise<number> {
+  if (!conditionId) return postedPrice;
+  try {
+    const vwap = await getOrderFillVwap(orderId, conditionId, orderAssetId, matchedShares);
+    if (vwap == null) {
+      logger.debug('[clob] fill VWAP unattributable — using posted price', {
+        orderId,
+        conditionId,
+        postedPrice,
+      });
+      return postedPrice;
+    }
+    if (Math.abs(vwap.avgFillPrice - postedPrice) > 1e-9) {
+      logger.info('[clob] maker fill priced at trade VWAP (differs from posted)', {
+        orderId,
+        postedPrice,
+        avgFillPrice: +vwap.avgFillPrice.toFixed(4),
+        attributedShares: +vwap.sharesFilled.toFixed(4),
+        matchedShares: +matchedShares.toFixed(4),
+      });
+    }
+    return vwap.avgFillPrice;
+  } catch (err) {
+    logger.warn('[clob] fill price resolution failed — using posted price', {
+      orderId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return postedPrice;
   }
 }
 

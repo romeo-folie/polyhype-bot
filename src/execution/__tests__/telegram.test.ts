@@ -115,6 +115,34 @@ describe('Telegram notifications', () => {
       await expect(notifyTradeExecuted(makeSignal(), undefined)).resolves.not.toThrow();
     });
 
+    it('renders the actual fill price as Entry price when opts.entryPrice is passed (CLOB)', async () => {
+      // Maker fills can execute below the scan-time market (trade VWAP). The
+      // rendered entry must reconcile with the (actual-cost) stake, so the
+      // fill price overrides signal.outcomePrice when provided.
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+      await notifyTradeExecuted(
+        makeSignal({ outcomePrice: 0.63 }),
+        undefined,
+        { venue: 'clob', sharesFilled: 7.94, entryPrice: 0.55 },
+      );
+
+      const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(opts.body as string) as { text: string };
+      expect(body.text).toContain('Entry price:</b> 0.550 (55.0% implied)');
+      expect(body.text).not.toContain('0.630 (63.0% implied)');
+    });
+
+    it('falls back to signal.outcomePrice as Entry price when opts.entryPrice is absent', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+      await notifyTradeExecuted(makeSignal({ outcomePrice: 0.63 }), undefined, { venue: 'clob' });
+
+      const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(opts.body as string) as { text: string };
+      expect(body.text).toContain('Entry price:</b> 0.630 (63.0% implied)');
+    });
+
     it('formats Hyperliquid meme entries with higher precision', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
 
