@@ -136,6 +136,8 @@ function makeConfig(overrides = {}) {
     WEATHER_BIAS_TRUSTED_SAMPLES: 14,
     WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER: 1.2,
     WEATHER_STDDEV_MULTIPLIER: 1.0,
+    WEATHER_FORECAST_RETRY_COUNT: 0,
+    WEATHER_FORECAST_CACHE_TTL_S: 10_800,
     ...overrides,
   };
 }
@@ -149,6 +151,7 @@ function makePosition(overrides = {}) {
     sharesHeld: 10,
     consensusProbability: 0.30, // P(YES)=0.30 → P(NO) at entry = 0.70
     sourcedFrom: 'weather:chicago:2026-05-31:39°F or below',
+    question: null, // populated for reconciled:weather coverage tests
     ...overrides,
   };
 }
@@ -288,7 +291,12 @@ describe('runWeatherInvalidationScan', () => {
         payload: expect.objectContaining({ invalidated: false }),
       }),
     );
-    expect(redis.set).not.toHaveBeenCalled();
+    // No INVALIDATION key may be set (the forecast-cache write also uses
+    // redis.set, so assert on the key prefix rather than zero calls).
+    const invalidationSets = redis.set.mock.calls.filter((c) =>
+      String(c[0]).startsWith('weather:forecast_invalidated:'),
+    );
+    expect(invalidationSets).toHaveLength(0);
   });
 
   it('invalidates NO position when held-side drop ≥ MIN_DROP and currentHeldProb ≤ threshold', async () => {
@@ -313,7 +321,12 @@ describe('runWeatherInvalidationScan', () => {
       }),
     );
     // invalidationEnabled=false → no Redis key
-    expect(redis.set).not.toHaveBeenCalled();
+    // No INVALIDATION key may be set (the forecast-cache write also uses
+    // redis.set, so assert on the key prefix rather than zero calls).
+    const invalidationSets = redis.set.mock.calls.filter((c) =>
+      String(c[0]).startsWith('weather:forecast_invalidated:'),
+    );
+    expect(invalidationSets).toHaveLength(0);
   });
 
   it('invalidates YES position when held-side drop ≥ MIN_DROP and currentHeldProb ≤ threshold', async () => {
@@ -397,7 +410,12 @@ describe('runWeatherInvalidationScan', () => {
 
     await runWeatherInvalidationScan(redis as any);
 
-    expect(redis.set).not.toHaveBeenCalled();
+    // No INVALIDATION key may be set (the forecast-cache write also uses
+    // redis.set, so assert on the key prefix rather than zero calls).
+    const invalidationSets = redis.set.mock.calls.filter((c) =>
+      String(c[0]).startsWith('weather:forecast_invalidated:'),
+    );
+    expect(invalidationSets).toHaveLength(0);
   });
 
   it('skips hedge execution (but still revalidates) for already-hedged positions', async () => {
@@ -1314,5 +1332,245 @@ describe('runWeatherInvalidationScan — Phase 5 resolution-day exit', () => {
     expect(mockFetchForecast).not.toHaveBeenCalled();
     expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
     expect(mockNotifyWeatherInvalidationNoHedge).not.toHaveBeenCalled();
+  });
+});
+
+// ── Forecast resilience + reconciled:weather coverage ────────────────────────
+
+describe('runWeatherInvalidationScan — forecast resilience and reconciled coverage', () => {
+  // Date-independent fixtures: derive tomorrow's month/day so the question
+  // parser's year inference always lands on the fixture's targetDate.
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const tomorrowIso = tomorrow.toISOString().slice(0, 10);
+  const MONTH_NAMES = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  const qMonth = MONTH_NAMES[tomorrow.getUTCMonth()]!;
+  const qDay = tomorrow.getUTCDate();
+  const amsterdamQuestion =
+    `Will the highest temperature in Amsterdam be 18°C on ${qMonth} ${qDay}?`;
+
+  function makeAmsterdamEvent() {
+    return makeParsedEvent({
+      city: 'amsterdam',
+      targetDate: tomorrowIso,
+      coords: { tz: 'Europe/Amsterdam' },
+      brackets: [{ label: '18°C', low: 18, high: 18, marketId: 'mkt-ams' }],
+    });
+  }
+
+  function makeReconciledPosition(overrides = {}) {
+    return makePosition({
+      id: 'pos-rec-1',
+      marketId: 'mkt-ams',
+      direction: 'NO' as const,
+      entryPrice: 0.62,
+      consensusProbability: null, // imported rows carry no model prob
+      sourcedFrom: 'reconciled:weather',
+      question: amsterdamQuestion,
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockLoadConfig.mockReturnValue(makeConfig());
+    mockFetchWeatherEvents.mockResolvedValue([{}]);
+    mockParseWeatherEvent.mockReturnValue(makeAmsterdamEvent());
+    mockFetchForecast.mockResolvedValue(makeForecast());
+    // parseWeatherMetaFromQuestion validates the bracket via parseBracketLabel.
+    mockParseBracketLabel.mockReturnValue({ low: 18, high: 18, unit: 'celsius' });
+    // Pre-resolution day so the Phase 5 exit path stays out of these tests.
+    mockCityLocalDate.mockReturnValue('1999-01-01');
+  });
+
+  it('evaluates a reconciled:weather position by parsing city/date/bracket from the question', async () => {
+    mockSql.mockResolvedValue([makeReconciledPosition()]);
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await runWeatherInvalidationScan(redis as any);
+
+    // The position is NOT skipped: the forecast fetch and probability model ran.
+    expect(mockFetchForecast).toHaveBeenCalledTimes(1);
+    expect(mockComputeBiasedProb).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a reconciled:weather position whose question names an unsupported city', async () => {
+    mockSql.mockResolvedValue([
+      makeReconciledPosition({
+        question: `Will the highest temperature in Atlantis be 18°C on ${qMonth} ${qDay}?`,
+      }),
+    ]);
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockFetchForecast).not.toHaveBeenCalled();
+  });
+
+  it('skips a reconciled:weather position whose bracket text does not parse', async () => {
+    mockParseBracketLabel.mockReturnValue(null);
+    mockSql.mockResolvedValue([makeReconciledPosition()]);
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockFetchForecast).not.toHaveBeenCalled();
+  });
+
+  it('skips a reconciled:weather position with no question text', async () => {
+    mockSql.mockResolvedValue([makeReconciledPosition({ question: null })]);
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockFetchForecast).not.toHaveBeenCalled();
+  });
+
+  it('uses the entry PRICE as the entry-held-prob baseline when consensusProbability is null', async () => {
+    // Without the guard, `1 - null` = 1 fabricates a perfect entry thesis for
+    // NO rows and false-triggers held_prob_drop. The entry price (0.62) is the
+    // market P(our side) at entry — the correct imported-row baseline.
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.45, // P(YES) → currentHeldProb (NO) = 0.55
+      effectiveStdDev: 1.4,
+      correctedForecastHigh: 17.6,
+      biasMode: 'full',
+    });
+    mockSql.mockResolvedValue([makeReconciledPosition()]);
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await runWeatherInvalidationScan(redis as any);
+
+    const { logger } = await import('../../shared/logger.js');
+    const evalCall = vi
+      .mocked(logger.info)
+      .mock.calls.find((c) => String(c[0]).includes('position evaluated'));
+    expect(evalCall).toBeDefined();
+    const payload = evalCall![1] as { entryHeldProb: number; invalidated: boolean };
+    expect(payload.entryHeldProb).toBeCloseTo(0.62, 6);
+    // drop = 0.62 - 0.55 = 0.07 < MIN_DROP 0.20 → must NOT invalidate
+    expect(payload.invalidated).toBe(false);
+  });
+
+  it('passes allowEnsembleOnly + retryCount to fetchForecast (monitoring opt-in)', async () => {
+    mockSql.mockResolvedValue([makePosition()]);
+    mockParseWeatherEvent.mockReturnValue(makeParsedEvent());
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_FORECAST_RETRY_COUNT: 2 }));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockFetchForecast).toHaveBeenCalledTimes(1);
+    const opts = mockFetchForecast.mock.calls[0]![8];
+    expect(opts).toEqual({ allowEnsembleOnly: true, retryCount: 2 });
+  });
+
+  it('caches a successful live forecast under weather:forecast_cache:<city>:<date>', async () => {
+    mockSql.mockResolvedValue([makePosition()]);
+    mockParseWeatherEvent.mockReturnValue(makeParsedEvent());
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await runWeatherInvalidationScan(redis as any);
+    await new Promise((r) => setTimeout(r, 0)); // cache write is fire-and-forget
+
+    const raw = redis._store.get('weather:forecast_cache:chicago:2026-05-31');
+    expect(raw).toBeDefined();
+    expect((JSON.parse(raw!) as { forecastHigh: number }).forecastHigh).toBe(55);
+  });
+
+  it('falls back to the cached forecast when the live fetch fails', async () => {
+    mockFetchForecast.mockResolvedValue(null);
+    mockSql.mockResolvedValue([makePosition()]);
+    mockParseWeatherEvent.mockReturnValue(makeParsedEvent());
+    const store = new Map<string, string>();
+    store.set(
+      'weather:forecast_cache:chicago:2026-05-31',
+      JSON.stringify({
+        forecastHigh: 54.5,
+        stdDev: 4.8,
+        source: 'combined',
+        ensembleMembers: 31,
+        ensembleModel: 'gfs',
+        fetchedAt: '2026-05-31T10:00:00Z',
+      }),
+    );
+    const redis = makeRedis(store);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await runWeatherInvalidationScan(redis as any);
+
+    // Evaluation proceeded on the cached forecast.
+    expect(mockComputeBiasedProb).toHaveBeenCalledTimes(1);
+    const forecastArg = mockComputeBiasedProb.mock.calls[0]![3] as { forecastHigh: number };
+    expect(forecastArg.forecastHigh).toBe(54.5);
+  });
+
+  it('skips the position when both the live fetch and the cache miss', async () => {
+    mockFetchForecast.mockResolvedValue(null);
+    mockSql.mockResolvedValue([makePosition()]);
+    mockParseWeatherEvent.mockReturnValue(makeParsedEvent());
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockComputeBiasedProb).not.toHaveBeenCalled();
+    expect(enqueueWrite).not.toHaveBeenCalled();
+  });
+});
+
+// ── parseWeatherMetaFromQuestion (pure parser) ───────────────────────────────
+
+describe('parseWeatherMetaFromQuestion', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockParseBracketLabel.mockReturnValue({ low: 18, high: 18, unit: 'celsius' });
+  });
+
+  it('parses city, bracket, and date with an explicit year', async () => {
+    const { parseWeatherMetaFromQuestion } = await import('../weatherInvalidation.js');
+    const result = parseWeatherMetaFromQuestion(
+      'Will the highest temperature in Amsterdam be 18°C on June 4, 2026?',
+    );
+    expect(result).toEqual({
+      city: 'amsterdam',
+      targetDate: '2026-06-04',
+      bracketLabel: '18°C',
+    });
+  });
+
+  it('parses a range bracket and a multi-word city', async () => {
+    mockParseBracketLabel.mockReturnValue({ low: 86, high: 87, unit: 'fahrenheit' });
+    const { parseWeatherMetaFromQuestion } = await import('../weatherInvalidation.js');
+    const result = parseWeatherMetaFromQuestion(
+      'Will the highest temperature in New York be between 86-87°F on July 12, 2026?',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.city).toBe('new york');
+    expect(result!.targetDate).toBe('2026-07-12');
+  });
+
+  it('returns null for a question with no recognisable date', async () => {
+    const { parseWeatherMetaFromQuestion } = await import('../weatherInvalidation.js');
+    expect(
+      parseWeatherMetaFromQuestion('Will the highest temperature in Amsterdam be 18°C someday?'),
+    ).toBeNull();
+  });
+
+  it('returns null when the bracket fails validation', async () => {
+    mockParseBracketLabel.mockReturnValue(null);
+    const { parseWeatherMetaFromQuestion } = await import('../weatherInvalidation.js');
+    expect(
+      parseWeatherMetaFromQuestion('Will the highest temperature in Amsterdam be gibberish on June 4, 2026?'),
+    ).toBeNull();
   });
 });

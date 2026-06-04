@@ -80,6 +80,63 @@ function fetchWithTimeout(url: string, fetchFn: FetchFn = fetch): Promise<Respon
   });
 }
 
+// Backoff between retry attempts: 750ms, then 1500ms (linear, not exponential —
+// the 10s per-attempt timeout already bounds total latency, and the shared
+// rate-limit queue spaces production requests regardless).
+const RETRY_BACKOFF_MS = 750;
+
+/**
+ * fetchWithTimeout plus bounded retries on transient failures.
+ *
+ * Retries 5xx responses and thrown network errors (timeouts/aborts/resets) up
+ * to `retryCount` additional attempts. NEVER retries HTTP 429 — we're already
+ * rate-limited at that point and hammering the API makes it worse; the response
+ * is returned immediately so the caller's existing `!res.ok` logging fires.
+ * Other non-5xx statuses (4xx) are returned immediately as well.
+ *
+ * `retryCount = 0` (the default) is a transparent pass-through, so direct
+ * callers and existing tests see exactly one attempt unless they opt in.
+ * Production opts in via WEATHER_FORECAST_RETRY_COUNT threaded through
+ * fetchForecast (weatherScanner.ts).
+ */
+async function fetchWithRetry(
+  url: string,
+  fetchFn: FetchFn,
+  retryCount: number,
+): Promise<Response> {
+  const maxAttempts = Math.max(1, retryCount + 1);
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (attempt > 1) {
+      await new Promise<void>((r) => setTimeout(r, RETRY_BACKOFF_MS * (attempt - 1)));
+    }
+    try {
+      const res = await fetchWithTimeout(url, fetchFn);
+      if (res.status === 429) return res; // rate-limited — never retry
+      if (res.status >= 500 && attempt < maxAttempts) {
+        logger.debug('[weather] retrying Open-Meteo after 5xx', {
+          status: res.status,
+          attempt,
+          maxAttempts,
+        });
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        logger.debug('[weather] retrying Open-Meteo after network error', {
+          error: err instanceof Error ? err.message : String(err),
+          attempt,
+          maxAttempts,
+        });
+        continue;
+      }
+    }
+  }
+  throw lastErr;
+}
+
 // ── Open-Meteo response shapes ─────────────────────────────────────────────
 
 interface DailyForecastResponse {
@@ -121,6 +178,7 @@ export async function fetchOpenMeteoForecast(
   targetDate: string,
   unit: 'fahrenheit' | 'celsius' = 'fahrenheit',
   fetchFn?: FetchFn,
+  retryCount = 0,
 ): Promise<OpenMeteoForecast | null> {
   const isInjected = fetchFn !== undefined;
   const doFetch = fetchFn ?? fetch;
@@ -138,7 +196,7 @@ export async function fetchOpenMeteoForecast(
     });
 
     const url = `${FORECAST_BASE}?${params.toString()}`;
-    const res = await fetchWithTimeout(url, doFetch);
+    const res = await fetchWithRetry(url, doFetch, retryCount);
 
     if (!res.ok) {
       logger.warn('[weather] Open-Meteo forecast API error', {
@@ -201,6 +259,7 @@ export async function fetchHrrrForecast(
   lon: number,
   targetDate: string,
   fetchFn?: FetchFn,
+  retryCount = 0,
 ): Promise<OpenMeteoForecast | null> {
   const isInjected = fetchFn !== undefined;
   const doFetch = fetchFn ?? fetch;
@@ -222,7 +281,7 @@ export async function fetchHrrrForecast(
     });
 
     const url = `${FORECAST_BASE}?${params.toString()}`;
-    const res = await fetchWithTimeout(url, doFetch);
+    const res = await fetchWithRetry(url, doFetch, retryCount);
 
     if (!res.ok) {
       logger.warn('[weather] HRRR forecast API error', { status: res.status, lat, lon });
@@ -282,6 +341,7 @@ export async function fetchEnsembleForecast(
   unit: 'fahrenheit' | 'celsius' = 'fahrenheit',
   fetchFn?: FetchFn,
   useEcmwf = false,
+  retryCount = 0,
 ): Promise<EnsembleForecast | null> {
   const isInjected = fetchFn !== undefined;
   const doFetch = fetchFn ?? fetch;
@@ -303,7 +363,7 @@ export async function fetchEnsembleForecast(
     });
 
     const url = `${ENSEMBLE_BASE}?${params.toString()}`;
-    const res = await fetchWithTimeout(url, doFetch);
+    const res = await fetchWithRetry(url, doFetch, retryCount);
 
     if (!res.ok) {
       logger.warn('[weather] Open-Meteo ensemble API error', {

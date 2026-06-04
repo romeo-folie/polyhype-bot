@@ -1985,6 +1985,25 @@ export const envSchema = z.object({
   // the calibration finding — so anchoring exits to the model is the wrong default.)
   WEATHER_FORECAST_INVALIDATION_DROP_MARKET_FLOOR: boolFromEnv.optional().default(true),
 
+  // ── Weather forecast resilience ────────────────────────────────────────────
+  // Retries on transient Open-Meteo failures (5xx / network abort) per fetch.
+  // 0 = single attempt. 429 is NEVER retried (already rate-limited). Threaded
+  // through fetchForecast to the deterministic, ensemble, and HRRR fetchers.
+  WEATHER_FORECAST_RETRY_COUNT: z.coerce.number().int().min(0).max(5).optional().default(2),
+  // TTL for the Redis last-good forecast cache (weather:forecast_cache:<city>:<date>).
+  // Written by the scanner and invalidation evaluator on every successful fetch;
+  // read ONLY by the invalidation evaluator as a last resort when live fetches
+  // fail — on a 30-min cadence a ≤3h-stale forecast beats a blind skip
+  // (2026-06-04 Open-Meteo outage blinded the entire invalidation sweep).
+  WEATHER_FORECAST_CACHE_TTL_S: z.coerce.number().int().min(60).optional().default(10_800),
+  // One loud Telegram alert when a scan's forecast failure rate is high, instead
+  // of silent noForecast inflation in the scan summary.
+  WEATHER_OUTAGE_ALERT_ENABLED: boolFromEnv.optional().default(true),
+  // Alert when noForecast / attempted exceeds this fraction (attempted ≥ 5).
+  WEATHER_OUTAGE_FAIL_RATE: z.coerce.number().min(0).max(1).optional().default(0.5),
+  // Suppress repeat outage alerts within this window (SET NX EX dedupe).
+  WEATHER_OUTAGE_ALERT_DEDUP_TTL_S: z.coerce.number().int().min(60).optional().default(14_400),
+
   // ── Weather oracle scanner ─────────────────────────────────────────────────
   // After the reconciler writes WU actuals for yesterday, scans active weather
   // markets for brackets whose outcome is now known but price hasn't fully

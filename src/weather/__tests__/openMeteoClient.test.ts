@@ -314,3 +314,126 @@ describe('fetchHrrrForecast', () => {
     expect(result).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Retry behaviour (retryCount param → fetchWithRetry)
+// ---------------------------------------------------------------------------
+
+describe('retry on transient failures', () => {
+  const goodBody = {
+    daily: {
+      time: ['2026-06-05'],
+      temperature_2m_max: [52.3],
+      temperature_2m_min: [38.1],
+      precipitation_probability_max: [20],
+    },
+  };
+  const ok = { ok: true, status: 200, json: () => Promise.resolve(goodBody) };
+  const bad = (status: number) => ({ ok: false, status, json: () => Promise.resolve({}) });
+
+  it('retries on 5xx and succeeds within the retry budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(bad(502))
+        .mockResolvedValueOnce(bad(503))
+        .mockResolvedValueOnce(ok);
+      const p = fetchOpenMeteoForecast(41.88, -87.63, '2026-06-05', 'fahrenheit', fetchFn, 2);
+      await vi.runAllTimersAsync();
+      const result = await p;
+      expect(fetchFn).toHaveBeenCalledTimes(3);
+      expect(result).not.toBeNull();
+      expect(result!.highTemp).toBeCloseTo(52.3, 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never retries a 429 (rate-limited) even with retry budget', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(bad(429));
+    const result = await fetchOpenMeteoForecast(41.88, -87.63, '2026-06-05', 'fahrenheit', fetchFn, 2);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(result).toBeNull();
+  });
+
+  it('retries thrown network errors (timeout/abort)', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchFn = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('This operation was aborted'))
+        .mockResolvedValueOnce(ok);
+      const p = fetchOpenMeteoForecast(41.88, -87.63, '2026-06-05', 'fahrenheit', fetchFn, 2);
+      await vi.runAllTimersAsync();
+      const result = await p;
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+      expect(result).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops after exhausting the retry budget and returns null', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchFn = vi.fn().mockResolvedValue(bad(502));
+      const p = fetchOpenMeteoForecast(41.88, -87.63, '2026-06-05', 'fahrenheit', fetchFn, 1);
+      await vi.runAllTimersAsync();
+      const result = await p;
+      // retryCount=1 → 2 total attempts
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+      expect(result).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('default retryCount=0 keeps the legacy single-attempt behaviour', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(bad(502));
+    const result = await fetchOpenMeteoForecast(41.88, -87.63, '2026-06-05', 'fahrenheit', fetchFn);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(result).toBeNull();
+  });
+
+  it('fetchEnsembleForecast retries on 5xx', async () => {
+    vi.useFakeTimers();
+    try {
+      const ensembleBody = {
+        daily: {
+          time: ['2026-06-05'],
+          temperature_2m_max: [[20, 21, 22, 23, 24]],
+        },
+      };
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(bad(500))
+        .mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve(ensembleBody) });
+      const p = fetchEnsembleForecast(52.37, 4.9, '2026-06-05', 'celsius', fetchFn, false, 2);
+      await vi.runAllTimersAsync();
+      const result = await p;
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+      expect(result).not.toBeNull();
+      expect(result!.memberCount).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fetchHrrrForecast retries on 5xx', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(bad(502))
+        .mockResolvedValueOnce(ok);
+      const p = fetchHrrrForecast(41.88, -87.63, '2026-06-05', fetchFn, 2);
+      await vi.runAllTimersAsync();
+      const result = await p;
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+      expect(result).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

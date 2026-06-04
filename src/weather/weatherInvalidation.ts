@@ -26,11 +26,13 @@ import { getClobOrderBook, submitClobBuy } from '../shared/clob.js';
 import { deductStake } from '../shared/bankroll.js';
 import { dedup } from '../shared/redis.js';
 import type { FetchFn } from './noaaClient.js';
+import { canonicalCityKey, lookupCity } from './noaaClient.js';
 import { getCityBias } from './cityBias.js';
 import { notifyWeatherInvalidationNoHedge } from '../execution/telegram.js';
 import { getPosition } from '../execution/positionLedger.js';
 import { executeTakeProfit } from '../monitor/takeProfitExecutor.js';
 import { cityLocalDate } from './resolutionTime.js';
+import { cacheForecast, readCachedForecast } from './forecastCache.js';
 // Circular-safe: these are only called at runtime (inside async functions),
 // never at module-initialisation time, so the live bindings are fully resolved
 // before any function body executes.
@@ -41,6 +43,7 @@ import {
   daysUntil,
   computeBiasedProb,
   forecastRoundsIntoBracket,
+  parseBracketLabel,
 } from './weatherScanner.js';
 
 export const FORECAST_INVALIDATED_KEY_PREFIX = 'weather:forecast_invalidated:';
@@ -87,12 +90,19 @@ interface OpenWeatherPosition {
   direction: 'YES' | 'NO';
   entryPrice: number;
   sharesHeld: number;
-  consensusProbability: number;
+  /** Null for reconciler-imported rows with no linked maker order. */
+  consensusProbability: number | null;
   sourcedFrom: string;
+  /** Market question text — the city/date/bracket source for reconciled rows. */
+  question: string | null;
 }
 
 async function fetchOpenWeatherPositions(): Promise<OpenWeatherPosition[]> {
   const sql = getSql();
+  // reconciled:weather% covers reconciler-imported and manually-entered
+  // positions — previously these were silently invisible to ALL invalidation
+  // monitoring (found 2026-06-04: a manual Amsterdam re-entry never appeared
+  // in any sweep). Their city/date/bracket are derived from `question`.
   return sql<OpenWeatherPosition[]>`
     SELECT
       id::text                      AS id,
@@ -101,9 +111,10 @@ async function fetchOpenWeatherPositions(): Promise<OpenWeatherPosition[]> {
       entry_price::float8           AS "entryPrice",
       shares_held::float8           AS "sharesHeld",
       consensus_probability::float8 AS "consensusProbability",
-      sourced_from                  AS "sourcedFrom"
+      sourced_from                  AS "sourcedFrom",
+      question                      AS "question"
     FROM positions
-    WHERE sourced_from LIKE 'weather:%'
+    WHERE (sourced_from LIKE 'weather:%' OR sourced_from LIKE 'reconciled:weather%')
       AND pending_settlement = false
       AND closed_at IS NULL
       AND shares_held > 0
@@ -117,10 +128,76 @@ interface ParsedSourcedFrom {
   bracketLabel: string;
 }
 
-function parseWeatherSourcedFrom(sourcedFrom: string): ParsedSourcedFrom | null {
+const MONTHS: Record<string, number> = {
+  january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+  july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+};
+
+/**
+ * Derive {city, targetDate, bracketLabel} from a market question of the form
+ * "Will the highest temperature in <City> be <bracket> on <Month D>?".
+ *
+ * Used for reconciled:weather positions whose sourcedFrom carries no embedded
+ * metadata. Returns null on any parse failure — the position is then skipped
+ * (better than evaluating against the wrong bracket). The city is canonicalised
+ * so it matches ParsedWeatherEvent.city; the bracket label must exactly match
+ * Gamma's groupItemTitle (the question embeds it verbatim).
+ */
+export function parseWeatherMetaFromQuestion(question: string): ParsedSourcedFrom | null {
+  const cityMatch = question.match(
+    /highest temperature in ([^?]+?) (?:be |exceed |fall |drop |reach |\d)/i,
+  );
+  if (!cityMatch?.[1]) return null;
+  const cityRaw = cityMatch[1].trim().toLowerCase();
+  const city = canonicalCityKey(cityRaw) ?? cityRaw;
+  if (!lookupCity(city)) return null;
+
+  // Bracket label: the text between "be " and " on <Month>", e.g. "18°C",
+  // "39°F or below", "86-87°F". Validate it parses as a real bracket so a
+  // question with unexpected phrasing fails closed.
+  const bracketMatch = question.match(/\bbe\s+(.+?)\s+on\s+[A-Za-z]/i);
+  if (!bracketMatch?.[1]) return null;
+  const bracketLabel = bracketMatch[1].trim();
+  if (!parseBracketLabel(bracketLabel)) return null;
+
+  // Date: "on <Month> <D>[st|nd|rd|th][, <YYYY>]". Build YYYY-MM-DD directly
+  // from the month/day tokens — round-tripping through a local-noon Date and
+  // toISOString can shift the calendar day depending on host timezone.
+  const dateMatch = question.match(/\bon\s+([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?\s*\?*\s*$/i);
+  if (!dateMatch?.[1] || !dateMatch[2]) return null;
+  const month = MONTHS[dateMatch[1].toLowerCase()];
+  const day = parseInt(dateMatch[2], 10);
+  if (!month || day < 1 || day > 31) return null;
+  // Year inference when absent: open positions are days old at most, so pick
+  // the year that puts the date within a sane window — a December market read
+  // in January belongs to LAST year? No: weather positions only exist pre-
+  // resolution, so the date is today-ish or in the near future. If the
+  // current-year date is >180 days in the past, it's a year-boundary artifact
+  // (e.g. "January 2" parsed in late December) → next year.
+  let year = dateMatch[3] ? parseInt(dateMatch[3], 10) : new Date().getUTCFullYear();
+  if (!dateMatch[3]) {
+    const candidate = Date.UTC(year, month - 1, day);
+    if (Date.now() - candidate > 180 * 24 * 3600 * 1000) year += 1;
+  }
+  const targetDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+
+  return { city, targetDate, bracketLabel };
+}
+
+function parseWeatherSourcedFrom(
+  sourcedFrom: string,
+  question?: string | null,
+): ParsedSourcedFrom | null {
   const m = sourcedFrom.match(SOURCED_FROM_RE);
-  if (!m?.[1] || !m[2] || !m[3]) return null;
-  return { city: m[1], targetDate: m[2], bracketLabel: m[3] };
+  if (m?.[1] && m[2] && m[3]) {
+    return { city: m[1], targetDate: m[2], bracketLabel: m[3] };
+  }
+  // reconciled:weather rows carry no embedded metadata — fall back to the
+  // market question text.
+  if (sourcedFrom.startsWith('reconciled:weather') && question) {
+    return parseWeatherMetaFromQuestion(question);
+  }
+  return null;
 }
 
 interface ExitOrNotifyOpts {
@@ -398,7 +475,7 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
 
   for (const pos of positions) {
     try {
-      const parsed = parseWeatherSourcedFrom(pos.sourcedFrom);
+      const parsed = parseWeatherSourcedFrom(pos.sourcedFrom, pos.question);
       if (!parsed) {
         logger.debug('[weather-invalidation] unparseable sourcedFrom — skipping', {
           positionId: pos.id,
@@ -474,7 +551,11 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
       // In particular, HRRR must be enabled for same-day US markets when
       // WEATHER_HRRR_ENABLED=true, otherwise the invalidation guard would use a
       // different (and weaker) deterministic base than the entry/size-up scanner.
-      const forecast = await fetchForecast(
+      // Monitoring may use the ensemble-only fallback (allowEnsembleOnly): when
+      // all deterministic sources fail but the ensemble endpoint is up, the
+      // ensemble mean keeps invalidation coverage alive through provider
+      // outages. Fresh ENTRIES never get this fallback.
+      let forecast = await fetchForecast(
         event,
         daysOut,
         fetchFn,
@@ -483,14 +564,32 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
         cfg.WEATHER_HRRR_ENABLED,
         cfg.WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED,
         cfg.WEATHER_HRRR_MAX_CROSS_SOURCE_SPREAD,
+        { allowEnsembleOnly: true, retryCount: cfg.WEATHER_FORECAST_RETRY_COUNT },
       );
-      if (!forecast) {
-        logger.debug('[weather-invalidation] forecast unavailable — skipping', {
+      if (forecast) {
+        // Persist for the next outage window (best-effort). Only live fetches
+        // are written — cache-sourced results below never re-write, so the TTL
+        // reflects true data age.
+        void cacheForecast(redis, city, targetDate, forecast).catch(() => {});
+      } else {
+        // Last resort: the most recent successful forecast (≤ cache TTL old).
+        // On a 30-min monitoring cadence a slightly stale forecast beats a
+        // blind skip (2026-06-04 outage blinded the whole sweep).
+        forecast = await readCachedForecast(redis, city, targetDate).catch(() => null);
+        if (!forecast) {
+          logger.debug('[weather-invalidation] forecast unavailable and no cache — skipping', {
+            positionId: pos.id,
+            city,
+            targetDate,
+          });
+          continue;
+        }
+        logger.info('[weather-invalidation] live forecast unavailable — using cached forecast', {
           positionId: pos.id,
           city,
           targetDate,
+          source: forecast.source,
         });
-        continue;
       }
 
       const cityBias = cfg.WEATHER_BIAS_CORRECTION_ENABLED
@@ -509,9 +608,16 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
           weakBiasStddevMultiplier: cfg.WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER,
         });
 
-      // Entry held probability: P(our side) at time of entry
+      // Entry held probability: P(our side) at time of entry. Reconciler-
+      // imported rows have no model probability (consensus_probability NULL) —
+      // without this guard `1 - null` evaluates to 1, fabricating a perfect
+      // entry thesis and false-triggering held_prob_drop on every NO position.
+      // The held side's entry PRICE is the market's P(our side) at entry — the
+      // best available baseline for imported/manual rows.
       const entryHeldProb =
-        pos.direction === 'YES' ? pos.consensusProbability : 1 - pos.consensusProbability;
+        pos.consensusProbability != null && Number.isFinite(pos.consensusProbability)
+          ? (pos.direction === 'YES' ? pos.consensusProbability : 1 - pos.consensusProbability)
+          : pos.entryPrice;
 
       // Current held probability: P(our side) now
       const currentHeldProb =
