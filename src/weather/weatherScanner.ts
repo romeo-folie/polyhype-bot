@@ -51,7 +51,9 @@ import type { CityBias, CityActuals } from './cityBias.js';
 const GAMMA_BASE = 'https://gamma-api.polymarket.com';
 const GAMMA_TIMEOUT_MS = 15_000;
 const DEDUP_KEY_PREFIX = 'weather:event:';
-const RES_DAY_DEDUP_KEY_PREFIX = 'weather:event_resday:';
+// NOTE: the old `weather:event_resday:` once-per-day size-up dedup key was removed —
+// size-up re-evaluation now runs on every resolution-day scan. Stale keys in Redis
+// simply expire; nothing reads them anymore.
 const RES_DAY_EARLY_KEY_PREFIX = 'weather:event_resday_early:';
 const MARKET_STATE_KEY_PREFIX = 'weather:market_state:';
 // Set after a successful new entry; lets subsequent scans bypass the event-level dedup for size-up re-evaluation.
@@ -1390,20 +1392,18 @@ export async function scanWeatherMarkets(
         (await hasAnyOpenWeatherPosition(redis, event.allMarketIds).catch(() => false));
 
       if (cfg.SIZE_UP_ENABLED && hasPosition) {
-        // Existing position → size-up path. Use a resolution-day-specific dedup key
-        // so a pre-noon scan that already claimed the normal dedup key doesn't block
-        // the first post-noon size-up. TTL covers the remainder of the target day so
-        // at most one size-up fires per event per day.
-        const rdKey = `${RES_DAY_DEDUP_KEY_PREFIX}${event.slug}`;
-        const rdTtlS = Math.max(
-          cfg.WEATHER_DEDUP_TTL_S,
-          Math.ceil((endOfTargetDayMs - Date.now()) / 1000),
-        );
-        const claimed = await redis.set(rdKey, '1', 'EX', rdTtlS, 'NX').catch(() => null);
-        if (!claimed) {
-          dedupSkipped++;
-          continue;
-        }
+        // Existing position → size-up path, re-evaluated on EVERY resolution-day
+        // scan (no per-day dedup — the old once-per-day key spent the event's
+        // single evaluation at whatever moment the first res-day scan ran; if a
+        // gate transiently failed then, the opportunity was lost for the day).
+        // A size-up can become viable at any point intraday (bankroll recovers
+        // on settlements, entry drift normalises, forecast firms up), and a
+        // resting size-up maker order needs this re-emission for the executor to
+        // resume-poll its fill (the old key forced fills through the reconciler).
+        // Exposure stays bounded by the executor's gates, not scan frequency:
+        // evaluateSizeUp's path stake cap + SIZE_UP_MAX_TOPUPS + the
+        // forecast-invalidation block keys gate actual top-ups, and the
+        // per-market pending key dedupes resting orders across scans.
         isSizeUpScan = true;
         sizeUpRescanned++;
         logger.debug('[weather] resolution-day size-up re-evaluation', {
