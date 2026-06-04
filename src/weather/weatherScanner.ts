@@ -47,6 +47,8 @@ import { cityLocalDate, cityDayEndUtcMs } from './resolutionTime.js';
 import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast } from './openMeteoClient.js';
 import { getCityBias, getCityActuals } from './cityBias.js';
 import type { CityBias, CityActuals } from './cityBias.js';
+import { cacheForecast } from './forecastCache.js';
+import { notify } from '../execution/telegram.js';
 
 const GAMMA_BASE = 'https://gamma-api.polymarket.com';
 const GAMMA_TIMEOUT_MS = 15_000;
@@ -398,13 +400,14 @@ export function parseWeatherEvent(event: WeatherGammaEvent): ParsedWeatherEvent 
 
 // ── Forecast fetching ────────────────────────────────────────────────────
 
-interface ForecastResult {
+export interface ForecastResult {
   /** Point forecast high temperature in the event's unit. */
   forecastHigh: number;
   /** Standard deviation to use for probability model. */
   stdDev: number;
-  /** Source of the forecast. */
-  source: 'noaa' | 'open-meteo' | 'combined' | 'hrrr-combined';
+  /** Source of the forecast. 'ensemble-only' = all deterministic sources
+   *  failed and the caller opted into the ensemble-mean fallback. */
+  source: 'noaa' | 'open-meteo' | 'combined' | 'hrrr-combined' | 'ensemble-only';
   /** Number of ensemble members (0 if no ensemble data). */
   ensembleMembers: number;
   /**
@@ -422,6 +425,20 @@ interface ForecastResult {
   } | null;
 }
 
+export interface FetchForecastOptions {
+  /**
+   * When all deterministic sources fail but the ensemble succeeded, return an
+   * 'ensemble-only' result using the ensemble mean as the point estimate
+   * instead of null. Opt-in for position MONITORING (invalidation evaluator)
+   * only — fresh entries must not trade on single-provider ensemble data, so
+   * the scanner's entry path never sets this.
+   */
+  allowEnsembleOnly?: boolean;
+  /** Retries on transient Open-Meteo failures, threaded to each fetcher
+   *  (WEATHER_FORECAST_RETRY_COUNT in production). */
+  retryCount?: number;
+}
+
 /**
  * Fetch forecast for a weather event. Uses NOAA for US cities,
  * Open-Meteo for international. Fetches ensemble data when available
@@ -436,6 +453,7 @@ export async function fetchForecast(
   useHrrr = false,
   dualEnsembleShadow = false,
   maxCrossSourceSpread = Infinity,
+  opts?: FetchForecastOptions,
 ): Promise<ForecastResult | null> {
   const { coords, targetDate, unit } = event;
   const month = parseInt(targetDate.slice(5, 7), 10);
@@ -454,14 +472,16 @@ export async function fetchForecast(
     ? getDefaultStdDev(Math.min(daysOut, 7), month) * 5 / 9
     : getDefaultStdDev(Math.min(daysOut, 7), month);
 
+  const retryCount = opts?.retryCount ?? 0;
+
   // Try ensemble first (works for both US and international).
   // Both fetches are submitted to Promise.all, but when fetchFn is the
   // production rate-limited queue they are still serialized by the limiter —
   // the shadow fetch adds one extra rate-limit slot per event when enabled.
   const [ensemble, shadowEnsembleRaw] = await Promise.all([
-    fetchEnsembleForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, useEcmwf),
+    fetchEnsembleForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, useEcmwf, retryCount),
     dualEnsembleShadow
-      ? fetchEnsembleForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, !useEcmwf)
+      ? fetchEnsembleForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, !useEcmwf, retryCount)
       : Promise.resolve(null),
   ]);
   const ensembleModel: ForecastResult['ensembleModel'] = ensemble?.ensembleModel ?? 'none';
@@ -472,8 +492,8 @@ export async function fetchForecast(
     const hrrrEnabled = useHrrr && daysOut <= 1;
     const [noaaForecast, omForecast, hrrrForecast] = await Promise.all([
       fetchNwsForecast(coords.lat, coords.lon, targetDate, fetchFn),
-      fetchOpenMeteoForecast(coords.lat, coords.lon, targetDate, unit, fetchFn),
-      hrrrEnabled ? fetchHrrrForecast(coords.lat, coords.lon, targetDate, fetchFn) : Promise.resolve(null),
+      fetchOpenMeteoForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, retryCount),
+      hrrrEnabled ? fetchHrrrForecast(coords.lat, coords.lon, targetDate, fetchFn, retryCount) : Promise.resolve(null),
     ]);
 
     // Collect available deterministic highs. NOAA is in °F — convert if needed.
@@ -488,6 +508,26 @@ export async function fetchForecast(
 
     const availableHighs = [noaaHigh, omHigh, hrrrHigh].filter((v): v is number => v !== null);
     if (availableHighs.length === 0) {
+      // All deterministic sources failed. When the caller opted in (position
+      // monitoring only), fall back to the ensemble mean — a 31-51 member mean
+      // is a robust point estimate and the ensemble endpoint is a different
+      // subdomain that has stayed up through forecast-API outages.
+      if (opts?.allowEnsembleOnly && ensemble) {
+        logger.info('[weather] deterministic sources unavailable — using ensemble-only forecast', {
+          city: event.city,
+          targetDate,
+          ensembleModel,
+          members: ensemble.memberCount,
+        });
+        return {
+          forecastHigh: ensemble.meanHigh,
+          stdDev: Math.max(ensemble.stddevHigh, floorStd * stddevMinFraction),
+          source: 'ensemble-only',
+          ensembleMembers: ensemble.memberCount,
+          ensembleModel,
+          shadowEnsemble: null,
+        };
+      }
       // NWS covers only ~7 days; at daysOut > 7 noaaHigh is always null by design.
       // If Open-Meteo also failed here, the only deterministic source for US cities
       // is absent — warn so the gap is visible in logs.
@@ -570,8 +610,30 @@ export async function fetchForecast(
   }
 
   // International city: Open-Meteo only (HRRR is US-only)
-  const omForecast = await fetchOpenMeteoForecast(coords.lat, coords.lon, targetDate, unit, fetchFn);
-  if (!omForecast) return null;
+  const omForecast = await fetchOpenMeteoForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, retryCount);
+  if (!omForecast) {
+    // Sole deterministic source failed. Same monitoring-only ensemble fallback
+    // as the US branch — international cities are 100% Open-Meteo-dependent,
+    // which is exactly what blinded the invalidation sweep in the 2026-06-04
+    // forecast-API outage while the ensemble endpoint stayed up.
+    if (opts?.allowEnsembleOnly && ensemble) {
+      logger.info('[weather] deterministic sources unavailable — using ensemble-only forecast', {
+        city: event.city,
+        targetDate,
+        ensembleModel,
+        members: ensemble.memberCount,
+      });
+      return {
+        forecastHigh: ensemble.meanHigh,
+        stdDev: Math.max(ensemble.stddevHigh, floorStd * stddevMinFraction),
+        source: 'ensemble-only',
+        ensembleMembers: ensemble.memberCount,
+        ensembleModel,
+        shadowEnsemble: null,
+      };
+    }
+    return null;
+  }
 
   const stdDev = Math.max(ensemble?.stddevHigh ?? defaultStd, floorStd * stddevMinFraction);
   const shadowStdDev = shadowEnsembleRaw
@@ -1461,7 +1523,8 @@ export async function scanWeatherMarkets(
       }
     }
 
-    // Step 3: Fetch forecast
+    // Step 3: Fetch forecast. retryCount only — the entry path never opts into
+    // the ensemble-only fallback (fresh entries must not trade on degraded data).
     const forecast = await fetchForecast(
       event,
       daysOut,
@@ -1471,6 +1534,7 @@ export async function scanWeatherMarkets(
       cfg.WEATHER_HRRR_ENABLED,
       cfg.WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED,
       cfg.WEATHER_HRRR_MAX_CROSS_SOURCE_SPREAD,
+      { retryCount: cfg.WEATHER_FORECAST_RETRY_COUNT },
     );
     if (!forecast) {
       noForecast++;
@@ -1480,6 +1544,10 @@ export async function scanWeatherMarkets(
       if (earlyEntryKey) await redis.del(earlyEntryKey).catch(() => null);
       continue;
     }
+
+    // Cache the successful forecast so the invalidation evaluator can fall back
+    // to it when live fetches fail (best-effort, never blocks the scan).
+    void cacheForecast(redis, event.city, event.targetDate, forecast).catch(() => {});
 
     // Fetch per-city bias (null when WEATHER_BIAS_CORRECTION_ENABLED=false or cache miss).
     const cityBias = cfg.WEATHER_BIAS_CORRECTION_ENABLED
@@ -1769,6 +1837,29 @@ export async function scanWeatherMarkets(
     tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
     enabled: cfg.WEATHER_SCANNER_ENABLED,
   });
+
+  // Outage alert: a high forecast-failure rate means a provider outage is
+  // degrading both entries and (more importantly) invalidation coverage. One
+  // loud Telegram alert per dedup window beats silent noForecast inflation
+  // (2026-06-04: noForecast 0→24 across three scans with zero operator signal).
+  if (cfg.WEATHER_OUTAGE_ALERT_ENABLED) {
+    // Only events that actually attempted a fetch belong in the denominator.
+    const attempted = parsedCount - dedupSkipped - horizonSkipped;
+    if (attempted >= 5 && noForecast / attempted > cfg.WEATHER_OUTAGE_FAIL_RATE) {
+      const claimed = await redis
+        .set('weather:outage_alert', '1', 'EX', cfg.WEATHER_OUTAGE_ALERT_DEDUP_TTL_S, 'NX')
+        .catch(() => null);
+      if (claimed === 'OK') {
+        const pct = Math.round((noForecast / attempted) * 100);
+        void notify(
+          `⚠️ <b>Weather forecast provider degraded</b>\n` +
+            `${noForecast}/${attempted} attempted events returned no forecast (${pct}%).\n` +
+            `Invalidation coverage is limited until the provider recovers — ` +
+            `cached/ensemble fallbacks are in use where available.`,
+        ).catch(() => {});
+      }
+    }
+  }
 
   // Return shadow-logged opportunities in edge-descending order. Callers that
   // execute must filter on `allowedByConfig`; the orchestrator below does so.

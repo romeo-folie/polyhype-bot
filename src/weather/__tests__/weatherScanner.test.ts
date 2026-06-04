@@ -39,6 +39,13 @@ const baseConfig = {
   WEATHER_MAX_STAKE_USD: 0,
   WEATHER_HRRR_MAX_CROSS_SOURCE_SPREAD: Infinity,
   MIN_BET_USD: 5,
+  // Forecast resilience knobs — alert disabled in the base config so existing
+  // scan tests are unaffected; outage-alert tests override explicitly.
+  WEATHER_FORECAST_RETRY_COUNT: 0,
+  WEATHER_FORECAST_CACHE_TTL_S: 10_800,
+  WEATHER_OUTAGE_ALERT_ENABLED: false,
+  WEATHER_OUTAGE_FAIL_RATE: 0.5,
+  WEATHER_OUTAGE_ALERT_DEDUP_TTL_S: 14_400,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
 vi.mock('../../shared/config.js', () => ({
@@ -53,6 +60,15 @@ vi.mock('../../execution/executor.js', () => ({
 const mockGetBankroll = vi.fn();
 vi.mock('../../shared/bankroll.js', () => ({
   getBankroll: mockGetBankroll,
+}));
+
+// Outage alert + invalidation notify both route through telegram. The mock
+// must export every symbol any module loaded in this suite imports:
+// weatherScanner (notify) and weatherInvalidation (notifyWeatherInvalidationNoHedge).
+const mockNotify = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../execution/telegram.js', () => ({
+  notify: mockNotify,
+  notifyWeatherInvalidationNoHedge: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../../shared/logger.js', () => ({
@@ -1737,6 +1753,7 @@ describe('fetchForecast - ECMWF flag wiring', () => {
       'celsius',
       undefined,
       false,
+      0, // retryCount default when no opts passed
     );
     expect(mockFetchEnsemble).toHaveBeenNthCalledWith(
       2,
@@ -1746,6 +1763,7 @@ describe('fetchForecast - ECMWF flag wiring', () => {
       'celsius',
       undefined,
       true,
+      0,
     );
   });
 
@@ -1792,6 +1810,7 @@ describe('fetchForecast - ECMWF flag wiring', () => {
       'celsius',
       undefined,
       true,
+      0, // retryCount default when no opts passed
     );
   });
 
@@ -1837,6 +1856,7 @@ describe('fetchForecast - ECMWF flag wiring', () => {
       'celsius',
       undefined,
       false,
+      0, // retryCount default when no opts passed
     );
   });
 });
@@ -3522,5 +3542,286 @@ describe('shrinkTowardMarket', () => {
   it('a model prob at/below the price still yields a zero Kelly under the shrink (no synthetic edge)', () => {
     expect(computeHalfKelly(shrinkTowardMarket(0.43, 0.43, 0.5), 0.43, 0.25)).toBe(0);
     expect(computeHalfKelly(shrinkTowardMarket(0.40, 0.43, 0.5), 0.43, 0.25)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchForecast — ensemble-only fallback (forecast resilience)
+// ---------------------------------------------------------------------------
+
+describe('fetchForecast - ensemble-only fallback', () => {
+  const amsCoords = lookupCity('amsterdam');
+
+  function mockEvent() {
+    return {
+      eventId: 'ams-test',
+      slug: 'amsterdam-test',
+      city: 'amsterdam',
+      coords: amsCoords!,
+      targetDate: '2026-06-04',
+      unit: 'celsius' as const,
+      brackets: [],
+      endDate: '2026-06-04T12:00:00Z',
+    };
+  }
+
+  function goodEnsemble() {
+    return {
+      meanHigh: 17.8,
+      stddevHigh: 1.4,
+      meanLow: 11,
+      stddevLow: 0.9,
+      memberCount: 31,
+      forecastDate: '2026-06-04',
+      ensembleModel: 'gfs',
+    };
+  }
+
+  beforeEach(() => {
+    mockFetchEnsemble.mockReset();
+    mockFetchOpenMeteo.mockReset();
+    mockFetchNwsForecast.mockReset();
+    mockFetchHrrr.mockReset();
+  });
+
+  it('returns null when deterministic fails and the caller did NOT opt in (entry path)', async () => {
+    // The 2026-06-04 outage shape: deterministic 502s, ensemble healthy.
+    mockFetchEnsemble.mockResolvedValue(goodEnsemble());
+    mockFetchOpenMeteo.mockResolvedValue(null);
+
+    const result = await fetchForecast(mockEvent(), 1, undefined, 0.7);
+    expect(result).toBeNull();
+  });
+
+  it('returns an ensemble-only forecast when deterministic fails and the caller opted in (monitoring)', async () => {
+    mockFetchEnsemble.mockResolvedValue(goodEnsemble());
+    mockFetchOpenMeteo.mockResolvedValue(null);
+
+    const result = await fetchForecast(
+      mockEvent(), 1, undefined, 0.7, false, false, false, Infinity,
+      { allowEnsembleOnly: true },
+    );
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('ensemble-only');
+    expect(result!.forecastHigh).toBeCloseTo(17.8, 6);
+    expect(result!.ensembleMembers).toBe(31);
+    // stdDev floored at floorStd * stddevMinFraction even on the fallback path
+    const floorCelsius = getDefaultStdDev(1, 6) * (5 / 9) * 0.7;
+    expect(result!.stdDev).toBeGreaterThanOrEqual(Math.min(1.4, floorCelsius) - 1e-9);
+  });
+
+  it('US city: falls back to ensemble-only when NWS, Open-Meteo, and HRRR all fail (opted in)', async () => {
+    const chiCoords = lookupCity('chicago');
+    const event = {
+      eventId: 'chi-test', slug: 'chicago-test', city: 'chicago',
+      coords: chiCoords!, targetDate: '2026-06-05', unit: 'fahrenheit' as const,
+      brackets: [], endDate: '2026-06-05T12:00:00Z',
+    };
+    mockFetchEnsemble.mockResolvedValue({ ...goodEnsemble(), meanHigh: 78.4, stddevHigh: 3.1 });
+    mockFetchNwsForecast.mockResolvedValue(null);
+    mockFetchOpenMeteo.mockResolvedValue(null);
+
+    const result = await fetchForecast(
+      event, 1, undefined, 0.7, false, false, false, Infinity,
+      { allowEnsembleOnly: true },
+    );
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('ensemble-only');
+    expect(result!.forecastHigh).toBeCloseTo(78.4, 6);
+  });
+
+  it('still returns null when BOTH deterministic and ensemble fail, even when opted in', async () => {
+    mockFetchEnsemble.mockResolvedValue(null);
+    mockFetchOpenMeteo.mockResolvedValue(null);
+
+    const result = await fetchForecast(
+      mockEvent(), 1, undefined, 0.7, false, false, false, Infinity,
+      { allowEnsembleOnly: true },
+    );
+    expect(result).toBeNull();
+  });
+
+  it('threads opts.retryCount through to the underlying fetchers', async () => {
+    mockFetchEnsemble.mockResolvedValue(goodEnsemble());
+    mockFetchOpenMeteo.mockResolvedValue({
+      highTemp: 18, lowTemp: 11, precipProbability: 10, forecastDate: '2026-06-04',
+    });
+
+    await fetchForecast(
+      mockEvent(), 1, undefined, 0.7, false, false, false, Infinity,
+      { retryCount: 2 },
+    );
+    // fetchOpenMeteoForecast(lat, lon, date, unit, fetchFn, retryCount)
+    expect(mockFetchOpenMeteo).toHaveBeenCalledWith(
+      expect.any(Number), expect.any(Number), '2026-06-04', 'celsius', undefined, 2,
+    );
+    // fetchEnsembleForecast(lat, lon, date, unit, fetchFn, useEcmwf, retryCount)
+    expect(mockFetchEnsemble).toHaveBeenCalledWith(
+      expect.any(Number), expect.any(Number), '2026-06-04', 'celsius', undefined, false, 2,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scanWeatherMarkets — outage alert + forecast cache write
+// ---------------------------------------------------------------------------
+
+describe('scanWeatherMarkets - outage alert and forecast cache', () => {
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const tomorrowIso = tomorrow.toISOString().slice(0, 10);
+  const [oy, om, od] = tomorrowIso.split('-') as [string, string, string];
+  const O_MONTHS = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  const oMonthName = O_MONTHS[parseInt(om, 10) - 1] ?? 'June';
+  const oTitleDate = `${oMonthName} ${parseInt(od, 10).toString()}`;
+  const oSlugDate = `${oMonthName.toLowerCase()}-${parseInt(od, 10).toString()}-${oy}`;
+  const oEndDate = `${tomorrowIso}T12:00:00Z`;
+
+  function makeIntlEvent(city: string, cityTitle: string) {
+    return {
+      id: `event-${city}`,
+      title: `Highest temperature in ${cityTitle} on ${oTitleDate}?`,
+      slug: `highest-temperature-in-${city.replace(/ /g, '-')}-on-${oSlugDate}`,
+      active: true,
+      closed: false,
+      negRisk: true,
+      endDate: oEndDate,
+      markets: Array.from({ length: 3 }, (_, i) => {
+        const labels = ['16°C or below', '17°C', '18°C or higher'];
+        const yesPrices = [0.2, 0.5, 0.3];
+        return {
+          id: `m-${city}-${i}`,
+          question: `Will the highest temperature in ${cityTitle} be ${labels[i]} on ${oTitleDate}?`,
+          conditionId: `cond-${city}-${i}`,
+          clobTokenIds: `["t${city}${i}y","t${city}${i}n"]`,
+          outcomePrices: `["${(yesPrices[i] ?? 0).toFixed(2)}","${(1 - (yesPrices[i] ?? 0)).toFixed(2)}"]`,
+          outcomes: '["Yes","No"]',
+          active: true,
+          closed: false,
+          volume: '10000',
+          liquidity: '5000',
+          endDate: oEndDate,
+          description: null,
+          groupItemTitle: labels[i],
+          groupItemThreshold: i.toString(),
+        };
+      }),
+    };
+  }
+
+  const SIX_CITIES: Array<[string, string]> = [
+    ['amsterdam', 'Amsterdam'], ['london', 'London'], ['paris', 'Paris'],
+    ['madrid', 'Madrid'], ['milan', 'Milan'], ['istanbul', 'Istanbul'],
+  ];
+
+  let savedFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    savedFetch = globalThis.fetch;
+    mockGetBankroll.mockResolvedValue(1000);
+  });
+
+  afterEach(() => {
+    globalThis.fetch = savedFetch;
+  });
+
+  function wireEvents(cities: Array<[string, string]>) {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve(cities.map(([c, t]) => makeIntlEvent(c, t))),
+    }) as unknown as typeof fetch;
+  }
+
+  function allForecastsFail() {
+    mockFetchEnsemble.mockResolvedValue(null);
+    mockFetchOpenMeteo.mockResolvedValue(null);
+    mockFetchNwsForecast.mockResolvedValue(null);
+  }
+
+  it('sends ONE deduped Telegram alert when the forecast failure rate exceeds the threshold', async () => {
+    const redisMock = createRedisMock();
+    mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true });
+    wireEvents(SIX_CITIES);
+    allForecastsFail();
+
+    await scanWeatherMarkets(redisMock as never);
+
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    expect(String(mockNotify.mock.calls[0]![0])).toContain('forecast provider degraded');
+    expect(redisMock.set).toHaveBeenCalledWith(
+      'weather:outage_alert', '1', 'EX', 14_400, 'NX',
+    );
+  });
+
+  it('suppresses the alert while the dedup key is live', async () => {
+    const redisMock = createRedisMock();
+    redisMock._store.set('weather:outage_alert', '1'); // prior alert within the window
+    mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true });
+    wireEvents(SIX_CITIES);
+    allForecastsFail();
+
+    await scanWeatherMarkets(redisMock as never);
+
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  it('does not alert below the minimum attempted-fetch sample size', async () => {
+    const redisMock = createRedisMock();
+    mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true });
+    wireEvents(SIX_CITIES.slice(0, 3)); // 3 attempted < 5 — even at 100% failure
+    allForecastsFail();
+
+    await scanWeatherMarkets(redisMock as never);
+
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  it('does not alert when WEATHER_OUTAGE_ALERT_ENABLED=false', async () => {
+    const redisMock = createRedisMock();
+    mockLoadConfig.mockReturnValue({ ...baseConfig }); // base: disabled
+    wireEvents(SIX_CITIES);
+    allForecastsFail();
+
+    await scanWeatherMarkets(redisMock as never);
+
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  it('writes the successful forecast to the cache keyed by city and target date', async () => {
+    const redisMock = createRedisMock();
+    mockLoadConfig.mockReturnValue({ ...baseConfig });
+    wireEvents([['amsterdam', 'Amsterdam']]);
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 17.8, stddevHigh: 1.4, meanLow: 11, stddevLow: 0.9,
+      memberCount: 31, forecastDate: tomorrowIso, ensembleModel: 'gfs',
+    });
+    mockFetchOpenMeteo.mockResolvedValue({
+      highTemp: 18, lowTemp: 11, precipProbability: 10, forecastDate: tomorrowIso,
+    });
+
+    await scanWeatherMarkets(redisMock as never);
+    // cacheForecast is fire-and-forget — let the microtask queue drain.
+    await new Promise((r) => setTimeout(r, 0));
+
+    const cacheKey = `weather:forecast_cache:amsterdam:${tomorrowIso}`;
+    expect(redisMock._store.has(cacheKey)).toBe(true);
+    const payload = JSON.parse(redisMock._store.get(cacheKey)!) as { forecastHigh: number };
+    expect(payload.forecastHigh).toBe(18);
+  });
+
+  it('does not write a cache entry when the forecast fetch fails', async () => {
+    const redisMock = createRedisMock();
+    mockLoadConfig.mockReturnValue({ ...baseConfig });
+    wireEvents([['amsterdam', 'Amsterdam']]);
+    allForecastsFail();
+
+    await scanWeatherMarkets(redisMock as never);
+    await new Promise((r) => setTimeout(r, 0));
+
+    const cacheKey = `weather:forecast_cache:amsterdam:${tomorrowIso}`;
+    expect(redisMock._store.has(cacheKey)).toBe(false);
   });
 });
