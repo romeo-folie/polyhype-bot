@@ -153,7 +153,10 @@ export async function notifyTradeExecuted(
     `${header}\n\n` +
     `<b>Market:</b> ${escapeHtml(signal.question)}\n` +
     `<b>Direction:</b> ${directionLabel}  |  <b>Venue:</b> ${venue}\n` +
-    `<b>Entry price:</b> ${isFutures ? fmtFiat(entryPrice) : fmtProb(signal.outcomePrice)}\n` +
+    // entryPrice = opts.entryPrice ?? signal.outcomePrice — callers that know the
+    // actual fill price (e.g. maker fills at trade VWAP) pass it so the rendered
+    // entry reconciles with the stake; otherwise the scan-time market price shows.
+    `<b>Entry price:</b> ${isFutures ? fmtFiat(entryPrice) : fmtProb(entryPrice)}\n` +
     stakeLine +
     sharesLine +
     metaLine +

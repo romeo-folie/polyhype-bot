@@ -1931,7 +1931,12 @@ export function buildWeatherFillShadow(input: {
       ? Math.round(((posted - ref) / ref) * 10_000)
       : null;
 
-  const postedPrice = finite(result.entryPrice);
+  // Prefer the benchmark's makerPostedPrice: on maker FILLS, result.entryPrice
+  // is the actual fill VWAP (which can sit below the posted limit when the GTC
+  // crossed at post time), and this shadow exists to compare the POSTED price
+  // against the side market. entryPrice remains the fallback for paths that
+  // carry no maker benchmark (e.g. taker fills), where it equals the fill price.
+  const postedPrice = finite(result.decisionBenchmark?.makerPostedPrice ?? result.entryPrice);
   const gammaSideMid = finite(input.gammaSideMid);
 
   // decisionMidPrice is the executor's book mid at post time. It is side-relative

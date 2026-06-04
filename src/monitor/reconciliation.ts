@@ -4,7 +4,7 @@ import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { getOpenPositions, closePosition, recordPosition, updatePositionShares, sizeUpPosition, type Position } from '../execution/positionLedger.js';
 import { getHyperliquid } from '../shared/hyperliquid.js';
-import { fetchClobTokenBalance, cancelClobOrder, getOrderFillVwap } from '../shared/clob.js';
+import { fetchClobTokenBalance, cancelClobOrder, resolveOrderFillPrice } from '../shared/clob.js';
 import { loadConfig } from '../shared/config.js';
 import { fetchPolymarketPositions, type PolymarketPosition } from '../shared/polymarketData.js';
 import { fetchMarketByConditionId, type GammaMarket } from '../shared/polymarketGamma.js';
@@ -344,14 +344,36 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
       });
     }
 
+    // Cost basis: the Data API's avgPrice (actual blended on-chain average).
+    // When the API returns no usable avgPrice (0/NaN), substitute the best
+    // available basis instead of writing a zero-basis row — zero entryPrice/
+    // stakeUsd corrupts P&L, makes the size-up drift gate unmeasurable, and
+    // leaves topUpStakeCap at the full path cap (observed: Ankara 2416074).
+    // Preference: linked maker order's posted price (our actual limit, an
+    // upper bound on cost) → Data API currentValue/shares (current market
+    // price — a proxy, but a measurable basis).
+    let basisPrice = pos.avgPrice;
+    if (!(basisPrice > 0) || basisPrice >= 1) {
+      const currentPrice = pos.currentValue > 0 && shares > 0 ? pos.currentValue / shares : 0;
+      const substitute = pendingOrder?.price ?? currentPrice;
+      basisPrice = substitute > 0 && substitute < 1 ? substitute : 0;
+      logger.warn('[reconcile] CLOB orphan has no usable avgPrice — substituting cost basis', {
+        marketId: market.id,
+        direction,
+        avgPrice: pos.avgPrice,
+        substitutedBasis: basisPrice,
+        substituteSource: pendingOrder?.price != null ? 'pending_order_price' : 'current_price',
+      });
+    }
+
     const newPos: Position = {
       marketId: market.id,
       conditionId: market.conditionId,
       clobTokenIds: market.clobTokenIds,
       question: market.question,
       direction,
-      entryPrice: pos.avgPrice,
-      stakeUsd: shares * pos.avgPrice,
+      entryPrice: basisPrice,
+      stakeUsd: shares * basisPrice,
       sharesHeld: shares,
       openedAt: new Date().toISOString(),
       executionVenue: 'clob',
@@ -390,14 +412,14 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
       const marketStateKey = `weather:market_state:${market.id}:${direction}`;
       const marketState = JSON.stringify({
         tradeSide: direction,
-        outcomePrice: pos.avgPrice,
+        outcomePrice: basisPrice,
         observedAt: new Date().toISOString(),
       });
       await redis.set(marketStateKey, marketState, 'EX', 48 * 60 * 60);
       logger.info('[reconcile] seeded weather market state for manual import', {
         marketId: market.id,
         direction,
-        entryPrice: pos.avgPrice,
+        entryPrice: basisPrice,
       });
     }
 
@@ -425,7 +447,7 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
           executionSucceeded: true,
           sharesFilled: shares,
           stakeUsdExecuted: newPos.stakeUsd,
-          entryPrice: pos.avgPrice,
+          entryPrice: basisPrice,
           makerAttempted: true,
           makerFillStatus: 'full',
           makerPostedPrice: pendingOrder.price,
@@ -447,7 +469,7 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
         stakeUsd: newPos.stakeUsd,
         edgeMagnitude: pendingOrder.edgeMagnitude ?? 0,
         ...(pendingOrder.consensusP != null && { consensusProbability: pendingOrder.consensusP }),
-        outcomePrice: pos.avgPrice,
+        outcomePrice: basisPrice,
         sourcedFrom: pendingOrder.sourcedFrom ?? 'reconciled:clob',
         reasoning: pendingOrder.reasoning ?? 'Async maker fill reconciled from CLOB position snapshot.',
       };
@@ -518,15 +540,22 @@ async function tryReconcileSizeUpFill(
     // healed entries at exactly the posted price (0.53) while on-chain fills
     // were cheaper, eating size-up headroom under the path stake cap.
     // Falls back to the posted price when fills can't be attributed.
-    const fillVwap = ledgerPos.conditionId
-      ? await getOrderFillVwap(
-          rawPending.orderId,
-          ledgerPos.conditionId,
-          rawPending.tokenId,
-          additionalShares,
-        ).catch(() => null)
-      : null;
-    const fillPrice = fillVwap?.avgFillPrice ?? rawPending.price;
+    //
+    // Best-effort marginal pricing: the VWAP spans ALL of this order's fills,
+    // while additionalShares is only the delta since the last heal. When the
+    // same order fills across multiple reconcile cycles (residual-cancel-
+    // unconfirmed keeps the pending key), a later cycle prices its delta at the
+    // order's running VWAP rather than the exact marginal price. For a pure
+    // maker rest every fill is at one price so the two are identical; for the
+    // rare multi-cycle taker cross the blend stays ≤ the posted price, i.e.
+    // still strictly better than the pre-VWAP posted-price basis.
+    const fillPrice = await resolveOrderFillPrice(
+      rawPending.orderId,
+      ledgerPos.conditionId,
+      rawPending.tokenId,
+      additionalShares,
+      rawPending.price,
+    );
     const additionalStake = additionalShares * fillPrice;
     // Defensive: a corrupt/zero stored price would write NaN/0 cost basis. Bail to
     // the generic heal (which has its own finite-stake guard) rather than corrupt.

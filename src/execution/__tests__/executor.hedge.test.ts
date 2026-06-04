@@ -45,7 +45,10 @@ vi.mock('../../shared/clob.js', () => ({
   getClobOrderBook: vi.fn().mockResolvedValue(null),
   submitClobLimitBuy: vi.fn().mockResolvedValue({ success: false }),
   getClobOrder: vi.fn().mockResolvedValue(null),
-  getOrderFillVwap: vi.fn().mockResolvedValue(null),
+  // Passthrough: resolves to the posted-price arg (no VWAP attribution in tests).
+  resolveOrderFillPrice: vi.fn(
+    async (_orderId: string, _cond: string | undefined, _asset: string, _shares: number, posted: number) => posted,
+  ),
   cancelClobOrder: vi.fn().mockResolvedValue(true),
   CLOB_MIN_ORDER_USD: 1.0,
 }));

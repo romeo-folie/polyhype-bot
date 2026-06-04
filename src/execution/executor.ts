@@ -18,7 +18,7 @@ import {
   getClobOrderBook,
   submitClobLimitBuy,
   getClobOrder,
-  getOrderFillVwap,
+  resolveOrderFillPrice,
   cancelClobOrder,
   CLOB_MIN_ORDER_USD,
 } from '../shared/clob.js';
@@ -235,6 +235,10 @@ interface DecisionBenchmark {
   counterfactualImmediateTakerCostUsd?: number | null;
   makerPriceImprovementBps?: number | null;
   makerPriceImprovementUsd?: number | null;
+  /** The posted maker limit price. Distinct from ExecutionResult.entryPrice,
+   * which on maker fills is the actual fill VWAP — consumers that need the
+   * posted price (e.g. the weather fill shadow) must read this field. */
+  makerPostedPrice?: number | null;
 }
 
 function idempotencyKey(signal: TradeSignal): string {
@@ -556,7 +560,7 @@ async function tryExecuteViaClobMaker(
         // Active order from a previous cycle — poll it once and return.
         const order = await getClobOrder(pending.orderId);
         if (order) {
-          const matched = parseFloat(order.size_matched ?? '0');
+          let matched = parseFloat(order.size_matched ?? '0');
           const original = parseFloat(order.original_size ?? '0');
           if (matched > 0) {
             const isPartial = matched + 1e-9 < original;
@@ -570,30 +574,37 @@ async function tryExecuteViaClobMaker(
                 original,
               });
               await confirmMakerCancel(pending.orderId);
+              // Fills can land in the window between the read above and the
+              // cancel confirming. Re-read the final matched size so the
+              // recorded shares/stake reflect everything that actually filled
+              // (the trade VWAP below attributes ALL the order's fills).
+              const finalOrder = await getClobOrder(pending.orderId).catch(() => null);
+              const finalMatched = parseFloat(finalOrder?.size_matched ?? '0');
+              if (Number.isFinite(finalMatched) && finalMatched > matched) {
+                logger.info('[executor] residual filled during cancel — using final matched size', {
+                  marketId: signal.marketId,
+                  orderId: pending.orderId,
+                  matched,
+                  finalMatched,
+                });
+                matched = finalMatched;
+              }
             }
             await deletePendingOrder(redis, signal.marketId, pending.direction);
             // Price the fill at the actual VWAP from CLOB trade records, not the
             // posted limit. GTC orders that cross the book at post time fill at
             // the resting orders' (better) prices; recording the posted price
             // inflates cost basis (stake + entryPrice) and eats size-up headroom.
-            // OpenOrder.market is the condition id — used to scope the trades query.
-            const fillVwap = await getOrderFillVwap(
+            // OpenOrder.market/asset_id are the authoritative condition id and
+            // token for the order (the stored blob is only a fallback).
+            const avgFillPrice = await resolveOrderFillPrice(
               pending.orderId,
               order.market,
-              pending.tokenId,
+              order.asset_id || pending.tokenId,
               matched,
-            ).catch(() => null);
-            const avgFillPrice = fillVwap?.avgFillPrice ?? pending.price;
+              pending.price,
+            );
             const filledStakeUsd = matched * avgFillPrice;
-            if (fillVwap && Math.abs(fillVwap.avgFillPrice - pending.price) > 1e-9) {
-              logger.info('[executor] pending maker fill priced at trade VWAP (better than posted)', {
-                marketId: signal.marketId,
-                orderId: pending.orderId,
-                postedPrice: pending.price,
-                avgFillPrice: +fillVwap.avgFillPrice.toFixed(4),
-                matched,
-              });
-            }
             return {
               ok: true,
               tradeResult: { success: true, shares_bought: matched },
@@ -602,7 +613,9 @@ async function tryExecuteViaClobMaker(
               makerOrderId: pending.orderId,
               makerPostedPrice: pending.price,
               makerPostedSize: pending.size,
-              makerFillStatus: isPartial ? 'partial' : 'full',
+              // Re-derive from the (possibly refreshed) matched size: a residual
+              // that finished filling during the cancel is a full fill.
+              makerFillStatus: matched + 1e-9 < original ? 'partial' : 'full',
               makerSharesFilled: matched,
               makerAvgFillPrice: avgFillPrice,
             };
@@ -1304,15 +1317,15 @@ async function tryExecuteViaClobMaker(
       if ((emptyBookMode || isWeatherPatient) && redis) await deletePendingOrder(redis, signal.marketId, signal.direction);
       // Same VWAP repricing as the pending-order resume path: a GTC that
       // crossed at post time filled below the posted limit, and the posted
-      // price would overstate cost basis. Fall back to the posted price when
+      // price would overstate cost basis. Falls back to the posted price when
       // fills can't be attributed.
-      const fillVwap = await getOrderFillVwap(
+      const avgFillPrice = await resolveOrderFillPrice(
         result.order_id,
         order.market,
-        tokenId,
+        order.asset_id || tokenId,
         matched,
-      ).catch(() => null);
-      const avgFillPrice = fillVwap?.avgFillPrice ?? price;
+        price,
+      );
       const filledStakeUsd = matched * avgFillPrice;
       const tradeResult: TradeResult = {
         success: true,
@@ -2823,6 +2836,9 @@ export async function executeSignal(
         ...(makerAttempt.tradeResult.shares_bought != null && {
           sharesFilled: makerAttempt.tradeResult.shares_bought,
         }),
+        // Actual fill price so the rendered entry reconciles with the
+        // (VWAP-based) stake — signal.outcomePrice is the scan-time market.
+        entryPrice: makerAttempt.makerAvgFillPrice ?? makerAttempt.makerPostedPrice ?? null,
       }).catch(() => {});
 
       void triggerDeltaHedge(signal, redis, knownSessionExposureUsd).catch((err) => {
@@ -2850,6 +2866,9 @@ export async function executeSignal(
         raw: {
           makerSharesFilled: makerTelemetry.makerSharesFilled ?? null,
           makerFilledStakeUsd: makerTelemetry.makerFilledStakeUsd ?? null,
+          // Actual avg fill price — makerPostedPrice alone overstates the
+          // realized price when the GTC crossed the book at post time.
+          makerAvgFillPrice: makerAttempt.makerAvgFillPrice ?? null,
         },
       });
 
@@ -3202,11 +3221,25 @@ async function evaluateSizeUp(
   // entry price (no cost basis recovered) are skipped — drift against a 0 basis
   // is `outcomePrice - 0`, which would block every size-up as a false positive
   // (observed: Ankara 2416074, entryPrice=0 → permanent entry_drift_too_high).
+  // The orphan importer now substitutes a real basis where one is recoverable
+  // (reconciliation.ts), so this skip is defense-in-depth for legacy rows; warn
+  // loudly because such a position also has stakeUsd≈0, meaning the stake-cap
+  // gate below leaves it nearly the full path cap of un-drift-bounded top-up room.
   const maxDrift = cfg.SIZE_UP_MAX_ENTRY_DRIFT ?? 0;
-  if (maxDrift > 0 && existing.entryPrice != null && existing.entryPrice > 0) {
-    const drift = (signal.outcomePrice ?? 0) - existing.entryPrice;
-    if (drift > maxDrift) {
-      return { eligible: false, reason: 'entry_drift_too_high' };
+  if (maxDrift > 0) {
+    if (existing.entryPrice > 0) {
+      const drift = (signal.outcomePrice ?? 0) - existing.entryPrice;
+      if (drift > maxDrift) {
+        return { eligible: false, reason: 'entry_drift_too_high' };
+      }
+    } else {
+      logger.warn('[executor] size-up drift gate skipped — existing position has no cost basis', {
+        marketId: signal.marketId,
+        direction: canonDir,
+        entryPrice: existing.entryPrice,
+        stakeUsd: existing.stakeUsd,
+        outcomePrice: signal.outcomePrice,
+      });
     }
   }
 

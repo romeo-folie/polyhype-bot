@@ -19,8 +19,11 @@ vi.mock('../../execution/positionLedger.js', () => ({
 vi.mock('../../shared/clob.js', () => ({
   fetchClobTokenBalance: vi.fn().mockResolvedValue({ ok: false, error: 'not found' }),
   cancelClobOrder: vi.fn().mockResolvedValue(true),
-  // Default: fills unattributable → size-up heal falls back to the posted price.
-  getOrderFillVwap: vi.fn().mockResolvedValue(null),
+  // Default passthrough: resolves to the posted-price arg — the resolver's
+  // fallback contract when fills can't be attributed (it never throws).
+  resolveOrderFillPrice: vi.fn(
+    async (_orderId: string, _cond: string | undefined, _asset: string, _shares: number, posted: number) => posted,
+  ),
 }));
 
 vi.mock('../../shared/polymarketData.js', () => ({
@@ -475,13 +478,14 @@ describe('Position Reconciliation Healer', () => {
       postedAt: Date.now() - 60_000, expiresAt: Date.now() + 60_000,
       consensusP: 0.7, direction: 'YES', sourcedFrom: 'weather:chicago',
     });
-    (clob.getOrderFillVwap as any).mockResolvedValueOnce({ sharesFilled: 60, avgFillPrice: 0.55 });
+    (clob.resolveOrderFillPrice as any).mockResolvedValueOnce(0.55);
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    // Trades query scoped by the ledger position's conditionId + the order's token.
-    expect(clob.getOrderFillVwap).toHaveBeenCalledWith(
-      'order-su-vwap', 'cond-su-vwap', 'tok-yes', expect.closeTo(60, 5),
+    // Resolution scoped by the ledger position's conditionId + the order's
+    // token, with the posted price as the fallback arg.
+    expect(clob.resolveOrderFillPrice).toHaveBeenCalledWith(
+      'order-su-vwap', 'cond-su-vwap', 'tok-yes', expect.closeTo(60, 5), 0.62,
     );
     // Top-up recorded at the ACTUAL fill price, not the posted 0.62.
     expect(positionLedger.sizeUpPosition).toHaveBeenCalledWith(
@@ -491,7 +495,7 @@ describe('Position Reconciliation Healer', () => {
     expect(positionLedger.updatePositionShares).not.toHaveBeenCalled();
   });
 
-  it('falls back to the posted price for an async size-up heal when the VWAP fetch rejects', async () => {
+  it('records the posted-price basis when the fill-price resolver falls back', async () => {
     const ledgerPosition = {
       marketId: 'numeric-su-fb',
       conditionId: 'cond-su-fb',
@@ -516,12 +520,13 @@ describe('Position Reconciliation Healer', () => {
       postedAt: Date.now() - 60_000, expiresAt: Date.now() + 60_000,
       consensusP: 0.7, direction: 'YES', sourcedFrom: 'weather:chicago',
     });
-    (clob.getOrderFillVwap as any).mockRejectedValueOnce(new Error('clob timeout'));
+    // Default passthrough mock returns the posted price (resolver fallback
+    // contract — VWAP unattributable or trades fetch failed; never throws).
 
     await runReconciliation(mockRedis, { forceFix: true });
 
-    // VWAP unavailable → posted price basis (60 × 0.62 = 37.2), still a size-up
-    // heal rather than a generic share heal.
+    // Posted price basis (60 × 0.62 = 37.2), still a size-up heal rather than
+    // a generic share heal.
     expect(positionLedger.sizeUpPosition).toHaveBeenCalledWith(
       mockRedis, 'numeric-su-fb', 'YES',
       expect.closeTo(60, 5), expect.closeTo(37.2, 5), expect.closeTo(0.62, 5),
@@ -732,6 +737,75 @@ describe('Position Reconciliation Healer', () => {
       'EX',
       48 * 60 * 60,
     );
+  });
+
+  it('substitutes the pending order price when an orphan import has no usable avgPrice', async () => {
+    // Data API returned avgPrice=0 — writing it through would create a
+    // zero-basis row (entryPrice=0, stakeUsd=0) that corrupts P&L and disables
+    // the size-up drift gate (observed: Ankara 2416074). With a linked maker
+    // order, its posted price is the best available basis.
+    const clobPosition = {
+      conditionId: 'cond-zero-basis',
+      asset: 'tok-zb-yes',
+      avgPrice: 0,
+      size: 50,
+      currentValue: 20, // current price 0.40
+    };
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([clobPosition]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue({
+      id: 'numeric-zb',
+      question: 'Will the highest temperature in Ankara be 26°C on June 4?',
+      conditionId: 'cond-zero-basis',
+      clobTokenIds: ['tok-zb-yes', 'tok-zb-no'],
+    });
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-zb-1',
+      tokenId: 'tok-zb-yes',
+      price: 0.62,
+      size: 50,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 60_000,
+      direction: 'YES',
+      sourcedFrom: 'weather:ankara:2026-06-04:26°C',
+    });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-zb',
+      direction: 'YES',
+      entryPrice: 0.62,
+      stakeUsd: expect.closeTo(50 * 0.62, 5),
+    }));
+  });
+
+  it('substitutes the current market price for a zero-avgPrice orphan with no linked order', async () => {
+    const clobPosition = {
+      conditionId: 'cond-zero-basis-2',
+      asset: 'tok-zb2-yes',
+      avgPrice: 0,
+      size: 50,
+      currentValue: 20, // current price 0.40 — last-resort basis proxy
+    };
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([clobPosition]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue({
+      id: 'numeric-zb2',
+      question: 'Will the highest temperature in Ankara be 27°C on June 4?',
+      conditionId: 'cond-zero-basis-2',
+      clobTokenIds: ['tok-zb2-yes', 'tok-zb2-no'],
+    });
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue(null);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
+      marketId: 'numeric-zb2',
+      direction: 'YES',
+      entryPrice: expect.closeTo(0.40, 6),
+      stakeUsd: expect.closeTo(20, 5),
+    }));
   });
 
   it('allows CLOB import of weather markets when a bot-posted pending maker order exists', async () => {

@@ -84,7 +84,7 @@ vi.mock('../redis.js', () => ({
   })),
 }));
 
-const { getOrderFillVwap } = await import('../clob.js');
+const { getOrderFillVwap, resolveOrderFillPrice } = await import('../clob.js');
 
 const OUR_ORDER = 'order-ours';
 const NO_TOKEN = 'tok-no';
@@ -249,5 +249,94 @@ describe('getOrderFillVwap', () => {
 
     const res = await getOrderFillVwap(OUR_ORDER, COND, NO_TOKEN);
     expect(res).toBeNull();
+  });
+
+  it('excludes FAILED and RETRYING trades from the VWAP (phantom fills never settled)', async () => {
+    // A reverted on-chain match is recorded as FAILED (and may coexist with a
+    // re-emitted retry). Counting it would inject phantom shares the lower-bound
+    // coverage check cannot catch.
+    mockGetTrades.mockResolvedValue([
+      makeTrade({
+        status: 'FAILED',
+        taker_order_id: OUR_ORDER,
+        maker_orders: [
+          { order_id: 'order-x', matched_amount: '100', price: '0.90', asset_id: NO_TOKEN },
+        ],
+      }),
+      makeTrade({
+        id: 'trade-retrying',
+        status: 'RETRYING',
+        taker_order_id: OUR_ORDER,
+        maker_orders: [
+          { order_id: 'order-y', matched_amount: '100', price: '0.90', asset_id: NO_TOKEN },
+        ],
+      }),
+      makeTrade({
+        id: 'trade-good',
+        status: 'CONFIRMED',
+        taker_order_id: OUR_ORDER,
+        maker_orders: [
+          { order_id: 'order-z', matched_amount: '10', price: '0.21', asset_id: NO_TOKEN },
+        ],
+      }),
+    ]);
+
+    const res = await getOrderFillVwap(OUR_ORDER, COND, NO_TOKEN);
+    // Only the CONFIRMED trade counts: 10 @ 0.21, not 210 shares blended at 0.87.
+    expect(res?.sharesFilled).toBeCloseTo(10, 6);
+    expect(res?.avgFillPrice).toBeCloseTo(0.21, 6);
+  });
+
+  it('treats an unknown/missing trade status as countable', async () => {
+    mockGetTrades.mockResolvedValue([
+      makeTrade({
+        status: undefined,
+        taker_order_id: OUR_ORDER,
+        maker_orders: [
+          { order_id: 'order-a', matched_amount: '10', price: '0.21', asset_id: NO_TOKEN },
+        ],
+      }),
+    ]);
+
+    const res = await getOrderFillVwap(OUR_ORDER, COND, NO_TOKEN);
+    expect(res?.avgFillPrice).toBeCloseTo(0.21, 6);
+  });
+});
+
+describe('resolveOrderFillPrice', () => {
+  beforeEach(() => {
+    mockGetTrades.mockReset();
+  });
+
+  it('returns the trade VWAP when fills are attributable', async () => {
+    mockGetTrades.mockResolvedValue([
+      makeTrade({
+        taker_order_id: OUR_ORDER,
+        maker_orders: [
+          { order_id: 'order-yes-bidder', matched_amount: '28.69', price: '0.78', asset_id: YES_TOKEN },
+        ],
+      }),
+    ]);
+
+    const price = await resolveOrderFillPrice(OUR_ORDER, COND, NO_TOKEN, 28.69, 0.26);
+    expect(price).toBeCloseTo(0.22, 6);
+  });
+
+  it('returns the posted price when nothing is attributable', async () => {
+    mockGetTrades.mockResolvedValue([]);
+    const price = await resolveOrderFillPrice(OUR_ORDER, COND, NO_TOKEN, 10, 0.26);
+    expect(price).toBe(0.26);
+  });
+
+  it('returns the posted price when the trades fetch fails (never throws)', async () => {
+    mockGetTrades.mockRejectedValue(new Error('CLOB 500'));
+    const price = await resolveOrderFillPrice(OUR_ORDER, COND, NO_TOKEN, 10, 0.26);
+    expect(price).toBe(0.26);
+  });
+
+  it('returns the posted price without querying when conditionId is missing', async () => {
+    const price = await resolveOrderFillPrice(OUR_ORDER, undefined, NO_TOKEN, 10, 0.26);
+    expect(price).toBe(0.26);
+    expect(mockGetTrades).not.toHaveBeenCalled();
   });
 });
