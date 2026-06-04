@@ -729,6 +729,18 @@ export const envSchema = z.object({
   SIZE_UP_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0),
   // Max allowed drift between original entry price and current price for a size-up (0 = disabled).
   SIZE_UP_MAX_ENTRY_DRIFT: z.coerce.number().min(0).max(1).optional().default(0),
+  // Size-up headroom: bankroll fraction cap for the TOTAL position after top-ups.
+  // Entries are Kelly-sized up to WEATHER_MAX_STAKE_FRACTION, so a max-size entry
+  // leaves zero top-up room under the same cap by construction. A larger size-up
+  // fraction gives thesis-confirmed positions their own room to grow while staying
+  // risk-proportional to current bankroll (shrinks automatically in drawdowns).
+  // 0 = legacy behavior (reuse WEATHER_MAX_STAKE_FRACTION).
+  SIZE_UP_MAX_STAKE_FRACTION: z.coerce.number().min(0).max(1).optional().default(0),
+  // Hard USD ceiling on the total position after top-ups (applied after the
+  // fraction cap, mirroring WEATHER_MAX_STAKE_USD). Without this, the larger
+  // size-up fraction is re-strangled by WEATHER_MAX_STAKE_USD at high bankroll.
+  // 0 = legacy behavior (reuse WEATHER_MAX_STAKE_USD).
+  SIZE_UP_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(0),
 
   // OSINT sibling fan-out
   OSINT_SIBLING_FANOUT_ENABLED: boolFromEnv.optional().default(false),

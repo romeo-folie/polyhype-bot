@@ -3249,14 +3249,23 @@ async function evaluateSizeUp(
     return { eligible: false, reason: 'max_topups_reached' };
   }
 
-  // Gate 7: remaining stake room under path cap
-  // Path cap = min(bankroll × WEATHER_MAX_STAKE_FRACTION, WEATHER_MAX_STAKE_USD)
-  // — mirrors the same dual-cap applied to fresh entries in runWeatherScan.
-  const pathMaxStakeFraction = cfg.WEATHER_MAX_STAKE_FRACTION;
+  // Gate 7: remaining stake room under the size-up path cap.
+  // Entries are Kelly-sized up to min(bankroll × WEATHER_MAX_STAKE_FRACTION,
+  // WEATHER_MAX_STAKE_USD), so a max-size entry leaves ZERO top-up room under
+  // that same cap by construction. SIZE_UP_MAX_STAKE_FRACTION / _USD give
+  // thesis-confirmed positions their own (larger) headroom while staying
+  // risk-proportional to current bankroll; 0 falls back to the entry caps
+  // (legacy behavior).
+  const pathMaxStakeFraction = cfg.SIZE_UP_MAX_STAKE_FRACTION > 0
+    ? cfg.SIZE_UP_MAX_STAKE_FRACTION
+    : cfg.WEATHER_MAX_STAKE_FRACTION;
+  const hardCapUsd = cfg.SIZE_UP_MAX_STAKE_USD > 0
+    ? cfg.SIZE_UP_MAX_STAKE_USD
+    : cfg.WEATHER_MAX_STAKE_USD;
   const bankroll = await getBankroll(redis);
   const fractionCap = bankroll * pathMaxStakeFraction;
-  const pathMaxStake = cfg.WEATHER_MAX_STAKE_USD > 0
-    ? Math.min(fractionCap, cfg.WEATHER_MAX_STAKE_USD)
+  const pathMaxStake = hardCapUsd > 0
+    ? Math.min(fractionCap, hardCapUsd)
     : fractionCap;
   const topUpStakeCap = pathMaxStake - existing.stakeUsd;
   if (topUpStakeCap <= 0) {

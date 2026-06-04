@@ -2844,6 +2844,46 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
   });
 
+  it('re-evaluates size-up on EVERY resolution-day scan (no once-per-day dedup)', async () => {
+    // The old `weather:event_resday:` key let only the FIRST res-day scan evaluate
+    // a size-up; if a gate transiently failed at that moment, the opportunity was
+    // lost for the whole day. Now every scan re-evaluates: two consecutive scans
+    // must BOTH reach the executor for the held event.
+    redisMock._store.set(activeEventKey, '1');
+    for (let i = 0; i < 11; i++) {
+      redisMock._store.set(`position:mt${i}:NO`, '1');
+      redisMock._store.set(`position:mt${i}:YES`, '1');
+    }
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayMocks();
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false, isSizeUp: true,
+      executionVenue: 'clob', entryPrice: 0.9, sharesFilled: 10, governorStamped: true,
+    });
+
+    await runWeatherScan(redisMock as never);
+    expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+    const firstScanCalls = mockExecuteAndRecordSignal.mock.calls.length;
+
+    // Second scan in the same day, same Redis state (the first scan's keys remain).
+    // Pre-change this dedup-skipped the event; now it must re-evaluate.
+    await runWeatherScan(redisMock as never);
+    expect(mockExecuteAndRecordSignal.mock.calls.length).toBeGreaterThan(firstScanCalls);
+    // Every emitted size-up signal must still be resolution-day sanctioned.
+    for (const call of mockExecuteAndRecordSignal.mock.calls) {
+      expect((call[0] as { sizeUpSanctioned?: boolean }).sizeUpSanctioned).toBe(true);
+    }
+  });
+
   it('skips resolution-day event when no active position exists', async () => {
     // No activeEventKey set in Redis, no position keys — both fallback paths return false.
     mockLoadConfig.mockReturnValue({

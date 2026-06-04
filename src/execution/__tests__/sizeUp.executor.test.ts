@@ -145,6 +145,9 @@ const mockConfig = {
   SIZE_UP_MAX_TOPUPS: 1,
   SIZE_UP_MIN_EDGE: 0,
   SIZE_UP_MAX_ENTRY_DRIFT: 0.15,
+  // 0 = legacy: size-ups reuse the entry caps (WEATHER_MAX_STAKE_FRACTION/_USD).
+  SIZE_UP_MAX_STAKE_FRACTION: 0,
+  SIZE_UP_MAX_STAKE_USD: 0,
 };
 
 const mockLoadConfig = vi.fn(() => mockConfig);
@@ -370,6 +373,72 @@ describe('evaluateSizeUp via executeAndRecordSignal — executor path', () => {
     // existingStake=5 → topUpStakeCap=8-5=3, which < MIN_BET_USD=5 → ineligible
     mockLoadConfig.mockReturnValueOnce({ ...mockConfig, WEATHER_MAX_STAKE_USD: 8 });
     mockGetPosition.mockResolvedValue(makeExistingPosition({ stakeUsd: 5, sharesHeld: 11 }));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('size_up_ineligible');
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+  });
+
+  it('SIZE_UP_MAX_STAKE_FRACTION: unlocks top-up room above the entry cap for a cap-sized entry', async () => {
+    // Entry cap = bankroll(500) × WEATHER_MAX_STAKE_FRACTION(0.02) = $10. A
+    // cap-sized entry (existingStake=9.5) has $0.50 of room → legacy behavior
+    // blocks (stake_cap_too_small, asserted in an earlier test). With the
+    // size-up fraction 0.03 the cap becomes $15 → room $5.50 ≥ MIN_BET → the
+    // top-up fires, clamped to the new cap's room.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_MAX_STAKE_FRACTION: 0.03 });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ stakeUsd: 9.5, sharesHeld: 21 }));
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob', shares_bought: 10 });
+    const redis = makeRedis();
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await executeAndRecordSignal(makeWeatherSignal(), redis as any);
+
+      expect(result.skipped).toBeFalsy();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result as any).isSizeUp).toBe(true);
+      // signal.stakeUsd=8 clamped to topUpStakeCap = 15 - 9.5 = 5.5
+      const additionalStakeArg = mockSizeUpPos.mock.calls[0]![4];
+      expect(additionalStakeArg).toBeCloseTo(5.5, 6);
+    } finally {
+      mockLoadConfig.mockReturnValue(mockConfig);
+    }
+  });
+
+  it('SIZE_UP_MAX_STAKE_USD: its own hard ceiling binds the size-up cap, not WEATHER_MAX_STAKE_USD', async () => {
+    // fractionCap = 500 × 0.04 = $20, SIZE_UP_MAX_STAKE_USD=12 → pathMaxStake=12.
+    // existingStake=9.5 → room $2.50 < MIN_BET → ineligible even though the
+    // fraction alone would have allowed it. Proves the size-up USD ceiling is
+    // applied (and that WEATHER_MAX_STAKE_USD=0 is not what binds).
+    mockLoadConfig.mockReturnValue({
+      ...mockConfig,
+      SIZE_UP_MAX_STAKE_FRACTION: 0.04,
+      SIZE_UP_MAX_STAKE_USD: 12,
+    });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ stakeUsd: 9.5, sharesHeld: 21 }));
+    const redis = makeRedis();
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await executeAndRecordSignal(makeWeatherSignal(), redis as any);
+
+      expect(result.skipped).toBe(true);
+      expect(result.skipReason).toBe('size_up_ineligible');
+      expect(mockSizeUpPos).not.toHaveBeenCalled();
+    } finally {
+      mockLoadConfig.mockReturnValue(mockConfig);
+    }
+  });
+
+  it('size-up knobs at 0 fall back to the legacy entry caps', async () => {
+    // SIZE_UP_MAX_STAKE_FRACTION=0 + SIZE_UP_MAX_STAKE_USD=0 (the defaults in
+    // this harness) → pathMaxStake = entry cap $10; existingStake=9.5 → room
+    // $0.50 < MIN_BET → blocked, exactly the legacy behavior.
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ stakeUsd: 9.5, sharesHeld: 21 }));
     const redis = makeRedis();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
