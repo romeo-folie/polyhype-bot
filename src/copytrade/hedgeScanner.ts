@@ -30,6 +30,7 @@ import { enqueueWrite } from '../db/writeQueue.js';
 import { getSql } from '../db/client.js';
 import { getMarket, parseClobTokenIds } from '../mapping/gamma.js';
 import { getClobOrderBook, submitClobBuy } from '../shared/clob.js';
+import { getBookTouchLevels } from '../shared/bookTouch.js';
 import { deductStake } from '../shared/bankroll.js';
 import { notify } from '../execution/telegram.js';
 
@@ -204,7 +205,8 @@ export async function runCopytradeHedgeScan(redis: Redis): Promise<void> {
         continue;
       }
 
-      const hedgeAsk = parseFloat(String(book.asks[0]!.price));
+      // Order-agnostic touch: asks[0] on a REST book is the WORST ask. See shared/bookTouch.ts.
+      const hedgeAsk = getBookTouchLevels(book).bestAsk?.price ?? 0;
       if (!isFinite(hedgeAsk) || hedgeAsk <= 0 || hedgeAsk >= 1) continue;
 
       const p = pos.entryPrice;

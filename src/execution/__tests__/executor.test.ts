@@ -398,6 +398,42 @@ describe('executeSignal', () => {
     expect(result.executionVenue).toBe('clob');
   });
 
+  it('reads the touch from multi-level raw-REST-order books (bids[0] = WORST bid)', async () => {
+    // The REST /book endpoint ships best-at-the-END arrays (bids ascending,
+    // asks descending). Pre-fix, bids[0]/asks[0] reads saw 0.01/0.99 on this
+    // 0.49/0.51 book → ~19600bps phantom spread → spread_too_wide skip.
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500; // 5%
+    mockGetOrderBook.mockResolvedValue({
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [
+        { price: '0.01', size: '5' },
+        { price: '0.30', size: '20' },
+        { price: '0.49', size: '100' }, // real best bid — LAST
+      ],
+      asks: [
+        { price: '0.99', size: '5' },
+        { price: '0.70', size: '20' },
+        { price: '0.51', size: '100' }, // real best ask — LAST
+      ],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal(), redis as any);
+
+    // Real spread = 200bps < 500 cap → executes instead of spread_too_wide.
+    expect(result.skipReason).not.toBe('spread_too_wide');
+    expect(result.skipped).toBe(false);
+    expect(result.executionVenue).toBe('clob');
+  });
+
   it('oracle-lag uses ORACLE_LAG_MAX_ENTRY_SPREAD_BPS override when >= 0', async () => {
     // Global threshold is 500 bps; override is 2000 bps — wide book should pass for oracle-lag
     mockConfig.MAX_ENTRY_SPREAD_BPS = 500;

@@ -200,6 +200,32 @@ describe('scanNegRiskArb', () => {
     expect(opps[0]!.coverageRatio).toBe(1.0);
   });
 
+  it('reads leg asks from multi-level raw-REST-order books (asks[0] = WORST ask)', async () => {
+    mockGetNegRiskEvents.mockResolvedValue([makeNegRiskEvent()]);
+    // REST books are best-at-the-END: asks descending, real best ask 0.30 is
+    // LAST. Pre-fix the scanner read asks[0]=0.99 per leg → sumAsks 2.97 →
+    // no arb could ever surface on populated books.
+    mockGetClobOrderBook.mockResolvedValue({
+      asks: [
+        { price: '0.99', size: '5' },
+        { price: '0.60', size: '10' },
+        { price: '0.30', size: '50' }, // real best ask — LAST
+      ],
+      bids: [
+        { price: '0.01', size: '5' },
+        { price: '0.29', size: '10' },
+      ],
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const opps = await scanNegRiskArb(redis as any);
+
+    expect(opps).toHaveLength(1);
+    expect(opps[0]!.sumAsks).toBeCloseTo(0.90, 4); // 3 × the REAL 0.30 touch
+    // Best-ask size must come from the touch level, not asks[0].
+    expect(opps[0]!.legs[0]!.bestAskSize).toBe(50);
+  });
+
   it('quick-rejects when Gamma prices sum >= 1.0 (stage 1)', async () => {
     // 3 outcomes × 0.35 = 1.05 >= 1.0 → no CLOB fetch
     mockGetNegRiskEvents.mockResolvedValue([

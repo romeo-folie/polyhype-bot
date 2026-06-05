@@ -24,6 +24,7 @@ import { enqueueWrite } from '../db/writeQueue.js';
 import { getSql } from '../db/client.js';
 import { getMarket, parseClobTokenIds } from '../mapping/gamma.js';
 import { getClobOrderBook, submitClobBuy } from '../shared/clob.js';
+import { getBookTouchLevels } from '../shared/bookTouch.js';
 import { deductStake } from '../shared/bankroll.js';
 
 const LOCK_IN_MIN_FILL_RATIO = 0.9;
@@ -131,9 +132,10 @@ export async function runWeatherLockInScan(redis: Redis): Promise<void> {
         continue;
       }
 
-      const bestAsk = book.asks[0];
-      if (!bestAsk) continue;
-      const oppositeAsk = parseFloat(String(bestAsk.price));
+      // Order-agnostic touch: asks[0] on a REST book is the WORST ask
+      // (best-at-the-END ordering) — reading it inflated lock-in cost and
+      // suppressed viable hedges. See shared/bookTouch.ts.
+      const oppositeAsk = getBookTouchLevels(book).bestAsk?.price ?? 0;
       if (!isFinite(oppositeAsk) || oppositeAsk <= 0) continue;
 
       const costTotal = pos.entryPrice + oppositeAsk;

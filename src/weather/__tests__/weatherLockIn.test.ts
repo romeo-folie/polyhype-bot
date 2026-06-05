@@ -167,6 +167,27 @@ describe('runWeatherLockInScan', () => {
     );
   });
 
+  it('reads the lock-in ask from a multi-level raw-REST-order book (asks[0] = WORST ask)', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' as const })]);
+    // REST books are best-at-the-END: asks descending, real best ask 0.03 is
+    // LAST. Pre-fix the price gate read asks[0]=0.99 → every lock-in skipped
+    // as over the max price / cost ceiling despite a viable 0.03 hedge.
+    mockGetClobOrderBook.mockResolvedValue({
+      asks: [
+        { price: '0.99', size: '5' },
+        { price: '0.50', size: '10' },
+        { price: '0.03', size: '60' }, // real best ask — LAST
+      ],
+    });
+    const redis = makeRedis();
+
+    await runWeatherLockInScan(redis as any);
+
+    expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-yes' }),
+    );
+  });
+
   it('buys NO (tokenIds[1]) when locking in a YES position', async () => {
     mockSql.mockResolvedValue([makePosition({ direction: 'YES' as const })]);
     const redis = makeRedis();

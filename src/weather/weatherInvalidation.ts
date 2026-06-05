@@ -23,6 +23,7 @@ import { enqueueWrite } from '../db/writeQueue.js';
 import { getSql } from '../db/client.js';
 import { getMarket, parseClobTokenIds } from '../mapping/gamma.js';
 import { getClobOrderBook, submitClobBuy } from '../shared/clob.js';
+import { getBookTouchLevels } from '../shared/bookTouch.js';
 import { deductStake } from '../shared/bankroll.js';
 import { dedup } from '../shared/redis.js';
 import type { FetchFn } from './noaaClient.js';
@@ -298,8 +299,10 @@ async function tryInvalidationExit(opts: ExitOrNotifyOpts): Promise<boolean> {
 
   // Held-side bid book: the side we SELL. Independent of the opposite-asks the hedge
   // checks, so a `no_book` barrier does not mean we cannot sell our own side.
+  // Order-agnostic touch: REST books are best-at-the-END, so bids[0] is the
+  // WORST bid — reading it here declined valid exits as "bid below floor".
   const heldBook = await getClobOrderBook(heldTokenId);
-  const bestBid = parseFloat(String(heldBook?.bids?.[0]?.price ?? '0'));
+  const bestBid = heldBook ? (getBookTouchLevels(heldBook).bestBid?.price ?? 0) : 0;
   if (!isFinite(bestBid) || bestBid <= 0) {
     logger.info('[weather-invalidation] exit declined — no held-side bid', {
       positionId: pos.id,
@@ -879,9 +882,9 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
         continue;
       }
 
-      const bestAsk = book.asks[0];
-      if (!bestAsk) continue;
-      const oppositeAsk = parseFloat(String(bestAsk.price));
+      // Order-agnostic touch: asks[0] on a REST book is the WORST ask —
+      // reading it inflated hedge cost into price_too_high/cost_ceiling skips.
+      const oppositeAsk = getBookTouchLevels(book).bestAsk?.price ?? 0;
       if (!isFinite(oppositeAsk) || oppositeAsk <= 0) continue;
 
       const costTotal = pos.entryPrice + oppositeAsk;

@@ -840,6 +840,27 @@ describe('runWeatherInvalidationScan — hedge (Phase 4)', () => {
     );
   });
 
+  it('reads the hedge ask from a multi-level raw-REST-order book (asks[0] = WORST ask)', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    // REST books are best-at-the-END: asks descending, real best ask 0.20 is
+    // LAST. Pre-fix the hedge gate read asks[0]=0.99 → price_too_high skip,
+    // forcing exit/notify paths on positions that had a viable 0.20 hedge.
+    mockGetClobOrderBook.mockResolvedValue({
+      asks: [
+        { price: '0.99', size: '5' },
+        { price: '0.60', size: '10' },
+        { price: '0.20', size: '40' }, // real best ask — LAST
+      ],
+    });
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-yes' }),
+    );
+  });
+
   it('buys NO when YES position is invalidated (hedge=buy NO)', async () => {
     mockSql.mockResolvedValue([
       makePosition({
@@ -1044,6 +1065,36 @@ describe('runWeatherInvalidationScan — Phase 5 resolution-day exit', () => {
     );
     expect(redis.set).toHaveBeenCalledWith('weather:forecast_exited:pos-1', '1', 'EX', expect.any(Number));
     expect(mockNotifyWeatherInvalidationNoHedge).not.toHaveBeenCalled();
+  });
+
+  it('reads the held-side bid from a multi-level raw-REST-order book (bids[0] = WORST bid)', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    // REST books are best-at-the-END: held bids ascending, real best bid 0.18
+    // is LAST. Pre-fix the floor gate read bids[0]=0.01 and declined this exit
+    // as "bid below floor" — blocking valid resolution-day sells.
+    mockGetClobOrderBook.mockImplementation(
+      books(
+        { asks: [{ price: '0.30' }] }, // price_too_high barrier (> 0.25 max hedge)
+        {
+          bids: [
+            { price: '0.01', size: '5' },
+            { price: '0.10', size: '8' },
+            { price: '0.18', size: '50' }, // real best bid — LAST
+          ],
+        },
+      ),
+    );
+    const redis = makeRedis();
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(mockExecuteTakeProfit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: 'weather_invalidation',
+        currentPrice: 0.18, // the REAL touch, not 0.01
+        position: expect.objectContaining({ marketId: 'mkt-1', direction: 'NO' }),
+      }),
+    );
   });
 
   it('exits using held-side bids even on a no_book barrier (empty opposite asks)', async () => {

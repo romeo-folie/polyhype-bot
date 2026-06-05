@@ -23,6 +23,7 @@ import {
   CLOB_MIN_ORDER_USD,
 } from '../shared/clob.js';
 import { hasOpenPosition, recordPosition, getPosition, sizeUpPosition } from './positionLedger.js';
+import { getBookTouch } from '../shared/bookTouch.js';
 import { isRecentlyResolved } from '../shared/closedGuard.js';
 import { deductStake, getBankroll } from '../shared/bankroll.js';
 import { isStaleCooldownActive } from '../monitor/staleExit.js';
@@ -312,8 +313,9 @@ function buildDecisionBenchmark(
   signal: TradeSignal,
   book: { bids: { price: string }[]; asks: { price: string }[]; tick_size: string },
 ): DecisionBenchmark {
-  const bestBid = parseFloat(book.bids[0]?.price ?? '0');
-  const bestAsk = parseFloat(book.asks[0]?.price ?? '0');
+  // Order-agnostic touch — REST books arrive best-at-the-END (bids[0] is the
+  // WORST bid). See shared/bookTouch.ts.
+  const { bestBid, bestAsk } = getBookTouch(book);
   const hasBestBid = isFinite(bestBid) && bestBid > 0;
   const hasBestAsk = isFinite(bestAsk) && bestAsk > 0;
   const mid = hasBestBid && hasBestAsk ? (bestBid + bestAsk) / 2 : null;
@@ -441,7 +443,10 @@ function resolveMakerPrice(
   const tick = parseFloat(book.tick_size);
   if (!isFinite(tick) || tick <= 0) return null;
 
-  const bestAsk = parseFloat(book.asks[0]?.price ?? '0');
+  // Order-agnostic touch — bids[0]/asks[0] on REST books are the WORST levels
+  // (best-at-the-END ordering). Anchoring to bids[0] priced makers off the
+  // bottom of the book. See shared/bookTouch.ts.
+  const { bestBid, bestAsk } = getBookTouch(book);
   const improvement = priceEdgeBps / 10_000;
 
   // When a fair-value anchor is provided (empty-book mode), use it instead
@@ -450,7 +455,6 @@ function resolveMakerPrice(
   if (fairValueOverride != null && isFinite(fairValueOverride)) {
     price = fairValueOverride - improvement;
   } else {
-    const bestBid = parseFloat(book.bids[0]?.price ?? '0');
     price = bestBid > 0 ? bestBid + improvement : 0;
     if (price <= 0 && bestAsk > 0) {
       price = bestAsk - tick;
@@ -667,8 +671,8 @@ async function tryExecuteViaClobMaker(
     return { ok: false, error: 'maker_no_orderbook', waitMs: Date.now() - startedAt };
   }
 
-  let bestBid = parseFloat(book.bids[0]?.price ?? '0');
-  let bestAsk = parseFloat(book.asks[0]?.price ?? '0');
+  // Order-agnostic touch (REST books are best-at-the-END — see shared/bookTouch.ts).
+  let { bestBid, bestAsk } = getBookTouch(book);
   let mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : null;
   let spreadBps = bestBid > 0 && bestAsk > 0 && mid ? ((bestAsk - bestBid) / mid) * 10000 : null;
 
@@ -1045,8 +1049,7 @@ async function tryExecuteViaClobMaker(
     });
     const retryBook = await getClobOrderBook(yesTokenId);
     if (retryBook) {
-      const rBestBid = parseFloat(retryBook.bids[0]?.price ?? '0');
-      const rBestAsk = parseFloat(retryBook.asks[0]?.price ?? '0');
+      const { bestBid: rBestBid, bestAsk: rBestAsk } = getBookTouch(retryBook);
       const rMid = rBestBid > 0 && rBestAsk > 0 ? (rBestBid + rBestAsk) / 2 : null;
       const rSpread =
         rBestBid > 0 && rBestAsk > 0 && rMid ? ((rBestAsk - rBestBid) / rMid) * 10000 : null;

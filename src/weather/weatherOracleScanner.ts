@@ -17,6 +17,7 @@ import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { getSql } from '../db/client.js';
 import { getClobOrderBook } from '../shared/clob.js';
+import { getBookTouchLevels } from '../shared/bookTouch.js';
 import { fetchWeatherEvents, parseWeatherEvent } from './weatherScanner.js';
 import { canonicalCityKey } from './noaaClient.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
@@ -149,9 +150,10 @@ export async function runWeatherOracleScan(redis: Redis): Promise<void> {
           continue;
         }
 
-        const bestAsk = book.asks[0];
-        if (!bestAsk) continue;
-        const winningAsk = parseFloat(String(bestAsk.price));
+        // Order-agnostic touch: asks[0] on a REST book is the WORST ask —
+        // reading ~0.99 made every bracket's discount look like zero and
+        // suppressed oracle entries on populated books. See shared/bookTouch.ts.
+        const winningAsk = getBookTouchLevels(book).bestAsk?.price ?? 0;
         if (!isFinite(winningAsk) || winningAsk <= 0) continue;
 
         const discount = 1.0 - winningAsk;
