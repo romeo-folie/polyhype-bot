@@ -80,7 +80,21 @@ services:
     depends_on:
       pga-bootstrap:
         condition: service_completed_successfully
-    command: npx tsx src/monitor/worker.ts
+    secrets:
+      - pg_password
+    # PG_URL from .env points at 127.0.0.1:5432 — correct for HOST processes
+    # (Postgres publishes on the host for the cron-run scanners) but unreachable
+    # inside a container, which broke every direct-DB read here (the copytrade
+    # hedge scan warned ECONNREFUSED each cycle). Rebuild it against pga-db at
+    # command time so the password stays off the env block — same pattern as
+    # pga-db-writer.
+    command:
+      - sh
+      - -c
+      - |
+        PGPASS=$$(cat /run/secrets/pg_password) && \
+        export PG_URL="postgres://pga:$${PGPASS}@pga-db:5432/pga?sslmode=disable" && \
+        exec npx tsx src/monitor/worker.ts
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }

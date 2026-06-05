@@ -1899,6 +1899,22 @@ export const envSchema = z.object({
   // Wider than WEATHER_REAL_BOOK_DISCOUNT_BPS since the bracket leg has no model
   // edge — we demand a bigger cushion to compensate.
   WEATHER_BRACKET_OPPOSITE_DISCOUNT_BPS: z.coerce.number().min(0).max(5000).optional().default(800),
+  // Cancel unfilled bracket-opposite legs once their hedge value is gone: on the
+  // market's resolution day (city-local), or pre-res-day when the PRIMARY side's
+  // price reaches WEATHER_BRACKET_CANCEL_PRIMARY_PRICE. Near resolution the leg
+  // fills almost only when the primary is WINNING — the leg's side collapses into
+  // our bid and we pay for shares resolving to $0, a pure deduction from the won
+  // primary (solo legs fare worse: a naked worthless fill). When the primary is
+  // losing the leg side rises away from the deep bid, so no salvage fill is lost.
+  // Extends PR #438 (no NEW res-day brackets) to legs that survived into res-day.
+  WEATHER_BRACKET_CANCEL_ENABLED: boolFromEnv.optional().default(false),
+  // Early-certainty arm of the bracket cancel: pre-res-day, cancel the leg when
+  // the PRIMARY side's Gamma price ≥ this (outcome effectively decided early).
+  // Uses the primary side, not the leg's own price — bracket legs rest on
+  // structurally cheap tails, so the leg side is "cheap" from the moment it
+  // posts; the primary side starts ≤ the entry cap and only reaches this
+  // threshold on a genuine repricing. 0 disables the arm (res-day only).
+  WEATHER_BRACKET_CANCEL_PRIMARY_PRICE: z.coerce.number().min(0).max(1).optional().default(0.90),
   // Gate: skip NO bets on tail brackets ("or higher" / "or below") when the model's
   // own P(YES) exceeds this threshold. Prevents betting against the model's directional
   // call — edgeNo can be spuriously positive even when modelProb is 0.80+ for YES.

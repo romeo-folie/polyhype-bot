@@ -3931,9 +3931,10 @@ describe('revalidateRestingWeatherOrders', () => {
     };
   }
 
-  // Minimal opportunity shape: revalidation reads only marketId + modelProbability.
-  function opp(marketId: string, modelProbability: number) {
-    return { marketId, modelProbability } as never;
+  // Minimal opportunity shape: the primary rule reads marketId + modelProbability;
+  // the bracket rule additionally reads isResolutionDay + yesPrice/noPrice.
+  function opp(marketId: string, modelProbability: number, extra: Record<string, unknown> = {}) {
+    return { marketId, modelProbability, ...extra } as never;
   }
 
   beforeEach(() => {
@@ -4055,5 +4056,164 @@ describe('revalidateRestingWeatherOrders', () => {
     await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
 
     expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+  });
+
+  describe('bracket-leg cancel (res-day + early certainty)', () => {
+    const bracketCancelConfig = () => ({
+      ...baseConfig,
+      WEATHER_BRACKET_CANCEL_ENABLED: true,
+      WEATHER_BRACKET_CANCEL_PRIMARY_PRICE: 0.90,
+      // Bracket rule must work independently of the primary FV rule.
+      WEATHER_RESTING_REVALIDATION_ENABLED: false,
+    });
+
+    function bracketEntry(overrides: Record<string, unknown> = {}) {
+      // Leg direction NO → primary side is YES (primarySidePrice = opp.yesPrice).
+      return pendingEntry({ order: { isBracketOpposite: true, edgeMagnitude: 0, ...overrides } });
+    }
+
+    beforeEach(() => {
+      mockLoadConfig.mockReturnValue(bracketCancelConfig() as never);
+    });
+
+    it('cancels an unfilled bracket leg on resolution day and deletes the key', async () => {
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))  // pre-cancel: nothing filled
+        .mockResolvedValueOnce(null);           // post-cancel: order gone
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-1', 0.80, { isResolutionDay: true, yesPrice: 0.60, noPrice: 0.40 }),
+      ]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-1', 'NO');
+    });
+
+    it('keeps a pre-res-day bracket leg while the primary side is below the certainty threshold', async () => {
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-1', 0.80, { isResolutionDay: false, yesPrice: 0.80, noPrice: 0.20 }),
+      ]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('cancels a pre-res-day bracket leg when the primary side reaches the certainty threshold', async () => {
+      // Leg is NO → primary side is YES at 0.92 ≥ 0.90 → outcome decided early.
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))
+        .mockResolvedValueOnce(null);
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-1', 0.80, { isResolutionDay: false, yesPrice: 0.92, noPrice: 0.08 }),
+      ]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-1', 'NO');
+    });
+
+    it('uses the leg direction to pick the primary side (YES leg → noPrice)', async () => {
+      // YES leg → primary side is NO; noPrice 0.95 ≥ 0.90 → cancel.
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ direction: 'YES', order: { isBracketOpposite: true, direction: 'YES' } }),
+      ]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))
+        .mockResolvedValueOnce(null);
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-1', 0.05, { isResolutionDay: false, yesPrice: 0.05, noPrice: 0.95 }),
+      ]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-1', 'YES');
+    });
+
+    it('certainty arm disabled (0) → pre-res-day legs are kept regardless of primary price', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...bracketCancelConfig(),
+        WEATHER_BRACKET_CANCEL_PRIMARY_PRICE: 0,
+      } as never);
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-1', 0.80, { isResolutionDay: false, yesPrice: 0.97, noPrice: 0.03 }),
+      ]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('never cancels legacy ambiguous blobs even on resolution day', async () => {
+      // Pre-flag blob: no isBracketOpposite, edge 0 — could be either kind.
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ order: { edgeMagnitude: 0 } }),
+      ]);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-1', 0.80, { isResolutionDay: true, yesPrice: 0.95, noPrice: 0.05 }),
+      ]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('partial-filled bracket leg on res-day: residual cancelled, key kept for reconciler', async () => {
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('3'))   // 3/10 filled pre-cancel
+        .mockResolvedValueOnce(liveOrder('3'));  // still 3 after cancel
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-1', 0.80, { isResolutionDay: true, yesPrice: 0.60, noPrice: 0.40 }),
+      ]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('bracket knob off → res-day legs are left alone (legacy behaviour)', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_RESTING_REVALIDATION_ENABLED: true,
+        WEATHER_BRACKET_CANCEL_ENABLED: false,
+      } as never);
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-1', 0.80, { isResolutionDay: true, yesPrice: 0.95, noPrice: 0.05 }),
+      ]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('primary FV rule stays gated on its own knob while the bracket rule runs', async () => {
+      // REVALIDATION off + BRACKET_CANCEL on: a value-negative PRIMARY must be
+      // kept while a res-day bracket leg in the same pass is cancelled.
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ marketId: 'mkt-primary' }), // primary, sideFV 0.20 < 0.55
+        { ...bracketEntry(), marketId: 'mkt-bracket' },
+      ]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))
+        .mockResolvedValueOnce(null);
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-primary', 0.80, { isResolutionDay: false }),
+        opp('mkt-bracket', 0.80, { isResolutionDay: true, yesPrice: 0.60, noPrice: 0.40 }),
+      ]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledTimes(1);
+      expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-bracket', 'NO');
+      expect(mockDeletePendingOrder).not.toHaveBeenCalledWith(expect.anything(), 'mkt-primary', 'NO');
+    });
   });
 });
