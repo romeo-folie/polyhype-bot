@@ -46,6 +46,11 @@ const baseConfig = {
   WEATHER_OUTAGE_ALERT_ENABLED: false,
   WEATHER_OUTAGE_FAIL_RATE: 0.5,
   WEATHER_OUTAGE_ALERT_DEDUP_TTL_S: 14_400,
+  // Resting-order revalidation + bracket cancel — mirror the config.ts schema
+  // defaults so tests never rely on `undefined` happening to be falsy.
+  WEATHER_RESTING_REVALIDATION_ENABLED: false,
+  WEATHER_BRACKET_CANCEL_ENABLED: false,
+  WEATHER_BRACKET_CANCEL_PRIMARY_PRICE: 0.90,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
 vi.mock('../../shared/config.js', () => ({
@@ -4013,8 +4018,8 @@ describe('revalidateRestingWeatherOrders', () => {
     expect(mockCancelClobOrder).not.toHaveBeenCalled();
   });
 
-  it('is inert when WEATHER_RESTING_REVALIDATION_ENABLED is off', async () => {
-    mockLoadConfig.mockReturnValue({ ...baseConfig } as never);
+  it('is inert when BOTH the revalidation and bracket-cancel knobs are off', async () => {
+    mockLoadConfig.mockReturnValue({ ...baseConfig } as never); // both default false
     mockListPendingOrders.mockResolvedValue([pendingEntry()]);
 
     await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
