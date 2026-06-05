@@ -4,9 +4,13 @@
  * Maker rebates are paid only on FILLED maker liquidity, so selection
  * optimizes for current fill probability, not book presence:
  *
- *   1. Cheap prefilter on cached Gamma data — binary, fee-enabled (the only
- *      markets that pay rebates), unexpired, volume/liquidity floors, price
- *      tails excluded.
+ *   1. Cheap prefilter on a Gamma universe ordered by TRAILING-24H volume —
+ *      binary, fee-enabled (the only markets that pay rebates), unexpired,
+ *      volume/liquidity floors, price tails excluded. Recent volume matters:
+ *      the lifetime-volume watchlist cache surfaced ~99 mostly-resolved
+ *      markets (96 at price extremes, the rest ghost books) → 0 candidates
+ *      every cycle, while 24h ordering surfaces live fee markets with real
+ *      1–2¢ books. The cache remains the fallback when Gamma is down.
  *   2. Per surviving market (capped for rate limits): fetch the YES + NO CLOB
  *      books and the recent public trade tape, then gate out ghost books
  *      (wide absolute spread, mid detached from where trades actually print)
@@ -25,8 +29,11 @@ import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getCachedMarkets } from '../shared/watchlist.js';
+import type { CachedMarket } from '../shared/watchlist.js';
 import { getClobOrderBook } from '../shared/clob.js';
+import { getBookTouch } from '../shared/bookTouch.js';
 import {
+  getActiveMarkets,
   parseOutcomes,
   parseOutcomePrices,
   parseClobTokenIds,
@@ -37,6 +44,34 @@ import type { RebateMarketCandidate, RebateQuote } from './types.js';
 /** Max markets to fetch books + trade tape for per cycle (rate limit guard).
  * Each costs 2 book fetches + 1 data-api tape fetch. */
 const MAX_MARKET_FETCHES = 15;
+/** Universe size fetched from Gamma per cycle. Gamma silently caps pages at
+ * 100 rows, so this paginates as 2 pages of 100. */
+const UNIVERSE_SIZE = 200;
+const UNIVERSE_PAGE_SIZE = 100;
+
+/** Fields the prefilter consumes — satisfied by both GammaMarket (primary
+ * universe) and CachedMarket (fallback; lacks volume24hr). */
+type UniverseMarket = CachedMarket & { volume24hr?: string | number };
+
+/**
+ * Candidate universe: active markets ordered by trailing-24h volume. Falls
+ * back to the (lifetime-volume) watchlist cache when Gamma is unavailable —
+ * mostly useless for selection but keeps the cycle alive and observable.
+ */
+async function fetchUniverse(redis: Redis): Promise<{ markets: UniverseMarket[]; source: string }> {
+  try {
+    const markets = await getActiveMarkets(UNIVERSE_SIZE, UNIVERSE_PAGE_SIZE, {
+      order: 'volume24hr',
+    });
+    if (markets.length > 0) return { markets, source: 'gamma_volume24hr' };
+    logger.warn('[rebate] gamma universe fetch returned empty — falling back to watchlist cache');
+  } catch (err) {
+    logger.warn('[rebate] gamma universe fetch failed — falling back to watchlist cache', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return { markets: await getCachedMarkets(redis), source: 'watchlist_cache' };
+}
 
 function roundDownToTick(value: number, tick: number): number {
   if (!isFinite(value) || !isFinite(tick) || tick <= 0) return value;
@@ -80,9 +115,9 @@ export async function selectRebateMarkets(
   maxMarkets: number,
 ): Promise<RebateMarketCandidate[]> {
   const cfg = loadConfig();
-  const markets = await getCachedMarkets(redis);
+  const { markets, source: universeSource } = await fetchUniverse(redis);
   if (markets.length === 0) {
-    logger.debug('[rebate] market cache empty — skipping selection');
+    logger.debug('[rebate] candidate universe empty — skipping selection');
     return [];
   }
 
@@ -118,7 +153,10 @@ export async function selectRebateMarkets(
       if (!isNaN(end) && end < Date.now()) continue;
     }
 
-    const volume = parseFloat(market.volume ?? '0');
+    // Recent (24h) volume when the universe provides it; lifetime volume
+    // otherwise (cache fallback). Recency is what predicts taker flow — the
+    // authoritative flow gate below still re-checks from the trade tape.
+    const volume = parseFloat(String(market.volume24hr ?? market.volume ?? '0'));
     if (!isFinite(volume) || volume < cfg.REBATE_MIN_VOLUME) continue;
 
     const liquidity = parseFloat(market.liquidity ?? '0');
@@ -178,8 +216,9 @@ export async function selectRebateMarkets(
       continue;
     }
 
-    const yesBid = parseFloat(yesBook.bids[0]?.price ?? '0');
-    const yesAsk = parseFloat(yesBook.asks[0]?.price ?? '0');
+    // Order-agnostic touch — the REST book puts the best price at the END of
+    // each array; bids[0] is the worst bid (see getBookTouch).
+    const { bestBid: yesBid, bestAsk: yesAsk } = getBookTouch(yesBook);
     if (yesBid <= 0 || yesAsk <= 0 || yesAsk <= yesBid) {
       skip('hollow_yes_book');
       continue;
@@ -249,8 +288,9 @@ export async function selectRebateMarkets(
     let noQuote: RebateQuote | null = null;
     if (wantNo) {
       const noBook = await getClobOrderBook(noTokenId);
-      const noBid = parseFloat(noBook?.bids[0]?.price ?? '0');
-      const noAsk = parseFloat(noBook?.asks[0]?.price ?? '0');
+      const { bestBid: noBid, bestAsk: noAsk } = noBook
+        ? getBookTouch(noBook)
+        : { bestBid: 0, bestAsk: 0 };
       noQuote = buildQuote('NO', noTokenId, 1 - yesMid, cfg.REBATE_QUOTE_EDGE, tick, noBid, noAsk);
     }
 
@@ -326,7 +366,8 @@ export async function selectRebateMarkets(
   }
 
   logger.info('[rebate] market selection complete', {
-    cached: markets.length,
+    universe: universeSource,
+    universeSize: markets.length,
     preFiltered: preFiltered.length,
     fetched: toFetch.length,
     passedGates: candidates.length,

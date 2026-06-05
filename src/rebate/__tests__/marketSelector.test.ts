@@ -10,6 +10,19 @@ const mockGetClobOrderBook = vi.fn();
 vi.mock('../../shared/clob.js', () => ({
   getClobOrderBook: (...args: unknown[]) => mockGetClobOrderBook(...args),
 }));
+// NOTE: shared/bookTouch.js is intentionally NOT mocked — it's pure, and the
+// raw-REST-ordering regression test below depends on its real scanning.
+
+// Primary candidate universe: Gamma ordered by trailing-24h volume. The parse
+// helpers stay real (pure functions) — only the fetch is mocked.
+const mockGetActiveMarkets = vi.fn();
+vi.mock('../../mapping/gamma.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    getActiveMarkets: (...args: unknown[]) => mockGetActiveMarkets(...args),
+  };
+});
 
 const mockFetchRecentMarketFlow = vi.fn();
 vi.mock('../flowAnalyzer.js', async (importOriginal) => {
@@ -117,7 +130,7 @@ describe('selectRebateMarkets', () => {
   });
 
   it('selects a fee-enabled market with real flow and quotes both sides at mid − edge', async () => {
-    mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
 
     const selected = await selectRebateMarkets(redis, 10);
 
@@ -141,7 +154,7 @@ describe('selectRebateMarkets', () => {
   });
 
   it('excludes feesEnabled=false markets when REBATE_REQUIRE_FEE_MARKETS=true (audit finding 2)', async () => {
-    mockGetCachedMarkets.mockResolvedValue([
+    mockGetActiveMarkets.mockResolvedValue([
       makeMarket({ id: 'no-fees', feesEnabled: false }),
       makeMarket({ id: 'fees', conditionId: '0xcond2' }),
     ]);
@@ -153,7 +166,7 @@ describe('selectRebateMarkets', () => {
 
   it('includes fee-free markets when the gate is explicitly disabled', async () => {
     mockLoadConfig.mockReturnValue({ ...baseRebateConfig, REBATE_REQUIRE_FEE_MARKETS: false });
-    mockGetCachedMarkets.mockResolvedValue([makeMarket({ feesEnabled: false })]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket({ feesEnabled: false })]);
 
     const selected = await selectRebateMarkets(redis, 10);
 
@@ -161,7 +174,7 @@ describe('selectRebateMarkets', () => {
   });
 
   it('rejects ghost books: wide absolute spread (the NO-at-0.02 case)', async () => {
-    mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
     // YES book bid 0.01 / ask 0.86 — spreadAbs 0.85 ≫ 0.10 cap.
     mockGetClobOrderBook.mockResolvedValue(makeBook(0.01, 0.86));
 
@@ -173,7 +186,7 @@ describe('selectRebateMarkets', () => {
   });
 
   it('rejects books whose mid detached from the printed trade VWAP', async () => {
-    mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
     // Book mid 0.40 but trades print at 0.85 in YES frame.
     mockFetchRecentMarketFlow.mockResolvedValue(makeFlow({ vwapYes: 0.85 }));
 
@@ -183,7 +196,7 @@ describe('selectRebateMarkets', () => {
   });
 
   it('fails closed with a per-market warn when the tape has flow but no usable outcomeIndex', async () => {
-    mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
     // Flow passes the notional gate but no trade carried an outcomeIndex →
     // vwapYes null → cannot verify the book isn't detached from prints.
     mockFetchRecentMarketFlow.mockResolvedValue(makeFlow({ vwapYes: null }));
@@ -198,7 +211,7 @@ describe('selectRebateMarkets', () => {
   });
 
   it('rejects markets without enough recent taker flow', async () => {
-    mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
     mockFetchRecentMarketFlow.mockResolvedValue(
       makeFlow({ takerNotionalUsdPerHour: 10, feeEquivalentUsdPerHour: 0.2 }),
     );
@@ -209,7 +222,7 @@ describe('selectRebateMarkets', () => {
   });
 
   it('treats a failed flow fetch as do-not-quote, not as flow-exists', async () => {
-    mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
     mockFetchRecentMarketFlow.mockResolvedValue(null);
 
     const selected = await selectRebateMarkets(redis, 10);
@@ -218,7 +231,7 @@ describe('selectRebateMarkets', () => {
   });
 
   it('ranks by recent fee-equivalent flow, not lifetime volume (audit finding 4)', async () => {
-    mockGetCachedMarkets.mockResolvedValue([
+    mockGetActiveMarkets.mockResolvedValue([
       makeMarket({ id: 'big-volume-dead', conditionId: '0xdead', volume: '9000000' }),
       makeMarket({ id: 'small-volume-active', conditionId: '0xactive', volume: '60000' }),
     ]);
@@ -237,7 +250,7 @@ describe('selectRebateMarkets', () => {
   });
 
   it('clamps a quote below a physical ask so post-only cannot cross', async () => {
-    mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
     // NO physical book has a low ask at 0.55 (< target 0.59).
     mockGetClobOrderBook.mockImplementation((tokenId: string) =>
       Promise.resolve(tokenId === 'tok-yes' ? makeBook(0.39, 0.41) : makeBook(0.30, 0.55)),
@@ -251,7 +264,7 @@ describe('selectRebateMarkets', () => {
 
   it('quotes only the majority side when two-sided mode is off', async () => {
     mockLoadConfig.mockReturnValue({ ...baseRebateConfig, REBATE_TWO_SIDED: false });
-    mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
 
     const selected = await selectRebateMarkets(redis, 10);
 
@@ -267,7 +280,7 @@ describe('selectRebateMarkets', () => {
       REBATE_QUOTE_EDGE: 0,
       REBATE_MIN_COMBINED_EDGE: 0.02,
     });
-    mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
 
     const selected = await selectRebateMarkets(redis, 10);
 
@@ -275,10 +288,98 @@ describe('selectRebateMarkets', () => {
   });
 
   it('applies the 20% crypto rebate share from feeType', async () => {
-    mockGetCachedMarkets.mockResolvedValue([makeMarket({ feeType: 'crypto_fees' })]);
+    mockGetActiveMarkets.mockResolvedValue([makeMarket({ feeType: 'crypto_fees' })]);
 
     const selected = await selectRebateMarkets(redis, 10);
 
     expect(selected[0]!.rebateShare).toBe(0.20);
+  });
+
+  it('reads the touch from multi-level books in raw REST order (bids[0] = WORST bid)', async () => {
+    // Regression for the live failure where every market skipped
+    // spread_too_wide: the REST book has best-at-the-END ordering, so naive
+    // bids[0]/asks[0] reads saw 0.01/0.99 on a 0.21/0.22 book.
+    mockGetActiveMarkets.mockResolvedValue([makeMarket({ outcomePrices: '["0.21","0.79"]' })]);
+    mockGetClobOrderBook.mockImplementation((tokenId: string) =>
+      Promise.resolve(
+        tokenId === 'tok-yes'
+          ? {
+              bids: [
+                { price: '0.01', size: '26941' },
+                { price: '0.19', size: '66185' },
+                { price: '0.21', size: '234414' },
+              ],
+              asks: [
+                { price: '0.99', size: '359445' },
+                { price: '0.24', size: '35383' },
+                { price: '0.22', size: '48152' },
+              ],
+              tick_size: '0.01',
+              neg_risk: false,
+            }
+          : makeBook(0.77, 0.79),
+      ),
+    );
+    mockFetchRecentMarketFlow.mockResolvedValue(makeFlow({ vwapYes: 0.215 }));
+
+    const selected = await selectRebateMarkets(redis, 10);
+
+    expect(selected).toHaveLength(1);
+    // Touch = 0.21/0.22 → mid 0.215, spreadAbs 0.01 (NOT 0.98).
+    expect(selected[0]!.yesMid).toBeCloseTo(0.215);
+    expect(selected[0]!.spreadAbs).toBeCloseTo(0.01);
+    const yes = selected[0]!.quotes.find((q) => q.direction === 'YES')!;
+    // mid 0.215 − edge 0.01 = 0.205, clamped below ask (0.22 − tick) → 0.205 → tick-rounded 0.20
+    expect(yes.price).toBeCloseTo(0.20);
+  });
+
+  describe('candidate universe sourcing', () => {
+    it('sources the universe from Gamma ordered by trailing-24h volume, not the watchlist cache', async () => {
+      mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
+
+      const selected = await selectRebateMarkets(redis, 10);
+
+      expect(selected).toHaveLength(1);
+      // Paginated below Gamma's silent 100-row page cap, recency-ordered.
+      expect(mockGetActiveMarkets).toHaveBeenCalledWith(200, 100, { order: 'volume24hr' });
+      expect(mockGetCachedMarkets).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the watchlist cache when the Gamma fetch throws', async () => {
+      mockGetActiveMarkets.mockRejectedValue(new Error('Gamma API rate-limited (429)'));
+      mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+
+      const selected = await selectRebateMarkets(redis, 10);
+
+      expect(selected).toHaveLength(1);
+      expect(vi.mocked(logger.warn)).toHaveBeenCalledWith(
+        '[rebate] gamma universe fetch failed — falling back to watchlist cache',
+        expect.objectContaining({ error: expect.stringContaining('429') }),
+      );
+    });
+
+    it('falls back to the watchlist cache when the Gamma fetch returns empty', async () => {
+      mockGetActiveMarkets.mockResolvedValue([]);
+      mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+
+      const selected = await selectRebateMarkets(redis, 10);
+
+      expect(selected).toHaveLength(1);
+      expect(mockGetCachedMarkets).toHaveBeenCalled();
+    });
+
+    it('applies the volume floor to 24h volume when present (lifetime volume otherwise)', async () => {
+      mockGetActiveMarkets.mockResolvedValue([
+        // Huge lifetime volume but dead today — must be filtered (the
+        // lifetime-volume failure mode that starved selection pre-fix).
+        makeMarket({ id: 'dead-today', conditionId: '0xdead', volume: '9000000', volume24hr: 1000 }),
+        // Modest lifetime volume but active today — must survive.
+        makeMarket({ id: 'live-today', conditionId: '0xlive', volume: '100', volume24hr: 60000 }),
+      ]);
+
+      const selected = await selectRebateMarkets(redis, 10);
+
+      expect(selected.map((c) => c.marketId)).toEqual(['live-today']);
+    });
   });
 });

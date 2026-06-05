@@ -59,6 +59,8 @@ export interface GammaMarket {
   active: boolean;
   closed: boolean;
   volume: string;
+  /** Trailing-24h volume (USD). Present on /markets responses; numeric or string. */
+  volume24hr?: string | number;
   liquidity: string;
   endDate: string | null;
   description: string | null;
@@ -261,15 +263,23 @@ export function parseOutcomes(outcomes: string | string[]): string[] {
  * Fetches up to `maxTotal` markets across multiple paginated requests, each
  * page capped at `pageSize` (Gamma API hard limit: 500 per request).
  *
- * Sorting by `liquidityNum` descending ensures the most liquid (and therefore
- * most executable) markets are scanned first. This matters for arb: thin-book
- * markets appear as arb opportunities on paper but FOK orders reliably fail
- * due to insufficient depth.
+ * Sorting by `liquidityNum` descending (the default) ensures the most liquid
+ * (and therefore most executable) markets are scanned first. This matters for
+ * arb: thin-book markets appear as arb opportunities on paper but FOK orders
+ * reliably fail due to insufficient depth. Callers that need recency instead
+ * of depth (e.g. rebate farming, which quotes where takers trade NOW) can
+ * pass `opts.order = 'volume24hr'`.
  *
  * Pagination stops early if a page returns fewer results than requested
- * (signals end of available markets).
+ * (signals end of available markets). NOTE: Gamma silently caps pages at 100
+ * rows regardless of `limit`, which this early-stop misreads as end-of-data —
+ * use `pageSize <= 100` when more than 100 results are actually needed.
  */
-export async function getActiveMarkets(maxTotal = 1000, pageSize = 500): Promise<GammaMarket[]> {
+export async function getActiveMarkets(
+  maxTotal = 1000,
+  pageSize = 500,
+  opts?: { order?: 'liquidityNum' | 'volume24hr' },
+): Promise<GammaMarket[]> {
   const results: GammaMarket[] = [];
   let offset = 0;
 
@@ -281,7 +291,7 @@ export async function getActiveMarkets(maxTotal = 1000, pageSize = 500): Promise
       enable_order_book: 'true',
       limit: batchSize.toString(),
       offset: offset.toString(),
-      order: 'liquidityNum',
+      order: opts?.order ?? 'liquidityNum',
       ascending: 'false',
     });
 
