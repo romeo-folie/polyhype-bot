@@ -3156,6 +3156,25 @@ describe('weather rest-above-cap (caps as clamps, not eligibility filters)', () 
     );
   });
 
+  it('plain real-book path (WEATHER_REAL_BOOK_DISCOUNT_BPS=0) still clamps the post to the cap', async () => {
+    // With the patient discount disabled, weather real-book makers use the
+    // bid-anchored global pricing (isWeatherPatient=false). For _restAboveCap
+    // signals that anchor tracks the above-cap market (bid 0.68), so without
+    // path-independent clamping the order would post unclamped above 0.55.
+    // WEATHER_REAL_BOOK_DISCOUNT_BPS is already 0 in this describe's beforeEach.
+    mockConfig.EXECUTION_MODE = 'maker';
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
+    mockGetOrderBook.mockResolvedValue(makeRealBook());
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await executeSignal(makeOutOfRangeSignal(), redis as any);
+
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+    const submitted = mockSubmitLimit.mock.calls[0]![0] as { price: number };
+    expect(submitted.price).toBeLessThanOrEqual(0.55);
+    expect(mockSubmitClob).not.toHaveBeenCalled(); // and never a taker buy
+  });
+
   it('hybrid mode: rest-above-cap maker failure NEVER falls through to a taker buy', async () => {
     // Real book + hybrid: a non-price-cap maker failure (order rejected at
     // submit) used to fall through to the taker fallback, which would

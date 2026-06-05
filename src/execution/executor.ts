@@ -847,11 +847,14 @@ async function tryExecuteViaClobMaker(
   // binding cap (rounded down to tick) so the order rests AT the cap instead of
   // being rejected with maker_price_above_cap. This matters on the patient
   // real-book path, where the side-ask anchor can sit above the cap; the
-  // empty-book path already clamps fairValue upstream. The defense-in-depth
-  // guards below still fire when the knob is off or clamping is impossible
-  // (cap below one tick).
+  // empty-book path already clamps fairValue upstream. _restAboveCap signals are
+  // covered on EVERY maker path — including the plain real-book path when
+  // WEATHER_REAL_BOOK_DISCOUNT_BPS=0 (isWeatherPatient=false), whose bid-anchored
+  // price tracks the above-cap market and would otherwise post unclamped. The
+  // defense-in-depth guards below still fire when the knob is off or clamping is
+  // impossible (cap below one tick).
   if (
-    (emptyBookMode || isWeatherPatient)
+    (emptyBookMode || isWeatherPatient || signal._restAboveCap === true)
     && signal.source === 'weather'
     && cfg.WEATHER_REST_ABOVE_CAP_ENABLED
   ) {
@@ -885,11 +888,13 @@ async function tryExecuteViaClobMaker(
     }
   }
 
-  // Defense-in-depth for WEATHER_MAX_ENTRY_PRICE: applies to both empty-book
-  // and patient real-book paths. For patient real-book the price is derived from
-  // side-ask, not fairValue, so we guard the final price directly.
+  // Defense-in-depth for WEATHER_MAX_ENTRY_PRICE: applies to the empty-book and
+  // patient real-book paths, and to ANY path carrying _restAboveCap (the plain
+  // real-book path is reachable for those when WEATHER_REAL_BOOK_DISCOUNT_BPS=0).
+  // For non-fairValue paths the price is book-derived, so we guard the final
+  // price directly.
   if (
-    (emptyBookMode || isWeatherPatient)
+    (emptyBookMode || isWeatherPatient || signal._restAboveCap === true)
     && signal.source === 'weather'
     && cfg.WEATHER_MAX_ENTRY_PRICE > 0
     && price > cfg.WEATHER_MAX_ENTRY_PRICE + 1e-9
@@ -906,9 +911,10 @@ async function tryExecuteViaClobMaker(
     };
   }
   // Defense-in-depth for WEATHER_EARLY_ENTRY_MAX_PRICE. Bracket opposite legs are
-  // exempt — same reasoning as the fairValue clamp above.
+  // exempt — same reasoning as the fairValue clamp above. _restAboveCap covered
+  // on every path, same as the WEATHER_MAX_ENTRY_PRICE guard.
   if (
-    (emptyBookMode || isWeatherPatient)
+    (emptyBookMode || isWeatherPatient || signal._restAboveCap === true)
     && signal.source === 'weather'
     && !signal._isResolutionDay
     && !signal._isBracketOpposite
