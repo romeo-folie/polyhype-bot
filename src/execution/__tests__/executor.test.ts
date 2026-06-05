@@ -3156,23 +3156,76 @@ describe('weather rest-above-cap (caps as clamps, not eligibility filters)', () 
     );
   });
 
-  it('plain real-book path (WEATHER_REAL_BOOK_DISCOUNT_BPS=0) still clamps the post to the cap', async () => {
+  it('plain real-book path (WEATHER_REAL_BOOK_DISCOUNT_BPS=0) clamps the post AND persists the resting order', async () => {
     // With the patient discount disabled, weather real-book makers use the
     // bid-anchored global pricing (isWeatherPatient=false). For _restAboveCap
     // signals that anchor tracks the above-cap market (bid 0.68), so without
-    // path-independent clamping the order would post unclamped above 0.55.
+    // path-independent clamping the order would post unclamped above 0.55 —
+    // and without the _restAboveCap persistence arm the accepted order would be
+    // cancelled by the generic wait loop instead of resting, never counting
+    // toward the sumRestAboveCapNotional pool.
     // WEATHER_REAL_BOOK_DISCOUNT_BPS is already 0 in this describe's beforeEach.
     mockConfig.EXECUTION_MODE = 'maker';
     mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
     mockGetOrderBook.mockResolvedValue(makeRealBook());
     const redis = makeRedis();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await executeSignal(makeOutOfRangeSignal(), redis as any);
+    const result = await executeSignal(makeOutOfRangeSignal(), redis as any);
 
     expect(mockSubmitLimit).toHaveBeenCalledOnce();
     const submitted = mockSubmitLimit.mock.calls[0]![0] as { price: number };
     expect(submitted.price).toBeLessThanOrEqual(0.55);
     expect(mockSubmitClob).not.toHaveBeenCalled(); // and never a taker buy
+    // The accepted order RESTS (pending lifecycle), tagged for the pool gate.
+    expect(result.entryExecutionPath).toBe('maker_pending');
+    expect(mockCancelOrder).not.toHaveBeenCalled(); // not cancelled by the wait loop
+    expect(mockSetPendingOrder).toHaveBeenCalledWith(
+      expect.anything(),
+      'mkt-test',
+      'YES',
+      expect.objectContaining({ restAboveCap: true }),
+      expect.any(Number),
+    );
+  });
+
+  it('resumes an existing rest-above-cap order even when the signal is back IN range (no double-post)', async () => {
+    // Crossing case: a rest-above-cap GTC posted on a prior scan still rests;
+    // the market then drops below the cap, so the re-emitted signal carries no
+    // _restAboveCap flag — and with WEATHER_REAL_BOOK_DISCOUNT_BPS=0 neither
+    // patient nor empty-book conditions hold. The lifecycle lookup must still
+    // find the pending order and resume it instead of posting a duplicate.
+    mockConfig.EXECUTION_MODE = 'maker';
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
+    mockGetOrderBook.mockResolvedValue(makeRealBook());
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'order-resting',
+      tokenId: 'tok-yes',
+      price: 0.55,
+      size: 9,
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 3_600_000,
+      consensusP: 0.9,
+      direction: 'YES',
+      source: 'weather',
+      restAboveCap: true,
+    });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-resting',
+      status: 'LIVE',
+      size_matched: '0',
+      original_size: '9',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeOutOfRangeSignal({ outcomePrice: 0.50 }), // back in range
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(mockSubmitLimit).not.toHaveBeenCalled(); // resumed, no duplicate post
+    expect(mockCancelOrder).not.toHaveBeenCalled(); // resting order left alone
+    expect(result.entryExecutionPath).toBe('maker_pending');
   });
 
   it('hybrid mode: rest-above-cap maker failure NEVER falls through to a taker buy', async () => {

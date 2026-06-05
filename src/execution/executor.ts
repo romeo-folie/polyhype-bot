@@ -539,10 +539,21 @@ async function tryExecuteViaClobMaker(
       : getPatientRealBookDiscountBps(signal.source, cfg);
   const isPatientRealBook = patientDiscountBps > 0;
   const isWeatherPatient = isPatientRealBook && signal.source === 'weather';
+  // Rest-above-cap pending lifecycle: when the knob is on, ANY weather signal
+  // must check for an existing pending order before posting — a rest-above-cap
+  // GTC may still be resting from a prior scan even when THIS scan's signal is
+  // back in range (market crossed below the cap, so _restAboveCap is no longer
+  // set) and the patient/empty-book conditions don't apply (e.g.
+  // WEATHER_REAL_BOOK_DISCOUNT_BPS=0). Without the lookup the re-emission would
+  // double-post and orphan the original resting order — the duplicate-orphan
+  // bug the pending-key lifecycle exists to prevent.
+  const isWeatherRestAboveCapLifecycle =
+    signal.source === 'weather' && cfg.WEATHER_REST_ABOVE_CAP_ENABLED;
 
-  // --- Pending order handling (empty-book + weather patient real-book) ---
+  // --- Pending order handling (empty-book + weather patient real-book +
+  // weather rest-above-cap lifecycle) ---
   // On each cron cycle, resume polling an existing open order rather than re-posting.
-  if ((emptyBookMode || isWeatherPatient) && redis) {
+  if ((emptyBookMode || isWeatherPatient || isWeatherRestAboveCapLifecycle) && redis) {
     const pending = await getPendingOrder(redis, signal.marketId, signal.direction);
     if (pending) {
       // Normalize both sides before comparing: oracle-lag stores 'UP'/'DOWN' in the
@@ -1257,10 +1268,14 @@ async function tryExecuteViaClobMaker(
   await recordGlobalTrade(getRedis(), 'polymarket');
   governorStamped = true;
 
-  // Empty-book mode or weather patient real-book: persist the order and return
-  // immediately (non-blocking). The next cron cycle resumes via the pending-order
-  // check at the top of this function.
-  if ((emptyBookMode || isWeatherPatient) && redis) {
+  // Empty-book mode, weather patient real-book, or rest-above-cap on the plain
+  // real-book path (WEATHER_REAL_BOOK_DISCOUNT_BPS=0): persist the order and
+  // return immediately (non-blocking). The next cron cycle resumes via the
+  // pending-order check at the top of this function. Without the _restAboveCap
+  // arm, a plain-path rest-above-cap post would be cancelled by the generic
+  // wait loop instead of resting, and would never count toward the
+  // sumRestAboveCapNotional pool.
+  if ((emptyBookMode || isWeatherPatient || signal._restAboveCap === true) && redis) {
     const expiresAt = startedAt + cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS;
     // The posted order is GTC — it rests on-chain until filled or explicitly
     // cancelled, which only happens via the resume path on a later scanner
@@ -1314,7 +1329,7 @@ async function tryExecuteViaClobMaker(
     logger.info('[executor] maker order posted — returning pending', {
       marketId: signal.marketId,
       source: signal.source,
-      mode: emptyBookMode ? 'empty_book' : 'weather_patient',
+      mode: emptyBookMode ? 'empty_book' : isWeatherPatient ? 'weather_patient' : 'rest_above_cap',
       orderId: result.order_id,
       price,
       expiresAt: new Date(expiresAt).toISOString(),
@@ -1403,7 +1418,7 @@ async function tryExecuteViaClobMaker(
         }
       }
 
-      if ((emptyBookMode || isWeatherPatient) && redis) await deletePendingOrder(redis, signal.marketId, signal.direction);
+      if ((emptyBookMode || isWeatherPatient || signal._restAboveCap === true) && redis) await deletePendingOrder(redis, signal.marketId, signal.direction);
       // Same VWAP repricing as the pending-order resume path: a GTC that
       // crossed at post time filled below the posted limit, and the posted
       // price would overstate cost basis. Falls back to the posted price when
@@ -1442,7 +1457,7 @@ async function tryExecuteViaClobMaker(
     await sleep(pollIntervalMs);
   }
 
-  if ((emptyBookMode || isWeatherPatient) && redis) await deletePendingOrder(redis, signal.marketId, signal.direction);
+  if ((emptyBookMode || isWeatherPatient || signal._restAboveCap === true) && redis) await deletePendingOrder(redis, signal.marketId, signal.direction);
   const cancelled = await confirmMakerCancel(result.order_id);
   if (!cancelled) {
     return {
