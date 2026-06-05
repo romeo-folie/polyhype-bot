@@ -101,10 +101,14 @@ export function evaluateTakeProfit(
   // making divergence closure effectively a tiny-profit exit which we don't want.
   // Skip for reconciled positions — they have no consensus estimate, so the 0.5
   // default causes either premature exits or stuck positions.
+  // Skip for rebate-farming inventory — no model prob either (the 0.5 fallback
+  // would insta-exit any YES leg filled at ≥0.5), and pair legs must hold to
+  // resolution rather than be sold apart on a price-crossing heuristic.
   if (
     !position.sourcedFrom.startsWith('copytrade:') &&
     !position.sourcedFrom.startsWith('reconciled:') &&
-    !position.sourcedFrom.startsWith('fv-scanner:')
+    !position.sourcedFrom.startsWith('fv-scanner:') &&
+    !position.sourcedFrom.startsWith('rebate-farming')
   ) {
     // UP (BTC Up/Down) is a YES-side direction — its token IS the YES-token.
     // Must be treated as 'YES' here or the else branch inverts the check.

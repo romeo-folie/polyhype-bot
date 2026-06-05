@@ -246,3 +246,93 @@ describe('POLYMARKET_TP_SL_ENABLED=false — hold-to-resolution kill switch', ()
     expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
   });
 });
+
+describe('rebate-farming hold-to-resolution (REBATE_*_PCT=0 disables TP/SL)', () => {
+  // Rebate inventory holds to resolution: pair legs must never be TP/SL'd
+  // apart (selling one leg of a YES+NO pair converts its locked profit back
+  // into a directional bet). 0 = disabled, mirroring the weather convention.
+  // POLYMARKET_TP_SL_ENABLED is TRUE here — the global kill switch must NOT
+  // be what protects these positions.
+  function makeRebatePosition(overrides = {}) {
+    return makePosition({
+      sourcedFrom: 'rebate-farming',
+      entryPrice: 0.5,
+      sharesHeld: 10,
+      consensusProbability: undefined, // rebate fills carry no model prob
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockExecuteTakeProfit.mockResolvedValue({ success: true, marketId: 'm1', returnPct: 0 });
+    mockEvaluateTrailingStop.mockReturnValue({ shouldExit: false });
+  });
+
+  it('holds through a −50% drawdown when REBATE_STOP_LOSS_PCT=0', async () => {
+    mockGetOpenPositions.mockResolvedValue([makeRebatePosition()]);
+    mockFetchAllCurrentPrices.mockResolvedValue(
+      new Map([['m1:YES', makeCurrentPrice(0.25)]]), // −50% vs 0.5 entry
+    );
+    mockLoadConfig.mockReturnValue(makeBaseConfig({
+      POLYMARKET_TP_SL_ENABLED: true,
+      REBATE_TAKE_PROFIT_PCT: 0,
+      REBATE_STOP_LOSS_PCT: 0,
+    }));
+
+    await runMonitorInner(makeRedis() as any);
+
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+  });
+
+  it('holds through a +60% gain when REBATE_TAKE_PROFIT_PCT=0', async () => {
+    mockGetOpenPositions.mockResolvedValue([makeRebatePosition()]);
+    mockFetchAllCurrentPrices.mockResolvedValue(
+      new Map([['m1:YES', makeCurrentPrice(0.80)]]), // +60% vs 0.5 entry
+    );
+    mockLoadConfig.mockReturnValue(makeBaseConfig({
+      POLYMARKET_TP_SL_ENABLED: true,
+      REBATE_TAKE_PROFIT_PCT: 0,
+      REBATE_STOP_LOSS_PCT: 0,
+    }));
+
+    await runMonitorInner(makeRedis() as any);
+
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+  });
+
+  it('legacy non-zero knobs still fire the stop-loss', async () => {
+    mockGetOpenPositions.mockResolvedValue([makeRebatePosition()]);
+    mockFetchAllCurrentPrices.mockResolvedValue(
+      new Map([['m1:YES', makeCurrentPrice(0.25)]]), // −50% ≤ −5%
+    );
+    mockLoadConfig.mockReturnValue(makeBaseConfig({
+      POLYMARKET_TP_SL_ENABLED: true,
+      REBATE_TAKE_PROFIT_PCT: 3,
+      REBATE_STOP_LOSS_PCT: 5,
+    }));
+
+    await runMonitorInner(makeRedis() as any);
+
+    expect(mockExecuteTakeProfit).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'stop_loss' }),
+    );
+  });
+
+  it('near-res gate (≥0.95 → pendingSettlement) remains the only exit with knobs=0', async () => {
+    mockGetOpenPositions.mockResolvedValue([makeRebatePosition()]);
+    mockFetchAllCurrentPrices.mockResolvedValue(
+      new Map([['m1:YES', makeCurrentPrice(0.96)]]), // +92% AND ≥ 0.95
+    );
+    mockLoadConfig.mockReturnValue(makeBaseConfig({
+      POLYMARKET_TP_SL_ENABLED: true,
+      REBATE_TAKE_PROFIT_PCT: 0,
+      REBATE_STOP_LOSS_PCT: 0,
+    }));
+
+    await runMonitorInner(makeRedis() as any);
+
+    expect(mockMarkPositionPendingSettlement).toHaveBeenCalledOnce();
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+  });
+});

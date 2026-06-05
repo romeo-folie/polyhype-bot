@@ -315,8 +315,16 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       tpThreshold = Number.POSITIVE_INFINITY; // disables TP and trailing activation for all entry prices
       slThreshold = cfg.CRYPTO_UPDOWN_STOP_LOSS;
     } else if (isRebateFarming) {
-      tpThreshold = cfg.REBATE_TAKE_PROFIT_PCT / 100;
-      slThreshold = cfg.REBATE_STOP_LOSS_PCT / 100;
+      // 0 = disabled (weather convention): rebate inventory holds to
+      // resolution — the near-res gate (→ redeemer) is the only exit. Pair
+      // legs especially must never be TP/SL'd apart: selling one leg of a
+      // YES+NO pair converts its locked profit back into a directional bet.
+      tpThreshold = cfg.REBATE_TAKE_PROFIT_PCT > 0
+        ? cfg.REBATE_TAKE_PROFIT_PCT / 100
+        : Number.POSITIVE_INFINITY;
+      slThreshold = cfg.REBATE_STOP_LOSS_PCT > 0
+        ? cfg.REBATE_STOP_LOSS_PCT / 100
+        : Number.POSITIVE_INFINITY;
     } else if (isCopytrade) {
       tpThreshold = cfg.COPYTRADE_TAKE_PROFIT;
       slThreshold = cfg.COPYTRADE_STOP_LOSS;

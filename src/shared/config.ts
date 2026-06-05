@@ -1159,10 +1159,13 @@ export const envSchema = z.object({
   // Replaces the backwards REBATE_SKIP_FEE_MARKETS (default true) that pointed
   // the farmer exclusively at markets that can never pay a rebate.
   REBATE_REQUIRE_FEE_MARKETS: boolFromEnv.optional().default(true),
-  // Take-profit threshold for rebate-farmed positions (lower than directional trades).
-  REBATE_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(3),
-  // Stop-loss threshold for rebate-farmed positions (tight since no directional conviction).
-  REBATE_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(5),
+  // Take-profit / stop-loss for rebate-farmed inventory. 0 = DISABLED (the
+  // default): hold to resolution — the near-res gate (→ redeemer) is the only
+  // exit. Early exits are wrong for this book: pair legs must never be
+  // TP/SL'd apart (selling one leg of a YES+NO pair converts its locked
+  // profit back into a directional bet), and singles realize spread/noise.
+  REBATE_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(0),
+  REBATE_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(0),
   // -- selection v2: quote where takers actually trade (audit finding 4) --
   // Lookback window for recent-taker-flow estimation from the public data-api.
   REBATE_FLOW_LOOKBACK_HOURS: z.coerce.number().min(0.5).optional().default(6),
