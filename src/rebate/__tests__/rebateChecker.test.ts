@@ -127,8 +127,9 @@ describe('maybeSendDailySummary', () => {
     stale_cancels: '5',
     reprice_cancels: '2',
     est_rebate_usd: '0.2531',
-    lifetime_ms_total: String(40 * 60_000),
-    lifetime_count: '8',
+    lifetime_ms_total: String(80 * 60_000),
+    lifetime_count: '8', // avg 10.0 min — distinct from the day bucket so the
+    // assertions prove which bucket feeds the avg-lifetime line
   };
 
   function makeRedis(overrides: Record<string, unknown> = {}): Record<string, ReturnType<typeof vi.fn>> {
@@ -175,9 +176,10 @@ describe('maybeSendDailySummary', () => {
     // API line (yesterday's payout figure).
     expect(text).toContain('$0.3100');
     // Same-period estimate line comes from the DATE bucket (0.1200 / 2 fills /
-    // avg 5.0 min), not the cumulative hash.
+    // avg 5.0 min), not the cumulative hash (avg 10.0 min).
     expect(text).toContain(`Est. ${yesterday}: $0.1200 from 2 fill(s)`);
     expect(text).toContain('avg lifetime 5.0 min');
+    expect(text).not.toContain('avg lifetime 10.0 min');
     expect(text).toContain('placed 6');
     // Cumulative counters are present but labelled all-time.
     expect(text).toContain('All-time: est $0.2531 | fills 4 | placed 12');

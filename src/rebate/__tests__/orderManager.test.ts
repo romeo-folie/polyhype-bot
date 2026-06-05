@@ -350,8 +350,10 @@ describe('orderManager', () => {
       );
       expect(redis.hset).toHaveBeenCalled();
       const stats = statCalls(redis);
+      const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
       expect(stats).toContainEqual({ key: 'rebate:stats', field: 'orders_placed', by: 1 });
       expect(stats).toContainEqual({ key: 'rebate:stats:market:mkt-1', field: 'orders_placed', by: 1 });
+      expect(stats).toContainEqual({ key: todayKey, field: 'orders_placed', by: 1 });
     });
 
     it('returns null and counts a place-failure when order submission fails', async () => {
@@ -386,7 +388,9 @@ describe('orderManager', () => {
       expect(ok).toBe(true);
       expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-1');
       const stats = statCalls(redis);
+      const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
       expect(stats).toContainEqual({ key: 'rebate:stats', field: 'reprice_cancels', by: 1 });
+      expect(stats).toContainEqual({ key: todayKey, field: 'reprice_cancels', by: 1 });
     });
 
     it('keeps the original order when cancel fails and the order is still live', async () => {
