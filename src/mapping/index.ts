@@ -121,6 +121,12 @@ export interface TradeSignal {
    *  discount (model-FV conviction discount or WEATHER_BRACKET_OPPOSITE_DISCOUNT_BPS)
    *  inflates the share count by `gammaMid / postedPrice` (observed 2.5–6.7×). */
   _bracketTargetShares?: number;
+  /** Set by the executor when a weather entry's market price exceeded the effective
+   *  entry-price cap but WEATHER_REST_ABOVE_CAP_ENABLED let it proceed as a resting
+   *  maker clamped to the cap (instead of the legacy entry_price_above_cap skip).
+   *  Gates the rest-above-cap notional cap and is persisted on the pending maker
+   *  order blob for cohort analysis. Transient — not persisted on positions. */
+  _restAboveCap?: boolean;
 }
 
 /**

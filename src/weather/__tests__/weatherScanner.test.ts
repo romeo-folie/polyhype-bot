@@ -57,6 +57,24 @@ vi.mock('../../execution/executor.js', () => ({
   executeAndRecordSignal: mockExecuteAndRecordSignal,
 }));
 
+const mockListPendingOrders = vi.fn();
+const mockDeletePendingOrder = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../execution/pendingMakerOrders.js', () => ({
+  listPendingOrders: mockListPendingOrders,
+  deletePendingOrder: mockDeletePendingOrder,
+}));
+
+const mockGetClobOrder = vi.fn();
+const mockCancelClobOrder = vi.fn();
+vi.mock('../../shared/clob.js', () => ({
+  getClobOrder: mockGetClobOrder,
+  cancelClobOrder: mockCancelClobOrder,
+  // weatherLockIn + weatherInvalidation load REAL in this suite and import these;
+  // their config gates are off in baseConfig so they are never invoked.
+  getClobOrderBook: vi.fn().mockResolvedValue(null),
+  submitClobBuy: vi.fn().mockResolvedValue({ success: false, error: 'mocked' }),
+}));
+
 const mockGetBankroll = vi.fn();
 vi.mock('../../shared/bankroll.js', () => ({
   getBankroll: mockGetBankroll,
@@ -131,6 +149,8 @@ const {
   runWeatherScan,
   buildWeatherFillShadow,
   shrinkTowardMarket,
+  partitionTradableByEntryCap,
+  revalidateRestingWeatherOrders,
 } = await import('../weatherScanner.js');
 
 const { computeHalfKelly } = await import('../../mapping/divergenceCalculator.js');
@@ -3823,5 +3843,217 @@ describe('scanWeatherMarkets - outage alert and forecast cache', () => {
 
     const cacheKey = `weather:forecast_cache:amsterdam:${tomorrowIso}`;
     expect(redisMock._store.has(cacheKey)).toBe(false);
+  });
+});
+
+describe('partitionTradableByEntryCap', () => {
+  const cfg = { WEATHER_MAX_ENTRY_PRICE: 0.75, WEATHER_EARLY_ENTRY_MAX_PRICE: 0.55 };
+
+  it('moves out-of-range opportunities behind in-range ones, preserving order within groups', () => {
+    const tradable = [
+      { marketId: 'a', outcomePrice: 0.80, isResolutionDay: false },  // out (pre-res cap 0.55)
+      { marketId: 'b', outcomePrice: 0.50, isResolutionDay: false },  // in
+      { marketId: 'c', outcomePrice: 0.60, isResolutionDay: false },  // out
+      { marketId: 'd', outcomePrice: 0.30, isResolutionDay: true },   // in
+    ];
+    const result = partitionTradableByEntryCap(tradable as never, cfg);
+    expect(result.map((o: { marketId: string }) => o.marketId)).toEqual(['b', 'd', 'a', 'c']);
+  });
+
+  it('uses WEATHER_MAX_ENTRY_PRICE (not the early cap) on resolution day', () => {
+    const tradable = [
+      { marketId: 'a', outcomePrice: 0.70, isResolutionDay: true },   // in: 0.70 ≤ 0.75
+      { marketId: 'b', outcomePrice: 0.70, isResolutionDay: false },  // out: 0.70 > 0.55
+      { marketId: 'c', outcomePrice: 0.80, isResolutionDay: true },   // out: 0.80 > 0.75
+    ];
+    const result = partitionTradableByEntryCap(tradable as never, cfg);
+    expect(result.map((o: { marketId: string }) => o.marketId)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('treats size-up rows as in-range regardless of price', () => {
+    const tradable = [
+      { marketId: 'a', outcomePrice: 0.90, isResolutionDay: false, sizeUpScanOnly: true },
+      { marketId: 'b', outcomePrice: 0.50, isResolutionDay: false },
+    ];
+    const result = partitionTradableByEntryCap(tradable as never, cfg);
+    expect(result.map((o: { marketId: string }) => o.marketId)).toEqual(['a', 'b']);
+  });
+
+  it('is a no-op when the caps are disabled (0)', () => {
+    const tradable = [
+      { marketId: 'a', outcomePrice: 0.99, isResolutionDay: false },
+      { marketId: 'b', outcomePrice: 0.10, isResolutionDay: false },
+    ];
+    const result = partitionTradableByEntryCap(tradable as never, {
+      WEATHER_MAX_ENTRY_PRICE: 0,
+      WEATHER_EARLY_ENTRY_MAX_PRICE: 0,
+    });
+    expect(result.map((o: { marketId: string }) => o.marketId)).toEqual(['a', 'b']);
+  });
+});
+
+describe('revalidateRestingWeatherOrders', () => {
+  const revalidationConfig = () => ({
+    ...baseConfig,
+    WEATHER_RESTING_REVALIDATION_ENABLED: true,
+  });
+
+  function pendingEntry(overrides: {
+    marketId?: string;
+    direction?: 'YES' | 'NO';
+    order?: Record<string, unknown>;
+  } = {}) {
+    return {
+      marketId: overrides.marketId ?? 'mkt-1',
+      direction: overrides.direction ?? 'NO',
+      order: {
+        orderId: 'order-1',
+        tokenId: 'tok',
+        price: 0.55,
+        size: 10,
+        postedAt: 1,
+        expiresAt: Date.now() + 3_600_000,
+        consensusP: 0.30,
+        direction: overrides.direction ?? 'NO',
+        source: 'weather',
+        edgeMagnitude: 0.20,
+        ...overrides.order,
+      },
+    };
+  }
+
+  function liveOrder(matched: string, original = '10') {
+    return {
+      id: 'order-1',
+      status: 'LIVE',
+      size_matched: matched,
+      original_size: original,
+    };
+  }
+
+  // Minimal opportunity shape: revalidation reads only marketId + modelProbability.
+  function opp(marketId: string, modelProbability: number) {
+    return { marketId, modelProbability } as never;
+  }
+
+  beforeEach(() => {
+    mockListPendingOrders.mockReset();
+    mockDeletePendingOrder.mockReset();
+    mockGetClobOrder.mockReset();
+    mockCancelClobOrder.mockReset();
+    mockDeletePendingOrder.mockResolvedValue(undefined);
+    mockLoadConfig.mockReturnValue(revalidationConfig() as never);
+  });
+
+  it('cancels a primary whose side-FV dropped below the posted price and deletes the key', async () => {
+    // NO posted at 0.55; fresh model P(YES)=0.80 → NO side FV = 0.20 < 0.55 → cancel.
+    mockListPendingOrders.mockResolvedValue([pendingEntry()]);
+    mockGetClobOrder
+      .mockResolvedValueOnce(liveOrder('0'))   // pre-cancel read: nothing filled
+      .mockResolvedValueOnce(null);            // post-cancel read: order gone
+    mockCancelClobOrder.mockResolvedValue(true);
+
+    await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+    expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+    expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-1', 'NO');
+  });
+
+  it('keeps a primary whose side-FV still supports the posted price', async () => {
+    // NO posted at 0.55; fresh P(YES)=0.20 → NO side FV = 0.80 > 0.55 → keep resting.
+    mockListPendingOrders.mockResolvedValue([pendingEntry()]);
+
+    await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.20)]);
+
+    expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+  });
+
+  it('never cancels bracket-opposite legs, flagged or legacy (edge=0)', async () => {
+    mockListPendingOrders.mockResolvedValue([
+      pendingEntry({ marketId: 'mkt-1', order: { isBracketOpposite: true } }),
+      pendingEntry({ marketId: 'mkt-2', order: { edgeMagnitude: 0 } }), // legacy blob heuristic
+    ]);
+
+    await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80), opp('mkt-2', 0.80)]);
+
+    expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+  });
+
+  it('never cancels legacy blobs missing edgeMagnitude entirely (when in doubt, do not cancel)', async () => {
+    // A real pre-flag legacy blob in Redis has neither isBracketOpposite nor
+    // edgeMagnitude — it could be a bracket leg, so it must be left alone.
+    mockListPendingOrders.mockResolvedValue([
+      pendingEntry({ order: { edgeMagnitude: undefined } }),
+    ]);
+
+    await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+    expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+  });
+
+  it('leaves orders for markets outside the current scan universe untouched', async () => {
+    mockListPendingOrders.mockResolvedValue([pendingEntry({ marketId: 'mkt-gone' })]);
+
+    await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+    expect(mockGetClobOrder).not.toHaveBeenCalled();
+    expect(mockCancelClobOrder).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when the opportunity list is empty (fail-safe on Gamma outage)', async () => {
+    mockListPendingOrders.mockResolvedValue([pendingEntry()]);
+
+    await revalidateRestingWeatherOrders({} as never, []);
+
+    expect(mockListPendingOrders).not.toHaveBeenCalled();
+    expect(mockCancelClobOrder).not.toHaveBeenCalled();
+  });
+
+  it('is inert when WEATHER_RESTING_REVALIDATION_ENABLED is off', async () => {
+    mockLoadConfig.mockReturnValue({ ...baseConfig } as never);
+    mockListPendingOrders.mockResolvedValue([pendingEntry()]);
+
+    await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+    expect(mockListPendingOrders).not.toHaveBeenCalled();
+  });
+
+  it('cancels the residual but KEEPS the pending key when the order partially filled', async () => {
+    mockListPendingOrders.mockResolvedValue([pendingEntry()]);
+    mockGetClobOrder
+      .mockResolvedValueOnce(liveOrder('4'))  // pre-cancel: 4/10 filled
+      .mockResolvedValueOnce(liveOrder('4')); // post-cancel: still 4 matched
+    mockCancelClobOrder.mockResolvedValue(true);
+
+    await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+    expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+    // Key kept → reconciler links the on-chain fill to its metadata.
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+  });
+
+  it('skips fully-filled orders entirely (resume/reconciler will record the position)', async () => {
+    mockListPendingOrders.mockResolvedValue([pendingEntry()]);
+    mockGetClobOrder.mockResolvedValueOnce(liveOrder('10', '10'));
+
+    await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+    expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+  });
+
+  it('keeps the key and retries next scan when the cancel cannot be confirmed', async () => {
+    mockListPendingOrders.mockResolvedValue([pendingEntry()]);
+    mockGetClobOrder
+      .mockResolvedValueOnce(liveOrder('0'))   // pre-cancel read
+      .mockResolvedValueOnce(liveOrder('0'));  // confirm read: still LIVE
+    mockCancelClobOrder.mockResolvedValue(false);
+
+    await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();
   });
 });

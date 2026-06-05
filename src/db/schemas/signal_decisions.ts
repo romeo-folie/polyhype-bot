@@ -29,6 +29,8 @@ const SKIP_REASON = [
   'recently_resolved',
   // size-up gate (added 2026-05-24)
   'size_up_ineligible',
+  // weather rest-above-cap pool gate (added 2026-06-05)
+  'resting_notional_cap',
   'other',
 ] as const;
 
