@@ -267,6 +267,18 @@ describe('getActiveMarkets', () => {
     expect(calledUrl).toContain('ascending=false');
   });
 
+  it('forwards opts.order=volume24hr to the query string (rebate universe path)', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [makeMarket('1')],
+    } as Response);
+
+    await getActiveMarkets(10, 10, { order: 'volume24hr' });
+    const calledUrl = mockFetch.mock.calls[0]?.[0] as string;
+    expect(calledUrl).toContain('order=volume24hr');
+    expect(calledUrl).not.toContain('order=liquidityNum');
+  });
+
   it('includes offset in subsequent page requests', async () => {
     const page1 = Array.from({ length: 500 }, (_, i) => makeMarket(`p1-${i}`));
     const page2 = [makeMarket('last')];

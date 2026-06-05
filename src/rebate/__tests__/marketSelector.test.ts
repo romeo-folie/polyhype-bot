@@ -381,5 +381,19 @@ describe('selectRebateMarkets', () => {
 
       expect(selected.map((c) => c.marketId)).toEqual(['live-today']);
     });
+
+    it('applies the volume floor to lifetime volume on the cache fallback (no volume24hr field)', async () => {
+      // CachedMarket rows lack volume24hr entirely — the ?? must fall through
+      // to lifetime volume, not treat every cached market as zero-volume.
+      mockGetActiveMarkets.mockRejectedValue(new Error('gamma down'));
+      mockGetCachedMarkets.mockResolvedValue([
+        makeMarket({ id: 'below-floor', volume: '1000' }), // < 50k floor
+        makeMarket({ id: 'above-floor', conditionId: '0xcond2', volume: '100000' }),
+      ]);
+
+      const selected = await selectRebateMarkets(redis, 10);
+
+      expect(selected.map((c) => c.marketId)).toEqual(['above-floor']);
+    });
   });
 });
