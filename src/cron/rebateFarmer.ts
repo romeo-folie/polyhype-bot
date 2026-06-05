@@ -30,7 +30,7 @@ import { getRedis, closeRedis } from '../shared/redis.js';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { getBankroll } from '../shared/bankroll.js';
-import { hasOpenPosition } from '../execution/positionLedger.js';
+import { hasOpenPosition, getPosition } from '../execution/positionLedger.js';
 import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
 import { selectRebateMarkets } from '../rebate/marketSelector.js';
 import {
@@ -41,6 +41,7 @@ import {
   deployedUsdForMarket,
   placeRestingOrder,
   cancelForReprice,
+  resolveMatchShares,
 } from '../rebate/orderManager.js';
 import { maybeSendDailySummary } from '../rebate/rebateChecker.js';
 
@@ -84,10 +85,15 @@ async function main(): Promise<void> {
       }
 
       // Phase 4: Place / reprice resting orders — one per market+direction.
+      // Two-sided legs are SHARE-matched: a YES+NO pair is riskless only for
+      // min(sharesYes, sharesNo), so the second leg (or a leg pairing against
+      // held inventory / a resting opposite order) matches the existing share
+      // count instead of sizing a fresh $ORDER_SIZE (which leaves the excess
+      // shares directional — the weather-bracket oversizing shape, PR #442).
       outer: for (const candidate of candidates) {
+        // Shares of the first leg placed for this candidate THIS cycle.
+        let cycleLegShares: number | null = null;
         for (const quote of candidate.quotes) {
-          if (remaining < cfg.REBATE_ORDER_SIZE_USD) break outer;
-
           const existing = findRestingOrder(orders, candidate.marketId, quote.direction);
           if (existing) {
             // Reprice: the market re-selected with a target that drifted away
@@ -111,6 +117,21 @@ async function main(): Promise<void> {
           // don't accumulate more of a side the monitor is already managing).
           if (await hasOpenPosition(redis, candidate.marketId, quote.direction)) continue;
 
+          // Pair-matching target: held opposite inventory beats a resting
+          // opposite order beats this cycle's first leg.
+          const oppositeDirection = quote.direction === 'YES' ? 'NO' : 'YES';
+          const heldOpposite = await getPosition(redis, candidate.marketId, oppositeDirection);
+          const restingOpposite = findRestingOrder(orders, candidate.marketId, oppositeDirection);
+          const matchShares = resolveMatchShares(
+            heldOpposite?.sharesHeld,
+            restingOpposite?.size,
+            cycleLegShares,
+          );
+
+          // Fresh legs need a full order's budget; pairing legs only their
+          // matched cost (placeRestingOrder enforces the CLOB minimum).
+          if (matchShares == null && remaining < cfg.REBATE_ORDER_SIZE_USD) continue;
+
           // Enforce per-market exposure cap across both directions.
           if (deployedUsdForMarket(orders, candidate.marketId) >= cfg.REBATE_MAX_PER_MARKET_USD) {
             continue;
@@ -126,14 +147,15 @@ async function main(): Promise<void> {
             break outer;
           }
 
-          const sizeUsd = Math.min(cfg.REBATE_ORDER_SIZE_USD, remaining);
-          const order = await placeRestingOrder(redis, candidate, quote, sizeUsd);
+          const maxUsd = Math.min(cfg.REBATE_ORDER_SIZE_USD, remaining);
+          const order = await placeRestingOrder(redis, candidate, quote, { maxUsd, matchShares });
 
           if (order) {
             await recordGlobalTrade(redis, 'polymarket');
             orders.set(order.orderId, order);
-            remaining -= sizeUsd;
+            remaining -= order.sizeUsd;
             placed++;
+            if (cycleLegShares === null) cycleLegShares = order.size;
           }
         }
       }

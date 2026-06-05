@@ -6,6 +6,7 @@ vi.mock('../../shared/clob.js', () => ({
   submitClobLimitBuy: vi.fn(),
   getClobOrder: vi.fn(),
   cancelClobOrder: vi.fn(),
+  CLOB_MIN_ORDER_USD: 1.0,
 }));
 
 vi.mock('../../execution/positionLedger.js', () => ({
@@ -55,6 +56,7 @@ import {
   deployedUsdForMarket,
   getDeployedUsd,
   loadRestingOrders,
+  resolveMatchShares,
 } from '../orderManager.js';
 import { getClobOrder, cancelClobOrder, submitClobLimitBuy } from '../../shared/clob.js';
 import { recordPosition } from '../../execution/positionLedger.js';
@@ -331,7 +333,7 @@ describe('orderManager', () => {
       const candidate = makeCandidate();
       const quote = makeQuote({ direction: 'NO', tokenId: 'tok-no', price: 0.59 });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const order = await placeRestingOrder(redis as any, candidate, quote, 5);
+      const order = await placeRestingOrder(redis as any, candidate, quote, { maxUsd: 5 });
 
       expect(order).not.toBeNull();
       expect(order!.orderId).toBe('order-new');
@@ -361,7 +363,7 @@ describe('orderManager', () => {
       mockSubmitLimit.mockResolvedValue({ success: false, error: 'order crosses book' });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const order = await placeRestingOrder(redis as any, makeCandidate(), makeQuote(), 5);
+      const order = await placeRestingOrder(redis as any, makeCandidate(), makeQuote(), { maxUsd: 5 });
       expect(order).toBeNull();
       const stats = statCalls(redis);
       expect(stats).toContainEqual({ key: 'rebate:stats', field: 'place_failures', by: 1 });
@@ -371,9 +373,80 @@ describe('orderManager', () => {
       const redis = makeRedis();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const r = redis as any;
-      expect(await placeRestingOrder(r, makeCandidate(), makeQuote({ price: 0 }), 5)).toBeNull();
-      expect(await placeRestingOrder(r, makeCandidate(), makeQuote({ price: 1 }), 5)).toBeNull();
+      expect(await placeRestingOrder(r, makeCandidate(), makeQuote({ price: 0 }), { maxUsd: 5 })).toBeNull();
+      expect(await placeRestingOrder(r, makeCandidate(), makeQuote({ price: 1 }), { maxUsd: 5 })).toBeNull();
       expect(mockSubmitLimit).not.toHaveBeenCalled();
+    });
+
+    it('share-matches a pairing leg: size = matchShares, sizeUsd = shares × price', async () => {
+      const redis = makeRedis();
+      mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-pair' });
+
+      // First leg was 8.4746 YES shares; this NO leg at 0.38 must match the
+      // SHARE count (8.4746 → $3.22), not size fresh at $5 (13.16 shares,
+      // leaving ~4.7 shares directional if both fill).
+      const quote = makeQuote({ direction: 'NO', tokenId: 'tok-no', price: 0.38 });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const order = await placeRestingOrder(redis as any, makeCandidate(), quote, {
+        maxUsd: 5,
+        matchShares: 8.4746,
+      });
+
+      expect(order).not.toBeNull();
+      expect(order!.size).toBeCloseTo(8.4746, 4);
+      expect(order!.sizeUsd).toBeCloseTo(8.4746 * 0.38, 4);
+      expect(mockSubmitLimit).toHaveBeenCalledWith(
+        expect.objectContaining({ size: expect.closeTo(8.4746, 4) as number, price: 0.38 }),
+      );
+    });
+
+    it('caps a pairing leg at the budget ceiling when matchShares is larger', async () => {
+      const redis = makeRedis();
+      mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-capped' });
+
+      // Held inventory 30 shares but only $5 budget at 0.50 → 10 shares.
+      const quote = makeQuote({ price: 0.5 });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const order = await placeRestingOrder(redis as any, makeCandidate(), quote, {
+        maxUsd: 5,
+        matchShares: 30,
+      });
+
+      expect(order!.size).toBeCloseTo(10, 6);
+      expect(order!.sizeUsd).toBeCloseTo(5, 6);
+    });
+
+    it('skips a pairing leg below the CLOB minimum instead of falling back to fresh sizing', async () => {
+      const redis = makeRedis();
+
+      // 1.2 held shares at 0.38 = $0.456 < $1 CLOB minimum — placing fresh
+      // $5 here would recreate the oversized pair this sizing prevents.
+      const quote = makeQuote({ direction: 'NO', tokenId: 'tok-no', price: 0.38 });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const order = await placeRestingOrder(redis as any, makeCandidate(), quote, {
+        maxUsd: 5,
+        matchShares: 1.2,
+      });
+
+      expect(order).toBeNull();
+      expect(mockSubmitLimit).not.toHaveBeenCalled();
+      // Not an API failure — no place_failures bump.
+      const stats = statCalls(redis);
+      expect(stats.some((s) => s.field === 'place_failures')).toBe(false);
+    });
+  });
+
+  describe('resolveMatchShares', () => {
+    it('prioritizes held inventory > resting opposite > same-cycle leg', () => {
+      expect(resolveMatchShares(8.5, 13.5, 10)).toBe(8.5);
+      expect(resolveMatchShares(null, 13.5, 10)).toBe(13.5);
+      expect(resolveMatchShares(undefined, undefined, 10)).toBe(10);
+      expect(resolveMatchShares(null, null, null)).toBeUndefined();
+    });
+
+    it('ignores zero/negative/non-finite candidates', () => {
+      expect(resolveMatchShares(0, -2, 10)).toBe(10);
+      expect(resolveMatchShares(NaN, Infinity, 7)).toBe(7);
     });
   });
 
