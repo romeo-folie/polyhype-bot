@@ -46,7 +46,7 @@ import {
   getDefaultStdDev,
 } from './noaaClient.js';
 import type { CityCoordinates, FetchFn } from './noaaClient.js';
-import { cityLocalDate, cityDayEndUtcMs } from './resolutionTime.js';
+import { cityLocalDate, cityLocalHour, cityDayEndUtcMs } from './resolutionTime.js';
 import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast } from './openMeteoClient.js';
 import { getCityBias, getCityActuals } from './cityBias.js';
 import type { CityBias, CityActuals } from './cityBias.js';
@@ -2197,24 +2197,24 @@ async function cancelRestingWeatherOrder(
  * side-ask, so cancellation requires a real FV decline, not flapping.
  *
  * BRACKET rule (`WEATHER_BRACKET_CANCEL_ENABLED`): cancel an unfilled
- * bracket-opposite leg when its hedge value is gone —
- *   (a) the market's resolution day has arrived (city-local), or
- *   (b) pre-res-day, the PRIMARY side's Gamma price has reached
- *       `WEATHER_BRACKET_CANCEL_PRIMARY_PRICE` (outcome effectively decided
- *       early; 0 disables this arm).
- * Near resolution the leg fills almost only when the primary side is WINNING:
- * the leg's side collapses into our bid and we pay for shares resolving to $0
- * — a pure deduction from the already-won primary (or a naked worthless fill
- * for solo legs, 4 of 5 historical bracket fills). When the primary is losing,
- * the leg side rises AWAY from our deep bid, so there is no salvage fill to
- * preserve. The genuine intra-day flip case for held primaries is covered by
- * the invalidation taker-hedge, which buys actively with proper sizing. Time
- * (not the leg's own price) is the trigger because bracket legs rest on
- * structurally cheap tails — "leg side is cheap" is true from the moment they
- * post. Extends PR #438's judgment (no NEW res-day brackets) to legs that
- * survived into res-day. The certainty arm uses the PRIMARY side's price,
- * which starts ≤ the entry cap and only reaches the threshold on a genuine
- * repricing.
+ * bracket-opposite leg once its reversal path is gone —
+ *   (a) LATE on resolution day: city-local hour ≥
+ *       `WEATHER_BRACKET_CANCEL_LOCAL_HOUR` (default 18). Daily highs are
+ *       monotonic — once the day's max is in, the outcome can no longer
+ *       reverse toward the leg, so any later fill is near-pure overpay
+ *       (collapse-side sellers hitting a stale bid). EARLIER on res-day the
+ *       leg deliberately stays live: a dip through the bid that later
+ *       reverses is a cheap win, and with a held primary ANY fill at price b
+ *       with primaryCost+b < 1 locks a guaranteed pair profit (the same trade
+ *       weatherLockIn makes deliberately). 24 disables this arm; 0 cancels
+ *       from the start of res-day. Unknown city timezone → arm skipped
+ *       (fail-safe: do not cancel).
+ *   (b) pre-res-day, the PRIMARY side's Gamma price ≥
+ *       `WEATHER_BRACKET_CANCEL_PRIMARY_PRICE` (outcome essentially settled a
+ *       day early; 0 disables). Primary side, not the leg's own price —
+ *       bracket legs rest on structurally cheap tails, so the leg side is
+ *       "cheap" from the moment it posts; the primary side starts ≤ the entry
+ *       cap and only reaches the threshold on a genuine repricing.
  *
  * Shared safety properties:
  *   - Only explicit `isBracketOpposite` blobs are treated as brackets; legacy
@@ -2259,23 +2259,33 @@ export async function revalidateRestingWeatherOrders(
     try {
       if (isBracket) {
         if (!bracketRuleOn) continue;
-        // (a) Resolution day: the collapse-fill regime begins as the day's
-        // high realizes — cancel on the first res-day scan, front-running it.
-        const resDay = opp.isResolutionDay === true;
+        // (a) LATE res-day only: the leg stays live through the swingy hours
+        // (dip-through-then-reverse fills are wins / lock-ins); once the
+        // city-local hour passes the threshold the daily high is effectively
+        // realized and any further fill is near-pure overpay. Unknown city /
+        // timezone → skip the arm (fail-safe: do not cancel). The tz lookup is
+        // scoped inside the res-day check so a missing/unknown city field can
+        // never throw an entry past the certainty arm below.
+        let lateResDay = false;
+        if (opp.isResolutionDay === true && cfg.WEATHER_BRACKET_CANCEL_LOCAL_HOUR < 24) {
+          const tz = opp.city ? lookupCity(opp.city)?.tz : undefined;
+          lateResDay = tz != null && cityLocalHour(tz) >= cfg.WEATHER_BRACKET_CANCEL_LOCAL_HOUR;
+        }
         // (b) Early certainty: primary side (opposite of the leg) repriced to
-        // near-certain before res-day. Gamma side prices are the usable
+        // near-settled before res-day. Gamma side prices are the usable
         // reference on ghost books (see [weather-fill-shadow]).
         const primarySidePrice = direction === 'YES' ? opp.noPrice : opp.yesPrice;
         const certaintyThreshold = cfg.WEATHER_BRACKET_CANCEL_PRIMARY_PRICE;
         const earlyCertain =
-          certaintyThreshold > 0
+          !opp.isResolutionDay
+          && certaintyThreshold > 0
           && Number.isFinite(primarySidePrice)
           && primarySidePrice >= certaintyThreshold;
-        if (!resDay && !earlyCertain) continue;
+        if (!lateResDay && !earlyCertain) continue;
 
         const deleted = await cancelRestingWeatherOrder(redis, marketId, direction, order, {
           rule: 'bracket_cancel',
-          trigger: resDay ? 'resolution_day' : 'primary_certainty',
+          trigger: lateResDay ? 'late_resolution_day' : 'primary_certainty',
           primarySidePrice: Number.isFinite(primarySidePrice)
             ? Number(primarySidePrice.toFixed(4))
             : null,
