@@ -21,6 +21,7 @@ import { fetchWithTimeout } from '../mapping/gamma.js';
 const CLOB_HOST = 'https://clob.polymarket.com';
 const REQUEST_TIMEOUT_MS = 10_000;
 const STATS_KEY = 'rebate:stats';
+const DATE_STATS_PREFIX = 'rebate:stats:date:';
 const SUMMARY_SENT_PREFIX = 'rebate:summary_sent:';
 
 /** One row of the rebates API response. */
@@ -117,16 +118,24 @@ export async function maybeSendDailySummary(redis: Redis): Promise<boolean> {
 
   const yesterday = utcDateString(1);
   const api = await fetchRebatesForDate(yesterday, makerAddress);
-  const stats = await redis.hgetall(STATS_KEY);
+  // Same-period comparison: yesterday's API total vs yesterday's date-bucketed
+  // estimates (orderManager writes every counter to rebate:stats:date:<day>).
+  // Cumulative counters are reported separately and labelled all-time — they
+  // must never sit beside a one-day API figure as if they were comparable.
+  const dayStats = await redis.hgetall(`${DATE_STATS_PREFIX}${yesterday}`);
+  const cumStats = await redis.hgetall(STATS_KEY);
 
-  const num = (field: string): number => {
+  const num = (stats: Record<string, string>, field: string): number => {
     const v = parseFloat(stats[field] ?? '0');
     return isFinite(v) ? v : 0;
   };
-  const lifetimeCount = num('lifetime_count');
-  const avgLifetimeMin = lifetimeCount > 0 ? num('lifetime_ms_total') / lifetimeCount / 60_000 : 0;
-  const fills = num('fills') + num('partial_fills');
-  const estRebateUsd = num('est_rebate_usd');
+  const dayLifetimeCount = num(dayStats, 'lifetime_count');
+  const dayAvgLifetimeMin =
+    dayLifetimeCount > 0 ? num(dayStats, 'lifetime_ms_total') / dayLifetimeCount / 60_000 : 0;
+  const dayFills = num(dayStats, 'fills') + num(dayStats, 'partial_fills');
+  const dayEstRebateUsd = num(dayStats, 'est_rebate_usd');
+  const cumFills = num(cumStats, 'fills') + num(cumStats, 'partial_fills');
+  const cumEstRebateUsd = num(cumStats, 'est_rebate_usd');
 
   const apiLine = api
     ? `API ${yesterday}: $${api.totalUsd.toFixed(4)} across ${api.rows.length.toString()} market(s)`
@@ -135,18 +144,19 @@ export async function maybeSendDailySummary(redis: Redis): Promise<boolean> {
   const summary = [
     '🧾 Rebate Farmer Daily Summary',
     apiLine,
-    `Cumulative est. rebates: $${estRebateUsd.toFixed(4)}`,
-    `Fills: ${fills.toString()} (full ${num('fills').toString()} / partial ${num('partial_fills').toString()})`,
-    `Placed: ${num('orders_placed').toString()} | stale-cancelled: ${num('stale_cancels').toString()} | repriced: ${num('reprice_cancels').toString()}`,
-    `Avg order lifetime: ${avgLifetimeMin.toFixed(1)} min`,
+    `Est. ${yesterday}: $${dayEstRebateUsd.toFixed(4)} from ${dayFills.toString()} fill(s) (full ${num(dayStats, 'fills').toString()} / partial ${num(dayStats, 'partial_fills').toString()})`,
+    `${yesterday} ops: placed ${num(dayStats, 'orders_placed').toString()} | stale-cancelled ${num(dayStats, 'stale_cancels').toString()} | repriced ${num(dayStats, 'reprice_cancels').toString()} | avg lifetime ${dayAvgLifetimeMin.toFixed(1)} min`,
+    `All-time: est $${cumEstRebateUsd.toFixed(4)} | fills ${cumFills.toString()} | placed ${num(cumStats, 'orders_placed').toString()}`,
   ].join('\n');
 
   logger.info('[rebate] daily summary', {
     apiDate: yesterday,
     apiTotalUsd: api?.totalUsd,
     apiRows: api?.rows.length,
-    estRebateUsd,
-    fills,
+    dayEstRebateUsd,
+    dayFills,
+    cumEstRebateUsd,
+    cumFills,
   });
   await notify(summary);
   return true;

@@ -107,19 +107,36 @@ describe('utcDateString', () => {
 });
 
 describe('maybeSendDailySummary', () => {
+  // Yesterday's date bucket (same-period comparison against the API) holds
+  // DIFFERENT numbers than the cumulative hash so the assertions prove which
+  // bucket feeds which summary line.
+  const dayStats = {
+    orders_placed: '6',
+    fills: '2',
+    partial_fills: '0',
+    stale_cancels: '3',
+    reprice_cancels: '1',
+    est_rebate_usd: '0.1200',
+    lifetime_ms_total: String(20 * 60_000),
+    lifetime_count: '4', // avg 5.0 min
+  };
+  const cumStats = {
+    orders_placed: '12',
+    fills: '3',
+    partial_fills: '1',
+    stale_cancels: '5',
+    reprice_cancels: '2',
+    est_rebate_usd: '0.2531',
+    lifetime_ms_total: String(40 * 60_000),
+    lifetime_count: '8',
+  };
+
   function makeRedis(overrides: Record<string, unknown> = {}): Record<string, ReturnType<typeof vi.fn>> {
     return {
       set: vi.fn().mockResolvedValue('OK'),
-      hgetall: vi.fn().mockResolvedValue({
-        orders_placed: '12',
-        fills: '3',
-        partial_fills: '1',
-        stale_cancels: '5',
-        reprice_cancels: '2',
-        est_rebate_usd: '0.2531',
-        lifetime_ms_total: String(40 * 60_000),
-        lifetime_count: '8',
-      }),
+      hgetall: vi.fn((key: string) =>
+        Promise.resolve(key.startsWith('rebate:stats:date:') ? { ...dayStats } : { ...cumStats }),
+      ),
       ...overrides,
     } as Record<string, ReturnType<typeof vi.fn>>;
   }
@@ -132,7 +149,7 @@ describe('maybeSendDailySummary', () => {
     );
   });
 
-  it('sends one summary per UTC day comparing API-reported vs estimated rebates', async () => {
+  it('sends one summary per UTC day comparing the API against the SAME day\'s estimate bucket', async () => {
     const redis = makeRedis();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -146,13 +163,24 @@ describe('maybeSendDailySummary', () => {
     // Queried YESTERDAY for the funder address (default maker address).
     const url = mockFetchWithTimeout.mock.calls[0]![0] as string;
     expect(url).toContain('maker_address=0x2474251E6F057d57d045853Bf94fB15DBd50Ec29');
-    // Summary content: API total, estimate, fills, avg lifetime.
+    const yesterday = utcDateString(1);
+    expect(url).toContain(`date=${yesterday}`);
+    // Read yesterday's date bucket, not just the cumulative hash.
+    const hgetallKeys = redis.hgetall.mock.calls.map((c) => c[0] as string);
+    expect(hgetallKeys).toContain(`rebate:stats:date:${yesterday}`);
+    expect(hgetallKeys).toContain('rebate:stats');
+
     expect(mockNotify).toHaveBeenCalledOnce();
     const text = mockNotify.mock.calls[0]![0] as string;
+    // API line (yesterday's payout figure).
     expect(text).toContain('$0.3100');
-    expect(text).toContain('$0.2531');
-    expect(text).toContain('Fills: 4');
-    expect(text).toContain('Avg order lifetime: 5.0 min');
+    // Same-period estimate line comes from the DATE bucket (0.1200 / 2 fills /
+    // avg 5.0 min), not the cumulative hash.
+    expect(text).toContain(`Est. ${yesterday}: $0.1200 from 2 fill(s)`);
+    expect(text).toContain('avg lifetime 5.0 min');
+    expect(text).toContain('placed 6');
+    // Cumulative counters are present but labelled all-time.
+    expect(text).toContain('All-time: est $0.2531 | fills 4 | placed 12');
   });
 
   it('does not resend when the date-gate key already exists', async () => {
@@ -205,7 +233,8 @@ describe('maybeSendDailySummary', () => {
     expect(sent).toBe(true);
     const text = mockNotify.mock.calls[0]![0] as string;
     expect(text).toContain('unavailable');
-    expect(text).toContain('$0.2531'); // our own counters still reported
+    expect(text).toContain('$0.1200'); // same-day estimates still reported
+    expect(text).toContain('$0.2531'); // all-time counters still reported
   });
 
   it('does nothing when the summary is disabled', async () => {

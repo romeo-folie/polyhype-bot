@@ -23,40 +23,60 @@ import {
 } from '../shared/clob.js';
 import { recordPosition } from '../execution/positionLedger.js';
 import { estimateFillRebateUsd } from './flowAnalyzer.js';
+import { utcDateString } from './rebateChecker.js';
 import type { RestingOrder, RebateMarketCandidate, RebateQuote } from './types.js';
 
 const ORDERS_HASH_KEY = 'rebate:orders';
 const MARKET_SET_PREFIX = 'rebate:orders:by_market:';
 const STATS_KEY = 'rebate:stats';
 const MARKET_STATS_PREFIX = 'rebate:stats:market:';
+const DATE_STATS_PREFIX = 'rebate:stats:date:';
 /** Per-market stat hashes expire after 30 idle days so dead markets don't leak keys. */
 const MARKET_STATS_TTL_S = 30 * 24 * 3600;
+/** Per-day stat hashes: the daily summary only needs yesterday; 7d aids debugging. */
+const DATE_STATS_TTL_S = 7 * 24 * 3600;
 
 // ─── Stats ───────────────────────────────────────────────────────────────────
+//
+// Every counter is written to three hashes in one pipeline: cumulative
+// (rebate:stats), per-market (rebate:stats:market:<id>), and per-UTC-day
+// (rebate:stats:date:<YYYY-MM-DD>). The date bucket exists so the daily
+// summary can compare yesterday's API-reported rebates against estimates from
+// the SAME period — cumulative counters next to a one-day API total would
+// misread as Polymarket under/over-paying. Events are bucketed by detection
+// time (reconcile run), so a fill detected just after UTC midnight lands in
+// the new day while the API attributes the trade to the prior one — accepted
+// skew for $-cents-scale estimates.
 
-/** Increment an integer counter on both the global and per-market stat hashes. */
+/** Increment an integer counter on the cumulative, per-market, and per-day stat hashes. */
 async function bumpStat(redis: Redis, marketId: string, field: string, by = 1): Promise<void> {
   try {
     const marketKey = `${MARKET_STATS_PREFIX}${marketId}`;
+    const dateKey = `${DATE_STATS_PREFIX}${utcDateString(0)}`;
     const pipeline = redis.multi();
     pipeline.hincrby(STATS_KEY, field, by);
     pipeline.hincrby(marketKey, field, by);
     pipeline.expire(marketKey, MARKET_STATS_TTL_S);
+    pipeline.hincrby(dateKey, field, by);
+    pipeline.expire(dateKey, DATE_STATS_TTL_S);
     await pipeline.exec();
   } catch {
     // Stats are best-effort — never fail order management on counter writes.
   }
 }
 
-/** Increment a float counter (USD amounts) on both stat hashes. */
+/** Increment a float counter (USD amounts) on the cumulative, per-market, and per-day stat hashes. */
 async function bumpStatFloat(redis: Redis, marketId: string, field: string, by: number): Promise<void> {
   if (!isFinite(by) || by === 0) return;
   try {
     const marketKey = `${MARKET_STATS_PREFIX}${marketId}`;
+    const dateKey = `${DATE_STATS_PREFIX}${utcDateString(0)}`;
     const pipeline = redis.multi();
     pipeline.hincrbyfloat(STATS_KEY, field, by);
     pipeline.hincrbyfloat(marketKey, field, by);
     pipeline.expire(marketKey, MARKET_STATS_TTL_S);
+    pipeline.hincrbyfloat(dateKey, field, by);
+    pipeline.expire(dateKey, DATE_STATS_TTL_S);
     await pipeline.exec();
   } catch {
     // best-effort
@@ -72,12 +92,16 @@ async function recordLifetime(redis: Redis, order: RestingOrder): Promise<void> 
   if (!isFinite(lifetimeMs) || lifetimeMs < 0) return;
   try {
     const marketKey = `${MARKET_STATS_PREFIX}${order.marketId}`;
+    const dateKey = `${DATE_STATS_PREFIX}${utcDateString(0)}`;
     const pipeline = redis.multi();
     pipeline.hincrby(STATS_KEY, 'lifetime_ms_total', Math.round(lifetimeMs));
     pipeline.hincrby(STATS_KEY, 'lifetime_count', 1);
     pipeline.hincrby(marketKey, 'lifetime_ms_total', Math.round(lifetimeMs));
     pipeline.hincrby(marketKey, 'lifetime_count', 1);
     pipeline.expire(marketKey, MARKET_STATS_TTL_S);
+    pipeline.hincrby(dateKey, 'lifetime_ms_total', Math.round(lifetimeMs));
+    pipeline.hincrby(dateKey, 'lifetime_count', 1);
+    pipeline.expire(dateKey, DATE_STATS_TTL_S);
     await pipeline.exec();
   } catch {
     // best-effort

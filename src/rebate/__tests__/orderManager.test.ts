@@ -231,15 +231,19 @@ describe('orderManager', () => {
       expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-1');
 
       const stats = statCalls(redis);
-      // Global + per-market fill counters.
+      const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
+      // Cumulative + per-market + per-day fill counters (the date bucket feeds
+      // the daily summary's same-period est-vs-API comparison).
       expect(stats).toContainEqual({ key: 'rebate:stats', field: 'fills', by: 1 });
       expect(stats).toContainEqual({ key: 'rebate:stats:market:mkt-1', field: 'fills', by: 1 });
-      // Estimated rebate accrual on both hashes.
+      expect(stats).toContainEqual({ key: todayKey, field: 'fills', by: 1 });
+      // Estimated rebate accrual on all three hashes.
       const rebateBumps = stats.filter((s) => s.field === 'est_rebate_usd');
-      expect(rebateBumps).toHaveLength(2);
+      expect(rebateBumps).toHaveLength(3);
       expect(rebateBumps[0]!.by).toBeCloseTo(0.062475, 5);
-      // Lifetime recorded on terminal event.
-      expect(stats.some((s) => s.field === 'lifetime_ms_total')).toBe(true);
+      expect(rebateBumps.map((b) => b.key)).toContain(todayKey);
+      // Lifetime recorded on terminal event, including the date bucket.
+      expect(stats.some((s) => s.field === 'lifetime_ms_total' && s.key === todayKey)).toBe(true);
     });
 
     it('cancels stale orders past TTL and bumps per-market stale counters', async () => {
@@ -278,8 +282,10 @@ describe('orderManager', () => {
       expect(mockCancelOrder).toHaveBeenCalledWith('order-stale');
       expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-stale');
       const stats = statCalls(redis);
+      const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
       expect(stats).toContainEqual({ key: 'rebate:stats', field: 'stale_cancels', by: 1 });
       expect(stats).toContainEqual({ key: 'rebate:stats:market:mkt-1', field: 'stale_cancels', by: 1 });
+      expect(stats).toContainEqual({ key: todayKey, field: 'stale_cancels', by: 1 });
     });
 
     it('skips recently-placed orders when CLOB returns null (transient error)', async () => {
