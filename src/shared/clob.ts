@@ -72,23 +72,30 @@ export function redactClobSecrets(text: string, includeGenericFields = false): s
 let sdkLogRedactionInstalled = false;
 
 /**
+ * Map console.error args through redaction. The SDK prefixes its leaky calls
+ * with a "[CLOB Client]…" first argument — generic-name secrets (order
+ * signature, owner/API-key) are scrubbed only on those calls; POLY_* auth
+ * headers are scrubbed everywhere. Non-string args pass through untouched:
+ * the SDK serializes the leaky payload with JSON.stringify before logging,
+ * so strings cover it. (Exported for tests.)
+ */
+export function redactConsoleErrorArgs(args: unknown[]): unknown[] {
+  const isClobSdkLog = args.some((a) => typeof a === 'string' && a.includes('[CLOB Client'));
+  return args.map((a) => (typeof a === 'string' ? redactClobSecrets(a, isClobSdkLog) : a));
+}
+
+/**
  * Wrap console.error so string arguments pass through redactClobSecrets.
  * Installed once at module load — every process that can construct a CLOB
  * client (and therefore trigger the SDK's leaky error logging) imports this
- * module. Non-string args pass through untouched: the SDK serializes the
- * leaky payload with JSON.stringify before logging, so strings cover it.
- *
- * The SDK prefixes its leaky calls with a "[CLOB Client]…" first argument —
- * generic-name secrets (order signature, owner/API-key) are scrubbed only on
- * those calls; POLY_* auth headers are scrubbed everywhere.
+ * module.
  */
 export function installClobLogRedaction(): void {
   if (sdkLogRedactionInstalled) return;
   sdkLogRedactionInstalled = true;
   const original = console.error.bind(console);
   console.error = (...args: unknown[]): void => {
-    const isClobSdkLog = args.some((a) => typeof a === 'string' && a.includes('[CLOB Client'));
-    original(...args.map((a) => (typeof a === 'string' ? redactClobSecrets(a, isClobSdkLog) : a)));
+    original(...redactConsoleErrorArgs(args));
   };
 }
 

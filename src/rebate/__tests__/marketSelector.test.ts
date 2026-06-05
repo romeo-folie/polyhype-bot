@@ -43,6 +43,7 @@ vi.mock('../../shared/logger.js', () => ({
 }));
 
 import { selectRebateMarkets } from '../marketSelector.js';
+import { logger } from '../../shared/logger.js';
 import type { MarketFlowStats } from '../flowAnalyzer.js';
 
 const redis = {} as never;
@@ -161,6 +162,21 @@ describe('selectRebateMarkets', () => {
     const selected = await selectRebateMarkets(redis, 10);
 
     expect(selected).toHaveLength(0);
+  });
+
+  it('fails closed with a per-market warn when the tape has flow but no usable outcomeIndex', async () => {
+    mockGetCachedMarkets.mockResolvedValue([makeMarket()]);
+    // Flow passes the notional gate but no trade carried an outcomeIndex →
+    // vwapYes null → cannot verify the book isn't detached from prints.
+    mockFetchRecentMarketFlow.mockResolvedValue(makeFlow({ vwapYes: null }));
+
+    const selected = await selectRebateMarkets(redis, 10);
+
+    expect(selected).toHaveLength(0);
+    expect(vi.mocked(logger.warn)).toHaveBeenCalledWith(
+      '[rebate] tape has flow but no usable outcomeIndex — failing closed',
+      expect.objectContaining({ marketId: 'mkt-1', tradeCount: 40 }),
+    );
   });
 
   it('rejects markets without enough recent taker flow', async () => {

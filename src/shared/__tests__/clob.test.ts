@@ -98,6 +98,7 @@ const {
   getClobBalance,
   redeemClobOutcome,
   redactClobSecrets,
+  redactConsoleErrorArgs,
 } = await import('../clob.js');
 
 describe('submitClobBuy', () => {
@@ -391,6 +392,40 @@ describe('redactClobSecrets', () => {
   it('leaves strings without credential fields untouched', () => {
     const clean = '[CLOB Client] request error {"error":"service not ready","status":425}';
     expect(redactClobSecrets(clean, true)).toBe(clean);
+  });
+});
+
+describe('redactConsoleErrorArgs (console.error patch wiring)', () => {
+  it('scrubs signature/owner when any arg carries the [CLOB Client prefix', () => {
+    const args = redactConsoleErrorArgs([
+      '[CLOB Client] request error',
+      '{"config":{"data":"{\\"signature\\":\\"0xdeadbeef\\",\\"owner\\":\\"api-key-uuid\\"}"}}',
+    ]);
+
+    expect(args[0]).toBe('[CLOB Client] request error');
+    expect(args[1]).not.toContain('0xdeadbeef');
+    expect(args[1]).not.toContain('api-key-uuid');
+    expect(args[1]).toContain('\\"signature\\":\\"REDACTED\\"');
+    expect(args[1]).toContain('\\"owner\\":\\"REDACTED\\"');
+  });
+
+  it('does NOT scrub generic signature/owner fields in non-SDK calls (over-redaction guard)', () => {
+    const appLog = '{"event":"transfer","owner":"alice","signature":"valid"}';
+    const args = redactConsoleErrorArgs(['app error', appLog]);
+
+    expect(args[1]).toBe(appLog);
+  });
+
+  it('scrubs POLY_* headers even in non-SDK calls and passes non-string args through', () => {
+    const err = new Error('boom');
+    const args = redactConsoleErrorArgs([
+      'some wrapper log',
+      '{"headers":{"POLY_PASSPHRASE":"secret-passphrase"}}',
+      err,
+    ]);
+
+    expect(args[1]).toContain('"POLY_PASSPHRASE":"REDACTED"');
+    expect(args[2]).toBe(err); // identity — Error objects untouched
   });
 });
 
