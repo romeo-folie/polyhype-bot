@@ -66,7 +66,14 @@ export async function reEvaluatePositions(
   for (const position of positions) {
     // Copytrades are entered on whale intent, not LLM edge — reeval is irrelevant
     // and counterproductive. TP/SL and whale-exit handle these positions.
-    if (position.sourcedFrom?.startsWith('copytrade:')) {
+    // Rebate-farming inventory is entered for maker rebates, not edge, and
+    // holds to resolution — an LLM re-score must never sell a leg (selling
+    // one side of a YES+NO pair re-acquires the directional risk the pair
+    // locked away).
+    if (
+      position.sourcedFrom?.startsWith('copytrade:') ||
+      position.sourcedFrom?.startsWith('rebate-farming')
+    ) {
       held++;
       continue;
     }

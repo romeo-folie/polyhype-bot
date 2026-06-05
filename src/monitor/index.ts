@@ -315,8 +315,16 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
       tpThreshold = Number.POSITIVE_INFINITY; // disables TP and trailing activation for all entry prices
       slThreshold = cfg.CRYPTO_UPDOWN_STOP_LOSS;
     } else if (isRebateFarming) {
-      tpThreshold = cfg.REBATE_TAKE_PROFIT_PCT / 100;
-      slThreshold = cfg.REBATE_STOP_LOSS_PCT / 100;
+      // 0 = disabled (weather convention): rebate inventory holds to
+      // resolution — the near-res gate (→ redeemer) is the only exit. Pair
+      // legs especially must never be TP/SL'd apart: selling one leg of a
+      // YES+NO pair converts its locked profit back into a directional bet.
+      tpThreshold = cfg.REBATE_TAKE_PROFIT_PCT > 0
+        ? cfg.REBATE_TAKE_PROFIT_PCT / 100
+        : Number.POSITIVE_INFINITY;
+      slThreshold = cfg.REBATE_STOP_LOSS_PCT > 0
+        ? cfg.REBATE_STOP_LOSS_PCT / 100
+        : Number.POSITIVE_INFINITY;
     } else if (isCopytrade) {
       tpThreshold = cfg.COPYTRADE_TAKE_PROFIT;
       slThreshold = cfg.COPYTRADE_STOP_LOSS;
@@ -610,10 +618,12 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
 
     // Trend-exit and stale-exit paths — only run when TP/SL/divergence did NOT fire.
     // Futures are skipped earlier in the loop (handled by futuresMonitor).
-    // Copytrades have their own exit logic.
+    // Copytrades have their own exit logic. Rebate-farming inventory holds to
+    // resolution — bleed/age heuristics must not sell pair legs apart, even if
+    // TREND/STALE_EXIT_ENABLED are flipped on in the future.
     const isCopytradePos = position.sourcedFrom?.startsWith('copytrade:') ?? false;
     const sampleTrackingNeeded =
-      !isCopytradePos && (cfg.TREND_EXIT_ENABLED || cfg.STALE_EXIT_ENABLED);
+      !isCopytradePos && !isRebateFarming && (cfg.TREND_EXIT_ENABLED || cfg.STALE_EXIT_ENABLED);
 
     if (!sampleTrackingNeeded) {
       held++;

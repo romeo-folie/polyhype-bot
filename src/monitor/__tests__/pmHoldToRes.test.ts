@@ -81,6 +81,14 @@ vi.mock('../../shared/outcomeRecorder.js', () => ({
 // ── Dynamic import after mocks ───────────────────────────────────────────────
 
 const { runMonitorInner } = await import('../index.js');
+// Handles to the staleExit/trendExit mock fns for the trend/stale gating tests.
+const staleExitMod = await import('../staleExit.js');
+const mockEvaluateStale = vi.mocked(staleExitMod.evaluateStale);
+const mockRecordStaleSample = vi.mocked(staleExitMod.recordStaleSample);
+const trendExitMod = await import('../trendExit.js');
+const mockEvaluateTrend = vi.mocked(trendExitMod.evaluateTrend);
+const mockFetchTrendSamples = vi.mocked(trendExitMod.fetchTrendSamples);
+const mockComputePnlRangePct = vi.mocked(staleExitMod.computePnlRangePct);
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -244,5 +252,172 @@ describe('POLYMARKET_TP_SL_ENABLED=false — hold-to-resolution kill switch', ()
 
     expect(mockMarkPositionPendingSettlement).toHaveBeenCalledOnce();
     expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+  });
+});
+
+describe('rebate-farming hold-to-resolution (REBATE_*_PCT=0 disables TP/SL)', () => {
+  // Rebate inventory holds to resolution: pair legs must never be TP/SL'd
+  // apart (selling one leg of a YES+NO pair converts its locked profit back
+  // into a directional bet). 0 = disabled, mirroring the weather convention.
+  // POLYMARKET_TP_SL_ENABLED is TRUE here — the global kill switch must NOT
+  // be what protects these positions.
+  function makeRebatePosition(overrides = {}) {
+    return makePosition({
+      sourcedFrom: 'rebate-farming',
+      entryPrice: 0.5,
+      sharesHeld: 10,
+      consensusProbability: undefined, // rebate fills carry no model prob
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockExecuteTakeProfit.mockResolvedValue({ success: true, marketId: 'm1', returnPct: 0 });
+    mockEvaluateTrailingStop.mockReturnValue({ shouldExit: false });
+  });
+
+  it('holds through a −50% drawdown when REBATE_STOP_LOSS_PCT=0', async () => {
+    mockGetOpenPositions.mockResolvedValue([makeRebatePosition()]);
+    mockFetchAllCurrentPrices.mockResolvedValue(
+      new Map([['m1:YES', makeCurrentPrice(0.25)]]), // −50% vs 0.5 entry
+    );
+    mockLoadConfig.mockReturnValue(makeBaseConfig({
+      POLYMARKET_TP_SL_ENABLED: true,
+      REBATE_TAKE_PROFIT_PCT: 0,
+      REBATE_STOP_LOSS_PCT: 0,
+    }));
+
+    await runMonitorInner(makeRedis() as any);
+
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+  });
+
+  it('holds through a +60% gain when REBATE_TAKE_PROFIT_PCT=0', async () => {
+    mockGetOpenPositions.mockResolvedValue([makeRebatePosition()]);
+    mockFetchAllCurrentPrices.mockResolvedValue(
+      new Map([['m1:YES', makeCurrentPrice(0.80)]]), // +60% vs 0.5 entry
+    );
+    mockLoadConfig.mockReturnValue(makeBaseConfig({
+      POLYMARKET_TP_SL_ENABLED: true,
+      REBATE_TAKE_PROFIT_PCT: 0,
+      REBATE_STOP_LOSS_PCT: 0,
+    }));
+
+    await runMonitorInner(makeRedis() as any);
+
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+  });
+
+  it('legacy non-zero knobs still fire the stop-loss', async () => {
+    mockGetOpenPositions.mockResolvedValue([makeRebatePosition()]);
+    mockFetchAllCurrentPrices.mockResolvedValue(
+      new Map([['m1:YES', makeCurrentPrice(0.25)]]), // −50% ≤ −5%
+    );
+    mockLoadConfig.mockReturnValue(makeBaseConfig({
+      POLYMARKET_TP_SL_ENABLED: true,
+      REBATE_TAKE_PROFIT_PCT: 3,
+      REBATE_STOP_LOSS_PCT: 5,
+    }));
+
+    await runMonitorInner(makeRedis() as any);
+
+    expect(mockExecuteTakeProfit).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'stop_loss' }),
+    );
+  });
+
+  it('near-res gate (≥0.95 → pendingSettlement) remains the only exit with knobs=0', async () => {
+    mockGetOpenPositions.mockResolvedValue([makeRebatePosition()]);
+    mockFetchAllCurrentPrices.mockResolvedValue(
+      new Map([['m1:YES', makeCurrentPrice(0.96)]]), // +92% AND ≥ 0.95
+    );
+    mockLoadConfig.mockReturnValue(makeBaseConfig({
+      POLYMARKET_TP_SL_ENABLED: true,
+      REBATE_TAKE_PROFIT_PCT: 0,
+      REBATE_STOP_LOSS_PCT: 0,
+    }));
+
+    await runMonitorInner(makeRedis() as any);
+
+    expect(mockMarkPositionPendingSettlement).toHaveBeenCalledOnce();
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+  });
+
+  it('never enters the stale/trend path even when STALE_EXIT_ENABLED=true and the evaluator wants out', async () => {
+    // The evaluator is rigged to exit — only the !isRebateFarming gate in
+    // sampleTrackingNeeded can be what protects the position.
+    mockEvaluateStale.mockReturnValue({ shouldExit: true, reason: 'pnl_bleed' } as never);
+    mockGetOpenPositions.mockResolvedValue([makeRebatePosition()]);
+    mockFetchAllCurrentPrices.mockResolvedValue(
+      new Map([['m1:YES', makeCurrentPrice(0.55)]]), // +10%: no near-res, no thresholds
+    );
+    mockLoadConfig.mockReturnValue(makeBaseConfig({
+      POLYMARKET_TP_SL_ENABLED: true,
+      REBATE_TAKE_PROFIT_PCT: 0,
+      REBATE_STOP_LOSS_PCT: 0,
+      STALE_EXIT_ENABLED: true,
+      TREND_EXIT_ENABLED: true,
+    }));
+
+    await runMonitorInner(makeRedis() as any);
+
+    expect(mockRecordStaleSample).not.toHaveBeenCalled();
+    expect(mockEvaluateStale).not.toHaveBeenCalled();
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+  });
+
+  it('control: an osint position DOES reach the stale path under the same flags', async () => {
+    mockEvaluateStale.mockReturnValue({
+      shouldExit: true,
+      rule: 'pnl_bleed',
+      ageH: 5,
+      trackedH: 5,
+      categoryAgeH: 24,
+      peakPnlPct: 10,
+      currentPnlPct: 10,
+      priceRangePct: 0,
+    } as never);
+    // Past the gate, the sampling/trend plumbing runs for real — give the
+    // mocks usable returns (clearAllMocks wiped the factory defaults).
+    mockRecordStaleSample.mockResolvedValue({
+      peakPnlPct: 10,
+      firstSeenMs: Date.now() - 3_600_000,
+    } as never);
+    mockFetchTrendSamples.mockResolvedValue([] as never);
+    mockComputePnlRangePct.mockResolvedValue(0 as never);
+    mockEvaluateTrend.mockReturnValue({
+      shouldExit: false,
+      currentPnlPct: 10,
+      ageH: 1,
+      sampleCount: 0,
+      slopePctPerH: null,
+      r2: null,
+      blockedReason: null,
+    } as never);
+    mockGetOpenPositions.mockResolvedValue([
+      // consensusProbability 0.9 keeps divergence_closed (0.55 < 0.9) and TP
+      // (+10% < 25%) quiet so the position flows through to the stale path.
+      makeRebatePosition({ sourcedFrom: 'osint:headline', consensusProbability: 0.9 }),
+    ]);
+    mockFetchAllCurrentPrices.mockResolvedValue(
+      new Map([['m1:YES', makeCurrentPrice(0.55)]]),
+    );
+    mockLoadConfig.mockReturnValue(makeBaseConfig({
+      POLYMARKET_TP_SL_ENABLED: true,
+      REBATE_TAKE_PROFIT_PCT: 0,
+      REBATE_STOP_LOSS_PCT: 0,
+      STALE_EXIT_ENABLED: true,
+      TREND_EXIT_ENABLED: true,
+    }));
+
+    await runMonitorInner(makeRedis() as any);
+
+    // Proves the rig reaches sampling+evaluation for non-rebate sources, so
+    // the rebate test above is skipped by the source gate alone.
+    expect(mockRecordStaleSample).toHaveBeenCalled();
+    expect(mockExecuteTakeProfit).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'stale_exit' }),
+    );
   });
 });
