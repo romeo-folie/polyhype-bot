@@ -1148,7 +1148,9 @@ export const envSchema = z.object({
   REBATE_ORDER_TTL_S: z.coerce.number().int().min(60).optional().default(300),
   // Minimum spread in basis points — below this, no room to improve the bid.
   REBATE_MIN_SPREAD_BPS: z.coerce.number().min(0).optional().default(50),
-  // Minimum lifetime volume (USD) — cheap prefilter before book/flow fetches.
+  // Minimum volume (USD) — cheap prefilter before book/flow fetches. Applied
+  // to trailing-24h volume when the Gamma universe provides it (primary path),
+  // lifetime volume on the watchlist-cache fallback.
   REBATE_MIN_VOLUME: z.coerce.number().min(0).optional().default(50_000),
   // Minimum liquidity (USD) for market selection.
   REBATE_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(10_000),
