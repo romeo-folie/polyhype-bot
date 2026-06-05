@@ -1,10 +1,24 @@
 /**
  * Market selector for rebate farming.
  *
- * Scores candidate markets by `volume × (10000 / spreadBps)` — rewards
- * high volume (more taker flow = more rebates) and tight spreads (less
- * adverse selection). Pre-filters on cached data before fetching order
- * books to stay within CLOB API rate limits.
+ * Maker rebates are paid only on FILLED maker liquidity, so selection
+ * optimizes for current fill probability, not book presence:
+ *
+ *   1. Cheap prefilter on cached Gamma data — binary, fee-enabled (the only
+ *      markets that pay rebates), unexpired, volume/liquidity floors, price
+ *      tails excluded.
+ *   2. Per surviving market (capped for rate limits): fetch the YES + NO CLOB
+ *      books and the recent public trade tape, then gate out ghost books
+ *      (wide absolute spread, mid detached from where trades actually print)
+ *      and dead tape (no recent taker flow).
+ *   3. Score by recent fee-equivalent flow per hour — the exact quantity the
+ *      rebate pool is built from — and quote both tokens at effective
+ *      mid − edge (a NO bid at q is an ask on YES at 1−q, so this is
+ *      two-sided liquidity with no inventory requirement).
+ *
+ * Rework of the lifetime-volume × inverse-spread selector that produced 2,204
+ * placed orders / 0 fills (docs/issues/maker-rebates-not-earning-2026-06-05.md,
+ * findings 2, 4, 5).
  */
 
 import type { Redis } from 'ioredis';
@@ -17,10 +31,49 @@ import {
   parseOutcomePrices,
   parseClobTokenIds,
 } from '../mapping/gamma.js';
-import type { RebateMarketCandidate } from './types.js';
+import { fetchRecentMarketFlow, makerRebateShare } from './flowAnalyzer.js';
+import type { RebateMarketCandidate, RebateQuote } from './types.js';
 
-/** Maximum number of order books to fetch per cycle (rate limit guard). */
-const MAX_BOOK_FETCHES = 25;
+/** Max markets to fetch books + trade tape for per cycle (rate limit guard).
+ * Each costs 2 book fetches + 1 data-api tape fetch. */
+const MAX_MARKET_FETCHES = 15;
+
+function roundDownToTick(value: number, tick: number): number {
+  if (!isFinite(value) || !isFinite(tick) || tick <= 0) return value;
+  // Epsilon absorbs FP noise (1 − 0.41 → 0.5899999…) without changing the
+  // round-DOWN semantics that keep the post-only clamp safe.
+  const rounded = Math.floor(value / tick + 1e-9) * tick;
+  return parseFloat(rounded.toFixed(6));
+}
+
+/**
+ * Build a post-only bid for one token, anchored to the effective mid and
+ * clamped so it can rest on the token's physical book:
+ *   - never at/above the physical best ask (post-only would reject),
+ *   - inside [tick, 1 − tick],
+ *   - rounded down to tick.
+ * Returns null when no valid resting price exists.
+ */
+function buildQuote(
+  direction: 'YES' | 'NO',
+  tokenId: string,
+  effectiveMid: number,
+  edge: number,
+  tick: number,
+  bestBid: number,
+  bestAsk: number,
+): RebateQuote | null {
+  let price = effectiveMid - edge;
+  if (bestAsk > 0) price = Math.min(price, bestAsk - tick);
+  price = Math.max(price, tick);
+  price = Math.min(price, 1 - tick);
+  price = roundDownToTick(price, tick);
+
+  if (price <= 0 || price >= 1) return null;
+  if (bestAsk > 0 && price >= bestAsk) return null;
+
+  return { direction, tokenId, price, bestBid, bestAsk };
+}
 
 export async function selectRebateMarkets(
   redis: Redis,
@@ -38,12 +91,12 @@ export async function selectRebateMarkets(
     marketId: string;
     conditionId: string;
     question: string;
-    clobTokenIds: string[];
+    clobTokenIds: [string, string];
+    feesEnabled: boolean;
+    feeType: string | null;
     volume: number;
     liquidity: number;
-    yesPrice: number;
     endDate: string | null;
-    negRisk: boolean;
   }[] = [];
 
   for (const market of markets) {
@@ -56,8 +109,8 @@ export async function selectRebateMarkets(
       }
     }
 
-    // Fee market gate.
-    if (cfg.REBATE_SKIP_FEE_MARKETS && market.feesEnabled) continue;
+    // Fee market gate — maker rebates exist ONLY on fee-enabled markets.
+    if (cfg.REBATE_REQUIRE_FEE_MARKETS && market.feesEnabled !== true) continue;
 
     // Expired market gate.
     if (market.endDate) {
@@ -71,19 +124,16 @@ export async function selectRebateMarkets(
     const liquidity = parseFloat(market.liquidity ?? '0');
     if (!isFinite(liquidity) || liquidity < cfg.REBATE_MIN_LIQUIDITY) continue;
 
-    // Parse YES price — need it for direction selection.
-    let yesPrice: number;
+    // Skip extreme cached prices — poor dynamics at the tails. Live-book
+    // gates below are the authority; this only saves API calls.
     try {
       const prices = parseOutcomePrices(market.outcomePrices);
       if (prices.length === 0) continue;
-      yesPrice = parseFloat(prices[0] ?? '0');
-      if (!isFinite(yesPrice) || yesPrice <= 0 || yesPrice >= 1) continue;
+      const yesPrice = parseFloat(prices[0] ?? '0');
+      if (!isFinite(yesPrice) || yesPrice < 0.10 || yesPrice > 0.90) continue;
     } catch {
       continue;
     }
-
-    // Skip extreme prices — poor spread dynamics at the tails.
-    if (yesPrice < 0.10 || yesPrice > 0.90) continue;
 
     let clobTokenIds: string[];
     try {
@@ -97,72 +147,181 @@ export async function selectRebateMarkets(
       marketId: market.id,
       conditionId: market.conditionId,
       question: market.question,
-      clobTokenIds,
+      clobTokenIds: [clobTokenIds[0]!, clobTokenIds[1]!],
+      feesEnabled: market.feesEnabled === true,
+      feeType: market.feeType ?? null,
       volume,
       liquidity,
-      yesPrice,
       endDate: market.endDate ?? null,
-      negRisk: false, // fetched from order book later
     });
   }
 
-  // Sort by volume descending and take top MAX_BOOK_FETCHES to limit API calls.
+  // Volume is only the fetch-priority heuristic here — final ranking is by
+  // recent fee-equivalent flow, fetched below.
   preFiltered.sort((a, b) => b.volume - a.volume);
-  const toFetch = preFiltered.slice(0, MAX_BOOK_FETCHES);
+  const toFetch = preFiltered.slice(0, MAX_MARKET_FETCHES);
 
-  // Phase 2: Fetch order books and score.
+  // Phase 2: Fetch live books + trade tape, gate, and score.
   const candidates: RebateMarketCandidate[] = [];
+  const skips: Record<string, number> = {};
+  const skip = (reason: string): void => {
+    skips[reason] = (skips[reason] ?? 0) + 1;
+  };
 
   for (const m of toFetch) {
-    // Choose direction: bid YES when yesPrice >= 0.50 (majority side), NO otherwise.
-    // Majority side has more natural taker flow and tighter spreads.
-    const direction: 'YES' | 'NO' = m.yesPrice >= 0.50 ? 'YES' : 'NO';
-    const tokenId = direction === 'YES' ? m.clobTokenIds[0]! : m.clobTokenIds[1]!;
+    const [yesTokenId, noTokenId] = m.clobTokenIds;
 
-    const book = await getClobOrderBook(tokenId);
-    if (!book) continue;
+    // Price discovery lives on the YES book — gate on it.
+    const yesBook = await getClobOrderBook(yesTokenId);
+    if (!yesBook) {
+      skip('no_yes_book');
+      continue;
+    }
 
-    const bestBid = parseFloat(book.bids[0]?.price ?? '0');
-    const bestAsk = parseFloat(book.asks[0]?.price ?? '0');
-    if (bestBid <= 0 || bestAsk <= 0 || bestAsk <= bestBid) continue;
+    const yesBid = parseFloat(yesBook.bids[0]?.price ?? '0');
+    const yesAsk = parseFloat(yesBook.asks[0]?.price ?? '0');
+    if (yesBid <= 0 || yesAsk <= 0 || yesAsk <= yesBid) {
+      skip('hollow_yes_book');
+      continue;
+    }
 
-    const midPrice = (bestBid + bestAsk) / 2;
-    const spreadBps = ((bestAsk - bestBid) / midPrice) * 10_000;
-    if (spreadBps < cfg.REBATE_MIN_SPREAD_BPS) continue;
+    const yesMid = (yesBid + yesAsk) / 2;
+    const spreadAbs = yesAsk - yesBid;
+    const spreadBps = (spreadAbs / yesMid) * 10_000;
 
-    // Score: volume × inverse spread. Higher is better.
-    const score = m.volume * (10_000 / spreadBps);
+    // Ghost-book gate 1: wide absolute spread means the visible quotes are
+    // not where this market trades (audit: NO bid 0.01 / market at 0.85).
+    if (spreadAbs > cfg.REBATE_MAX_SPREAD_ABS) {
+      skip('spread_too_wide');
+      continue;
+    }
+    // No room to improve the bid.
+    if (spreadBps < cfg.REBATE_MIN_SPREAD_BPS) {
+      skip('spread_too_tight');
+      continue;
+    }
+
+    // Recent taker flow — the thing rebates are actually paid on.
+    const flow = await fetchRecentMarketFlow(m.conditionId, {
+      lookbackHours: cfg.REBATE_FLOW_LOOKBACK_HOURS,
+      feeRateBps: cfg.REBATE_FEE_RATE_BPS,
+    });
+    if (!flow) {
+      skip('flow_fetch_failed');
+      continue;
+    }
+    if (flow.takerNotionalUsdPerHour < cfg.REBATE_MIN_FLOW_USD_PER_HOUR) {
+      skip('insufficient_flow');
+      continue;
+    }
+
+    // Ghost-book gate 2: book mid must sit near where trades actually print.
+    if (flow.vwapYes === null) {
+      skip('no_usable_vwap');
+      continue;
+    }
+    if (Math.abs(yesMid - flow.vwapYes) > cfg.REBATE_MAX_MID_VWAP_DIVERGENCE) {
+      skip('mid_vwap_divergence');
+      continue;
+    }
+
+    const tick = parseFloat(yesBook.tick_size);
+    if (!isFinite(tick) || tick <= 0) {
+      skip('bad_tick');
+      continue;
+    }
+
+    // Build quotes. The NO book is fetched only for post-only clamping — its
+    // (often hollow) quotes never drive pricing; the YES mid does.
+    const quotes: RebateQuote[] = [];
+    const yesQuote = buildQuote('YES', yesTokenId, yesMid, cfg.REBATE_QUOTE_EDGE, tick, yesBid, yesAsk);
+    const wantNo = cfg.REBATE_TWO_SIDED || yesMid < 0.5;
+    let noQuote: RebateQuote | null = null;
+    if (wantNo) {
+      const noBook = await getClobOrderBook(noTokenId);
+      const noBid = parseFloat(noBook?.bids[0]?.price ?? '0');
+      const noAsk = parseFloat(noBook?.asks[0]?.price ?? '0');
+      noQuote = buildQuote('NO', noTokenId, 1 - yesMid, cfg.REBATE_QUOTE_EDGE, tick, noBid, noAsk);
+    }
+
+    if (cfg.REBATE_TWO_SIDED) {
+      if (yesQuote) quotes.push(yesQuote);
+      if (noQuote) quotes.push(noQuote);
+
+      // Combined-price guard: both fills = riskless pair only when
+      // yesBid + noBid ≤ 1 − minEdge. Clamping only moves prices down, so
+      // this rarely trips — when it does, drop the side further from its
+      // effective mid (least likely to fill anyway).
+      if (
+        quotes.length === 2 &&
+        quotes[0]!.price + quotes[1]!.price > 1 - cfg.REBATE_MIN_COMBINED_EDGE
+      ) {
+        const yesDist = yesMid - quotes[0]!.price;
+        const noDist = 1 - yesMid - quotes[1]!.price;
+        quotes.splice(yesDist > noDist ? 0 : 1, 1);
+      }
+    } else {
+      // Single-sided: quote the majority side (more natural taker flow).
+      const single = yesMid >= 0.5 ? yesQuote : noQuote;
+      if (single) quotes.push(single);
+    }
+
+    if (quotes.length === 0) {
+      skip('no_valid_quote');
+      continue;
+    }
 
     candidates.push({
       marketId: m.marketId,
       conditionId: m.conditionId,
       question: m.question,
       clobTokenIds: m.clobTokenIds,
-      direction,
-      tokenId,
-      bestBid,
-      bestAsk,
+      feesEnabled: m.feesEnabled,
+      feeType: m.feeType,
+      yesMid,
+      spreadAbs,
       spreadBps,
-      midPrice,
+      quotes,
       volume: m.volume,
       liquidity: m.liquidity,
-      score,
-      tickSize: book.tick_size,
-      negRisk: book.neg_risk ?? false,
+      flow,
+      rebateShare: makerRebateShare(m.feeType),
+      score: flow.feeEquivalentUsdPerHour,
+      tickSize: yesBook.tick_size,
+      negRisk: yesBook.neg_risk ?? false,
       endDate: m.endDate,
     });
   }
 
-  // Sort by score descending and take top N.
+  // Rank by recent fee-equivalent flow — what the rebate pool pays on.
   candidates.sort((a, b) => b.score - a.score);
   const selected = candidates.slice(0, maxMarkets);
+
+  // Selection telemetry (audit P1.3) — one line per selected market.
+  for (const c of selected) {
+    logger.info('[rebate] candidate selected', {
+      marketId: c.marketId,
+      question: c.question.slice(0, 60),
+      feesEnabled: c.feesEnabled,
+      feeType: c.feeType,
+      rebateShare: c.rebateShare,
+      yesMid: c.yesMid.toFixed(3),
+      spreadAbs: c.spreadAbs.toFixed(3),
+      quotes: c.quotes.map((q) => `${q.direction}@${q.price.toFixed(3)}`).join(','),
+      flowUsdPerHour: c.flow.takerNotionalUsdPerHour.toFixed(0),
+      feeEquivUsdPerHour: c.flow.feeEquivalentUsdPerHour.toFixed(3),
+      vwapYes: c.flow.vwapYes?.toFixed(3),
+      windowH: c.flow.effectiveWindowHours.toFixed(1),
+    });
+  }
 
   logger.info('[rebate] market selection complete', {
     cached: markets.length,
     preFiltered: preFiltered.length,
-    booksFetched: toFetch.length,
-    passedSpread: candidates.length,
+    fetched: toFetch.length,
+    passedGates: candidates.length,
     selected: selected.length,
+    skips,
   });
 
   return selected;

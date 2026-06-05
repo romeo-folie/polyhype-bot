@@ -3,10 +3,13 @@
  *
  * Tracks resting GTC post-only limit orders in Redis. Each cron cycle:
  * 1) Reconciles tracked orders (detects fills, cancels stale)
- * 2) Places new orders on selected markets
+ * 2) Places new orders on selected markets (one per market+direction)
  *
  * Filled orders are recorded in the position ledger so the monitor
- * handles TP/SL like any other position.
+ * handles TP/SL like any other position. Fill-time rebate accrual is
+ * estimated as shares × feeRate × p(1−p) × rebateShare and tracked in
+ * `rebate:stats` (global) and `rebate:stats:market:<id>` (per market) for
+ * the daily est-vs-API summary.
  */
 
 import type { Redis } from 'ioredis';
@@ -19,11 +22,67 @@ import {
   cancelClobOrder,
 } from '../shared/clob.js';
 import { recordPosition } from '../execution/positionLedger.js';
-import type { RestingOrder, RebateMarketCandidate } from './types.js';
+import { estimateFillRebateUsd } from './flowAnalyzer.js';
+import type { RestingOrder, RebateMarketCandidate, RebateQuote } from './types.js';
 
 const ORDERS_HASH_KEY = 'rebate:orders';
 const MARKET_SET_PREFIX = 'rebate:orders:by_market:';
 const STATS_KEY = 'rebate:stats';
+const MARKET_STATS_PREFIX = 'rebate:stats:market:';
+/** Per-market stat hashes expire after 30 idle days so dead markets don't leak keys. */
+const MARKET_STATS_TTL_S = 30 * 24 * 3600;
+
+// ─── Stats ───────────────────────────────────────────────────────────────────
+
+/** Increment an integer counter on both the global and per-market stat hashes. */
+async function bumpStat(redis: Redis, marketId: string, field: string, by = 1): Promise<void> {
+  try {
+    const marketKey = `${MARKET_STATS_PREFIX}${marketId}`;
+    const pipeline = redis.multi();
+    pipeline.hincrby(STATS_KEY, field, by);
+    pipeline.hincrby(marketKey, field, by);
+    pipeline.expire(marketKey, MARKET_STATS_TTL_S);
+    await pipeline.exec();
+  } catch {
+    // Stats are best-effort — never fail order management on counter writes.
+  }
+}
+
+/** Increment a float counter (USD amounts) on both stat hashes. */
+async function bumpStatFloat(redis: Redis, marketId: string, field: string, by: number): Promise<void> {
+  if (!isFinite(by) || by === 0) return;
+  try {
+    const marketKey = `${MARKET_STATS_PREFIX}${marketId}`;
+    const pipeline = redis.multi();
+    pipeline.hincrbyfloat(STATS_KEY, field, by);
+    pipeline.hincrbyfloat(marketKey, field, by);
+    pipeline.expire(marketKey, MARKET_STATS_TTL_S);
+    await pipeline.exec();
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Record order lifetime on terminal events (fill / partial / stale / external
+ * cancel / reprice) — average lifetime = lifetime_ms_total / lifetime_count.
+ */
+async function recordLifetime(redis: Redis, order: RestingOrder): Promise<void> {
+  const lifetimeMs = Date.now() - new Date(order.placedAt).getTime();
+  if (!isFinite(lifetimeMs) || lifetimeMs < 0) return;
+  try {
+    const marketKey = `${MARKET_STATS_PREFIX}${order.marketId}`;
+    const pipeline = redis.multi();
+    pipeline.hincrby(STATS_KEY, 'lifetime_ms_total', Math.round(lifetimeMs));
+    pipeline.hincrby(STATS_KEY, 'lifetime_count', 1);
+    pipeline.hincrby(marketKey, 'lifetime_ms_total', Math.round(lifetimeMs));
+    pipeline.hincrby(marketKey, 'lifetime_count', 1);
+    pipeline.expire(marketKey, MARKET_STATS_TTL_S);
+    await pipeline.exec();
+  } catch {
+    // best-effort
+  }
+}
 
 // ─── Redis CRUD ──────────────────────────────────────────────────────────────
 
@@ -80,22 +139,40 @@ export async function hasRestingOrderForMarket(redis: Redis, marketId: string): 
   return count > 0;
 }
 
-export async function getDeployedUsd(redis: Redis): Promise<number> {
-  const orders = await loadRestingOrders(redis);
-  let total = 0;
+/** Find the resting order for a (market, direction) pair in a loaded order map. */
+export function findRestingOrder(
+  orders: Map<string, RestingOrder>,
+  marketId: string,
+  direction: 'YES' | 'NO',
+): RestingOrder | null {
   for (const order of orders.values()) {
-    total += order.sizeUsd;
+    if (order.marketId === marketId && order.direction === direction) return order;
   }
+  return null;
+}
+
+/** Total USD across a loaded order map. */
+export function deployedUsd(orders: Map<string, RestingOrder>): number {
+  let total = 0;
+  for (const order of orders.values()) total += order.sizeUsd;
   return total;
 }
 
-export async function getDeployedUsdForMarket(redis: Redis, marketId: string): Promise<number> {
-  const orders = await loadRestingOrders(redis);
+/** USD deployed to one market across a loaded order map. */
+export function deployedUsdForMarket(orders: Map<string, RestingOrder>, marketId: string): number {
   let total = 0;
   for (const order of orders.values()) {
     if (order.marketId === marketId) total += order.sizeUsd;
   }
   return total;
+}
+
+export async function getDeployedUsd(redis: Redis): Promise<number> {
+  return deployedUsd(await loadRestingOrders(redis));
+}
+
+export async function getDeployedUsdForMarket(redis: Redis, marketId: string): Promise<number> {
+  return deployedUsdForMarket(await loadRestingOrders(redis), marketId);
 }
 
 // ─── Reconciliation ──────────────────────────────────────────────────────────
@@ -136,6 +213,7 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
         if (ageMs > cfg.REBATE_ORDER_TTL_S * 2 * 1000) {
           // Well past TTL — safe to assume the order is genuinely gone.
           await removeRestingOrder(redis, orderId, order.marketId);
+          await recordLifetime(redis, order);
           result.cancelled.push(order);
         } else {
           logger.debug('[rebate] getClobOrder returned null, skipping (may be transient)', { orderId });
@@ -152,8 +230,9 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
       if (matched >= original - 1e-9 && matched > 0) {
         await recordFilledOrder(redis, order, matched);
         await removeRestingOrder(redis, orderId, order.marketId);
+        await recordLifetime(redis, order);
         result.filled.push(order);
-        await redis.hincrby(STATS_KEY, 'fills', 1).catch(() => {});
+        await bumpStat(redis, order.marketId, 'fills');
         continue;
       }
 
@@ -178,14 +257,16 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
         }
         await recordFilledOrder(redis, order, matched);
         await removeRestingOrder(redis, orderId, order.marketId);
+        await recordLifetime(redis, order);
         result.partialFills.push(order);
-        await redis.hincrby(STATS_KEY, 'partial_fills', 1).catch(() => {});
+        await bumpStat(redis, order.marketId, 'partial_fills');
         continue;
       }
 
       // Check if already cancelled/expired.
       if (['cancelled', 'canceled', 'expired'].includes(status)) {
         await removeRestingOrder(redis, orderId, order.marketId);
+        await recordLifetime(redis, order);
         result.cancelled.push(order);
         continue;
       }
@@ -208,8 +289,9 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
           }
         }
         await removeRestingOrder(redis, orderId, order.marketId);
+        await recordLifetime(redis, order);
         result.stale.push(order);
-        await redis.hincrby(STATS_KEY, 'stale_cancels', 1).catch(() => {});
+        await bumpStat(redis, order.marketId, 'stale_cancels');
         continue;
       }
 
@@ -242,7 +324,18 @@ async function recordFilledOrder(
   order: RestingOrder,
   sharesFilled: number,
 ): Promise<void> {
+  const cfg = loadConfig();
   const filledUsd = sharesFilled * order.price;
+
+  // Estimated rebate accrual for this fill. Orders persisted before the
+  // 2026-06-05 rework lack fee fields — fall back to config defaults.
+  const estRebateUsd = estimateFillRebateUsd(
+    sharesFilled,
+    order.price,
+    order.feeRateBps ?? cfg.REBATE_FEE_RATE_BPS,
+    order.rebateShare ?? 0.25,
+  );
+  await bumpStatFloat(redis, order.marketId, 'est_rebate_usd', estRebateUsd);
 
   logger.info('[rebate] resting order filled — recording position', {
     marketId: order.marketId,
@@ -250,6 +343,7 @@ async function recordFilledOrder(
     price: order.price,
     shares: sharesFilled.toFixed(6),
     usd: filledUsd.toFixed(2),
+    estRebateUsd: estRebateUsd.toFixed(4),
   });
 
   await recordPosition(redis, {
@@ -272,52 +366,63 @@ async function recordFilledOrder(
 
 // ─── Order placement ─────────────────────────────────────────────────────────
 
-function roundDownToTick(value: number, tick: number): number {
-  if (!isFinite(value) || !isFinite(tick) || tick <= 0) return value;
-  const rounded = Math.floor(value / tick) * tick;
-  return parseFloat(rounded.toFixed(6));
+/**
+ * Cancel a resting order so it can be re-posted at a drifted target price.
+ * Returns true when the order is confirmed gone (safe to place a replacement);
+ * false leaves the original tracked and skips the replacement this cycle.
+ */
+export async function cancelForReprice(redis: Redis, order: RestingOrder): Promise<boolean> {
+  const cancelled = await cancelClobOrder(order.orderId);
+  if (!cancelled) {
+    const recheck = await getClobOrder(order.orderId);
+    const recheckStatus = String(recheck?.status ?? '').toLowerCase();
+    if (!recheck || !['cancelled', 'canceled', 'expired'].includes(recheckStatus)) {
+      logger.warn('[rebate] reprice cancel unconfirmed — keeping original order', {
+        orderId: order.orderId,
+        marketId: order.marketId,
+      });
+      return false;
+    }
+  }
+  await removeRestingOrder(redis, order.orderId, order.marketId);
+  await recordLifetime(redis, order);
+  await bumpStat(redis, order.marketId, 'reprice_cancels');
+  return true;
 }
 
 /**
- * Place a resting GTC post-only limit buy on the CLOB.
- *
- * Price is set at `bestBid + 1 tick`, capped below the bestAsk so the
- * order rests passively without crossing. Returns the RestingOrder on
- * success, or null on failure.
+ * Place one resting GTC post-only limit buy from a selector quote. The quote
+ * price is already anchored to the effective mid and clamped against the
+ * physical book; post-only is the final safety — a crossing order is rejected
+ * by the exchange, never taker-filled.
  */
 export async function placeRestingOrder(
   redis: Redis,
   candidate: RebateMarketCandidate,
+  quote: RebateQuote,
   sizeUsd: number,
 ): Promise<RestingOrder | null> {
-  const tick = parseFloat(candidate.tickSize);
-  if (!isFinite(tick) || tick <= 0) return null;
-
-  // Rest at bestBid + 1 tick — improves on passive bids, stays below ask.
-  let price = candidate.bestBid + tick;
-  price = Math.min(price, candidate.bestAsk - tick); // Never cross.
-  price = Math.max(price, candidate.bestBid); // Never go below best bid (tight spread guard).
-  price = Math.max(price, tick);
-  price = Math.min(price, 1 - tick);
-  price = roundDownToTick(price, tick);
-
-  if (price <= 0 || price >= candidate.bestAsk) return null;
+  const cfg = loadConfig();
+  const price = quote.price;
+  if (!isFinite(price) || price <= 0 || price >= 1) return null;
 
   const size = sizeUsd / price;
   if (size <= 0) return null;
 
   logger.info('[rebate] placing resting order', {
     marketId: candidate.marketId,
-    direction: candidate.direction,
-    tokenId: candidate.tokenId,
+    direction: quote.direction,
+    tokenId: quote.tokenId,
     price,
     size: size.toFixed(4),
     sizeUsd: sizeUsd.toFixed(2),
+    yesMid: candidate.yesMid.toFixed(3),
     spreadBps: candidate.spreadBps.toFixed(0),
+    feeEquivUsdPerHour: candidate.flow.feeEquivalentUsdPerHour.toFixed(3),
   });
 
   const result = await submitClobLimitBuy({
-    tokenId: candidate.tokenId,
+    tokenId: quote.tokenId,
     price,
     size,
     tickSize: candidate.tickSize as TickSize,
@@ -329,8 +434,10 @@ export async function placeRestingOrder(
   if (!result.success || !result.order_id) {
     logger.warn('[rebate] order placement failed', {
       marketId: candidate.marketId,
+      direction: quote.direction,
       error: result.error,
     });
+    await bumpStat(redis, candidate.marketId, 'place_failures');
     return null;
   }
 
@@ -338,9 +445,9 @@ export async function placeRestingOrder(
     orderId: result.order_id,
     marketId: candidate.marketId,
     conditionId: candidate.conditionId,
-    tokenId: candidate.tokenId,
-    clobTokenIds: [candidate.clobTokenIds[0]!, candidate.clobTokenIds[1]!],
-    direction: candidate.direction,
+    tokenId: quote.tokenId,
+    clobTokenIds: candidate.clobTokenIds,
+    direction: quote.direction,
     price,
     size,
     sizeUsd,
@@ -348,10 +455,12 @@ export async function placeRestingOrder(
     tickSize: candidate.tickSize,
     negRisk: candidate.negRisk,
     question: candidate.question,
+    feeRateBps: cfg.REBATE_FEE_RATE_BPS,
+    rebateShare: candidate.rebateShare,
   };
 
   await saveRestingOrder(redis, order);
-  await redis.hincrby(STATS_KEY, 'orders_placed', 1).catch(() => {});
+  await bumpStat(redis, candidate.marketId, 'orders_placed');
 
   return order;
 }
