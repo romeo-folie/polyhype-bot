@@ -26,6 +26,7 @@
 import WebSocket from 'ws';
 import type { Redis } from 'ioredis';
 import { logger } from './logger.js';
+import { getBookTouchLevels } from './bookTouch.js';
 
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 const PRICE_CACHE_TTL_S = 30;
@@ -264,10 +265,11 @@ export class ClobPriceFeed {
   }
 
   /**
-   * Cache the best-bid from a CLOB `book` event. Bids are sorted descending
-   * in Polymarket's protocol, so `bids[0]` is the authoritative best-bid for
-   * the token. We cache under the YES or NO key depending on which side of
-   * the watched market the token belongs to.
+   * Cache the best-bid from a CLOB `book` event. The touch is extracted with
+   * an order-agnostic scan (getBookTouchLevels) — WS events document
+   * bids-descending, but the REST endpoint uses the opposite ordering, so we
+   * trust neither. We cache under the YES or NO key depending on which side
+   * of the watched market the token belongs to.
    */
   private async cacheBookBestBid(m: Record<string, unknown>): Promise<void> {
     const tokenId = typeof m.asset_id === 'string' ? m.asset_id : null;
@@ -281,16 +283,12 @@ export class ClobPriceFeed {
 
     const bids = Array.isArray(m.bids) ? m.bids : null;
     if (!bids || bids.length === 0) return;
-    const firstBid = bids[0];
-    if (!firstBid || typeof firstBid !== 'object') return;
-    const priceField = (firstBid as Record<string, unknown>).price;
-    const rawPrice =
-      typeof priceField === 'string' ? priceField
-      : typeof priceField === 'number' ? String(priceField)
-      : null;
-    if (rawPrice === null) return;
-    const price = parseFloat(rawPrice);
-    if (!isFinite(price)) return;
+    // Order-agnostic touch. WS book events document bids-descending (bids[0]
+    // = best), but the REST endpoint ships the OPPOSITE ordering — scanning
+    // all levels costs nothing and survives either convention changing.
+    const touch = getBookTouchLevels({ bids: bids as { price?: string | number }[] });
+    if (!touch.bestBid) return;
+    const price = touch.bestBid.price;
     const formatted = price.toFixed(6);
 
     if (tokens[0] === tokenId) {

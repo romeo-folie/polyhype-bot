@@ -54,6 +54,24 @@ describe('parseBookMessage', () => {
   it('returns null without an asset_id', () => {
     expect(parseBookMessage({ bids: [], asks: [] })).toBeNull();
   });
+
+  it('extracts the touch order-agnostically (REST-style best-at-the-END arrays)', () => {
+    // WS book events document best-first, but the REST endpoint ships the
+    // opposite ordering — the parser scans all levels so either shape yields
+    // the real touch (and the touch level's size).
+    const out = parseBookMessage({
+      asset_id: 'tok-1',
+      market: 'mkt-1',
+      bids: [{ price: '0.01', size: '5' }, { price: '0.41', size: '200' }, { price: '0.42', size: '100' }],
+      asks: [{ price: '0.99', size: '5' }, { price: '0.46', size: '20' }, { price: '0.45', size: '50' }],
+      timestamp: 1700000000000,
+    });
+
+    expect(out?.snapshot.bestBid).toBe(0.42);
+    expect(out?.snapshot.bestAsk).toBe(0.45);
+    expect(out?.snapshot.bidSize).toBe(100);
+    expect(out?.snapshot.askSize).toBe(50);
+  });
 });
 
 describe('parseTradeMessage', () => {

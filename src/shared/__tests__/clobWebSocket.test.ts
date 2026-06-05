@@ -77,6 +77,31 @@ describe('ClobPriceFeed', () => {
     expect(price).toBeCloseTo(0.72, 4);
   });
 
+  it('caches the REAL best bid from ascending (REST-style) level arrays', async () => {
+    // WS book events document bids-descending, but the touch extraction is
+    // order-agnostic — an ascending array (the REST convention, where [0] is
+    // the WORST bid) must still cache the max.
+    const feedAny = feed as unknown as {
+      watchedMarkets: Map<string, string[]>;
+      tokenToMarket: Map<string, string>;
+      handleMessage: (raw: string) => Promise<void>;
+    };
+    feedAny.watchedMarkets.set('market-1', ['yes-token', 'no-token']);
+    feedAny.tokenToMarket.set('yes-token', 'market-1');
+
+    await feedAny.handleMessage(
+      JSON.stringify({
+        event_type: 'book',
+        asset_id: 'yes-token',
+        bids: [{ price: '0.01', size: '5' }, { price: '0.71', size: '10' }, { price: '0.72', size: '50' }],
+        asks: [{ price: '0.75', size: '20' }],
+      }),
+    );
+
+    const price = await feed.getCachedPrice('market-1');
+    expect(price).toBeCloseTo(0.72, 4); // max bid, not bids[0]=0.01
+  });
+
   // ── watch / unwatch ─────────────────────────────────────────────────────
 
   it('watch() sets up tokenToMarket mapping (enabled feed)', async () => {

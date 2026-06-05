@@ -297,6 +297,28 @@ describe('runCopytradeHedgeScan', () => {
     );
   });
 
+  it('reads the hedge ask from a multi-level raw-REST-order book (asks[0] = WORST ask)', async () => {
+    mockSql.mockResolvedValue([makePosition({ direction: 'NO' })]);
+    mockParseClobTokenIds.mockReturnValue(['tok-yes', 'tok-no']);
+    // REST books are best-at-the-END: asks descending, real best ask 0.40 is
+    // LAST. Pre-fix the scanner read asks[0]=0.99 → hedge_ask >= q_max skip
+    // on every populated book.
+    mockGetClobOrderBook.mockResolvedValue({
+      asks: [
+        { price: '0.99', size: '5' },
+        { price: '0.70', size: '10' },
+        { price: '0.40', size: '50' }, // real best ask — LAST
+      ],
+    });
+    const redis = makeRedis();
+
+    await runCopytradeHedgeScan(redis as any);
+
+    expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-yes' }),
+    );
+  });
+
   it('buys NO when position direction is YES', async () => {
     // sharesHeld must match entryPrice (5 / 0.46 ≈ 10.87) so originalWins > 0
     mockSql.mockResolvedValue([makePosition({ direction: 'YES', entryPrice: 0.46, sharesHeld: 10.87 })]);

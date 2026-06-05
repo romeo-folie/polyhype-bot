@@ -9,23 +9,63 @@
  * scans every level instead of trusting either convention.
  */
 
-import type { OrderBookSummary } from '@polymarket/clob-client-v2';
+/** One side level as it appears in REST books (strings) or WS events (string | number). */
+interface RawLevel {
+  price?: string | number;
+  size?: string | number;
+}
+
+export interface TouchLevel {
+  price: number;
+  /** 0 when the source level had no parseable size. */
+  size: number;
+}
+
+function parseLevelNumber(v: string | number | undefined): number {
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? parseFloat(v) : NaN;
+  return isFinite(n) ? n : NaN;
+}
 
 /**
- * Order-agnostic touch. Returns 0 for an empty/unparseable side.
+ * Order-agnostic touch with level sizes. Accepts REST-shaped books (string
+ * fields) and WS-event sides (string or number fields). Returns null for an
+ * empty/unparseable side.
  */
-export function getBookTouch(
-  book: Pick<OrderBookSummary, 'bids' | 'asks'>,
-): { bestBid: number; bestAsk: number } {
-  let bestBid = 0;
+export function getBookTouchLevels(book: {
+  bids?: RawLevel[] | null;
+  asks?: RawLevel[] | null;
+}): { bestBid: TouchLevel | null; bestAsk: TouchLevel | null } {
+  let bestBid: TouchLevel | null = null;
   for (const level of book.bids ?? []) {
-    const p = parseFloat(level.price);
-    if (isFinite(p) && p > bestBid) bestBid = p;
+    if (!level || typeof level !== 'object') continue;
+    const p = parseLevelNumber(level.price);
+    if (!isFinite(p) || p <= 0) continue;
+    if (bestBid === null || p > bestBid.price) {
+      const s = parseLevelNumber(level.size);
+      bestBid = { price: p, size: isFinite(s) ? s : 0 };
+    }
   }
-  let bestAsk = 0;
+  let bestAsk: TouchLevel | null = null;
   for (const level of book.asks ?? []) {
-    const p = parseFloat(level.price);
-    if (isFinite(p) && p > 0 && (bestAsk === 0 || p < bestAsk)) bestAsk = p;
+    if (!level || typeof level !== 'object') continue;
+    const p = parseLevelNumber(level.price);
+    if (!isFinite(p) || p <= 0) continue;
+    if (bestAsk === null || p < bestAsk.price) {
+      const s = parseLevelNumber(level.size);
+      bestAsk = { price: p, size: isFinite(s) ? s : 0 };
+    }
   }
   return { bestBid, bestAsk };
+}
+
+/**
+ * Order-agnostic touch, prices only. Returns 0 for an empty/unparseable side.
+ * Accepts any structurally book-shaped object (OrderBookSummary included).
+ */
+export function getBookTouch(book: {
+  bids?: RawLevel[] | null;
+  asks?: RawLevel[] | null;
+}): { bestBid: number; bestAsk: number } {
+  const { bestBid, bestAsk } = getBookTouchLevels(book);
+  return { bestBid: bestBid?.price ?? 0, bestAsk: bestAsk?.price ?? 0 };
 }

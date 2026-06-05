@@ -16,6 +16,7 @@ import {
 } from '../mapping/gamma.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import { getClobOrderBook, submitClobBuy, CLOB_MIN_ORDER_USD } from '../shared/clob.js';
+import { getBookTouchLevels } from '../shared/bookTouch.js';
 import { getBankroll, deductStake } from '../shared/bankroll.js';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
@@ -132,14 +133,12 @@ async function fetchOrderbooks(
     for (const result of settled) {
       if (result.status !== 'fulfilled' || !result.value.book) continue;
       const { tokenId, book } = result.value;
-      const asks = book.asks;
-      if (!Array.isArray(asks) || asks.length === 0) continue;
-      const firstAsk = asks[0];
-      if (!firstAsk) continue;
-      const price = parseFloat(firstAsk.price);
-      const size = parseFloat(firstAsk.size);
-      if (!isFinite(price) || price <= 0 || !isFinite(size) || size <= 0) continue;
-      results.set(tokenId, { bestAsk: price, bestAskSize: size });
+      // Order-agnostic touch: asks[0] on a REST book is the WORST ask
+      // (best-at-the-END ordering) — reading it made every leg look ~0.99 so
+      // outcome sums never dropped below 1 and no arb could ever surface.
+      const best = getBookTouchLevels(book).bestAsk;
+      if (!best || best.price <= 0 || best.size <= 0) continue;
+      results.set(tokenId, { bestAsk: best.price, bestAskSize: best.size });
     }
   }
 

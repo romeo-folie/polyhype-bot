@@ -267,4 +267,28 @@ describe('runWeatherOracleScan', () => {
     expect(signal.direction).toBe('YES');
     expect(signal.source).toBe('weather');
   });
+
+  it('reads the winning ask from a multi-level raw-REST-order book (asks[0] = WORST ask)', async () => {
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    mockSql.mockResolvedValue([
+      { city: 'new york', targetDate: yesterday, actualHigh: 77, unit: 'fahrenheit' },
+    ]);
+    mockFetchWeatherEvents.mockResolvedValue([{}]);
+    mockParseWeatherEvent.mockReturnValue(makeEvent());
+    // REST books are best-at-the-END: asks descending, real best ask 0.08 is
+    // LAST. Pre-fix the scanner read asks[0]=0.99 → discount looked like 0.01
+    // → every oracle opportunity on a populated book was suppressed.
+    mockGetClobOrderBook.mockResolvedValue({
+      asks: [
+        { price: '0.99', size: '5' },
+        { price: '0.40', size: '10' },
+        { price: '0.08', size: '60' }, // real best ask — LAST
+      ],
+    });
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_ORACLE_ENABLED: true }));
+
+    await runWeatherOracleScan(makeRedis() as any);
+
+    expect(mockExecuteAndRecordSignal).toHaveBeenCalledOnce();
+  });
 });

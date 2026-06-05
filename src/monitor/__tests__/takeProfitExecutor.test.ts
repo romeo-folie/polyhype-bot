@@ -64,7 +64,7 @@ const { submitClobSell, fetchClobTokenBalance } = await import('../../shared/clo
 const { closePosition, updatePositionShares, markPositionPendingSettlement } = await import('../../execution/positionLedger.js');
 const { notifyTakeProfitExecuted } = await import('../../execution/telegram.js');
 const { recordPositionOutcome } = await import('../../shared/positionOutcomeRecorder.js');
-const { executeTakeProfit } = await import('../takeProfitExecutor.js');
+const { executeTakeProfit, resolveMakerExitPrice } = await import('../takeProfitExecutor.js');
 
 const mockClobSell = vi.mocked(submitClobSell);
 const mockFetchClobTokenBalance = vi.mocked(fetchClobTokenBalance);
@@ -579,5 +579,45 @@ describe('executeTakeProfit', () => {
     const outcomeArgs = mockRecordOutcome.mock.calls[0]?.[2] as { result: string; returnPct: number };
     expect(outcomeArgs.result).toBe('won');
     expect(outcomeArgs.returnPct).toBeCloseTo(((9.99 * 0.8) - 5.0) / 5.0 * 100, 2);
+  });
+});
+
+describe('resolveMakerExitPrice', () => {
+  it('rests below the REAL best ask on a multi-level raw-REST-order book', () => {
+    // REST books are best-at-the-END: asks[0] is the WORST ask. Pre-fix this
+    // book priced a maker exit at 0.99 − edge = 0.98 instead of off the real
+    // 0.51 touch — a resting sell nothing would ever lift.
+    const book = {
+      bids: [
+        { price: '0.01', size: '5' },
+        { price: '0.49', size: '100' }, // real best bid — LAST
+      ],
+      asks: [
+        { price: '0.99', size: '5' },
+        { price: '0.51', size: '100' }, // real best ask — LAST
+      ],
+      tick_size: '0.01',
+    };
+
+    // 100bps below the REAL ask: 0.51 − 0.01 = 0.50 (= real bid + tick).
+    expect(resolveMakerExitPrice(book, 100)).toBeCloseTo(0.50);
+  });
+
+  it('clamps the post-only floor to the REAL best bid, not the bottom-of-book bid', () => {
+    // Real touch 0.49/0.50. An 8% edge targets 0.42 — below the bid — so the
+    // clamp must lift it to REAL bid + tick (0.50), not to 0.01 + tick.
+    const book = {
+      bids: [
+        { price: '0.01', size: '5' },
+        { price: '0.49', size: '100' },
+      ],
+      asks: [
+        { price: '0.99', size: '5' },
+        { price: '0.50', size: '100' },
+      ],
+      tick_size: '0.01',
+    };
+
+    expect(resolveMakerExitPrice(book, 800)).toBeCloseTo(0.50);
   });
 });

@@ -26,6 +26,7 @@ import {
   CLOB_MIN_ORDER_USD,
 } from '../shared/clob.js';
 import type { TickSize } from '@polymarket/clob-client-v2';
+import { getBookTouch } from '../shared/bookTouch.js';
 import {
   closePosition,
   getPosition,
@@ -540,15 +541,18 @@ async function confirmMakerExitCancel(orderId: string): Promise<boolean> {
  * rest *below* the best ask by `priceEdgeBps`. Clamped to tick and to a
  * floor strictly above the best bid so post-only doesn't cross.
  */
-function resolveMakerExitPrice(
+// Exported for unit tests (same pattern as bookDepthCheck.simulateFill) —
+// the raw-REST-ordering regression needs to drive this directly.
+export function resolveMakerExitPrice(
   book: { bids: { price: string }[]; asks: { price: string }[]; tick_size: string },
   priceEdgeBps: number,
 ): number | null {
   const tick = parseFloat(book.tick_size);
   if (!isFinite(tick) || tick <= 0) return null;
 
-  const bestBid = parseFloat(book.bids[0]?.price ?? '0');
-  const bestAsk = parseFloat(book.asks[0]?.price ?? '0');
+  // Order-agnostic touch — REST books are best-at-the-END; asks[0] is the
+  // WORST ask, which would rest exit sells near 0.99. See shared/bookTouch.ts.
+  const { bestBid, bestAsk } = getBookTouch(book);
   const improvement = priceEdgeBps / 10_000;
 
   // Rest below the ask by `improvement`, capturing spread vs taker who would hit the bid.

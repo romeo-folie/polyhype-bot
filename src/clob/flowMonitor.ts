@@ -17,6 +17,7 @@ import { logger } from '../shared/logger.js';
 import { loadConfig } from '../shared/config.js';
 import { getRedis, closeRedis, acquireLock, releaseLock } from '../shared/redis.js';
 import { getCachedMarkets } from '../shared/watchlist.js';
+import { getBookTouchLevels } from '../shared/bookTouch.js';
 import { parseClobTokenIds, getActiveMarkets } from '../mapping/gamma.js';
 import {
   ClobPriceFeed,
@@ -43,9 +44,10 @@ export interface BookSnapshot {
 /**
  * Pure helper: parse a CLOB `book` message into a snapshot. Exposed for tests.
  *
- * Polymarket book messages contain `bids` and `asks` arrays of {price, size}
- * with bids sorted descending and asks ascending; the canonical "best" is
- * the first element of each side.
+ * The touch is extracted with an order-agnostic scan (getBookTouchLevels):
+ * WS book messages document bids-descending/asks-ascending (best-first), but
+ * the REST endpoint ships the OPPOSITE ordering — trusting neither costs
+ * nothing and survives either convention changing.
  */
 export function parseBookMessage(msg: Record<string, unknown>): {
   tokenId: string;
@@ -56,30 +58,21 @@ export function parseBookMessage(msg: Record<string, unknown>): {
   if (!tokenId) return null;
   const marketIdRaw = typeof msg.market === 'string' ? msg.market : tokenId;
 
-  const sideTop = (side: unknown): { price: number | null; size: number | null } => {
-    if (!Array.isArray(side) || side.length === 0) return { price: null, size: null };
-    const first = side[0];
-    if (!first || typeof first !== 'object') return { price: null, size: null };
-    const o = first as Record<string, unknown>;
-    const price = typeof o.price === 'string' ? parseFloat(o.price) : typeof o.price === 'number' ? o.price : NaN;
-    const size = typeof o.size === 'string' ? parseFloat(o.size) : typeof o.size === 'number' ? o.size : NaN;
-    return {
-      price: Number.isFinite(price) ? price : null,
-      size: Number.isFinite(size) ? size : null,
-    };
-  };
-
-  const bid = sideTop(msg.bids);
-  const ask = sideTop(msg.asks);
+  const toLevels = (side: unknown): { price?: string | number; size?: string | number }[] =>
+    Array.isArray(side) ? (side as { price?: string | number; size?: string | number }[]) : [];
+  const { bestBid, bestAsk } = getBookTouchLevels({
+    bids: toLevels(msg.bids),
+    asks: toLevels(msg.asks),
+  });
 
   return {
     tokenId,
     marketId: marketIdRaw,
     snapshot: {
-      bestBid: bid.price,
-      bestAsk: ask.price,
-      bidSize: bid.size,
-      askSize: ask.size,
+      bestBid: bestBid?.price ?? null,
+      bestAsk: bestAsk?.price ?? null,
+      bidSize: bestBid ? (bestBid.size > 0 ? bestBid.size : null) : null,
+      askSize: bestAsk ? (bestAsk.size > 0 ? bestAsk.size : null) : null,
       ts: typeof msg.timestamp === 'number' ? msg.timestamp : Date.now(),
     },
   };
