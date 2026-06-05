@@ -182,7 +182,10 @@ describe('ClobPriceFeed', () => {
     expect(redis._store.get(WS_YES_PRICE_KEY('mkt-2'))?.value).toBe('0.720000');
   });
 
-  it('takes bids[0] as best-bid even when multiple levels present', async () => {
+  it('returns the max bid regardless of array ordering (WS-descending case)', async () => {
+    // In WS-descending order bids[0] coincidentally IS the max — the cache
+    // must extract the touch by scanning, never by trusting index 0 (the
+    // REST endpoint ships the opposite ordering; see shared/bookTouch.ts).
     const feedAny = feed as unknown as {
       watchedMarkets: Map<string, string[]>;
       tokenToMarket: Map<string, string>;
