@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { z } from 'zod';
 
 // Mock external dependencies before imports.
 vi.mock('../../shared/clob.js', () => ({
@@ -11,8 +12,24 @@ vi.mock('../../execution/positionLedger.js', () => ({
   recordPosition: vi.fn(),
 }));
 
+// Foundation from the REAL Zod schema defaults so the mock can't drift from
+// config.ts (see feedback: hand-written literals crash on new cfg.X reads).
+const { envSchema } = await vi.importActual<{ envSchema: z.AnyZodObject }>(
+  '../../shared/config.js',
+);
+function schemaDefaults(schema: z.AnyZodObject): Record<string, unknown> {
+  const defaults: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(schema.shape)) {
+    const parsed = field.safeParse(undefined);
+    if (parsed.success && parsed.data !== undefined) defaults[key] = parsed.data;
+  }
+  return defaults;
+}
+
 vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => ({
+    ...schemaDefaults(envSchema),
+    // Pinned: rebate-estimate assertions below are computed from these.
     REBATE_ORDER_TTL_S: 300,
     REBATE_FEE_RATE_BPS: 1000,
     CLOB_FALLBACK_ENABLED: true,

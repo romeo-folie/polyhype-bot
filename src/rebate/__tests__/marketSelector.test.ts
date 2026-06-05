@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { z } from 'zod';
 
 const mockGetCachedMarkets = vi.fn();
 vi.mock('../../shared/watchlist.js', () => ({
@@ -19,7 +20,24 @@ vi.mock('../flowAnalyzer.js', async (importOriginal) => {
   };
 });
 
+// Foundation from the REAL Zod schema defaults so the mock can't drift from
+// config.ts (see feedback: hand-written literals crash on new cfg.X reads).
+const { envSchema } = await vi.importActual<{ envSchema: z.AnyZodObject }>(
+  '../../shared/config.js',
+);
+function schemaDefaults(schema: z.AnyZodObject): Record<string, unknown> {
+  const defaults: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(schema.shape)) {
+    const parsed = field.safeParse(undefined);
+    if (parsed.success && parsed.data !== undefined) defaults[key] = parsed.data;
+  }
+  return defaults;
+}
+
+// Schema defaults as the foundation; the explicit values below pin the knobs
+// these tests' price/flow expectations are computed from.
 const baseRebateConfig = {
+  ...schemaDefaults(envSchema),
   REBATE_REQUIRE_FEE_MARKETS: true,
   REBATE_MIN_VOLUME: 50_000,
   REBATE_MIN_LIQUIDITY: 10_000,

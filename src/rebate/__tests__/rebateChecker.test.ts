@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { z } from 'zod';
 
 vi.mock('../../shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
@@ -14,7 +15,22 @@ vi.mock('../../execution/telegram.js', () => ({
   notify: (...args: unknown[]) => mockNotify(...args),
 }));
 
+// Foundation from the REAL Zod schema defaults so the mock can't drift from
+// config.ts (see feedback: hand-written literals crash on new cfg.X reads).
+const { envSchema } = await vi.importActual<{ envSchema: z.AnyZodObject }>(
+  '../../shared/config.js',
+);
+function schemaDefaults(schema: z.AnyZodObject): Record<string, unknown> {
+  const defaults: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(schema.shape)) {
+    const parsed = field.safeParse(undefined);
+    if (parsed.success && parsed.data !== undefined) defaults[key] = parsed.data;
+  }
+  return defaults;
+}
+
 const baseConfig = {
+  ...schemaDefaults(envSchema),
   REBATE_DAILY_SUMMARY_ENABLED: true,
   REBATE_MAKER_ADDRESS: undefined as string | undefined,
   POLYMARKET_FUNDER_ADDRESS: '0x2474251E6F057d57d045853Bf94fB15DBd50Ec29',
@@ -161,7 +177,7 @@ describe('maybeSendDailySummary', () => {
     expect(url).toContain('maker_address=0xoverride');
   });
 
-  it('skips (no notify) when no maker address is configured', async () => {
+  it('skips (no notify) when no maker address is configured — WITHOUT burning the date gate', async () => {
     mockLoadConfig.mockReturnValue({
       ...baseConfig,
       REBATE_MAKER_ADDRESS: undefined,
@@ -174,6 +190,9 @@ describe('maybeSendDailySummary', () => {
 
     expect(sent).toBe(false);
     expect(mockNotify).not.toHaveBeenCalled();
+    // Date gate must NOT be acquired — once the address is configured, the
+    // next cycle (same day) should still send.
+    expect(redis.set).not.toHaveBeenCalled();
   });
 
   it('still sends the summary with "unavailable" when the rebates API fails', async () => {

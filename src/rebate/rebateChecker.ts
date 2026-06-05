@@ -98,12 +98,9 @@ export async function maybeSendDailySummary(redis: Redis): Promise<boolean> {
   const cfg = loadConfig();
   if (!cfg.REBATE_DAILY_SUMMARY_ENABLED) return false;
 
-  const today = utcDateString(0);
-  const sentKey = `${SUMMARY_SENT_PREFIX}${today}`;
-  // NX + 48h TTL: exactly one summary per UTC day, keys self-expire.
-  const acquired = await redis.set(sentKey, '1', 'EX', 48 * 3600, 'NX');
-  if (acquired !== 'OK') return false;
-
+  // Check config BEFORE acquiring the date gate — a missing address must not
+  // burn the day's one send (it would silently suppress the summary for 48h
+  // even after the config is fixed).
   const makerAddress = cfg.REBATE_MAKER_ADDRESS ?? cfg.POLYMARKET_FUNDER_ADDRESS;
   if (!makerAddress) {
     logger.warn('[rebate] daily summary skipped — no maker address configured', {
@@ -111,6 +108,12 @@ export async function maybeSendDailySummary(redis: Redis): Promise<boolean> {
     });
     return false;
   }
+
+  const today = utcDateString(0);
+  const sentKey = `${SUMMARY_SENT_PREFIX}${today}`;
+  // NX + 48h TTL: exactly one summary per UTC day, keys self-expire.
+  const acquired = await redis.set(sentKey, '1', 'EX', 48 * 3600, 'NX');
+  if (acquired !== 'OK') return false;
 
   const yesterday = utcDateString(1);
   const api = await fetchRebatesForDate(yesterday, makerAddress);
