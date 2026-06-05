@@ -41,6 +41,7 @@ vi.mock('../pendingMakerOrders.js', () => ({
   getPendingOrder: vi.fn(),
   setPendingOrder: vi.fn(),
   deletePendingOrder: vi.fn(),
+  sumRestAboveCapNotional: vi.fn().mockResolvedValue(0),
 }));
 
 vi.mock('../../shared/logger.js', () => ({
@@ -119,7 +120,7 @@ const { submitClobBuy, getClobOrderBook, submitClobLimitBuy, getClobOrder, resol
 const { hasOpenPosition } = await import('../positionLedger.js');
 const { recordExecutionMetric, recordExecutionTiming, recordExecutionEvent } =
   await import('../../shared/telemetry.js');
-const { getPendingOrder, setPendingOrder, deletePendingOrder } =
+const { getPendingOrder, setPendingOrder, deletePendingOrder, sumRestAboveCapNotional } =
   await import('../pendingMakerOrders.js');
 const { executeSignal, executeSignals, executeAndRecordSignal } = await import('../executor.js');
 const positionLedgerMocks = await import('../positionLedger.js');
@@ -138,6 +139,7 @@ const mockRecordExecutionEvent = vi.mocked(recordExecutionEvent);
 const mockGetPendingOrder = vi.mocked(getPendingOrder);
 const mockSetPendingOrder = vi.mocked(setPendingOrder);
 const mockDeletePendingOrder = vi.mocked(deletePendingOrder);
+const mockSumRestAboveCap = vi.mocked(sumRestAboveCapNotional);
 
 function makeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
   return {
@@ -2957,5 +2959,286 @@ describe('empty-book maker route', () => {
       );
       expect(result.skipReason).not.toBe('entry_price_above_cap');
     });
+  });
+});
+
+describe('weather rest-above-cap (caps as clamps, not eligibility filters)', () => {
+  function makeGhostBook() {
+    return {
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.01', size: '100' }],
+      asks: [{ price: '0.99', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.50',
+      hash: 'hash',
+    };
+  }
+
+  function makeRealBook() {
+    return {
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      timestamp: new Date().toISOString(),
+      bids: [{ price: '0.68', size: '100' }],
+      asks: [{ price: '0.72', size: '100' }],
+      min_order_size: '1',
+      tick_size: '0.01',
+      neg_risk: false,
+      last_trade_price: '0.70',
+      hash: 'hash',
+    };
+  }
+
+  // Pre-resolution-day weather entry whose market price (0.80) is above the
+  // effective cap min(EARLY=0.55, MAX=0.75) = 0.55.
+  function makeOutOfRangeSignal(overrides: Partial<TradeSignal> = {}): TradeSignal {
+    return makeSignal({
+      source: 'weather',
+      direction: 'YES',
+      outcomePrice: 0.80,
+      consensusProbability: 0.90,
+      edgeMagnitude: 0.25,
+      consensusStddev: 0.01,
+      _isResolutionDay: false,
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    mockSubmitClob.mockReset();
+    mockGetOrderBook.mockReset();
+    mockSubmitLimit.mockReset();
+    mockGetOrder.mockReset();
+    mockCancelOrder.mockReset();
+    mockHasPosition.mockReset();
+    mockGetCalibrationStats.mockReset();
+    mockRecordExecutionMetric.mockReset();
+    mockRecordExecutionTiming.mockReset();
+    mockRecordExecutionEvent.mockReset();
+    mockGetPendingOrder.mockReset();
+    mockSetPendingOrder.mockReset();
+    mockDeletePendingOrder.mockReset();
+    mockSumRestAboveCap.mockReset();
+
+    mockRecordExecutionMetric.mockResolvedValue(undefined);
+    mockRecordExecutionTiming.mockResolvedValue(undefined);
+    mockRecordExecutionEvent.mockResolvedValue(undefined);
+    mockGetCalibrationStats.mockResolvedValue(null);
+    mockGetPendingOrder.mockResolvedValue(null);
+    mockSetPendingOrder.mockResolvedValue(undefined);
+    mockDeletePendingOrder.mockResolvedValue(undefined);
+    mockSumRestAboveCap.mockResolvedValue(0);
+
+    mockConfig.EXECUTION_MODE = 'hybrid';
+    mockConfig.MAKER_MAX_WAIT_MS = 0;
+    mockConfig.MAKER_POLL_INTERVAL_MS = 10;
+    mockConfig.MAKER_PRICE_EDGE_BPS = 0;
+    mockConfig.MAKER_EMPTY_BOOK_MAX_WAIT_MS = 900_000;
+    mockConfig.MAKER_EMPTY_BOOK_EDGE_BPS = 150;
+    mockConfig.EMPTY_BOOK_BID_THRESHOLD = 0.04;
+    mockConfig.EMPTY_BOOK_ASK_THRESHOLD = 0.96;
+    mockConfig.TAKER_MIN_EDGE = 0;
+    mockConfig.TAKER_MIN_EDGE_CATEGORIES = {};
+    mockConfig.TAIL_TAKER_BLOCK = false;
+    // Spread guardrail ON so the ghost-book check runs (needsBookCheck gate);
+    // ghost books bypass spreadTooWide via the emptyBook branch.
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 500;
+    mockConfig.WEATHER_MAKER_POST_ONLY = true;
+    mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 0;
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.75;
+    mockConfig.WEATHER_EMPTY_BOOK_DISCOUNT_BPS = 2000;
+    mockConfig.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE = 0;
+    mockConfig.WEATHER_MAX_SIGNAL_PRICE_DRIFT = 0;
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (mockConfig as any).WEATHER_EARLY_ENTRY_MAX_PRICE = 0.55;
+    (mockConfig as any).WEATHER_REST_ABOVE_CAP_ENABLED = true;
+    (mockConfig as any).WEATHER_REST_ABOVE_CAP_MAX_NOTIONAL_USD = 100;
+    (mockConfig as any).WEATHER_REAL_BOOK_DISCOUNT_BPS = 0;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+
+    mockGetOrderBook.mockResolvedValue(makeGhostBook());
+    mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-rac' });
+    mockGetOrder.mockResolvedValue(null);
+    mockCancelOrder.mockResolvedValue(true);
+    mockHasPosition.mockResolvedValue(false);
+  });
+
+  afterEach(() => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    delete (mockConfig as any).WEATHER_EARLY_ENTRY_MAX_PRICE;
+    delete (mockConfig as any).WEATHER_REST_ABOVE_CAP_ENABLED;
+    delete (mockConfig as any).WEATHER_REST_ABOVE_CAP_MAX_NOTIONAL_USD;
+    delete (mockConfig as any).WEATHER_REAL_BOOK_DISCOUNT_BPS;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+    mockConfig.EXECUTION_MODE = 'taker';
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0;
+    mockConfig.WEATHER_EMPTY_BOOK_DISCOUNT_BPS = 0;
+    mockConfig.WEATHER_MAKER_DISCOUNT_BPS = 500;
+    mockConfig.WEATHER_MAX_SIGNAL_PRICE_DRIFT = 0.08;
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
+  });
+
+  it('legacy: skips out-of-range weather entry when the knob is OFF', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mockConfig as any).WEATHER_REST_ABOVE_CAP_ENABLED = false;
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeOutOfRangeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('entry_price_above_cap');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
+  it('knob ON: out-of-range empty-book entry posts a resting maker clamped below the cap', async () => {
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeOutOfRangeSignal(), redis as any);
+
+    // Not skipped at the price gate — posted as a resting GTC instead.
+    expect(result.skipReason).not.toBe('entry_price_above_cap');
+    expect(result.entryExecutionPath).toBe('maker_pending');
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+    // FV 0.90 × (1 − 20%) = 0.72 → ceiling'd to EARLY cap 0.55 → minus 150bps
+    // empty-book edge = 0.535 → tick-rounded down to 0.53. Never above the cap.
+    const submitted = mockSubmitLimit.mock.calls[0]![0] as { price: number };
+    expect(submitted.price).toBeLessThanOrEqual(0.55);
+    expect(submitted.price).toBeCloseTo(0.53, 5);
+    // Cohort tag persisted on the pending blob for the pool gate + analysis.
+    expect(mockSetPendingOrder).toHaveBeenCalledWith(
+      expect.anything(),
+      'mkt-test',
+      'YES',
+      expect.objectContaining({ restAboveCap: true }),
+      expect.any(Number),
+    );
+  });
+
+  it('knob ON: size-up sanctioned signals above cap keep the legacy skip', async () => {
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeOutOfRangeSignal({ sizeUpSanctioned: true }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('entry_price_above_cap');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
+  it('knob ON: patient real-book price above cap is CLAMPED to the cap, not rejected', async () => {
+    // Real book at 0.68/0.72; patient discount 200bps → raw post 0.7056 → 0.70,
+    // which exceeds the pre-res-day cap 0.55 → clamped to 0.55 (legacy behaviour
+    // rejected with maker_price_above_cap → entry_price_above_cap skip).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mockConfig as any).WEATHER_REAL_BOOK_DISCOUNT_BPS = 200;
+    mockConfig.EXECUTION_MODE = 'maker';
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0; // real-book spread (571bps) is not under test
+    mockGetOrderBook.mockResolvedValue(makeRealBook());
+    const redis = makeRedis();
+    const result = await executeSignal(makeOutOfRangeSignal(), redis as any); // eslint-disable-line @typescript-eslint/no-explicit-any
+
+    expect(result.skipReason).not.toBe('entry_price_above_cap');
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+    const submitted = mockSubmitLimit.mock.calls[0]![0] as { price: number };
+    expect(submitted.price).toBeCloseTo(0.55, 5);
+    expect(mockSetPendingOrder).toHaveBeenCalledWith(
+      expect.anything(),
+      'mkt-test',
+      'YES',
+      expect.objectContaining({ restAboveCap: true }),
+      expect.any(Number),
+    );
+  });
+
+  it('knob OFF: patient real-book price above cap still rejects (legacy guard intact)', async () => {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    (mockConfig as any).WEATHER_REST_ABOVE_CAP_ENABLED = false;
+    (mockConfig as any).WEATHER_REAL_BOOK_DISCOUNT_BPS = 200;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+    mockConfig.EXECUTION_MODE = 'maker';
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0; // real-book spread (571bps) is not under test
+    mockGetOrderBook.mockResolvedValue(makeRealBook());
+    const redis = makeRedis();
+    // In-range at the gate (0.50 ≤ 0.55) but the patient post price (0.70)
+    // exceeds the cap → defense-in-depth rejects, no order is placed.
+    const result = await executeSignal(
+      makeOutOfRangeSignal({ outcomePrice: 0.50 }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('entry_price_above_cap');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
+  it('rest-above-cap pool full: refuses the post with resting_notional_cap (no taker fallback)', async () => {
+    mockSumRestAboveCap.mockResolvedValue(96); // 96 + ~5 notional > 100 cap
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeOutOfRangeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('resting_notional_cap');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+  });
+
+  it('pool cap unset (0) fails closed: no rest-above-cap post is placed', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mockConfig as any).WEATHER_REST_ABOVE_CAP_MAX_NOTIONAL_USD = 0;
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeOutOfRangeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('resting_notional_cap');
+    expect(mockSumRestAboveCap).not.toHaveBeenCalled();
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+  });
+
+  it('in-range weather entries are never gated by the pool cap and carry no cohort tag', async () => {
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeOutOfRangeSignal({ outcomePrice: 0.50 }), // ≤ 0.55 → in-range
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipReason).not.toBe('resting_notional_cap');
+    expect(mockSumRestAboveCap).not.toHaveBeenCalled();
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+    const pendingBlob = mockSetPendingOrder.mock.calls[0]![3] as { restAboveCap?: boolean };
+    expect(pendingBlob.restAboveCap).toBeUndefined();
+  });
+
+  it('bracket-opposite legs persist isBracketOpposite on the pending blob', async () => {
+    const redis = makeRedis();
+    const result = await executeSignal(
+      makeOutOfRangeSignal({
+        direction: 'NO',
+        consensusProbability: 0.10, // NO side fair value 0.90
+        outcomePrice: 0.85,
+        _isBracketOpposite: true,
+        _bracketTargetShares: 10,
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipReason).not.toBe('entry_price_above_cap');
+    expect(mockSetPendingOrder).toHaveBeenCalledWith(
+      expect.anything(),
+      'mkt-test',
+      'NO',
+      expect.objectContaining({ isBracketOpposite: true }),
+      expect.any(Number),
+    );
   });
 });

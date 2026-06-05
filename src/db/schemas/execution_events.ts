@@ -19,6 +19,8 @@ const SKIP_REASON = [
   'spread_too_wide', 'one_sided_book', 'no_clob_book',
   'entry_price_above_cap',
   'size_up_ineligible',
+  // weather rest-above-cap pool gate (added 2026-06-05)
+  'resting_notional_cap',
   'other',
 ] as const;
 

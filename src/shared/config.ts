@@ -1863,6 +1863,33 @@ export const envSchema = z.object({
   // next scan cycle with a refreshed side-ask anchor if not yet filled.
   // 0 = use the global MAKER_PRICE_EDGE_BPS logic instead.
   WEATHER_REAL_BOOK_DISCOUNT_BPS: z.coerce.number().min(0).max(5000).optional().default(300),
+  // Rest-above-cap: treat the weather entry-price caps as price CLAMPS instead of
+  // participation filters. When enabled, a fresh weather entry whose market price
+  // (signal.outcomePrice) exceeds the effective cap is NOT skipped with
+  // entry_price_above_cap — the maker path posts a resting GTC clamped to the cap
+  // instead (the posted price still never exceeds the cap; only eligibility
+  // changes). Size-up top-ups keep the legacy skip. The market price being above
+  // the cap is often noise on ghost books (0.99 rebate-asks) and on real books a
+  // resting bid below market is free optionality — PROVIDED the revalidation pass
+  // below cancels it when the model edge disappears (otherwise the bid fills
+  // exactly when the forecast moves against the thesis).
+  WEATHER_REST_ABOVE_CAP_ENABLED: boolFromEnv.optional().default(false),
+  // Aggregate notional ceiling (USD) for the rest-above-cap resting pool: the sum
+  // of price*size across unfilled restAboveCap maker orders. Resting orders deduct
+  // nothing from bankroll and per-scan caps reset every scan, so without this cap
+  // out-of-range bids accumulate unboundedly and can over-subscribe the bankroll
+  // with CORRELATED fills (one regime shift collapses several city markets at
+  // once). Bounds ONLY the out-of-range pool — in-range posts are not gated, so a
+  // full lottery-ticket pool can never block normal entries. 0 = fail closed (no
+  // rest-above-cap posts while the feature is enabled).
+  WEATHER_REST_ABOVE_CAP_MAX_NOTIONAL_USD: z.coerce.number().min(0).optional().default(0),
+  // Each scan, re-validate unfilled resting weather PRIMARY maker orders against
+  // the fresh model fair value and cancel any whose side-FV has dropped below the
+  // posted price (the bid is now value-negative at our own price). Bracket legs
+  // are exempt — they intentionally rest value-negative as the pairing leg.
+  // Closes the gap that forecast invalidation only covers HELD positions, which
+  // becomes the dominant risk once rest-above-cap widens the resting pool.
+  WEATHER_RESTING_REVALIDATION_ENABLED: boolFromEnv.optional().default(false),
   // Bracket-maker strategy: when enabled, each primary weather GTC maker order is
   // paired with a simultaneous GTC on the opposite side at a wider discount. Both
   // orders rest until one fills; the other expires worthless at resolution. If both

@@ -45,7 +45,7 @@ import { getRedis } from '../shared/redis.js';
 import type { OrderBookSummary, TickSize } from '@polymarket/clob-client-v2';
 import type { Redis } from 'ioredis';
 import type { TradeSignal } from '../mapping/index.js';
-import { getPendingOrder, setPendingOrder, deletePendingOrder } from './pendingMakerOrders.js';
+import { getPendingOrder, setPendingOrder, deletePendingOrder, sumRestAboveCapNotional } from './pendingMakerOrders.js';
 
 /**
  * Normalised trade result shape used internally across CLOB and HL paths.
@@ -842,6 +842,49 @@ async function tryExecuteViaClobMaker(
     };
   }
 
+  // Rest-above-cap: when enabled, the weather entry-price caps act as price
+  // CLAMPS rather than rejection gates — pull the final maker price down to the
+  // binding cap (rounded down to tick) so the order rests AT the cap instead of
+  // being rejected with maker_price_above_cap. This matters on the patient
+  // real-book path, where the side-ask anchor can sit above the cap; the
+  // empty-book path already clamps fairValue upstream. The defense-in-depth
+  // guards below still fire when the knob is off or clamping is impossible
+  // (cap below one tick).
+  if (
+    (emptyBookMode || isWeatherPatient)
+    && signal.source === 'weather'
+    && cfg.WEATHER_REST_ABOVE_CAP_ENABLED
+  ) {
+    let cappedPrice = price;
+    if (cfg.WEATHER_MAX_ENTRY_PRICE > 0) {
+      cappedPrice = Math.min(cappedPrice, cfg.WEATHER_MAX_ENTRY_PRICE);
+    }
+    // Bracket legs are exempt from the early-entry cap — same reasoning as the
+    // fairValue clamp above (they provide maker liquidity at a discount).
+    if (
+      !signal._isResolutionDay
+      && !signal._isBracketOpposite
+      && cfg.WEATHER_EARLY_ENTRY_MAX_PRICE > 0
+    ) {
+      cappedPrice = Math.min(cappedPrice, cfg.WEATHER_EARLY_ENTRY_MAX_PRICE);
+    }
+    if (cappedPrice < price - 1e-9) {
+      const tick = parseFloat(book.tick_size ?? '0.01');
+      const clamped = roundDownToTick(cappedPrice, tick);
+      if (isFinite(clamped) && clamped >= tick) {
+        logger.info('[weather-rest-above-cap] maker price clamped to entry cap', {
+          marketId: signal.marketId,
+          rawPrice: price,
+          clampedPrice: clamped,
+          restAboveCap: signal._restAboveCap === true,
+        });
+        price = clamped;
+      }
+      // else: cap below one tick — fall through to the guards below, which
+      // reject the post rather than silently overpaying.
+    }
+  }
+
   // Defense-in-depth for WEATHER_MAX_ENTRY_PRICE: applies to both empty-book
   // and patient real-book paths. For patient real-book the price is derived from
   // side-ask, not fairValue, so we guard the final price directly.
@@ -984,6 +1027,38 @@ async function tryExecuteViaClobMaker(
       ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
       makerFillStatus: 'rejected',
     };
+  }
+
+  // Rest-above-cap notional pool gate: bound aggregate unfilled out-of-range
+  // exposure BEFORE posting. Resting orders deduct nothing from bankroll and the
+  // per-scan caps reset every scan, so without this the pool would grow
+  // unboundedly across scans (over-subscription + correlated-fill risk — one
+  // weather regime shift can collapse several city markets onto our bids at
+  // once). Counts only restAboveCap-flagged orders: a full lottery-ticket pool
+  // must never block normal in-range entries. Fail closed: cap unset (0) or no
+  // redis handle → refuse the post.
+  if (signal._restAboveCap === true) {
+    const poolCapUsd = cfg.WEATHER_REST_ABOVE_CAP_MAX_NOTIONAL_USD;
+    const orderNotional = price * size;
+    const poolUsd = poolCapUsd > 0 && redis ? await sumRestAboveCapNotional(redis) : null;
+    if (poolUsd === null || poolUsd + orderNotional > poolCapUsd + 1e-9) {
+      logger.info('[weather-rest-above-cap] resting notional pool cap — refusing post', {
+        marketId: signal.marketId,
+        poolUsd,
+        orderNotional: Number(orderNotional.toFixed(2)),
+        poolCapUsd,
+      });
+      return {
+        ok: false,
+        error: 'maker_resting_notional_cap',
+        waitMs: Date.now() - startedAt,
+        makerBestBid: bestBid,
+        makerBestAsk: bestAsk,
+        ...(mid ? { makerMidPrice: mid } : {}),
+        ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
+        makerFillStatus: 'rejected',
+      };
+    }
   }
 
   logger.info('[executor] submitting maker order on CLOB', {
@@ -1222,6 +1297,11 @@ async function tryExecuteViaClobMaker(
         reasoning: signal.reasoning,
         ...(signal.executionId && { executionId: signal.executionId }),
         ...(signal.source && { source: signal.source }),
+        // Rest-above-cap cohort tag + bracket-leg marker: the notional pool gate
+        // sums restAboveCap blobs; the scanner's revalidation pass must never
+        // cancel bracket legs (they intentionally rest value-negative).
+        ...(signal._restAboveCap === true && { restAboveCap: true }),
+        ...(signal._isBracketOpposite === true && { isBracketOpposite: true }),
       },
       pendingTtlS,
     );
@@ -1937,13 +2017,37 @@ export async function executeSignal(
     }
   })();
   if (!signal.isFutures && !signal._isBracketOpposite && effectivePriceCap > 0 && (signal.outcomePrice ?? 0) > effectivePriceCap) {
-    logger.info('[executor] skipping — entry price above cap', {
-      marketId: signal.marketId,
-      source: signal.source,
-      outcomePrice: signal.outcomePrice,
-      effectivePriceCap,
-    });
-    return { signal, skipped: true, skipReason: 'entry_price_above_cap' };
+    // Rest-above-cap: for FRESH weather entries the cap is a price clamp, not a
+    // participation filter — proceed to the maker path, which posts a resting
+    // GTC clamped to the cap (and never falls through to a taker buy: weather
+    // maker failures are terminal and the taker gate re-checks the cap). The
+    // scan-time market price is often noise on ghost books (0.99 rebate-asks),
+    // and on real books a resting bid below market is cheap optionality — the
+    // scanner's revalidation pass cancels it if the model edge later disappears.
+    // Size-ups keep the legacy skip: a top-up chasing a market that has run
+    // above the cap is exactly the adverse entry the cap exists to block.
+    if (
+      cfg.WEATHER_REST_ABOVE_CAP_ENABLED
+      && signal.source === 'weather'
+      && signal.sizeUpSanctioned !== true
+    ) {
+      logger.info('[weather-rest-above-cap] market price above cap — resting maker instead of skipping', {
+        marketId: signal.marketId,
+        sourcedFrom: signal.sourcedFrom,
+        outcomePrice: signal.outcomePrice,
+        effectivePriceCap,
+        isResolutionDay: signal._isResolutionDay ?? false,
+      });
+      signal = { ...signal, _restAboveCap: true };
+    } else {
+      logger.info('[executor] skipping — entry price above cap', {
+        marketId: signal.marketId,
+        source: signal.source,
+        outcomePrice: signal.outcomePrice,
+        effectivePriceCap,
+      });
+      return { signal, skipped: true, skipReason: 'entry_price_above_cap' };
+    }
   }
 
   const executionId = createHash('sha256')
@@ -2930,6 +3034,18 @@ export async function executeSignal(
       safeRecordExecutionMetric('maker_rejected');
     } else if (makerAttempt.makerFillStatus === 'cancel_unconfirmed') {
       safeRecordExecutionMetric('maker_cancel_uncertain');
+    }
+
+    // Rest-above-cap pool full: terminal for the signal on BOTH maker routes
+    // (checked before the empty-book catch-all below so it doesn't get folded
+    // into no_clob_book). Never falls through to a taker buy — the entry's
+    // market price is above the cap by definition.
+    if (signal.source === 'weather' && makerAttempt.error === 'maker_resting_notional_cap') {
+      logger.info('[executor] weather rest-above-cap notional pool full — no taker fallback', {
+        marketId: signal.marketId,
+        error: makerAttempt.error,
+      });
+      return recordSkip('resting_notional_cap', 'maker_rejected', makerTelemetry, 'clob', 'maker');
     }
 
     // Empty-book orders that timeout have no taker path — the book is still empty.

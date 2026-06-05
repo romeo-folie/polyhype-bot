@@ -56,6 +56,7 @@ vi.mock('../pendingMakerOrders.js', () => ({
   getPendingOrder: vi.fn().mockResolvedValue(null),
   setPendingOrder: vi.fn().mockResolvedValue(undefined),
   deletePendingOrder: vi.fn().mockResolvedValue(undefined),
+  sumRestAboveCapNotional: vi.fn().mockResolvedValue(0),
 }));
 
 vi.mock('../../shared/logger.js', () => ({
