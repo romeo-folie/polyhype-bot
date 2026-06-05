@@ -3156,6 +3156,26 @@ describe('weather rest-above-cap (caps as clamps, not eligibility filters)', () 
     );
   });
 
+  it('hybrid mode: rest-above-cap maker failure NEVER falls through to a taker buy', async () => {
+    // Real book + hybrid: a non-price-cap maker failure (order rejected at
+    // submit) used to fall through to the taker fallback, which would
+    // market-buy at the above-cap outcomePrice — the exact adverse entry the
+    // cap exists to prevent. The _restAboveCap guard must terminate instead.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mockConfig as any).WEATHER_REAL_BOOK_DISCOUNT_BPS = 200;
+    mockConfig.EXECUTION_MODE = 'hybrid';
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
+    mockGetOrderBook.mockResolvedValue(makeRealBook());
+    mockSubmitLimit.mockResolvedValue({ success: false, error: 'maker_order_rejected' });
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeOutOfRangeSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('entry_price_above_cap');
+    expect(mockSubmitClob).not.toHaveBeenCalled(); // no taker buy
+  });
+
   it('knob OFF: patient real-book price above cap still rejects (legacy guard intact)', async () => {
     /* eslint-disable @typescript-eslint/no-explicit-any */
     (mockConfig as any).WEATHER_REST_ABOVE_CAP_ENABLED = false;

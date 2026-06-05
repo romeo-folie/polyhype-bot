@@ -3981,6 +3981,19 @@ describe('revalidateRestingWeatherOrders', () => {
     expect(mockDeletePendingOrder).not.toHaveBeenCalled();
   });
 
+  it('never cancels legacy blobs missing edgeMagnitude entirely (when in doubt, do not cancel)', async () => {
+    // A real pre-flag legacy blob in Redis has neither isBracketOpposite nor
+    // edgeMagnitude — it could be a bracket leg, so it must be left alone.
+    mockListPendingOrders.mockResolvedValue([
+      pendingEntry({ order: { edgeMagnitude: undefined } }),
+    ]);
+
+    await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+    expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+  });
+
   it('leaves orders for markets outside the current scan universe untouched', async () => {
     mockListPendingOrders.mockResolvedValue([pendingEntry({ marketId: 'mkt-gone' })]);
 

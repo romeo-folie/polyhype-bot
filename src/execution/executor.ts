@@ -2019,8 +2019,9 @@ export async function executeSignal(
   if (!signal.isFutures && !signal._isBracketOpposite && effectivePriceCap > 0 && (signal.outcomePrice ?? 0) > effectivePriceCap) {
     // Rest-above-cap: for FRESH weather entries the cap is a price clamp, not a
     // participation filter — proceed to the maker path, which posts a resting
-    // GTC clamped to the cap (and never falls through to a taker buy: weather
-    // maker failures are terminal and the taker gate re-checks the cap). The
+    // GTC clamped to the cap. Never falls through to a taker buy: an explicit
+    // _restAboveCap guard after the maker attempt terminates the signal on ANY
+    // maker failure (taker would pay the above-cap market price). The
     // scan-time market price is often noise on ghost books (0.99 rebate-asks),
     // and on real books a resting bid below market is cheap optionality — the
     // scanner's revalidation pass cancels it if the model edge later disappears.
@@ -3082,6 +3083,20 @@ export async function executeSignal(
       logger.info('[executor] weather maker price above cap — no taker fallback', {
         marketId: signal.marketId,
         error: makerAttempt.error,
+      });
+      return recordSkip('entry_price_above_cap', 'maker_rejected', makerTelemetry, 'clob', 'maker');
+    }
+
+    // Rest-above-cap entries are maker-ONLY, terminal on ANY maker failure.
+    // Their market price is above the cap by definition, so a hybrid taker
+    // fallback (e.g. after maker_order_rejected / maker_bad_price /
+    // maker_below_min_size on a real book) would market-buy at exactly the
+    // adverse price the cap exists to prevent. The empty-book and price-cap
+    // branches above already terminate their cases; this catches the rest.
+    if (signal._restAboveCap === true) {
+      logger.info('[executor] weather rest-above-cap maker failed — no taker fallback', {
+        marketId: signal.marketId,
+        error: makerAttempt.error ?? 'maker_not_filled',
       });
       return recordSkip('entry_price_above_cap', 'maker_rejected', makerTelemetry, 'clob', 'maker');
     }
