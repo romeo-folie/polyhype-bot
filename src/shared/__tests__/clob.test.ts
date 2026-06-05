@@ -358,15 +358,17 @@ describe('redactClobSecrets', () => {
     expect(redacted).toContain('"status":425');
   });
 
-  it('scrubs the escaped order signature and owner (api key) inside the request body string', () => {
+  it('scrubs the escaped order signature and owner (api key) in SDK-context strings', () => {
     // The request body is a JSON-encoded string INSIDE the serialized config,
-    // so its quotes arrive escaped: \"signature\":\"0x...\".
+    // so its quotes arrive escaped: \"signature\":\"0x...\". signature/owner
+    // are generic names — scrubbed only with includeGenericFields=true (the
+    // console patch sets it for "[CLOB Client]…" calls).
     const leaked =
       '{"config":{"data":"{\\"order\\":{\\"maker\\":\\"0x2474\\",' +
       '\\"signature\\":\\"0xa909e09d409a7d1cbbed5b30b4b938bbcdb3786e\\"},' +
       '\\"owner\\":\\"36724185-4022-567e-e78c-f01b6e831290\\",\\"orderType\\":\\"GTC\\"}"}}';
 
-    const redacted = redactClobSecrets(leaked);
+    const redacted = redactClobSecrets(leaked, true);
 
     expect(redacted).not.toContain('0xa909e09d');
     expect(redacted).not.toContain('36724185-4022');
@@ -375,9 +377,20 @@ describe('redactClobSecrets', () => {
     expect(redacted).toContain('\\"orderType\\":\\"GTC\\"');
   });
 
+  it('leaves generic signature/owner fields intact outside SDK context (no over-redaction)', () => {
+    // Non-SDK structured logging legitimately uses these field names.
+    const appLog = '{"event":"transfer","owner":"alice","signature":"valid"}';
+    expect(redactClobSecrets(appLog)).toBe(appLog);
+    // POLY_* headers are unambiguous credentials — scrubbed regardless of context.
+    const mixed = '{"owner":"alice","POLY_API_KEY":"36724185-4022"}';
+    const redacted = redactClobSecrets(mixed);
+    expect(redacted).toContain('"owner":"alice"');
+    expect(redacted).toContain('"POLY_API_KEY":"REDACTED"');
+  });
+
   it('leaves strings without credential fields untouched', () => {
     const clean = '[CLOB Client] request error {"error":"service not ready","status":425}';
-    expect(redactClobSecrets(clean)).toBe(clean);
+    expect(redactClobSecrets(clean, true)).toBe(clean);
   });
 });
 

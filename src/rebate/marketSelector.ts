@@ -216,7 +216,17 @@ export async function selectRebateMarkets(
     }
 
     // Ghost-book gate 2: book mid must sit near where trades actually print.
+    // Fail closed when the tape carries no usable outcomeIndex: real flow
+    // exists (gate above passed) but we cannot verify the book isn't detached
+    // from it — warn per market so a data-api schema change that blanks
+    // outcomeIndex across the board is visible immediately, not just as an
+    // aggregate skip count.
     if (flow.vwapYes === null) {
+      logger.warn('[rebate] tape has flow but no usable outcomeIndex — failing closed', {
+        marketId: m.marketId,
+        conditionId: m.conditionId,
+        tradeCount: flow.tradeCount,
+      });
       skip('no_usable_vwap');
       continue;
     }

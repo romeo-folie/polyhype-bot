@@ -43,30 +43,52 @@ const CLOB_ORDER_TIMEOUT_MS = 30_000;
 // exposes no logging hook, so we patch console.error to scrub the secrets
 // from string args before they reach stdout/stderr.
 
-/** JSON-field patterns whose values must never reach a log line. */
-const CLOB_SECRET_FIELD_RE =
-  /("(?:POLY_SIGNATURE|POLY_API_KEY|POLY_PASSPHRASE|POLY_ADDRESS|signature|owner)\\*"\s*:\s*\\*")(?:[^"\\]|\\.)*?(\\*")/g;
+/**
+ * Unambiguous credential headers — redacted in ANY console.error string.
+ * These names exist only as CLOB L2 auth headers; no over-redaction risk.
+ */
+const CLOB_HEADER_SECRET_RE =
+  /("(?:POLY_SIGNATURE|POLY_API_KEY|POLY_PASSPHRASE|POLY_ADDRESS)\\*"\s*:\s*\\*")(?:[^"\\]|\\.)*?(\\*")/g;
+/**
+ * Generic field names that are secrets in the SDK's request payload (the
+ * order's EIP-712 `signature`, `owner` = API key) but legitimate data in
+ * other JSON. Only redacted when the log line is identifiably the SDK's
+ * ("[CLOB Client] …") so unrelated structured logging stays intact.
+ */
+const CLOB_BODY_SECRET_RE =
+  /("(?:signature|owner)\\*"\s*:\s*\\*")(?:[^"\\]|\\.)*?(\\*")/g;
 
-/** Scrub CLOB credential values from a log string (idempotent). */
-export function redactClobSecrets(text: string): string {
-  return text.replace(CLOB_SECRET_FIELD_RE, '$1REDACTED$2');
+/**
+ * Scrub CLOB credential values from a log string (idempotent).
+ * `includeGenericFields` additionally scrubs `signature`/`owner` — callers
+ * should set it only for strings known to be CLOB SDK output.
+ */
+export function redactClobSecrets(text: string, includeGenericFields = false): string {
+  let out = text.replace(CLOB_HEADER_SECRET_RE, '$1REDACTED$2');
+  if (includeGenericFields) out = out.replace(CLOB_BODY_SECRET_RE, '$1REDACTED$2');
+  return out;
 }
 
 let sdkLogRedactionInstalled = false;
 
 /**
- * Wrap console.error so any string argument passes through redactClobSecrets.
+ * Wrap console.error so string arguments pass through redactClobSecrets.
  * Installed once at module load — every process that can construct a CLOB
  * client (and therefore trigger the SDK's leaky error logging) imports this
  * module. Non-string args pass through untouched: the SDK serializes the
  * leaky payload with JSON.stringify before logging, so strings cover it.
+ *
+ * The SDK prefixes its leaky calls with a "[CLOB Client]…" first argument —
+ * generic-name secrets (order signature, owner/API-key) are scrubbed only on
+ * those calls; POLY_* auth headers are scrubbed everywhere.
  */
 export function installClobLogRedaction(): void {
   if (sdkLogRedactionInstalled) return;
   sdkLogRedactionInstalled = true;
   const original = console.error.bind(console);
   console.error = (...args: unknown[]): void => {
-    original(...args.map((a) => (typeof a === 'string' ? redactClobSecrets(a) : a)));
+    const isClobSdkLog = args.some((a) => typeof a === 'string' && a.includes('[CLOB Client'));
+    original(...args.map((a) => (typeof a === 'string' ? redactClobSecrets(a, isClobSdkLog) : a)));
   };
 }
 
