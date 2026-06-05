@@ -1,5 +1,35 @@
-import { describe, it, expect } from 'vitest';
-import { extractKeywords, STOP_WORDS } from '../signalReeval.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// ── Mocks for reEvaluatePositions (pure helpers below are unaffected) ───────
+
+const mockLoadConfig = vi.fn();
+vi.mock('../../shared/config.js', () => ({
+  loadConfig: (...args: unknown[]) => mockLoadConfig(...args),
+}));
+vi.mock('../../shared/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
+const mockGetOpenPositions = vi.fn();
+vi.mock('../../execution/positionLedger.js', () => ({
+  getOpenPositions: (...args: unknown[]) => mockGetOpenPositions(...args),
+}));
+const mockFetchCurrentPrice = vi.fn();
+vi.mock('../priceFetcher.js', () => ({
+  fetchCurrentPrice: (...args: unknown[]) => mockFetchCurrentPrice(...args),
+}));
+const mockEstimateConsensus = vi.fn();
+vi.mock('../../mapping/consensusCalculator.js', () => ({
+  estimateConsensusProbability: (...args: unknown[]) => mockEstimateConsensus(...args),
+}));
+const mockExecuteTakeProfit = vi.fn();
+vi.mock('../takeProfitExecutor.js', () => ({
+  executeTakeProfit: (...args: unknown[]) => mockExecuteTakeProfit(...args),
+}));
+vi.mock('../../shared/outcomeRecorder.js', () => ({
+  inferCategory: vi.fn(() => 'geopolitical'),
+}));
+
+import { extractKeywords, STOP_WORDS, reEvaluatePositions } from '../signalReeval.js';
 
 // ── extractKeywords unit tests ──────────────────────────────────────────────
 
@@ -162,5 +192,67 @@ describe('edge computation logic', () => {
   it('NO position: direction flip when freshP > marketP', () => {
     // freshP=0.60, marketP=0.50 → edge = (1-0.60)-(1-0.50) = 0.40-0.50 = -0.10
     expect(computeEdge('NO', 0.6, 0.5)).toBeCloseTo(-0.1);
+  });
+});
+
+// ── reEvaluatePositions source guards ────────────────────────────────────────
+
+describe('reEvaluatePositions — rebate-farming exemption', () => {
+  function makePosition(overrides = {}) {
+    return {
+      marketId: 'm1',
+      question: 'Will Russia capture Pokrovsk by July?',
+      direction: 'YES',
+      entryPrice: 0.5,
+      sharesHeld: 10,
+      sourcedFrom: 'rebate-farming',
+      executionVenue: 'clob',
+      ...overrides,
+    };
+  }
+  // Category ('geopolitical', mocked inferCategory) and keyword ('pokrovsk')
+  // both match — only the source guard can skip this position.
+  const matchingItem = {
+    categoryId: 'geopolitical',
+    title: 'Russian forces advance on Pokrovsk front',
+  } as never;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockLoadConfig.mockReturnValue({
+      REEVAL_ENABLED: true,
+      REEVAL_EDGE_FLOOR: 0.03,
+      REEVAL_ITM_SKIP_THRESHOLD: 0.9,
+    });
+    mockFetchCurrentPrice.mockResolvedValue({
+      marketId: 'm1',
+      direction: 'YES',
+      currentOutcomePrice: 0.5,
+      currentYesPrice: 0.5,
+    });
+  });
+
+  it('never re-evaluates rebate-farming inventory (no LLM call, no exit)', async () => {
+    mockGetOpenPositions.mockResolvedValue([makePosition()]);
+
+    const result = await reEvaluatePositions([matchingItem], {} as never);
+
+    expect(result.held).toBe(1);
+    expect(result.exited).toBe(0);
+    expect(mockFetchCurrentPrice).not.toHaveBeenCalled();
+    expect(mockEstimateConsensus).not.toHaveBeenCalled();
+    expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+  });
+
+  it('control: an identical osint position passes the guard and is re-evaluated', async () => {
+    mockGetOpenPositions.mockResolvedValue([makePosition({ sourcedFrom: 'osint:headline' })]);
+    mockFetchCurrentPrice.mockResolvedValue(null); // short-circuit after the guard
+
+    const result = await reEvaluatePositions([matchingItem], {} as never);
+
+    // Reaching fetchCurrentPrice proves category+keyword guards pass for this
+    // rig — so the rebate test above is skipped by the SOURCE guard alone.
+    expect(mockFetchCurrentPrice).toHaveBeenCalledOnce();
+    expect(result.errors).toBe(1);
   });
 });

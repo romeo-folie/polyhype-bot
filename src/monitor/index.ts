@@ -618,10 +618,12 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
 
     // Trend-exit and stale-exit paths — only run when TP/SL/divergence did NOT fire.
     // Futures are skipped earlier in the loop (handled by futuresMonitor).
-    // Copytrades have their own exit logic.
+    // Copytrades have their own exit logic. Rebate-farming inventory holds to
+    // resolution — bleed/age heuristics must not sell pair legs apart, even if
+    // TREND/STALE_EXIT_ENABLED are flipped on in the future.
     const isCopytradePos = position.sourcedFrom?.startsWith('copytrade:') ?? false;
     const sampleTrackingNeeded =
-      !isCopytradePos && (cfg.TREND_EXIT_ENABLED || cfg.STALE_EXIT_ENABLED);
+      !isCopytradePos && !isRebateFarming && (cfg.TREND_EXIT_ENABLED || cfg.STALE_EXIT_ENABLED);
 
     if (!sampleTrackingNeeded) {
       held++;
