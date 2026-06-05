@@ -20,6 +20,7 @@ import {
   submitClobLimitBuy,
   getClobOrder,
   cancelClobOrder,
+  CLOB_MIN_ORDER_USD,
 } from '../shared/clob.js';
 import { recordPosition } from '../execution/positionLedger.js';
 import { estimateFillRebateUsd } from './flowAnalyzer.js';
@@ -415,6 +416,37 @@ export async function cancelForReprice(redis: Redis, order: RestingOrder): Promi
 }
 
 /**
+ * Pair-matching share target for a quote, by priority:
+ *   1. held opposite-side inventory (a prior fill waiting to be paired),
+ *   2. a resting opposite-side order (match what's already on the book),
+ *   3. the first leg placed for this market in the current cycle.
+ * Returns undefined when nothing exists to match — the leg is sized fresh.
+ * (Pure — extracted so the priority order is directly testable.)
+ */
+export function resolveMatchShares(
+  heldOppositeShares: number | null | undefined,
+  restingOppositeShares: number | null | undefined,
+  cycleLegShares: number | null | undefined,
+): number | undefined {
+  for (const v of [heldOppositeShares, restingOppositeShares, cycleLegShares]) {
+    if (typeof v === 'number' && isFinite(v) && v > 0) return v;
+  }
+  return undefined;
+}
+
+export interface RestingOrderSizing {
+  /** USD ceiling for this leg (min of REBATE_ORDER_SIZE_USD and remaining budget). */
+  maxUsd: number;
+  /**
+   * Share count to match (pairing leg). A YES+NO pair is riskless only for
+   * min(sharesYes, sharesNo) — equal-USD legs at different prices leave the
+   * excess shares directional (the weather-bracket oversizing shape, PR #442).
+   * When set, the leg is sized to min(matchShares, maxUsd/price).
+   */
+  matchShares?: number | undefined;
+}
+
+/**
  * Place one resting GTC post-only limit buy from a selector quote. The quote
  * price is already anchored to the effective mid and clamped against the
  * physical book; post-only is the final safety — a crossing order is rejected
@@ -424,14 +456,28 @@ export async function placeRestingOrder(
   redis: Redis,
   candidate: RebateMarketCandidate,
   quote: RebateQuote,
-  sizeUsd: number,
+  sizing: RestingOrderSizing,
 ): Promise<RestingOrder | null> {
   const cfg = loadConfig();
   const price = quote.price;
   if (!isFinite(price) || price <= 0 || price >= 1) return null;
 
-  const size = sizeUsd / price;
+  let size = sizing.maxUsd / price;
+  if (sizing.matchShares != null) size = Math.min(size, sizing.matchShares);
+  const sizeUsd = size * price;
   if (size <= 0) return null;
+  // Below the exchange minimum — typically a pair-completion leg whose match
+  // target is tiny. Skip rather than fall back to fresh sizing (which would
+  // recreate the oversized-pair problem this sizing exists to prevent).
+  if (sizeUsd < CLOB_MIN_ORDER_USD) {
+    logger.debug('[rebate] leg below CLOB minimum — skipping', {
+      marketId: candidate.marketId,
+      direction: quote.direction,
+      sizeUsd: sizeUsd.toFixed(2),
+      matchShares: sizing.matchShares,
+    });
+    return null;
+  }
 
   logger.info('[rebate] placing resting order', {
     marketId: candidate.marketId,
