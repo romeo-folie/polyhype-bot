@@ -46,6 +46,12 @@ const baseConfig = {
   WEATHER_OUTAGE_ALERT_ENABLED: false,
   WEATHER_OUTAGE_FAIL_RATE: 0.5,
   WEATHER_OUTAGE_ALERT_DEDUP_TTL_S: 14_400,
+  // Resting-order revalidation + bracket cancel — mirror the config.ts schema
+  // defaults so tests never rely on `undefined` happening to be falsy.
+  WEATHER_RESTING_REVALIDATION_ENABLED: false,
+  WEATHER_BRACKET_CANCEL_ENABLED: false,
+  WEATHER_BRACKET_CANCEL_LOCAL_HOUR: 18,
+  WEATHER_BRACKET_CANCEL_PRIMARY_PRICE: 0.95,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
 vi.mock('../../shared/config.js', () => ({
@@ -74,6 +80,16 @@ vi.mock('../../shared/clob.js', () => ({
   getClobOrderBook: vi.fn().mockResolvedValue(null),
   submitClobBuy: vi.fn().mockResolvedValue({ success: false, error: 'mocked' }),
 }));
+
+// cityLocalHour drives the late-res-day bracket cancel arm — mocked so tests
+// control the clock; everything else in resolutionTime stays real (the scanner
+// relies on cityLocalDate for res-day detection).
+const mockCityLocalHour = vi.fn();
+vi.mock('../resolutionTime.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('../resolutionTime.js')>('../resolutionTime.js');
+  return { ...actual, cityLocalHour: mockCityLocalHour };
+});
 
 const mockGetBankroll = vi.fn();
 vi.mock('../../shared/bankroll.js', () => ({
@@ -3687,7 +3703,13 @@ describe('fetchForecast - ensemble-only fallback', () => {
 // ---------------------------------------------------------------------------
 
 describe('scanWeatherMarkets - outage alert and forecast cache', () => {
-  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  // +72h, not +24h: with a "tomorrow" (UTC) target date the CEST cities cross
+  // local midnight at 22:00 UTC, the synthetic event silently becomes
+  // resolution-day for them, and the scan takes the early-res-day path —
+  // these tests then fail in the 22:00–00:00 UTC wall-clock window (observed
+  // 2026-06-05 22:04 UTC; pre-existing flake, unrelated to any code change).
+  // Three days out is res-day for no city at any wall-clock time.
+  const tomorrow = new Date(Date.now() + 72 * 60 * 60 * 1000);
   const tomorrowIso = tomorrow.toISOString().slice(0, 10);
   const [oy, om, od] = tomorrowIso.split('-') as [string, string, string];
   const O_MONTHS = [
@@ -3931,9 +3953,10 @@ describe('revalidateRestingWeatherOrders', () => {
     };
   }
 
-  // Minimal opportunity shape: revalidation reads only marketId + modelProbability.
-  function opp(marketId: string, modelProbability: number) {
-    return { marketId, modelProbability } as never;
+  // Minimal opportunity shape: the primary rule reads marketId + modelProbability;
+  // the bracket rule additionally reads isResolutionDay + yesPrice/noPrice.
+  function opp(marketId: string, modelProbability: number, extra: Record<string, unknown> = {}) {
+    return { marketId, modelProbability, ...extra } as never;
   }
 
   beforeEach(() => {
@@ -4012,8 +4035,8 @@ describe('revalidateRestingWeatherOrders', () => {
     expect(mockCancelClobOrder).not.toHaveBeenCalled();
   });
 
-  it('is inert when WEATHER_RESTING_REVALIDATION_ENABLED is off', async () => {
-    mockLoadConfig.mockReturnValue({ ...baseConfig } as never);
+  it('is inert when BOTH the revalidation and bracket-cancel knobs are off', async () => {
+    mockLoadConfig.mockReturnValue({ ...baseConfig } as never); // both default false
     mockListPendingOrders.mockResolvedValue([pendingEntry()]);
 
     await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
@@ -4055,5 +4078,207 @@ describe('revalidateRestingWeatherOrders', () => {
     await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
 
     expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+  });
+
+  describe('bracket-leg cancel (late res-day + early certainty)', () => {
+    const bracketCancelConfig = () => ({
+      ...baseConfig,
+      WEATHER_BRACKET_CANCEL_ENABLED: true,
+      WEATHER_BRACKET_CANCEL_LOCAL_HOUR: 18,
+      WEATHER_BRACKET_CANCEL_PRIMARY_PRICE: 0.95,
+      // Bracket rule must work independently of the primary FV rule.
+      WEATHER_RESTING_REVALIDATION_ENABLED: false,
+    });
+
+    function bracketEntry(overrides: Record<string, unknown> = {}) {
+      // Leg direction NO → primary side is YES (primarySidePrice = opp.yesPrice).
+      return pendingEntry({ order: { isBracketOpposite: true, edgeMagnitude: 0, ...overrides } });
+    }
+
+    // 'london' resolves via the real lookupCity (the late-hour arm needs a tz).
+    const resDayOpp = (extra: Record<string, unknown> = {}) =>
+      opp('mkt-1', 0.80, { city: 'london', isResolutionDay: true, yesPrice: 0.60, noPrice: 0.40, ...extra });
+
+    beforeEach(() => {
+      mockCityLocalHour.mockReset();
+      mockLoadConfig.mockReturnValue(bracketCancelConfig() as never);
+    });
+
+    it('cancels an unfilled bracket leg LATE on resolution day (local hour ≥ threshold)', async () => {
+      mockCityLocalHour.mockReturnValue(19); // past 18:00 local — high realized
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))  // pre-cancel: nothing filled
+        .mockResolvedValueOnce(null);           // post-cancel: order gone
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [resDayOpp()]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-1', 'NO');
+    });
+
+    it('keeps the leg EARLY on resolution day — whipsaw dips through the bid stay capturable', async () => {
+      mockCityLocalHour.mockReturnValue(10); // mid-morning: high not realized yet
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+
+      // Even with the primary side near-certain (0.97): the certainty arm is
+      // pre-res-day only — on res-day, time governs, not price.
+      await revalidateRestingWeatherOrders({} as never, [
+        resDayOpp({ yesPrice: 0.97, noPrice: 0.03 }),
+      ]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('late-hour arm fails safe when the city timezone is unknown', async () => {
+      mockCityLocalHour.mockReturnValue(23);
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        resDayOpp({ city: 'atlantis-unknown-city' }),
+      ]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('late-hour arm disabled (24) → res-day legs are never time-cancelled', async () => {
+      mockCityLocalHour.mockReturnValue(23);
+      mockLoadConfig.mockReturnValue({
+        ...bracketCancelConfig(),
+        WEATHER_BRACKET_CANCEL_LOCAL_HOUR: 24,
+      } as never);
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+
+      await revalidateRestingWeatherOrders({} as never, [resDayOpp()]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('keeps a pre-res-day bracket leg while the primary side is below the certainty threshold', async () => {
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-1', 0.80, { isResolutionDay: false, yesPrice: 0.92, noPrice: 0.08 }),
+      ]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('cancels a pre-res-day bracket leg when the primary side reaches the certainty threshold', async () => {
+      // Leg is NO → primary side is YES at 0.96 ≥ 0.95 → settled a day early.
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))
+        .mockResolvedValueOnce(null);
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-1', 0.80, { isResolutionDay: false, yesPrice: 0.96, noPrice: 0.04 }),
+      ]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-1', 'NO');
+    });
+
+    it('uses the leg direction to pick the primary side (YES leg → noPrice)', async () => {
+      // YES leg → primary side is NO; noPrice 0.96 ≥ 0.95 → cancel.
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ direction: 'YES', order: { isBracketOpposite: true, direction: 'YES' } }),
+      ]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))
+        .mockResolvedValueOnce(null);
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-1', 0.04, { isResolutionDay: false, yesPrice: 0.04, noPrice: 0.96 }),
+      ]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-1', 'YES');
+    });
+
+    it('certainty arm disabled (0) → pre-res-day legs are kept regardless of primary price', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...bracketCancelConfig(),
+        WEATHER_BRACKET_CANCEL_PRIMARY_PRICE: 0,
+      } as never);
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-1', 0.80, { isResolutionDay: false, yesPrice: 0.97, noPrice: 0.03 }),
+      ]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('never cancels legacy ambiguous blobs even late on resolution day', async () => {
+      // Pre-flag blob: no isBracketOpposite, edge 0 — could be either kind.
+      mockCityLocalHour.mockReturnValue(20);
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ order: { edgeMagnitude: 0 } }),
+      ]);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        resDayOpp({ yesPrice: 0.95, noPrice: 0.05 }),
+      ]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('partial-filled bracket leg late on res-day: residual cancelled, key kept for reconciler', async () => {
+      mockCityLocalHour.mockReturnValue(20);
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('3'))   // 3/10 filled pre-cancel
+        .mockResolvedValueOnce(liveOrder('3'));  // still 3 after cancel
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [resDayOpp()]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('bracket knob off → res-day legs are left alone (legacy behaviour)', async () => {
+      mockCityLocalHour.mockReturnValue(20);
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_RESTING_REVALIDATION_ENABLED: true,
+        WEATHER_BRACKET_CANCEL_ENABLED: false,
+      } as never);
+      mockListPendingOrders.mockResolvedValue([bracketEntry()]);
+
+      await revalidateRestingWeatherOrders({} as never, [resDayOpp()]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('primary FV rule stays gated on its own knob while the bracket rule runs', async () => {
+      // REVALIDATION off + BRACKET_CANCEL on: a value-negative PRIMARY must be
+      // kept while a late-res-day bracket leg in the same pass is cancelled.
+      mockCityLocalHour.mockReturnValue(20);
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ marketId: 'mkt-primary' }), // primary, sideFV 0.20 < 0.55
+        { ...bracketEntry(), marketId: 'mkt-bracket' },
+      ]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))
+        .mockResolvedValueOnce(null);
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [
+        opp('mkt-primary', 0.80, { isResolutionDay: false }),
+        opp('mkt-bracket', 0.80, { city: 'london', isResolutionDay: true, yesPrice: 0.60, noPrice: 0.40 }),
+      ]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledTimes(1);
+      expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-bracket', 'NO');
+      expect(mockDeletePendingOrder).not.toHaveBeenCalledWith(expect.anything(), 'mkt-primary', 'NO');
+    });
   });
 });

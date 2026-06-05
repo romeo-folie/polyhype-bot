@@ -34,6 +34,7 @@ import { executeAndRecordSignal } from '../execution/executor.js';
 import type { ExecutionResult } from '../execution/executor.js';
 import { hasOpenPosition } from '../execution/positionLedger.js';
 import { listPendingOrders, deletePendingOrder } from '../execution/pendingMakerOrders.js';
+import type { PendingMakerOrder } from '../execution/pendingMakerOrders.js';
 import { getClobOrder, cancelClobOrder } from '../shared/clob.js';
 import type { TradeSignal } from '../mapping/index.js';
 import { getBankroll } from '../shared/bankroll.js';
@@ -45,7 +46,7 @@ import {
   getDefaultStdDev,
 } from './noaaClient.js';
 import type { CityCoordinates, FetchFn } from './noaaClient.js';
-import { cityLocalDate, cityDayEndUtcMs } from './resolutionTime.js';
+import { cityLocalDate, cityLocalHour, cityDayEndUtcMs } from './resolutionTime.js';
 import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast } from './openMeteoClient.js';
 import { getCityBias, getCityActuals } from './cityBias.js';
 import type { CityBias, CityActuals } from './cityBias.js';
@@ -2102,126 +2103,205 @@ export function partitionTradableByEntryCap<
 }
 
 /**
- * Revalidate unfilled resting weather PRIMARY maker orders against this scan's
- * fresh model fair value and cancel any that have turned value-negative at
- * their own posted price (side-FV < posted price).
+ * Cancel a resting maker order with the partial-fill-safe flow shared by the
+ * primary-FV and bracket cancel rules:
+ *   - order not found on CLOB → leave the key (reconciler attributes any fill)
+ *   - fully filled → nothing to cancel (resume/reconciler records the position)
+ *   - cancel refused → confirm terminal state, else leave the key and retry
+ *     next scan (mirrors the executor's confirmMakerCancel)
+ *   - partial fill at cancel time → residual cancelled but the key is KEPT so
+ *     the reconciler's orphan-import links the on-chain fill to its metadata
+ *   - clean zero-fill cancel → key deleted
  *
- * Why: forecast invalidation (weatherInvalidation.ts) covers HELD positions
- * only — an unfilled resting GTC survives a thesis break untouched until its
- * TTL. That gap becomes the dominant risk under rest-above-cap: a bid resting
- * below market fills mostly when new forecast runs move AGAINST the thesis, so
- * a stale resting order is a free option granted to the market. Cancelling
- * costs nothing (we can always re-post when edge returns).
+ * Returns true only on the clean zero-fill cancel (key deleted).
+ */
+async function cancelRestingWeatherOrder(
+  redis: Redis,
+  marketId: string,
+  direction: 'YES' | 'NO',
+  order: PendingMakerOrder,
+  /** Cancel rule that fired — merged into every log line for slicing. */
+  logCtx: Record<string, unknown>,
+): Promise<boolean> {
+  const liveOrder = await getClobOrder(order.orderId);
+  if (!liveOrder) {
+    logger.info('[weather-revalidate] order to cancel not found on CLOB — leaving for reconciler', {
+      marketId,
+      direction,
+      orderId: order.orderId,
+      ...logCtx,
+    });
+    return false;
+  }
+  const matched = parseFloat(liveOrder.size_matched ?? '0') || 0;
+  const original = parseFloat(liveOrder.original_size ?? '0') || 0;
+  if (original > 0 && matched >= original - 1e-9) {
+    // Fully filled — nothing to cancel; resume/reconciler records the position.
+    return false;
+  }
+
+  const cancelled = await cancelClobOrder(order.orderId).catch(() => false);
+  if (!cancelled) {
+    const after = await getClobOrder(order.orderId).catch(() => null);
+    const status = String(after?.status ?? '').toLowerCase();
+    const terminal = !after || ['cancelled', 'canceled', 'filled'].includes(status);
+    if (!terminal) {
+      logger.warn('[weather-revalidate] cancel unconfirmed — will retry next scan', {
+        marketId,
+        direction,
+        orderId: order.orderId,
+        ...logCtx,
+      });
+      return false;
+    }
+  }
+
+  // Fills can land between the read above and the cancel confirming —
+  // re-read the final matched size before deciding the key's fate.
+  const finalOrder = await getClobOrder(order.orderId).catch(() => null);
+  const finalMatched = Math.max(matched, parseFloat(finalOrder?.size_matched ?? '0') || 0);
+  if (finalMatched > 0) {
+    logger.info('[weather-revalidate] cancelled residual — partial fill remains, key kept for reconciler', {
+      marketId,
+      direction,
+      orderId: order.orderId,
+      matched: finalMatched,
+      postedPrice: order.price,
+      ...logCtx,
+    });
+    return false;
+  }
+  await deletePendingOrder(redis, marketId, direction);
+  logger.info('[weather-revalidate] cancelled resting order', {
+    marketId,
+    direction,
+    orderId: order.orderId,
+    postedPrice: order.price,
+    restAboveCap: order.restAboveCap === true,
+    sourcedFrom: order.sourcedFrom,
+    ...logCtx,
+  });
+  return true;
+}
+
+/**
+ * Revalidate unfilled resting weather maker orders against this scan's fresh
+ * state. Two independent, knob-gated cancel rules:
  *
- * Safety properties:
- *   - Bracket legs are never cancelled — they intentionally rest value-negative
- *     as the 1:1 pairing leg. Legacy blobs without the explicit flag are
- *     identified by edgeMagnitude===0 (primaries always carry positive edge);
- *     when in doubt, do not cancel.
- *   - Hysteresis is structural: posts go out at FV×(1−discount) or below the
- *     side-ask, so cancellation requires a real FV decline, not flapping.
+ * PRIMARY rule (`WEATHER_RESTING_REVALIDATION_ENABLED`): cancel a primary
+ * whose fresh model side-FV dropped below its posted price (the bid is now
+ * value-negative at our own price). Forecast invalidation only covers HELD
+ * positions — without this, a stale resting order is a free option granted to
+ * the market, filled mostly when the forecast moves AGAINST the thesis.
+ * Hysteresis is structural: posts go out at FV×(1−discount) or below the
+ * side-ask, so cancellation requires a real FV decline, not flapping.
+ *
+ * BRACKET rule (`WEATHER_BRACKET_CANCEL_ENABLED`): cancel an unfilled
+ * bracket-opposite leg once its reversal path is gone —
+ *   (a) LATE on resolution day: city-local hour ≥
+ *       `WEATHER_BRACKET_CANCEL_LOCAL_HOUR` (default 18). Daily highs are
+ *       monotonic — once the day's max is in, the outcome can no longer
+ *       reverse toward the leg, so any later fill is near-pure overpay
+ *       (collapse-side sellers hitting a stale bid). EARLIER on res-day the
+ *       leg deliberately stays live: a dip through the bid that later
+ *       reverses is a cheap win, and with a held primary ANY fill at price b
+ *       with primaryCost+b < 1 locks a guaranteed pair profit (the same trade
+ *       weatherLockIn makes deliberately). 24 disables this arm; 0 cancels
+ *       from the start of res-day. Unknown city timezone → arm skipped
+ *       (fail-safe: do not cancel).
+ *   (b) pre-res-day, the PRIMARY side's Gamma price ≥
+ *       `WEATHER_BRACKET_CANCEL_PRIMARY_PRICE` (outcome essentially settled a
+ *       day early; 0 disables). Primary side, not the leg's own price —
+ *       bracket legs rest on structurally cheap tails, so the leg side is
+ *       "cheap" from the moment it posts; the primary side starts ≤ the entry
+ *       cap and only reaches the threshold on a genuine repricing.
+ *
+ * Shared safety properties:
+ *   - Only explicit `isBracketOpposite` blobs are treated as brackets; legacy
+ *     blobs without the flag (edgeMagnitude ≤ 0 heuristic) are never cancelled
+ *     by either rule — when in doubt, do not cancel. They age out within the
+ *     market horizon.
  *   - Markets absent from this scan's opportunity list (out of universe) are
  *     left alone; a Gamma outage yields zero opportunities and zero cancels.
- *   - Partial fills: the residual is cancelled but the pending key is KEPT so
- *     the reconciler's orphan-import links the on-chain fill to its metadata.
- *     Only a confirmed zero-fill cancel deletes the key.
+ *   - Partial fills keep the pending key (see cancelRestingWeatherOrder).
  */
 export async function revalidateRestingWeatherOrders(
   redis: Redis,
   opportunities: WeatherBracketOpportunity[],
 ): Promise<void> {
   const cfg = loadConfig();
-  if (!cfg.WEATHER_RESTING_REVALIDATION_ENABLED) return;
+  const primaryRuleOn = cfg.WEATHER_RESTING_REVALIDATION_ENABLED;
+  const bracketRuleOn = cfg.WEATHER_BRACKET_CANCEL_ENABLED;
+  if (!primaryRuleOn && !bracketRuleOn) return;
   if (opportunities.length === 0) return;
 
   const entries = await listPendingOrders(redis);
-  const primaries = entries.filter(({ order }) => {
-    if (order.source !== 'weather') return false;
-    if (order.isBracketOpposite === true) return false;
-    // Legacy blobs predate the explicit bracket flag — treat edge ≤ 0 as
-    // "possibly a bracket leg" and never cancel those.
-    if (order.isBracketOpposite == null && !(order.edgeMagnitude != null && order.edgeMagnitude > 0)) {
-      return false;
-    }
-    return true;
-  });
-  if (primaries.length === 0) return;
+  const weatherEntries = entries.filter(({ order }) => order.source === 'weather');
+  if (weatherEntries.length === 0) return;
 
   // modelProbability is P(YES) for the market regardless of tradeSide, so a
-  // single opportunity row per market is a valid FV reference for either side.
+  // single opportunity row per market is a valid reference for either side.
   const oppByMarket = new Map(opportunities.map((o) => [o.marketId, o]));
 
-  let cancelledCount = 0;
-  for (const { marketId, direction, order } of primaries) {
+  let cancelledPrimaries = 0;
+  let cancelledBrackets = 0;
+  for (const { marketId, direction, order } of weatherEntries) {
     const opp = oppByMarket.get(marketId);
     if (!opp) continue; // out of scan universe — leave alone
-    const sideFV = direction === 'YES' ? opp.modelProbability : 1 - opp.modelProbability;
-    if (!Number.isFinite(sideFV)) continue;
-    if (sideFV + 1e-9 >= order.price) continue; // still value-positive at our bid
+
+    const isBracket = order.isBracketOpposite === true;
+    // Legacy blobs predate the explicit bracket flag — treat edge ≤ 0 as
+    // "possibly a bracket leg" and never cancel those under either rule.
+    const isAmbiguousLegacy =
+      order.isBracketOpposite == null && !(order.edgeMagnitude != null && order.edgeMagnitude > 0);
+    if (isAmbiguousLegacy) continue;
 
     try {
-      const liveOrder = await getClobOrder(order.orderId);
-      if (!liveOrder) {
-        // Not found — already filled+swept or cancelled externally. Leave the
-        // key: the reconciler attributes any on-chain fill, and the key's TTL
-        // cleans up the rest.
-        logger.info('[weather-revalidate] value-negative order not found on CLOB — leaving for reconciler', {
-          marketId,
-          direction,
-          orderId: order.orderId,
-        });
-        continue;
-      }
-      const matched = parseFloat(liveOrder.size_matched ?? '0') || 0;
-      const original = parseFloat(liveOrder.original_size ?? '0') || 0;
-      if (original > 0 && matched >= original - 1e-9) {
-        // Fully filled — nothing to cancel; resume/reconciler records the position.
-        continue;
-      }
-
-      const cancelled = await cancelClobOrder(order.orderId).catch(() => false);
-      if (!cancelled) {
-        // Cancel API refused — confirm terminal state before giving up
-        // (mirrors the executor's confirmMakerCancel): the order may already
-        // be gone or filled. Otherwise leave the key and retry next scan.
-        const after = await getClobOrder(order.orderId).catch(() => null);
-        const status = String(after?.status ?? '').toLowerCase();
-        const terminal = !after || ['cancelled', 'canceled', 'filled'].includes(status);
-        if (!terminal) {
-          logger.warn('[weather-revalidate] cancel unconfirmed — will retry next scan', {
-            marketId,
-            direction,
-            orderId: order.orderId,
-          });
-          continue;
+      if (isBracket) {
+        if (!bracketRuleOn) continue;
+        // (a) LATE res-day only: the leg stays live through the swingy hours
+        // (dip-through-then-reverse fills are wins / lock-ins); once the
+        // city-local hour passes the threshold the daily high is effectively
+        // realized and any further fill is near-pure overpay. Unknown city /
+        // timezone → skip the arm (fail-safe: do not cancel). The tz lookup is
+        // scoped inside the res-day check so a missing/unknown city field can
+        // never throw an entry past the certainty arm below.
+        let lateResDay = false;
+        if (opp.isResolutionDay === true && cfg.WEATHER_BRACKET_CANCEL_LOCAL_HOUR < 24) {
+          const tz = opp.city ? lookupCity(opp.city)?.tz : undefined;
+          lateResDay = tz != null && cityLocalHour(tz) >= cfg.WEATHER_BRACKET_CANCEL_LOCAL_HOUR;
         }
-      }
+        // (b) Early certainty: primary side (opposite of the leg) repriced to
+        // near-settled before res-day. Gamma side prices are the usable
+        // reference on ghost books (see [weather-fill-shadow]).
+        const primarySidePrice = direction === 'YES' ? opp.noPrice : opp.yesPrice;
+        const certaintyThreshold = cfg.WEATHER_BRACKET_CANCEL_PRIMARY_PRICE;
+        const earlyCertain =
+          !opp.isResolutionDay
+          && certaintyThreshold > 0
+          && Number.isFinite(primarySidePrice)
+          && primarySidePrice >= certaintyThreshold;
+        if (!lateResDay && !earlyCertain) continue;
 
-      // Fills can land between the read above and the cancel confirming —
-      // re-read the final matched size before deciding the key's fate.
-      const finalOrder = await getClobOrder(order.orderId).catch(() => null);
-      const finalMatched = Math.max(matched, parseFloat(finalOrder?.size_matched ?? '0') || 0);
-      if (finalMatched > 0) {
-        logger.info('[weather-revalidate] cancelled residual — partial fill remains, key kept for reconciler', {
-          marketId,
-          direction,
-          orderId: order.orderId,
-          matched: finalMatched,
-          postedPrice: order.price,
-          sideFV: Number(sideFV.toFixed(4)),
+        const deleted = await cancelRestingWeatherOrder(redis, marketId, direction, order, {
+          rule: 'bracket_cancel',
+          trigger: lateResDay ? 'late_resolution_day' : 'primary_certainty',
+          primarySidePrice: Number.isFinite(primarySidePrice)
+            ? Number(primarySidePrice.toFixed(4))
+            : null,
         });
+        if (deleted) cancelledBrackets++;
       } else {
-        await deletePendingOrder(redis, marketId, direction);
-        cancelledCount++;
-        logger.info('[weather-revalidate] cancelled value-negative resting order', {
-          marketId,
-          direction,
-          orderId: order.orderId,
-          postedPrice: order.price,
+        if (!primaryRuleOn) continue;
+        const sideFV = direction === 'YES' ? opp.modelProbability : 1 - opp.modelProbability;
+        if (!Number.isFinite(sideFV)) continue;
+        if (sideFV + 1e-9 >= order.price) continue; // still value-positive at our bid
+
+        const deleted = await cancelRestingWeatherOrder(redis, marketId, direction, order, {
+          rule: 'primary_fv',
           sideFV: Number(sideFV.toFixed(4)),
-          restAboveCap: order.restAboveCap === true,
-          sourcedFrom: order.sourcedFrom,
         });
+        if (deleted) cancelledPrimaries++;
       }
     } catch (err) {
       logger.warn('[weather-revalidate] error processing resting order (non-fatal)', {
@@ -2233,10 +2313,11 @@ export async function revalidateRestingWeatherOrders(
     }
   }
 
-  if (cancelledCount > 0) {
+  if (cancelledPrimaries > 0 || cancelledBrackets > 0) {
     logger.info('[weather-revalidate] revalidation pass complete', {
-      restingPrimaries: primaries.length,
-      cancelled: cancelledCount,
+      restingWeatherOrders: weatherEntries.length,
+      cancelledPrimaries,
+      cancelledBrackets,
     });
   }
 }
@@ -2269,8 +2350,9 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
   await runWeatherInvalidationScan(redis, fetchFn);
 
   // Revalidate unfilled resting weather maker orders against this scan's fresh
-  // model FV — cancels primaries that turned value-negative at their own posted
-  // price (forecast invalidation only covers HELD positions). Best-effort: a
+  // state — cancels primaries that turned value-negative at their own posted
+  // price (forecast invalidation only covers HELD positions) and bracket legs
+  // whose hedge value is gone (res-day / primary near-certain). Best-effort: a
   // failure here must never break the entry scan.
   try {
     await revalidateRestingWeatherOrders(redis, opportunities);

@@ -16,6 +16,13 @@ export function cityLocalDate(tz: string): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
 }
 
+/** Return the current hour-of-day (0-23) in the given IANA timezone. */
+export function cityLocalHour(tz: string): number {
+  const h = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hourCycle: 'h23' })
+    .format(new Date());
+  return parseInt(h, 10);
+}
+
 /**
  * Return the UTC millisecond timestamp for the end of `targetDate` in `tz`
  * (i.e. local midnight of the following day — the instant the city's calendar
