@@ -1,9 +1,9 @@
 # Maker Rebate Farmer Audit: active but not earning
 
-**Date observed:** 2026-06-05  
-**Affected job:** `src/cron/rebateFarmer.ts` (`cron:rebate`)  
-**Runtime status:** enabled in `.env` and running every 5 minutes  
-**Primary issue:** orders are being placed and stale-cancelled, but not filled; no maker rebates accrue without filled maker liquidity.
+- **Date observed:** 2026-06-05
+- **Affected job:** `src/cron/rebateFarmer.ts` (`cron:rebate`)
+- **Runtime status:** enabled in `.env` and running every 5 minutes
+- **Primary issue:** orders are being placed and stale-cancelled, but not filled; no maker rebates accrue without filled maker liquidity.
 
 ---
 
@@ -350,4 +350,3 @@ GET https://clob.polymarket.com/rebates/current?date=YYYY-MM-DD&maker_address=0x
 1. Which wallet address should be used for rebate API checks: signer, proxy wallet, or maker address from trade records? The CLOB trade object's `maker_address` should be treated as the source of truth.
 2. Are these markets on global Polymarket or Polymarket US for this account? Payout semantics differ in docs.
 3. Should this feature target maker rebates only, or should it be expanded to also optimize classic liquidity rewards? The formulas and eligibility criteria are different.
-
