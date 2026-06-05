@@ -55,7 +55,7 @@ vi.mock('@polymarket/clob-client-v2', () => ({
       .fn()
       .mockResolvedValue({ key: 'test', secret: 'test', passphrase: 'test' }),
   })),
-  OrderType: { FOK: 'FOK', FAK: 'FAK' },
+  OrderType: { FOK: 'FOK', FAK: 'FAK', GTC: 'GTC' },
   Side: { BUY: 'BUY', SELL: 'SELL' },
   AssetType: { COLLATERAL: 'COLLATERAL' },
   Chain: { POLYGON: 137 },
@@ -90,8 +90,16 @@ vi.mock('../redis.js', () => ({
   })),
 }));
 
-const { submitClobBuy, submitClobSell, submitClobLimitSell, getClobBalance, redeemClobOutcome } =
-  await import('../clob.js');
+const {
+  submitClobBuy,
+  submitClobSell,
+  submitClobLimitBuy,
+  submitClobLimitSell,
+  getClobBalance,
+  redeemClobOutcome,
+  redactClobSecrets,
+  redactConsoleErrorArgs,
+} = await import('../clob.js');
 
 describe('submitClobBuy', () => {
   beforeEach(() => {
@@ -256,6 +264,168 @@ describe('submitClobLimitSell', () => {
     expect(result.shares_bought).toBeCloseTo(6.0);   // YES shares sold (makingAmount)
     expect(result.cost).toBeCloseTo(4.20);            // USDC proceeds (takingAmount)
     expect(result.price).toBeCloseTo(0.7);            // 4.20 / 6.00
+  });
+});
+
+describe('post-only / defer-exec SDK argument mapping', () => {
+  // @polymarket/clob-client-v2 createAndPostOrder positional signature:
+  //   (userOrder, options, orderType, postOnly, deferExec)
+  // The two flags were swapped until 2026-06-05 — every "post-only" order went
+  // out as postOnly=false + deferExec=true (maker-rebate audit, finding 1).
+  // These tests pin the mapping BY POSITION so an SDK bump or refactor that
+  // reorders them fails loudly.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCreateAndPostOrder.mockResolvedValue({
+      success: true,
+      errorMsg: '',
+      orderID: 'order-postonly',
+      status: 'live',
+    });
+  });
+
+  it('submitClobLimitBuy maps postOnly:true to SDK arg 4 and deferExec=false to arg 5', async () => {
+    const result = await submitClobLimitBuy({
+      tokenId: 'tok-yes',
+      price: 0.40,
+      size: 10,
+      tickSize: '0.01',
+      negRisk: false,
+      orderType: 'GTC',
+      postOnly: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockCreateAndPostOrder).toHaveBeenCalledTimes(1);
+    const args = mockCreateAndPostOrder.mock.calls[0]!;
+    expect(args[2]).toBe('GTC'); // orderType
+    expect(args[3]).toBe(true); // postOnly — was false pre-fix
+    expect(args[4]).toBe(false); // deferExec — was true pre-fix
+  });
+
+  it('submitClobLimitBuy defaults postOnly to false (and never defers) when omitted', async () => {
+    await submitClobLimitBuy({
+      tokenId: 'tok-yes',
+      price: 0.40,
+      size: 10,
+      tickSize: '0.01',
+      negRisk: false,
+    });
+
+    const args = mockCreateAndPostOrder.mock.calls[0]!;
+    expect(args[3]).toBe(false); // postOnly default
+    expect(args[4]).toBe(false); // deferExec always false
+  });
+
+  it('submitClobLimitSell maps postOnly:true to SDK arg 4 and deferExec=false to arg 5', async () => {
+    await submitClobLimitSell({
+      tokenId: 'tok-yes',
+      price: 0.70,
+      size: 6,
+      tickSize: '0.01',
+      negRisk: false,
+      orderType: 'GTC',
+      postOnly: true,
+    });
+
+    expect(mockCreateAndPostOrder).toHaveBeenCalledTimes(1);
+    const args = mockCreateAndPostOrder.mock.calls[0]!;
+    expect(args[3]).toBe(true); // postOnly
+    expect(args[4]).toBe(false); // deferExec
+  });
+});
+
+describe('redactClobSecrets', () => {
+  it('scrubs L2 auth header values from a serialized axios config', () => {
+    const leaked =
+      '[CLOB Client] request error {"status":425,"config":{"headers":{"Accept":"*/*",' +
+      '"POLY_ADDRESS":"0x3e945beEE937eC4D3eB79C0B2710a467BCABC382",' +
+      '"POLY_SIGNATURE":"VaTCKF9I-ogyxvsz3oHcXHRwHcFQVrIuN7Nhx_cz8cg=",' +
+      '"POLY_TIMESTAMP":"1779831633",' +
+      '"POLY_API_KEY":"36724185-4022-567e-e78c-f01b6e831290",' +
+      '"POLY_PASSPHRASE":"eb4fd6b420626ed508cf1f2fde4b8b06019781b5b9d83736ef911010f7b2a0ba"}}}';
+
+    const redacted = redactClobSecrets(leaked);
+
+    expect(redacted).not.toContain('VaTCKF9I');
+    expect(redacted).not.toContain('36724185-4022');
+    expect(redacted).not.toContain('eb4fd6b420626ed');
+    expect(redacted).not.toContain('0x3e945beEE937');
+    expect(redacted).toContain('"POLY_SIGNATURE":"REDACTED"');
+    expect(redacted).toContain('"POLY_API_KEY":"REDACTED"');
+    expect(redacted).toContain('"POLY_PASSPHRASE":"REDACTED"');
+    // Non-secret fields survive.
+    expect(redacted).toContain('"POLY_TIMESTAMP":"1779831633"');
+    expect(redacted).toContain('"status":425');
+  });
+
+  it('scrubs the escaped order signature and owner (api key) in SDK-context strings', () => {
+    // The request body is a JSON-encoded string INSIDE the serialized config,
+    // so its quotes arrive escaped: \"signature\":\"0x...\". signature/owner
+    // are generic names — scrubbed only with includeGenericFields=true (the
+    // console patch sets it for "[CLOB Client]…" calls).
+    const leaked =
+      '{"config":{"data":"{\\"order\\":{\\"maker\\":\\"0x2474\\",' +
+      '\\"signature\\":\\"0xa909e09d409a7d1cbbed5b30b4b938bbcdb3786e\\"},' +
+      '\\"owner\\":\\"36724185-4022-567e-e78c-f01b6e831290\\",\\"orderType\\":\\"GTC\\"}"}}';
+
+    const redacted = redactClobSecrets(leaked, true);
+
+    expect(redacted).not.toContain('0xa909e09d');
+    expect(redacted).not.toContain('36724185-4022');
+    expect(redacted).toContain('\\"signature\\":\\"REDACTED\\"');
+    expect(redacted).toContain('\\"owner\\":\\"REDACTED\\"');
+    expect(redacted).toContain('\\"orderType\\":\\"GTC\\"');
+  });
+
+  it('leaves generic signature/owner fields intact outside SDK context (no over-redaction)', () => {
+    // Non-SDK structured logging legitimately uses these field names.
+    const appLog = '{"event":"transfer","owner":"alice","signature":"valid"}';
+    expect(redactClobSecrets(appLog)).toBe(appLog);
+    // POLY_* headers are unambiguous credentials — scrubbed regardless of context.
+    const mixed = '{"owner":"alice","POLY_API_KEY":"36724185-4022"}';
+    const redacted = redactClobSecrets(mixed);
+    expect(redacted).toContain('"owner":"alice"');
+    expect(redacted).toContain('"POLY_API_KEY":"REDACTED"');
+  });
+
+  it('leaves strings without credential fields untouched', () => {
+    const clean = '[CLOB Client] request error {"error":"service not ready","status":425}';
+    expect(redactClobSecrets(clean, true)).toBe(clean);
+  });
+});
+
+describe('redactConsoleErrorArgs (console.error patch wiring)', () => {
+  it('scrubs signature/owner when any arg carries the [CLOB Client prefix', () => {
+    const args = redactConsoleErrorArgs([
+      '[CLOB Client] request error',
+      '{"config":{"data":"{\\"signature\\":\\"0xdeadbeef\\",\\"owner\\":\\"api-key-uuid\\"}"}}',
+    ]);
+
+    expect(args[0]).toBe('[CLOB Client] request error');
+    expect(args[1]).not.toContain('0xdeadbeef');
+    expect(args[1]).not.toContain('api-key-uuid');
+    expect(args[1]).toContain('\\"signature\\":\\"REDACTED\\"');
+    expect(args[1]).toContain('\\"owner\\":\\"REDACTED\\"');
+  });
+
+  it('does NOT scrub generic signature/owner fields in non-SDK calls (over-redaction guard)', () => {
+    const appLog = '{"event":"transfer","owner":"alice","signature":"valid"}';
+    const args = redactConsoleErrorArgs(['app error', appLog]);
+
+    expect(args[1]).toBe(appLog);
+  });
+
+  it('scrubs POLY_* headers even in non-SDK calls and passes non-string args through', () => {
+    const err = new Error('boom');
+    const args = redactConsoleErrorArgs([
+      'some wrapper log',
+      '{"headers":{"POLY_PASSPHRASE":"secret-passphrase"}}',
+      err,
+    ]);
+
+    expect(args[1]).toContain('"POLY_PASSPHRASE":"REDACTED"');
+    expect(args[2]).toBe(err); // identity — Error objects untouched
   });
 });
 

@@ -1122,9 +1122,17 @@ export const envSchema = z.object({
   CORRELATION_MAX_MARKETS_FOR_DISCOVERY: z.coerce.number().int().min(1).optional().default(500),
 
   // --- REBATE FARMING (passive maker liquidity provision) ---
-  // Places resting GTC post-only limit orders on high-volume tight-spread markets
-  // to earn maker rebates (Polymarket distributes 100% of taker fees to makers).
-  // Filled orders become positions tracked by the monitor with tight TP/SL.
+  // Places resting GTC post-only limit orders on fee-enabled markets with real
+  // recent taker flow to earn maker rebates. Rebates are paid ONLY on filled
+  // maker liquidity (resting orders earn nothing) from a per-market daily pool
+  // funded by taker fees: crypto 20%, most other fee categories (sports,
+  // politics, weather, …) 25%; geopolitics is fee-free → no rebate. Payout is
+  // daily in pUSD, $1 minimum accrual. Per-fill accrual estimate:
+  //   fee_equivalent = shares × feeRate × p × (1−p);  rebate ≈ fee_equivalent × share
+  // (actual payout is pool/share based per market). See
+  // docs/issues/maker-rebates-not-earning-2026-06-05.md for the audit that
+  // shaped these knobs. Filled orders become positions tracked by the monitor
+  // with tight TP/SL.
   REBATE_FARMING_ENABLED: boolFromEnv.optional().default(false),
   // Maximum fraction of bankroll deployed to resting rebate orders.
   REBATE_MAX_BANKROLL_FRACTION: z.coerce.number().min(0).max(1).optional().default(0.10),
@@ -1138,18 +1146,57 @@ export const envSchema = z.object({
   REBATE_MAX_PER_MARKET_USD: z.coerce.number().min(1).optional().default(10),
   // TTL for resting orders before cancel + refresh at new prices (seconds).
   REBATE_ORDER_TTL_S: z.coerce.number().int().min(60).optional().default(300),
-  // Minimum spread in basis points — below this, no room to profitably rest as maker.
+  // Minimum spread in basis points — below this, no room to improve the bid.
   REBATE_MIN_SPREAD_BPS: z.coerce.number().min(0).optional().default(50),
-  // Minimum 24h volume (USD) for market selection.
+  // Minimum lifetime volume (USD) — cheap prefilter before book/flow fetches.
   REBATE_MIN_VOLUME: z.coerce.number().min(0).optional().default(50_000),
   // Minimum liquidity (USD) for market selection.
   REBATE_MIN_LIQUIDITY: z.coerce.number().min(0).optional().default(10_000),
-  // Skip fee-enabled markets (rebate economics differ on fee markets).
-  REBATE_SKIP_FEE_MARKETS: boolFromEnv.optional().default(true),
+  // Only quote fee-enabled markets (feesEnabled=true). Maker rebates exist ONLY
+  // on fee markets, so disabling this turns the farmer into unpaid liquidity.
+  // Replaces the backwards REBATE_SKIP_FEE_MARKETS (default true) that pointed
+  // the farmer exclusively at markets that can never pay a rebate.
+  REBATE_REQUIRE_FEE_MARKETS: boolFromEnv.optional().default(true),
   // Take-profit threshold for rebate-farmed positions (lower than directional trades).
   REBATE_TAKE_PROFIT_PCT: z.coerce.number().min(0).optional().default(3),
   // Stop-loss threshold for rebate-farmed positions (tight since no directional conviction).
   REBATE_STOP_LOSS_PCT: z.coerce.number().min(0).optional().default(5),
+  // -- selection v2: quote where takers actually trade (audit finding 4) --
+  // Lookback window for recent-taker-flow estimation from the public data-api.
+  REBATE_FLOW_LOOKBACK_HOURS: z.coerce.number().min(0.5).optional().default(6),
+  // Minimum recent taker notional per hour (USD) — below this a resting quote
+  // realistically never fills, it just churns stale-cancels.
+  REBATE_MIN_FLOW_USD_PER_HOUR: z.coerce.number().min(0).optional().default(50),
+  // Taker fee rate (bps) used for fee-equivalent estimates. CLOB fee markets
+  // currently report taker_base_fee=1000; per-market override is intentionally
+  // not fetched (1 extra API call/market) while rates are uniform.
+  REBATE_FEE_RATE_BPS: z.coerce.number().min(0).optional().default(1000),
+  // Maximum absolute YES-book spread (bestAsk − bestBid). Wider = ghost book;
+  // quoting bestBid+1tick on those is how we ended up bidding NO at 0.02 on a
+  // market trading NO at 0.85.
+  REBATE_MAX_SPREAD_ABS: z.coerce.number().min(0).max(1).optional().default(0.10),
+  // Maximum |YES-book mid − recent trade VWAP| — rejects books whose visible
+  // quotes have detached from where trades actually print.
+  REBATE_MAX_MID_VWAP_DIVERGENCE: z.coerce.number().min(0).max(1).optional().default(0.10),
+  // Distance below effective mid for our resting bid (absolute price units).
+  REBATE_QUOTE_EDGE: z.coerce.number().min(0).max(0.5).optional().default(0.01),
+  // -- two-sided quoting --
+  // Quote BOTH tokens (YES bid + NO bid). A NO bid at q is economically an ask
+  // on YES at 1−q, so this is two-sided liquidity without holding inventory;
+  // both sides filling = riskless pair (cost < $1, redeems $1) + two rebates.
+  REBATE_TWO_SIDED: boolFromEnv.optional().default(true),
+  // Required combined-price headroom: yesBid + noBid ≤ 1 − this. Guarantees a
+  // both-sides fill nets at least this much per share before rebates.
+  REBATE_MIN_COMBINED_EDGE: z.coerce.number().min(0).max(0.5).optional().default(0.02),
+  // Reprice trigger: when a market re-selects and the fresh target price has
+  // drifted from a resting order's price by more than this, cancel + repost.
+  REBATE_REPRICE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.02),
+  // -- rebate verification --
+  // Maker address for the public rebates API (defaults to POLYMARKET_FUNDER_ADDRESS
+  // — order placement stamps the funder/proxy wallet as `maker`).
+  REBATE_MAKER_ADDRESS: z.string().optional(),
+  // Telegram + log daily summary comparing estimated vs API-reported rebates.
+  REBATE_DAILY_SUMMARY_ENABLED: boolFromEnv.optional().default(true),
 
   // --- CRYPTO FUTURES (Phase: futures) ---
   FUTURES_ENABLED: boolFromEnv.optional().default(false),

@@ -1,16 +1,21 @@
 /**
  * Rebate Farmer — passive maker liquidity provision.
  *
- * Places resting GTC post-only limit orders on high-volume, tight-spread
- * binary markets to earn maker rebates. Polymarket distributes 100% of
- * taker fees to makers, so even random-direction resting orders that get
- * filled are structurally positive (+1.12% per trade on average).
+ * Places resting GTC post-only limit orders on fee-enabled markets with real
+ * recent taker flow. Maker rebates are paid ONLY on filled maker liquidity,
+ * daily, from each market's taker-fee pool: crypto 20%, most other fee
+ * categories 25%, geopolitics fee-free → no rebate. Resting orders that never
+ * fill earn nothing — selection optimizes for fill probability
+ * (docs/issues/maker-rebates-not-earning-2026-06-05.md).
  *
  * Cycle (runs every 5 min via cron or Docker):
  *   1. Reconcile tracked orders — detect fills, cancel stale orders
  *   2. Compute budget from bankroll × fraction, capped by hard limit
- *   3. Select top markets by volume × (1/spread) composite score
- *   4. Place new resting orders inside the spread
+ *   3. Select markets by recent fee-equivalent flow/hour; quote both tokens
+ *      at effective YES-mid ∓ edge (two-sided, no inventory needed)
+ *   4. Place/reprice resting orders — one per market+direction
+ *   5. Once per UTC day: summary comparing fill-time rebate estimates with
+ *      the public rebates API (log + Telegram)
  *
  * Filled orders enter the position ledger with sourcedFrom='rebate-farming'
  * and are managed by the monitor with tight TP/SL thresholds.
@@ -30,11 +35,14 @@ import { checkGlobalGovernor, recordGlobalTrade } from '../shared/governor.js';
 import { selectRebateMarkets } from '../rebate/marketSelector.js';
 import {
   reconcileOrders,
-  getDeployedUsd,
-  getDeployedUsdForMarket,
-  hasRestingOrderForMarket,
+  loadRestingOrders,
+  findRestingOrder,
+  deployedUsd,
+  deployedUsdForMarket,
   placeRestingOrder,
+  cancelForReprice,
 } from '../rebate/orderManager.js';
+import { maybeSendDailySummary } from '../rebate/rebateChecker.js';
 
 async function main(): Promise<void> {
   const redis = getRedis();
@@ -49,63 +57,85 @@ async function main(): Promise<void> {
     // Phase 1: Reconcile existing resting orders.
     const reconciled = await reconcileOrders(redis);
 
-    // Phase 2: Compute budget.
+    // Phase 2: Compute budget. Reload after reconcile — fills/cancels free budget.
+    const orders = await loadRestingOrders(redis);
     const bankroll = await getBankroll(redis);
     const maxDeploy = Math.min(
       bankroll * cfg.REBATE_MAX_BANKROLL_FRACTION,
       cfg.REBATE_MAX_TOTAL_USD,
     );
-    const currentlyDeployed = await getDeployedUsd(redis);
+    const currentlyDeployed = deployedUsd(orders);
     let remaining = maxDeploy - currentlyDeployed;
+
+    let placed = 0;
+    let repriced = 0;
 
     if (remaining < cfg.REBATE_ORDER_SIZE_USD) {
       logger.info('[rebate] budget exhausted', {
         maxDeploy: maxDeploy.toFixed(2),
         currentlyDeployed: currentlyDeployed.toFixed(2),
       });
-      return;
-    }
+    } else {
+      // Phase 3: Select markets by recent fee-equivalent taker flow.
+      const candidates = await selectRebateMarkets(redis, cfg.REBATE_MAX_MARKETS);
 
-    // Phase 3: Select markets.
-    const candidates = await selectRebateMarkets(redis, cfg.REBATE_MAX_MARKETS);
-
-    if (candidates.length === 0) {
-      logger.info('[rebate] no eligible markets found');
-      return;
-    }
-
-    // Phase 4: Place new resting orders.
-    let placed = 0;
-    for (const candidate of candidates) {
-      if (remaining < cfg.REBATE_ORDER_SIZE_USD) break;
-
-      // Skip markets where we already have a resting order.
-      if (await hasRestingOrderForMarket(redis, candidate.marketId)) continue;
-
-      // Skip markets where we already have an open position.
-      if (await hasOpenPosition(redis, candidate.marketId, candidate.direction)) continue;
-
-      // Enforce per-market exposure cap.
-      const marketDeployed = await getDeployedUsdForMarket(redis, candidate.marketId);
-      if (marketDeployed >= cfg.REBATE_MAX_PER_MARKET_USD) continue;
-
-      // Respect global rate limits.
-      const gov = await checkGlobalGovernor(redis, 'polymarket');
-      if (!gov.ok) {
-        logger.info('[rebate] governor rate limit — pausing placement', {
-          elapsedMs: gov.elapsedMs,
-          minIntervalMs: gov.minIntervalMs,
-        });
-        break;
+      if (candidates.length === 0) {
+        logger.info('[rebate] no eligible markets found');
       }
 
-      const sizeUsd = Math.min(cfg.REBATE_ORDER_SIZE_USD, remaining);
-      const order = await placeRestingOrder(redis, candidate, sizeUsd);
+      // Phase 4: Place / reprice resting orders — one per market+direction.
+      outer: for (const candidate of candidates) {
+        for (const quote of candidate.quotes) {
+          if (remaining < cfg.REBATE_ORDER_SIZE_USD) break outer;
 
-      if (order) {
-        await recordGlobalTrade(redis, 'polymarket');
-        remaining -= sizeUsd;
-        placed++;
+          const existing = findRestingOrder(orders, candidate.marketId, quote.direction);
+          if (existing) {
+            // Reprice: the market re-selected with a target that drifted away
+            // from the resting price — cancel and re-post at the fresh target.
+            // Within threshold → leave it resting (keeps queue priority).
+            if (Math.abs(existing.price - quote.price) <= cfg.REBATE_REPRICE_THRESHOLD) continue;
+            const cancelledOk = await cancelForReprice(redis, existing);
+            if (!cancelledOk) continue;
+            orders.delete(existing.orderId);
+            remaining += existing.sizeUsd;
+            repriced++;
+            logger.info('[rebate] repricing drifted order', {
+              marketId: candidate.marketId,
+              direction: quote.direction,
+              oldPrice: existing.price,
+              newPrice: quote.price,
+            });
+          }
+
+          // Skip directions where we already hold a position (inventory-aware:
+          // don't accumulate more of a side the monitor is already managing).
+          if (await hasOpenPosition(redis, candidate.marketId, quote.direction)) continue;
+
+          // Enforce per-market exposure cap across both directions.
+          if (deployedUsdForMarket(orders, candidate.marketId) >= cfg.REBATE_MAX_PER_MARKET_USD) {
+            continue;
+          }
+
+          // Respect global rate limits.
+          const gov = await checkGlobalGovernor(redis, 'polymarket');
+          if (!gov.ok) {
+            logger.info('[rebate] governor rate limit — pausing placement', {
+              elapsedMs: gov.elapsedMs,
+              minIntervalMs: gov.minIntervalMs,
+            });
+            break outer;
+          }
+
+          const sizeUsd = Math.min(cfg.REBATE_ORDER_SIZE_USD, remaining);
+          const order = await placeRestingOrder(redis, candidate, quote, sizeUsd);
+
+          if (order) {
+            await recordGlobalTrade(redis, 'polymarket');
+            orders.set(order.orderId, order);
+            remaining -= sizeUsd;
+            placed++;
+          }
+        }
       }
     }
 
@@ -114,9 +144,17 @@ async function main(): Promise<void> {
       partialFills: reconciled.partialFills.length,
       staleCancelled: reconciled.stale.length,
       externalCancelled: reconciled.cancelled.length,
+      repriced,
       newOrdersPlaced: placed,
       budgetRemaining: remaining.toFixed(2),
       totalDeployed: (maxDeploy - remaining).toFixed(2),
+    });
+
+    // Phase 5: Daily est-vs-API rebate summary (best-effort, never fails the cycle).
+    await maybeSendDailySummary(redis).catch((err: unknown) => {
+      logger.warn('[rebate] daily summary failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
   } finally {
     await closeRedis();

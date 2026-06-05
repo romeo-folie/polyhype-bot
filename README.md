@@ -335,10 +335,18 @@ Violation scanner (every 15min):
 ### 12. Rebate Farmer (`cron:rebateFarmer`)
 
 ```
-High-volume tight-spread markets
-  → Place resting GTC post-only limit orders
-  → Earn maker rebates (Polymarket distributes 100% of taker fees to makers)
+Fee-enabled markets with recent taker flow (public data-api /trades)
+  → Score by fee-equivalent flow/hour: Σ shares × feeRate × p(1−p)
+  → Gate ghost books (max spread, mid-vs-VWAP divergence)
+  → Quote two-sided: post-only YES bid + NO bid at effective mid − edge
+    (combined ≤ 1 − REBATE_MIN_COMBINED_EDGE: both fill = riskless pair)
+  → Earn maker rebates on FILLED maker liquidity only
 ```
+
+Rebates are paid daily (pUSD, $1 min) from each market's taker-fee pool:
+crypto 20%, most other fee categories 25%, geopolitics fee-free (no rebate).
+Resting orders that never fill earn nothing. Accrual is verified against the
+public `GET clob.polymarket.com/rebates/current` endpoint in a daily summary.
 
 Currently disabled (`REBATE_FARMING_ENABLED=false`).
 

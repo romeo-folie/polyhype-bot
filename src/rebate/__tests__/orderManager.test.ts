@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { z } from 'zod';
 
 // Mock external dependencies before imports.
 vi.mock('../../shared/clob.js', () => ({
@@ -11,9 +12,26 @@ vi.mock('../../execution/positionLedger.js', () => ({
   recordPosition: vi.fn(),
 }));
 
+// Foundation from the REAL Zod schema defaults so the mock can't drift from
+// config.ts (see feedback: hand-written literals crash on new cfg.X reads).
+const { envSchema } = await vi.importActual<{ envSchema: z.AnyZodObject }>(
+  '../../shared/config.js',
+);
+function schemaDefaults(schema: z.AnyZodObject): Record<string, unknown> {
+  const defaults: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(schema.shape)) {
+    const parsed = field.safeParse(undefined);
+    if (parsed.success && parsed.data !== undefined) defaults[key] = parsed.data;
+  }
+  return defaults;
+}
+
 vi.mock('../../shared/config.js', () => ({
   loadConfig: vi.fn(() => ({
+    ...schemaDefaults(envSchema),
+    // Pinned: rebate-estimate assertions below are computed from these.
     REBATE_ORDER_TTL_S: 300,
+    REBATE_FEE_RATE_BPS: 1000,
     CLOB_FALLBACK_ENABLED: true,
   })),
 }));
@@ -30,20 +48,37 @@ vi.mock('../../shared/logger.js', () => ({
 import {
   reconcileOrders,
   placeRestingOrder,
+  cancelForReprice,
   hasRestingOrderForMarket,
+  findRestingOrder,
+  deployedUsd,
+  deployedUsdForMarket,
   getDeployedUsd,
+  loadRestingOrders,
 } from '../orderManager.js';
 import { getClobOrder, cancelClobOrder, submitClobLimitBuy } from '../../shared/clob.js';
 import { recordPosition } from '../../execution/positionLedger.js';
-import type { RebateMarketCandidate } from '../types.js';
+import type { RestingOrder, RebateMarketCandidate, RebateQuote } from '../types.js';
+import type { MarketFlowStats } from '../flowAnalyzer.js';
 
 const mockGetOrder = vi.mocked(getClobOrder);
 const mockCancelOrder = vi.mocked(cancelClobOrder);
 const mockSubmitLimit = vi.mocked(submitClobLimitBuy);
 const mockRecordPosition = vi.mocked(recordPosition);
 
-function makeRedis(): Record<string, ReturnType<typeof vi.fn>> {
-  return {
+interface PipelineMock {
+  hincrby: ReturnType<typeof vi.fn>;
+  hincrbyfloat: ReturnType<typeof vi.fn>;
+  expire: ReturnType<typeof vi.fn>;
+  del: ReturnType<typeof vi.fn>;
+  sadd: ReturnType<typeof vi.fn>;
+  exec: ReturnType<typeof vi.fn>;
+}
+
+function makeRedis(): Record<string, ReturnType<typeof vi.fn>> & { pipelines: PipelineMock[] } {
+  const pipelines: PipelineMock[] = [];
+  const redis = {
+    pipelines,
     hgetall: vi.fn().mockResolvedValue({}),
     hset: vi.fn().mockResolvedValue(1),
     hdel: vi.fn().mockResolvedValue(1),
@@ -51,6 +86,51 @@ function makeRedis(): Record<string, ReturnType<typeof vi.fn>> {
     srem: vi.fn().mockResolvedValue(1),
     scard: vi.fn().mockResolvedValue(0),
     hincrby: vi.fn().mockResolvedValue(1),
+    multi: vi.fn(() => {
+      const pipeline: PipelineMock = {
+        hincrby: vi.fn(),
+        hincrbyfloat: vi.fn(),
+        expire: vi.fn(),
+        del: vi.fn(),
+        sadd: vi.fn(),
+        exec: vi.fn().mockResolvedValue([]),
+      };
+      pipeline.hincrby.mockReturnValue(pipeline);
+      pipeline.hincrbyfloat.mockReturnValue(pipeline);
+      pipeline.expire.mockReturnValue(pipeline);
+      pipeline.del.mockReturnValue(pipeline);
+      pipeline.sadd.mockReturnValue(pipeline);
+      pipelines.push(pipeline);
+      return pipeline;
+    }),
+  };
+  return redis;
+}
+
+/** All hincrby/hincrbyfloat calls across every pipeline the code opened. */
+function statCalls(redis: ReturnType<typeof makeRedis>): { field: string; key: string; by: number | string }[] {
+  const calls: { field: string; key: string; by: number | string }[] = [];
+  for (const p of redis.pipelines) {
+    for (const c of p.hincrby.mock.calls) {
+      calls.push({ key: c[0] as string, field: c[1] as string, by: c[2] as number });
+    }
+    for (const c of p.hincrbyfloat.mock.calls) {
+      calls.push({ key: c[0] as string, field: c[1] as string, by: c[2] as number });
+    }
+  }
+  return calls;
+}
+
+function makeFlow(overrides: Partial<MarketFlowStats> = {}): MarketFlowStats {
+  return {
+    tradeCount: 40,
+    takerNotionalUsd: 1200,
+    takerNotionalUsdPerHour: 200,
+    feeEquivalentUsd: 30,
+    feeEquivalentUsdPerHour: 5,
+    vwapYes: 0.40,
+    effectiveWindowHours: 6,
+    ...overrides,
   };
 }
 
@@ -60,18 +140,52 @@ function makeCandidate(overrides: Partial<RebateMarketCandidate> = {}): RebateMa
     conditionId: 'cond-1',
     question: 'Will X happen?',
     clobTokenIds: ['tok-yes', 'tok-no'],
-    direction: 'YES',
-    tokenId: 'tok-yes',
-    bestBid: 0.50,
-    bestAsk: 0.52,
-    spreadBps: 385,
-    midPrice: 0.51,
+    feesEnabled: true,
+    feeType: 'weather_fees',
+    yesMid: 0.40,
+    spreadAbs: 0.02,
+    spreadBps: 500,
+    quotes: [],
     volume: 100000,
     liquidity: 20000,
-    score: 100000 * (10000 / 385),
+    flow: makeFlow(),
+    rebateShare: 0.25,
+    score: 5,
     tickSize: '0.01',
     negRisk: false,
     endDate: null,
+    ...overrides,
+  };
+}
+
+function makeQuote(overrides: Partial<RebateQuote> = {}): RebateQuote {
+  return {
+    direction: 'YES',
+    tokenId: 'tok-yes',
+    price: 0.39,
+    bestBid: 0.39,
+    bestAsk: 0.41,
+    ...overrides,
+  };
+}
+
+function makeOrder(overrides: Partial<RestingOrder> = {}): RestingOrder {
+  return {
+    orderId: 'order-1',
+    marketId: 'mkt-1',
+    conditionId: 'cond-1',
+    tokenId: 'tok-yes',
+    clobTokenIds: ['tok-yes', 'tok-no'],
+    direction: 'YES',
+    price: 0.51,
+    size: 10,
+    sizeUsd: 5.1,
+    placedAt: new Date().toISOString(),
+    tickSize: '0.01',
+    negRisk: false,
+    question: 'Will X?',
+    feeRateBps: 1000,
+    rebateShare: 0.25,
     ...overrides,
   };
 }
@@ -82,23 +196,11 @@ describe('orderManager', () => {
   });
 
   describe('reconcileOrders', () => {
-    it('detects fully filled orders and records positions', async () => {
+    it('detects fully filled orders, records positions, and accrues the estimated rebate', async () => {
       const redis = makeRedis();
-      const order = {
-        orderId: 'order-1',
-        marketId: 'mkt-1',
-        conditionId: 'cond-1',
-        tokenId: 'tok-yes',
-        clobTokenIds: ['tok-yes', 'tok-no'],
-        direction: 'YES',
-        price: 0.51,
-        size: 10,
-        sizeUsd: 5.1,
-        placedAt: new Date().toISOString(),
-        tickSize: '0.01',
-        negRisk: false,
-        question: 'Will X?',
-      };
+      // 10 shares at 0.51, 1000bps, 25% share:
+      // 10 × 0.10 × 0.51 × 0.49 × 0.25 = 0.062475
+      const order = makeOrder({ price: 0.51, size: 10 });
       redis.hgetall.mockResolvedValue({ 'order-1': JSON.stringify(order) });
 
       mockGetOrder.mockResolvedValue({
@@ -117,7 +219,8 @@ describe('orderManager', () => {
         created_at: Date.now(),
         expiration: '',
         order_type: 'GTC',
-      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await reconcileOrders(redis as any);
@@ -126,25 +229,29 @@ describe('orderManager', () => {
       expect(result.filled[0]!.orderId).toBe('order-1');
       expect(mockRecordPosition).toHaveBeenCalledOnce();
       expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-1');
+
+      const stats = statCalls(redis);
+      const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
+      // Cumulative + per-market + per-day fill counters (the date bucket feeds
+      // the daily summary's same-period est-vs-API comparison).
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'fills', by: 1 });
+      expect(stats).toContainEqual({ key: 'rebate:stats:market:mkt-1', field: 'fills', by: 1 });
+      expect(stats).toContainEqual({ key: todayKey, field: 'fills', by: 1 });
+      // Estimated rebate accrual on all three hashes.
+      const rebateBumps = stats.filter((s) => s.field === 'est_rebate_usd');
+      expect(rebateBumps).toHaveLength(3);
+      expect(rebateBumps[0]!.by).toBeCloseTo(0.062475, 5);
+      expect(rebateBumps.map((b) => b.key)).toContain(todayKey);
+      // Lifetime recorded on terminal event, including the date bucket.
+      expect(stats.some((s) => s.field === 'lifetime_ms_total' && s.key === todayKey)).toBe(true);
     });
 
-    it('cancels stale orders past TTL', async () => {
+    it('cancels stale orders past TTL and bumps per-market stale counters', async () => {
       const redis = makeRedis();
-      const order = {
+      const order = makeOrder({
         orderId: 'order-stale',
-        marketId: 'mkt-1',
-        conditionId: 'cond-1',
-        tokenId: 'tok-yes',
-        clobTokenIds: ['tok-yes', 'tok-no'],
-        direction: 'YES',
-        price: 0.51,
-        size: 10,
-        sizeUsd: 5.1,
         placedAt: new Date(Date.now() - 600_000).toISOString(), // 10 min ago (> 300s TTL)
-        tickSize: '0.01',
-        negRisk: false,
-        question: 'Will X?',
-      };
+      });
       redis.hgetall.mockResolvedValue({ 'order-stale': JSON.stringify(order) });
 
       mockGetOrder.mockResolvedValue({
@@ -163,7 +270,8 @@ describe('orderManager', () => {
         created_at: Date.now() - 600_000,
         expiration: '',
         order_type: 'GTC',
-      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
 
       mockCancelOrder.mockResolvedValue(true);
 
@@ -173,25 +281,16 @@ describe('orderManager', () => {
       expect(result.stale).toHaveLength(1);
       expect(mockCancelOrder).toHaveBeenCalledWith('order-stale');
       expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-stale');
+      const stats = statCalls(redis);
+      const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'stale_cancels', by: 1 });
+      expect(stats).toContainEqual({ key: 'rebate:stats:market:mkt-1', field: 'stale_cancels', by: 1 });
+      expect(stats).toContainEqual({ key: todayKey, field: 'stale_cancels', by: 1 });
     });
 
     it('skips recently-placed orders when CLOB returns null (transient error)', async () => {
       const redis = makeRedis();
-      const order = {
-        orderId: 'order-gone',
-        marketId: 'mkt-1',
-        conditionId: 'cond-1',
-        tokenId: 'tok-yes',
-        clobTokenIds: ['tok-yes', 'tok-no'],
-        direction: 'YES',
-        price: 0.51,
-        size: 10,
-        sizeUsd: 5.1,
-        placedAt: new Date().toISOString(), // fresh — within 2×TTL
-        tickSize: '0.01',
-        negRisk: false,
-        question: 'Will X?',
-      };
+      const order = makeOrder({ orderId: 'order-gone' }); // fresh — within 2×TTL
       redis.hgetall.mockResolvedValue({ 'order-gone': JSON.stringify(order) });
       mockGetOrder.mockResolvedValue(null);
 
@@ -206,21 +305,10 @@ describe('orderManager', () => {
 
     it('removes order when CLOB returns null and order is well past TTL', async () => {
       const redis = makeRedis();
-      const order = {
+      const order = makeOrder({
         orderId: 'order-ancient',
-        marketId: 'mkt-1',
-        conditionId: 'cond-1',
-        tokenId: 'tok-yes',
-        clobTokenIds: ['tok-yes', 'tok-no'],
-        direction: 'YES',
-        price: 0.51,
-        size: 10,
-        sizeUsd: 5.1,
-        placedAt: new Date(Date.now() - 700_000).toISOString(), // 11.7 min ago (> 2×300s TTL)
-        tickSize: '0.01',
-        negRisk: false,
-        question: 'Will X?',
-      };
+        placedAt: new Date(Date.now() - 700_000).toISOString(), // > 2×300s TTL
+      });
       redis.hgetall.mockResolvedValue({ 'order-ancient': JSON.stringify(order) });
       mockGetOrder.mockResolvedValue(null);
 
@@ -233,7 +321,7 @@ describe('orderManager', () => {
   });
 
   describe('placeRestingOrder', () => {
-    it('places a GTC post-only limit buy inside the spread', async () => {
+    it('places a GTC post-only buy at the quote price and persists fee params for fill-time estimates', async () => {
       const redis = makeRedis();
       mockSubmitLimit.mockResolvedValue({
         success: true,
@@ -241,49 +329,127 @@ describe('orderManager', () => {
       });
 
       const candidate = makeCandidate();
+      const quote = makeQuote({ direction: 'NO', tokenId: 'tok-no', price: 0.59 });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const order = await placeRestingOrder(redis as any, candidate, 5);
+      const order = await placeRestingOrder(redis as any, candidate, quote, 5);
 
       expect(order).not.toBeNull();
       expect(order!.orderId).toBe('order-new');
-      expect(order!.price).toBe(0.51); // bestBid(0.50) + tick(0.01) = 0.51
+      expect(order!.direction).toBe('NO');
+      expect(order!.tokenId).toBe('tok-no');
+      expect(order!.price).toBe(0.59); // quote price used verbatim — selector owns pricing
+      expect(order!.feeRateBps).toBe(1000);
+      expect(order!.rebateShare).toBe(0.25);
       expect(mockSubmitLimit).toHaveBeenCalledWith(
         expect.objectContaining({
-          tokenId: 'tok-yes',
-          price: 0.51,
+          tokenId: 'tok-no',
+          price: 0.59,
           orderType: 'GTC',
           postOnly: true,
         }),
       );
       expect(redis.hset).toHaveBeenCalled();
+      const stats = statCalls(redis);
+      const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'orders_placed', by: 1 });
+      expect(stats).toContainEqual({ key: 'rebate:stats:market:mkt-1', field: 'orders_placed', by: 1 });
+      expect(stats).toContainEqual({ key: todayKey, field: 'orders_placed', by: 1 });
     });
 
-    it('returns null when order submission fails', async () => {
+    it('returns null and counts a place-failure when order submission fails', async () => {
       const redis = makeRedis();
-      mockSubmitLimit.mockResolvedValue({ success: false, error: 'insufficient_balance' });
+      mockSubmitLimit.mockResolvedValue({ success: false, error: 'order crosses book' });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const order = await placeRestingOrder(redis as any, makeCandidate(), 5);
+      const order = await placeRestingOrder(redis as any, makeCandidate(), makeQuote(), 5);
       expect(order).toBeNull();
+      const stats = statCalls(redis);
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'place_failures', by: 1 });
     });
 
-    it('caps price below bestAsk to ensure post-only', async () => {
+    it('rejects degenerate quote prices', async () => {
       const redis = makeRedis();
-      mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-tight' });
-
-      // Very tight spread: bid=0.50, ask=0.51, tick=0.01
-      // bestBid + tick = 0.51 = bestAsk → must be capped to bestAsk - tick = 0.50
-      const candidate = makeCandidate({ bestBid: 0.50, bestAsk: 0.51 });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const order = await placeRestingOrder(redis as any, candidate, 5);
-
-      expect(order).not.toBeNull();
-      expect(order!.price).toBe(0.50); // capped: min(0.51, 0.51-0.01) = 0.50
+      const r = redis as any;
+      expect(await placeRestingOrder(r, makeCandidate(), makeQuote({ price: 0 }), 5)).toBeNull();
+      expect(await placeRestingOrder(r, makeCandidate(), makeQuote({ price: 1 }), 5)).toBeNull();
+      expect(mockSubmitLimit).not.toHaveBeenCalled();
     });
   });
 
-  describe('getDeployedUsd', () => {
-    it('sums sizeUsd from all tracked orders', async () => {
+  describe('cancelForReprice', () => {
+    it('cancels, removes tracking, and counts a reprice on confirmed cancel', async () => {
+      const redis = makeRedis();
+      mockCancelOrder.mockResolvedValue(true);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ok = await cancelForReprice(redis as any, makeOrder());
+
+      expect(ok).toBe(true);
+      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-1');
+      const stats = statCalls(redis);
+      const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'reprice_cancels', by: 1 });
+      expect(stats).toContainEqual({ key: todayKey, field: 'reprice_cancels', by: 1 });
+    });
+
+    it('keeps the original order when cancel fails and the order is still live', async () => {
+      const redis = makeRedis();
+      mockCancelOrder.mockResolvedValue(false);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockGetOrder.mockResolvedValue({ status: 'LIVE' } as any);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ok = await cancelForReprice(redis as any, makeOrder());
+
+      expect(ok).toBe(false);
+      expect(redis.hdel).not.toHaveBeenCalled();
+    });
+
+    it('treats a cancel-failure with confirmed-cancelled recheck as success', async () => {
+      const redis = makeRedis();
+      mockCancelOrder.mockResolvedValue(false);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockGetOrder.mockResolvedValue({ status: 'CANCELED' } as any);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ok = await cancelForReprice(redis as any, makeOrder());
+
+      expect(ok).toBe(true);
+      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-1');
+    });
+  });
+
+  describe('order map helpers', () => {
+    it('findRestingOrder matches on market AND direction (two-sided quoting)', async () => {
+      const redis = makeRedis();
+      const yes = makeOrder({ orderId: 'o-yes', direction: 'YES' });
+      const no = makeOrder({ orderId: 'o-no', direction: 'NO' });
+      redis.hgetall.mockResolvedValue({
+        'o-yes': JSON.stringify(yes),
+        'o-no': JSON.stringify(no),
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const orders = await loadRestingOrders(redis as any);
+
+      expect(findRestingOrder(orders, 'mkt-1', 'YES')?.orderId).toBe('o-yes');
+      expect(findRestingOrder(orders, 'mkt-1', 'NO')?.orderId).toBe('o-no');
+      expect(findRestingOrder(orders, 'mkt-other', 'YES')).toBeNull();
+    });
+
+    it('deployedUsd and deployedUsdForMarket sum the loaded map', () => {
+      const orders = new Map<string, RestingOrder>([
+        ['a', makeOrder({ orderId: 'a', marketId: 'mkt-1', sizeUsd: 5 })],
+        ['b', makeOrder({ orderId: 'b', marketId: 'mkt-1', sizeUsd: 5, direction: 'NO' })],
+        ['c', makeOrder({ orderId: 'c', marketId: 'mkt-2', sizeUsd: 10 })],
+      ]);
+
+      expect(deployedUsd(orders)).toBe(20);
+      expect(deployedUsdForMarket(orders, 'mkt-1')).toBe(10);
+      expect(deployedUsdForMarket(orders, 'mkt-2')).toBe(10);
+    });
+
+    it('getDeployedUsd sums sizeUsd from all tracked orders (Redis-backed)', async () => {
       const redis = makeRedis();
       redis.hgetall.mockResolvedValue({
         'order-1': JSON.stringify({ sizeUsd: 5 }),
