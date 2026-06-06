@@ -91,6 +91,22 @@ describe('planPairAction — fresh pairs (P0-1 atomic preflight)', () => {
     expect(plan).toEqual({ kind: 'skip', reason: 'fresh_single_not_allowed' });
   });
 
+  it('blocked quote + one fresh quote in two-sided mode still fails closed', () => {
+    // The blocked-gating relaxation (one-sided fix) must not weaken this:
+    // a fresh single in two-sided mode is never placed, whatever blocked it.
+    const plan = planPairAction(
+      makeSnapshot({
+        actionableQuotes: [
+          makeQuote({ direction: 'YES', price: 0.39 }),
+          makeQuote({ direction: 'NO', tokenId: 'tok-no', price: 0.57 }),
+        ],
+        heldOpposite: (dir) => (dir === 'NO' ? { shares: 8.19, price: undefined } : null),
+      }),
+    );
+
+    expect(plan).toEqual({ kind: 'skip', reason: 'fresh_single_not_allowed' });
+  });
+
   it('skips the whole market when combined cost breaches the ceiling', () => {
     const plan = planPairAction(
       makeSnapshot({
