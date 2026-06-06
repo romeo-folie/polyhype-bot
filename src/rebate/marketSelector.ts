@@ -133,6 +133,7 @@ export async function selectRebateMarkets(
     liquidity: number;
     endDate: string | null;
   }[] = [];
+  let liveGameSkips = 0;
 
   for (const market of markets) {
     // Binary-only gate.
@@ -151,6 +152,18 @@ export async function selectRebateMarkets(
     if (market.endDate) {
       const end = new Date(market.endDate).getTime();
       if (!isNaN(end) && end < Date.now()) continue;
+    }
+
+    // In-play gate: skip sports markets whose game has started. Live games
+    // carry the most informed taker flow — resting bids get hit precisely
+    // when the game turns (day-one naked legs ran 4W/10L). The fee-equiv
+    // ranking otherwise ranks these FIRST, because informed flow is flow.
+    if (cfg.REBATE_EXCLUDE_LIVE_GAMES && market.gameStartTime) {
+      const start = new Date(market.gameStartTime).getTime();
+      if (!isNaN(start) && start <= Date.now()) {
+        liveGameSkips++;
+        continue;
+      }
     }
 
     // Recent (24h) volume when the universe provides it; lifetime volume
@@ -368,6 +381,7 @@ export async function selectRebateMarkets(
   logger.info('[rebate] market selection complete', {
     universe: universeSource,
     universeSize: markets.length,
+    liveGameSkips,
     preFiltered: preFiltered.length,
     fetched: toFetch.length,
     passedGates: candidates.length,

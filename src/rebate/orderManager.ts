@@ -415,21 +415,53 @@ export async function cancelForReprice(redis: Redis, order: RestingOrder): Promi
   return true;
 }
 
+export interface PairTarget {
+  /** Share count of the leg being paired against. */
+  matchShares: number;
+  /**
+   * Entry price (held inventory) or posted price (resting order) of the leg
+   * being paired against — the input to the pair-cost ceiling. A pair is
+   * riskless only when combined cost < $1; completing one above that LOCKS a
+   * loss (live failure 2026-06-06: held YES@0.61 pair-completed at NO@0.65 →
+   * 1.26 combined → guaranteed −$2 — the market had moved and the second leg
+   * chased it).
+   */
+  partnerCost: number;
+}
+
 /**
- * Pair-matching share target for a quote, by priority:
+ * Pair-matching target for a quote, by priority:
  *   1. held opposite-side inventory (a prior fill waiting to be paired),
  *   2. a resting opposite-side order (match what's already on the book),
  *   3. the first leg placed for this market in the current cycle.
- * Returns undefined when nothing exists to match — the leg is sized fresh.
+ *
+ * Returns:
+ *   - a PairTarget when there is something valid to pair against,
+ *   - `null` (PAIRING BLOCKED) when held opposite inventory EXISTS but its
+ *     entry price is unusable — falling through to a resting order would
+ *     mis-size against the wrong inventory, and placing fresh would re-create
+ *     the oversized-pair problem; the caller must skip the leg entirely,
+ *   - `undefined` when nothing exists to pair against — the leg is fresh.
  * (Pure — extracted so the priority order is directly testable.)
  */
-export function resolveMatchShares(
-  heldOppositeShares: number | null | undefined,
-  restingOppositeShares: number | null | undefined,
-  cycleLegShares: number | null | undefined,
-): number | undefined {
-  for (const v of [heldOppositeShares, restingOppositeShares, cycleLegShares]) {
-    if (typeof v === 'number' && isFinite(v) && v > 0) return v;
+export function resolvePairTarget(
+  heldOpposite: { shares: number | null | undefined; price: number | null | undefined } | null,
+  restingOpposite: { shares: number; price: number } | null,
+  cycleLeg: { shares: number; price: number } | null,
+): PairTarget | null | undefined {
+  const valid = (v: unknown): v is number => typeof v === 'number' && isFinite(v) && v > 0;
+  if (heldOpposite && valid(heldOpposite.shares)) {
+    if (valid(heldOpposite.price)) {
+      return { matchShares: heldOpposite.shares, partnerCost: heldOpposite.price };
+    }
+    // Held inventory with an unusable cost basis: the pair-cost ceiling
+    // cannot be evaluated — fail closed.
+    return null;
+  }
+  for (const c of [restingOpposite, cycleLeg]) {
+    if (c && valid(c.shares) && valid(c.price)) {
+      return { matchShares: c.shares, partnerCost: c.price };
+    }
   }
   return undefined;
 }
@@ -444,6 +476,13 @@ export interface RestingOrderSizing {
    * When set, the leg is sized to min(matchShares, maxUsd/price).
    */
   matchShares?: number | undefined;
+  /**
+   * Partner leg's cost (see PairTarget.partnerCost). When set together with
+   * matchShares, the leg is REJECTED unless
+   * quote.price + partnerCost ≤ 1 − REBATE_MIN_COMBINED_EDGE — completing a
+   * pair above that locks a guaranteed loss.
+   */
+  partnerCost?: number | undefined;
 }
 
 /**
@@ -461,6 +500,26 @@ export async function placeRestingOrder(
   const cfg = loadConfig();
   const price = quote.price;
   if (!isFinite(price) || price <= 0 || price >= 1) return null;
+
+  // Pair-cost ceiling: never complete a pair whose combined cost locks a
+  // loss. The selector's combined guard only covers fresh two-sided quotes in
+  // ONE snapshot — legs filled/repriced across cycles chase a moved market,
+  // which is how 8 of the first 12 live pairs combined above $1.00.
+  if (sizing.matchShares != null && sizing.partnerCost != null) {
+    const ceiling = 1 - cfg.REBATE_MIN_COMBINED_EDGE;
+    if (price + sizing.partnerCost > ceiling + 1e-9) {
+      logger.info('[rebate] pair leg skipped — combined cost above ceiling', {
+        marketId: candidate.marketId,
+        direction: quote.direction,
+        quotePrice: price,
+        partnerCost: sizing.partnerCost,
+        combined: +(price + sizing.partnerCost).toFixed(4),
+        ceiling: +ceiling.toFixed(4),
+      });
+      await bumpStat(redis, candidate.marketId, 'pair_cost_skips');
+      return null;
+    }
+  }
 
   let size = sizing.maxUsd / price;
   if (sizing.matchShares != null) size = Math.min(size, sizing.matchShares);

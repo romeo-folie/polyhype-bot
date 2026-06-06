@@ -41,7 +41,7 @@ import {
   deployedUsdForMarket,
   placeRestingOrder,
   cancelForReprice,
-  resolveMatchShares,
+  resolvePairTarget,
 } from '../rebate/orderManager.js';
 import { maybeSendDailySummary } from '../rebate/rebateChecker.js';
 
@@ -92,7 +92,7 @@ async function main(): Promise<void> {
       // shares directional — the weather-bracket oversizing shape, PR #442).
       outer: for (const candidate of candidates) {
         // Shares of the first leg placed for this candidate THIS cycle.
-        let cycleLegShares: number | null = null;
+        let cycleLeg: { shares: number; price: number } | null = null;
         for (const quote of candidate.quotes) {
           const existing = findRestingOrder(orders, candidate.marketId, quote.direction);
           if (existing) {
@@ -118,19 +118,39 @@ async function main(): Promise<void> {
           if (await hasOpenPosition(redis, candidate.marketId, quote.direction)) continue;
 
           // Pair-matching target: held opposite inventory beats a resting
-          // opposite order beats this cycle's first leg.
+          // opposite order beats this cycle's first leg. partnerCost feeds the
+          // pair-cost ceiling in placeRestingOrder — a pairing leg that would
+          // push the combined cost above 1 − REBATE_MIN_COMBINED_EDGE is
+          // skipped, never placed (locking a loss is worse than staying naked
+          // on a leg we already hold).
           const oppositeDirection = quote.direction === 'YES' ? 'NO' : 'YES';
           const heldOpposite = await getPosition(redis, candidate.marketId, oppositeDirection);
           const restingOpposite = findRestingOrder(orders, candidate.marketId, oppositeDirection);
-          const matchShares = resolveMatchShares(
-            heldOpposite?.sharesHeld,
-            restingOpposite?.size,
-            cycleLegShares,
+          const pair = resolvePairTarget(
+            heldOpposite
+              ? { shares: heldOpposite.sharesHeld, price: heldOpposite.entryPrice }
+              : null,
+            restingOpposite
+              ? { shares: restingOpposite.size, price: restingOpposite.price }
+              : null,
+            cycleLeg,
           );
+
+          // null = pairing BLOCKED: held opposite inventory exists but its
+          // cost basis is unusable, so the pair-cost ceiling can't be
+          // evaluated. Skip the leg entirely (fail closed).
+          if (pair === null) {
+            logger.warn('[rebate] pair leg skipped — held inventory has unusable cost basis', {
+              marketId: candidate.marketId,
+              direction: quote.direction,
+              heldEntryPrice: heldOpposite?.entryPrice,
+            });
+            continue;
+          }
 
           // Fresh legs need a full order's budget; pairing legs only their
           // matched cost (placeRestingOrder enforces the CLOB minimum).
-          if (matchShares == null && remaining < cfg.REBATE_ORDER_SIZE_USD) continue;
+          if (pair === undefined && remaining < cfg.REBATE_ORDER_SIZE_USD) continue;
 
           // Enforce per-market exposure cap across both directions.
           if (deployedUsdForMarket(orders, candidate.marketId) >= cfg.REBATE_MAX_PER_MARKET_USD) {
@@ -148,14 +168,18 @@ async function main(): Promise<void> {
           }
 
           const maxUsd = Math.min(cfg.REBATE_ORDER_SIZE_USD, remaining);
-          const order = await placeRestingOrder(redis, candidate, quote, { maxUsd, matchShares });
+          const order = await placeRestingOrder(redis, candidate, quote, {
+            maxUsd,
+            matchShares: pair?.matchShares,
+            partnerCost: pair?.partnerCost,
+          });
 
           if (order) {
             await recordGlobalTrade(redis, 'polymarket');
             orders.set(order.orderId, order);
             remaining -= order.sizeUsd;
             placed++;
-            if (cycleLegShares === null) cycleLegShares = order.size;
+            if (cycleLeg === null) cycleLeg = { shares: order.size, price: order.price };
           }
         }
       }
