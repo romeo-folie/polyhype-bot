@@ -50,11 +50,8 @@ const UNIVERSE_SIZE = 200;
 const UNIVERSE_PAGE_SIZE = 100;
 
 /** Fields the prefilter consumes — satisfied by both GammaMarket (primary
- * universe) and CachedMarket (fallback; lacks volume24hr/gameStartTime). */
-type UniverseMarket = CachedMarket & {
-  volume24hr?: string | number;
-  gameStartTime?: string | null;
-};
+ * universe) and CachedMarket (fallback; lacks volume24hr). */
+type UniverseMarket = CachedMarket & { volume24hr?: string | number };
 
 /**
  * Candidate universe: active markets ordered by trailing-24h volume. Falls

@@ -404,6 +404,24 @@ describe('selectRebateMarkets', () => {
       expect(selected.map((c) => c.marketId).sort()).toEqual(['no-game-time', 'pre-game']);
     });
 
+    it('also applies the in-play gate on the cache-fallback path', async () => {
+      // CachedMarket carries gameStartTime since the strict-pairs change —
+      // the gate must keep working when Gamma is down. (Entries cached before
+      // the field rolled out lack it and pass; TTL-bounded.)
+      mockGetActiveMarkets.mockRejectedValue(new Error('gamma down'));
+      mockGetCachedMarkets.mockResolvedValue([
+        makeMarket({
+          id: 'cached-live-game',
+          gameStartTime: new Date(Date.now() - 3600_000).toISOString(),
+        }),
+        makeMarket({ id: 'cached-pre-game', conditionId: '0xcond2' }),
+      ]);
+
+      const selected = await selectRebateMarkets(redis, 10);
+
+      expect(selected.map((c) => c.marketId)).toEqual(['cached-pre-game']);
+    });
+
     it('keeps in-play markets when REBATE_EXCLUDE_LIVE_GAMES=false', async () => {
       mockLoadConfig.mockReturnValue({ ...baseRebateConfig, REBATE_EXCLUDE_LIVE_GAMES: false });
       mockGetActiveMarkets.mockResolvedValue([

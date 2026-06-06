@@ -31,6 +31,7 @@ export type CachedMarket = Pick<
   | 'volume'
   | 'feesEnabled'
   | 'feeType'
+  | 'gameStartTime'
 >;
 
 const WATCHLIST_KEY = 'watchlist:dynamic_keywords';
@@ -148,6 +149,10 @@ export async function refreshDynamicWatchlist(redis: Redis): Promise<number> {
           volume: m.volume,
           feesEnabled: m.feesEnabled,
           feeType: m.feeType,
+          // Lets the rebate selector's in-play gate keep working on the
+          // cache-fallback path (entries cached before this field rolled out
+          // simply lack it and pass the gate — acceptable, TTL-bounded).
+          gameStartTime: m.gameStartTime,
         }));
         await redis.set(MARKET_CACHE_KEY, JSON.stringify(slim), 'EX', WATCHLIST_TTL_SECONDS);
       } catch (err: unknown) {

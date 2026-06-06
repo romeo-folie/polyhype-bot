@@ -434,22 +434,33 @@ export interface PairTarget {
  *   1. held opposite-side inventory (a prior fill waiting to be paired),
  *   2. a resting opposite-side order (match what's already on the book),
  *   3. the first leg placed for this market in the current cycle.
- * Returns undefined when nothing exists to pair against — the leg is fresh.
+ *
+ * Returns:
+ *   - a PairTarget when there is something valid to pair against,
+ *   - `null` (PAIRING BLOCKED) when held opposite inventory EXISTS but its
+ *     entry price is unusable — falling through to a resting order would
+ *     mis-size against the wrong inventory, and placing fresh would re-create
+ *     the oversized-pair problem; the caller must skip the leg entirely,
+ *   - `undefined` when nothing exists to pair against — the leg is fresh.
  * (Pure — extracted so the priority order is directly testable.)
  */
 export function resolvePairTarget(
   heldOpposite: { shares: number | null | undefined; price: number | null | undefined } | null,
   restingOpposite: { shares: number; price: number } | null,
   cycleLeg: { shares: number; price: number } | null,
-): PairTarget | undefined {
-  for (const c of [heldOpposite, restingOpposite, cycleLeg]) {
-    if (!c) continue;
-    const { shares, price } = c;
-    if (
-      typeof shares === 'number' && isFinite(shares) && shares > 0 &&
-      typeof price === 'number' && isFinite(price) && price > 0
-    ) {
-      return { matchShares: shares, partnerCost: price };
+): PairTarget | null | undefined {
+  const valid = (v: unknown): v is number => typeof v === 'number' && isFinite(v) && v > 0;
+  if (heldOpposite && valid(heldOpposite.shares)) {
+    if (valid(heldOpposite.price)) {
+      return { matchShares: heldOpposite.shares, partnerCost: heldOpposite.price };
+    }
+    // Held inventory with an unusable cost basis: the pair-cost ceiling
+    // cannot be evaluated — fail closed.
+    return null;
+  }
+  for (const c of [restingOpposite, cycleLeg]) {
+    if (c && valid(c.shares) && valid(c.price)) {
+      return { matchShares: c.shares, partnerCost: c.price };
     }
   }
   return undefined;

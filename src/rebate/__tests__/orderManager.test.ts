@@ -466,10 +466,22 @@ describe('orderManager', () => {
       expect(
         resolvePairTarget({ shares: NaN, price: 0.5 }, null, { shares: 7, price: 0.4 }),
       ).toEqual({ matchShares: 7, partnerCost: 0.4 });
-      // Held position with shares but no usable entry price falls through.
+    });
+
+    it('BLOCKS pairing (null) when held inventory exists with an unusable cost basis', () => {
+      // The ceiling can't be evaluated without the held entry price. Falling
+      // through to the resting order would size against the WRONG inventory
+      // (13.5 resting vs 8.5 held = 5 directional shares); placing fresh
+      // would recreate the oversized pair. Fail closed.
       expect(
-        resolvePairTarget({ shares: 8.5, price: undefined }, null, null),
-      ).toBeUndefined();
+        resolvePairTarget(
+          { shares: 8.5, price: undefined },
+          { shares: 13.5, price: 0.37 },
+          { shares: 10, price: 0.5 },
+        ),
+      ).toBeNull();
+      expect(resolvePairTarget({ shares: 8.5, price: 0 }, null, null)).toBeNull();
+      expect(resolvePairTarget({ shares: 8.5, price: NaN }, null, null)).toBeNull();
     });
   });
 

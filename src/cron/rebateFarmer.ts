@@ -136,9 +136,21 @@ async function main(): Promise<void> {
             cycleLeg,
           );
 
+          // null = pairing BLOCKED: held opposite inventory exists but its
+          // cost basis is unusable, so the pair-cost ceiling can't be
+          // evaluated. Skip the leg entirely (fail closed).
+          if (pair === null) {
+            logger.warn('[rebate] pair leg skipped — held inventory has unusable cost basis', {
+              marketId: candidate.marketId,
+              direction: quote.direction,
+              heldEntryPrice: heldOpposite?.entryPrice,
+            });
+            continue;
+          }
+
           // Fresh legs need a full order's budget; pairing legs only their
           // matched cost (placeRestingOrder enforces the CLOB minimum).
-          if (pair == null && remaining < cfg.REBATE_ORDER_SIZE_USD) continue;
+          if (pair === undefined && remaining < cfg.REBATE_ORDER_SIZE_USD) continue;
 
           // Enforce per-market exposure cap across both directions.
           if (deployedUsdForMarket(orders, candidate.marketId) >= cfg.REBATE_MAX_PER_MARKET_USD) {
