@@ -215,31 +215,78 @@ export interface ReconcileResult {
 /**
  * Cancel a tracked resting order on the CLOB and remove it from tracking.
  * Shared by the fresh-pair rollback (leg 2 failed after leg 1 placed) and the
- * orphan-leg sweep. When the CLOB cancel cannot be confirmed the order stays
- * TRACKED so the next reconcile retries — never drop tracking for an order
- * that may still be live.
+ * orphan-leg sweep.
+ *
+ * Fail-closed accounting (PR #459 review):
+ *   - 'cancelled'    — confirmed dead with ZERO fill; untracked.
+ *   - 'filled'       — the order (partially) FILLED before/while we cancelled;
+ *                      the fill is recorded into the position ledger + rebate
+ *                      stats first, then untracked. Capital became inventory —
+ *                      callers must NOT refund its budget.
+ *   - 'kept_tracked' — anything uncertain: cancel unconfirmed AND the order
+ *                      may still be live, or the post-cancel recheck failed
+ *                      (getClobOrder returns null for transient errors too).
+ *                      Tracking is kept so the next reconcile retries; never
+ *                      drop visibility of an order that may be live or filled.
  */
 export async function cancelRestingOrder(
   redis: Redis,
   order: RestingOrder,
   reason: 'rollback' | 'orphan',
-): Promise<'cancelled' | 'cancel_failed_still_tracked'> {
+): Promise<'cancelled' | 'filled' | 'kept_tracked'> {
   const cancelled = await cancelClobOrder(order.orderId);
-  if (!cancelled) {
-    const recheck = await getClobOrder(order.orderId);
-    const recheckStatus = String(recheck?.status ?? '').toLowerCase();
-    const genuinelyGone =
-      recheck === null || ['cancelled', 'canceled', 'expired', 'matched'].includes(recheckStatus);
-    if (!genuinelyGone) {
-      logger.error('[rebate] cancel failed — order remains tracked for next reconcile', {
-        orderId: order.orderId,
-        marketId: order.marketId,
-        direction: order.direction,
-        reason,
-      });
-      return 'cancel_failed_still_tracked';
-    }
+
+  // ALWAYS recheck — even after a successful cancel the order can have
+  // partially filled first, and that fill must reach the ledger.
+  const recheck = await getClobOrder(order.orderId);
+  if (recheck === null) {
+    // Not-found and transient fetch errors are indistinguishable here.
+    // Keep tracked; reconcile's age-based heuristic resolves truly-gone
+    // orders, and a live/filled order gets processed normally next cycle.
+    logger.warn('[rebate] cancel recheck unavailable — order remains tracked for next reconcile', {
+      orderId: order.orderId,
+      marketId: order.marketId,
+      direction: order.direction,
+      cancelAccepted: cancelled,
+      reason,
+    });
+    return 'kept_tracked';
   }
+
+  const matched = parseFloat(recheck.size_matched ?? '0');
+  if (isFinite(matched) && matched > 0) {
+    // Filled (fully or partially) before the cancel took hold. Record the
+    // fill FIRST — losing it would leave invisible naked inventory, the
+    // exact exposure this helper exists to contain.
+    const original = parseFloat(recheck.original_size ?? String(order.size));
+    await recordFilledOrder(redis, order, matched);
+    await removeRestingOrder(redis, order.orderId, order.marketId);
+    await recordLifetime(redis, order);
+    await bumpStat(redis, order.marketId, matched >= original - 1e-9 ? 'fills' : 'partial_fills');
+    logger.warn('[rebate] order filled during cancel — fill recorded, inventory now held', {
+      orderId: order.orderId,
+      marketId: order.marketId,
+      direction: order.direction,
+      sharesFilled: matched,
+      reason,
+    });
+    return 'filled';
+  }
+
+  const recheckStatus = String(recheck.status ?? '').toLowerCase();
+  const terminal = ['cancelled', 'canceled', 'expired'].includes(recheckStatus);
+  if (!cancelled && !terminal) {
+    logger.error('[rebate] cancel failed — order remains tracked for next reconcile', {
+      orderId: order.orderId,
+      marketId: order.marketId,
+      direction: order.direction,
+      recheckStatus,
+      reason,
+    });
+    return 'kept_tracked';
+  }
+
+  // Confirmed dead with zero fill.
   await removeRestingOrder(redis, order.orderId, order.marketId);
   await recordLifetime(redis, order);
   await bumpStat(redis, order.marketId, reason === 'rollback' ? 'pair_rollbacks' : 'orphan_leg_cancels');
@@ -281,6 +328,10 @@ async function sweepOrphanLegs(
       if (outcome === 'cancelled') {
         orders.delete(order.orderId);
         orphanCancels.push(order);
+      } else if (outcome === 'filled') {
+        // Filled during the sweep — the fill is recorded and the order
+        // untracked; it is held inventory now, not an orphan cancel.
+        orders.delete(order.orderId);
       } else {
         errors++;
       }
@@ -393,8 +444,20 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
             logger.warn('[rebate] stale cancel + recheck failed, will retry', { orderId });
             continue;
           }
+          // Filled while we tried to cancel it (race between the top-of-loop
+          // fetch and the cancel): keep TRACKED — the next cycle's fill
+          // detection records the position + rebate stats properly. Removing
+          // here would silently drop the fill from the ledger (PR #459 review).
+          const recheckMatched = parseFloat(recheck.size_matched ?? '0');
+          if (isFinite(recheckMatched) && recheckMatched > 0) {
+            logger.warn('[rebate] stale order filled during cancel — leaving for fill detection', {
+              orderId,
+              sharesFilled: recheckMatched,
+            });
+            continue;
+          }
           const recheckStatus = String(recheck.status ?? '').toLowerCase();
-          if (!['cancelled', 'canceled', 'expired', 'matched'].includes(recheckStatus)) {
+          if (!['cancelled', 'canceled', 'expired'].includes(recheckStatus)) {
             logger.warn('[rebate] stale cancel failed, will retry', { orderId });
             continue;
           }

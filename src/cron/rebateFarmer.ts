@@ -258,10 +258,22 @@ export async function main(): Promise<void> {
               remaining += orderA.sizeUsd;
               placed--;
               rollbacks++;
+            } else if (rollback === 'filled') {
+              // Leg A filled during the rollback — its fill is recorded and
+              // the capital became held inventory (no budget refund). Future
+              // cycles attempt pair completion against it under the ceiling.
+              orders.delete(orderA.orderId);
+              placed--;
+              logger.warn('[rebate] leg A filled during rollback — now held inventory awaiting pair completion', {
+                marketId: candidate.marketId,
+                legAOrderId: orderA.orderId,
+                legADirection: orderA.direction,
+              });
             } else {
-              // Order may still be live and is still tracked — the orphan
-              // sweep retries next cycle. Do NOT refund budget for it.
-              logger.error('[rebate] ROLLBACK FAILED — leg A remains tracked for the orphan sweep', {
+              // kept_tracked: order may still be live or its state is
+              // unverifiable — tracking retained; reconcile/orphan sweep
+              // resolves next cycle. Do NOT refund budget for it.
+              logger.error('[rebate] ROLLBACK UNCONFIRMED — leg A remains tracked for next reconcile', {
                 marketId: candidate.marketId,
                 legAOrderId: orderA.orderId,
               });

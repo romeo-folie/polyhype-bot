@@ -296,6 +296,30 @@ describe('orderManager', () => {
       expect(stats).toContainEqual({ key: todayKey, field: 'stale_cancels', by: 1 });
     });
 
+    it('PR-459 review: a stale order that FILLED during its cancel stays tracked for fill detection', async () => {
+      const redis = makeRedis();
+      const order = makeOrder({
+        orderId: 'order-stale-filled',
+        placedAt: new Date(Date.now() - 10 * 3600 * 1000).toISOString(), // way past TTL
+      });
+      redis.hgetall.mockResolvedValue({ 'order-stale-filled': JSON.stringify(order) });
+      // Top-of-loop fetch: still live, no fill yet → proceeds to stale-cancel.
+      // Recheck after the failed cancel: it MATCHED in the race.
+      mockGetOrder
+        .mockResolvedValueOnce({ status: 'LIVE', size_matched: '0', original_size: '12.8' })
+        .mockResolvedValueOnce({ status: 'MATCHED', size_matched: '12.8', original_size: '12.8' });
+      mockCancelOrder.mockResolvedValue(false);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await reconcileOrders(redis as any);
+
+      // NOT removed as stale — next cycle's fill detection records the
+      // position; removing here would drop the fill from the ledger.
+      expect(result.stale).toHaveLength(0);
+      expect(redis.hdel).not.toHaveBeenCalledWith('rebate:orders', 'order-stale-filled');
+      expect(mockRecordPosition).not.toHaveBeenCalled();
+    });
+
     it('skips recently-placed orders when CLOB returns null (transient error)', async () => {
       const redis = makeRedis();
       const order = makeOrder({ orderId: 'order-gone' }); // fresh — within 2×TTL
@@ -738,10 +762,11 @@ describe('orderManager', () => {
   });
 
   describe('cancelRestingOrder', () => {
-    it("reason='rollback' cancels, untracks and bumps pair_rollbacks", async () => {
+    it("reason='rollback' cancels cleanly (zero fill), untracks and bumps pair_rollbacks", async () => {
       const redis = makeRedis();
       const order = makeOrder({ orderId: 'order-rb' });
       mockCancelOrder.mockResolvedValue(true);
+      mockGetOrder.mockResolvedValue({ status: 'CANCELED', size_matched: '0', original_size: '12.8' });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const outcome = await cancelRestingOrder(redis as any, order, 'rollback');
@@ -756,11 +781,11 @@ describe('orderManager', () => {
       expect(stats).toContainEqual({ key: todayKey, field: 'pair_rollbacks', by: 1 });
     });
 
-    it('treats a failed cancel whose recheck shows the order gone as cancelled', async () => {
+    it('treats a failed cancel whose recheck shows the order gone (zero fill) as cancelled', async () => {
       const redis = makeRedis();
       const order = makeOrder({ orderId: 'order-already-gone' });
       mockCancelOrder.mockResolvedValue(false);
-      mockGetOrder.mockResolvedValue({ status: 'CANCELED' });
+      mockGetOrder.mockResolvedValue({ status: 'CANCELED', size_matched: '0', original_size: '12.8' });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const outcome = await cancelRestingOrder(redis as any, order, 'rollback');
@@ -769,17 +794,94 @@ describe('orderManager', () => {
       expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-already-gone');
     });
 
-    it('returns cancel_failed_still_tracked when the order is verifiably still live', async () => {
+    it('keeps tracking when the order is verifiably still live', async () => {
       const redis = makeRedis();
       const order = makeOrder({ orderId: 'order-live' });
       mockCancelOrder.mockResolvedValue(false);
-      mockGetOrder.mockResolvedValue({ status: 'LIVE' });
+      mockGetOrder.mockResolvedValue({ status: 'LIVE', size_matched: '0', original_size: '12.8' });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const outcome = await cancelRestingOrder(redis as any, order, 'rollback');
 
-      expect(outcome).toBe('cancel_failed_still_tracked');
+      expect(outcome).toBe('kept_tracked');
       expect(redis.hdel).not.toHaveBeenCalled();
+    });
+
+    it('PR-459 review: keeps tracking on cancel-fail + recheck-null (transient, NOT genuinely gone)', async () => {
+      // getClobOrder returns null for transient fetch failures too — dropping
+      // tracking here could lose visibility of a LIVE order.
+      const redis = makeRedis();
+      const order = makeOrder({ orderId: 'order-blip' });
+      mockCancelOrder.mockResolvedValue(false);
+      mockGetOrder.mockResolvedValue(null);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const outcome = await cancelRestingOrder(redis as any, order, 'rollback');
+
+      expect(outcome).toBe('kept_tracked');
+      expect(redis.hdel).not.toHaveBeenCalled();
+      expect(mockRecordPosition).not.toHaveBeenCalled();
+    });
+
+    it('PR-459 review: keeps tracking when cancel SUCCEEDED but the recheck is unavailable', async () => {
+      // The order is dead, but whether it partially filled first is unknown —
+      // reconcile resolves it next cycle with full fill accounting.
+      const redis = makeRedis();
+      const order = makeOrder({ orderId: 'order-cancelled-blind' });
+      mockCancelOrder.mockResolvedValue(true);
+      mockGetOrder.mockResolvedValue(null);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const outcome = await cancelRestingOrder(redis as any, order, 'orphan');
+
+      expect(outcome).toBe('kept_tracked');
+      expect(redis.hdel).not.toHaveBeenCalled();
+    });
+
+    it('PR-459 review: records the fill when the order MATCHED before the cancel took hold', async () => {
+      const redis = makeRedis();
+      const order = makeOrder({ orderId: 'order-raced-fill', direction: 'YES' });
+      mockCancelOrder.mockResolvedValue(false);
+      mockGetOrder.mockResolvedValue({ status: 'MATCHED', size_matched: '12.8', original_size: '12.8' });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const outcome = await cancelRestingOrder(redis as any, order, 'rollback');
+
+      expect(outcome).toBe('filled');
+      // The fill reaches the position ledger BEFORE tracking is dropped —
+      // losing it would create invisible naked inventory.
+      expect(mockRecordPosition).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          marketId: 'mkt-1',
+          direction: 'YES',
+          sharesHeld: 12.8,
+          sourcedFrom: 'rebate-farming',
+        }),
+      );
+      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-raced-fill');
+      const stats = statCalls(redis);
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'fills', by: 1 });
+      // No rollback stat — this was a fill, not a cancel.
+      expect(stats.some((s) => s.field === 'pair_rollbacks')).toBe(false);
+    });
+
+    it('PR-459 review: records a PARTIAL fill after a successful cancel', async () => {
+      const redis = makeRedis();
+      const order = makeOrder({ orderId: 'order-partial', direction: 'YES' });
+      mockCancelOrder.mockResolvedValue(true); // remainder cancelled fine
+      mockGetOrder.mockResolvedValue({ status: 'CANCELED', size_matched: '4.0', original_size: '12.8' });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const outcome = await cancelRestingOrder(redis as any, order, 'rollback');
+
+      expect(outcome).toBe('filled');
+      expect(mockRecordPosition).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ sharesHeld: 4.0 }),
+      );
+      const stats = statCalls(redis);
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'partial_fills', by: 1 });
     });
   });
 });

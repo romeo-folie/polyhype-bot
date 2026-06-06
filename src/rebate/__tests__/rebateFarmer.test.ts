@@ -195,23 +195,44 @@ describe('rebateFarmer main()', () => {
     expect(cycleLog.newOrdersPlaced).toBe(0);
   });
 
-  it('P0-3: a failed rollback keeps leg A tracked and does not refund its budget', async () => {
+  it('P0-3: an unconfirmed rollback keeps leg A tracked and does not refund its budget', async () => {
     const orderA = makeOrder({ orderId: 'order-a', sizeUsd: 5 });
     mockPlaceRestingOrder.mockResolvedValueOnce(orderA).mockResolvedValueOnce(null);
-    mockCancelRestingOrder.mockResolvedValue('cancel_failed_still_tracked');
+    mockCancelRestingOrder.mockResolvedValue('kept_tracked');
 
     await main();
 
     expect(vi.mocked(logger.error)).toHaveBeenCalledWith(
-      expect.stringContaining('ROLLBACK FAILED'),
+      expect.stringContaining('ROLLBACK UNCONFIRMED'),
       expect.objectContaining({ legAOrderId: 'order-a' }),
     );
     const cycleLog = vi.mocked(logger.info).mock.calls.find(
       (c) => c[0] === '[rebate] cycle complete',
     )![1]!;
     // Budget NOT refunded: 40 − 5 = 35 remaining; the leg counts as placed
-    // (it is genuinely resting until the orphan sweep clears it).
+    // (it is genuinely resting until reconcile/orphan sweep clears it).
     expect(cycleLog.budgetRemaining).toBe('35.00');
+    expect(cycleLog.rollbacks).toBe(0);
+  });
+
+  it('P0-3 (PR-459 review): leg A FILLING during rollback keeps the spend and counts no rollback', async () => {
+    const orderA = makeOrder({ orderId: 'order-a', sizeUsd: 5 });
+    mockPlaceRestingOrder.mockResolvedValueOnce(orderA).mockResolvedValueOnce(null);
+    mockCancelRestingOrder.mockResolvedValue('filled');
+
+    await main();
+
+    expect(vi.mocked(logger.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('leg A filled during rollback'),
+      expect.objectContaining({ legAOrderId: 'order-a' }),
+    );
+    const cycleLog = vi.mocked(logger.info).mock.calls.find(
+      (c) => c[0] === '[rebate] cycle complete',
+    )![1]!;
+    // Capital became held inventory: no refund (40 − 5 = 35), no resting
+    // order (placed 0), and NOT a rollback.
+    expect(cycleLog.budgetRemaining).toBe('35.00');
+    expect(cycleLog.newOrdersPlaced).toBe(0);
     expect(cycleLog.rollbacks).toBe(0);
   });
 
