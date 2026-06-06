@@ -9,8 +9,10 @@ vi.mock('../../shared/clob.js', () => ({
   CLOB_MIN_ORDER_USD: 1.0,
 }));
 
+const mockGetPosition = vi.fn();
 vi.mock('../../execution/positionLedger.js', () => ({
   recordPosition: vi.fn(),
+  getPosition: (...args: unknown[]) => mockGetPosition(...args),
 }));
 
 // Foundation from the REAL Zod schema defaults so the mock can't drift from
@@ -57,6 +59,7 @@ import {
   getDeployedUsd,
   loadRestingOrders,
   resolvePairTarget,
+  cancelRestingOrder,
 } from '../orderManager.js';
 import { getClobOrder, cancelClobOrder, submitClobLimitBuy } from '../../shared/clob.js';
 import { recordPosition } from '../../execution/positionLedger.js';
@@ -195,6 +198,9 @@ function makeOrder(overrides: Partial<RestingOrder> = {}): RestingOrder {
 describe('orderManager', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Sweep-neutral default: a held opposite position exists, so the orphan
+    // sweep leaves tracked orders alone. Sweep-specific tests override to null.
+    mockGetPosition.mockResolvedValue({ sharesHeld: 5, entryPrice: 0.5 });
   });
 
   describe('reconcileOrders', () => {
@@ -295,6 +301,9 @@ describe('orderManager', () => {
       const order = makeOrder({ orderId: 'order-gone' }); // fresh — within 2×TTL
       redis.hgetall.mockResolvedValue({ 'order-gone': JSON.stringify(order) });
       mockGetOrder.mockResolvedValue(null);
+      // Held opposite inventory keeps the orphan sweep away from this order —
+      // the test isolates the transient-null handling.
+      mockGetPosition.mockResolvedValue({ sharesHeld: 5, entryPrice: 0.5 });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await reconcileOrders(redis as any);
@@ -655,6 +664,121 @@ describe('orderManager', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const has = await hasRestingOrderForMarket(redis as any, 'mkt-1');
       expect(has).toBe(false);
+    });
+  });
+
+  describe('orphan-leg sweep (via reconcileOrders)', () => {
+    function liveClobOrder(): Record<string, unknown> {
+      return { status: 'LIVE', size_matched: '0', original_size: '12.8' };
+    }
+
+    it('cancels a naked fresh leg: no held opposite, no resting opposite', async () => {
+      const redis = makeRedis();
+      const order = makeOrder({ orderId: 'order-naked', direction: 'YES' });
+      redis.hgetall.mockResolvedValue({ 'order-naked': JSON.stringify(order) });
+      mockGetOrder.mockResolvedValue(liveClobOrder());
+      mockGetPosition.mockResolvedValue(null); // nothing held
+      mockCancelOrder.mockResolvedValue(true);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await reconcileOrders(redis as any);
+
+      expect(result.orphanCancels).toHaveLength(1);
+      expect(mockCancelOrder).toHaveBeenCalledWith('order-naked');
+      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-naked');
+      const stats = statCalls(redis);
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'orphan_leg_cancels', by: 1 });
+    });
+
+    it('spares a pair-completion state: held opposite position exists', async () => {
+      const redis = makeRedis();
+      const order = makeOrder({ orderId: 'order-completion', direction: 'NO' });
+      redis.hgetall.mockResolvedValue({ 'order-completion': JSON.stringify(order) });
+      mockGetOrder.mockResolvedValue(liveClobOrder());
+      mockGetPosition.mockResolvedValue({ sharesHeld: 8.19, entryPrice: 0.5 }); // held YES
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await reconcileOrders(redis as any);
+
+      expect(result.orphanCancels).toHaveLength(0);
+      expect(mockCancelOrder).not.toHaveBeenCalled();
+    });
+
+    it('spares an intact two-sided resting pair', async () => {
+      const redis = makeRedis();
+      const yes = makeOrder({ orderId: 'order-yes', direction: 'YES', tokenId: 'tok-yes' });
+      const no = makeOrder({ orderId: 'order-no', direction: 'NO', tokenId: 'tok-no' });
+      redis.hgetall.mockResolvedValue({
+        'order-yes': JSON.stringify(yes),
+        'order-no': JSON.stringify(no),
+      });
+      mockGetOrder.mockResolvedValue(liveClobOrder());
+      mockGetPosition.mockResolvedValue(null); // nothing held — the legs save each other
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await reconcileOrders(redis as any);
+
+      expect(result.orphanCancels).toHaveLength(0);
+      expect(mockCancelOrder).not.toHaveBeenCalled();
+    });
+
+    it('keeps a naked leg TRACKED when the cancel cannot be confirmed', async () => {
+      const redis = makeRedis();
+      const order = makeOrder({ orderId: 'order-stuck', direction: 'YES' });
+      redis.hgetall.mockResolvedValue({ 'order-stuck': JSON.stringify(order) });
+      mockGetOrder.mockResolvedValue(liveClobOrder()); // still live on recheck too
+      mockGetPosition.mockResolvedValue(null);
+      mockCancelOrder.mockResolvedValue(false); // cancel fails
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await reconcileOrders(redis as any);
+
+      expect(result.orphanCancels).toHaveLength(0);
+      expect(result.errors).toBeGreaterThanOrEqual(1);
+      // Never drop tracking for an order that may still be live.
+      expect(redis.hdel).not.toHaveBeenCalledWith('rebate:orders', 'order-stuck');
+    });
+  });
+
+  describe('cancelRestingOrder', () => {
+    it("reason='rollback' cancels, untracks and bumps pair_rollbacks", async () => {
+      const redis = makeRedis();
+      const order = makeOrder({ orderId: 'order-rb' });
+      mockCancelOrder.mockResolvedValue(true);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const outcome = await cancelRestingOrder(redis as any, order, 'rollback');
+
+      expect(outcome).toBe('cancelled');
+      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-rb');
+      const stats = statCalls(redis);
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'pair_rollbacks', by: 1 });
+    });
+
+    it('treats a failed cancel whose recheck shows the order gone as cancelled', async () => {
+      const redis = makeRedis();
+      const order = makeOrder({ orderId: 'order-already-gone' });
+      mockCancelOrder.mockResolvedValue(false);
+      mockGetOrder.mockResolvedValue({ status: 'CANCELED' });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const outcome = await cancelRestingOrder(redis as any, order, 'rollback');
+
+      expect(outcome).toBe('cancelled');
+      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-already-gone');
+    });
+
+    it('returns cancel_failed_still_tracked when the order is verifiably still live', async () => {
+      const redis = makeRedis();
+      const order = makeOrder({ orderId: 'order-live' });
+      mockCancelOrder.mockResolvedValue(false);
+      mockGetOrder.mockResolvedValue({ status: 'LIVE' });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const outcome = await cancelRestingOrder(redis as any, order, 'rollback');
+
+      expect(outcome).toBe('cancel_failed_still_tracked');
+      expect(redis.hdel).not.toHaveBeenCalled();
     });
   });
 });

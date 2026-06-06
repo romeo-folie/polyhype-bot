@@ -53,6 +53,38 @@ const UNIVERSE_PAGE_SIZE = 100;
  * universe) and CachedMarket (fallback; lacks volume24hr). */
 type UniverseMarket = CachedMarket & { volume24hr?: string | number };
 
+export type SportsClass =
+  | 'pre_game'              // sports, gameStartTime in the future — eligible
+  | 'live'                  // sports, gameStartTime passed — ineligible
+  | 'no_game_time_excluded' // sports, no usable gameStartTime, near-term — ineligible (fail closed)
+  | 'outright_exempt'       // sports, no usable gameStartTime, long-dated — eligible
+  | 'non_sports';           // not a sports fee type — eligible (gate doesn't apply)
+
+/**
+ * Sports eligibility classification (pure — exported for tests).
+ *
+ * Fail-closed rule: a sports-typed market (feeType `sports_*`) with no
+ * parseable FUTURE gameStartTime reads as in-play risk — missing metadata on
+ * a near-term event must not grant a pass. Long-dated outrights (World Cup
+ * winner etc.) legitimately have no single game time and are exempted when
+ * endDate is more than `outrightMinDays` away.
+ */
+export function classifySportsEligibility(
+  market: Pick<UniverseMarket, 'feeType' | 'gameStartTime' | 'endDate'>,
+  outrightMinDays: number,
+): SportsClass {
+  if (!market.feeType?.startsWith('sports_')) return 'non_sports';
+
+  const start = market.gameStartTime ? new Date(market.gameStartTime).getTime() : NaN;
+  if (!isNaN(start)) {
+    return start > Date.now() ? 'pre_game' : 'live';
+  }
+
+  const end = market.endDate ? new Date(market.endDate).getTime() : NaN;
+  const daysToEnd = isNaN(end) ? 0 : (end - Date.now()) / 86_400_000;
+  return daysToEnd > outrightMinDays ? 'outright_exempt' : 'no_game_time_excluded';
+}
+
 /**
  * Candidate universe: active markets ordered by trailing-24h volume. Falls
  * back to the (lifetime-volume) watchlist cache when Gamma is unavailable —
@@ -133,7 +165,13 @@ export async function selectRebateMarkets(
     liquidity: number;
     endDate: string | null;
   }[] = [];
-  let liveGameSkips = 0;
+  const sportsTelemetry: Record<SportsClass, number> = {
+    pre_game: 0,
+    live: 0,
+    no_game_time_excluded: 0,
+    outright_exempt: 0,
+    non_sports: 0,
+  };
 
   for (const market of markets) {
     // Binary-only gate.
@@ -154,16 +192,16 @@ export async function selectRebateMarkets(
       if (!isNaN(end) && end < Date.now()) continue;
     }
 
-    // In-play gate: skip sports markets whose game has started. Live games
-    // carry the most informed taker flow — resting bids get hit precisely
-    // when the game turns (day-one naked legs ran 4W/10L). The fee-equiv
-    // ranking otherwise ranks these FIRST, because informed flow is flow.
-    if (cfg.REBATE_EXCLUDE_LIVE_GAMES && market.gameStartTime) {
-      const start = new Date(market.gameStartTime).getTime();
-      if (!isNaN(start) && start <= Date.now()) {
-        liveGameSkips++;
-        continue;
-      }
+    // Sports eligibility: in-play gate + fail-closed metadata gate. Live
+    // games carry the most informed taker flow — resting bids get hit
+    // precisely when the game turns (day-one naked legs ran 4W/10L); the
+    // fee-equiv ranking otherwise ranks these FIRST, because informed flow
+    // is flow. Sports markets with NO usable gameStartTime are treated as
+    // in-play risk unless long-dated (outrights).
+    if (cfg.REBATE_EXCLUDE_LIVE_GAMES) {
+      const sportsClass = classifySportsEligibility(market, cfg.REBATE_SPORTS_OUTRIGHT_MIN_DAYS);
+      sportsTelemetry[sportsClass]++;
+      if (sportsClass === 'live' || sportsClass === 'no_game_time_excluded') continue;
     }
 
     // Recent (24h) volume when the universe provides it; lifetime volume
@@ -308,23 +346,23 @@ export async function selectRebateMarkets(
     }
 
     if (cfg.REBATE_TWO_SIDED) {
-      if (yesQuote) quotes.push(yesQuote);
-      if (noQuote) quotes.push(noQuote);
-
-      // Combined-price guard: both fills = riskless pair only when
-      // yesBid + noBid ≤ 1 − minEdge. Clamping only moves prices down, so
-      // this rarely trips — when it does, drop the side further from its
-      // effective mid (least likely to fill anyway).
-      if (
-        quotes.length === 2 &&
-        quotes[0]!.price + quotes[1]!.price > 1 - cfg.REBATE_MIN_COMBINED_EDGE
-      ) {
-        const yesDist = yesMid - quotes[0]!.price;
-        const noDist = 1 - yesMid - quotes[1]!.price;
-        quotes.splice(yesDist > noDist ? 0 : 1, 1);
+      // Strict pairs: a fresh market is entered as a PAIR or not at all.
+      // Anything less than two quotes under the combined ceiling means the
+      // market cannot host a riskless pair right now — skip it entirely
+      // (audit P1: the old behavior spliced one side off and quoted the
+      // survivor, which is exactly a naked fresh leg).
+      if (!yesQuote || !noQuote) {
+        skip('no_valid_quote');
+        continue;
       }
+      if (yesQuote.price + noQuote.price > 1 - cfg.REBATE_MIN_COMBINED_EDGE) {
+        skip('combined_above_ceiling');
+        continue;
+      }
+      quotes.push(yesQuote, noQuote);
     } else {
       // Single-sided: quote the majority side (more natural taker flow).
+      // Documented-intentional one-sided inventory mode — not pair-farming.
       const single = yesMid >= 0.5 ? yesQuote : noQuote;
       if (single) quotes.push(single);
     }
@@ -381,7 +419,7 @@ export async function selectRebateMarkets(
   logger.info('[rebate] market selection complete', {
     universe: universeSource,
     universeSize: markets.length,
-    liveGameSkips,
+    sports: sportsTelemetry,
     preFiltered: preFiltered.length,
     fetched: toFetch.length,
     passedGates: candidates.length,

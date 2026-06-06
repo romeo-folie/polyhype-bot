@@ -1201,6 +1201,17 @@ export const envSchema = z.object({
   // are where taker flow is most informed — resting bids get hit exactly when
   // the game turns (first-day naked legs ran 4W/10L). Pre-game books only.
   REBATE_EXCLUDE_LIVE_GAMES: boolFromEnv.optional().default(true),
+  // Sports-typed markets (feeType sports_*) with NO parseable future
+  // gameStartTime are ineligible (fail closed: missing metadata on a
+  // near-term event reads as in-play risk) UNLESS endDate is more than this
+  // many days out — long-dated outrights (World Cup winner etc.) legitimately
+  // have no single game time.
+  REBATE_SPORTS_OUTRIGHT_MIN_DAYS: z.coerce.number().min(0).optional().default(2),
+  // Shadow mode: with REBATE_FARMING_ENABLED=true, run reconciliation (real)
+  // plus selection and the full atomic-pair preflight, but LOG the would-be
+  // placements ([rebate-shadow]) instead of sending orders. No governor
+  // consumption, no order tracking writes. Go-live validation knob.
+  REBATE_SHADOW_MODE: boolFromEnv.optional().default(false),
   // Reprice trigger: when a market re-selects and the fresh target price has
   // drifted from a resting order's price by more than this, cancel + repost.
   REBATE_REPRICE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.02),
