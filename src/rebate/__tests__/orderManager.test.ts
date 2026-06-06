@@ -320,6 +320,27 @@ describe('orderManager', () => {
       expect(mockRecordPosition).not.toHaveBeenCalled();
     });
 
+    it('PR-459 review r2: a SUCCESSFUL stale cancel that raced a partial fill also stays tracked', async () => {
+      // The cancel accepted the REMAINDER — the partial fill before it must
+      // not be dropped by the removal path.
+      const redis = makeRedis();
+      const order = makeOrder({
+        orderId: 'order-stale-partial',
+        placedAt: new Date(Date.now() - 10 * 3600 * 1000).toISOString(),
+      });
+      redis.hgetall.mockResolvedValue({ 'order-stale-partial': JSON.stringify(order) });
+      mockGetOrder
+        .mockResolvedValueOnce({ status: 'LIVE', size_matched: '0', original_size: '12.8' })
+        .mockResolvedValueOnce({ status: 'CANCELED', size_matched: '4.0', original_size: '12.8' });
+      mockCancelOrder.mockResolvedValue(true); // cancel SUCCEEDED
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await reconcileOrders(redis as any);
+
+      expect(result.stale).toHaveLength(0);
+      expect(redis.hdel).not.toHaveBeenCalledWith('rebate:orders', 'order-stale-partial');
+    });
+
     it('skips recently-placed orders when CLOB returns null (transient error)', async () => {
       const redis = makeRedis();
       const order = makeOrder({ orderId: 'order-gone' }); // fresh — within 2×TTL
@@ -580,9 +601,12 @@ describe('orderManager', () => {
   });
 
   describe('cancelForReprice', () => {
-    it('cancels, removes tracking, and counts a reprice on confirmed cancel', async () => {
+    it('cancels, removes tracking, and counts a reprice on confirmed zero-fill cancel', async () => {
       const redis = makeRedis();
       mockCancelOrder.mockResolvedValue(true);
+      // Post-cancel recheck (always performed): dead, nothing filled.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockGetOrder.mockResolvedValue({ status: 'CANCELED', size_matched: '0' } as any);
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const ok = await cancelForReprice(redis as any, makeOrder());
@@ -593,6 +617,39 @@ describe('orderManager', () => {
       const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
       expect(stats).toContainEqual({ key: 'rebate:stats', field: 'reprice_cancels', by: 1 });
       expect(stats).toContainEqual({ key: todayKey, field: 'reprice_cancels', by: 1 });
+    });
+
+    it('PR-459 review: records a fill that raced the reprice cancel and skips the re-post', async () => {
+      const redis = makeRedis();
+      mockCancelOrder.mockResolvedValue(true); // remainder cancelled
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockGetOrder.mockResolvedValue({ status: 'CANCELED', size_matched: '5.0', original_size: '12.8' } as any);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ok = await cancelForReprice(redis as any, makeOrder({ direction: 'YES' }));
+
+      // No re-post: the capital became held inventory.
+      expect(ok).toBe(false);
+      expect(mockRecordPosition).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ sharesHeld: 5.0, sourcedFrom: 'rebate-farming' }),
+      );
+      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-1');
+      const stats = statCalls(redis);
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'partial_fills', by: 1 });
+      expect(stats.some((s) => s.field === 'reprice_cancels')).toBe(false);
+    });
+
+    it('PR-459 review: keeps the original tracked when the post-cancel recheck is unavailable', async () => {
+      const redis = makeRedis();
+      mockCancelOrder.mockResolvedValue(true);
+      mockGetOrder.mockResolvedValue(null);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ok = await cancelForReprice(redis as any, makeOrder());
+
+      expect(ok).toBe(false);
+      expect(redis.hdel).not.toHaveBeenCalled();
     });
 
     it('keeps the original order when cancel fails and the order is still live', async () => {

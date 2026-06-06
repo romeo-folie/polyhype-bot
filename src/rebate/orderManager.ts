@@ -437,30 +437,32 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
       const ageMs = Date.now() - new Date(order.placedAt).getTime();
       if (ageMs > cfg.REBATE_ORDER_TTL_S * 1000) {
         const cancelled = await cancelClobOrder(orderId);
-        if (!cancelled) {
-          const recheck = await getClobOrder(orderId);
-          if (!recheck) {
-            // Recheck also failed (transient?) — retry next cycle.
-            logger.warn('[rebate] stale cancel + recheck failed, will retry', { orderId });
-            continue;
-          }
-          // Filled while we tried to cancel it (race between the top-of-loop
-          // fetch and the cancel): keep TRACKED — the next cycle's fill
-          // detection records the position + rebate stats properly. Removing
-          // here would silently drop the fill from the ledger (PR #459 review).
-          const recheckMatched = parseFloat(recheck.size_matched ?? '0');
-          if (isFinite(recheckMatched) && recheckMatched > 0) {
-            logger.warn('[rebate] stale order filled during cancel — leaving for fill detection', {
-              orderId,
-              sharesFilled: recheckMatched,
-            });
-            continue;
-          }
-          const recheckStatus = String(recheck.status ?? '').toLowerCase();
-          if (!['cancelled', 'canceled', 'expired'].includes(recheckStatus)) {
-            logger.warn('[rebate] stale cancel failed, will retry', { orderId });
-            continue;
-          }
+        // ALWAYS recheck, success included — the order can partially fill in
+        // the race between the top-of-loop fetch and the cancel, and a
+        // successful cancel of the REMAINDER must not drop that fill from
+        // the ledger (PR #459 review).
+        const recheck = await getClobOrder(orderId);
+        if (!recheck) {
+          // Recheck failed (transient?) — keep tracked, retry next cycle.
+          logger.warn('[rebate] stale cancel + recheck failed, will retry', { orderId });
+          continue;
+        }
+        const recheckMatched = parseFloat(recheck.size_matched ?? '0');
+        if (isFinite(recheckMatched) && recheckMatched > 0) {
+          // Filled during the cancel window — keep TRACKED; the next cycle's
+          // top-of-loop fill detection records the position + rebate stats
+          // through the normal full/partial paths.
+          logger.warn('[rebate] stale order filled during cancel — leaving for fill detection', {
+            orderId,
+            sharesFilled: recheckMatched,
+            cancelAccepted: cancelled,
+          });
+          continue;
+        }
+        const recheckStatus = String(recheck.status ?? '').toLowerCase();
+        if (!cancelled && !['cancelled', 'canceled', 'expired'].includes(recheckStatus)) {
+          logger.warn('[rebate] stale cancel failed, will retry', { orderId });
+          continue;
         }
         await removeRestingOrder(redis, orderId, order.marketId);
         await recordLifetime(redis, order);
@@ -553,22 +555,53 @@ async function recordFilledOrder(
 
 /**
  * Cancel a resting order so it can be re-posted at a drifted target price.
- * Returns true when the order is confirmed gone (safe to place a replacement);
- * false leaves the original tracked and skips the replacement this cycle.
+ * Returns true when the order is confirmed gone WITH ZERO FILL (safe to place
+ * a replacement); false skips the replacement this cycle — either the
+ * original stays tracked (unconfirmed) or it (partially) FILLED during the
+ * cancel, in which case the fill is recorded first and re-posting the same
+ * direction would stack onto fresh inventory.
  */
 export async function cancelForReprice(redis: Redis, order: RestingOrder): Promise<boolean> {
   const cancelled = await cancelClobOrder(order.orderId);
-  if (!cancelled) {
-    const recheck = await getClobOrder(order.orderId);
-    const recheckStatus = String(recheck?.status ?? '').toLowerCase();
-    if (!recheck || !['cancelled', 'canceled', 'expired'].includes(recheckStatus)) {
-      logger.warn('[rebate] reprice cancel unconfirmed — keeping original order', {
-        orderId: order.orderId,
-        marketId: order.marketId,
-      });
-      return false;
-    }
+
+  // ALWAYS recheck — a successful cancel can follow a partial fill, and that
+  // fill must reach the ledger (PR #459 review; same discipline as
+  // cancelRestingOrder).
+  const recheck = await getClobOrder(order.orderId);
+  if (!recheck) {
+    logger.warn('[rebate] reprice cancel recheck unavailable — keeping original tracked', {
+      orderId: order.orderId,
+      marketId: order.marketId,
+      cancelAccepted: cancelled,
+    });
+    return false;
   }
+
+  const matched = parseFloat(recheck.size_matched ?? '0');
+  if (isFinite(matched) && matched > 0) {
+    const original = parseFloat(recheck.original_size ?? String(order.size));
+    await recordFilledOrder(redis, order, matched);
+    await removeRestingOrder(redis, order.orderId, order.marketId);
+    await recordLifetime(redis, order);
+    await bumpStat(redis, order.marketId, matched >= original - 1e-9 ? 'fills' : 'partial_fills');
+    logger.warn('[rebate] order filled during reprice cancel — fill recorded, no re-post', {
+      orderId: order.orderId,
+      marketId: order.marketId,
+      direction: order.direction,
+      sharesFilled: matched,
+    });
+    return false;
+  }
+
+  const recheckStatus = String(recheck.status ?? '').toLowerCase();
+  if (!cancelled && !['cancelled', 'canceled', 'expired'].includes(recheckStatus)) {
+    logger.warn('[rebate] reprice cancel unconfirmed — keeping original order', {
+      orderId: order.orderId,
+      marketId: order.marketId,
+    });
+    return false;
+  }
+
   await removeRestingOrder(redis, order.orderId, order.marketId);
   await recordLifetime(redis, order);
   await bumpStat(redis, order.marketId, 'reprice_cancels');
