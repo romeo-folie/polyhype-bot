@@ -22,7 +22,7 @@ import {
   cancelClobOrder,
   CLOB_MIN_ORDER_USD,
 } from '../shared/clob.js';
-import { recordPosition } from '../execution/positionLedger.js';
+import { recordPosition, getPosition } from '../execution/positionLedger.js';
 import { estimateFillRebateUsd } from './flowAnalyzer.js';
 import { utcDateString } from './rebateChecker.js';
 import type { RestingOrder, RebateMarketCandidate, RebateQuote } from './types.js';
@@ -207,7 +207,143 @@ export interface ReconcileResult {
   partialFills: RestingOrder[];
   cancelled: RestingOrder[];
   stale: RestingOrder[];
+  /** Naked fresh legs cancelled by the orphan sweep (no held or resting opposite). */
+  orphanCancels: RestingOrder[];
   errors: number;
+}
+
+/**
+ * Cancel a tracked resting order on the CLOB and remove it from tracking.
+ * Shared by the fresh-pair rollback (leg 2 failed after leg 1 placed) and the
+ * orphan-leg sweep.
+ *
+ * Fail-closed accounting (PR #459 review):
+ *   - 'cancelled'    — confirmed dead with ZERO fill; untracked.
+ *   - 'filled'       — the order (partially) FILLED before/while we cancelled;
+ *                      the fill is recorded into the position ledger + rebate
+ *                      stats first, then untracked. Capital became inventory —
+ *                      callers must NOT refund its budget.
+ *   - 'kept_tracked' — anything uncertain: cancel unconfirmed AND the order
+ *                      may still be live, or the post-cancel recheck failed
+ *                      (getClobOrder returns null for transient errors too).
+ *                      Tracking is kept so the next reconcile retries; never
+ *                      drop visibility of an order that may be live or filled.
+ */
+export async function cancelRestingOrder(
+  redis: Redis,
+  order: RestingOrder,
+  reason: 'rollback' | 'orphan',
+): Promise<'cancelled' | 'filled' | 'kept_tracked'> {
+  const cancelled = await cancelClobOrder(order.orderId);
+
+  // ALWAYS recheck — even after a successful cancel the order can have
+  // partially filled first, and that fill must reach the ledger.
+  const recheck = await getClobOrder(order.orderId);
+  if (recheck === null) {
+    // Not-found and transient fetch errors are indistinguishable here.
+    // Keep tracked; reconcile's age-based heuristic resolves truly-gone
+    // orders, and a live/filled order gets processed normally next cycle.
+    logger.warn('[rebate] cancel recheck unavailable — order remains tracked for next reconcile', {
+      orderId: order.orderId,
+      marketId: order.marketId,
+      direction: order.direction,
+      cancelAccepted: cancelled,
+      reason,
+    });
+    return 'kept_tracked';
+  }
+
+  const matched = parseFloat(recheck.size_matched ?? '0');
+  if (isFinite(matched) && matched > 0) {
+    // Filled (fully or partially) before the cancel took hold. Record the
+    // fill FIRST — losing it would leave invisible naked inventory, the
+    // exact exposure this helper exists to contain.
+    const original = parseFloat(recheck.original_size ?? String(order.size));
+    await recordFilledOrder(redis, order, matched);
+    await removeRestingOrder(redis, order.orderId, order.marketId);
+    await recordLifetime(redis, order);
+    await bumpStat(redis, order.marketId, matched >= original - 1e-9 ? 'fills' : 'partial_fills');
+    logger.warn('[rebate] order filled during cancel — fill recorded, inventory now held', {
+      orderId: order.orderId,
+      marketId: order.marketId,
+      direction: order.direction,
+      sharesFilled: matched,
+      reason,
+    });
+    return 'filled';
+  }
+
+  const recheckStatus = String(recheck.status ?? '').toLowerCase();
+  const terminal = ['cancelled', 'canceled', 'expired'].includes(recheckStatus);
+  if (!cancelled && !terminal) {
+    logger.error('[rebate] cancel failed — order remains tracked for next reconcile', {
+      orderId: order.orderId,
+      marketId: order.marketId,
+      direction: order.direction,
+      recheckStatus,
+      reason,
+    });
+    return 'kept_tracked';
+  }
+
+  // Confirmed dead with zero fill.
+  await removeRestingOrder(redis, order.orderId, order.marketId);
+  await recordLifetime(redis, order);
+  await bumpStat(redis, order.marketId, reason === 'rollback' ? 'pair_rollbacks' : 'orphan_leg_cancels');
+  return 'cancelled';
+}
+
+/**
+ * Orphan-leg sweep: a tracked resting order with NO held opposite-side
+ * position and NO tracked resting opposite-side order is a naked fresh leg —
+ * the exact exposure the atomic-pair preflight exists to prevent (it can
+ * still arise from a crash between legs, a manual cancel of one leg, or
+ * pre-redesign state). Cancel it.
+ *
+ * Legitimate survivors: pair-completion state (held opposite exists) and
+ * intact two-sided resting pairs (resting opposite exists).
+ */
+async function sweepOrphanLegs(
+  redis: Redis,
+  orders: Map<string, RestingOrder>,
+): Promise<{ orphanCancels: RestingOrder[]; errors: number }> {
+  const orphanCancels: RestingOrder[] = [];
+  let errors = 0;
+  for (const order of orders.values()) {
+    try {
+      const oppositeDirection = order.direction === 'YES' ? 'NO' : 'YES';
+      const heldOpposite = await getPosition(redis, order.marketId, oppositeDirection);
+      if (heldOpposite) continue;
+      if (findRestingOrder(orders, order.marketId, oppositeDirection)) continue;
+
+      logger.warn('[rebate] orphaned fresh leg detected — cancelling', {
+        orderId: order.orderId,
+        marketId: order.marketId,
+        direction: order.direction,
+        price: order.price,
+        sizeUsd: order.sizeUsd,
+        question: order.question.slice(0, 60),
+      });
+      const outcome = await cancelRestingOrder(redis, order, 'orphan');
+      if (outcome === 'cancelled') {
+        orders.delete(order.orderId);
+        orphanCancels.push(order);
+      } else if (outcome === 'filled') {
+        // Filled during the sweep — the fill is recorded and the order
+        // untracked; it is held inventory now, not an orphan cancel.
+        orders.delete(order.orderId);
+      } else {
+        errors++;
+      }
+    } catch (err: unknown) {
+      errors++;
+      logger.warn('[rebate] orphan sweep error for order', {
+        orderId: order.orderId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return { orphanCancels, errors };
 }
 
 /**
@@ -222,6 +358,7 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
     partialFills: [],
     cancelled: [],
     stale: [],
+    orphanCancels: [],
     errors: 0,
   };
 
@@ -300,18 +437,32 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
       const ageMs = Date.now() - new Date(order.placedAt).getTime();
       if (ageMs > cfg.REBATE_ORDER_TTL_S * 1000) {
         const cancelled = await cancelClobOrder(orderId);
-        if (!cancelled) {
-          const recheck = await getClobOrder(orderId);
-          if (!recheck) {
-            // Recheck also failed (transient?) — retry next cycle.
-            logger.warn('[rebate] stale cancel + recheck failed, will retry', { orderId });
-            continue;
-          }
-          const recheckStatus = String(recheck.status ?? '').toLowerCase();
-          if (!['cancelled', 'canceled', 'expired', 'matched'].includes(recheckStatus)) {
-            logger.warn('[rebate] stale cancel failed, will retry', { orderId });
-            continue;
-          }
+        // ALWAYS recheck, success included — the order can partially fill in
+        // the race between the top-of-loop fetch and the cancel, and a
+        // successful cancel of the REMAINDER must not drop that fill from
+        // the ledger (PR #459 review).
+        const recheck = await getClobOrder(orderId);
+        if (!recheck) {
+          // Recheck failed (transient?) — keep tracked, retry next cycle.
+          logger.warn('[rebate] stale cancel + recheck failed, will retry', { orderId });
+          continue;
+        }
+        const recheckMatched = parseFloat(recheck.size_matched ?? '0');
+        if (isFinite(recheckMatched) && recheckMatched > 0) {
+          // Filled during the cancel window — keep TRACKED; the next cycle's
+          // top-of-loop fill detection records the position + rebate stats
+          // through the normal full/partial paths.
+          logger.warn('[rebate] stale order filled during cancel — leaving for fill detection', {
+            orderId,
+            sharesFilled: recheckMatched,
+            cancelAccepted: cancelled,
+          });
+          continue;
+        }
+        const recheckStatus = String(recheck.status ?? '').toLowerCase();
+        if (!cancelled && !['cancelled', 'canceled', 'expired'].includes(recheckStatus)) {
+          logger.warn('[rebate] stale cancel failed, will retry', { orderId });
+          continue;
         }
         await removeRestingOrder(redis, orderId, order.marketId);
         await recordLifetime(redis, order);
@@ -331,12 +482,23 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
     }
   }
 
-  if (result.filled.length > 0 || result.partialFills.length > 0 || result.stale.length > 0) {
+  // Orphan-leg sweep on the POST-reconcile state (the loop above removes
+  // entries in Redis, not in the local map — reload for an accurate view).
+  const postOrders = await loadRestingOrders(redis);
+  const sweep = await sweepOrphanLegs(redis, postOrders);
+  result.orphanCancels = sweep.orphanCancels;
+  result.errors += sweep.errors;
+
+  if (
+    result.filled.length > 0 || result.partialFills.length > 0 ||
+    result.stale.length > 0 || result.orphanCancels.length > 0
+  ) {
     logger.info('[rebate] reconciliation complete', {
       filled: result.filled.length,
       partialFills: result.partialFills.length,
       cancelled: result.cancelled.length,
       stale: result.stale.length,
+      orphanCancels: result.orphanCancels.length,
       errors: result.errors,
     });
   }
@@ -393,22 +555,53 @@ async function recordFilledOrder(
 
 /**
  * Cancel a resting order so it can be re-posted at a drifted target price.
- * Returns true when the order is confirmed gone (safe to place a replacement);
- * false leaves the original tracked and skips the replacement this cycle.
+ * Returns true when the order is confirmed gone WITH ZERO FILL (safe to place
+ * a replacement); false skips the replacement this cycle — either the
+ * original stays tracked (unconfirmed) or it (partially) FILLED during the
+ * cancel, in which case the fill is recorded first and re-posting the same
+ * direction would stack onto fresh inventory.
  */
 export async function cancelForReprice(redis: Redis, order: RestingOrder): Promise<boolean> {
   const cancelled = await cancelClobOrder(order.orderId);
-  if (!cancelled) {
-    const recheck = await getClobOrder(order.orderId);
-    const recheckStatus = String(recheck?.status ?? '').toLowerCase();
-    if (!recheck || !['cancelled', 'canceled', 'expired'].includes(recheckStatus)) {
-      logger.warn('[rebate] reprice cancel unconfirmed — keeping original order', {
-        orderId: order.orderId,
-        marketId: order.marketId,
-      });
-      return false;
-    }
+
+  // ALWAYS recheck — a successful cancel can follow a partial fill, and that
+  // fill must reach the ledger (PR #459 review; same discipline as
+  // cancelRestingOrder).
+  const recheck = await getClobOrder(order.orderId);
+  if (!recheck) {
+    logger.warn('[rebate] reprice cancel recheck unavailable — keeping original tracked', {
+      orderId: order.orderId,
+      marketId: order.marketId,
+      cancelAccepted: cancelled,
+    });
+    return false;
   }
+
+  const matched = parseFloat(recheck.size_matched ?? '0');
+  if (isFinite(matched) && matched > 0) {
+    const original = parseFloat(recheck.original_size ?? String(order.size));
+    await recordFilledOrder(redis, order, matched);
+    await removeRestingOrder(redis, order.orderId, order.marketId);
+    await recordLifetime(redis, order);
+    await bumpStat(redis, order.marketId, matched >= original - 1e-9 ? 'fills' : 'partial_fills');
+    logger.warn('[rebate] order filled during reprice cancel — fill recorded, no re-post', {
+      orderId: order.orderId,
+      marketId: order.marketId,
+      direction: order.direction,
+      sharesFilled: matched,
+    });
+    return false;
+  }
+
+  const recheckStatus = String(recheck.status ?? '').toLowerCase();
+  if (!cancelled && !['cancelled', 'canceled', 'expired'].includes(recheckStatus)) {
+    logger.warn('[rebate] reprice cancel unconfirmed — keeping original order', {
+      orderId: order.orderId,
+      marketId: order.marketId,
+    });
+    return false;
+  }
+
   await removeRestingOrder(redis, order.orderId, order.marketId);
   await recordLifetime(redis, order);
   await bumpStat(redis, order.marketId, 'reprice_cancels');
@@ -432,8 +625,7 @@ export interface PairTarget {
 /**
  * Pair-matching target for a quote, by priority:
  *   1. held opposite-side inventory (a prior fill waiting to be paired),
- *   2. a resting opposite-side order (match what's already on the book),
- *   3. the first leg placed for this market in the current cycle.
+ *   2. a resting opposite-side order (match what's already on the book).
  *
  * Returns:
  *   - a PairTarget when there is something valid to pair against,
@@ -441,13 +633,14 @@ export interface PairTarget {
  *     entry price is unusable — falling through to a resting order would
  *     mis-size against the wrong inventory, and placing fresh would re-create
  *     the oversized-pair problem; the caller must skip the leg entirely,
- *   - `undefined` when nothing exists to pair against — the leg is fresh.
+ *   - `undefined` when nothing exists to pair against — the leg is fresh
+ *     (fresh pairs are planned atomically by pairPlanner, never chained
+ *     within a cycle).
  * (Pure — extracted so the priority order is directly testable.)
  */
 export function resolvePairTarget(
   heldOpposite: { shares: number | null | undefined; price: number | null | undefined } | null,
   restingOpposite: { shares: number; price: number } | null,
-  cycleLeg: { shares: number; price: number } | null,
 ): PairTarget | null | undefined {
   const valid = (v: unknown): v is number => typeof v === 'number' && isFinite(v) && v > 0;
   if (heldOpposite && valid(heldOpposite.shares)) {
@@ -458,10 +651,8 @@ export function resolvePairTarget(
     // cannot be evaluated — fail closed.
     return null;
   }
-  for (const c of [restingOpposite, cycleLeg]) {
-    if (c && valid(c.shares) && valid(c.price)) {
-      return { matchShares: c.shares, partnerCost: c.price };
-    }
+  if (restingOpposite && valid(restingOpposite.shares) && valid(restingOpposite.price)) {
+    return { matchShares: restingOpposite.shares, partnerCost: restingOpposite.price };
   }
   return undefined;
 }

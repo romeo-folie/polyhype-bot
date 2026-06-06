@@ -73,7 +73,7 @@ vi.mock('../../shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }));
 
-import { selectRebateMarkets } from '../marketSelector.js';
+import { selectRebateMarkets, classifySportsEligibility } from '../marketSelector.js';
 import { logger } from '../../shared/logger.js';
 import type { MarketFlowStats } from '../flowAnalyzer.js';
 
@@ -273,7 +273,10 @@ describe('selectRebateMarkets', () => {
     expect(selected[0]!.quotes[0]!.direction).toBe('NO');
   });
 
-  it('drops one side when the combined price would breach the riskless-pair guard', async () => {
+  it('skips the WHOLE market when the combined price breaches the riskless-pair guard (P1-5 fail closed)', async () => {
+    // Behavioral inversion from the original audit fix: the old code spliced
+    // one quote off and quoted the survivor — exactly a naked fresh leg. In
+    // strict-pair mode a market that cannot host both legs is not selected.
     mockLoadConfig.mockReturnValue({
       ...baseRebateConfig,
       // Edge so small both quotes land at mid: 0.40 + 0.60 = 1.00 > 1 − 0.02.
@@ -284,7 +287,23 @@ describe('selectRebateMarkets', () => {
 
     const selected = await selectRebateMarkets(redis, 10);
 
-    expect(selected[0]!.quotes.length).toBeLessThanOrEqual(1);
+    expect(selected).toHaveLength(0);
+  });
+
+  it('one-sided mode (REBATE_TWO_SIDED=false) still quotes a single majority side', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseRebateConfig,
+      REBATE_TWO_SIDED: false,
+      REBATE_QUOTE_EDGE: 0, // would breach the combined guard in two-sided mode
+      REBATE_MIN_COMBINED_EDGE: 0.02,
+    });
+    mockGetActiveMarkets.mockResolvedValue([makeMarket()]);
+
+    const selected = await selectRebateMarkets(redis, 10);
+
+    // Documented-intentional one-sided mode: the combined ceiling does not apply.
+    expect(selected).toHaveLength(1);
+    expect(selected[0]!.quotes).toHaveLength(1);
   });
 
   it('applies the 20% crypto rebate share from feeType', async () => {
@@ -387,15 +406,17 @@ describe('selectRebateMarkets', () => {
         // Game started an hour ago — informed in-play flow, must be skipped.
         makeMarket({
           id: 'live-game',
+          feeType: 'sports_fees_v2',
           gameStartTime: new Date(Date.now() - 3600_000).toISOString(),
         }),
         // Game starts in 3h — pre-game book, allowed.
         makeMarket({
           id: 'pre-game',
           conditionId: '0xcond2',
+          feeType: 'sports_fees_v2',
           gameStartTime: new Date(Date.now() + 3 * 3600_000).toISOString(),
         }),
-        // No gameStartTime (non-sports) — allowed.
+        // No gameStartTime and non-sports feeType — gate doesn't apply.
         makeMarket({ id: 'no-game-time', conditionId: '0xcond3' }),
       ]);
 
@@ -404,29 +425,55 @@ describe('selectRebateMarkets', () => {
       expect(selected.map((c) => c.marketId).sort()).toEqual(['no-game-time', 'pre-game']);
     });
 
-    it('also applies the in-play gate on the cache-fallback path', async () => {
-      // CachedMarket carries gameStartTime since the strict-pairs change —
-      // the gate must keep working when Gamma is down. (Entries cached before
-      // the field rolled out lack it and pass; TTL-bounded.)
-      mockGetActiveMarkets.mockRejectedValue(new Error('gamma down'));
-      mockGetCachedMarkets.mockResolvedValue([
+    it('fails closed on sports markets with NO usable gameStartTime resolving near-term (P1-6)', async () => {
+      mockGetActiveMarkets.mockResolvedValue([
+        // sports-typed, missing game metadata, resolves tomorrow → reads as
+        // in-play risk: ineligible.
         makeMarket({
-          id: 'cached-live-game',
-          gameStartTime: new Date(Date.now() - 3600_000).toISOString(),
+          id: 'sports-no-meta',
+          feeType: 'sports_fees_v2',
+          endDate: new Date(Date.now() + 1 * 86_400_000).toISOString(),
         }),
-        makeMarket({ id: 'cached-pre-game', conditionId: '0xcond2' }),
+        // sports-typed, missing game metadata, resolves in 10 days → a
+        // long-dated outright (World Cup winner shape): eligible.
+        makeMarket({
+          id: 'sports-outright',
+          conditionId: '0xcond2',
+          feeType: 'sports_fees_v2',
+          endDate: new Date(Date.now() + 10 * 86_400_000).toISOString(),
+        }),
       ]);
 
       const selected = await selectRebateMarkets(redis, 10);
 
-      expect(selected.map((c) => c.marketId)).toEqual(['cached-pre-game']);
+      expect(selected.map((c) => c.marketId)).toEqual(['sports-outright']);
     });
 
-    it('keeps in-play markets when REBATE_EXCLUDE_LIVE_GAMES=false', async () => {
+    it('also applies the sports gate on the cache-fallback path', async () => {
+      // CachedMarket carries gameStartTime since the strict-pairs change —
+      // the gate must keep working when Gamma is down. (Entries cached before
+      // the field rolled out lack it and now FAIL CLOSED for near-term sports.)
+      mockGetActiveMarkets.mockRejectedValue(new Error('gamma down'));
+      mockGetCachedMarkets.mockResolvedValue([
+        makeMarket({
+          id: 'cached-live-game',
+          feeType: 'sports_fees_v2',
+          gameStartTime: new Date(Date.now() - 3600_000).toISOString(),
+        }),
+        makeMarket({ id: 'cached-non-sports', conditionId: '0xcond2' }),
+      ]);
+
+      const selected = await selectRebateMarkets(redis, 10);
+
+      expect(selected.map((c) => c.marketId)).toEqual(['cached-non-sports']);
+    });
+
+    it('keeps in-play sports markets when REBATE_EXCLUDE_LIVE_GAMES=false', async () => {
       mockLoadConfig.mockReturnValue({ ...baseRebateConfig, REBATE_EXCLUDE_LIVE_GAMES: false });
       mockGetActiveMarkets.mockResolvedValue([
         makeMarket({
           id: 'live-game',
+          feeType: 'sports_fees_v2',
           gameStartTime: new Date(Date.now() - 3600_000).toISOString(),
         }),
       ]);
@@ -449,5 +496,35 @@ describe('selectRebateMarkets', () => {
 
       expect(selected.map((c) => c.marketId)).toEqual(['above-floor']);
     });
+  });
+});
+
+// ── Sports eligibility classifier (pure) ─────────────────────────────────────
+
+describe('classifySportsEligibility', () => {
+  const inHours = (h: number): string => new Date(Date.now() + h * 3600_000).toISOString();
+
+  it('classifies the five states', () => {
+    expect(classifySportsEligibility({ feeType: 'weather_fees', gameStartTime: null, endDate: inHours(24) }, 2)).toBe('non_sports');
+    expect(classifySportsEligibility({ feeType: null, gameStartTime: null, endDate: null }, 2)).toBe('non_sports');
+    expect(classifySportsEligibility({ feeType: 'sports_fees_v2', gameStartTime: inHours(3), endDate: inHours(24) }, 2)).toBe('pre_game');
+    expect(classifySportsEligibility({ feeType: 'sports_fees_v2', gameStartTime: inHours(-1), endDate: inHours(24) }, 2)).toBe('live');
+    expect(classifySportsEligibility({ feeType: 'sports_fees_v2', gameStartTime: null, endDate: inHours(24) }, 2)).toBe('no_game_time_excluded');
+    expect(classifySportsEligibility({ feeType: 'sports_fees_v2', gameStartTime: null, endDate: inHours(10 * 24) }, 2)).toBe('outright_exempt');
+  });
+
+  it('treats unparseable gameStartTime as missing (fail closed for near-term)', () => {
+    expect(
+      classifySportsEligibility(
+        { feeType: 'sports_fees_v2', gameStartTime: 'not-a-date', endDate: inHours(24) },
+        2,
+      ),
+    ).toBe('no_game_time_excluded');
+  });
+
+  it('treats a sports market with no endDate as near-term (fail closed)', () => {
+    expect(
+      classifySportsEligibility({ feeType: 'sports_fees_v2', gameStartTime: null, endDate: null }, 2),
+    ).toBe('no_game_time_excluded');
   });
 });
