@@ -56,7 +56,7 @@ import {
   deployedUsdForMarket,
   getDeployedUsd,
   loadRestingOrders,
-  resolveMatchShares,
+  resolvePairTarget,
 } from '../orderManager.js';
 import { getClobOrder, cancelClobOrder, submitClobLimitBuy } from '../../shared/clob.js';
 import { recordPosition } from '../../execution/positionLedger.js';
@@ -436,17 +436,108 @@ describe('orderManager', () => {
     });
   });
 
-  describe('resolveMatchShares', () => {
+  describe('resolvePairTarget', () => {
     it('prioritizes held inventory > resting opposite > same-cycle leg', () => {
-      expect(resolveMatchShares(8.5, 13.5, 10)).toBe(8.5);
-      expect(resolveMatchShares(null, 13.5, 10)).toBe(13.5);
-      expect(resolveMatchShares(undefined, undefined, 10)).toBe(10);
-      expect(resolveMatchShares(null, null, null)).toBeUndefined();
+      expect(
+        resolvePairTarget(
+          { shares: 8.5, price: 0.61 },
+          { shares: 13.5, price: 0.37 },
+          { shares: 10, price: 0.5 },
+        ),
+      ).toEqual({ matchShares: 8.5, partnerCost: 0.61 });
+      expect(
+        resolvePairTarget(null, { shares: 13.5, price: 0.37 }, { shares: 10, price: 0.5 }),
+      ).toEqual({ matchShares: 13.5, partnerCost: 0.37 });
+      expect(resolvePairTarget(null, null, { shares: 10, price: 0.5 })).toEqual({
+        matchShares: 10,
+        partnerCost: 0.5,
+      });
+      expect(resolvePairTarget(null, null, null)).toBeUndefined();
     });
 
-    it('ignores zero/negative/non-finite candidates', () => {
-      expect(resolveMatchShares(0, -2, 10)).toBe(10);
-      expect(resolveMatchShares(NaN, Infinity, 7)).toBe(7);
+    it('skips candidates with zero/negative/non-finite shares or price', () => {
+      expect(
+        resolvePairTarget(
+          { shares: 0, price: 0.5 },
+          { shares: 13.5, price: -1 },
+          { shares: 7, price: 0.4 },
+        ),
+      ).toEqual({ matchShares: 7, partnerCost: 0.4 });
+      expect(
+        resolvePairTarget({ shares: NaN, price: 0.5 }, null, { shares: 7, price: 0.4 }),
+      ).toEqual({ matchShares: 7, partnerCost: 0.4 });
+      // Held position with shares but no usable entry price falls through.
+      expect(
+        resolvePairTarget({ shares: 8.5, price: undefined }, null, null),
+      ).toBeUndefined();
+    });
+  });
+
+  describe('pair-cost ceiling', () => {
+    it('rejects a pair-completing leg whose combined cost locks a loss (live CS replay)', async () => {
+      const redis = makeRedis();
+
+      // 2026-06-06 live failure: held YES@0.61, market moved, NO repriced to
+      // 0.65 → combined 1.26 → guaranteed −$2 if both redeem. The leg must be
+      // SKIPPED (no submit, no place_failures bump), not placed.
+      const quote = makeQuote({ direction: 'NO', tokenId: 'tok-no', price: 0.65 });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const order = await placeRestingOrder(redis as any, makeCandidate(), quote, {
+        maxUsd: 5,
+        matchShares: 8.19,
+        partnerCost: 0.61,
+      });
+
+      expect(order).toBeNull();
+      expect(mockSubmitLimit).not.toHaveBeenCalled();
+      const stats = statCalls(redis);
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'pair_cost_skips', by: 1 });
+      expect(stats.some((s) => s.field === 'place_failures')).toBe(false);
+    });
+
+    it('places a pair-completing leg when combined cost is at or under 1 − minCombinedEdge', async () => {
+      const redis = makeRedis();
+      mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-pair-ok' });
+
+      // 0.33 + 0.63 = 0.96 ≤ 0.98 ceiling → riskless pair, place it.
+      const quote = makeQuote({ direction: 'NO', tokenId: 'tok-no', price: 0.63 });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const order = await placeRestingOrder(redis as any, makeCandidate(), quote, {
+        maxUsd: 5,
+        matchShares: 7.93,
+        partnerCost: 0.33,
+      });
+
+      expect(order).not.toBeNull();
+      expect(order!.size).toBeCloseTo(7.93, 4);
+    });
+
+    it('rejects exactly at the boundary (combined just above the ceiling)', async () => {
+      const redis = makeRedis();
+
+      // ceiling = 0.98; 0.50 + 0.485 = 0.985 > 0.98 → reject.
+      const quote = makeQuote({ price: 0.485 });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const order = await placeRestingOrder(redis as any, makeCandidate(), quote, {
+        maxUsd: 5,
+        matchShares: 10,
+        partnerCost: 0.50,
+      });
+
+      expect(order).toBeNull();
+      expect(mockSubmitLimit).not.toHaveBeenCalled();
+    });
+
+    it('does not apply the ceiling to fresh legs (no partnerCost)', async () => {
+      const redis = makeRedis();
+      mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-fresh' });
+
+      // A fresh 0.65 leg with no partner is just a one-sided quote — allowed.
+      const quote = makeQuote({ direction: 'NO', tokenId: 'tok-no', price: 0.65 });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const order = await placeRestingOrder(redis as any, makeCandidate(), quote, { maxUsd: 5 });
+
+      expect(order).not.toBeNull();
     });
   });
 

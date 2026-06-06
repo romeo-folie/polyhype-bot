@@ -382,6 +382,42 @@ describe('selectRebateMarkets', () => {
       expect(selected.map((c) => c.marketId)).toEqual(['live-today']);
     });
 
+    it('skips in-play sports markets (gameStartTime in the past) when REBATE_EXCLUDE_LIVE_GAMES=true', async () => {
+      mockGetActiveMarkets.mockResolvedValue([
+        // Game started an hour ago — informed in-play flow, must be skipped.
+        makeMarket({
+          id: 'live-game',
+          gameStartTime: new Date(Date.now() - 3600_000).toISOString(),
+        }),
+        // Game starts in 3h — pre-game book, allowed.
+        makeMarket({
+          id: 'pre-game',
+          conditionId: '0xcond2',
+          gameStartTime: new Date(Date.now() + 3 * 3600_000).toISOString(),
+        }),
+        // No gameStartTime (non-sports) — allowed.
+        makeMarket({ id: 'no-game-time', conditionId: '0xcond3' }),
+      ]);
+
+      const selected = await selectRebateMarkets(redis, 10);
+
+      expect(selected.map((c) => c.marketId).sort()).toEqual(['no-game-time', 'pre-game']);
+    });
+
+    it('keeps in-play markets when REBATE_EXCLUDE_LIVE_GAMES=false', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseRebateConfig, REBATE_EXCLUDE_LIVE_GAMES: false });
+      mockGetActiveMarkets.mockResolvedValue([
+        makeMarket({
+          id: 'live-game',
+          gameStartTime: new Date(Date.now() - 3600_000).toISOString(),
+        }),
+      ]);
+
+      const selected = await selectRebateMarkets(redis, 10);
+
+      expect(selected.map((c) => c.marketId)).toEqual(['live-game']);
+    });
+
     it('applies the volume floor to lifetime volume on the cache fallback (no volume24hr field)', async () => {
       // CachedMarket rows lack volume24hr entirely — the ?? must fall through
       // to lifetime volume, not treat every cached market as zero-volume.

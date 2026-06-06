@@ -61,6 +61,8 @@ export interface GammaMarket {
   volume: string;
   /** Trailing-24h volume (USD). Present on /markets responses; numeric or string. */
   volume24hr?: string | number;
+  /** Scheduled game start (ISO) on sports markets; absent elsewhere. */
+  gameStartTime?: string | null;
   liquidity: string;
   endDate: string | null;
   description: string | null;

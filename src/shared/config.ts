@@ -1191,8 +1191,16 @@ export const envSchema = z.object({
   // both sides filling = riskless pair (cost < $1, redeems $1) + two rebates.
   REBATE_TWO_SIDED: boolFromEnv.optional().default(true),
   // Required combined-price headroom: yesBid + noBid ≤ 1 − this. Guarantees a
-  // both-sides fill nets at least this much per share before rebates.
+  // both-sides fill nets at least this much per share before rebates. Also the
+  // pair-cost ceiling for pair-COMPLETING legs across cycles (orderManager):
+  // a leg pairing against held inventory / a resting opposite order is skipped
+  // when quote + partner cost would exceed 1 − this (8 of the first 12 live
+  // pairs combined above $1.00 by chasing moved markets — locked losses).
   REBATE_MIN_COMBINED_EDGE: z.coerce.number().min(0).max(0.5).optional().default(0.02),
+  // Skip sports markets whose gameStartTime has passed (in-play). Live games
+  // are where taker flow is most informed — resting bids get hit exactly when
+  // the game turns (first-day naked legs ran 4W/10L). Pre-game books only.
+  REBATE_EXCLUDE_LIVE_GAMES: boolFromEnv.optional().default(true),
   // Reprice trigger: when a market re-selects and the fresh target price has
   // drifted from a resting order's price by more than this, cancel + repost.
   REBATE_REPRICE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.02),
