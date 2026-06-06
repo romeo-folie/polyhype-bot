@@ -210,6 +210,37 @@ describe('planPairAction — one-sided mode (REBATE_TWO_SIDED=false)', () => {
     if (plan.kind !== 'fresh_single') return;
     expect(plan.leg.sizeUsd).toBeCloseTo(5, 6);
   });
+
+  it('a blocked quote does not suppress a genuinely fresh other side (review fix)', () => {
+    // YES quote pairs against held NO with unusable basis → blocked.
+    // NO quote is genuinely fresh. One-sided mode must still plan it.
+    const plan = planPairAction(
+      makeSnapshot({
+        actionableQuotes: [
+          makeQuote({ direction: 'YES', price: 0.39 }),
+          makeQuote({ direction: 'NO', tokenId: 'tok-no', price: 0.57 }),
+        ],
+        heldOpposite: (dir) => (dir === 'NO' ? { shares: 8.19, price: undefined } : null),
+        cfg: { ...baseCfg, REBATE_TWO_SIDED: false },
+      }),
+    );
+
+    expect(plan.kind).toBe('fresh_single');
+  });
+});
+
+describe('planPairAction — completion legs below the CLOB minimum', () => {
+  it('drops a sub-minimum completion leg at planning (no governor slot wasted)', () => {
+    // 1.2 held shares × 0.38 = $0.456 < $1 minimum.
+    const plan = planPairAction(
+      makeSnapshot({
+        actionableQuotes: [makeQuote({ direction: 'NO', tokenId: 'tok-no', price: 0.38 })],
+        heldOpposite: (dir) => (dir === 'YES' ? { shares: 1.2, price: 0.5 } : null),
+      }),
+    );
+
+    expect(plan).toEqual({ kind: 'skip', reason: 'below_clob_minimum' });
+  });
 });
 
 describe('planPairAction — nothing to do', () => {

@@ -446,22 +446,17 @@ describe('orderManager', () => {
   });
 
   describe('resolvePairTarget', () => {
-    it('prioritizes held inventory > resting opposite > same-cycle leg', () => {
+    it('prioritizes held inventory > resting opposite', () => {
       expect(
         resolvePairTarget(
           { shares: 8.5, price: 0.61 },
           { shares: 13.5, price: 0.37 },
-          { shares: 10, price: 0.5 },
         ),
       ).toEqual({ matchShares: 8.5, partnerCost: 0.61 });
       expect(
-        resolvePairTarget(null, { shares: 13.5, price: 0.37 }, { shares: 10, price: 0.5 }),
+        resolvePairTarget(null, { shares: 13.5, price: 0.37 }),
       ).toEqual({ matchShares: 13.5, partnerCost: 0.37 });
-      expect(resolvePairTarget(null, null, { shares: 10, price: 0.5 })).toEqual({
-        matchShares: 10,
-        partnerCost: 0.5,
-      });
-      expect(resolvePairTarget(null, null, null)).toBeUndefined();
+      expect(resolvePairTarget(null, null)).toBeUndefined();
     });
 
     it('skips candidates with zero/negative/non-finite shares or price', () => {
@@ -469,11 +464,10 @@ describe('orderManager', () => {
         resolvePairTarget(
           { shares: 0, price: 0.5 },
           { shares: 13.5, price: -1 },
-          { shares: 7, price: 0.4 },
         ),
-      ).toEqual({ matchShares: 7, partnerCost: 0.4 });
+      ).toBeUndefined();
       expect(
-        resolvePairTarget({ shares: NaN, price: 0.5 }, null, { shares: 7, price: 0.4 }),
+        resolvePairTarget({ shares: NaN, price: 0.5 }, { shares: 7, price: 0.4 }),
       ).toEqual({ matchShares: 7, partnerCost: 0.4 });
     });
 
@@ -486,11 +480,10 @@ describe('orderManager', () => {
         resolvePairTarget(
           { shares: 8.5, price: undefined },
           { shares: 13.5, price: 0.37 },
-          { shares: 10, price: 0.5 },
         ),
       ).toBeNull();
-      expect(resolvePairTarget({ shares: 8.5, price: 0 }, null, null)).toBeNull();
-      expect(resolvePairTarget({ shares: 8.5, price: NaN }, null, null)).toBeNull();
+      expect(resolvePairTarget({ shares: 8.5, price: 0 }, null)).toBeNull();
+      expect(resolvePairTarget({ shares: 8.5, price: NaN }, null)).toBeNull();
     });
   });
 
@@ -686,8 +679,12 @@ describe('orderManager', () => {
       expect(result.orphanCancels).toHaveLength(1);
       expect(mockCancelOrder).toHaveBeenCalledWith('order-naked');
       expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-naked');
+      // Three-bucket stat convention: cumulative + per-market + per-day.
+      const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
       const stats = statCalls(redis);
       expect(stats).toContainEqual({ key: 'rebate:stats', field: 'orphan_leg_cancels', by: 1 });
+      expect(stats).toContainEqual({ key: 'rebate:stats:market:mkt-1', field: 'orphan_leg_cancels', by: 1 });
+      expect(stats).toContainEqual({ key: todayKey, field: 'orphan_leg_cancels', by: 1 });
     });
 
     it('spares a pair-completion state: held opposite position exists', async () => {
@@ -751,8 +748,12 @@ describe('orderManager', () => {
 
       expect(outcome).toBe('cancelled');
       expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-rb');
+      // Three-bucket stat convention: cumulative + per-market + per-day.
+      const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
       const stats = statCalls(redis);
       expect(stats).toContainEqual({ key: 'rebate:stats', field: 'pair_rollbacks', by: 1 });
+      expect(stats).toContainEqual({ key: 'rebate:stats:market:mkt-1', field: 'pair_rollbacks', by: 1 });
+      expect(stats).toContainEqual({ key: todayKey, field: 'pair_rollbacks', by: 1 });
     });
 
     it('treats a failed cancel whose recheck shows the order gone as cancelled', async () => {

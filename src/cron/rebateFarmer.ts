@@ -273,11 +273,12 @@ export async function main(): Promise<void> {
           placed++;
         } else {
           // pair_completion / fresh_single: independent single legs.
+          // CompletionLeg carries required ceiling inputs; FreshLeg has none.
           for (const leg of legs) {
             const order = await placeRestingOrder(redis, candidate, leg.quote, {
               maxUsd: Math.min(cfg.REBATE_ORDER_SIZE_USD, remaining),
-              matchShares: leg.matchShares,
-              partnerCost: leg.partnerCost,
+              matchShares: 'matchShares' in leg ? leg.matchShares : undefined,
+              partnerCost: 'partnerCost' in leg ? leg.partnerCost : undefined,
             });
             if (order) {
               orders.set(order.orderId, order);

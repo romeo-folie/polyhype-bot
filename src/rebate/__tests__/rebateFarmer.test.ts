@@ -159,6 +159,9 @@ describe('rebateFarmer main()', () => {
     expect(mockReconcileOrders).toHaveBeenCalledOnce();
     expect(mockSelectRebateMarkets).not.toHaveBeenCalled();
     expect(mockPlaceRestingOrder).not.toHaveBeenCalled();
+    // The daily summary is also gated on enabled — disabled mode is
+    // reconcile-only.
+    expect(mockDailySummary).not.toHaveBeenCalled();
   });
 
   it('P0-1/P0-2: a fresh pair reserves 2 governor slots and places both legs', async () => {
@@ -234,6 +237,8 @@ describe('rebateFarmer main()', () => {
     await main();
 
     expect(mockReserveGovernorSlots).toHaveBeenCalledWith(expect.anything(), 'polymarket', 1);
+    // Never a 2-slot reservation: this candidate must NOT plan as fresh_pair.
+    expect(mockReserveGovernorSlots).not.toHaveBeenCalledWith(expect.anything(), 'polymarket', 2);
     expect(mockPlaceRestingOrder).toHaveBeenCalledTimes(1);
     const sizing = mockPlaceRestingOrder.mock.calls[0]![3] as Record<string, unknown>;
     expect(sizing.matchShares).toBe(8.19);

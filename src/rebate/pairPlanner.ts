@@ -35,21 +35,27 @@ export type PlanSkipReason =
   | 'market_cap_exceeded'       // both legs together breach REBATE_MAX_PER_MARKET_USD
   | 'budget_exhausted';         // both legs together exceed remaining budget
 
-export interface PlannedLeg {
+export interface FreshLeg {
   quote: RebateQuote;
   /** Exact share count to place (legs of a fresh pair are equal by construction). */
   shares: number;
   sizeUsd: number;
-  /** Pair-cost ceiling inputs (pair-completion legs only). */
-  matchShares?: number;
-  partnerCost?: number;
 }
 
+/** A leg pairing against existing opposite inventory or a resting order —
+ * the ceiling inputs are REQUIRED, never optional. */
+export interface CompletionLeg extends FreshLeg {
+  matchShares: number;
+  partnerCost: number;
+}
+
+export type PlannedLeg = FreshLeg | CompletionLeg;
+
 export type PairPlan =
-  | { kind: 'fresh_pair'; legs: [PlannedLeg, PlannedLeg]; combined: number }
-  | { kind: 'pair_completion'; legs: PlannedLeg[] }
+  | { kind: 'fresh_pair'; legs: [FreshLeg, FreshLeg]; combined: number }
+  | { kind: 'pair_completion'; legs: CompletionLeg[] }
   /** One-sided mode only (REBATE_TWO_SIDED=false, documented-intentional). */
-  | { kind: 'fresh_single'; leg: PlannedLeg }
+  | { kind: 'fresh_single'; leg: FreshLeg }
   | { kind: 'skip'; reason: PlanSkipReason };
 
 export interface PlannerSnapshot {
@@ -84,9 +90,10 @@ export function planPairAction(snap: PlannerSnapshot): PairPlan {
   if (actionableQuotes.length === 0) return { kind: 'skip', reason: 'no_actionable_quotes' };
 
   // Classify each actionable quote: pair-completion (opposite exists) or fresh.
-  const completions: PlannedLeg[] = [];
+  const completions: CompletionLeg[] = [];
   const fresh: RebateQuote[] = [];
   let blocked = false;
+  let droppedBelowMin = false;
 
   for (const quote of actionableQuotes) {
     const oppDir = opposite(quote.direction);
@@ -95,7 +102,6 @@ export function planPairAction(snap: PlannerSnapshot): PairPlan {
     const pair = resolvePairTarget(
       held,
       resting ? { shares: resting.size, price: resting.price } : null,
-      null,
     );
 
     if (pair === null) {
@@ -111,9 +117,15 @@ export function planPairAction(snap: PlannerSnapshot): PairPlan {
     }
 
     // Pair-completion sizing: share-match the partner, cap by per-leg budget.
+    // Sub-minimum legs are dropped HERE so the farmer never reserves a
+    // governor slot for a leg placeRestingOrder would refuse anyway.
     const maxUsd = Math.min(cfg.REBATE_ORDER_SIZE_USD, snap.remainingBudget);
     const shares = Math.min(pair.matchShares, maxUsd / quote.price);
     const sizeUsd = shares * quote.price;
+    if (sizeUsd < CLOB_MIN_ORDER_USD) {
+      droppedBelowMin = true;
+      continue;
+    }
     completions.push({
       quote,
       shares,
@@ -124,13 +136,23 @@ export function planPairAction(snap: PlannerSnapshot): PairPlan {
   }
 
   // Pair-completion takes priority: closing existing exposure beats opening new.
-  // (placeRestingOrder re-enforces the pair-cost ceiling and CLOB minimum —
-  // legs that would breach them are dropped at execution with stats.)
+  // (placeRestingOrder re-enforces the pair-cost ceiling and CLOB minimum as
+  // execution-time backstops.)
   if (completions.length > 0) {
     return { kind: 'pair_completion', legs: completions };
   }
-  if (blocked) return { kind: 'skip', reason: 'pair_blocked_unusable_basis' };
-  if (fresh.length === 0) return { kind: 'skip', reason: 'no_actionable_quotes' };
+  // A blocked quote only blocks the MARKET when nothing else is plannable —
+  // a genuinely fresh other side (one-sided mode) must not be suppressed by
+  // an unusable basis on the opposite quote.
+  if (blocked && fresh.length === 0) {
+    return { kind: 'skip', reason: 'pair_blocked_unusable_basis' };
+  }
+  if (fresh.length === 0) {
+    return {
+      kind: 'skip',
+      reason: droppedBelowMin ? 'below_clob_minimum' : 'no_actionable_quotes',
+    };
+  }
 
   // ── Fresh legs: atomic pair preflight (P0-1) ──────────────────────────────
   // In two-sided mode a fresh market is entered as a PAIR or not at all.
@@ -153,6 +175,10 @@ export function planPairAction(snap: PlannerSnapshot): PairPlan {
 
   const [legA, legB] = fresh as [RebateQuote, RebateQuote];
   const combined = legA.price + legB.price;
+  // The selector already enforces this ceiling on the same quote objects, so
+  // in today's single-cycle flow this guard cannot fire — it exists so the
+  // planner stays safe if actionableQuotes ever diverge from selection-time
+  // quotes (caching, repricing, future call sites).
   if (combined > 1 - cfg.REBATE_MIN_COMBINED_EDGE + 1e-9) {
     return { kind: 'skip', reason: 'combined_above_ceiling' };
   }
