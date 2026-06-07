@@ -993,6 +993,11 @@ describe('runWeatherInvalidationScan — hedge (Phase 4)', () => {
         expect.any(String),
         expect.any(Number),
       );
+      // The skip is a PLAIN skip by design — it must not route to the
+      // can't-hedge exit/notify path (that path is for genuine market
+      // barriers; a near-free opposite ask means the held side is winning).
+      expect(mockNotifyWeatherInvalidationNoHedge).not.toHaveBeenCalled();
+      expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
     });
 
     it('partial fill of a bumped hedge below MIN_FILL_RATIO deducts cost, sets cooldown, no marker', async () => {
