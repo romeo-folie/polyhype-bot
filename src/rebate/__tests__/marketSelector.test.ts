@@ -504,11 +504,12 @@ describe('selectRebateMarkets', () => {
 describe('classifySportsEligibility', () => {
   const inHours = (h: number): string => new Date(Date.now() + h * 3600_000).toISOString();
 
-  it('classifies the five states', () => {
+  it('classifies the six states', () => {
     expect(classifySportsEligibility({ feeType: 'weather_fees', gameStartTime: null, endDate: inHours(24) }, 2, 1)).toBe('non_sports');
     expect(classifySportsEligibility({ feeType: null, gameStartTime: null, endDate: null }, 2, 1)).toBe('non_sports');
     expect(classifySportsEligibility({ feeType: 'sports_fees_v2', gameStartTime: inHours(3), endDate: inHours(24) }, 2, 1)).toBe('pre_game');
     expect(classifySportsEligibility({ feeType: 'sports_fees_v2', gameStartTime: inHours(-1), endDate: inHours(24) }, 2, 1)).toBe('live');
+    expect(classifySportsEligibility({ feeType: 'sports_fees_v2', gameStartTime: inHours(0.5), endDate: inHours(24) }, 2, 1)).toBe('starting_soon');
     expect(classifySportsEligibility({ feeType: 'sports_fees_v2', gameStartTime: null, endDate: inHours(24) }, 2, 1)).toBe('no_game_time_excluded');
     expect(classifySportsEligibility({ feeType: 'sports_fees_v2', gameStartTime: null, endDate: inHours(10 * 24) }, 2, 1)).toBe('outright_exempt');
   });
@@ -591,5 +592,31 @@ describe('selectRebateMarkets — pre-game buffer exclusion', () => {
     const selected = await selectRebateMarkets(redis, 10);
 
     expect(selected.map((c) => c.marketId)).toEqual(['plenty-of-time']);
+  });
+});
+
+describe('selectRebateMarkets — REBATE_EXCLUDE_LIVE_GAMES master switch', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetClobOrderBook.mockImplementation((tokenId: string) =>
+      Promise.resolve(tokenId === 'tok-yes' ? makeBook(0.39, 0.41) : makeBook(0.58, 0.62)),
+    );
+    mockFetchRecentMarketFlow.mockResolvedValue(makeFlow());
+  });
+
+  it('=false also disables the pre-game buffer (documented master-switch coupling)', async () => {
+    mockLoadConfig.mockReturnValue({ ...baseRebateConfig, REBATE_EXCLUDE_LIVE_GAMES: false });
+    mockGetActiveMarkets.mockResolvedValue([
+      makeMarket({
+        id: 'starting-in-5min',
+        feeType: 'sports_fees_v2',
+        gameStartTime: new Date(Date.now() + 5 * 60_000).toISOString(),
+      }),
+    ]);
+
+    const selected = await selectRebateMarkets(redis, 10);
+
+    // The whole sports-timing gate is off — starting_soon passes too.
+    expect(selected.map((c) => c.marketId)).toEqual(['starting-in-5min']);
   });
 });

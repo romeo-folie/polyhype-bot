@@ -1200,6 +1200,8 @@ export const envSchema = z.object({
   // Skip sports markets whose gameStartTime has passed (in-play). Live games
   // are where taker flow is most informed — resting bids get hit exactly when
   // the game turns (first-day naked legs ran 4W/10L). Pre-game books only.
+  // MASTER SWITCH for the whole sports-timing gate: false also disables the
+  // no-gameStartTime fail-close AND the REBATE_MIN_HOURS_TO_GAME_START buffer.
   REBATE_EXCLUDE_LIVE_GAMES: boolFromEnv.optional().default(true),
   // Sports-typed markets (feeType sports_*) with NO parseable future
   // gameStartTime are ineligible (fail closed: missing metadata on a
