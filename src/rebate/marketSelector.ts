@@ -54,7 +54,8 @@ const UNIVERSE_PAGE_SIZE = 100;
 type UniverseMarket = CachedMarket & { volume24hr?: string | number };
 
 export type SportsClass =
-  | 'pre_game'              // sports, gameStartTime in the future — eligible
+  | 'pre_game'              // sports, game starts beyond the pre-game buffer — eligible
+  | 'starting_soon'         // sports, game starts within REBATE_MIN_HOURS_TO_GAME_START — ineligible
   | 'live'                  // sports, gameStartTime passed — ineligible
   | 'no_game_time_excluded' // sports, no usable gameStartTime, near-term — ineligible (fail closed)
   | 'outright_exempt'       // sports, no usable gameStartTime, long-dated — eligible
@@ -72,12 +73,20 @@ export type SportsClass =
 export function classifySportsEligibility(
   market: Pick<UniverseMarket, 'feeType' | 'gameStartTime' | 'endDate'>,
   outrightMinDays: number,
+  minHoursToStart: number,
 ): SportsClass {
   if (!market.feeType?.startsWith('sports_')) return 'non_sports';
 
   const start = market.gameStartTime ? new Date(market.gameStartTime).getTime() : NaN;
   if (!isNaN(start)) {
-    return start > Date.now() ? 'pre_game' : 'live';
+    if (start <= Date.now()) return 'live';
+    // Pre-game buffer: quoting right up to the whistle leaves resting pairs
+    // carrying into the live game until the order TTL clears them (shadow
+    // caught an NHL pair planned 5 minutes before puck drop). Markets whose
+    // game starts within the buffer are excluded so nothing of ours rests
+    // near the informed-flow boundary.
+    if (start <= Date.now() + minHoursToStart * 3_600_000) return 'starting_soon';
+    return 'pre_game';
   }
 
   const end = market.endDate ? new Date(market.endDate).getTime() : NaN;
@@ -167,6 +176,7 @@ export async function selectRebateMarkets(
   }[] = [];
   const sportsTelemetry: Record<SportsClass, number> = {
     pre_game: 0,
+    starting_soon: 0,
     live: 0,
     no_game_time_excluded: 0,
     outright_exempt: 0,
@@ -199,9 +209,19 @@ export async function selectRebateMarkets(
     // is flow. Sports markets with NO usable gameStartTime are treated as
     // in-play risk unless long-dated (outrights).
     if (cfg.REBATE_EXCLUDE_LIVE_GAMES) {
-      const sportsClass = classifySportsEligibility(market, cfg.REBATE_SPORTS_OUTRIGHT_MIN_DAYS);
+      const sportsClass = classifySportsEligibility(
+        market,
+        cfg.REBATE_SPORTS_OUTRIGHT_MIN_DAYS,
+        cfg.REBATE_MIN_HOURS_TO_GAME_START,
+      );
       sportsTelemetry[sportsClass]++;
-      if (sportsClass === 'live' || sportsClass === 'no_game_time_excluded') continue;
+      if (
+        sportsClass === 'live' ||
+        sportsClass === 'starting_soon' ||
+        sportsClass === 'no_game_time_excluded'
+      ) {
+        continue;
+      }
     }
 
     // Recent (24h) volume when the universe provides it; lifetime volume

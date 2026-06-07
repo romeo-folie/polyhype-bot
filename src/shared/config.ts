@@ -1200,6 +1200,8 @@ export const envSchema = z.object({
   // Skip sports markets whose gameStartTime has passed (in-play). Live games
   // are where taker flow is most informed — resting bids get hit exactly when
   // the game turns (first-day naked legs ran 4W/10L). Pre-game books only.
+  // MASTER SWITCH for the whole sports-timing gate: false also disables the
+  // no-gameStartTime fail-close AND the REBATE_MIN_HOURS_TO_GAME_START buffer.
   REBATE_EXCLUDE_LIVE_GAMES: boolFromEnv.optional().default(true),
   // Sports-typed markets (feeType sports_*) with NO parseable future
   // gameStartTime are ineligible (fail closed: missing metadata on a
@@ -1207,6 +1209,12 @@ export const envSchema = z.object({
   // many days out — long-dated outrights (World Cup winner etc.) legitimately
   // have no single game time.
   REBATE_SPORTS_OUTRIGHT_MIN_DAYS: z.coerce.number().min(0).optional().default(2),
+  // Pre-game buffer: sports markets whose game starts within this many hours
+  // are ineligible ('starting_soon'). Quoting up to the whistle leaves
+  // resting pairs carrying into the live game until the order TTL clears
+  // them (shadow caught an NHL pair planned 5 minutes before puck drop), and
+  // late pre-game flow is the most informed. 0 disables the buffer.
+  REBATE_MIN_HOURS_TO_GAME_START: z.coerce.number().min(0).optional().default(1),
   // Shadow mode: with REBATE_FARMING_ENABLED=true, run reconciliation (real)
   // plus selection and the full atomic-pair preflight, but LOG the would-be
   // placements ([rebate-shadow]) instead of sending orders. No governor
