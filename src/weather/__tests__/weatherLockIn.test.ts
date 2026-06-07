@@ -272,6 +272,10 @@ describe('runWeatherLockInScan', () => {
 
     it('bumps at exactly the 60% tolerance boundary (inclusive)', async () => {
       // 20 sh × 0.03 = $0.60 — exactly 60% of the $1 minimum → still bumped.
+      // IEEE 754 note: `20 * 0.03` and `1.0 * 0.6` evaluate to the IDENTICAL
+      // double (0.5999999999999999778), so this genuinely pins the inclusive
+      // boundary of the strict `<` skip check — flipping it to `<=` routes
+      // this case to the skip path and fails the assertion below.
       mockSql.mockResolvedValue([makePosition({ sharesHeld: 20 })]);
       mockSubmitClobBuy.mockResolvedValue({ success: true, shares_bought: 33, cost: 1.0 });
       const redis = makeRedis();
@@ -281,6 +285,22 @@ describe('runWeatherLockInScan', () => {
       expect(mockSubmitClobBuy).toHaveBeenCalledWith(
         expect.objectContaining({ amountUsd: 1.0 }),
       );
+    });
+
+    it('partial fill of a bumped order below 0.9 ratio deducts cost but does not set lock', async () => {
+      mockSql.mockResolvedValue([makePosition({ sharesHeld: 30 })]);
+      // Bumped to $1.00; only 20 of 30 needed shares fill → ratio 0.67 < 0.9
+      // → no lock (retried next scan), but the spent cost is still deducted.
+      mockSubmitClobBuy.mockResolvedValue({ success: true, shares_bought: 20, cost: 0.60 });
+      const redis = makeRedis();
+
+      await runWeatherLockInScan(redis as any);
+
+      expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+        expect.objectContaining({ amountUsd: 1.0 }),
+      );
+      expect(redis.set).not.toHaveBeenCalled();
+      expect(mockDeductStake).toHaveBeenCalledWith(redis, 0.60);
     });
 
     it('skips entirely when intended notional is too far below the minimum (no oversized bump)', async () => {
