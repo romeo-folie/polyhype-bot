@@ -22,7 +22,7 @@ import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { getSql } from '../db/client.js';
 import { getMarket, parseClobTokenIds } from '../mapping/gamma.js';
-import { getClobOrderBook, submitClobBuy } from '../shared/clob.js';
+import { getClobOrderBook, submitClobBuy, CLOB_MIN_ORDER_USD } from '../shared/clob.js';
 import { getBookTouchLevels } from '../shared/bookTouch.js';
 import { deductStake } from '../shared/bankroll.js';
 import { dedup } from '../shared/redis.js';
@@ -57,6 +57,16 @@ const LOCK_IN_KEY_PREFIX = 'weather:locked:';
 const HEDGE_PARTIAL_COOLDOWN_KEY_PREFIX = 'weather:forecast_hedge_partial_cooldown:';
 const HEDGE_PARTIAL_COOLDOWN_S = 30 * 60;
 const HEDGE_TTL_S = 14 * 24 * 3600;
+
+// CLOB rejects orders below CLOB_MIN_ORDER_USD, and a 1:1 hedge on a collapsed
+// opposite side is often pennies (sharesHeld × ask). Same rule as the lock-in
+// scanner (weatherLockIn.ts): bump to the minimum when the intended notional is
+// at least this fraction of it (≤1.67× overshoot — the extra opposite shares
+// are cents of exposure on the side the model now favors); below the fraction,
+// skip rather than submit a doomed order. Duplicated, not shared via
+// shared/clob.ts, because the weather test suites mock that module wholesale —
+// a helper there would be mocked away under vi.mock factories.
+const HEDGE_MIN_ORDER_BUMP_RATIO = 0.6;
 // Idempotency marker for the Phase 5 resolution-day exit. Set once a held-side
 // sell succeeds so a second scan (before the closed/pending position drops out of
 // the SQL query) cannot re-enter the exit path. Mirrors the hedge marker's TTL.
@@ -960,7 +970,34 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
         continue;
       }
 
-      const amountUsd = pos.sharesHeld * oppositeAsk;
+      const intendedUsd = pos.sharesHeld * oppositeAsk;
+      if (intendedUsd < CLOB_MIN_ORDER_USD * HEDGE_MIN_ORDER_BUMP_RATIO) {
+        // Too far below the exchange minimum to bump 1:1-ish. Deliberately a
+        // plain skip rather than the exitOrNotify path: an ask this cheap on a
+        // ≥MIN_BET-sized position means the held side is effectively winning
+        // (the hedge would be near-free if it were buyable), and dust slivers
+        // aren't worth forcing exits over. Re-evaluated next scan.
+        logger.info('[weather-invalidation] hedge notional too far below CLOB minimum — skipping', {
+          positionId: pos.id,
+          marketId: pos.marketId,
+          direction: pos.direction,
+          oppositeAsk,
+          intendedUsd: Number(intendedUsd.toFixed(4)),
+          minOrderUsd: CLOB_MIN_ORDER_USD,
+          bumpRatio: HEDGE_MIN_ORDER_BUMP_RATIO,
+        });
+        continue;
+      }
+      const amountUsd = Math.max(intendedUsd, CLOB_MIN_ORDER_USD);
+      if (amountUsd > intendedUsd) {
+        logger.info('[weather-invalidation] bumping hedge order to CLOB minimum', {
+          positionId: pos.id,
+          marketId: pos.marketId,
+          direction: pos.direction,
+          intendedUsd: Number(intendedUsd.toFixed(4)),
+          amountUsd,
+        });
+      }
       const result = await submitClobBuy({ tokenId: oppositeTokenId, amountUsd, orderType: 'FAK' });
 
       if (result.success) {

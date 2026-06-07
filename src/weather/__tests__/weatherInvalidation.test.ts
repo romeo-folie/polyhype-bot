@@ -946,6 +946,100 @@ describe('runWeatherInvalidationScan — hedge (Phase 4)', () => {
     expect(mockDeductStake).toHaveBeenCalledWith(redis, 2.0);
   });
 
+  describe('CLOB minimum-order bump (sharesHeld × ask below $1)', () => {
+    it('bumps a near-miss hedge up to the CLOB minimum and sets the marker on fill', async () => {
+      // 10 sh × 0.08 = $0.80 intended ≥ 60% of $1 → submit at exactly $1.00.
+      mockSql.mockResolvedValue([makePosition({ sharesHeld: 10 })]);
+      mockGetClobOrderBook.mockResolvedValue({ asks: [{ price: '0.08' }] });
+      // $1.00 at 0.08 buys ~12 shares → ratio 12/10 > 0.9 → marker sets.
+      mockSubmitClobBuy.mockResolvedValue({ success: true, shares_bought: 12, cost: 1.0 });
+      const redis = makeRedis();
+
+      await runWeatherInvalidationScan(redis as any);
+
+      expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+        expect.objectContaining({ amountUsd: 1.0 }),
+      );
+      expect(redis.set).toHaveBeenCalledWith(
+        'weather:forecast_hedged:pos-1',
+        '1',
+        'EX',
+        expect.any(Number),
+      );
+      expect(mockDeductStake).toHaveBeenCalledWith(redis, 1.0);
+    });
+
+    it('skips entirely when intended notional is too far below the minimum (no submit, no marker, no cooldown)', async () => {
+      // 10 sh × 0.03 = $0.30 < 60% of $1 → plain skip: bumping would be a >3×
+      // oversize, and an ask this cheap means the held side is effectively
+      // winning anyway. Re-evaluated next scan — cooldown must NOT be set.
+      mockSql.mockResolvedValue([makePosition({ sharesHeld: 10 })]);
+      mockGetClobOrderBook.mockResolvedValue({ asks: [{ price: '0.03' }] });
+      const redis = makeRedis();
+
+      await runWeatherInvalidationScan(redis as any);
+
+      expect(mockSubmitClobBuy).not.toHaveBeenCalled();
+      expect(mockDeductStake).not.toHaveBeenCalled();
+      expect(redis.set).not.toHaveBeenCalledWith(
+        expect.stringContaining('weather:forecast_hedged:'),
+        expect.any(String),
+        expect.any(String),
+        expect.any(Number),
+      );
+      expect(redis.set).not.toHaveBeenCalledWith(
+        expect.stringContaining('weather:forecast_hedge_partial_cooldown:'),
+        expect.any(String),
+        expect.any(String),
+        expect.any(Number),
+      );
+      // The skip is a PLAIN skip by design — it must not route to the
+      // can't-hedge exit/notify path (that path is for genuine market
+      // barriers; a near-free opposite ask means the held side is winning).
+      expect(mockNotifyWeatherInvalidationNoHedge).not.toHaveBeenCalled();
+      expect(mockExecuteTakeProfit).not.toHaveBeenCalled();
+    });
+
+    it('partial fill of a bumped hedge below MIN_FILL_RATIO deducts cost, sets cooldown, no marker', async () => {
+      mockSql.mockResolvedValue([makePosition({ sharesHeld: 10 })]);
+      mockGetClobOrderBook.mockResolvedValue({ asks: [{ price: '0.08' }] });
+      // Bumped to $1.00; only 5 of 10 needed shares fill → ratio 0.5 < 0.9.
+      mockSubmitClobBuy.mockResolvedValue({ success: true, shares_bought: 5, cost: 0.40 });
+      const redis = makeRedis();
+
+      await runWeatherInvalidationScan(redis as any);
+
+      expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+        expect.objectContaining({ amountUsd: 1.0 }),
+      );
+      expect(redis.set).not.toHaveBeenCalledWith(
+        expect.stringContaining('weather:forecast_hedged:'),
+        expect.any(String),
+        expect.any(String),
+        expect.any(Number),
+      );
+      expect(redis.set).toHaveBeenCalledWith(
+        'weather:forecast_hedge_partial_cooldown:pos-1',
+        '1',
+        'EX',
+        30 * 60,
+      );
+      expect(mockDeductStake).toHaveBeenCalledWith(redis, 0.40);
+    });
+
+    it('passes the intended notional through unchanged when it clears the minimum', async () => {
+      // Default 10 sh × 0.20 = $2.00 ≥ $1 → no bump, no rounding.
+      mockSql.mockResolvedValue([makePosition({ sharesHeld: 10 })]);
+      const redis = makeRedis();
+
+      await runWeatherInvalidationScan(redis as any);
+
+      expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+        expect.objectContaining({ amountUsd: expect.closeTo(2.0, 5) }),
+      );
+    });
+  });
+
   it('shadow-logs hedge opportunity even when HEDGE_ENABLED=false', async () => {
     mockLoadConfig.mockReturnValue(
       makeConfig({
