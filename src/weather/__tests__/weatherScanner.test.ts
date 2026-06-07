@@ -79,6 +79,7 @@ vi.mock('../../shared/clob.js', () => ({
   // their config gates are off in baseConfig so they are never invoked.
   getClobOrderBook: vi.fn().mockResolvedValue(null),
   submitClobBuy: vi.fn().mockResolvedValue({ success: false, error: 'mocked' }),
+  CLOB_MIN_ORDER_USD: 1.0,
 }));
 
 // cityLocalHour drives the late-res-day bracket cancel arm — mocked so tests
