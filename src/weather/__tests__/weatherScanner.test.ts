@@ -4026,13 +4026,32 @@ describe('revalidateRestingWeatherOrders', () => {
     expect(mockCancelClobOrder).not.toHaveBeenCalled();
   });
 
-  it('does nothing when the opportunity list is empty (fail-safe on Gamma outage)', async () => {
+  it('zero opportunities (Gamma outage): FV rule inert, unexpired orders untouched', async () => {
+    // The expiry sweep proceeds on an outage (it is time-based, not FV-based),
+    // so listPendingOrders IS consulted — but an unexpired order has no rule
+    // left to fire: the FV rule needs an opportunity row it doesn't have.
+    mockListPendingOrders.mockResolvedValue([pendingEntry()]);
+
+    await revalidateRestingWeatherOrders({} as never, []);
+
+    expect(mockListPendingOrders).toHaveBeenCalled();
+    expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+  });
+
+  it('zero opportunities with only the bracket knob on: fully inert (no Redis scan)', async () => {
+    // Without the primary/expiry knob there is no time-based rule, so the
+    // original outage fail-safe applies in full.
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_BRACKET_CANCEL_ENABLED: true,
+      WEATHER_RESTING_REVALIDATION_ENABLED: false,
+    } as never);
     mockListPendingOrders.mockResolvedValue([pendingEntry()]);
 
     await revalidateRestingWeatherOrders({} as never, []);
 
     expect(mockListPendingOrders).not.toHaveBeenCalled();
-    expect(mockCancelClobOrder).not.toHaveBeenCalled();
   });
 
   it('is inert when BOTH the revalidation and bracket-cancel knobs are off', async () => {
@@ -4078,6 +4097,159 @@ describe('revalidateRestingWeatherOrders', () => {
     await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
 
     expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+  });
+
+  describe('expiry sweep (expiresAt re-post window lapsed)', () => {
+    const expired = () => ({ expiresAt: Date.now() - 60_000 });
+
+    it('cancels an expired primary even when its market is outside the scan universe', async () => {
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ marketId: 'mkt-gone', order: expired() }),
+      ]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))   // pre-cancel read: nothing filled
+        .mockResolvedValueOnce(null);            // post-cancel read: order gone
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-gone', 'NO');
+    });
+
+    it('sweeps expired primaries even on a Gamma outage (zero opportunities)', async () => {
+      mockListPendingOrders.mockResolvedValue([pendingEntry({ order: expired() })]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))
+        .mockResolvedValueOnce(null);
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, []);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-1', 'NO');
+    });
+
+    it('never sweeps bracket legs, however stale — their lifecycle is the bracket rule', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...revalidationConfig(),
+        WEATHER_BRACKET_CANCEL_ENABLED: true,
+      } as never);
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({
+          marketId: 'mkt-gone', // out of universe → bracket rule can't fire either
+          order: { isBracketOpposite: true, edgeMagnitude: 0, expiresAt: Date.now() - 86_400_000 },
+        }),
+      ]);
+
+      await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('never sweeps ambiguous legacy blobs (no bracket flag, edge ≤ 0)', async () => {
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ order: { edgeMagnitude: 0, ...expired() } }),
+      ]);
+
+      await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.20)]);
+
+      expect(mockGetClobOrder).not.toHaveBeenCalled();
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('is inert when the revalidation knob is off, even with the bracket knob on', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_BRACKET_CANCEL_ENABLED: true,
+        WEATHER_RESTING_REVALIDATION_ENABLED: false,
+      } as never);
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ marketId: 'mkt-gone', order: expired() }),
+      ]);
+
+      await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('does not sweep an expired IN-universe primary when only the bracket knob is on', async () => {
+      // Distinct from the out-of-universe case above: an in-universe expired
+      // blob reaches the sweep's knob gate itself, so this pins the
+      // primaryRuleOn guard specifically (the out-of-universe variant would
+      // also be silenced by the universe lookup and could mask its removal).
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_BRACKET_CANCEL_ENABLED: true,
+        WEATHER_RESTING_REVALIDATION_ENABLED: false,
+      } as never);
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ marketId: 'mkt-1', order: expired() }),
+      ]);
+
+      await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('keeps the key on a partial fill (residual cancelled, reconciler attribution preserved)', async () => {
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ marketId: 'mkt-gone', order: expired() }),
+      ]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('4'))  // pre-cancel: 4/10 filled
+        .mockResolvedValueOnce(liveOrder('4')); // post-cancel: still 4 matched
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('keeps the key when the order is gone from the CLOB (possible unattributed fill)', async () => {
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ marketId: 'mkt-gone', order: expired() }),
+      ]);
+      mockGetClobOrder.mockResolvedValueOnce(null); // vanished — fill or external cancel
+
+      await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('handles an expired, in-universe, value-negative primary exactly once (as expiry, not FV)', async () => {
+      // Both rules would fire for this order; the sweep runs first and the FV
+      // rule must not re-process it.
+      mockListPendingOrders.mockResolvedValue([pendingEntry({ order: expired() })]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))
+        .mockResolvedValueOnce(null);
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledTimes(1);
+      expect(mockDeletePendingOrder).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not treat a malformed expiresAt (null) as expired', async () => {
+      // A raw `Date.now() >= null` comparison coerces null to 0 and reads as
+      // expired; the Number.isFinite guard must route the blob to the
+      // conservative FV path instead (supportive FV here → no cancel).
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ order: { expiresAt: null } }),
+      ]);
+
+      await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.20)]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
   });
 
   describe('bracket-leg cancel (late res-day + early certainty)', () => {
