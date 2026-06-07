@@ -37,6 +37,7 @@ const mockSubmitClobBuy = vi.fn();
 vi.mock('../../shared/clob.js', () => ({
   getClobOrderBook: mockGetClobOrderBook,
   submitClobBuy: mockSubmitClobBuy,
+  CLOB_MIN_ORDER_USD: 1.0,
 }));
 
 const mockDeductStake = vi.fn().mockResolvedValue(undefined);
@@ -86,12 +87,15 @@ function makeConfig(overrides = {}) {
 }
 
 function makePosition(overrides = {}) {
+  // sharesHeld 40 × default ask 0.03 = $1.20 intended notional — above the $1
+  // CLOB minimum, so the default fixture takes the no-bump path. Sub-minimum
+  // sizing behaviour is exercised explicitly in the CLOB-minimum-bump block.
   return {
     id: 'pos-1',
     marketId: 'mkt-1',
     direction: 'NO' as const,
     entryPrice: 0.62,
-    sharesHeld: 10,
+    sharesHeld: 40,
     ...overrides,
   };
 }
@@ -123,7 +127,7 @@ describe('runWeatherLockInScan', () => {
     mockGetMarket.mockResolvedValue({ clobTokenIds: '["tok-yes","tok-no"]' });
     mockParseClobTokenIds.mockReturnValue(['tok-yes', 'tok-no']);
     mockGetClobOrderBook.mockResolvedValue({ asks: [{ price: '0.03' }] });
-    mockSubmitClobBuy.mockResolvedValue({ success: true, shares_bought: 10, cost: 0.30 });
+    mockSubmitClobBuy.mockResolvedValue({ success: true, shares_bought: 40, cost: 1.20 });
   });
 
   it('skips positions that already have a Redis lock', async () => {
@@ -216,9 +220,9 @@ describe('runWeatherLockInScan', () => {
   });
 
   it('does not set lock when fill ratio is below 90%', async () => {
-    mockSql.mockResolvedValue([makePosition({ sharesHeld: 10 })]);
-    // Only 8 of 10 shares filled → ratio 0.8 < 0.9 threshold
-    mockSubmitClobBuy.mockResolvedValue({ success: true, shares_bought: 8, cost: 0.24 });
+    mockSql.mockResolvedValue([makePosition({ sharesHeld: 40 })]);
+    // Only 30 of 40 shares filled → ratio 0.75 < 0.9 threshold
+    mockSubmitClobBuy.mockResolvedValue({ success: true, shares_bought: 30, cost: 0.90 });
     const redis = makeRedis();
 
     await runWeatherLockInScan(redis as any);
@@ -229,8 +233,8 @@ describe('runWeatherLockInScan', () => {
   });
 
   it('sets the Redis lock and deducts bankroll on a full fill', async () => {
-    mockSql.mockResolvedValue([makePosition({ sharesHeld: 10 })]);
-    mockSubmitClobBuy.mockResolvedValue({ success: true, shares_bought: 10, cost: 0.30 });
+    mockSql.mockResolvedValue([makePosition({ sharesHeld: 40 })]);
+    mockSubmitClobBuy.mockResolvedValue({ success: true, shares_bought: 40, cost: 1.20 });
     const redis = makeRedis();
 
     await runWeatherLockInScan(redis as any);
@@ -241,7 +245,68 @@ describe('runWeatherLockInScan', () => {
       'EX',
       expect.any(Number),
     );
-    expect(mockDeductStake).toHaveBeenCalledWith(redis, 0.30);
+    expect(mockDeductStake).toHaveBeenCalledWith(redis, 1.20);
+  });
+
+  describe('CLOB minimum-order bump (sharesHeld × ask below $1)', () => {
+    it('bumps a near-miss order up to the CLOB minimum and locks on fill', async () => {
+      // 30 sh × 0.03 = $0.90 intended ≥ 60% of $1 → submit at exactly $1.00.
+      mockSql.mockResolvedValue([makePosition({ sharesHeld: 30 })]);
+      // $1.00 at ask 0.03 buys ~33 shares → ratio 33/30 > 0.9 → lock sets.
+      mockSubmitClobBuy.mockResolvedValue({ success: true, shares_bought: 33, cost: 1.0 });
+      const redis = makeRedis();
+
+      await runWeatherLockInScan(redis as any);
+
+      expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+        expect.objectContaining({ amountUsd: 1.0 }),
+      );
+      expect(redis.set).toHaveBeenCalledWith(
+        expect.stringContaining('weather:locked:'),
+        '1',
+        'EX',
+        expect.any(Number),
+      );
+      expect(mockDeductStake).toHaveBeenCalledWith(redis, 1.0);
+    });
+
+    it('bumps at exactly the 60% tolerance boundary (inclusive)', async () => {
+      // 20 sh × 0.03 = $0.60 — exactly 60% of the $1 minimum → still bumped.
+      mockSql.mockResolvedValue([makePosition({ sharesHeld: 20 })]);
+      mockSubmitClobBuy.mockResolvedValue({ success: true, shares_bought: 33, cost: 1.0 });
+      const redis = makeRedis();
+
+      await runWeatherLockInScan(redis as any);
+
+      expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+        expect.objectContaining({ amountUsd: 1.0 }),
+      );
+    });
+
+    it('skips entirely when intended notional is too far below the minimum (no oversized bump)', async () => {
+      // 10 sh × 0.03 = $0.30 < 60% of $1 → bumping would be a >3× oversize on
+      // a near-settled market — skip, no submit, no lock; re-evaluated next scan.
+      mockSql.mockResolvedValue([makePosition({ sharesHeld: 10 })]);
+      const redis = makeRedis();
+
+      await runWeatherLockInScan(redis as any);
+
+      expect(mockSubmitClobBuy).not.toHaveBeenCalled();
+      expect(redis.set).not.toHaveBeenCalled();
+      expect(mockDeductStake).not.toHaveBeenCalled();
+    });
+
+    it('passes the intended notional through unchanged when it clears the minimum', async () => {
+      // Default 40 sh × 0.03 = $1.20 ≥ $1 → no bump, no rounding.
+      mockSql.mockResolvedValue([makePosition()]);
+      const redis = makeRedis();
+
+      await runWeatherLockInScan(redis as any);
+
+      expect(mockSubmitClobBuy).toHaveBeenCalledWith(
+        expect.objectContaining({ amountUsd: expect.closeTo(1.2, 5) }),
+      );
+    });
   });
 });
 

@@ -23,11 +23,21 @@ import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { getSql } from '../db/client.js';
 import { getMarket, parseClobTokenIds } from '../mapping/gamma.js';
-import { getClobOrderBook, submitClobBuy } from '../shared/clob.js';
+import { getClobOrderBook, submitClobBuy, CLOB_MIN_ORDER_USD } from '../shared/clob.js';
 import { getBookTouchLevels } from '../shared/bookTouch.js';
 import { deductStake } from '../shared/bankroll.js';
 
 const LOCK_IN_MIN_FILL_RATIO = 0.9;
+
+// CLOB rejects orders below CLOB_MIN_ORDER_USD, and a 1:1 lock-in on a
+// collapsed opposite side is often pennies (sharesHeld × ask) — in the Jun 5-7
+// logs 60 of 61 gate-passing lock-in attempts died on "below minimum size".
+// Mirror the executor's stake-floor rule: when the intended notional is at
+// least this fraction of the minimum, bump the order up to the minimum (≤1.67×
+// overshoot — the extra opposite shares are a few cents of tail exposure on
+// top of the 1:1 pair). Below the fraction, skip: the bump would be a
+// many-fold oversize whose cost is mostly longshot premium, not insurance.
+const LOCK_IN_MIN_ORDER_BUMP_RATIO = 0.6;
 
 const LOCK_KEY_PREFIX = 'weather:locked:';
 // Must match HEDGE_KEY_PREFIX in weatherInvalidation.ts — both scanners check
@@ -184,7 +194,32 @@ export async function runWeatherLockInScan(redis: Redis): Promise<void> {
 
       if (!wouldLockIn || !cfg.WEATHER_LOCK_IN_ENABLED) continue;
 
-      const amountUsd = pos.sharesHeld * oppositeAsk;
+      const intendedUsd = pos.sharesHeld * oppositeAsk;
+      if (intendedUsd < CLOB_MIN_ORDER_USD * LOCK_IN_MIN_ORDER_BUMP_RATIO) {
+        // Too far below the exchange minimum to bump 1:1-ish — the position is
+        // effectively a settled winner whose insurance is unbuyable at sane
+        // size. Re-evaluated next scan if the ask recovers.
+        logger.info('[weather-lock-in] intended notional too far below CLOB minimum — skipping', {
+          positionId: pos.id,
+          marketId: pos.marketId,
+          direction: pos.direction,
+          oppositeAsk,
+          intendedUsd: Number(intendedUsd.toFixed(4)),
+          minOrderUsd: CLOB_MIN_ORDER_USD,
+          bumpRatio: LOCK_IN_MIN_ORDER_BUMP_RATIO,
+        });
+        continue;
+      }
+      const amountUsd = Math.max(intendedUsd, CLOB_MIN_ORDER_USD);
+      if (amountUsd > intendedUsd) {
+        logger.info('[weather-lock-in] bumping order to CLOB minimum', {
+          positionId: pos.id,
+          marketId: pos.marketId,
+          direction: pos.direction,
+          intendedUsd: Number(intendedUsd.toFixed(4)),
+          amountUsd,
+        });
+      }
       const result = await submitClobBuy({ tokenId: oppositeTokenId, amountUsd, orderType: 'FAK' });
 
       if (result.success) {

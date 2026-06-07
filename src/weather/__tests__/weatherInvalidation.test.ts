@@ -46,6 +46,7 @@ const mockSubmitClobBuy = vi.fn();
 vi.mock('../../shared/clob.js', () => ({
   getClobOrderBook: mockGetClobOrderBook,
   submitClobBuy: mockSubmitClobBuy,
+  CLOB_MIN_ORDER_USD: 1.0,
 }));
 
 const mockDeductStake = vi.fn().mockResolvedValue(undefined);

@@ -24,6 +24,7 @@ vi.mock('../../db/client.js', () => ({ getSql: () => mockSql }));
 const mockGetClobOrderBook = vi.fn();
 vi.mock('../../shared/clob.js', () => ({
   getClobOrderBook: mockGetClobOrderBook,
+  CLOB_MIN_ORDER_USD: 1.0,
 }));
 
 const mockFetchWeatherEvents = vi.fn();
