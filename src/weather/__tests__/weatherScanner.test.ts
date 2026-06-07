@@ -4175,6 +4175,26 @@ describe('revalidateRestingWeatherOrders', () => {
       expect(mockDeletePendingOrder).not.toHaveBeenCalled();
     });
 
+    it('does not sweep an expired IN-universe primary when only the bracket knob is on', async () => {
+      // Distinct from the out-of-universe case above: an in-universe expired
+      // blob reaches the sweep's knob gate itself, so this pins the
+      // primaryRuleOn guard specifically (the out-of-universe variant would
+      // also be silenced by the universe lookup and could mask its removal).
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_BRACKET_CANCEL_ENABLED: true,
+        WEATHER_RESTING_REVALIDATION_ENABLED: false,
+      } as never);
+      mockListPendingOrders.mockResolvedValue([
+        pendingEntry({ marketId: 'mkt-1', order: expired() }),
+      ]);
+
+      await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.80)]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
     it('keeps the key on a partial fill (residual cancelled, reconciler attribution preserved)', async () => {
       mockListPendingOrders.mockResolvedValue([
         pendingEntry({ marketId: 'mkt-gone', order: expired() }),
