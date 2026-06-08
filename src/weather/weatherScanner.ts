@@ -2201,6 +2201,35 @@ async function cancelRestingWeatherOrder(
 }
 
 /**
+ * True when a resting order's market has passed resolution — the city-local
+ * target day is fully over, so the daily high is locked and the order can no
+ * longer fill. Derived from the order's `sourcedFrom`
+ * (`weather:<city>:<YYYY-MM-DD>:<bracket…>`) so it works for orders OUT of the
+ * current scan universe too, with no Gamma call. Uses the city-LOCAL end-of-day
+ * (cityDayEndUtcMs), not Gamma's noon-UTC endDate, so US-city orders are kept
+ * through their local afternoon (the high is observed end-of-local-day).
+ * Fail-safe: unparseable sourcedFrom / unknown city / bad date → false (do not
+ * sweep; the Redis key TTL is the backstop). `marketId` never contains ':' and
+ * city/date never do either, so a left split is safe even if a bracket label
+ * somehow did.
+ */
+export function isWeatherOrderPastResolution(order: PendingMakerOrder): boolean {
+  const sf = order.sourcedFrom;
+  if (!sf || !sf.startsWith('weather:')) return false;
+  const parts = sf.split(':');
+  // parts: ['weather', <city>, <targetDate>, <bracket…>]
+  if (parts.length < 3) return false;
+  const city = parts[1];
+  const targetDate = parts[2];
+  if (!city || !targetDate || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) return false;
+  const tz = lookupCity(city)?.tz;
+  if (!tz) return false;
+  const endOfDayMs = cityDayEndUtcMs(targetDate, tz);
+  if (!Number.isFinite(endOfDayMs)) return false;
+  return Date.now() > endOfDayMs;
+}
+
+/**
  * Revalidate unfilled resting weather maker orders against this scan's fresh
  * state. Three knob-gated cancel rules:
  *
@@ -2212,20 +2241,19 @@ async function cancelRestingWeatherOrder(
  * Hysteresis is structural: posts go out at FV×(1−discount) or below the
  * side-ask, so cancellation requires a real FV decline, not flapping.
  *
- * EXPIRY sweep (rides `WEATHER_RESTING_REVALIDATION_ENABLED`): cancel any
- * primary whose `expiresAt` re-post window has lapsed, regardless of whether
- * its market is in this scan's universe. The executor already treats a post
- * older than `MAKER_EMPTY_BOOK_MAX_WAIT_MS` as stale — but it only enforces
- * that lazily, when the scanner re-emits the same market+direction. Markets
- * that fall out of emission (res-day rollover, edge gone) otherwise rest
- * forever on a price nobody re-validated AND pin the rest-above-cap notional
- * pool (`sumRestAboveCapNotional` counts every restAboveCap blob until its key
- * is deleted), starving fresh posts via `resting_notional_cap`. Entries the
- * scanner still wants are unaffected in effect: this pass runs before the
- * entry loop, so a swept market that re-emits simply re-posts at fresh prices
- * the same scan — identical net behaviour to the executor's own
- * cancel-and-repost. Runs even when the scan has zero opportunities (a time
- * gate needs no Gamma data; an outage is when dead bids are most exposed).
+ * POST-RESOLUTION sweep (rides `WEATHER_RESTING_REVALIDATION_ENABLED`): cancel
+ * any primary whose market has passed resolution (the city-local target day is
+ * over → daily high locked → can no longer fill), regardless of whether the
+ * market is still in this scan's universe. This clears the rest-above-cap pool
+ * (`sumRestAboveCapNotional` counts every restAboveCap blob until its key is
+ * deleted) without ever touching a still-live order. It deliberately does NOT
+ * key on the order's `expiresAt`: time-expiry no longer cancels a weather order
+ * anywhere (the executor holds it resting to preserve CLOB price-time priority
+ * — a cancel+repost at the same clamped cap forfeits queue position and
+ * suppresses fills). An unfilled weather maker therefore rests through the
+ * final hours, where a late swing can still fill it, and is swept only after
+ * resolution. Runs even when the scan has zero opportunities (a resolution gate
+ * needs no Gamma data). See `isWeatherOrderPastResolution`.
  *
  * BRACKET rule (`WEATHER_BRACKET_CANCEL_ENABLED`): cancel an unfilled
  * bracket-opposite leg once its reversal path is gone —
@@ -2252,13 +2280,13 @@ async function cancelRestingWeatherOrder(
  *     blobs without the flag (edgeMagnitude ≤ 0 heuristic) are never cancelled
  *     by any rule — when in doubt, do not cancel. They age out within the
  *     market horizon.
- *   - Bracket legs are exempt from the expiry sweep: they intentionally rest
- *     value-negative for days and have their own lifecycle (bracket rule).
+ *   - Bracket legs are exempt from the post-resolution sweep: they have their
+ *     own lifecycle (bracket rule) and are cleared by it + the Redis key TTL.
  *   - Markets absent from this scan's opportunity list (out of universe) are
  *     left alone by the FV and bracket rules, which need fresh model/price
  *     references; a Gamma outage therefore yields zero FV/bracket cancels.
- *     The expiry sweep is deliberately NOT universe-gated — unreachable
- *     markets are exactly where zombies accumulate.
+ *     The post-resolution sweep is deliberately NOT universe-gated — orders on
+ *     markets the scanner stopped emitting still get cleared once resolved.
  *   - Partial fills keep the pending key (see cancelRestingWeatherOrder).
  */
 export async function revalidateRestingWeatherOrders(
@@ -2270,8 +2298,8 @@ export async function revalidateRestingWeatherOrders(
   const bracketRuleOn = cfg.WEATHER_BRACKET_CANCEL_ENABLED;
   if (!primaryRuleOn && !bracketRuleOn) return;
   // The FV and bracket rules need fresh opportunity data, so a Gamma outage
-  // (zero opportunities) disables them. The expiry sweep is purely time-based
-  // and proceeds regardless — it rides the primary-rule knob.
+  // (zero opportunities) disables them. The post-resolution sweep needs no
+  // Gamma data and proceeds regardless — it rides the primary-rule knob.
   if (opportunities.length === 0 && !primaryRuleOn) return;
 
   const entries = await listPendingOrders(redis);
@@ -2284,7 +2312,7 @@ export async function revalidateRestingWeatherOrders(
 
   let cancelledPrimaries = 0;
   let cancelledBrackets = 0;
-  let cancelledExpired = 0;
+  let cancelledPostResolution = 0;
   for (const { marketId, direction, order } of weatherEntries) {
     const isBracket = order.isBracketOpposite === true;
     // Legacy blobs predate the explicit bracket flag — treat edge ≤ 0 as
@@ -2294,25 +2322,25 @@ export async function revalidateRestingWeatherOrders(
     if (isAmbiguousLegacy) continue;
 
     try {
-      // EXPIRY sweep — checked before the universe lookup so markets the
-      // scanner no longer emits are still swept (they are exactly where
-      // zombies pin the rest-above-cap pool). `Number.isFinite` guards
-      // malformed blobs (null would coerce to 0 and read as expired).
-      if (
-        !isBracket
-        && primaryRuleOn
-        && Number.isFinite(order.expiresAt)
-        && Date.now() >= order.expiresAt
-      ) {
+      // POST-RESOLUTION sweep — checked before the universe lookup so markets
+      // the scanner no longer emits are still cleared (they are where zombies
+      // pin the rest-above-cap pool). Keyed on the market's city-local
+      // end-of-day, NOT the order's expiresAt: an unfilled weather maker is
+      // kept resting through the final hours — where a late price swing can
+      // still fill it and where forfeiting CLOB queue priority hurts most — and
+      // is swept only once resolution has actually passed (the daily high is
+      // locked, so it can no longer fill). Time-expiry no longer cancels a
+      // weather order anywhere; the executor holds it (see executor resume
+      // path). Pre-resolution in-universe orders fall through to the FV rule;
+      // pre-resolution out-of-universe orders rest until this rule clears them
+      // post-resolution. Fail-safe: unparseable sourcedFrom / unknown city →
+      // not past resolution → not swept (the Redis key TTL is the backstop).
+      if (!isBracket && primaryRuleOn && isWeatherOrderPastResolution(order)) {
         const deleted = await cancelRestingWeatherOrder(redis, marketId, direction, order, {
-          rule: 'expiry_sweep',
-          expiredForMin: Math.round((Date.now() - order.expiresAt) / 60_000),
+          rule: 'post_resolution_sweep',
           inScanUniverse: oppByMarket.has(marketId),
         });
-        if (deleted) cancelledExpired++;
-        // Expired posts never fall through to the FV rule: the post price is
-        // stale by the executor's own definition, so it gets cancelled (or
-        // retried next scan) — not re-judged against fresh FV.
+        if (deleted) cancelledPostResolution++;
         continue;
       }
 
@@ -2375,12 +2403,12 @@ export async function revalidateRestingWeatherOrders(
     }
   }
 
-  if (cancelledPrimaries > 0 || cancelledBrackets > 0 || cancelledExpired > 0) {
+  if (cancelledPrimaries > 0 || cancelledBrackets > 0 || cancelledPostResolution > 0) {
     logger.info('[weather-revalidate] revalidation pass complete', {
       restingWeatherOrders: weatherEntries.length,
       cancelledPrimaries,
       cancelledBrackets,
-      cancelledExpired,
+      cancelledPostResolution,
     });
   }
 }

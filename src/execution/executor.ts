@@ -571,8 +571,23 @@ async function tryExecuteViaClobMaker(
         });
         await confirmMakerCancel(pending.orderId);
         await deletePendingOrder(redis, signal.marketId, pending.direction);
-      } else if (Date.now() < pending.expiresAt) {
+      } else if (Date.now() < pending.expiresAt || signal.source === 'weather') {
         // Active order from a previous cycle — poll it once and return.
+        //
+        // Weather takes this branch REGARDLESS of expiresAt: an unfilled
+        // weather maker is held resting to preserve its CLOB time priority.
+        // Polymarket's book is price-time priority, so a cancel+repost — even
+        // at the same clamped cap price, which is the common case — forfeits
+        // queue position and sends us to the back of the line, suppressing
+        // fills. Time-expiry therefore must NOT churn a weather order; it is
+        // cancelled only by the FV-revalidation rule (value-negative), a
+        // partial-fill residual (below), or the post-resolution sweep — never
+        // on the clock. Repricing is not a maker's friend: a value-negative
+        // bid is caught by the FV rule (which deletes the key so the entry
+        // loop re-posts fresh at the new price), and a bid that is now
+        // conservatively cheap is exactly the one to keep. Non-weather sources
+        // (e.g. oracle-lag, 15-min markets) keep the expiry cancel+repost in
+        // the else branch below.
         const order = await getClobOrder(pending.orderId);
         if (order) {
           let matched = parseFloat(order.size_matched ?? '0');
@@ -2567,9 +2582,13 @@ export async function executeSignal(
   // 4c) Clean up any expired empty-book pending maker orders for this market.
   // Must run before the spread gate so we don't accidentally try to resume
   // an order whose expiresAt window has already passed.
+  // Weather is exempt: a weather maker is held resting to preserve queue/time
+  // priority (see the resume path above) and is cancelled only by the
+  // FV-revalidation rule, a partial fill, or the post-resolution sweep — never
+  // on the expiresAt clock. Cleaning it here would re-introduce the churn.
   {
     const expiredPending = await getPendingOrder(redis, signal.marketId, signal.direction);
-    if (expiredPending && Date.now() >= expiredPending.expiresAt) {
+    if (expiredPending && Date.now() >= expiredPending.expiresAt && signal.source !== 'weather') {
       logger.info('[executor] cleaning up expired empty-book maker order before cycle', {
         marketId: signal.marketId,
         orderId: expiredPending.orderId,
