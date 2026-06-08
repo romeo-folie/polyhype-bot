@@ -2941,6 +2941,55 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     }
   });
 
+  it('claims the res-day early-entry dedup key with the per-scan TTL, not an all-day TTL', async () => {
+    // Regression guard: the early-entry claim used to hold an all-day TTL
+    // (max(DEDUP_TTL, until-end-of-day)), so once the resting-order expiry sweep
+    // cancelled the unfilled order it could never re-post — the order vanished
+    // for the back half of res-day, exactly the final-hours window where the
+    // price can swing into our resting range. The claim now uses the per-scan
+    // WEATHER_DEDUP_TTL_S window so a swept order re-posts on a later scan.
+    // No active position + SIZE_UP disabled → falls through to the early-entry path.
+    (redisMock as any).del = vi.fn().mockResolvedValue(1);
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      SIZE_UP_ENABLED: false,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      WEATHER_RES_DAY_EARLY_ENTRY_ENABLED: true,
+      WEATHER_RES_DAY_MIN_HOURS_REMAINING: -100, // always pass regardless of clock
+      // Small sentinel so the assertion is deterministic: old code would pass
+      // max(7, until-end-of-day) ≫ 7; new code passes exactly 7.
+      WEATHER_DEDUP_TTL_S: 7,
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
+      WEATHER_MARKET_DISAGREEMENT_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayMocks();
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8,
+      memberCount: 31, forecastDate: todayIso, ensembleModel: 'gfs',
+    });
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false,
+      executionVenue: 'clob', entryPrice: 0.43, sharesFilled: null,
+      governorStamped: true, wasEmptyBook: true,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    // The early-entry dedup claim: set(key, '1', 'EX', ttlSeconds, 'NX').
+    const earlyClaim = redisMock.set.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].startsWith('weather:event_resday_early:'),
+    );
+    expect(earlyClaim).toBeDefined();
+    expect(earlyClaim?.[3]).toBe(7);      // WEATHER_DEDUP_TTL_S — not until-end-of-day
+    expect(earlyClaim?.[4]).toBe('NX');
+  });
+
   it('skips resolution-day event when no active position exists', async () => {
     // No activeEventKey set in Redis, no position keys — both fallback paths return false.
     mockLoadConfig.mockReturnValue({

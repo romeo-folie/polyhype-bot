@@ -1483,12 +1483,24 @@ export async function scanWeatherMarkets(
         // Early-entry window: no existing position, enough hours remain before the
         // local daily high is observed. Ensemble agreement enforced per-opportunity
         // below (shadowEdge > 0; null also blocks — fail closed).
+        //
+        // Dedup TTL is WEATHER_DEDUP_TTL_S (the same per-scan re-evaluation window
+        // as the non-resolution-day path below and the size-up path above), NOT
+        // until-end-of-day. A once-per-day claim spent the event's single entry
+        // at whatever moment the first res-day scan ran, then blocked all
+        // re-emission for the rest of the day. That interacted badly with the
+        // resting-order expiry sweep (revalidateRestingWeatherOrders): the sweep
+        // cancels an unfilled order ~MAKER_EMPTY_BOOK_MAX_WAIT_MS after it posts,
+        // but the all-day claim prevented re-posting it — so the order vanished
+        // for the entire back half of res-day, exactly the final-hours window
+        // where the daily high realizes and the price can swing into our resting
+        // range. With a per-scan window the sweep and the entry loop run in the
+        // same cycle (sweep deletes the pending key, the entry loop re-posts
+        // fresh), keeping the order present and refreshed. The maker:open pending
+        // key remains the real guard against duplicate orders. Mirrors the
+        // size-up re-evaluation rationale above.
         earlyEntryKey = `${RES_DAY_EARLY_KEY_PREFIX}${event.slug}`;
-        const rdEarlyTtlS = Math.max(
-          cfg.WEATHER_DEDUP_TTL_S,
-          Math.ceil((endOfTargetDayMs - Date.now()) / 1000),
-        );
-        const claimed = await redis.set(earlyEntryKey, '1', 'EX', rdEarlyTtlS, 'NX').catch(() => null);
+        const claimed = await redis.set(earlyEntryKey, '1', 'EX', cfg.WEATHER_DEDUP_TTL_S, 'NX').catch(() => null);
         if (!claimed) {
           dedupSkipped++;
           continue;
