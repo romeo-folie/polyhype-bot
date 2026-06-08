@@ -2943,12 +2943,12 @@ describe('resolution-day size-up and near-res gate bypass', () => {
 
   it('claims the res-day early-entry dedup key with the per-scan TTL, not an all-day TTL', async () => {
     // Regression guard: the early-entry claim used to hold an all-day TTL
-    // (max(DEDUP_TTL, until-end-of-day)), so once the resting-order expiry sweep
-    // cancelled the unfilled order it could never re-post — the order vanished
-    // for the back half of res-day, exactly the final-hours window where the
-    // price can swing into our resting range. The claim now uses the per-scan
-    // WEATHER_DEDUP_TTL_S window so a swept order re-posts on a later scan.
-    // No active position + SIZE_UP disabled → falls through to the early-entry path.
+    // (max(DEDUP_TTL, until-end-of-day)), which dropped the event out of the
+    // revalidation pass's universe for the rest of the day — its resting order
+    // could no longer be FV-checked, and after an FV-cancel or transient gate
+    // failure it never got a fresh post. The claim now uses the per-scan
+    // WEATHER_DEDUP_TTL_S window so the event is re-emitted (and re-postable)
+    // every scan. No active position + SIZE_UP disabled → early-entry path.
     (redisMock as any).del = vi.fn().mockResolvedValue(1);
     mockLoadConfig.mockReturnValue({
       ...baseConfig,
@@ -4076,10 +4076,11 @@ describe('revalidateRestingWeatherOrders', () => {
     expect(mockCancelClobOrder).not.toHaveBeenCalled();
   });
 
-  it('zero opportunities (Gamma outage): FV rule inert, unexpired orders untouched', async () => {
-    // The expiry sweep proceeds on an outage (it is time-based, not FV-based),
-    // so listPendingOrders IS consulted — but an unexpired order has no rule
-    // left to fire: the FV rule needs an opportunity row it doesn't have.
+  it('zero opportunities (Gamma outage): FV rule inert, pre-resolution orders untouched', async () => {
+    // The post-resolution sweep proceeds on an outage (resolution-based, not
+    // FV-based), so listPendingOrders IS consulted — but a pre-resolution order
+    // (default pendingEntry has no sourcedFrom → not past resolution) has no
+    // rule left to fire: the FV rule needs an opportunity row it doesn't have.
     mockListPendingOrders.mockResolvedValue([pendingEntry()]);
 
     await revalidateRestingWeatherOrders({} as never, []);
@@ -4090,8 +4091,8 @@ describe('revalidateRestingWeatherOrders', () => {
   });
 
   it('zero opportunities with only the bracket knob on: fully inert (no Redis scan)', async () => {
-    // Without the primary/expiry knob there is no time-based rule, so the
-    // original outage fail-safe applies in full.
+    // Without the primary (revalidation) knob there is no resolution-based
+    // rule, so the original outage fail-safe applies in full.
     mockLoadConfig.mockReturnValue({
       ...baseConfig,
       WEATHER_BRACKET_CANCEL_ENABLED: true,
