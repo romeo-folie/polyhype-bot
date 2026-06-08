@@ -1488,17 +1488,15 @@ export async function scanWeatherMarkets(
         // as the non-resolution-day path below and the size-up path above), NOT
         // until-end-of-day. A once-per-day claim spent the event's single entry
         // at whatever moment the first res-day scan ran, then blocked all
-        // re-emission for the rest of the day. That interacted badly with the
-        // resting-order expiry sweep (revalidateRestingWeatherOrders): the sweep
-        // cancels an unfilled order ~MAKER_EMPTY_BOOK_MAX_WAIT_MS after it posts,
-        // but the all-day claim prevented re-posting it — so the order vanished
-        // for the entire back half of res-day, exactly the final-hours window
-        // where the daily high realizes and the price can swing into our resting
-        // range. With a per-scan window the sweep and the entry loop run in the
-        // same cycle (sweep deletes the pending key, the entry loop re-posts
-        // fresh), keeping the order present and refreshed. The maker:open pending
-        // key remains the real guard against duplicate orders. Mirrors the
-        // size-up re-evaluation rationale above.
+        // re-emission for the rest of the day — so the event dropped out of the
+        // revalidation pass's universe (the FV rule could no longer evaluate its
+        // resting order) and, after an FV-cancel or a transient gate failure,
+        // never got a fresh post. The per-scan window keeps the event re-emitted
+        // every cycle: its resting order stays FV-checked, and a fresh post goes
+        // out the same scan whenever there is no live order (the maker:open
+        // pending key is the real guard against duplicate posts). Mirrors the
+        // size-up re-evaluation rationale above. (Resting orders themselves are
+        // held, not churned, on time — see revalidateRestingWeatherOrders.)
         earlyEntryKey = `${RES_DAY_EARLY_KEY_PREFIX}${event.slug}`;
         const claimed = await redis.set(earlyEntryKey, '1', 'EX', cfg.WEATHER_DEDUP_TTL_S, 'NX').catch(() => null);
         if (!claimed) {
