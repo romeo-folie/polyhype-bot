@@ -1916,11 +1916,15 @@ export const envSchema = z.object({
   // are exempt — they intentionally rest value-negative as the pairing leg.
   // Closes the gap that forecast invalidation only covers HELD positions, which
   // becomes the dominant risk once rest-above-cap widens the resting pool.
-  // ALSO arms the expiry sweep: primaries whose `expiresAt` re-post window has
-  // lapsed are confirm-cancelled and their pending key deleted, regardless of
-  // whether the market is in the current scan universe, even on zero-opportunity
-  // scans (Gamma outage). Without it, markets that fall out of emission rest
-  // forever at stale prices and pin WEATHER_REST_ABOVE_CAP_MAX_NOTIONAL_USD.
+  // ALSO arms the post-resolution sweep: primaries whose city-local target day
+  // has ended (isWeatherOrderPastResolution — daily high locked, can no longer
+  // fill) are confirm-cancelled and their key deleted, regardless of whether
+  // the market is still in the current scan universe, even on zero-opportunity
+  // scans (Gamma outage). Time-expiry no longer cancels a weather maker: it is
+  // held resting to preserve CLOB queue priority. Consequence: a restAboveCap
+  // post consumes WEATHER_REST_ABOVE_CAP_MAX_NOTIONAL_USD pool notional until
+  // resolution (the full day), not the old ~MAKER_EMPTY_BOOK_MAX_WAIT_MS window
+  // — raise the cap if a heavy day starves new posts.
   WEATHER_RESTING_REVALIDATION_ENABLED: boolFromEnv.optional().default(false),
   // Bracket-maker strategy: when enabled, each primary weather GTC maker order is
   // paired with a simultaneous GTC on the opposite side at a wider discount. Both
