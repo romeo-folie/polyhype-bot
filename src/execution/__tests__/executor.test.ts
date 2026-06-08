@@ -2336,6 +2336,73 @@ describe('empty-book maker route', () => {
     expect(redis.set).not.toHaveBeenCalled();
   });
 
+  it('weather: HOLDS an expired unfilled pending order (preserves CLOB queue priority — no cancel, no re-post)', async () => {
+    // Queue-priority fix: a weather maker past expiresAt is held resting (the
+    // CLOB order is untouched, keeping its time priority) rather than
+    // cancelled+reposted. Covers BOTH expiry-cancel sites — the pre-cycle
+    // cleanup AND the resume path — since a cancel at either would surface here.
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'order-wx',
+      tokenId: 'tok-yes',
+      price: 0.50,
+      size: 10,
+      postedAt: Date.now() - 7_200_000,
+      expiresAt: Date.now() - 3_600_000, // expired 1h ago
+      consensusP: 0.65,
+      direction: 'YES',
+      source: 'weather',
+    });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-wx', status: 'open', owner: '0x1', maker_address: '0x1',
+      market: 'mkt-test', asset_id: 'tok-yes', side: 'BUY',
+      original_size: '10', size_matched: '0', price: '0.50',
+      associate_trades: [], outcome: 'YES', created_at: Date.now() - 7_200_000,
+      expiration: '', order_type: 'GTC',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'weather' }), redis as any);
+
+    expect(result.entryExecutionPath).toBe('maker_pending');
+    expect(mockCancelOrder).not.toHaveBeenCalled(); // never churned on time
+    expect(mockSubmitLimit).not.toHaveBeenCalled();  // not re-posted
+    expect(redis.set).not.toHaveBeenCalled();        // idempotency unset — resumes next cycle
+  });
+
+  it('non-weather (oracle-lag): still cancels an expired unfilled pending order (queue-hold is weather-only)', async () => {
+    // Regression guard: the hold is scoped to weather. Short-lived sources keep
+    // the expiry cancel (+ re-post) — they should not rest stale.
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'order-ol',
+      tokenId: 'tok-yes',
+      price: 0.50,
+      size: 10,
+      postedAt: Date.now() - 7_200_000,
+      expiresAt: Date.now() - 3_600_000, // expired
+      consensusP: 0.55,
+      direction: 'UP',
+      source: 'oracle-lag',
+    });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-ol', status: 'open', owner: '0x1', maker_address: '0x1',
+      market: 'mkt-test', asset_id: 'tok-yes', side: 'BUY',
+      original_size: '10', size_matched: '0', price: '0.50',
+      associate_trades: [], outcome: 'UP', created_at: Date.now() - 7_200_000,
+      expiration: '', order_type: 'GTC',
+    });
+    mockCancelOrder.mockResolvedValue(true);
+
+    const redis = makeRedis();
+    await executeSignal(
+      makeSignal({ source: 'oracle-lag', direction: 'UP', consensusProbability: 0.55 }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(mockCancelOrder).toHaveBeenCalled(); // expired non-weather → cancelled
+  });
+
   it('resumes pending order that has since filled — returns success and sets idempotency', async () => {
     mockGetPendingOrder.mockResolvedValue({
       orderId: 'order-filled',
@@ -2422,6 +2489,41 @@ describe('empty-book maker route', () => {
     expect(mockDeletePendingOrder).toHaveBeenCalled();
     // Idempotency key set (partial fill counts as a real fill)
     expect(redis.set).toHaveBeenCalled();
+  });
+
+  it('weather: an EXPIRED order that partially filled still records the fill (held branch handles fills, not just holds)', async () => {
+    // The hold for weather takes the poll branch regardless of expiresAt, so a
+    // fill that landed on a now-expired weather order must still be detected and
+    // recorded — the residual cancelled, the fill booked, idempotency set — not
+    // silently held forever.
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'order-wx-partial',
+      tokenId: 'tok-yes',
+      price: 0.50,
+      size: 10,
+      postedAt: Date.now() - 7_200_000,
+      expiresAt: Date.now() - 3_600_000, // expired 1h ago
+      consensusP: 0.65,
+      direction: 'YES',
+      source: 'weather',
+    });
+    mockGetOrder.mockResolvedValue({
+      id: 'order-wx-partial', status: 'open', owner: '0x1', maker_address: '0x1',
+      market: 'mkt-test', asset_id: 'tok-yes', side: 'BUY',
+      original_size: '10', size_matched: '4', price: '0.50', // partial fill
+      associate_trades: [], outcome: 'YES', created_at: Date.now() - 7_200_000,
+      expiration: '', order_type: 'GTC',
+    });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'weather' }), redis as any);
+
+    expect(!result.skipped && !result.error).toBe(true);
+    expect(mockCancelOrder).toHaveBeenCalledWith('order-wx-partial'); // residual cancelled
+    expect(mockDeletePendingOrder).toHaveBeenCalled();
+    expect(mockSubmitLimit).not.toHaveBeenCalled();                   // no re-post
+    expect(redis.set).toHaveBeenCalled();                             // fill recorded (idempotency)
   });
 
   it('prices a resumed fill at the trade VWAP, not the posted limit price', async () => {
