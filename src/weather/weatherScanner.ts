@@ -29,6 +29,7 @@ import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import { runWeatherLockInScan } from './weatherLockIn.js';
 import { runWeatherInvalidationScan, FORECAST_INVALIDATED_KEY_PREFIX } from './weatherInvalidation.js';
+import { runWeatherDriftStrategy } from './weatherDriftStrategy.js';
 import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
 import type { ExecutionResult } from '../execution/executor.js';
@@ -2437,6 +2438,18 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
   // fetch events. Keys set here are checked by the execution loop below (same
   // cycle), so size-up blocking still applies within the current scan.
   await runWeatherInvalidationScan(redis, fetchFn);
+
+  // Drift strategy scanner: evaluates open positions for thesis drift and
+  // writes shadow rows. Runs after invalidation so modal streak Redis values
+  // are already updated; the drift scanner reads but does not write them.
+  // Best-effort: a failure must never block entry execution.
+  try {
+    await runWeatherDriftStrategy(redis, fetchFn);
+  } catch (err) {
+    logger.warn('[weather-drift] scan threw (non-fatal)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   // Revalidate unfilled resting weather maker orders against this scan's fresh
   // state — cancels primaries that turned value-negative at their own posted
