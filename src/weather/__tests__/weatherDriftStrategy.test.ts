@@ -139,6 +139,29 @@ vi.mock('../weatherExit.js', () => ({
   tryWeatherExit: mockTryWeatherExit,
 }));
 
+const mockFetchLiveObservation = vi.fn().mockResolvedValue({
+  city: 'chicago',
+  targetDate: '2026-06-01',
+  observedMax: null,
+  source: 'none' as const,
+  confidence: 'none' as const,
+  observedAt: null,
+});
+const mockClassifyOracleState = vi.fn().mockReturnValue(null);
+const mockClassifyContradiction = vi.fn().mockReturnValue(null);
+vi.mock('../liveObservation.js', () => ({
+  fetchLiveObservation: mockFetchLiveObservation,
+  classifyOracleState: mockClassifyOracleState,
+  classifyContradiction: mockClassifyContradiction,
+}));
+
+const mockClassifyFlipCandidate = vi.fn().mockReturnValue(null);
+const mockTryWeatherFlip = vi.fn().mockResolvedValue({ executed: false, amountUsd: 0, reason: 'no_flip' });
+vi.mock('../weatherFlip.js', () => ({
+  classifyFlipCandidate: mockClassifyFlipCandidate,
+  tryWeatherFlip: mockTryWeatherFlip,
+}));
+
 // ── Dynamic imports ───────────────────────────────────────────────────────────
 
 const {
@@ -194,6 +217,23 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.50,
     WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.65,
     WEATHER_DRIFT_MARKET_DIVERGENCE_NOTIFY: 0.55,
+    // Phase 5/6 defaults
+    WEATHER_DRIFT_LIVE_OBS_ENABLED: false,
+    WEATHER_DRIFT_WU_LIVE_ENABLED: false,
+    WEATHER_DRIFT_METAR_LIVE_ENABLED: false,
+    WEATHER_DRIFT_HKO_LIVE_ENABLED: false,
+    WEATHER_DRIFT_LIVE_OBS_MAX_AGE_MIN: 30,
+    WEATHER_DRIFT_CONTRADICTION_AUDIT_ENABLED: false,
+    WEATHER_DRIFT_CONTRADICTION_MIN_MODEL_MARKET_GAP: 0.55,
+    WEATHER_DRIFT_MARKET_DEAD_BID: 0.05,
+    WEATHER_DRIFT_FLIP_ENABLED: false,
+    WEATHER_DRIFT_FLIP_CONFIRMED_ONLY: true,
+    WEATHER_DRIFT_FLIP_MIN_EDGE_BPS: 500,
+    WEATHER_DRIFT_FLIP_MAX_OPPOSITE_PRICE: 0.95,
+    WEATHER_DRIFT_FLIP_MAX_CITY_NOTIONAL: 25,
+    WEATHER_DRIFT_FLIP_MAX_SCAN_NOTIONAL: 50,
+    WEATHER_DRIFT_EXACT_MODAL_MIN_RUNS: 1,
+    WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS: 2,
     ...overrides,
   };
 }
@@ -1468,6 +1508,242 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
 
     const dedupCalls = vi.mocked(mockDedup).mock.calls;
     expect(dedupCalls.some((c) => String(c[0]).includes('market_against:t2'))).toBe(true);
+  });
+
+  // ── Phase 5: live observation + oracle state ────────────────────────────────
+
+  it('does not fetch live observation when all per-source flags are off', async () => {
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+    expect(mockFetchLiveObservation).not.toHaveBeenCalled();
+  });
+
+  it('fetches live observation when WU_LIVE_ENABLED is true', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_DRIFT_WU_LIVE_ENABLED: true }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+    expect(mockFetchLiveObservation).toHaveBeenCalledWith(
+      'chicago',
+      '2026-06-01',
+      expect.anything(),
+      expect.objectContaining({ wuEnabled: true }),
+    );
+  });
+
+  it('shadow_observations payload includes observedMax and observedSource when live obs available', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_DRIFT_WU_LIVE_ENABLED: true }));
+    mockFetchLiveObservation.mockResolvedValue({
+      city: 'chicago', targetDate: '2026-06-01',
+      observedMax: 32, source: 'wu-live', confidence: 'settlement_aligned', observedAt: '2026-06-01T12:00:00Z',
+    });
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    // The weather_live_observation shadow row.
+    const liveObsCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_live_observation',
+    );
+    expect(liveObsCall).toBeDefined();
+    expect((liveObsCall![1] as any).payload.observedMax).toBe(32);
+    expect((liveObsCall![1] as any).payload.source).toBe('wu-live');
+
+    // The main drift_decision row also has observedMax.
+    const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((driftCall![1] as any).payload.observedMax).toBe(32);
+    expect((driftCall![1] as any).payload.observedSource).toBe('wu-live');
+  });
+
+  it('writes weather_live_observation row even when WEATHER_DRIFT_LIVE_OBS_ENABLED=false', async () => {
+    // shadow rows are always written when a fetch succeeds
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+      WEATHER_DRIFT_LIVE_OBS_ENABLED: false,
+    }));
+    mockFetchLiveObservation.mockResolvedValue({
+      city: 'chicago', targetDate: '2026-06-01',
+      observedMax: 30, source: 'wu-live', confidence: 'settlement_aligned', observedAt: '2026-06-01T10:00:00Z',
+    });
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const liveObsCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_live_observation',
+    );
+    expect(liveObsCall).toBeDefined();
+  });
+
+  it('oracle state overrides forecast state when LIVE_OBS_ENABLED=true and classifyOracleState returns oracle_impossible', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+      WEATHER_DRIFT_LIVE_OBS_ENABLED: true,
+    }));
+    mockFetchLiveObservation.mockResolvedValue({
+      city: 'chicago', targetDate: '2026-06-01',
+      observedMax: 45, source: 'wu-live', confidence: 'settlement_aligned', observedAt: '2026-06-01T14:00:00Z',
+    });
+    mockClassifyOracleState.mockReturnValue('oracle_impossible');
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((driftCall![1] as any).payload.state).toBe('oracle_impossible');
+    expect((driftCall![1] as any).payload.oracleState).toBe('oracle_impossible');
+  });
+
+  it('oracle state does NOT override forecast state when LIVE_OBS_ENABLED=false', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+      WEATHER_DRIFT_LIVE_OBS_ENABLED: false,  // disabled
+    }));
+    mockFetchLiveObservation.mockResolvedValue({
+      city: 'chicago', targetDate: '2026-06-01',
+      observedMax: 45, source: 'wu-live', confidence: 'settlement_aligned', observedAt: '2026-06-01T14:00:00Z',
+    });
+    mockClassifyOracleState.mockReturnValue('oracle_impossible');
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    // forecast state should apply (stable/watch/etc), not oracle
+    expect((driftCall![1] as any).payload.state).not.toBe('oracle_impossible');
+  });
+
+  it('writes weather_market_oracle_contradiction row when CONTRADICTION_AUDIT_ENABLED and classifyContradiction returns non-null', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_CONTRADICTION_AUDIT_ENABLED: true,
+    }));
+    mockClassifyContradiction.mockReturnValue('market_contradicts_model');
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const contradictionCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_market_oracle_contradiction',
+    );
+    expect(contradictionCall).toBeDefined();
+    expect((contradictionCall![1] as any).payload.contradictionClass).toBe('market_contradicts_model');
+    expect((contradictionCall![1] as any).payload.requiresOracleAudit).toBe(true);
+  });
+
+  it('does not write contradiction row when classifyContradiction returns null', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_CONTRADICTION_AUDIT_ENABLED: true,
+    }));
+    mockClassifyContradiction.mockReturnValue(null);
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const contradictionCalls = vi.mocked(enqueueWrite).mock.calls.filter(
+      (c) => (c[1] as any).kind === 'weather_market_oracle_contradiction',
+    );
+    expect(contradictionCalls).toHaveLength(0);
+  });
+
+  // ── Phase 6: flip strategy ──────────────────────────────────────────────────
+
+  it('classifyFlipCandidate is called when action is still none after earlier gates', async () => {
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+    expect(mockClassifyFlipCandidate).toHaveBeenCalled();
+  });
+
+  it('classifyFlipCandidate is called but tryWeatherFlip is NOT executed when exit already fired', async () => {
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_FLIP_ENABLED: true,
+    }));
+    // market_against Tier 1 triggers exit on resolution day
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.20 }, bestAsk: null });
+    // Classify returns a candidate to ensure tryWeatherFlip would be called IF the gate passed
+    mockClassifyFlipCandidate.mockReturnValue('confirmed_flip');
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    // Flip classification runs unconditionally for shadow data, but execution is gated.
+    expect(mockClassifyFlipCandidate).toHaveBeenCalled();
+    // Position was already exited — action=exit means tryWeatherFlip must NOT fire.
+    expect(mockTryWeatherFlip).not.toHaveBeenCalled();
+  });
+
+  it('does not execute flip when WEATHER_DRIFT_FLIP_ENABLED=false', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_FLIP_ENABLED: false,
+    }));
+    mockClassifyFlipCandidate.mockReturnValue('confirmed_flip');
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherFlip).not.toHaveBeenCalled();
+  });
+
+  it('executes flip when FLIP_ENABLED=true and classifyFlipCandidate returns confirmed_flip', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_FLIP_ENABLED: true,
+    }));
+    mockClassifyFlipCandidate.mockReturnValue('confirmed_flip');
+    mockTryWeatherFlip.mockResolvedValue({ executed: true, amountUsd: 7.5, reason: 'flip_executed' });
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherFlip).toHaveBeenCalledWith(
+      expect.objectContaining({
+        flipCandidateClass: 'confirmed_flip',
+        confirmedOnly: true,
+      }),
+    );
+    const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((driftCall![1] as any).payload.action).toBe('flip');
+    expect((driftCall![1] as any).payload.flipCandidateClass).toBe('confirmed_flip');
+  });
+
+  it('flip action does not fire when heldTokenId is null (market fetch failed)', async () => {
+    mockGetMarket.mockRejectedValue(new Error('market unavailable'));
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_FLIP_ENABLED: true,
+    }));
+    mockClassifyFlipCandidate.mockReturnValue('confirmed_flip');
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherFlip).not.toHaveBeenCalled();
+  });
+
+  it('scan notional used accumulates across positions in a single scan', async () => {
+    // Two positions in one scan — verify second position gets reduced notional budget.
+    // Set up two positions.
+    const pos1 = makePos({ id: 'pos-1' });
+    const pos2 = makePos({ id: 'pos-2', marketId: 'mkt-2' });
+    mockSql.mockResolvedValue([pos1, pos2]);
+    mockGetMarket.mockResolvedValue({ clobTokenIds: '["tok-yes","tok-no"]', outcomePrices: '["0.35","0.65"]' });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_FLIP_ENABLED: true,
+      WEATHER_DRIFT_FLIP_MAX_SCAN_NOTIONAL: 10,
+    }));
+    mockClassifyFlipCandidate.mockReturnValue('confirmed_flip');
+    mockTryWeatherFlip
+      .mockResolvedValueOnce({ executed: true, amountUsd: 7.5, reason: 'flip_executed' })
+      .mockResolvedValueOnce({ executed: false, amountUsd: 0, reason: 'scan_notional_cap' });
+
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    // Second tryWeatherFlip call should have remainingScanNotional = 10 - 7.5 = 2.5
+    const secondCall = mockTryWeatherFlip.mock.calls[1]!;
+    expect(secondCall[0].remainingScanNotional).toBeCloseTo(2.5, 2);
   });
 
   it('cancel_resting still fires when forecastState=modal_against and state=market_against', async () => {
