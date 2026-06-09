@@ -2124,8 +2124,13 @@ export function partitionTradableByEntryCap<
  *     the reconciler's orphan-import links the on-chain fill to its metadata
  *   - clean zero-fill cancel → key deleted
  *
- * Returns true only on the clean zero-fill cancel (key deleted).
+ * Returns:
+ *   'cancelled' — clean zero-fill cancel (pending key deleted)
+ *   'terminal'  — order gone or fully/partially filled; no retry needed
+ *   'retry'     — cancel API call returned non-success and CLOB still shows the
+ *                 order as live; caller should NOT suppress further attempts
  */
+export type CancelOrderResult = 'cancelled' | 'terminal' | 'retry';
 export async function cancelRestingWeatherOrder(
   redis: Redis,
   marketId: string,
@@ -2133,7 +2138,7 @@ export async function cancelRestingWeatherOrder(
   order: PendingMakerOrder,
   /** Cancel rule that fired — merged into every log line for slicing. */
   logCtx: Record<string, unknown>,
-): Promise<boolean> {
+): Promise<CancelOrderResult> {
   const liveOrder = await getClobOrder(order.orderId);
   if (!liveOrder) {
     // warn, not info: an order we never cancelled that is gone from the CLOB
@@ -2146,13 +2151,13 @@ export async function cancelRestingWeatherOrder(
       orderId: order.orderId,
       ...logCtx,
     });
-    return false;
+    return 'terminal';
   }
   const matched = parseFloat(liveOrder.size_matched ?? '0') || 0;
   const original = parseFloat(liveOrder.original_size ?? '0') || 0;
   if (original > 0 && matched >= original - 1e-9) {
     // Fully filled — nothing to cancel; resume/reconciler records the position.
-    return false;
+    return 'terminal';
   }
 
   const cancelled = await cancelClobOrder(order.orderId).catch(() => false);
@@ -2167,7 +2172,7 @@ export async function cancelRestingWeatherOrder(
         orderId: order.orderId,
         ...logCtx,
       });
-      return false;
+      return 'retry';
     }
   }
 
@@ -2184,7 +2189,7 @@ export async function cancelRestingWeatherOrder(
       postedPrice: order.price,
       ...logCtx,
     });
-    return false;
+    return 'terminal';
   }
   await deletePendingOrder(redis, marketId, direction);
   logger.info('[weather-revalidate] cancelled resting order', {
@@ -2196,7 +2201,7 @@ export async function cancelRestingWeatherOrder(
     sourcedFrom: order.sourcedFrom,
     ...logCtx,
   });
-  return true;
+  return 'cancelled';
 }
 
 /**
@@ -2339,7 +2344,7 @@ export async function revalidateRestingWeatherOrders(
           rule: 'post_resolution_sweep',
           inScanUniverse: oppByMarket.has(marketId),
         });
-        if (deleted) cancelledPostResolution++;
+        if (deleted === 'cancelled') cancelledPostResolution++;
         continue;
       }
 
@@ -2379,7 +2384,7 @@ export async function revalidateRestingWeatherOrders(
             ? Number(primarySidePrice.toFixed(4))
             : null,
         });
-        if (deleted) cancelledBrackets++;
+        if (deleted === 'cancelled') cancelledBrackets++;
       } else {
         if (!primaryRuleOn) continue;
         const sideFV = direction === 'YES' ? opp.modelProbability : 1 - opp.modelProbability;
@@ -2390,7 +2395,7 @@ export async function revalidateRestingWeatherOrders(
           rule: 'primary_fv',
           sideFV: Number(sideFV.toFixed(4)),
         });
-        if (deleted) cancelledPrimaries++;
+        if (deleted === 'cancelled') cancelledPrimaries++;
       }
     } catch (err) {
       logger.warn('[weather-revalidate] error processing resting order (non-fatal)', {

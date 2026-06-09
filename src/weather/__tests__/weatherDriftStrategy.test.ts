@@ -68,7 +68,7 @@ const mockFetchWeatherEvents = vi.fn().mockResolvedValue([]);
 const mockParseWeatherEvent = vi.fn().mockReturnValue(null);
 const mockFetchForecast = vi.fn();
 const mockDaysUntil = vi.fn().mockReturnValue(1);
-const mockCancelRestingWeatherOrder = vi.fn().mockResolvedValue(false);
+const mockCancelRestingWeatherOrder = vi.fn().mockResolvedValue('terminal' as const);
 
 vi.mock('../weatherScanner.js', () => ({
   fetchWeatherEvents: mockFetchWeatherEvents,
@@ -177,6 +177,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     WEATHER_DRIFT_SEVERE_DROP: 0.30,
     WEATHER_DRIFT_EXIT_MIN_BID: 0.10,
     WEATHER_DRIFT_EXIT_MAX_SLIPPAGE: 0.15,
+    WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO: 0.90,
     WEATHER_DRIFT_EXIT_COOLDOWN_S: 1800,
     WEATHER_DRIFT_NOTIFY_DEDUP_S: 3600,
     ...overrides,
@@ -899,6 +900,22 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     expect(call.payload.wouldBlock).toBe(false);
   });
 
+  it('sets wouldBlock=true for non-severe thesis_weakened (isBlockable but !isActionable)', async () => {
+    // drop=0.40, SEVERE_DROP=0.50 → isActionable=false, but isBlockable=true (thesis_weakened)
+    // wouldBlock must reflect the wider isBlockable gate, not just isActionable
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: false,
+      WEATHER_DRIFT_SEVERE_DROP: 0.50,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.isActionable).toBe(false);
+    expect(call.wouldBlock).toBe(true);
+    expect(call.payload.wouldBlock).toBe(true);
+  });
+
   it('sets wouldBlock=false when state is stable (not actionable)', async () => {
     // entryPrice=0.30, consensusProbability=null → entryHeldProb=0.30
     // mockComputeBiasedProb returns currentHeldProb(NO)=0.30 → drop=0.00 < any threshold
@@ -1011,6 +1028,45 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     expect(setCalls.find((c) => c[0].startsWith('weather:forecast_invalidated:'))).toBeUndefined();
   });
 
+  it('writes forecast_invalidated key for non-severe thesis_weakened (drop below SEVERE_DROP)', async () => {
+    // Raise SEVERE_DROP above the default drop (0.40) → thesis_weakened but not actionable.
+    // block_size_up uses the wider isBlockable gate and should still fire.
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_BLOCK_SIZE_UP_ENABLED: true,
+      WEATHER_DRIFT_SEVERE_DROP: 0.50,  // drop=0.40 < 0.50 → not actionable, but isBlockable=true
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const setCalls = vi.mocked(redis.set).mock.calls;
+    expect(setCalls.find((c) => c[0] === 'weather:forecast_invalidated:mkt-1:NO')).toBeTruthy();
+  });
+
+  it('writes forecast_invalidated key for first-scan modal_against with streak below minRuns', async () => {
+    // streak=1 < MODAL_MIN_RUNS=2 → modal_against but not actionable (isBlockable=true, isActionable=false).
+    // block_size_up should fire; notify/cancel/exit should not.
+    const redis = makeRedis();
+    setupModalAgainstPosition(redis); // seeds streak=1
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_BLOCK_SIZE_UP_ENABLED: true,
+      WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: 2,  // streak=1 < 2 → not actionable
+    }));
+
+    await runWeatherDriftStrategy(redis as any);
+
+    // block_size_up key written
+    const setCalls = vi.mocked(redis.set).mock.calls;
+    expect(setCalls.find((c) => c[0].startsWith('weather:forecast_invalidated:'))).toBeTruthy();
+    // Not actionable → no notification, no cancel attempt
+    expect(mockNotifyWeatherDrift).not.toHaveBeenCalled();
+    expect(mockCancelRestingWeatherOrder).not.toHaveBeenCalled();
+    // action=block_size_up in shadow row
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.action).toBe('block_size_up');
+  });
+
   // ── Cancel resting ───────────────────────────────────────────────────────────
 
   it('cancels resting maker order for modal_against position', async () => {
@@ -1018,7 +1074,7 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     setupModalAgainstPosition(redis);
     const fakePendingOrder = { orderId: 'ord-1', price: 0.30, sourcedFrom: 'weather:hong kong:2026-06-01:28°C' };
     mockGetPendingOrder.mockResolvedValue(fakePendingOrder);
-    mockCancelRestingWeatherOrder.mockResolvedValue(true);
+    mockCancelRestingWeatherOrder.mockResolvedValue('cancelled' as const);
     mockLoadConfig.mockReturnValue(makeConfig({
       WEATHER_DRIFT_ENABLED: true,
       WEATHER_DRIFT_CANCEL_RESTING_ENABLED: true,
@@ -1057,12 +1113,12 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     expect(mockCancelRestingWeatherOrder).not.toHaveBeenCalled();
   });
 
-  it('writes idempotency marker even when cancelRestingWeatherOrder returns false', async () => {
-    // false = terminal result (filled/partial/not-found) — retry on next scan is wasteful
+  it('writes idempotency marker when cancelRestingWeatherOrder returns terminal', async () => {
+    // 'terminal' = filled/partial/not-found — order is gone, no retry needed
     const redis = makeRedis();
     setupModalAgainstPosition(redis);
     mockGetPendingOrder.mockResolvedValue({ orderId: 'ord-1', price: 0.30 });
-    mockCancelRestingWeatherOrder.mockResolvedValue(false);
+    mockCancelRestingWeatherOrder.mockResolvedValue('terminal' as const);
     mockLoadConfig.mockReturnValue(makeConfig({
       WEATHER_DRIFT_ENABLED: true,
       WEATHER_DRIFT_CANCEL_RESTING_ENABLED: true,
@@ -1072,6 +1128,23 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
 
     const setCalls = vi.mocked(redis.set).mock.calls;
     expect(setCalls.find((c) => c[0] === 'weather:drift_cancelled_resting:pos-1')).toBeTruthy();
+  });
+
+  it('does NOT write idempotency marker when cancelRestingWeatherOrder returns retry', async () => {
+    // 'retry' = cancel API unconfirmed, order still live — must not suppress next scan
+    const redis = makeRedis();
+    setupModalAgainstPosition(redis);
+    mockGetPendingOrder.mockResolvedValue({ orderId: 'ord-1', price: 0.30 });
+    mockCancelRestingWeatherOrder.mockResolvedValue('retry' as const);
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_CANCEL_RESTING_ENABLED: true,
+    }));
+
+    await runWeatherDriftStrategy(redis as any);
+
+    const setCalls = vi.mocked(redis.set).mock.calls;
+    expect(setCalls.find((c) => c[0] === 'weather:drift_cancelled_resting:pos-1')).toBeUndefined();
   });
 
   it('skips cancel_resting when no resting maker order found', async () => {
@@ -1123,6 +1196,7 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     expect(exitArgs.logMarker).toBe('[weather-drift]');
     expect(exitArgs.exitedKey).toBe('weather:forecast_exited:pos-1');
     expect(exitArgs.exitCooldownKey).toBe('weather:drift_exit_cooldown:pos-1');
+    expect(exitArgs.minDepthRatio).toBe(0.90);
   });
 
   it('does not call tryWeatherExit when not resolution day', async () => {

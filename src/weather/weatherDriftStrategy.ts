@@ -312,9 +312,12 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       );
 
       // ── Phase 3+4: live actions ──────────────────────────────────────────────
-      // A position is actionable when:
-      //  - modal_against: forecast has been rounding against the thesis for ≥ minRuns
-      //  - thesis_weakened: held-prob has dropped beyond the severe threshold
+      // isActionable: stricter gate for high-impact actions (exit/cancel/notify).
+      //   - modal_against: forecast has rounded against thesis for ≥ minRuns scans
+      //   - thesis_weakened: held-prob dropped beyond the severe (not just watch) threshold
+      // isBlockable: wider gate for block_size_up (any weakened/against state).
+      //   Fires for thesis_weakened and modal_against — including first-scan modal_against
+      //   and thesis_weakened with drop in [WEAKENED_DROP, SEVERE_DROP).
       // Notification always fires for the first occurrence per position+state
       // (deduped per WEATHER_DRIFT_NOTIFY_DEDUP_S) regardless of whether live
       // actions are enabled — the user is always kept in the loop.
@@ -322,15 +325,18 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         (state === 'modal_against' &&
           result.modalStreak >= cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS) ||
         (state === 'thesis_weakened' && result.drop >= cfg.WEATHER_DRIFT_SEVERE_DROP);
-      const wouldBlock = isActionable && !cfg.WEATHER_DRIFT_ENABLED;
+      const isBlockable = state === 'thesis_weakened' || state === 'modal_against';
+      const wouldBlock = isBlockable && !cfg.WEATHER_DRIFT_ENABLED;
 
       let action: WeatherDriftAction = 'none';
+      // Hoisted so the notification (fired after block_size_up) sees the final action.
+      let shouldNotify = false;
 
       if (isActionable) {
         // Dedup key per position+state — state escalations (e.g. thesis_weakened →
         // modal_against) use different keys and fire fresh notifications.
         const notifyDedupKey = `${DRIFT_NOTIFY_KEY_PREFIX}${pos.id}:${state}`;
-        const shouldNotify = await dedup(notifyDedupKey, cfg.WEATHER_DRIFT_NOTIFY_DEDUP_S).catch(() => false);
+        shouldNotify = await dedup(notifyDedupKey, cfg.WEATHER_DRIFT_NOTIFY_DEDUP_S).catch(() => false);
 
         if (cfg.WEATHER_DRIFT_ENABLED) {
           // 1. Resolution-day exit (highest priority).
@@ -370,6 +376,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
                 exitReason: 'weather_drift',
                 shadowKind: 'weather_drift_exit',
                 logMarker: '[weather-drift]',
+                minDepthRatio: cfg.WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO,
                 extraContext: { driftState: state },
               }).catch(() => false);
               if (exited) action = 'exit';
@@ -383,79 +390,84 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             if (!alreadyCancelled) {
               const pendingOrder = await getPendingOrder(redis, pos.marketId, pos.direction).catch(() => null);
               if (pendingOrder) {
-                const cancelled = await cancelRestingWeatherOrder(
+                const cancelStatus = await cancelRestingWeatherOrder(
                   redis,
                   pos.marketId,
                   pos.direction,
                   pendingOrder,
                   { rule: 'drift_modal_against', positionId: pos.id, modalStreak: result.modalStreak },
-                ).catch(() => false);
-                // Always write the idempotency marker — all non-true returns from
-                // cancelRestingWeatherOrder are terminal (filled/partial/not-found)
-                // and would only waste CLOB API budget on every subsequent scan cycle.
-                await redis.set(cancelledKey, '1', 'EX', DRIFT_CANCELLED_RESTING_TTL_S).catch(() => {});
-                if (cancelled) action = 'cancel_resting';
+                ).catch(() => 'retry' as const);
+                // Write idempotency marker only on confirmed outcomes; 'retry' means
+                // the order is still live on CLOB — suppress would prevent the next scan
+                // from retrying the cancel.
+                if (cancelStatus !== 'retry') {
+                  await redis.set(cancelledKey, '1', 'EX', DRIFT_CANCELLED_RESTING_TTL_S).catch(() => {});
+                }
+                if (cancelStatus === 'cancelled') action = 'cancel_resting';
               }
             }
           }
-
-          // 3. Write the shared size-up block key (skip when exit succeeded — position sold).
-          if (action !== 'exit' && cfg.WEATHER_DRIFT_BLOCK_SIZE_UP_ENABLED) {
-            const invalidKey = `${FORECAST_INVALIDATED_KEY_PREFIX}${pos.marketId}:${pos.direction}`;
-            await redis.set(
-              invalidKey,
-              JSON.stringify({
-                city,
-                targetDate,
-                bracketLabel,
-                entryHeldProb: result.entryHeldProb,
-                currentHeldProb: result.currentHeldProb,
-                drop: result.drop,
-                driftState: state,
-                observedAt: new Date().toISOString(),
-              }),
-              'EX',
-              cfg.WEATHER_FORECAST_INVALIDATION_TTL_S,
-            ).catch(() => {});
-            logger.info('[weather-drift] size-up block key set', {
-              positionId: pos.id,
-              marketId: pos.marketId,
-              direction: pos.direction,
-              invalidKey,
-              driftState: state,
-            });
-            if (action === 'none') action = 'block_size_up';
-          }
-
-          // If actionable and live but no specific action fired yet, mark as notify.
-          if (action === 'none') action = 'notify';
         }
+      }
 
-        // Fire notification (alongside or as the only action, always deduped).
-        if (shouldNotify) {
-          await notifyWeatherDrift({
-            positionId: pos.id,
-            marketId: pos.marketId,
+      // 3. Write the shared size-up block key.
+      // Gated by isBlockable (wider than isActionable) so any thesis_weakened or
+      // modal_against position — including first-scan and drop in [weakened, severe) —
+      // blocks size-ups while the position is held. Skipped after a successful exit
+      // (position is sold; writing the key would be misleading).
+      if (action !== 'exit' && isBlockable && cfg.WEATHER_DRIFT_ENABLED && cfg.WEATHER_DRIFT_BLOCK_SIZE_UP_ENABLED) {
+        const invalidKey = `${FORECAST_INVALIDATED_KEY_PREFIX}${pos.marketId}:${pos.direction}`;
+        await redis.set(
+          invalidKey,
+          JSON.stringify({
             city,
             targetDate,
             bracketLabel,
-            direction: pos.direction,
-            entryPrice: pos.entryPrice,
-            sharesHeld: pos.sharesHeld,
-            state,
-            drop: result.drop,
+            entryHeldProb: result.entryHeldProb,
             currentHeldProb: result.currentHeldProb,
-            modalStreak: result.modalStreak,
-            daysOut,
-            isResolutionDay,
-            action,
-          }).catch((err: unknown) => {
-            logger.warn('[weather-drift] notification failed', {
-              positionId: pos.id,
-              error: err instanceof Error ? err.message : String(err),
-            });
+            drop: result.drop,
+            driftState: state,
+            observedAt: new Date().toISOString(),
+          }),
+          'EX',
+          cfg.WEATHER_FORECAST_INVALIDATION_TTL_S,
+        ).catch(() => {});
+        logger.info('[weather-drift] size-up block key set', {
+          positionId: pos.id,
+          marketId: pos.marketId,
+          direction: pos.direction,
+          invalidKey,
+          driftState: state,
+        });
+        if (action === 'none') action = 'block_size_up';
+      }
+
+      // 4. Notify fallback + notification fire (actionable positions only).
+      // Runs after block_size_up so the notification shows the final action.
+      if (isActionable && cfg.WEATHER_DRIFT_ENABLED && action === 'none') action = 'notify';
+      if (shouldNotify) {
+        await notifyWeatherDrift({
+          positionId: pos.id,
+          marketId: pos.marketId,
+          city,
+          targetDate,
+          bracketLabel,
+          direction: pos.direction,
+          entryPrice: pos.entryPrice,
+          sharesHeld: pos.sharesHeld,
+          state,
+          drop: result.drop,
+          currentHeldProb: result.currentHeldProb,
+          modalStreak: result.modalStreak,
+          daysOut,
+          isResolutionDay,
+          action,
+        }).catch((err: unknown) => {
+          logger.warn('[weather-drift] notification failed', {
+            positionId: pos.id,
+            error: err instanceof Error ? err.message : String(err),
           });
-        }
+        });
       }
 
       const decision: WeatherDriftDecision = {

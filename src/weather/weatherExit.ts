@@ -44,6 +44,11 @@ export interface TryWeatherExitOpts {
   exitReason: 'weather_invalidation' | 'weather_drift';
   shadowKind: string;
   logMarker: string;
+  /**
+   * Fraction of sharesHeld that must be covered by bids at or above exitFloor (0–1).
+   * Defaults to 1.0 (full coverage). Drift exits can pass 0.90 to allow partial-depth exits.
+   */
+  minDepthRatio?: number;
   /** Optional fields merged into log lines and shadow payload — e.g. hedgeBarrier, driftState. */
   extraContext?: Record<string, unknown>;
 }
@@ -57,7 +62,7 @@ export async function tryWeatherExit(opts: TryWeatherExitOpts): Promise<boolean>
     redis, pos, heldTokenId, isResolutionDay, currentHeldProb,
     invalidationReason, enabled, minExitPrice, maxExitSlippage,
     useMarketFloor, exitCooldownKey, exitCooldownS, exitedKey, exitedTtlS,
-    exitReason, shadowKind, logMarker, extraContext = {},
+    exitReason, shadowKind, logMarker, minDepthRatio = 1, extraContext = {},
   } = opts;
 
   if (!enabled) return false;
@@ -115,12 +120,14 @@ export async function tryWeatherExit(opts: TryWeatherExitOpts): Promise<boolean>
     const size = parseFloat(String(level?.size ?? '0'));
     if (isFinite(price) && isFinite(size) && price >= exitFloor) depthAtOrAboveFloor += size;
   }
-  if (depthAtOrAboveFloor < pos.sharesHeld) {
+  if (depthAtOrAboveFloor < pos.sharesHeld * minDepthRatio) {
     logger.info(`${logMarker} exit declined — insufficient bid depth above floor`, {
       positionId: pos.id,
       marketId: pos.marketId,
       ...extraContext,
       sharesHeld: pos.sharesHeld,
+      minDepthRatio,
+      depthRequired: +(pos.sharesHeld * minDepthRatio).toFixed(2),
       depthAtOrAboveFloor: +depthAtOrAboveFloor.toFixed(2),
       exitFloor: +exitFloor.toFixed(4),
       bestBid: +bestBid.toFixed(4),

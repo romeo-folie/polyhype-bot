@@ -2203,6 +2203,10 @@ export const envSchema = z.object({
   // Maximum slippage allowed relative to currentHeldProb when not in market-floor
   // mode. Drift exits always use market-floor mode; kept for future path variants.
   WEATHER_DRIFT_EXIT_MAX_SLIPPAGE: z.coerce.number().min(0).max(1).optional().default(0.15),
+  // Fraction of sharesHeld that must be covered by bids at/above the exit floor.
+  // 0.90 = exit when 90% of the position can fill without sweeping below floor.
+  // Invalidation exits always require 1.0 (full coverage); this knob tunes drift only.
+  WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO: z.coerce.number().min(0).max(1).optional().default(0.90),
   // Cooldown after a failed exit sell to prevent rapid retry storms.
   WEATHER_DRIFT_EXIT_COOLDOWN_S: z.coerce.number().int().min(0).optional().default(1800),
   // Dedup window for the actionable-state Telegram notification. Same state on
