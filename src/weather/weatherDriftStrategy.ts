@@ -29,6 +29,8 @@ import { getCityBias } from './cityBias.js';
 import { cacheForecast, readCachedForecast } from './forecastCache.js';
 import { cityLocalDate } from './resolutionTime.js';
 import { getMarket, parseClobTokenIds } from '../mapping/gamma.js';
+import { getClobOrderBook } from '../shared/clob.js';
+import { getBookTouchLevels } from '../shared/bookTouch.js';
 import { getPendingOrder } from '../execution/pendingMakerOrders.js';
 import { notifyWeatherDrift } from '../execution/telegram.js';
 import {
@@ -54,6 +56,7 @@ export type WeatherDriftState =
   | 'watch'
   | 'thesis_weakened'
   | 'modal_against'
+  | 'market_against'      // Market price has moved strongly against us (independent of forecast)
   | 'oracle_impossible'   // Phase 5+
   | 'oracle_confirmed'    // Phase 5+
   | 'exit_candidate'      // Phase 3+
@@ -300,7 +303,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         skipModalStreakAdvance: true,
       });
 
-      const { state, reason } = classifyDriftState(
+      const { state: forecastState, reason } = classifyDriftState(
         result,
         { low: bracket.low, high: bracket.high },
         {
@@ -311,10 +314,70 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         },
       );
 
+      // ── Market-adverse detection ─────────────────────────────────────────────
+      // Fetch the held-side CLOB bid once per position to detect cases where the
+      // market has moved strongly against us even when the ensemble forecast hasn't
+      // shifted (e.g. model stays at 99% but market prices the position at ~0%).
+      //
+      // Tier 1 (exit, res-day): marketDrop ≥ EXIT threshold AND model drop ≥ SEVERE_DROP.
+      // Tier 2 (notify, any day): marketDrop ≥ NOTIFY threshold AND model-market gap ≥ DIVERGENCE.
+      //
+      // A non-null heldTokenId is needed for both market-adverse detection and the
+      // Tier 1 exit, so we fetch it here and reuse it below.
+      let heldTokenId: string | null = null;
+      try {
+        const market = await getMarket(pos.marketId);
+        const tokenIds = parseClobTokenIds(market.clobTokenIds);
+        heldTokenId = (pos.direction === 'YES' ? tokenIds[0] : tokenIds[1]) ?? null;
+      } catch (err) {
+        logger.warn('[weather-drift] market fetch failed — market-adverse check and exit skipped', {
+          positionId: pos.id,
+          marketId: pos.marketId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      let currentHeldBid: number | null = null;
+      let marketDrop = 0;
+      let modelMarketGap = 0;
+      let marketAgainstTier: 1 | 2 | null = null;
+
+      if (heldTokenId) {
+        try {
+          const book = await getClobOrderBook(heldTokenId);
+          currentHeldBid = book ? (getBookTouchLevels(book).bestBid?.price ?? null) : null;
+        } catch { /* CLOB unavailable — skip market-adverse check */ }
+
+        if (currentHeldBid != null && pos.entryPrice > 0) {
+          marketDrop = (pos.entryPrice - currentHeldBid) / pos.entryPrice;
+          modelMarketGap = result.currentHeldProb - currentHeldBid;
+
+          // DROP_EXIT < DROP_NOTIFY by design: tier1 compensates with the extra
+          // model-drop gate. Do not raise DROP_EXIT above DROP_NOTIFY (see config comment).
+          const tier1 =
+            marketDrop >= cfg.WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT &&
+            result.drop >= cfg.WEATHER_DRIFT_SEVERE_DROP;
+          // Tier 2 only fires when Tier 1 is not already met — avoids double-notify.
+          const tier2 =
+            !tier1 &&
+            marketDrop >= cfg.WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY &&
+            modelMarketGap >= cfg.WEATHER_DRIFT_MARKET_DIVERGENCE_NOTIFY;
+
+          if (tier1) marketAgainstTier = 1;
+          else if (tier2) marketAgainstTier = 2;
+        }
+      }
+
+      // Final state: market_against overrides the forecast-derived state when the
+      // market signal is clear. forecastState is kept for forecast-specific gates
+      // (e.g. cancel_resting requires modal_against from the forecast, not market).
+      const state: WeatherDriftState = marketAgainstTier != null ? 'market_against' : forecastState;
+
       // ── Phase 3+4: live actions ──────────────────────────────────────────────
       // isActionable: stricter gate for high-impact actions (exit/cancel/notify).
       //   - modal_against: forecast has rounded against thesis for ≥ minRuns scans
       //   - thesis_weakened: held-prob dropped beyond the severe (not just watch) threshold
+      //   - market_against: market bid has moved strongly against our held side
       // isBlockable: wider gate for block_size_up (any weakened/against state).
       //   Fires for thesis_weakened and modal_against — including first-scan modal_against
       //   and thesis_weakened with drop in [WEAKENED_DROP, SEVERE_DROP).
@@ -322,10 +385,12 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       // (deduped per WEATHER_DRIFT_NOTIFY_DEDUP_S) regardless of whether live
       // actions are enabled — the user is always kept in the loop.
       const isActionable =
-        (state === 'modal_against' &&
+        (forecastState === 'modal_against' &&
           result.modalStreak >= cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS) ||
-        (state === 'thesis_weakened' && result.drop >= cfg.WEATHER_DRIFT_SEVERE_DROP);
-      const isBlockable = state === 'thesis_weakened' || state === 'modal_against';
+        (forecastState === 'thesis_weakened' && result.drop >= cfg.WEATHER_DRIFT_SEVERE_DROP) ||
+        state === 'market_against';
+      const isBlockable =
+        forecastState === 'thesis_weakened' || forecastState === 'modal_against' || state === 'market_against';
       const wouldBlock = isBlockable && !cfg.WEATHER_DRIFT_ENABLED;
 
       let action: WeatherDriftAction = 'none';
@@ -334,27 +399,24 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
 
       if (isActionable) {
         // Dedup key per position+state — state escalations (e.g. thesis_weakened →
-        // modal_against) use different keys and fire fresh notifications.
-        const notifyDedupKey = `${DRIFT_NOTIFY_KEY_PREFIX}${pos.id}:${state}`;
+        // modal_against, or market_against tier2 → tier1) use different keys and
+        // fire fresh notifications.
+        const notifyDedupSuffix =
+          state === 'market_against' ? `market_against:t${marketAgainstTier}` : state;
+        const notifyDedupKey = `${DRIFT_NOTIFY_KEY_PREFIX}${pos.id}:${notifyDedupSuffix}`;
         shouldNotify = await dedup(notifyDedupKey, cfg.WEATHER_DRIFT_NOTIFY_DEDUP_S).catch(() => false);
 
         if (cfg.WEATHER_DRIFT_ENABLED) {
           // 1. Resolution-day exit (highest priority).
-          if (cfg.WEATHER_DRIFT_EXIT_ENABLED && isResolutionDay) {
-            let heldTokenId: string | null = null;
-            try {
-              const market = await getMarket(pos.marketId);
-              const tokenIds = parseClobTokenIds(market.clobTokenIds);
-              heldTokenId = (pos.direction === 'YES' ? tokenIds[0] : tokenIds[1]) ?? null;
-            } catch (err) {
-              logger.warn('[weather-drift] market fetch failed for exit — skipping', {
-                positionId: pos.id,
-                marketId: pos.marketId,
-                error: err instanceof Error ? err.message : String(err),
-              });
-            }
-
+          // market_against: only Tier 1 (both market and model moved) triggers exit.
+          // Tier 2 (model stuck, divergence only) is notify-only.
+          const marketAgainstCanExit = state === 'market_against' && marketAgainstTier === 1;
+          const forecastCanExit = state !== 'market_against';
+          if (cfg.WEATHER_DRIFT_EXIT_ENABLED && isResolutionDay && (forecastCanExit || marketAgainstCanExit)) {
             if (heldTokenId) {
+              // tryWeatherExit fetches the book again for an accurate exit price.
+              // The earlier fetch was for tier classification only; a fresh fetch
+              // ensures the exit floor check uses the current bid, not a stale one.
               const exited = await tryWeatherExit({
                 redis,
                 pos,
@@ -377,14 +439,15 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
                 shadowKind: 'weather_drift_exit',
                 logMarker: '[weather-drift]',
                 minDepthRatio: cfg.WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO,
-                extraContext: { driftState: state },
+                extraContext: { driftState: state, marketAgainstTier },
               }).catch(() => false);
               if (exited) action = 'exit';
             }
           }
 
-          // 2. Cancel resting maker order (modal_against only — streak satisfied).
-          if (action === 'none' && state === 'modal_against' && cfg.WEATHER_DRIFT_CANCEL_RESTING_ENABLED) {
+          // 2. Cancel resting maker order (forecast modal_against only — streak satisfied).
+          // Not triggered by market_against alone since the forecast may still support the thesis.
+          if (action === 'none' && forecastState === 'modal_against' && cfg.WEATHER_DRIFT_CANCEL_RESTING_ENABLED) {
             const cancelledKey = `${DRIFT_CANCELLED_RESTING_KEY_PREFIX}${pos.id}`;
             const alreadyCancelled = !!(await redis.get(cancelledKey).catch(() => null));
             if (!alreadyCancelled) {
@@ -462,6 +525,8 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           daysOut,
           isResolutionDay,
           action,
+          ...(currentHeldBid != null && { currentHeldBid }),
+          ...(marketAgainstTier != null && { marketDrop, marketAgainstTier }),
         }).catch((err: unknown) => {
           logger.warn('[weather-drift] notification failed', {
             positionId: pos.id,
@@ -519,6 +584,12 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         modalStreak: result.modalStreak,
         correctedForecastHigh: +result.correctedForecastHigh.toFixed(1),
         roundedForecast: result.roundedForecast,
+        ...(currentHeldBid != null && {
+          currentHeldBid: +currentHeldBid.toFixed(4),
+          marketDrop: +marketDrop.toFixed(3),
+          modelMarketGap: +modelMarketGap.toFixed(3),
+          marketAgainstTier,
+        }),
       });
 
       void enqueueWrite('shadow_observations', {
@@ -562,6 +633,10 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           isActionable,
           wouldBlock,
           driftEnabled: cfg.WEATHER_DRIFT_ENABLED,
+          currentHeldBid,
+          marketDrop: currentHeldBid != null ? marketDrop : null,
+          modelMarketGap: currentHeldBid != null ? modelMarketGap : null,
+          marketAgainstTier,
         },
       });
     } catch (err) {

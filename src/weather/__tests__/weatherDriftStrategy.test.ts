@@ -118,6 +118,13 @@ vi.mock('../../mapping/gamma.js', () => ({
   parseClobTokenIds: mockParseClobTokenIds,
 }));
 
+// Default: no resting bid (market price unavailable) — tests that need a bid override this.
+const mockGetClobOrderBook = vi.fn().mockResolvedValue(null);
+vi.mock('../../shared/clob.js', () => ({ getClobOrderBook: mockGetClobOrderBook }));
+
+const mockGetBookTouchLevels = vi.fn().mockReturnValue({ bestBid: null, bestAsk: null });
+vi.mock('../../shared/bookTouch.js', () => ({ getBookTouchLevels: mockGetBookTouchLevels }));
+
 const mockNotifyWeatherDrift = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../execution/telegram.js', () => ({
   notifyWeatherDrift: mockNotifyWeatherDrift,
@@ -180,6 +187,9 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO: 0.90,
     WEATHER_DRIFT_EXIT_COOLDOWN_S: 1800,
     WEATHER_DRIFT_NOTIFY_DEDUP_S: 3600,
+    WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.50,
+    WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.65,
+    WEATHER_DRIFT_MARKET_DIVERGENCE_NOTIFY: 0.55,
     ...overrides,
   };
 }
@@ -1257,5 +1267,198 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
 
     const setCalls = vi.mocked(redis.set).mock.calls;
     expect(setCalls.find((c) => c[0].startsWith('weather:forecast_invalidated:'))).toBeUndefined();
+  });
+
+  // ── market_against ────────────────────────────────────────────────────────
+  // Uses the default thesis_weakened position (entryPrice=0.65, drop=0.40).
+  // Tests override getClobOrderBook/getBookTouchLevels to simulate various bid levels.
+
+  it('classifies market_against (Tier 2) when bid drops > NOTIFY threshold and model-market gap > DIVERGENCE', async () => {
+    // entryPrice=0.65, currentHeldBid=0.10 → marketDrop=(0.65-0.10)/0.65≈0.846 ≥ 0.65
+    // currentHeldProb=0.30 (from computeBiasedProb mock), modelMarketGap=0.30-0.10=0.20 < 0.55
+    // → Tier 2 NOT met on default drop (0.40) position alone.
+    // Override: model stays high (entryPrice=0.50, consensusProbability=null → entryHeldProb=0.50)
+    // but use a stable (low-drop) position with a very high model prob to trigger divergence.
+    mockSql.mockResolvedValue([makePos({ consensusProbability: null, entryPrice: 0.50 })]);
+    // computeBiasedProb returns modelProbability=0.70 → currentHeldProb(NO)=1-0.30=0.70... wait
+    // Actually: for NO, currentHeldProb = 1 - modelProbability = 1 - 0.70 = 0.30 based on mock.
+    // We need high currentHeldProb. Change: set direction=YES so currentHeldProb=modelProbability=0.70.
+    mockSql.mockResolvedValue([makePos({ direction: 'YES', consensusProbability: null, entryPrice: 0.50,
+      sourcedFrom: 'weather:chicago:2026-06-01:39°F or below' })]);
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    // Bid at 0.05: entryPrice=0.50, marketDrop=(0.50-0.05)/0.50=0.90 ≥ 0.65 ✓
+    // currentHeldProb=0.70 (YES, modelProb=0.70), modelMarketGap=0.70-0.05=0.65 ≥ 0.55 ✓
+    // drop = entryHeldProb(0.50) - currentHeldProb(0.70) = -0.20 (model improved) < SEVERE → Tier 1 NOT met
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.05 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_DRIFT_SHADOW_ENABLED: true }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.state).toBe('market_against');
+    expect(call.payload.marketAgainstTier).toBe(2);
+  });
+
+  it('classifies market_against (Tier 1) when bid and model both drop enough', async () => {
+    // thesis_weakened default: entryPrice=0.65, direction=NO, drop=0.40 ≥ severeDrop=0.30
+    // Provide a bid that gives marketDrop ≥ 0.50: bid=0.20 → (0.65-0.20)/0.65≈0.692 ≥ 0.50 ✓
+    // drop=0.40 ≥ SEVERE_DROP=0.30 ✓  →  Tier 1 met
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.20 }, bestAsk: null });
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.state).toBe('market_against');
+    expect(call.payload.marketAgainstTier).toBe(1);
+  });
+
+  it('does NOT classify market_against when bid drop is below NOTIFY threshold', async () => {
+    // entryPrice=0.65, bid=0.40 → marketDrop=(0.65-0.40)/0.65≈0.385 — below both 0.50 and 0.65
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.40 }, bestAsk: null });
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    // thesis_weakened from forecast (drop=0.40 ≥ thesisWeakenedDrop=0.20) but NOT market_against
+    expect(call.payload.state).toBe('thesis_weakened');
+    expect(call.payload.marketAgainstTier).toBeNull();
+  });
+
+  it('market_against Tier 2 fires notify on any day (not just resolution day)', async () => {
+    // Tier 2 should notify pre-resolution — simulate daysOut=1
+    mockCityLocalDate.mockReturnValue('2026-05-31'); // differs from targetDate '2026-06-01'
+    mockSql.mockResolvedValue([makePos({ direction: 'YES', consensusProbability: null, entryPrice: 0.50,
+      sourcedFrom: 'weather:chicago:2026-06-01:39°F or below' })]);
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.05 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_SHADOW_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockNotifyWeatherDrift).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'market_against', marketAgainstTier: 2 }),
+    );
+  });
+
+  it('market_against Tier 2 does NOT attempt exit (notify-only)', async () => {
+    // Tier 2 only: market moved but model stable (no severe drop) → exit should not fire
+    mockSql.mockResolvedValue([makePos({ direction: 'YES', consensusProbability: null, entryPrice: 0.50,
+      sourcedFrom: 'weather:chicago:2026-06-01:39°F or below' })]);
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.05 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.action).toBe('notify');
+  });
+
+  it('market_against Tier 1 attempts exit on resolution day when EXIT_ENABLED', async () => {
+    // Tier 1: marketDrop ≥ 0.50 AND drop ≥ SEVERE_DROP — exit should fire
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    // entryPrice=0.65, bid=0.20 → marketDrop≈0.692 ≥ 0.50 ✓; drop=0.40 ≥ 0.30 ✓
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.20 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).toHaveBeenCalledWith(
+      expect.objectContaining({ exitReason: 'weather_drift', extraContext: expect.objectContaining({ driftState: 'market_against', marketAgainstTier: 1 }) }),
+    );
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.action).toBe('exit');
+    expect(call.payload.marketAgainstTier).toBe(1);
+  });
+
+  it('market_against shadow row includes currentHeldBid and marketDrop fields', async () => {
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.20 }, bestAsk: null });
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.currentHeldBid).toBeCloseTo(0.20, 4);
+    expect(call.payload.marketDrop).toBeCloseTo((0.65 - 0.20) / 0.65, 2);
+  });
+
+  it('does not classify market_against when CLOB fetch returns no bid', async () => {
+    // getClobOrderBook returns a book but bestBid is null — no market signal
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: null, bestAsk: null });
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.state).toBe('thesis_weakened'); // falls back to forecast state
+    expect(call.payload.marketAgainstTier).toBeNull();
+  });
+
+  it('market_against Tier 1 uses dedup key containing market_against:t1', async () => {
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.20 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_DRIFT_SHADOW_ENABLED: true }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const dedupCalls = vi.mocked(mockDedup).mock.calls;
+    expect(dedupCalls.some((c) => String(c[0]).includes('market_against:t1'))).toBe(true);
+  });
+
+  it('market_against Tier 2 uses dedup key containing market_against:t2', async () => {
+    // Tier 2: model stable (drop < SEVERE), large market+divergence
+    mockSql.mockResolvedValue([makePos({ direction: 'YES', consensusProbability: null, entryPrice: 0.50,
+      sourcedFrom: 'weather:chicago:2026-06-01:39°F or below' })]);
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.05 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_DRIFT_SHADOW_ENABLED: true }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const dedupCalls = vi.mocked(mockDedup).mock.calls;
+    expect(dedupCalls.some((c) => String(c[0]).includes('market_against:t2'))).toBe(true);
+  });
+
+  it('cancel_resting still fires when forecastState=modal_against and state=market_against', async () => {
+    // modal_against position (forecastState) + Tier 1 market signal active but exit disabled
+    // cancel_resting is gated on forecastState=modal_against, not final state,
+    // so it should still execute even though final state = market_against.
+    const redis = makeRedis();
+    setupModalAgainstPosition(redis);
+    // Tier 1: entryPrice=0.65, bid=0.20 → marketDrop≈0.692 ≥ 0.50; drop=0.40 ≥ 0.30 (biased mock)
+    // Actually modal_against position has consensusProbability=0.20 (direction=NO)
+    // → currentHeldProb(NO) = 1 - modelProbability(0.70) = 0.30; entryHeldProb = 1 - 0.20 = 0.80
+    // → drop = 0.80 - 0.30 = 0.50 ≥ severeDrop=0.30 ✓
+    // The mock for computeBiasedProb returns modelProbability=0.70 regardless.
+    // entryPrice from makePos default = 0.65; bid=0.20 → marketDrop≈0.692 ≥ 0.50 ✓
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.20 }, bestAsk: null });
+    mockGetPendingOrder.mockResolvedValue({ orderId: 'ord-1', price: 0.30 });
+    mockCancelRestingWeatherOrder.mockResolvedValue('cancelled' as const);
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_CANCEL_RESTING_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: false,
+    }));
+
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockCancelRestingWeatherOrder).toHaveBeenCalled();
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.state).toBe('market_against');
+    expect(call.payload.action).toBe('cancel_resting');
   });
 });
