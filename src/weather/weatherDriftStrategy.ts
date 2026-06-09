@@ -275,6 +275,10 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         modalMaxHeldProb: cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MAX_HELD_PROB,
         invalidationMinDrop: cfg.WEATHER_FORECAST_INVALIDATION_MIN_DROP,
         invalidationMinCurrentHeldProb: cfg.WEATHER_FORECAST_INVALIDATION_MIN_CURRENT_HELD_PROB,
+        // Invalidation scanner runs first in runWeatherScan and has already written
+        // the streak this cycle. Read without re-advancing so the shadow row records
+        // the true post-invalidation streak value.
+        skipModalStreakAdvance: true,
       });
 
       const { state, reason } = classifyDriftState(

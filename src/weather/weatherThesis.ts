@@ -157,6 +157,17 @@ export interface WeatherThesisInput {
   // Hard invalidation thresholds (used to compute dropInvalidated / modalInvalidated)
   invalidationMinDrop: number;
   invalidationMinCurrentHeldProb: number;
+  /**
+   * Read-only streak mode. When true the evaluator returns the current Redis
+   * streak value without incrementing or deleting it, and all three
+   * shouldWrite/shouldDelete/shouldRefresh signals are false.
+   *
+   * Use this in the drift scanner, which runs AFTER the invalidation scanner has
+   * already advanced and written the streak for this cycle. Without this flag the
+   * drift scanner would double-increment: invalidation writes 1, drift reads 1,
+   * then the helper computes 1+1=2 and the shadow row records a wrong streak.
+   */
+  skipModalStreakAdvance?: boolean;
 }
 
 export interface WeatherThesisResult {
@@ -211,6 +222,7 @@ export function evaluateWeatherPositionThesis(input: WeatherThesisInput): Weathe
     modalMaxHeldProb,
     invalidationMinDrop,
     invalidationMinCurrentHeldProb,
+    skipModalStreakAdvance = false,
   } = input;
 
   const { modelProbability: currentModelProb, effectiveStdDev, correctedForecastHigh, biasMode } =
@@ -260,14 +272,18 @@ export function evaluateWeatherPositionThesis(input: WeatherThesisInput): Weathe
   let shouldWriteModalStreak = false;
   let shouldDeleteModalStreak = false;
 
-  if (modalInversionRaw) {
+  if (skipModalStreakAdvance) {
+    // Read-only: return the current Redis value without advancing or deleting.
+    // The invalidation scanner has already written the streak this cycle.
+    modalStreak = parseInt(modalStreakRaw ?? '0', 10) || 0;
+  } else if (modalInversionRaw) {
     modalStreak = (parseInt(modalStreakRaw ?? '0', 10) || 0) + 1;
     shouldWriteModalStreak = true;
   } else if (modalStreakRaw) {
     shouldDeleteModalStreak = true;
   }
 
-  const shouldRefreshSupportedMarker = modalApplicable && modalSupportsThesis;
+  const shouldRefreshSupportedMarker = !skipModalStreakAdvance && modalApplicable && modalSupportsThesis;
 
   // Mirror weatherInvalidation.ts: if this run first sets the supported marker,
   // update the local variable so the modalInvalidated gate sees the same value

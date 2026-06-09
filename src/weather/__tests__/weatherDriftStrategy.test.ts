@@ -357,6 +357,40 @@ describe('evaluateWeatherPositionThesis', () => {
     expect(result.modalInvalidated).toBe(false);
   });
 
+  it('skipModalStreakAdvance: returns current Redis streak without incrementing', () => {
+    // Simulates the drift scanner reading a streak that invalidation already wrote (=1).
+    // Without the flag the helper would compute 1+1=2, corrupting shadow data.
+    const input = makeThesisInput({
+      pos: makePos({ direction: 'NO', consensusProbability: 0.20 }),
+      bracket: { low: 28, high: 28 },
+      forecast: makeForecast({ forecastHigh: 28.2 }), // rounds into bracket → inversion
+      redisValues: { modalStreakRaw: '1', modalSupportedMarkerRaw: '1' },
+      skipModalStreakAdvance: true,
+    });
+    const result = evaluateWeatherPositionThesis(input);
+    // Streak must reflect the stored value (1), not 1+1=2.
+    expect(result.modalStreak).toBe(1);
+    expect(result.shouldWriteModalStreak).toBe(false);
+    expect(result.shouldDeleteModalStreak).toBe(false);
+    expect(result.shouldRefreshSupportedMarker).toBe(false);
+    // Inversion is still detected correctly; only the advance is suppressed.
+    expect(result.modalInversionRaw).toBe(true);
+  });
+
+  it('skipModalStreakAdvance: returns 0 streak when no prior streak exists', () => {
+    const input = makeThesisInput({
+      pos: makePos({ direction: 'NO', consensusProbability: 0.20 }),
+      bracket: { low: 28, high: 28 },
+      forecast: makeForecast({ forecastHigh: 28.2 }),
+      redisValues: { modalStreakRaw: null, modalSupportedMarkerRaw: null },
+      skipModalStreakAdvance: true,
+    });
+    const result = evaluateWeatherPositionThesis(input);
+    expect(result.modalStreak).toBe(0);
+    expect(result.shouldWriteModalStreak).toBe(false);
+    expect(result.shouldDeleteModalStreak).toBe(false);
+  });
+
   it('does not trigger modalInvalidated when held prob above modal ceiling', () => {
     // currentHeldProb above MODAL_MAX_HELD_PROB=0.55 suppresses modal invalidation
     // Direction=YES, consensusProbability=0.85 → entryHeldProb=0.85

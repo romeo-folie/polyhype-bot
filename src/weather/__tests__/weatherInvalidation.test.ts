@@ -1674,6 +1674,94 @@ describe('runWeatherInvalidationScan — forecast resilience and reconciled cove
   });
 });
 
+// ── parity regression: shared thesis evaluator ───────────────────────────────
+// Proves that refactoring invalidation to call evaluateWeatherPositionThesis
+// preserves all Redis write behaviour compared to the old inline implementation.
+
+describe('runWeatherInvalidationScan — shared thesis evaluator parity', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetchWeatherEvents.mockResolvedValue([{}]);
+    mockParseWeatherEvent.mockReturnValue(
+      makeParsedEvent({
+        city: 'chicago',
+        brackets: [{ label: '73-74°F', low: 73, high: 74, marketId: 'mkt-1' }],
+      }),
+    );
+    mockSql.mockResolvedValue([
+      makePosition({ sourcedFrom: 'weather:chicago:2026-05-31:73-74°F', direction: 'NO' }),
+    ]);
+    mockFetchForecast.mockResolvedValue(makeForecast());
+    mockParseBracketLabel.mockReturnValue({ low: 73, high: 74, unit: 'fahrenheit' });
+  });
+
+  it('applies shouldWriteModalStreak from the shared helper on first inversion', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: 2 }));
+    // Forecast rounds into bracket → raw inversion (NO thesis = forecast should NOT land in bracket)
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.48, // held(NO)=0.52 ≤ 0.55 ceiling; no drop (< 0.20)
+      effectiveStdDev: 3.45,
+      correctedForecastHigh: 73.4, // Math.round(73.4)=73, inside [73,74] → inversion for NO
+      biasMode: 'full',
+    });
+    const redis = makeRedis(); // no prior streak
+
+    await runWeatherInvalidationScan(redis as any);
+
+    // Streak written to 1; not yet invalidated (< MIN_RUNS=2)
+    expect(redis.set).toHaveBeenCalledWith(
+      'weather:forecast_modal_streak:pos-1',
+      '1',
+      'EX',
+      expect.any(Number),
+    );
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({
+        payload: expect.objectContaining({ invalidated: false, modalStreak: 1 }),
+      }),
+    );
+  });
+
+  it('applies shouldDeleteModalStreak when inversion clears', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS: 2 }));
+    // Forecast no longer rounds into bracket
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.25,
+      effectiveStdDev: 3.45,
+      correctedForecastHigh: 71.6, // rounds to 72, outside [73,74]
+      biasMode: 'full',
+    });
+    const store = new Map([['weather:forecast_modal_streak:pos-1', '1']]);
+    const redis = makeRedis(store);
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(redis.del).toHaveBeenCalledWith('weather:forecast_modal_streak:pos-1');
+  });
+
+  it('applies shouldRefreshSupportedMarker when the modal supports the thesis', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig());
+    // forecast rounds outside [73,74] → inversion=false for NO → modalSupportsThesis=true
+    mockComputeBiasedProb.mockReturnValue({
+      modelProbability: 0.25,
+      effectiveStdDev: 3.45,
+      correctedForecastHigh: 71.4, // rounds to 71, outside [73,74] → supports NO
+      biasMode: 'full',
+    });
+    const redis = makeRedis(); // no existing supported marker
+
+    await runWeatherInvalidationScan(redis as any);
+
+    expect(redis.set).toHaveBeenCalledWith(
+      'weather:forecast_modal_supported:pos-1',
+      '1',
+      'EX',
+      expect.any(Number),
+    );
+  });
+});
+
 // ── parseWeatherMetaFromQuestion (pure parser) ───────────────────────────────
 
 describe('parseWeatherMetaFromQuestion', () => {

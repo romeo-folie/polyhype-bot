@@ -20,14 +20,12 @@ import type { Redis } from 'ioredis';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
-import { getSql } from '../db/client.js';
 import { getMarket, parseClobTokenIds } from '../mapping/gamma.js';
 import { getClobOrderBook, submitClobBuy, CLOB_MIN_ORDER_USD } from '../shared/clob.js';
 import { getBookTouchLevels } from '../shared/bookTouch.js';
 import { deductStake } from '../shared/bankroll.js';
 import { dedup } from '../shared/redis.js';
 import type { FetchFn } from './noaaClient.js';
-import { canonicalCityKey, lookupCity } from './noaaClient.js';
 import { getCityBias } from './cityBias.js';
 import { notifyWeatherInvalidationNoHedge } from '../execution/telegram.js';
 import { getPosition } from '../execution/positionLedger.js';
@@ -42,10 +40,14 @@ import {
   parseWeatherEvent,
   fetchForecast,
   daysUntil,
-  computeBiasedProb,
-  forecastRoundsIntoBracket,
-  parseBracketLabel,
 } from './weatherScanner.js';
+import {
+  fetchOpenWeatherPositions,
+  parseWeatherPositionMeta,
+  evaluateWeatherPositionThesis,
+} from './weatherThesis.js';
+export { parseWeatherMetaFromQuestion } from './weatherThesis.js';
+import type { OpenWeatherPosition } from './weatherThesis.js';
 
 export const FORECAST_INVALIDATED_KEY_PREFIX = 'weather:forecast_invalidated:';
 const HEDGE_KEY_PREFIX = 'weather:forecast_hedged:';
@@ -92,124 +94,6 @@ const MODAL_STREAK_TTL_S = 2 * 3600;
 const MODAL_SUPPORTED_KEY_PREFIX = 'weather:forecast_modal_supported:';
 const MODAL_SUPPORTED_TTL_S = 14 * 24 * 3600;
 
-// Matches: weather:<city>:<YYYY-MM-DD>:<bracketLabel>
-const SOURCED_FROM_RE = /^weather:(.+):(\d{4}-\d{2}-\d{2}):(.+)$/;
-
-interface OpenWeatherPosition {
-  id: string;
-  marketId: string;
-  direction: 'YES' | 'NO';
-  entryPrice: number;
-  sharesHeld: number;
-  /** Null for reconciler-imported rows with no linked maker order. */
-  consensusProbability: number | null;
-  sourcedFrom: string;
-  /** Market question text — the city/date/bracket source for reconciled rows. */
-  question: string | null;
-}
-
-async function fetchOpenWeatherPositions(): Promise<OpenWeatherPosition[]> {
-  const sql = getSql();
-  // reconciled:weather% covers reconciler-imported and manually-entered
-  // positions — previously these were silently invisible to ALL invalidation
-  // monitoring (found 2026-06-04: a manual Amsterdam re-entry never appeared
-  // in any sweep). Their city/date/bracket are derived from `question`.
-  return sql<OpenWeatherPosition[]>`
-    SELECT
-      id::text                      AS id,
-      market_id                     AS "marketId",
-      direction                     AS direction,
-      entry_price::float8           AS "entryPrice",
-      shares_held::float8           AS "sharesHeld",
-      consensus_probability::float8 AS "consensusProbability",
-      sourced_from                  AS "sourcedFrom",
-      question                      AS "question"
-    FROM positions
-    WHERE (sourced_from LIKE 'weather:%' OR sourced_from LIKE 'reconciled:weather%')
-      AND pending_settlement = false
-      AND closed_at IS NULL
-      AND shares_held > 0
-    ORDER BY opened_at DESC
-  `;
-}
-
-interface ParsedSourcedFrom {
-  city: string;
-  targetDate: string;
-  bracketLabel: string;
-}
-
-const MONTHS: Record<string, number> = {
-  january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
-  july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
-};
-
-/**
- * Derive {city, targetDate, bracketLabel} from a market question of the form
- * "Will the highest temperature in <City> be <bracket> on <Month D>?".
- *
- * Used for reconciled:weather positions whose sourcedFrom carries no embedded
- * metadata. Returns null on any parse failure — the position is then skipped
- * (better than evaluating against the wrong bracket). The city is canonicalised
- * so it matches ParsedWeatherEvent.city; the bracket label must exactly match
- * Gamma's groupItemTitle (the question embeds it verbatim).
- */
-export function parseWeatherMetaFromQuestion(question: string): ParsedSourcedFrom | null {
-  const cityMatch = question.match(
-    /highest temperature in ([^?]+?) (?:be |exceed |fall |drop |reach |\d)/i,
-  );
-  if (!cityMatch?.[1]) return null;
-  const cityRaw = cityMatch[1].trim().toLowerCase();
-  const city = canonicalCityKey(cityRaw) ?? cityRaw;
-  if (!lookupCity(city)) return null;
-
-  // Bracket label: the text between "be " and " on <Month>", e.g. "18°C",
-  // "39°F or below", "86-87°F". Validate it parses as a real bracket so a
-  // question with unexpected phrasing fails closed.
-  const bracketMatch = question.match(/\bbe\s+(.+?)\s+on\s+[A-Za-z]/i);
-  if (!bracketMatch?.[1]) return null;
-  const bracketLabel = bracketMatch[1].trim();
-  if (!parseBracketLabel(bracketLabel)) return null;
-
-  // Date: "on <Month> <D>[st|nd|rd|th][, <YYYY>]". Build YYYY-MM-DD directly
-  // from the month/day tokens — round-tripping through a local-noon Date and
-  // toISOString can shift the calendar day depending on host timezone.
-  const dateMatch = question.match(/\bon\s+([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?\s*\?*\s*$/i);
-  if (!dateMatch?.[1] || !dateMatch[2]) return null;
-  const month = MONTHS[dateMatch[1].toLowerCase()];
-  const day = parseInt(dateMatch[2], 10);
-  if (!month || day < 1 || day > 31) return null;
-  // Year inference when absent: open positions are days old at most, so pick
-  // the year that puts the date within a sane window — a December market read
-  // in January belongs to LAST year? No: weather positions only exist pre-
-  // resolution, so the date is today-ish or in the near future. If the
-  // current-year date is >180 days in the past, it's a year-boundary artifact
-  // (e.g. "January 2" parsed in late December) → next year.
-  let year = dateMatch[3] ? parseInt(dateMatch[3], 10) : new Date().getUTCFullYear();
-  if (!dateMatch[3]) {
-    const candidate = Date.UTC(year, month - 1, day);
-    if (Date.now() - candidate > 180 * 24 * 3600 * 1000) year += 1;
-  }
-  const targetDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-
-  return { city, targetDate, bracketLabel };
-}
-
-function parseWeatherSourcedFrom(
-  sourcedFrom: string,
-  question?: string | null,
-): ParsedSourcedFrom | null {
-  const m = sourcedFrom.match(SOURCED_FROM_RE);
-  if (m?.[1] && m[2] && m[3]) {
-    return { city: m[1], targetDate: m[2], bracketLabel: m[3] };
-  }
-  // reconciled:weather rows carry no embedded metadata — fall back to the
-  // market question text.
-  if (sourcedFrom.startsWith('reconciled:weather') && question) {
-    return parseWeatherMetaFromQuestion(question);
-  }
-  return null;
-}
 
 interface ExitOrNotifyOpts {
   redis: Redis;
@@ -488,7 +372,7 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
 
   for (const pos of positions) {
     try {
-      const parsed = parseWeatherSourcedFrom(pos.sourcedFrom, pos.question);
+      const parsed = parseWeatherPositionMeta(pos.sourcedFrom, pos.question);
       if (!parsed) {
         logger.debug('[weather-invalidation] unparseable sourcedFrom — skipping', {
           positionId: pos.id,
@@ -609,118 +493,58 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
         ? await getCityBias(redis, city)
         : null;
 
-      // Use bracket.low/high directly — bracket was already parsed by parseWeatherEvent
-      // so re-calling parseBracketLabel would be redundant (C4 fix).
-      const { modelProbability: currentModelProb, effectiveStdDev, correctedForecastHigh, biasMode } =
-        computeBiasedProb(bracket.low, bracket.high, daysOut, forecast, {
-          stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
-          cityBias,
-          biasCorrectionEnabled: cfg.WEATHER_BIAS_CORRECTION_ENABLED,
-          biasMinSamples: cfg.WEATHER_BIAS_MIN_SAMPLES,
-          biasTrustedSamples: cfg.WEATHER_BIAS_TRUSTED_SAMPLES,
-          weakBiasStddevMultiplier: cfg.WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER,
-        });
+      const thesisResult = evaluateWeatherPositionThesis({
+        pos,
+        bracket: { low: bracket.low, high: bracket.high },
+        daysOut,
+        forecast,
+        cityBias,
+        redisValues: { modalStreakRaw, modalSupportedMarkerRaw },
+        stddevMultiplier: cfg.WEATHER_STDDEV_MULTIPLIER,
+        biasCorrectionEnabled: cfg.WEATHER_BIAS_CORRECTION_ENABLED,
+        biasMinSamples: cfg.WEATHER_BIAS_MIN_SAMPLES,
+        biasTrustedSamples: cfg.WEATHER_BIAS_TRUSTED_SAMPLES,
+        weakBiasStddevMultiplier: cfg.WEATHER_WEAK_BIAS_STDDEV_MULTIPLIER,
+        modalEnabled: cfg.WEATHER_FORECAST_INVALIDATION_MODAL_ENABLED,
+        modalMinRuns: cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS,
+        modalMaxHeldProb: cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MAX_HELD_PROB,
+        invalidationMinDrop: cfg.WEATHER_FORECAST_INVALIDATION_MIN_DROP,
+        invalidationMinCurrentHeldProb: cfg.WEATHER_FORECAST_INVALIDATION_MIN_CURRENT_HELD_PROB,
+      });
 
-      // Entry held probability: P(our side) at time of entry. Reconciler-
-      // imported rows have no model probability (consensus_probability NULL) —
-      // without this guard `1 - null` evaluates to 1, fabricating a perfect
-      // entry thesis and false-triggering held_prob_drop on every NO position.
-      // The held side's entry PRICE is the market's P(our side) at entry — the
-      // best available baseline for imported/manual rows.
-      const entryHeldProb =
-        pos.consensusProbability != null && Number.isFinite(pos.consensusProbability)
-          ? (pos.direction === 'YES' ? pos.consensusProbability : 1 - pos.consensusProbability)
-          : pos.entryPrice;
-
-      // Current held probability: P(our side) now
-      const currentHeldProb =
-        pos.direction === 'YES' ? currentModelProb : 1 - currentModelProb;
-
-      const drop = entryHeldProb - currentHeldProb;
-
-      // Held-prob degradation: the whole distribution shifted away from our side.
-      const dropInvalidated =
-        drop >= cfg.WEATHER_FORECAST_INVALIDATION_MIN_DROP &&
-        currentHeldProb <= cfg.WEATHER_FORECAST_INVALIDATION_MIN_CURRENT_HELD_PROB;
-
-      // Modal inversion: the corrected forecast's central estimate has crossed the
-      // rounding boundary relative to our bracket — the same predicate the entry
-      // scanner uses to refuse interior-NO bets (weatherScanner interior guard). A
-      // wide stddev can keep the continuous held-prob high even as the modal outcome
-      // flips against us, so this catches inversions dropInvalidated misses. Only
-      // bounded brackets carry the signal — tails have an open side the forecast
-      // cannot "round out of".
-      let modalInversionRaw = false;
-      let modalSupportsThesis = false;
-      let roundedForecast: number | null = null;
-      const modalApplicable =
-        cfg.WEATHER_FORECAST_INVALIDATION_MODAL_ENABLED &&
-        bracket.low !== null &&
-        bracket.high !== null;
-      if (modalApplicable) {
-        roundedForecast = Math.round(correctedForecastHigh);
-        const forecastInBracket = forecastRoundsIntoBracket(
-          correctedForecastHigh,
-          bracket.low,
-          bracket.high,
-        );
-        // NO thesis = "high will NOT land in bracket": inverted when forecast rounds in.
-        // YES thesis = "high WILL land in bracket": inverted when forecast rounds out.
-        modalInversionRaw = pos.direction === 'NO' ? forecastInBracket : !forecastInBracket;
-        modalSupportsThesis = !modalInversionRaw;
-      }
-
-      // Debounce: require the inversion to persist for MIN_RUNS consecutive scans
-      // before it counts. Increment the streak on an inverting run, reset it (delete
-      // the key) the moment the forecast rounds back to the supporting side.
-      let modalStreak = 0;
-      if (modalInversionRaw) {
-        modalStreak = (parseInt(modalStreakRaw ?? '0', 10) || 0) + 1;
+      // Apply Redis write signals from the shared evaluator.
+      if (thesisResult.shouldWriteModalStreak) {
         await redis
-          .set(modalStreakKey, String(modalStreak), 'EX', MODAL_STREAK_TTL_S)
+          .set(modalStreakKey, String(thesisResult.modalStreak), 'EX', MODAL_STREAK_TTL_S)
           .catch(() => {});
-      } else if (modalStreakRaw) {
+      } else if (thesisResult.shouldDeleteModalStreak) {
         await redis.del(modalStreakKey).catch(() => {});
       }
-
-      // Transition guard (B): a modal inversion only counts when the modal was EVER on
-      // our side since we started observing — i.e. the thesis genuinely flipped from
-      // supporting → against. A position whose modal was never on our side (a sub-modal
-      // longshot YES whose narrow bracket was never the central estimate — e.g. Houston
-      // 86-87°F YES entered at 0.293, forecast ~84 the whole time) was "born inverted",
-      // not flipped, and must not invalidate. Record the supporting state whenever we
-      // see it and refresh the marker so it survives the whole holding window.
-      let modalWasEverSupported = !!modalSupportedMarkerRaw;
-      if (modalApplicable && modalSupportsThesis) {
-        modalWasEverSupported = true;
+      if (thesisResult.shouldRefreshSupportedMarker) {
         await redis
           .set(modalSupportedKey, '1', 'EX', MODAL_SUPPORTED_TTL_S)
           .catch(() => {});
       }
 
-      // Held-prob ceiling (A): even with a debounced modal flip, don't treat the thesis
-      // as invalidated while the model still favours our side above this ceiling. A wide
-      // stddev keeps the continuous held-prob high as the rounded central estimate
-      // straddles a bracket boundary (a 0.1°C wobble flips 18.4↔18.6), so a bare modal
-      // flip there is noise. (Amsterdam 19°C NO, 2026-06-03: modal flipped at held-prob
-      // 0.686 and NO still resolved at $1.) Above the ceiling we ride.
-      const modalHeldProbOk =
-        currentHeldProb <= cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MAX_HELD_PROB;
-
-      const modalInvalidated =
-        modalInversionRaw &&
-        modalStreak >= cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS &&
-        modalHeldProbOk &&
-        modalWasEverSupported;
-
-      const invalidated = dropInvalidated || modalInvalidated;
-      const invalidationReason = !invalidated
-        ? null
-        : dropInvalidated && modalInvalidated
-          ? 'both'
-          : dropInvalidated
-            ? 'held_prob_drop'
-            : 'modal_inversion';
+      const {
+        entryHeldProb,
+        currentModelProb,
+        currentHeldProb,
+        drop,
+        correctedForecastHigh,
+        effectiveStdDev,
+        biasMode,
+        modalApplicable,
+        roundedForecast,
+        modalInversionRaw,
+        modalSupportsThesis,
+        modalWasEverSupported,
+        modalStreak,
+        dropInvalidated,
+        modalInvalidated,
+        invalidated,
+        invalidationReason,
+      } = thesisResult;
 
       const invalidKey = `${FORECAST_INVALIDATED_KEY_PREFIX}${pos.marketId}:${pos.direction}`;
 
