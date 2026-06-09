@@ -2157,6 +2157,28 @@ export const envSchema = z.object({
   WEATHER_ORACLE_MIN_DISCOUNT: z.coerce.number().min(0).max(1).optional().default(0.05),
   // Hard stake cap per oracle trade (USD).
   WEATHER_ORACLE_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(20),
+
+  // ── Weather drift strategy ─────────────────────────────────────────────────
+  // Shadow-log thesis drift states for open weather positions each scan cycle.
+  // Ships dark. Flip true to start collecting shadow data before enabling actions.
+  WEATHER_DRIFT_SHADOW_ENABLED: boolFromEnv.optional().default(false),
+  // Held-prob drop threshold to classify a position as 'watch' — earliest warning.
+  // Does not block entries or cancel orders on its own.
+  WEATHER_DRIFT_WATCH_DROP: z.coerce.number().min(0).max(1).optional().default(0.10),
+  // Held-prob drop threshold to classify a position as 'thesis_weakened'.
+  // Matches WEATHER_FORECAST_INVALIDATION_MIN_DROP so positions reach
+  // 'thesis_weakened' before the hard invalidation trigger fires.
+  WEATHER_DRIFT_THESIS_WEAKENED_DROP: z.coerce.number().min(0).max(1).optional().default(0.20),
+  // Enable exact-bracket modal classification. When true, interior brackets
+  // (low !== null && high !== null) are classified as 'modal_against' when the
+  // corrected forecast rounds against the held side. Default true because
+  // exact-bracket modal rounding is the primary missing signal for this scanner.
+  WEATHER_DRIFT_EXACT_ENABLED: boolFromEnv.optional().default(true),
+  // Half-degree buffer around bracket rounding boundaries for early 'watch'
+  // escalation. Promotes 'stable' to 'watch' when the corrected forecast is
+  // within this many degrees of a rounding threshold — catches positions on the
+  // verge of modal inversion before it happens.
+  WEATHER_DRIFT_EXACT_BOUNDARY_BUFFER: z.coerce.number().min(0).max(2).optional().default(0.35),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
