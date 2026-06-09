@@ -23,15 +23,20 @@ import type { Redis } from 'ioredis';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
+import { dedup } from '../shared/redis.js';
 import type { FetchFn } from './noaaClient.js';
 import { getCityBias } from './cityBias.js';
 import { cacheForecast, readCachedForecast } from './forecastCache.js';
 import { cityLocalDate } from './resolutionTime.js';
+import { getMarket, parseClobTokenIds } from '../mapping/gamma.js';
+import { getPendingOrder } from '../execution/pendingMakerOrders.js';
+import { notifyWeatherDrift } from '../execution/telegram.js';
 import {
   fetchWeatherEvents,
   parseWeatherEvent,
   fetchForecast,
   daysUntil,
+  cancelRestingWeatherOrder,
 } from './weatherScanner.js';
 import type { ParsedWeatherEvent, ParsedBracket } from './weatherScanner.js';
 import {
@@ -40,6 +45,7 @@ import {
   evaluateWeatherPositionThesis,
 } from './weatherThesis.js';
 import type { OpenWeatherPosition, WeatherThesisResult } from './weatherThesis.js';
+import { tryWeatherExit } from './weatherExit.js';
 
 // ── Drift state types ────────────────────────────────────────────────────────
 
@@ -151,19 +157,32 @@ export function classifyDriftState(
   return { state: 'stable', reason: 'ok' };
 }
 
-// ── Modal streak Redis key helpers ───────────────────────────────────────────
+// ── Redis key constants ───────────────────────────────────────────────────────
 
 const MODAL_STREAK_KEY_PREFIX = 'weather:forecast_modal_streak:';
 const MODAL_STREAK_TTL_S = 2 * 3600;
 const MODAL_SUPPORTED_KEY_PREFIX = 'weather:forecast_modal_supported:';
 const MODAL_SUPPORTED_TTL_S = 14 * 24 * 3600;
 
+// Shared with the invalidation scanner — drift writes this same key so the
+// existing size-up gate checks a single namespace regardless of which scanner set it.
+const FORECAST_INVALIDATED_KEY_PREFIX = 'weather:forecast_invalidated:';
+// Shared exited key — if either scanner already sold the position this fires idempotency.
+const EXITED_KEY_PREFIX = 'weather:forecast_exited:';
+const EXITED_TTL_S = 14 * 24 * 3600;
+// Drift-specific cancel idempotency and exit cooldown keys.
+const DRIFT_CANCELLED_RESTING_KEY_PREFIX = 'weather:drift_cancelled_resting:';
+const DRIFT_CANCELLED_RESTING_TTL_S = 14 * 24 * 3600;
+const DRIFT_EXIT_COOLDOWN_KEY_PREFIX = 'weather:drift_exit_cooldown:';
+// Notification dedup — per position+state so state escalations re-notify.
+const DRIFT_NOTIFY_KEY_PREFIX = 'weather:drift_notify:';
+
 // ── Main scanner ─────────────────────────────────────────────────────────────
 
-/** Run one drift-strategy scan cycle (shadow only in Phase 2). */
+/** Run one drift-strategy scan cycle. */
 export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): Promise<void> {
   const cfg = loadConfig();
-  if (!cfg.WEATHER_DRIFT_SHADOW_ENABLED) return;
+  if (!cfg.WEATHER_DRIFT_SHADOW_ENABLED && !cfg.WEATHER_DRIFT_ENABLED) return;
 
   let positions: OpenWeatherPosition[];
   try {
@@ -292,8 +311,164 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         },
       );
 
-      // Phase 2: all actions are shadow-only
-      const action: WeatherDriftAction = 'none';
+      // ── Phase 3+4: live actions ──────────────────────────────────────────────
+      // isActionable: stricter gate for high-impact actions (exit/cancel/notify).
+      //   - modal_against: forecast has rounded against thesis for ≥ minRuns scans
+      //   - thesis_weakened: held-prob dropped beyond the severe (not just watch) threshold
+      // isBlockable: wider gate for block_size_up (any weakened/against state).
+      //   Fires for thesis_weakened and modal_against — including first-scan modal_against
+      //   and thesis_weakened with drop in [WEAKENED_DROP, SEVERE_DROP).
+      // Notification always fires for the first occurrence per position+state
+      // (deduped per WEATHER_DRIFT_NOTIFY_DEDUP_S) regardless of whether live
+      // actions are enabled — the user is always kept in the loop.
+      const isActionable =
+        (state === 'modal_against' &&
+          result.modalStreak >= cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS) ||
+        (state === 'thesis_weakened' && result.drop >= cfg.WEATHER_DRIFT_SEVERE_DROP);
+      const isBlockable = state === 'thesis_weakened' || state === 'modal_against';
+      const wouldBlock = isBlockable && !cfg.WEATHER_DRIFT_ENABLED;
+
+      let action: WeatherDriftAction = 'none';
+      // Hoisted so the notification (fired after block_size_up) sees the final action.
+      let shouldNotify = false;
+
+      if (isActionable) {
+        // Dedup key per position+state — state escalations (e.g. thesis_weakened →
+        // modal_against) use different keys and fire fresh notifications.
+        const notifyDedupKey = `${DRIFT_NOTIFY_KEY_PREFIX}${pos.id}:${state}`;
+        shouldNotify = await dedup(notifyDedupKey, cfg.WEATHER_DRIFT_NOTIFY_DEDUP_S).catch(() => false);
+
+        if (cfg.WEATHER_DRIFT_ENABLED) {
+          // 1. Resolution-day exit (highest priority).
+          if (cfg.WEATHER_DRIFT_EXIT_ENABLED && isResolutionDay) {
+            let heldTokenId: string | null = null;
+            try {
+              const market = await getMarket(pos.marketId);
+              const tokenIds = parseClobTokenIds(market.clobTokenIds);
+              heldTokenId = (pos.direction === 'YES' ? tokenIds[0] : tokenIds[1]) ?? null;
+            } catch (err) {
+              logger.warn('[weather-drift] market fetch failed for exit — skipping', {
+                positionId: pos.id,
+                marketId: pos.marketId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+
+            if (heldTokenId) {
+              const exited = await tryWeatherExit({
+                redis,
+                pos,
+                city,
+                targetDate,
+                bracketLabel,
+                heldTokenId,
+                currentHeldProb: result.currentHeldProb,
+                invalidationReason: result.invalidationReason ?? state,
+                enabled: true,
+                isResolutionDay,
+                minExitPrice: cfg.WEATHER_DRIFT_EXIT_MIN_BID,
+                maxExitSlippage: cfg.WEATHER_DRIFT_EXIT_MAX_SLIPPAGE,
+                useMarketFloor: true,
+                exitCooldownKey: `${DRIFT_EXIT_COOLDOWN_KEY_PREFIX}${pos.id}`,
+                exitCooldownS: cfg.WEATHER_DRIFT_EXIT_COOLDOWN_S,
+                exitedKey: `${EXITED_KEY_PREFIX}${pos.id}`,
+                exitedTtlS: EXITED_TTL_S,
+                exitReason: 'weather_drift',
+                shadowKind: 'weather_drift_exit',
+                logMarker: '[weather-drift]',
+                minDepthRatio: cfg.WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO,
+                extraContext: { driftState: state },
+              }).catch(() => false);
+              if (exited) action = 'exit';
+            }
+          }
+
+          // 2. Cancel resting maker order (modal_against only — streak satisfied).
+          if (action === 'none' && state === 'modal_against' && cfg.WEATHER_DRIFT_CANCEL_RESTING_ENABLED) {
+            const cancelledKey = `${DRIFT_CANCELLED_RESTING_KEY_PREFIX}${pos.id}`;
+            const alreadyCancelled = !!(await redis.get(cancelledKey).catch(() => null));
+            if (!alreadyCancelled) {
+              const pendingOrder = await getPendingOrder(redis, pos.marketId, pos.direction).catch(() => null);
+              if (pendingOrder) {
+                const cancelStatus = await cancelRestingWeatherOrder(
+                  redis,
+                  pos.marketId,
+                  pos.direction,
+                  pendingOrder,
+                  { rule: 'drift_modal_against', positionId: pos.id, modalStreak: result.modalStreak },
+                ).catch(() => 'retry' as const);
+                // Write idempotency marker only on confirmed outcomes; 'retry' means
+                // the order is still live on CLOB — suppress would prevent the next scan
+                // from retrying the cancel.
+                if (cancelStatus !== 'retry') {
+                  await redis.set(cancelledKey, '1', 'EX', DRIFT_CANCELLED_RESTING_TTL_S).catch(() => {});
+                }
+                if (cancelStatus === 'cancelled') action = 'cancel_resting';
+              }
+            }
+          }
+        }
+      }
+
+      // 3. Write the shared size-up block key.
+      // Gated by isBlockable (wider than isActionable) so any thesis_weakened or
+      // modal_against position — including first-scan and drop in [weakened, severe) —
+      // blocks size-ups while the position is held. Skipped after a successful exit
+      // (position is sold; writing the key would be misleading).
+      if (action !== 'exit' && isBlockable && cfg.WEATHER_DRIFT_ENABLED && cfg.WEATHER_DRIFT_BLOCK_SIZE_UP_ENABLED) {
+        const invalidKey = `${FORECAST_INVALIDATED_KEY_PREFIX}${pos.marketId}:${pos.direction}`;
+        await redis.set(
+          invalidKey,
+          JSON.stringify({
+            city,
+            targetDate,
+            bracketLabel,
+            entryHeldProb: result.entryHeldProb,
+            currentHeldProb: result.currentHeldProb,
+            drop: result.drop,
+            driftState: state,
+            observedAt: new Date().toISOString(),
+          }),
+          'EX',
+          cfg.WEATHER_FORECAST_INVALIDATION_TTL_S,
+        ).catch(() => {});
+        logger.info('[weather-drift] size-up block key set', {
+          positionId: pos.id,
+          marketId: pos.marketId,
+          direction: pos.direction,
+          invalidKey,
+          driftState: state,
+        });
+        if (action === 'none') action = 'block_size_up';
+      }
+
+      // 4. Notify fallback + notification fire (actionable positions only).
+      // Runs after block_size_up so the notification shows the final action.
+      if (isActionable && cfg.WEATHER_DRIFT_ENABLED && action === 'none') action = 'notify';
+      if (shouldNotify) {
+        await notifyWeatherDrift({
+          positionId: pos.id,
+          marketId: pos.marketId,
+          city,
+          targetDate,
+          bracketLabel,
+          direction: pos.direction,
+          entryPrice: pos.entryPrice,
+          sharesHeld: pos.sharesHeld,
+          state,
+          drop: result.drop,
+          currentHeldProb: result.currentHeldProb,
+          modalStreak: result.modalStreak,
+          daysOut,
+          isResolutionDay,
+          action,
+        }).catch((err: unknown) => {
+          logger.warn('[weather-drift] notification failed', {
+            positionId: pos.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
 
       const decision: WeatherDriftDecision = {
         positionId: pos.id,
@@ -351,7 +526,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         source: 'arb',
         marketId: pos.marketId,
         direction: pos.direction,
-        wouldBlock: false,
+        wouldBlock,
         metricValue: result.drop,
         threshold: cfg.WEATHER_DRIFT_WATCH_DROP,
         payload: {
@@ -382,7 +557,11 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           forecastHigh: forecast.forecastHigh,
           watchDrop: cfg.WEATHER_DRIFT_WATCH_DROP,
           thesisWeakenedDrop: cfg.WEATHER_DRIFT_THESIS_WEAKENED_DROP,
+          severeDrop: cfg.WEATHER_DRIFT_SEVERE_DROP,
           exactEnabled: cfg.WEATHER_DRIFT_EXACT_ENABLED,
+          isActionable,
+          wouldBlock,
+          driftEnabled: cfg.WEATHER_DRIFT_ENABLED,
         },
       });
     } catch (err) {

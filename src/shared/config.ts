@@ -2179,6 +2179,40 @@ export const envSchema = z.object({
   // within this many degrees of a rounding threshold — catches positions on the
   // verge of modal inversion before it happens.
   WEATHER_DRIFT_EXACT_BOUNDARY_BUFFER: z.coerce.number().min(0).max(2).optional().default(0.35),
+
+  // ── Weather drift live actions (Phase 3+4) ──────────────────────────────
+  // Master live gate. Shadow logging (WEATHER_DRIFT_SHADOW_ENABLED) is
+  // independent — both can be on simultaneously. When this is false all live
+  // actions are suppressed but notifications still fire so the user stays
+  // informed.
+  WEATHER_DRIFT_ENABLED: boolFromEnv.optional().default(false),
+  // Write the forecast_invalidated key (size-up blocker shared with the
+  // invalidation scanner) when drift classifies a position as actionable.
+  WEATHER_DRIFT_BLOCK_SIZE_UP_ENABLED: boolFromEnv.optional().default(false),
+  // Cancel a resting maker order for a modal_against position with streak
+  // satisfied. One-time per position (idempotency marker).
+  WEATHER_DRIFT_CANCEL_RESTING_ENABLED: boolFromEnv.optional().default(false),
+  // Attempt a resolution-day market-floor sell for actionable positions.
+  WEATHER_DRIFT_EXIT_ENABLED: boolFromEnv.optional().default(false),
+  // Held-prob drop at which a thesis_weakened position is considered actionable.
+  // Deliberately higher than WEATHER_DRIFT_THESIS_WEAKENED_DROP so only severe
+  // drift triggers live actions — recovery is unlikely beyond this point.
+  WEATHER_DRIFT_SEVERE_DROP: z.coerce.number().min(0).max(1).optional().default(0.30),
+  // Minimum best-bid required to proceed with a drift exit sell.
+  WEATHER_DRIFT_EXIT_MIN_BID: z.coerce.number().min(0).max(1).optional().default(0.10),
+  // Maximum slippage allowed relative to currentHeldProb when not in market-floor
+  // mode. Drift exits always use market-floor mode; kept for future path variants.
+  WEATHER_DRIFT_EXIT_MAX_SLIPPAGE: z.coerce.number().min(0).max(1).optional().default(0.15),
+  // Fraction of sharesHeld that must be covered by bids at/above the exit floor.
+  // 0.90 = exit when 90% of the position can fill without sweeping below floor.
+  // Invalidation exits always require 1.0 (full coverage); this knob tunes drift only.
+  WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO: z.coerce.number().min(0).max(1).optional().default(0.90),
+  // Cooldown after a failed exit sell to prevent rapid retry storms.
+  WEATHER_DRIFT_EXIT_COOLDOWN_S: z.coerce.number().int().min(0).optional().default(1800),
+  // Dedup window for the actionable-state Telegram notification. Same state on
+  // the same position will not re-notify within this window; state escalations
+  // (e.g. thesis_weakened → modal_against) use different keys and re-notify.
+  WEATHER_DRIFT_NOTIFY_DEDUP_S: z.coerce.number().int().min(0).optional().default(3600),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

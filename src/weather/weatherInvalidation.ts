@@ -28,8 +28,6 @@ import { dedup } from '../shared/redis.js';
 import type { FetchFn } from './noaaClient.js';
 import { getCityBias } from './cityBias.js';
 import { notifyWeatherInvalidationNoHedge } from '../execution/telegram.js';
-import { getPosition } from '../execution/positionLedger.js';
-import { executeTakeProfit } from '../monitor/takeProfitExecutor.js';
 import { cityLocalDate } from './resolutionTime.js';
 import { cacheForecast, readCachedForecast } from './forecastCache.js';
 // Circular-safe: these are only called at runtime (inside async functions),
@@ -48,6 +46,7 @@ import {
 } from './weatherThesis.js';
 export { parseWeatherMetaFromQuestion } from './weatherThesis.js';
 import type { OpenWeatherPosition } from './weatherThesis.js';
+import { tryWeatherExit } from './weatherExit.js';
 
 export const FORECAST_INVALIDATED_KEY_PREFIX = 'weather:forecast_invalidated:';
 const HEDGE_KEY_PREFIX = 'weather:forecast_hedged:';
@@ -168,180 +167,40 @@ async function exitOrNotifyOnInvalidation(opts: ExitOrNotifyOpts): Promise<void>
 }
 
 /**
- * Resolution-day price-gated exit. Returns true only when the held side was actually
- * sold (executeTakeProfit succeeded); false in every other case so the caller
- * notifies instead.
+ * Resolution-day price-gated exit. Thin wrapper over the shared tryWeatherExit
+ * helper — supplies invalidation-specific keys and config values.
  */
 async function tryInvalidationExit(opts: ExitOrNotifyOpts): Promise<boolean> {
   const { redis, cfg, pos, heldTokenId, isResolutionDay, currentHeldProb, hedgeBarrier, invalidationReason } = opts;
-
-  if (!cfg.WEATHER_FORECAST_INVALIDATION_EXIT_ENABLED) return false;
-  // Only on resolution day — before then we let the position ride in case the
-  // forecast migrates back into our bracket.
-  if (!isResolutionDay) return false;
-
-  // Defer if a prior sell failed recently — avoids re-submitting a taker market sell
-  // every scan on a transient CLOB/RPC error (the fallback notify still fires).
-  const exitCooldownKey = `${EXIT_FAIL_COOLDOWN_KEY_PREFIX}${pos.id}`;
-  if (await redis.get(exitCooldownKey).catch(() => null)) {
-    logger.debug('[weather-invalidation] exit on cooldown after a prior failed sell — deferring', {
-      positionId: pos.id,
-      marketId: pos.marketId,
-    });
-    return false;
-  }
-
-  // Held-side bid book: the side we SELL. Independent of the opposite-asks the hedge
-  // checks, so a `no_book` barrier does not mean we cannot sell our own side.
-  // Order-agnostic touch: REST books are best-at-the-END, so bids[0] is the
-  // WORST bid — reading it here declined valid exits as "bid below floor".
-  const heldBook = await getClobOrderBook(heldTokenId);
-  const bestBid = heldBook ? (getBookTouchLevels(heldBook).bestBid?.price ?? 0) : 0;
-  if (!isFinite(bestBid) || bestBid <= 0) {
-    logger.info('[weather-invalidation] exit declined — no held-side bid', {
-      positionId: pos.id,
-      marketId: pos.marketId,
-      hedgeBarrier,
-    });
-    return false;
-  }
-
-  const minExitPrice = cfg.WEATHER_FORECAST_INVALIDATION_MIN_EXIT_PRICE;
-  const slippageFloor = currentHeldProb - cfg.WEATHER_FORECAST_INVALIDATION_MAX_EXIT_SLIPPAGE;
-  // Floor anchoring. The continuous held-prob is systematically overconfident (the model
-  // is a worse forecaster than the market — closed-bet calibration), so a slippage floor
-  // anchored to it guards model-fantasy value: e.g. a held_prob_drop to 0.37 while the
-  // market bid is 0.01. So we anchor the exit to the market (absolute MIN_EXIT_PRICE floor
-  // only — sell at the best bid) rather than the model prob, gated per invalidation reason:
-  // modal_inversion → MODAL_MARKET_FLOOR; held_prob_drop / both → DROP_MARKET_FLOOR. When a
-  // gate is off, that reason falls back to the model-anchored slippage floor.
+  // Floor anchoring per reason: modal_inversion → market floor (model is overconfident);
+  // held_prob_drop/both → also market floor when configured, else slippage-anchored.
   const useMarketFloor =
     invalidationReason === 'modal_inversion'
       ? cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MARKET_FLOOR
       : cfg.WEATHER_FORECAST_INVALIDATION_DROP_MARKET_FLOOR;
-  const exitFloor = useMarketFloor ? minExitPrice : Math.max(minExitPrice, slippageFloor);
-  if (bestBid < exitFloor) {
-    logger.info('[weather-invalidation] exit declined — bid below floor', {
-      positionId: pos.id,
-      marketId: pos.marketId,
-      hedgeBarrier,
-      invalidationReason,
-      floorMode: useMarketFloor ? 'market' : 'slippage',
-      bestBid: +bestBid.toFixed(4),
-      minExitPrice,
-      slippageFloor: +slippageFloor.toFixed(4),
-      exitFloor: +exitFloor.toFixed(4),
-      currentHeldProb: +currentHeldProb.toFixed(4),
-    });
-    return false;
-  }
-
-  // Depth gate: executeTakeProfit submits a *market* sell, which walks down the book.
-  // Top-of-book clearing the floor is not enough — require the cumulative bid size at
-  // or above the floor to absorb the whole position, so the fill cannot sweep below
-  // exitFloor. Without this, 10 shares can dump into a 1-share top bid above an air
-  // pocket and realize far below the gate-passing price.
-  let depthAtOrAboveFloor = 0;
-  for (const level of heldBook?.bids ?? []) {
-    const price = parseFloat(String(level?.price ?? '0'));
-    const size = parseFloat(String(level?.size ?? '0'));
-    if (isFinite(price) && isFinite(size) && price >= exitFloor) depthAtOrAboveFloor += size;
-  }
-  if (depthAtOrAboveFloor < pos.sharesHeld) {
-    logger.info('[weather-invalidation] exit declined — insufficient bid depth above floor', {
-      positionId: pos.id,
-      marketId: pos.marketId,
-      hedgeBarrier,
-      sharesHeld: pos.sharesHeld,
-      depthAtOrAboveFloor: +depthAtOrAboveFloor.toFixed(2),
-      exitFloor: +exitFloor.toFixed(4),
-      bestBid: +bestBid.toFixed(4),
-    });
-    return false;
-  }
-
-  // executeTakeProfit + closePosition operate on the Redis ledger, not the Postgres
-  // snapshot the scan queried — load the canonical position.
-  const ledgerPos = await getPosition(redis, pos.marketId, pos.direction);
-  if (!ledgerPos) {
-    logger.warn('[weather-invalidation] exit declined — no ledger position', {
-      positionId: pos.id,
-      marketId: pos.marketId,
-      direction: pos.direction,
-    });
-    return false;
-  }
-
-  const returnPct =
-    pos.entryPrice > 0 ? ((bestBid - pos.entryPrice) / pos.entryPrice) * 100 : 0;
-  logger.info('[weather-invalidation] exiting invalidated position', {
-    positionId: pos.id,
-    marketId: pos.marketId,
-    direction: pos.direction,
-    hedgeBarrier,
-    bestBid: +bestBid.toFixed(4),
-    entryPrice: pos.entryPrice,
-    returnPct: +returnPct.toFixed(2),
-  });
-
-  const result = await executeTakeProfit({
-    position: ledgerPos,
-    currentPrice: bestBid,
-    returnPct,
-    reason: 'weather_invalidation',
+  return tryWeatherExit({
     redis,
+    pos,
+    city: opts.city,
+    targetDate: opts.targetDate,
+    bracketLabel: opts.bracketLabel,
+    heldTokenId,
+    currentHeldProb,
+    invalidationReason,
+    enabled: cfg.WEATHER_FORECAST_INVALIDATION_EXIT_ENABLED,
+    isResolutionDay,
+    minExitPrice: cfg.WEATHER_FORECAST_INVALIDATION_MIN_EXIT_PRICE,
+    maxExitSlippage: cfg.WEATHER_FORECAST_INVALIDATION_MAX_EXIT_SLIPPAGE,
+    useMarketFloor,
+    exitCooldownKey: `${EXIT_FAIL_COOLDOWN_KEY_PREFIX}${pos.id}`,
+    exitCooldownS: EXIT_FAIL_COOLDOWN_S,
+    exitedKey: `${EXITED_KEY_PREFIX}${pos.id}`,
+    exitedTtlS: EXITED_TTL_S,
+    exitReason: 'weather_invalidation',
+    shadowKind: 'weather_forecast_invalidation_exit',
+    logMarker: '[weather-invalidation]',
+    extraContext: { hedgeBarrier },
   });
-
-  if (!result.success) {
-    logger.warn('[weather-invalidation] exit sell failed — cooling down, falling back to notify', {
-      positionId: pos.id,
-      marketId: pos.marketId,
-      error: result.error,
-    });
-    // Suppress sell retries for a cooldown window; the fallback notify still alerts.
-    await redis.set(exitCooldownKey, '1', 'EX', EXIT_FAIL_COOLDOWN_S).catch(() => {});
-    return false;
-  }
-
-  // Idempotency marker so a follow-up scan can't re-enter before the close/pending
-  // write drops the row out of the SQL snapshot.
-  await redis.set(`${EXITED_KEY_PREFIX}${pos.id}`, '1', 'EX', EXITED_TTL_S).catch(() => {});
-
-  void enqueueWrite('shadow_observations', {
-    kind: 'weather_forecast_invalidation_exit',
-    source: 'arb',
-    marketId: pos.marketId,
-    direction: pos.direction,
-    wouldBlock: false,
-    metricValue: bestBid,
-    threshold: minExitPrice,
-    payload: {
-      positionId: pos.id,
-      city: opts.city,
-      targetDate: opts.targetDate,
-      bracketLabel: opts.bracketLabel,
-      hedgeBarrier,
-      bestBid,
-      entryPrice: pos.entryPrice,
-      sharesHeld: pos.sharesHeld,
-      currentHeldProb,
-      returnPct,
-      realizedReturnPct: result.returnPct,
-      minExitPrice,
-      maxExitSlippage: cfg.WEATHER_FORECAST_INVALIDATION_MAX_EXIT_SLIPPAGE,
-      invalidationReason: opts.invalidationReason,
-    },
-  });
-
-  logger.info('[weather-invalidation] exit executed', {
-    positionId: pos.id,
-    marketId: pos.marketId,
-    direction: pos.direction,
-    hedgeBarrier,
-    bestBid: +bestBid.toFixed(4),
-    realizedReturnPct: +result.returnPct.toFixed(2),
-  });
-  return true;
 }
 
 /** Run one forecast-invalidation scan cycle. */

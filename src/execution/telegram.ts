@@ -214,6 +214,7 @@ export type TakeProfitReason =
   | 'oracle_lag_stop_loss'
   | 'weather_near_resolution'
   | 'weather_invalidation'
+  | 'weather_drift'
   | 'funding_normalized'
   | 'funding_sign_flip'
   | 'hedge_pm_resolved';
@@ -246,6 +247,7 @@ export async function notifyTakeProfitExecuted(opts: {
     oracle_lag_stop_loss: '🛑 Oracle-lag — stop-loss triggered',
     weather_near_resolution: '⏱️ Weather — near-resolution loss cut',
     weather_invalidation: '🌧️ Weather — forecast invalidated, exited',
+    weather_drift: '🌧️ Weather — drift invalidation, exited',
     funding_normalized: '📊 Funding normalized — mean-reversion exit',
     funding_sign_flip: '🔀 Funding sign flip — crowd reversed',
     hedge_pm_resolved: '🔗 Delta-hedge closed — PM market resolved',
@@ -522,6 +524,53 @@ export async function notifyWeatherInvalidationNoHedge(opts: {
     `<b>Reason:</b> ${escapeHtml(reasonLabel)}\n` +
     `<b>Held-prob drop:</b> ${(drop * 100).toFixed(1)}% → now ${(currentHeldProb * 100).toFixed(1)}%\n\n` +
     `⚠️ <b>No auto-hedge:</b> ${escapeHtml(barrierDetail)}\n` +
+    `<b>Position ID:</b> <code>${escapeHtml(positionId)}</code>`;
+
+  await notify(text);
+}
+
+/**
+ * Notify when the drift scanner classifies a position as actionable (modal_against
+ * with streak satisfied, or thesis_weakened beyond the severe-drop threshold).
+ * Fired once per position+state per dedup window regardless of whether live actions
+ * are enabled — the user is always kept in the loop.
+ */
+export async function notifyWeatherDrift(opts: {
+  positionId: string;
+  marketId: string;
+  city: string;
+  targetDate: string;
+  bracketLabel: string;
+  direction: 'YES' | 'NO';
+  entryPrice: number;
+  sharesHeld: number;
+  state: string;
+  drop: number;
+  currentHeldProb: number;
+  modalStreak: number;
+  daysOut: number;
+  isResolutionDay: boolean;
+  action: string;
+}): Promise<void> {
+  const {
+    positionId, marketId, city, targetDate, bracketLabel,
+    direction, entryPrice, sharesHeld, state,
+    drop, currentHeldProb, modalStreak, daysOut, isResolutionDay, action,
+  } = opts;
+
+  const stateLabel = state.replace(/_/g, ' ');
+  const actionLabel = action === 'none' ? 'watch only' : action.replace(/_/g, ' ');
+  const streakNote = state === 'modal_against' ? ` (streak ${modalStreak})` : '';
+  const resNote = isResolutionDay ? ' — resolution day' : ` (${daysOut}d out)`;
+
+  const text =
+    `🌧️ <b>Weather Drift Invalidation</b>${resNote}\n\n` +
+    `<b>City:</b> ${escapeHtml(city)}  <b>Date:</b> ${escapeHtml(targetDate)}  <b>Bracket:</b> ${escapeHtml(bracketLabel)}\n` +
+    `<b>Position:</b> ${direction} @ ${entryPrice.toFixed(3)} (${sharesHeld.toFixed(2)} shares)\n` +
+    `<b>Market:</b> <code>${escapeHtml(marketId)}</code>\n\n` +
+    `<b>State:</b> ${escapeHtml(stateLabel)}${streakNote}\n` +
+    `<b>Held-prob drop:</b> ${(drop * 100).toFixed(1)}% → now ${(currentHeldProb * 100).toFixed(1)}%\n\n` +
+    `<b>Action:</b> ${escapeHtml(actionLabel)}\n` +
     `<b>Position ID:</b> <code>${escapeHtml(positionId)}</code>`;
 
   await notify(text);
