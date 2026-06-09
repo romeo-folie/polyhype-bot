@@ -2213,6 +2213,25 @@ export const envSchema = z.object({
   // the same position will not re-notify within this window; state escalations
   // (e.g. thesis_weakened → modal_against) use different keys and re-notify.
   WEATHER_DRIFT_NOTIFY_DEDUP_S: z.coerce.number().int().min(0).optional().default(3600),
+
+  // Market-adverse detection for open weather positions.
+  // Fires when the CLOB bid for the held side has moved strongly against us,
+  // even when the ensemble forecast hasn't shifted (the "model right, market wrong"
+  // or "model wrong throughout" case).
+  //
+  // Tier 1 (exit, resolution-day only): marketDrop ≥ EXIT + model drop ≥ SEVERE_DROP.
+  // Tier 2 (notify, any day):           marketDrop ≥ NOTIFY + model-market gap ≥ DIVERGENCE.
+  //
+  // marketDrop = (entryPrice − currentHeldBid) / entryPrice
+  // modelMarketGap = currentHeldProb − currentHeldBid
+  //
+  // NOTE: DROP_EXIT (0.50) is intentionally LOWER than DROP_NOTIFY (0.65).
+  // Tier 1 compensates with the additional model-drop gate (≥ SEVERE_DROP), making
+  // it the stricter combined condition. Do not raise DROP_EXIT above DROP_NOTIFY —
+  // doing so creates a gap [DROP_NOTIFY, DROP_EXIT) where neither tier fires.
+  WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: z.coerce.number().min(0).max(1).optional().default(0.50),
+  WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: z.coerce.number().min(0).max(1).optional().default(0.65),
+  WEATHER_DRIFT_MARKET_DIVERGENCE_NOTIFY: z.coerce.number().min(0).max(1).optional().default(0.55),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

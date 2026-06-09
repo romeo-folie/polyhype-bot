@@ -551,17 +551,26 @@ export async function notifyWeatherDrift(opts: {
   daysOut: number;
   isResolutionDay: boolean;
   action: string;
+  currentHeldBid?: number;
+  marketDrop?: number;
+  marketAgainstTier?: 1 | 2;
 }): Promise<void> {
   const {
     positionId, marketId, city, targetDate, bracketLabel,
     direction, entryPrice, sharesHeld, state,
     drop, currentHeldProb, modalStreak, daysOut, isResolutionDay, action,
+    currentHeldBid, marketDrop, marketAgainstTier,
   } = opts;
 
   const stateLabel = state.replace(/_/g, ' ');
   const actionLabel = action === 'none' ? 'watch only' : action.replace(/_/g, ' ');
   const streakNote = state === 'modal_against' ? ` (streak ${modalStreak})` : '';
   const resNote = isResolutionDay ? ' — resolution day' : ` (${daysOut}d out)`;
+  const marketNote =
+    state === 'market_against' && currentHeldBid != null && marketDrop != null
+      ? `\n<b>Market bid:</b> ${currentHeldBid.toFixed(3)} (${(marketDrop * 100).toFixed(1)}% below entry)` +
+        (marketAgainstTier != null ? `  <b>Tier ${marketAgainstTier}</b>` : '')
+      : '';
 
   const text =
     `🌧️ <b>Weather Drift Invalidation</b>${resNote}\n\n` +
@@ -569,7 +578,8 @@ export async function notifyWeatherDrift(opts: {
     `<b>Position:</b> ${direction} @ ${entryPrice.toFixed(3)} (${sharesHeld.toFixed(2)} shares)\n` +
     `<b>Market:</b> <code>${escapeHtml(marketId)}</code>\n\n` +
     `<b>State:</b> ${escapeHtml(stateLabel)}${streakNote}\n` +
-    `<b>Held-prob drop:</b> ${(drop * 100).toFixed(1)}% → now ${(currentHeldProb * 100).toFixed(1)}%\n\n` +
+    `<b>Held-prob drop:</b> ${(drop * 100).toFixed(1)}% → now ${(currentHeldProb * 100).toFixed(1)}%` +
+    `${marketNote}\n\n` +
     `<b>Action:</b> ${escapeHtml(actionLabel)}\n` +
     `<b>Position ID:</b> <code>${escapeHtml(positionId)}</code>`;
 
