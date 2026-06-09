@@ -2126,7 +2126,7 @@ export function partitionTradableByEntryCap<
  *
  * Returns true only on the clean zero-fill cancel (key deleted).
  */
-async function cancelRestingWeatherOrder(
+export async function cancelRestingWeatherOrder(
   redis: Redis,
   marketId: string,
   direction: 'YES' | 'NO',

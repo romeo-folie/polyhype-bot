@@ -35,7 +35,8 @@ export type ExitReason =
   | 'oracle_lag_near_resolution'
   | 'oracle_lag_stop_loss'
   | 'weather_near_resolution'
-  | 'weather_invalidation';
+  | 'weather_invalidation'
+  | 'weather_drift';
 
 export interface ExitDecision {
   shouldExit: boolean;
