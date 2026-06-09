@@ -28,7 +28,7 @@ import type { FetchFn } from './noaaClient.js';
 import { getCityBias } from './cityBias.js';
 import { cacheForecast, readCachedForecast } from './forecastCache.js';
 import { cityLocalDate } from './resolutionTime.js';
-import { getMarket, parseClobTokenIds } from '../mapping/gamma.js';
+import { getMarket, parseClobTokenIds, parseOutcomePrices } from '../mapping/gamma.js';
 import { getClobOrderBook } from '../shared/clob.js';
 import { getBookTouchLevels } from '../shared/bookTouch.js';
 import { getPendingOrder } from '../execution/pendingMakerOrders.js';
@@ -324,11 +324,22 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       //
       // A non-null heldTokenId is needed for both market-adverse detection and the
       // Tier 1 exit, so we fetch it here and reuse it below.
+      // The market object is also kept so its outcomePrices can serve as a fallback
+      // bid price when the CLOB book has no resting bids (common for crashed positions).
       let heldTokenId: string | null = null;
+      let gammaBidFallback: number | null = null;
       try {
         const market = await getMarket(pos.marketId);
         const tokenIds = parseClobTokenIds(market.clobTokenIds);
         heldTokenId = (pos.direction === 'YES' ? tokenIds[0] : tokenIds[1]) ?? null;
+        // Parse Gamma's market-implied price for the held side. Index 0 = YES, 1 = NO.
+        const prices = parseOutcomePrices(market.outcomePrices);
+        const rawPrice = pos.direction === 'YES' ? prices[0] : prices[1];
+        const parsed = rawPrice != null ? parseFloat(rawPrice) : NaN;
+        // `parsed > 0` intentionally skips resolved markets: Gamma returns "0"
+        // for the losing side once the market settles. Those are handled by the
+        // reconciler, not the drift scanner.
+        if (isFinite(parsed) && parsed > 0) gammaBidFallback = parsed;
       } catch (err) {
         logger.warn('[weather-drift] market fetch failed — market-adverse check and exit skipped', {
           positionId: pos.id,
@@ -338,6 +349,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       }
 
       let currentHeldBid: number | null = null;
+      let bidSource: 'clob' | 'gamma' | null = null;
       let marketDrop = 0;
       let modelMarketGap = 0;
       let marketAgainstTier: 1 | 2 | null = null;
@@ -345,8 +357,24 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       if (heldTokenId) {
         try {
           const book = await getClobOrderBook(heldTokenId);
-          currentHeldBid = book ? (getBookTouchLevels(book).bestBid?.price ?? null) : null;
-        } catch { /* CLOB unavailable — skip market-adverse check */ }
+          const clobBid = book ? (getBookTouchLevels(book).bestBid?.price ?? null) : null;
+          if (clobBid != null) {
+            currentHeldBid = clobBid;
+            bidSource = 'clob';
+          } else if (gammaBidFallback != null) {
+            // No resting CLOB bid — use Gamma's market-implied price as a proxy.
+            // This fires for truly crashed positions (e.g. NO priced at 0.025 with
+            // no one willing to post a resting bid at any meaningful price).
+            currentHeldBid = gammaBidFallback;
+            bidSource = 'gamma';
+          }
+        } catch {
+          // CLOB unavailable — try Gamma fallback before giving up.
+          if (gammaBidFallback != null) {
+            currentHeldBid = gammaBidFallback;
+            bidSource = 'gamma';
+          }
+        }
 
         if (currentHeldBid != null && pos.entryPrice > 0) {
           marketDrop = (pos.entryPrice - currentHeldBid) / pos.entryPrice;
@@ -439,7 +467,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
                 shadowKind: 'weather_drift_exit',
                 logMarker: '[weather-drift]',
                 minDepthRatio: cfg.WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO,
-                extraContext: { driftState: state, marketAgainstTier },
+                extraContext: { driftState: state, marketAgainstTier, bidSource },
               }).catch(() => false);
               if (exited) action = 'exit';
             }
@@ -586,6 +614,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         roundedForecast: result.roundedForecast,
         ...(currentHeldBid != null && {
           currentHeldBid: +currentHeldBid.toFixed(4),
+          bidSource,
           marketDrop: +marketDrop.toFixed(3),
           modelMarketGap: +modelMarketGap.toFixed(3),
           marketAgainstTier,
@@ -634,6 +663,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           wouldBlock,
           driftEnabled: cfg.WEATHER_DRIFT_ENABLED,
           currentHeldBid,
+          bidSource,
           marketDrop: currentHeldBid != null ? marketDrop : null,
           modelMarketGap: currentHeldBid != null ? modelMarketGap : null,
           marketAgainstTier,

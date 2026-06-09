@@ -111,11 +111,15 @@ vi.mock('../../execution/pendingMakerOrders.js', () => ({
   getPendingOrder: mockGetPendingOrder,
 }));
 
-const mockGetMarket = vi.fn().mockResolvedValue({ clobTokenIds: '["tok-yes","tok-no"]' });
+const mockGetMarket = vi.fn().mockResolvedValue({ clobTokenIds: '["tok-yes","tok-no"]', outcomePrices: '["0.35","0.65"]' });
 const mockParseClobTokenIds = vi.fn().mockReturnValue(['tok-yes', 'tok-no']);
+// Default: NO price = 0.65 (= entryPrice) → marketDrop = 0 → no market_against tier fires.
+// Tests that need a crashed price override this.
+const mockParseOutcomePrices = vi.fn().mockReturnValue(['0.35', '0.65']);
 vi.mock('../../mapping/gamma.js', () => ({
   getMarket: mockGetMarket,
   parseClobTokenIds: mockParseClobTokenIds,
+  parseOutcomePrices: mockParseOutcomePrices,
 }));
 
 // Default: no resting bid (market price unavailable) — tests that need a bid override this.
@@ -1395,16 +1399,50 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     expect(call.payload.marketDrop).toBeCloseTo((0.65 - 0.20) / 0.65, 2);
   });
 
-  it('does not classify market_against when CLOB fetch returns no bid', async () => {
-    // getClobOrderBook returns a book but bestBid is null — no market signal
+  it('uses Gamma outcomePrices as fallback bid when CLOB returns no bid', async () => {
+    // CLOB book exists but has no resting bid (crashed position).
+    // Gamma outcomePrices for direction=NO (index 1) = '0.05' → bid fallback = 0.05.
+    // entryPrice=0.65 (default pos), marketDrop=(0.65-0.05)/0.65≈0.923 ≥ 0.50 ✓
+    // drop=0.40 ≥ SEVERE_DROP=0.30 ✓ → Tier 1
     mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
     mockGetBookTouchLevels.mockReturnValue({ bestBid: null, bestAsk: null });
+    // Override outcomePrices: NO (index 1) = 0.05
+    mockParseOutcomePrices.mockReturnValue(['0.95', '0.05']);
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.state).toBe('market_against');
+    expect(call.payload.marketAgainstTier).toBe(1);
+    expect(call.payload.bidSource).toBe('gamma');
+  });
+
+  it('does not classify market_against when CLOB returns no bid AND Gamma price is above DROP_EXIT threshold', async () => {
+    // CLOB no bid; Gamma NO price = 0.50 → marketDrop=(0.65-0.50)/0.65≈0.23 — below 0.50
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: null, bestAsk: null });
+    mockParseOutcomePrices.mockReturnValue(['0.50', '0.50']);
     const redis = makeRedis();
     await runWeatherDriftStrategy(redis as any);
 
     const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
     expect(call.payload.state).toBe('thesis_weakened'); // falls back to forecast state
     expect(call.payload.marketAgainstTier).toBeNull();
+    expect(call.payload.bidSource).toBe('gamma');
+  });
+
+  it('uses Gamma fallback when getClobOrderBook throws', async () => {
+    // Network error on CLOB fetch → catch block falls back to gammaBidFallback.
+    // Gamma NO price = 0.05 → Tier 1 fires same as the no-bid path.
+    mockGetClobOrderBook.mockRejectedValue(new Error('CLOB timeout'));
+    mockParseOutcomePrices.mockReturnValue(['0.95', '0.05']);
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.state).toBe('market_against');
+    expect(call.payload.marketAgainstTier).toBe(1);
+    expect(call.payload.bidSource).toBe('gamma');
   });
 
   it('market_against Tier 1 uses dedup key containing market_against:t1', async () => {
