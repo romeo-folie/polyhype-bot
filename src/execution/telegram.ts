@@ -571,9 +571,14 @@ export async function notifyWeatherDrift(opts: {
       ? `\n<b>Market bid:</b> ${currentHeldBid.toFixed(3)} (${(marketDrop * 100).toFixed(1)}% below entry)` +
         (marketAgainstTier != null ? `  <b>Tier ${marketAgainstTier}</b>` : '')
       : '';
+  const header =
+    state === 'oracle_confirmed'   ? '✅ <b>Weather Oracle Confirmed</b>' :
+    state === 'oracle_impossible'  ? '🚫 <b>Weather Oracle Impossible</b>' :
+    state === 'oracle_likely_against' ? '⚠️ <b>Weather Drift — Oracle Against</b>' :
+                                     '🌧️ <b>Weather Drift Invalidation</b>';
 
   const text =
-    `🌧️ <b>Weather Drift Invalidation</b>${resNote}\n\n` +
+    `${header}${resNote}\n\n` +
     `<b>City:</b> ${escapeHtml(city)}  <b>Date:</b> ${escapeHtml(targetDate)}  <b>Bracket:</b> ${escapeHtml(bracketLabel)}\n` +
     `<b>Position:</b> ${direction} @ ${entryPrice.toFixed(3)} (${sharesHeld.toFixed(2)} shares)\n` +
     `<b>Market:</b> <code>${escapeHtml(marketId)}</code>\n\n` +
