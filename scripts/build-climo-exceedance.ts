@@ -144,7 +144,7 @@ function buildMonthHourMap(dailyHourly: Record<string, number[]>, tz: string): M
     const month = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'numeric' }).format(date), 10);
     const finalMax = Math.max(...temps);
 
-    for (let h = 0; h < temps.length; h++) {
+    for (let h = 0; h < temps.length && h <= 23; h++) {
       let runningMax = -Infinity;
       for (let i = 0; i <= h; i++) {
         const v = temps[i];
@@ -160,7 +160,7 @@ function buildMonthHourMap(dailyHourly: Record<string, number[]>, tz: string): M
   return map;
 }
 
-function computeExceedanceTable(rises: number[], nQuantiles = 50): Array<{ delta: number; exceedance: number }> {
+function computeExceedanceTable(rises: number[], nQuantiles = 20): Array<{ delta: number; exceedance: number }> {
   if (rises.length === 0) return [];
   const sorted = [...rises].sort((a, b) => a - b);
   const result: Array<{ delta: number; exceedance: number }> = [];
@@ -236,7 +236,7 @@ async function main() {
     cities,
   };
 
-  writeFileSync(args.outPath, JSON.stringify(output, null, 2));
+  writeFileSync(args.outPath, JSON.stringify(output));
   console.log(`Written to ${args.outPath}`);
 }
 

@@ -359,8 +359,11 @@ async function main() {
   console.log(`Wins:    ${wins}  (${pct(wins, known.length)})`);
   console.log(`Losses:  ${known.length - wins}  (${pct(known.length - wins, known.length)})`);
 
-  // A.2 — Brier score
-  console.log(`\n--- Gate A.2: Brier Calibration ---`);
+  // A.2 — Brier score (proxy: entry_price as market baseline, not live bid at scan time)
+  // NOTE: this is a PROXY metric. The real Gate A.2 verdict uses live Phase A shadow rows
+  // where currentHeldBid is recorded at each scan. Entry price is adverse-selection-biased
+  // on cap-clamped fills and does not match the doc's "market bid at the same timestamps."
+  console.log(`\n--- Proxy A.2 (entry-price baseline — NOT the live gate): Brier Calibration ---`);
   const brierPoints: Array<{ pred: number; actual: number }> = [];
   const marketBrierPoints: Array<{ pred: number; actual: number }> = [];
   for (const r of known) {
@@ -375,18 +378,22 @@ async function main() {
   const oracleBrier = brierScore(brierPoints);
   const marketBrier = brierScore(marketBrierPoints);
   const naiveBrier = 0.25; // always-0.5 baseline
-  console.log(`Oracle (climo) Brier:          ${fmt3(oracleBrier)} (${brierPoints.length} scan points)`);
-  console.log(`Market-bid Brier (entry_price): ${fmt3(marketBrier)} (${marketBrierPoints.length} positions)`);
-  console.log(`Naive 0.5 baseline Brier:       ${fmt3(naiveBrier)}`);
+  console.log(`Oracle (climo) Brier:              ${fmt3(oracleBrier)} (${brierPoints.length} scan points)`);
+  console.log(`Market-bid proxy Brier (entryPrice): ${fmt3(marketBrier)} (${marketBrierPoints.length} positions)`);
+  console.log(`Naive 0.5 baseline Brier:            ${fmt3(naiveBrier)}`);
   if (brierPoints.length > 0) {
-    const verdict = oracleBrier <= marketBrier ? '✅ PASS (oracle ≤ market)' : '❌ FAIL (oracle > market)';
-    console.log(`Gate A.2: ${verdict}`);
+    const verdict = oracleBrier <= marketBrier ? '✅ PROXY PASS (oracle ≤ entry-price proxy)' : '❌ PROXY FAIL (oracle > entry-price proxy)';
+    console.log(`Proxy A.2: ${verdict}`);
   } else {
-    console.log(`Gate A.2: ⚠️  SKIP — no oracle scan points (climo table empty?)`);
+    console.log(`Proxy A.2: ⚠️  SKIP — no oracle scan points (climo table empty?)`);
   }
 
-  // A.3 — Counterfactual PnL
-  console.log(`\n--- Gate A.3: Counterfactual PnL (3-policy) ---`);
+  // A.3 — Counterfactual PnL (proxy: oracle heldProb as both exit trigger and exit price proxy)
+  // NOTE: this is a PROXY metric. Both Policy B trigger (heldProb ≤ entry×0.8) and Policy C
+  // exit price (estimateExitPrice(heldProb)) use the oracle's own beliefs. If the oracle is
+  // miscalibrated the simulation pays itself fantasy prices. Real Gate A.3 uses live shadow
+  // rows where currentHeldBid is the actual market bid, not the oracle's estimate.
+  console.log(`\n--- Proxy A.3 (oracle-heldProb as bid proxy — NOT the live gate): Counterfactual PnL ---`);
   const policyA = sumPnl(results, r => r.policyA_pnl);
   const policyB_exits = results.filter(r => r.policyB_exitHour !== null).length;
   const policyB = sumPnl(results, r => r.policyB_pnl);
@@ -399,10 +406,10 @@ async function main() {
   console.log(`C vs B incremental:                   ${fmtPnl(policyC - policyB)}`);
   if (policyC_exits > 0) {
     const cOverB = policyC - policyB;
-    const verdict = cOverB > 0 ? '✅ PASS (C saves over B)' : '❌ FAIL (C worse than B)';
-    console.log(`Gate A.3: ${verdict}`);
+    const verdict = cOverB > 0 ? '✅ PROXY PASS (C saves over B)' : '❌ PROXY FAIL (C worse than B)';
+    console.log(`Proxy A.3: ${verdict}`);
   } else {
-    console.log(`Gate A.3: ⚠️  SKIP — oracle issued 0 exits (climo table empty?)`);
+    console.log(`Proxy A.3: ⚠️  SKIP — oracle issued 0 exits (climo table empty?)`);
   }
 
   // Quality of oracle exits: what fraction of C-exited positions were losses?
@@ -412,8 +419,8 @@ async function main() {
     console.log(`  Oracle-exited positions: ${cExited.length}  (${cExitedLosses} were losses = ${pct(cExitedLosses, cExited.length)} correct)`);
   }
 
-  // A.5 — Dead-at-20% recovery
-  console.log(`\n--- Gate A.5: Dead-at-20% Recovery Rate ---`);
+  // A.5 — Dead-at-20% recovery (proxy: same oracle-heldProb caveat as A.3)
+  console.log(`\n--- Proxy A.5 (oracle-heldProb proxy — NOT the live gate): Dead-at-20% Recovery Rate ---`);
   const dropped20 = results.filter(r => {
     return r.scans.some(s => s.conditionalP !== null && !s.isStale &&
       s.conditionalP <= r.pos.entryPrice * (1 - TIER2_DROP_THRESH));
@@ -424,11 +431,11 @@ async function main() {
   if (dropped20Known.length > 0) {
     console.log(`Of those, fraction that won: ${dropped20Wins}/${dropped20Known.length} = ${pct(dropped20Wins, dropped20Known.length)}`);
     const verdict = (dropped20Wins / dropped20Known.length) < 0.10
-      ? '✅ PASS (<10% recover — Tier2 stays un-vetoable)'
-      : '⚠️  REVIEW (>10% recover — check Tier2 veto table)';
-    console.log(`Gate A.5: ${verdict}`);
+      ? '✅ PROXY PASS (<10% recover — Tier2 stays un-vetoable)'
+      : '⚠️  PROXY REVIEW (>10% recover — check Tier2 veto table)';
+    console.log(`Proxy A.5: ${verdict}`);
   } else {
-    console.log(`Gate A.5: ⚠️  SKIP — no oracle P drops observed`);
+    console.log(`Proxy A.5: ⚠️  SKIP — no oracle P drops observed`);
   }
 
   // A.7 — Estimator statistics
@@ -485,6 +492,12 @@ async function main() {
   }
 
   await pool.end();
+  console.log('\n--- NOTE ---');
+  console.log('Proxy A.2/A.3/A.5 above use oracle heldProb as a bid proxy and entry_price as');
+  console.log('the market baseline. These are useful for direction-of-effect checks only.');
+  console.log('Real Gate A.2/A.3/A.5 verdicts require live Phase A shadow rows where');
+  console.log('currentHeldBid is recorded at each scan. Query weather_cond_oracle table once');
+  console.log('sufficient shadow data has accumulated.');
   console.log('\nDone.');
 }
 
