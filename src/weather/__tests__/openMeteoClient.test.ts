@@ -442,7 +442,9 @@ describe('retry on transient failures', () => {
 
 describe('fetchEnsembleHourly', () => {
   function hourlyResponse(memberCount: number, hourCount = 24, value = 50) {
-    const time = Array.from({ length: hourCount }, (_, h) => `2026-06-10T${String(h).padStart(2, '0')}:00`);
+    // Epoch seconds matching 2026-06-10T00:00Z + h hours (unixtime format)
+    const base = Date.UTC(2026, 5, 10) / 1000;
+    const time = Array.from({ length: hourCount }, (_, h) => base + h * 3600);
     const hourly: Record<string, unknown> = { time };
     for (let m = 1; m <= memberCount; m++) {
       hourly[`temperature_2m_member${String(m).padStart(2, '0')}`] = Array(hourCount).fill(value);
@@ -457,20 +459,22 @@ describe('fetchEnsembleHourly', () => {
     expect(result!.memberCount).toBe(30);
     expect(result!.memberTemps).toHaveLength(30);
     expect(result!.hours).toHaveLength(24);
+    expect(typeof result!.hours[0]).toBe('number'); // epoch seconds, not ISO string
     expect(result!.memberTemps[0]).toHaveLength(24);
     expect(result!.forecastDate).toBe('2026-06-10');
     expect(result!.ensembleModel).toBe('gfs');
   });
 
   it('returns null when no member keys in response', async () => {
-    const fetchFn = mockFetch({ hourly: { time: ['2026-06-10T00:00'] } });
+    const fetchFn = mockFetch({ hourly: { time: [Date.UTC(2026, 5, 10) / 1000] } });
     const result = await fetchEnsembleHourly(41.88, -87.63, '2026-06-10', 'fahrenheit', fetchFn);
     expect(result).toBeNull();
   });
 
   it('drops members whose row length mismatches the time array', async () => {
     // One good member (24 values) + one bad member (only 1 value → dropped).
-    const time = Array.from({ length: 24 }, (_, h) => `2026-06-10T${String(h).padStart(2, '0')}:00`);
+    const base = Date.UTC(2026, 5, 10) / 1000;
+    const time = Array.from({ length: 24 }, (_, h) => base + h * 3600);
     const fetchFn = mockFetch({
       hourly: {
         time,

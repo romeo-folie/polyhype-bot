@@ -4539,11 +4539,13 @@ describe('revalidateRestingWeatherOrders', () => {
     }
 
     // Valid cached oracle result: heldProb 0.40 → order.price 0.55 > 0.40 + 0.05 → picked off.
-    const hitPayload = JSON.stringify({
+    // computedAt must be present and fresh for the blob-age check to pass (≤35 min).
+    const hitPayload = () => JSON.stringify({
       heldProb: 0.40,
       isStale: false,
       estimator: 'ensemble',
       confidence: 'settlement_aligned',
+      computedAt: Date.now(),
     });
 
     beforeEach(() => {
@@ -4557,7 +4559,7 @@ describe('revalidateRestingWeatherOrders', () => {
         .mockResolvedValueOnce(null);           // post-cancel: order gone
       mockCancelClobOrder.mockResolvedValue(true);
 
-      await revalidateRestingWeatherOrders(makeRedisMock(hitPayload), [resDayOpp()]);
+      await revalidateRestingWeatherOrders(makeRedisMock(hitPayload()), [resDayOpp()]);
 
       expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
       expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-1', 'NO');
@@ -4570,6 +4572,7 @@ describe('revalidateRestingWeatherOrders', () => {
         isStale: false,
         estimator: 'ensemble',
         confidence: 'settlement_aligned',
+        computedAt: Date.now(),
       });
       mockListPendingOrders.mockResolvedValue([condEntry()]);
 
@@ -4579,11 +4582,26 @@ describe('revalidateRestingWeatherOrders', () => {
       expect(mockDeletePendingOrder).not.toHaveBeenCalled();
     });
 
+    it('does NOT cancel when the blob computedAt is older than 35 minutes', async () => {
+      const oldPayload = JSON.stringify({
+        heldProb: 0.40,
+        isStale: false,
+        estimator: 'ensemble',
+        confidence: 'settlement_aligned',
+        computedAt: Date.now() - 36 * 60 * 1000,
+      });
+      mockListPendingOrders.mockResolvedValue([condEntry()]);
+
+      await revalidateRestingWeatherOrders(makeRedisMock(oldPayload), [resDayOpp()]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
     it('does NOT cancel on a non-resolution-day opportunity', async () => {
       mockListPendingOrders.mockResolvedValue([condEntry()]);
 
       await revalidateRestingWeatherOrders(
-        makeRedisMock(hitPayload),
+        makeRedisMock(hitPayload()),
         [opp('mkt-1', 0.60, { city: 'chicago', targetDate: '2026-06-10', isResolutionDay: false })],
       );
 
@@ -4643,7 +4661,7 @@ describe('revalidateRestingWeatherOrders', () => {
       } as never);
       mockListPendingOrders.mockResolvedValue([condEntry()]);
 
-      await revalidateRestingWeatherOrders(makeRedisMock(hitPayload), [resDayOpp()]);
+      await revalidateRestingWeatherOrders(makeRedisMock(hitPayload()), [resDayOpp()]);
 
       // listPendingOrders is not called when all three rules are off.
       expect(mockListPendingOrders).not.toHaveBeenCalled();
@@ -4654,7 +4672,7 @@ describe('revalidateRestingWeatherOrders', () => {
         condEntry({ isBracketOpposite: true }),
       ]);
 
-      await revalidateRestingWeatherOrders(makeRedisMock(hitPayload), [resDayOpp()]);
+      await revalidateRestingWeatherOrders(makeRedisMock(hitPayload()), [resDayOpp()]);
 
       expect(mockCancelClobOrder).not.toHaveBeenCalled();
     });

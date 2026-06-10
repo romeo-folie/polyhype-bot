@@ -548,8 +548,8 @@ export async function fetchHistoricalHigh(
  * Used by the conditional oracle to estimate the final daily max distribution.
  */
 export interface EnsembleHourlyForecast {
-  /** ISO8601 datetime strings for the hours covered (city-local timezone). */
-  hours: string[];
+  /** Unix epoch seconds for each hour (timezone-unambiguous). */
+  hours: number[];
   /** Per-member hourly temperatures: memberTemps[memberIdx][hourIdx]. Native unit. */
   memberTemps: number[][];
   memberCount: number;
@@ -592,6 +592,7 @@ export async function fetchEnsembleHourly(
       models: model,
       temperature_unit: unit,
       timezone: 'auto',
+      timeformat: 'unixtime',
       start_date: targetStr,
       end_date: targetStr,
     });
@@ -613,7 +614,7 @@ export async function fetchEnsembleHourly(
       return null;
     }
 
-    const timeArr = hourly.time as string[] | undefined;
+    const timeArr = hourly.time as number[] | undefined;
     if (!Array.isArray(timeArr) || timeArr.length === 0) return null;
 
     // Collect all member keys

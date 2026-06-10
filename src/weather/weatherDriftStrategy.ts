@@ -71,14 +71,21 @@ import type { FlipCandidateClass } from './weatherFlip.js';
  * Hours 0..observedAtLocalHour have already been observed; including them
  * would let past (possibly incorrect) model values dominate the final-max
  * distribution, breaking the conditioning on the running max.
+ *
+ * `hourlyData.hours` are Unix epoch seconds (from the unixtime API param) so
+ * the comparison against a true-UTC observedAt is timezone-unambiguous.
+ *
+ * When all hours are past (late-day obs), returns one empty slice per member
+ * so conditionalHeldProbability treats finalMax = observedMax for every member
+ * — the correct deterministic answer rather than a climo fallback.
  */
-function sliceToRemainingHours(
+export function sliceToRemainingHours(
   hourlyData: EnsembleHourlyForecast,
   observedAt: string,
 ): number[][] {
-  const obsTime = new Date(observedAt).getTime();
-  const firstIdx = hourlyData.hours.findIndex((h) => new Date(h).getTime() > obsTime);
-  if (firstIdx === -1) return [];  // all hours already observed → only observedMax matters
+  const obsTimeS = new Date(observedAt).getTime() / 1000;
+  const firstIdx = hourlyData.hours.findIndex((t) => t > obsTimeS);
+  if (firstIdx === -1) return hourlyData.memberTemps.map(() => []);
   return hourlyData.memberTemps.map((member) => member.slice(firstIdx));
 }
 
@@ -245,7 +252,10 @@ const PREV_BID_KEY_PREFIX = 'weather:drift_prev_bid:';
 const PREV_BID_TTL_S = 3600; // covers 2 scan cycles; auto-expires when position closes
 // Conditional oracle result cache: written by drift strategy, read by revalidation pass.
 export const COND_ORACLE_RESULT_KEY_PREFIX = 'weather:cond_oracle:';
-const COND_ORACLE_RESULT_TTL_S = 3600;
+// 35 min: shorter than one scan cycle (30 min) + execution window, so the read
+// side never acts on a blob from a prior cycle. Also mitigates round-1 L1
+// (isStale frozen at compute time).
+const COND_ORACLE_RESULT_TTL_S = 2100;
 
 // Climo table loaded once per process (file reads are cheap; content rarely changes).
 let _climoTable: ReturnType<typeof loadClimoTable> | undefined;
@@ -685,7 +695,9 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
 
         if (condOracleResult) {
           // Cache result for the revalidation pass (reads it for fourth cancel rule).
-          const condKey = `${COND_ORACLE_RESULT_KEY_PREFIX}${city}:${targetDate}:${pos.direction}`;
+          // Key on marketId (not city/date) to avoid cross-bracket contamination
+          // when multiple brackets share the same city, date and direction.
+          const condKey = `${COND_ORACLE_RESULT_KEY_PREFIX}${pos.marketId}:${pos.direction}`;
           void redis.set(
             condKey,
             JSON.stringify({
@@ -693,6 +705,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
               isStale: condOracleResult.isStale,
               estimator: condOracleResult.estimator,
               confidence: liveObs.confidence,
+              computedAt: Date.now(),
             }),
             'EX',
             COND_ORACLE_RESULT_TTL_S,
@@ -1331,11 +1344,14 @@ export async function runWeatherNowcastScan(
 
       if (condResult == null) continue;
 
-      // H2 fix: write the cache so the fourth revalidation cancel rule can protect
-      // resting orders that don't yet have a held position (pure unfilled scenario).
-      // NX so the drift strategy's held-position write (same key, same TTL) takes precedence
-      // if a position is already held and runWeatherDriftStrategy ran first this cycle.
-      const nowcastCacheKey = `${COND_ORACLE_RESULT_KEY_PREFIX}${opp.city}:${opp.targetDate}:${opp.tradeSide}`;
+      // Write the cache so the fourth revalidation cancel rule can protect resting
+      // orders without held positions (unfilled scenario). Key on marketId (not
+      // city/date) to avoid cross-bracket contamination between multiple brackets
+      // sharing the same city, date and direction. No NX: nowcast runs first in
+      // the scan order (before revalidation), so it establishes the base value;
+      // the drift loop may overwrite with a held-position computation later in
+      // the same cycle — both use the same market so the overwrite is coherent.
+      const nowcastCacheKey = `${COND_ORACLE_RESULT_KEY_PREFIX}${opp.marketId}:${opp.tradeSide}`;
       void redis.set(
         nowcastCacheKey,
         JSON.stringify({
@@ -1343,10 +1359,10 @@ export async function runWeatherNowcastScan(
           isStale: condResult.isStale,
           estimator: condResult.estimator,
           confidence: liveObs.confidence,
+          computedAt: Date.now(),
         }),
         'EX',
-        3600,
-        'NX',
+        COND_ORACLE_RESULT_TTL_S,
       ).catch(() => {});
 
       const edge = condResult.heldProb - opp.outcomePrice;

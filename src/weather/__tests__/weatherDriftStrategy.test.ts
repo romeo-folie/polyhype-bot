@@ -193,7 +193,7 @@ const {
   parseWeatherPositionMeta,
 } = await import('../weatherThesis.js');
 
-const { classifyDriftState, runWeatherDriftStrategy, runWeatherNowcastScan } =
+const { classifyDriftState, runWeatherDriftStrategy, runWeatherNowcastScan, sliceToRemainingHours } =
   await import('../weatherDriftStrategy.js');
 
 const { enqueueWrite } = await import('../../db/writeQueue.js');
@@ -2302,15 +2302,17 @@ describe('runWeatherNowcastScan', () => {
   it('writes the oracle result to the Redis cache (H2: unfilled resting order coverage)', async () => {
     const redis = makeRedis();
     await runWeatherNowcastScan(redis as any, [makeOpp()]);
-    // Cache key: weather:cond_oracle:<city>:<targetDate>:<direction>
-    const cacheKey = 'weather:cond_oracle:chicago:2026-06-01:NO';
+    // Cache key: weather:cond_oracle:<marketId>:<direction>
+    const cacheKey = 'weather:cond_oracle:mkt-1:NO';
     expect(redis.set).toHaveBeenCalledWith(
       cacheKey,
       expect.stringContaining('"heldProb":0.55'),
       'EX',
-      3600,
-      'NX',
+      2100,
     );
+    // Blob includes computedAt for the read-side blob-age check.
+    const setArg = vi.mocked(redis.set).mock.calls[0]?.[1] as string;
+    expect(setArg).toMatch(/"computedAt":\d+/);
   });
 
   it('does NOT write cache when condResult is null', async () => {
@@ -2329,5 +2331,62 @@ describe('runWeatherNowcastScan', () => {
     );
     expect(shadowCall).toBeDefined();
     expect((shadowCall![1] as any).payload.conditionalHeldProb).toBe(0.55);
+  });
+});
+
+// ── sliceToRemainingHours ──────────────────────────────────────────────────────
+// Tests for the exported helper that filters member trajectories to hours
+// strictly after observedAt. Hours are Unix epoch seconds (unixtime API format),
+// so comparisons are timezone-unambiguous.
+
+describe('sliceToRemainingHours', () => {
+  // 2026-06-10 00:00 UTC in epoch seconds
+  const BASE_S = Date.UTC(2026, 5, 10) / 1000;
+  // Build 24 hourly epoch-second timestamps starting at BASE_S
+  const hours = Array.from({ length: 24 }, (_, h) => BASE_S + h * 3600);
+  const memberA = Array.from({ length: 24 }, (_, h) => 60 + h);
+  const memberB = Array.from({ length: 24 }, (_, h) => 70 + h);
+  const hourlyData = {
+    hours, memberTemps: [memberA, memberB],
+    memberCount: 2, forecastDate: '2026-06-10', ensembleModel: 'gfs' as const,
+  };
+
+  it('returns future-only slices for a mid-day observedAt', () => {
+    // obs at 09:30 UTC → firstIdx should be 10 (10:00 UTC)
+    const obsAt = new Date((BASE_S + 9 * 3600 + 1800) * 1000).toISOString();
+    const slices = sliceToRemainingHours(hourlyData, obsAt);
+    expect(slices).toHaveLength(2);
+    expect(slices[0]).toHaveLength(14);  // hours 10..23
+    expect(slices[0][0]).toBe(memberA[10]);
+  });
+
+  it('handles non-UTC city timezone correctly (HK fixture)', () => {
+    // HK = UTC+8. obs at 14:30 HKT = 06:30 UTC = BASE_S + 6.5h.
+    // API hours are epoch seconds (timezone-unambiguous), so firstIdx = 7 (07:00 UTC).
+    const obsAtUtcS = BASE_S + 6 * 3600 + 1800;
+    const obsAt = new Date(obsAtUtcS * 1000).toISOString();
+    const slices = sliceToRemainingHours(hourlyData, obsAt);
+    expect(slices[0]).toHaveLength(17);  // hours 7..23
+    expect(slices[0][0]).toBe(memberA[7]);
+  });
+
+  it('returns one empty slice per member when all hours are past (late-day obs)', () => {
+    // obs after the last hour → firstIdx === -1
+    const obsAt = new Date((BASE_S + 24 * 3600) * 1000).toISOString();
+    const slices = sliceToRemainingHours(hourlyData, obsAt);
+    // Must be per-member empty arrays, NOT a single empty array — so
+    // conditionalHeldProbability gets memberCount >= minMembers and
+    // resolves finalMax = observedMax exactly (not a climo fallback).
+    expect(slices).toHaveLength(2);
+    expect(slices[0]).toHaveLength(0);
+    expect(slices[1]).toHaveLength(0);
+  });
+
+  it('includes the first remaining hour (strict >)', () => {
+    // obs exactly at BASE_S+5*3600 (05:00 UTC) → only 06:00+ should be included
+    const obsAt = new Date((BASE_S + 5 * 3600) * 1000).toISOString();
+    const slices = sliceToRemainingHours(hourlyData, obsAt);
+    expect(slices[0]).toHaveLength(18);  // hours 6..23
+    expect(slices[0][0]).toBe(memberA[6]);
   });
 });
