@@ -350,25 +350,14 @@ export function conditionalHeldProbability(
 
   // Degenerate case: binary oracle boundary already crossed → agree with classifyOracleState.
   const binaryState = classifyOracleState(observedMax, direction, bracket);
-  if (binaryState === 'oracle_impossible') {
+  if (binaryState === 'oracle_impossible' || binaryState === 'oracle_confirmed') {
+    const obsAgeMinDegen = (Date.now() - new Date(observedAt).getTime()) / 60_000;
     return {
-      heldProb: 0,
+      heldProb: binaryState === 'oracle_confirmed' ? 1 : 0,
       estimator: 'degenerate',
       members: 0,
-      observedAtLocalHour: 0,
-      isStale: false,
-      clampedByClimo: false,
-      estimatorGap: null,
-      climoHeldProb: null,
-    };
-  }
-  if (binaryState === 'oracle_confirmed') {
-    return {
-      heldProb: 1,
-      estimator: 'degenerate',
-      members: 0,
-      observedAtLocalHour: 0,
-      isStale: false,
+      observedAtLocalHour: localHourFromUtc(observedAt, tz),
+      isStale: obsAgeMinDegen > maxObsAgeMin,
       clampedByClimo: false,
       estimatorGap: null,
       climoHeldProb: null,

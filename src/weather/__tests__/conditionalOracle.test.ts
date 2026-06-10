@@ -388,21 +388,23 @@ describe('conditionalHeldProbability', () => {
 
   describe('conservative clamp (estimatorMaxGap)', () => {
     it('uses less favorable estimate when gap exceeds threshold', () => {
-      // Build a climo table entry that disagrees with the ensemble estimate.
-      // Ensemble: all members at 45 → interior NO [40,41] → P(NO)=1.0 (outside bracket)
-      // Climo: 0.5
-      // Gap = 0.5 > estimatorMaxGap=0.25 → use the worse value = min(1.0, 0.5) for NO = 0.5
-      const climoTable = {
-        chicago: {
-          6: {
-            [new Date().getHours()]: [
-              { delta: -10, exceedance: 0.50 },
-              { delta: 10, exceedance: 0.50 },
-            ],
-          },
-        },
-      };
-      // Get current Chicago local hour for the climo table key
+      // Ensemble: all 20 members at 45 → interior NO [40,41] → P(NO)=1.0 (all outside bracket).
+      // Climo table designed to give climoHeldProb_NO ≈ 0.50 so gap = |1.0 - 0.50| = 0.50 > 0.25.
+      // Interior NO bracket [40,41], observedMax=38 (below bracket):
+      //   deltaLow = (40-0.5)-38 = 1.5; deltaHigh = (41+0.5)-38 = 3.5
+      //   excLow ≈ 0.90 (very likely to exceed low threshold), excHigh ≈ 0.40 (less likely to exceed high)
+      //   pYes = excLow - excHigh = 0.50 → climoHeldProb_NO = 1 - 0.50 = 0.50
+      //   gap = |1.0 - 0.50| = 0.50 > estimatorMaxGap=0.25 → clamp to 0.50 (worse for NO)
+      const entries = [
+        { delta: 0, exceedance: 0.95 },
+        { delta: 2, exceedance: 0.90 },  // ~deltaLow=1.5 → exc≈0.90 after interpolation
+        { delta: 4, exceedance: 0.40 },  // ~deltaHigh=3.5 → exc≈0.40 after interpolation
+        { delta: 10, exceedance: 0.10 },
+      ];
+      const allHours: Record<number, typeof entries> = {};
+      for (let h = 0; h < 24; h++) allHours[h] = entries;
+      const climoTable = { chicago: { 6: allHours } };
+
       const result = conditionalHeldProbability(baseInput({
         direction: 'NO',
         bracket: INTERIOR_BRACKET,
@@ -411,15 +413,12 @@ describe('conditionalHeldProbability', () => {
         climoTable: climoTable as never,
         estimatorMaxGap: 0.25,
       }));
-      if (result?.clampedByClimo) {
-        // When clamped, heldProb should be the more conservative value
-        expect(result.heldProb).toBeLessThan(1.0);
-        expect(result.clampedByClimo).toBe(true);
-        expect(result.estimatorGap).not.toBeNull();
-      }
-      // This test is conditional on the climo table entry matching the local hour.
-      // Just verify the result is non-null.
       expect(result).not.toBeNull();
+      expect(result!.clampedByClimo).toBe(true);
+      expect(result!.estimatorGap).not.toBeNull();
+      expect(result!.estimatorGap).toBeGreaterThan(0.25);
+      // Conservative clamp: heldProb should be less than 1.0 (climo pulled it down).
+      expect(result!.heldProb).toBeLessThan(1.0);
     });
   });
 });

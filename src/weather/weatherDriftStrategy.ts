@@ -62,8 +62,25 @@ import {
 } from './conditionalOracle.js';
 import type { ConditionalOracleResult } from './conditionalOracle.js';
 import { fetchEnsembleHourly } from './openMeteoClient.js';
+import type { EnsembleHourlyForecast } from './openMeteoClient.js';
 import { classifyFlipCandidate, tryWeatherFlip } from './weatherFlip.js';
 import type { FlipCandidateClass } from './weatherFlip.js';
+
+/**
+ * Slice ensemble member trajectories to hours strictly after observedAt.
+ * Hours 0..observedAtLocalHour have already been observed; including them
+ * would let past (possibly incorrect) model values dominate the final-max
+ * distribution, breaking the conditioning on the running max.
+ */
+function sliceToRemainingHours(
+  hourlyData: EnsembleHourlyForecast,
+  observedAt: string,
+): number[][] {
+  const obsTime = new Date(observedAt).getTime();
+  const firstIdx = hourlyData.hours.findIndex((h) => new Date(h).getTime() > obsTime);
+  if (firstIdx === -1) return [];  // all hours already observed → only observedMax matters
+  return hourlyData.memberTemps.map((member) => member.slice(firstIdx));
+}
 
 // ── Drift state types ────────────────────────────────────────────────────────
 
@@ -635,7 +652,8 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
               cfg.WEATHER_MODEL_ECMWF_ENABLED,
               cfg.WEATHER_FORECAST_RETRY_COUNT,
             ).catch(() => null);
-            if (hourlyData) remainingHourlyMembers = hourlyData.memberTemps;
+            if (hourlyData && liveObs?.observedAt)
+              remainingHourlyMembers = sliceToRemainingHours(hourlyData, liveObs.observedAt);
           } catch {
             // Non-fatal: fall back to climo-only
           }
@@ -775,7 +793,15 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           ? null
           : currentHeldBid != null &&
             currentHeldBid > condOracleResult.heldProb + cfg.WEATHER_COND_ORACLE_EXIT_COST_BUFFER;
-        const wouldVeto = condOracleResult.isStale ? null : holdGuardVetoed;
+        // Compute wouldVeto independently of HOLD_GUARD_ENABLED so Phase A audit
+        // data captures hypothetical vetoes while the guard knob is dark.
+        const wouldVeto = condOracleResult.isStale
+          ? null
+          : bidVelocityTrigger &&
+            isResolutionDay &&
+            liveObs?.confidence === 'settlement_aligned' &&
+            currentHeldBid != null &&
+            condOracleResult.heldProb - currentHeldBid >= cfg.WEATHER_COND_ORACLE_HOLD_GUARD_GAP;
         condOracleAudit = {
           wouldConfirm,
           wouldVeto,
@@ -1278,9 +1304,14 @@ export async function runWeatherNowcastScan(
 
       const ensembleHourly = await fetchEnsembleHourly(
         cityCoords.lat, cityCoords.lon, opp.targetDate, opp.unit, fetchFn,
+        cfg.WEATHER_MODEL_ECMWF_ENABLED, cfg.WEATHER_FORECAST_RETRY_COUNT,
       ).catch((): null => null);
 
       const bias = await getCityBias(redis, opp.city).catch((): null => null);
+
+      const remainingMembers = ensembleHourly
+        ? sliceToRemainingHours(ensembleHourly, liveObs.observedAt)
+        : null;
 
       const condResult = conditionalHeldProbability({
         city: opp.city,
@@ -1289,7 +1320,7 @@ export async function runWeatherNowcastScan(
         observedMax: liveObs.observedMax,
         observedAt: liveObs.observedAt,
         tz: cityCoords.tz,
-        remainingHourlyMembers: ensembleHourly?.memberTemps ?? null,
+        remainingHourlyMembers: remainingMembers,
         climoTable,
         biasCorrection: bias?.meanBias ?? 0,
         spreadInflation: cfg.WEATHER_COND_ORACLE_SPREAD_INFLATION,
@@ -1299,6 +1330,21 @@ export async function runWeatherNowcastScan(
       });
 
       if (condResult == null) continue;
+
+      // H2 fix: write the cache so the fourth revalidation cancel rule can protect
+      // resting orders that don't yet have a held position (pure unfilled scenario).
+      const nowcastCacheKey = `${COND_ORACLE_RESULT_KEY_PREFIX}${opp.city}:${opp.targetDate}:${opp.tradeSide}`;
+      void redis.set(
+        nowcastCacheKey,
+        JSON.stringify({
+          heldProb: condResult.heldProb,
+          isStale: condResult.isStale,
+          estimator: condResult.estimator,
+          confidence: liveObs.confidence,
+        }),
+        'EX',
+        3600,
+      ).catch(() => {});
 
       const edge = condResult.heldProb - opp.outcomePrice;
       const meetsEdge = !condResult.isStale && edge >= cfg.WEATHER_COND_ORACLE_NOWCAST_MIN_EDGE;

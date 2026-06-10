@@ -9,7 +9,7 @@ vi.mock('../../shared/logger.js', () => ({
   },
 }));
 
-const { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHistoricalHigh, fetchHrrrForecast } = await import(
+const { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHistoricalHigh, fetchHrrrForecast, fetchEnsembleHourly } = await import(
   '../openMeteoClient.js'
 );
 
@@ -435,5 +435,71 @@ describe('retry on transient failures', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ── fetchEnsembleHourly ──────────────────────────────────────────────────────
+
+describe('fetchEnsembleHourly', () => {
+  function hourlyResponse(memberCount: number, hourCount = 24, value = 50) {
+    const time = Array.from({ length: hourCount }, (_, h) => `2026-06-10T${String(h).padStart(2, '0')}:00`);
+    const hourly: Record<string, unknown> = { time };
+    for (let m = 1; m <= memberCount; m++) {
+      hourly[`temperature_2m_member${String(m).padStart(2, '0')}`] = Array(hourCount).fill(value);
+    }
+    return { hourly };
+  }
+
+  it('returns multi-member forecast with hours and memberTemps', async () => {
+    const fetchFn = mockFetch(hourlyResponse(30));
+    const result = await fetchEnsembleHourly(41.88, -87.63, '2026-06-10', 'fahrenheit', fetchFn);
+    expect(result).not.toBeNull();
+    expect(result!.memberCount).toBe(30);
+    expect(result!.memberTemps).toHaveLength(30);
+    expect(result!.hours).toHaveLength(24);
+    expect(result!.memberTemps[0]).toHaveLength(24);
+    expect(result!.forecastDate).toBe('2026-06-10');
+    expect(result!.ensembleModel).toBe('gfs');
+  });
+
+  it('returns null when no member keys in response', async () => {
+    const fetchFn = mockFetch({ hourly: { time: ['2026-06-10T00:00'] } });
+    const result = await fetchEnsembleHourly(41.88, -87.63, '2026-06-10', 'fahrenheit', fetchFn);
+    expect(result).toBeNull();
+  });
+
+  it('drops members whose row length mismatches the time array', async () => {
+    // One good member (24 values) + one bad member (only 1 value → dropped).
+    const time = Array.from({ length: 24 }, (_, h) => `2026-06-10T${String(h).padStart(2, '0')}:00`);
+    const fetchFn = mockFetch({
+      hourly: {
+        time,
+        temperature_2m_member01: Array(24).fill(50),
+        temperature_2m_member02: [45],  // wrong length — dropped
+      },
+    });
+    const result = await fetchEnsembleHourly(41.88, -87.63, '2026-06-10', 'fahrenheit', fetchFn);
+    expect(result).not.toBeNull();
+    expect(result!.memberCount).toBe(1);
+  });
+
+  it('returns null when !res.ok', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({ ok: false, status: 429, json: () => Promise.resolve({}) });
+    const result = await fetchEnsembleHourly(41.88, -87.63, '2026-06-10', 'fahrenheit', fetchFn);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when hourly data is absent', async () => {
+    const fetchFn = mockFetch({});
+    const result = await fetchEnsembleHourly(41.88, -87.63, '2026-06-10', 'fahrenheit', fetchFn);
+    expect(result).toBeNull();
+  });
+
+  it('uses ecmwf_ifs025 model when useEcmwf=true', async () => {
+    const fetchFn = mockFetch(hourlyResponse(5));
+    const result = await fetchEnsembleHourly(41.88, -87.63, '2026-06-10', 'fahrenheit', fetchFn, true);
+    expect(result!.ensembleModel).toBe('ecmwf');
+    const url = (fetchFn.mock.calls[0] as string[])[0];
+    expect(url).toContain('ecmwf_ifs025');
   });
 });

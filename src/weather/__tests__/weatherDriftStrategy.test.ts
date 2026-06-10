@@ -193,7 +193,7 @@ const {
   parseWeatherPositionMeta,
 } = await import('../weatherThesis.js');
 
-const { classifyDriftState, runWeatherDriftStrategy } =
+const { classifyDriftState, runWeatherDriftStrategy, runWeatherNowcastScan } =
   await import('../weatherDriftStrategy.js');
 
 const { enqueueWrite } = await import('../../db/writeQueue.js');
@@ -2230,5 +2230,103 @@ describe('runWeatherDriftStrategy — conditional oracle (Phases A-C)', () => {
     expect(mockTryWeatherFlip).toHaveBeenCalledWith(
       expect.objectContaining({ oppositeModelFairValue: expect.closeTo(0.70, 3) }),
     );
+  });
+});
+
+// ── runWeatherNowcastScan ─────────────────────────────────────────────────────
+
+describe('runWeatherNowcastScan', () => {
+  // Minimal opportunity shape for the nowcast scan.
+  function makeOpp(overrides: Record<string, unknown> = {}) {
+    return {
+      marketId: 'mkt-1',
+      city: 'chicago',
+      targetDate: '2026-06-01',
+      bracketLabel: '39°F or below',
+      tradeSide: 'NO' as const,
+      outcomePrice: 0.30,
+      unit: 'fahrenheit',
+      isResolutionDay: true,
+      sizeUpScanOnly: false,
+      ...overrides,
+    } as never;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_COND_ORACLE_ENABLED: true }));
+    mockFetchLiveObservation.mockResolvedValue({
+      city: 'chicago', targetDate: '2026-06-01',
+      observedMax: 35, source: 'wu-live',
+      confidence: 'settlement_aligned',
+      observedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+    });
+    mockFetchEnsembleHourly.mockResolvedValue(null);
+    mockConditionalHeldProbability.mockReturnValue({
+      heldProb: 0.55, isStale: false, estimator: 'ensemble' as const,
+      members: 20, observedAtLocalHour: 9, clampedByClimo: false,
+      estimatorGap: null, climoHeldProb: null,
+    });
+    mockLoadClimoTable.mockReturnValue(null);
+  });
+
+  it('is a no-op when WEATHER_COND_ORACLE_ENABLED=false', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_COND_ORACLE_ENABLED: false }));
+    const redis = makeRedis();
+    await runWeatherNowcastScan(redis as any, [makeOpp()]);
+    expect(mockConditionalHeldProbability).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when there are no resolution-day opportunities', async () => {
+    const redis = makeRedis();
+    await runWeatherNowcastScan(redis as any, [makeOpp({ isResolutionDay: false })]);
+    expect(mockConditionalHeldProbability).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when the only opp is sizeUpScanOnly', async () => {
+    const redis = makeRedis();
+    await runWeatherNowcastScan(redis as any, [makeOpp({ sizeUpScanOnly: true })]);
+    expect(mockConditionalHeldProbability).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when live obs confidence is none', async () => {
+    mockFetchLiveObservation.mockResolvedValue({
+      city: 'chicago', targetDate: '2026-06-01',
+      observedMax: null, source: 'none', confidence: 'none', observedAt: null,
+    });
+    const redis = makeRedis();
+    await runWeatherNowcastScan(redis as any, [makeOpp()]);
+    expect(mockConditionalHeldProbability).not.toHaveBeenCalled();
+  });
+
+  it('writes the oracle result to the Redis cache (H2: unfilled resting order coverage)', async () => {
+    const redis = makeRedis();
+    await runWeatherNowcastScan(redis as any, [makeOpp()]);
+    // Cache key: weather:cond_oracle:<city>:<targetDate>:<direction>
+    const cacheKey = 'weather:cond_oracle:chicago:2026-06-01:NO';
+    expect(redis.set).toHaveBeenCalledWith(
+      cacheKey,
+      expect.stringContaining('"heldProb":0.55'),
+      'EX',
+      3600,
+    );
+  });
+
+  it('does NOT write cache when condResult is null', async () => {
+    mockConditionalHeldProbability.mockReturnValue(null);
+    const redis = makeRedis();
+    await runWeatherNowcastScan(redis as any, [makeOpp()]);
+    expect(redis.set).not.toHaveBeenCalled();
+  });
+
+  it('writes a shadow_observations row for every computed result', async () => {
+    const redis = makeRedis();
+    await runWeatherNowcastScan(redis as any, [makeOpp()]);
+    const shadowCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[0] as string) === 'shadow_observations' &&
+             (c[1] as any).kind === 'weather_nowcast_entry',
+    );
+    expect(shadowCall).toBeDefined();
+    expect((shadowCall![1] as any).payload.conditionalHeldProb).toBe(0.55);
   });
 });
