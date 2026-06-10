@@ -2285,6 +2285,36 @@ export const envSchema = z.object({
   WEATHER_DRIFT_FLIP_MAX_CITY_NOTIONAL: z.coerce.number().min(0).optional().default(25),
   // Maximum total notional (USD) across all flip buys in one scan cycle.
   WEATHER_DRIFT_FLIP_MAX_SCAN_NOTIONAL: z.coerce.number().min(0).optional().default(50),
+
+  // ── Conditional weather oracle (Phases A-C) ───────────────────────────────
+  // Phase A: compute conditionalHeldProbability + shadow-log only. No actions.
+  WEATHER_COND_ORACLE_ENABLED: boolFromEnv.optional().default(false),
+  // Phase B: enable bid-vs-fair-value soft exit rule.
+  WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED: boolFromEnv.optional().default(false),
+  // Phase B: cancel resting makers when fresh conditionalSideProb fails posted price.
+  WEATHER_COND_ORACLE_RESTING_CANCEL_ENABLED: boolFromEnv.optional().default(false),
+  // Phase B: suppress market-only exits when conditionalP - bid ≥ gap (hold guard).
+  WEATHER_COND_ORACLE_HOLD_GUARD_ENABLED: boolFromEnv.optional().default(false),
+  // Gap (in probability) between conditionalP and bid required to veto a market-only exit.
+  WEATHER_COND_ORACLE_HOLD_GUARD_GAP: z.coerce.number().min(0).max(1).optional().default(0.30),
+  // Exit fires when bestBid > conditionalHeldProb + this buffer (covers fees + estimator noise).
+  WEATHER_COND_ORACLE_EXIT_COST_BUFFER: z.coerce.number().min(0).max(1).optional().default(0.05),
+  // Maximum observation age (minutes) for a conditional estimate to be action-eligible.
+  WEATHER_COND_ORACLE_MAX_OBS_AGE_MIN: z.coerce.number().int().min(1).optional().default(90),
+  // Spread inflation multiplier for ensemble member trajectories (>1 = wider spread).
+  WEATHER_COND_ORACLE_SPREAD_INFLATION: z.coerce.number().min(0.5).max(5).optional().default(1.0),
+  // Minimum ensemble members required to use the ensemble estimator (fall back to climo below).
+  WEATHER_COND_ORACLE_MIN_MEMBERS: z.coerce.number().int().min(1).optional().default(10),
+  // Enable the climatological exceedance table as fallback/clamp for the ensemble estimator.
+  WEATHER_COND_ORACLE_CLIMO_FALLBACK_ENABLED: boolFromEnv.optional().default(true),
+  // If ensemble and climo estimators disagree by more than this, use the conservative value.
+  WEATHER_COND_ORACLE_ESTIMATOR_MAX_GAP: z.coerce.number().min(0).max(1).optional().default(0.25),
+  // Phase C: replace static flip fair value with 1 - conditionalHeldProb for non-confirmed flips.
+  WEATHER_COND_ORACLE_FLIP_FAIR_VALUE_ENABLED: boolFromEnv.optional().default(false),
+  // Phase C: write weather_nowcast_entry shadow rows (live execution dark until explicitly enabled).
+  WEATHER_COND_ORACLE_NOWCAST_ENTRY_ENABLED: boolFromEnv.optional().default(false),
+  // Minimum edge (probability) required for a nowcast entry shadow row to be emitted.
+  WEATHER_COND_ORACLE_NOWCAST_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

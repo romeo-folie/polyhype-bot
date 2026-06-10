@@ -29,7 +29,11 @@ import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import { runWeatherLockInScan } from './weatherLockIn.js';
 import { runWeatherInvalidationScan, FORECAST_INVALIDATED_KEY_PREFIX } from './weatherInvalidation.js';
-import { runWeatherDriftStrategy } from './weatherDriftStrategy.js';
+import {
+  runWeatherDriftStrategy,
+  runWeatherNowcastScan,
+  COND_ORACLE_RESULT_KEY_PREFIX,
+} from './weatherDriftStrategy.js';
 import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
 import type { ExecutionResult } from '../execution/executor.js';
@@ -2235,7 +2239,7 @@ export function isWeatherOrderPastResolution(order: PendingMakerOrder): boolean 
 
 /**
  * Revalidate unfilled resting weather maker orders against this scan's fresh
- * state. Three knob-gated cancel rules:
+ * state. Four knob-gated cancel rules:
  *
  * PRIMARY rule (`WEATHER_RESTING_REVALIDATION_ENABLED`): cancel a primary
  * whose fresh model side-FV dropped below its posted price (the bid is now
@@ -2279,6 +2283,22 @@ export function isWeatherOrderPastResolution(order: PendingMakerOrder): boolean 
  *       "cheap" from the moment it posts; the primary side starts ≤ the entry
  *       cap and only reaches the threshold on a genuine repricing.
  *
+ * CONDITIONAL ORACLE rule (`WEATHER_COND_ORACLE_RESTING_CANCEL_ENABLED`): cancel
+ * a primary resting order when the conditional oracle (computed by the drift
+ * strategy for a held position on the same market+direction in this scan cycle)
+ * estimates `P(side wins | current obs) < posted price − EXIT_COST_BUFFER`. A
+ * taker watching the intraday thermometer can fill our stale bid at above fair
+ * value; cancelling avoids the pick-off. Fires only:
+ *   - on resolution day (`opp.isResolutionDay`),
+ *   - when the cached result is settlement_aligned and not stale,
+ *   - for primary orders only (bracket legs have their own cancel rule).
+ * The cache (`weather:cond_oracle:<marketId>:<direction>`) is written by
+ * `runWeatherNowcastScan` (for position-less resting orders) and by
+ * `runWeatherDriftStrategy` (for held positions). Nowcast runs first in the
+ * scan order, then revalidation reads the cache, then drift may overwrite.
+ * A cache miss or a blob older than ~35 min means no oracle was computed this
+ * cycle for this market; the rule is skipped (fail-safe: do not cancel).
+ *
  * Shared safety properties:
  *   - Only explicit `isBracketOpposite` blobs are treated as brackets; legacy
  *     blobs without the flag (edgeMagnitude ≤ 0 heuristic) are never cancelled
@@ -2300,10 +2320,11 @@ export async function revalidateRestingWeatherOrders(
   const cfg = loadConfig();
   const primaryRuleOn = cfg.WEATHER_RESTING_REVALIDATION_ENABLED;
   const bracketRuleOn = cfg.WEATHER_BRACKET_CANCEL_ENABLED;
-  if (!primaryRuleOn && !bracketRuleOn) return;
-  // The FV and bracket rules need fresh opportunity data, so a Gamma outage
-  // (zero opportunities) disables them. The post-resolution sweep needs no
-  // Gamma data and proceeds regardless — it rides the primary-rule knob.
+  const condOracleRuleOn = cfg.WEATHER_COND_ORACLE_RESTING_CANCEL_ENABLED;
+  if (!primaryRuleOn && !bracketRuleOn && !condOracleRuleOn) return;
+  // The FV, bracket, and cond-oracle rules need fresh opportunity data, so a
+  // Gamma outage (zero opportunities) disables them. The post-resolution sweep
+  // needs no Gamma data and proceeds regardless — it rides the primary-rule knob.
   if (opportunities.length === 0 && !primaryRuleOn) return;
 
   const entries = await listPendingOrders(redis);
@@ -2317,6 +2338,7 @@ export async function revalidateRestingWeatherOrders(
   let cancelledPrimaries = 0;
   let cancelledBrackets = 0;
   let cancelledPostResolution = 0;
+  let cancelledCondOracle = 0;
   for (const { marketId, direction, order } of weatherEntries) {
     const isBracket = order.isBracketOpposite === true;
     // Legacy blobs predate the explicit bracket flag — treat edge ≤ 0 as
@@ -2386,6 +2408,47 @@ export async function revalidateRestingWeatherOrders(
         });
         if (deleted === 'cancelled') cancelledBrackets++;
       } else {
+        // CONDITIONAL ORACLE rule: cancel when drift strategy computed a fresh
+        // cond-oracle result for this market+direction this scan cycle and it
+        // shows the posted price is above P(side wins | obs) + buffer. Cache miss
+        // (no held position → no oracle computed) is a deliberate skip (fail-safe).
+        if (condOracleRuleOn && opp.isResolutionDay === true) {
+          const condKey = `${COND_ORACLE_RESULT_KEY_PREFIX}${marketId}:${direction}`;
+          const cachedRaw = await redis.get(condKey).catch((): null => null);
+          if (cachedRaw) {
+            try {
+              const cached = JSON.parse(cachedRaw) as {
+                heldProb: number;
+                isStale: boolean;
+                estimator: string;
+                confidence: string;
+                computedAt?: number;
+              };
+              const blobAgeMin = cached.computedAt
+                ? (Date.now() - cached.computedAt) / 60_000
+                : Infinity;
+              if (!cached.isStale && cached.confidence === 'settlement_aligned' && blobAgeMin <= 35) {
+                const buffer = cfg.WEATHER_COND_ORACLE_EXIT_COST_BUFFER;
+                const pickedOffRisk = order.price - cached.heldProb;
+                if (order.price > cached.heldProb + buffer) {
+                  const deleted = await cancelRestingWeatherOrder(redis, marketId, direction, order, {
+                    rule: 'cond_oracle_picked_off',
+                    conditionalHeldProb: +cached.heldProb.toFixed(4),
+                    postedPrice: +order.price.toFixed(4),
+                    pickedOffRisk: +pickedOffRisk.toFixed(4),
+                    estimator: cached.estimator,
+                  });
+                  if (deleted === 'cancelled') cancelledCondOracle++;
+                  // Always skip FV rule once oracle branch was entered — avoid double-processing.
+                  continue;
+                }
+              }
+            } catch {
+              // Malformed cache entry — skip fourth rule, fall through to FV rule.
+            }
+          }
+        }
+
         if (!primaryRuleOn) continue;
         const sideFV = direction === 'YES' ? opp.modelProbability : 1 - opp.modelProbability;
         if (!Number.isFinite(sideFV)) continue;
@@ -2407,12 +2470,13 @@ export async function revalidateRestingWeatherOrders(
     }
   }
 
-  if (cancelledPrimaries > 0 || cancelledBrackets > 0 || cancelledPostResolution > 0) {
+  if (cancelledPrimaries > 0 || cancelledBrackets > 0 || cancelledPostResolution > 0 || cancelledCondOracle > 0) {
     logger.info('[weather-revalidate] revalidation pass complete', {
       restingWeatherOrders: weatherEntries.length,
       cancelledPrimaries,
       cancelledBrackets,
       cancelledPostResolution,
+      cancelledCondOracle,
     });
   }
 }
@@ -2456,11 +2520,24 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     });
   }
 
+  // Nowcast entry scan: shadow-log conditional oracle signals on resolution-day
+  // opportunities and write the cond_oracle Redis cache for each market. Runs
+  // BEFORE revalidation so the fourth cancel rule (in revalidateRestingWeatherOrders)
+  // can read fresh oracle values for position-less resting orders this same cycle.
+  try {
+    await runWeatherNowcastScan(redis, opportunities, fetchFn);
+  } catch (err) {
+    logger.warn('[weather-nowcast] scan threw (non-fatal)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   // Revalidate unfilled resting weather maker orders against this scan's fresh
   // state — cancels primaries that turned value-negative at their own posted
   // price (forecast invalidation only covers HELD positions) and bracket legs
-  // whose hedge value is gone (res-day / primary near-certain). Best-effort: a
-  // failure here must never break the entry scan.
+  // whose hedge value is gone (res-day / primary near-certain). Reads the
+  // cond_oracle Redis cache written by nowcast above. Best-effort: a failure
+  // here must never break the entry scan.
   try {
     await revalidateRestingWeatherOrders(redis, opportunities);
   } catch (err) {
