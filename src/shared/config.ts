@@ -2225,19 +2225,26 @@ export const envSchema = z.object({
   // even when the ensemble forecast hasn't shifted (the "model right, market wrong"
   // or "model wrong throughout" case).
   //
-  // Tier 1 (exit, resolution-day only): marketDrop ≥ EXIT + model drop ≥ SEVERE_DROP.
-  // Tier 2 (notify, any day):           marketDrop ≥ NOTIFY + model-market gap ≥ DIVERGENCE.
+  // Tier 1 (exit, resolution-day only): marketDrop ≥ DROP_EXIT + model drop ≥ SEVERE_DROP.
+  // Tier 2 (notify + optional res-day exit): marketDrop ≥ DROP_NOTIFY + modelMarketGap ≥ DIVERGENCE.
   //
   // marketDrop = (entryPrice − currentHeldBid) / entryPrice
   // modelMarketGap = currentHeldProb − currentHeldBid
   //
-  // NOTE: DROP_EXIT (0.50) is intentionally LOWER than DROP_NOTIFY (0.65).
-  // Tier 1 compensates with the additional model-drop gate (≥ SEVERE_DROP), making
-  // it the stricter combined condition. Do not raise DROP_EXIT above DROP_NOTIFY —
-  // doing so creates a gap [DROP_NOTIFY, DROP_EXIT) where neither tier fires.
-  WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: z.coerce.number().min(0).max(1).optional().default(0.50),
-  WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: z.coerce.number().min(0).max(1).optional().default(0.65),
+  // DROP_EXIT must be ≤ DROP_NOTIFY to avoid a gap where neither tier fires.
+  WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: z.coerce.number().min(0).max(1).optional().default(0.20),
+  WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: z.coerce.number().min(0).max(1).optional().default(0.25),
   WEATHER_DRIFT_MARKET_DIVERGENCE_NOTIFY: z.coerce.number().min(0).max(1).optional().default(0.55),
+  // When true, Tier 2 also triggers an exit on resolution day (not just a notification).
+  // On resolution day the model cannot reprice intraday, so the market divergence signal
+  // is treated as authoritative even without model-drop confirmation.
+  WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY: boolFromEnv.optional().default(false),
+
+  // Bid velocity exit: if the held-side bid drops by more than BID_VELOCITY_THRESHOLD
+  // (relative) in a single 30-min scan cycle on resolution day, exit immediately.
+  // Catches rapid single-scan collapses that reach Tier thresholds too late.
+  WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED: boolFromEnv.optional().default(false),
+  WEATHER_DRIFT_BID_VELOCITY_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.40),
 
   // ── Weather drift Phase 5: live observation + contradiction audit ───────────
   // Master gate for fetching live intraday observations for open weather
