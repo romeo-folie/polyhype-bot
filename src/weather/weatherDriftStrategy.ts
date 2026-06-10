@@ -293,6 +293,10 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
   let scanFlipNotionalUsed = 0;
   const cityFlipNotionalUsed: Record<string, number> = {};
 
+  // Per-scan ensemble hourly memo: one GFS fetch per (city, targetDate) regardless of how
+  // many brackets for that city-date are held. Avoids N×11 identical API calls per scan.
+  const ensembleHourlyMemo = new Map<string, import('./openMeteoClient.js').EnsembleHourlyForecast | null>();
+
   for (const pos of positions) {
     try {
       const meta = parseWeatherPositionMeta(pos.sourcedFrom, pos.question);
@@ -650,18 +654,26 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         liveObs.confidence !== 'none'
       ) {
         // Fetch ensemble hourly trajectories on resolution day (or daysOut ≤ 1) only.
+        // Memo-ised per (city, targetDate) — multiple brackets for the same event share one fetch.
         let remainingHourlyMembers: number[][] | null = null;
         if (isResolutionDay || daysOut <= 1) {
           try {
-            const hourlyData = await fetchEnsembleHourly(
-              event.coords.lat,
-              event.coords.lon,
-              targetDate,
-              event.coords.unit,
-              fetchFn as import('./openMeteoClient.js').FetchFn | undefined,
-              cfg.WEATHER_MODEL_ECMWF_ENABLED,
-              cfg.WEATHER_FORECAST_RETRY_COUNT,
-            ).catch(() => null);
+            const memoKey = `${city}:${targetDate}`;
+            let hourlyData: import('./openMeteoClient.js').EnsembleHourlyForecast | null;
+            if (ensembleHourlyMemo.has(memoKey)) {
+              hourlyData = ensembleHourlyMemo.get(memoKey)!;
+            } else {
+              hourlyData = await fetchEnsembleHourly(
+                event.coords.lat,
+                event.coords.lon,
+                targetDate,
+                event.coords.unit,
+                fetchFn as import('./openMeteoClient.js').FetchFn | undefined,
+                cfg.WEATHER_MODEL_ECMWF_ENABLED,
+                cfg.WEATHER_FORECAST_RETRY_COUNT,
+              ).catch(() => null);
+              ensembleHourlyMemo.set(memoKey, hourlyData);
+            }
             if (hourlyData && liveObs?.observedAt)
               remainingHourlyMembers = sliceToRemainingHours(hourlyData, liveObs.observedAt);
           } catch {
@@ -751,9 +763,11 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       }
 
       // Compute oracle_likely_against state when soft exit is enabled.
+      // Requires settlement_aligned obs so climo-only (no live obs) can't drive an exit.
       const condOracleLikelyAgainst =
         condOracleResult != null &&
         !condOracleResult.isStale &&
+        liveObs?.confidence === 'settlement_aligned' &&
         currentHeldBid != null &&
         currentHeldBid > condOracleResult.heldProb + cfg.WEATHER_COND_ORACLE_EXIT_COST_BUFFER;
 
@@ -767,13 +781,12 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
 
       // ── Phase B: hold guard ──────────────────────────────────────────────────
       // When conditionalP - bid ≥ HOLD_GUARD_GAP with fresh settlement-aligned obs,
-      // veto bid-velocity exits (peak-relative whipsaw protection). Does NOT veto
-      // binary oracle exits, Tier 1 market_against, or Tier 2 exits.
+      // veto res-day exits driven by bid-velocity OR forecast state (thesis_weakened /
+      // modal_against). Does NOT veto binary oracle exits or market_against exits.
       let holdGuardVetoed = false;
       let holdGuardVetoReason: string | null = null;
       if (
         cfg.WEATHER_COND_ORACLE_HOLD_GUARD_ENABLED &&
-        bidVelocityTrigger &&
         isResolutionDay &&
         condOracleResult != null &&
         !condOracleResult.isStale &&
@@ -783,9 +796,15 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         const pMinusBid = condOracleResult.heldProb - currentHeldBid;
         if (pMinusBid >= cfg.WEATHER_COND_ORACLE_HOLD_GUARD_GAP) {
           holdGuardVetoed = true;
-          holdGuardVetoReason = 'bid_velocity';
-          logger.info('[weather-drift] hold guard vetoing bid-velocity exit', {
+          holdGuardVetoReason =
+            bidVelocityTrigger && (forecastState === 'thesis_weakened' || forecastState === 'modal_against')
+              ? 'bid_velocity+forecast_state'
+              : bidVelocityTrigger
+                ? 'bid_velocity'
+                : 'forecast_state';
+          logger.info('[weather-drift] hold guard vetoing exit', {
             positionId: pos.id,
+            vetoReason: holdGuardVetoReason,
             conditionalP: +condOracleResult.heldProb.toFixed(3),
             currentHeldBid: +currentHeldBid.toFixed(4),
             pMinusBid: +pMinusBid.toFixed(3),
@@ -800,7 +819,8 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       if (
         cfg.WEATHER_COND_ORACLE_ENABLED &&
         condOracleResult != null &&
-        (bidVelocityTrigger || marketAgainstTier === 2)
+        (bidVelocityTrigger || marketAgainstTier === 2 ||
+          forecastState === 'thesis_weakened' || forecastState === 'modal_against')
       ) {
         const wouldConfirm = condOracleResult.isStale
           ? null
@@ -808,10 +828,12 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             currentHeldBid > condOracleResult.heldProb + cfg.WEATHER_COND_ORACLE_EXIT_COST_BUFFER;
         // Compute wouldVeto independently of HOLD_GUARD_ENABLED so Phase A audit
         // data captures hypothetical vetoes while the guard knob is dark.
+        // Covers both bid-velocity and forecast-state exits (not oracle_impossible).
         const wouldVeto = condOracleResult.isStale
           ? null
-          : bidVelocityTrigger &&
+          : (bidVelocityTrigger || forecastState === 'thesis_weakened' || forecastState === 'modal_against') &&
             isResolutionDay &&
+            state !== 'oracle_impossible' &&
             liveObs?.confidence === 'settlement_aligned' &&
             currentHeldBid != null &&
             condOracleResult.heldProb - currentHeldBid >= cfg.WEATHER_COND_ORACLE_HOLD_GUARD_GAP;
@@ -874,10 +896,13 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             (marketAgainstTier === 1 ||
               (marketAgainstTier === 2 && isResolutionDay && cfg.WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY));
           // oracle_confirmed means our held side is the winner — never exit via drift.
+          // Hold guard may veto thesis_weakened/modal_against on res-day when fresh
+          // settlement-aligned oracle says P is still favorable (oracle_impossible is exempt).
           const forecastCanExit =
             state !== 'market_against' &&
             state !== 'oracle_confirmed' &&
-            state !== 'oracle_likely_against'; // conditional oracle has its own gate below
+            state !== 'oracle_likely_against' && // conditional oracle has its own gate below
+            !(holdGuardVetoed && state !== 'oracle_impossible');
           // oracle_impossible is permanent (daily max only rises) — exit any day, not just res-day.
           const oracleImpossibleCanExit = state === 'oracle_impossible';
           // Bid velocity: rapid single-scan collapse on resolution day bypasses Tier logic.
@@ -1297,6 +1322,10 @@ export async function runWeatherNowcastScan(
 
   const climoTable = getClimoTable();
 
+  // Memo-ised ensemble hourly per (city, targetDate) — multiple brackets for the same
+  // event would otherwise each trigger an identical GFS fetch.
+  const ensembleHourlyMemo = new Map<string, import('./openMeteoClient.js').EnsembleHourlyForecast | null>();
+
   for (const opp of resDayOpps) {
     try {
       const cityCoords = lookupCity(opp.city);
@@ -1315,10 +1344,17 @@ export async function runWeatherNowcastScan(
 
       if (!liveObs || liveObs.observedMax == null || liveObs.observedAt == null || liveObs.confidence === 'none') continue;
 
-      const ensembleHourly = await fetchEnsembleHourly(
-        cityCoords.lat, cityCoords.lon, opp.targetDate, opp.unit, fetchFn,
-        cfg.WEATHER_MODEL_ECMWF_ENABLED, cfg.WEATHER_FORECAST_RETRY_COUNT,
-      ).catch((): null => null);
+      const nowcastMemoKey = `${opp.city}:${opp.targetDate}`;
+      let ensembleHourly: import('./openMeteoClient.js').EnsembleHourlyForecast | null;
+      if (ensembleHourlyMemo.has(nowcastMemoKey)) {
+        ensembleHourly = ensembleHourlyMemo.get(nowcastMemoKey)!;
+      } else {
+        ensembleHourly = await fetchEnsembleHourly(
+          cityCoords.lat, cityCoords.lon, opp.targetDate, opp.unit, fetchFn,
+          cfg.WEATHER_MODEL_ECMWF_ENABLED, cfg.WEATHER_FORECAST_RETRY_COUNT,
+        ).catch((): null => null);
+        ensembleHourlyMemo.set(nowcastMemoKey, ensembleHourly);
+      }
 
       const bias = await getCityBias(redis, opp.city).catch((): null => null);
 
