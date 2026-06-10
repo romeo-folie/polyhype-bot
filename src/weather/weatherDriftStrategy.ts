@@ -48,6 +48,14 @@ import {
 } from './weatherThesis.js';
 import type { OpenWeatherPosition, WeatherThesisResult } from './weatherThesis.js';
 import { tryWeatherExit } from './weatherExit.js';
+import {
+  fetchLiveObservation,
+  classifyOracleState,
+  classifyContradiction,
+} from './liveObservation.js';
+import type { ContradictionClass } from './liveObservation.js';
+import { classifyFlipCandidate, tryWeatherFlip } from './weatherFlip.js';
+import type { FlipCandidateClass } from './weatherFlip.js';
 
 // ── Drift state types ────────────────────────────────────────────────────────
 
@@ -99,6 +107,14 @@ export interface WeatherDriftDecision {
   invalidated: boolean;
   invalidationReason: string | null;
   forecastSource: string;
+  // Phase 5: live observation
+  observedMax: number | null;
+  observedSource: string | null;
+  liveObsConfidence: string | null;
+  oracleState: 'oracle_impossible' | 'oracle_confirmed' | null;
+  contradictionClass: ContradictionClass | null;
+  // Phase 6: flip
+  flipCandidateClass: FlipCandidateClass | null;
 }
 
 // ── State classification ─────────────────────────────────────────────────────
@@ -204,6 +220,10 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
     .filter((e): e is NonNullable<typeof e> => e !== null);
 
   const decisions: WeatherDriftDecision[] = [];
+
+  // Phase 6: per-scan and per-city notional caps for flip buys.
+  let scanFlipNotionalUsed = 0;
+  const cityFlipNotionalUsed: Record<string, number> = {};
 
   for (const pos of positions) {
     try {
@@ -327,19 +347,25 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       // The market object is also kept so its outcomePrices can serve as a fallback
       // bid price when the CLOB book has no resting bids (common for crashed positions).
       let heldTokenId: string | null = null;
+      let oppositeTokenId: string | null = null;
       let gammaBidFallback: number | null = null;
+      let gammaOppositeAsk: number | null = null;
       try {
         const market = await getMarket(pos.marketId);
         const tokenIds = parseClobTokenIds(market.clobTokenIds);
         heldTokenId = (pos.direction === 'YES' ? tokenIds[0] : tokenIds[1]) ?? null;
+        oppositeTokenId = (pos.direction === 'YES' ? tokenIds[1] : tokenIds[0]) ?? null;
         // Parse Gamma's market-implied price for the held side. Index 0 = YES, 1 = NO.
         const prices = parseOutcomePrices(market.outcomePrices);
         const rawPrice = pos.direction === 'YES' ? prices[0] : prices[1];
+        const rawOppositePrice = pos.direction === 'YES' ? prices[1] : prices[0];
         const parsed = rawPrice != null ? parseFloat(rawPrice) : NaN;
+        const parsedOpp = rawOppositePrice != null ? parseFloat(rawOppositePrice) : NaN;
         // `parsed > 0` intentionally skips resolved markets: Gamma returns "0"
         // for the losing side once the market settles. Those are handled by the
         // reconciler, not the drift scanner.
         if (isFinite(parsed) && parsed > 0) gammaBidFallback = parsed;
+        if (isFinite(parsedOpp) && parsedOpp > 0) gammaOppositeAsk = parsedOpp;
       } catch (err) {
         logger.warn('[weather-drift] market fetch failed — market-adverse check and exit skipped', {
           positionId: pos.id,
@@ -396,10 +422,126 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         }
       }
 
-      // Final state: market_against overrides the forecast-derived state when the
-      // market signal is clear. forecastState is kept for forecast-specific gates
-      // (e.g. cancel_resting requires modal_against from the forecast, not market).
-      const state: WeatherDriftState = marketAgainstTier != null ? 'market_against' : forecastState;
+      // ── Phase 5: live observation + oracle state ─────────────────────────────
+      // Fetch intraday observed max for the city. Written as a shadow row even
+      // when WEATHER_DRIFT_LIVE_OBS_ENABLED=false so data accumulates from day one.
+      let liveObs: Awaited<ReturnType<typeof fetchLiveObservation>> | null = null;
+      let oracleState: 'oracle_impossible' | 'oracle_confirmed' | null = null;
+
+      const liveObsEnabled = cfg.WEATHER_DRIFT_LIVE_OBS_ENABLED;
+      const shouldFetchObs =
+        cfg.WEATHER_DRIFT_WU_LIVE_ENABLED ||
+        cfg.WEATHER_DRIFT_METAR_LIVE_ENABLED ||
+        cfg.WEATHER_DRIFT_HKO_LIVE_ENABLED;
+
+      if (shouldFetchObs) {
+        liveObs = await fetchLiveObservation(city, targetDate, redis, {
+          wuEnabled: cfg.WEATHER_DRIFT_WU_LIVE_ENABLED,
+          metarEnabled: cfg.WEATHER_DRIFT_METAR_LIVE_ENABLED,
+          hkoEnabled: cfg.WEATHER_DRIFT_HKO_LIVE_ENABLED,
+          maxAgeMin: cfg.WEATHER_DRIFT_LIVE_OBS_MAX_AGE_MIN,
+          ...(fetchFn != null && { fetchFn: fetchFn as typeof fetch }),
+        }).catch((err: unknown) => {
+          logger.warn('[weather-drift] live observation fetch failed', {
+            positionId: pos.id,
+            city,
+            targetDate,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return null;
+        });
+
+        if (liveObs?.observedMax != null) {
+          oracleState = classifyOracleState(
+            liveObs.observedMax,
+            pos.direction,
+            { low: bracket.low, high: bracket.high },
+          );
+
+          // Shadow-log the live observation for every position with a viable source.
+          void enqueueWrite('shadow_observations', {
+            kind: 'weather_live_observation',
+            source: 'arb',
+            marketId: pos.marketId,
+            direction: pos.direction,
+            wouldBlock: false,
+            metricValue: liveObs.observedMax,
+            payload: {
+              positionId: pos.id,
+              city,
+              targetDate,
+              bracketLabel,
+              bracketLow: bracket.low,
+              bracketHigh: bracket.high,
+              direction: pos.direction,
+              observedMax: liveObs.observedMax,
+              source: liveObs.source,
+              confidence: liveObs.confidence,
+              observedAt: liveObs.observedAt,
+              oracleState,
+              isResolutionDay,
+              liveObsEnabled,
+            },
+          });
+        }
+      }
+
+      // ── Phase 5: market/oracle contradiction classifier ───────────────────────
+      // Computes the relationship between forecast model, live oracle, and market price.
+      // Shadow-logged when WEATHER_DRIFT_CONTRADICTION_AUDIT_ENABLED.
+      const contradictionClass = cfg.WEATHER_DRIFT_CONTRADICTION_AUDIT_ENABLED
+        ? classifyContradiction({
+            currentHeldBid,
+            entryPrice: pos.entryPrice,
+            currentHeldProb: result.currentHeldProb,
+            oracleState: liveObsEnabled ? oracleState : null,
+            oracleConfidence: liveObsEnabled ? (liveObs?.confidence ?? 'none') : 'none',
+            forecastState: forecastState as 'stable' | 'watch' | 'thesis_weakened' | 'modal_against',
+            marketDeadBid: cfg.WEATHER_DRIFT_MARKET_DEAD_BID,
+            contradictionMinModelMarketGap: cfg.WEATHER_DRIFT_CONTRADICTION_MIN_MODEL_MARKET_GAP,
+          })
+        : null;
+
+      if (contradictionClass != null) {
+        void enqueueWrite('shadow_observations', {
+          kind: 'weather_market_oracle_contradiction',
+          source: 'arb',
+          marketId: pos.marketId,
+          direction: pos.direction,
+          wouldBlock: false,
+          metricValue: currentHeldBid,
+          payload: {
+            positionId: pos.id,
+            city,
+            targetDate,
+            bracketLabel,
+            direction: pos.direction,
+            contradictionClass,
+            currentHeldBid,
+            bidSource,
+            currentHeldProb: result.currentHeldProb,
+            correctedForecastHigh: result.correctedForecastHigh,
+            roundedForecast: result.roundedForecast,
+            forecastState,
+            marketDrop: currentHeldBid != null ? marketDrop : null,
+            modelMarketGap: currentHeldBid != null ? modelMarketGap : null,
+            marketAgainstTier,
+            observedMax: liveObs?.observedMax ?? null,
+            liveObsSource: liveObs?.source ?? 'none',
+            liveObsConfidence: liveObs?.confidence ?? 'none',
+            oracleState,
+            requiresOracleAudit: contradictionClass === 'market_contradicts_model',
+          },
+        });
+      }
+
+      // Final state: oracle states take priority over market_against which takes
+      // priority over forecast-derived state. forecastState is kept separately for
+      // forecast-specific gates (cancel_resting, etc.).
+      const resolvedOracleState =
+        liveObsEnabled && oracleState != null ? oracleState : null;
+      const state: WeatherDriftState =
+        resolvedOracleState ?? (marketAgainstTier != null ? 'market_against' : forecastState);
 
       // ── Phase 3+4: live actions ──────────────────────────────────────────────
       // isActionable: stricter gate for high-impact actions (exit/cancel/notify).
@@ -416,7 +558,12 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         (forecastState === 'modal_against' &&
           result.modalStreak >= cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS) ||
         (forecastState === 'thesis_weakened' && result.drop >= cfg.WEATHER_DRIFT_SEVERE_DROP) ||
-        state === 'market_against';
+        state === 'market_against' ||
+        // Oracle states always alert — the settlement outcome may be decided even on
+        // non-resolution days (max only increases). Notification fires regardless of
+        // whether exit is gated to resolution day.
+        state === 'oracle_impossible' ||
+        state === 'oracle_confirmed';
       const isBlockable =
         forecastState === 'thesis_weakened' || forecastState === 'modal_against' || state === 'market_against';
       const wouldBlock = isBlockable && !cfg.WEATHER_DRIFT_ENABLED;
@@ -439,7 +586,8 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           // market_against: only Tier 1 (both market and model moved) triggers exit.
           // Tier 2 (model stuck, divergence only) is notify-only.
           const marketAgainstCanExit = state === 'market_against' && marketAgainstTier === 1;
-          const forecastCanExit = state !== 'market_against';
+          // oracle_confirmed means our held side is the winner — never exit it via drift.
+          const forecastCanExit = state !== 'market_against' && state !== 'oracle_confirmed';
           if (cfg.WEATHER_DRIFT_EXIT_ENABLED && isResolutionDay && (forecastCanExit || marketAgainstCanExit)) {
             if (heldTokenId) {
               // tryWeatherExit fetches the book again for an accurate exit price.
@@ -533,8 +681,90 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         if (action === 'none') action = 'block_size_up';
       }
 
-      // 4. Notify fallback + notification fire (actionable positions only).
-      // Runs after block_size_up so the notification shows the final action.
+      // 4. Phase 6: flip candidate classification + optional execution.
+      // Classify unconditionally (even when block_size_up fired) so that:
+      //  a. Shadow rows always capture flip candidate data.
+      //  b. oracle_impossible positions that are ALSO thesis_weakened (isBlockable) are
+      //     not silently skipped — block_size_up has no bearing on whether a flip is valid.
+      // Execution is gated to action === 'none' | 'block_size_up': we don't flip after
+      // an exit (position already sold) or after a cancel_resting (still re-evaluating).
+      const flipCandidateClass: FlipCandidateClass | null = classifyFlipCandidate({
+        state,
+        oracleState: resolvedOracleState,
+        oracleConfidence: liveObs?.confidence ?? 'none',
+        contradictionClass,
+        marketAgainstTier,
+        currentHeldBid,
+        marketDeadBid: cfg.WEATHER_DRIFT_MARKET_DEAD_BID,
+        currentHeldProb: result.currentHeldProb,
+        modalStreak: result.modalStreak,
+        // Use the exact-bracket exit min runs as the flip confirmation threshold.
+        modalMinRunsForFlip: cfg.WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS ?? 2,
+      });
+
+      if (
+        flipCandidateClass != null &&
+        (action === 'none' || action === 'block_size_up') &&
+        cfg.WEATHER_DRIFT_ENABLED &&
+        cfg.WEATHER_DRIFT_FLIP_ENABLED &&
+        heldTokenId &&
+        oppositeTokenId
+      ) {
+        const oppositeDirection = pos.direction === 'YES' ? 'NO' : 'YES';
+        // confirmed_flip: the oracle has settlement-proven the opposite side wins.
+        // The forecast model may still believe the held side is ~0.99 likely, which
+        // would yield ~0.01 fair value for the opposite and fail the edge gate.
+        // Use 1.0 for oracle-confirmed cases; model-derived value for others.
+        const oppositeModelFairValue =
+          flipCandidateClass === 'confirmed_flip'
+            ? 1.0
+            : Math.max(0, 1 - result.currentHeldProb);
+
+        const cityFlipUsed = cityFlipNotionalUsed[city] ?? 0;
+        const remainingCityNotional = cfg.WEATHER_DRIFT_FLIP_MAX_CITY_NOTIONAL - cityFlipUsed;
+        const remainingScanNotional = cfg.WEATHER_DRIFT_FLIP_MAX_SCAN_NOTIONAL - scanFlipNotionalUsed;
+
+        const flipResult = await tryWeatherFlip({
+          redis,
+          pos,
+          city,
+          targetDate,
+          bracketLabel,
+          heldTokenId,
+          oppositeTokenId,
+          oppositeDirection,
+          currentHeldProb: result.currentHeldProb,
+          oppositeModelFairValue,
+          flipCandidateClass,
+          isResolutionDay,
+          confirmedOnly: cfg.WEATHER_DRIFT_FLIP_CONFIRMED_ONLY,
+          minEdgeBps: cfg.WEATHER_DRIFT_FLIP_MIN_EDGE_BPS,
+          maxOppositePrice: cfg.WEATHER_DRIFT_FLIP_MAX_OPPOSITE_PRICE,
+          remainingScanNotional,
+          remainingCityNotional,
+          exitCooldownKey: `${DRIFT_EXIT_COOLDOWN_KEY_PREFIX}${pos.id}`,
+          exitCooldownS: cfg.WEATHER_DRIFT_EXIT_COOLDOWN_S,
+          exitedKey: `${EXITED_KEY_PREFIX}${pos.id}`,
+          exitedTtlS: EXITED_TTL_S,
+          flipCooldownS: cfg.WEATHER_DRIFT_EXIT_COOLDOWN_S,
+          extraContext: { driftState: state, oracleState: resolvedOracleState, contradictionClass, bidSource },
+        }).catch((err: unknown) => {
+          logger.warn('[weather-drift] flip error', {
+            positionId: pos.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return { executed: false, amountUsd: 0, reason: 'unexpected_error' } as const;
+        });
+
+        if (flipResult.executed) {
+          action = 'flip';
+          scanFlipNotionalUsed += flipResult.amountUsd;
+          cityFlipNotionalUsed[city] = (cityFlipNotionalUsed[city] ?? 0) + flipResult.amountUsd;
+        }
+      }
+
+      // 5. Notify fallback + notification fire (actionable positions only).
+      // Runs after block_size_up and flip so the notification shows the final action.
       if (isActionable && cfg.WEATHER_DRIFT_ENABLED && action === 'none') action = 'notify';
       if (shouldNotify) {
         await notifyWeatherDrift({
@@ -590,6 +820,12 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         invalidated: result.invalidated,
         invalidationReason: result.invalidationReason,
         forecastSource: forecast.source,
+        observedMax: liveObs?.observedMax ?? null,
+        observedSource: liveObs?.source ?? null,
+        liveObsConfidence: liveObs?.confidence ?? null,
+        oracleState: resolvedOracleState,
+        contradictionClass,
+        flipCandidateClass,
       };
 
       decisions.push(decision);
@@ -667,6 +903,12 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           marketDrop: currentHeldBid != null ? marketDrop : null,
           modelMarketGap: currentHeldBid != null ? modelMarketGap : null,
           marketAgainstTier,
+          observedMax: liveObs?.observedMax ?? null,
+          observedSource: liveObs?.source ?? null,
+          liveObsConfidence: liveObs?.confidence ?? null,
+          oracleState: resolvedOracleState,
+          contradictionClass,
+          flipCandidateClass,
         },
       });
     } catch (err) {

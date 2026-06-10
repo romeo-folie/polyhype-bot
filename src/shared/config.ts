@@ -2179,6 +2179,12 @@ export const envSchema = z.object({
   // within this many degrees of a rounding threshold — catches positions on the
   // verge of modal inversion before it happens.
   WEATHER_DRIFT_EXACT_BOUNDARY_BUFFER: z.coerce.number().min(0).max(2).optional().default(0.35),
+  // Number of consecutive modal-against scans required before classifying a
+  // position as actionable for cancellation/notification (modal_against gate).
+  WEATHER_DRIFT_EXACT_MODAL_MIN_RUNS: z.coerce.number().int().min(1).optional().default(1),
+  // Number of consecutive modal-against scans required before considering exit
+  // or flip for exact-bracket positions (stricter than notification gate).
+  WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS: z.coerce.number().int().min(1).optional().default(2),
 
   // ── Weather drift live actions (Phase 3+4) ──────────────────────────────
   // Master live gate. Shadow logging (WEATHER_DRIFT_SHADOW_ENABLED) is
@@ -2232,6 +2238,46 @@ export const envSchema = z.object({
   WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: z.coerce.number().min(0).max(1).optional().default(0.50),
   WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: z.coerce.number().min(0).max(1).optional().default(0.65),
   WEATHER_DRIFT_MARKET_DIVERGENCE_NOTIFY: z.coerce.number().min(0).max(1).optional().default(0.55),
+
+  // ── Weather drift Phase 5: live observation + contradiction audit ───────────
+  // Master gate for fetching live intraday observations for open weather
+  // positions. Shadow rows are always written when a fetch succeeds; live oracle
+  // state transitions (oracle_impossible / oracle_confirmed) also require
+  // WEATHER_DRIFT_ENABLED.
+  WEATHER_DRIFT_LIVE_OBS_ENABLED: boolFromEnv.optional().default(false),
+  // Per-source live observation enable flags. All three require
+  // WEATHER_DRIFT_LIVE_OBS_ENABLED to be true.
+  WEATHER_DRIFT_WU_LIVE_ENABLED: boolFromEnv.optional().default(false),
+  WEATHER_DRIFT_METAR_LIVE_ENABLED: boolFromEnv.optional().default(false),
+  WEATHER_DRIFT_HKO_LIVE_ENABLED: boolFromEnv.optional().default(false),
+  // Maximum age (minutes) of a cached live observation before re-fetching.
+  WEATHER_DRIFT_LIVE_OBS_MAX_AGE_MIN: z.coerce.number().int().min(1).optional().default(30),
+  // Enable market/oracle contradiction audit rows. Shadow-only; no live action.
+  WEATHER_DRIFT_CONTRADICTION_AUDIT_ENABLED: boolFromEnv.optional().default(true),
+  // Minimum model-market gap for a market_contradicts_model row.
+  // currentHeldProb − currentHeldBid must exceed this to qualify.
+  WEATHER_DRIFT_CONTRADICTION_MIN_MODEL_MARKET_GAP: z.coerce.number().min(0).max(1).optional().default(0.55),
+  // Held-side bid at or below which the position is treated as effectively dead
+  // for contradiction and flip classification. Below this, currentHeldBid ≈ 0.
+  WEATHER_DRIFT_MARKET_DEAD_BID: z.coerce.number().min(0).max(1).optional().default(0.05),
+
+  // ── Weather drift Phase 6: flip strategy ─────────────────────────────────
+  // Enable live flip execution (exit held side + taker buy opposite). Ships dark.
+  // Requires WEATHER_DRIFT_ENABLED. Only confirmed_flip and (when
+  // WEATHER_DRIFT_FLIP_CONFIRMED_ONLY=false) market_oracle_flip are eligible.
+  // audit_only and forecast_flip never auto-execute.
+  WEATHER_DRIFT_FLIP_ENABLED: boolFromEnv.optional().default(false),
+  // When true, only confirmed_flip (live oracle proves winner/loser) is eligible.
+  // When false, market_oracle_flip is also eligible. Default true for safety.
+  WEATHER_DRIFT_FLIP_CONFIRMED_ONLY: boolFromEnv.optional().default(true),
+  // Minimum edge (basis points) required: oppositeModelFairValue − oppositeAsk ≥ bps/10000.
+  WEATHER_DRIFT_FLIP_MIN_EDGE_BPS: z.coerce.number().int().min(0).optional().default(500),
+  // Maximum ask price for the opposite side to consider a flip buy.
+  WEATHER_DRIFT_FLIP_MAX_OPPOSITE_PRICE: z.coerce.number().min(0).max(1).optional().default(0.95),
+  // Maximum total notional (USD) of flip buys for a single city in one scan cycle.
+  WEATHER_DRIFT_FLIP_MAX_CITY_NOTIONAL: z.coerce.number().min(0).optional().default(25),
+  // Maximum total notional (USD) across all flip buys in one scan cycle.
+  WEATHER_DRIFT_FLIP_MAX_SCAN_NOTIONAL: z.coerce.number().min(0).optional().default(50),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

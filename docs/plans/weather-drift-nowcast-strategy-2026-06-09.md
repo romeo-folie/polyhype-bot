@@ -407,12 +407,17 @@ WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO=0.90
 WEATHER_DRIFT_EXIT_COOLDOWN_S=1800
 ```
 
-### Phase 5: Intraday Live Observation (All Cities)
+### Phase 5: Intraday Live Observation + Market Contradiction Audit (All Cities)
 
 Add live observation clients for all settlement oracles. Each city's `CityCoordinates.resolutionSource`
 determines which client to call (`'wu'` → WU intraday, `'metar'` → METAR hourly stream,
 `'hko'` → HKO live observations). HKO was the city that first motivated this phase, but the
 implementation must cover all cities from the start.
+
+This phase should build on the existing adverse-drift work, not duplicate it. `weatherDriftStrategy`
+already writes `weather_drift_decision` rows and classifies `market_against` when the held-side bid
+has moved sharply against the position. Phase 5 adds settlement-aligned live observation data and
+uses it to explain or challenge that adverse market signal.
 
 **Scope**:
 
@@ -421,6 +426,9 @@ implementation must cover all cities from the start.
   that need exit/cancel decisions. Exclusion only blocks new entries.
 - A city whose oracle has no viable live endpoint gets `confidence: 'none'` and is treated like a
   pre-resolution day (forecast-only drift, no oracle state transitions).
+- Store live observed state in Redis and `shadow_observations` so it can be joined to
+  `weather_drift_decision`, `weather_forecast_invalidation`, `weather_lock_in`, and
+  `weather_near_resolution` rows during postmortems.
 
 **Per-oracle implementation notes**:
 
@@ -436,23 +444,95 @@ implementation must cover all cities from the start.
 All three must satisfy the source requirements described in the
 [Intraday Observed Max / Nowcast Layer](#intraday-observed-max--nowcast-layer) section above.
 
+Add a market/oracle contradiction classifier that runs after live observed state and the existing
+market-adverse drift check are available:
+
+- `market_confirms_oracle`: market price has moved against us and live observed max / nowcast also
+  implies the held side is impaired.
+- `market_contradicts_model`: market price has moved against us, but forecast-derived held
+  probability remains high and live observed max does not yet explain the move.
+- `oracle_contradicts_market`: live observed max implies our side is impaired, but the market has not
+  repriced yet.
+- `model_only`: forecast/modal drift exists without market or live-observation confirmation.
+
+The Istanbul 23C June 9 position is the motivating case for `market_contradicts_model`: the model
+still assigned the held `NO` side roughly 99% probability while the held-side market price was near
+zero. That must produce a high-priority audit row even when the forecast itself still supports the
+position.
+
+Recommended shadow row:
+
+```json
+{
+  "city": "istanbul",
+  "targetDate": "2026-06-09",
+  "bracketLabel": "23°C",
+  "direction": "NO",
+  "state": "market_contradicts_model",
+  "liveObservedMax": 23.0,
+  "liveObservedMaxSource": "wu-live",
+  "liveObservedMaxConfidence": "station",
+  "currentHeldBid": 0.002,
+  "oppositeAsk": 0.998,
+  "currentHeldProb": 0.991,
+  "correctedForecastHigh": 26.2,
+  "roundedForecast": 26,
+  "marketAgainstTier": 2,
+  "requiresOracleAudit": true
+}
+```
+
 Once implemented:
 
 - Confirm impossible exact/low-tail YES positions as soon as observed max exceeds their bracket.
 - Confirm high-tail YES positions as soon as observed max reaches the tail.
 - Block/cancel opposite stale orders immediately.
+- Emit `weather_live_observation` rows for every open weather position that has a viable live source.
+- Emit `weather_market_oracle_contradiction` rows whenever market price, forecast model, and live
+  observed state disagree materially.
+- Escalate `market_against` Tier 2 from "notify-only" to "audit-required" when the held-side bid is
+  near zero and the model still shows high confidence. This does not automatically exit, but it must
+  be visible and queryable as a distinct risk state.
 - Shadow-log potential buys of confirmed winners, but only enable live buying after separate review.
 
 ### Phase 6: Flip Strategy
 
-Only after shadow review, consider flipping:
+Only after shadow review, consider flipping. The flip engine should consume the Phase 3-5 state
+machine rather than creating new drift logic. Inputs should include:
+
+- `weather_drift_decision.state`, especially `modal_against`, `thesis_weakened`, and
+  `market_against`.
+- `marketAgainstTier`, `currentHeldBid`, `marketDrop`, `modelMarketGap`, and `bidSource`.
+- Phase 5 live observed max state and contradiction state.
+- Existing `weather_forecast_invalidated:<marketId>:<direction>` markers.
+- Existing hedge/lock-in markers so the system does not double-buy the opposite side.
+
+Flip candidates should be classified before execution:
+
+- `confirmed_flip`: live observed max proves the opposite side is the winner or makes our held side
+  impossible under the settlement rules.
+- `market_oracle_flip`: market has repriced against us and live oracle/nowcast explains the move.
+- `forecast_flip`: modal/forecast state has persisted against us, but the live oracle has not yet
+  confirmed the move.
+- `audit_only`: market price is near zero while forecast/live oracle do not explain it. Do not buy
+  the opposite side automatically here; this is an oracle-mapping or market-data contradiction until
+  resolved.
+
+Execution rules:
 
 - Exit current side if bid/depth clear.
 - Buy opposite side only if:
+  - candidate class is `confirmed_flip` or `market_oracle_flip`,
   - opposite fair value exceeds ask by minimum edge,
-  - forecast/modal state supports the opposite side for consecutive scans,
+  - forecast/modal state supports the opposite side for consecutive scans **or** live observed max
+    has already made the outcome settlement-clear,
   - spread and fees leave positive expected value,
   - per-city and per-scan exposure caps allow it.
+- Never auto-flip on `market_contradicts_model` / `audit_only` alone. The correct response may be an
+  oracle-source fix, not a trade.
+- If the held side is already effectively dead (`currentHeldBid <= WEATHER_DRIFT_MARKET_DEAD_BID`)
+  and the opposite ask is near 1.00, do not chase unless the live oracle proves the winner and the
+  expected settlement/redeem economics still clear fees and capital lockup.
 
 Proposed default: do not enable automatic flips until the shadow cohort shows clear positive EV.
 
@@ -481,6 +561,11 @@ WEATHER_DRIFT_EXIT_MAX_SLIPPAGE=0.15
 WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO=0.90
 WEATHER_DRIFT_EXIT_COOLDOWN_S=1800
 
+WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT=0.50
+WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY=0.65
+WEATHER_DRIFT_MARKET_DIVERGENCE_NOTIFY=0.55
+WEATHER_DRIFT_MARKET_DEAD_BID=0.05
+
 WEATHER_DRIFT_HEDGE_ENABLED=false
 WEATHER_DRIFT_MAX_HEDGE_PRICE=0.20
 WEATHER_DRIFT_MAX_TOTAL_COST=1.05
@@ -491,6 +576,15 @@ WEATHER_DRIFT_WU_LIVE_ENABLED=false
 WEATHER_DRIFT_METAR_LIVE_ENABLED=false
 WEATHER_DRIFT_HKO_LIVE_ENABLED=false
 WEATHER_DRIFT_LIVE_OBS_MAX_AGE_MIN=30
+WEATHER_DRIFT_CONTRADICTION_AUDIT_ENABLED=true
+WEATHER_DRIFT_CONTRADICTION_MIN_MODEL_MARKET_GAP=0.55
+
+WEATHER_DRIFT_FLIP_ENABLED=false
+WEATHER_DRIFT_FLIP_CONFIRMED_ONLY=true
+WEATHER_DRIFT_FLIP_MIN_EDGE_BPS=500
+WEATHER_DRIFT_FLIP_MAX_OPPOSITE_PRICE=0.95
+WEATHER_DRIFT_FLIP_MAX_CITY_NOTIONAL=25
+WEATHER_DRIFT_FLIP_MAX_SCAN_NOTIONAL=50
 ```
 
 Use conservative defaults:
@@ -515,6 +609,8 @@ Use conservative defaults:
 - More consistent stake-to-confidence behavior through the full position lifecycle, not just entry.
 - Better separation of forecast risk from settlement-oracle risk.
 - Better postmortems because every open position has a time series of thesis states.
+- Faster detection of model/market contradictions where adverse price action is not explained by
+  the forecast model.
 
 ### Long-Term
 
@@ -541,6 +637,10 @@ Write enough data into `shadow_observations` to compute:
 - PnL of stale resting maker fills that revalidation would have cancelled.
 - False-positive rate: drift exits that would have recovered to win.
 - False-negative rate: held positions that went from stable/watch to losing resolution.
+- Count and PnL of `market_against` Tier 2 positions split by contradiction class.
+- PnL of positions where `currentHeldBid <= WEATHER_DRIFT_MARKET_DEAD_BID` while model held
+  probability stayed above 0.80.
+- Time from first market-implied impairment to oracle/live-observation confirmation.
 
 Minimum dashboard slices:
 
@@ -558,6 +658,14 @@ FROM shadow_observations
 WHERE kind = 'weather_drift_decision'
   AND payload->>'action' IN ('exit', 'hedge', 'flip')
 ORDER BY observed_at DESC;
+
+-- Market/model contradictions
+SELECT observed_at, market_id, payload->>'city', payload->>'bracketLabel',
+       payload->>'state', payload->>'currentHeldBid', payload->>'currentHeldProb',
+       payload->>'correctedForecastHigh', payload->>'roundedForecast'
+FROM shadow_observations
+WHERE kind = 'weather_market_oracle_contradiction'
+ORDER BY observed_at DESC;
 ```
 
 ## Tests
@@ -574,6 +682,11 @@ Add `src/weather/__tests__/weatherDriftStrategy.test.ts`:
 - Blocks size-up only when configured.
 - Does not exit when bid depth is insufficient.
 - Does not hedge when cost ceiling fails.
+- Classifies market/model contradiction when held bid is near zero but forecast held probability is
+  still high.
+- Does not auto-flip on contradiction-only / audit-only cases.
+- Allows confirmed flip only when live observed max makes the opposite side settlement-clear or
+  market repricing is explained by live oracle state.
 
 Update existing tests:
 
