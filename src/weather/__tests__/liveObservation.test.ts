@@ -393,6 +393,38 @@ describe('fetchHkoIntradayHigh', () => {
     // recordTime 2026-06-09T14:00:00+08:00 = 2026-06-09T06:00:00Z
     expect(result.observedAt).toContain('2026-06-09');
   });
+
+  it('does NOT update Redis when recordTime belongs to a different HKT calendar day', async () => {
+    // Scenario: position targetDate is June 9 but rhrread has already rolled to June 10 HKT
+    // (e.g. 00:30 HKT June 10 = 16:30 UTC June 9). Must not contaminate June 9 accumulator.
+    const nextDayPayload = {
+      temperature: {
+        recordTime: '2026-06-10T00:30:00+08:00', // June 10 HKT
+        data: [{ place: 'Hong Kong Observatory', value: 28.0, unit: 'C' }],
+      },
+    };
+    const store = new Map([['weather:hko_intraday_max:2026-06-09', '31.5']]);
+    const redis = makeRedis(store);
+    const fetchFn = makeMockFetch(nextDayPayload);
+    await fetchHkoIntradayHigh(TARGET_DATE, redis as any, fetchFn);
+    // Redis key for June 9 must remain unchanged
+    expect(store.get('weather:hko_intraday_max:2026-06-09')).toBe('31.5');
+  });
+
+  it('does NOT update Redis when recordTime is absent', async () => {
+    const noRecordTime = {
+      temperature: {
+        data: [{ place: 'Hong Kong Observatory', value: 35.0, unit: 'C' }],
+        // recordTime intentionally omitted
+      },
+    };
+    const store = new Map([['weather:hko_intraday_max:2026-06-09', '31.5']]);
+    const redis = makeRedis(store);
+    const fetchFn = makeMockFetch(noRecordTime);
+    await fetchHkoIntradayHigh(TARGET_DATE, redis as any, fetchFn);
+    // Without recordTime we cannot verify the date; leave accumulator untouched
+    expect(store.get('weather:hko_intraday_max:2026-06-09')).toBe('31.5');
+  });
 });
 
 // ── 5. fetchLiveObservation routing ──────────────────────────────────────────

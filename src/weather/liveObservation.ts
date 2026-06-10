@@ -243,12 +243,28 @@ export async function fetchHkoIntradayHigh(
         (d) => d.place === HKO_STATION_NAME,
       );
       if (station && typeof station.value === 'number' && isFinite(station.value)) {
-        currentReading = station.value;
-        // recordTime is in local HKT (UTC+8); convert to UTC ISO8601.
         const recordTime = payload.temperature?.recordTime ?? null;
-        observedAt = recordTime
-          ? new Date(recordTime).toISOString()
-          : new Date().toISOString();
+        if (recordTime) {
+          // Verify the observation belongs to targetDate in HKT (UTC+8).
+          // rhrread is a "current reading" endpoint — around/after HKT midnight
+          // it returns the next calendar day's reading before positions roll over,
+          // which would contaminate the targetDate accumulator with wrong-day data.
+          const hktDate = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Hong_Kong',
+            year: 'numeric', month: '2-digit', day: '2-digit',
+          }).format(new Date(recordTime));
+          if (hktDate === targetDate) {
+            currentReading = station.value;
+            observedAt = new Date(recordTime).toISOString();
+          } else {
+            logger.debug('[weather-live-obs] HKO observation date mismatch — skipping update', {
+              targetDate, observationDate: hktDate, recordTime,
+            });
+          }
+        } else {
+          // No recordTime — cannot verify calendar date; skip to avoid cross-date contamination.
+          logger.debug('[weather-live-obs] HKO rhrread: no recordTime — skipping update', { targetDate });
+        }
       }
     } catch {
       logger.warn('[weather-live-obs] HKO rhrread JSON parse failed', { targetDate });

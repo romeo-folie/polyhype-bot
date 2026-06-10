@@ -711,10 +711,14 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         oppositeTokenId
       ) {
         const oppositeDirection = pos.direction === 'YES' ? 'NO' : 'YES';
-        // Use 1 - currentHeldProb as a naive opposite-side fair value when no
-        // better estimate is available. For confirmed_flip, the oracle makes this
-        // moot (the opposite side is ~certain), but the edge gate must still clear.
-        const oppositeModelFairValue = Math.max(0, 1 - result.currentHeldProb);
+        // confirmed_flip: the oracle has settlement-proven the opposite side wins.
+        // The forecast model may still believe the held side is ~0.99 likely, which
+        // would yield ~0.01 fair value for the opposite and fail the edge gate.
+        // Use 1.0 for oracle-confirmed cases; model-derived value for others.
+        const oppositeModelFairValue =
+          flipCandidateClass === 'confirmed_flip'
+            ? 1.0
+            : Math.max(0, 1 - result.currentHeldProb);
 
         const cityFlipUsed = cityFlipNotionalUsed[city] ?? 0;
         const remainingCityNotional = cfg.WEATHER_DRIFT_FLIP_MAX_CITY_NOTIONAL - cityFlipUsed;
