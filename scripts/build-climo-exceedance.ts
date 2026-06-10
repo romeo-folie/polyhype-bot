@@ -4,7 +4,7 @@
  *
  * Usage:
  *   npx tsx scripts/build-climo-exceedance.ts \
- *     --city chicago --city london --city hongkong \
+ *     --city chicago --city london --city "hong kong" \
  *     --years 2010-2024 --out src/weather/data/climoExceedance.json
  *
  * Data source: Open-Meteo Historical API (ERA5 reanalysis) for each city's
@@ -18,7 +18,7 @@
  *
  * Algorithm:
  *   For each historical day d and city:
- *     For each local hour H from 0 to 22:
+ *     For each local hour H from 0 to 23:
  *       runningMax_H = max(hourly temps from 00:00 to H)
  *       finalMax = max(all hourly temps for day d)
  *       rise = finalMax − runningMax_H
@@ -65,19 +65,41 @@ function parseArgs(): Args {
 
 // City coordinate lookup — matches CityCoordinates in noaaClient.ts.
 const CITY_COORDS: Record<string, { lat: number; lon: number; unit: 'fahrenheit' | 'celsius'; tz: string }> = {
-  chicago: { lat: 41.9803, lon: -87.9090, unit: 'fahrenheit', tz: 'America/Chicago' },
-  dallas: { lat: 32.8998, lon: -97.0403, unit: 'fahrenheit', tz: 'America/Chicago' },
-  houston: { lat: 29.9844, lon: -95.3414, unit: 'fahrenheit', tz: 'America/Chicago' },
-  miami: { lat: 25.7959, lon: -80.2870, unit: 'fahrenheit', tz: 'America/New_York' },
-  'new york': { lat: 40.6501, lon: -73.7749, unit: 'fahrenheit', tz: 'America/New_York' },
-  london: { lat: 51.4775, lon: -0.4614, unit: 'celsius', tz: 'Europe/London' },
-  paris: { lat: 48.7233, lon: 2.3794, unit: 'celsius', tz: 'Europe/Paris' },
-  istanbul: { lat: 40.9769, lon: 28.8146, unit: 'celsius', tz: 'Europe/Istanbul' },
-  hongkong: { lat: 22.3080, lon: 114.1747, unit: 'celsius', tz: 'Asia/Hong_Kong' },
-  shenzhen: { lat: 22.6393, lon: 113.8107, unit: 'celsius', tz: 'Asia/Shanghai' },
-  tokyo: { lat: 35.5494, lon: 139.7798, unit: 'celsius', tz: 'Asia/Tokyo' },
-  taipei: { lat: 25.0657, lon: 121.6152, unit: 'celsius', tz: 'Asia/Taipei' },
-  seoul: { lat: 37.5665, lon: 126.9780, unit: 'celsius', tz: 'Asia/Seoul' },
+  // US (Fahrenheit)
+  chicago:         { lat: 41.8781, lon: -87.6298,  unit: 'fahrenheit', tz: 'America/Chicago'       },
+  dallas:          { lat: 32.7767, lon: -96.797,   unit: 'fahrenheit', tz: 'America/Chicago'       },
+  houston:         { lat: 29.6454, lon: -95.2789,  unit: 'fahrenheit', tz: 'America/Chicago'       },
+  miami:           { lat: 25.7617, lon: -80.1918,  unit: 'fahrenheit', tz: 'America/New_York'      },
+  'new york':      { lat: 40.7128, lon: -74.006,   unit: 'fahrenheit', tz: 'America/New_York'      },
+  denver:          { lat: 39.7016, lon: -104.7516, unit: 'fahrenheit', tz: 'America/Denver'        },
+  seattle:         { lat: 47.6062, lon: -122.3321, unit: 'fahrenheit', tz: 'America/Los_Angeles'   },
+  atlanta:         { lat: 33.749,  lon: -84.388,   unit: 'fahrenheit', tz: 'America/New_York'      },
+  austin:          { lat: 30.2672, lon: -97.7431,  unit: 'fahrenheit', tz: 'America/Chicago'       },
+  'los angeles':   { lat: 34.0522, lon: -118.2437, unit: 'fahrenheit', tz: 'America/Los_Angeles'   },
+  'san francisco': { lat: 37.7749, lon: -122.4194, unit: 'fahrenheit', tz: 'America/Los_Angeles'   },
+  // International (Celsius)
+  london:          { lat: 51.5074, lon: -0.1278,   unit: 'celsius',    tz: 'Europe/London'         },
+  paris:           { lat: 48.8566, lon: 2.3522,    unit: 'celsius',    tz: 'Europe/Paris'          },
+  istanbul:        { lat: 40.9769, lon: 28.8146,   unit: 'celsius',    tz: 'Europe/Istanbul'       },
+  amsterdam:       { lat: 52.3676, lon: 4.9041,    unit: 'celsius',    tz: 'Europe/Amsterdam'      },
+  madrid:          { lat: 40.4168, lon: -3.7038,   unit: 'celsius',    tz: 'Europe/Madrid'         },
+  milan:           { lat: 45.6306, lon: 8.7281,    unit: 'celsius',    tz: 'Europe/Rome'           },
+  warsaw:          { lat: 52.2297, lon: 21.0122,   unit: 'celsius',    tz: 'Europe/Warsaw'         },
+  moscow:          { lat: 55.5915, lon: 37.2615,   unit: 'celsius',    tz: 'Europe/Moscow'         },
+  ankara:          { lat: 39.9334, lon: 32.8597,   unit: 'celsius',    tz: 'Europe/Istanbul'       },
+  'tel aviv':      { lat: 31.9965, lon: 34.8906,   unit: 'celsius',    tz: 'Asia/Jerusalem'        },
+  jeddah:          { lat: 21.4858, lon: 39.1925,   unit: 'celsius',    tz: 'Asia/Riyadh'           },
+  'hong kong':     { lat: 22.3020, lon: 114.1740,  unit: 'celsius',    tz: 'Asia/Hong_Kong'        },
+  shenzhen:        { lat: 22.5431, lon: 114.0579,  unit: 'celsius',    tz: 'Asia/Shanghai'         },
+  tokyo:           { lat: 35.5494, lon: 139.7798,  unit: 'celsius',    tz: 'Asia/Tokyo'            },
+  taipei:          { lat: 25.0777, lon: 121.2328,  unit: 'celsius',    tz: 'Asia/Taipei'           },
+  seoul:           { lat: 37.5665, lon: 126.9780,  unit: 'celsius',    tz: 'Asia/Seoul'            },
+  lucknow:         { lat: 26.8467, lon: 80.9462,   unit: 'celsius',    tz: 'Asia/Kolkata'          },
+  toronto:         { lat: 43.6532, lon: -79.3832,  unit: 'celsius',    tz: 'America/Toronto'       },
+  'mexico city':   { lat: 19.4326, lon: -99.1332,  unit: 'celsius',    tz: 'America/Mexico_City'   },
+  'panama city':   { lat: 8.9833,  lon: -79.5556,  unit: 'celsius',    tz: 'America/Panama'        },
+  'buenos aires':  { lat: -34.6037, lon: -58.3816, unit: 'celsius',    tz: 'America/Argentina/Buenos_Aires' },
+  'sao paulo':     { lat: -23.5505, lon: -46.6333, unit: 'celsius',    tz: 'America/Sao_Paulo'     },
 };
 
 type MonthHourMap = Record<number, Record<number, number[]>>; // month → hour → rises[]
@@ -122,7 +144,7 @@ function buildMonthHourMap(dailyHourly: Record<string, number[]>, tz: string): M
     const month = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'numeric' }).format(date), 10);
     const finalMax = Math.max(...temps);
 
-    for (let h = 0; h < temps.length - 1; h++) {
+    for (let h = 0; h < temps.length && h <= 23; h++) {
       let runningMax = -Infinity;
       for (let i = 0; i <= h; i++) {
         const v = temps[i];
@@ -138,7 +160,7 @@ function buildMonthHourMap(dailyHourly: Record<string, number[]>, tz: string): M
   return map;
 }
 
-function computeExceedanceTable(rises: number[], nQuantiles = 50): Array<{ delta: number; exceedance: number }> {
+function computeExceedanceTable(rises: number[], nQuantiles = 20): Array<{ delta: number; exceedance: number }> {
   if (rises.length === 0) return [];
   const sorted = [...rises].sort((a, b) => a - b);
   const result: Array<{ delta: number; exceedance: number }> = [];
@@ -214,7 +236,7 @@ async function main() {
     cities,
   };
 
-  writeFileSync(args.outPath, JSON.stringify(output, null, 2));
+  writeFileSync(args.outPath, JSON.stringify(output));
   console.log(`Written to ${args.outPath}`);
 }
 
