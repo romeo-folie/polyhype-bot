@@ -24,6 +24,7 @@ import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
 import { dedup } from '../shared/redis.js';
+import { lookupCity } from './noaaClient.js';
 import type { FetchFn } from './noaaClient.js';
 import { getCityBias } from './cityBias.js';
 import { cacheForecast, readCachedForecast } from './forecastCache.js';
@@ -36,11 +37,12 @@ import { notifyWeatherDrift } from '../execution/telegram.js';
 import {
   fetchWeatherEvents,
   parseWeatherEvent,
+  parseBracketLabel,
   fetchForecast,
   daysUntil,
   cancelRestingWeatherOrder,
 } from './weatherScanner.js';
-import type { ParsedWeatherEvent, ParsedBracket } from './weatherScanner.js';
+import type { ParsedWeatherEvent, ParsedBracket, WeatherBracketOpportunity } from './weatherScanner.js';
 import {
   fetchOpenWeatherPositions,
   parseWeatherPositionMeta,
@@ -54,6 +56,12 @@ import {
   classifyContradiction,
 } from './liveObservation.js';
 import type { ContradictionClass } from './liveObservation.js';
+import {
+  conditionalHeldProbability,
+  loadClimoTable,
+} from './conditionalOracle.js';
+import type { ConditionalOracleResult } from './conditionalOracle.js';
+import { fetchEnsembleHourly } from './openMeteoClient.js';
 import { classifyFlipCandidate, tryWeatherFlip } from './weatherFlip.js';
 import type { FlipCandidateClass } from './weatherFlip.js';
 
@@ -64,12 +72,13 @@ export type WeatherDriftState =
   | 'watch'
   | 'thesis_weakened'
   | 'modal_against'
-  | 'market_against'      // Market price has moved strongly against us (independent of forecast)
-  | 'oracle_impossible'   // Phase 5+
-  | 'oracle_confirmed'    // Phase 5+
-  | 'exit_candidate'      // Phase 3+
-  | 'hedge_candidate'     // Phase 4+
-  | 'flip_candidate';     // Phase 6+
+  | 'market_against'            // Market price has moved strongly against us (independent of forecast)
+  | 'oracle_impossible'         // Phase 5+: binary certainty — held side mathematically cannot win
+  | 'oracle_confirmed'          // Phase 5+: binary certainty — held side has already won
+  | 'oracle_likely_against'     // Phase A+: conditional oracle estimates bid > P + buffer (probabilistic)
+  | 'exit_candidate'            // Phase 3+
+  | 'hedge_candidate'           // Phase 4+
+  | 'flip_candidate';           // Phase 6+
 
 export type WeatherDriftAction =
   | 'none'
@@ -118,6 +127,22 @@ export interface WeatherDriftDecision {
   // Bid velocity exit
   bidVelocityTrigger: boolean;
   bidVelocityDrop: number | null;
+  // Conditional oracle (Phases A-C)
+  conditionalHeldProb: number | null;
+  conditionalEstimator: string | null;
+  conditionalMembers: number | null;
+  conditionalIsStale: boolean | null;
+  conditionalClampedByClimo: boolean | null;
+  conditionalEstimatorGap: number | null;
+  // Phase B audit: did conditional oracle agree/disagree with #470 heuristic exits?
+  condOracleAudit: {
+    wouldConfirm: boolean | null;
+    wouldVeto: boolean | null;
+    gap: number | null;
+  } | null;
+  // Phase B hold guard
+  holdGuardVetoed: boolean;
+  holdGuardVetoReason: string | null;
 }
 
 // ── State classification ─────────────────────────────────────────────────────
@@ -201,6 +226,16 @@ const DRIFT_NOTIFY_KEY_PREFIX = 'weather:drift_notify:';
 // Bid velocity: stores the previous scan's bid for rate-of-change comparison.
 const PREV_BID_KEY_PREFIX = 'weather:drift_prev_bid:';
 const PREV_BID_TTL_S = 3600; // covers 2 scan cycles; auto-expires when position closes
+// Conditional oracle result cache: written by drift strategy, read by revalidation pass.
+export const COND_ORACLE_RESULT_KEY_PREFIX = 'weather:cond_oracle:';
+const COND_ORACLE_RESULT_TTL_S = 3600;
+
+// Climo table loaded once per process (file reads are cheap; content rarely changes).
+let _climoTable: ReturnType<typeof loadClimoTable> | undefined;
+function getClimoTable() {
+  if (_climoTable === undefined) _climoTable = loadClimoTable();
+  return _climoTable;
+}
 
 // ── Main scanner ─────────────────────────────────────────────────────────────
 
@@ -573,8 +608,180 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       // forecast-specific gates (cancel_resting, etc.).
       const resolvedOracleState =
         liveObsEnabled && oracleState != null ? oracleState : null;
+
+      // ── Conditional oracle (Phases A-C) ─────────────────────────────────────
+      // Compute conditionalHeldProbability when:
+      //   - WEATHER_COND_ORACLE_ENABLED is true
+      //   - Binary oracle is inconclusive (resolvedOracleState === null)
+      //   - We have a live observation with observedMax
+      let condOracleResult: ConditionalOracleResult | null = null;
+      if (
+        cfg.WEATHER_COND_ORACLE_ENABLED &&
+        resolvedOracleState === null &&
+        liveObs?.observedMax != null &&
+        liveObs.observedAt != null &&
+        liveObs.confidence !== 'none'
+      ) {
+        // Fetch ensemble hourly trajectories on resolution day (or daysOut ≤ 1) only.
+        let remainingHourlyMembers: number[][] | null = null;
+        if (isResolutionDay || daysOut <= 1) {
+          try {
+            const hourlyData = await fetchEnsembleHourly(
+              event.coords.lat,
+              event.coords.lon,
+              targetDate,
+              event.coords.unit,
+              fetchFn as import('./openMeteoClient.js').FetchFn | undefined,
+              cfg.WEATHER_MODEL_ECMWF_ENABLED,
+              cfg.WEATHER_FORECAST_RETRY_COUNT,
+            ).catch(() => null);
+            if (hourlyData) remainingHourlyMembers = hourlyData.memberTemps;
+          } catch {
+            // Non-fatal: fall back to climo-only
+          }
+        }
+
+        try {
+          condOracleResult = conditionalHeldProbability({
+            city,
+            direction: pos.direction,
+            bracket: { low: bracket.low, high: bracket.high },
+            observedMax: liveObs.observedMax,
+            observedAt: liveObs.observedAt,
+            tz: event.coords.tz,
+            remainingHourlyMembers,
+            climoTable: cfg.WEATHER_COND_ORACLE_CLIMO_FALLBACK_ENABLED ? getClimoTable() : null,
+            biasCorrection: cityBias?.meanBias ?? 0,
+            spreadInflation: cfg.WEATHER_COND_ORACLE_SPREAD_INFLATION,
+            minMembers: cfg.WEATHER_COND_ORACLE_MIN_MEMBERS,
+            maxObsAgeMin: cfg.WEATHER_COND_ORACLE_MAX_OBS_AGE_MIN,
+            estimatorMaxGap: cfg.WEATHER_COND_ORACLE_ESTIMATOR_MAX_GAP,
+          });
+        } catch (err) {
+          logger.warn('[weather-drift] conditional oracle error', {
+            positionId: pos.id,
+            city,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+
+        if (condOracleResult) {
+          // Cache result for the revalidation pass (reads it for fourth cancel rule).
+          const condKey = `${COND_ORACLE_RESULT_KEY_PREFIX}${city}:${targetDate}:${pos.direction}`;
+          void redis.set(
+            condKey,
+            JSON.stringify({
+              heldProb: condOracleResult.heldProb,
+              isStale: condOracleResult.isStale,
+              estimator: condOracleResult.estimator,
+              confidence: liveObs.confidence,
+            }),
+            'EX',
+            COND_ORACLE_RESULT_TTL_S,
+          ).catch(() => {});
+
+          // Shadow-log the conditional oracle evaluation.
+          void enqueueWrite('shadow_observations', {
+            kind: 'weather_cond_oracle',
+            source: 'arb',
+            marketId: pos.marketId,
+            direction: pos.direction,
+            wouldBlock: false,
+            metricValue: condOracleResult.heldProb,
+            payload: {
+              positionId: pos.id,
+              city,
+              targetDate,
+              bracketLabel,
+              bracketLow: bracket.low,
+              bracketHigh: bracket.high,
+              direction: pos.direction,
+              observedMax: liveObs.observedMax,
+              observedAt: liveObs.observedAt,
+              observedAtLocalHour: condOracleResult.observedAtLocalHour,
+              isResolutionDay,
+              heldProb: condOracleResult.heldProb,
+              estimator: condOracleResult.estimator,
+              members: condOracleResult.members,
+              isStale: condOracleResult.isStale,
+              clampedByClimo: condOracleResult.clampedByClimo,
+              estimatorGap: condOracleResult.estimatorGap,
+              climoHeldProb: condOracleResult.climoHeldProb,
+              staticModelHeldProb: result.currentHeldProb,
+              bestBid: currentHeldBid,
+              bidSource,
+              softExitEnabled: cfg.WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED,
+              wouldExitOnFairValue: currentHeldBid != null && !condOracleResult.isStale
+                ? currentHeldBid > condOracleResult.heldProb + cfg.WEATHER_COND_ORACLE_EXIT_COST_BUFFER
+                : null,
+            },
+          });
+        }
+      }
+
+      // Compute oracle_likely_against state when soft exit is enabled.
+      const condOracleLikelyAgainst =
+        condOracleResult != null &&
+        !condOracleResult.isStale &&
+        currentHeldBid != null &&
+        currentHeldBid > condOracleResult.heldProb + cfg.WEATHER_COND_ORACLE_EXIT_COST_BUFFER;
+
       const state: WeatherDriftState =
-        resolvedOracleState ?? (marketAgainstTier != null ? 'market_against' : forecastState);
+        resolvedOracleState ??
+        (condOracleLikelyAgainst && cfg.WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED
+          ? 'oracle_likely_against'
+          : marketAgainstTier != null
+            ? 'market_against'
+            : forecastState);
+
+      // ── Phase B: hold guard ──────────────────────────────────────────────────
+      // When conditionalP - bid ≥ HOLD_GUARD_GAP with fresh settlement-aligned obs,
+      // veto bid-velocity exits (peak-relative whipsaw protection). Does NOT veto
+      // binary oracle exits, Tier 1 market_against, or Tier 2 exits.
+      let holdGuardVetoed = false;
+      let holdGuardVetoReason: string | null = null;
+      if (
+        cfg.WEATHER_COND_ORACLE_HOLD_GUARD_ENABLED &&
+        bidVelocityTrigger &&
+        isResolutionDay &&
+        condOracleResult != null &&
+        !condOracleResult.isStale &&
+        liveObs?.confidence === 'settlement_aligned' &&
+        currentHeldBid != null
+      ) {
+        const pMinusBid = condOracleResult.heldProb - currentHeldBid;
+        if (pMinusBid >= cfg.WEATHER_COND_ORACLE_HOLD_GUARD_GAP) {
+          holdGuardVetoed = true;
+          holdGuardVetoReason = 'bid_velocity';
+          logger.info('[weather-drift] hold guard vetoing bid-velocity exit', {
+            positionId: pos.id,
+            conditionalP: +condOracleResult.heldProb.toFixed(3),
+            currentHeldBid: +currentHeldBid.toFixed(4),
+            pMinusBid: +pMinusBid.toFixed(3),
+            gap: cfg.WEATHER_COND_ORACLE_HOLD_GUARD_GAP,
+          });
+        }
+      }
+
+      // Phase A audit: for each scan where a #470 heuristic would fire, record whether
+      // the conditional oracle would have confirmed or vetoed (even while SOFT_EXIT is dark).
+      let condOracleAudit: WeatherDriftDecision['condOracleAudit'] = null;
+      if (
+        cfg.WEATHER_COND_ORACLE_ENABLED &&
+        condOracleResult != null &&
+        (bidVelocityTrigger || marketAgainstTier === 2)
+      ) {
+        const wouldConfirm = condOracleResult.isStale
+          ? null
+          : currentHeldBid != null &&
+            currentHeldBid > condOracleResult.heldProb + cfg.WEATHER_COND_ORACLE_EXIT_COST_BUFFER;
+        const wouldVeto = condOracleResult.isStale ? null : holdGuardVetoed;
+        condOracleAudit = {
+          wouldConfirm,
+          wouldVeto,
+          gap: currentHeldBid != null ? condOracleResult.heldProb - currentHeldBid : null,
+        };
+      }
 
       // ── Phase 3+4: live actions ──────────────────────────────────────────────
       // isActionable: stricter gate for high-impact actions (exit/cancel/notify).
@@ -597,6 +804,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         // whether exit is gated to resolution day.
         state === 'oracle_impossible' ||
         state === 'oracle_confirmed' ||
+        state === 'oracle_likely_against' ||
         // Bid velocity: rapid collapse on resolution day warrants immediate notification + exit.
         (bidVelocityTrigger && isResolutionDay);
       const isBlockable =
@@ -627,15 +835,25 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             (marketAgainstTier === 1 ||
               (marketAgainstTier === 2 && isResolutionDay && cfg.WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY));
           // oracle_confirmed means our held side is the winner — never exit via drift.
-          const forecastCanExit = state !== 'market_against' && state !== 'oracle_confirmed';
+          const forecastCanExit =
+            state !== 'market_against' &&
+            state !== 'oracle_confirmed' &&
+            state !== 'oracle_likely_against'; // conditional oracle has its own gate below
           // oracle_impossible is permanent (daily max only rises) — exit any day, not just res-day.
           const oracleImpossibleCanExit = state === 'oracle_impossible';
           // Bid velocity: rapid single-scan collapse on resolution day bypasses Tier logic.
-          const bidVelocityCanExit = bidVelocityTrigger && isResolutionDay;
+          // Hold guard may veto when fresh conditional oracle says hold.
+          const bidVelocityCanExit = bidVelocityTrigger && isResolutionDay && !holdGuardVetoed;
+          // Conditional oracle soft exit (Phase B): bid > conditionalP + buffer on res-day.
+          const conditionalOracleCanExit =
+            cfg.WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED &&
+            state === 'oracle_likely_against' &&
+            isResolutionDay;
 
           const shouldExit =
             oracleImpossibleCanExit ||
             bidVelocityCanExit ||
+            conditionalOracleCanExit ||
             (isResolutionDay && (forecastCanExit || marketAgainstCanExit));
 
           if (cfg.WEATHER_DRIFT_EXIT_ENABLED && shouldExit && heldTokenId) {
@@ -765,11 +983,16 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         // confirmed_flip: the oracle has settlement-proven the opposite side wins.
         // The forecast model may still believe the held side is ~0.99 likely, which
         // would yield ~0.01 fair value for the opposite and fail the edge gate.
-        // Use 1.0 for oracle-confirmed cases; model-derived value for others.
+        // Use 1.0 for oracle-confirmed cases; conditional oracle (Phase C) when
+        // available and fresh; static model-derived value otherwise.
         const oppositeModelFairValue =
           flipCandidateClass === 'confirmed_flip'
             ? 1.0
-            : Math.max(0, 1 - result.currentHeldProb);
+            : cfg.WEATHER_COND_ORACLE_FLIP_FAIR_VALUE_ENABLED &&
+              condOracleResult != null &&
+              !condOracleResult.isStale
+              ? Math.max(0, 1 - condOracleResult.heldProb)
+              : Math.max(0, 1 - result.currentHeldProb);
 
         const cityFlipUsed = cityFlipNotionalUsed[city] ?? 0;
         const remainingCityNotional = cfg.WEATHER_DRIFT_FLIP_MAX_CITY_NOTIONAL - cityFlipUsed;
@@ -879,6 +1102,15 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         flipCandidateClass,
         bidVelocityTrigger,
         bidVelocityDrop: cfg.WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED ? bidVelocityDrop : null,
+        conditionalHeldProb: condOracleResult?.heldProb ?? null,
+        conditionalEstimator: condOracleResult?.estimator ?? null,
+        conditionalMembers: condOracleResult?.members ?? null,
+        conditionalIsStale: condOracleResult?.isStale ?? null,
+        conditionalClampedByClimo: condOracleResult?.clampedByClimo ?? null,
+        conditionalEstimatorGap: condOracleResult?.estimatorGap ?? null,
+        condOracleAudit,
+        holdGuardVetoed,
+        holdGuardVetoReason,
       };
 
       decisions.push(decision);
@@ -966,6 +1198,15 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           bidVelocityDrop: cfg.WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED && currentHeldBid != null
             ? bidVelocityDrop
             : null,
+          conditionalHeldProb: condOracleResult?.heldProb ?? null,
+          conditionalEstimator: condOracleResult?.estimator ?? null,
+          conditionalMembers: condOracleResult?.members ?? null,
+          conditionalIsStale: condOracleResult?.isStale ?? null,
+          conditionalClampedByClimo: condOracleResult?.clampedByClimo ?? null,
+          conditionalEstimatorGap: condOracleResult?.estimatorGap ?? null,
+          condOracleAudit,
+          holdGuardVetoed,
+          holdGuardVetoReason,
         },
       });
     } catch (err) {
@@ -987,5 +1228,132 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       evaluated: decisions.length,
       stateCounts,
     });
+  }
+}
+
+/**
+ * Nowcast entry scan (Phase C shadow / Phase D live).
+ *
+ * For each resolution-day opportunity without a size-up flag, computes the
+ * conditional oracle P(trade side wins | current observed max) and writes a
+ * `weather_nowcast_entry` shadow row. Live execution is deferred to Phase D
+ * (backtesting first) — even when `WEATHER_COND_ORACLE_NOWCAST_ENTRY_ENABLED`
+ * is true, the current implementation logs the signal but does not place an order.
+ *
+ * Gated on `WEATHER_COND_ORACLE_ENABLED`. Safe to call when there are no
+ * res-day opportunities — returns immediately.
+ *
+ * Log marker: [weather-nowcast]
+ */
+export async function runWeatherNowcastScan(
+  redis: Redis,
+  opportunities: WeatherBracketOpportunity[],
+  fetchFn?: FetchFn,
+): Promise<void> {
+  const cfg = loadConfig();
+  if (!cfg.WEATHER_COND_ORACLE_ENABLED) return;
+
+  const resDayOpps = opportunities.filter((o) => o.isResolutionDay === true && !o.sizeUpScanOnly);
+  if (resDayOpps.length === 0) return;
+
+  const climoTable = getClimoTable();
+
+  for (const opp of resDayOpps) {
+    try {
+      const cityCoords = lookupCity(opp.city);
+      if (!cityCoords) continue;
+
+      const bracket = parseBracketLabel(opp.bracketLabel);
+      if (!bracket) continue;
+
+      const liveObs = await fetchLiveObservation(opp.city, opp.targetDate, redis, {
+        wuEnabled: cfg.WEATHER_DRIFT_WU_LIVE_ENABLED,
+        metarEnabled: cfg.WEATHER_DRIFT_METAR_LIVE_ENABLED,
+        hkoEnabled: cfg.WEATHER_DRIFT_HKO_LIVE_ENABLED,
+        maxAgeMin: cfg.WEATHER_COND_ORACLE_MAX_OBS_AGE_MIN,
+        ...(fetchFn != null && { fetchFn: fetchFn as typeof fetch }),
+      }).catch((): null => null);
+
+      if (!liveObs || liveObs.observedMax == null || liveObs.observedAt == null || liveObs.confidence === 'none') continue;
+
+      const ensembleHourly = await fetchEnsembleHourly(
+        cityCoords.lat, cityCoords.lon, opp.targetDate, opp.unit, fetchFn,
+      ).catch((): null => null);
+
+      const bias = await getCityBias(redis, opp.city).catch((): null => null);
+
+      const condResult = conditionalHeldProbability({
+        city: opp.city,
+        direction: opp.tradeSide,
+        bracket: { low: bracket.low, high: bracket.high },
+        observedMax: liveObs.observedMax,
+        observedAt: liveObs.observedAt,
+        tz: cityCoords.tz,
+        remainingHourlyMembers: ensembleHourly?.memberTemps ?? null,
+        climoTable,
+        biasCorrection: bias?.meanBias ?? 0,
+        spreadInflation: cfg.WEATHER_COND_ORACLE_SPREAD_INFLATION,
+        minMembers: cfg.WEATHER_COND_ORACLE_MIN_MEMBERS,
+        maxObsAgeMin: cfg.WEATHER_COND_ORACLE_MAX_OBS_AGE_MIN,
+        estimatorMaxGap: cfg.WEATHER_COND_ORACLE_ESTIMATOR_MAX_GAP,
+      });
+
+      if (condResult == null) continue;
+
+      const edge = condResult.heldProb - opp.outcomePrice;
+      const meetsEdge = !condResult.isStale && edge >= cfg.WEATHER_COND_ORACLE_NOWCAST_MIN_EDGE;
+
+      void enqueueWrite('shadow_observations', {
+        kind: 'weather_nowcast_entry',
+        source: 'arb',
+        marketId: opp.marketId,
+        direction: opp.tradeSide,
+        wouldBlock: false,
+        metricValue: condResult.heldProb,
+        payload: {
+          city: opp.city,
+          targetDate: opp.targetDate,
+          bracketLabel: opp.bracketLabel,
+          bracketLow: bracket.low,
+          bracketHigh: bracket.high,
+          direction: opp.tradeSide,
+          observedMax: liveObs.observedMax,
+          observedAt: liveObs.observedAt,
+          observedAtLocalHour: condResult.observedAtLocalHour,
+          liveObsConfidence: liveObs.confidence,
+          conditionalHeldProb: condResult.heldProb,
+          estimator: condResult.estimator,
+          members: condResult.members,
+          isStale: condResult.isStale,
+          clampedByClimo: condResult.clampedByClimo,
+          estimatorGap: condResult.estimatorGap,
+          climoHeldProb: condResult.climoHeldProb,
+          outcomePrice: opp.outcomePrice,
+          edge: +edge.toFixed(4),
+          minEdge: cfg.WEATHER_COND_ORACLE_NOWCAST_MIN_EDGE,
+          meetsEdge,
+          nowcastEnabled: cfg.WEATHER_COND_ORACLE_NOWCAST_ENTRY_ENABLED,
+        },
+      });
+
+      if (meetsEdge && cfg.WEATHER_COND_ORACLE_NOWCAST_ENTRY_ENABLED) {
+        logger.info('[weather-nowcast] entry signal (Phase D execution deferred)', {
+          city: opp.city,
+          marketId: opp.marketId,
+          direction: opp.tradeSide,
+          conditionalHeldProb: +condResult.heldProb.toFixed(3),
+          outcomePrice: +opp.outcomePrice.toFixed(3),
+          edge: +edge.toFixed(3),
+          estimator: condResult.estimator,
+          liveObsConfidence: liveObs.confidence,
+        });
+      }
+    } catch (err) {
+      logger.warn('[weather-nowcast] error evaluating opportunity (non-fatal)', {
+        marketId: opp.marketId,
+        city: opp.city,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }

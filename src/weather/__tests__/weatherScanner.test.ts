@@ -4509,4 +4509,173 @@ describe('revalidateRestingWeatherOrders', () => {
       expect(mockDeletePendingOrder).not.toHaveBeenCalledWith(expect.anything(), 'mkt-primary', 'NO');
     });
   });
+
+  describe('conditional oracle cancel rule (fourth rule)', () => {
+    // Shared helpers for this block.
+    const condOracleConfig = () => ({
+      ...baseConfig,
+      WEATHER_COND_ORACLE_RESTING_CANCEL_ENABLED: true,
+      WEATHER_COND_ORACLE_EXIT_COST_BUFFER: 0.05,
+      // Primary FV rule off so it can't interfere.
+      WEATHER_RESTING_REVALIDATION_ENABLED: false,
+    });
+
+    // Resolution-day opportunity with a parseable sourcedFrom
+    const resDayOpp = (extra: Record<string, unknown> = {}) =>
+      opp('mkt-1', 0.60, {
+        city: 'chicago',
+        targetDate: '2026-06-10',
+        isResolutionDay: true,
+        ...extra,
+      });
+
+    // Pending entry whose order is resting at price 0.55 (NO direction)
+    const condEntry = (overrides: Record<string, unknown> = {}) =>
+      pendingEntry({ order: { price: 0.55, edgeMagnitude: 0.20, source: 'weather', ...overrides } });
+
+    // Build a minimal Redis mock whose .get returns a pre-set value.
+    function makeRedisMock(getReturnValue: string | null) {
+      return { get: vi.fn().mockResolvedValue(getReturnValue) } as unknown as import('ioredis').Redis;
+    }
+
+    // Valid cached oracle result: heldProb 0.40 → order.price 0.55 > 0.40 + 0.05 → picked off.
+    const hitPayload = JSON.stringify({
+      heldProb: 0.40,
+      isStale: false,
+      estimator: 'ensemble',
+      confidence: 'settlement_aligned',
+    });
+
+    beforeEach(() => {
+      mockLoadConfig.mockReturnValue(condOracleConfig() as never);
+    });
+
+    it('cancels a resting primary when price > conditionalHeldProb + buffer on res-day', async () => {
+      mockListPendingOrders.mockResolvedValue([condEntry()]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))  // pre-cancel: nothing filled
+        .mockResolvedValueOnce(null);           // post-cancel: order gone
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      await revalidateRestingWeatherOrders(makeRedisMock(hitPayload), [resDayOpp()]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-1', 'NO');
+    });
+
+    it('does NOT cancel when the order price is within the buffer (0.55 ≤ 0.52 + 0.05)', async () => {
+      // heldProb=0.52 → threshold=0.57 → order.price=0.55 ≤ 0.57 → keep.
+      const payload = JSON.stringify({
+        heldProb: 0.52,
+        isStale: false,
+        estimator: 'ensemble',
+        confidence: 'settlement_aligned',
+      });
+      mockListPendingOrders.mockResolvedValue([condEntry()]);
+
+      await revalidateRestingWeatherOrders(makeRedisMock(payload), [resDayOpp()]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+      expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    });
+
+    it('does NOT cancel on a non-resolution-day opportunity', async () => {
+      mockListPendingOrders.mockResolvedValue([condEntry()]);
+
+      await revalidateRestingWeatherOrders(
+        makeRedisMock(hitPayload),
+        [opp('mkt-1', 0.60, { city: 'chicago', targetDate: '2026-06-10', isResolutionDay: false })],
+      );
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('does NOT cancel when there is no cache entry (fail-safe)', async () => {
+      mockListPendingOrders.mockResolvedValue([condEntry()]);
+
+      await revalidateRestingWeatherOrders(makeRedisMock(null), [resDayOpp()]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('does NOT cancel when the cached result is stale', async () => {
+      const stalePayload = JSON.stringify({
+        heldProb: 0.30,
+        isStale: true,
+        estimator: 'climo',
+        confidence: 'settlement_aligned',
+      });
+      mockListPendingOrders.mockResolvedValue([condEntry()]);
+
+      await revalidateRestingWeatherOrders(makeRedisMock(stalePayload), [resDayOpp()]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('does NOT cancel when confidence is not settlement_aligned', async () => {
+      const heuristicPayload = JSON.stringify({
+        heldProb: 0.30,
+        isStale: false,
+        estimator: 'climo',
+        confidence: 'heuristic',
+      });
+      mockListPendingOrders.mockResolvedValue([condEntry()]);
+
+      await revalidateRestingWeatherOrders(makeRedisMock(heuristicPayload), [resDayOpp()]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('skips gracefully when the cache value is malformed JSON', async () => {
+      mockListPendingOrders.mockResolvedValue([condEntry()]);
+
+      await revalidateRestingWeatherOrders(makeRedisMock('not-json{bad}'), [resDayOpp()]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('does NOT fire when the knob is off — all three knobs off is inert', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_RESTING_REVALIDATION_ENABLED: false,
+        WEATHER_BRACKET_CANCEL_ENABLED: false,
+        WEATHER_COND_ORACLE_RESTING_CANCEL_ENABLED: false,
+      } as never);
+      mockListPendingOrders.mockResolvedValue([condEntry()]);
+
+      await revalidateRestingWeatherOrders(makeRedisMock(hitPayload), [resDayOpp()]);
+
+      // listPendingOrders is not called when all three rules are off.
+      expect(mockListPendingOrders).not.toHaveBeenCalled();
+    });
+
+    it('skips bracket legs (isBracketOpposite=true) even with a picked-off cache hit', async () => {
+      mockListPendingOrders.mockResolvedValue([
+        condEntry({ isBracketOpposite: true }),
+      ]);
+
+      await revalidateRestingWeatherOrders(makeRedisMock(hitPayload), [resDayOpp()]);
+
+      expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    });
+
+    it('falls through to FV rule when fourth rule conditions are not met (cache miss)', async () => {
+      // Cache miss → fourth rule skipped → FV rule fires (primary revalidation on, sideFV 0.40 < 0.55).
+      mockLoadConfig.mockReturnValue({
+        ...condOracleConfig(),
+        WEATHER_RESTING_REVALIDATION_ENABLED: true,
+      } as never);
+      mockListPendingOrders.mockResolvedValue([condEntry()]);
+      mockGetClobOrder
+        .mockResolvedValueOnce(liveOrder('0'))
+        .mockResolvedValueOnce(null);
+      mockCancelClobOrder.mockResolvedValue(true);
+
+      // modelProbability=0.60 → NO side FV = 0.40 < posted 0.55 → FV fires.
+      await revalidateRestingWeatherOrders(makeRedisMock(null), [resDayOpp()]);
+
+      expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
+      expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-1', 'NO');
+    });
+  });
 });

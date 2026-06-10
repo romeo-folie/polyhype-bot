@@ -541,6 +541,115 @@ export async function fetchHistoricalHigh(
   }
 }
 
+// ── Ensemble hourly fetch (for conditional oracle) ────────────────────────
+
+/**
+ * Per-member hourly temperature trajectories for the remaining hours of a target day.
+ * Used by the conditional oracle to estimate the final daily max distribution.
+ */
+export interface EnsembleHourlyForecast {
+  /** ISO8601 datetime strings for the hours covered (city-local timezone). */
+  hours: string[];
+  /** Per-member hourly temperatures: memberTemps[memberIdx][hourIdx]. Native unit. */
+  memberTemps: number[][];
+  memberCount: number;
+  forecastDate: string;
+  ensembleModel: 'gfs' | 'ecmwf';
+}
+
+interface EnsembleHourlyResponse {
+  hourly?: Record<string, unknown>;
+}
+
+/**
+ * Fetch per-member hourly temperature_2m trajectories for a target local day.
+ * Used only for resolution-day (or daysOut ≤ 1) positions where live obs are
+ * available. The window is limited to the target date to keep payloads small.
+ *
+ * Response format matches the ensemble daily format: member data in flat keys
+ * `temperature_2m_member00`, `temperature_2m_member01`, etc.
+ */
+export async function fetchEnsembleHourly(
+  lat: number,
+  lon: number,
+  targetDate: string,
+  unit: 'fahrenheit' | 'celsius' = 'fahrenheit',
+  fetchFn?: FetchFn,
+  useEcmwf = false,
+  retryCount = 0,
+): Promise<EnsembleHourlyForecast | null> {
+  const isInjected = fetchFn !== undefined;
+  const doFetch = fetchFn ?? fetch;
+  const targetStr = targetDate.slice(0, 10);
+  try {
+    if (!isInjected) await rateLimitWait();
+
+    const model = useEcmwf ? 'ecmwf_ifs025' : 'gfs_seamless';
+    const params = new URLSearchParams({
+      latitude: lat.toFixed(4),
+      longitude: lon.toFixed(4),
+      hourly: 'temperature_2m',
+      models: model,
+      temperature_unit: unit,
+      timezone: 'auto',
+      start_date: targetStr,
+      end_date: targetStr,
+    });
+
+    const url = `${ENSEMBLE_BASE}?${params.toString()}`;
+    const res = await fetchWithRetry(url, doFetch, retryCount);
+
+    if (!res.ok) {
+      logger.warn('[weather] Open-Meteo ensemble hourly API error', {
+        status: res.status, lat, lon, targetDate: targetStr,
+      });
+      return null;
+    }
+
+    const data = (await res.json()) as EnsembleHourlyResponse;
+    const hourly = data.hourly;
+    if (!hourly || typeof hourly !== 'object') {
+      logger.warn('[weather] ensemble hourly returned no hourly data', { lat, lon, targetDate: targetStr });
+      return null;
+    }
+
+    const timeArr = hourly.time as string[] | undefined;
+    if (!Array.isArray(timeArr) || timeArr.length === 0) return null;
+
+    // Collect all member keys
+    const memberKeys = Object.keys(hourly).filter((k) => k.startsWith('temperature_2m_member'));
+    if (memberKeys.length === 0) return null;
+
+    const memberTemps: number[][] = [];
+    for (const key of memberKeys) {
+      const vals = hourly[key];
+      if (!Array.isArray(vals)) continue;
+      const row: number[] = [];
+      for (const v of vals) {
+        row.push(typeof v === 'number' && isFinite(v) ? v : NaN);
+      }
+      if (row.length === timeArr.length) memberTemps.push(row);
+    }
+
+    if (memberTemps.length === 0) return null;
+
+    const ensembleModel: EnsembleHourlyForecast['ensembleModel'] = useEcmwf ? 'ecmwf' : 'gfs';
+    return {
+      hours: timeArr,
+      memberTemps,
+      memberCount: memberTemps.length,
+      forecastDate: targetStr,
+      ensembleModel,
+    };
+  } catch (err) {
+    logger.warn('[weather] fetchEnsembleHourly failed', {
+      error: err instanceof Error ? err.message : String(err),
+      lat, lon, targetDate: targetStr,
+    });
+    return null;
+  }
+}
+
 function computeEnsembleStats(
   members: number[],
   forecastDate: string,

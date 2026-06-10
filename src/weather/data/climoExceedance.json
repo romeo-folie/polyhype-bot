@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "description": "Empirical conditional exceedance table: P(finalDailyMax > runningMax + delta | localHour, month, city). Built from settlement-station history (WU/ISD/HKO) by scripts/build-climo-exceedance.ts.",
+    "schema": "city -> month (1-12) -> localHour (0-23) -> sorted array of { delta: number, exceedance: number }",
+    "units": "native per city (celsius or fahrenheit)",
+    "generatedAt": null,
+    "sourceRange": null
+  },
+  "cities": {}
+}

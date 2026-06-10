@@ -162,6 +162,29 @@ vi.mock('../weatherFlip.js', () => ({
   tryWeatherFlip: mockTryWeatherFlip,
 }));
 
+const mockConditionalHeldProbability = vi.fn().mockReturnValue(null);
+const mockLoadClimoTable = vi.fn().mockReturnValue(null);
+vi.mock('../conditionalOracle.js', () => ({
+  conditionalHeldProbability: mockConditionalHeldProbability,
+  loadClimoTable: mockLoadClimoTable,
+}));
+
+const mockFetchEnsembleHourly = vi.fn().mockResolvedValue(null);
+vi.mock('../openMeteoClient.js', () => ({
+  fetchEnsembleHourly: mockFetchEnsembleHourly,
+  fetchOpenMeteoForecast: vi.fn().mockResolvedValue(null),
+  fetchEnsembleForecast: vi.fn().mockResolvedValue(null),
+  fetchHrrrForecast: vi.fn().mockResolvedValue(null),
+}));
+
+vi.mock('../noaaClient.js', () => ({
+  lookupCity: vi.fn().mockReturnValue({
+    lat: 41.88, lon: -87.63, unit: 'fahrenheit', tz: 'America/Chicago',
+    noaaCoverage: true, wuStation: 'KORD', resolutionSource: 'wu', isoCountry: 'US',
+  }),
+  canonicalCityKey: vi.fn().mockReturnValue('chicago'),
+}));
+
 // ── Dynamic imports ───────────────────────────────────────────────────────────
 
 const {
@@ -237,6 +260,21 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     WEATHER_DRIFT_FLIP_MAX_SCAN_NOTIONAL: 50,
     WEATHER_DRIFT_EXACT_MODAL_MIN_RUNS: 1,
     WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS: 2,
+    // Conditional oracle knobs — all dark by default
+    WEATHER_COND_ORACLE_ENABLED: false,
+    WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED: false,
+    WEATHER_COND_ORACLE_HOLD_GUARD_ENABLED: false,
+    WEATHER_COND_ORACLE_HOLD_GUARD_GAP: 0.30,
+    WEATHER_COND_ORACLE_EXIT_COST_BUFFER: 0.05,
+    WEATHER_COND_ORACLE_MAX_OBS_AGE_MIN: 90,
+    WEATHER_COND_ORACLE_SPREAD_INFLATION: 1.0,
+    WEATHER_COND_ORACLE_MIN_MEMBERS: 10,
+    WEATHER_COND_ORACLE_CLIMO_FALLBACK_ENABLED: true,
+    WEATHER_COND_ORACLE_ESTIMATOR_MAX_GAP: 0.25,
+    WEATHER_COND_ORACLE_FLIP_FAIR_VALUE_ENABLED: false,
+    WEATHER_COND_ORACLE_NOWCAST_ENTRY_ENABLED: false,
+    WEATHER_COND_ORACLE_NOWCAST_MIN_EDGE: 0.08,
+    WEATHER_COND_ORACLE_RESTING_CANCEL_ENABLED: false,
     ...overrides,
   };
 }
@@ -1942,5 +1980,255 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
     expect(call.payload.state).toBe('market_against');
     expect(call.payload.action).toBe('cancel_resting');
+  });
+});
+
+// ── Conditional oracle integration (Phases A-C) ──────────────────────────────
+
+describe('runWeatherDriftStrategy — conditional oracle (Phases A-C)', () => {
+  /** Cond oracle result fixture: heldProb=0.25, not stale, settlement_aligned obs. */
+  const condOracleResult = {
+    heldProb: 0.25,
+    isStale: false,
+    estimator: 'ensemble' as const,
+    members: 20,
+    observedAtLocalHour: 9,
+    clampedByClimo: false,
+    estimatorGap: null,
+    climoHeldProb: null,
+  };
+
+  function setupCondOraclePosition() {
+    mockFetchWeatherEvents.mockResolvedValue([{}]);
+    mockParseWeatherEvent.mockReturnValue({
+      city: 'chicago',
+      targetDate: '2026-06-01',
+      coords: { tz: 'America/Chicago' },
+      brackets: [{ label: '39°F or below', low: null, high: 39, marketId: 'mkt-1' }],
+    });
+    mockSql.mockResolvedValue([makePos()]);
+    mockFetchForecast.mockResolvedValue(makeForecast());
+    mockFetchLiveObservation.mockResolvedValue({
+      city: 'chicago',
+      targetDate: '2026-06-01',
+      observedMax: 35,
+      source: 'wu-live',
+      confidence: 'settlement_aligned',
+      observedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+    mockClassifyOracleState.mockReturnValue(null); // no binary certainty
+    mockConditionalHeldProbability.mockReturnValue(condOracleResult);
+    // bid = 0.40: above condP (0.25) + buffer (0.05) = 0.30 → condOracleLikelyAgainst
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.40 }, bestAsk: null });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockDedup.mockResolvedValue(true);
+    mockCityLocalDate.mockReturnValue('2026-06-01');
+    mockConditionalHeldProbability.mockReturnValue(null);
+    mockLoadClimoTable.mockReturnValue(null);
+    mockFetchEnsembleHourly.mockResolvedValue(null);
+    mockFetchLiveObservation.mockResolvedValue({
+      city: 'chicago', targetDate: '2026-06-01',
+      observedMax: null, source: 'none', confidence: 'none', observedAt: null,
+    });
+    mockClassifyOracleState.mockReturnValue(null);
+    setupCondOraclePosition();
+  });
+
+  it('does NOT compute conditional oracle when WEATHER_COND_ORACLE_ENABLED=false', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_COND_ORACLE_ENABLED: false,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockConditionalHeldProbability).not.toHaveBeenCalled();
+  });
+
+  it('computes conditional oracle when WEATHER_COND_ORACLE_ENABLED=true with settlement_aligned obs', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_COND_ORACLE_ENABLED: true,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockConditionalHeldProbability).toHaveBeenCalled();
+  });
+
+  it('does NOT compute conditional oracle when obs confidence is none', async () => {
+    mockFetchLiveObservation.mockResolvedValue({
+      city: 'chicago', targetDate: '2026-06-01',
+      observedMax: 35, source: 'none', confidence: 'none',
+      observedAt: new Date().toISOString(),
+    });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_COND_ORACLE_ENABLED: true,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockConditionalHeldProbability).not.toHaveBeenCalled();
+  });
+
+  it('dark mode: state is NOT oracle_likely_against when SOFT_EXIT_ENABLED=false even with condP < bid', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_COND_ORACLE_ENABLED: true,
+      WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED: false,  // dark
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((driftCall![1] as any).payload.state).not.toBe('oracle_likely_against');
+    // Shadow row IS written with the computed conditional oracle data
+    expect((driftCall![1] as any).payload.conditionalHeldProb).toBeCloseTo(0.25);
+  });
+
+  it('state = oracle_likely_against when SOFT_EXIT_ENABLED=true and bid > condP + buffer', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_COND_ORACLE_ENABLED: true,
+      WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED: true,
+      WEATHER_COND_ORACLE_EXIT_COST_BUFFER: 0.05,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((driftCall![1] as any).payload.state).toBe('oracle_likely_against');
+  });
+
+  it('state is NOT oracle_likely_against when bid <= condP + buffer', async () => {
+    // bid=0.28: condP=0.25 + buffer=0.05 = 0.30; 0.28 < 0.30 → no signal
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.28 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_COND_ORACLE_ENABLED: true,
+      WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED: true,
+      WEATHER_COND_ORACLE_EXIT_COST_BUFFER: 0.05,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((driftCall![1] as any).payload.state).not.toBe('oracle_likely_against');
+  });
+
+  it('hold guard vetoes bid-velocity exit when condP - bid >= HOLD_GUARD_GAP', async () => {
+    // condP=0.75: bid=0.40 → condP-bid=0.35 ≥ gap=0.30 → holdGuardVetoed=true
+    // bidVelocityCanExit = bidVelocityTrigger && isResolutionDay && !holdGuardVetoed
+    //   = true && true && false = FALSE (hold guard blocks this path)
+    // The forecast-path exit (isResolutionDay && forecastCanExit) may still fire for
+    // thesis_weakened positions — the hold guard only targets the bid-velocity path.
+    // We verify holdGuardVetoed=true in the shadow log, not that all exits are suppressed.
+    mockConditionalHeldProbability.mockReturnValue({
+      ...condOracleResult,
+      heldProb: 0.75,  // much higher than bid=0.40
+    });
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_THRESHOLD: 0.40,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.80,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.80,
+      WEATHER_DRIFT_SEVERE_DROP: 0.80,
+      WEATHER_COND_ORACLE_ENABLED: true,
+      WEATHER_COND_ORACLE_HOLD_GUARD_ENABLED: true,
+      WEATHER_COND_ORACLE_HOLD_GUARD_GAP: 0.30,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+    }));
+    // prev bid = 0.80 (stored), current bid = 0.40 → drop=0.50 ≥ threshold=0.40 → bidVelocityTrigger=true
+    const redis = makeRedis(new Map([['weather:drift_prev_bid:pos-1', '0.80']]));
+    await runWeatherDriftStrategy(redis as any);
+
+    // Shadow log must record holdGuardVetoed=true for the bid-velocity path
+    const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((driftCall![1] as any).payload.holdGuardVetoed).toBe(true);
+    expect((driftCall![1] as any).payload.holdGuardVetoReason).toBe('bid_velocity');
+  });
+
+  it('Phase A audit: condOracleAudit.wouldConfirm=true when bid > condP + buffer and bid-velocity triggered', async () => {
+    // bid=0.40 > condP(0.25) + buffer(0.05)=0.30 → wouldConfirm=true
+    // Need bid-velocity trigger (prev bid stored)
+    const redis = makeRedis(new Map([['weather:drift_prev_bid:pos-1', '0.80']]));
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_COND_ORACLE_ENABLED: true,
+      WEATHER_COND_ORACLE_EXIT_COST_BUFFER: 0.05,
+      WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_THRESHOLD: 0.40,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.80,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.80,
+      WEATHER_DRIFT_SEVERE_DROP: 0.80,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+    }));
+    await runWeatherDriftStrategy(redis as any);
+
+    const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((driftCall![1] as any).payload.condOracleAudit).not.toBeNull();
+    expect((driftCall![1] as any).payload.condOracleAudit.wouldConfirm).toBe(true);
+  });
+
+  it('Phase C flip fair value: uses condP when FLIP_FAIR_VALUE_ENABLED=true for non-confirmed flip', async () => {
+    // flip_candidate = 'forecast_flip' (non-confirmed) → oppositeModelFairValue should come from condP
+    mockClassifyFlipCandidate.mockReturnValue('forecast_flip');
+    mockTryWeatherFlip.mockResolvedValue({ executed: true, amountUsd: 5, reason: 'flip_executed' });
+    mockGetMarket.mockResolvedValue({ clobTokenIds: '["tok-yes","tok-no"]', outcomePrices: '["0.35","0.65"]' });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_FLIP_ENABLED: true,
+      WEATHER_DRIFT_FLIP_CONFIRMED_ONLY: false,
+      WEATHER_COND_ORACLE_ENABLED: true,
+      WEATHER_COND_ORACLE_FLIP_FAIR_VALUE_ENABLED: true,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    // condOracleResult.heldProb = 0.25 → oppositeModelFairValue = 1 - 0.25 = 0.75
+    expect(mockTryWeatherFlip).toHaveBeenCalledWith(
+      expect.objectContaining({ oppositeModelFairValue: expect.closeTo(0.75, 3) }),
+    );
+  });
+
+  it('Phase C flip fair value: falls back to static model when condP is stale', async () => {
+    mockConditionalHeldProbability.mockReturnValue({ ...condOracleResult, isStale: true });
+    mockClassifyFlipCandidate.mockReturnValue('forecast_flip');
+    mockTryWeatherFlip.mockResolvedValue({ executed: false, amountUsd: 0, reason: 'no_flip' });
+    mockGetMarket.mockResolvedValue({ clobTokenIds: '["tok-yes","tok-no"]', outcomePrices: '["0.35","0.65"]' });
+    // currentHeldProb for NO = 1 - modelProbability(0.70) = 0.30 → opposite FV = 1-0.30 = 0.70
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_FLIP_ENABLED: true,
+      WEATHER_DRIFT_FLIP_CONFIRMED_ONLY: false,
+      WEATHER_COND_ORACLE_ENABLED: true,
+      WEATHER_COND_ORACLE_FLIP_FAIR_VALUE_ENABLED: true,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    // stale condP → falls back to static model: 1 - currentHeldProb
+    expect(mockTryWeatherFlip).toHaveBeenCalledWith(
+      expect.objectContaining({ oppositeModelFairValue: expect.closeTo(0.70, 3) }),
+    );
   });
 });
