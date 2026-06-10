@@ -115,6 +115,9 @@ export interface WeatherDriftDecision {
   contradictionClass: ContradictionClass | null;
   // Phase 6: flip
   flipCandidateClass: FlipCandidateClass | null;
+  // Bid velocity exit
+  bidVelocityTrigger: boolean;
+  bidVelocityDrop: number | null;
 }
 
 // ── State classification ─────────────────────────────────────────────────────
@@ -195,6 +198,9 @@ const DRIFT_CANCELLED_RESTING_TTL_S = 14 * 24 * 3600;
 const DRIFT_EXIT_COOLDOWN_KEY_PREFIX = 'weather:drift_exit_cooldown:';
 // Notification dedup — per position+state so state escalations re-notify.
 const DRIFT_NOTIFY_KEY_PREFIX = 'weather:drift_notify:';
+// Bid velocity: stores the previous scan's bid for rate-of-change comparison.
+const PREV_BID_KEY_PREFIX = 'weather:drift_prev_bid:';
+const PREV_BID_TTL_S = 3600; // covers 2 scan cycles; auto-expires when position closes
 
 // ── Main scanner ─────────────────────────────────────────────────────────────
 
@@ -422,6 +428,33 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         }
       }
 
+      // ── Bid velocity detection ───────────────────────────────────────────────
+      // Compare the current bid to the previous scan's bid. A rapid collapse
+      // (≥ BID_VELOCITY_THRESHOLD relative drop in one 30-min cycle) on resolution
+      // day triggers an exit bypass regardless of the Tier classification.
+      let bidVelocityTrigger = false;
+      let bidVelocityDrop = 0;
+      if (currentHeldBid != null && cfg.WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED) {
+        const prevBidKey = `${PREV_BID_KEY_PREFIX}${pos.id}`;
+        const prevBidRaw = await redis.get(prevBidKey).catch(() => null);
+        const prevBid = prevBidRaw != null ? parseFloat(prevBidRaw) : null;
+        if (prevBid != null && prevBid > 0) {
+          bidVelocityDrop = (prevBid - currentHeldBid) / prevBid;
+          if (bidVelocityDrop >= cfg.WEATHER_DRIFT_BID_VELOCITY_THRESHOLD) {
+            bidVelocityTrigger = true;
+            logger.info('[weather-drift] bid velocity threshold breached', {
+              positionId: pos.id,
+              prevBid: +prevBid.toFixed(4),
+              currentHeldBid: +currentHeldBid.toFixed(4),
+              bidVelocityDrop: +bidVelocityDrop.toFixed(3),
+              threshold: cfg.WEATHER_DRIFT_BID_VELOCITY_THRESHOLD,
+              isResolutionDay,
+            });
+          }
+        }
+        await redis.set(prevBidKey, String(currentHeldBid), 'EX', PREV_BID_TTL_S).catch(() => {});
+      }
+
       // ── Phase 5: live observation + oracle state ─────────────────────────────
       // Fetch intraday observed max for the city. Written as a shadow row even
       // when WEATHER_DRIFT_LIVE_OBS_ENABLED=false so data accumulates from day one.
@@ -563,7 +596,9 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         // non-resolution days (max only increases). Notification fires regardless of
         // whether exit is gated to resolution day.
         state === 'oracle_impossible' ||
-        state === 'oracle_confirmed';
+        state === 'oracle_confirmed' ||
+        // Bid velocity: rapid collapse on resolution day warrants immediate notification + exit.
+        (bidVelocityTrigger && isResolutionDay);
       const isBlockable =
         forecastState === 'thesis_weakened' || forecastState === 'modal_against' || state === 'market_against';
       const wouldBlock = isBlockable && !cfg.WEATHER_DRIFT_ENABLED;
@@ -582,43 +617,59 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         shouldNotify = await dedup(notifyDedupKey, cfg.WEATHER_DRIFT_NOTIFY_DEDUP_S).catch(() => false);
 
         if (cfg.WEATHER_DRIFT_ENABLED) {
-          // 1. Resolution-day exit (highest priority).
-          // market_against: only Tier 1 (both market and model moved) triggers exit.
-          // Tier 2 (model stuck, divergence only) is notify-only.
-          const marketAgainstCanExit = state === 'market_against' && marketAgainstTier === 1;
-          // oracle_confirmed means our held side is the winner — never exit it via drift.
+          // 1. Exit gate (highest priority).
+          //
+          // market_against Tier 1: both market and model moved — exit on resolution day.
+          // market_against Tier 2: market moved but model can't update intraday.
+          //   When TIER2_EXIT_ON_RES_DAY, exit anyway on resolution day (market IS the oracle).
+          const marketAgainstCanExit =
+            state === 'market_against' &&
+            (marketAgainstTier === 1 ||
+              (marketAgainstTier === 2 && isResolutionDay && cfg.WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY));
+          // oracle_confirmed means our held side is the winner — never exit via drift.
           const forecastCanExit = state !== 'market_against' && state !== 'oracle_confirmed';
-          if (cfg.WEATHER_DRIFT_EXIT_ENABLED && isResolutionDay && (forecastCanExit || marketAgainstCanExit)) {
-            if (heldTokenId) {
-              // tryWeatherExit fetches the book again for an accurate exit price.
-              // The earlier fetch was for tier classification only; a fresh fetch
-              // ensures the exit floor check uses the current bid, not a stale one.
-              const exited = await tryWeatherExit({
-                redis,
-                pos,
-                city,
-                targetDate,
-                bracketLabel,
-                heldTokenId,
-                currentHeldProb: result.currentHeldProb,
-                invalidationReason: result.invalidationReason ?? state,
-                enabled: true,
-                isResolutionDay,
-                minExitPrice: cfg.WEATHER_DRIFT_EXIT_MIN_BID,
-                maxExitSlippage: cfg.WEATHER_DRIFT_EXIT_MAX_SLIPPAGE,
-                useMarketFloor: true,
-                exitCooldownKey: `${DRIFT_EXIT_COOLDOWN_KEY_PREFIX}${pos.id}`,
-                exitCooldownS: cfg.WEATHER_DRIFT_EXIT_COOLDOWN_S,
-                exitedKey: `${EXITED_KEY_PREFIX}${pos.id}`,
-                exitedTtlS: EXITED_TTL_S,
-                exitReason: 'weather_drift',
-                shadowKind: 'weather_drift_exit',
-                logMarker: '[weather-drift]',
-                minDepthRatio: cfg.WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO,
-                extraContext: { driftState: state, marketAgainstTier, bidSource },
-              }).catch(() => false);
-              if (exited) action = 'exit';
-            }
+          // oracle_impossible is permanent (daily max only rises) — exit any day, not just res-day.
+          const oracleImpossibleCanExit = state === 'oracle_impossible';
+          // Bid velocity: rapid single-scan collapse on resolution day bypasses Tier logic.
+          const bidVelocityCanExit = bidVelocityTrigger && isResolutionDay;
+
+          const shouldExit =
+            oracleImpossibleCanExit ||
+            bidVelocityCanExit ||
+            (isResolutionDay && (forecastCanExit || marketAgainstCanExit));
+
+          if (cfg.WEATHER_DRIFT_EXIT_ENABLED && shouldExit && heldTokenId) {
+            // tryWeatherExit fetches the book again for an accurate exit price.
+            // The earlier fetch was for tier classification only; a fresh fetch
+            // ensures the exit floor check uses the current bid, not a stale one.
+            const exited = await tryWeatherExit({
+              redis,
+              pos,
+              city,
+              targetDate,
+              bracketLabel,
+              heldTokenId,
+              currentHeldProb: result.currentHeldProb,
+              invalidationReason: result.invalidationReason ?? state,
+              enabled: true,
+              isResolutionDay,
+              minExitPrice: cfg.WEATHER_DRIFT_EXIT_MIN_BID,
+              maxExitSlippage: cfg.WEATHER_DRIFT_EXIT_MAX_SLIPPAGE,
+              useMarketFloor: true,
+              exitCooldownKey: `${DRIFT_EXIT_COOLDOWN_KEY_PREFIX}${pos.id}`,
+              exitCooldownS: cfg.WEATHER_DRIFT_EXIT_COOLDOWN_S,
+              exitedKey: `${EXITED_KEY_PREFIX}${pos.id}`,
+              exitedTtlS: EXITED_TTL_S,
+              exitReason: 'weather_drift',
+              shadowKind: 'weather_drift_exit',
+              logMarker: '[weather-drift]',
+              minDepthRatio: cfg.WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO,
+              extraContext: {
+                driftState: state, marketAgainstTier, bidSource,
+                ...(bidVelocityTrigger && { bidVelocityTrigger, bidVelocityDrop: +bidVelocityDrop.toFixed(3) }),
+              },
+            }).catch(() => false);
+            if (exited) action = 'exit';
           }
 
           // 2. Cancel resting maker order (forecast modal_against only — streak satisfied).
@@ -826,6 +877,8 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         oracleState: resolvedOracleState,
         contradictionClass,
         flipCandidateClass,
+        bidVelocityTrigger,
+        bidVelocityDrop: cfg.WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED ? bidVelocityDrop : null,
       };
 
       decisions.push(decision);
@@ -909,6 +962,10 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           oracleState: resolvedOracleState,
           contradictionClass,
           flipCandidateClass,
+          bidVelocityTrigger,
+          bidVelocityDrop: cfg.WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED && currentHeldBid != null
+            ? bidVelocityDrop
+            : null,
         },
       });
     } catch (err) {

@@ -214,9 +214,12 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     WEATHER_DRIFT_EXIT_MIN_DEPTH_RATIO: 0.90,
     WEATHER_DRIFT_EXIT_COOLDOWN_S: 1800,
     WEATHER_DRIFT_NOTIFY_DEDUP_S: 3600,
-    WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.50,
-    WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.65,
+    WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.20,
+    WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.25,
     WEATHER_DRIFT_MARKET_DIVERGENCE_NOTIFY: 0.55,
+    WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY: false,
+    WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED: false,
+    WEATHER_DRIFT_BID_VELOCITY_THRESHOLD: 0.40,
     // Phase 5/6 defaults
     WEATHER_DRIFT_LIVE_OBS_ENABLED: false,
     WEATHER_DRIFT_WU_LIVE_ENABLED: false,
@@ -1345,7 +1348,7 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
 
   it('classifies market_against (Tier 1) when bid and model both drop enough', async () => {
     // thesis_weakened default: entryPrice=0.65, direction=NO, drop=0.40 ≥ severeDrop=0.30
-    // Provide a bid that gives marketDrop ≥ 0.50: bid=0.20 → (0.65-0.20)/0.65≈0.692 ≥ 0.50 ✓
+    // Provide a bid that gives marketDrop ≥ 0.20: bid=0.20 → (0.65-0.20)/0.65≈0.692 ≥ 0.20 ✓
     // drop=0.40 ≥ SEVERE_DROP=0.30 ✓  →  Tier 1 met
     mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
     mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.20 }, bestAsk: null });
@@ -1358,9 +1361,9 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
   });
 
   it('does NOT classify market_against when bid drop is below NOTIFY threshold', async () => {
-    // entryPrice=0.65, bid=0.40 → marketDrop=(0.65-0.40)/0.65≈0.385 — below both 0.50 and 0.65
+    // entryPrice=0.65, bid=0.55 → marketDrop=(0.65-0.55)/0.65≈0.154 — below 0.20 (DROP_EXIT)
     mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
-    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.40 }, bestAsk: null });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.55 }, bestAsk: null });
     const redis = makeRedis();
     await runWeatherDriftStrategy(redis as any);
 
@@ -1458,10 +1461,10 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
   });
 
   it('does not classify market_against when CLOB returns no bid AND Gamma price is above DROP_EXIT threshold', async () => {
-    // CLOB no bid; Gamma NO price = 0.50 → marketDrop=(0.65-0.50)/0.65≈0.23 — below 0.50
+    // CLOB no bid; Gamma NO price = 0.56 → marketDrop=(0.65-0.56)/0.65≈0.138 — below 0.20 (DROP_EXIT)
     mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
     mockGetBookTouchLevels.mockReturnValue({ bestBid: null, bestAsk: null });
-    mockParseOutcomePrices.mockReturnValue(['0.50', '0.50']);
+    mockParseOutcomePrices.mockReturnValue(['0.44', '0.56']);
     const redis = makeRedis();
     await runWeatherDriftStrategy(redis as any);
 
@@ -1508,6 +1511,171 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
 
     const dedupCalls = vi.mocked(mockDedup).mock.calls;
     expect(dedupCalls.some((c) => String(c[0]).includes('market_against:t2'))).toBe(true);
+  });
+
+  it('market_against Tier 2 exits on resolution day when TIER2_EXIT_ON_RES_DAY=true', async () => {
+    // Tier 2: model stable (drop < SEVERE), but market has moved 90% against us.
+    // With TIER2_EXIT_ON_RES_DAY=true + isResolutionDay, exit should fire.
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockSql.mockResolvedValue([makePos({ direction: 'YES', consensusProbability: null, entryPrice: 0.50,
+      sourcedFrom: 'weather:chicago:2026-06-01:39°F or below' })]);
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    // entryPrice=0.50, bid=0.05 → marketDrop=0.90 ≥ 0.25 ✓; drop=-0.20 < SEVERE → Tier 2
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.05 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).toHaveBeenCalled();
+    const call = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect(call![1] as any).toMatchObject({ payload: { action: 'exit', marketAgainstTier: 2 } });
+  });
+
+  it('market_against Tier 2 does NOT exit when TIER2_EXIT_ON_RES_DAY=false', async () => {
+    // Same setup as above but knob is off — should stay notify-only.
+    mockSql.mockResolvedValue([makePos({ direction: 'YES', consensusProbability: null, entryPrice: 0.50,
+      sourcedFrom: 'weather:chicago:2026-06-01:39°F or below' })]);
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.05 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY: false,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+  });
+
+  it('oracle_impossible exits on non-resolution day', async () => {
+    // oracle_impossible does not require isResolutionDay — daily max only rises,
+    // so the oracle state is permanent and the position is already a loser.
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockCityLocalDate.mockReturnValue('2026-06-02'); // NOT resolution day (event = 2026-06-01)
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+      WEATHER_DRIFT_LIVE_OBS_ENABLED: true,
+    }));
+    mockFetchLiveObservation.mockResolvedValue({
+      city: 'chicago', targetDate: '2026-06-01',
+      observedMax: 45, source: 'wu-live', confidence: 'settlement_aligned', observedAt: '2026-06-01T14:00:00Z',
+    });
+    mockClassifyOracleState.mockReturnValue('oracle_impossible');
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).toHaveBeenCalled();
+    const call = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((call![1] as any).payload.action).toBe('exit');
+    expect((call![1] as any).payload.state).toBe('oracle_impossible');
+  });
+
+  // ── Bid velocity exit ────────────────────────────────────────────────────────
+
+  it('bid velocity exit fires on resolution day when single-scan drop >= threshold', async () => {
+    // Store prev bid of 0.40 in Redis; current bid = 0.20 → velocity drop = 0.50 ≥ 0.40 ✓
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.20 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_THRESHOLD: 0.40,
+      // Disable market_against to isolate velocity signal:
+      // entryPrice=0.65, bid=0.20 → marketDrop=0.692 ≥ 0.20 → Tier 1 would also fire.
+      // To test velocity in isolation, suppress the forecast drop (set DROP_EXIT very high).
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.80,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.80,
+      WEATHER_DRIFT_SEVERE_DROP: 0.80,
+    }));
+    const redis = makeRedis(new Map([['weather:drift_prev_bid:pos-1', '0.40']]));
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).toHaveBeenCalled();
+    const call = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((call![1] as any).payload.action).toBe('exit');
+    expect((call![1] as any).payload.bidVelocityTrigger).toBe(true);
+    expect((call![1] as any).payload.bidVelocityDrop).toBeCloseTo(0.50, 2);
+  });
+
+  it('bid velocity exit does NOT fire on non-resolution day', async () => {
+    // Same velocity setup but daysOut > 0 (not resolution day) — exit must not fire.
+    mockCityLocalDate.mockReturnValue('2026-06-02'); // NOT resolution day
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.20 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_THRESHOLD: 0.40,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.80,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.80,
+      WEATHER_DRIFT_SEVERE_DROP: 0.80,
+    }));
+    const redis = makeRedis(new Map([['weather:drift_prev_bid:pos-1', '0.40']]));
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+    const call = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    // velocity detected but not actionable off resolution day
+    expect((call![1] as any).payload.bidVelocityTrigger).toBe(true);
+    expect((call![1] as any).payload.action).not.toBe('exit');
+  });
+
+  it('bid velocity does NOT fire when drop is below threshold', async () => {
+    // Prev bid=0.40, current=0.30 → velocity drop=0.25 < threshold 0.40 → no trigger.
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.30 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_THRESHOLD: 0.40,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.80,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.80,
+      WEATHER_DRIFT_SEVERE_DROP: 0.80,
+    }));
+    const redis = makeRedis(new Map([['weather:drift_prev_bid:pos-1', '0.40']]));
+    await runWeatherDriftStrategy(redis as any);
+
+    const call = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((call![1] as any).payload.bidVelocityTrigger).toBe(false);
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+  });
+
+  it('bid velocity stores current bid in Redis each scan cycle', async () => {
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.42 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(redis.set).toHaveBeenCalledWith(
+      'weather:drift_prev_bid:pos-1',
+      '0.42',
+      'EX',
+      3600,
+    );
   });
 
   // ── Phase 5: live observation + oracle state ────────────────────────────────
