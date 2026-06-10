@@ -2309,6 +2309,7 @@ describe('runWeatherNowcastScan', () => {
       expect.stringContaining('"heldProb":0.55'),
       'EX',
       3600,
+      'NX',
     );
   });
 

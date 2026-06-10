@@ -307,7 +307,9 @@ describe('conditionalHeldProbability', () => {
       ];
       const allHours: Record<number, typeof hourEntries> = {};
       for (let h = 0; h < 24; h++) allHours[h] = hourEntries;
-      const climoTable = { chicago: { 6: allHours } };
+      const allMonths: Record<number, typeof allHours> = {};
+      for (let m = 1; m <= 12; m++) allMonths[m] = allHours;
+      const climoTable = { chicago: allMonths };
       const result = conditionalHeldProbability(baseInput({
         remainingHourlyMembers: flatMembers(40, 5), // only 5 members < minMembers=10
         climoTable: climoTable as never,
@@ -351,7 +353,9 @@ describe('conditionalHeldProbability', () => {
       ];
       const allHours: Record<number, typeof hourEntries> = {};
       for (let h = 0; h < 24; h++) allHours[h] = hourEntries;
-      const climoTable = { chicago: { 6: allHours } };
+      const allMonths: Record<number, typeof allHours> = {};
+      for (let m = 1; m <= 12; m++) allMonths[m] = allHours;
+      const climoTable = { chicago: allMonths };
 
       const result = conditionalHeldProbability({
         city: 'chicago',
@@ -403,7 +407,9 @@ describe('conditionalHeldProbability', () => {
       ];
       const allHours: Record<number, typeof entries> = {};
       for (let h = 0; h < 24; h++) allHours[h] = entries;
-      const climoTable = { chicago: { 6: allHours } };
+      const allMonths: Record<number, typeof allHours> = {};
+      for (let m = 1; m <= 12; m++) allMonths[m] = allHours;
+      const climoTable = { chicago: allMonths };
 
       const result = conditionalHeldProbability(baseInput({
         direction: 'NO',

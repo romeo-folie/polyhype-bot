@@ -1333,6 +1333,8 @@ export async function runWeatherNowcastScan(
 
       // H2 fix: write the cache so the fourth revalidation cancel rule can protect
       // resting orders that don't yet have a held position (pure unfilled scenario).
+      // NX so the drift strategy's held-position write (same key, same TTL) takes precedence
+      // if a position is already held and runWeatherDriftStrategy ran first this cycle.
       const nowcastCacheKey = `${COND_ORACLE_RESULT_KEY_PREFIX}${opp.city}:${opp.targetDate}:${opp.tradeSide}`;
       void redis.set(
         nowcastCacheKey,
@@ -1344,6 +1346,7 @@ export async function runWeatherNowcastScan(
         }),
         'EX',
         3600,
+        'NX',
       ).catch(() => {});
 
       const edge = condResult.heldProb - opp.outcomePrice;
