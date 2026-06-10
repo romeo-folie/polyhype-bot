@@ -2130,10 +2130,10 @@ describe('runWeatherDriftStrategy — conditional oracle (Phases A-C)', () => {
   it('hold guard vetoes bid-velocity exit when condP - bid >= HOLD_GUARD_GAP', async () => {
     // condP=0.75: bid=0.40 → condP-bid=0.35 ≥ gap=0.30 → holdGuardVetoed=true
     // bidVelocityCanExit = bidVelocityTrigger && isResolutionDay && !holdGuardVetoed
-    //   = true && true && false = FALSE (hold guard blocks this path)
-    // The forecast-path exit (isResolutionDay && forecastCanExit) may still fire for
-    // thesis_weakened positions — the hold guard only targets the bid-velocity path.
-    // We verify holdGuardVetoed=true in the shadow log, not that all exits are suppressed.
+    //   = true && true && false = FALSE
+    // forecastCanExit = ... && !(holdGuardVetoed && state !== 'oracle_impossible')
+    //   = ... && false = FALSE (hold guard blocks forecast-state exits too)
+    // All exit paths suppressed; tryWeatherExit must NOT be called.
     mockConditionalHeldProbability.mockReturnValue({
       ...condOracleResult,
       heldProb: 0.75,  // much higher than bid=0.40
@@ -2152,11 +2152,11 @@ describe('runWeatherDriftStrategy — conditional oracle (Phases A-C)', () => {
       WEATHER_COND_ORACLE_HOLD_GUARD_GAP: 0.30,
       WEATHER_DRIFT_WU_LIVE_ENABLED: true,
     }));
-    // prev bid = 0.80 (stored), current bid = 0.40 → drop=0.50 ≥ threshold=0.40 → bidVelocityTrigger=true
+    // prev bid = 0.80 (stored), current bid = 0.40 → velocity drop=0.40 ≥ threshold=0.40 → bidVelocityTrigger=true
     const redis = makeRedis(new Map([['weather:drift_prev_bid:pos-1', '0.80']]));
     await runWeatherDriftStrategy(redis as any);
 
-    // Shadow log must record holdGuardVetoed=true. The fixture position has drop=0.30 ≥
+    // The fixture position has heldProbDrop=0.30 (entryHeldProb=0.70 − bid=0.40) ≥
     // THESIS_WEAKENED_DROP=0.20, so thesis_weakened fires alongside bidVelocityTrigger →
     // compound reason 'bid_velocity+forecast_state'.
     const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
@@ -2164,6 +2164,8 @@ describe('runWeatherDriftStrategy — conditional oracle (Phases A-C)', () => {
     );
     expect((driftCall![1] as any).payload.holdGuardVetoed).toBe(true);
     expect((driftCall![1] as any).payload.holdGuardVetoReason).toBe('bid_velocity+forecast_state');
+    // Hold guard must suppress all exits — tryWeatherExit must not be called.
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
   });
 
   it('Phase A audit: condOracleAudit.wouldConfirm=true when bid > condP + buffer and bid-velocity triggered', async () => {
@@ -2551,6 +2553,94 @@ describe('runWeatherDriftStrategy — M3: hold guard vetoes forecast-state exits
       (c) => (c[1] as any).kind === 'weather_drift_decision',
     );
     expect((driftCall![1] as any).payload.holdGuardVetoed).toBe(false);
+  });
+});
+
+// ── Phase B soft-exit execution path ─────────────────────────────────────────
+
+describe('runWeatherDriftStrategy — Phase B soft-exit: oracle_likely_against triggers tryWeatherExit', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockDedup.mockResolvedValue(true);
+    mockCityLocalDate.mockReturnValue('2026-06-01');
+    mockFetchWeatherEvents.mockResolvedValue([{}]);
+    mockParseWeatherEvent.mockReturnValue({
+      city: 'chicago', targetDate: '2026-06-01',
+      coords: { tz: 'America/Chicago' },
+      brackets: [{ label: '39°F or below', low: null, high: 39, marketId: 'mkt-1' }],
+    });
+    mockSql.mockResolvedValue([makePos()]);
+    mockFetchForecast.mockResolvedValue(makeForecast());
+    // settlement_aligned obs required for oracle_likely_against
+    mockFetchLiveObservation.mockResolvedValue({
+      city: 'chicago', targetDate: '2026-06-01',
+      observedMax: 35, source: 'wu-live',
+      confidence: 'settlement_aligned',
+      observedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+    mockClassifyOracleState.mockReturnValue(null);
+    mockLoadClimoTable.mockReturnValue(null);
+    mockFetchEnsembleHourly.mockResolvedValue(null);
+    // condP=0.25, bid=0.40 → bid (0.40) > condP (0.25) + buffer (0.05) = 0.30 → condOracleLikelyAgainst
+    mockConditionalHeldProbability.mockReturnValue({
+      heldProb: 0.25, isStale: false, estimator: 'ensemble' as const,
+      members: 20, observedAtLocalHour: 9, clampedByClimo: false,
+      estimatorGap: null, climoHeldProb: null,
+    });
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.40 }, bestAsk: null });
+    mockTryWeatherExit.mockResolvedValue(true);
+  });
+
+  it('calls tryWeatherExit when SOFT_EXIT_ENABLED + oracle_likely_against + res-day', async () => {
+    // condP=0.25, bid=0.40, buffer=0.05 → condOracleLikelyAgainst=true → state='oracle_likely_against'
+    // conditionalOracleCanExit = SOFT_EXIT_ENABLED && state=oracle_likely_against && isResolutionDay = true
+    // HOLD_GUARD: condP(0.25) - bid(0.40) = -0.15 < gap(0.30) → guard does not fire
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_COND_ORACLE_ENABLED: true,
+      WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED: true,
+      WEATHER_COND_ORACLE_EXIT_COST_BUFFER: 0.05,
+      WEATHER_COND_ORACLE_HOLD_GUARD_ENABLED: true,
+      WEATHER_COND_ORACLE_HOLD_GUARD_GAP: 0.30,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.80,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.80,
+    }));
+    await runWeatherDriftStrategy(makeRedis() as any);
+
+    const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((driftCall![1] as any).payload.state).toBe('oracle_likely_against');
+    // Phase B execution: tryWeatherExit must be called
+    expect(mockTryWeatherExit).toHaveBeenCalledOnce();
+  });
+
+  it('does NOT call tryWeatherExit when SOFT_EXIT_ENABLED=false (state falls back to forecast state)', async () => {
+    // With SOFT_EXIT=false, condOracleLikelyAgainst is computed but state stays 'thesis_weakened'.
+    // Set thresholds high so no other exit path fires: THESIS_WEAKENED_DROP=0.35 > heldProbDrop=0.30,
+    // no bid-velocity (no prevBid in Redis), MARKET_ADVERSE_DROP_EXIT=0.80 prevents Tier 2.
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_COND_ORACLE_ENABLED: true,
+      WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED: false,
+      WEATHER_COND_ORACLE_EXIT_COST_BUFFER: 0.05,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+      WEATHER_DRIFT_THESIS_WEAKENED_DROP: 0.35,
+      WEATHER_DRIFT_SEVERE_DROP: 0.80,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.80,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.80,
+    }));
+    await runWeatherDriftStrategy(makeRedis() as any);
+
+    const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((driftCall![1] as any).payload.state).not.toBe('oracle_likely_against');
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
   });
 });
 

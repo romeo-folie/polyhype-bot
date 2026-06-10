@@ -661,7 +661,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             const memoKey = `${city}:${targetDate}`;
             let hourlyData: import('./openMeteoClient.js').EnsembleHourlyForecast | null;
             if (ensembleHourlyMemo.has(memoKey)) {
-              hourlyData = ensembleHourlyMemo.get(memoKey)!;
+              hourlyData = ensembleHourlyMemo.get(memoKey) ?? null;
             } else {
               hourlyData = await fetchEnsembleHourly(
                 event.coords.lat,
@@ -788,6 +788,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       if (
         cfg.WEATHER_COND_ORACLE_HOLD_GUARD_ENABLED &&
         isResolutionDay &&
+        (bidVelocityTrigger || forecastState === 'thesis_weakened' || forecastState === 'modal_against') &&
         condOracleResult != null &&
         !condOracleResult.isStale &&
         liveObs?.confidence === 'settlement_aligned' &&
@@ -1347,7 +1348,7 @@ export async function runWeatherNowcastScan(
       const nowcastMemoKey = `${opp.city}:${opp.targetDate}`;
       let ensembleHourly: import('./openMeteoClient.js').EnsembleHourlyForecast | null;
       if (ensembleHourlyMemo.has(nowcastMemoKey)) {
-        ensembleHourly = ensembleHourlyMemo.get(nowcastMemoKey)!;
+        ensembleHourly = ensembleHourlyMemo.get(nowcastMemoKey) ?? null;
       } else {
         ensembleHourly = await fetchEnsembleHourly(
           cityCoords.lat, cityCoords.lon, opp.targetDate, opp.unit, fetchFn,
