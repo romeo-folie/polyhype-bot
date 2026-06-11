@@ -35,6 +35,7 @@ import {
   COND_ORACLE_RESULT_KEY_PREFIX,
 } from './weatherDriftStrategy.js';
 import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
+import { shrinkTowardMarket } from '../shared/probability.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
 import type { ExecutionResult } from '../execution/executor.js';
 import { hasOpenPosition } from '../execution/positionLedger.js';
@@ -879,31 +880,11 @@ export function daysUntil(targetDate: string, now?: Date): number {
   return Math.max(0, Math.ceil(diffMs / (24 * 60 * 60 * 1000)));
 }
 
-/**
- * Shrink a model win-probability toward the market price before Kelly sizing:
- *
- *   sizingProb = w·modelProb + (1−w)·marketPrice
- *
- * Closed-bet calibration shows the weather model is overconfident (model ~0.65 →
- * realized ~0.52) and only ties the market as a forecaster, so Half-Kelly on the
- * raw model prob oversizes the edge ~2×. Shrinking toward the better-calibrated
- * market price right-sizes the stake. Sign-invariant: for w∈(0,1],
- * `sizingProb > price ⟺ modelProb > price`, so it never flips a positive-edge entry
- * to a skip — it only reduces stake magnitude. w=1 → no shrink. (w=0 → fully market,
- * which zeroes the Kelly edge; the weather config restricts to (0,1] so that degenerate
- * value can't silently skip every entry — see WEATHER_KELLY_SHRINK_WEIGHT.)
- *
- * @param modelProb   model P(side wins), 0–1
- * @param marketPrice price of the side we buy (= market-implied P(side)), 0–1
- * @param weight      shrink weight w∈[0,1] (clamped)
- */
-export function shrinkTowardMarket(modelProb: number, marketPrice: number, weight: number): number {
-  // Non-finite weight (e.g. an unset config) falls back to no shrink (legacy behavior)
-  // rather than poisoning the stake with NaN.
-  const w = Number.isFinite(weight) ? Math.min(1, Math.max(0, weight)) : 1;
-  const shrunk = w * modelProb + (1 - w) * marketPrice;
-  return Math.min(1, Math.max(0, shrunk));
-}
+// shrinkTowardMarket moved to src/shared/probability.ts so the executor's size-up
+// gate can share it without a circular import (the scanner imports the executor,
+// so the reverse edge would cycle). Imported at the top for internal sizing use;
+// re-exported here for back-compat with existing callers/tests.
+export { shrinkTowardMarket };
 
 /**
  * True when the corrected forecast's central estimate rounds into [low, high].
@@ -2573,11 +2554,20 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
   // Filter by WEATHER_TRADE_SIDES, market-disagreement gate, ensemble-veto gate,
   // and excluded-city list. Excluded-city opps remain in shadow records so
   // calibration data stays clean.
+  // Size-ups face the SAME quality bar as a fresh entry: allowedByConfig (side
+  // filter), the market-disagreement gate, and the ensemble veto all apply. They
+  // previously bypassed these (an `o.sizeUpScanOnly ||` short-circuit on each
+  // clause), so a top-up cleared FEWER gates than the original entry — exactly
+  // backwards for adding to risk. On resolution day the forecast is locked, so
+  // these gates are precisely the corroboration we want before topping up: the
+  // model must not wildly disagree with the market and the secondary ensemble
+  // must agree. (Entry-horizon gates — max-lookahead, near-resolution — are still
+  // bypassed for size-ups below: a res-day top-up is inherently near resolution.)
   let tradable = opportunities.filter(
     (o) =>
-      (o.sizeUpScanOnly || o.allowedByConfig) &&
-      (o.sizeUpScanOnly || !o.blockedByMarketDisagreement) &&
-      (o.sizeUpScanOnly || !o.blockedByEnsembleVeto) &&
+      o.allowedByConfig &&
+      !o.blockedByMarketDisagreement &&
+      !o.blockedByEnsembleVeto &&
       !excludedCities.has(o.city.toLowerCase()),
   );
 
