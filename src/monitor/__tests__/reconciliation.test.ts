@@ -41,11 +41,16 @@ vi.mock('../../execution/pendingMakerOrders.js', () => ({
 }));
 
 vi.mock('../../shared/config.js', () => ({
-  loadConfig: vi.fn(() => ({ SIZE_UP_ENABLED: true, SIZE_UP_ELIGIBLE_SOURCES: 'weather' })),
+  loadConfig: vi.fn(() => ({
+    SIZE_UP_ENABLED: true,
+    SIZE_UP_ELIGIBLE_SOURCES: 'weather',
+    RECONCILE_GHOST_ALERT_THRESHOLD: 5,
+  })),
 }));
 
 vi.mock('../../execution/telegram.js', () => ({
   notifyTradeExecuted: vi.fn().mockResolvedValue(undefined),
+  notify: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../../shared/hyperliquid.js', () => ({
@@ -81,6 +86,10 @@ describe('Position Reconciliation Healer', () => {
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([]);
     (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(null);
     (polymarketGamma.fetchMarketByQuestion as any).mockResolvedValue(null);
+    // clearAllMocks() does not reset implementations set via .mockResolvedValue
+    // in a prior test — restore the inconclusive default so each test's explicit
+    // override is isolated.
+    (clob.fetchClobTokenBalance as any).mockResolvedValue({ ok: false, error: 'not found' });
   });
 
   it('detects and heals a share mismatch for CLOB position', async () => {
@@ -120,7 +129,7 @@ describe('Position Reconciliation Healer', () => {
     );
   });
 
-  it('detects and closes a ghost position (in ledger but missing from CLOB venue)', async () => {
+  it('closes a ghost position only when the on-chain balance read CONFIRMS zero', async () => {
     const ghostPosition = {
       marketId: 'ghost-1',
       conditionId: 'cond-ghost',
@@ -142,11 +151,67 @@ describe('Position Reconciliation Healer', () => {
 
     (positionLedger.getOpenPositions as any).mockResolvedValue([ghostPosition]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
+    // Token absent from the snapshot → on-chain confirms a genuine zero balance.
+    (clob.fetchClobTokenBalance as any).mockResolvedValue({ ok: true, balance: 0 });
 
     await runReconciliation(mockRedis, { forceFix: true });
 
     // Expecting Ghost Cleanup
     expect(positionLedger.closePosition).toHaveBeenCalledWith(mockRedis, 'ghost-1', 'NO');
+  });
+
+  it('does NOT ghost-close when the on-chain balance read FAILS (inconclusive)', async () => {
+    // Regression for the 2026-06 false-ghost: a position we still hold was
+    // deleted from the ledger because its token fell off the (unpaginated) Data
+    // API page AND every RPC failed for that token on one pass. An RPC failure
+    // must read as "unknown", never as "zero balance".
+    const heldButOffPage = {
+      marketId: 'spurs-finals',
+      conditionId: 'cond-spurs',
+      direction: 'YES',
+      executionVenue: 'clob',
+      sharesHeld: 5.02,
+      clobTokenIds: ['tok-spurs-yes', 'tok-spurs-no'],
+    };
+
+    // Snapshot lists only unrelated junk — non-zero total clears the abort guard.
+    const clobPositions = [
+      { conditionId: 'cond-junk', asset: 'tok-junk', size: 1, avgPrice: 0.5 },
+    ];
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([heldButOffPage]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
+    // All RPCs failed for this token on this pass.
+    (clob.fetchClobTokenBalance as any).mockResolvedValue({ ok: false, error: 'all RPCs failed' });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // The row must survive — no ghost close on an inconclusive check.
+    expect(positionLedger.closePosition).not.toHaveBeenCalled();
+  });
+
+  it('alerts (does not block) when a cycle ghost-closes at or above the threshold', async () => {
+    // Five genuinely-gone positions (confirmed zero balance) → all closed AND a
+    // human-facing alert fires. The alert is observability only; closes proceed.
+    const ghosts = Array.from({ length: 5 }, (_, i) => ({
+      marketId: `gone-${i}`,
+      conditionId: `cond-gone-${i}`,
+      direction: 'YES',
+      executionVenue: 'clob',
+      sharesHeld: 10,
+      clobTokenIds: [`tok-gone-${i}-yes`, `tok-gone-${i}-no`],
+    }));
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue(ghosts);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([
+      { conditionId: 'cond-real', asset: 'tok-real', size: 1, avgPrice: 0.5 },
+    ]);
+    (clob.fetchClobTokenBalance as any).mockResolvedValue({ ok: true, balance: 0 });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(positionLedger.closePosition).toHaveBeenCalledTimes(5);
+    expect(telegram.notify as any).toHaveBeenCalledWith(expect.stringContaining('ghost-closed 5'));
   });
 
   it('automatically re-imports an orphan position from CLOB using Data & Gamma APIs', async () => {

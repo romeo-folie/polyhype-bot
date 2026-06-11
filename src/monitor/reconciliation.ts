@@ -50,7 +50,7 @@ async function closeGhostPositionWithHedge(
 }
 
 interface ReconciliationDetail {
-  type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded' | 'recovered_outcome';
+  type: 'orphan' | 'ghost' | 'mismatch' | 'healed' | 'imported' | 'upgraded' | 'recovered_outcome' | 'skipped';
   marketId: string;
   direction?: string;
   ledgerShares?: number;
@@ -110,6 +110,10 @@ export async function runReconciliation(
 
       let venueShares = 0;
       let foundOnVenue = false;
+      // POSITIVE proof of the on-venue balance: either the position snapshot
+      // listed the token, or an on-chain balance read SUCCEEDED. An RPC failure
+      // is NOT proof of absence — see the ghost guard below.
+      let venueCheckConclusive = false;
       const venueName = 'clob';
 
       // All PM positions reconcile against the CLOB
@@ -121,13 +125,28 @@ export async function runReconciliation(
       const clobMatch = tokenId ? clobMap.get(tokenId) : null;
       if (clobMatch) {
         foundOnVenue = true;
+        venueCheckConclusive = true;
         venueShares = clobMatch.size ?? 0;
         clobMap.delete(tokenId!);
       } else if (tokenId) {
+        // Not on the position snapshot — confirm directly on-chain. ONLY a
+        // successful read is conclusive: fetchClobTokenBalance returns
+        // { ok: false } when every RPC endpoint fails, and reading that as a
+        // zero balance silently deletes a position we still hold (observed
+        // 2026-06: a finals pair leg false-ghosted on a transient RPC outage
+        // while the tokens sat in the wallet).
         const balanceResult = await fetchClobTokenBalance(tokenId);
         if (balanceResult.ok) {
+          venueCheckConclusive = true;
           venueShares = balanceResult.balance;
           foundOnVenue = venueShares > 0.0001;
+        } else {
+          logger.warn('[reconcile] on-chain balance read failed — cannot confirm ghost, skipping', {
+            marketId: ledgerPos.marketId,
+            direction: ledgerPos.direction,
+            tokenId,
+            error: balanceResult.error,
+          });
         }
       }
 
@@ -136,13 +155,34 @@ export async function runReconciliation(
 
       // -- CHECK FOR GHOSTS --
       if (!foundOnVenue) {
+        // Fail-safe: NEVER delete a ledger row on an inconclusive check. A
+        // missing tokenId or an RPC failure means "unknown", not "gone" —
+        // leave the row intact and retry next cycle. A genuinely-gone position
+        // stays absent and gets closed once the balance read succeeds.
+        if (!venueCheckConclusive) {
+          logger.warn('[reconcile] venue check inconclusive — skipping (no ghost close)', {
+            marketId: ledgerPos.marketId,
+            direction: ledgerPos.direction,
+            hasTokenId: Boolean(tokenId),
+          });
+          details.push({
+            type: 'skipped',
+            marketId: ledgerPos.marketId,
+            direction: ledgerPos.direction,
+            venue: venueName,
+            ledgerShares,
+            reason: 'venue check inconclusive — ledger row preserved',
+          });
+          continue;
+        }
+
         logger.error('[reconcile] ghost detected — closing stale ledger entry', {
           marketId: ledgerPos.marketId,
           direction: ledgerPos.direction,
           venue: venueName,
           ledgerShares,
         });
-        
+
         if (forceFix) {
           await closeGhostPositionWithHedge(redis, ledgerPos.marketId, ledgerPos.direction);
           ghostsFixed++;
@@ -270,6 +310,24 @@ export async function runReconciliation(
 
     if (details.length === 0) {
       logger.info('[reconcile] all positions reconciled — ledger is healthy');
+    }
+
+    // Observability guard: mass ghost-closure in one cycle almost always means
+    // a systemic data fault (API/RPC), not that many positions genuinely
+    // vanished at once. The inconclusive-skip above already blocks false
+    // deletions, so this only ALERTS for human review — it never blocks
+    // legitimate cleanup (e.g. a batch of markets resolving and redeeming).
+    // `ghostsFixed` only accrues under forceFix (closures happen there), so the
+    // alert is inherently scoped to real closes — a dry run never pages.
+    if (forceFix && ghostsFixed >= cfg.RECONCILE_GHOST_ALERT_THRESHOLD) {
+      logger.error('[reconcile] unusually high ghost-closure count this cycle', {
+        ghostsFixed,
+        ledgerCount: activePositions.length,
+      });
+      void notify(
+        `⚠️ Reconciler ghost-closed ${ghostsFixed} positions in one cycle ` +
+        `(ledger had ${activePositions.length}). Verify this is real, not a data fault.`,
+      ).catch(() => {});
     }
   } catch (err) {
     logger.error('[reconcile] reconciliation failed', {
