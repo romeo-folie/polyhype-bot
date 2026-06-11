@@ -2370,6 +2370,70 @@ describe('empty-book maker route', () => {
     expect(redis.set).not.toHaveBeenCalled();        // idempotency unset — resumes next cycle
   });
 
+  it('weather: clears the stale key and re-posts when CLOB reports the resting order CANCELLED (external/manual cancel)', async () => {
+    // Root-cause fix: a manually/externally cancelled weather maker leaves its
+    // maker:open key behind. Nothing else reconciles an external cancel (the
+    // revalidation rules only delete on THEIR triggers; the reconciler only
+    // clears after linking a real fill), so the key would otherwise strand
+    // re-entry until its TTL — the scanner re-emits, lands in this resume poll
+    // every cycle, and returns maker_not_filled forever. When the poll sees the
+    // order CANCELLED with zero fill, clear the key and fall through to re-post.
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.6;
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'order-wx-cxl', tokenId: 'tok-yes', price: 0.49, size: 10,
+      postedAt: Date.now() - 3_600_000, expiresAt: Date.now() + 600_000,
+      consensusP: 0.7, direction: 'YES', source: 'weather',
+    });
+    // First poll (resume) → the cancelled order; later polls → the fresh re-post.
+    mockGetOrder
+      .mockResolvedValueOnce({
+        id: 'order-wx-cxl', status: 'canceled', owner: '0x1', maker_address: '0x1',
+        market: 'mkt-test', asset_id: 'tok-yes', side: 'BUY',
+        original_size: '10', size_matched: '0', price: '0.49',
+        associate_trades: [], outcome: 'YES', created_at: Date.now() - 3_600_000,
+        expiration: '', order_type: 'GTC',
+      })
+      .mockResolvedValue({
+        id: 'order-wx-new', status: 'open', owner: '0x1', maker_address: '0x1',
+        market: 'mkt-test', asset_id: 'tok-yes', side: 'BUY',
+        original_size: '10', size_matched: '0', price: '0.49',
+        associate_trades: [], outcome: 'YES', created_at: Date.now(),
+        expiration: '', order_type: 'GTC',
+      });
+    mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-wx-new' });
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await executeSignal(makeSignal({ source: 'weather' }), redis as any);
+
+    // The stale key for the cancelled order is cleared (re-entry unblocked)…
+    expect(mockDeletePendingOrder).toHaveBeenCalledWith(redis, 'mkt-test', 'YES');
+    // …and a fresh order is posted instead of holding the cancelled one.
+    expect(mockSubmitLimit).toHaveBeenCalled();
+
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0;
+  });
+
+  it('weather: leaves the key and does NOT re-post when the resting order is GONE from CLOB (possible unattributed fill)', async () => {
+    // Contrast: a null getClobOrder (order vanished without a CANCELLED status)
+    // may be an async fill the reconciler still needs the key's metadata to
+    // link — so the key is preserved and we report pending, unchanged.
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'order-wx-gone', tokenId: 'tok-yes', price: 0.49, size: 10,
+      postedAt: Date.now() - 3_600_000, expiresAt: Date.now() + 600_000,
+      consensusP: 0.7, direction: 'YES', source: 'weather',
+    });
+    mockGetOrder.mockResolvedValue(null); // gone from CLOB
+
+    const redis = makeRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(makeSignal({ source: 'weather' }), redis as any);
+
+    expect(result.entryExecutionPath).toBe('maker_pending'); // reported pending, held
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();   // key preserved for reconciler
+    expect(mockSubmitLimit).not.toHaveBeenCalled();          // not re-posted
+  });
+
   it('non-weather (oracle-lag): still cancels an expired unfilled pending order (queue-hold is weather-only)', async () => {
     // Regression guard: the hold is scoped to weather. Short-lived sources keep
     // the expiry cancel (+ re-post) — they should not rest stale.
