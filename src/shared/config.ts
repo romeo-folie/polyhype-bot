@@ -721,6 +721,13 @@ export const envSchema = z.object({
 
   // Position size-up (pyramid) — add to an existing open position when fresh edge still exists.
   SIZE_UP_ENABLED: boolFromEnv.optional().default(false),
+  // Shadow mode: when true (and SIZE_UP_ENABLED is false), the weather scanner still
+  // emits a size-up evaluation for held resolution-day positions, but evaluateSizeUp
+  // returns feature_disabled so NOTHING executes — it only writes `would_size_up`
+  // shadow rows (would-fire + conviction-gate blocks) for calibration. Without this
+  // the scanner skips held events entirely when SIZE_UP_ENABLED is false, so no shadow
+  // data is produced. Ignored when SIZE_UP_ENABLED is true (already evaluating live).
+  SIZE_UP_SHADOW_ENABLED: boolFromEnv.optional().default(false),
   // Comma-separated signal sources eligible for position size-up.
   SIZE_UP_ELIGIBLE_SOURCES: z.string().optional().default('weather'),
   // Maximum number of size-up top-ups allowed per open position.
@@ -741,6 +748,24 @@ export const envSchema = z.object({
   // size-up fraction is re-strangled by WEATHER_MAX_STAKE_USD at high bankroll.
   // 0 = legacy behavior (reuse WEATHER_MAX_STAKE_USD).
   SIZE_UP_MAX_STAKE_USD: z.coerce.number().min(0).optional().default(0),
+  // Minimum RISE in the model's held-side probability since entry required to size
+  // up. Encodes "add only on extra model conviction": a top-up fires only when the
+  // (resolution-day) forecast has firmed in our favour relative to the entry
+  // estimate — not merely because the market price moved. The entry estimate is the
+  // position's stored consensusProbability; the current estimate is the size-up
+  // signal's. Fails closed (no top-up) when the entry baseline is missing/degenerate
+  // (healed/orphan rows). 0 = disabled.
+  SIZE_UP_MIN_CONFIDENCE_RISE: z.coerce.number().min(0).max(1).optional().default(0),
+  // Max the current price may sit BELOW the original entry price before a size-up is
+  // refused. Blocks averaging DOWN into a position the market has moved against — the
+  // "it got cheaper, add more" tilt. Pairs with SIZE_UP_MAX_ENTRY_DRIFT (the upper
+  // bound) to form a two-sided confirming-drift band. 0 = disabled.
+  SIZE_UP_MAX_ADVERSE_DRIFT: z.coerce.number().min(0).max(1).optional().default(0),
+  // When true, a size-up requires a two-sided (real) book and never posts above the
+  // side mid. Refuses to ADD into a one-sided ghost book at a discounted-fair-value
+  // price the thin quote won't honour (the empty-book adverse-fill case observed
+  // 2026-06-05). Fresh entries are unaffected.
+  SIZE_UP_REQUIRE_REAL_BOOK: boolFromEnv.optional().default(true),
 
   // OSINT sibling fan-out
   OSINT_SIBLING_FANOUT_ENABLED: boolFromEnv.optional().default(false),

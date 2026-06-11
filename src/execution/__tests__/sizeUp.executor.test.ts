@@ -8,7 +8,7 @@
  *
  * All signals route to CLOB; submitClobBuy is the venue mock for the happy-path execution.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { TradeSignal } from '../../mapping/index.js';
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
@@ -146,9 +146,26 @@ const mockConfig = {
   SIZE_UP_MAX_TOPUPS: 1,
   SIZE_UP_MIN_EDGE: 0,
   SIZE_UP_MAX_ENTRY_DRIFT: 0.15,
+  // Conviction gates — default OFF (0) so the existing stake/drift tests are
+  // unaffected; individual tests below override to exercise each gate.
+  SIZE_UP_MIN_CONFIDENCE_RISE: 0,
+  SIZE_UP_MAX_ADVERSE_DRIFT: 0,
+  SIZE_UP_REQUIRE_REAL_BOOK: true,
+  WEATHER_KELLY_SHRINK_WEIGHT: 0.4,
   // 0 = legacy: size-ups reuse the entry caps (WEATHER_MAX_STAKE_FRACTION/_USD).
   SIZE_UP_MAX_STAKE_FRACTION: 0,
   SIZE_UP_MAX_STAKE_USD: 0,
+  // Weather empty-book/maker knobs — needed for the Fix E execution-price tests
+  // that drive the empty-book maker route. Defensive `> 0` checks in the executor
+  // mean omitted knobs are simply inert, but set the ones the route reads.
+  WEATHER_EMPTY_BOOK_DISCOUNT_BPS: 0,
+  WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE: 0,
+  WEATHER_EARLY_ENTRY_MAX_PRICE: 0,
+  WEATHER_REST_ABOVE_CAP_ENABLED: false,
+  WEATHER_REST_ABOVE_CAP_MAX_NOTIONAL_USD: 0,
+  MAKER_EMPTY_BOOK_MIN_CONSENSUS: 0.5,
+  MAKER_EMPTY_BOOK_MIN_EDGE: 0,
+  MAKER_EMPTY_BOOK_MAX_STDDEV: 1,
 };
 
 const mockLoadConfig = vi.fn(() => mockConfig);
@@ -158,11 +175,16 @@ vi.mock('../../shared/config.js', () => ({ loadConfig: mockLoadConfig }));
 
 import type { Position } from '../positionLedger.js';
 
-const { submitClobBuy } = await import('../../shared/clob.js');
+const { submitClobBuy, getClobOrderBook, submitClobLimitBuy, getClobOrder } = await import('../../shared/clob.js');
 const { hasOpenPosition, getPosition, sizeUpPosition } = await import('../positionLedger.js');
 const { executeAndRecordSignal } = await import('../executor.js');
+const { enqueueWrite } = await import('../../db/writeQueue.js');
 
+const mockEnqueueWrite = vi.mocked(enqueueWrite);
 const mockSubmitClob   = vi.mocked(submitClobBuy);
+const mockGetOrderBook = vi.mocked(getClobOrderBook);
+const mockSubmitLimit  = vi.mocked(submitClobLimitBuy);
+const mockGetOrder     = vi.mocked(getClobOrder);
 const mockHasPosition  = vi.mocked(hasOpenPosition);
 const mockGetPosition  = vi.mocked(getPosition);
 const mockSizeUpPos    = vi.mocked(sizeUpPosition);
@@ -199,6 +221,10 @@ function makeExistingPosition(overrides: Partial<Position> = {}): Position {
     entryPrice: 0.45,
     stakeUsd: 5.0,   // existing stake: topUpStakeCap = 10 - 5 = 5
     edgeMagnitude: 0.15,
+    // Entry conviction baseline (P(YES)). The conviction-rise gate compares the
+    // current signal's consensusProbability against this. Present by default so the
+    // gate has a baseline; the no_confidence_baseline test overrides it to undefined.
+    consensusProbability: 0.55,
     sourcedFrom: 'weather-scanner',
     openedAt: new Date('2026-05-24T08:00:00Z').toISOString(),
     executionVenue: 'clob',
@@ -448,5 +474,356 @@ describe('evaluateSizeUp via executeAndRecordSignal — executor path', () => {
     expect(result.skipped).toBe(true);
     expect(result.skipReason).toBe('size_up_ineligible');
     expect(mockSizeUpPos).not.toHaveBeenCalled();
+  });
+});
+
+// ── Gate A: conviction must have RISEN since entry ─────────────────────────────
+describe('evaluateSizeUp — conviction-rise gate (SIZE_UP_MIN_CONFIDENCE_RISE)', () => {
+  beforeEach(() => {
+    mockHasPosition.mockReset();
+    mockGetPosition.mockReset();
+    mockSubmitClob.mockReset();
+    mockSizeUpPos.mockReset();
+    mockSizeUpPos.mockResolvedValue(undefined);
+    mockHasPosition.mockImplementation(async (_r: unknown, _m: string, dir: string) => dir === 'YES');
+  });
+  afterEach(() => mockLoadConfig.mockReturnValue(mockConfig));
+
+  it('confidence_not_risen: blocks when the model held-prob barely moved (delta < rise)', async () => {
+    // Entry P(YES)=0.62, current=0.63 → confidence delta 0.01 < required 0.04.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_MIN_CONFIDENCE_RISE: 0.04 });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ consensusProbability: 0.62, stakeUsd: 5, sharesHeld: 11 }));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ consensusProbability: 0.63 }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('size_up_ineligible');
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+  });
+
+  it('confidence rose: allows the top-up when the model firmed in our favour (delta ≥ rise)', async () => {
+    // Entry P(YES)=0.55, current=0.65 → delta 0.10 ≥ 0.04.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_MIN_CONFIDENCE_RISE: 0.04 });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ consensusProbability: 0.55, stakeUsd: 5, sharesHeld: 11 }));
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob', shares_bought: 10 });
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ consensusProbability: 0.65 }), redis as any);
+
+    expect(result.skipped).toBeFalsy();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((result as any).isSizeUp).toBe(true);
+    expect(mockSizeUpPos).toHaveBeenCalledOnce();
+  });
+
+  it('NO position: held-prob is computed from (1 − P(YES)); a firming NO passes', async () => {
+    // NO side held-prob = 1 − P(YES). Entry P(YES)=0.45 → held 0.55; current P(YES)=0.33
+    // → held 0.67 → delta 0.12 ≥ 0.04. A naive P(YES) comparison would see a DROP.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_MIN_CONFIDENCE_RISE: 0.04 });
+    mockHasPosition.mockImplementation(async (_r: unknown, _m: string, dir: string) => dir === 'NO');
+    mockGetPosition.mockResolvedValue(
+      makeExistingPosition({ direction: 'NO', consensusProbability: 0.45, entryPrice: 0.45, stakeUsd: 5, sharesHeld: 11 }),
+    );
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob', shares_bought: 10 });
+    const redis = makeRedis();
+
+    const result = await executeAndRecordSignal(
+      makeWeatherSignal({ direction: 'NO', consensusProbability: 0.33, outcomePrice: 0.50 }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBeFalsy();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((result as any).isSizeUp).toBe(true);
+  });
+
+  it('no_confidence_baseline: fails closed when the entry consensus is missing', async () => {
+    // A healed/orphan position with no stored consensusProbability has no baseline
+    // to compare against — refuse rather than top up blind.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_MIN_CONFIDENCE_RISE: 0.04 });
+    mockGetPosition.mockResolvedValue(
+      makeExistingPosition({ consensusProbability: undefined, stakeUsd: 5, sharesHeld: 11 }),
+    );
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ consensusProbability: 0.80 }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('size_up_ineligible');
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+  });
+});
+
+// ── Gate B: confirming-drift band (SIZE_UP_MAX_ADVERSE_DRIFT) ──────────────────
+describe('evaluateSizeUp — confirming-drift band (SIZE_UP_MAX_ADVERSE_DRIFT)', () => {
+  beforeEach(() => {
+    mockHasPosition.mockReset();
+    mockGetPosition.mockReset();
+    mockSubmitClob.mockReset();
+    mockSizeUpPos.mockReset();
+    mockSizeUpPos.mockResolvedValue(undefined);
+    mockHasPosition.mockImplementation(async (_r: unknown, _m: string, dir: string) => dir === 'YES');
+  });
+  afterEach(() => mockLoadConfig.mockReturnValue(mockConfig));
+
+  it('adverse_drift_too_high: blocks averaging DOWN when the price got cheaper than entry', async () => {
+    // Entry 0.55, current 0.45 → drift −0.10, beyond the −0.06 adverse bound. This is
+    // the "it got cheaper, add more" tilt the band exists to stop.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_MAX_ADVERSE_DRIFT: 0.06 });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ entryPrice: 0.55, stakeUsd: 5, sharesHeld: 11 }));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ outcomePrice: 0.45 }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('size_up_ineligible');
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+  });
+
+  it('within band: allows a top-up when the price is only mildly below entry (confirming)', async () => {
+    // Entry 0.55, current 0.50 → drift −0.05, inside the −0.06 adverse bound.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_MAX_ADVERSE_DRIFT: 0.06 });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ entryPrice: 0.55, stakeUsd: 5, sharesHeld: 11 }));
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob', shares_bought: 10 });
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ outcomePrice: 0.50 }), redis as any);
+
+    expect(result.skipped).toBeFalsy();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((result as any).isSizeUp).toBe(true);
+  });
+});
+
+// ── Gate C: shrunk-edge floor (replaces the raw-edge floor) ────────────────────
+describe('evaluateSizeUp — shrunk-edge floor (SIZE_UP_MIN_EDGE on market-shrunk edge)', () => {
+  beforeEach(() => {
+    mockHasPosition.mockReset();
+    mockGetPosition.mockReset();
+    mockSubmitClob.mockReset();
+    mockSizeUpPos.mockReset();
+    mockSizeUpPos.mockResolvedValue(undefined);
+    mockHasPosition.mockImplementation(async (_r: unknown, _m: string, dir: string) => dir === 'YES');
+  });
+  afterEach(() => mockLoadConfig.mockReturnValue(mockConfig));
+
+  it('edge_below_floor: a high-RAW-edge but market-divergent size-up fails the shrunk floor', async () => {
+    // YES held 0.60 @ price 0.50 → raw edge 0.10 (would pass a raw≥0.05 floor), but
+    // shrunk edge = shrinkWeight(0.4) × 0.10 = 0.04 < 0.05. The raw floor rewarded
+    // exactly this disagreement; the shrunk floor (what we size on) blocks it.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_MIN_EDGE: 0.05 });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ entryPrice: 0.45, stakeUsd: 5, sharesHeld: 11 }));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ consensusProbability: 0.60, outcomePrice: 0.50 }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('size_up_ineligible');
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+  });
+
+  it('passes the shrunk floor when the edge is genuinely large', async () => {
+    // YES held 0.72 @ price 0.50 → raw edge 0.22, shrunk 0.088 ≥ 0.05.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_MIN_EDGE: 0.05 });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ entryPrice: 0.45, stakeUsd: 5, sharesHeld: 11 }));
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xclob', shares_bought: 10 });
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ consensusProbability: 0.72, outcomePrice: 0.50 }), redis as any);
+
+    expect(result.skipped).toBeFalsy();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((result as any).isSizeUp).toBe(true);
+  });
+});
+
+// ── Fix E: size-up execution-price discipline (maker route) ────────────────────
+describe('evaluateSizeUp — execution-price discipline (SIZE_UP_REQUIRE_REAL_BOOK)', () => {
+  function makeBook(bids: { price: string; size: string }[], asks: { price: string; size: string }[]) {
+    return {
+      market: 'mkt', asset_id: 'tok-yes', timestamp: new Date('2026-06-11T00:00:00Z').toISOString(),
+      bids, asks, min_order_size: '1', tick_size: '0.01', neg_risk: false,
+      last_trade_price: '0.50', hash: 'h',
+    };
+  }
+  // A two-sided ghost book (0.01 wall / 0.99 wall) routes a weather size-up through
+  // the empty-book maker path. The entry-spread guardrail (MAX_ENTRY_SPREAD_BPS>0)
+  // must be active for the executor to populate the benchmark that classifies the
+  // book as a ghost; with it at 0 the size-up takes the bid-anchored real-book path.
+  const makerCfg = {
+    ...mockConfig,
+    EXECUTION_MODE: 'maker',
+    WEATHER_MAKER_POST_ONLY: true,
+    MAKER_EMPTY_BOOK_MAX_WAIT_MS: 1,
+    MAX_ENTRY_SPREAD_BPS: 500,
+  };
+
+  beforeEach(() => {
+    mockHasPosition.mockReset();
+    mockGetPosition.mockReset();
+    mockSubmitClob.mockReset();
+    mockSubmitLimit.mockReset();
+    mockGetOrderBook.mockReset();
+    mockGetOrder.mockReset();
+    mockSizeUpPos.mockReset();
+    mockSizeUpPos.mockResolvedValue(undefined);
+    mockGetOrder.mockResolvedValue(null);
+    mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-eb' });
+    mockHasPosition.mockImplementation(async (_r: unknown, _m: string, dir: string) => dir === 'YES');
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ entryPrice: 0.45, stakeUsd: 5, sharesHeld: 11 }));
+    mockLoadConfig.mockReturnValue(makerCfg);
+  });
+  afterEach(() => {
+    mockLoadConfig.mockReturnValue(mockConfig);
+    mockGetOrderBook.mockResolvedValue(null);
+  });
+
+  it('clamps the maker post price to the side mid — never pays above market to add', async () => {
+    // Two-sided ghost book 0.01 / 0.99 → mid 0.50. Without the clamp the conviction
+    // price (model FV ≈ 0.65, posted ~0.64) would rest above mid; Fix E pulls it down
+    // to 0.50 so a top-up never pays above the current market.
+    mockGetOrderBook.mockResolvedValue(makeBook([{ price: '0.01', size: '100' }], [{ price: '0.99', size: '100' }]));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await executeAndRecordSignal(makeWeatherSignal({ consensusProbability: 0.65, outcomePrice: 0.50 }), redis as any);
+
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+    const postedPrice = mockSubmitLimit.mock.calls[0]![0].price;
+    expect(postedPrice).toBeLessThanOrEqual(0.50 + 1e-9);
+    expect(postedPrice).toBeCloseTo(0.50, 6);
+  });
+
+  it('NO direction on a real two-sided book clamps to the NO mid (not 1 − mid)', async () => {
+    // Real-book patient path (WEATHER_REAL_BOOK_DISCOUNT_BPS>0, spread guard off): the
+    // NO-token book is loaded, so its mid IS the NO mid. Fix E must clamp to it, NOT to
+    // 1 − mid — which would post far below the NO market and never fill. NO book bid
+    // 0.50 / ask 0.55 → NO mid 0.525; patient price ≈0.53 > mid → clamp to 0.52. The
+    // buggy 1 − mid path would have posted ≈0.47.
+    mockLoadConfig.mockReturnValue({
+      ...makerCfg,
+      MAX_ENTRY_SPREAD_BPS: 0,
+      WEATHER_REAL_BOOK_DISCOUNT_BPS: 300,
+    });
+    mockHasPosition.mockImplementation(async (_r: unknown, _m: string, dir: string) => dir === 'NO');
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ direction: 'NO', entryPrice: 0.50, stakeUsd: 5, sharesHeld: 11 }));
+    mockGetOrderBook.mockResolvedValue(makeBook([{ price: '0.50', size: '100' }], [{ price: '0.55', size: '100' }]));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await executeAndRecordSignal(makeWeatherSignal({ direction: 'NO', consensusProbability: 0.40, outcomePrice: 0.55 }), redis as any);
+
+    expect(mockSubmitLimit).toHaveBeenCalledOnce();
+    const postedPrice = mockSubmitLimit.mock.calls[0]![0].price;
+    expect(postedPrice).toBeGreaterThan(0.48); // NOT the buggy 1 − mid ≈ 0.47
+    expect(postedPrice).toBeCloseTo(0.52, 6);
+  });
+
+  it('refuses to add into a one-sided book (no two-sided market) when the spread guard is off', async () => {
+    // With MAX_ENTRY_SPREAD_BPS=0 the upstream one-sided-book guard is inactive, so an
+    // asks-only book reaches the maker path with a null mid. SIZE_UP_REQUIRE_REAL_BOOK
+    // then refuses the add before any order is posted (size_up_no_real_book).
+    mockLoadConfig.mockReturnValue({ ...makerCfg, MAX_ENTRY_SPREAD_BPS: 0 });
+    mockGetOrderBook.mockResolvedValue(makeBook([], [{ price: '0.50', size: '100' }]));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ consensusProbability: 0.65, outcomePrice: 0.50 }), redis as any);
+
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(true);
+  });
+
+  it('hybrid mode: a no-real-book refusal is terminal — does NOT fall through to a taker buy', async () => {
+    // A size-up is maker-only. In hybrid mode a maker failure normally falls back to a
+    // taker buy; for size_up_no_real_book that would re-buy from the one-sided book the
+    // maker path just refused (and at the ask, above mid). The terminal guard must stop
+    // it: submitClobBuy (taker) is never called.
+    mockLoadConfig.mockReturnValue({
+      ...makerCfg,
+      EXECUTION_MODE: 'hybrid',
+      MAX_ENTRY_SPREAD_BPS: 0,
+      WEATHER_REAL_BOOK_DISCOUNT_BPS: 300,
+    });
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xtaker', shares_bought: 10 });
+    mockGetOrderBook.mockResolvedValue(makeBook([], [{ price: '0.50', size: '100' }]));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ consensusProbability: 0.65, outcomePrice: 0.50 }), redis as any);
+
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled(); // no taker fallback
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(true);
+  });
+});
+
+// ── Shadow mode: SIZE_UP_ENABLED=false never executes, only shadow-logs ────────
+describe('evaluateSizeUp — shadow mode (SIZE_UP_ENABLED=false)', () => {
+  beforeEach(() => {
+    mockHasPosition.mockReset();
+    mockGetPosition.mockReset();
+    mockSubmitClob.mockReset();
+    mockSubmitLimit.mockReset();
+    mockSizeUpPos.mockReset();
+    mockEnqueueWrite.mockReset();
+    mockSizeUpPos.mockResolvedValue(undefined);
+    mockHasPosition.mockImplementation(async (_r: unknown, _m: string, dir: string) => dir === 'YES');
+  });
+  afterEach(() => mockLoadConfig.mockReturnValue(mockConfig));
+
+  it('all gates pass → feature_disabled: nothing executes, a would-fire shadow row is written', async () => {
+    // The shadow-mode invariant: even when every conviction gate would pass, with the
+    // feature off evaluateSizeUp returns feature_disabled, so no order is placed and no
+    // ledger mutation happens — only the would_size_up shadow row is enqueued.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_ENABLED: false });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ stakeUsd: 5, sharesHeld: 11 }));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('size_up_ineligible');
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+    expect(mockEnqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({ kind: 'would_size_up', wouldBlock: false }),
+    );
+  });
+
+  it('conviction gate blocks in shadow mode → wouldBlock:true shadow row, still no execution', async () => {
+    // Confidence did not rise (0.62→0.63 < 0.04). In shadow mode this records a
+    // wouldBlock:true row so we can see the gate firing, and still executes nothing.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_ENABLED: false, SIZE_UP_MIN_CONFIDENCE_RISE: 0.04 });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ consensusProbability: 0.62, stakeUsd: 5, sharesHeld: 11 }));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ consensusProbability: 0.63 }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+    expect(mockEnqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({ kind: 'would_size_up', wouldBlock: true, payload: expect.objectContaining({ reason: 'confidence_not_risen' }) }),
+    );
   });
 });

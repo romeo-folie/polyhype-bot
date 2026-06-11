@@ -26,6 +26,7 @@ import { hasOpenPosition, recordPosition, getPosition, sizeUpPosition } from './
 import { getBookTouch } from '../shared/bookTouch.js';
 import { isRecentlyResolved } from '../shared/closedGuard.js';
 import { deductStake, getBankroll } from '../shared/bankroll.js';
+import { shrinkTowardMarket } from '../shared/probability.js';
 import { isStaleCooldownActive } from '../monitor/staleExit.js';
 import { getHyperliquid, resolveHlSymbol, type HlPosition } from '../shared/hyperliquid.js';
 import { computeATR } from '../arb/indicators.js';
@@ -1072,6 +1073,61 @@ async function tryExecuteViaClobMaker(
         ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
         makerFillStatus: 'rejected',
       };
+    }
+  }
+
+  // Size-up execution discipline (SIZE_UP_REQUIRE_REAL_BOOK). Adding to an EXISTING
+  // position is strictly more conservative than opening one: we refuse to pay up.
+  //   • Require a two-sided (real) book. A one-sided ghost book has no mid the thin
+  //     quote will honour — the empty-book discount path would rest at a model-FV
+  //     price ABOVE the (absent) market, producing adverse fills (HK 2026-06-05,
+  //     filled in 2 min and lost). Skip instead of resting there.
+  //   • Never post above the side mid. The side mid for YES is the YES-book mid; for
+  //     NO it is 1 − mid (NO price = 1 − YES price). Clamp the post down to it so a
+  //     top-up only ever rests at or below the current market.
+  // Runs before `size` is computed so the clamped price flows into the share count.
+  if (signal._isSizeUp === true) {
+    if (mid == null) {
+      if (cfg.SIZE_UP_REQUIRE_REAL_BOOK) {
+        logger.info('[executor] size-up refused — no two-sided book to add into', {
+          marketId: signal.marketId,
+          direction: signal.direction,
+          bestBid,
+          bestAsk,
+        });
+        return {
+          ok: false,
+          error: 'size_up_no_real_book',
+          waitMs: Date.now() - startedAt,
+          makerBestBid: bestBid,
+          makerBestAsk: bestAsk,
+          makerFillStatus: 'rejected',
+        };
+      }
+    } else {
+      // `mid` is the mid of whichever book was loaded. In empty-book mode that is
+      // ALWAYS the YES-token book (see yesTokenId above), so a NO side's mid is
+      // 1 − mid. On the real-book path the book is the signal's OWN token
+      // (clobTokenForSignal → NO token for a NO signal), so `mid` is already the
+      // side mid and must NOT be flipped. Flip only for empty-book NO.
+      const isYesDir = signal.direction === 'YES' || signal.direction === 'UP';
+      const sideMid = emptyBookMode && !isYesDir ? 1 - mid : mid;
+      if (price > sideMid + 1e-9) {
+        const tick = parseFloat(book.tick_size ?? '0.01');
+        const clamped = roundDownToTick(sideMid, tick);
+        if (isFinite(clamped) && clamped >= tick) {
+          logger.info('[executor] size-up maker price clamped to side mid', {
+            marketId: signal.marketId,
+            direction: signal.direction,
+            rawPrice: price,
+            sideMid,
+            clampedPrice: clamped,
+          });
+          price = clamped;
+        }
+        // else: side mid below one tick — fall through; the min-size / price guards
+        // below reject rather than silently overpaying.
+      }
     }
   }
 
@@ -2544,6 +2600,9 @@ export async function executeSignal(
         source: signal.source,
         existingStake: sizeUpResult.existingStake,
         topUpStakeCap: sizeUpResult.topUpStakeCap,
+        // Conviction/price evidence behind the top-up — the firmed forecast and
+        // confirming market move, not just a cheaper price.
+        ...sizeUpResult.metrics,
       });
       // Clamp signal stake to the remaining room under the path cap.
       signal = { ...signal, stakeUsd: Math.min(signal.stakeUsd, sizeUpResult.topUpStakeCap!) };
@@ -2561,23 +2620,39 @@ export async function executeSignal(
         marketId: signal.marketId,
         source: signal.source,
         reason: sizeUpResult.reason,
+        ...sizeUpResult.metrics,
       });
-      // Shadow-log when the feature is off so we can observe would-have-fired opportunities.
-      // Only emitted when reason is feature_disabled — meaning all other gates passed.
-      if (!cfg.SIZE_UP_ENABLED && sizeUpResult.reason === 'feature_disabled') {
+      // Shadow-log size-up evaluations for calibration / threshold tuning. When the
+      // feature is OFF and all gates passed (feature_disabled) this is a would-have-
+      // fired opportunity; when a CONVICTION/DRIFT/EDGE gate blocked it we record that
+      // too (wouldBlock:true) so we can see how often each fires and on which positions.
+      // Early/capacity exits (price_above_cap, stake_cap_*, max_topups_reached, …) are
+      // excluded: they have no conviction metrics and would just be noise. metricValue/
+      // threshold track the primary new gate (confidence rise).
+      const SHADOW_GATE_REASONS = new Set([
+        'confidence_not_risen',
+        'no_confidence_baseline',
+        'adverse_drift_too_high',
+        'entry_drift_too_high',
+        'edge_below_floor',
+      ]);
+      const blockedByGate = sizeUpResult.reason != null && SHADOW_GATE_REASONS.has(sizeUpResult.reason);
+      if ((!cfg.SIZE_UP_ENABLED && sizeUpResult.reason === 'feature_disabled') || blockedByGate) {
         void enqueueWrite('shadow_observations', {
           kind: 'would_size_up',
           source: signal.source ?? 'osint',
           marketId: signal.marketId,
           direction: signal.direction,
-          wouldBlock: false,
-          metricValue: signal.edgeMagnitude ?? 0,
-          threshold: cfg.SIZE_UP_MIN_EDGE,
+          wouldBlock: blockedByGate,
+          metricValue: sizeUpResult.metrics?.confidenceDelta ?? 0,
+          threshold: cfg.SIZE_UP_MIN_CONFIDENCE_RISE,
           payload: {
+            reason: sizeUpResult.reason,
             existingStake: sizeUpResult.existingStake,
             topUpStakeCap: sizeUpResult.topUpStakeCap,
             source: signal.source,
             outcomePrice: signal.outcomePrice,
+            ...sizeUpResult.metrics,
           },
         });
       }
@@ -3176,6 +3251,22 @@ export async function executeSignal(
       return recordSkip('entry_price_above_cap', 'maker_rejected', makerTelemetry, 'clob', 'maker');
     }
 
+    // Size-ups are maker-ONLY — a top-up must never fall through to a taker buy. A
+    // taker pays the ask (above the side mid), which defeats Fix E's "never pay above
+    // mid to add" discipline; and for size_up_no_real_book specifically it would
+    // re-buy from the one-sided book the maker path just refused (SIZE_UP_REQUIRE_REAL_BOOK).
+    // Terminal on ANY maker failure, BEFORE the hybrid taker fallback below. (Maker
+    // mode already terminates downstream; this closes the hybrid-mode leak.)
+    if (signal._isSizeUp === true) {
+      logger.info('[executor] size-up maker did not fill — no taker fallback (maker-only)', {
+        marketId: signal.marketId,
+        error: makerAttempt.error ?? 'maker_not_filled',
+      });
+      const skipReason =
+        makerAttempt.error === 'size_up_no_real_book' ? 'no_clob_book' : (makerAttempt.error ?? 'maker_not_filled');
+      return recordSkip(skipReason, 'maker_rejected', makerTelemetry, 'clob', 'maker');
+    }
+
     if (executionMode === 'hybrid') {
       logger.info('[executor] maker did not fill — taker fallback', {
         marketId: signal.marketId,
@@ -3366,6 +3457,28 @@ export async function executeSignals(
   return results;
 }
 
+/**
+ * Conviction/price metrics computed during a size-up evaluation. Surfaced on the
+ * result (eligible or not) so the caller can log them — both the live info line
+ * and the shadow row — for calibration and threshold tuning.
+ */
+interface SizeUpMetrics {
+  /** Side-relative model win-prob stored at entry (the conviction baseline). */
+  entryHeldProb?: number;
+  /** Side-relative model win-prob from the current size-up signal. */
+  currentHeldProb?: number;
+  /** currentHeldProb − entryHeldProb. Positive = model firmed in our favour. */
+  confidenceDelta?: number;
+  /** Side-relative entry price (cost basis). */
+  entryPrice?: number;
+  /** Side-relative current market price. */
+  currentPrice?: number;
+  /** currentPrice − entryPrice. Positive = market confirming (moved toward us). */
+  priceDrift?: number;
+  /** Market-shrunk edge actually gated on (shrunk held-prob − current price). */
+  shrunkEdge?: number;
+}
+
 interface SizeUpEvaluation {
   eligible: boolean;
   reason?: string;
@@ -3373,6 +3486,7 @@ interface SizeUpEvaluation {
   topUpStakeCap?: number;
   /** Number of top-ups already applied to the existing position (0 on first top-up). */
   existingTopUps?: number;
+  metrics?: SizeUpMetrics;
 }
 
 async function evaluateSizeUp(
@@ -3397,13 +3511,9 @@ async function evaluateSizeUp(
     return { eligible: false, reason: 'price_above_cap' };
   }
 
-  // Gate 3: edge floor
-  const minEdge = cfg.SIZE_UP_MIN_EDGE > 0 ? cfg.SIZE_UP_MIN_EDGE : 0;
-  if (minEdge > 0 && (signal.edgeMagnitude ?? 0) < minEdge) {
-    return { eligible: false, reason: 'edge_below_floor' };
-  }
-
-  // Gate 4: load existing position to check topUpCount + existing stake
+  // Gate 4: load existing position to check topUpCount + existing stake. Loaded
+  // before the conviction gates because they compare against the entry baseline
+  // (consensusProbability, entryPrice) stored on the position.
   const canonDir: 'YES' | 'NO' =
     signal.direction === 'YES' || signal.direction === 'UP' ? 'YES' : 'NO';
   const existing = await getPosition(redis, signal.marketId, canonDir);
@@ -3424,24 +3534,88 @@ async function evaluateSizeUp(
     return { eligible: false, reason: 'no_share_count' };
   }
 
-  // Gate 5c: entry price drift — block if the market has already moved too far from
-  // our original entry. Prevents chasing a position that's run most of its course.
-  // Only fires when SIZE_UP_MAX_ENTRY_DRIFT > 0. Positions healed with a zero
-  // entry price (no cost basis recovered) are skipped — drift against a 0 basis
-  // is `outcomePrice - 0`, which would block every size-up as a false positive
-  // (observed: Ankara 2416074, entryPrice=0 → permanent entry_drift_too_high).
-  // The orphan importer now substitutes a real basis where one is recoverable
-  // (reconciliation.ts), so this skip is defense-in-depth for legacy rows; warn
-  // loudly because such a position also has stakeUsd≈0, meaning the stake-cap
-  // gate below leaves it nearly the full path cap of un-drift-bounded top-up room.
+  // ── Conviction/price metrics ────────────────────────────────────────────────
+  // consensusProbability is always P(YES); flip to the held side. The entry value
+  // is the conviction baseline stored when we opened (untouched by sizeUpPosition);
+  // the signal value is the current (resolution-day) estimate.
+  const heldFromPYes = (p: number): number => (canonDir === 'YES' ? p : 1 - p);
+  const entryPYes = existing.consensusProbability;
+  const currPYes = signal.consensusProbability;
+  const entryHeldProb =
+    entryPYes != null && Number.isFinite(entryPYes) ? heldFromPYes(entryPYes) : undefined;
+  const currentHeldProb =
+    currPYes != null && Number.isFinite(currPYes) ? heldFromPYes(currPYes) : undefined;
+  const currentPrice = signal.outcomePrice ?? undefined; // side-relative price we'd add at
+  const entryPriceBasis = existing.entryPrice;
+  const priceDrift =
+    currentPrice != null && entryPriceBasis > 0 ? currentPrice - entryPriceBasis : undefined;
+  const confidenceDelta =
+    entryHeldProb != null && currentHeldProb != null ? currentHeldProb - entryHeldProb : undefined;
+  // Market-shrunk edge: the same overconfidence-tempered quantity we size on. Weather
+  // only — non-weather eligible sources fall back to the raw signal edge in the gate.
+  const shrunkEdge =
+    signal.source === 'weather' && currentHeldProb != null && currentPrice != null
+      ? shrinkTowardMarket(currentHeldProb, currentPrice, cfg.WEATHER_KELLY_SHRINK_WEIGHT) - currentPrice
+      : undefined;
+  const metrics: SizeUpMetrics = {
+    ...(entryHeldProb != null && { entryHeldProb }),
+    ...(currentHeldProb != null && { currentHeldProb }),
+    ...(confidenceDelta != null && { confidenceDelta }),
+    ...(entryPriceBasis > 0 && { entryPrice: entryPriceBasis }),
+    ...(currentPrice != null && { currentPrice }),
+    ...(priceDrift != null && { priceDrift }),
+    ...(shrunkEdge != null && { shrunkEdge }),
+  };
+
+  // Gate A: conviction must have RISEN since entry. The core of the size-up thesis —
+  // add only when the (resolution-day) forecast has firmed in our favour, NOT merely
+  // because the price moved. Fails closed when the entry baseline is missing/degenerate
+  // (healed/orphan rows with no or extreme consensusProbability): we can't tell whether
+  // conviction rose, so we refuse rather than top up blind.
+  const minRise = cfg.SIZE_UP_MIN_CONFIDENCE_RISE ?? 0;
+  if (minRise > 0) {
+    // Both the entry baseline AND the current estimate must be sane, non-degenerate
+    // probabilities for the comparison to mean anything — a 0/1 (or missing) value on
+    // either side is treated as untrustworthy and fails closed.
+    const inUnitInterval = (p: number | undefined): boolean =>
+      p != null && Number.isFinite(p) && p > 0 && p < 1;
+    const baselineOk = inUnitInterval(entryPYes) && inUnitInterval(currPYes);
+    if (!baselineOk || currentHeldProb == null || entryHeldProb == null) {
+      logger.warn('[executor] size-up blocked — no conviction baseline to compare', {
+        marketId: signal.marketId,
+        direction: canonDir,
+        entryConsensus: entryPYes,
+        currentConsensus: currPYes,
+      });
+      return { eligible: false, reason: 'no_confidence_baseline', existingStake: existing.stakeUsd, metrics };
+    }
+    if (currentHeldProb - entryHeldProb < minRise) {
+      return { eligible: false, reason: 'confidence_not_risen', existingStake: existing.stakeUsd, metrics };
+    }
+  }
+
+  // Gate B: confirming-drift band. Block both extremes of price movement since entry:
+  //   • adverse  (price dropped > SIZE_UP_MAX_ADVERSE_DRIFT below entry) → the market
+  //     has moved against the held side; averaging DOWN here is the "it got cheaper,
+  //     add more" tilt we want to stop.
+  //   • favorable over-run (price ran up > SIZE_UP_MAX_ENTRY_DRIFT above entry) → the
+  //     position has mostly run its course; little edge left to chase.
+  // Positions healed with a zero entry price (no recoverable cost basis, e.g. Ankara
+  // 2416074) skip the band — drift against a 0 basis is just the current price and
+  // would false-positive every top-up. Warn loudly: such a row also has stakeUsd≈0,
+  // leaving the stake-cap gate below nearly the full path cap of un-bounded room.
   const maxDrift = cfg.SIZE_UP_MAX_ENTRY_DRIFT ?? 0;
-  if (maxDrift > 0) {
-    if (existing.entryPrice > 0) {
-      const drift = (signal.outcomePrice ?? 0) - existing.entryPrice;
-      if (drift > maxDrift) {
-        return { eligible: false, reason: 'entry_drift_too_high' };
+  const maxAdverse = cfg.SIZE_UP_MAX_ADVERSE_DRIFT ?? 0;
+  if (maxDrift > 0 || maxAdverse > 0) {
+    if (existing.entryPrice > 0 && currentPrice != null) {
+      const drift = currentPrice - existing.entryPrice;
+      if (maxDrift > 0 && drift > maxDrift) {
+        return { eligible: false, reason: 'entry_drift_too_high', existingStake: existing.stakeUsd, metrics };
       }
-    } else {
+      if (maxAdverse > 0 && drift < -maxAdverse) {
+        return { eligible: false, reason: 'adverse_drift_too_high', existingStake: existing.stakeUsd, metrics };
+      }
+    } else if (existing.entryPrice <= 0) {
       logger.warn('[executor] size-up drift gate skipped — existing position has no cost basis', {
         marketId: signal.marketId,
         direction: canonDir,
@@ -3452,10 +3626,22 @@ async function evaluateSizeUp(
     }
   }
 
+  // Gate C: shrunk-edge floor (replaces the legacy raw-edge floor). Gate on the
+  // market-shrunk edge, not the raw model edge: raw edge GROWS with market
+  // disagreement, so a raw floor makes the most-overconfident size-ups the most
+  // eligible — backwards. The shrunk edge is the quantity we actually size on.
+  const minEdge = cfg.SIZE_UP_MIN_EDGE > 0 ? cfg.SIZE_UP_MIN_EDGE : 0;
+  if (minEdge > 0) {
+    const gateEdge = shrunkEdge ?? signal.edgeMagnitude ?? 0;
+    if (gateEdge < minEdge) {
+      return { eligible: false, reason: 'edge_below_floor', existingStake: existing.stakeUsd, metrics };
+    }
+  }
+
   // Gate 6: top-up count
   const currentTopUps = existing.topUpCount ?? 0;
   if (currentTopUps >= cfg.SIZE_UP_MAX_TOPUPS) {
-    return { eligible: false, reason: 'max_topups_reached' };
+    return { eligible: false, reason: 'max_topups_reached', existingStake: existing.stakeUsd, metrics };
   }
 
   // Gate 7: remaining stake room under the size-up path cap.
@@ -3478,21 +3664,21 @@ async function evaluateSizeUp(
     : fractionCap;
   const topUpStakeCap = pathMaxStake - existing.stakeUsd;
   if (topUpStakeCap <= 0) {
-    return { eligible: false, reason: 'stake_cap_reached', existingStake: existing.stakeUsd };
+    return { eligible: false, reason: 'stake_cap_reached', existingStake: existing.stakeUsd, metrics };
   }
   // Gate 7b: remaining room must be at least MIN_BET_USD so the clamped stake
   // is executable without needing a floor-bump that would exceed the path cap.
   const minBet = cfg.MIN_BET_USD;
   if (topUpStakeCap < minBet) {
-    return { eligible: false, reason: 'stake_cap_too_small', existingStake: existing.stakeUsd, topUpStakeCap };
+    return { eligible: false, reason: 'stake_cap_too_small', existingStake: existing.stakeUsd, topUpStakeCap, metrics };
   }
 
   // Only proceed if SIZE_UP_ENABLED; otherwise shadow caller will handle logging
   if (!cfg.SIZE_UP_ENABLED) {
-    return { eligible: false, reason: 'feature_disabled', existingStake: existing.stakeUsd, topUpStakeCap };
+    return { eligible: false, reason: 'feature_disabled', existingStake: existing.stakeUsd, topUpStakeCap, metrics };
   }
 
-  return { eligible: true, existingStake: existing.stakeUsd, topUpStakeCap, existingTopUps: currentTopUps };
+  return { eligible: true, existingStake: existing.stakeUsd, topUpStakeCap, existingTopUps: currentTopUps, metrics };
 }
 
 /**
