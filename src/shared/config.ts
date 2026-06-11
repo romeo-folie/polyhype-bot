@@ -1721,6 +1721,10 @@ export const envSchema = z.object({
   // events with ~11 brackets each (e.g. "40-41°F", "42-43°F", ...).
   // Ships dark (WEATHER_SCANNER_ENABLED=false). Shadow-log first, review, then enable.
   WEATHER_SCANNER_ENABLED: boolFromEnv.optional().default(false),
+  // Telegram + log once-per-UTC-day digest of weather performance (bets placed,
+  // fills, entry prices, realized PnL, wins/losses, best/worst). Fires from the
+  // weather cron entrypoint; gated by a Redis NX key so it sends at most once/day.
+  WEATHER_DAILY_SUMMARY_ENABLED: boolFromEnv.optional().default(true),
   // Restricts which bracket sides the scanner will treat as tradable. Default 'BOTH'
   // preserves legacy behavior. 'NO' is the 2026-04-19 post-analysis config: 186-outcome
   // reconciliation showed NO side at 73.7% vs YES at 11.5% — gate out YES until the
