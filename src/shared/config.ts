@@ -757,6 +757,14 @@ export const envSchema = z.object({
   REDEEMER_DUST_THRESHOLD_USDC: z.coerce.number().min(0).optional().default(0.25),
   /** Minimum notional (shares * avgPrice) for a reconciled CLOB orphan to be imported. Below this, skip as dust. */
   RECONCILE_IMPORT_MIN_USD: z.coerce.number().min(0).optional().default(1),
+  /**
+   * Observability guard: when a single reconciliation cycle ghost-closes at
+   * least this many positions, emit an alert. Mass ghosting usually signals a
+   * systemic data fault (API/RPC), not that many positions genuinely vanished.
+   * The reconciler already refuses to ghost on an inconclusive venue check, so
+   * this only ALERTS — it never blocks legitimate cleanup.
+   */
+  RECONCILE_GHOST_ALERT_THRESHOLD: z.coerce.number().int().min(1).optional().default(5),
   /** Post-exit sweep: after a partial fill, resell the residual up to N times. */
   RESIDUAL_SWEEP_ENABLED: boolFromEnv.optional().default(true),
   RESIDUAL_SWEEP_MAX_ATTEMPTS: z.coerce.number().int().min(0).max(5).optional().default(2),
