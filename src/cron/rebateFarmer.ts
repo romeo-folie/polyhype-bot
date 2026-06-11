@@ -307,7 +307,7 @@ export async function main(): Promise<void> {
       shadow: isShadow,
       filled: reconciled.filled.length,
       partialFills: reconciled.partialFills.length,
-      staleCancelled: reconciled.stale.length,
+      heldCancelled: reconciled.stale.length, // past-resolution + lifetime-cap cancels
       externalCancelled: reconciled.cancelled.length,
       orphanCancels: reconciled.orphanCancels.length,
       repriced,
