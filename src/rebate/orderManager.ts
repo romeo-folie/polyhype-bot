@@ -580,14 +580,37 @@ async function recordFilledOrder(
 // ─── Order placement ─────────────────────────────────────────────────────────
 
 /**
- * Cancel a resting order so it can be re-posted at a drifted target price.
+ * A resting BUY bid is "stranded" when the live maker target has risen ABOVE
+ * its resting price by more than `threshold` — the market moved up and away, so
+ * a seller will never come down to our bid and it can't fill. Directional on
+ * purpose: if `freshTarget <= restingPrice` the market came down TO our bid and
+ * it's about to fill (or still in range) — NOT stranded. Do NOT use |abs| here:
+ * the reprice pass can (it re-posts), but this drives a CANCEL that forfeits
+ * queue priority, so it must only fire on the won't-fill direction.
+ */
+export function isRestingOrderStranded(
+  restingPrice: number,
+  freshTarget: number,
+  threshold: number,
+): boolean {
+  return freshTarget - restingPrice > threshold;
+}
+
+/**
+ * Cancel a resting order so it can be re-posted at a drifted target price (or
+ * dropped entirely, for the de-selected revalidation pass — pass
+ * `statField='stale_drift_cancels'`).
  * Returns true when the order is confirmed gone WITH ZERO FILL (safe to place
  * a replacement); false skips the replacement this cycle — either the
  * original stays tracked (unconfirmed) or it (partially) FILLED during the
  * cancel, in which case the fill is recorded first and re-posting the same
  * direction would stack onto fresh inventory.
  */
-export async function cancelForReprice(redis: Redis, order: RestingOrder): Promise<boolean> {
+export async function cancelForReprice(
+  redis: Redis,
+  order: RestingOrder,
+  statField = 'reprice_cancels',
+): Promise<boolean> {
   const cancelled = await cancelClobOrder(order.orderId);
 
   // ALWAYS recheck — a successful cancel can follow a partial fill, and that
@@ -630,7 +653,7 @@ export async function cancelForReprice(redis: Redis, order: RestingOrder): Promi
 
   await removeRestingOrder(redis, order.orderId, order.marketId);
   await recordLifetime(redis, order);
-  await bumpStat(redis, order.marketId, 'reprice_cancels');
+  await bumpStat(redis, order.marketId, statField);
   return true;
 }
 

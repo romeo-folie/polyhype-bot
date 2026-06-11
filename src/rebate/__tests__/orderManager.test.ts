@@ -60,6 +60,7 @@ import {
   loadRestingOrders,
   resolvePairTarget,
   cancelRestingOrder,
+  isRestingOrderStranded,
 } from '../orderManager.js';
 import { getClobOrder, cancelClobOrder, submitClobLimitBuy } from '../../shared/clob.js';
 import { recordPosition } from '../../execution/positionLedger.js';
@@ -1033,11 +1034,53 @@ describe('orderManager', () => {
     });
   });
 
+  describe('isRestingOrderStranded (directional drift predicate)', () => {
+    it('TRUE when the fresh target rose above the resting bid by > threshold (won\'t fill)', () => {
+      // Mexico replay: resting BUY YES @ 0.67, market ran to mid 0.86 → fresh
+      // target ~0.845. 0.845 − 0.67 = 0.175 > 0.05 → stranded.
+      expect(isRestingOrderStranded(0.67, 0.845, 0.05)).toBe(true);
+    });
+
+    it('FALSE when within threshold (still well-placed — keep queue priority)', () => {
+      expect(isRestingOrderStranded(0.66, 0.67, 0.05)).toBe(false); // 0.01 drift
+      expect(isRestingOrderStranded(0.67, 0.72, 0.05)).toBe(false); // exactly at the band (not >)
+    });
+
+    it('FALSE when the market came DOWN to/under our bid (about to fill — never cancel)', () => {
+      // freshTarget < restingPrice → negative drift → NOT stranded. This is the
+      // case symmetric |abs| would wrongly cancel.
+      expect(isRestingOrderStranded(0.67, 0.50, 0.05)).toBe(false);
+      expect(isRestingOrderStranded(0.67, 0.67, 0.05)).toBe(false);
+    });
+  });
+
+  describe('cancelForReprice statField', () => {
+    it('bumps a custom stat field (stale_drift_cancels) instead of reprice_cancels', async () => {
+      const redis = makeRedis();
+      mockCancelOrder.mockResolvedValue(true);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockGetOrder.mockResolvedValue({ status: 'CANCELED', size_matched: '0' } as any);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ok = await cancelForReprice(redis as any, makeOrder(), 'stale_drift_cancels');
+
+      expect(ok).toBe(true);
+      const stats = statCalls(redis);
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'stale_drift_cancels', by: 1 });
+      expect(stats.some((s) => s.field === 'reprice_cancels')).toBe(false);
+    });
+  });
+
   describe('config defaults (schema-derived)', () => {
     it('REBATE_MAX_ORDER_LIFETIME_S defaults to 86400 (24h backstop)', () => {
       // Derived from the REAL Zod schema so the new knob can't silently drift
       // from config.ts (see feedback: hand-written mocks crash on new reads).
       expect(schemaDefaults(envSchema).REBATE_MAX_ORDER_LIFETIME_S).toBe(86_400);
+    });
+
+    it('Phase-2 revalidation knobs default to disabled / 0.05 band', () => {
+      expect(schemaDefaults(envSchema).REBATE_REVALIDATE_RESTING_ENABLED).toBe(false);
+      expect(schemaDefaults(envSchema).REBATE_STALE_DRIFT_THRESHOLD).toBe(0.05);
     });
   });
 });

@@ -1266,6 +1266,20 @@ export const envSchema = z.object({
   // Reprice trigger: when a market re-selects and the fresh target price has
   // drifted from a resting order's price by more than this, cancel + repost.
   REBATE_REPRICE_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.02),
+  // -- resting-order price revalidation (Phase 2) --
+  // The reprice pass only re-prices markets RE-SELECTED this cycle. A resting
+  // order on a market that fell out of the top-N is never re-priced — on a
+  // trending market its bid is left stranded below the market, never fills, and
+  // ties up budget until resolution. When enabled, re-check each DE-selected
+  // resting order's price against the live book and CANCEL the stranded ones
+  // (frees budget for currently-selected markets). Within-threshold and
+  // about-to-fill orders are held (queue priority preserved).
+  REBATE_REVALIDATE_RESTING_ENABLED: boolFromEnv.optional().default(false),
+  // Stranded-cancel band: cancel a de-selected resting BUY when the fresh maker
+  // target has risen ABOVE its resting price by more than this (won't fill).
+  // Wider than REBATE_REPRICE_THRESHOLD on purpose — cancelling forfeits queue
+  // priority, so only cut clearly-dead bids, not routine 1-3¢ noise.
+  REBATE_STALE_DRIFT_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.05),
   // -- rebate verification --
   // Maker address for the public rebates API (defaults to POLYMARKET_FUNDER_ADDRESS
   // — order placement stamps the funder/proxy wallet as `maker`).
