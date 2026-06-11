@@ -306,6 +306,24 @@ describe('rebateFarmer main()', () => {
     expect(cycleLog.repriced).toBe(0);
   });
 
+  it('cycle-complete log reports hold-policy cancels under heldCancelled (not the retired staleCancelled)', async () => {
+    // The hold change renamed the per-cycle cancel field: reconciled.stale now
+    // holds past-resolution + lifetime-cap cancels, not the old 300s churn.
+    mockReconcileOrders.mockResolvedValue({
+      ...emptyReconcile,
+      stale: [makeOrder({ orderId: 'held-x' })],
+    });
+    mockSelectRebateMarkets.mockResolvedValue([]); // no placement — isolate the cycle log
+
+    await main();
+
+    const cycleLog = vi.mocked(logger.info).mock.calls.find(
+      (c) => c[0] === '[rebate] cycle complete',
+    )![1]!;
+    expect(cycleLog.heldCancelled).toBe(1);
+    expect(cycleLog).not.toHaveProperty('staleCancelled');
+  });
+
   it('shadow mode logs the would-be pair and never places, reserves, or reprices', async () => {
     mockLoadConfig.mockReturnValue({ ...baseConfig, REBATE_SHADOW_MODE: true });
 
