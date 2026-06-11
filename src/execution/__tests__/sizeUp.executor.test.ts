@@ -744,4 +744,28 @@ describe('evaluateSizeUp — execution-price discipline (SIZE_UP_REQUIRE_REAL_BO
     expect(mockSizeUpPos).not.toHaveBeenCalled();
     expect(result.skipped).toBe(true);
   });
+
+  it('hybrid mode: a no-real-book refusal is terminal — does NOT fall through to a taker buy', async () => {
+    // A size-up is maker-only. In hybrid mode a maker failure normally falls back to a
+    // taker buy; for size_up_no_real_book that would re-buy from the one-sided book the
+    // maker path just refused (and at the ask, above mid). The terminal guard must stop
+    // it: submitClobBuy (taker) is never called.
+    mockLoadConfig.mockReturnValue({
+      ...makerCfg,
+      EXECUTION_MODE: 'hybrid',
+      MAX_ENTRY_SPREAD_BPS: 0,
+      WEATHER_REAL_BOOK_DISCOUNT_BPS: 300,
+    });
+    mockSubmitClob.mockResolvedValue({ success: true, tx_hash: '0xtaker', shares_bought: 10 });
+    mockGetOrderBook.mockResolvedValue(makeBook([], [{ price: '0.50', size: '100' }]));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ consensusProbability: 0.65, outcomePrice: 0.50 }), redis as any);
+
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled(); // no taker fallback
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(true);
+  });
 });

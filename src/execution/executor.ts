@@ -3251,6 +3251,22 @@ export async function executeSignal(
       return recordSkip('entry_price_above_cap', 'maker_rejected', makerTelemetry, 'clob', 'maker');
     }
 
+    // Size-ups are maker-ONLY — a top-up must never fall through to a taker buy. A
+    // taker pays the ask (above the side mid), which defeats Fix E's "never pay above
+    // mid to add" discipline; and for size_up_no_real_book specifically it would
+    // re-buy from the one-sided book the maker path just refused (SIZE_UP_REQUIRE_REAL_BOOK).
+    // Terminal on ANY maker failure, BEFORE the hybrid taker fallback below. (Maker
+    // mode already terminates downstream; this closes the hybrid-mode leak.)
+    if (signal._isSizeUp === true) {
+      logger.info('[executor] size-up maker did not fill — no taker fallback (maker-only)', {
+        marketId: signal.marketId,
+        error: makerAttempt.error ?? 'maker_not_filled',
+      });
+      const skipReason =
+        makerAttempt.error === 'size_up_no_real_book' ? 'no_clob_book' : (makerAttempt.error ?? 'maker_not_filled');
+      return recordSkip(skipReason, 'maker_rejected', makerTelemetry, 'clob', 'maker');
+    }
+
     if (executionMode === 'hybrid') {
       logger.info('[executor] maker did not fill — taker fallback', {
         marketId: signal.marketId,
