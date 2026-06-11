@@ -41,6 +41,9 @@ function schemaDefaults(schema: z.AnyZodObject): Record<string, unknown> {
 // tests need a specific value (e.g. HL_MOMENTUM_MIN_SCORE=4 vs the schema default 6).
 const baseConfig = {
   ...schemaDefaults(envSchema),
+  // Log ALL decisions in tests (schema default is 0.1 sampling, which would make
+  // skip-logging assertions flaky). Sampling behaviour is covered explicitly below.
+  HL_DECISION_LOG_SAMPLE_RATE: 1,
   HL_MOMENTUM_ENABLED: false,
   HL_MOMENTUM_SYMBOLS: 'btcusdt,ethusdt,solusdt,xrpusdt,dogeusdt,pepeusdt,wifusdt,bonkusdt,penguusdt',
   HL_MOMENTUM_MIN_SCORE: 4,
@@ -238,6 +241,33 @@ describe('scanHlMomentum — candle data gates', () => {
     const redis = makeRedis();
     const result = await scanHlMomentum(makeTick(), redis as never);
     expect(result).toBeNull();
+  });
+
+  it('throttle: persists the score_below_min skip row when HL_DECISION_LOG_SAMPLE_RATE=1', async () => {
+    // baseConfig pins rate=1 → all skips logged (legacy behaviour).
+    mockBuildCandles.mockResolvedValue([{}]);
+    mockScoreHlTrend.mockReturnValue({ score: 2, adx: 40, voters: {} }); // score_below_min
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    await scanHlMomentum(makeTick(), redis as never);
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ skipReason: 'score_below_min' }),
+    );
+  });
+
+  it('throttle: drops the score_below_min skip row when HL_DECISION_LOG_SAMPLE_RATE=0', async () => {
+    mockLoadConfig.mockReturnValue({ ...baseConfig, HL_DECISION_LOG_SAMPLE_RATE: 0 });
+    mockBuildCandles.mockResolvedValue([{}]);
+    mockScoreHlTrend.mockReturnValue({ score: 2, adx: 40, voters: {} }); // score_below_min
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull(); // still skips the trade — only the LOG is suppressed
+    expect(enqueueWrite).not.toHaveBeenCalledWith('signal_decisions', expect.anything());
+    mockLoadConfig.mockReturnValue({ ...baseConfig }); // restore rate=1 for later tests
   });
 
   it('returns null when ADX is below HL_MOMENTUM_MIN_ADX', async () => {

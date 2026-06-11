@@ -3,6 +3,7 @@ import type { Redis } from 'ioredis';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
+import { shouldDropSampledDecision } from './decisionSampling.js';
 import { hasOpenPosition, getOpenPositions } from '../execution/positionLedger.js';
 import { getAllCachedAssetCtxs, fundingRateToApr } from './hlAssetCtxCache.js';
 import type { TradeSignal } from '../mapping/index.js';
@@ -159,6 +160,10 @@ function logDecision(
   hasTrade: boolean,
   skipReason?: string,
 ): void {
+  // Throttle the per-tick skip flood: persist every trade, sample skip rows at
+  // HL_DECISION_LOG_SAMPLE_RATE to bound signal_decisions write rate. logDecision
+  // is module-level (9 skip call sites), so read the rate here rather than thread it.
+  if (shouldDropSampledDecision(hasTrade, loadConfig().HL_DECISION_LOG_SAMPLE_RATE)) return;
   void enqueueWrite('signal_decisions', {
     decisionId,
     source: 'hl-funding' as const,
