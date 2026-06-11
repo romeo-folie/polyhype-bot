@@ -117,6 +117,7 @@ describe('maybeSendDailySummary', () => {
     post_resolution_cancels: '2',
     lifetime_cap_cancels: '1',
     reprice_cancels: '1',
+    stale_drift_cancels: '4',
     est_rebate_usd: '0.1200',
     lifetime_ms_total: String(20 * 60_000),
     lifetime_count: '4', // avg 5.0 min
@@ -186,6 +187,7 @@ describe('maybeSendDailySummary', () => {
     // Hold-policy cancels replace the retired stale_cancels: the ops line shows
     // the post-resolution / lifetime-cap breakdown from the DATE bucket (2 + 1).
     expect(text).toContain('held-cancelled 3 (res 2 / cap 1)');
+    expect(text).toContain('stale-drift-cancelled 4');
     expect(text).not.toContain('stale-cancelled');
     // Cumulative counters are present but labelled all-time.
     expect(text).toContain('All-time: est $0.2531 | fills 4 | placed 12');

@@ -41,7 +41,7 @@ import { logger } from '../shared/logger.js';
 import { getBankroll } from '../shared/bankroll.js';
 import { hasOpenPosition, getPosition } from '../execution/positionLedger.js';
 import { reserveGovernorSlots } from '../shared/governor.js';
-import { selectRebateMarkets } from '../rebate/marketSelector.js';
+import { selectRebateMarkets, computeRestingTarget } from '../rebate/marketSelector.js';
 import { planPairAction } from '../rebate/pairPlanner.js';
 import type { PairPlan, PlannedLeg } from '../rebate/pairPlanner.js';
 import {
@@ -53,6 +53,7 @@ import {
   placeRestingOrder,
   cancelForReprice,
   cancelRestingOrder,
+  isRestingOrderStranded,
 } from '../rebate/orderManager.js';
 import { maybeSendDailySummary } from '../rebate/rebateChecker.js';
 import type { RebateQuote } from '../rebate/types.js';
@@ -101,6 +102,71 @@ export async function main(): Promise<void> {
     let placed = 0;
     let repriced = 0;
     let rollbacks = 0;
+    let staleDriftCancels = 0;
+
+    // Phase 3: Select markets by recent fee-equivalent taker flow. Done BEFORE
+    // the budget gate so the revalidation pass below can free stranded budget
+    // and re-open placement this cycle.
+    const candidates = await selectRebateMarkets(redis, cfg.REBATE_MAX_MARKETS);
+
+    // Phase 3.5: Revalidate resting orders on DE-SELECTED markets. The reprice
+    // pass (Step A) only sees markets selected this cycle, so a resting order on
+    // a market that fell out of the top-N is never re-priced — on a trending
+    // market its bid is left stranded below the market, never fills, and ties up
+    // budget until resolution. Re-check each de-selected order against the live
+    // book and cancel the genuinely-stranded ones to free budget. Within-
+    // threshold and about-to-fill orders are HELD (queue priority, PR #475).
+    // Cancelling one leg of a resting pair leaves the partner naked; the orphan
+    // sweep at the top of the next reconcile cycle clears it (≤1 cycle) — far
+    // shorter than the pre-Phase-2 behaviour of holding the dead pair to
+    // resolution. Above-market (adverse-fill) legs are out of scope here.
+    if (cfg.REBATE_REVALIDATE_RESTING_ENABLED && orders.size > 0) {
+      const selectedIds = new Set(candidates.map((c) => c.marketId));
+      for (const order of [...orders.values()]) {
+        if (selectedIds.has(order.marketId)) continue; // reprice pass owns selected markets
+        let freshTarget: number | null;
+        try {
+          freshTarget = await computeRestingTarget(order);
+        } catch (err: unknown) {
+          // Never cancel on a failed/missing book read — leave it resting.
+          logger.debug('[rebate] revalidation book read failed — leaving order resting', {
+            orderId: order.orderId,
+            marketId: order.marketId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          continue;
+        }
+        if (freshTarget == null) continue; // no usable book this cycle — conservative skip
+        if (!isRestingOrderStranded(order.price, freshTarget, cfg.REBATE_STALE_DRIFT_THRESHOLD)) continue;
+
+        if (isShadow) {
+          logger.info('[rebate-shadow] would revalidate-cancel stranded order', {
+            marketId: order.marketId,
+            direction: order.direction,
+            restingPrice: order.price,
+            freshTarget: +freshTarget.toFixed(4),
+            drift: +(freshTarget - order.price).toFixed(4),
+            question: order.question.slice(0, 60),
+          });
+          continue;
+        }
+
+        const cancelled = await cancelForReprice(redis, order, 'stale_drift_cancels');
+        if (!cancelled) continue; // filled during cancel / unconfirmed — reconcile handles it
+        orders.delete(order.orderId);
+        remaining += order.sizeUsd;
+        staleDriftCancels++;
+        logger.info('[rebate] revalidate-cancel: stranded resting order freed', {
+          marketId: order.marketId,
+          direction: order.direction,
+          restingPrice: order.price,
+          freshTarget: +freshTarget.toFixed(4),
+          drift: +(freshTarget - order.price).toFixed(4),
+          freedUsd: order.sizeUsd.toFixed(2),
+          question: order.question.slice(0, 60),
+        });
+      }
+    }
 
     if (remaining < cfg.REBATE_ORDER_SIZE_USD) {
       logger.info('[rebate] budget exhausted', {
@@ -108,9 +174,6 @@ export async function main(): Promise<void> {
         currentlyDeployed: currentlyDeployed.toFixed(2),
       });
     } else {
-      // Phase 3: Select markets by recent fee-equivalent taker flow.
-      const candidates = await selectRebateMarkets(redis, cfg.REBATE_MAX_MARKETS);
-
       if (candidates.length === 0) {
         logger.info('[rebate] no eligible markets found');
       }
@@ -311,6 +374,7 @@ export async function main(): Promise<void> {
       externalCancelled: reconciled.cancelled.length,
       orphanCancels: reconciled.orphanCancels.length,
       repriced,
+      staleDriftCancels,
       rollbacks,
       newOrdersPlaced: placed,
       budgetRemaining: remaining.toFixed(2),

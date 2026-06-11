@@ -36,8 +36,10 @@ vi.mock('../../shared/governor.js', () => ({
   reserveGovernorSlots: (...args: unknown[]) => mockReserveGovernorSlots(...args),
 }));
 const mockSelectRebateMarkets = vi.fn();
+const mockComputeRestingTarget = vi.fn();
 vi.mock('../marketSelector.js', () => ({
   selectRebateMarkets: (...args: unknown[]) => mockSelectRebateMarkets(...args),
+  computeRestingTarget: (...args: unknown[]) => mockComputeRestingTarget(...args),
 }));
 const mockReconcileOrders = vi.fn();
 const mockLoadRestingOrders = vi.fn();
@@ -322,6 +324,77 @@ describe('rebateFarmer main()', () => {
     )![1]!;
     expect(cycleLog.heldCancelled).toBe(1);
     expect(cycleLog).not.toHaveProperty('staleCancelled');
+  });
+
+  it('Phase-2: cancels a stranded resting order on a DE-selected market and frees its budget', async () => {
+    mockLoadConfig.mockReturnValue({ ...baseConfig, REBATE_REVALIDATE_RESTING_ENABLED: true });
+    const stranded = makeOrder({ orderId: 'order-stranded', marketId: 'mkt-dead', direction: 'YES', price: 0.67, sizeUsd: 5 });
+    mockLoadRestingOrders.mockResolvedValue(new Map([['order-stranded', stranded]]));
+    mockSelectRebateMarkets.mockResolvedValue([]); // nothing selected → order is de-selected
+    mockComputeRestingTarget.mockResolvedValue(0.845); // market ran up: 0.845 − 0.67 = 0.175 > 0.05
+    mockCancelForReprice.mockResolvedValue(true);
+
+    await main();
+
+    // Cancelled via the parameterized stat field, NOT a reprice.
+    expect(mockCancelForReprice).toHaveBeenCalledWith(expect.anything(), stranded, 'stale_drift_cancels');
+    const cycleLog = vi.mocked(logger.info).mock.calls.find(
+      (c) => c[0] === '[rebate] cycle complete',
+    )![1]!;
+    expect(cycleLog.staleDriftCancels).toBe(1);
+  });
+
+  it('Phase-2: does NOT revalidate an order whose market is selected this cycle (reprice pass owns it)', async () => {
+    mockLoadConfig.mockReturnValue({ ...baseConfig, REBATE_REVALIDATE_RESTING_ENABLED: true });
+    // Order on mkt-1 at the candidate's own YES quote price (no reprice drift either).
+    const order = makeOrder({ orderId: 'order-sel', marketId: 'mkt-1', direction: 'YES', price: 0.39 });
+    mockLoadRestingOrders.mockResolvedValue(new Map([['order-sel', order]]));
+    mockSelectRebateMarkets.mockResolvedValue([makeCandidate()]); // candidate marketId 'mkt-1'
+    mockPlaceRestingOrder.mockResolvedValue(null);
+
+    await main();
+
+    expect(mockComputeRestingTarget).not.toHaveBeenCalled();
+  });
+
+  it('Phase-2: HOLDS a de-selected order the market came DOWN to (about to fill — not stranded)', async () => {
+    mockLoadConfig.mockReturnValue({ ...baseConfig, REBATE_REVALIDATE_RESTING_ENABLED: true });
+    const order = makeOrder({ orderId: 'order-good', marketId: 'mkt-dead', direction: 'YES', price: 0.67 });
+    mockLoadRestingOrders.mockResolvedValue(new Map([['order-good', order]]));
+    mockSelectRebateMarkets.mockResolvedValue([]);
+    mockComputeRestingTarget.mockResolvedValue(0.50); // target BELOW our bid → about to fill
+
+    await main();
+
+    expect(mockComputeRestingTarget).toHaveBeenCalled();
+    expect(mockCancelForReprice).not.toHaveBeenCalled();
+    const cycleLog = vi.mocked(logger.info).mock.calls.find(
+      (c) => c[0] === '[rebate] cycle complete',
+    )![1]!;
+    expect(cycleLog.staleDriftCancels).toBe(0);
+  });
+
+  it('Phase-2: leaves an order resting when the book read returns null (never cancel on missing data)', async () => {
+    mockLoadConfig.mockReturnValue({ ...baseConfig, REBATE_REVALIDATE_RESTING_ENABLED: true });
+    const order = makeOrder({ orderId: 'order-noBook', marketId: 'mkt-dead', price: 0.67 });
+    mockLoadRestingOrders.mockResolvedValue(new Map([['order-noBook', order]]));
+    mockSelectRebateMarkets.mockResolvedValue([]);
+    mockComputeRestingTarget.mockResolvedValue(null);
+
+    await main();
+
+    expect(mockCancelForReprice).not.toHaveBeenCalled();
+  });
+
+  it('Phase-2: does nothing when REBATE_REVALIDATE_RESTING_ENABLED is false (default)', async () => {
+    const order = makeOrder({ orderId: 'order-x', marketId: 'mkt-dead', price: 0.67 });
+    mockLoadRestingOrders.mockResolvedValue(new Map([['order-x', order]]));
+    mockSelectRebateMarkets.mockResolvedValue([]);
+
+    await main();
+
+    expect(mockComputeRestingTarget).not.toHaveBeenCalled();
+    expect(mockCancelForReprice).not.toHaveBeenCalled();
   });
 
   it('shadow mode logs the would-be pair and never places, reserves, or reprices', async () => {

@@ -39,7 +39,7 @@ import {
   parseClobTokenIds,
 } from '../mapping/gamma.js';
 import { fetchRecentMarketFlow, makerRebateShare } from './flowAnalyzer.js';
-import type { RebateMarketCandidate, RebateQuote } from './types.js';
+import type { RebateMarketCandidate, RebateQuote, RestingOrder } from './types.js';
 
 /** Max markets to fetch books + trade tape for per cycle (rate limit guard).
  * Each costs 2 book fetches + 1 data-api tape fetch. */
@@ -149,6 +149,43 @@ function buildQuote(
   if (bestAsk > 0 && price >= bestAsk) return null;
 
   return { direction, tokenId, price, bestBid, bestAsk };
+}
+
+/**
+ * Recompute the maker target price the selector WOULD quote right now for an
+ * existing resting order, from the live book. Used by the de-selected-order
+ * revalidation pass (rebateFarmer) to detect bids the market has left behind.
+ *
+ * Mirrors the per-market quoting in selectRebateMarkets (anchored to the
+ * effective YES-book mid, then buildQuote's edge + book clamp). Returns null
+ * when the YES book is missing/degenerate this cycle (the caller must NEVER
+ * cancel on missing data) or buildQuote rejects the price.
+ */
+export async function computeRestingTarget(order: RestingOrder): Promise<number | null> {
+  const cfg = loadConfig();
+  const [yesTokenId, noTokenId] = order.clobTokenIds;
+  const tick = parseFloat(order.tickSize) || 0.01;
+
+  const yesBook = await getClobOrderBook(yesTokenId);
+  if (!yesBook) return null; // no book read this cycle — caller must not cancel
+  const { bestBid: yesBid, bestAsk: yesAsk } = getBookTouch(yesBook);
+  if (yesBid <= 0 || yesAsk <= 0 || yesAsk <= yesBid) return null;
+  const yesMid = (yesBid + yesAsk) / 2;
+
+  // Book clamp inputs are the order's OWN token: YES leg → YES book; NO leg →
+  // the NO book (often hollow/absent — buildQuote guards on bestAsk > 0).
+  let tokBid = yesBid;
+  let tokAsk = yesAsk;
+  if (order.direction === 'NO') {
+    const noBook = await getClobOrderBook(noTokenId);
+    const noTouch = noBook ? getBookTouch(noBook) : { bestBid: 0, bestAsk: 0 };
+    tokBid = noTouch.bestBid;
+    tokAsk = noTouch.bestAsk;
+  }
+
+  const effectiveMid = order.direction === 'YES' ? yesMid : 1 - yesMid;
+  const fresh = buildQuote(order.direction, order.tokenId, effectiveMid, cfg.REBATE_QUOTE_EDGE, tick, tokBid, tokAsk);
+  return fresh?.price ?? null;
 }
 
 export async function selectRebateMarkets(

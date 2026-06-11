@@ -139,6 +139,8 @@ export async function maybeSendDailySummary(redis: Redis): Promise<boolean> {
   // backstop. avg lifetime rising + these staying low = the hold is working.
   const dayPostResCancels = num(dayStats, 'post_resolution_cancels');
   const dayLifetimeCapCancels = num(dayStats, 'lifetime_cap_cancels');
+  // Stranded de-selected bids cancelled to free budget (Phase-2 revalidation).
+  const dayStaleDriftCancels = num(dayStats, 'stale_drift_cancels');
   const cumFills = num(cumStats, 'fills') + num(cumStats, 'partial_fills');
   const cumEstRebateUsd = num(cumStats, 'est_rebate_usd');
 
@@ -150,7 +152,7 @@ export async function maybeSendDailySummary(redis: Redis): Promise<boolean> {
     '🧾 Rebate Farmer Daily Summary',
     apiLine,
     `Est. ${yesterday}: $${dayEstRebateUsd.toFixed(4)} from ${dayFills.toString()} fill(s) (full ${num(dayStats, 'fills').toString()} / partial ${num(dayStats, 'partial_fills').toString()})`,
-    `${yesterday} ops: placed ${num(dayStats, 'orders_placed').toString()} | held-cancelled ${(dayPostResCancels + dayLifetimeCapCancels).toString()} (res ${dayPostResCancels.toString()} / cap ${dayLifetimeCapCancels.toString()}) | repriced ${num(dayStats, 'reprice_cancels').toString()} | avg lifetime ${dayAvgLifetimeMin.toFixed(1)} min`,
+    `${yesterday} ops: placed ${num(dayStats, 'orders_placed').toString()} | held-cancelled ${(dayPostResCancels + dayLifetimeCapCancels).toString()} (res ${dayPostResCancels.toString()} / cap ${dayLifetimeCapCancels.toString()}) | repriced ${num(dayStats, 'reprice_cancels').toString()} | stale-drift-cancelled ${dayStaleDriftCancels.toString()} | avg lifetime ${dayAvgLifetimeMin.toFixed(1)} min`,
     `All-time: est $${cumEstRebateUsd.toFixed(4)} | fills ${cumFills.toString()} | placed ${num(cumStats, 'orders_placed').toString()}`,
   ].join('\n');
 
