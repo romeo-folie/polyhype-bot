@@ -178,7 +178,9 @@ import type { Position } from '../positionLedger.js';
 const { submitClobBuy, getClobOrderBook, submitClobLimitBuy, getClobOrder } = await import('../../shared/clob.js');
 const { hasOpenPosition, getPosition, sizeUpPosition } = await import('../positionLedger.js');
 const { executeAndRecordSignal } = await import('../executor.js');
+const { enqueueWrite } = await import('../../db/writeQueue.js');
 
+const mockEnqueueWrite = vi.mocked(enqueueWrite);
 const mockSubmitClob   = vi.mocked(submitClobBuy);
 const mockGetOrderBook = vi.mocked(getClobOrderBook);
 const mockSubmitLimit  = vi.mocked(submitClobLimitBuy);
@@ -767,5 +769,61 @@ describe('evaluateSizeUp — execution-price discipline (SIZE_UP_REQUIRE_REAL_BO
     expect(mockSubmitClob).not.toHaveBeenCalled(); // no taker fallback
     expect(mockSizeUpPos).not.toHaveBeenCalled();
     expect(result.skipped).toBe(true);
+  });
+});
+
+// ── Shadow mode: SIZE_UP_ENABLED=false never executes, only shadow-logs ────────
+describe('evaluateSizeUp — shadow mode (SIZE_UP_ENABLED=false)', () => {
+  beforeEach(() => {
+    mockHasPosition.mockReset();
+    mockGetPosition.mockReset();
+    mockSubmitClob.mockReset();
+    mockSubmitLimit.mockReset();
+    mockSizeUpPos.mockReset();
+    mockEnqueueWrite.mockReset();
+    mockSizeUpPos.mockResolvedValue(undefined);
+    mockHasPosition.mockImplementation(async (_r: unknown, _m: string, dir: string) => dir === 'YES');
+  });
+  afterEach(() => mockLoadConfig.mockReturnValue(mockConfig));
+
+  it('all gates pass → feature_disabled: nothing executes, a would-fire shadow row is written', async () => {
+    // The shadow-mode invariant: even when every conviction gate would pass, with the
+    // feature off evaluateSizeUp returns feature_disabled, so no order is placed and no
+    // ledger mutation happens — only the would_size_up shadow row is enqueued.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_ENABLED: false });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ stakeUsd: 5, sharesHeld: 11 }));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal(), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('size_up_ineligible');
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+    expect(mockEnqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({ kind: 'would_size_up', wouldBlock: false }),
+    );
+  });
+
+  it('conviction gate blocks in shadow mode → wouldBlock:true shadow row, still no execution', async () => {
+    // Confidence did not rise (0.62→0.63 < 0.04). In shadow mode this records a
+    // wouldBlock:true row so we can see the gate firing, and still executes nothing.
+    mockLoadConfig.mockReturnValue({ ...mockConfig, SIZE_UP_ENABLED: false, SIZE_UP_MIN_CONFIDENCE_RISE: 0.04 });
+    mockGetPosition.mockResolvedValue(makeExistingPosition({ consensusProbability: 0.62, stakeUsd: 5, sharesHeld: 11 }));
+    const redis = makeRedis();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeAndRecordSignal(makeWeatherSignal({ consensusProbability: 0.63 }), redis as any);
+
+    expect(result.skipped).toBe(true);
+    expect(mockSizeUpPos).not.toHaveBeenCalled();
+    expect(mockSubmitClob).not.toHaveBeenCalled();
+    expect(mockEnqueueWrite).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({ kind: 'would_size_up', wouldBlock: true, payload: expect.objectContaining({ reason: 'confidence_not_risen' }) }),
+    );
   });
 });
