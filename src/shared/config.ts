@@ -1399,6 +1399,14 @@ export const envSchema = z.object({
   // ── HL Momentum Scanner (Binance spot-triggered perp entries) ──
   // Ships dark. Flip to true after ≥48h shadow review shows credible signals.
   HL_MOMENTUM_ENABLED: boolFromEnv.optional().default(false),
+  // Fraction of NON-TRADE signal_decisions rows the HL momentum + funding
+  // scanners persist. They evaluate every symbol every tick and log a row per
+  // evaluation, flooding signal_decisions with routine early-gate skips
+  // (~280k rows/day, the dominant DB grower). Trades (has_trade=true) are ALWAYS
+  // persisted; skip rows are sampled at this rate to bound the write rate.
+  // 1 = persist all (legacy), 0 = persist no skips. Reweight aggregate skip
+  // counts by 1 / this rate. Applies to hl-momentum + hl-funding only.
+  HL_DECISION_LOG_SAMPLE_RATE: z.coerce.number().min(0).max(1).optional().default(0.1),
   // Comma-separated Binance USDT pairs to watch (symbols must match the <sym> portion of
   // spot:klines:<sym>:<timeframe> keys, e.g. spot:klines:ethusdt:1m).
   HL_MOMENTUM_SYMBOLS: z.string().optional().default('btcusdt,ethusdt,solusdt,xrpusdt,dogeusdt,bnbusdt,suiusdt,avaxusdt,linkusdt,tonusdt,aptusdt,pepeusdt,wifusdt,bonkusdt,penguusdt'),

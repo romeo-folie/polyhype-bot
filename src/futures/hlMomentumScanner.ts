@@ -11,6 +11,7 @@ import { fundingRateToApr, getCachedAssetCtx, getOrSetOiBaseline } from './hlAss
 import type { CachedAssetCtx } from './hlAssetCtxCache.js';
 import { hasOpenPosition } from '../execution/positionLedger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
+import { shouldDropSampledDecision } from './decisionSampling.js';
 import type { TradeSignal } from '../mapping/index.js';
 
 export interface BinancePriceTick {
@@ -241,6 +242,9 @@ export async function scanHlMomentum(
 
   /** Enqueue one signal_decisions row for this hl-momentum candidate evaluation. */
   const logDecision = (hasTrade: boolean, skipReason?: string, skipDetail?: string): void => {
+    // Throttle the per-tick skip flood: persist every trade, sample skip rows at
+    // HL_DECISION_LOG_SAMPLE_RATE to bound signal_decisions write rate.
+    if (shouldDropSampledDecision(hasTrade, cfg.HL_DECISION_LOG_SAMPLE_RATE)) return;
     void enqueueWrite('signal_decisions', {
       decisionId,
       source: 'hl-momentum' as const,

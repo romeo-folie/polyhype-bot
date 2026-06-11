@@ -25,6 +25,8 @@ const baseConfig = {
   HL_FUNDING_SCANNER_MIN_SKIP_COOLDOWN_SEC: 60,
   HL_FUNDING_SCANNER_SYMBOL_DENYLIST: '',
   FUTURES_MAX_PER_TRADE_USD: 15,
+  // Log ALL decisions in tests; sampling is covered explicitly below.
+  HL_DECISION_LOG_SAMPLE_RATE: 1,
 };
 
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
@@ -113,6 +115,40 @@ describe('scanHlFunding', () => {
     const redis = makeRedis();
     const signals = await scanHlFunding(redis as never);
     expect(signals).toHaveLength(0);
+  });
+
+  it('throttle: persists the apr_below_threshold skip when HL_DECISION_LOG_SAMPLE_RATE=1', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_FUNDING_SCANNER_ENABLED: true,
+      HL_DECISION_LOG_SAMPLE_RATE: 1,
+    });
+    mockGetAllCachedAssetCtxs.mockResolvedValue({
+      BTC: { fundingRate: aprToHourly(50), markPrice: 70000, openInterest: 1000 }, // APR 50 < 100 → apr_below_threshold
+    });
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    const redis = makeRedis();
+    await scanHlFunding(redis as never);
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({ skipReason: 'apr_below_threshold' }),
+    );
+  });
+
+  it('throttle: drops the apr_below_threshold skip when HL_DECISION_LOG_SAMPLE_RATE=0', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_FUNDING_SCANNER_ENABLED: true,
+      HL_DECISION_LOG_SAMPLE_RATE: 0,
+    });
+    mockGetAllCachedAssetCtxs.mockResolvedValue({
+      BTC: { fundingRate: aprToHourly(50), markPrice: 70000, openInterest: 1000 },
+    });
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    const redis = makeRedis();
+    const signals = await scanHlFunding(redis as never);
+    expect(signals).toHaveLength(0); // still skipped — only the LOG is suppressed
+    expect(enqueueWrite).not.toHaveBeenCalledWith('signal_decisions', expect.anything());
   });
 
   it('returns no signal when enabled=false even if APR > threshold (scanner_dark gate)', async () => {
