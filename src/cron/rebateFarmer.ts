@@ -9,9 +9,10 @@
  * (docs/issues/maker-rebates-not-earning-2026-06-05.md).
  *
  * Cycle (runs every 5 min via cron or Docker):
- *   1. Reconcile tracked orders — detect fills, cancel stale orders, sweep
- *      orphaned fresh legs. ALWAYS runs, even while farming is disabled, so
- *      stale state self-heals.
+ *   1. Reconcile tracked orders — detect fills, HOLD still-live orders to keep
+ *      CLOB queue priority (cancel only past resolution / lifetime backstop),
+ *      sweep orphaned fresh legs. ALWAYS runs, even while farming is disabled,
+ *      so stale state self-heals.
  *   2. Compute budget from bankroll × fraction, capped by hard limit
  *   3. Select markets by recent fee-equivalent flow/hour; quote both tokens
  *      at effective YES-mid ∓ edge (two-sided, strict pairs)
@@ -79,7 +80,7 @@ export async function main(): Promise<void> {
     if (!cfg.REBATE_FARMING_ENABLED) {
       logger.info('[rebate] rebate farming disabled', {
         filled: reconciled.filled.length,
-        staleCancelled: reconciled.stale.length,
+        heldCancelled: reconciled.stale.length, // past-resolution + lifetime-cap cancels
         orphanCancels: reconciled.orphanCancels.length,
       });
       return;

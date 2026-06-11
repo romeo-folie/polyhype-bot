@@ -206,6 +206,8 @@ export interface ReconcileResult {
   filled: RestingOrder[];
   partialFills: RestingOrder[];
   cancelled: RestingOrder[];
+  /** Held orders cancelled by the hold policy: past resolution or past the
+   * lifetime backstop. NOT the old per-cycle age>TTL churn (now removed). */
   stale: RestingOrder[];
   /** Naked fresh legs cancelled by the orphan sweep (no held or resting opposite). */
   orphanCancels: RestingOrder[];
@@ -348,7 +350,10 @@ async function sweepOrphanLegs(
 
 /**
  * Reconcile all tracked resting orders against the CLOB.
- * Detects fills (→ recordPosition), cancels stale orders, cleans up.
+ * Detects fills (→ recordPosition) and external cancels. Still-live orders are
+ * HELD to preserve CLOB time-priority — cancelled only past their market's
+ * resolution or past the long lifetime backstop (REBATE_MAX_ORDER_LIFETIME_S);
+ * price drift is handled separately by the reprice pass. Sweeps orphan legs.
  */
 export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
   const cfg = loadConfig();
@@ -376,6 +381,7 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
           // Well past TTL — safe to assume the order is genuinely gone.
           await removeRestingOrder(redis, orderId, order.marketId);
           await recordLifetime(redis, order);
+          await bumpStat(redis, order.marketId, 'assumed_gone');
           result.cancelled.push(order);
         } else {
           logger.debug('[rebate] getClobOrder returned null, skipping (may be transient)', { orderId });
@@ -433,9 +439,21 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
         continue;
       }
 
-      // Check staleness — cancel orders older than TTL.
+      // Hold-policy cancel. A still-live, well-priced resting order is HELD
+      // across cycles to preserve CLOB time-priority — the blanket
+      // age>TTL cancel that used to fire here recycled ~99% of orders every
+      // 5-min cycle, forfeiting queue position and crushing the fill rate
+      // (mirrors the weather maker queue-priority fix, PR #465). Price drift
+      // is handled by the reprice pass (cancelForReprice); a held order is
+      // cancelled HERE only when:
+      //   (a) it is past its market's resolution (endDate) — avoid adverse
+      //       fills into resolution, mirroring weather's post-resolution sweep, or
+      //   (b) it exceeds the long lifetime backstop — a stuck-order safety net.
       const ageMs = Date.now() - new Date(order.placedAt).getTime();
-      if (ageMs > cfg.REBATE_ORDER_TTL_S * 1000) {
+      const endMs = order.endDate ? Date.parse(order.endDate) : NaN;
+      const pastResolution = isFinite(endMs) && Date.now() > endMs;
+      const pastLifetimeCap = ageMs > cfg.REBATE_MAX_ORDER_LIFETIME_S * 1000;
+      if (pastResolution || pastLifetimeCap) {
         const cancelled = await cancelClobOrder(orderId);
         // ALWAYS recheck, success included — the order can partially fill in
         // the race between the top-of-loop fetch and the cancel, and a
@@ -444,7 +462,7 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
         const recheck = await getClobOrder(orderId);
         if (!recheck) {
           // Recheck failed (transient?) — keep tracked, retry next cycle.
-          logger.warn('[rebate] stale cancel + recheck failed, will retry', { orderId });
+          logger.warn('[rebate] hold-cancel + recheck failed, will retry', { orderId });
           continue;
         }
         const recheckMatched = parseFloat(recheck.size_matched ?? '0');
@@ -452,7 +470,7 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
           // Filled during the cancel window — keep TRACKED; the next cycle's
           // top-of-loop fill detection records the position + rebate stats
           // through the normal full/partial paths.
-          logger.warn('[rebate] stale order filled during cancel — leaving for fill detection', {
+          logger.warn('[rebate] held order filled during cancel — leaving for fill detection', {
             orderId,
             sharesFilled: recheckMatched,
             cancelAccepted: cancelled,
@@ -461,17 +479,25 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
         }
         const recheckStatus = String(recheck.status ?? '').toLowerCase();
         if (!cancelled && !['cancelled', 'canceled', 'expired'].includes(recheckStatus)) {
-          logger.warn('[rebate] stale cancel failed, will retry', { orderId });
+          logger.warn('[rebate] hold-cancel failed, will retry', { orderId });
           continue;
         }
         await removeRestingOrder(redis, orderId, order.marketId);
         await recordLifetime(redis, order);
         result.stale.push(order);
-        await bumpStat(redis, order.marketId, 'stale_cancels');
+        await bumpStat(redis, order.marketId, pastResolution ? 'post_resolution_cancels' : 'lifetime_cap_cancels');
+        logger.info('[rebate] held order cancelled', {
+          orderId,
+          marketId: order.marketId,
+          direction: order.direction,
+          reason: pastResolution ? 'past_resolution' : 'lifetime_cap',
+          ageHours: +(ageMs / 3_600_000).toFixed(1),
+        });
         continue;
       }
 
-      // Order still live and within TTL — leave it.
+      // Order still live, still valid, not past resolution — HOLD it to keep
+      // queue priority. The reprice pass cancels it only if its price drifts.
     } catch (err: unknown) {
       result.errors++;
       logger.warn('[rebate] reconciliation error for order', {
@@ -777,6 +803,7 @@ export async function placeRestingOrder(
     question: candidate.question,
     feeRateBps: cfg.REBATE_FEE_RATE_BPS,
     rebateShare: candidate.rebateShare,
+    endDate: candidate.endDate,
   };
 
   await saveRestingOrder(redis, order);

@@ -25,6 +25,13 @@ export interface RestingOrder {
    */
   feeRateBps?: number;
   rebateShare?: number;
+  /**
+   * Market resolution timestamp (ISO), captured at placement from the
+   * candidate. Reconcile cancels a held resting order once past it (avoids
+   * adverse fills into resolution). Optional: orders persisted before the
+   * queue-priority rework lack it — those fall back to the lifetime backstop.
+   */
+  endDate?: string | null;
 }
 
 /** One post-only bid the farmer wants resting on a specific token. */
