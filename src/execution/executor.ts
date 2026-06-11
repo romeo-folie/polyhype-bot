@@ -650,17 +650,52 @@ async function tryExecuteViaClobMaker(
               makerAvgFillPrice: avgFillPrice,
             };
           }
+          // Zero fill but CLOB reports the order CANCELLED — it was cancelled
+          // out from under us (a manual/external cancel). Nothing else
+          // reconciles an external cancel: the revalidation rules only delete
+          // the key when one of THEIR rules fires (and a value-positive resting
+          // order trips none), and the reconciler only clears the key after
+          // linking a real fill. So the key would otherwise strand re-entry
+          // until its TTL — the scanner re-emits, lands here every cycle, and
+          // returns maker_not_filled forever. Clear the stale key and fall
+          // through to re-post fresh at the current cap. (Partial-fill-then-
+          // cancel is handled by the matched > 0 branch above: the fill is
+          // recorded and the key deleted there, never re-posted.)
+          const orderStatus = String(order.status ?? '').toLowerCase();
+          if (orderStatus === 'canceled' || orderStatus === 'cancelled') {
+            logger.info('[executor] pending maker order externally cancelled (zero fill) — clearing stale key to re-post', {
+              marketId: signal.marketId,
+              orderId: pending.orderId,
+              source: signal.source,
+            });
+            await deletePendingOrder(redis, signal.marketId, pending.direction);
+            // do NOT return — fall through past the pending block to re-post below.
+          } else {
+            // Genuinely resting and unfilled this cycle — hold for queue priority.
+            return {
+              ok: false,
+              error: 'maker_not_filled',
+              waitMs: Date.now() - startedAt,
+              makerOrderId: pending.orderId,
+              makerPostedPrice: pending.price,
+              makerPostedSize: pending.size,
+              makerFillStatus: 'pending',
+            };
+          }
+        } else {
+          // Order gone from CLOB (null): possibly an unattributed async fill —
+          // leave the key so the reconciler can link the fill to its position.
+          // Report not-filled this cycle (unchanged behaviour).
+          return {
+            ok: false,
+            error: 'maker_not_filled',
+            waitMs: Date.now() - startedAt,
+            makerOrderId: pending.orderId,
+            makerPostedPrice: pending.price,
+            makerPostedSize: pending.size,
+            makerFillStatus: 'pending',
+          };
         }
-        // Still open — not filled yet on this cycle
-        return {
-          ok: false,
-          error: 'maker_not_filled',
-          waitMs: Date.now() - startedAt,
-          makerOrderId: pending.orderId,
-          makerPostedPrice: pending.price,
-          makerPostedSize: pending.size,
-          makerFillStatus: 'pending',
-        };
       } else {
         // Expired — cancel and fall through to re-post
         logger.info('[executor] pending maker order expired — cancelling before re-post', {
