@@ -7,7 +7,7 @@ import { getHyperliquid } from '../shared/hyperliquid.js';
 import { fetchClobTokenBalance, cancelClobOrder, resolveOrderFillPrice } from '../shared/clob.js';
 import { loadConfig } from '../shared/config.js';
 import { fetchPolymarketPositions, type PolymarketPosition } from '../shared/polymarketData.js';
-import { fetchMarketByConditionId, type GammaMarket } from '../shared/polymarketGamma.js';
+import { fetchMarketByConditionId } from '../shared/polymarketGamma.js';
 import { isRecentlyClosed, isRecentlyResolved } from '../shared/closedGuard.js';
 import { getPendingOrder, deletePendingOrder } from '../execution/pendingMakerOrders.js';
 import { notifyTradeExecuted, notify } from '../execution/telegram.js';
@@ -347,6 +347,24 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
     const market = await fetchMarketByConditionId(pos.conditionId);
     if (!market) {
       logger.warn('[reconcile] could not resolve Gamma market for CLOB orphan', { conditionId: pos.conditionId });
+      return false;
+    }
+
+    // Never import an orphan on a RESOLVED market. The orphan-import path exists
+    // to recover OPEN positions that fell out of the ledger; importing a settled
+    // position as "open" is semantically wrong and pure churn — once pagination
+    // (PR #473) surfaces the whole wallet, every old resolved-but-unredeemed
+    // position would otherwise be imported and immediately re-closed by the
+    // redeemer each time the recently-closed guard lapses (~weekly). This is a
+    // stronger, time-independent guard than the recently-closed/-resolved Redis
+    // flags below, which only cover a window. A stranded resolved WINNER, if
+    // ever held, belongs in a dedicated redemption sweep over on-chain balances,
+    // not here.
+    if (market.closed) {
+      logger.debug('[reconcile] skipping CLOB orphan on resolved market', {
+        marketId: market.id,
+        conditionId: pos.conditionId,
+      });
       return false;
     }
 

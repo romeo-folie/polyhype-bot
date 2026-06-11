@@ -246,6 +246,35 @@ describe('Position Reconciliation Healer', () => {
     }));
   });
 
+  it('does NOT import a CLOB orphan whose market is RESOLVED (closed=true)', async () => {
+    // Pagination (PR #473) surfaces old settled-but-unredeemed positions to this
+    // path; importing them as "open" is churn (imported → redeemer closes them
+    // every time the recently-closed guard lapses). Resolved markets must be
+    // skipped outright, independent of the time-window guards.
+    const resolvedOrphan = {
+      conditionId: 'cond-resolved',
+      asset: 'tok-yes',
+      avgPrice: 0.60,
+      size: 1000,
+    };
+
+    const resolvedGammaMarket = {
+      id: 'numeric-resolved',
+      question: 'Did it already happen?',
+      conditionId: 'cond-resolved',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+      closed: true,
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([resolvedOrphan]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(resolvedGammaMarket);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
+  });
+
   it('links oracle-lag UP pending order to YES reconciled fill (UP↔YES normalization)', async () => {
     const orphanClobPosition = {
       conditionId: 'cond-oracle',
