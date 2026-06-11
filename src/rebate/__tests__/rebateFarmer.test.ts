@@ -266,6 +266,46 @@ describe('rebateFarmer main()', () => {
     expect(sizing.partnerCost).toBe(0.5);
   });
 
+  it('reprice pass still cancels a price-drifted resting order (queue-hold change unchanged here)', async () => {
+    // Holding orders past the old 300s TTL must NOT weaken price-drift
+    // cancellation: a resting YES order whose target moved beyond
+    // REBATE_REPRICE_THRESHOLD is still cancel+reposted via cancelForReprice.
+    const existing = makeOrder({ orderId: 'order-drift', direction: 'YES', price: 0.50, sizeUsd: 5 });
+    mockLoadRestingOrders.mockResolvedValue(
+      new Map([['order-drift', existing]]),
+    );
+    // Candidate quotes YES@0.39 → |0.50 − 0.39| = 0.11 > 0.02 threshold.
+    mockCancelForReprice.mockResolvedValue(true);
+    mockPlaceRestingOrder.mockResolvedValue(null); // nothing re-placed this cycle — isolate the reprice
+
+    await main();
+
+    expect(mockCancelForReprice).toHaveBeenCalledWith(expect.anything(), existing);
+    const cycleLog = vi.mocked(logger.info).mock.calls.find(
+      (c) => c[0] === '[rebate] cycle complete',
+    )![1]!;
+    expect(cycleLog.repriced).toBe(1);
+  });
+
+  it('reprice pass HOLDS a within-threshold resting order (no cancel)', async () => {
+    // The farmer-level mirror of the queue-priority hold: a YES order whose
+    // target barely moved (≤ threshold) keeps its queue position untouched.
+    const existing = makeOrder({ orderId: 'order-stable', direction: 'YES', price: 0.40, sizeUsd: 5 });
+    mockLoadRestingOrders.mockResolvedValue(
+      new Map([['order-stable', existing]]),
+    );
+    // Candidate quotes YES@0.39 → |0.40 − 0.39| = 0.01 ≤ 0.02 threshold.
+    mockPlaceRestingOrder.mockResolvedValue(null);
+
+    await main();
+
+    expect(mockCancelForReprice).not.toHaveBeenCalled();
+    const cycleLog = vi.mocked(logger.info).mock.calls.find(
+      (c) => c[0] === '[rebate] cycle complete',
+    )![1]!;
+    expect(cycleLog.repriced).toBe(0);
+  });
+
   it('shadow mode logs the would-be pair and never places, reserves, or reprices', async () => {
     mockLoadConfig.mockReturnValue({ ...baseConfig, REBATE_SHADOW_MODE: true });
 

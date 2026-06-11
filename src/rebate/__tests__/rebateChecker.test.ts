@@ -114,7 +114,8 @@ describe('maybeSendDailySummary', () => {
     orders_placed: '6',
     fills: '2',
     partial_fills: '0',
-    stale_cancels: '3',
+    post_resolution_cancels: '2',
+    lifetime_cap_cancels: '1',
     reprice_cancels: '1',
     est_rebate_usd: '0.1200',
     lifetime_ms_total: String(20 * 60_000),
@@ -124,7 +125,8 @@ describe('maybeSendDailySummary', () => {
     orders_placed: '12',
     fills: '3',
     partial_fills: '1',
-    stale_cancels: '5',
+    post_resolution_cancels: '3',
+    lifetime_cap_cancels: '2',
     reprice_cancels: '2',
     est_rebate_usd: '0.2531',
     lifetime_ms_total: String(80 * 60_000),
@@ -181,6 +183,10 @@ describe('maybeSendDailySummary', () => {
     expect(text).toContain('avg lifetime 5.0 min');
     expect(text).not.toContain('avg lifetime 10.0 min');
     expect(text).toContain('placed 6');
+    // Hold-policy cancels replace the retired stale_cancels: the ops line shows
+    // the post-resolution / lifetime-cap breakdown from the DATE bucket (2 + 1).
+    expect(text).toContain('held-cancelled 3 (res 2 / cap 1)');
+    expect(text).not.toContain('stale-cancelled');
     // Cumulative counters are present but labelled all-time.
     expect(text).toContain('All-time: est $0.2531 | fills 4 | placed 12');
   });

@@ -1152,8 +1152,18 @@ export const envSchema = z.object({
   REBATE_MAX_MARKETS: z.coerce.number().int().min(1).optional().default(10),
   // Maximum USD exposure per market (prevents doubling up).
   REBATE_MAX_PER_MARKET_USD: z.coerce.number().min(1).optional().default(10),
-  // TTL for resting orders before cancel + refresh at new prices (seconds).
+  // Age (seconds) past which a resting order CLOB can no longer find is assumed
+  // genuinely gone (the !clobOrder "assume gone" heuristic uses 2× this). No
+  // longer drives a per-cycle age-cancel of LIVE orders — that churn forfeited
+  // CLOB time-priority and crushed fill rate; live orders are now HELD and only
+  // cancelled by the reprice pass, a partial fill, resolution, or the lifetime
+  // backstop below (queue-priority fix mirroring weather PR #465).
   REBATE_ORDER_TTL_S: z.coerce.number().int().min(60).optional().default(300),
+  // Backstop only: cancel a still-LIVE resting order older than this purely as
+  // a stuck-order safety net (seconds). Resting orders are otherwise HELD to
+  // preserve CLOB time-priority. 24h lets an order actually accrue queue
+  // position instead of being recycled every 5-min cycle at the old 300s TTL.
+  REBATE_MAX_ORDER_LIFETIME_S: z.coerce.number().int().min(300).optional().default(86_400),
   // Minimum spread in basis points — below this, no room to improve the bid.
   REBATE_MIN_SPREAD_BPS: z.coerce.number().min(0).optional().default(50),
   // Minimum volume (USD) — cheap prefilter before book/flow fetches. Applied

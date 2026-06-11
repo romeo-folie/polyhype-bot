@@ -254,56 +254,128 @@ describe('orderManager', () => {
       expect(stats.some((s) => s.field === 'lifetime_ms_total' && s.key === todayKey)).toBe(true);
     });
 
-    it('cancels stale orders past TTL and bumps per-market stale counters', async () => {
+    it('HOLDS a still-live order past the old 300s TTL — no cancel, queue priority preserved', async () => {
+      // The core queue-priority fix (PR #465 analogue): an order 10 min old
+      // (well past the old 300s TTL) but under the 24h backstop and not yet at
+      // resolution must be HELD, not recycled. The old code cancelled here
+      // EVERY cycle, forfeiting CLOB time-priority — ~99% of placements died
+      // this way as stale_cancels and almost never filled.
       const redis = makeRedis();
       const order = makeOrder({
-        orderId: 'order-stale',
-        placedAt: new Date(Date.now() - 600_000).toISOString(), // 10 min ago (> 300s TTL)
+        orderId: 'order-held',
+        placedAt: new Date(Date.now() - 600_000).toISOString(), // 10 min ago (> old 300s TTL)
+        endDate: new Date(Date.now() + 24 * 3600 * 1000).toISOString(), // resolves tomorrow
       });
-      redis.hgetall.mockResolvedValue({ 'order-stale': JSON.stringify(order) });
-
-      mockGetOrder.mockResolvedValue({
-        id: 'order-stale',
-        status: 'LIVE',
-        owner: '0x1',
-        maker_address: '0x1',
-        market: 'mkt-1',
-        asset_id: 'tok-yes',
-        side: 'BUY',
-        original_size: '10',
-        size_matched: '0',
-        price: '0.51',
-        associate_trades: [],
-        outcome: 'YES',
-        created_at: Date.now() - 600_000,
-        expiration: '',
-        order_type: 'GTC',
+      redis.hgetall.mockResolvedValue({ 'order-held': JSON.stringify(order) });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any);
+      mockGetOrder.mockResolvedValue({ status: 'LIVE', size_matched: '0', original_size: '10' } as any);
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await reconcileOrders(redis as any);
+
+      expect(result.stale).toHaveLength(0);
+      expect(mockCancelOrder).not.toHaveBeenCalled();
+      expect(redis.hdel).not.toHaveBeenCalledWith('rebate:orders', 'order-held');
+      const stats = statCalls(redis);
+      // No cancel counter of any kind fires for a held, still-valid order.
+      expect(stats.some((s) => s.field === 'stale_cancels')).toBe(false);
+      expect(stats.some((s) => s.field === 'lifetime_cap_cancels')).toBe(false);
+      expect(stats.some((s) => s.field === 'post_resolution_cancels')).toBe(false);
+    });
+
+    it('cancels a held order once PAST its market resolution and bumps post_resolution_cancels', async () => {
+      const redis = makeRedis();
+      const order = makeOrder({
+        orderId: 'order-resolved',
+        placedAt: new Date(Date.now() - 600_000).toISOString(), // young — only resolution triggers it
+        endDate: new Date(Date.now() - 3600_000).toISOString(), // resolved 1h ago
+      });
+      redis.hgetall.mockResolvedValue({ 'order-resolved': JSON.stringify(order) });
+      // Top-of-loop: live unfilled → hold-cancel; recheck: confirmed dead, zero fill.
+      mockGetOrder
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValueOnce({ status: 'LIVE', size_matched: '0', original_size: '10' } as any)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValueOnce({ status: 'CANCELED', size_matched: '0', original_size: '10' } as any);
       mockCancelOrder.mockResolvedValue(true);
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await reconcileOrders(redis as any);
 
       expect(result.stale).toHaveLength(1);
-      expect(mockCancelOrder).toHaveBeenCalledWith('order-stale');
-      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-stale');
+      expect(mockCancelOrder).toHaveBeenCalledWith('order-resolved');
+      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-resolved');
       const stats = statCalls(redis);
       const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
-      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'stale_cancels', by: 1 });
-      expect(stats).toContainEqual({ key: 'rebate:stats:market:mkt-1', field: 'stale_cancels', by: 1 });
-      expect(stats).toContainEqual({ key: todayKey, field: 'stale_cancels', by: 1 });
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'post_resolution_cancels', by: 1 });
+      expect(stats).toContainEqual({ key: 'rebate:stats:market:mkt-1', field: 'post_resolution_cancels', by: 1 });
+      expect(stats).toContainEqual({ key: todayKey, field: 'post_resolution_cancels', by: 1 });
+      // The old per-cycle staleness counter is retired — never bumped now.
+      expect(stats.some((s) => s.field === 'stale_cancels')).toBe(false);
     });
 
-    it('PR-459 review: a stale order that FILLED during its cancel stays tracked for fill detection', async () => {
+    it('cancels a held order older than REBATE_MAX_ORDER_LIFETIME_S (backstop) and bumps lifetime_cap_cancels', async () => {
+      const redis = makeRedis();
+      const order = makeOrder({
+        orderId: 'order-ancient-live',
+        // 25h old > 24h (86400s) backstop; no/future resolution so only the cap fires.
+        placedAt: new Date(Date.now() - 25 * 3600 * 1000).toISOString(),
+        endDate: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+      });
+      redis.hgetall.mockResolvedValue({ 'order-ancient-live': JSON.stringify(order) });
+      // Top-of-loop: live unfilled → hold-cancel; recheck: confirmed dead, zero fill.
+      mockGetOrder
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValueOnce({ status: 'LIVE', size_matched: '0', original_size: '10' } as any)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValueOnce({ status: 'CANCELED', size_matched: '0', original_size: '10' } as any);
+      mockCancelOrder.mockResolvedValue(true);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await reconcileOrders(redis as any);
+
+      expect(result.stale).toHaveLength(1);
+      expect(mockCancelOrder).toHaveBeenCalledWith('order-ancient-live');
+      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-ancient-live');
+      const stats = statCalls(redis);
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'lifetime_cap_cancels', by: 1 });
+      expect(stats.some((s) => s.field === 'stale_cancels')).toBe(false);
+      expect(stats.some((s) => s.field === 'post_resolution_cancels')).toBe(false);
+    });
+
+    it('still records a fill on an order HELD well past the old 300s TTL', async () => {
+      // Fill detection must not regress now that orders are held past 300s: an
+      // aged order that fills next cycle still records its position + rebate.
+      const redis = makeRedis();
+      const order = makeOrder({
+        orderId: 'order-held-fill',
+        price: 0.51,
+        size: 10,
+        placedAt: new Date(Date.now() - 600_000).toISOString(), // 10 min ago
+        endDate: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+      });
+      redis.hgetall.mockResolvedValue({ 'order-held-fill': JSON.stringify(order) });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mockGetOrder.mockResolvedValue({ status: 'MATCHED', size_matched: '10', original_size: '10' } as any);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await reconcileOrders(redis as any);
+
+      expect(result.filled).toHaveLength(1);
+      expect(mockRecordPosition).toHaveBeenCalledOnce();
+      expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-held-fill');
+      const stats = statCalls(redis);
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'fills', by: 1 });
+    });
+
+    it('PR-459 review: a held order that FILLED during its backstop cancel stays tracked for fill detection', async () => {
       const redis = makeRedis();
       const order = makeOrder({
         orderId: 'order-stale-filled',
-        placedAt: new Date(Date.now() - 10 * 3600 * 1000).toISOString(), // way past TTL
+        placedAt: new Date(Date.now() - 25 * 3600 * 1000).toISOString(), // past 24h backstop
       });
       redis.hgetall.mockResolvedValue({ 'order-stale-filled': JSON.stringify(order) });
-      // Top-of-loop fetch: still live, no fill yet → proceeds to stale-cancel.
+      // Top-of-loop fetch: still live, no fill yet → proceeds to hold-cancel.
       // Recheck after the failed cancel: it MATCHED in the race.
       mockGetOrder
         .mockResolvedValueOnce({ status: 'LIVE', size_matched: '0', original_size: '12.8' })
@@ -320,13 +392,13 @@ describe('orderManager', () => {
       expect(mockRecordPosition).not.toHaveBeenCalled();
     });
 
-    it('PR-459 review r2: a SUCCESSFUL stale cancel that raced a partial fill also stays tracked', async () => {
+    it('PR-459 review r2: a SUCCESSFUL backstop cancel that raced a partial fill also stays tracked', async () => {
       // The cancel accepted the REMAINDER — the partial fill before it must
       // not be dropped by the removal path.
       const redis = makeRedis();
       const order = makeOrder({
         orderId: 'order-stale-partial',
-        placedAt: new Date(Date.now() - 10 * 3600 * 1000).toISOString(),
+        placedAt: new Date(Date.now() - 25 * 3600 * 1000).toISOString(), // past 24h backstop
       });
       redis.hgetall.mockResolvedValue({ 'order-stale-partial': JSON.stringify(order) });
       mockGetOrder
@@ -373,6 +445,9 @@ describe('orderManager', () => {
 
       expect(result.cancelled).toHaveLength(1);
       expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-ancient');
+      // Own-disposal decision is now counted (not silently dropped).
+      const stats = statCalls(redis);
+      expect(stats).toContainEqual({ key: 'rebate:stats', field: 'assumed_gone', by: 1 });
     });
   });
 
@@ -410,6 +485,22 @@ describe('orderManager', () => {
       expect(stats).toContainEqual({ key: 'rebate:stats', field: 'orders_placed', by: 1 });
       expect(stats).toContainEqual({ key: 'rebate:stats:market:mkt-1', field: 'orders_placed', by: 1 });
       expect(stats).toContainEqual({ key: todayKey, field: 'orders_placed', by: 1 });
+    });
+
+    it('captures the candidate endDate on the persisted order (drives the post-resolution cancel)', async () => {
+      const redis = makeRedis();
+      mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'order-end' });
+      const resolvesAt = new Date(Date.now() + 12 * 3600 * 1000).toISOString();
+
+      const candidate = makeCandidate({ endDate: resolvesAt });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const order = await placeRestingOrder(redis as any, candidate, makeQuote(), { maxUsd: 5 });
+
+      expect(order).not.toBeNull();
+      expect(order!.endDate).toBe(resolvesAt);
+      // The persisted JSON also carries it (reconcile reads endDate off the hash).
+      const persisted = JSON.parse(redis.hset.mock.calls[0]![2] as string) as RestingOrder;
+      expect(persisted.endDate).toBe(resolvesAt);
     });
 
     it('returns null and counts a place-failure when order submission fails', async () => {
@@ -939,6 +1030,14 @@ describe('orderManager', () => {
       );
       const stats = statCalls(redis);
       expect(stats).toContainEqual({ key: 'rebate:stats', field: 'partial_fills', by: 1 });
+    });
+  });
+
+  describe('config defaults (schema-derived)', () => {
+    it('REBATE_MAX_ORDER_LIFETIME_S defaults to 86400 (24h backstop)', () => {
+      // Derived from the REAL Zod schema so the new knob can't silently drift
+      // from config.ts (see feedback: hand-written mocks crash on new reads).
+      expect(schemaDefaults(envSchema).REBATE_MAX_ORDER_LIFETIME_S).toBe(86_400);
     });
   });
 });

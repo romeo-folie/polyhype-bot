@@ -134,6 +134,11 @@ export async function maybeSendDailySummary(redis: Redis): Promise<boolean> {
     dayLifetimeCount > 0 ? num(dayStats, 'lifetime_ms_total') / dayLifetimeCount / 60_000 : 0;
   const dayFills = num(dayStats, 'fills') + num(dayStats, 'partial_fills');
   const dayEstRebateUsd = num(dayStats, 'est_rebate_usd');
+  // Hold-policy cancels (replaced the old per-cycle stale_cancels): orders are
+  // held for queue priority and cancelled only past resolution or the lifetime
+  // backstop. avg lifetime rising + these staying low = the hold is working.
+  const dayPostResCancels = num(dayStats, 'post_resolution_cancels');
+  const dayLifetimeCapCancels = num(dayStats, 'lifetime_cap_cancels');
   const cumFills = num(cumStats, 'fills') + num(cumStats, 'partial_fills');
   const cumEstRebateUsd = num(cumStats, 'est_rebate_usd');
 
@@ -145,7 +150,7 @@ export async function maybeSendDailySummary(redis: Redis): Promise<boolean> {
     '🧾 Rebate Farmer Daily Summary',
     apiLine,
     `Est. ${yesterday}: $${dayEstRebateUsd.toFixed(4)} from ${dayFills.toString()} fill(s) (full ${num(dayStats, 'fills').toString()} / partial ${num(dayStats, 'partial_fills').toString()})`,
-    `${yesterday} ops: placed ${num(dayStats, 'orders_placed').toString()} | stale-cancelled ${num(dayStats, 'stale_cancels').toString()} | repriced ${num(dayStats, 'reprice_cancels').toString()} | avg lifetime ${dayAvgLifetimeMin.toFixed(1)} min`,
+    `${yesterday} ops: placed ${num(dayStats, 'orders_placed').toString()} | held-cancelled ${(dayPostResCancels + dayLifetimeCapCancels).toString()} (res ${dayPostResCancels.toString()} / cap ${dayLifetimeCapCancels.toString()}) | repriced ${num(dayStats, 'reprice_cancels').toString()} | avg lifetime ${dayAvgLifetimeMin.toFixed(1)} min`,
     `All-time: est $${cumEstRebateUsd.toFixed(4)} | fills ${cumFills.toString()} | placed ${num(cumStats, 'orders_placed').toString()}`,
   ].join('\n');
 
