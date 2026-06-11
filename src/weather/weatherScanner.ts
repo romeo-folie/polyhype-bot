@@ -2223,7 +2223,7 @@ export async function cancelRestingWeatherOrder(
  */
 export function isWeatherOrderPastResolution(order: PendingMakerOrder): boolean {
   const sf = order.sourcedFrom;
-  if (!sf || !sf.startsWith('weather:')) return false;
+  if (!sf?.startsWith('weather:')) return false;
   const parts = sf.split(':');
   // parts: ['weather', <city>, <targetDate>, <bracket…>]
   if (parts.length < 3) return false;
@@ -3051,9 +3051,20 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
 
 async function main() {
   const { getRedis, closeRedis } = await import('../shared/redis.js');
+  const { maybeSendWeatherDailySummary } = await import('./weatherDigest.js');
   const redis = getRedis();
   try {
     await runWeatherScan(redis);
+    // Once-per-UTC-day performance digest. Best-effort: a digest failure (DB or
+    // Telegram) must never fail the scan. The Redis NX gate inside makes this
+    // send at most once per day even though main() runs every */30 cron tick.
+    try {
+      await maybeSendWeatherDailySummary(redis);
+    } catch (err) {
+      logger.warn('[weather-digest] send threw (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   } finally {
     await closeRedis();
   }
