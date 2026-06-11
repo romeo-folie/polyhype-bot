@@ -2971,6 +2971,66 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
   });
 
+  // ── Shadow mode: emit the evaluation, let the executor decline + shadow-log ──
+  it('shadow mode (SIZE_UP_ENABLED=false + SIZE_UP_SHADOW_ENABLED=true) still emits a sanctioned size-up eval', async () => {
+    // The scanner must reach the executor with a sanctioned size-up signal even when
+    // the feature is off, so evaluateSizeUp can write `would_size_up` shadow rows
+    // (it returns feature_disabled → no execution). Without this the held event is
+    // skipped and no shadow data is produced.
+    redisMock._store.set(activeEventKey, '1');
+    for (let i = 0; i < 11; i++) {
+      redisMock._store.set(`position:mt${i}:NO`, '1');
+      redisMock._store.set(`position:mt${i}:YES`, '1');
+    }
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_TRADE_SIDES: 'BOTH',
+      SIZE_UP_ENABLED: false,
+      SIZE_UP_SHADOW_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayMocks();
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 0 } as never, skipped: true, skipReason: 'size_up_ineligible',
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+    const sig = mockExecuteAndRecordSignal.mock.calls[0]![0] as { sizeUpSanctioned?: boolean };
+    expect(sig.sizeUpSanctioned).toBe(true);
+  });
+
+  it('fully off (SIZE_UP_ENABLED=false + SIZE_UP_SHADOW_ENABLED=false) skips the held event — no executor call', async () => {
+    redisMock._store.set(activeEventKey, '1');
+    for (let i = 0; i < 11; i++) {
+      redisMock._store.set(`position:mt${i}:NO`, '1');
+      redisMock._store.set(`position:mt${i}:YES`, '1');
+    }
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_TRADE_SIDES: 'BOTH',
+      SIZE_UP_ENABLED: false,
+      SIZE_UP_SHADOW_ENABLED: false,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayMocks();
+    mockGetBankroll.mockResolvedValue(1000);
+
+    await runWeatherScan(redisMock as never);
+
+    expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+  });
+
   it('re-evaluates size-up on EVERY resolution-day scan (no once-per-day dedup)', async () => {
     // The old `weather:event_resday:` key let only the FIRST res-day scan evaluate
     // a size-up; if a gate transiently failed at that moment, the opportunity was

@@ -1442,7 +1442,7 @@ export async function scanWeatherMarkets(
         activeMarker ||
         (await hasAnyOpenWeatherPosition(redis, event.allMarketIds).catch(() => false));
 
-      if (cfg.SIZE_UP_ENABLED && hasPosition) {
+      if ((cfg.SIZE_UP_ENABLED || cfg.SIZE_UP_SHADOW_ENABLED) && hasPosition) {
         // Existing position → size-up path, re-evaluated on EVERY resolution-day
         // scan (no per-day dedup — the old once-per-day key spent the event's
         // single evaluation at whatever moment the first res-day scan ran; if a
@@ -1455,6 +1455,11 @@ export async function scanWeatherMarkets(
         // evaluateSizeUp's path stake cap + SIZE_UP_MAX_TOPUPS + the
         // forecast-invalidation block keys gate actual top-ups, and the
         // per-market pending key dedupes resting orders across scans.
+        //
+        // SHADOW: when SIZE_UP_SHADOW_ENABLED is on but SIZE_UP_ENABLED is off, we
+        // still emit the evaluation; evaluateSizeUp returns feature_disabled so
+        // nothing executes — it only writes `would_size_up` shadow rows. Without
+        // this the held event is skipped below and no shadow data is produced.
         isSizeUpScan = true;
         sizeUpRescanned++;
         logger.debug('[weather] resolution-day size-up re-evaluation', {
@@ -1499,10 +1504,11 @@ export async function scanWeatherMarkets(
         // Fall through to forecast + bracket evaluation.
       } else {
         dedupSkipped++;
-        // Covers: SIZE_UP_ENABLED=false with a position; SIZE_UP_ENABLED=true but
-        // no position and early-entry disabled/threshold-not-met; or early-entry
-        // disabled with no position and size-up disabled.
-        const reason = cfg.SIZE_UP_ENABLED ? 'no_active_position' : 'size_up_disabled';
+        // Reached when neither the size-up path (held position + size-up live OR
+        // shadow) nor the early-entry path applied: either no held position, or a
+        // held position with size-up fully off (both SIZE_UP_ENABLED and
+        // SIZE_UP_SHADOW_ENABLED false).
+        const reason = hasPosition ? 'size_up_disabled' : 'no_active_position';
         logger.debug('[weather] resolution-day skip', {
           eventSlug: event.slug,
           city: event.city,

@@ -721,6 +721,13 @@ export const envSchema = z.object({
 
   // Position size-up (pyramid) — add to an existing open position when fresh edge still exists.
   SIZE_UP_ENABLED: boolFromEnv.optional().default(false),
+  // Shadow mode: when true (and SIZE_UP_ENABLED is false), the weather scanner still
+  // emits a size-up evaluation for held resolution-day positions, but evaluateSizeUp
+  // returns feature_disabled so NOTHING executes — it only writes `would_size_up`
+  // shadow rows (would-fire + conviction-gate blocks) for calibration. Without this
+  // the scanner skips held events entirely when SIZE_UP_ENABLED is false, so no shadow
+  // data is produced. Ignored when SIZE_UP_ENABLED is true (already evaluating live).
+  SIZE_UP_SHADOW_ENABLED: boolFromEnv.optional().default(false),
   // Comma-separated signal sources eligible for position size-up.
   SIZE_UP_ELIGIBLE_SOURCES: z.string().optional().default('weather'),
   // Maximum number of size-up top-ups allowed per open position.
