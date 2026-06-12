@@ -59,9 +59,20 @@ vi.mock('../poller.js', () => ({ pollSpotPrices: vi.fn().mockResolvedValue([{ as
 const mockDetectMoves = vi.fn();
 vi.mock('../thresholdDetector.js', () => ({ detectMoves: (...args: unknown[]) => mockDetectMoves(...args) }));
 
-vi.mock('../marketCorrelator.js', () => ({ findCorrelatedMarkets: vi.fn().mockResolvedValue([]) }));
-vi.mock('../fastPathConsensus.js', () => ({ estimateFastConsensus: vi.fn() }));
-vi.mock('../../mapping/divergenceCalculator.js', () => ({ computeDivergence: vi.fn() }));
+const mockFindCorrelatedMarkets = vi.fn();
+vi.mock('../marketCorrelator.js', () => ({
+  findCorrelatedMarkets: (...args: unknown[]) => mockFindCorrelatedMarkets(...args),
+}));
+
+const mockEstimateFastConsensus = vi.fn();
+vi.mock('../fastPathConsensus.js', () => ({
+  estimateFastConsensus: (...args: unknown[]) => mockEstimateFastConsensus(...args),
+}));
+
+const mockComputeDivergence = vi.fn();
+vi.mock('../../mapping/divergenceCalculator.js', () => ({
+  computeDivergence: (...args: unknown[]) => mockComputeDivergence(...args),
+}));
 
 const mockExecuteSignals = vi.fn().mockResolvedValue([]);
 vi.mock('../../execution/executor.js', () => ({
@@ -92,6 +103,7 @@ beforeEach(() => {
   mockLoadConfig.mockReturnValue({ ...baseConfig });
   mockExecuteSignals.mockResolvedValue([]);
   mockRedis.exists.mockResolvedValue(0);
+  mockFindCorrelatedMarkets.mockResolvedValue([]);
 });
 
 // ---------------------------------------------------------------------------
@@ -133,6 +145,47 @@ describe('runSpotMonitor — SPOT_FUTURES_ENABLED gate', () => {
         payload: expect.objectContaining({ movePct: 2.0, windowMinutes: 5 }),
       }),
     );
+  });
+
+  it('still emits correlated PM-market signals when SPOT_FUTURES_ENABLED=false', async () => {
+    mockLoadConfig.mockReturnValue({ ...baseConfig, SPOT_FUTURES_ENABLED: false });
+    mockDetectMoves.mockResolvedValue([makeMove()]);
+    mockFindCorrelatedMarkets.mockResolvedValue([
+      {
+        marketId: '0xmarket1',
+        conditionId: '0xcond1',
+        clobTokenIds: ['0xyes', '0xno'],
+        question: 'Will BTC be above $80k?',
+        currentYesPrice: 0.5,
+        correlationDirection: 'positive',
+      },
+    ]);
+    mockEstimateFastConsensus.mockResolvedValue({ probability: 0.8, stddev: 0, reasoning: 'test' });
+    mockComputeDivergence.mockReturnValue({
+      hasTrade: true,
+      decision: {
+        direction: 'YES',
+        stakeUsd: 5,
+        edgeMagnitude: 0.3,
+        consensusProbability: 0.8,
+        outcomePrice: 0.5,
+        halfKellyFraction: 0.1,
+        priceZone: 3,
+      },
+    });
+
+    await runSpotMonitor();
+
+    // The perp leg is shadowed, but the correlated PM-market signal still executes.
+    expect(mockExecuteSignals).toHaveBeenCalledTimes(1);
+    const signals = mockExecuteSignals.mock.calls[0]![0] as Record<string, unknown>[];
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      marketId: '0xmarket1',
+      direction: 'YES',
+      source: 'spot',
+    });
+    expect(signals[0]!.isFutures).toBeUndefined();
   });
 
   it('shadow row carries the evaluated stake and SHORT direction for a down move', async () => {

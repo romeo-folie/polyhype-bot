@@ -256,7 +256,8 @@ async function runSpotMonitorInner(
 
         // Live-entry gate: when SPOT_FUTURES_ENABLED=false the fully-evaluated signal
         // is recorded as a shadow observation instead of traded, so the path keeps
-        // accumulating a judgeable record while live entries are suspended.
+        // accumulating a judgeable record while live entries are suspended. Only the
+        // perp leg is gated — the correlated-PM-market path below still runs.
         if (!cfg.SPOT_FUTURES_ENABLED) {
           logger.info('[spot] futures entry shadowed — SPOT_FUTURES_ENABLED=false', {
             symbol: hlSymbol, moveDirection,
@@ -273,26 +274,25 @@ async function runSpotMonitorInner(
               currentPrice: move.currentPrice,
             },
           });
-          continue;
+        } else {
+          signals.push({
+            marketId: hlSymbol,
+            question: `Hyperliquid Perp: ${hlSymbol} ${moveDirection}`,
+            direction: moveDirection,
+            stakeUsd,
+            edgeMagnitude: Math.abs(move.changePercent) / 100, // proxy edge by move magnitude
+            outcomePrice: move.currentPrice,
+            isFutures: true,
+            leverage: cfg.FUTURES_DEFAULT_LEVERAGE,
+            priceZone: priceZoneOf(move.currentPrice),
+            sourcedFrom: `Spot: ${move.assetId} ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(1)}% in ${move.windowMinutes.toString()}min`,
+            reasoning: `Intraday momentum detected on ${move.assetId}. Current price: ${move.currentPrice.toString()}. Scaling into ${hlSymbol} perp.`,
+            assetId: move.assetId,
+            eventTs: move.eventTs,
+            source: 'spot',
+            decisionId: randomUUID(),
+          });
         }
-
-        signals.push({
-          marketId: hlSymbol,
-          question: `Hyperliquid Perp: ${hlSymbol} ${moveDirection}`,
-          direction: moveDirection,
-          stakeUsd,
-          edgeMagnitude: Math.abs(move.changePercent) / 100, // proxy edge by move magnitude
-          outcomePrice: move.currentPrice,
-          isFutures: true,
-          leverage: cfg.FUTURES_DEFAULT_LEVERAGE,
-          priceZone: priceZoneOf(move.currentPrice),
-          sourcedFrom: `Spot: ${move.assetId} ${move.changePercent > 0 ? '+' : ''}${move.changePercent.toFixed(1)}% in ${move.windowMinutes.toString()}min`,
-          reasoning: `Intraday momentum detected on ${move.assetId}. Current price: ${move.currentPrice.toString()}. Scaling into ${hlSymbol} perp.`,
-          assetId: move.assetId,
-          eventTs: move.eventTs,
-          source: 'spot',
-          decisionId: randomUUID(),
-        });
       }
     }
 
