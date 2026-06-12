@@ -9,7 +9,13 @@ vi.mock('../../execution/telegram.js', () => ({
   notify: notifyMock,
 }));
 
-const { parseResolutionStation, auditWeatherStations, runStationAudit } = await import(
+const fetchWeatherEventsMock = vi.fn(async (_limit: number, _offset?: number): Promise<unknown[]> => []);
+vi.mock('../weatherScanner.js', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>('../weatherScanner.js');
+  return { ...actual, fetchWeatherEvents: fetchWeatherEventsMock };
+});
+
+const { parseResolutionStation, auditWeatherStations, runStationAudit, fetchAllWeatherEvents } = await import(
   '../stationAudit.js'
 );
 import type { WeatherGammaEvent } from '../weatherScanner.js';
@@ -65,6 +71,8 @@ function makeEvent(title: string, slug: string, description: string): WeatherGam
 
 beforeEach(() => {
   notifyMock.mockClear();
+  fetchWeatherEventsMock.mockClear();
+  fetchWeatherEventsMock.mockImplementation(async () => []);
 });
 
 // ── parseResolutionStation ─────────────────────────────────────────────────
@@ -161,11 +169,11 @@ describe('auditWeatherStations', () => {
 
   it('collects untracked cities instead of flagging mismatches', () => {
     const result = auditWeatherStations([
-      makeEvent('Highest temperature in Tokyo on June 13?', 'tok', DESC_WU_NAME_ONLY),
-      makeEvent('Highest temperature in Helsinki on June 13?', 'hel', DESC_WU_NAME_ONLY),
+      makeEvent('Highest temperature in Reykjavik on June 13?', 'rey', DESC_WU_NAME_ONLY),
+      makeEvent('Highest temperature in Oslo on June 13?', 'osl', DESC_WU_NAME_ONLY),
     ]);
     expect(result.mismatches).toEqual([]);
-    expect(result.unknownCities).toEqual(['helsinki', 'tokyo']);
+    expect(result.unknownCities).toEqual(['oslo', 'reykjavik']);
   });
 
   it('marks prose-only same-source descriptions as uncomparable, not mismatched', () => {
@@ -246,12 +254,12 @@ describe('runStationAudit', () => {
   it('notifies untracked cities as expansion candidates, deduped', async () => {
     const redis = makeRedis();
     const events = [
-      makeEvent('Highest temperature in Tokyo on June 13?', 'tok', DESC_WU_NAME_ONLY),
+      makeEvent('Highest temperature in Reykjavik on June 13?', 'rey', DESC_WU_NAME_ONLY),
     ];
 
     await runStationAudit(redis as never, events);
     expect(notifyMock).toHaveBeenCalledTimes(1);
-    expect(notifyMock.mock.calls[0][0]).toContain('tokyo');
+    expect(notifyMock.mock.calls[0][0]).toContain('reykjavik');
 
     notifyMock.mockClear();
     await runStationAudit(redis as never, events);
@@ -277,5 +285,44 @@ describe('runStationAudit', () => {
       makeEvent('Highest temperature in Istanbul on June 9?', 'ist', switched),
     ]);
     expect(result).toBeNull();
+  });
+});
+
+// ── fetchAllWeatherEvents ──────────────────────────────────────────────────
+
+describe('fetchAllWeatherEvents', () => {
+  const ev = (slug: string) =>
+    makeEvent(`Highest temperature in Paris on June 11?`, slug, DESC_WU_LFPB);
+
+  it('pages past the per-request cap until a short batch', async () => {
+    // Gamma caps each request at 100 events; with 117 live events a single
+    // page silently dropped the lowest-liquidity cities from the audit.
+    fetchWeatherEventsMock
+      .mockResolvedValueOnce([ev('a'), ev('b')])
+      .mockResolvedValueOnce([ev('c'), ev('d')])
+      .mockResolvedValueOnce([ev('e')]);
+
+    const all = await fetchAllWeatherEvents(2, 5);
+
+    expect(all).toHaveLength(5);
+    expect(fetchWeatherEventsMock.mock.calls).toEqual([[2, 0], [2, 2], [2, 4]]);
+  });
+
+  it('stops after a single short page', async () => {
+    fetchWeatherEventsMock.mockResolvedValueOnce([ev('a')]);
+
+    const all = await fetchAllWeatherEvents(2, 5);
+
+    expect(all).toHaveLength(1);
+    expect(fetchWeatherEventsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('is bounded by maxPages even when every page is full', async () => {
+    fetchWeatherEventsMock.mockImplementation(async () => [ev('x'), ev('y')]);
+
+    const all = await fetchAllWeatherEvents(2, 3);
+
+    expect(all).toHaveLength(6);
+    expect(fetchWeatherEventsMock).toHaveBeenCalledTimes(3);
   });
 });

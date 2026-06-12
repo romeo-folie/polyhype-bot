@@ -128,6 +128,33 @@ export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   // systematically cooler; that gap is likely why taipei's bias never
   // stabilised and the city ended up in WEATHER_EXCLUDED_CITIES.
   taipei:          { lat: 25.0694, lon: 121.5521,   noaaCoverage: false, unit: 'celsius', wuStation: 'RCSS', resolutionSource: 'wu', isoCountry: 'TW', tz: 'Asia/Taipei'               },
+  // ── Added 2026-06-12 (station-audit discovery): all cities below were
+  // live on Polymarket without tracking. Stations/units extracted from the
+  // market descriptions; every ICAO verified to return WU observations.
+  // Ground truth + bias accumulate via the reconciler from day one; keep
+  // them in WEATHER_EXCLUDED_CITIES until the bias window has samples.
+  beijing:         { lat: 40.0801, lon: 116.5846,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZBAA', resolutionSource: 'wu', isoCountry: 'CN', tz: 'Asia/Shanghai'              },
+  busan:           { lat: 35.1795, lon: 128.9382,   noaaCoverage: false, unit: 'celsius', wuStation: 'RKPK', resolutionSource: 'wu', isoCountry: 'KR', tz: 'Asia/Seoul'                 },
+  'cape town':     { lat: -33.9648, lon: 18.6017,   noaaCoverage: false, unit: 'celsius', wuStation: 'FACT', resolutionSource: 'wu', isoCountry: 'ZA', tz: 'Africa/Johannesburg'        },
+  chengdu:         { lat: 30.5785, lon: 103.9471,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZUUU', resolutionSource: 'wu', isoCountry: 'CN', tz: 'Asia/Shanghai'              },
+  chongqing:       { lat: 29.7192, lon: 106.6417,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZUCK', resolutionSource: 'wu', isoCountry: 'CN', tz: 'Asia/Shanghai'              },
+  guangzhou:       { lat: 23.3924, lon: 113.2988,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZGGG', resolutionSource: 'wu', isoCountry: 'CN', tz: 'Asia/Shanghai'              },
+  helsinki:        { lat: 60.3172, lon: 24.9633,    noaaCoverage: false, unit: 'celsius', wuStation: 'EFHK', resolutionSource: 'wu', isoCountry: 'FI', tz: 'Europe/Helsinki'            },
+  jinan:           { lat: 36.8572, lon: 117.2161,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZSJN', resolutionSource: 'wu', isoCountry: 'CN', tz: 'Asia/Shanghai'              },
+  // WU labels OPKC "Masroor Airbase" but the URL ICAO is OPKC (Jinnah Intl);
+  // the URL ICAO is what the fetcher queries, so coords follow OPKC.
+  karachi:         { lat: 24.9065, lon: 67.1608,    noaaCoverage: false, unit: 'celsius', wuStation: 'OPKC', resolutionSource: 'wu', isoCountry: 'PK', tz: 'Asia/Karachi'               },
+  'kuala lumpur':  { lat: 2.7456,  lon: 101.7099,   noaaCoverage: false, unit: 'celsius', wuStation: 'WMKK', resolutionSource: 'wu', isoCountry: 'MY', tz: 'Asia/Kuala_Lumpur'          },
+  manila:          { lat: 14.5086, lon: 121.0194,   noaaCoverage: false, unit: 'celsius', wuStation: 'RPLL', resolutionSource: 'wu', isoCountry: 'PH', tz: 'Asia/Manila'                },
+  munich:          { lat: 48.3538, lon: 11.7861,    noaaCoverage: false, unit: 'celsius', wuStation: 'EDDM', resolutionSource: 'wu', isoCountry: 'DE', tz: 'Europe/Berlin'              },
+  qingdao:         { lat: 36.3614, lon: 120.0883,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZSQD', resolutionSource: 'wu', isoCountry: 'CN', tz: 'Asia/Shanghai'              },
+  seoul:           { lat: 37.4602, lon: 126.4407,   noaaCoverage: false, unit: 'celsius', wuStation: 'RKSI', resolutionSource: 'wu', isoCountry: 'KR', tz: 'Asia/Seoul'                 },
+  shanghai:        { lat: 31.1443, lon: 121.8083,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZSPD', resolutionSource: 'wu', isoCountry: 'CN', tz: 'Asia/Shanghai'              },
+  singapore:       { lat: 1.3644,  lon: 103.9915,   noaaCoverage: false, unit: 'celsius', wuStation: 'WSSS', resolutionSource: 'wu', isoCountry: 'SG', tz: 'Asia/Singapore'             },
+  tokyo:           { lat: 35.5494, lon: 139.7798,   noaaCoverage: false, unit: 'celsius', wuStation: 'RJTT', resolutionSource: 'wu', isoCountry: 'JP', tz: 'Asia/Tokyo'                 },
+  wellington:      { lat: -41.3272, lon: 174.8053,  noaaCoverage: false, unit: 'celsius', wuStation: 'NZWN', resolutionSource: 'wu', isoCountry: 'NZ', tz: 'Pacific/Auckland'           },
+  wuhan:           { lat: 30.7838, lon: 114.2081,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZHHH', resolutionSource: 'wu', isoCountry: 'CN', tz: 'Asia/Shanghai'              },
+  zhengzhou:       { lat: 34.5197, lon: 113.8409,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZHCC', resolutionSource: 'wu', isoCountry: 'CN', tz: 'Asia/Shanghai'              },
 };
 
 // ── Aliases: map Polymarket event title city names to canonical keys ───────

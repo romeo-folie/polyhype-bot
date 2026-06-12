@@ -268,6 +268,7 @@ export function parseBracketLabel(
  */
 export async function fetchWeatherEvents(
   limit: number,
+  offset = 0,
 ): Promise<WeatherGammaEvent[]> {
   // Circuit breaker: skip if rate-limited recently
   if (Date.now() < rateLimitedUntilMs) {
@@ -278,6 +279,7 @@ export async function fetchWeatherEvents(
   const params = new URLSearchParams({
     tag_slug: 'highest-temperature',
     limit: limit.toString(),
+    offset: offset.toString(),
     active: 'true',
     closed: 'false',
     order: 'liquidity',

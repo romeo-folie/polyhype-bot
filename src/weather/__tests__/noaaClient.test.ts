@@ -106,6 +106,43 @@ describe('CITY_COORDINATES', () => {
       expect(entry!.lon, `${city} lon`).toBeCloseTo(lon, 3);
     }
   });
+
+  it('tracks all cities discovered live on Polymarket 2026-06-12, stations per their descriptions', () => {
+    // Station-audit discovery: these 20 cities had active markets with no
+    // CITY_COORDINATES entry. ICAOs come from the market descriptions' WU
+    // URLs; every one verified to return WU observations before adding.
+    const discovered: { city: string; station: string; iso: string; tz: string }[] = [
+      { city: 'beijing',      station: 'ZBAA', iso: 'CN', tz: 'Asia/Shanghai' },
+      { city: 'busan',        station: 'RKPK', iso: 'KR', tz: 'Asia/Seoul' },
+      { city: 'cape town',    station: 'FACT', iso: 'ZA', tz: 'Africa/Johannesburg' },
+      { city: 'chengdu',      station: 'ZUUU', iso: 'CN', tz: 'Asia/Shanghai' },
+      { city: 'chongqing',    station: 'ZUCK', iso: 'CN', tz: 'Asia/Shanghai' },
+      { city: 'guangzhou',    station: 'ZGGG', iso: 'CN', tz: 'Asia/Shanghai' },
+      { city: 'helsinki',     station: 'EFHK', iso: 'FI', tz: 'Europe/Helsinki' },
+      { city: 'jinan',        station: 'ZSJN', iso: 'CN', tz: 'Asia/Shanghai' },
+      { city: 'karachi',      station: 'OPKC', iso: 'PK', tz: 'Asia/Karachi' },
+      { city: 'kuala lumpur', station: 'WMKK', iso: 'MY', tz: 'Asia/Kuala_Lumpur' },
+      { city: 'manila',       station: 'RPLL', iso: 'PH', tz: 'Asia/Manila' },
+      { city: 'munich',       station: 'EDDM', iso: 'DE', tz: 'Europe/Berlin' },
+      { city: 'qingdao',      station: 'ZSQD', iso: 'CN', tz: 'Asia/Shanghai' },
+      { city: 'seoul',        station: 'RKSI', iso: 'KR', tz: 'Asia/Seoul' },
+      { city: 'shanghai',     station: 'ZSPD', iso: 'CN', tz: 'Asia/Shanghai' },
+      { city: 'singapore',    station: 'WSSS', iso: 'SG', tz: 'Asia/Singapore' },
+      { city: 'tokyo',        station: 'RJTT', iso: 'JP', tz: 'Asia/Tokyo' },
+      { city: 'wellington',   station: 'NZWN', iso: 'NZ', tz: 'Pacific/Auckland' },
+      { city: 'wuhan',        station: 'ZHHH', iso: 'CN', tz: 'Asia/Shanghai' },
+      { city: 'zhengzhou',    station: 'ZHCC', iso: 'CN', tz: 'Asia/Shanghai' },
+    ];
+    for (const { city, station, iso, tz } of discovered) {
+      const entry = CITY_COORDINATES[city];
+      expect(entry, `${city} missing from CITY_COORDINATES`).toBeDefined();
+      expect(entry!.wuStation, `${city} station`).toBe(station);
+      expect(entry!.resolutionSource, `${city} source`).toBe('wu');
+      expect(entry!.unit, `${city} unit`).toBe('celsius');
+      expect(entry!.isoCountry, `${city} iso`).toBe(iso);
+      expect(entry!.tz, `${city} tz`).toBe(tz);
+    }
+  });
 });
 
 describe('canonicalCityKey / lookupCity', () => {
