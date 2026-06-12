@@ -202,6 +202,26 @@ export function auditWeatherStations(events: WeatherGammaEvent[]): StationAuditR
 }
 
 /**
+ * Fetch ALL active weather events, paging past Gamma's 100-per-request cap.
+ * The audit must see every city — the scanner's single liquidity-ordered page
+ * silently dropped the lowest-liquidity events once the event count passed
+ * 100 (117 live as of 2026-06-12). Stops on a short page; maxPages bounds the
+ * total in case the tag ever explodes.
+ */
+export async function fetchAllWeatherEvents(
+  pageSize = AUDIT_EVENT_LIMIT,
+  maxPages = 5,
+): Promise<WeatherGammaEvent[]> {
+  const all: WeatherGammaEvent[] = [];
+  for (let page = 0; page < maxPages; page++) {
+    const batch = await fetchWeatherEvents(pageSize, page * pageSize);
+    all.push(...batch);
+    if (batch.length < pageSize) break;
+  }
+  return all;
+}
+
+/**
  * Fetch active weather events, audit them, and alert on findings.
  * Mismatch alerts re-fire every 3 days while the mismatch persists; untracked
  * cities are mentioned at most once every 30 days. Never throws.
@@ -211,7 +231,7 @@ export async function runStationAudit(
   events?: WeatherGammaEvent[],
 ): Promise<StationAuditResult | null> {
   try {
-    const evts = events ?? (await fetchWeatherEvents(AUDIT_EVENT_LIMIT));
+    const evts = events ?? (await fetchAllWeatherEvents());
     if (evts.length === 0) {
       logger.info('[weather-station-audit] no events to audit');
       return null;
