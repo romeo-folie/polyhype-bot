@@ -1633,6 +1633,99 @@ async function tryExecuteViaClob(signal: TradeSignal): Promise<{
   return { ok: false, tradeResult, error: clobResult.error ?? 'CLOB trade failed' };
 }
 
+/**
+ * Post-only maker entry for hl-momentum signals: rest at the touch (best bid for
+ * LONG, best ask for SHORT), poll for a fill, cancel when the wait expires. No
+ * taker fallback by design. An ALO rejection ("would have immediately matched")
+ * is an expected race with a moving book and maps to not_filled, not error.
+ */
+async function placeHlMakerEntry(
+  hl: ReturnType<typeof getHyperliquid>,
+  signal: TradeSignal,
+  leverage: number,
+  cfg: ReturnType<typeof loadConfig>,
+): Promise<
+  | { outcome: 'filled'; txHash: string; price: number; fillFraction: number }
+  | { outcome: 'not_filled'; detail: string }
+  | { outcome: 'error'; error: string }
+> {
+  const isBuy = signal.direction === 'LONG';
+  const book = await hl.getBestBidAsk(signal.marketId).catch(() => null);
+  if (!book) return { outcome: 'error', error: 'l2 book unavailable for maker entry' };
+  const limitPrice = isBuy ? book.bestBid : book.bestAsk;
+
+  const placed = await hl.placeRestingOrder({
+    symbol: signal.marketId,
+    isBuy,
+    sizeUsd: signal.stakeUsd,
+    leverage,
+    limitPrice,
+  });
+  if (!placed.success || placed.oid === undefined) {
+    const err = placed.error ?? 'resting order failed';
+    if (/immediately match/i.test(err)) {
+      return { outcome: 'not_filled', detail: 'alo_would_cross' };
+    }
+    return { outcome: 'error', error: err };
+  }
+  const postedPrice = placed.price ?? limitPrice;
+  if (loadConfig().HL_DRY_RUN) {
+    return { outcome: 'filled', txHash: 'dry-run', price: postedPrice, fillFraction: 1 };
+  }
+  logger.info('[executor] maker entry resting', {
+    symbol: signal.marketId,
+    direction: signal.direction,
+    oid: placed.oid,
+    postedPrice,
+    waitSec: cfg.HL_MAKER_WAIT_SEC,
+  });
+
+  const deadline = Date.now() + cfg.HL_MAKER_WAIT_SEC * 1000;
+  while (Date.now() < deadline) {
+    await sleep(cfg.HL_MAKER_POLL_INTERVAL_SEC * 1000);
+    const status = await hl.getOrderStatus(placed.oid).catch(() => null);
+    if (!status) continue; // transient info-API blip — keep waiting
+    if (status.status === 'filled') {
+      return { outcome: 'filled', txHash: String(placed.oid), price: postedPrice, fillFraction: 1 };
+    }
+    if (status.status === 'canceled' || status.status === 'rejected') {
+      // An ALO order can partially fill before an external cancel (e.g. an HL
+      // margin cancel) — the filled part is a live position and must be recorded,
+      // not dropped, or the ledger never sees it until the monitor backfill.
+      if (status.filledSz > 0 && status.origSz > 0) {
+        return {
+          outcome: 'filled',
+          txHash: String(placed.oid),
+          price: postedPrice,
+          fillFraction: status.filledSz / status.origSz,
+        };
+      }
+      return { outcome: 'not_filled', detail: `order_${status.status}` };
+    }
+  }
+
+  // Timeout: cancel, then re-check — the order may have filled in the race window.
+  const cancel = await hl.cancelOrder(signal.marketId, placed.oid);
+  const finalStatus = await hl.getOrderStatus(placed.oid).catch(() => null);
+  if (finalStatus?.status === 'filled') {
+    return { outcome: 'filled', txHash: String(placed.oid), price: postedPrice, fillFraction: 1 };
+  }
+  if (finalStatus && finalStatus.origSz > 0 && finalStatus.filledSz > 0) {
+    return {
+      outcome: 'filled',
+      txHash: String(placed.oid),
+      price: postedPrice,
+      fillFraction: finalStatus.filledSz / finalStatus.origSz,
+    };
+  }
+  if (!cancel.success && !finalStatus) {
+    // Cancel failed AND status unknown — the order may still be live. Surface as an
+    // error so it is visible; the reconciler picks up any orphaned fill from venue state.
+    return { outcome: 'error', error: `cancel failed with unknown order state: ${cancel.error ?? ''}` };
+  }
+  return { outcome: 'not_filled', detail: 'wait_timeout' };
+}
+
 async function executeHyperliquidSignal(
   signal: TradeSignal,
   redis: Redis,
@@ -1754,19 +1847,55 @@ async function executeHyperliquidSignal(
     }
 
     // 2. Submit Order
+    const leverage = signal.leverage || cfg.FUTURES_DEFAULT_LEVERAGE;
     logger.info('[executor] submitting Hyperliquid trade', {
       symbol: signal.marketId,
       direction: signal.direction,
       stakeUsd: signal.stakeUsd,
-      leverage: signal.leverage || cfg.FUTURES_DEFAULT_LEVERAGE,
+      leverage,
     });
 
-    const tradeResult = await hl.placeMarketOrder({
-      symbol: signal.marketId,
-      isBuy: signal.direction === 'LONG',
-      sizeUsd: signal.stakeUsd,
-      leverage: signal.leverage || cfg.FUTURES_DEFAULT_LEVERAGE,
-    });
+    // Post-only maker entry for hl-momentum (2026-06-12 review): post at the touch,
+    // wait, cancel on timeout — never fall back to taker. With gross PF ≈ 0.94 a
+    // missed entry costs ~nothing in expectation; a taker fill costs 3× the fee.
+    let tradeResult: { success: boolean; txHash?: string; price?: number; error?: string };
+    let entryOrderType: 'maker' | 'taker' = 'taker';
+    if (cfg.HL_MAKER_ENTRIES_ENABLED && signal.sourcedFrom === 'hl-momentum') {
+      const makerRes = await placeHlMakerEntry(hl, signal, leverage, cfg);
+      if (makerRes.outcome === 'not_filled') {
+        logger.info('[executor] maker entry not filled — skipping', {
+          symbol: signal.marketId,
+          direction: signal.direction,
+          detail: makerRes.detail,
+        });
+        return { signal, skipped: true, skipReason: `maker_not_filled:${makerRes.detail}` };
+      }
+      if (makerRes.outcome === 'error') {
+        tradeResult = { success: false, error: makerRes.error };
+      } else {
+        entryOrderType = 'maker';
+        if (makerRes.fillFraction < 1) {
+          // Partial fill at timeout: the position exists for the filled part only.
+          // Scale the recorded stake so ledger exposure matches reality.
+          const scaledStake = signal.stakeUsd * makerRes.fillFraction;
+          logger.info('[executor] maker entry partially filled — scaling recorded stake', {
+            symbol: signal.marketId,
+            fillFraction: makerRes.fillFraction.toFixed(3),
+            originalStake: signal.stakeUsd.toFixed(2),
+            scaledStake: scaledStake.toFixed(2),
+          });
+          signal.stakeUsd = scaledStake;
+        }
+        tradeResult = { success: true, txHash: makerRes.txHash, price: makerRes.price };
+      }
+    } else {
+      tradeResult = await hl.placeMarketOrder({
+        symbol: signal.marketId,
+        isBuy: signal.direction === 'LONG',
+        sizeUsd: signal.stakeUsd,
+        leverage,
+      });
+    }
 
     if (tradeResult.success) {
       // Atomically add this trade's stake to the pending counter.
@@ -1864,13 +1993,73 @@ async function executeHyperliquidSignal(
         }
       }
 
+      // 2026-06-12 review: freeze ATR-scaled SL/TP for NON-meme hl-momentum entries
+      // too, reusing the meme fields (they hold "frozen ATR SL/TP" regardless of
+      // class — the monitor distinguishes by symbol + its own enable knobs). Reuses
+      // the entryAtrPct snapshot above (same 15m timeframe + lookback as the meme
+      // path) instead of re-computing.
+      if (
+        signal.sourcedFrom === 'hl-momentum' &&
+        !isMemeSymbol(signal.marketId, cfg.HL_MOMENTUM_MEME_SYMBOLS) &&
+        entryAtrPct !== undefined &&
+        entryAtrPct > 0
+      ) {
+        const rawSl = entryAtrPct * cfg.HL_MOMENTUM_SL_ATR_MULT;
+        memeAtrSlPct = Math.min(
+          Math.max(rawSl, cfg.HL_MOMENTUM_SL_FLOOR_PCT),
+          cfg.HL_MOMENTUM_SL_CEIL_PCT,
+        );
+        // Trailing-arm threshold; unclamped — the trailing stop manages the upside.
+        memeAtrTpPct = entryAtrPct * cfg.HL_MOMENTUM_TP_ATR_MULT;
+        logger.info('[executor] hl-momentum ATR SL/TP captured', {
+          symbol: signal.marketId,
+          atr15mPct: entryAtrPct.toFixed(3),
+          atrSlPct: memeAtrSlPct.toFixed(3),
+          atrTpPct: memeAtrTpPct.toFixed(3),
+          slFloorActive: rawSl < cfg.HL_MOMENTUM_SL_FLOOR_PCT,
+          slCeilActive: rawSl > cfg.HL_MOMENTUM_SL_CEIL_PCT,
+        });
+      }
+
+      // Pure-time-exit shadow experiment (2026-06-12 review): record the entry so
+      // the futures monitor can log what a no-SL/no-trail exit after
+      // HL_TIME_EXIT_SHADOW_HOURS would have returned. Logging only.
+      if (
+        cfg.HL_TIME_EXIT_SHADOW_ENABLED &&
+        signal.sourcedFrom === 'hl-momentum' &&
+        tradeResult.price !== undefined
+      ) {
+        try {
+          const entryTs = Date.now();
+          const shadowKey = `hl:time_exit_shadow:${signal.marketId}:${entryTs.toString()}`;
+          await redis.set(
+            shadowKey,
+            JSON.stringify({
+              symbol: signal.marketId,
+              direction: signal.direction,
+              entryPrice: tradeResult.price,
+              entryTs,
+              entryOrderType,
+            }),
+            'EX',
+            Math.ceil((cfg.HL_TIME_EXIT_SHADOW_HOURS + 4) * 3600),
+          );
+          await redis.sadd('hl:time_exit_shadow:index', shadowKey);
+        } catch (e: unknown) {
+          logger.debug('[executor] time-exit shadow record failed (non-fatal)', {
+            symbol: signal.marketId,
+            error: String(e),
+          });
+        }
+      }
+
       const result: ExecutionResult = {
         signal,
         skipped: false,
         executionVenue: 'hyperliquid',
         modeConfigured: cfg.EXECUTION_MODE,
         entryExecutionPath: 'hyperliquid_fill',
-        entryOrderType: 'taker',
+        entryOrderType,
         entryPrice: tradeResult.price ?? null,
       };
       if (entryAtr !== undefined) result.entryAtr = entryAtr;

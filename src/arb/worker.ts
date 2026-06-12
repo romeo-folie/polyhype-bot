@@ -661,7 +661,10 @@ export class ArbitrageWorker {
       if (!signal) return;
 
       // Atomic NX claim prevents double-fire across concurrent worker instances.
-      // Short TTL (30s) covers the executor round-trip; extended on success/skip:
+      // TTL must cover the executor round-trip: 30s for taker entries, but maker
+      // entries (HL_MAKER_ENTRIES_ENABLED) can rest for HL_MAKER_WAIT_SEC before
+      // resolving — an expired claim mid-wait would let a second instance
+      // double-enter the same thesis. Extended on success/skip:
       //   - success → full HL_MOMENTUM_COOLDOWN_SEC (prevents same-thesis re-entry)
       //   - stake_below_hl_minimum → HL_MOMENTUM_MIN_SKIP_COOLDOWN_SEC (short; HL
       //     minimum notional is price-dependent and may clear on the next tick)
@@ -669,7 +672,8 @@ export class ArbitrageWorker {
       //   - other skips / errors → deleted (allow immediate retry)
       const direction = signal.direction as 'LONG' | 'SHORT';
       const cooldownKey = momentumCooldownKey(signal.marketId, direction);
-      const claimed = await redis.set(cooldownKey, 'in-flight', 'EX', 30, 'NX');
+      const claimTtlSec = cfg.HL_MAKER_ENTRIES_ENABLED ? cfg.HL_MAKER_WAIT_SEC + 30 : 30;
+      const claimed = await redis.set(cooldownKey, 'in-flight', 'EX', claimTtlSec, 'NX');
       if (!claimed) {
         logger.debug('[hl-momentum] cooldown claim lost (race)', {
           symbol: signal.marketId,

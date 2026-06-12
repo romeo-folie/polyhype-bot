@@ -1468,6 +1468,36 @@ export const envSchema = z.object({
   // (RSI-exhaustion bounce buys) are exempt. Measured Apr–Jun 2026: momentum LONGs
   // −4.7 cumulative price-% vs SHORTs +24.2; post-gate contrarian LONGs 66% WR.
   HL_MOMENTUM_BLOCK_MOMENTUM_LONGS: boolFromEnv.optional().default(false),
+  // Post-only (ALO) maker entries for hl-momentum: post at the touch, wait for a
+  // fill, cancel on timeout — never fall back to taker. Cuts the entry fee from
+  // 0.045% to 0.015% (fees were 2/3 of the all-time HL loss; all 827 fills taker).
+  HL_MAKER_ENTRIES_ENABLED: boolFromEnv.optional().default(false),
+  // How long a maker entry rests before being cancelled (signal is stale past this).
+  HL_MAKER_WAIT_SEC: z.coerce.number().int().min(5).optional().default(90),
+  // Poll cadence for the resting order's fill status.
+  HL_MAKER_POLL_INTERVAL_SEC: z.coerce.number().int().min(1).optional().default(5),
+  // ATR-scaled SL/TP for NON-meme hl-momentum positions (2026-06-12 review): frozen
+  // at entry like the meme path and stored in the same ledger fields
+  // (memeAtrSlPct/memeAtrTpPct = "frozen ATR SL/TP", meme or not). Replaces the fixed
+  // ROE stop, which at 10x leverage sat 0.85% price from entry — inside ordinary 15m
+  // noise (107 of 256 hl-momentum exits were stop-losses).
+  HL_MOMENTUM_ATR_SLTP_ENABLED: boolFromEnv.optional().default(false),
+  // SL = clamp(15m ATR% × mult, floor, ceil), price terms.
+  HL_MOMENTUM_SL_ATR_MULT: z.coerce.number().min(0.5).optional().default(2.75),
+  HL_MOMENTUM_SL_FLOOR_PCT: z.coerce.number().min(0).optional().default(1.5),
+  HL_MOMENTUM_SL_CEIL_PCT: z.coerce.number().min(0).optional().default(6),
+  // Trailing-arm threshold = 15m ATR% × mult, price terms (unclamped — trailing
+  // manages the upside beyond it).
+  HL_MOMENTUM_TP_ATR_MULT: z.coerce.number().min(0.5).optional().default(3.0),
+  // Trailing giveback = entry 15m ATR% × mult, price terms. Replaces the fixed ROE
+  // giveback (0.5% price at 10x) that scratched winners on the first wiggle.
+  HL_MOMENTUM_TRAIL_ATR_MULT: z.coerce.number().min(0.1).optional().default(1.0),
+  // Pure-time-exit shadow experiment: for every hl-momentum entry, record what a
+  // no-SL/no-trail exit after HL_TIME_EXIT_SHADOW_HOURS would have returned
+  // (shadow_observations kind=hl_time_exit_shadow). Separates "signal is dead" from
+  // "geometry kills a real edge". Logging only — no trading behaviour.
+  HL_TIME_EXIT_SHADOW_ENABLED: boolFromEnv.optional().default(true),
+  HL_TIME_EXIT_SHADOW_HOURS: z.coerce.number().min(1).optional().default(8),
   // Contrarian mode: validate the momentum setup as usual, then execute the opposite side.
   HL_MOMENTUM_CONTRARIAN_ENABLED: boolFromEnv.optional().default(false),
   // When ADX is at or above this ceiling, momentum is genuinely trending and contrarian is
@@ -2470,6 +2500,11 @@ export function loadConfig(forceReload = false): AppConfig {
   // HL momentum meme ATR: floor must be ≤ ceiling so the clamp interval is non-empty.
   if (cfg.HL_MOMENTUM_MEME_SL_FLOOR_PCT > cfg.HL_MOMENTUM_MEME_SL_CEIL_PCT) {
     throw new Error('HL_MOMENTUM_MEME_SL_FLOOR_PCT must be ≤ HL_MOMENTUM_MEME_SL_CEIL_PCT');
+  }
+
+  // HL momentum non-meme ATR: same non-empty clamp interval requirement.
+  if (cfg.HL_MOMENTUM_SL_FLOOR_PCT > cfg.HL_MOMENTUM_SL_CEIL_PCT) {
+    throw new Error('HL_MOMENTUM_SL_FLOOR_PCT must be ≤ HL_MOMENTUM_SL_CEIL_PCT');
   }
 
   // HL funding scanner: exit APR must be below entry APR (or the exit condition fires immediately).

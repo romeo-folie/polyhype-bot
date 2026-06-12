@@ -32,7 +32,89 @@ import { isMemeSymbol, momentumCooldownKey } from '../futures/hlMomentumScanner.
 import { getAllCachedAssetCtxs, fundingRateToApr } from '../futures/hlAssetCtxCache.js';
 
 const POLL_INTERVAL_MS = 5000; // 5 seconds — safe for rate limits, fast enough for intraday
+const TIME_EXIT_SHADOW_INDEX_KEY = 'hl:time_exit_shadow:index';
 const MONITOR_LOCK_KEY = 'futures-monitor:lock';
+
+/**
+ * Pure-time-exit shadow experiment (2026-06-12 review). The executor records every
+ * hl-momentum entry under hl:time_exit_shadow:*; once an entry is older than
+ * HL_TIME_EXIT_SHADOW_HOURS this sweep logs what a no-SL/no-trail exit at the
+ * current mid would have returned, independent of how (or whether) the real
+ * position has since closed. Separates "signal is dead" from "geometry kills a
+ * real edge". Cheap when the index is empty.
+ */
+async function sweepTimeExitShadows(
+  redis: ReturnType<typeof getRedis>,
+  hl: ReturnType<typeof getHyperliquid>,
+  cfg: ReturnType<typeof loadConfig>,
+): Promise<void> {
+  if (!cfg.HL_TIME_EXIT_SHADOW_ENABLED) return;
+  const keys = await redis.smembers(TIME_EXIT_SHADOW_INDEX_KEY);
+  if (keys.length === 0) return;
+  const horizonMs = cfg.HL_TIME_EXIT_SHADOW_HOURS * 3_600_000;
+  let mids: Record<string, number> | null = null;
+  for (const key of keys) {
+    const raw = await redis.get(key);
+    if (!raw) {
+      // Value TTL-expired (or was deleted) — drop the dangling index member.
+      await redis.srem(TIME_EXIT_SHADOW_INDEX_KEY, key);
+      continue;
+    }
+    let entry: {
+      symbol: string;
+      direction: 'LONG' | 'SHORT';
+      entryPrice: number;
+      entryTs: number;
+      entryOrderType?: string;
+    };
+    try {
+      entry = JSON.parse(raw) as typeof entry;
+    } catch {
+      await redis.del(key);
+      await redis.srem(TIME_EXIT_SHADOW_INDEX_KEY, key);
+      continue;
+    }
+    if (Date.now() - entry.entryTs < horizonMs) continue;
+    if (!mids) {
+      mids = await hl.fetchAllMids().catch(() => null);
+      if (!mids) return; // info-API blip — retry the whole sweep next tick
+    }
+    const mid = mids[entry.symbol];
+    if (!mid || !Number.isFinite(mid) || mid <= 0 || !(entry.entryPrice > 0)) {
+      logger.warn('[futures-monitor] time-exit shadow dropped — no usable mid', {
+        symbol: entry.symbol, mid: mid ?? null,
+      });
+      await redis.del(key);
+      await redis.srem(TIME_EXIT_SHADOW_INDEX_KEY, key);
+      continue;
+    }
+    const sign = entry.direction === 'LONG' ? 1 : -1;
+    const returnPct = sign * ((mid - entry.entryPrice) / entry.entryPrice) * 100;
+    void enqueueWrite('shadow_observations', {
+      kind: 'hl_time_exit_shadow',
+      source: 'hl-momentum',
+      symbol: entry.symbol,
+      direction: entry.direction,
+      wouldBlock: false,
+      metricValue: returnPct,
+      payload: {
+        entryPrice: entry.entryPrice,
+        exitPrice: mid,
+        returnPct,
+        holdHours: cfg.HL_TIME_EXIT_SHADOW_HOURS,
+        entryTs: entry.entryTs,
+        entryOrderType: entry.entryOrderType ?? null,
+      },
+    });
+    logger.info('[futures-monitor] time-exit shadow recorded', {
+      symbol: entry.symbol,
+      direction: entry.direction,
+      returnPct: returnPct.toFixed(2),
+    });
+    await redis.del(key);
+    await redis.srem(TIME_EXIT_SHADOW_INDEX_KEY, key);
+  }
+}
 // TTL must be comfortably larger than the WORST-CASE single cycle (HL API stalls,
 // LLM calls in recordPositionOutcome, network blips). 120s gives ~24 poll intervals of
 // margin before our own TTL would lapse — far beyond any realistic single-cycle
@@ -209,6 +291,14 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         });
         lastHeartbeat = now;
       }
+
+      // Time-exit shadow sweep — must run before the empty-positions early-continue
+      // below: shadow entries usually outlive their real positions.
+      await sweepTimeExitShadows(redis, hl, cfg).catch((err: unknown) => {
+        logger.warn('[futures-monitor] time-exit shadow sweep failed (non-fatal)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
 
       // Sync HL positions with ledger to get true 'openedAt' timestamps
       let ledgerPositions = await getOpenPositions(redis);
@@ -400,6 +490,31 @@ export async function runFuturesMonitorWorker(): Promise<void> {
           tpPct = cfg.HL_MOMENTUM_CONTRARIAN_TAKE_PROFIT_PCT;
         }
 
+        // HL-momentum ATR geometry (2026-06-12 review): frozen entry-time ATR-scaled
+        // SL/TP for NON-meme hl-momentum positions, stored in the same ledger fields
+        // the meme path uses ("frozen ATR SL/TP" regardless of class). Deliberately
+        // placed after the contrarian override — when this knob is on, stops scale to
+        // the symbol's measured noise for contrarian and momentum entries alike,
+        // replacing fixed ROE distances (0.85% price at 10x) that sat inside 15m noise.
+        // Meme symbols keep their own knob (HL_MOMENTUM_MEME_ATR_SLTP_ENABLED).
+        let usingHlAtr = false;
+        if (
+          cfg.HL_MOMENTUM_ATR_SLTP_ENABLED &&
+          !usingMemeAtr &&
+          ledgerPosForAtr?.sourcedFrom === 'hl-momentum' &&
+          !isMemeSymbol(symbol, cfg.HL_MOMENTUM_MEME_SYMBOLS) &&
+          ledgerPosForAtr?.memeAtrSlPct !== undefined &&
+          Number.isFinite(ledgerPosForAtr.memeAtrSlPct) &&
+          ledgerPosForAtr.memeAtrSlPct > 0 &&
+          ledgerPosForAtr?.memeAtrTpPct !== undefined &&
+          Number.isFinite(ledgerPosForAtr.memeAtrTpPct) &&
+          ledgerPosForAtr.memeAtrTpPct > 0
+        ) {
+          slPct = -ledgerPosForAtr.memeAtrSlPct;
+          tpPct = ledgerPosForAtr.memeAtrTpPct;
+          usingHlAtr = true;
+        }
+
         // Detect active delta-hedge early — needed by trailing-stop, fixed-TP,
         // max-hold, and TA-fade blocks. A position is an active hedge while the
         // hedge:link key exists (redeemer deletes it on PM resolution).
@@ -451,11 +566,21 @@ export async function runFuturesMonitorWorker(): Promise<void> {
         if (usingMemeAtr) {
           trailStopPct = cfg.FUTURES_TRAILING_STOP_PCT / effectiveLeverage;
         }
+        // HL-ATR positions trail by a multiple of their entry ATR (notional %) —
+        // the giveback scales to the symbol's noise the same way the stop does.
+        // Fall back to the ROE→notional conversion when the ATR snapshot is missing.
+        if (usingHlAtr) {
+          const entryAtrPctSnap = ledgerPosForAtr?.entryAtrPct;
+          trailStopPct =
+            entryAtrPctSnap !== undefined && Number.isFinite(entryAtrPctSnap) && entryAtrPctSnap > 0
+              ? entryAtrPctSnap * cfg.HL_MOMENTUM_TRAIL_ATR_MULT
+              : cfg.FUTURES_TRAILING_STOP_PCT / effectiveLeverage;
+        }
 
         // ATR-derived thresholds are in notional % (price-action based); fixed-pct
         // thresholds are in ROE % (margin-based, matches HL UI). Use roePct for the
         // fixed-pct gate so config values are intuitive: SL=15 means -15% ROE.
-        const gatePct = (usingAtrMode || usingMemeAtr) ? priceChangePct : roePct;
+        const gatePct = (usingAtrMode || usingMemeAtr || usingHlAtr) ? priceChangePct : roePct;
 
         // Shadow comparison: when ATR mode is OFF but we have an entryAtrPct snapshot,
         // compute what the ATR-derived thresholds WOULD be and log when their verdict
@@ -596,7 +721,9 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             ? ` atr_sl=${slPct.toFixed(2)}`
             : usingMemeAtr
               ? ` meme_atr_sl=${slPct.toFixed(2)}`
-              : '';
+              : usingHlAtr
+                ? ` hl_atr_sl=${slPct.toFixed(2)}`
+                : '';
           reason = `Stop-Loss triggered (${gatePct.toFixed(2)}%${slTag})`;
         } else if (!cfg.FUTURES_TRAILING_STOP_ENABLED && !isActiveHedge && gatePct >= tpPct) {
           // Fixed TP only when trailing is disabled. When trailing is on, it
@@ -610,7 +737,9 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             ? ` atr_tp=${tpPct.toFixed(2)}`
             : usingMemeAtr
               ? ` meme_atr_tp=${tpPct.toFixed(2)}`
-              : '';
+              : usingHlAtr
+                ? ` hl_atr_tp=${tpPct.toFixed(2)}`
+                : '';
           reason = `Take-Profit triggered (${gatePct.toFixed(2)}%${tpTag})`;
         }
 
@@ -653,7 +782,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             const floorPct = Math.max(tpPct, hwm - trailStopPct);
             if (gatePct <= floorPct) {
               shouldExit = true;
-              reason = `Trailing stop (peak +${hwm.toFixed(2)}%, floor +${floorPct.toFixed(2)}%, now +${gatePct.toFixed(2)}%${usingAtrMode ? ` atr_trail=${trailStopPct.toFixed(2)}` : ''})`;
+              reason = `Trailing stop (peak +${hwm.toFixed(2)}%, floor +${floorPct.toFixed(2)}%, now +${gatePct.toFixed(2)}%${usingAtrMode ? ` atr_trail=${trailStopPct.toFixed(2)}` : usingHlAtr ? ` hl_atr_trail=${trailStopPct.toFixed(2)}` : ''})`;
             } else {
               logger.debug('[futures-monitor] trailing active', {
                 symbol, hwm: hwm.toFixed(2), floor: floorPct.toFixed(2), current: gatePct.toFixed(2),
