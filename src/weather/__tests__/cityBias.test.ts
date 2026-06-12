@@ -31,6 +31,7 @@ function makeRedis() {
       return 'OK';
     }),
     get: vi.fn(async (key: string) => store.get(key)?.value ?? null),
+    del: vi.fn(async (key: string) => (store.delete(key) ? 1 : 0)),
     _store: store,
   };
 }
@@ -50,9 +51,9 @@ describe('computeCityBias', () => {
     await computeCityBias(sql as never, redis as never, 14);
 
     expect(redis.set).toHaveBeenCalledTimes(2);
-    const chicagoCall = redis.set.mock.calls.find((c) => (c[0] as string).includes('chicago'));
+    const chicagoCall = redis.set.mock.calls.find((c) => (c[0]).includes('chicago'));
     expect(chicagoCall).toBeDefined();
-    const payload = JSON.parse(chicagoCall![1] as string) as {
+    const payload = JSON.parse(chicagoCall![1]) as {
       meanBias: number; empiricalStddev: number; rawMae: number; correctedMae: number; meanShiftHelpful: boolean; sampleSize: number;
     };
     expect(payload.meanBias).toBeCloseTo(1.5, 2);
@@ -94,6 +95,74 @@ describe('computeCityBias', () => {
     expect(redis.set).not.toHaveBeenCalled();
   });
 
+  it('clamps the sample window to WEATHER_BIAS_SAMPLES_SINCE when later than the EWMA lookback', async () => {
+    // After a station/coords change, pre-cutover samples were measured against
+    // a different thermometer — they must not enter the EWMA.
+    const sql = makeSql([]);
+    const redis = makeRedis();
+    const since = new Date(Date.now() - 2 * 86_400_000).toISOString(); // 2 days ago, inside 28d lookback
+
+    await computeCityBias(sql as never, redis as never, 14, since);
+
+    const dateParam = (sql.mock.calls[0] as unknown[]).find((v) => v instanceof Date)!;
+    expect(dateParam).toBeDefined();
+    expect(dateParam.getTime()).toBe(new Date(since).getTime());
+  });
+
+  it('falls back to the EWMA lookback when the cutover is older or absent', async () => {
+    const sql = makeSql([]);
+    const redis = makeRedis();
+    const ancient = new Date(Date.now() - 365 * 86_400_000).toISOString();
+
+    await computeCityBias(sql as never, redis as never, 14, ancient);
+
+    const dateParam = (sql.mock.calls[0] as unknown[]).find((v) => v instanceof Date)!;
+    const expectedFloor = Date.now() - 28 * 86_400_000;
+    expect(Math.abs(dateParam.getTime() - expectedFloor)).toBeLessThan(60_000);
+  });
+
+  it('ignores an unparseable cutover instead of breaking the bias refresh', async () => {
+    const sql = makeSql([]);
+    const redis = makeRedis();
+
+    await expect(
+      computeCityBias(sql as never, redis as never, 14, 'not-a-date'),
+    ).resolves.not.toThrow();
+
+    const dateParam = (sql.mock.calls[0] as unknown[]).find((v) => v instanceof Date)!;
+    const expectedFloor = Date.now() - 28 * 86_400_000;
+    expect(Math.abs(dateParam.getTime() - expectedFloor)).toBeLessThan(60_000);
+  });
+
+  it('deletes cached bias for cities that no longer qualify', async () => {
+    // After a WEATHER_BIAS_SAMPLES_SINCE cutover, a city below minSamples must
+    // not keep serving its stale (wrong-thermometer) correction for the TTL —
+    // the refresh is authoritative and removes it.
+    const sql = makeSql([
+      { city: 'chicago', sample_size: 20, mean_bias: 1.5, empirical_stddev: 2.3, raw_mae: 2.0, corrected_mae: 1.4 },
+    ]);
+    const redis = makeRedis();
+
+    await computeCityBias(sql as never, redis as never, 14);
+
+    const deleted = redis.del.mock.calls.map((c) => c[0]);
+    expect(deleted).toContain('weather:city_bias:miami');
+    expect(deleted).not.toContain('weather:city_bias:chicago');
+    expect(redis.set).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes all cached biases when no city qualifies', async () => {
+    const sql = makeSql([]);
+    const redis = makeRedis();
+
+    await computeCityBias(sql as never, redis as never, 14);
+
+    const deleted = redis.del.mock.calls.map((c) => c[0]);
+    expect(deleted).toContain('weather:city_bias:miami');
+    expect(deleted).toContain('weather:city_bias:istanbul');
+    expect(redis.set).not.toHaveBeenCalled();
+  });
+
   it('uses canonical city key in Redis key', async () => {
     const sql = makeSql([
       { city: 'new york', sample_size: 20, mean_bias: 1.0, empirical_stddev: 1.5, raw_mae: 1.5, corrected_mae: 1.0 },
@@ -104,7 +173,7 @@ describe('computeCityBias', () => {
 
     const calls = redis.set.mock.calls;
     expect(calls.length).toBe(1);
-    const key = calls[0]![0] as string;
+    const key = calls[0]![0];
     // Key must use the namespace prefix
     expect(key).toMatch(/^weather:city_bias:/);
     // Key must reference the city identity — canonicalized form of "new york"
@@ -193,9 +262,9 @@ describe('computeCityBaseRates', () => {
     await computeCityBaseRates(sql as never, redis as never, 14);
 
     expect(redis.set).toHaveBeenCalledTimes(2);
-    const chicagoCall = redis.set.mock.calls.find((c) => (c[0] as string).includes('chicago'));
+    const chicagoCall = redis.set.mock.calls.find((c) => (c[0]).includes('chicago'));
     expect(chicagoCall).toBeDefined();
-    const payload = JSON.parse(chicagoCall![1] as string) as { highs: number[]; unit: string; sampleSize: number };
+    const payload = JSON.parse(chicagoCall![1]) as { highs: number[]; unit: string; sampleSize: number };
     expect(payload.highs).toEqual([72, 68, 75, 70, 71]);
     expect(payload.unit).toBe('fahrenheit');
     expect(payload.sampleSize).toBe(5);
@@ -239,7 +308,7 @@ describe('computeCityBaseRates', () => {
 
     await computeCityBaseRates(sql as never, redis as never, 14);
 
-    const key = redis.set.mock.calls[0]![0] as string;
+    const key = redis.set.mock.calls[0]![0];
     expect(key).toMatch(/^weather:actuals:/);
   });
 

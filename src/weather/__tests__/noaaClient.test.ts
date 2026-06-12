@@ -34,24 +34,76 @@ describe('CITY_COORDINATES', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('all four cities formerly routed via METAR are now WU-sourced with isoCountry', () => {
-    // Regression guard: the 2026-04-24 backfill audit found LTFM/LLBG/UUWW/RCTP
-    // failing because aviationweather.gov caps obs at ~400 (~9d window), so
-    // anything older dropped out of the canonical-resolution backfill. Keeping
-    // these on WU is load-bearing — reverting would silently re-strand
-    // istanbul/tel aviv/moscow/taipei resolution_high rows in the DB.
-    const formerlyMetar: Array<{ city: string; station: string; iso: string }> = [
+  it('tel aviv and moscow stay WU-sourced with isoCountry (2026-04-24 METAR cap)', () => {
+    // aviationweather.gov caps obs at ~400 (~9d window) so long-history
+    // backfills must go through WU. Their markets resolve via NOAA's
+    // timeseries page for the SAME ICAO — WU renders the same METAR feed,
+    // so WU stays correct as long as the station matches.
+    const wuCities: { city: string; station: string; iso: string }[] = [
       { city: 'tel aviv', station: 'LLBG', iso: 'IL' },
-      { city: 'istanbul', station: 'LTBA', iso: 'TR' }, // LTFM → LTBA; new IST airport not in WU
       { city: 'moscow',   station: 'UUWW', iso: 'RU' },
-      { city: 'taipei',   station: 'RCTP', iso: 'TW' },
     ];
-    for (const { city, station, iso } of formerlyMetar) {
+    for (const { city, station, iso } of wuCities) {
       const entry = CITY_COORDINATES[city];
       expect(entry, `${city} missing from CITY_COORDINATES`).toBeDefined();
       expect(entry!.resolutionSource).toBe('wu');
       expect(entry!.wuStation).toBe(station);
       expect(entry!.isoCountry).toBe(iso);
+    }
+  });
+
+  it('istanbul resolves via METAR at LTFM — the station Polymarket settles on', () => {
+    // 2026-06-12 station audit: the market description links
+    // weather.gov/wrh/timeseries?site=LTFM. Our previous LTBA proxy diverged
+    // up to 4°C (Jun 9: LTFM 23 / LTBA 27 — market resolved 23°C YES, our
+    // NO-on-23 was written off). WU has no LTFM history (HTTP 400), so
+    // resolution uses METAR; the reconciler only needs the day-after fetch,
+    // well inside METAR's ~8-day window.
+    const istanbul = CITY_COORDINATES.istanbul;
+    expect(istanbul.wuStation).toBe('LTFM');
+    expect(istanbul.resolutionSource).toBe('metar');
+    // Forecast point must be the LTFM airfield (Black Sea coast), not LTBA.
+    expect(istanbul.lat).toBeCloseTo(41.2753, 3);
+    expect(istanbul.lon).toBeCloseTo(28.7519, 3);
+  });
+
+  it('paris resolves at Le Bourget (LFPB), not Charles de Gaulle', () => {
+    // Market description: "Paris-Le Bourget Airport Station" on Wunderground.
+    // LFPG cost the May-31 and Jun-11 2026 markets (resolved 1°C above CDG).
+    const paris = CITY_COORDINATES.paris;
+    expect(paris.wuStation).toBe('LFPB');
+    expect(paris.resolutionSource).toBe('wu');
+    expect(paris.lat).toBeCloseTo(48.9694, 3);
+    expect(paris.lon).toBeCloseTo(2.4414, 3);
+  });
+
+  it('taipei resolves at Songshan (RCSS), not Taoyuan', () => {
+    // Market description names Songshan (downtown). Taoyuan is 30km west on
+    // the coast and systematically cooler — the residual that kept taipei in
+    // WEATHER_EXCLUDED_CITIES.
+    const taipei = CITY_COORDINATES.taipei;
+    expect(taipei.wuStation).toBe('RCSS');
+    expect(taipei.resolutionSource).toBe('wu');
+    expect(taipei.lat).toBeCloseTo(25.0694, 3);
+    expect(taipei.lon).toBeCloseTo(121.5521, 3);
+  });
+
+  it('forecast coordinates sit at the resolution station, not the city center', () => {
+    // Spot-check the largest geography gaps the 2026-06-12 audit fixed: if
+    // someone reverts a station's coords to downtown, the forecast re-acquires
+    // a terrain offset cityBias cannot reliably absorb.
+    const stationCoords: { city: string; lat: number; lon: number }[] = [
+      { city: 'los angeles', lat: 33.9416, lon: -118.4085 }, // KLAX coast, not downtown
+      { city: 'chicago',     lat: 41.9786, lon: -87.9048 },  // KORD
+      { city: 'ankara',      lat: 40.1281, lon: 32.9951 },   // LTAC, 25km out, +200m
+      { city: 'jeddah',      lat: 21.6796, lon: 39.1565 },   // OEJN
+      { city: 'buenos aires', lat: -34.8222, lon: -58.5358 }, // SAEZ Ezeiza
+    ];
+    for (const { city, lat, lon } of stationCoords) {
+      const entry = CITY_COORDINATES[city];
+      expect(entry, `${city} missing`).toBeDefined();
+      expect(entry!.lat, `${city} lat`).toBeCloseTo(lat, 3);
+      expect(entry!.lon, `${city} lon`).toBeCloseTo(lon, 3);
     }
   });
 });

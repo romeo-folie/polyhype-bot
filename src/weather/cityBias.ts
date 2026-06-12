@@ -12,7 +12,7 @@
 import type { Sql } from 'postgres';
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
-import { canonicalCityKey } from './noaaClient.js';
+import { CITY_COORDINATES, canonicalCityKey } from './noaaClient.js';
 
 const REDIS_TTL_S = 7 * 24 * 60 * 60; // 7 days
 const ACTUALS_REDIS_TTL_S = 36 * 60 * 60; // 36 hours — reconciler runs every 24h; extra 12h guards against jitter/delay
@@ -77,8 +77,28 @@ export async function computeCityBias(
   sql: Sql,
   redis: Redis,
   minSamples = 14,
+  /**
+   * ISO timestamp; samples observed before this are excluded. Set when the
+   * forecast coordinates / resolution stations change so pre-cutover pairs
+   * (measured against a different thermometer) don't poison the EWMA.
+   */
+  samplesSince = '',
 ): Promise<void> {
   try {
+    // Effective floor of the sample window: the EWMA lookback, raised to the
+    // cutover date when one is configured. Folding it into one bound keeps the
+    // query shape (and its index use) identical with or without a cutover.
+    const lookbackFloor = new Date(Date.now() - EWMA_LOOKBACK_DAYS * 86_400_000);
+    const sinceDate = samplesSince ? new Date(samplesSince) : null;
+    if (sinceDate && Number.isNaN(sinceDate.getTime())) {
+      logger.warn('[weather-bias] unparseable WEATHER_BIAS_SAMPLES_SINCE — ignoring cutover', {
+        samplesSince,
+      });
+    }
+    const windowStart =
+      sinceDate && !Number.isNaN(sinceDate.getTime()) && sinceDate > lookbackFloor
+        ? sinceDate
+        : lookbackFloor;
     const rows = await sql<{
       city: string;
       sample_size: number;
@@ -105,7 +125,7 @@ export async function computeCityBias(
           ON gt.city       = so.payload->>'city'
          AND gt.target_date = (so.payload->>'targetDate')::date
         WHERE so.kind = 'weather_event'
-          AND so.observed_at >= NOW() - ${EWMA_LOOKBACK_DAYS} * INTERVAL '1 day'
+          AND so.observed_at >= ${windowStart}
           AND (so.payload->>'forecastHigh') IS NOT NULL
       ),
       stats AS (
@@ -136,6 +156,20 @@ export async function computeCityBias(
         ON w.city = s.city
       GROUP BY s.city, s.sample_size, s.mean_bias, s.empirical_stddev
     `;
+
+    // The refresh is authoritative: cities that no longer qualify (below
+    // minSamples in the window) get their cached bias DELETED, not merely
+    // left to expire. Otherwise a WEATHER_BIAS_SAMPLES_SINCE cutover — set
+    // precisely because old samples were measured against a different
+    // station/coords — would leave every city applying its stale,
+    // wrong-thermometer correction for up to the 7-day TTL. Falling back to
+    // "no correction" is the designed below-minSamples behaviour.
+    const qualified = new Set(rows.map((r) => canonicalCityKey(r.city) ?? r.city.toLowerCase().trim()));
+    for (const city of Object.keys(CITY_COORDINATES)) {
+      if (!qualified.has(city)) {
+        await redis.del(redisKey(city));
+      }
+    }
 
     if (rows.length === 0) {
       logger.info('[weather-bias] no cities with enough paired samples yet', { minSamples });

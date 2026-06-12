@@ -102,8 +102,9 @@ describe('reconcileTargets', () => {
       [{ city: 'london', targetDate: '2026-04-10', hasArchive: false }],
       fetcher,
     );
-    // London is international → celsius, pulled from CITY_COORDINATES not the caller.
-    expect(fetcher).toHaveBeenCalledWith(51.5074, -0.1278, '2026-04-10', 'celsius');
+    // London is international → celsius, pulled from CITY_COORDINATES not the
+    // caller. Coords are the EGLC (London City Airport) resolution station.
+    expect(fetcher).toHaveBeenCalledWith(51.5053, 0.0553, '2026-04-10', 'celsius');
     const [, payload] = enqueueWriteMock.mock.calls[0]!;
     expect((payload as { unit: string }).unit).toBe('celsius');
   });
