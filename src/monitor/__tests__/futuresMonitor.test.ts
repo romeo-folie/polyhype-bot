@@ -930,6 +930,27 @@ describe('futuresMonitor', () => {
       expect(mockClosePosition).toHaveBeenCalledWith('SOL');
     });
 
+    it('deliberately overrides the contrarian fixed thresholds when enabled', async () => {
+      // Contrarian SL is 15 ROE (= -1.5% price at 10x). Price -2.0% → ROE -20%:
+      // the contrarian fixed stop would fire, but the frozen ATR stop (2.5%) holds.
+      loadConfigMock.mockReturnValue({
+        ...hlAtrCfg,
+        HL_MOMENTUM_CONTRARIAN_STOP_LOSS_PCT: 15,
+        HL_MOMENTUM_CONTRARIAN_TAKE_PROFIT_PCT: 10,
+      });
+      mockGetOpenPositions.mockResolvedValue([makeLeveredHlPos('SOL', -2)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        {
+          ...makeLedgerHlPos({ symbol: 'SOL', memeAtrSlPct: 2.5, memeAtrTpPct: 4.5 }),
+          isContrarian: true,
+        },
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+
     it('meme symbols are governed by the meme knob, not this one', async () => {
       // hl-ATR on, meme knob off → kPEPE keeps fixed ROE thresholds.
       loadConfigMock.mockReturnValue(hlAtrCfg);

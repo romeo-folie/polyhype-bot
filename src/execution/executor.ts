@@ -1689,6 +1689,17 @@ async function placeHlMakerEntry(
       return { outcome: 'filled', txHash: String(placed.oid), price: postedPrice, fillFraction: 1 };
     }
     if (status.status === 'canceled' || status.status === 'rejected') {
+      // An ALO order can partially fill before an external cancel (e.g. an HL
+      // margin cancel) — the filled part is a live position and must be recorded,
+      // not dropped, or the ledger never sees it until the monitor backfill.
+      if (status.filledSz > 0 && status.origSz > 0) {
+        return {
+          outcome: 'filled',
+          txHash: String(placed.oid),
+          price: postedPrice,
+          fillFraction: status.filledSz / status.origSz,
+        };
+      }
       return { outcome: 'not_filled', detail: `order_${status.status}` };
     }
   }

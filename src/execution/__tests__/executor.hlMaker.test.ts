@@ -180,6 +180,26 @@ describe('hl-momentum post-only maker entries', () => {
     expect(result.signal.stakeUsd).toBeCloseTo(12, 5); // 30 × 0.4
   });
 
+  it('records the filled part when an external cancel lands after a partial fill', async () => {
+    // HL margin-cancels the resting order mid-wait with 30% already filled.
+    mockGetOrderStatus.mockResolvedValue({ status: 'canceled', origSz: 10, remainingSz: 7, filledSz: 3 });
+
+    const result = await executeSignal(makeHlSignal({ stakeUsd: 30 }) as never, mockRedis);
+
+    expect(result.skipped).toBe(false);
+    expect(result.entryOrderType).toBe('maker');
+    expect(result.signal.stakeUsd).toBeCloseTo(9, 5); // 30 × 0.3
+  });
+
+  it('skips cleanly when an external cancel lands with zero fill', async () => {
+    mockGetOrderStatus.mockResolvedValue({ status: 'canceled', origSz: 10, remainingSz: 10, filledSz: 0 });
+
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toContain('order_canceled');
+  });
+
   it('falls back to taker market orders when the maker knob is off', async () => {
     mockLoadConfig.mockReturnValue({ ...mockConfig, HL_MAKER_ENTRIES_ENABLED: false });
     mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '0xtx', price: 50_000 });
@@ -224,6 +244,16 @@ describe('hl-momentum frozen ATR SL/TP capture (non-meme)', () => {
     const result = await executeSignal(makeHlSignal() as never, mockRedis);
 
     expect(result.memeAtrSlPct).toBeCloseTo(1.5, 5); // floor
+  });
+
+  it('leaves the ATR fields unset when no ATR snapshot is available', async () => {
+    mockGetOrderStatus.mockResolvedValue({ status: 'filled', origSz: 1, remainingSz: 0, filledSz: 1 });
+    mockComputeATR.mockResolvedValue(null); // monitor must fall back to fixed thresholds
+
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(result.memeAtrSlPct).toBeUndefined();
+    expect(result.memeAtrTpPct).toBeUndefined();
   });
 
   it('records the time-exit shadow entry when the experiment knob is on', async () => {
