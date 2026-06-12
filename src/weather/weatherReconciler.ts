@@ -37,6 +37,7 @@ import { fetchWuHistoricalHigh } from './wuClient.js';
 import { fetchMetarDailyHigh } from './metarClient.js';
 import { fetchHkoDailyHigh } from './hkoClient.js';
 import { computeCityBias, computeCityBaseRates } from './cityBias.js';
+import { runStationAudit } from './stationAudit.js';
 import { runWeatherOracleScan } from './weatherOracleScanner.js';
 
 /** One unresolved (city, target_date) tuple to reconcile. */
@@ -272,8 +273,9 @@ export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
       lagDays: cfg.WEATHER_RECONCILER_LAG_DAYS,
       lookbackDays: cfg.WEATHER_RECONCILER_LOOKBACK_DAYS,
     });
-    await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES);
+    await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES, cfg.WEATHER_BIAS_SAMPLES_SINCE);
     await computeCityBaseRates(sql, redis, cfg.WEATHER_BASE_RATE_LOOKBACK_DAYS);
+    if (cfg.WEATHER_STATION_AUDIT_ENABLED) await runStationAudit(redis);
     await runWeatherOracleScan(redis).catch((err: unknown) => {
       logger.warn('[weather-reconciler] oracle scan failed — continuing', {
         error: err instanceof Error ? err.message : String(err),
@@ -295,8 +297,9 @@ export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
 
   // After ground-truth upserts, refresh per-city bias cache and actuals cache in
   // Redis. Run unconditionally so caches are warm before flags are flipped.
-  await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES);
+  await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES, cfg.WEATHER_BIAS_SAMPLES_SINCE);
   await computeCityBaseRates(sql, redis, cfg.WEATHER_BASE_RATE_LOOKBACK_DAYS);
+  if (cfg.WEATHER_STATION_AUDIT_ENABLED) await runStationAudit(redis);
   await runWeatherOracleScan(redis).catch((err: unknown) => {
     logger.warn('[weather-reconciler] oracle scan failed — continuing', {
       error: err instanceof Error ? err.message : String(err),

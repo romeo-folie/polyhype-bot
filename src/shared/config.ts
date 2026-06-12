@@ -1907,6 +1907,19 @@ export const envSchema = z.object({
   // list (and restart pga-cron) once its residual error stabilises. Example:
   // WEATHER_EXCLUDED_CITIES=los angeles,miami,amsterdam,london
   WEATHER_EXCLUDED_CITIES: z.string().optional().default(''),
+  // Only feed (forecast, observed) pairs observed at/after this ISO timestamp
+  // into the per-city bias EWMA. Set this to the deploy time whenever forecast
+  // coordinates or resolution stations change: older samples were measured
+  // against a different thermometer and would poison the mean shift (e.g. LA's
+  // downtown-coords bias applied to KLAX-coords forecasts would inject an
+  // ~11°F error). Cities fall back to uncorrected/weak-band behaviour until
+  // enough post-cutover samples accumulate. Empty = no cutoff.
+  WEATHER_BIAS_SAMPLES_SINCE: z.string().optional().default(''),
+  // Daily audit (runs with the weather reconciler): parse every active weather
+  // market's description for its resolution station and alert on any city
+  // whose station/source disagrees with CITY_COORDINATES. Catches silent
+  // station switches like LTBA→LTFM before they cost positions.
+  WEATHER_STATION_AUDIT_ENABLED: boolFromEnv.optional().default(true),
   // --- WEATHER EXECUTION ---
   // Killswitch separate from the scanner flag. Scanner may be ENABLED=true (shadow +
   // `would execute trade` logs) without actually placing orders. Flipping

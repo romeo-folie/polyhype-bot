@@ -90,12 +90,12 @@ const RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 
 // ── Gamma event types (weather-specific fields) ──────────────────────────
 
-interface WeatherGammaMarket extends GammaMarket {
+export interface WeatherGammaMarket extends GammaMarket {
   groupItemTitle?: string;
   groupItemThreshold?: string;
 }
 
-interface WeatherGammaEvent {
+export interface WeatherGammaEvent {
   id: string;
   title: string;
   slug: string;

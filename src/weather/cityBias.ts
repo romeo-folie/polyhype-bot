@@ -77,8 +77,28 @@ export async function computeCityBias(
   sql: Sql,
   redis: Redis,
   minSamples = 14,
+  /**
+   * ISO timestamp; samples observed before this are excluded. Set when the
+   * forecast coordinates / resolution stations change so pre-cutover pairs
+   * (measured against a different thermometer) don't poison the EWMA.
+   */
+  samplesSince = '',
 ): Promise<void> {
   try {
+    // Effective floor of the sample window: the EWMA lookback, raised to the
+    // cutover date when one is configured. Folding it into one bound keeps the
+    // query shape (and its index use) identical with or without a cutover.
+    const lookbackFloor = new Date(Date.now() - EWMA_LOOKBACK_DAYS * 86_400_000);
+    const sinceDate = samplesSince ? new Date(samplesSince) : null;
+    if (sinceDate && Number.isNaN(sinceDate.getTime())) {
+      logger.warn('[weather-bias] unparseable WEATHER_BIAS_SAMPLES_SINCE — ignoring cutover', {
+        samplesSince,
+      });
+    }
+    const windowStart =
+      sinceDate && !Number.isNaN(sinceDate.getTime()) && sinceDate > lookbackFloor
+        ? sinceDate
+        : lookbackFloor;
     const rows = await sql<{
       city: string;
       sample_size: number;
@@ -105,7 +125,7 @@ export async function computeCityBias(
           ON gt.city       = so.payload->>'city'
          AND gt.target_date = (so.payload->>'targetDate')::date
         WHERE so.kind = 'weather_event'
-          AND so.observed_at >= NOW() - ${EWMA_LOOKBACK_DAYS} * INTERVAL '1 day'
+          AND so.observed_at >= ${windowStart}
           AND (so.payload->>'forecastHigh') IS NOT NULL
       ),
       stats AS (

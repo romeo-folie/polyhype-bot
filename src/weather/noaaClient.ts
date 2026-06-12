@@ -50,29 +50,45 @@ export interface CityCoordinates {
 
 // Cities active on Polymarket weather markets.
 // US cities use Fahrenheit, international cities use Celsius.
+//
+// lat/lon = the RESOLUTION STATION's coordinates, not the city center.
+// Polymarket settles each market against a specific station (named in the
+// market description); forecasting the city center instead bakes a
+// geography offset (coastal marine layer, airport elevation, 25km+ of
+// distance) into every probability. cityBias then has to absorb terrain
+// as if it were model error — and non-constant gaps (KLAX marine layer:
+// −11°F some June days) cannot be absorbed by a mean shift at all.
+// Aligned 2026-06-12 after the LTBA/LTFM mismatch audit; verify against
+// `stationAudit.ts` (runs with the weather reconciler) before editing.
 export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   // US cities (Fahrenheit) — all resolve via Weather Underground
-  'new york':      { lat: 40.7128, lon: -74.006,    noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KLGA', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/New_York'     },
-  chicago:         { lat: 41.8781, lon: -87.6298,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KORD', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Chicago'       },
-  miami:           { lat: 25.7617, lon: -80.1918,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KMIA', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/New_York'     },
+  'new york':      { lat: 40.7769, lon: -73.8740,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KLGA', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/New_York'     },
+  chicago:         { lat: 41.9786, lon: -87.9048,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KORD', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Chicago'       },
+  miami:           { lat: 25.7959, lon: -80.2870,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KMIA', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/New_York'     },
   // Hobby (KHOU), not IAH — Polymarket resolves against KHOU
   houston:         { lat: 29.6454, lon: -95.2789,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KHOU', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Chicago'       },
-  dallas:          { lat: 32.7767, lon: -96.797,    noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KDAL', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Chicago'       },
+  dallas:          { lat: 32.8471, lon: -96.8518,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KDAL', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Chicago'       },
   // Buckley SFB (KBKF) in Aurora, not Denver airport — Polymarket resolves against KBKF
   denver:          { lat: 39.7016, lon: -104.7516,  noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KBKF', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Denver'        },
-  seattle:         { lat: 47.6062, lon: -122.3321,  noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KSEA', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Los_Angeles'   },
-  atlanta:         { lat: 33.749,  lon: -84.388,    noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KATL', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/New_York'     },
-  austin:          { lat: 30.2672, lon: -97.7431,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KAUS', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Chicago'       },
-  'los angeles':   { lat: 34.0522, lon: -118.2437,  noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KLAX', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Los_Angeles'   },
-  'san francisco': { lat: 37.7749, lon: -122.4194,  noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KSFO', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Los_Angeles'   },
+  seattle:         { lat: 47.4502, lon: -122.3088,  noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KSEA', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Los_Angeles'   },
+  atlanta:         { lat: 33.6407, lon: -84.4277,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KATL', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/New_York'     },
+  austin:          { lat: 30.1945, lon: -97.6699,   noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KAUS', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Chicago'       },
+  // KLAX is on the coast — downtown LA (the old coords) runs up to 11°F hotter
+  // when the marine layer holds at the airport. Forecast the airport.
+  'los angeles':   { lat: 33.9416, lon: -118.4085,  noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KLAX', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Los_Angeles'   },
+  'san francisco': { lat: 37.6213, lon: -122.3790,  noaaCoverage: true,  unit: 'fahrenheit', wuStation: 'KSFO', resolutionSource: 'wu', isoCountry: 'US', tz: 'America/Los_Angeles'   },
   // International cities (Celsius) — WU unless noted
-  london:          { lat: 51.5074, lon: -0.1278,    noaaCoverage: false, unit: 'celsius', wuStation: 'EGLC', resolutionSource: 'wu', isoCountry: 'GB', tz: 'Europe/London'             },
-  paris:           { lat: 48.8566, lon: 2.3522,     noaaCoverage: false, unit: 'celsius', wuStation: 'LFPG', resolutionSource: 'wu', isoCountry: 'FR', tz: 'Europe/Paris'              },
-  toronto:         { lat: 43.6532, lon: -79.3832,   noaaCoverage: false, unit: 'celsius', wuStation: 'CYYZ', resolutionSource: 'wu', isoCountry: 'CA', tz: 'America/Toronto'           },
-  'sao paulo':     { lat: -23.5505, lon: -46.6333,  noaaCoverage: false, unit: 'celsius', wuStation: 'SBGR', resolutionSource: 'wu', isoCountry: 'BR', tz: 'America/Sao_Paulo'        },
-  'buenos aires':  { lat: -34.6037, lon: -58.3816,  noaaCoverage: false, unit: 'celsius', wuStation: 'SAEZ', resolutionSource: 'wu', isoCountry: 'AR', tz: 'America/Argentina/Buenos_Aires' },
-  ankara:          { lat: 39.9334, lon: 32.8597,    noaaCoverage: false, unit: 'celsius', wuStation: 'LTAC', resolutionSource: 'wu', isoCountry: 'TR', tz: 'Europe/Istanbul'           },
-  lucknow:         { lat: 26.8467, lon: 80.9462,    noaaCoverage: false, unit: 'celsius', wuStation: 'VILK', resolutionSource: 'wu', isoCountry: 'IN', tz: 'Asia/Kolkata'              },
+  london:          { lat: 51.5053, lon: 0.0553,     noaaCoverage: false, unit: 'celsius', wuStation: 'EGLC', resolutionSource: 'wu', isoCountry: 'GB', tz: 'Europe/London'             },
+  // Paris-Le Bourget (LFPB), NOT Charles de Gaulle (LFPG) — Polymarket's
+  // description names Le Bourget. LFPG cost us the May-31 and Jun-11 2026
+  // markets (resolved 1°C above our CDG reading both times).
+  paris:           { lat: 48.9694, lon: 2.4414,     noaaCoverage: false, unit: 'celsius', wuStation: 'LFPB', resolutionSource: 'wu', isoCountry: 'FR', tz: 'Europe/Paris'              },
+  toronto:         { lat: 43.6777, lon: -79.6248,   noaaCoverage: false, unit: 'celsius', wuStation: 'CYYZ', resolutionSource: 'wu', isoCountry: 'CA', tz: 'America/Toronto'           },
+  'sao paulo':     { lat: -23.4356, lon: -46.4731,  noaaCoverage: false, unit: 'celsius', wuStation: 'SBGR', resolutionSource: 'wu', isoCountry: 'BR', tz: 'America/Sao_Paulo'        },
+  'buenos aires':  { lat: -34.8222, lon: -58.5358,  noaaCoverage: false, unit: 'celsius', wuStation: 'SAEZ', resolutionSource: 'wu', isoCountry: 'AR', tz: 'America/Argentina/Buenos_Aires' },
+  // Esenboğa (LTAC) sits 25km north of Ankara and ~200m higher — forecast it directly.
+  ankara:          { lat: 40.1281, lon: 32.9951,    noaaCoverage: false, unit: 'celsius', wuStation: 'LTAC', resolutionSource: 'wu', isoCountry: 'TR', tz: 'Europe/Istanbul'           },
+  lucknow:         { lat: 26.7606, lon: 80.8893,    noaaCoverage: false, unit: 'celsius', wuStation: 'VILK', resolutionSource: 'wu', isoCountry: 'IN', tz: 'Asia/Kolkata'              },
   // Ben Gurion (LLBG). Originally routed through METAR; switched to WU
   // 2026-04-24 after the aviationweather.gov endpoint was found to cap at
   // ~400 obs regardless of the `hours` param (effective ~9-day window, not
@@ -82,28 +98,36 @@ export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   'hong kong':     { lat: 22.3020, lon: 114.1740,   noaaCoverage: false, unit: 'celsius', wuStation: 'HKO',  resolutionSource: 'hko',                    tz: 'Asia/Hong_Kong'          },
   // Malpensa (LIMC), not Linate (LIML) — Polymarket resolves against LIMC
   milan:           { lat: 45.6306, lon: 8.7281,     noaaCoverage: false, unit: 'celsius', wuStation: 'LIMC', resolutionSource: 'wu', isoCountry: 'IT', tz: 'Europe/Rome'               },
-  madrid:          { lat: 40.4168, lon: -3.7038,    noaaCoverage: false, unit: 'celsius', wuStation: 'LEMD', resolutionSource: 'wu', isoCountry: 'ES', tz: 'Europe/Madrid'             },
-  warsaw:          { lat: 52.2297, lon: 21.0122,    noaaCoverage: false, unit: 'celsius', wuStation: 'EPWA', resolutionSource: 'wu', isoCountry: 'PL', tz: 'Europe/Warsaw'             },
-  shenzhen:        { lat: 22.5431, lon: 114.0579,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZGSZ', resolutionSource: 'wu', isoCountry: 'CN', tz: 'Asia/Shanghai'             },
-  // Istanbul Atatürk (LTBA). The new IST airport (LTFM, opened 2019) is not
-  // in WU's historical database (returns HTTP 400), so we proxy via LTBA —
-  // the long-standing Istanbul weather station present in most historical
-  // datasets. cityBias absorbs any station-to-station offset vs Polymarket's
-  // actual resolution source once enough samples accumulate (configured via
-  // WEATHER_BIAS_MIN_SAMPLES). Switched from METAR/LTFM → WU/LTBA 2026-04-24
-  // (same reason as tel aviv above).
-  istanbul:        { lat: 40.9769, lon: 28.8146,    noaaCoverage: false, unit: 'celsius', wuStation: 'LTBA', resolutionSource: 'wu', isoCountry: 'TR', tz: 'Europe/Istanbul'           },
-  'mexico city':   { lat: 19.4326, lon: -99.1332,   noaaCoverage: false, unit: 'celsius', wuStation: 'MMMX', resolutionSource: 'wu', isoCountry: 'MX', tz: 'America/Mexico_City'      },
-  amsterdam:       { lat: 52.3676, lon: 4.9041,     noaaCoverage: false, unit: 'celsius', wuStation: 'EHAM', resolutionSource: 'wu', isoCountry: 'NL', tz: 'Europe/Amsterdam'          },
+  madrid:          { lat: 40.4719, lon: -3.5626,    noaaCoverage: false, unit: 'celsius', wuStation: 'LEMD', resolutionSource: 'wu', isoCountry: 'ES', tz: 'Europe/Madrid'             },
+  warsaw:          { lat: 52.1657, lon: 20.9671,    noaaCoverage: false, unit: 'celsius', wuStation: 'EPWA', resolutionSource: 'wu', isoCountry: 'PL', tz: 'Europe/Warsaw'             },
+  shenzhen:        { lat: 22.6393, lon: 113.8108,   noaaCoverage: false, unit: 'celsius', wuStation: 'ZGSZ', resolutionSource: 'wu', isoCountry: 'CN', tz: 'Asia/Shanghai'             },
+  // Istanbul Airport (LTFM) — the station Polymarket actually resolves
+  // against (market description links weather.gov/wrh/timeseries?site=LTFM).
+  // We previously proxied via Atatürk (LTBA) because WU returns HTTP 400 for
+  // LTFM, assuming cityBias would absorb the offset. It cannot: LTFM is on
+  // the Black Sea coast and diverges from LTBA by up to 4°C depending on
+  // wind (Jun 9 2026: LTFM 23 / LTBA 27 — market resolved 23, we held the
+  // LTBA view and lost). WU still has no LTFM history, so resolution goes
+  // through METAR (aviationweather.gov), which carries the same observations
+  // NOAA's timeseries page renders. METAR's ~8-day window is fine for the
+  // reconciler's day-after fetch.
+  istanbul:        { lat: 41.2753, lon: 28.7519,    noaaCoverage: false, unit: 'celsius', wuStation: 'LTFM', resolutionSource: 'metar', isoCountry: 'TR', tz: 'Europe/Istanbul'        },
+  'mexico city':   { lat: 19.4363, lon: -99.0721,   noaaCoverage: false, unit: 'celsius', wuStation: 'MMMX', resolutionSource: 'wu', isoCountry: 'MX', tz: 'America/Mexico_City'      },
+  amsterdam:       { lat: 52.3105, lon: 4.7683,     noaaCoverage: false, unit: 'celsius', wuStation: 'EHAM', resolutionSource: 'wu', isoCountry: 'NL', tz: 'Europe/Amsterdam'          },
   // Marcos A. Gelabert/Albrook (MPMG), not Tocumen (MPTO)
   'panama city':   { lat: 8.9833,  lon: -79.5556,   noaaCoverage: false, unit: 'celsius', wuStation: 'MPMG', resolutionSource: 'wu', isoCountry: 'PA', tz: 'America/Panama'           },
   // Halim Perdanakusuma (WIHH), not Soekarno-Hatta (WIII)
   jakarta:         { lat: -6.2661, lon: 106.8908,   noaaCoverage: false, unit: 'celsius', wuStation: 'WIHH', resolutionSource: 'wu', isoCountry: 'ID', tz: 'Asia/Jakarta'              },
-  jeddah:          { lat: 21.4858, lon: 39.1925,    noaaCoverage: false, unit: 'celsius', wuStation: 'OEJN', resolutionSource: 'wu', isoCountry: 'SA', tz: 'Asia/Riyadh'              },
+  jeddah:          { lat: 21.6796, lon: 39.1565,    noaaCoverage: false, unit: 'celsius', wuStation: 'OEJN', resolutionSource: 'wu', isoCountry: 'SA', tz: 'Asia/Riyadh'              },
   // Vnukovo (UUWW). Switched METAR → WU 2026-04-24 (same reason as tel aviv).
+  // Market resolves via NOAA's timeseries page for the same ICAO — both
+  // render the UUWW METAR feed, so WU remains equivalent here.
   moscow:          { lat: 55.5915, lon: 37.2615,    noaaCoverage: false, unit: 'celsius', wuStation: 'UUWW', resolutionSource: 'wu', isoCountry: 'RU', tz: 'Europe/Moscow'             },
-  // Taiwan Taoyuan (RCTP). Switched METAR → WU 2026-04-24.
-  taipei:          { lat: 25.0777, lon: 121.2328,   noaaCoverage: false, unit: 'celsius', wuStation: 'RCTP', resolutionSource: 'wu', isoCountry: 'TW', tz: 'Asia/Taipei'               },
+  // Songshan (RCSS), downtown Taipei — the station Polymarket's description
+  // names. We previously used Taoyuan (RCTP), 30km west on the coast and
+  // systematically cooler; that gap is likely why taipei's bias never
+  // stabilised and the city ended up in WEATHER_EXCLUDED_CITIES.
+  taipei:          { lat: 25.0694, lon: 121.5521,   noaaCoverage: false, unit: 'celsius', wuStation: 'RCSS', resolutionSource: 'wu', isoCountry: 'TW', tz: 'Asia/Taipei'               },
 };
 
 // ── Aliases: map Polymarket event title city names to canonical keys ───────
