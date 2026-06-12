@@ -175,3 +175,137 @@ describe('HyperliquidClient', () => {
     expect(mockedAxiosPost).toHaveBeenCalledTimes(6); // exactly 2 attempts, no third
   });
 });
+
+describe('HyperliquidClient — maker order methods (post-only entries)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetHyperliquid();
+  });
+
+  it('getBestBidAsk parses the l2 book touch', async () => {
+    const client = getHyperliquid();
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: {
+        levels: [
+          [{ px: '49990', sz: '1', n: 2 }, { px: '49980', sz: '3', n: 1 }],
+          [{ px: '50010', sz: '2', n: 1 }, { px: '50020', sz: '1', n: 1 }],
+        ],
+      },
+    });
+    const book = await client.getBestBidAsk('BTC');
+    expect(book).toEqual({ bestBid: 49990, bestAsk: 50010 });
+  });
+
+  it('getBestBidAsk returns null on an empty side', async () => {
+    const client = getHyperliquid();
+    mockedAxiosPost.mockResolvedValueOnce({ data: { levels: [[], [{ px: '50010' }]] } });
+    expect(await client.getBestBidAsk('BTC')).toBeNull();
+  });
+
+  it('placeRestingOrder posts an ALO order at the limit price', async () => {
+    const client = getHyperliquid();
+    // 1. getMeta
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { universe: [{ name: 'BTC', szDecimals: 3, index: 0 }] },
+    });
+    // 2. updateLeverage
+    mockedAxiosPost.mockResolvedValueOnce({ data: { status: 'ok' } });
+    // 3. exchange → resting
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: {
+        status: 'ok',
+        response: { type: 'order', data: { statuses: [{ resting: { oid: 777 } }] } },
+      },
+    });
+
+    const result = await client.placeRestingOrder({
+      symbol: 'BTC',
+      isBuy: true,
+      sizeUsd: 100,
+      leverage: 5,
+      limitPrice: 49990,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.oid).toBe(777);
+    expect(result.price).toBe(49990);
+
+    // The exchange call (3rd) must carry tif Alo at the requested price.
+    const exchangeCall = mockedAxiosPost.mock.calls[2]!;
+    const payload = exchangeCall[1] as {
+      action: { orders: { p: string; t: { limit: { tif: string } } }[] };
+    };
+    expect(payload.action.orders[0]!.t.limit.tif).toBe('Alo');
+    expect(payload.action.orders[0]!.p).toBe('49990');
+  });
+
+  it('placeRestingOrder surfaces the ALO would-cross rejection as an error string', async () => {
+    const client = getHyperliquid();
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { universe: [{ name: 'BTC', szDecimals: 3, index: 0 }] },
+    });
+    mockedAxiosPost.mockResolvedValueOnce({ data: { status: 'ok' } });
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: {
+        status: 'ok',
+        response: {
+          type: 'order',
+          data: { statuses: [{ error: 'Post only order would have immediately matched, bbo was 49990' }] },
+        },
+      },
+    });
+
+    const result = await client.placeRestingOrder({
+      symbol: 'BTC', isBuy: true, sizeUsd: 100, leverage: 5, limitPrice: 50_011,
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/immediately matched/);
+  });
+
+  it('getOrderStatus maps fill state and computes filledSz', async () => {
+    const client = getHyperliquid();
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { status: 'order', order: { status: 'open', order: { origSz: '10', sz: '4' } } },
+    });
+    const status = await client.getOrderStatus(777);
+    expect(status.status).toBe('open');
+    expect(status.origSz).toBe(10);
+    expect(status.remainingSz).toBe(4);
+    expect(status.filledSz).toBe(6);
+  });
+
+  it('getOrderStatus returns unknown for unknownOid', async () => {
+    const client = getHyperliquid();
+    mockedAxiosPost.mockResolvedValueOnce({ data: { status: 'unknownOid' } });
+    const status = await client.getOrderStatus(123);
+    expect(status.status).toBe('unknown');
+  });
+
+  it('cancelOrder succeeds on a clean cancel', async () => {
+    const client = getHyperliquid();
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { universe: [{ name: 'BTC', szDecimals: 3, index: 0 }] },
+    });
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { status: 'ok', response: { type: 'cancel', data: { statuses: ['success'] } } },
+    });
+    const result = await client.cancelOrder('BTC', 777);
+    expect(result.success).toBe(true);
+  });
+
+  it('cancelOrder reports failure when the order is already gone', async () => {
+    const client = getHyperliquid();
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { universe: [{ name: 'BTC', szDecimals: 3, index: 0 }] },
+    });
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: {
+        status: 'ok',
+        response: { type: 'cancel', data: { statuses: [{ error: 'Order was never placed, already canceled, or filled.' }] } },
+      },
+    });
+    const result = await client.cancelOrder('BTC', 777);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/already canceled/);
+  });
+});

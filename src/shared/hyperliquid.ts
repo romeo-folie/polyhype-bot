@@ -557,6 +557,186 @@ class HyperliquidClient {
     });
   }
 
+  /**
+   * Best bid/ask from the L2 book. Used to post maker orders at the touch.
+   * Returns null when either side of the book is empty.
+   */
+  async getBestBidAsk(symbol: string): Promise<{ bestBid: number; bestAsk: number } | null> {
+    const response = await axios.post<{ levels?: [{ px: string }[], { px: string }[]] }>(
+      `${this.baseUrl}/info`,
+      { type: 'l2Book', coin: symbol },
+      { timeout: HL_REQUEST_TIMEOUT_MS },
+    );
+    const levels = response.data?.levels;
+    const bestBid = levels?.[0]?.[0]?.px ? parseFloat(levels[0][0].px) : NaN;
+    const bestAsk = levels?.[1]?.[0]?.px ? parseFloat(levels[1][0].px) : NaN;
+    if (!isFinite(bestBid) || !isFinite(bestAsk) || bestBid <= 0 || bestAsk <= 0) return null;
+    return { bestBid, bestAsk };
+  }
+
+  /**
+   * Place a post-only (ALO) resting limit order. Never crosses the spread —
+   * HL rejects ALO orders that would immediately match, so the worst case is
+   * a rejection, never an accidental taker fill. Pays the maker fee (0.015%)
+   * instead of taker (0.045%) when filled.
+   */
+  async placeRestingOrder(opts: {
+    symbol: string;
+    isBuy: boolean;
+    sizeUsd: number;
+    leverage: number;
+    limitPrice: number;
+  }): Promise<{ success: boolean; oid?: number; price?: number; sizeBase?: number; error?: string }> {
+    if (loadConfig().HL_DRY_RUN) {
+      logger.info('[hyperliquid] DRY RUN — resting order not submitted', {
+        symbol: opts.symbol, isBuy: opts.isBuy, sizeUsd: opts.sizeUsd, limitPrice: opts.limitPrice,
+      });
+      return { success: true, oid: 0, price: opts.limitPrice };
+    }
+
+    try {
+      // Floor bump mirrors placeMarketOrder so maker mode keeps identical sizing rules.
+      if (opts.sizeUsd < HL_MIN_ORDER_USD) {
+        if (opts.sizeUsd >= HL_MIN_ORDER_USD * 0.6) {
+          opts.sizeUsd = HL_MIN_ORDER_USD;
+        } else {
+          return {
+            success: false,
+            error: `Stake $${opts.sizeUsd.toFixed(2)} too small for HL minimum ($${HL_MIN_ORDER_USD}); skipped`,
+          };
+        }
+      }
+
+      const { index, szDecimals } = await this.getAssetMeta(opts.symbol);
+      if (index === -1) throw new Error(`Symbol ${opts.symbol} not found on Hyperliquid`);
+
+      const leverageOk = await this.updateLeverage(opts.symbol, opts.leverage);
+      if (!leverageOk) {
+        return {
+          success: false,
+          error: `updateLeverage failed for ${opts.symbol} — order aborted to avoid wrong-leverage trade`,
+        };
+      }
+
+      if (!isFinite(opts.limitPrice) || opts.limitPrice <= 0) {
+        return { success: false, error: `invalid limit price ${String(opts.limitPrice)}` };
+      }
+      const px = this.roundPrice(opts.limitPrice, szDecimals);
+      const sizeBase = this.roundSize(opts.sizeUsd / px, szDecimals);
+
+      const action = {
+        type: 'order',
+        orders: [
+          {
+            a: index,
+            b: opts.isBuy,
+            p: String(px),
+            s: String(sizeBase),
+            r: false,
+            t: { limit: { tif: 'Alo' } },
+          },
+        ],
+        grouping: 'na',
+      };
+
+      const nonce = nextHlNonce();
+      const signature = await this.signAction(action, nonce);
+      const response = await axios.post<HlExchangeResponse>(
+        `${this.baseUrl}/exchange`,
+        { action, nonce, signature, vaultAddress: this.vaultAddress },
+        { timeout: HL_REQUEST_TIMEOUT_MS },
+      );
+
+      if (response.data.status === 'ok') {
+        const responseObj = typeof response.data.response === 'object' ? response.data.response : undefined;
+        const result = responseObj?.data?.statuses?.[0] as Record<string, unknown> | undefined;
+        const resting = result?.resting as { oid?: unknown } | undefined;
+        // ALO can partially fill against queued liquidity in edge cases; treat a
+        // filled status the same as resting (the order exists and has an oid).
+        const filled = result?.filled as { oid?: unknown } | undefined;
+        const oidRaw = resting?.oid ?? filled?.oid;
+        if (oidRaw != null) {
+          return { success: true, oid: Number(oidRaw), price: px, sizeBase };
+        }
+        const errorMsg = result?.error as string | undefined;
+        if (errorMsg) return { success: false, error: errorMsg };
+      }
+      return { success: false, error: JSON.stringify(response.data) };
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
+      const responseBody = axiosErr.response?.data
+        ? JSON.stringify(axiosErr.response.data).slice(0, 500)
+        : undefined;
+      const msg = axiosErr.message ?? String(err);
+      return { success: false, error: responseBody ? `${msg}: ${responseBody}` : msg };
+    }
+  }
+
+  /**
+   * Query the status of an order by oid. `filledSz` is origSz − remaining sz.
+   */
+  async getOrderStatus(oid: number): Promise<{
+    status: 'open' | 'filled' | 'canceled' | 'rejected' | 'unknown';
+    origSz: number;
+    remainingSz: number;
+    filledSz: number;
+  }> {
+    const response = await axios.post<{
+      status: string;
+      order?: { status?: string; order?: { origSz?: string; sz?: string } };
+    }>(
+      `${this.baseUrl}/info`,
+      { type: 'orderStatus', user: this.mainWalletAddress, oid },
+      { timeout: HL_REQUEST_TIMEOUT_MS },
+    );
+    if (response.data?.status !== 'order' || !response.data.order) {
+      return { status: 'unknown', origSz: 0, remainingSz: 0, filledSz: 0 };
+    }
+    const raw = response.data.order;
+    const origSz = parseFloat(raw.order?.origSz ?? '0');
+    const remainingSz = parseFloat(raw.order?.sz ?? '0');
+    const filledSz = Math.max(0, origSz - remainingSz);
+    const s = raw.status ?? '';
+    const status =
+      s === 'open' ? 'open'
+      : s === 'filled' ? 'filled'
+      : s === 'canceled' || s === 'marginCanceled' ? 'canceled'
+      : s === 'rejected' ? 'rejected'
+      : 'unknown';
+    return { status, origSz, remainingSz, filledSz };
+  }
+
+  /**
+   * Cancel a resting order by oid.
+   */
+  async cancelOrder(symbol: string, oid: number): Promise<{ success: boolean; error?: string }> {
+    try {
+      const { index } = await this.getAssetMeta(symbol);
+      if (index === -1) throw new Error(`Symbol ${symbol} not found on Hyperliquid`);
+      const action = { type: 'cancel', cancels: [{ a: index, o: oid }] };
+      const nonce = nextHlNonce();
+      const signature = await this.signAction(action, nonce);
+      const response = await axios.post<HlExchangeResponse>(
+        `${this.baseUrl}/exchange`,
+        { action, nonce, signature, vaultAddress: this.vaultAddress },
+        { timeout: HL_REQUEST_TIMEOUT_MS },
+      );
+      if (response.data.status === 'ok') {
+        const responseObj = typeof response.data.response === 'object' ? response.data.response : undefined;
+        const result = responseObj?.data?.statuses?.[0];
+        // statuses[0] is the literal string 'success' on a clean cancel; an object
+        // with an error field means the cancel failed (e.g. already filled).
+        if (result === 'success') return { success: true };
+        const errorMsg = (result as Record<string, unknown> | undefined)?.error as string | undefined;
+        return { success: false, error: errorMsg ?? JSON.stringify(response.data) };
+      }
+      return { success: false, error: JSON.stringify(response.data) };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, error: msg };
+    }
+  }
+
   // --- Private Helpers ---
 
   /**

@@ -54,6 +54,8 @@ const mockRedis = {
   setex: vi.fn().mockResolvedValue('OK'),
   del: vi.fn().mockResolvedValue(1),
   eval: vi.fn().mockResolvedValue(1),
+  smembers: vi.fn().mockResolvedValue([]),
+  srem: vi.fn().mockResolvedValue(1),
 };
 
 vi.mock('../../shared/redis.js', () => ({
@@ -66,10 +68,12 @@ vi.mock('../../shared/redis.js', () => ({
 // Mock Hyperliquid Client
 const mockGetOpenPositions = vi.fn();
 const mockClosePosition = vi.fn();
+const mockFetchAllMids = vi.fn();
 vi.mock('../../shared/hyperliquid.js', () => ({
   getHyperliquid: vi.fn().mockReturnValue({
     getOpenPositions: mockGetOpenPositions,
     closePosition: mockClosePosition,
+    fetchAllMids: mockFetchAllMids,
   }),
 }));
 
@@ -841,6 +845,241 @@ describe('futuresMonitor', () => {
           (payload as { kind?: string }).kind === 'meme_atr_sltp_shadow',
       );
       expect(memeShadowCalls).toHaveLength(0);
+    });
+  });
+
+  describe('hl-momentum ATR geometry (2026-06-12 review)', () => {
+    // Frozen ATR SL/TP active for NON-meme hl-momentum positions. Fixed HL SL in
+    // baseCfg is -5 ROE; the frozen ATR SL here is 2.5 notional %.
+    const hlAtrCfg = {
+      ...baseCfg,
+      HL_MOMENTUM_ATR_SLTP_ENABLED: true,
+      HL_MOMENTUM_TRAIL_ATR_MULT: 1.0,
+    };
+
+    const makeLedgerHlPos = (opts: {
+      symbol: string;
+      memeAtrSlPct?: number;
+      memeAtrTpPct?: number;
+      entryAtrPct?: number;
+      sourcedFrom?: string;
+    }) => ({
+      marketId: opts.symbol,
+      symbol: opts.symbol,
+      direction: 'LONG' as const,
+      isFutures: true,
+      question: `${opts.symbol} perpetual`,
+      entryPrice: 1,
+      stakeUsd: 30,
+      edgeMagnitude: 0,
+      sourcedFrom: opts.sourcedFrom ?? 'hl-momentum',
+      openedAt: new Date().toISOString(),
+      executionVenue: 'hyperliquid' as const,
+      memeAtrSlPct: opts.memeAtrSlPct,
+      memeAtrTpPct: opts.memeAtrTpPct,
+      entryAtrPct: opts.entryAtrPct,
+    });
+
+    // marginUsed 10 with positionValue 100 → 10x effective leverage:
+    // pnlPct param is the NOTIONAL price-change %; ROE is 10× that.
+    const makeLeveredHlPos = (symbol: string, pricePct: number) => ({
+      symbol,
+      position: {
+        szi: '100',
+        entryPx: '1',
+        unrealizedPnl: String(pricePct),
+        marginUsed: '10',
+      },
+    });
+
+    it('SL fires when price change hits the frozen ATR stop', async () => {
+      loadConfigMock.mockReturnValue(hlAtrCfg);
+      mockGetOpenPositions.mockResolvedValue([makeLeveredHlPos('SOL', -2.6)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerHlPos({ symbol: 'SOL', memeAtrSlPct: 2.5, memeAtrTpPct: 4.5 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('SOL');
+    });
+
+    it('replaces the fixed ROE stop: ROE past -5 but price above the ATR stop → hold', async () => {
+      loadConfigMock.mockReturnValue(hlAtrCfg);
+      // price -1% → ROE -10% at 10x: the old fixed -5 ROE stop would have fired.
+      mockGetOpenPositions.mockResolvedValue([makeLeveredHlPos('SOL', -1)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerHlPos({ symbol: 'SOL', memeAtrSlPct: 2.5, memeAtrTpPct: 4.5 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+
+    it('knob off: fixed ROE stop behaviour unchanged', async () => {
+      loadConfigMock.mockReturnValue({ ...baseCfg, HL_MOMENTUM_ATR_SLTP_ENABLED: false });
+      // price -1% → ROE -10% at 10x → fixed HL SL (-5 ROE) fires despite frozen fields.
+      mockGetOpenPositions.mockResolvedValue([makeLeveredHlPos('SOL', -1)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerHlPos({ symbol: 'SOL', memeAtrSlPct: 2.5, memeAtrTpPct: 4.5 }),
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('SOL');
+    });
+
+    it('meme symbols are governed by the meme knob, not this one', async () => {
+      // hl-ATR on, meme knob off → kPEPE keeps fixed ROE thresholds.
+      loadConfigMock.mockReturnValue(hlAtrCfg);
+      mockGetOpenPositions.mockResolvedValue([makeLeveredHlPos('kPEPE', -1)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        makeLedgerHlPos({ symbol: 'kPEPE', memeAtrSlPct: 15, memeAtrTpPct: 30 }),
+      ]);
+
+      await runTick();
+
+      // ROE -10% past fixed -5 → fires (the hl-ATR block must NOT have claimed kPEPE)
+      expect(mockClosePosition).toHaveBeenCalledWith('kPEPE');
+    });
+
+    it('trailing giveback scales with entry ATR (1×ATR from peak)', async () => {
+      loadConfigMock.mockReturnValue({
+        ...hlAtrCfg,
+        FUTURES_TRAILING_STOP_ENABLED: true,
+      });
+      // Frozen TP (arm) = 4.5%; entryAtrPct = 1.2 → giveback 1.2%.
+      // Prior HWM 6.0%; current price +4.7% → drawdown 1.3% > 1.2% → trail fires.
+      mockRedis.get.mockImplementation((key: string) =>
+        Promise.resolve(key.includes('hwm') ? '6' : null),
+      );
+      mockGetOpenPositions.mockResolvedValue([makeLeveredHlPos('SOL', 4.7)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        {
+          ...makeLedgerHlPos({
+            symbol: 'SOL', memeAtrSlPct: 2.5, memeAtrTpPct: 4.5, entryAtrPct: 1.2,
+          }),
+          highWaterMarkPct: 6,
+        },
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('SOL');
+    });
+
+    it('trailing holds inside the ATR giveback', async () => {
+      loadConfigMock.mockReturnValue({
+        ...hlAtrCfg,
+        FUTURES_TRAILING_STOP_ENABLED: true,
+      });
+      // HWM 6.0%, current +5.1% → drawdown 0.9% < 1.2% giveback → hold.
+      mockGetOpenPositions.mockResolvedValue([makeLeveredHlPos('SOL', 5.1)]);
+      mockGetLedgerPositions.mockResolvedValue([
+        {
+          ...makeLedgerHlPos({
+            symbol: 'SOL', memeAtrSlPct: 2.5, memeAtrTpPct: 4.5, entryAtrPct: 1.2,
+          }),
+          highWaterMarkPct: 6,
+        },
+      ]);
+
+      await runTick();
+
+      expect(mockClosePosition).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('pure-time-exit shadow sweep (2026-06-12 experiment)', () => {
+    const shadowCfg = {
+      ...baseCfg,
+      HL_TIME_EXIT_SHADOW_ENABLED: true,
+      HL_TIME_EXIT_SHADOW_HOURS: 8,
+    };
+    const NOW = Date.now();
+
+    it('logs the hypothetical time-exit return once an entry is due', async () => {
+      loadConfigMock.mockReturnValue(shadowCfg);
+      const key = `hl:time_exit_shadow:BTC:${NOW - 9 * 3_600_000}`;
+      mockRedis.smembers.mockResolvedValue([key]);
+      mockRedis.get.mockImplementation((k: string) =>
+        Promise.resolve(
+          k === key
+            ? JSON.stringify({
+                symbol: 'BTC',
+                direction: 'SHORT',
+                entryPrice: 50_000,
+                entryTs: NOW - 9 * 3_600_000,
+                entryOrderType: 'maker',
+              })
+            : null,
+        ),
+      );
+      mockFetchAllMids.mockResolvedValue({ BTC: 49_000 });
+
+      await runTick();
+
+      // SHORT from 50k to 49k = +2%
+      expect(mockEnqueueWrite).toHaveBeenCalledWith(
+        'shadow_observations',
+        expect.objectContaining({
+          kind: 'hl_time_exit_shadow',
+          symbol: 'BTC',
+          direction: 'SHORT',
+          metricValue: expect.closeTo(2, 5),
+          payload: expect.objectContaining({ exitPrice: 49_000, holdHours: 8 }),
+        }),
+      );
+      expect(mockRedis.del).toHaveBeenCalledWith(key);
+      expect(mockRedis.srem).toHaveBeenCalledWith('hl:time_exit_shadow:index', key);
+    });
+
+    it('leaves entries that are not yet due untouched', async () => {
+      loadConfigMock.mockReturnValue(shadowCfg);
+      const key = `hl:time_exit_shadow:BTC:${NOW - 3_600_000}`;
+      mockRedis.smembers.mockResolvedValue([key]);
+      mockRedis.get.mockImplementation((k: string) =>
+        Promise.resolve(
+          k === key
+            ? JSON.stringify({
+                symbol: 'BTC', direction: 'LONG', entryPrice: 50_000, entryTs: NOW - 3_600_000,
+              })
+            : null,
+        ),
+      );
+
+      await runTick();
+
+      expect(mockEnqueueWrite).not.toHaveBeenCalledWith(
+        'shadow_observations',
+        expect.objectContaining({ kind: 'hl_time_exit_shadow' }),
+      );
+      expect(mockRedis.del).not.toHaveBeenCalledWith(key);
+      expect(mockFetchAllMids).not.toHaveBeenCalled();
+    });
+
+    it('prunes dangling index members whose value TTL-expired', async () => {
+      loadConfigMock.mockReturnValue(shadowCfg);
+      const key = `hl:time_exit_shadow:BTC:${NOW - 20 * 3_600_000}`;
+      mockRedis.smembers.mockResolvedValue([key]);
+      mockRedis.get.mockResolvedValue(null);
+
+      await runTick();
+
+      expect(mockRedis.srem).toHaveBeenCalledWith('hl:time_exit_shadow:index', key);
+      expect(mockEnqueueWrite).not.toHaveBeenCalledWith(
+        'shadow_observations',
+        expect.objectContaining({ kind: 'hl_time_exit_shadow' }),
+      );
+    });
+
+    it('does nothing when the experiment knob is off', async () => {
+      loadConfigMock.mockReturnValue({ ...shadowCfg, HL_TIME_EXIT_SHADOW_ENABLED: false });
+
+      await runTick();
+
+      expect(mockRedis.smembers).not.toHaveBeenCalled();
     });
   });
 
