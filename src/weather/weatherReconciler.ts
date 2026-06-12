@@ -233,7 +233,9 @@ function makeResolutionFetcher(redis: Redis, fetchFn?: FetchFn): ResolutionFetch
       return high !== null ? { high, source: 'hko' } : null;
     }
     if (coords.resolutionSource === 'metar') {
-      const high = await fetchMetarDailyHigh(coords.wuStation, targetDate, wf);
+      // Pass the station tz: the market settles on the station's local day,
+      // and METAR reportTimes are UTC (3h misaligned for Istanbul).
+      const high = await fetchMetarDailyHigh(coords.wuStation, targetDate, wf, coords.tz);
       return high !== null ? { high, source: 'metar' } : null;
     }
     // WU
