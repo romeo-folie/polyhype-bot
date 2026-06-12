@@ -254,6 +254,28 @@ async function runSpotMonitorInner(
           }
         }
 
+        // Live-entry gate: when SPOT_FUTURES_ENABLED=false the fully-evaluated signal
+        // is recorded as a shadow observation instead of traded, so the path keeps
+        // accumulating a judgeable record while live entries are suspended.
+        if (!cfg.SPOT_FUTURES_ENABLED) {
+          logger.info('[spot] futures entry shadowed — SPOT_FUTURES_ENABLED=false', {
+            symbol: hlSymbol, moveDirection,
+            movePct: move.changePercent.toFixed(2),
+            stakeUsd: stakeUsd.toFixed(2),
+          });
+          void enqueueWrite('shadow_observations', {
+            kind: 'spot_futures_signal', source: 'spot', symbol: hlSymbol, direction: moveDirection,
+            wouldBlock: true, metricValue: move.changePercent,
+            payload: {
+              stakeUsd,
+              movePct: move.changePercent,
+              windowMinutes: move.windowMinutes,
+              currentPrice: move.currentPrice,
+            },
+          });
+          continue;
+        }
+
         signals.push({
           marketId: hlSymbol,
           question: `Hyperliquid Perp: ${hlSymbol} ${moveDirection}`,

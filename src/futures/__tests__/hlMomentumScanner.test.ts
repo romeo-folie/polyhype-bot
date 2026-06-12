@@ -1828,6 +1828,84 @@ describe('scanHlMomentum — contrarian mode', () => {
 // Anti-chase stretch gate (RSI + VWAP distance)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Momentum-long block (HL_MOMENTUM_BLOCK_MOMENTUM_LONGS)
+// ---------------------------------------------------------------------------
+
+describe('scanHlMomentum — momentum-long block', () => {
+  beforeEach(() => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_BLOCK_MOMENTUM_LONGS: true,
+      HL_MOMENTUM_SOFT_CONFIRM_ENABLED: false,
+      HL_MOMENTUM_ANTI_CHASE_ENABLED: false,
+    });
+    mockBuildCandles.mockResolvedValue([{}]);
+    mockScoreHlTrend.mockReturnValue(bullishResult);
+    mockHasOpenPosition.mockResolvedValue(false);
+    mockComputeEMA.mockReturnValue(null);
+    mockComputeMACDFromCandles.mockReturnValue(null);
+    mockComputeRSIFromCandles.mockReturnValue(null);
+    mockComputeVWAP.mockReturnValue(null);
+  });
+
+  it('blocks a momentum-direction LONG and logs momentum_long_blocked', async () => {
+    const { enqueueWrite } = await import('../../db/writeQueue.js');
+    vi.mocked(enqueueWrite).mockClear();
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).toBeNull();
+    expect(enqueueWrite).toHaveBeenCalledWith(
+      'signal_decisions',
+      expect.objectContaining({
+        hasTrade: false,
+        skipReason: 'momentum_long_blocked',
+        direction: 'LONG',
+        raw: expect.objectContaining({ isContrarian: false, momentumDirection: 'LONG' }),
+      }),
+    );
+  });
+
+  it('still allows momentum SHORTs when the block is on', async () => {
+    mockScoreHlTrend.mockReturnValue(bearishResult);
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).not.toBeNull();
+    expect(result!.direction).toBe('SHORT');
+  });
+
+  it('exempts contrarian LONGs (RSI-exhaustion bounce buys)', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_BLOCK_MOMENTUM_LONGS: true,
+      HL_MOMENTUM_CONTRARIAN_ENABLED: true,
+      HL_MOMENTUM_SOFT_CONFIRM_ENABLED: false,
+      HL_MOMENTUM_ANTI_CHASE_ENABLED: false,
+    });
+    mockScoreHlTrend.mockReturnValue(bearishResult); // momentum SHORT → contrarian trade LONG
+    mockComputeRSIFromCandles.mockReturnValue(25);   // exhaustion gate passes
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).not.toBeNull();
+    expect(result!.direction).toBe('LONG');
+  });
+
+  it('does not block momentum LONGs when the knob is off (default)', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      HL_MOMENTUM_ENABLED: true,
+      HL_MOMENTUM_SOFT_CONFIRM_ENABLED: false,
+      HL_MOMENTUM_ANTI_CHASE_ENABLED: false,
+    });
+    const redis = makeRedis();
+    const result = await scanHlMomentum(makeTick(), redis as never);
+    expect(result).not.toBeNull();
+    expect(result!.direction).toBe('LONG');
+  });
+});
+
 describe('scanHlMomentum — anti-chase gate', () => {
   const antiChaseConfig = {
     ...baseConfig,

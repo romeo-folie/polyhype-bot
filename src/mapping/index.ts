@@ -819,6 +819,24 @@ export async function mapNewsToFutures(
       }
     }
 
+    // Live-entry gate: when NEWS_FUTURES_ENABLED=false the fully-evaluated signal
+    // is recorded as a shadow observation instead of traded, so the path keeps
+    // accumulating a judgeable record while live entries are suspended.
+    if (!cfg.NEWS_FUTURES_ENABLED) {
+      logger.info('[mapping] news futures entry shadowed — NEWS_FUTURES_ENABLED=false', {
+        symbol, direction,
+        urgencyScore: item.urgencyScore,
+        stakeUsd: stakeUsd.toFixed(2),
+        title: item.title,
+      });
+      void enqueueWrite('shadow_observations', {
+        kind: 'news_futures_signal', source: 'futures', symbol, direction,
+        wouldBlock: true, metricValue: item.urgencyScore,
+        payload: { stakeUsd, urgencyScore: item.urgencyScore, title: item.title },
+      });
+      continue;
+    }
+
     signals.push({
       marketId: symbol,
       question: `News Futures: ${symbol} ${direction}`,

@@ -308,6 +308,19 @@ export async function scanHlMomentum(
     return null;
   }
 
+  // Gate: momentum-direction LONGs disabled. Trend-chasing longs measured Apr–Jun 2026
+  // at −4.7 cumulative price-% vs SHORTs +24.2; contrarian LONGs (RSI-exhaustion bounce
+  // buys, 66% WR post-gate) are exempt — they enter on washouts, not chases.
+  if (cfg.HL_MOMENTUM_BLOCK_MOMENTUM_LONGS && !isContrarian && tradeDirection === 'LONG') {
+    logger.debug('[hl-momentum] momentum LONG blocked', {
+      symbol: hlSymbol,
+      momentumDirection,
+      score,
+    });
+    logDecision(false, 'momentum_long_blocked');
+    return null;
+  }
+
   // Gate: contrarian entries require RSI to confirm genuine exhaustion.
   // Contrarian LONG (momentum DOWN) needs RSI ≤ oversold threshold — the down move must be
   // stretched enough that a snap-back is plausible. Contrarian SHORT (momentum UP) needs
