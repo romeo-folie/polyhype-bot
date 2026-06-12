@@ -31,6 +31,8 @@ const SKIP_REASON = [
   'size_up_ineligible',
   // weather rest-above-cap pool gate (added 2026-06-05)
   'resting_notional_cap',
+  // hl-momentum trend-chasing-long block (added 2026-06-12)
+  'momentum_long_blocked',
   'other',
 ] as const;
 

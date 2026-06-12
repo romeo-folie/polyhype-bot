@@ -336,6 +336,12 @@ export const envSchema = z.object({
 
   // Spot price monitor (Phase 5)
   SPOT_MONITOR_ENABLED: boolFromEnv.optional().default(false),
+  // Live perp entries from spot-move detection. When false the path still evaluates
+  // every candidate and writes a shadow_observations row (kind=spot_futures_signal)
+  // for what it would have traded — measured Apr–Jun 2026 at 30% WR / −$1.50 gross,
+  // it chases the direction of an already-completed spike. Correlated PM-market
+  // signals from the same move are unaffected.
+  SPOT_FUTURES_ENABLED: boolFromEnv.optional().default(true),
   SPOT_MOVE_THRESHOLD: z.coerce.number().min(0).optional().default(3),
   SPOT_LOOKBACK_MINUTES: z.coerce.number().int().min(1).optional().default(5),
   SPOT_COOLDOWN_MINUTES: z.coerce.number().int().min(1).optional().default(15),
@@ -1400,6 +1406,11 @@ export const envSchema = z.object({
   // changes rather than occurring within them, so gating on regime state is
   // backward causal. Defaults false.
   NEWS_FUTURES_REGIME_GATES_ENABLED: boolFromEnv.optional().default(false),
+  // Live perp entries from news headlines (mapNewsToFutures). When false the path
+  // still evaluates every candidate and writes a shadow_observations row
+  // (kind=news_futures_signal) for what it would have traded — measured Apr–Jun 2026
+  // at 17–32% WR / −$4.51 gross across the news+osint labels.
+  NEWS_FUTURES_ENABLED: boolFromEnv.optional().default(true),
   VOLUME_SPIKE_PERIOD: z.coerce.number().int().min(2).optional().default(20),
   VOLUME_SPIKE_MULT: z.coerce.number().min(0.1).optional().default(2.0),
   // OBV slope voter
@@ -1453,6 +1464,10 @@ export const envSchema = z.object({
   HL_MOMENTUM_MIN_SCORE: z.coerce.number().int().min(0).max(8).optional().default(6),
   // Minimum ADX to require a trending regime before acting on the direction vote.
   HL_MOMENTUM_MIN_ADX: z.coerce.number().min(0).optional().default(20),
+  // Block momentum-direction LONG entries (trend-chasing longs). Contrarian LONGs
+  // (RSI-exhaustion bounce buys) are exempt. Measured Apr–Jun 2026: momentum LONGs
+  // −4.7 cumulative price-% vs SHORTs +24.2; post-gate contrarian LONGs 66% WR.
+  HL_MOMENTUM_BLOCK_MOMENTUM_LONGS: boolFromEnv.optional().default(false),
   // Contrarian mode: validate the momentum setup as usual, then execute the opposite side.
   HL_MOMENTUM_CONTRARIAN_ENABLED: boolFromEnv.optional().default(false),
   // When ADX is at or above this ceiling, momentum is genuinely trending and contrarian is
