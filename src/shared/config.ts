@@ -2502,6 +2502,11 @@ export function loadConfig(forceReload = false): AppConfig {
     throw new Error('HL_MOMENTUM_MEME_SL_FLOOR_PCT must be ≤ HL_MOMENTUM_MEME_SL_CEIL_PCT');
   }
 
+  // HL momentum non-meme ATR: same non-empty clamp interval requirement.
+  if (cfg.HL_MOMENTUM_SL_FLOOR_PCT > cfg.HL_MOMENTUM_SL_CEIL_PCT) {
+    throw new Error('HL_MOMENTUM_SL_FLOOR_PCT must be ≤ HL_MOMENTUM_SL_CEIL_PCT');
+  }
+
   // HL funding scanner: exit APR must be below entry APR (or the exit condition fires immediately).
   if (cfg.HL_FUNDING_SCANNER_EXIT_APR_THRESHOLD >= cfg.HL_FUNDING_SCANNER_ENTRY_APR_THRESHOLD) {
     throw new Error('HL_FUNDING_SCANNER_EXIT_APR_THRESHOLD must be less than HL_FUNDING_SCANNER_ENTRY_APR_THRESHOLD');
