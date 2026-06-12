@@ -11,11 +11,11 @@
  * parameter suggests. aviationweather.gov caps responses at ~400 observations
  * regardless of the requested range, so older dates return empty. Callers
  * that need a longer historical window should route via `wuClient.ts`
- * instead. As of 2026-04-24, no city in CITY_COORDINATES uses METAR as its
- * primary resolution source — all international stations moved to WU after
- * this cap was discovered during the weather_ground_truth backfill audit.
- * The module is kept for potential future use (e.g., same-day resolution
- * on stations without WU coverage).
+ * instead — METAR is only suitable for day-after fetches.
+ * As of 2026-06-12, istanbul (LTFM) resolves through this client: the
+ * market settles on NOAA's timeseries for LTFM (same METAR feed) and WU
+ * returns HTTP 400 for that station. All other international stations
+ * stay on WU (2026-04-24 backfill audit).
  *
  * Log marker: [weather-metar]
  */

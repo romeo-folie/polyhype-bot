@@ -153,6 +153,22 @@ describe('auditWeatherStations', () => {
     expect(result.uncomparable).toEqual(['new york']);
   });
 
+  it('treats an unrecognized description format as uncomparable — never alerts', () => {
+    // If Polymarket rewrites its description template, every city would
+    // otherwise fire a mismatch alert at once. Unknown formats go to the
+    // uncomparable list (visible in the audit log) instead.
+    const result = auditWeatherStations([
+      makeEvent(
+        'Highest temperature in Istanbul on June 9?',
+        'ist',
+        'This market resolves based on the official reading. Details to follow.',
+      ),
+    ]);
+    expect(result.mismatches).toEqual([]);
+    expect(result.uncomparable).toEqual(['istanbul']);
+    expect(result.checked).toBe(0);
+  });
+
   it('flags an hko/wu source conflict even without a station id', () => {
     // If Polymarket moved Hong Kong from HKO to a WU airport station, the
     // station id may be absent but the source flip alone is actionable.

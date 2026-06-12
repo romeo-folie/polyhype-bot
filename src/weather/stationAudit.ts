@@ -135,6 +135,14 @@ export function auditWeatherStations(events: WeatherGammaEvent[]): StationAuditR
     if (!coords) continue; // canonicalCityKey already guarantees presence; defensive
 
     const parsed = parseResolutionStation(description);
+    if (parsed.sourceType === 'unknown') {
+      // Unrecognized description format — nothing to compare against. Don't
+      // alert: a Polymarket template change would otherwise page once per
+      // city. The uncomparable list in the audit log is the signal to update
+      // parseResolutionStation.
+      uncomparable.add(canonical);
+      continue;
+    }
     checked++;
 
     const stationMismatch = parsed.stationId !== null && parsed.stationId !== coords.wuStation;
