@@ -31,6 +31,7 @@ function makeRedis() {
       return 'OK';
     }),
     get: vi.fn(async (key: string) => store.get(key)?.value ?? null),
+    del: vi.fn(async (key: string) => (store.delete(key) ? 1 : 0)),
     _store: store,
   };
 }
@@ -131,6 +132,35 @@ describe('computeCityBias', () => {
     const dateParam = (sql.mock.calls[0] as unknown[]).find((v) => v instanceof Date)!;
     const expectedFloor = Date.now() - 28 * 86_400_000;
     expect(Math.abs(dateParam.getTime() - expectedFloor)).toBeLessThan(60_000);
+  });
+
+  it('deletes cached bias for cities that no longer qualify', async () => {
+    // After a WEATHER_BIAS_SAMPLES_SINCE cutover, a city below minSamples must
+    // not keep serving its stale (wrong-thermometer) correction for the TTL —
+    // the refresh is authoritative and removes it.
+    const sql = makeSql([
+      { city: 'chicago', sample_size: 20, mean_bias: 1.5, empirical_stddev: 2.3, raw_mae: 2.0, corrected_mae: 1.4 },
+    ]);
+    const redis = makeRedis();
+
+    await computeCityBias(sql as never, redis as never, 14);
+
+    const deleted = redis.del.mock.calls.map((c) => c[0]);
+    expect(deleted).toContain('weather:city_bias:miami');
+    expect(deleted).not.toContain('weather:city_bias:chicago');
+    expect(redis.set).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes all cached biases when no city qualifies', async () => {
+    const sql = makeSql([]);
+    const redis = makeRedis();
+
+    await computeCityBias(sql as never, redis as never, 14);
+
+    const deleted = redis.del.mock.calls.map((c) => c[0]);
+    expect(deleted).toContain('weather:city_bias:miami');
+    expect(deleted).toContain('weather:city_bias:istanbul');
+    expect(redis.set).not.toHaveBeenCalled();
   });
 
   it('uses canonical city key in Redis key', async () => {
