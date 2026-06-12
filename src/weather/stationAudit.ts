@@ -79,14 +79,32 @@ export function parseResolutionStation(description: string): ParsedResolutionSou
     return { sourceType: 'noaa', stationId: noaaSite.toUpperCase(), stationName };
   }
 
-  const wuUrl = description.match(
-    /wunderground\.com\/history\/daily\/[^/\s]+\/[^/\s]+\/([A-Z0-9]{3,5})/i,
-  )?.[1];
   if (/wunderground/i.test(description)) {
-    return { sourceType: 'wu', stationId: wuUrl ? wuUrl.toUpperCase() : null, stationName };
+    return { sourceType: 'wu', stationId: extractWuStationFromUrl(description), stationName };
   }
 
   return { sourceType: 'unknown', stationId: null, stationName };
+}
+
+/**
+ * Pull the ICAO out of a Wunderground history URL. The path depth varies —
+ * international URLs are `daily/<cc>/<city>/<ICAO>/date/...` while US URLs
+ * are `daily/us/<state>/<city>/<ICAO>` with no /date/ suffix — so position
+ * is unreliable. Instead, scan the segments for the one that LOOKS like a
+ * station id: uppercase, letter-led, 3–5 chars. The match is deliberately
+ * case-sensitive: city/state slugs are lowercase ("miami", "fl"), and an
+ * insensitive match once promoted "miami"→MIAMI, firing 11 false mismatch
+ * alerts (2026-06-12).
+ */
+function extractWuStationFromUrl(description: string): string | null {
+  const path = description.match(/wunderground\.com\/history\/daily\/([^\s"')]+)/i)?.[1];
+  if (!path) return null;
+  let station: string | null = null;
+  for (const seg of path.split('/')) {
+    const token = seg.replace(/[^A-Za-z0-9].*$/, ''); // strip trailing punctuation ("KMIA.")
+    if (/^[A-Z][A-Z0-9]{2,4}$/.test(token)) station = token;
+  }
+  return station;
 }
 
 /**

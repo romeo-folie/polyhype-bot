@@ -24,6 +24,14 @@ const DESC_WU_LFPB =
   "This market will resolve to the temperature range that contains the highest temperature recorded at the Paris-Le Bourget Airport Station in degrees Celsius on 11 Jun '26.\n\n" +
   'The resolution source for this market will be information from Wunderground, specifically the highest temperature recorded for all times on this day for the Paris-Le Bourget Airport Station, available here: https://www.wunderground.com/history/daily/fr/le-bourget/LFPB/date/2026-6-11';
 
+// US format: extra state segment AND no /date/ suffix — the ICAO is the last
+// path segment, terminated by sentence punctuation. Captured verbatim from
+// the live Miami June 12 market after this exact shape caused 11 false
+// mismatch alerts in production (parser grabbed the lowercase city slug).
+const DESC_WU_US_URL =
+  "This market will resolve to the temperature range that contains the highest temperature recorded at the Miami Intl Airport in degrees Fahrenheit on 12 Jun '26.\n\n" +
+  'The resolution source for this market will be information from Wunderground, specifically the highest temperature recorded for all times on this day for the Miami Intl Airport, available here: https://www.wunderground.com/history/daily/us/fl/miami/KMIA.';
+
 const DESC_WU_NAME_ONLY =
   "This market will resolve to the temperature range that contains the highest temperature recorded at the LaGuardia Airport in degrees Fahrenheit on 13 Jun '26.\n\n" +
   'The resolution source for this market will be information from Wunderground, specifically the highest temperature recorded for all times on this day.';
@@ -76,6 +84,20 @@ describe('parseResolutionStation', () => {
     expect(parsed.stationName).toBe('Paris-Le Bourget Airport');
   });
 
+  it('extracts the ICAO from US-format WU URLs (state segment, no /date/, trailing period)', () => {
+    const parsed = parseResolutionStation(DESC_WU_US_URL);
+    expect(parsed.sourceType).toBe('wu');
+    expect(parsed.stationId).toBe('KMIA');
+  });
+
+  it('never promotes lowercase city/state slugs to a station id', () => {
+    // "miami"→MIAMI was the production false-alert bug (2026-06-12).
+    const noIcao = DESC_WU_US_URL.replace('/KMIA.', '.');
+    const parsed = parseResolutionStation(noIcao);
+    expect(parsed.sourceType).toBe('wu');
+    expect(parsed.stationId).toBeNull();
+  });
+
   it('returns WU with null stationId for prose-only descriptions', () => {
     const parsed = parseResolutionStation(DESC_WU_NAME_ONLY);
     expect(parsed.sourceType).toBe('wu');
@@ -117,14 +139,15 @@ describe('auditWeatherStations', () => {
     });
   });
 
-  it('passes matching stations (istanbul=LTFM, paris=LFPB, hong kong=HKO)', () => {
+  it('passes matching stations (istanbul=LTFM, paris=LFPB, hong kong=HKO, miami=KMIA)', () => {
     const result = auditWeatherStations([
       makeEvent('Highest temperature in Istanbul on June 9?', 'ist', DESC_NOAA_LTFM),
       makeEvent('Highest temperature in Paris on June 11?', 'par', DESC_WU_LFPB),
       makeEvent('Highest temperature in Hong Kong on June 13?', 'hk', DESC_HKO),
+      makeEvent('Highest temperature in Miami on June 12?', 'mia', DESC_WU_US_URL),
     ]);
     expect(result.mismatches).toEqual([]);
-    expect(result.checked).toBe(3);
+    expect(result.checked).toBe(4);
   });
 
   it('treats NOAA timeseries vs our WU as compatible when the ICAO matches', () => {
