@@ -33,6 +33,13 @@ vi.mock('../flowAnalyzer.js', async (importOriginal) => {
   };
 });
 
+const mockGetOpenPositions = vi.fn();
+const mockGetPosition = vi.fn();
+vi.mock('../../execution/positionLedger.js', () => ({
+  getOpenPositions: (...args: unknown[]) => mockGetOpenPositions(...args),
+  getPosition: (...args: unknown[]) => mockGetPosition(...args),
+}));
+
 // Foundation from the REAL Zod schema defaults so the mock can't drift from
 // config.ts (see feedback: hand-written literals crash on new cfg.X reads).
 const { envSchema } = await vi.importActual<{ envSchema: z.AnyZodObject }>(
@@ -73,7 +80,7 @@ vi.mock('../../shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }));
 
-import { selectRebateMarkets, classifySportsEligibility } from '../marketSelector.js';
+import { selectRebateMarkets, classifySportsEligibility, buildCompletionCandidates } from '../marketSelector.js';
 import { logger } from '../../shared/logger.js';
 import type { MarketFlowStats } from '../flowAnalyzer.js';
 
@@ -618,5 +625,108 @@ describe('selectRebateMarkets — REBATE_EXCLUDE_LIVE_GAMES master switch', () =
 
     // The whole sports-timing gate is off — starting_soon passes too.
     expect(selected.map((c) => c.marketId)).toEqual(['starting-in-5min']);
+  });
+});
+
+describe('buildCompletionCandidates', () => {
+  function nakedNoPosition(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      sourcedFrom: 'rebate-farming',
+      direction: 'NO',
+      marketId: 'mkt-nl',
+      conditionId: '0xnl',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+      question: 'Will Netherlands win?',
+      entryPrice: 0.51,
+      sharesHeld: 6,
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockLoadConfig.mockReturnValue({ ...baseRebateConfig });
+    // YES book 0.46/0.48 → mid 0.47 → YES completion quote = 0.47 − edge(0.01) = 0.46.
+    mockGetClobOrderBook.mockImplementation((tokenId: string) =>
+      Promise.resolve(tokenId === 'tok-yes' ? makeBook(0.46, 0.48) : makeBook(0.50, 0.54)),
+    );
+    mockGetPosition.mockResolvedValue(null); // no held opposite by default
+    mockGetOpenPositions.mockResolvedValue([]);
+  });
+
+  it('builds a YES completion candidate for a naked NO leg on a de-selected market', async () => {
+    mockGetOpenPositions.mockResolvedValue([nakedNoPosition()]);
+
+    const out = await buildCompletionCandidates(redis, new Set<string>(), new Map());
+
+    expect(out).toHaveLength(1);
+    const c = out[0]!;
+    expect(c.marketId).toBe('mkt-nl');
+    expect(c.quotes).toHaveLength(1);
+    expect(c.quotes[0]!.direction).toBe('YES');
+    expect(c.quotes[0]!.price).toBeCloseTo(0.46, 5);
+    // combined held NO 0.51 + completion YES 0.46 = 0.97 < ceiling 0.98.
+  });
+
+  it('builds a NO completion candidate for a naked YES leg (NO-book clamp path)', async () => {
+    // Held YES @ 0.46 → completion is NO. effectiveMid = 1 − yesMid(0.47) = 0.53;
+    // NO quote = 0.53 − edge(0.01) = 0.52, clamped by the NO book ask(0.54) − tick.
+    mockGetOpenPositions.mockResolvedValue([nakedNoPosition({ direction: 'YES', entryPrice: 0.46 })]);
+
+    const out = await buildCompletionCandidates(redis, new Set<string>(), new Map());
+
+    expect(out).toHaveLength(1);
+    const c = out[0]!;
+    expect(c.quotes[0]!.direction).toBe('NO');
+    expect(c.quotes[0]!.tokenId).toBe('tok-no');
+    expect(c.quotes[0]!.price).toBeCloseTo(0.52, 5);
+    // combined held YES 0.46 + NO 0.52 = 0.98 ≤ ceiling 0.98 (1e-9 tolerance) → built.
+  });
+
+  it('skips a market already selected this cycle (the Phase-4 loop owns it)', async () => {
+    mockGetOpenPositions.mockResolvedValue([nakedNoPosition()]);
+
+    const out = await buildCompletionCandidates(redis, new Set(['mkt-nl']), new Map());
+
+    expect(out).toHaveLength(0);
+  });
+
+  it('skips when the opposite side is already held (pair already complete)', async () => {
+    mockGetOpenPositions.mockResolvedValue([nakedNoPosition()]);
+    mockGetPosition.mockResolvedValue({ direction: 'YES', sharesHeld: 6, entryPrice: 0.46 });
+
+    const out = await buildCompletionCandidates(redis, new Set<string>(), new Map());
+
+    expect(out).toHaveLength(0);
+  });
+
+  it('skips when the completion leg is already resting', async () => {
+    mockGetOpenPositions.mockResolvedValue([nakedNoPosition()]);
+    const resting = new Map<string, never>([
+      ['oid-1', { marketId: 'mkt-nl', direction: 'YES' } as never],
+    ]);
+
+    const out = await buildCompletionCandidates(redis, new Set<string>(), resting);
+
+    expect(out).toHaveLength(0);
+  });
+
+  it('skips when the completion would breach the pair-cost ceiling', async () => {
+    // Held NO @ 0.55 + YES completion 0.46 = 1.01 > ceiling 0.98 → would lock a loss.
+    mockGetOpenPositions.mockResolvedValue([nakedNoPosition({ entryPrice: 0.55 })]);
+
+    const out = await buildCompletionCandidates(redis, new Set<string>(), new Map());
+
+    expect(out).toHaveLength(0);
+  });
+
+  it('ignores non-rebate positions', async () => {
+    mockGetOpenPositions.mockResolvedValue([
+      nakedNoPosition({ sourcedFrom: 'weather:amsterdam' }),
+    ]);
+
+    const out = await buildCompletionCandidates(redis, new Set<string>(), new Map());
+
+    expect(out).toHaveLength(0);
   });
 });

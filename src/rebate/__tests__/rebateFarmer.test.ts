@@ -37,9 +37,11 @@ vi.mock('../../shared/governor.js', () => ({
 }));
 const mockSelectRebateMarkets = vi.fn();
 const mockComputeRestingTarget = vi.fn();
+const mockBuildCompletionCandidates = vi.fn();
 vi.mock('../marketSelector.js', () => ({
   selectRebateMarkets: (...args: unknown[]) => mockSelectRebateMarkets(...args),
   computeRestingTarget: (...args: unknown[]) => mockComputeRestingTarget(...args),
+  buildCompletionCandidates: (...args: unknown[]) => mockBuildCompletionCandidates(...args),
 }));
 const mockReconcileOrders = vi.fn();
 const mockLoadRestingOrders = vi.fn();
@@ -149,6 +151,7 @@ describe('rebateFarmer main()', () => {
     mockHasOpenPosition.mockResolvedValue(false);
     mockGetPosition.mockResolvedValue(null);
     mockSelectRebateMarkets.mockResolvedValue([makeCandidate()]);
+    mockBuildCompletionCandidates.mockResolvedValue([]);
     mockReserveGovernorSlots.mockResolvedValue({ ok: true, elapsedMs: Infinity, minIntervalMs: 1333 });
     mockDailySummary.mockResolvedValue(undefined);
   });
@@ -164,6 +167,46 @@ describe('rebateFarmer main()', () => {
     // The daily summary is also gated on enabled — disabled mode is
     // reconcile-only.
     expect(mockDailySummary).not.toHaveBeenCalled();
+  });
+
+  it('places a naked-leg completion under tight budget (gate uses CLOB min, not ORDER_SIZE)', async () => {
+    // remaining = maxDeploy(4) − deployed(0) = 4, which is BELOW
+    // REBATE_ORDER_SIZE_USD (5) but ≥ the CLOB minimum. The old blanket gate
+    // skipped ALL placement here (the Netherlands bug); the fix lets the
+    // affordable completion through.
+    mockGetBankroll.mockResolvedValue(10); // maxDeploy = min(10*0.4, 50) = 4
+    mockSelectRebateMarkets.mockResolvedValue([]); // no fresh candidates — isolate the completion
+    mockBuildCompletionCandidates.mockResolvedValue([
+      makeCandidate({
+        marketId: 'mkt-nl',
+        quotes: [{ direction: 'YES', tokenId: 'tok-yes', price: 0.46, bestBid: 0.46, bestAsk: 0.48 }],
+      }),
+    ]);
+    // Held NO leg present; YES not held → planner returns pair_completion for YES.
+    mockGetPosition.mockImplementation((_r: unknown, _m: unknown, dir: string) =>
+      Promise.resolve(dir === 'NO' ? { sharesHeld: 6, entryPrice: 0.51, direction: 'NO' } : null),
+    );
+    mockPlaceRestingOrder.mockResolvedValue(
+      makeOrder({ orderId: 'compl-1', direction: 'YES', tokenId: 'tok-yes', price: 0.46, size: 6, sizeUsd: 2.76 }),
+    );
+
+    await main();
+
+    expect(mockBuildCompletionCandidates).toHaveBeenCalledOnce();
+    expect(mockPlaceRestingOrder).toHaveBeenCalledTimes(1);
+    const placedQuote = (mockPlaceRestingOrder.mock.calls[0] as unknown[])[2] as { direction: string };
+    expect(placedQuote.direction).toBe('YES');
+  });
+
+  it('does not place anything when remaining is below the CLOB minimum', async () => {
+    mockGetBankroll.mockResolvedValue(1); // maxDeploy = min(1*0.4, 50) = 0.4 < CLOB min
+    mockBuildCompletionCandidates.mockResolvedValue([
+      makeCandidate({ marketId: 'mkt-nl', quotes: [{ direction: 'YES', tokenId: 'tok-yes', price: 0.46, bestBid: 0.46, bestAsk: 0.48 }] }),
+    ]);
+
+    await main();
+
+    expect(mockPlaceRestingOrder).not.toHaveBeenCalled();
   });
 
   it('P0-1/P0-2: a fresh pair reserves 2 governor slots and places both legs', async () => {
