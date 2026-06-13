@@ -2440,7 +2440,10 @@ export const envSchema = z.object({
   WEATHER_COND_ORACLE_FLIP_FAIR_VALUE_ENABLED: boolFromEnv.optional().default(false),
   // Phase C: write weather_nowcast_entry shadow rows (live execution dark until explicitly enabled).
   WEATHER_COND_ORACLE_NOWCAST_ENTRY_ENABLED: boolFromEnv.optional().default(false),
-  // Minimum edge (probability) required for a nowcast entry shadow row to be emitted.
+  // Minimum edge (probability) for a nowcast signal to set meetsEdge=true. Shadow
+  // rows are written for EVERY evaluated res-day opportunity regardless; this knob
+  // only marks which would qualify as entries. Edge is measured vs the executable
+  // CLOB ask when a resting ask exists (edgeBasis='ask'), else vs Gamma outcomePrice.
   WEATHER_COND_ORACLE_NOWCAST_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
 });
 

@@ -2249,11 +2249,19 @@ describe('runWeatherNowcastScan', () => {
       bracketLabel: '39°F or below',
       tradeSide: 'NO' as const,
       outcomePrice: 0.30,
+      clobTokenIds: ['tok-yes', 'tok-no'],
       unit: 'fahrenheit',
       isResolutionDay: true,
       sizeUpScanOnly: false,
       ...overrides,
     } as never;
+  }
+
+  function findNowcastRow() {
+    return vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[0] as string) === 'shadow_observations' &&
+             (c[1] as any).kind === 'weather_nowcast_entry',
+    );
   }
 
   beforeEach(() => {
@@ -2329,12 +2337,49 @@ describe('runWeatherNowcastScan', () => {
   it('writes a shadow_observations row for every computed result', async () => {
     const redis = makeRedis();
     await runWeatherNowcastScan(redis as any, [makeOpp()]);
-    const shadowCall = vi.mocked(enqueueWrite).mock.calls.find(
-      (c) => (c[0] as string) === 'shadow_observations' &&
-             (c[1] as any).kind === 'weather_nowcast_entry',
-    );
+    const shadowCall = findNowcastRow();
     expect(shadowCall).toBeDefined();
     expect((shadowCall![1] as any).payload.conditionalHeldProb).toBe(0.55);
+  });
+
+  it('measures edge vs the executable CLOB ask when a resting ask exists (edgeBasis=ask)', async () => {
+    // heldProb 0.55; Gamma outcomePrice 0.30 (mid edge +0.25 would inflate);
+    // real ask 0.50 → ask edge 0.05, below MIN_EDGE 0.08 → meetsEdge=false.
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [{ price: '0.50', size: '100' }] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: null, bestAsk: { price: 0.50, size: 100 } });
+    const redis = makeRedis();
+    await runWeatherNowcastScan(redis as any, [makeOpp()]);
+    // The NO-side token (index 1) is the one quoted.
+    expect(mockGetClobOrderBook).toHaveBeenCalledWith('tok-no');
+    const payload = (findNowcastRow()![1] as any).payload;
+    expect(payload.edgeBasis).toBe('ask');
+    expect(payload.bestAsk).toBe(0.50);
+    expect(payload.edgeVsAsk).toBeCloseTo(0.05, 6);
+    expect(payload.edgeVsMid).toBeCloseTo(0.25, 6);
+    expect(payload.edge).toBeCloseTo(0.05, 6);
+    expect(payload.meetsEdge).toBe(false);
+  });
+
+  it('falls back to Gamma outcomePrice when the book has no resting ask (edgeBasis=mid)', async () => {
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: null, bestAsk: null });
+    const redis = makeRedis();
+    await runWeatherNowcastScan(redis as any, [makeOpp()]);
+    const payload = (findNowcastRow()![1] as any).payload;
+    expect(payload.edgeBasis).toBe('mid');
+    expect(payload.bestAsk).toBeNull();
+    expect(payload.edgeVsAsk).toBeNull();
+    expect(payload.edge).toBeCloseTo(0.25, 6); // heldProb 0.55 − outcomePrice 0.30
+    expect(payload.meetsEdge).toBe(true);
+  });
+
+  it('still writes the row (mid basis) when the CLOB fetch throws', async () => {
+    mockGetClobOrderBook.mockRejectedValue(new Error('CLOB timeout'));
+    const redis = makeRedis();
+    await runWeatherNowcastScan(redis as any, [makeOpp()]);
+    const payload = (findNowcastRow()![1] as any).payload;
+    expect(payload.edgeBasis).toBe('mid');
+    expect(payload.edge).toBeCloseTo(0.25, 6);
   });
 });
 

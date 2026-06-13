@@ -1402,7 +1402,25 @@ export async function runWeatherNowcastScan(
         COND_ORACLE_RESULT_TTL_S,
       ).catch(() => {});
 
-      const edge = condResult.heldProb - opp.outcomePrice;
+      // Edge vs the executable CLOB ask, not just Gamma's outcomePrice (a mid/last
+      // proxy). Gamma mids overstate entry edge on thin books — the doc's Phase C
+      // gate requires realized-EV measured against asks at signal time. Fall back
+      // to outcomePrice when the book has no resting ask (edgeBasis records which).
+      let bestAsk: number | null = null;
+      const sideTokenId = (opp.tradeSide === 'YES' ? opp.clobTokenIds?.[0] : opp.clobTokenIds?.[1]) ?? null;
+      if (sideTokenId) {
+        try {
+          const book = await getClobOrderBook(sideTokenId);
+          bestAsk = book ? (getBookTouchLevels(book).bestAsk?.price ?? null) : null;
+        } catch {
+          bestAsk = null;
+        }
+      }
+
+      const edgeVsMid = condResult.heldProb - opp.outcomePrice;
+      const edgeVsAsk = bestAsk != null ? condResult.heldProb - bestAsk : null;
+      const edgeBasis: 'ask' | 'mid' = edgeVsAsk != null ? 'ask' : 'mid';
+      const edge = edgeVsAsk ?? edgeVsMid;
       const meetsEdge = !condResult.isStale && edge >= cfg.WEATHER_COND_ORACLE_NOWCAST_MIN_EDGE;
 
       void enqueueWrite('shadow_observations', {
@@ -1431,6 +1449,10 @@ export async function runWeatherNowcastScan(
           estimatorGap: condResult.estimatorGap,
           climoHeldProb: condResult.climoHeldProb,
           outcomePrice: opp.outcomePrice,
+          bestAsk,
+          edgeBasis,
+          edgeVsMid: +edgeVsMid.toFixed(4),
+          edgeVsAsk: edgeVsAsk != null ? +edgeVsAsk.toFixed(4) : null,
           edge: +edge.toFixed(4),
           minEdge: cfg.WEATHER_COND_ORACLE_NOWCAST_MIN_EDGE,
           meetsEdge,
@@ -1445,6 +1467,8 @@ export async function runWeatherNowcastScan(
           direction: opp.tradeSide,
           conditionalHeldProb: +condResult.heldProb.toFixed(3),
           outcomePrice: +opp.outcomePrice.toFixed(3),
+          bestAsk,
+          edgeBasis,
           edge: +edge.toFixed(3),
           estimator: condResult.estimator,
           liveObsConfidence: liveObs.confidence,

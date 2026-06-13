@@ -3,13 +3,22 @@
  * Build the climatological exceedance table for the conditional weather oracle.
  *
  * Usage:
- *   npx tsx scripts/build-climo-exceedance.ts \
- *     --city chicago --city london --city "hong kong" \
- *     --years 2010-2024 --out src/weather/data/climoExceedance.json
+ *   npx tsx scripts/build-climo-exceedance.ts --all --years 2010-2024   # full rebuild (preferred)
+ *   npx tsx scripts/build-climo-exceedance.ts --city chicago --city "hong kong"  # incremental merge
  *
- * Data source: Open-Meteo Historical API (ERA5 reanalysis) for each city's
- * coordinates. For covered cities where WU station data is available, prefer
- * the station-matched source. ERA5 grid-point data is tagged 'proxy' confidence.
+ * City list and coordinates are imported from src/weather/noaaClient.ts
+ * (CITY_COORDINATES) — the same table the live oracle and forecast pipeline
+ * use — so coordinate corrections propagate automatically. After any change
+ * to CITY_COORDINATES (coords moved, cities added), re-run with --all and
+ * commit the regenerated JSON; the climoTable integrity test fails until the
+ * table matches the runtime city list again.
+ *
+ * Data source: Open-Meteo Historical API (ERA5 reanalysis) at the city's
+ * runtime coordinates. NOTE: ERA5 grid data has compressed extremes vs
+ * station observations (verified 2026-06-11: Milan June 15:00 max 15-year
+ * rise reads 1.7°C) — the table understates tail rises. Acceptable for the
+ * fallback/clamp role; a station-history build (WU/ISD) is the planned
+ * replacement for cities where the fallback binds.
  *
  * Table schema:
  *   city → month (1-12) → localHour (0-23) →
@@ -31,12 +40,15 @@
 
 import { writeFileSync, existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
+import { CITY_COORDINATES, canonicalCityKey } from '../src/weather/noaaClient.js';
 
 const ARCHIVE_BASE = 'https://archive-api.open-meteo.com/v1/archive';
 const DEFAULT_OUT = resolve('src/weather/data/climoExceedance.json');
 
 interface Args {
   cities: string[];
+  /** True when --all was passed: rebuild every runtime city from scratch (no merge). */
+  all: boolean;
   yearRange: [number, number];
   outPath: string;
 }
@@ -44,6 +56,7 @@ interface Args {
 function parseArgs(): Args {
   const argv = process.argv.slice(2);
   const cities: string[] = [];
+  let all = false;
   let yearStart = 2010;
   let yearEnd = 2024;
   let outPath = DEFAULT_OUT;
@@ -51,56 +64,30 @@ function parseArgs(): Args {
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--city' && argv[i + 1]) {
       cities.push(argv[++i]!);
+    } else if (argv[i] === '--all') {
+      all = true;
     } else if (argv[i] === '--years' && argv[i + 1]) {
       const parts = argv[++i]!.split('-');
-      yearStart = parseInt(parts[0]!, 10);
-      yearEnd = parseInt(parts[1]!, 10);
+      const start = parts[0] ? parseInt(parts[0], 10) : NaN;
+      const end = parts[1] ? parseInt(parts[1], 10) : NaN;
+      if (parts.length !== 2 || !Number.isInteger(start) || !Number.isInteger(end) || start > end) {
+        console.error(`Invalid --years '${argv[i]}': expected START-END, e.g. 2010-2024`);
+        process.exit(1);
+      }
+      yearStart = start;
+      yearEnd = end;
     } else if (argv[i] === '--out' && argv[i + 1]) {
       outPath = resolve(argv[++i]!);
     }
   }
 
-  return { cities, yearRange: [yearStart, yearEnd], outPath };
+  return { cities, all, yearRange: [yearStart, yearEnd], outPath };
 }
 
-// City coordinate lookup — matches CityCoordinates in noaaClient.ts.
-const CITY_COORDS: Record<string, { lat: number; lon: number; unit: 'fahrenheit' | 'celsius'; tz: string }> = {
-  // US (Fahrenheit)
-  chicago:         { lat: 41.8781, lon: -87.6298,  unit: 'fahrenheit', tz: 'America/Chicago'       },
-  dallas:          { lat: 32.7767, lon: -96.797,   unit: 'fahrenheit', tz: 'America/Chicago'       },
-  houston:         { lat: 29.6454, lon: -95.2789,  unit: 'fahrenheit', tz: 'America/Chicago'       },
-  miami:           { lat: 25.7617, lon: -80.1918,  unit: 'fahrenheit', tz: 'America/New_York'      },
-  'new york':      { lat: 40.7128, lon: -74.006,   unit: 'fahrenheit', tz: 'America/New_York'      },
-  denver:          { lat: 39.7016, lon: -104.7516, unit: 'fahrenheit', tz: 'America/Denver'        },
-  seattle:         { lat: 47.6062, lon: -122.3321, unit: 'fahrenheit', tz: 'America/Los_Angeles'   },
-  atlanta:         { lat: 33.749,  lon: -84.388,   unit: 'fahrenheit', tz: 'America/New_York'      },
-  austin:          { lat: 30.2672, lon: -97.7431,  unit: 'fahrenheit', tz: 'America/Chicago'       },
-  'los angeles':   { lat: 34.0522, lon: -118.2437, unit: 'fahrenheit', tz: 'America/Los_Angeles'   },
-  'san francisco': { lat: 37.7749, lon: -122.4194, unit: 'fahrenheit', tz: 'America/Los_Angeles'   },
-  // International (Celsius)
-  london:          { lat: 51.5074, lon: -0.1278,   unit: 'celsius',    tz: 'Europe/London'         },
-  paris:           { lat: 48.8566, lon: 2.3522,    unit: 'celsius',    tz: 'Europe/Paris'          },
-  istanbul:        { lat: 40.9769, lon: 28.8146,   unit: 'celsius',    tz: 'Europe/Istanbul'       },
-  amsterdam:       { lat: 52.3676, lon: 4.9041,    unit: 'celsius',    tz: 'Europe/Amsterdam'      },
-  madrid:          { lat: 40.4168, lon: -3.7038,   unit: 'celsius',    tz: 'Europe/Madrid'         },
-  milan:           { lat: 45.6306, lon: 8.7281,    unit: 'celsius',    tz: 'Europe/Rome'           },
-  warsaw:          { lat: 52.2297, lon: 21.0122,   unit: 'celsius',    tz: 'Europe/Warsaw'         },
-  moscow:          { lat: 55.5915, lon: 37.2615,   unit: 'celsius',    tz: 'Europe/Moscow'         },
-  ankara:          { lat: 39.9334, lon: 32.8597,   unit: 'celsius',    tz: 'Europe/Istanbul'       },
-  'tel aviv':      { lat: 31.9965, lon: 34.8906,   unit: 'celsius',    tz: 'Asia/Jerusalem'        },
-  jeddah:          { lat: 21.4858, lon: 39.1925,   unit: 'celsius',    tz: 'Asia/Riyadh'           },
-  'hong kong':     { lat: 22.3020, lon: 114.1740,  unit: 'celsius',    tz: 'Asia/Hong_Kong'        },
-  shenzhen:        { lat: 22.5431, lon: 114.0579,  unit: 'celsius',    tz: 'Asia/Shanghai'         },
-  tokyo:           { lat: 35.5494, lon: 139.7798,  unit: 'celsius',    tz: 'Asia/Tokyo'            },
-  taipei:          { lat: 25.0777, lon: 121.2328,  unit: 'celsius',    tz: 'Asia/Taipei'           },
-  seoul:           { lat: 37.5665, lon: 126.9780,  unit: 'celsius',    tz: 'Asia/Seoul'            },
-  lucknow:         { lat: 26.8467, lon: 80.9462,   unit: 'celsius',    tz: 'Asia/Kolkata'          },
-  toronto:         { lat: 43.6532, lon: -79.3832,  unit: 'celsius',    tz: 'America/Toronto'       },
-  'mexico city':   { lat: 19.4326, lon: -99.1332,  unit: 'celsius',    tz: 'America/Mexico_City'   },
-  'panama city':   { lat: 8.9833,  lon: -79.5556,  unit: 'celsius',    tz: 'America/Panama'        },
-  'buenos aires':  { lat: -34.6037, lon: -58.3816, unit: 'celsius',    tz: 'America/Argentina/Buenos_Aires' },
-  'sao paulo':     { lat: -23.5505, lon: -46.6333, unit: 'celsius',    tz: 'America/Sao_Paulo'     },
-};
+// City list and coordinates come from the runtime table (src/weather/noaaClient.ts)
+// so coordinate corrections there propagate here automatically. Do NOT maintain
+// a separate city list in this script — a hand-synced duplicate drifted twice
+// (wrong 'hongkong' key; 25 stale coords + 17 missing cities after PR #485/#488).
 
 type MonthHourMap = Record<number, Record<number, number[]>>; // month → hour → rises[]
 
@@ -175,25 +162,32 @@ function computeExceedanceTable(rises: number[], nQuantiles = 20): Array<{ delta
 
 async function main() {
   const args = parseArgs();
-  if (args.cities.length === 0) {
-    console.log('Usage: tsx scripts/build-climo-exceedance.ts --city chicago --city london --years 2010-2024');
+  if (!args.all && args.cities.length === 0) {
+    console.log('Usage: tsx scripts/build-climo-exceedance.ts (--all | --city chicago --city "hong kong" ...) [--years 2010-2024]');
     process.exit(0);
   }
 
+  // --all: rebuild every runtime city from an empty table so the output has a
+  // single provenance (no stale-coordinate cities merged in from a prior build).
+  // --city: incremental merge into the existing file.
   let existing: Record<string, unknown> = { _meta: {}, cities: {} };
-  if (existsSync(args.outPath)) {
+  if (!args.all && existsSync(args.outPath)) {
     existing = JSON.parse(readFileSync(args.outPath, 'utf-8')) as Record<string, unknown>;
   }
 
   const cities = (existing.cities ?? {}) as Record<string, unknown>;
+  const cityProvenance = ((existing._meta as Record<string, unknown> | undefined)?.cityProvenance ?? {}) as Record<string, unknown>;
 
-  for (const city of args.cities) {
-    const coords = CITY_COORDS[city.toLowerCase()];
+  const targetCities = args.all ? Object.keys(CITY_COORDINATES) : args.cities;
+
+  for (const cityArg of targetCities) {
+    const city = canonicalCityKey(cityArg) ?? cityArg.toLowerCase();
+    const coords = CITY_COORDINATES[city];
     if (!coords) {
-      console.warn(`Unknown city: ${city}. Add to CITY_COORDS in this script.`);
+      console.warn(`Unknown city: ${cityArg}. Must exist in CITY_COORDINATES (src/weather/noaaClient.ts).`);
       continue;
     }
-    console.log(`Building climo table for ${city} (${args.yearRange[0]}–${args.yearRange[1]})...`);
+    console.log(`Building climo table for ${city} (${args.yearRange[0]}–${args.yearRange[1]}, ${coords.lat},${coords.lon})...`);
 
     const combined: MonthHourMap = {};
     for (let year = args.yearRange[0]; year <= args.yearRange[1]; year++) {
@@ -222,7 +216,17 @@ async function main() {
         cityTable[m]![h] = computeExceedanceTable(rises);
       }
     }
-    cities[city.toLowerCase()] = cityTable;
+    cities[city] = cityTable;
+    // Per-city provenance: lets the table-integrity test detect coordinate drift
+    // between this build and the runtime CITY_COORDINATES table.
+    cityProvenance[city] = {
+      lat: coords.lat,
+      lon: coords.lon,
+      unit: coords.unit,
+      source: 'open-meteo-archive-era5',
+      years: `${args.yearRange[0]}-${args.yearRange[1]}`,
+      generatedAt: new Date().toISOString(),
+    };
     console.log(`  Done: ${city}`);
   }
 
@@ -232,6 +236,7 @@ async function main() {
       schema: 'city → month (1-12) → localHour (0-23) → sorted array of { delta, exceedance }',
       generatedAt: new Date().toISOString(),
       sourceRange: `${args.yearRange[0]}-${args.yearRange[1]}`,
+      cityProvenance,
     },
     cities,
   };
