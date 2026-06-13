@@ -212,7 +212,15 @@ export function bracketWinProbFromFinalMaxes(
   return wins / finalMaxes.length;
 }
 
-/** Look up the climatological exceedance for a given city/month/localHour at a specific delta. */
+/**
+ * Look up the climatological exceedance for a given city/month/localHour at a specific delta.
+ *
+ * Deltas outside the table's range are clamped to the nearest endpoint — an
+ * approximation: below the historical minimum rise the true exceedance
+ * approaches 1.0 but the clamp returns the first entry's value; above the
+ * historical maximum it returns the last entry's (≈0). Material only for
+ * observations far outside the table's multi-year envelope.
+ */
 function climoExceedanceAt(
   table: ClimoExceedanceTable,
   city: string,
