@@ -255,6 +255,24 @@ describe('orderManager', () => {
       expect(stats.some((s) => s.field === 'lifetime_ms_total' && s.key === todayKey)).toBe(true);
     });
 
+    it('persists the order rebateShare on the recorded position (crypto 0.20 not the 0.25 default)', async () => {
+      const redis = makeRedis();
+      const order = makeOrder({ price: 0.51, size: 10, rebateShare: 0.20 }); // crypto fee market
+      redis.hgetall.mockResolvedValue({ 'order-1': JSON.stringify(order) });
+      mockGetOrder.mockResolvedValue(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { status: 'MATCHED', size_matched: '10', original_size: '10' } as any,
+      );
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await reconcileOrders(redis as any);
+
+      expect(mockRecordPosition).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ sourcedFrom: 'rebate-farming', rebateShare: 0.20 }),
+      );
+    });
+
     it('HOLDS a still-live order past the old 300s TTL — no cancel, queue priority preserved', async () => {
       // The core queue-priority fix (PR #465 analogue): an order 10 min old
       // (well past the old 300s TTL) but under the 24h backstop and not yet at

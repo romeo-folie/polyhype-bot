@@ -106,6 +106,10 @@ export interface Position {
   isContrarian?: boolean | undefined;
   /** Number of size-up top-ups added to this position (0 = never topped up). */
   topUpCount?: number | undefined;
+  /** Maker rebate share for this market's fee category (0.20 crypto / 0.25 rest),
+   *  captured at fill so a pair-completion leg built later from this position
+   *  inherits the correct share instead of defaulting to 0.25. */
+  rebateShare?: number | undefined;
 }
 
 function canonicalDirection(direction: Position['direction']): Position['direction'] {
@@ -236,6 +240,7 @@ export async function recordPosition(redis: Redis, positionIn: Position): Promis
     entryFundingApr: position.entryFundingApr !== undefined ? String(position.entryFundingApr) : '',
     isContrarian: position.isContrarian ? 'true' : '',
     topUpCount: position.topUpCount !== undefined ? String(position.topUpCount) : '0',
+    rebateShare: position.rebateShare !== undefined ? String(position.rebateShare) : '',
   });
 
   // Add to sorted index (score = openedAt ms for chronological retrieval)
@@ -552,6 +557,8 @@ function deserialisePosition(raw: Record<string, string>): Position {
   if (raw.isContrarian === 'true') pos.isContrarian = true;
   if (raw.topUpCount !== undefined && raw.topUpCount !== '')
     pos.topUpCount = parseInt(raw.topUpCount, 10);
+  if (raw.rebateShare !== undefined && raw.rebateShare !== '')
+    pos.rebateShare = parseFloat(raw.rebateShare);
 
   return pos;
 }

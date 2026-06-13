@@ -720,6 +720,23 @@ describe('buildCompletionCandidates', () => {
     expect(out).toHaveLength(0);
   });
 
+  it('inherits the held position rebateShare (crypto 0.20), not the 0.25 default', async () => {
+    mockGetOpenPositions.mockResolvedValue([nakedNoPosition({ rebateShare: 0.20 })]);
+
+    const out = await buildCompletionCandidates(redis, new Set<string>(), new Map());
+
+    expect(out).toHaveLength(1);
+    expect(out[0]!.rebateShare).toBe(0.20);
+  });
+
+  it('falls back to the default rebateShare for a legacy position without one', async () => {
+    mockGetOpenPositions.mockResolvedValue([nakedNoPosition()]); // no rebateShare field
+
+    const out = await buildCompletionCandidates(redis, new Set<string>(), new Map());
+
+    expect(out[0]!.rebateShare).toBe(0.25);
+  });
+
   it('ignores non-rebate positions', async () => {
     mockGetOpenPositions.mockResolvedValue([
       nakedNoPosition({ sourcedFrom: 'weather:amsterdam' }),

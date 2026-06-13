@@ -293,7 +293,10 @@ export async function buildCompletionCandidates(
       volume: 0,
       liquidity: 0,
       flow: COMPLETION_FLOW_STUB,
-      rebateShare: makerRebateShare(null),
+      // Inherit the held leg's fee-category share (persisted at fill) so a
+      // crypto-market completion isn't billed at the default 0.25; fall back to
+      // the default only for legacy positions recorded before that field.
+      rebateShare: pos.rebateShare ?? makerRebateShare(null),
       score: 0,
       tickSize: yesBook.tick_size,
       negRisk: yesBook.neg_risk ?? false,
