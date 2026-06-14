@@ -46,6 +46,8 @@ vi.mock('../../shared/config.js', () => ({
     SIZE_UP_ELIGIBLE_SOURCES: 'weather',
     RECONCILE_GHOST_ALERT_THRESHOLD: 5,
     RECONCILE_MIN_HEAL_SHARES: 1,
+    RECONCILE_WIPE_SUPPRESS_ALERT_RUNS: 3,
+    RECONCILE_WIPE_SUPPRESS_TTL_S: 21_600,
   })),
 }));
 
@@ -79,6 +81,7 @@ describe('Position Reconciliation Healer', () => {
       set: vi.fn().mockResolvedValue('OK'),
       hset: vi.fn().mockResolvedValue(1),
       incr: vi.fn().mockResolvedValue(1),
+      expire: vi.fn().mockResolvedValue(1),
       sismember: vi.fn().mockResolvedValue(0),
       exists: vi.fn().mockResolvedValue(0),
     } as unknown as Redis;
@@ -159,8 +162,70 @@ describe('Position Reconciliation Healer', () => {
     // Ledger preserved: NOT healed down, and NOT ghost-closed.
     expect(positionLedger.updatePositionShares).not.toHaveBeenCalled();
     expect(positionLedger.closePosition).not.toHaveBeenCalled();
-    // Operator alerted for manual review.
+    // A SINGLE suppression (incr→1, below the alert threshold) stays quiet — no
+    // page — because a one-off is almost always a transient venue read.
+    expect(telegram.notify).not.toHaveBeenCalledWith(
+      expect.stringContaining('wipe-to-dust'),
+    );
+  });
+
+  it('escalates (pages once) when a wipe-to-dust suppression PERSISTS past the alert threshold', async () => {
+    // Same suppression, but the streak counter has reached the alert threshold
+    // (3) — a genuinely stale ledger row vs a real on-chain ~0 balance — so the
+    // operator is paged exactly once on the crossing.
+    const livePosition = {
+      marketId: 'mkt-dust',
+      conditionId: 'cond-dust',
+      direction: 'NO',
+      executionVenue: 'clob',
+      stakeUsd: 4.99,
+      entryPrice: 0.55,
+      sharesHeld: 9.08,
+      clobTokenIds: ['tok-dust-yes', 'tok-dust-no'],
+    };
+    const clobPositions = [
+      { conditionId: 'cond-dust', asset: 'tok-dust-no', size: 0.0089, avgPrice: 0.55 },
+    ];
+    (positionLedger.getOpenPositions as any).mockResolvedValue([livePosition]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
+    (mockRedis.incr as any).mockResolvedValue(3); // streak hit the threshold
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Still preserved, but now paged for manual review.
+    expect(positionLedger.updatePositionShares).not.toHaveBeenCalled();
+    expect(positionLedger.closePosition).not.toHaveBeenCalled();
     expect(telegram.notify).toHaveBeenCalledWith(
+      expect.stringContaining('wipe-to-dust'),
+    );
+  });
+
+  it('does NOT re-page after the escalation threshold has already been crossed', async () => {
+    // Past the threshold (incr→4): the operator was already paged at the
+    // crossing, so further cycles stay quiet (debug-only) to avoid per-cycle spam.
+    const livePosition = {
+      marketId: 'mkt-dust',
+      conditionId: 'cond-dust',
+      direction: 'NO',
+      executionVenue: 'clob',
+      stakeUsd: 4.99,
+      entryPrice: 0.55,
+      sharesHeld: 9.08,
+      clobTokenIds: ['tok-dust-yes', 'tok-dust-no'],
+    };
+    const clobPositions = [
+      { conditionId: 'cond-dust', asset: 'tok-dust-no', size: 0.0089, avgPrice: 0.55 },
+    ];
+    (positionLedger.getOpenPositions as any).mockResolvedValue([livePosition]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
+    (mockRedis.incr as any).mockResolvedValue(4); // already past the threshold
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Still preserved, but NO page (already alerted once on the crossing).
+    expect(positionLedger.updatePositionShares).not.toHaveBeenCalled();
+    expect(positionLedger.closePosition).not.toHaveBeenCalled();
+    expect(telegram.notify).not.toHaveBeenCalledWith(
       expect.stringContaining('wipe-to-dust'),
     );
   });

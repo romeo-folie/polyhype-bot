@@ -240,23 +240,55 @@ export async function runReconciliation(
             venueShares < minHealShares &&
             ledgerShares >= minHealShares
           ) {
-            logger.error('[reconcile] suppressing wipe-to-dust heal — suspected false-zero venue read', {
+            // Streak-aware alerting. A single suppression is almost always a
+            // transient venue read, so it stays debug-only; only a divergence
+            // that PERSISTS RECONCILE_WIPE_SUPPRESS_ALERT_RUNS consecutive cycles
+            // (a genuinely stale ledger row vs a real on-chain ~0 balance)
+            // escalates to error + page, and only once on the crossing so it
+            // doesn't spam every cycle thereafter. The counter's TTL resets the
+            // streak once suppressions stop.
+            const suppressKey = `reconcile:wipe_suppress:${ledgerPos.marketId}:${ledgerPos.direction}`;
+            let suppressRuns = 1;
+            try {
+              suppressRuns = await redis.incr(suppressKey);
+            } catch {
+              // Redis hiccup on INCR → treat as a first (quiet) run rather than
+              // escalating spuriously.
+              suppressRuns = 1;
+            }
+            // Refresh the TTL independently so an INCR-ok/EXPIRE-fail does not
+            // (a) reset the escalation decision or (b) leave the counter without
+            // a reset window inheriting a stale streak — it's best-effort.
+            try {
+              await redis.expire(suppressKey, cfg.RECONCILE_WIPE_SUPPRESS_TTL_S);
+            } catch {
+              logger.debug('[reconcile] could not refresh wipe-suppress TTL', { suppressKey });
+            }
+            const suppressCtx = {
               marketId: ledgerPos.marketId,
               direction: ledgerPos.direction,
               venue: venueName,
               ledgerShares: ledgerShares.toFixed(4),
               venueShares: venueShares.toFixed(4),
               minHealShares,
-            });
-            // Only page in fix mode — match every other outward side-effect in
-            // this pass (ghost closes, heals, imports are all forceFix-gated).
-            if (forceFix) {
-              void notify(
-                `⚠️ Reconcile suppressed a wipe-to-dust heal — manual check\n` +
-                  `Market: ${ledgerPos.marketId} ${ledgerPos.direction}\n` +
-                  `Ledger ${ledgerShares.toFixed(2)} sh → venue read ${venueShares.toFixed(4)} sh (below ${minHealShares})\n` +
-                  `Ledger preserved; verify on-chain balance.`,
-              ).catch(() => {});
+              consecutiveRuns: suppressRuns,
+              alertRuns: cfg.RECONCILE_WIPE_SUPPRESS_ALERT_RUNS,
+            };
+            if (suppressRuns === cfg.RECONCILE_WIPE_SUPPRESS_ALERT_RUNS) {
+              logger.error('[reconcile] PERSISTENT wipe-to-dust suppression — manual check', suppressCtx);
+              // Only page in fix mode — match every other outward side-effect in
+              // this pass (ghost closes, heals, imports are all forceFix-gated).
+              if (forceFix) {
+                void notify(
+                  `⚠️ Reconcile suppressed a wipe-to-dust heal ${suppressRuns}× (persistent) — manual check\n` +
+                    `Market: ${ledgerPos.marketId} ${ledgerPos.direction}\n` +
+                    `Ledger ${ledgerShares.toFixed(2)} sh → venue read ${venueShares.toFixed(4)} sh (below ${minHealShares})\n` +
+                    `Ledger preserved; verify on-chain balance.`,
+                ).catch(() => {});
+              }
+            } else {
+              // One-off (below threshold) or post-escalation repeat — stay quiet.
+              logger.debug('[reconcile] wipe-to-dust heal suppressed (transient/quiet)', suppressCtx);
             }
             details.push({
               type: 'skipped',
