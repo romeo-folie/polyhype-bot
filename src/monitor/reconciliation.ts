@@ -225,6 +225,51 @@ export async function runReconciliation(
           });
           continue;
         }
+          // False-zero guard: a venue read that wipes a still-meaningful ledger
+          // position down to dust is almost always a transient/partial read, not
+          // a real exit (a real full exit reads true-zero and is handled by the
+          // ghost path with its own conclusive-read guard). Healing down to dust
+          // destroys the recorded stake, so the position's eventual win/loss is
+          // booked as ≈$0 (observed 2026-06-13: a 9.08-share weather winner healed
+          // to 0.0089 sh → its +$4 win recorded as +$0.00). Suppress the heal,
+          // preserve the ledger, and alert. Partial down-heals to a still-
+          // meaningful size and upward (size-up) heals are unaffected.
+          const minHealShares = cfg.RECONCILE_MIN_HEAL_SHARES;
+          if (
+            venueShares < ledgerShares &&
+            venueShares < minHealShares &&
+            ledgerShares >= minHealShares
+          ) {
+            logger.error('[reconcile] suppressing wipe-to-dust heal — suspected false-zero venue read', {
+              marketId: ledgerPos.marketId,
+              direction: ledgerPos.direction,
+              venue: venueName,
+              ledgerShares: ledgerShares.toFixed(4),
+              venueShares: venueShares.toFixed(4),
+              minHealShares,
+            });
+            // Only page in fix mode — match every other outward side-effect in
+            // this pass (ghost closes, heals, imports are all forceFix-gated).
+            if (forceFix) {
+              void notify(
+                `⚠️ Reconcile suppressed a wipe-to-dust heal — manual check\n` +
+                  `Market: ${ledgerPos.marketId} ${ledgerPos.direction}\n` +
+                  `Ledger ${ledgerShares.toFixed(2)} sh → venue read ${venueShares.toFixed(4)} sh (below ${minHealShares})\n` +
+                  `Ledger preserved; verify on-chain balance.`,
+              ).catch(() => {});
+            }
+            details.push({
+              type: 'skipped',
+              marketId: ledgerPos.marketId,
+              direction: ledgerPos.direction,
+              venue: venueName,
+              ledgerShares,
+              venueShares,
+              reason: `wipe-to-dust heal suppressed (venue ${venueShares.toFixed(4)} < ${minHealShares}) — suspected false-zero read`,
+            });
+            continue;
+          }
+
           logger.info('[reconcile] mismatch detected — healing shares (preserving entryPrice)', {
           marketId: ledgerPos.marketId,
           direction: ledgerPos.direction,

@@ -45,6 +45,7 @@ vi.mock('../../shared/config.js', () => ({
     SIZE_UP_ENABLED: true,
     SIZE_UP_ELIGIBLE_SOURCES: 'weather',
     RECONCILE_GHOST_ALERT_THRESHOLD: 5,
+    RECONCILE_MIN_HEAL_SHARES: 1,
   })),
 }));
 
@@ -126,6 +127,74 @@ describe('Position Reconciliation Healer', () => {
       200,
       expect.stringContaining('healed_mismatch'),
       80,
+    );
+  });
+
+  it('does NOT heal a live position down to dust on a suspected false-zero venue read', async () => {
+    // Regression for 2026-06-13: a 9.08-share weather winner had its on-venue
+    // balance momentarily read as 0.0089 sh; the reconciler healed the ledger
+    // down to dust, so when it resolved a winner the +$4 was booked as +$0.00.
+    // A wipe-to-dust heal of a still-meaningful position must be suppressed.
+    const livePosition = {
+      marketId: 'mkt-dust',
+      conditionId: 'cond-dust',
+      direction: 'NO',
+      executionVenue: 'clob',
+      stakeUsd: 4.99,
+      entryPrice: 0.55,
+      sharesHeld: 9.08,
+      clobTokenIds: ['tok-dust-yes', 'tok-dust-no'],
+    };
+
+    // Venue snapshot reports dust for the NO token (index 1) — a transient read.
+    const clobPositions = [
+      { conditionId: 'cond-dust', asset: 'tok-dust-no', size: 0.0089, avgPrice: 0.55 },
+    ];
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([livePosition]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Ledger preserved: NOT healed down, and NOT ghost-closed.
+    expect(positionLedger.updatePositionShares).not.toHaveBeenCalled();
+    expect(positionLedger.closePosition).not.toHaveBeenCalled();
+    // Operator alerted for manual review.
+    expect(telegram.notify).toHaveBeenCalledWith(
+      expect.stringContaining('wipe-to-dust'),
+    );
+  });
+
+  it('still heals a downward mismatch when the venue read stays above the dust floor', async () => {
+    // Guard must not block legitimate partial-exit reconciliation: 9.08 → 4.5 is
+    // a real (still-meaningful) size, so the heal proceeds with recomputed stake.
+    const partialPosition = {
+      marketId: 'mkt-partial',
+      conditionId: 'cond-partial',
+      direction: 'NO',
+      executionVenue: 'clob',
+      stakeUsd: 4.99,
+      entryPrice: 0.50,
+      sharesHeld: 9.08,
+      clobTokenIds: ['tok-partial-yes', 'tok-partial-no'],
+    };
+    const clobPositions = [
+      { conditionId: 'cond-partial', asset: 'tok-partial-no', size: 4.5, avgPrice: 0.50 },
+    ];
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([partialPosition]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    // Heals to 4.5 shares, stake = 4.5 * 0.50 = 2.25.
+    expect(positionLedger.updatePositionShares).toHaveBeenCalledWith(
+      mockRedis,
+      'mkt-partial',
+      'NO',
+      4.5,
+      expect.stringContaining('healed_mismatch'),
+      2.25,
     );
   });
 
