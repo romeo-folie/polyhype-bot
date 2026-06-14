@@ -296,6 +296,7 @@ function makePos(overrides: Record<string, unknown> = {}) {
 function makeForecast(overrides: Record<string, unknown> = {}) {
   return {
     forecastHigh: 55,
+    metric: 'high' as const,
     stdDev: 5,
     source: 'combined' as const,
     ensembleMembers: 50,
@@ -685,6 +686,7 @@ describe('runWeatherDriftStrategy', () => {
     mockLoadConfig.mockReturnValue(makeConfig());
     mockFetchWeatherEvents.mockResolvedValue([{}]);
     mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
       city: 'chicago',
       targetDate: '2026-06-01',
       coords: { tz: 'America/Chicago' },
@@ -722,6 +724,7 @@ describe('runWeatherDriftStrategy', () => {
     mockSql.mockResolvedValue([makePos()]);
     // parseWeatherEvent returns an event for a different city
     mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
       city: 'miami',
       targetDate: '2026-06-01',
       coords: { tz: 'America/New_York' },
@@ -795,6 +798,7 @@ describe('runWeatherDriftStrategy', () => {
     // Interior bracket [28, 28] with forecastHigh=28.2 → rounds to 28 → forecastInBracket=true
     // direction=NO → modalInversionRaw=true → modal_against
     mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
       city: 'hong kong',
       targetDate: '2026-06-01',
       coords: { tz: 'Asia/Hong_Kong' },
@@ -839,6 +843,7 @@ describe('runWeatherDriftStrategy', () => {
     // reconciled:weather rows have no embedded city/date/bracket in sourcedFrom;
     // parseWeatherPositionMeta falls back to parseWeatherMetaFromQuestion.
     mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
       city: 'chicago',
       targetDate: '2026-06-01',
       coords: { tz: 'America/Chicago' },
@@ -884,6 +889,7 @@ describe('runWeatherDriftStrategy', () => {
     // Tail bracket, mockComputeBiasedProb returns forecastHigh=28 for a NO position
     // Even if the NO position's held-prob drops, tail must not emit modal_against
     mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
       city: 'chicago',
       targetDate: '2026-06-01',
       coords: { tz: 'America/Chicago' },
@@ -910,6 +916,7 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
   function setupThesisWeakenedPosition() {
     mockFetchWeatherEvents.mockResolvedValue([{}]);
     mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
       city: 'chicago',
       targetDate: '2026-06-01',
       coords: { tz: 'America/Chicago' },
@@ -923,6 +930,7 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
   function setupModalAgainstPosition(redis: ReturnType<typeof makeRedis>) {
     mockFetchWeatherEvents.mockResolvedValue([{}]);
     mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
       city: 'hong kong',
       targetDate: '2026-06-01',
       coords: { tz: 'Asia/Hong_Kong' },
@@ -2001,6 +2009,7 @@ describe('runWeatherDriftStrategy — conditional oracle (Phases A-C)', () => {
   function setupCondOraclePosition() {
     mockFetchWeatherEvents.mockResolvedValue([{}]);
     mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
       city: 'chicago',
       targetDate: '2026-06-01',
       coords: { tz: 'America/Chicago' },
@@ -2449,6 +2458,7 @@ describe('runWeatherDriftStrategy — M2: settlement_aligned gate', () => {
     mockCityLocalDate.mockReturnValue('2026-06-01');
     mockFetchWeatherEvents.mockResolvedValue([{}]);
     mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
       city: 'chicago', targetDate: '2026-06-01',
       coords: { tz: 'America/Chicago' },
       brackets: [{ label: '39°F or below', low: null, high: 39, marketId: 'mkt-1' }],
@@ -2516,6 +2526,7 @@ describe('runWeatherDriftStrategy — M3: hold guard vetoes forecast-state exits
   function setupForecastExitPosition() {
     mockFetchWeatherEvents.mockResolvedValue([{}]);
     mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
       city: 'chicago', targetDate: '2026-06-01',
       coords: { tz: 'America/Chicago' },
       brackets: [{ label: '39°F or below', low: null, high: 39, marketId: 'mkt-1' }],
@@ -2610,6 +2621,7 @@ describe('runWeatherDriftStrategy — Phase B soft-exit: oracle_likely_against t
     mockCityLocalDate.mockReturnValue('2026-06-01');
     mockFetchWeatherEvents.mockResolvedValue([{}]);
     mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
       city: 'chicago', targetDate: '2026-06-01',
       coords: { tz: 'America/Chicago' },
       brackets: [{ label: '39°F or below', low: null, high: 39, marketId: 'mkt-1' }],
@@ -2698,6 +2710,7 @@ describe('runWeatherDriftStrategy — M4: ensemble fetch memo deduplication', ()
     mockCityLocalDate.mockReturnValue('2026-06-01');
     mockFetchWeatherEvents.mockResolvedValue([{}]);
     mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
       city: 'chicago', targetDate: '2026-06-01',
       coords: { tz: 'America/Chicago' },
       brackets: [

@@ -20,7 +20,7 @@
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 import { lookupCity } from './noaaClient.js';
-import { fetchWuHistoricalHigh } from './wuClient.js';
+import { fetchWuHistoricalExtreme } from './wuClient.js';
 
 const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -32,8 +32,12 @@ export type LiveObsConfidence = 'settlement_aligned' | 'proxy' | 'none';
 export interface WeatherLiveObservation {
   city: string;
   targetDate: string;
-  /** Intraday running maximum temperature in city's native unit. null when unavailable. */
+  /** Intraday running extreme temperature in the city's native unit, null when
+   *  unavailable. For metric='high' this is the running daily MAX; for
+   *  metric='low' it is the running daily MIN. */
   observedMax: number | null;
+  /** Which daily extreme observedMax tracks — drives the oracle direction. */
+  metric: 'high' | 'low';
   source: LiveObsSource;
   /** Settlement-aligned: same source as the final reconciler; proxy: different source or intraday proxy. */
   confidence: LiveObsConfidence;
@@ -45,14 +49,21 @@ export interface WeatherLiveObservation {
 
 const LIVE_OBS_CACHE_PREFIX = 'weather:live_obs:';
 
+// The cache key includes the metric so a city's highest- and lowest-temperature
+// observations (running max vs running min for the same city/date) never collide.
+function liveObsCacheKey(metric: 'high' | 'low', city: string, targetDate: string): string {
+  return `${LIVE_OBS_CACHE_PREFIX}${metric}:${city}:${targetDate}`;
+}
+
 async function readCachedObs(
   redis: Redis,
+  metric: 'high' | 'low',
   city: string,
   targetDate: string,
   maxAgeMin: number,
 ): Promise<WeatherLiveObservation | null> {
   try {
-    const raw = await redis.get(`${LIVE_OBS_CACHE_PREFIX}${city}:${targetDate}`);
+    const raw = await redis.get(liveObsCacheKey(metric, city, targetDate));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as WeatherLiveObservation & { cachedAt: string };
     const ageMs = Date.now() - new Date(parsed.cachedAt).getTime();
@@ -70,7 +81,7 @@ async function writeCachedObs(
 ): Promise<void> {
   try {
     const value = JSON.stringify({ ...obs, cachedAt: new Date().toISOString() });
-    await redis.set(`${LIVE_OBS_CACHE_PREFIX}${obs.city}:${obs.targetDate}`, value, 'EX', ttlS);
+    await redis.set(liveObsCacheKey(obs.metric, obs.city, obs.targetDate), value, 'EX', ttlS);
   } catch {
     // Cache write is best-effort.
   }
@@ -79,29 +90,32 @@ async function writeCachedObs(
 // ── WU live ───────────────────────────────────────────────────────────────────
 
 /**
- * Fetch the intraday running maximum from Weather Underground.
+ * Fetch the intraday running extreme from Weather Underground.
  * Uses the same historical endpoint with today's date — WU returns all hourly
- * observations up to now, so max(obs.temp) is the intraday high so far.
+ * observations up to now, so max(obs.temp) is the intraday high so far and
+ * min(obs.temp) the intraday low so far (metric='low').
  */
-async function fetchWuIntradayHigh(
+async function fetchWuIntradayExtreme(
   icao: string,
   isoCountry: string,
   targetDate: string,
   unit: 'fahrenheit' | 'celsius',
   redis: Redis,
+  metric: 'high' | 'low',
   fetchFn?: typeof fetch,
 ): Promise<{ observedMax: number | null; observedAt: string | null }> {
-  const max = await fetchWuHistoricalHigh(
+  const extreme = await fetchWuHistoricalExtreme(
     icao,
     isoCountry,
     targetDate,
     unit,
     redis,
+    metric,
     fetchFn,
   );
   // WU historical endpoint does not return per-observation timestamps in the
-  // max computation path, so observedAt is approximated as the fetch time.
-  return { observedMax: max, observedAt: max != null ? new Date().toISOString() : null };
+  // extreme computation path, so observedAt is approximated as the fetch time.
+  return { observedMax: extreme, observedAt: extreme != null ? new Date().toISOString() : null };
 }
 
 // ── METAR live ────────────────────────────────────────────────────────────────
@@ -120,13 +134,15 @@ interface MetarObservation {
 }
 
 /**
- * Fetch the intraday maximum temperature from hourly METAR observations.
+ * Fetch the intraday extreme temperature from hourly METAR observations.
  * Requests the last 48 hours and filters to observations on targetDate (UTC).
+ * metric='low' reduces with min() to give the intraday running low.
  */
-export async function fetchMetarIntradayHigh(
+export async function fetchMetarIntradayExtreme(
   icao: string,
   targetDate: string,
   fetchFn: typeof fetch = fetch,
+  metric: 'high' | 'low' = 'high',
 ): Promise<{ observedMax: number | null; observedAt: string | null }> {
   const url = `${METAR_BASE}?ids=${icao}&hours=48&format=json`;
 
@@ -165,7 +181,8 @@ export async function fetchMetarIntradayHigh(
 
   if (dayObs.length === 0) return { observedMax: null, observedAt: null };
 
-  const maxTemp = Math.max(...dayObs.map((o) => o.temp as number));
+  const temps = dayObs.map((o) => o.temp as number);
+  const extreme = metric === 'low' ? Math.min(...temps) : Math.max(...temps);
   // Use the latest reportTime from today's observations as the observedAt stamp.
   const latestReport = dayObs
     .map((o) => o.reportTime)
@@ -174,20 +191,36 @@ export async function fetchMetarIntradayHigh(
     .at(-1) ?? null;
   const observedAt = latestReport ? new Date(latestReport + 'Z').toISOString() : new Date().toISOString();
 
-  logger.debug('[weather-live-obs] METAR intraday high', {
+  logger.debug('[weather-live-obs] METAR intraday extreme', {
     icao,
     targetDate,
-    maxTemp,
+    metric,
+    extreme,
     obsCount: dayObs.length,
   });
-  return { observedMax: maxTemp, observedAt };
+  return { observedMax: extreme, observedAt };
+}
+
+/**
+ * Fetch the intraday running MAXIMUM from METAR. Thin wrapper preserving the
+ * original signature for callers/tests.
+ */
+export function fetchMetarIntradayHigh(
+  icao: string,
+  targetDate: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<{ observedMax: number | null; observedAt: string | null }> {
+  return fetchMetarIntradayExtreme(icao, targetDate, fetchFn, 'high');
 }
 
 // ── HKO live ──────────────────────────────────────────────────────────────────
 
-// Redis key for accumulating the HKO intraday running max.
-// Keyed by date so it resets each calendar day. TTL = 36h for overlap safety.
+// Redis keys for accumulating the HKO intraday running extreme.
+// Keyed by date so they reset each calendar day. TTL = 36h for overlap safety.
+// Separate keys per metric so the running max and running min never overwrite
+// each other when a city has both a highest- and a lowest-temperature market.
 const HKO_INTRADAY_MAX_PREFIX = 'weather:hko_intraday_max:';
+const HKO_INTRADAY_MIN_PREFIX = 'weather:hko_intraday_min:';
 const HKO_INTRADAY_MAX_TTL_S = 36 * 3600;
 const HKO_RHRREAD_URL =
   'https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en';
@@ -209,18 +242,21 @@ interface HkoRhrreadPayload {
 /**
  * Fetch the current temperature at the Hong Kong Observatory station from the
  * HKO rhrread API, then update and return the Redis-accumulated intraday running
- * maximum for targetDate.
+ * extreme for targetDate.
  *
  * The rhrread endpoint provides the most recent observation at HKO. Because the
- * daily maximum can only increase, accumulating it in Redis is equivalent to
- * computing max(all observations today).
+ * daily maximum can only increase (and the daily minimum can only decrease),
+ * accumulating it in Redis is equivalent to computing max/min over all
+ * observations today. metric='low' tracks the running minimum.
  */
-export async function fetchHkoIntradayHigh(
+export async function fetchHkoIntradayExtreme(
   targetDate: string,
   redis: Redis,
+  metric: 'high' | 'low' = 'high',
   fetchFn: typeof fetch = fetch,
 ): Promise<{ observedMax: number | null; observedAt: string | null }> {
-  const maxKey = `${HKO_INTRADAY_MAX_PREFIX}${targetDate}`;
+  const accKey =
+    `${metric === 'low' ? HKO_INTRADAY_MIN_PREFIX : HKO_INTRADAY_MAX_PREFIX}${targetDate}`;
 
   let currentReading: number | null = null;
   let observedAt: string | null = null;
@@ -276,16 +312,22 @@ export async function fetchHkoIntradayHigh(
     });
   }
 
-  // Update the Redis running max if the new reading is higher.
+  // Update the Redis running extreme if the new reading is more extreme.
+  // For 'high' a higher reading wins; for 'low' a lower reading wins.
   if (currentReading != null) {
     try {
-      const storedRaw = await redis.get(maxKey);
-      const storedMax = storedRaw != null ? parseFloat(storedRaw) : -Infinity;
-      if (!isFinite(storedMax) || currentReading > storedMax) {
-        await redis.set(maxKey, String(currentReading), 'EX', HKO_INTRADAY_MAX_TTL_S);
-        logger.debug('[weather-live-obs] HKO intraday max updated', {
+      const storedRaw = await redis.get(accKey);
+      const seed = metric === 'low' ? Infinity : -Infinity;
+      const stored = storedRaw != null ? parseFloat(storedRaw) : seed;
+      const isMoreExtreme = metric === 'low'
+        ? currentReading < stored
+        : currentReading > stored;
+      if (!isFinite(stored) || isMoreExtreme) {
+        await redis.set(accKey, String(currentReading), 'EX', HKO_INTRADAY_MAX_TTL_S);
+        logger.debug('[weather-live-obs] HKO intraday extreme updated', {
           targetDate,
-          previous: isFinite(storedMax) ? storedMax : null,
+          metric,
+          previous: isFinite(stored) ? stored : null,
           current: currentReading,
         });
       }
@@ -294,13 +336,13 @@ export async function fetchHkoIntradayHigh(
     }
   }
 
-  // Return the running max from Redis (may be from an earlier observation today).
+  // Return the running extreme from Redis (may be from an earlier observation today).
   try {
-    const storedRaw = await redis.get(maxKey);
+    const storedRaw = await redis.get(accKey);
     if (storedRaw != null) {
-      const runningMax = parseFloat(storedRaw);
-      if (isFinite(runningMax)) {
-        return { observedMax: runningMax, observedAt: observedAt ?? new Date().toISOString() };
+      const running = parseFloat(storedRaw);
+      if (isFinite(running)) {
+        return { observedMax: running, observedAt: observedAt ?? new Date().toISOString() };
       }
     }
   } catch {
@@ -310,56 +352,100 @@ export async function fetchHkoIntradayHigh(
   return { observedMax: currentReading, observedAt };
 }
 
+/**
+ * Fetch the HKO intraday running MAXIMUM. Thin wrapper preserving the original
+ * signature for callers/tests.
+ */
+export function fetchHkoIntradayHigh(
+  targetDate: string,
+  redis: Redis,
+  fetchFn: typeof fetch = fetch,
+): Promise<{ observedMax: number | null; observedAt: string | null }> {
+  return fetchHkoIntradayExtreme(targetDate, redis, 'high', fetchFn);
+}
+
 // ── Oracle state classification ───────────────────────────────────────────────
 
 /**
- * Classify the oracle implication of a live observed maximum for an open position.
+ * Classify the oracle implication of a live observed daily extreme for an open
+ * position. The intraday running value is monotone in one direction:
+ *   metric='high' → running daily MAX, only increases.
+ *   metric='low'  → running daily MIN, only decreases.
  *
- * Rules (daily max only increases intraday):
+ * `observed` is that running extreme. The conclusions are point-reflections of
+ * each other across the two metrics.
  *
- * Interior bracket [low, high] (both integers, rounding window [low-0.5, high+0.5)):
- *   observedMax > high + 0.5 → high exceeded, rounds ≥ high+1 → YES impossible, NO confirmed
+ * metric='high' (max only increases):
+ *   Interior [low,high]: observed > high+0.5 → rounds ≥ high+1 → YES impossible, NO confirmed.
+ *   High-tail "low or higher": observed ≥ low-0.5 → reached tail → YES confirmed, NO impossible.
+ *   Low-tail "high or below": observed > high+0.5 → above ceiling → YES impossible, NO confirmed.
  *
- * High-tail bracket (low set, high = null; means "low or higher"):
- *   observedMax ≥ low - 0.5 → already rounds into the tail → YES confirmed, NO impossible
+ * metric='low' (min only decreases):
+ *   Interior [low,high]: observed < low-0.5 → rounds ≤ low-1 → YES impossible, NO confirmed.
+ *   High-tail "low or higher": observed < low-0.5 → dropped below floor → YES impossible, NO confirmed.
+ *   Low-tail "high or below": observed < high+0.5 → reached ceiling → YES confirmed, NO impossible.
  *
- * Low-tail bracket (high set, low = null; means "high or below"):
- *   observedMax > high + 0.5 → already rounds above the tail ceiling → YES impossible, NO confirmed
- *
- * Returns null when the observation is inconclusive (observedMax is within range or
- * below the threshold for high-tail — the day could still end anywhere).
+ * Returns null when the observation is inconclusive — the running extreme is
+ * still in a region the day could resolve either way from.
  */
 export function classifyOracleState(
-  observedMax: number,
+  observed: number,
   direction: 'YES' | 'NO',
   bracket: { low: number | null; high: number | null },
+  metric: 'high' | 'low' = 'high',
 ): 'oracle_impossible' | 'oracle_confirmed' | null {
   const { low, high } = bracket;
   const isTail = low === null || high === null;
 
+  if (metric === 'low') {
+    // Daily minimum can only fall further intraday.
+    if (!isTail) {
+      // Interior: YES impossible once the running min drops below the bracket floor.
+      if (observed < low! - 0.5) {
+        return direction === 'YES' ? 'oracle_impossible' : 'oracle_confirmed';
+      }
+      return null;
+    }
+    if (low === null) {
+      // Low-tail "high or below": YES means final min ≤ high (rounds < high+0.5).
+      // Once the running min is already there, it can only go lower → YES confirmed.
+      if (observed < high! + 0.5) {
+        return direction === 'YES' ? 'oracle_confirmed' : 'oracle_impossible';
+      }
+      return null;
+    }
+    // High-tail "low or higher": YES means final min ≥ low (rounds ≥ low-0.5).
+    // Once the running min has dropped below low-0.5 it can never recover → YES impossible.
+    if (observed < low - 0.5) {
+      return direction === 'YES' ? 'oracle_impossible' : 'oracle_confirmed';
+    }
+    return null;
+  }
+
+  // metric === 'high': daily maximum can only rise further intraday.
   if (!isTail) {
     // Interior bracket: YES is impossible once the running max has exceeded the
     // bracket's upper rounding boundary (the day can only get hotter).
-    if (observedMax > high! + 0.5) {
+    if (observed > high! + 0.5) {
       return direction === 'YES' ? 'oracle_impossible' : 'oracle_confirmed';
     }
-    // If observedMax is still within or below the bracket, we can't conclude
+    // If observed is still within or below the bracket, we can't conclude
     // anything yet — the day may not be over.
     return null;
   }
 
   if (low === null) {
     // Low-tail: "high or below" — YES means final max ≤ high; rounds < high + 0.5.
-    // If observedMax already > high + 0.5, the final max will round ≥ high+1, so YES is impossible.
-    if (observedMax > high! + 0.5) {
+    // If observed already > high + 0.5, the final max will round ≥ high+1, so YES is impossible.
+    if (observed > high! + 0.5) {
       return direction === 'YES' ? 'oracle_impossible' : 'oracle_confirmed';
     }
     return null;
   }
 
   // High-tail: "low or higher" — YES means final max ≥ low; rounds ≥ low - 0.5.
-  // If observedMax already ≥ low - 0.5, the running max has reached the tail, so YES is confirmed.
-  if (observedMax >= low - 0.5) {
+  // If observed already ≥ low - 0.5, the running max has reached the tail, so YES is confirmed.
+  if (observed >= low - 0.5) {
     return direction === 'YES' ? 'oracle_confirmed' : 'oracle_impossible';
   }
   return null;
@@ -386,13 +472,17 @@ export async function fetchLiveObservation(
     metarEnabled: boolean;
     hkoEnabled: boolean;
     maxAgeMin: number;
+    /** Which daily extreme to track. Defaults to 'high'. */
+    metric?: 'high' | 'low';
     fetchFn?: FetchFn;
   },
 ): Promise<WeatherLiveObservation> {
+  const metric = opts.metric ?? 'high';
   const none: WeatherLiveObservation = {
     city,
     targetDate,
     observedMax: null,
+    metric,
     source: 'none',
     confidence: 'none',
     observedAt: null,
@@ -402,7 +492,7 @@ export async function fetchLiveObservation(
   if (!coords) return none;
 
   // Check cache first.
-  const cached = await readCachedObs(redis, city, targetDate, opts.maxAgeMin);
+  const cached = await readCachedObs(redis, metric, city, targetDate, opts.maxAgeMin);
   if (cached) return cached;
 
   const { resolutionSource, wuStation, isoCountry, unit } = coords;
@@ -411,48 +501,53 @@ export async function fetchLiveObservation(
   let result: WeatherLiveObservation;
 
   if (resolutionSource === 'hko' && opts.hkoEnabled) {
-    const { observedMax, observedAt } = await fetchHkoIntradayHigh(targetDate, redis, fetchFn);
+    const { observedMax, observedAt } = await fetchHkoIntradayExtreme(targetDate, redis, metric, fetchFn);
     result = {
       city,
       targetDate,
       observedMax,
+      metric,
       source: 'hko-live',
       // HKO rhrread is the official observatory reading — same station as the
       // final dailyExtract settlement source, so intraday readings are settlement_aligned
-      // when they support an irreversible oracle conclusion (max only goes up).
+      // when they support an irreversible oracle conclusion (max only up / min only down).
       confidence: observedMax != null ? 'settlement_aligned' : 'none',
       observedAt,
     };
   } else if (resolutionSource === 'wu' && opts.wuEnabled) {
-    const { observedMax, observedAt } = await fetchWuIntradayHigh(
+    const { observedMax, observedAt } = await fetchWuIntradayExtreme(
       wuStation,
       isoCountry ?? '',
       targetDate,
       unit,
       redis,
+      metric,
       fetchFn,
     );
     result = {
       city,
       targetDate,
       observedMax,
+      metric,
       source: 'wu-live',
       // WU intraday returns the same hourly observations the final daily extract
-      // is derived from, so intraday max is settlement_aligned for irreversible
-      // oracle conclusions (the running max will only increase).
+      // is derived from, so intraday extreme is settlement_aligned for irreversible
+      // oracle conclusions (running max only increases / running min only decreases).
       confidence: observedMax != null ? 'settlement_aligned' : 'none',
       observedAt,
     };
   } else if (resolutionSource === 'metar' && opts.metarEnabled) {
-    const { observedMax, observedAt } = await fetchMetarIntradayHigh(
+    const { observedMax, observedAt } = await fetchMetarIntradayExtreme(
       wuStation,
       targetDate,
       fetchFn,
+      metric,
     );
     result = {
       city,
       targetDate,
       observedMax,
+      metric,
       source: 'metar-live',
       // METAR hourly observations are a proxy — no city currently uses METAR as
       // its primary resolution source, so this is always 'proxy' until verified.

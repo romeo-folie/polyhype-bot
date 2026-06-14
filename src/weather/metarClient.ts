@@ -58,7 +58,8 @@ function reportTimeToLocalDate(
 }
 
 /**
- * Fetch the daily maximum temperature from the METAR record for an ICAO station.
+ * Fetch the daily extreme temperature (max or min) from the METAR record for an
+ * ICAO station.
  *
  * When `tz` is provided, observations are grouped by the station's LOCAL
  * calendar date — Polymarket settles on the station's local day, so a UTC
@@ -66,13 +67,17 @@ function reportTimeToLocalDate(
  * hours of the next one (3h misalignment for Istanbul, UTC+3). Without `tz`
  * the legacy UTC grouping applies.
  *
+ * `metric='low'` returns `min(temps)` — the resolution value for "Lowest
+ * temperature" markets — over the same set of hourly observations.
+ *
  * Returns null if the date is outside the effective ~8–9 day window or data is unavailable.
  */
-export async function fetchMetarDailyHigh(
+export async function fetchMetarDailyExtreme(
   icao: string,
   date: string, // YYYY-MM-DD, in the station's local calendar when tz is given
   fetchFn: FetchFn = fetch,
   tz?: string, // IANA timezone of the station, e.g. 'Europe/Istanbul'
+  metric: 'high' | 'low' = 'high',
 ): Promise<number | null> {
   const url = `${METAR_BASE}?ids=${icao}&hours=${MAX_HOURS}&format=json`;
 
@@ -132,7 +137,34 @@ export async function fetchMetarDailyHigh(
     return null;
   }
 
-  const maxTemp = Math.max(...dayObs.map((o) => o.temp!));
-  logger.debug('[weather-metar] daily high fetched', { icao, date, maxTemp, obsCount: dayObs.length });
-  return maxTemp;
+  const temps = dayObs.map((o) => o.temp!);
+  const extreme = metric === 'low' ? Math.min(...temps) : Math.max(...temps);
+  logger.debug('[weather-metar] daily extreme fetched', { icao, date, metric, extreme, obsCount: dayObs.length });
+  return extreme;
+}
+
+/**
+ * Fetch the daily MAXIMUM temperature from METAR. Thin wrapper over
+ * {@link fetchMetarDailyExtreme} preserving the original call signature.
+ */
+export function fetchMetarDailyHigh(
+  icao: string,
+  date: string,
+  fetchFn: FetchFn = fetch,
+  tz?: string,
+): Promise<number | null> {
+  return fetchMetarDailyExtreme(icao, date, fetchFn, tz, 'high');
+}
+
+/**
+ * Fetch the daily MINIMUM temperature from METAR — the resolution value for
+ * "Lowest temperature in [city]" markets.
+ */
+export function fetchMetarDailyLow(
+  icao: string,
+  date: string,
+  fetchFn: FetchFn = fetch,
+  tz?: string,
+): Promise<number | null> {
+  return fetchMetarDailyExtreme(icao, date, fetchFn, tz, 'low');
 }

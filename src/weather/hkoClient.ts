@@ -10,8 +10,10 @@
  *   Current month: https://www.weather.gov.hk/cis/dailyExtract/dailyExtract_YYYYMM.xml
  *   Past months:   https://www.weather.gov.hk/cis/dailyExtract/dailyExtract_YYYY.xml
  *
- * Response is JSON despite the .xml extension. Column index 2 of each dayData
- * row is the absolute daily maximum temperature.
+ * Response is JSON despite the .xml extension. Each dayData row carries (by
+ * column index): [0] day, [1] mean pressure, [2] absolute daily MAX temp,
+ * [3] mean temp, [4] absolute daily MIN temp, ... So row[2] resolves
+ * "Highest temperature" markets and row[4] resolves "Lowest temperature" ones.
  *
  * No auth, no rate limit documented. Data lag: ~1 day.
  *
@@ -40,12 +42,18 @@ interface HkoPayload {
   stn: { data: HkoMonthBlock[] };
 }
 
+/** dayData column index of the absolute daily extreme for each metric. */
+const HKO_COL = { high: 2, low: 4 } as const;
+
 /**
- * Fetch the absolute daily maximum temperature from HKO for a given date.
- * Returns null if the date is not yet available (< 1-day lag) or data is missing.
+ * Fetch the absolute daily extreme temperature (max or min) from HKO for a given
+ * date. Returns null if the date is not yet available (< 1-day lag) or data is
+ * missing. `metric='low'` reads the daily-minimum column (row[4]) used to
+ * resolve "Lowest temperature" markets.
  */
-export async function fetchHkoDailyHigh(
+export async function fetchHkoDailyExtreme(
   date: string, // YYYY-MM-DD
+  metric: 'high' | 'low' = 'high',
   fetchFn: FetchFn = fetch,
 ): Promise<number | null> {
   const parts = date.split('-');
@@ -97,14 +105,37 @@ export async function fetchHkoDailyHigh(
     (r) => r[0] === dayPadded || r[0] === String(day),
   );
 
-  if (!row || !row[2]) {
-    logger.debug('[weather-hko] day row not found', { date });
+  const col = HKO_COL[metric];
+  if (!row || !row[col]) {
+    logger.debug('[weather-hko] day row not found', { date, metric });
     return null;
   }
 
-  const temp = parseFloat(row[2]);
+  const temp = parseFloat(row[col]);
   if (!Number.isFinite(temp)) return null;
 
-  logger.debug('[weather-hko] daily high fetched', { date, temp });
+  logger.debug('[weather-hko] daily extreme fetched', { date, metric, temp });
   return temp;
+}
+
+/**
+ * Fetch the absolute daily MAXIMUM temperature from HKO. Thin wrapper over
+ * {@link fetchHkoDailyExtreme} preserving the original call signature.
+ */
+export function fetchHkoDailyHigh(
+  date: string,
+  fetchFn: FetchFn = fetch,
+): Promise<number | null> {
+  return fetchHkoDailyExtreme(date, 'high', fetchFn);
+}
+
+/**
+ * Fetch the absolute daily MINIMUM temperature from HKO — the resolution value
+ * for "Lowest temperature in Hong Kong" markets.
+ */
+export function fetchHkoDailyLow(
+  date: string,
+  fetchFn: FetchFn = fetch,
+): Promise<number | null> {
+  return fetchHkoDailyExtreme(date, 'low', fetchFn);
 }

@@ -59,6 +59,7 @@ import type { ContradictionClass } from './liveObservation.js';
 import {
   conditionalHeldProbability,
   loadClimoTable,
+  loadClimoFallTable,
 } from './conditionalOracle.js';
 import type { ConditionalOracleResult } from './conditionalOracle.js';
 import { fetchEnsembleHourly } from './openMeteoClient.js';
@@ -257,9 +258,16 @@ export const COND_ORACLE_RESULT_KEY_PREFIX = 'weather:cond_oracle:';
 // (isStale frozen at compute time).
 const COND_ORACLE_RESULT_TTL_S = 2100;
 
-// Climo table loaded once per process (file reads are cheap; content rarely changes).
+// Climo tables loaded once per process (file reads are cheap; content rarely
+// changes). The rise table serves highest-temperature markets; the fall table
+// serves lowest-temperature markets (P(runningMin − finalMin > delta)).
 let _climoTable: ReturnType<typeof loadClimoTable> | undefined;
-function getClimoTable() {
+let _climoFallTable: ReturnType<typeof loadClimoFallTable> | undefined;
+function getClimoTable(metric: 'high' | 'low' = 'high') {
+  if (metric === 'low') {
+    if (_climoFallTable === undefined) _climoFallTable = loadClimoFallTable();
+    return _climoFallTable;
+  }
   if (_climoTable === undefined) _climoTable = loadClimoTable();
   return _climoTable;
 }
@@ -282,8 +290,15 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
   }
   if (positions.length === 0) return;
 
-  const rawEvents = await fetchWeatherEvents(cfg.WEATHER_MAX_EVENTS);
-  const parsedEvents = rawEvents
+  const lowestTempActive =
+    cfg.WEATHER_LOWEST_TEMP_ENABLED || cfg.WEATHER_LOWEST_TEMP_SHADOW_ENABLED;
+  const [rawHighEvents, rawLowEvents] = await Promise.all([
+    fetchWeatherEvents(cfg.WEATHER_MAX_EVENTS, 0, 'highest-temperature'),
+    lowestTempActive
+      ? fetchWeatherEvents(cfg.WEATHER_MAX_EVENTS, 0, 'lowest-temperature')
+      : Promise.resolve([]),
+  ]);
+  const parsedEvents = [...rawHighEvents, ...rawLowEvents]
     .map(parseWeatherEvent)
     .filter((e): e is NonNullable<typeof e> => e !== null);
 
@@ -307,9 +322,11 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         });
         continue;
       }
-      const { city, targetDate, bracketLabel } = meta;
+      const { city, targetDate, bracketLabel, metric } = meta;
 
-      const event = parsedEvents.find((e) => e.city === city && e.targetDate === targetDate);
+      const event = parsedEvents.find(
+        (e) => e.city === city && e.targetDate === targetDate && e.metric === metric,
+      );
       if (!event) {
         logger.debug('[weather-drift] no active Gamma event — skipping', {
           positionId: pos.id,
@@ -357,7 +374,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       if (forecast) {
         void cacheForecast(redis, city, targetDate, forecast).catch(() => {});
       } else {
-        forecast = await readCachedForecast(redis, city, targetDate).catch(() => null);
+        forecast = await readCachedForecast(redis, city, targetDate, metric).catch(() => null);
         if (!forecast) {
           logger.debug('[weather-drift] forecast unavailable — skipping', {
             positionId: pos.id,
@@ -369,7 +386,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       }
 
       const cityBias = cfg.WEATHER_BIAS_CORRECTION_ENABLED
-        ? await getCityBias(redis, city)
+        ? await getCityBias(redis, city, metric)
         : null;
 
       const result = evaluateWeatherPositionThesis({
@@ -539,6 +556,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           metarEnabled: cfg.WEATHER_DRIFT_METAR_LIVE_ENABLED,
           hkoEnabled: cfg.WEATHER_DRIFT_HKO_LIVE_ENABLED,
           maxAgeMin: cfg.WEATHER_DRIFT_LIVE_OBS_MAX_AGE_MIN,
+          metric,
           ...(fetchFn != null && { fetchFn: fetchFn as typeof fetch }),
         }).catch((err: unknown) => {
           logger.warn('[weather-drift] live observation fetch failed', {
@@ -555,6 +573,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             liveObs.observedMax,
             pos.direction,
             { low: bracket.low, high: bracket.high },
+            metric,
           );
 
           // Shadow-log the live observation for every position with a viable source.
@@ -687,10 +706,11 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             direction: pos.direction,
             bracket: { low: bracket.low, high: bracket.high },
             observedMax: liveObs.observedMax,
+            metric,
             observedAt: liveObs.observedAt,
             tz: event.coords.tz,
             remainingHourlyMembers,
-            climoTable: cfg.WEATHER_COND_ORACLE_CLIMO_FALLBACK_ENABLED ? getClimoTable() : null,
+            climoTable: cfg.WEATHER_COND_ORACLE_CLIMO_FALLBACK_ENABLED ? getClimoTable(metric) : null,
             biasCorrection: cityBias?.meanBias ?? 0,
             spreadInflation: cfg.WEATHER_COND_ORACLE_SPREAD_INFLATION,
             minMembers: cfg.WEATHER_COND_ORACLE_MIN_MEMBERS,
@@ -1321,8 +1341,6 @@ export async function runWeatherNowcastScan(
   const resDayOpps = opportunities.filter((o) => o.isResolutionDay === true && !o.sizeUpScanOnly);
   if (resDayOpps.length === 0) return;
 
-  const climoTable = getClimoTable();
-
   // Memo-ised ensemble hourly per (city, targetDate) — multiple brackets for the same
   // event would otherwise each trigger an identical GFS fetch.
   const ensembleHourlyMemo = new Map<string, import('./openMeteoClient.js').EnsembleHourlyForecast | null>();
@@ -1340,6 +1358,7 @@ export async function runWeatherNowcastScan(
         metarEnabled: cfg.WEATHER_DRIFT_METAR_LIVE_ENABLED,
         hkoEnabled: cfg.WEATHER_DRIFT_HKO_LIVE_ENABLED,
         maxAgeMin: cfg.WEATHER_COND_ORACLE_MAX_OBS_AGE_MIN,
+        metric: opp.metric,
         ...(fetchFn != null && { fetchFn: fetchFn as typeof fetch }),
       }).catch((): null => null);
 
@@ -1357,7 +1376,7 @@ export async function runWeatherNowcastScan(
         ensembleHourlyMemo.set(nowcastMemoKey, ensembleHourly);
       }
 
-      const bias = await getCityBias(redis, opp.city).catch((): null => null);
+      const bias = await getCityBias(redis, opp.city, opp.metric).catch((): null => null);
 
       const remainingMembers = ensembleHourly
         ? sliceToRemainingHours(ensembleHourly, liveObs.observedAt)
@@ -1368,10 +1387,11 @@ export async function runWeatherNowcastScan(
         direction: opp.tradeSide,
         bracket: { low: bracket.low, high: bracket.high },
         observedMax: liveObs.observedMax,
+        metric: opp.metric,
         observedAt: liveObs.observedAt,
         tz: cityCoords.tz,
         remainingHourlyMembers: remainingMembers,
-        climoTable,
+        climoTable: getClimoTable(opp.metric),
         biasCorrection: bias?.meanBias ?? 0,
         spreadInflation: cfg.WEATHER_COND_ORACLE_SPREAD_INFLATION,
         minMembers: cfg.WEATHER_COND_ORACLE_MIN_MEMBERS,

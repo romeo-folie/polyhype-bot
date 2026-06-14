@@ -27,7 +27,8 @@ import type { TradeSignal } from '../mapping/index.js';
 interface GroundTruthRow {
   city: string;
   targetDate: string;
-  actualHigh: number;
+  actualHigh: number | null;
+  actualLow: number | null;
   unit: string;
 }
 
@@ -38,33 +39,37 @@ async function fetchYesterdayGroundTruth(): Promise<GroundTruthRow[]> {
       city                                          AS city,
       target_date::text                             AS "targetDate",
       COALESCE(resolution_high, observed_high)::float8 AS "actualHigh",
+      COALESCE(resolution_low, observed_low)::float8   AS "actualLow",
       unit
     FROM weather_ground_truth
     WHERE target_date = CURRENT_DATE - 1
-      AND (resolution_high IS NOT NULL OR observed_high IS NOT NULL)
+      AND (resolution_high IS NOT NULL OR observed_high IS NOT NULL
+        OR resolution_low IS NOT NULL OR observed_low IS NOT NULL)
     ORDER BY city ASC
   `;
 }
 
 /**
- * Determine whether YES or NO wins for a bracket given the actual observed high.
- * Returns 'YES', 'NO', or null when the bracket type is unrecognised.
+ * Determine whether YES or NO wins for a bracket given the actual observed daily
+ * extreme (the max for highest-temperature markets, the min for lowest). The
+ * bracket comparison is identical regardless of metric — only which observed
+ * value the caller passes differs. Returns 'YES' or 'NO'.
  */
 export function winningDirection(
-  actualHigh: number,
+  actual: number,
   low: number | null,
   high: number | null,
 ): 'YES' | 'NO' {
   if (high === null) {
-    // High-tail: "X°F or higher" — YES wins when actual >= low
-    return actualHigh >= low! ? 'YES' : 'NO';
+    // High-tail: "X° or higher" — YES wins when actual >= low
+    return actual >= low! ? 'YES' : 'NO';
   }
   if (low === null) {
-    // Low-tail: "X°F or below" — YES wins when actual <= high
-    return actualHigh <= high ? 'YES' : 'NO';
+    // Low-tail: "X° or below" — YES wins when actual <= high
+    return actual <= high ? 'YES' : 'NO';
   }
   // Interior bracket: YES wins when low <= actual <= high
-  return actualHigh >= low && actualHigh <= high ? 'YES' : 'NO';
+  return actual >= low && actual <= high ? 'YES' : 'NO';
 }
 
 /** Run one oracle scan cycle. */
@@ -93,7 +98,16 @@ export async function runWeatherOracleScan(redis: Redis): Promise<void> {
     truthByCity.set(key, row);
   }
 
-  const rawEvents = await fetchWeatherEvents(200);
+  // Include lowest-temperature events when that feature is active in either mode.
+  const lowestTempActive =
+    cfg.WEATHER_LOWEST_TEMP_ENABLED || cfg.WEATHER_LOWEST_TEMP_SHADOW_ENABLED;
+  const [rawHighEvents, rawLowEvents] = await Promise.all([
+    fetchWeatherEvents(200, 0, 'highest-temperature'),
+    lowestTempActive
+      ? fetchWeatherEvents(200, 0, 'lowest-temperature')
+      : Promise.resolve([]),
+  ]);
+  const rawEvents = [...rawHighEvents, ...rawLowEvents];
   if (rawEvents.length === 0) {
     logger.debug('[weather-oracle] no active weather events from Gamma');
     return;
@@ -123,11 +137,19 @@ export async function runWeatherOracleScan(redis: Redis): Promise<void> {
       continue;
     }
 
-    const actualHigh = truth.actualHigh;
+    // Pick the observed extreme matching the event metric. Skip when that extreme
+    // wasn't reconciled (e.g. a historical row with only the high populated).
+    const actual = event.metric === 'low' ? truth.actualLow : truth.actualHigh;
+    if (actual == null || !Number.isFinite(actual)) continue;
+
+    // The oracle strategy runs under WEATHER_ORACLE_ENABLED; lowest-temp events
+    // additionally require the lowest-temp feature to be live before trading.
+    const featureLive =
+      cfg.WEATHER_ORACLE_ENABLED && (event.metric === 'low' ? cfg.WEATHER_LOWEST_TEMP_ENABLED : true);
 
     for (const bracket of event.brackets) {
       try {
-        const direction = winningDirection(actualHigh, bracket.low, bracket.high);
+        const direction = winningDirection(actual, bracket.low, bracket.high);
         // winning token: YES = index 0, NO = index 1
         const winningTokenId = direction === 'YES'
           ? bracket.clobTokenIds[0]
@@ -164,15 +186,16 @@ export async function runWeatherOracleScan(redis: Redis): Promise<void> {
         logger.info('[weather-oracle] bracket opportunity', {
           city: event.city,
           targetDate: event.targetDate,
+          metric: event.metric,
           bracket: bracket.label,
-          actualHigh,
+          actual,
           direction,
           winningAsk,
           discount: discount.toFixed(4),
           meetsPrice,
           meetsDiscount,
           wouldTrade,
-          enabled: cfg.WEATHER_ORACLE_ENABLED,
+          enabled: featureLive,
         });
 
         void enqueueWrite('shadow_observations', {
@@ -180,14 +203,15 @@ export async function runWeatherOracleScan(redis: Redis): Promise<void> {
           source: 'arb',
           marketId: bracket.marketId,
           direction,
-          wouldBlock: !wouldTrade || !cfg.WEATHER_ORACLE_ENABLED,
+          wouldBlock: !wouldTrade || !featureLive,
           metricValue: winningAsk,
           threshold: cfg.WEATHER_ORACLE_MAX_BUY_PRICE,
           payload: {
             city: event.city,
             targetDate: event.targetDate,
+            metric: event.metric,
             bracket: bracket.label,
-            actualHigh,
+            actual,
             direction,
             winningAsk,
             discount,
@@ -195,11 +219,11 @@ export async function runWeatherOracleScan(redis: Redis): Promise<void> {
             meetsDiscount,
             maxBuyPrice: cfg.WEATHER_ORACLE_MAX_BUY_PRICE,
             minDiscount: cfg.WEATHER_ORACLE_MIN_DISCOUNT,
-            enabled: cfg.WEATHER_ORACLE_ENABLED,
+            enabled: featureLive,
           },
         });
 
-        if (!wouldTrade || !cfg.WEATHER_ORACLE_ENABLED) continue;
+        if (!wouldTrade || !featureLive) continue;
 
         // Lazy-load bankroll once per scan cycle, only when we have tradable signals
         if (bankrollUsd === null) {
@@ -222,8 +246,10 @@ export async function runWeatherOracleScan(redis: Redis): Promise<void> {
           outcomePrice: winningAsk,
           question: bracket.question,
           source: 'weather',
-          sourcedFrom: `weather-oracle:${event.city}:${event.targetDate}:${bracket.label}`,
-          reasoning: `Known outcome: actual_high=${actualHigh.toFixed(1)} ${event.unit}; bracket "${bracket.label}" resolves ${direction}; winningAsk=${winningAsk.toFixed(3)}`,
+          sourcedFrom: event.metric === 'low'
+            ? `weather-oracle:low:${event.city}:${event.targetDate}:${bracket.label}`
+            : `weather-oracle:${event.city}:${event.targetDate}:${bracket.label}`,
+          reasoning: `Known outcome: actual_${event.metric}=${actual.toFixed(1)} ${event.unit}; bracket "${bracket.label}" resolves ${direction}; winningAsk=${winningAsk.toFixed(3)}`,
           // Oracle signals always target a resolved (yesterday's) market — treat as
           // resolution-day so the executor applies WEATHER_MAX_ENTRY_PRICE, not the
           // stricter WEATHER_EARLY_ENTRY_MAX_PRICE reserved for pre-res-day entries.

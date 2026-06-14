@@ -223,9 +223,18 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
 
   if (positions.length === 0) return;
 
-  // Fetch active events once and parse — reused across all positions.
-  const rawEvents = await fetchWeatherEvents(cfg.WEATHER_MAX_EVENTS);
-  const parsedEvents = rawEvents
+  // Fetch active events once and parse — reused across all positions. Include
+  // lowest-temperature events when that feature is active so held low positions
+  // can find their Gamma event.
+  const lowestTempActive =
+    cfg.WEATHER_LOWEST_TEMP_ENABLED || cfg.WEATHER_LOWEST_TEMP_SHADOW_ENABLED;
+  const [rawHighEvents, rawLowEvents] = await Promise.all([
+    fetchWeatherEvents(cfg.WEATHER_MAX_EVENTS, 0, 'highest-temperature'),
+    lowestTempActive
+      ? fetchWeatherEvents(cfg.WEATHER_MAX_EVENTS, 0, 'lowest-temperature')
+      : Promise.resolve([]),
+  ]);
+  const parsedEvents = [...rawHighEvents, ...rawLowEvents]
     .map(parseWeatherEvent)
     .filter((e): e is NonNullable<typeof e> => e !== null);
 
@@ -240,14 +249,19 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
         continue;
       }
 
-      const { city, targetDate, bracketLabel } = parsed;
+      const { city, targetDate, bracketLabel, metric } = parsed;
 
-      const event = parsedEvents.find((e) => e.city === city && e.targetDate === targetDate);
+      // Match on metric too: a city runs both a highest- and lowest-temperature
+      // event on the same day, so city+date alone is ambiguous.
+      const event = parsedEvents.find(
+        (e) => e.city === city && e.targetDate === targetDate && e.metric === metric,
+      );
       if (!event) {
         logger.debug('[weather-invalidation] no active Gamma event found — skipping', {
           positionId: pos.id,
           city,
           targetDate,
+          metric,
         });
         continue;
       }
@@ -331,7 +345,7 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
         // Last resort: the most recent successful forecast (≤ cache TTL old).
         // On a 30-min monitoring cadence a slightly stale forecast beats a
         // blind skip (2026-06-04 outage blinded the whole sweep).
-        forecast = await readCachedForecast(redis, city, targetDate).catch(() => null);
+        forecast = await readCachedForecast(redis, city, targetDate, metric).catch(() => null);
         if (!forecast) {
           logger.debug('[weather-invalidation] forecast unavailable and no cache — skipping', {
             positionId: pos.id,
@@ -349,7 +363,7 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
       }
 
       const cityBias = cfg.WEATHER_BIAS_CORRECTION_ENABLED
-        ? await getCityBias(redis, city)
+        ? await getCityBias(redis, city, metric)
         : null;
 
       const thesisResult = evaluateWeatherPositionThesis({
