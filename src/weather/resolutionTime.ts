@@ -98,8 +98,9 @@ interface ParsedWeatherMarket {
  * Shared by the target-date and end-date helpers below. Returns null when the
  * question cannot be parsed or the city is unrecognised.
  *
- * `rawEndDate` (Gamma's endDate) seeds year inference when the question omits a
- * year, avoiding a January/December boundary bug.
+ * `rawEndDate` (Gamma's endDate, or the digest's closed_at) anchors year
+ * inference when the question omits a year, avoiding a January/December boundary
+ * bug.
  */
 function parseWeatherCityDate(question: string, rawEndDate?: string): ParsedWeatherMarket | null {
   // Extract city: "highest temperature in <city> <verb>"
@@ -115,13 +116,34 @@ function parseWeatherCityDate(question: string, rawEndDate?: string): ParsedWeat
   const dateMatch = question.match(/\bon (\w+ \d{1,2}(?:st|nd|rd|th)?(?:,?\s*\d{4})?)\??/i);
   if (!dateMatch) return null;
   const rawDate = dateMatch[1]!.replace(/(\d+)(?:st|nd|rd|th)\b/g, '$1').trim();
-  // If no year in the string, derive it from the Gamma endDate when available
-  // (avoids a year-boundary bug when called in January for a December market).
-  const fallbackYear = rawEndDate
-    ? new Date(rawEndDate).getFullYear()
-    : new Date().getFullYear();
-  const withYear = /\d{4}/.test(rawDate) ? rawDate : `${rawDate} ${fallbackYear}`;
-  const parsed = new Date(withYear);
+
+  let parsed: Date;
+  if (/\d{4}/.test(rawDate)) {
+    parsed = new Date(rawDate);
+  } else {
+    // Year omitted. A weather market resolves at city-local midnight just AFTER
+    // its target date, so the anchor (endDate / closed_at) is within ~36h of the
+    // target. Pick the year whose Month-Day lands CLOSEST to the anchor rather
+    // than blindly reusing the anchor's year — the latter shifts a "December 31"
+    // market that redeems on January 1 into the wrong year (Dec 31 of the new
+    // year), which then fails the digest's weather-day match and hides the row.
+    const rawMs = rawEndDate ? new Date(rawEndDate).getTime() : Date.now();
+    const anchorMs = isFinite(rawMs) ? rawMs : Date.now();
+    const anchorYear = new Date(anchorMs).getUTCFullYear();
+    let best: Date | null = null;
+    for (const y of [anchorYear - 1, anchorYear, anchorYear + 1]) {
+      const cand = new Date(`${rawDate} ${y}`);
+      if (isNaN(cand.getTime())) continue;
+      if (
+        !best ||
+        Math.abs(cand.getTime() - anchorMs) < Math.abs(best.getTime() - anchorMs)
+      ) {
+        best = cand;
+      }
+    }
+    if (!best) return null;
+    parsed = best;
+  }
   if (isNaN(parsed.getTime())) return null;
   return { city, tz: coords.tz, targetDate: parsed.toISOString().slice(0, 10) };
 }
