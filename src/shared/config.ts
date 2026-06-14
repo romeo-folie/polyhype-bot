@@ -807,6 +807,19 @@ export const envSchema = z.object({
    * unaffected; the guard only blocks a wipe-to-dust and alerts for manual review.
    */
   RECONCILE_MIN_HEAL_SHARES: z.coerce.number().min(0).optional().default(1),
+  /**
+   * Wipe-to-dust suppression is logged/paged only once it PERSISTS this many
+   * consecutive reconcile cycles. A single suppression is almost always a
+   * transient venue read and not worth an alert — only a divergence that
+   * survives N cycles (a genuinely stale ledger row vs a real on-chain ~0
+   * balance) escalates to error + page; before that it stays debug-only, and
+   * after the one escalation it goes quiet again to avoid per-cycle spam.
+   */
+  RECONCILE_WIPE_SUPPRESS_ALERT_RUNS: z.coerce.number().int().min(1).optional().default(3),
+  /** TTL (s) on the per-(market,direction) suppression-streak counter. If no
+   *  suppression recurs within this window the streak resets, so a fresh
+   *  transient starts the count over rather than inheriting a stale streak. */
+  RECONCILE_WIPE_SUPPRESS_TTL_S: z.coerce.number().int().min(60).optional().default(21_600),
   /** Post-exit sweep: after a partial fill, resell the residual up to N times. */
   RESIDUAL_SWEEP_ENABLED: boolFromEnv.optional().default(true),
   RESIDUAL_SWEEP_MAX_ATTEMPTS: z.coerce.number().int().min(0).max(5).optional().default(2),
