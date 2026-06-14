@@ -63,6 +63,7 @@ export async function handlePositions(sql: Sql, payloads: unknown[]): Promise<vo
       entry_funding_apr:                  d.entryFundingApr ?? null,
       is_contrarian:                      d.isContrarian ?? null,
       top_up_count:                       d.topUpCount ?? 0,
+      rebate_share:                       d.rebateShare ?? null,
       consensus_probability:              d.consensusProbability ?? null,
       consensus_stddev:                   d.consensusStddev ?? null,
       question:                           d.question,
@@ -84,7 +85,7 @@ export async function handlePositions(sql: Sql, payloads: unknown[]): Promise<vo
       'mapping_confidence', 'relevance_class', 'edge_class', 'sizing_reason',
       'is_futures', 'symbol', 'leverage', 'entry_atr', 'entry_atr_pct',
       'meme_atr_sl_pct', 'meme_atr_tp_pct', 'price_zone', 'entry_funding_apr', 'is_contrarian',
-      'top_up_count',
+      'top_up_count', 'rebate_share',
       'consensus_probability', 'consensus_stddev', 'question', 'sourced_from',
       'updated_at', 'raw'
     )}

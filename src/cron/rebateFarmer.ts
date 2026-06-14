@@ -41,7 +41,8 @@ import { logger } from '../shared/logger.js';
 import { getBankroll } from '../shared/bankroll.js';
 import { hasOpenPosition, getPosition } from '../execution/positionLedger.js';
 import { reserveGovernorSlots } from '../shared/governor.js';
-import { selectRebateMarkets, computeRestingTarget } from '../rebate/marketSelector.js';
+import { selectRebateMarkets, computeRestingTarget, buildCompletionCandidates } from '../rebate/marketSelector.js';
+import { CLOB_MIN_ORDER_USD } from '../shared/clob.js';
 import { planPairAction } from '../rebate/pairPlanner.js';
 import type { PairPlan, PlannedLeg } from '../rebate/pairPlanner.js';
 import {
@@ -168,12 +169,31 @@ export async function main(): Promise<void> {
       }
     }
 
-    if (remaining < cfg.REBATE_ORDER_SIZE_USD) {
+    // Budget gate. A completion only needs the CLOB minimum, not a full
+    // REBATE_ORDER_SIZE_USD — gate on the exchange floor so an affordable
+    // pair-completion is never blocked just because a full fresh leg won't fit
+    // (observed: a $3 Netherlands completion skipped under $3.84 remaining).
+    // Fresh pairs self-gate inside the planner via remainingBudget.
+    if (remaining < CLOB_MIN_ORDER_USD) {
       logger.info('[rebate] budget exhausted', {
         maxDeploy: maxDeploy.toFixed(2),
         currentlyDeployed: currentlyDeployed.toFixed(2),
+        remaining: remaining.toFixed(2),
       });
     } else {
+      // Phase 3.6: Complete HELD naked legs on DE-SELECTED markets. When one leg
+      // of a pair filled but its market then fell out of the top-N (flow faded
+      // as the game nears resolution), the Phase-4 loop never re-plans the
+      // missing side — the leg sits naked to resolution (observed: Netherlands
+      // 1897061). Rebuild a single-quote completion candidate for each such leg
+      // and PREPEND it, so completions (risk-reducing) are placed before fresh
+      // pairs (risk-opening) when budget is tight.
+      if (cfg.REBATE_COMPLETE_NAKED_LEGS_ENABLED) {
+        const selectedIds = new Set(candidates.map((c) => c.marketId));
+        const completions = await buildCompletionCandidates(redis, selectedIds, orders);
+        if (completions.length > 0) candidates.unshift(...completions);
+      }
+
       if (candidates.length === 0) {
         logger.info('[rebate] no eligible markets found');
       }

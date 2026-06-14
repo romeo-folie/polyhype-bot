@@ -574,6 +574,10 @@ async function recordFilledOrder(
     executionVenue: 'clob',
     entryOrderType: 'maker',
     entryExecutionPath: 'rebate_maker_fill',
+    // Preserve the market's fee-category share so a later pair-completion leg
+    // built from this position inherits the correct rebate share (0.20 crypto /
+    // 0.25 rest) instead of defaulting to 0.25 and overstating est_rebate_usd.
+    ...(order.rebateShare !== undefined && { rebateShare: order.rebateShare }),
   });
 }
 

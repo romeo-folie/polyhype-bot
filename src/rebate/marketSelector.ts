@@ -38,7 +38,8 @@ import {
   parseOutcomePrices,
   parseClobTokenIds,
 } from '../mapping/gamma.js';
-import { fetchRecentMarketFlow, makerRebateShare } from './flowAnalyzer.js';
+import { fetchRecentMarketFlow, makerRebateShare, type MarketFlowStats } from './flowAnalyzer.js';
+import { getOpenPositions, getPosition } from '../execution/positionLedger.js';
 import type { RebateMarketCandidate, RebateQuote, RestingOrder } from './types.js';
 
 /** Max markets to fetch books + trade tape for per cycle (rate limit guard).
@@ -186,6 +187,133 @@ export async function computeRestingTarget(order: RestingOrder): Promise<number 
   const effectiveMid = order.direction === 'YES' ? yesMid : 1 - yesMid;
   const fresh = buildQuote(order.direction, order.tokenId, effectiveMid, cfg.REBATE_QUOTE_EDGE, tick, tokBid, tokAsk);
   return fresh?.price ?? null;
+}
+
+/** Placeholder flow for completion candidates — they bypass flow ranking
+ * entirely (a held naked leg must be closed regardless of current taker flow),
+ * so the only consumer is one log line in placeRestingOrder. */
+const COMPLETION_FLOW_STUB: MarketFlowStats = {
+  tradeCount: 0,
+  takerNotionalUsd: 0,
+  takerNotionalUsdPerHour: 0,
+  feeEquivalentUsd: 0,
+  feeEquivalentUsdPerHour: 0,
+  vwapYes: null,
+  effectiveWindowHours: 0,
+};
+
+/**
+ * Build single-quote completion candidates for HELD naked rebate legs on
+ * DE-SELECTED markets.
+ *
+ * The selector ranks markets by recent fee-flow and keeps only the top-N
+ * (REBATE_MAX_MARKETS). When a market we already hold ONE leg of drops out of
+ * that set — flow fades as a game nears resolution (observed: Netherlands
+ * 1897061) — the Phase-4 loop never plans its completion, so the held leg sits
+ * NAKED to resolution. This rebuilds a candidate carrying only the MISSING
+ * side's quote so the existing pair_completion path can close the pair.
+ *
+ * Symmetric to the Phase-2 revalidation pass: that CANCELS stranded de-selected
+ * orders; this POSTS the completion for stranded de-selected positions.
+ *
+ * Skips: markets already selected (the loop owns them), pairs already complete
+ * (both sides held), legs whose completion is already resting, markets with no
+ * usable book this cycle, and completions that would breach the pair-cost
+ * ceiling (held entry + completion price ≥ riskless ceiling).
+ */
+export async function buildCompletionCandidates(
+  redis: Redis,
+  selectedIds: Set<string>,
+  restingOrders: Map<string, RestingOrder>,
+): Promise<RebateMarketCandidate[]> {
+  const cfg = loadConfig();
+  const positions = await getOpenPositions(redis);
+  const out: RebateMarketCandidate[] = [];
+  const seenMarkets = new Set<string>();
+
+  for (const pos of positions) {
+    if (pos.sourcedFrom !== 'rebate-farming') continue;
+    if (pos.direction !== 'YES' && pos.direction !== 'NO') continue;
+    const marketId = pos.marketId;
+    if (selectedIds.has(marketId)) continue; // the Phase-4 loop already plans this market
+    if (seenMarkets.has(marketId)) continue;
+
+    const completionDir: 'YES' | 'NO' = pos.direction === 'YES' ? 'NO' : 'YES';
+    // Pair already complete (both sides held) or completion already resting → nothing to do.
+    if (await getPosition(redis, marketId, completionDir)) continue;
+    const restingOpposite = [...restingOrders.values()].some(
+      (o) => o.marketId === marketId && o.direction === completionDir,
+    );
+    if (restingOpposite) continue;
+
+    const tokenIds = pos.clobTokenIds;
+    if (!tokenIds || tokenIds.length < 2) continue;
+    const yesTokenId = tokenIds[0]!;
+    const noTokenId = tokenIds[1]!;
+    const completionTokenId = completionDir === 'YES' ? yesTokenId : noTokenId;
+
+    // Price discovery on the YES book (mirrors computeRestingTarget / selector).
+    const yesBook = await getClobOrderBook(yesTokenId);
+    if (!yesBook) continue; // no book this cycle — try again next cycle
+    const { bestBid: yesBid, bestAsk: yesAsk } = getBookTouch(yesBook);
+    if (yesBid <= 0 || yesAsk <= 0 || yesAsk <= yesBid) continue;
+    const yesMid = (yesBid + yesAsk) / 2;
+    const tick = parseFloat(yesBook.tick_size) || 0.01;
+
+    // Completion side's own book for the post-only clamp (NO book often hollow).
+    let clampBid = yesBid;
+    let clampAsk = yesAsk;
+    if (completionDir === 'NO') {
+      const noBook = await getClobOrderBook(noTokenId);
+      const noTouch = noBook ? getBookTouch(noBook) : { bestBid: 0, bestAsk: 0 };
+      clampBid = noTouch.bestBid;
+      clampAsk = noTouch.bestAsk;
+    }
+    const effectiveMid = completionDir === 'YES' ? yesMid : 1 - yesMid;
+    const quote = buildQuote(completionDir, completionTokenId, effectiveMid, cfg.REBATE_QUOTE_EDGE, tick, clampBid, clampAsk);
+    if (!quote) continue;
+
+    // Completion pair-cost ceiling: held entry + completion price must stay
+    // riskless (placeRestingOrder re-enforces this, but skipping here avoids a
+    // wasted governor slot + candidate when the market has moved away).
+    if (pos.entryPrice + quote.price > 1 - cfg.REBATE_MIN_COMBINED_EDGE + 1e-9) continue;
+
+    seenMarkets.add(marketId);
+    out.push({
+      marketId,
+      conditionId: pos.conditionId ?? '',
+      question: pos.question,
+      clobTokenIds: [yesTokenId, noTokenId],
+      feesEnabled: true,
+      feeType: null,
+      yesMid,
+      spreadAbs: yesAsk - yesBid,
+      spreadBps: ((yesAsk - yesBid) / yesMid) * 10_000,
+      quotes: [quote],
+      volume: 0,
+      liquidity: 0,
+      flow: COMPLETION_FLOW_STUB,
+      // Inherit the held leg's fee-category share (persisted at fill) so a
+      // crypto-market completion isn't billed at the default 0.25; fall back to
+      // the default only for legacy positions recorded before that field.
+      rebateShare: pos.rebateShare ?? makerRebateShare(null),
+      score: 0,
+      tickSize: yesBook.tick_size,
+      negRisk: yesBook.neg_risk ?? false,
+      endDate: pos.endDate ?? null,
+    });
+    logger.info('[rebate] completion candidate built for naked leg', {
+      marketId,
+      heldDirection: pos.direction,
+      completionDirection: completionDir,
+      heldEntry: pos.entryPrice,
+      completionPrice: quote.price,
+      combined: +(pos.entryPrice + quote.price).toFixed(4),
+      question: pos.question.slice(0, 60),
+    });
+  }
+
+  return out;
 }
 
 export async function selectRebateMarkets(

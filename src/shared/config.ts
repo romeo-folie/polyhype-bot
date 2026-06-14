@@ -1286,6 +1286,13 @@ export const envSchema = z.object({
   // Wider than REBATE_REPRICE_THRESHOLD on purpose — cancelling forfeits queue
   // priority, so only cut clearly-dead bids, not routine 1-3¢ noise.
   REBATE_STALE_DRIFT_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.05),
+  // Complete HELD naked legs on DE-SELECTED markets: when one leg of a pair
+  // filled but its market then dropped out of the top-N (flow faded near
+  // resolution), the Phase-4 loop never re-plans the missing side and the leg
+  // sits naked. When true, rebuild a completion candidate for it each cycle so
+  // the pair gets closed regardless of flow ranking. Risk-reducing (closes
+  // exposure); gated by the same pair-cost ceiling + CLOB minimum as any leg.
+  REBATE_COMPLETE_NAKED_LEGS_ENABLED: boolFromEnv.optional().default(true),
   // -- rebate verification --
   // Maker address for the public rebates API (defaults to POLYMARKET_FUNDER_ADDRESS
   // — order placement stamps the funder/proxy wallet as `maker`).

@@ -63,6 +63,7 @@ export const positionRowSchema = z.object({
   entryFundingApr:                  z.number().optional(),
   isContrarian:                     z.boolean().optional(),
   topUpCount:                       z.number().int().optional().default(0),
+  rebateShare:                      z.number().optional(),
   // Consensus snapshot
   consensusProbability:             z.number().optional(),
   consensusStddev:                  z.number().optional(),
