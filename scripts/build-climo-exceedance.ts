@@ -3,8 +3,14 @@
  * Build the climatological exceedance table for the conditional weather oracle.
  *
  * Usage:
- *   npx tsx scripts/build-climo-exceedance.ts --all --years 2010-2024   # full rebuild (preferred)
+ *   npx tsx scripts/build-climo-exceedance.ts --all --years 2010-2024            # rise table (highest-temp)
+ *   npx tsx scripts/build-climo-exceedance.ts --all --metric low --years 2010-2024  # fall table (lowest-temp)
  *   npx tsx scripts/build-climo-exceedance.ts --city chicago --city "hong kong"  # incremental merge
+ *
+ * --metric high (default) builds the RISE table P(finalMax > runningMax + delta)
+ * written to climoExceedance.json. --metric low builds the FALL table
+ * P(runningMin − finalMin > delta) written to climoFallExceedance.json — the
+ * lowest-temperature conditional oracle's climo fallback.
  *
  * City list and coordinates are imported from src/weather/noaaClient.ts
  * (CITY_COORDINATES) — the same table the live oracle and forecast pipeline
@@ -43,7 +49,8 @@ import { resolve } from 'path';
 import { CITY_COORDINATES, canonicalCityKey } from '../src/weather/noaaClient.js';
 
 const ARCHIVE_BASE = 'https://archive-api.open-meteo.com/v1/archive';
-const DEFAULT_OUT = resolve('src/weather/data/climoExceedance.json');
+const RISE_OUT = resolve('src/weather/data/climoExceedance.json');
+const FALL_OUT = resolve('src/weather/data/climoFallExceedance.json');
 
 interface Args {
   cities: string[];
@@ -51,6 +58,8 @@ interface Args {
   all: boolean;
   yearRange: [number, number];
   outPath: string;
+  /** 'high' → rise table (daily max); 'low' → fall table (daily min). */
+  metric: 'high' | 'low';
 }
 
 function parseArgs(): Args {
@@ -59,13 +68,21 @@ function parseArgs(): Args {
   let all = false;
   let yearStart = 2010;
   let yearEnd = 2024;
-  let outPath = DEFAULT_OUT;
+  let outPath: string | null = null;
+  let metric: 'high' | 'low' = 'high';
 
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--city' && argv[i + 1]) {
       cities.push(argv[++i]!);
     } else if (argv[i] === '--all') {
       all = true;
+    } else if (argv[i] === '--metric' && argv[i + 1]) {
+      const m = argv[++i]!;
+      if (m !== 'high' && m !== 'low') {
+        console.error(`Invalid --metric '${m}': expected 'high' or 'low'`);
+        process.exit(1);
+      }
+      metric = m;
     } else if (argv[i] === '--years' && argv[i + 1]) {
       const parts = argv[++i]!.split('-');
       const start = parts[0] ? parseInt(parts[0], 10) : NaN;
@@ -81,7 +98,10 @@ function parseArgs(): Args {
     }
   }
 
-  return { cities, all, yearRange: [yearStart, yearEnd], outPath };
+  // Default output path follows the metric so the two tables never overwrite.
+  if (outPath === null) outPath = metric === 'low' ? FALL_OUT : RISE_OUT;
+
+  return { cities, all, yearRange: [yearStart, yearEnd], outPath, metric };
 }
 
 // City list and coordinates come from the runtime table (src/weather/noaaClient.ts)
@@ -123,25 +143,34 @@ async function fetchHourlyForYear(
   return result;
 }
 
-function buildMonthHourMap(dailyHourly: Record<string, number[]>, tz: string): MonthHourMap {
+function buildMonthHourMap(
+  dailyHourly: Record<string, number[]>,
+  tz: string,
+  metric: 'high' | 'low' = 'high',
+): MonthHourMap {
   const map: MonthHourMap = {};
   for (const [day, temps] of Object.entries(dailyHourly)) {
     if (temps.length < 20) continue; // incomplete day
     const date = new Date(day + 'T12:00:00Z');
     const month = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'numeric' }).format(date), 10);
-    const finalMax = Math.max(...temps);
+
+    // 'high': delta = finalMax − runningMax (how much further the day climbs).
+    // 'low':  delta = runningMin − finalMin (how much further the day drops).
+    // Both are ≥ 0 by construction, so the exceedance table semantics match.
+    const finalExtreme = metric === 'low' ? Math.min(...temps) : Math.max(...temps);
 
     for (let h = 0; h < temps.length && h <= 23; h++) {
-      let runningMax = -Infinity;
+      let running = metric === 'low' ? Infinity : -Infinity;
       for (let i = 0; i <= h; i++) {
         const v = temps[i];
-        if (v !== undefined && isFinite(v) && v > runningMax) runningMax = v;
+        if (v === undefined || !isFinite(v)) continue;
+        if (metric === 'low' ? v < running : v > running) running = v;
       }
-      if (!isFinite(runningMax)) continue;
-      const rise = finalMax - runningMax;
+      if (!isFinite(running)) continue;
+      const delta = metric === 'low' ? running - finalExtreme : finalExtreme - running;
       if (!map[month]) map[month] = {};
       if (!map[month]![h]) map[month]![h] = [];
-      map[month]![h]!.push(rise);
+      map[month]![h]!.push(delta);
     }
   }
   return map;
@@ -194,7 +223,7 @@ async function main() {
       console.log(`  Fetching ${year}...`);
       const dailyHourly = await fetchHourlyForYear(coords.lat, coords.lon, coords.unit, year);
       if (!dailyHourly) continue;
-      const yearMap = buildMonthHourMap(dailyHourly, coords.tz);
+      const yearMap = buildMonthHourMap(dailyHourly, coords.tz, args.metric);
       for (const [mStr, hours] of Object.entries(yearMap)) {
         const m = parseInt(mStr, 10);
         if (!combined[m]) combined[m] = {};
@@ -232,8 +261,13 @@ async function main() {
 
   const output = {
     _meta: {
-      description: 'Empirical conditional exceedance table for the conditional weather oracle.',
-      schema: 'city → month (1-12) → localHour (0-23) → sorted array of { delta, exceedance }',
+      description: args.metric === 'low'
+        ? 'Empirical conditional FALL exceedance table for the lowest-temperature conditional oracle.'
+        : 'Empirical conditional RISE exceedance table for the conditional weather oracle.',
+      metric: args.metric,
+      schema: args.metric === 'low'
+        ? 'city → month (1-12) → localHour (0-23) → sorted array of { delta, exceedance } where exceedance = P(runningMin − finalMin > delta)'
+        : 'city → month (1-12) → localHour (0-23) → sorted array of { delta, exceedance } where exceedance = P(finalMax > runningMax + delta)',
       generatedAt: new Date().toISOString(),
       sourceRange: `${args.yearRange[0]}-${args.yearRange[1]}`,
       cityProvenance,

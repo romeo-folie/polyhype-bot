@@ -88,7 +88,10 @@ describe('computeCityBias', () => {
   });
 
   it('handles SQL error gracefully — does not throw', async () => {
-    const sql = vi.fn().mockRejectedValue(new Error('DB connection lost'));
+    // Throw synchronously: the real postgres tag builds query fragments
+    // (groundTruth/metricFilter) synchronously, so a SQL-layer failure surfaces
+    // when the tag is invoked. computeCityBias must swallow it.
+    const sql = vi.fn(() => { throw new Error('DB connection lost'); });
     const redis = makeRedis();
 
     await expect(computeCityBias(sql as never, redis as never)).resolves.not.toThrow();
@@ -104,7 +107,9 @@ describe('computeCityBias', () => {
 
     await computeCityBias(sql as never, redis as never, 14, since);
 
-    const dateParam = (sql.mock.calls[0] as unknown[]).find((v) => v instanceof Date)!;
+    // The query is built from sql fragments (groundTruth/metricFilter) plus the
+    // main query, so search every sql call's args for the windowStart Date.
+    const dateParam = (sql.mock.calls.flat() as unknown[]).find((v) => v instanceof Date) as Date;
     expect(dateParam).toBeDefined();
     expect(dateParam.getTime()).toBe(new Date(since).getTime());
   });
@@ -116,7 +121,7 @@ describe('computeCityBias', () => {
 
     await computeCityBias(sql as never, redis as never, 14, ancient);
 
-    const dateParam = (sql.mock.calls[0] as unknown[]).find((v) => v instanceof Date)!;
+    const dateParam = (sql.mock.calls.flat() as unknown[]).find((v) => v instanceof Date) as Date;
     const expectedFloor = Date.now() - 28 * 86_400_000;
     expect(Math.abs(dateParam.getTime() - expectedFloor)).toBeLessThan(60_000);
   });
@@ -129,7 +134,7 @@ describe('computeCityBias', () => {
       computeCityBias(sql as never, redis as never, 14, 'not-a-date'),
     ).resolves.not.toThrow();
 
-    const dateParam = (sql.mock.calls[0] as unknown[]).find((v) => v instanceof Date)!;
+    const dateParam = (sql.mock.calls.flat() as unknown[]).find((v) => v instanceof Date) as Date;
     const expectedFloor = Date.now() - 28 * 86_400_000;
     expect(Math.abs(dateParam.getTime() - expectedFloor)).toBeLessThan(60_000);
   });

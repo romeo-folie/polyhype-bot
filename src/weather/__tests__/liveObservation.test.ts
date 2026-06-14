@@ -16,9 +16,9 @@ vi.mock('../../shared/logger.js', () => ({
 }));
 
 // Mock wuClient to avoid network calls in routing tests.
-const mockFetchWuHistoricalHigh = vi.fn().mockResolvedValue(null);
+const mockFetchWuHistoricalExtreme = vi.fn().mockResolvedValue(null);
 vi.mock('../wuClient.js', () => ({
-  fetchWuHistoricalHigh: mockFetchWuHistoricalHigh,
+  fetchWuHistoricalExtreme: mockFetchWuHistoricalExtreme,
 }));
 
 // Mock noaaClient to provide CITY_COORDINATES without network dependency.
@@ -432,17 +432,17 @@ describe('fetchHkoIntradayHigh', () => {
 describe('fetchLiveObservation routing', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockFetchWuHistoricalHigh.mockResolvedValue(null);
+    mockFetchWuHistoricalExtreme.mockResolvedValue(null);
   });
 
   it('calls WU for a wu resolutionSource city when wuEnabled=true', async () => {
     const redis = makeRedis();
-    mockFetchWuHistoricalHigh.mockResolvedValue(22.0);
+    mockFetchWuHistoricalExtreme.mockResolvedValue(22.0);
     await fetchLiveObservation('chicago', '2026-06-09', redis as any, {
       wuEnabled: true, metarEnabled: false, hkoEnabled: false, maxAgeMin: 30,
     });
-    expect(mockFetchWuHistoricalHigh).toHaveBeenCalledWith(
-      'KORD', 'US', '2026-06-09', 'fahrenheit', expect.anything(), expect.anything(),
+    expect(mockFetchWuHistoricalExtreme).toHaveBeenCalledWith(
+      'KORD', 'US', '2026-06-09', 'fahrenheit', expect.anything(), 'high', expect.anything(),
     );
   });
 
@@ -465,21 +465,21 @@ describe('fetchLiveObservation routing', () => {
 
   it('returns cached obs when cache is still fresh', async () => {
     const redis = makeRedis();
-    // Seed a fresh cache entry.
+    // Seed a fresh cache entry (metric-aware key: weather:live_obs:<metric>:<city>:<date>).
     const cached = {
       city: 'chicago', targetDate: '2026-06-09',
-      observedMax: 25.0, source: 'wu-live', confidence: 'settlement_aligned',
+      observedMax: 25.0, metric: 'high', source: 'wu-live', confidence: 'settlement_aligned',
       observedAt: '2026-06-09T12:00:00Z',
       cachedAt: new Date().toISOString(),
     };
-    redis._store.set('weather:live_obs:chicago:2026-06-09', JSON.stringify(cached));
+    redis._store.set('weather:live_obs:high:chicago:2026-06-09', JSON.stringify(cached));
 
     const obs = await fetchLiveObservation('chicago', '2026-06-09', redis as any, {
       wuEnabled: true, metarEnabled: false, hkoEnabled: false, maxAgeMin: 30,
     });
     expect(obs.observedMax).toBe(25.0);
     // Should not have called WU since cache was fresh.
-    expect(mockFetchWuHistoricalHigh).not.toHaveBeenCalled();
+    expect(mockFetchWuHistoricalExtreme).not.toHaveBeenCalled();
   });
 
   it('re-fetches when cache has expired', async () => {
@@ -492,17 +492,17 @@ describe('fetchLiveObservation routing', () => {
       cachedAt: new Date(Date.now() - 2 * 3600_000).toISOString(),
     };
     redis._store.set('weather:live_obs:chicago:2026-06-09', JSON.stringify(stale));
-    mockFetchWuHistoricalHigh.mockResolvedValue(27.5);
+    mockFetchWuHistoricalExtreme.mockResolvedValue(27.5);
 
     const obs = await fetchLiveObservation('chicago', '2026-06-09', redis as any, {
       wuEnabled: true, metarEnabled: false, hkoEnabled: false, maxAgeMin: 30,
     });
     expect(obs.observedMax).toBe(27.5);
-    expect(mockFetchWuHistoricalHigh).toHaveBeenCalled();
+    expect(mockFetchWuHistoricalExtreme).toHaveBeenCalled();
   });
 
   it('WU result has settlement_aligned confidence', async () => {
-    mockFetchWuHistoricalHigh.mockResolvedValue(26.0);
+    mockFetchWuHistoricalExtreme.mockResolvedValue(26.0);
     const redis = makeRedis();
     const obs = await fetchLiveObservation('london', '2026-06-09', redis as any, {
       wuEnabled: true, metarEnabled: false, hkoEnabled: false, maxAgeMin: 30,

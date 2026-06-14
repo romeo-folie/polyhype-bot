@@ -33,9 +33,9 @@ import {
   type FetchFn,
   type HistoricalHigh,
 } from './openMeteoClient.js';
-import { fetchWuHistoricalHigh } from './wuClient.js';
-import { fetchMetarDailyHigh } from './metarClient.js';
-import { fetchHkoDailyHigh } from './hkoClient.js';
+import { fetchWuHistoricalHigh, fetchWuHistoricalLow } from './wuClient.js';
+import { fetchMetarDailyHigh, fetchMetarDailyLow } from './metarClient.js';
+import { fetchHkoDailyHigh, fetchHkoDailyLow } from './hkoClient.js';
 import { computeCityBias, computeCityBaseRates } from './cityBias.js';
 import { runStationAudit } from './stationAudit.js';
 import { runWeatherOracleScan } from './weatherOracleScanner.js';
@@ -56,11 +56,12 @@ type ArchiveFetcher = (
   unit: 'fahrenheit' | 'celsius',
 ) => Promise<HistoricalHigh | null>;
 
-/** Injectable resolution fetcher for tests. */
+/** Injectable resolution fetcher for tests. Returns the daily high (and, when
+ *  available, the daily low) from the exact Polymarket resolution source. */
 export type ResolutionFetcher = (
   coords: CityCoordinates,
   targetDate: string,
-) => Promise<{ high: number; source: string } | null>;
+) => Promise<{ high: number; source: string; low: number | null } | null>;
 
 /**
  * Generate (city, target_date) tuples for every canonical city in
@@ -103,6 +104,7 @@ export async function fetchTargetsToReconcile(
      AND gt.target_date = dr.target_date
     WHERE gt.id IS NULL
        OR gt.resolution_high IS NULL
+       OR gt.resolution_low IS NULL
     ORDER BY dr.target_date DESC, cl.city ASC
     LIMIT ${limit}
   `;
@@ -144,6 +146,7 @@ export async function reconcileTargets(
 
     // If archive row already exists, skip the Open-Meteo fetch and only populate resolution.
     let archiveHigh: number | undefined;
+    let archiveLow: number | null | undefined;
     if (!t.hasArchive) {
       const result = await archiveFetcher(coords.lat, coords.lon, t.targetDate, coords.unit);
       if (!result) {
@@ -154,10 +157,11 @@ export async function reconcileTargets(
         continue;
       }
       archiveHigh = result.observedHigh;
+      archiveLow = result.observedLow;
     }
 
     // Fetch from the exact Polymarket resolution source (best-effort; never aborts the loop).
-    let resolution: { high: number; source: string } | null = null;
+    let resolution: { high: number; source: string; low: number | null } | null = null;
     try {
       resolution = await resolverFn(coords, t.targetDate);
     } catch (err) {
@@ -179,6 +183,13 @@ export async function reconcileTargets(
 
     const observedAt = new Date().toISOString();
 
+    // Low resolution is paired with its source (both-or-neither, per the schema):
+    // only attach when the source actually returned a low. `!= null` catches both
+    // a null low and an absent field (older fetchers / test doubles).
+    const resolutionLowPair = resolution?.low != null
+      ? { resolutionLow: resolution.low, resolutionLowSource: resolution.source }
+      : {};
+
     if (t.hasArchive) {
       // Resolution-only backfill: writer issues a bare UPDATE — no INSERT path.
       void enqueueWrite('weather_ground_truth', {
@@ -187,6 +198,7 @@ export async function reconcileTargets(
         unit: coords.unit,
         resolutionHigh: resolution!.high,
         resolutionSource: resolution!.source,
+        ...resolutionLowPair,
         observedAt,
         backfillOnly: true,
       });
@@ -196,9 +208,11 @@ export async function reconcileTargets(
         targetDate: t.targetDate,
         unit: coords.unit,
         observedHigh: archiveHigh!,
+        ...(archiveLow != null ? { observedLow: archiveLow } : {}),
         source: 'open-meteo-archive',
         resolutionHigh: resolution?.high,
         resolutionSource: resolution?.source,
+        ...resolutionLowPair,
         observedAt,
       });
     }
@@ -208,7 +222,9 @@ export async function reconcileTargets(
       targetDate: t.targetDate,
       unit: coords.unit,
       observedHigh: archiveHigh,
+      observedLow: archiveLow ?? null,
       resolutionHigh: resolution?.high,
+      resolutionLow: resolution?.low ?? null,
       resolutionSource: resolution?.source,
     });
     resolved++;
@@ -228,30 +244,35 @@ function makeResolutionFetcher(redis: Redis, fetchFn?: FetchFn): ResolutionFetch
   type WideFetch = typeof fetch;
   const wf = fetchFn as WideFetch | undefined;
   return async (coords, targetDate) => {
+    // Fetch both daily extremes from the same source so one reconcile grounds
+    // both the highest- and lowest-temperature markets. `low` is best-effort:
+    // returning a high with a null low still writes the high row.
     if (coords.resolutionSource === 'hko') {
-      const high = await fetchHkoDailyHigh(targetDate, wf);
-      return high !== null ? { high, source: 'hko' } : null;
+      const [high, low] = await Promise.all([
+        fetchHkoDailyHigh(targetDate, wf),
+        fetchHkoDailyLow(targetDate, wf),
+      ]);
+      return high !== null ? { high, source: 'hko', low } : null;
     }
     if (coords.resolutionSource === 'metar') {
       // Pass the station tz: the market settles on the station's local day,
       // and METAR reportTimes are UTC (3h misaligned for Istanbul).
-      const high = await fetchMetarDailyHigh(coords.wuStation, targetDate, wf, coords.tz);
-      return high !== null ? { high, source: 'metar' } : null;
+      const [high, low] = await Promise.all([
+        fetchMetarDailyHigh(coords.wuStation, targetDate, wf, coords.tz),
+        fetchMetarDailyLow(coords.wuStation, targetDate, wf, coords.tz),
+      ]);
+      return high !== null ? { high, source: 'metar', low } : null;
     }
     // WU
     if (!coords.isoCountry) {
       logger.warn('[weather-reconciler] wu city missing isoCountry', { wuStation: coords.wuStation });
       return null;
     }
-    const high = await fetchWuHistoricalHigh(
-      coords.wuStation,
-      coords.isoCountry,
-      targetDate,
-      coords.unit,
-      redis,
-      wf,
-    );
-    return high !== null ? { high, source: 'wu' } : null;
+    const [high, low] = await Promise.all([
+      fetchWuHistoricalHigh(coords.wuStation, coords.isoCountry, targetDate, coords.unit, redis, wf),
+      fetchWuHistoricalLow(coords.wuStation, coords.isoCountry, targetDate, coords.unit, redis, wf),
+    ]);
+    return high !== null ? { high, source: 'wu', low } : null;
   };
 }
 
@@ -275,7 +296,8 @@ export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
       lagDays: cfg.WEATHER_RECONCILER_LAG_DAYS,
       lookbackDays: cfg.WEATHER_RECONCILER_LOOKBACK_DAYS,
     });
-    await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES, cfg.WEATHER_BIAS_SAMPLES_SINCE);
+    await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES, cfg.WEATHER_BIAS_SAMPLES_SINCE, 'high');
+    await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES, cfg.WEATHER_BIAS_SAMPLES_SINCE, 'low');
     await computeCityBaseRates(sql, redis, cfg.WEATHER_BASE_RATE_LOOKBACK_DAYS);
     if (cfg.WEATHER_STATION_AUDIT_ENABLED) await runStationAudit(redis);
     await runWeatherOracleScan(redis).catch((err: unknown) => {
@@ -297,9 +319,11 @@ export async function runWeatherReconcile(fetchFn?: FetchFn): Promise<void> {
     ...summary,
   });
 
-  // After ground-truth upserts, refresh per-city bias cache and actuals cache in
-  // Redis. Run unconditionally so caches are warm before flags are flipped.
-  await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES, cfg.WEATHER_BIAS_SAMPLES_SINCE);
+  // After ground-truth upserts, refresh per-city bias caches (high and low) and
+  // actuals cache in Redis. Run unconditionally so caches are warm before flags
+  // are flipped.
+  await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES, cfg.WEATHER_BIAS_SAMPLES_SINCE, 'high');
+  await computeCityBias(sql, redis, cfg.WEATHER_BIAS_MIN_SAMPLES, cfg.WEATHER_BIAS_SAMPLES_SINCE, 'low');
   await computeCityBaseRates(sql, redis, cfg.WEATHER_BASE_RATE_LOOKBACK_DAYS);
   if (cfg.WEATHER_STATION_AUDIT_ENABLED) await runStationAudit(redis);
   await runWeatherOracleScan(redis).catch((err: unknown) => {

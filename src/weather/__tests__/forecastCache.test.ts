@@ -50,7 +50,7 @@ describe('forecastCache', () => {
     await cacheForecast(redis as any, 'amsterdam', '2026-06-04', makeForecast());
 
     expect(redis.set).toHaveBeenCalledWith(
-      'weather:forecast_cache:amsterdam:2026-06-04',
+      'weather:forecast_cache:high:amsterdam:2026-06-04',
       expect.any(String),
       'EX',
       10_800,

@@ -105,20 +105,27 @@ interface WuObservation {
 }
 
 /**
- * Fetch the daily maximum temperature from WU for a specific ICAO station and date.
- * Returns null if the station is unavailable or data is missing for that date.
+ * Fetch the daily extreme temperature (max or min) from WU for a specific ICAO
+ * station and date. Returns null if the station is unavailable or data is missing
+ * for that date.
+ *
+ * The WU historical endpoint returns the same array of hourly observations
+ * regardless of metric — `max(temps)` is the daily high, `min(temps)` the daily
+ * low. "Lowest temperature" Polymarket markets resolve against this daily minimum.
  *
  * @param icao       ICAO station code (e.g. 'EGLC')
  * @param isoCountry ISO 3166-1 alpha-2 country code (e.g. 'GB')
  * @param date       Target date YYYY-MM-DD
  * @param unit       Temperature unit: 'fahrenheit' | 'celsius'
+ * @param metric     'high' (daily max, default) | 'low' (daily min)
  */
-export async function fetchWuHistoricalHigh(
+export async function fetchWuHistoricalExtreme(
   icao: string,
   isoCountry: string,
   date: string,
   unit: 'fahrenheit' | 'celsius',
   redis: Redis,
+  metric: 'high' | 'low' = 'high',
   fetchFn: FetchFn = fetch,
 ): Promise<number | null> {
   const dateStr = date.replace(/-/g, '');
@@ -171,10 +178,40 @@ export async function fetchWuHistoricalHigh(
     const temps = obs.map((o) => o.temp).filter((t): t is number => typeof t === 'number');
     if (!temps.length) return null;
 
-    const maxTemp = Math.max(...temps);
-    logger.debug('[weather-wu] daily high fetched', { icao, date, maxTemp, obsCount: obs.length });
-    return Math.round(maxTemp * 10) / 10;
+    const extreme = metric === 'low' ? Math.min(...temps) : Math.max(...temps);
+    logger.debug('[weather-wu] daily extreme fetched', { icao, date, metric, extreme, obsCount: obs.length });
+    return Math.round(extreme * 10) / 10;
   }
 
   return null;
+}
+
+/**
+ * Fetch the daily MAXIMUM temperature from WU. Thin wrapper over
+ * {@link fetchWuHistoricalExtreme} preserving the original call signature.
+ */
+export function fetchWuHistoricalHigh(
+  icao: string,
+  isoCountry: string,
+  date: string,
+  unit: 'fahrenheit' | 'celsius',
+  redis: Redis,
+  fetchFn: FetchFn = fetch,
+): Promise<number | null> {
+  return fetchWuHistoricalExtreme(icao, isoCountry, date, unit, redis, 'high', fetchFn);
+}
+
+/**
+ * Fetch the daily MINIMUM temperature from WU — the resolution value for
+ * "Lowest temperature in [city]" markets.
+ */
+export function fetchWuHistoricalLow(
+  icao: string,
+  isoCountry: string,
+  date: string,
+  unit: 'fahrenheit' | 'celsius',
+  redis: Redis,
+  fetchFn: FetchFn = fetch,
+): Promise<number | null> {
+  return fetchWuHistoricalExtreme(icao, isoCountry, date, unit, redis, 'low', fetchFn);
 }

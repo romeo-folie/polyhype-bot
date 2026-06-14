@@ -374,7 +374,9 @@ describe('weatherGroundTruthRowSchema', () => {
       expect(hit).toBeDefined();
     }
 
-    // backfillOnly with both halves missing emits one issue per absent field.
+    // backfillOnly carrying NEITHER resolution pair (no high, no low) is rejected
+    // with a single "at least one resolution pair" issue (a low-only backfill is
+    // now valid, so the rule is OR across the two pairs rather than per-field).
     const backfillEmpty = weatherGroundTruthRowSchema.safeParse({
       city: 'london',
       targetDate: '2026-04-10',
@@ -383,9 +385,8 @@ describe('weatherGroundTruthRowSchema', () => {
     });
     expect(backfillEmpty.success).toBe(false);
     if (!backfillEmpty.success) {
-      const paths = backfillEmpty.error.errors.map((e) => e.path.join('.'));
-      expect(paths).toContain('resolutionHigh');
-      expect(paths).toContain('resolutionSource');
+      const messages = backfillEmpty.error.errors.map((e) => e.message);
+      expect(messages.some((m) => m.includes('at least one resolution pair'))).toBe(true);
     }
   });
 });

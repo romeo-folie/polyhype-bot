@@ -21,6 +21,16 @@ export const weatherGroundTruthRowSchema = z.object({
   resolutionHigh:   z.number().finite().optional(),
   /** Which fetcher produced resolutionHigh. */
   resolutionSource: z.enum(['wu', 'metar', 'hko']).optional(),
+  /**
+   * Observed daily LOW in the requested unit (Open-Meteo archive). Optional even
+   * on inserts: the archive occasionally omits the min, and lowest-temperature
+   * support is additive — a missing low must never block the high row.
+   */
+  observedLow:   z.number().finite().optional(),
+  /** Daily low from the exact Polymarket resolution source (WU/METAR/HKO). */
+  resolutionLow:   z.number().finite().optional(),
+  /** Which fetcher produced resolutionLow. */
+  resolutionLowSource: z.enum(['wu', 'metar', 'hko']).optional(),
   /** Optional override for the fetch timestamp (defaults to now() in SQL). */
   observedAt:    z.string().datetime().optional(),
   /**
@@ -41,6 +51,16 @@ export const weatherGroundTruthRowSchema = z.object({
       path: [hasHigh ? 'resolutionSource' : 'resolutionHigh'],
     });
   }
+  // Same both-or-neither invariant for the LOW resolution pair.
+  const hasLow    = d.resolutionLow !== undefined;
+  const hasLowSrc = d.resolutionLowSource !== undefined;
+  if (hasLow !== hasLowSrc) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'resolutionLow and resolutionLowSource must both be present or both absent',
+      path: [hasLow ? 'resolutionLowSource' : 'resolutionLow'],
+    });
+  }
   // `observedHigh` is only optional for the backfillOnly (UPDATE-resolution)
   // path. Inserts must always include it — a missing value here would land as
   // NULL in `observed_high` and silently break cityBias calibration, which
@@ -53,24 +73,16 @@ export const weatherGroundTruthRowSchema = z.object({
       path: ['observedHigh'],
     });
   }
-  // backfillOnly payloads must carry BOTH resolution columns. Emit a separate
-  // issue per missing field so each absent field is individually identifiable
-  // in the writer's rejection log.
-  if (d.backfillOnly === true) {
-    if (d.resolutionHigh === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'backfillOnly payloads must include resolutionHigh',
-        path: ['resolutionHigh'],
-      });
-    }
-    if (d.resolutionSource === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'backfillOnly payloads must include resolutionSource',
-        path: ['resolutionSource'],
-      });
-    }
+  // backfillOnly payloads must carry at least one complete resolution pair —
+  // high or low (the both-or-neither invariants above already guarantee each
+  // present pair is complete). A low-only backfill is valid: the writer's UPDATE
+  // path fills resolution_low independently of resolution_high.
+  if (d.backfillOnly === true && d.resolutionHigh === undefined && d.resolutionLow === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'backfillOnly payloads must include at least one resolution pair (high or low)',
+      path: ['resolutionHigh'],
+    });
   }
 });
 

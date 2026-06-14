@@ -152,16 +152,19 @@ interface EnsembleDailyResponse {
   daily?: {
     time?: string[];
     temperature_2m_max?: number[][];
+    temperature_2m_min?: number[][];
   };
 }
 
 /** Minimal shape of the archive endpoint response — kept separate from
  *  DailyForecastResponse so the two endpoints can diverge without silent
- *  misparsing. The archive API only returns `temperature_2m_max` for our use. */
+ *  misparsing. We request both daily extremes so one call grounds both the
+ *  highest- and lowest-temperature markets. */
 interface ArchiveDailyResponse {
   daily?: {
     time?: string[];
     temperature_2m_max?: number[];
+    temperature_2m_min?: number[];
   };
 }
 
@@ -342,9 +345,13 @@ export async function fetchEnsembleForecast(
   fetchFn?: FetchFn,
   useEcmwf = false,
   retryCount = 0,
+  metric: 'high' | 'low' = 'high',
 ): Promise<EnsembleForecast | null> {
   const isInjected = fetchFn !== undefined;
   const doFetch = fetchFn ?? fetch;
+  // "Lowest temperature" markets resolve on the daily minimum, so the ensemble
+  // spread must come from the per-member daily-min distribution, not the max.
+  const dailyVar = metric === 'low' ? 'temperature_2m_min' : 'temperature_2m_max';
   try {
     if (!isInjected) await rateLimitWait();
 
@@ -354,7 +361,7 @@ export async function fetchEnsembleForecast(
     const params = new URLSearchParams({
       latitude: lat.toFixed(4),
       longitude: lon.toFixed(4),
-      daily: 'temperature_2m_max',
+      daily: dailyVar,
       models: model,
       temperature_unit: unit,
       timezone: 'auto',
@@ -376,8 +383,9 @@ export async function fetchEnsembleForecast(
 
     const data = (await res.json()) as EnsembleDailyResponse;
     const daily = data.daily;
-    if (!daily?.time?.length || !daily.temperature_2m_max?.length) {
-      logger.warn('[weather] Open-Meteo ensemble returned no daily data', { lat, lon, targetDate });
+    const series = metric === 'low' ? daily?.temperature_2m_min : daily?.temperature_2m_max;
+    if (!daily?.time?.length || !series?.length) {
+      logger.warn('[weather] Open-Meteo ensemble returned no daily data', { lat, lon, targetDate, metric });
       return null;
     }
 
@@ -385,12 +393,12 @@ export async function fetchEnsembleForecast(
     const idx = daily.time.indexOf(targetStr);
     if (idx === -1) return null;
 
-    const members = daily.temperature_2m_max[idx];
+    const members = series[idx];
     const ensembleModel: EnsembleForecast['ensembleModel'] = useEcmwf ? 'ecmwf' : 'gfs';
     if (!members || !Array.isArray(members) || members.length < 2) {
       // Open-Meteo ensemble returns members as columns, not nested arrays
       // Try parsing flat array: all values for the single target day
-      return parseEnsembleFlat(daily, targetStr, ensembleModel);
+      return parseEnsembleFlat(daily, targetStr, ensembleModel, metric);
     }
 
     return computeEnsembleStats(members, targetStr, ensembleModel);
@@ -413,6 +421,7 @@ function parseEnsembleFlat(
   daily: Record<string, unknown>,
   targetDate: string,
   ensembleModel: EnsembleForecast['ensembleModel'],
+  metric: 'high' | 'low' = 'high',
 ): EnsembleForecast | null {
   const members: number[] = [];
   const time = daily.time as string[] | undefined;
@@ -420,9 +429,12 @@ function parseEnsembleFlat(
   const idx = time.indexOf(targetDate);
   if (idx === -1) return null;
 
+  const baseKey = metric === 'low' ? 'temperature_2m_min' : 'temperature_2m_max';
+  const memberPrefix = `${baseKey}_member`;
+
   // Collect all member keys
   for (const [key, val] of Object.entries(daily)) {
-    if (key.startsWith('temperature_2m_max_member') && Array.isArray(val)) {
+    if (key.startsWith(memberPrefix) && Array.isArray(val)) {
       const v = val[idx];
       if (typeof v === 'number' && isFinite(v)) {
         members.push(v);
@@ -432,7 +444,7 @@ function parseEnsembleFlat(
 
   // Also check if the main key has a flat array of numbers (single day)
   if (members.length === 0) {
-    const mainVal = daily.temperature_2m_max;
+    const mainVal = daily[baseKey];
     if (Array.isArray(mainVal)) {
       for (const v of mainVal) {
         if (typeof v === 'number' && isFinite(v)) {
@@ -451,6 +463,9 @@ function parseEnsembleFlat(
 export interface HistoricalHigh {
   /** Observed daily high temperature in the requested unit. */
   observedHigh: number;
+  /** Observed daily low temperature in the requested unit. null when the
+   *  archive omits the min (older responses / partial data). */
+  observedLow: number | null;
   /** The date this reading applies to (YYYY-MM-DD). */
   targetDate: string;
   /** Unit of the reading. */
@@ -458,9 +473,14 @@ export interface HistoricalHigh {
 }
 
 /**
- * Fetch the observed daily high for a past date from the Open-Meteo archive.
- * Used by the weather reconciler to validate shadow-scan predictions against
- * ground truth (what the forecast actually verified as).
+ * Fetch the observed daily extremes (high AND low) for a past date from the
+ * Open-Meteo archive. Used by the weather reconciler to validate shadow-scan
+ * predictions against ground truth (what the forecast actually verified as).
+ *
+ * One archive call returns both extremes, so the reconciler can ground both the
+ * "Highest temperature" and "Lowest temperature" markets for a city/date. The
+ * function still returns null only when the HIGH is unavailable (preserving the
+ * historical contract); `observedLow` is null when only the min is missing.
  *
  * Archive data lags real time by a few days — callers should only request dates
  * at least 1 full UTC day in the past, and be prepared for null when the archive
@@ -484,7 +504,7 @@ export async function fetchHistoricalHigh(
     const params = new URLSearchParams({
       latitude: lat.toFixed(4),
       longitude: lon.toFixed(4),
-      daily: 'temperature_2m_max',
+      daily: 'temperature_2m_max,temperature_2m_min',
       temperature_unit: unit,
       timezone: 'auto',
       start_date: targetStr,
@@ -525,8 +545,13 @@ export async function fetchHistoricalHigh(
     const observedHigh = daily.temperature_2m_max[idx];
     if (observedHigh === undefined || !Number.isFinite(observedHigh)) return null;
 
+    const rawLow = daily.temperature_2m_min?.[idx];
+    const observedLow =
+      rawLow !== undefined && Number.isFinite(rawLow) ? Math.round(rawLow * 10) / 10 : null;
+
     return {
       observedHigh: Math.round(observedHigh * 10) / 10,
+      observedLow,
       targetDate: targetStr,
       unit,
     };
@@ -660,13 +685,18 @@ function computeEnsembleStats(
   const mean = members.reduce((s, v) => s + v, 0) / n;
   const variance = members.reduce((s, v) => s + (v - mean) ** 2, 0) / (n - 1);
   const stddev = Math.sqrt(variance);
+  const roundedMean = Math.round(mean * 10) / 10;
+  const roundedStddev = Math.round(stddev * 100) / 100;
 
+  // `members` are the per-member values for ONE metric (max members on a high
+  // fetch, min members on a low fetch). Both field pairs are filled with the
+  // same computed stats so a caller reads valid numbers from whichever pair
+  // matches the metric it requested.
   return {
-    meanHigh: Math.round(mean * 10) / 10,
-    stddevHigh: Math.round(stddev * 100) / 100,
-    // For ensemble, we only fetch high temp — low temp uses deterministic
-    meanLow: mean, // placeholder — not used for bracket probability
-    stddevLow: stddev,
+    meanHigh: roundedMean,
+    stddevHigh: roundedStddev,
+    meanLow: roundedMean,
+    stddevLow: roundedStddev,
     memberCount: n,
     forecastDate,
     ensembleModel,

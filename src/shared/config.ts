@@ -1831,6 +1831,18 @@ export const envSchema = z.object({
   // events with ~11 brackets each (e.g. "40-41°F", "42-43°F", ...).
   // Ships dark (WEATHER_SCANNER_ENABLED=false). Shadow-log first, review, then enable.
   WEATHER_SCANNER_ENABLED: boolFromEnv.optional().default(false),
+  // Lowest-temperature markets ("Lowest temperature in [city] on [date]?",
+  // Gamma tag_slug=lowest-temperature). Same bracket structure as the highest
+  // markets but resolves against the day's MINIMUM temperature, so it uses the
+  // forecast low, an inverted conditional oracle, and a min climo "fall" table.
+  // Two-stage rollout mirrors the rest of the weather stack:
+  //   Stage 1 (shadow): WEATHER_LOWEST_TEMP_SHADOW_ENABLED=true (default) logs
+  //     would-trade lowest-temp opportunities to shadow_observations, never executes.
+  //   Stage 2 (live):   WEATHER_LOWEST_TEMP_ENABLED=true routes them through the
+  //     normal execution path (still subject to WEATHER_EXECUTION_ENABLED).
+  // Both default-off-for-live / on-for-shadow so the feature ships dark.
+  WEATHER_LOWEST_TEMP_ENABLED: boolFromEnv.optional().default(false),
+  WEATHER_LOWEST_TEMP_SHADOW_ENABLED: boolFromEnv.optional().default(true),
   // Telegram + log once-per-UTC-day digest of weather performance (bets placed,
   // fills, entry prices, realized PnL, wins/losses, best/worst). Fires from the
   // weather cron entrypoint; gated by a Redis NX key so it sends at most once/day.

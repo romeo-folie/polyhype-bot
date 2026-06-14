@@ -44,7 +44,12 @@ export interface ConditionalOracleInput {
   city: string;
   direction: 'YES' | 'NO';
   bracket: { low: number | null; high: number | null };
+  /** Running daily extreme observed so far: daily MAX for metric='high', daily
+   *  MIN for metric='low'. Named observedMax for continuity with the high path. */
   observedMax: number;
+  /** Which daily extreme the market resolves on. Defaults to 'high'. Drives the
+   *  oracle direction (max increases vs min decreases) and the climo table type. */
+  metric?: 'high' | 'low';
   /** ISO8601 UTC timestamp of the observation that set observedMax. */
   observedAt: string;
   /** IANA timezone for the city (to derive local hour from observedAt). */
@@ -120,16 +125,18 @@ function localMonthFromUtc(utcIso: string, tz: string): number {
 }
 
 /**
- * Compute P(finalMax > threshold) from ensemble member trajectories conditioned
- * on an already-observed running max. Each member's final max = max(observedMax,
- * member's remaining hourly values). Spread inflation expands each member's
- * deviation from the per-hour ensemble mean before computing the final max.
+ * Compute the projected final daily extreme for each ensemble member,
+ * conditioned on the already-observed running extreme. For metric='high' each
+ * member's final value = max(observed, member's remaining hourly values); for
+ * metric='low' it is min(observed, …). Spread inflation expands each member's
+ * deviation from the per-hour ensemble mean before reducing.
  */
-function ensembleFinalMaxExceedance(
-  observedMax: number,
+function ensembleFinalExtremeDistribution(
+  observed: number,
   memberTemps: number[][],
   biasCorrection: number,
   spreadInflation: number,
+  metric: 'high' | 'low' = 'high',
 ): number[] {
   const nMembers = memberTemps.length;
   if (nMembers === 0) return [];
@@ -146,9 +153,9 @@ function ensembleFinalMaxExceedance(
     return count > 0 ? sum / count : 0;
   });
 
-  const finalMaxes: number[] = [];
+  const finalValues: number[] = [];
   for (const member of memberTemps) {
-    let memberMax = observedMax;
+    let memberExtreme = observed;
     for (let h = 0; h < nHours; h++) {
       const raw = member[h];
       if (raw == null || !Number.isFinite(raw)) continue;
@@ -157,27 +164,29 @@ function ensembleFinalMaxExceedance(
       const corrected = raw - biasCorrection;
       const correctedMean = (hourMean[h] ?? 0) - biasCorrection;
       const inflated = correctedMean + (corrected - correctedMean) * spreadInflation;
-      if (inflated > memberMax) memberMax = inflated;
+      if (metric === 'low' ? inflated < memberExtreme : inflated > memberExtreme) {
+        memberExtreme = inflated;
+      }
     }
-    finalMaxes.push(memberMax);
+    finalValues.push(memberExtreme);
   }
-  return finalMaxes;
+  return finalValues;
 }
 
 /**
- * P(finalMax rounds into winning condition for a given direction + bracket)
- * given a sorted array of per-member final max values.
+ * P(the final daily statistic rounds into the winning condition for a given
+ * direction + bracket) given a per-member array of projected final values.
+ *
+ * This is direction-AGNOSTIC: the win condition only asks whether the resolved
+ * daily value (a max for highest-temperature markets, a min for lowest) rounds
+ * into the bracket, so the same math serves both metrics — only how each
+ * member's final value was reduced (max vs min) differs upstream.
  *
  * The rounding boundary semantics match classifyOracleState:
- *   Interior YES: final max must round into [low, high] → finalMax < high + 0.5
- *   Interior NO:  final max must round outside [low, high] → finalMax ≥ high + 0.5
- *   High-tail YES: finalMax rounds ≥ low → finalMax ≥ low - 0.5
- *   High-tail NO:  finalMax rounds < low → finalMax < low - 0.5
- *   Low-tail YES:  finalMax rounds ≤ high → finalMax < high + 0.5
- *   Low-tail NO:   finalMax rounds > high → finalMax ≥ high + 0.5
- *
- * Also handles the case where observedMax has already crossed an irreversible
- * boundary — degenerates to 0 or 1 and matches classifyOracleState.
+ *   Interior YES: final value must round into [low, high] → low-0.5 ≤ v < high + 0.5
+ *   High-tail YES: rounds ≥ low → v ≥ low - 0.5
+ *   Low-tail YES:  rounds ≤ high → v < high + 0.5
+ *   (NO is the complement of YES in each case.)
  */
 export function bracketWinProbFromFinalMaxes(
   finalMaxes: number[],
@@ -255,6 +264,12 @@ function climoExceedanceAt(
 /**
  * Compute conditionalHeldProb from the climo table alone.
  * Returns null when the city/month/hour is not covered.
+ *
+ * For metric='high' the table is a "rise" table — climoExceedanceAt returns
+ * P(finalMax > runningMax + delta) — and observedMax is the running daily max.
+ * For metric='low' the caller passes a "fall" table whose entries are
+ * P(runningMin - finalMin > delta), observed is the running daily min, and the
+ * derivation below is the point-reflection of the high case.
  */
 function climoHeldProbability(
   table: ClimoExceedanceTable,
@@ -264,8 +279,15 @@ function climoHeldProbability(
   month: number,
   direction: 'YES' | 'NO',
   bracket: { low: number | null; high: number | null },
+  metric: 'high' | 'low' = 'high',
 ): number | null {
   const { low, high } = bracket;
+
+  if (metric === 'low') {
+    return climoHeldProbabilityLow(
+      table, city, observedMax, observedAtLocalHour, month, direction, bracket,
+    );
+  }
 
   if (low !== null && high !== null) {
     // Interior bracket.
@@ -322,6 +344,82 @@ function climoHeldProbability(
   return null;
 }
 
+/**
+ * climoHeldProbability for lowest-temperature markets (metric='low').
+ *
+ * `observedMin` is the running daily minimum (only decreases intraday). The
+ * `table` is a "fall" table: climoExceedanceAt(table, …, delta) returns
+ * P(runningMin − finalMin > delta), i.e. P(the final daily min ends more than
+ * `delta` BELOW the current running min). Equivalently P(finalMin < observedMin − delta).
+ *
+ * This is the point-reflection of the high-temperature derivation above.
+ */
+function climoHeldProbabilityLow(
+  table: ClimoExceedanceTable,
+  city: string,
+  observedMin: number,
+  observedAtLocalHour: number,
+  month: number,
+  direction: 'YES' | 'NO',
+  bracket: { low: number | null; high: number | null },
+): number | null {
+  const { low, high } = bracket;
+  // P(finalMin < boundary), via the fall table. boundary must be ≤ observedMin
+  // for a meaningful (delta ≥ 0) lookup; callers below guarantee that.
+  const pFinalBelow = (boundary: number): number | null => {
+    const delta = observedMin - boundary;
+    return climoExceedanceAt(table, city, month, observedAtLocalHour, delta);
+  };
+
+  if (low !== null && high !== null) {
+    // Interior. YES = finalMin rounds into [low, high] → low-0.5 ≤ finalMin < high+0.5.
+    if (observedMin < low - 0.5) {
+      // Irreversible: running min already below the bracket floor → YES impossible.
+      return direction === 'YES' ? 0 : 1;
+    }
+    if (observedMin < high + 0.5) {
+      // Already inside the rounding window from above; only risk is dropping out
+      // the bottom. P(YES) = P(finalMin ≥ low-0.5) = 1 − P(finalMin < low-0.5).
+      const excLow = pFinalBelow(low - 0.5);
+      if (excLow === null) return null;
+      const pYes = 1 - excLow;
+      return direction === 'YES' ? clamp01(pYes) : clamp01(1 - pYes);
+    }
+    // Above bracket: must fall into [low-0.5, high+0.5) — reach below high+0.5 but not below low-0.5.
+    const excHigh = pFinalBelow(high + 0.5);
+    const excLow = pFinalBelow(low - 0.5);
+    if (excHigh === null || excLow === null) return null;
+    const pYes = excHigh - excLow;
+    return direction === 'YES' ? clamp01(pYes) : clamp01(1 - pYes);
+  }
+
+  if (low === null && high !== null) {
+    // Low-tail "high or below": YES = finalMin ≤ high → finalMin < high + 0.5.
+    if (observedMin < high + 0.5) {
+      // Running min already at/below the ceiling and only drops further → YES confirmed.
+      return direction === 'YES' ? 1 : 0;
+    }
+    const exc = pFinalBelow(high + 0.5);
+    if (exc === null) return null;
+    const pYes = exc;
+    return direction === 'YES' ? clamp01(pYes) : clamp01(1 - pYes);
+  }
+
+  if (high === null && low !== null) {
+    // High-tail "low or higher": YES = finalMin ≥ low → finalMin ≥ low - 0.5.
+    if (observedMin < low - 0.5) {
+      // Running min already below the floor → YES impossible.
+      return direction === 'YES' ? 0 : 1;
+    }
+    const exc = pFinalBelow(low - 0.5);
+    if (exc === null) return null;
+    const pYes = 1 - exc;
+    return direction === 'YES' ? clamp01(pYes) : clamp01(1 - pYes);
+  }
+
+  return null;
+}
+
 function clamp01(v: number): number {
   return Math.max(0, Math.min(1, v));
 }
@@ -355,9 +453,10 @@ export function conditionalHeldProbability(
     maxObsAgeMin,
     estimatorMaxGap,
   } = input;
+  const metric = input.metric ?? 'high';
 
   // Degenerate case: binary oracle boundary already crossed → agree with classifyOracleState.
-  const binaryState = classifyOracleState(observedMax, direction, bracket);
+  const binaryState = classifyOracleState(observedMax, direction, bracket, metric);
   if (binaryState === 'oracle_impossible' || binaryState === 'oracle_confirmed') {
     const obsAgeMinDegen = (Date.now() - new Date(observedAt).getTime()) / 60_000;
     return {
@@ -391,15 +490,16 @@ export function conditionalHeldProbability(
     remainingHourlyMembers.length >= minMembers
   ) {
     try {
-      const finalMaxes = ensembleFinalMaxDistribution(
+      const finalValues = ensembleFinalMaxDistribution(
         observedMax,
         remainingHourlyMembers,
         biasCorrection,
         spreadInflation,
+        metric,
       );
-      if (finalMaxes.length >= minMembers) {
-        ensembleHeldProb = bracketWinProbFromFinalMaxes(finalMaxes, direction, bracket);
-        membersUsed = finalMaxes.length;
+      if (finalValues.length >= minMembers) {
+        ensembleHeldProb = bracketWinProbFromFinalMaxes(finalValues, direction, bracket);
+        membersUsed = finalValues.length;
       }
     } catch (err) {
       logger.warn('[weather-cond-oracle] ensemble estimator error', {
@@ -421,6 +521,7 @@ export function conditionalHeldProbability(
         month,
         direction,
         bracket,
+        metric,
       );
     } catch (err) {
       logger.warn('[weather-cond-oracle] climo estimator error', {
@@ -481,8 +582,9 @@ export function conditionalHeldProbability(
 }
 
 /**
- * Compute the final daily max for each ensemble member, given the running max
- * already observed and the remaining hourly trajectories.
+ * Compute the projected final daily extreme for each ensemble member, given the
+ * running extreme already observed and the remaining hourly trajectories.
+ * metric='low' reduces with min() (for lowest-temperature markets).
  * Exported for testing.
  */
 export function ensembleFinalMaxDistribution(
@@ -490,18 +592,34 @@ export function ensembleFinalMaxDistribution(
   memberTemps: number[][],
   biasCorrection: number,
   spreadInflation: number,
+  metric: 'high' | 'low' = 'high',
 ): number[] {
-  return ensembleFinalMaxExceedance(observedMax, memberTemps, biasCorrection, spreadInflation);
+  return ensembleFinalExtremeDistribution(observedMax, memberTemps, biasCorrection, spreadInflation, metric);
 }
 
 /**
- * Load the climatological exceedance table from the bundled JSON asset.
- * Returns null on read failure. The table may have an empty 'cities' object
- * when no station history has been built yet.
+ * Load the climatological RISE exceedance table (highest-temperature markets)
+ * from the bundled JSON asset. Returns null on read failure. The table may have
+ * an empty 'cities' object when no station history has been built yet.
  */
 export function loadClimoTable(): ClimoExceedanceTable | null {
   try {
     const raw = _require('./data/climoExceedance.json') as { cities: ClimoExceedanceTable };
+    return raw.cities ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load the climatological FALL exceedance table (lowest-temperature markets):
+ * P(runningMin − finalMin > delta) per city/month/localHour. Same JSON shape as
+ * the rise table. Returns null when the asset is missing — callers then fall
+ * back to the ensemble estimator alone.
+ */
+export function loadClimoFallTable(): ClimoExceedanceTable | null {
+  try {
+    const raw = _require('./data/climoFallExceedance.json') as { cities: ClimoExceedanceTable };
     return raw.cities ?? null;
   } catch {
     return null;

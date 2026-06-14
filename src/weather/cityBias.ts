@@ -42,9 +42,13 @@ export interface CityBias {
   updatedAt: string;
 }
 
-function redisKey(city: string): string {
+function redisKey(city: string, metric: 'high' | 'low' = 'high'): string {
   const canonical = canonicalCityKey(city) ?? city.toLowerCase().trim();
-  return `weather:city_bias:${canonical}`;
+  // Low markets keep an independent bias profile — the overnight-min error
+  // distribution differs from the daytime-max one, so they must never share a key.
+  return metric === 'low'
+    ? `weather:city_bias_low:${canonical}`
+    : `weather:city_bias:${canonical}`;
 }
 
 function actualsRedisKey(city: string): string {
@@ -55,9 +59,13 @@ function actualsRedisKey(city: string): string {
 export interface CityActuals {
   /** Recent WU daily high temperatures (COALESCE(resolution_high, observed_high)), sorted newest-first. */
   highs: number[];
+  /** Recent WU daily LOW temperatures (COALESCE(resolution_low, observed_low)), sorted newest-first.
+   *  Used by the lowest-temperature tail-NO base-rate gate. Optional for backward
+   *  compatibility with cache entries written before lowest-temp support. */
+  lows?: number[];
   /** Unit of the values ('celsius' | 'fahrenheit'). */
   unit: string;
-  /** Number of valid rows used. */
+  /** Number of valid rows used (for the highs series). */
   sampleSize: number;
   updatedAt: string;
 }
@@ -83,6 +91,12 @@ export async function computeCityBias(
    * (measured against a different thermometer) don't poison the EWMA.
    */
   samplesSince = '',
+  /**
+   * Which daily extreme to compute bias for. 'high' joins the forecast point
+   * estimate to resolution_high; 'low' to resolution_low and only consumes
+   * lowest-temperature shadow rows. High excludes low rows so the two never mix.
+   */
+  metric: 'high' | 'low' = 'high',
 ): Promise<void> {
   try {
     // Effective floor of the sample window: the EWMA lookback, raised to the
@@ -99,6 +113,15 @@ export async function computeCityBias(
       sinceDate && !Number.isNaN(sinceDate.getTime()) && sinceDate > lookbackFloor
         ? sinceDate
         : lookbackFloor;
+    // Metric-specific ground-truth column + shadow-row filter. The high query
+    // excludes lowest-temp rows (which also carry a `forecastHigh` payload field
+    // holding the LOW forecast) so the two bias profiles never contaminate.
+    const groundTruth = metric === 'low'
+      ? sql`COALESCE(gt.resolution_low, gt.observed_low)`
+      : sql`COALESCE(gt.resolution_high, gt.observed_high)`;
+    const metricFilter = metric === 'low'
+      ? sql`AND so.payload->>'metric' = 'low'`
+      : sql`AND (so.payload->>'metric' IS DISTINCT FROM 'low')`;
     const rows = await sql<{
       city: string;
       sample_size: number;
@@ -110,9 +133,11 @@ export async function computeCityBias(
       WITH weighted AS (
         SELECT
           gt.city,
-          -- Prefer resolution_high (exact Polymarket source) over observed_high (Open-Meteo archive).
+          -- Prefer the exact Polymarket resolution value over the Open-Meteo
+          -- archive. The forecastHigh payload field holds the point forecast for
+          -- the event metric (the daily-min forecast on lowest-temp rows).
           (so.payload->>'forecastHigh')::float
-            - COALESCE(gt.resolution_high, gt.observed_high)        AS error,
+            - ${groundTruth}                                         AS error,
           -- Exponential decay: samples N days old get weight 2^(-N / half_life).
           -- Newer observations dominate so seasonal drift surfaces in ~5 days
           -- rather than the ~12 days an equal-weight mean would take.
@@ -127,6 +152,7 @@ export async function computeCityBias(
         WHERE so.kind = 'weather_event'
           AND so.observed_at >= ${windowStart}
           AND (so.payload->>'forecastHigh') IS NOT NULL
+          ${metricFilter}
       ),
       stats AS (
       SELECT
@@ -167,12 +193,12 @@ export async function computeCityBias(
     const qualified = new Set(rows.map((r) => canonicalCityKey(r.city) ?? r.city.toLowerCase().trim()));
     for (const city of Object.keys(CITY_COORDINATES)) {
       if (!qualified.has(city)) {
-        await redis.del(redisKey(city));
+        await redis.del(redisKey(city, metric));
       }
     }
 
     if (rows.length === 0) {
-      logger.info('[weather-bias] no cities with enough paired samples yet', { minSamples });
+      logger.info('[weather-bias] no cities with enough paired samples yet', { minSamples, metric });
       return;
     }
 
@@ -187,9 +213,10 @@ export async function computeCityBias(
         sampleSize: row.sample_size,
         updatedAt: now,
       };
-      await redis.set(redisKey(row.city), JSON.stringify(bias), 'EX', REDIS_TTL_S);
+      await redis.set(redisKey(row.city, metric), JSON.stringify(bias), 'EX', REDIS_TTL_S);
       logger.info('[weather-bias] city bias updated', {
         city: row.city,
+        metric,
         meanBias: bias.meanBias,
         empiricalStddev: bias.empiricalStddev,
         rawMae: bias.rawMae,
@@ -224,6 +251,7 @@ export async function computeCityBaseRates(
       city: string;
       unit: string;
       highs: number[];
+      lows: (number | null)[];
       sample_size: number;
     }[]>`
       SELECT
@@ -233,6 +261,10 @@ export async function computeCityBaseRates(
           COALESCE(resolution_high, observed_high)
           ORDER BY target_date DESC
         ) AS highs,
+        ARRAY_AGG(
+          COALESCE(resolution_low, observed_low)
+          ORDER BY target_date DESC
+        ) AS lows,
         COUNT(*)::int AS sample_size
       FROM weather_ground_truth
       WHERE target_date >= (CURRENT_DATE - ${lookbackDays}::int)::date
@@ -247,8 +279,13 @@ export async function computeCityBaseRates(
 
     const now = new Date().toISOString();
     for (const row of rows) {
+      // Drop null lows (rows whose min wasn't reconciled yet) so the lowest-temp
+      // base-rate gate only sees real observations. Highs are guaranteed non-null
+      // by the WHERE clause.
+      const lows = (row.lows ?? []).filter((v): v is number => typeof v === 'number');
       const actuals: CityActuals = {
         highs: row.highs,
+        lows,
         unit: row.unit,
         sampleSize: row.sample_size,
         updatedAt: now,
@@ -258,6 +295,7 @@ export async function computeCityBaseRates(
         city: row.city,
         unit: row.unit,
         sampleSize: row.sample_size,
+        lowSampleSize: lows.length,
       });
     }
   } catch (err) {
@@ -270,9 +308,13 @@ export async function computeCityBaseRates(
 /**
  * Read a city's cached bias from Redis. Returns null if absent or unparseable.
  */
-export async function getCityBias(redis: Redis, city: string): Promise<CityBias | null> {
+export async function getCityBias(
+  redis: Redis,
+  city: string,
+  metric: 'high' | 'low' = 'high',
+): Promise<CityBias | null> {
   try {
-    const raw = await redis.get(redisKey(city));
+    const raw = await redis.get(redisKey(city, metric));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as CityBias;
     if (typeof parsed.meanBias !== 'number' || typeof parsed.empiricalStddev !== 'number') {

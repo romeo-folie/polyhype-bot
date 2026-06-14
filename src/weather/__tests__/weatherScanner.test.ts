@@ -52,6 +52,11 @@ const baseConfig = {
   WEATHER_BRACKET_CANCEL_ENABLED: false,
   WEATHER_BRACKET_CANCEL_LOCAL_HOUR: 18,
   WEATHER_BRACKET_CANCEL_PRIMARY_PRICE: 0.95,
+  // Lowest-temperature feature off by default in the base config so legacy scan
+  // tests never trigger the second (lowest-temperature) Gamma fetch; the
+  // dedicated lowest-temp tests override these explicitly.
+  WEATHER_LOWEST_TEMP_ENABLED: false,
+  WEATHER_LOWEST_TEMP_SHADOW_ENABLED: false,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
 vi.mock('../../shared/config.js', () => ({
@@ -645,6 +650,80 @@ describe('findMispricedBrackets', () => {
       expect(bracket52.tradeSide).toBe('YES');
       expect(bracket52.edge).toBeGreaterThan(0);
     }
+  });
+
+  it('lowest-temp tail-NO base-rate gate uses daily LOWS, not highs', () => {
+    // High-tail "58°F or higher" on a LOWEST-temperature market: YES = daily MIN ≥ 58.
+    // Forecast low 50 → model says min well below 58 → NO has large edge.
+    // cityActuals.highs all ≥ 58 (would block NO if the gate wrongly used highs);
+    // cityActuals.lows all < 58 (correctly does NOT block — daily mins rarely ≥ 58).
+    const lowEvent = {
+      eventId: 'el', slug: 'low-event', city: 'chicago', coords: lookupCity('chicago')!,
+      targetDate: '2026-06-14', unit: 'fahrenheit' as const, metric: 'low' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'], threshold: 0, low: null, high: 45, label: '45°F or below', yesPrice: 0.05, noPrice: 0.95 },
+        { marketId: 'm1', conditionId: 'c1', clobTokenIds: ['t1y', 't1n'], threshold: 1, low: 46, high: 47, label: '46-47°F', yesPrice: 0.10, noPrice: 0.90 },
+        { marketId: 'm2', conditionId: 'c2', clobTokenIds: ['t2y', 't2n'], threshold: 2, low: 48, high: 49, label: '48-49°F', yesPrice: 0.25, noPrice: 0.75 },
+        { marketId: 'm3', conditionId: 'c3', clobTokenIds: ['t3y', 't3n'], threshold: 3, low: 50, high: 51, label: '50-51°F', yesPrice: 0.30, noPrice: 0.70 },
+        { marketId: 'm4', conditionId: 'c4', clobTokenIds: ['t4y', 't4n'], threshold: 4, low: 52, high: 53, label: '52-53°F', yesPrice: 0.15, noPrice: 0.85 },
+        { marketId: 'm5', conditionId: 'c5', clobTokenIds: ['t5y', 't5n'], threshold: 5, low: 54, high: 55, label: '54-55°F', yesPrice: 0.05, noPrice: 0.95 },
+        { marketId: 'm6', conditionId: 'c6', clobTokenIds: ['t6y', 't6n'], threshold: 6, low: 58, high: null, label: '58°F or higher', yesPrice: 0.15, noPrice: 0.85 },
+      ],
+      endDate: '2026-06-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 50, metric: 'low' as const, stdDev: 3, source: 'combined' as const, ensembleMembers: 31 };
+    const cityActuals = {
+      highs: [70, 71, 72, 69, 73, 70, 71, 72], // all ≥ 58 → high-based fraction = 1.0 (would block)
+      lows: [48, 50, 49, 51, 47, 50, 52, 49],  // all < 58 → low-based fraction = 0 (allows)
+      unit: 'fahrenheit',
+      sampleSize: 8,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const { opportunities } = findMispricedBrackets(lowEvent, forecast, 1, 0.08, {
+      cityActuals: cityActuals as never,
+      baseRateMinSamples: 5,
+      baseRateNoBlockThreshold: 0.70,
+      minModelCoverage: 0.5, // isolate the base-rate gate from the coverage guard
+    });
+
+    // The high-tail NO survived the gate (lows don't favour YES) → opportunity present.
+    const tailNo = opportunities.find((o) => o.bracketLabel === '58°F or higher' && o.tradeSide === 'NO');
+    expect(tailNo).toBeDefined();
+    expect(tailNo!.metric).toBe('low');
+  });
+
+  it('lowest-temp tail-NO fails CLOSED when cityActuals.lows is absent (stale cache entry)', () => {
+    // A cache entry written before lowest-temp support has highs but no lows. The
+    // gate must NOT fall back to highs — it fails closed (blocks the tail NO) until
+    // the actuals cache is refreshed with lows (≤36h TTL window after deploy).
+    const lowEvent = {
+      eventId: 'el2', slug: 'low-event-2', city: 'chicago', coords: lookupCity('chicago')!,
+      targetDate: '2026-06-14', unit: 'fahrenheit' as const, metric: 'low' as const,
+      brackets: [
+        { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'], threshold: 0, low: null, high: 45, label: '45°F or below', yesPrice: 0.05, noPrice: 0.95 },
+        { marketId: 'm3', conditionId: 'c3', clobTokenIds: ['t3y', 't3n'], threshold: 3, low: 50, high: 51, label: '50-51°F', yesPrice: 0.30, noPrice: 0.70 },
+        { marketId: 'm6', conditionId: 'c6', clobTokenIds: ['t6y', 't6n'], threshold: 6, low: 58, high: null, label: '58°F or higher', yesPrice: 0.15, noPrice: 0.85 },
+      ],
+      endDate: '2026-06-14T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 50, metric: 'low' as const, stdDev: 3, source: 'combined' as const, ensembleMembers: 31 };
+    const staleActuals = {
+      highs: [48, 50, 49, 51, 47, 50, 52, 49], // < 58 — would ALLOW the NO if wrongly used
+      // no `lows` field (old cache entry)
+      unit: 'fahrenheit', sampleSize: 8, updatedAt: new Date().toISOString(),
+    };
+
+    const { opportunities } = findMispricedBrackets(lowEvent, forecast, 1, 0.08, {
+      cityActuals: staleActuals as never,
+      baseRateMinSamples: 5,
+      baseRateNoBlockThreshold: 0.70,
+      minModelCoverage: 0.5,
+    });
+
+    // lows absent → actualsSeries undefined → fail closed → tail NO suppressed.
+    const tailNo = opportunities.find((o) => o.bracketLabel === '58°F or higher' && o.tradeSide === 'NO');
+    expect(tailNo).toBeUndefined();
   });
 
   it('stddevMultiplier widens the model distribution as expected', () => {
@@ -1791,6 +1870,7 @@ describe('fetchForecast - ECMWF flag wiring', () => {
       undefined,
       false,
       0, // retryCount default when no opts passed
+      'high', // metric — high-temperature event
     );
     expect(mockFetchEnsemble).toHaveBeenNthCalledWith(
       2,
@@ -1801,6 +1881,7 @@ describe('fetchForecast - ECMWF flag wiring', () => {
       undefined,
       true,
       0,
+      'high', // metric — shadow ensemble keeps the same metric
     );
   });
 
@@ -1848,6 +1929,7 @@ describe('fetchForecast - ECMWF flag wiring', () => {
       undefined,
       true,
       0, // retryCount default when no opts passed
+      'high', // metric — high-temperature event
     );
   });
 
@@ -1894,6 +1976,7 @@ describe('fetchForecast - ECMWF flag wiring', () => {
       undefined,
       false,
       0, // retryCount default when no opts passed
+      'high', // metric — high-temperature event
     );
   });
 });
@@ -2785,6 +2868,83 @@ describe('scanWeatherMarkets', () => {
       await runWeatherScan(redisMock as never);
 
       expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+    });
+  });
+
+  // ── lowest-temperature discovery + shadow/live gating ────────────────────
+  describe('lowest-temperature events', () => {
+    function makeMockLowGammaEvent() {
+      const ev = makeMockGammaEvent();
+      ev.id = 'event-low-1';
+      ev.title = `Lowest temperature in Chicago on ${titleDate}?`;
+      ev.slug = `lowest-temperature-in-chicago-on-${slugDate}`;
+      ev.markets = ev.markets.map((m) => ({
+        ...m,
+        question: m.question.replace('highest temperature', 'lowest temperature'),
+      }));
+      return ev;
+    }
+
+    // Gamma fetch returns the low event for the lowest-temperature tag and nothing
+    // for the highest-temperature tag, isolating low-event behaviour. Forecast low
+    // is wired to 52 so the same bracket structure produces opportunities.
+    function wireLowOnlyGammaAndForecast() {
+      globalThis.fetch = vi.fn((url: string) => Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(String(url).includes('lowest-temperature') ? [makeMockLowGammaEvent()] : []),
+      })) as unknown as typeof fetch;
+      mockFetchNwsForecast.mockResolvedValue({
+        highF: 70, lowF: 52, precipProbability: 10, forecastDate: targetIso, shortForecast: 'Clear',
+      });
+      mockFetchOpenMeteo.mockResolvedValue({
+        highTemp: 70, lowTemp: 52, precipProbability: 10, forecastDate: targetIso,
+      });
+      mockFetchEnsemble.mockResolvedValue({
+        meanHigh: 70, stddevHigh: 3.2, meanLow: 52, stddevLow: 3.2, memberCount: 31, forecastDate: targetIso,
+      });
+    }
+
+    it('shadow mode: evaluates a low event but suppresses it from the returned (tradable) set', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_LOWEST_TEMP_ENABLED: false,   // not live
+        WEATHER_LOWEST_TEMP_SHADOW_ENABLED: true,
+      });
+      wireLowOnlyGammaAndForecast();
+
+      const results = await scanWeatherMarkets(redisMock as never);
+
+      // The low event is evaluated (logged with metric='low') ...
+      expect(logger.info).toHaveBeenCalledWith(
+        '[weather] event evaluated',
+        expect.objectContaining({ city: 'chicago', metric: 'low' }),
+      );
+      // ... but produces NO tradable opportunities (shadow-suppressed).
+      expect(results.filter((o) => o.metric === 'low')).toHaveLength(0);
+      // The scan summary records the suppression so it is provably evaluated-then-held.
+      const summaryCall = (logger.info as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .find((c) => c[0] === '[weather] scan summary');
+      expect(summaryCall).toBeDefined();
+      expect((summaryCall![1] as { lowShadowSuppressed: number }).lowShadowSuppressed).toBeGreaterThan(0);
+    });
+
+    it('live mode: low opportunities ARE returned for execution when WEATHER_LOWEST_TEMP_ENABLED=true', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_LOWEST_TEMP_ENABLED: true,    // live
+        WEATHER_LOWEST_TEMP_SHADOW_ENABLED: true,
+      });
+      wireLowOnlyGammaAndForecast();
+
+      const results = await scanWeatherMarkets(redisMock as never);
+
+      const lowOpps = results.filter((o) => o.metric === 'low');
+      expect(lowOpps.length).toBeGreaterThan(0);
+      // sourcedFrom carries the low namespace so it never collides with a high market.
+      expect(lowOpps[0]!.city).toBe('chicago');
     });
   });
 });
@@ -3871,9 +4031,9 @@ describe('fetchForecast - ensemble-only fallback', () => {
     expect(mockFetchOpenMeteo).toHaveBeenCalledWith(
       expect.any(Number), expect.any(Number), '2026-06-04', 'celsius', undefined, 2,
     );
-    // fetchEnsembleForecast(lat, lon, date, unit, fetchFn, useEcmwf, retryCount)
+    // fetchEnsembleForecast(lat, lon, date, unit, fetchFn, useEcmwf, retryCount, metric)
     expect(mockFetchEnsemble).toHaveBeenCalledWith(
-      expect.any(Number), expect.any(Number), '2026-06-04', 'celsius', undefined, false, 2,
+      expect.any(Number), expect.any(Number), '2026-06-04', 'celsius', undefined, false, 2, 'high',
     );
   });
 });
@@ -4028,7 +4188,7 @@ describe('scanWeatherMarkets - outage alert and forecast cache', () => {
     // cacheForecast is fire-and-forget — let the microtask queue drain.
     await new Promise((r) => setTimeout(r, 0));
 
-    const cacheKey = `weather:forecast_cache:amsterdam:${tomorrowIso}`;
+    const cacheKey = `weather:forecast_cache:high:amsterdam:${tomorrowIso}`;
     expect(redisMock._store.has(cacheKey)).toBe(true);
     const payload = JSON.parse(redisMock._store.get(cacheKey)!) as { forecastHigh: number };
     expect(payload.forecastHigh).toBe(18);
@@ -4043,7 +4203,7 @@ describe('scanWeatherMarkets - outage alert and forecast cache', () => {
     await scanWeatherMarkets(redisMock as never);
     await new Promise((r) => setTimeout(r, 0));
 
-    const cacheKey = `weather:forecast_cache:amsterdam:${tomorrowIso}`;
+    const cacheKey = `weather:forecast_cache:high:amsterdam:${tomorrowIso}`;
     expect(redisMock._store.has(cacheKey)).toBe(false);
   });
 });

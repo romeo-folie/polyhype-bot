@@ -67,6 +67,8 @@ export interface ParsedWeatherMeta {
   city: string;
   targetDate: string;
   bracketLabel: string;
+  /** Which daily extreme the market resolves on ('high' | 'low'). */
+  metric: 'high' | 'low';
 }
 
 const MONTHS: Record<string, number> = {
@@ -74,21 +76,20 @@ const MONTHS: Record<string, number> = {
   july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
 };
 
-const SOURCED_FROM_RE = /^weather:(.+):(\d{4}-\d{2}-\d{2}):(.+)$/;
-
 /**
- * Derive {city, targetDate, bracketLabel} from a market question of the form
- * "Will the highest temperature in <City> be <bracket> on <Month D>?".
+ * Derive {city, targetDate, bracketLabel, metric} from a market question of the
+ * form "Will the highest|lowest temperature in <City> be <bracket> on <Month D>?".
  *
  * Used for reconciled:weather positions whose sourcedFrom carries no embedded
  * metadata. Returns null on any parse failure.
  */
 export function parseWeatherMetaFromQuestion(question: string): ParsedWeatherMeta | null {
   const cityMatch = question.match(
-    /highest temperature in ([^?]+?) (?:be |exceed |fall |drop |reach |\d)/i,
+    /(highest|lowest) temperature in ([^?]+?) (?:be |exceed |fall |drop |reach |\d)/i,
   );
-  if (!cityMatch?.[1]) return null;
-  const cityRaw = cityMatch[1].trim().toLowerCase();
+  if (!cityMatch?.[1] || !cityMatch[2]) return null;
+  const metric: 'high' | 'low' = cityMatch[1].toLowerCase() === 'lowest' ? 'low' : 'high';
+  const cityRaw = cityMatch[2].trim().toLowerCase();
   const city = canonicalCityKey(cityRaw) ?? cityRaw;
   if (!lookupCity(city)) return null;
 
@@ -108,20 +109,33 @@ export function parseWeatherMetaFromQuestion(question: string): ParsedWeatherMet
     if (Date.now() - candidate > 180 * 24 * 3600 * 1000) year += 1;
   }
   const targetDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-  return { city, targetDate, bracketLabel };
+  return { city, targetDate, bracketLabel, metric };
 }
 
+// Matches both key forms:
+//   weather:<city>:<date>:<bracket>            (highest temperature)
+//   weather:low:<city>:<date>:<bracket>        (lowest temperature)
+// Group 1 captures the optional `low` metric marker. No city is named "low",
+// so the optional group is unambiguous.
+const SOURCED_FROM_RE = /^weather:(?:(low):)?(.+):(\d{4}-\d{2}-\d{2}):(.+)$/;
+
 /**
- * Parse {city, targetDate, bracketLabel} from a position's sourcedFrom field,
- * falling back to the market question for reconciled:weather rows.
+ * Parse {city, targetDate, bracketLabel, metric} from a position's sourcedFrom
+ * field, falling back to the market question for reconciled:weather rows.
+ * Handles both the high (`weather:…`) and low (`weather:low:…`) key forms.
  */
 export function parseWeatherPositionMeta(
   sourcedFrom: string,
   question?: string | null,
 ): ParsedWeatherMeta | null {
   const m = sourcedFrom.match(SOURCED_FROM_RE);
-  if (m?.[1] && m[2] && m[3]) {
-    return { city: m[1], targetDate: m[2], bracketLabel: m[3] };
+  if (m?.[2] && m[3] && m[4]) {
+    return {
+      city: m[2],
+      targetDate: m[3],
+      bracketLabel: m[4],
+      metric: m[1] === 'low' ? 'low' : 'high',
+    };
   }
   if (sourcedFrom.startsWith('reconciled:weather') && question) {
     return parseWeatherMetaFromQuestion(question);

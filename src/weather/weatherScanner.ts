@@ -142,6 +142,9 @@ export interface ParsedWeatherEvent {
   targetDate: string;
   /** Temperature unit. */
   unit: 'fahrenheit' | 'celsius';
+  /** Which daily extreme the event resolves on: 'high' (Highest temperature)
+   *  or 'low' (Lowest temperature). */
+  metric: 'high' | 'low';
   /** Parsed brackets sorted by threshold ascending. */
   brackets: ParsedBracket[];
   /** All market IDs in the event including closed/inactive ones — used for
@@ -153,12 +156,63 @@ export interface ParsedWeatherEvent {
 
 /**
  * Extract city name from a weather event title.
- * Titles follow: "Highest temperature in {City} on {Month} {Day}?"
+ * Titles follow: "Highest temperature in {City} on {Month} {Day}?" or
+ *                "Lowest temperature in {City} on {Month} {Day}?"
  */
 export function extractCityFromTitle(title: string): string | null {
-  const match = title.match(/highest\s+temperature\s+in\s+(.+?)\s+on\s+/i);
+  const match = title.match(/(?:highest|lowest)\s+temperature\s+in\s+(.+?)\s+on\s+/i);
   if (!match?.[1]) return null;
   return match[1].trim().toLowerCase();
+}
+
+/**
+ * Determine whether a weather event measures the daily highest or lowest
+ * temperature from its title. Returns null when the title is neither.
+ */
+export function extractMetricFromTitle(title: string): 'high' | 'low' | null {
+  const m = title.match(/(highest|lowest)\s+temperature\s+in\s+/i);
+  if (!m?.[1]) return null;
+  return m[1].toLowerCase() === 'lowest' ? 'low' : 'high';
+}
+
+/**
+ * Build the `sourcedFrom` key for a weather opportunity.
+ *
+ * Highest-temperature markets keep the legacy `weather:{city}:{date}:{bracket}`
+ * form so existing held positions parse unchanged. Lowest-temperature markets
+ * insert a `low` segment — `weather:low:{city}:{date}:{bracket}` — because a city
+ * runs a high AND a low market on the same day that can share a bracket label
+ * (e.g. "20°C"), which would otherwise collide. No city is named "low", so the
+ * marker is unambiguous. Both forms still match `LIKE 'weather:%'`.
+ */
+export function weatherSourcedFrom(
+  metric: 'high' | 'low',
+  city: string,
+  targetDate: string,
+  bracketLabel: string,
+): string {
+  return metric === 'low'
+    ? `weather:low:${city}:${targetDate}:${bracketLabel}`
+    : `weather:${city}:${targetDate}:${bracketLabel}`;
+}
+
+/**
+ * Parse a weather `sourcedFrom` key back into its parts. Returns null when the
+ * string is not a weather key. Handles both the high form and the low form.
+ */
+export function parseWeatherSourcedFrom(
+  sourcedFrom: string,
+): { metric: 'high' | 'low'; city: string; targetDate: string; bracketLabel: string } | null {
+  const parts = sourcedFrom.split(':');
+  if (parts[0] !== 'weather') return null;
+  // Low form: weather:low:{city}:{date}:{bracket}
+  if (parts[1] === 'low') {
+    if (parts.length < 5) return null;
+    return { metric: 'low', city: parts[2]!, targetDate: parts[3]!, bracketLabel: parts.slice(4).join(':') };
+  }
+  // High form: weather:{city}:{date}:{bracket}
+  if (parts.length < 4) return null;
+  return { metric: 'high', city: parts[1]!, targetDate: parts[2]!, bracketLabel: parts.slice(3).join(':') };
 }
 
 /**
@@ -269,6 +323,7 @@ export function parseBracketLabel(
 export async function fetchWeatherEvents(
   limit: number,
   offset = 0,
+  tagSlug: 'highest-temperature' | 'lowest-temperature' = 'highest-temperature',
 ): Promise<WeatherGammaEvent[]> {
   // Circuit breaker: skip if rate-limited recently
   if (Date.now() < rateLimitedUntilMs) {
@@ -277,7 +332,7 @@ export async function fetchWeatherEvents(
   }
 
   const params = new URLSearchParams({
-    tag_slug: 'highest-temperature',
+    tag_slug: tagSlug,
     limit: limit.toString(),
     offset: offset.toString(),
     active: 'true',
@@ -326,6 +381,9 @@ export function parseWeatherEvent(event: WeatherGammaEvent): ParsedWeatherEvent 
 
   const cityRaw = extractCityFromTitle(event.title);
   if (!cityRaw) return null;
+
+  const metric = extractMetricFromTitle(event.title);
+  if (!metric) return null;
 
   const coords = lookupCity(cityRaw);
   if (!coords) return null;
@@ -403,6 +461,7 @@ export function parseWeatherEvent(event: WeatherGammaEvent): ParsedWeatherEvent 
     coords,
     targetDate,
     unit: coords.unit,
+    metric,
     brackets,
     allMarketIds: event.markets.map((m) => m.id),
     endDate: event.endDate ?? null,
@@ -412,8 +471,13 @@ export function parseWeatherEvent(event: WeatherGammaEvent): ParsedWeatherEvent 
 // ── Forecast fetching ────────────────────────────────────────────────────
 
 export interface ForecastResult {
-  /** Point forecast high temperature in the event's unit. */
+  /** Point forecast temperature in the event's unit. For metric='high' this is
+   *  the forecast daily MAX; for metric='low' it is the forecast daily MIN. The
+   *  field keeps the `forecastHigh` name for continuity across the (large) set
+   *  of high-temperature call sites — read `metric` to interpret it. */
   forecastHigh: number;
+  /** Which daily extreme forecastHigh estimates. */
+  metric: 'high' | 'low';
   /** Standard deviation to use for probability model. */
   stdDev: number;
   /** Source of the forecast. 'ensemble-only' = all deterministic sources
@@ -468,6 +532,15 @@ export async function fetchForecast(
 ): Promise<ForecastResult | null> {
   const { coords, targetDate, unit } = event;
   const month = parseInt(targetDate.slice(5, 7), 10);
+  // Resolve on the daily MIN for lowest-temperature events, daily MAX otherwise.
+  const metric: 'high' | 'low' = event.metric ?? 'high';
+  // Pick the per-metric ensemble stats. computeEnsembleStats fills both field
+  // pairs from the single requested metric's members, but read the matching
+  // pair so this stays correct independent of that internal detail.
+  const ensStddev = (e: { stddevHigh: number; stddevLow: number }): number =>
+    metric === 'low' ? e.stddevLow : e.stddevHigh;
+  const ensMean = (e: { meanHigh: number; meanLow: number }): number =>
+    metric === 'low' ? e.meanLow : e.meanHigh;
 
   // Default stddev for this unit — Celsius stddev is ~5/9 of Fahrenheit
   let defaultStd = getDefaultStdDev(daysOut, month);
@@ -490,9 +563,9 @@ export async function fetchForecast(
   // production rate-limited queue they are still serialized by the limiter —
   // the shadow fetch adds one extra rate-limit slot per event when enabled.
   const [ensemble, shadowEnsembleRaw] = await Promise.all([
-    fetchEnsembleForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, useEcmwf, retryCount),
+    fetchEnsembleForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, useEcmwf, retryCount, metric),
     dualEnsembleShadow
-      ? fetchEnsembleForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, !useEcmwf, retryCount)
+      ? fetchEnsembleForecast(coords.lat, coords.lon, targetDate, unit, fetchFn, !useEcmwf, retryCount, metric)
       : Promise.resolve(null),
   ]);
   const ensembleModel: ForecastResult['ensembleModel'] = ensemble?.ensembleModel ?? 'none';
@@ -507,15 +580,18 @@ export async function fetchForecast(
       hrrrEnabled ? fetchHrrrForecast(coords.lat, coords.lon, targetDate, fetchFn, retryCount) : Promise.resolve(null),
     ]);
 
-    // Collect available deterministic highs. NOAA is in °F — convert if needed.
-    const noaaHigh = noaaForecast
-      ? (unit === 'celsius' ? (noaaForecast.highF - 32) * 5 / 9 : noaaForecast.highF)
+    // Collect available deterministic point forecasts for the metric. NOAA is
+    // in °F — convert if needed. For metric='low' use each source's daily-min field.
+    const noaaRaw = noaaForecast ? (metric === 'low' ? noaaForecast.lowF : noaaForecast.highF) : null;
+    const noaaHigh = noaaRaw !== null
+      ? (unit === 'celsius' ? (noaaRaw - 32) * 5 / 9 : noaaRaw)
       : null;
     // HRRR is always °F — convert if the event uses Celsius (US cities are always °F, but be safe).
-    const hrrrHigh = hrrrForecast
-      ? (unit === 'celsius' ? (hrrrForecast.highTemp - 32) * 5 / 9 : hrrrForecast.highTemp)
+    const hrrrRaw = hrrrForecast ? (metric === 'low' ? hrrrForecast.lowTemp : hrrrForecast.highTemp) : null;
+    const hrrrHigh = hrrrRaw !== null
+      ? (unit === 'celsius' ? (hrrrRaw - 32) * 5 / 9 : hrrrRaw)
       : null;
-    const omHigh = omForecast?.highTemp ?? null;
+    const omHigh = (metric === 'low' ? omForecast?.lowTemp : omForecast?.highTemp) ?? null;
 
     const availableHighs = [noaaHigh, omHigh, hrrrHigh].filter((v): v is number => v !== null);
     if (availableHighs.length === 0) {
@@ -531,8 +607,9 @@ export async function fetchForecast(
           members: ensemble.memberCount,
         });
         return {
-          forecastHigh: ensemble.meanHigh,
-          stdDev: Math.max(ensemble.stddevHigh, floorStd * stddevMinFraction),
+          forecastHigh: ensMean(ensemble),
+          metric,
+          stdDev: Math.max(ensStddev(ensemble), floorStd * stddevMinFraction),
           source: 'ensemble-only',
           ensembleMembers: ensemble.memberCount,
           ensembleModel,
@@ -595,17 +672,19 @@ export async function fetchForecast(
     // Single-source: use defaultStd as the ensemble fallback so a partial outage
     // (only NOAA responds, ensemble null) doesn't silently tighten uncertainty to the
     // stddevMinFraction floor. Multi-source: spread already adds variance, so 0 fallback is fine.
+    const ensStd = ensemble ? ensStddev(ensemble) : null;
     const stdDev = availableHighs.length === 1
-      ? Math.max(ensemble?.stddevHigh ?? defaultStd, floorStd * stddevMinFraction)
-      : Math.max(ensemble?.stddevHigh ?? 0, spread, floorStd * stddevMinFraction);
+      ? Math.max(ensStd ?? defaultStd, floorStd * stddevMinFraction)
+      : Math.max(ensStd ?? 0, spread, floorStd * stddevMinFraction);
     const shadowStdDev = shadowEnsembleRaw
       ? (availableHighs.length === 1
-        ? Math.max(shadowEnsembleRaw.stddevHigh, floorStd * stddevMinFraction)
-        : Math.max(shadowEnsembleRaw.stddevHigh, spread, floorStd * stddevMinFraction))
+        ? Math.max(ensStddev(shadowEnsembleRaw), floorStd * stddevMinFraction)
+        : Math.max(ensStddev(shadowEnsembleRaw), spread, floorStd * stddevMinFraction))
       : null;
 
     return {
       forecastHigh,
+      metric,
       stdDev,
       source,
       ensembleMembers: ensemble?.memberCount ?? 0,
@@ -635,8 +714,9 @@ export async function fetchForecast(
         members: ensemble.memberCount,
       });
       return {
-        forecastHigh: ensemble.meanHigh,
-        stdDev: Math.max(ensemble.stddevHigh, floorStd * stddevMinFraction),
+        forecastHigh: ensMean(ensemble),
+        metric,
+        stdDev: Math.max(ensStddev(ensemble), floorStd * stddevMinFraction),
         source: 'ensemble-only',
         ensembleMembers: ensemble.memberCount,
         ensembleModel,
@@ -646,12 +726,14 @@ export async function fetchForecast(
     return null;
   }
 
-  const stdDev = Math.max(ensemble?.stddevHigh ?? defaultStd, floorStd * stddevMinFraction);
+  const ensStd = ensemble ? ensStddev(ensemble) : null;
+  const stdDev = Math.max(ensStd ?? defaultStd, floorStd * stddevMinFraction);
   const shadowStdDev = shadowEnsembleRaw
-    ? Math.max(shadowEnsembleRaw.stddevHigh, floorStd * stddevMinFraction)
+    ? Math.max(ensStddev(shadowEnsembleRaw), floorStd * stddevMinFraction)
     : null;
   return {
-    forecastHigh: omForecast.highTemp,
+    forecastHigh: metric === 'low' ? omForecast.lowTemp : omForecast.highTemp,
+    metric,
     stdDev,
     source: 'open-meteo',
     ensembleMembers: ensemble?.memberCount ?? 0,
@@ -677,6 +759,8 @@ export interface WeatherBracketOpportunity {
   eventSlug: string;
   city: string;
   targetDate: string;
+  /** Which daily extreme the market resolves on ('high' | 'low'). */
+  metric: 'high' | 'low';
   /** Bracket details. */
   bracketLabel: string;
   /** Full market question — passed to executor + category inference. */
@@ -1228,29 +1312,34 @@ export function findMispricedBrackets(
     // Thin sample → fail open: some data exists, just not enough to be confident
     // either way, so let the model probability decide.
     if (tradeSide === 'NO' && (bracket.low === null || bracket.high === null)) {
-      if (cityActuals === null) {
+      // For lowest-temperature markets the base rate must come from the daily MIN
+      // series, not the daily MAX — a min ≥ 20°C is far rarer than a max ≥ 20°C.
+      const actualsSeries = event.metric === 'low' ? cityActuals?.lows : cityActuals?.highs;
+      if (cityActuals === null || !actualsSeries || actualsSeries.length === 0) {
         logger.info('[weather] skipping tail NO — actuals cache absent, failing closed', {
           city: event.city,
           bracket: bracket.label,
+          metric: event.metric,
         });
         continue;
       }
       if (
         cityActuals.unit === event.unit &&
-        cityActuals.sampleSize >= baseRateMinSamples
+        actualsSeries.length >= baseRateMinSamples
       ) {
         const threshold = bracket.high === null ? bracket.low! : bracket.high;
         const yesFraction =
           bracket.high === null
-            ? cityActuals.highs.filter((h) => h >= threshold).length / cityActuals.highs.length
-            : cityActuals.highs.filter((h) => h <= threshold).length / cityActuals.highs.length;
+            ? actualsSeries.filter((v) => v >= threshold).length / actualsSeries.length
+            : actualsSeries.filter((v) => v <= threshold).length / actualsSeries.length;
         if (yesFraction >= baseRateNoBlockThreshold) {
           logger.info('[weather] skipping tail NO — base rate strongly favors YES', {
             city: event.city,
             bracket: bracket.label,
+            metric: event.metric,
             threshold,
             yesFraction: Math.round(yesFraction * 1000) / 1000,
-            sampleSize: cityActuals.sampleSize,
+            sampleSize: actualsSeries.length,
             baseRateNoBlockThreshold,
           });
           continue;
@@ -1292,6 +1381,7 @@ export function findMispricedBrackets(
       eventSlug: event.slug,
       city: event.city,
       targetDate: event.targetDate,
+      metric: event.metric,
       bracketLabel: bracket.label,
       question: bracket.question,
       clobTokenIds: bracket.clobTokenIds,
@@ -1376,8 +1466,18 @@ export async function scanWeatherMarkets(
   const cfg = loadConfig();
   const allOpportunities: WeatherBracketOpportunity[] = [];
 
-  // Step 1: Discover weather events
-  const rawEvents = await fetchWeatherEvents(cfg.WEATHER_MAX_EVENTS);
+  // Step 1: Discover weather events. Highest-temperature always; lowest-temperature
+  // when its feature is on in EITHER mode (shadow logs, live trades). Both tags
+  // feed the same per-event pipeline — parseWeatherEvent tags each with `metric`.
+  const lowestTempActive =
+    cfg.WEATHER_LOWEST_TEMP_ENABLED || cfg.WEATHER_LOWEST_TEMP_SHADOW_ENABLED;
+  const [rawHighEvents, rawLowEvents] = await Promise.all([
+    fetchWeatherEvents(cfg.WEATHER_MAX_EVENTS, 0, 'highest-temperature'),
+    lowestTempActive
+      ? fetchWeatherEvents(cfg.WEATHER_MAX_EVENTS, 0, 'lowest-temperature')
+      : Promise.resolve([]),
+  ]);
+  const rawEvents = [...rawHighEvents, ...rawLowEvents];
 
   if (rawEvents.length === 0) {
     logger.debug('[weather] no temperature events found on Gamma');
@@ -1394,6 +1494,9 @@ export async function scanWeatherMarkets(
   let horizonSkipped = 0;
   let eventsWithOpportunities = 0;
   let totalDisagreementBlocked = 0;
+  // Lowest-temp opportunities suppressed from the execution set while the feature
+  // is shadow-only (still shadow-logged). Surfaced in the scan summary.
+  let lowShadowSuppressed = 0;
 
   for (const rawEvent of rawEvents) {
     // Step 2: Parse the event
@@ -1556,9 +1659,16 @@ export async function scanWeatherMarkets(
     // to it when live fetches fail (best-effort, never blocks the scan).
     void cacheForecast(redis, event.city, event.targetDate, forecast).catch(() => {});
 
-    // Fetch per-city bias (null when WEATHER_BIAS_CORRECTION_ENABLED=false or cache miss).
+    // Whether the feature governing this event is live (trades) vs shadow-only.
+    // Highest-temp is gated by WEATHER_SCANNER_ENABLED; lowest-temp by its own flag.
+    const featureLive = event.metric === 'low'
+      ? cfg.WEATHER_LOWEST_TEMP_ENABLED
+      : cfg.WEATHER_SCANNER_ENABLED;
+
+    // Fetch per-city bias for this metric (null when WEATHER_BIAS_CORRECTION_ENABLED=false
+    // or cache miss). Low markets use a separate bias profile — never the high bias.
     const cityBias = cfg.WEATHER_BIAS_CORRECTION_ENABLED
-      ? await getCityBias(redis, event.city)
+      ? await getCityBias(redis, event.city, event.metric)
       : null;
 
     // Fetch per-city WU actuals for tail NO base-rate gate (always, regardless of
@@ -1632,6 +1742,7 @@ export async function scanWeatherMarkets(
       slug: event.slug,
       city: event.city,
       targetDate: event.targetDate,
+      metric: event.metric,
       daysOut,
       unit: event.unit,
       brackets: event.brackets.length,
@@ -1664,7 +1775,7 @@ export async function scanWeatherMarkets(
       // weather_bracket semantics so event-level `wouldBlock` aggregates stay
       // consistent with bracket-level `wouldTrade` counts.
       wouldBlock:
-        !cfg.WEATHER_SCANNER_ENABLED ||
+        !featureLive ||
         gatedOpportunities.length === 0 ||
         allowedInEvent === 0,
       metricValue: bestEdge,
@@ -1674,6 +1785,7 @@ export async function scanWeatherMarkets(
         slug: event.slug,
         city: event.city,
         targetDate: event.targetDate,
+        metric: event.metric,
         daysOut,
         unit: event.unit,
         brackets: event.brackets.length,
@@ -1718,7 +1830,7 @@ export async function scanWeatherMarkets(
     // accruing validation data for the gated side — only wouldTrade flips.
     for (const opp of gatedOpportunities) {
       const wouldTrade =
-        cfg.WEATHER_SCANNER_ENABLED &&
+        featureLive &&
         opp.allowedByConfig &&
         !opp.blockedByMarketDisagreement &&
         !opp.blockedByEnsembleVeto;
@@ -1762,6 +1874,7 @@ export async function scanWeatherMarkets(
           eventSlug: opp.eventSlug,
           city: opp.city,
           targetDate: opp.targetDate,
+          metric: opp.metric,
           bracket: opp.bracketLabel,
           tradeSide: opp.tradeSide,
           modelProb: opp.modelProbability,
@@ -1819,7 +1932,14 @@ export async function scanWeatherMarkets(
         for (const opp of gatedOpportunities) opp.earlyResolutionDayEntry = true;
       }
       for (const opp of gatedOpportunities) opp.isResolutionDay = isResolutionDay;
-      allOpportunities.push(...gatedOpportunities);
+      // Lowest-temp opportunities are shadow-logged above but only enter the
+      // returned (execution) set once the feature is live. In shadow mode they
+      // are recorded and counted, never traded.
+      if (event.metric === 'low' && !cfg.WEATHER_LOWEST_TEMP_ENABLED) {
+        lowShadowSuppressed += gatedOpportunities.length;
+      } else {
+        allOpportunities.push(...gatedOpportunities);
+      }
     }
   }
 
@@ -1841,6 +1961,9 @@ export async function scanWeatherMarkets(
     sideFiltered: allOpportunities.filter((o) => !o.allowedByConfig).length,
     totalDisagreementBlocked,
     totalEnsembleVetoBlocked,
+    lowShadowSuppressed,
+    lowestTempActive,
+    lowestTempLive: cfg.WEATHER_LOWEST_TEMP_ENABLED,
     tradeSidesMode: cfg.WEATHER_TRADE_SIDES,
     enabled: cfg.WEATHER_SCANNER_ENABLED,
   });
@@ -1902,8 +2025,8 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
     outcomePrice: opp.outcomePrice,
     question: opp.question,
     source: 'weather',
-    sourcedFrom: `weather:${opp.city}:${opp.targetDate}:${opp.bracketLabel}`,
-    reasoning: `Forecast high ${opp.forecastHigh.toFixed(1)}°, model P=${opp.modelProbability.toFixed(3)} vs market ${opp.outcomePrice.toFixed(3)}; ${opp.tradeSide} bracket "${opp.bracketLabel}" daysOut=${opp.daysOut}`,
+    sourcedFrom: weatherSourcedFrom(opp.metric, opp.city, opp.targetDate, opp.bracketLabel),
+    reasoning: `Forecast ${opp.metric === 'low' ? 'low' : 'high'} ${opp.forecastHigh.toFixed(1)}°, model P=${opp.modelProbability.toFixed(3)} vs market ${opp.outcomePrice.toFixed(3)}; ${opp.tradeSide} bracket "${opp.bracketLabel}" daysOut=${opp.daysOut}`,
     // Authorise a size-up of an already-held position ONLY when this opportunity
     // came from the resolution-day size-up re-evaluation (sizeUpScanOnly). On any
     // other (off-day) scan the executor must not top up a held bracket.
@@ -1945,7 +2068,7 @@ function buildBracketOppositeSignal(
     outcomePrice: oppositePrice,
     question: opp.question,
     source: 'weather',
-    sourcedFrom: `weather:${opp.city}:${opp.targetDate}:${opp.bracketLabel}`,
+    sourcedFrom: weatherSourcedFrom(opp.metric, opp.city, opp.targetDate, opp.bracketLabel),
     reasoning: `Bracket opposite of ${opp.tradeSide}; primary edge=${opp.edge.toFixed(3)} daysOut=${opp.daysOut}`,
     _isBracketOpposite: true,
     _isResolutionDay: opp.isResolutionDay ?? false,
@@ -2199,26 +2322,22 @@ export async function cancelRestingWeatherOrder(
 
 /**
  * True when a resting order's market has passed resolution — the city-local
- * target day is fully over, so the daily high is locked and the order can no
+ * target day is fully over, so the daily extreme is locked and the order can no
  * longer fill. Derived from the order's `sourcedFrom`
- * (`weather:<city>:<YYYY-MM-DD>:<bracket…>`) so it works for orders OUT of the
- * current scan universe too, with no Gamma call. Uses the city-LOCAL end-of-day
- * (cityDayEndUtcMs), not Gamma's noon-UTC endDate, so US-city orders are kept
- * through their local afternoon (the high is observed end-of-local-day).
+ * (`weather:<city>:<date>:<bracket…>` or `weather:low:<city>:<date>:<bracket…>`)
+ * so it works for orders OUT of the current scan universe too, with no Gamma
+ * call. Uses the city-LOCAL end-of-day (cityDayEndUtcMs), not Gamma's noon-UTC
+ * endDate, so US-city orders are kept through their local afternoon.
  * Fail-safe: unparseable sourcedFrom / unknown city / bad date → false (do not
- * sweep; the Redis key TTL is the backstop). `marketId` never contains ':' and
- * city/date never do either, so a left split is safe even if a bracket label
- * somehow did.
+ * sweep; the Redis key TTL is the backstop).
  */
 export function isWeatherOrderPastResolution(order: PendingMakerOrder): boolean {
   const sf = order.sourcedFrom;
-  if (!sf?.startsWith('weather:')) return false;
-  const parts = sf.split(':');
-  // parts: ['weather', <city>, <targetDate>, <bracket…>]
-  if (parts.length < 3) return false;
-  const city = parts[1];
-  const targetDate = parts[2];
-  if (!city || !targetDate || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) return false;
+  if (!sf) return false;
+  const parsed = parseWeatherSourcedFrom(sf);
+  if (!parsed) return false;
+  const { city, targetDate } = parsed;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) return false;
   const tz = lookupCity(city)?.tz;
   if (!tz) return false;
   const endOfDayMs = cityDayEndUtcMs(targetDate, tz);

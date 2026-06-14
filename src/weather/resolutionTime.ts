@@ -103,9 +103,9 @@ interface ParsedWeatherMarket {
  * bug.
  */
 function parseWeatherCityDate(question: string, rawEndDate?: string): ParsedWeatherMarket | null {
-  // Extract city: "highest temperature in <city> <verb>"
+  // Extract city: "highest|lowest temperature in <city> <verb>"
   const cityMatch = question.match(
-    /highest temperature in ([^?]+?) (?:be |exceed |fall |drop |reach |\d)/i,
+    /(?:highest|lowest) temperature in ([^?]+?) (?:be |exceed |fall |drop |reach |\d)/i,
   );
   if (!cityMatch) return null;
   const city = cityMatch[1]!.trim().toLowerCase();

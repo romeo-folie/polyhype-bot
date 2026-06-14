@@ -161,6 +161,9 @@ function makeParsedEvent(overrides = {}) {
   return {
     city: 'chicago',
     targetDate: '2026-05-31',
+    // Match the metric the position parses to (high) — the invalidation/drift
+    // scans now match events on city+targetDate+metric.
+    metric: 'high',
     // coords.tz feeds the resolution-day predicate (event.targetDate === cityLocalDate(tz)).
     coords: { tz: 'America/Chicago' },
     brackets: [
@@ -173,6 +176,7 @@ function makeParsedEvent(overrides = {}) {
 function makeForecast() {
   return {
     forecastHigh: 55,
+    metric: 'high',
     stdDev: 5,
     source: 'combined',
     ensembleMembers: 50,
@@ -1628,7 +1632,7 @@ describe('runWeatherInvalidationScan — forecast resilience and reconciled cove
     await runWeatherInvalidationScan(redis as any);
     await new Promise((r) => setTimeout(r, 0)); // cache write is fire-and-forget
 
-    const raw = redis._store.get('weather:forecast_cache:chicago:2026-05-31');
+    const raw = redis._store.get('weather:forecast_cache:high:chicago:2026-05-31');
     expect(raw).toBeDefined();
     expect((JSON.parse(raw!) as { forecastHigh: number }).forecastHigh).toBe(55);
   });
@@ -1639,7 +1643,7 @@ describe('runWeatherInvalidationScan — forecast resilience and reconciled cove
     mockParseWeatherEvent.mockReturnValue(makeParsedEvent());
     const store = new Map<string, string>();
     store.set(
-      'weather:forecast_cache:chicago:2026-05-31',
+      'weather:forecast_cache:high:chicago:2026-05-31',
       JSON.stringify({
         forecastHigh: 54.5,
         stdDev: 4.8,
@@ -1779,6 +1783,7 @@ describe('parseWeatherMetaFromQuestion', () => {
       city: 'amsterdam',
       targetDate: '2026-06-04',
       bracketLabel: '18°C',
+      metric: 'high',
     });
   });
 

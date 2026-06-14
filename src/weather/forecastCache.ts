@@ -9,9 +9,12 @@
  *
  * Fresh ENTRIES never read this cache: a scan miss stays a miss.
  *
- * Key: weather:forecast_cache:<city>:<YYYY-MM-DD>
+ * Key: weather:forecast_cache:<metric>:<city>:<YYYY-MM-DD>
  * Payload: JSON ForecastResult (shadowEnsemble stripped — calibration-only
  * data, not needed for invalidation decisions) + fetchedAt for observability.
+ *
+ * The metric segment keeps a city's highest- and lowest-temperature forecasts
+ * (which differ) in separate cache entries for the same city/date.
  */
 
 import type { Redis } from 'ioredis';
@@ -21,8 +24,12 @@ import type { ForecastResult } from './weatherScanner.js';
 
 const CACHE_KEY_PREFIX = 'weather:forecast_cache:';
 
-export function forecastCacheKey(city: string, targetDate: string): string {
-  return `${CACHE_KEY_PREFIX}${city}:${targetDate}`;
+export function forecastCacheKey(
+  city: string,
+  targetDate: string,
+  metric: 'high' | 'low' = 'high',
+): string {
+  return `${CACHE_KEY_PREFIX}${metric}:${city}:${targetDate}`;
 }
 
 /** Cached payload = ForecastResult minus shadowEnsemble, plus fetchedAt. */
@@ -45,7 +52,7 @@ export async function cacheForecast(
   const { shadowEnsemble: _shadow, ...rest } = forecast;
   const payload: CachedForecast = { ...rest, fetchedAt: new Date().toISOString() };
   await redis.set(
-    forecastCacheKey(city, targetDate),
+    forecastCacheKey(city, targetDate, forecast.metric ?? 'high'),
     JSON.stringify(payload),
     'EX',
     cfg.WEATHER_FORECAST_CACHE_TTL_S,
@@ -60,8 +67,9 @@ export async function readCachedForecast(
   redis: Redis,
   city: string,
   targetDate: string,
+  metric: 'high' | 'low' = 'high',
 ): Promise<ForecastResult | null> {
-  const raw = await redis.get(forecastCacheKey(city, targetDate));
+  const raw = await redis.get(forecastCacheKey(city, targetDate, metric));
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as Partial<CachedForecast>;
@@ -77,11 +85,14 @@ export async function readCachedForecast(
     logger.debug('[weather] forecast cache hit', {
       city,
       targetDate,
+      metric,
       source: parsed.source,
       fetchedAt: parsed.fetchedAt,
     });
     return {
       forecastHigh: parsed.forecastHigh,
+      // Fall back to the requested metric when older cache entries predate the field.
+      metric: parsed.metric ?? metric,
       stdDev: parsed.stdDev,
       source: parsed.source as ForecastResult['source'],
       ensembleMembers: typeof parsed.ensembleMembers === 'number' ? parsed.ensembleMembers : 0,
