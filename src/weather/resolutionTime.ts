@@ -83,18 +83,26 @@ export function weatherResolutionEndMs(sourcedFrom: string, question?: string, r
   return null;
 }
 
+interface ParsedWeatherMarket {
+  /** City as written in the question, lower-cased. */
+  city: string;
+  /** IANA timezone of the resolution station. */
+  tz: string;
+  /** City-local target date (YYYY-MM-DD) — the "on June 13" the market is about. */
+  targetDate: string;
+}
+
 /**
- * Derive the correct city-local resolution end date from a weather market
- * question string ("Will the highest temperature in Hong Kong be …on May 31?").
+ * Parse the city, timezone, and city-local target date out of a weather market
+ * question ("Will the highest temperature in Hong Kong be …on May 31?").
+ * Shared by the target-date and end-date helpers below. Returns null when the
+ * question cannot be parsed or the city is unrecognised.
  *
- * Returns an ISO 8601 string (e.g. "2026-05-31T16:00:00.000Z" for HK May 31)
- * or null when the question cannot be parsed or the city is unrecognised.
- *
- * Used by the reconciler to write a correct endDate on imported weather
- * positions instead of relying on Gamma's API value (which is 24h late for
- * UTC+ cities).
+ * `rawEndDate` (Gamma's endDate, or the digest's closed_at) anchors year
+ * inference when the question omits a year, avoiding a January/December boundary
+ * bug.
  */
-export function weatherEndDateFromQuestion(question: string, rawEndDate?: string): string | null {
+function parseWeatherCityDate(question: string, rawEndDate?: string): ParsedWeatherMarket | null {
   // Extract city: "highest temperature in <city> <verb>"
   const cityMatch = question.match(
     /highest temperature in ([^?]+?) (?:be |exceed |fall |drop |reach |\d)/i,
@@ -108,14 +116,64 @@ export function weatherEndDateFromQuestion(question: string, rawEndDate?: string
   const dateMatch = question.match(/\bon (\w+ \d{1,2}(?:st|nd|rd|th)?(?:,?\s*\d{4})?)\??/i);
   if (!dateMatch) return null;
   const rawDate = dateMatch[1]!.replace(/(\d+)(?:st|nd|rd|th)\b/g, '$1').trim();
-  // If no year in the string, derive it from the Gamma endDate when available
-  // (avoids a year-boundary bug when called in January for a December market).
-  const fallbackYear = rawEndDate
-    ? new Date(rawEndDate).getFullYear()
-    : new Date().getFullYear();
-  const withYear = /\d{4}/.test(rawDate) ? rawDate : `${rawDate} ${fallbackYear}`;
-  const parsed = new Date(withYear);
+
+  let parsed: Date;
+  if (/\d{4}/.test(rawDate)) {
+    parsed = new Date(rawDate);
+  } else {
+    // Year omitted. A weather market resolves at city-local midnight just AFTER
+    // its target date, so the anchor (endDate / closed_at) is within ~36h of the
+    // target. Pick the year whose Month-Day lands CLOSEST to the anchor rather
+    // than blindly reusing the anchor's year — the latter shifts a "December 31"
+    // market that redeems on January 1 into the wrong year (Dec 31 of the new
+    // year), which then fails the digest's weather-day match and hides the row.
+    const rawMs = rawEndDate ? new Date(rawEndDate).getTime() : Date.now();
+    const anchorMs = isFinite(rawMs) ? rawMs : Date.now();
+    const anchorYear = new Date(anchorMs).getUTCFullYear();
+    let best: Date | null = null;
+    for (const y of [anchorYear - 1, anchorYear, anchorYear + 1]) {
+      const cand = new Date(`${rawDate} ${y}`);
+      if (isNaN(cand.getTime())) continue;
+      if (
+        !best ||
+        Math.abs(cand.getTime() - anchorMs) < Math.abs(best.getTime() - anchorMs)
+      ) {
+        best = cand;
+      }
+    }
+    if (!best) return null;
+    parsed = best;
+  }
   if (isNaN(parsed.getTime())) return null;
-  const targetDate = parsed.toISOString().slice(0, 10);
-  return new Date(cityDayEndUtcMs(targetDate, coords.tz)).toISOString();
+  return { city, tz: coords.tz, targetDate: parsed.toISOString().slice(0, 10) };
+}
+
+/**
+ * Derive the city-local target date (YYYY-MM-DD) a weather market is about — the
+ * "on June 13" in the question — independent of the city's timezone. Used to
+ * group resolutions by the weather day they belong to (a "June 13" market
+ * resolves at city-local midnight, which for Western-hemisphere cities is the
+ * NEXT UTC day, so closed_at's UTC date is the wrong grouping key).
+ *
+ * Returns null when the question cannot be parsed or the city is unrecognised.
+ */
+export function weatherTargetDateFromQuestion(question: string, rawEndDate?: string): string | null {
+  return parseWeatherCityDate(question, rawEndDate)?.targetDate ?? null;
+}
+
+/**
+ * Derive the correct city-local resolution end date from a weather market
+ * question string ("Will the highest temperature in Hong Kong be …on May 31?").
+ *
+ * Returns an ISO 8601 string (e.g. "2026-05-31T16:00:00.000Z" for HK May 31)
+ * or null when the question cannot be parsed or the city is unrecognised.
+ *
+ * Used by the reconciler to write a correct endDate on imported weather
+ * positions instead of relying on Gamma's API value (which is 24h late for
+ * UTC+ cities).
+ */
+export function weatherEndDateFromQuestion(question: string, rawEndDate?: string): string | null {
+  const parsed = parseWeatherCityDate(question, rawEndDate);
+  if (!parsed) return null;
+  return new Date(cityDayEndUtcMs(parsed.targetDate, parsed.tz)).toISOString();
 }

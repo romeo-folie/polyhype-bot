@@ -2,13 +2,22 @@
  * Weather strategy daily digest.
  *
  * Once per UTC day, summarise how the weather strategy performed over the
- * *previous* complete UTC day and send it to Telegram — the weather analogue of
- * the rebate farmer's daily summary (`src/rebate/rebateChecker.ts`).
+ * *previous* weather day and send it to Telegram — the weather analogue of the
+ * rebate farmer's daily summary (`src/rebate/rebateChecker.ts`).
  *
  * Yesterday (not today) is used because weather PnL is only realised when a
  * market resolves at the end of its local day; today's resolutions are still
- * moving. The window is the same for every section so the report is one coherent
- * UTC day.
+ * moving.
+ *
+ * Two different clocks, intentionally:
+ *   - Entry-activity sections (placed/filled) are windowed by the UTC calendar
+ *     day — they describe what we DID yesterday (UTC).
+ *   - Resolutions (PnL, wins/losses, best/worst) are bucketed by each market's
+ *     CITY-LOCAL resolution day. A "June 13" market resolves at local midnight,
+ *     which for Western-hemisphere cities lands in the next UTC day — so grouping
+ *     resolutions by closed_at's UTC date splits a weather day in two and pushes
+ *     Western wins into the wrong report. The send is also deferred to
+ *     WEATHER_DAILY_SUMMARY_MIN_UTC_HOUR so those late resolutions have settled.
  *
  * Data sources (all populated in Postgres; `signal_decisions` is intentionally
  * NOT used — the weather path never writes it):
@@ -17,7 +26,7 @@
  *   - positions         sourced_from LIKE 'weather%'      → fills that became
  *                       positions, entry prices, stake     ("filled")
  *   - outcomes          source='weather'                  → realised PnL,
- *                       wins/losses, return %, best/worst
+ *                       wins/losses, return %, best/worst (bucketed by weather day)
  *
  * Fired from the weather cron entrypoint (`weatherScanner.ts` main()) every
  * scan; a Redis NX key (`weather:summary_sent:<day>`) makes it send at most once
@@ -32,6 +41,7 @@ import { loadConfig } from '../shared/config.js';
 import { notify, escapeHtml } from '../execution/telegram.js';
 import { getSql } from '../db/client.js';
 import { utcDateString } from '../rebate/rebateChecker.js';
+import { weatherTargetDateFromQuestion } from './resolutionTime.js';
 
 const SUMMARY_SENT_PREFIX = 'weather:summary_sent:';
 
@@ -49,6 +59,23 @@ interface ResolvedRow {
   direction: string;
   question: string;
   pnlUsd: number;
+  /** ISO close timestamp — used to bucket by city-local weather day. */
+  closedAt: string;
+}
+
+/**
+ * The weather day a resolved row belongs to: the city-local target date parsed
+ * from the question ("on June 13"), falling back to the UTC date of closed_at
+ * when the question can't be parsed. Grouping by closed_at's UTC date alone is
+ * wrong — a "June 13" market in a Western-hemisphere city resolves at local
+ * midnight, which lands in the NEXT UTC day.
+ */
+function weatherDayOf(row: { question: string; closedAt: string }): string {
+  // closedAt is a 'YYYY-MM-DD …' string (timestamptz::text); the date-only slice
+  // is both the year hint for parsing (a reliable ISO date for `new Date()`) and
+  // the fallback bucket when the question can't be parsed.
+  const closedDate = row.closedAt.slice(0, 10);
+  return weatherTargetDateFromQuestion(row.question, closedDate) ?? closedDate;
 }
 
 /** Signed dollar amount, e.g. +$8.65 / -$2.10. */
@@ -97,15 +124,32 @@ export async function maybeSendWeatherDailySummary(
   const sql = getSql();
 
   const today = utcDateString(0, nowMs);
+
+  // Defer until late enough in the UTC day that the PREVIOUS weather-day's
+  // Western-hemisphere markets have all resolved (they settle at city-local
+  // midnight ≈ early-UTC the next day). Checked BEFORE the NX gate so an early
+  // scan returns without burning the day's one send. A genuine misconfiguration
+  // (hour > 23) can't permanently block — the value is clamped to 0..23 by Zod.
+  if (new Date(nowMs).getUTCHours() < cfg.WEATHER_DAILY_SUMMARY_MIN_UTC_HOUR) {
+    return false;
+  }
+
   const sentKey = `${SUMMARY_SENT_PREFIX}${today}`;
   // NX + 48h TTL: exactly one summary per UTC day; the key self-expires.
   const acquired = await redis.set(sentKey, '1', 'EX', 48 * 3600, 'NX');
   if (acquired !== 'OK') return false;
 
   const day = utcDateString(1, nowMs);
-  // Explicit UTC bounds — do NOT rely on the DB session timezone (CURRENT_DATE).
+  // Explicit UTC bounds for the entry-activity sections — do NOT rely on the DB
+  // session timezone (CURRENT_DATE).
   const start = `${day}T00:00:00Z`;
   const end = `${today}T00:00:00Z`;
+  // Resolutions are bucketed by city-local weather day (see weatherDayOf), so the
+  // SQL scan must span a window wide enough to catch every row whose weather day
+  // is `day`: from an early drift-exit a couple of days before, to an Americas
+  // local-midnight resolution that lands in the next UTC day. day-2 … day+2.
+  const resolvedScanStart = `${utcDateString(3, nowMs)}T00:00:00Z`;
+  const resolvedScanEnd = `${utcDateString(-1, nowMs)}T00:00:00Z`;
 
   // 1. Resting maker orders we worked yesterday (distinct market+side).
   const placedRows = await sql<{ placed: number }[]>`
@@ -128,20 +172,28 @@ export async function maybeSendWeatherDailySummary(
       AND opened_at >= ${start} AND opened_at < ${end}
   `;
 
-  // 3. Markets that resolved yesterday — realised PnL, wins/losses, best/worst.
-  // Ordered by realised PnL so the first row is the worst, the last the best.
-  const resolved = await sql<ResolvedRow[]>`
+  // 3. Markets whose weather day is `day` — realised PnL, wins/losses, best/worst.
+  // Scanned over a wide closed_at window, then bucketed by city-local weather day
+  // (weatherDayOf) and sorted by realised PnL (worst first, best last) in TS.
+  const resolvedScan = await sql<ResolvedRow[]>`
     SELECT result,
            return_pct::float8                                AS "returnPct",
            entry_price::float8                               AS "entryPrice",
            direction,
            question,
-           (COALESCE(stake_usd, 0) * return_pct / 100.0)::float8 AS "pnlUsd"
+           (COALESCE(stake_usd, 0) * return_pct / 100.0)::float8 AS "pnlUsd",
+           -- Render as a UTC string (not ::text, which uses the session timezone
+           -- and would mis-date the weatherDayOf fallback on a non-UTC session;
+           -- and not an uncast timestamptz, which postgres.js returns as a JS Date
+           -- that weatherDayOf can't slice).
+           to_char(closed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "closedAt"
     FROM outcomes
     WHERE source = 'weather'
-      AND closed_at >= ${start} AND closed_at < ${end}
-    ORDER BY (COALESCE(stake_usd, 0) * return_pct / 100.0) ASC
+      AND closed_at >= ${resolvedScanStart} AND closed_at < ${resolvedScanEnd}
   `;
+  const resolved = resolvedScan
+    .filter((r) => weatherDayOf(r) === day)
+    .sort((a, b) => (a.pnlUsd ?? 0) - (b.pnlUsd ?? 0));
 
   // ── Aggregate ──────────────────────────────────────────────────────────────
   const filledCount = filled.length;

@@ -796,6 +796,17 @@ export const envSchema = z.object({
    * this only ALERTS — it never blocks legitimate cleanup.
    */
   RECONCILE_GHOST_ALERT_THRESHOLD: z.coerce.number().int().min(1).optional().default(5),
+  /**
+   * False-zero heal guard. When the venue reports FEWER than this many shares
+   * for a ledger position that itself holds at least this many, the reconciler
+   * treats it as a suspected transient/false-zero read and SUPPRESSES the
+   * downward heal (which would otherwise wipe a live position's recorded stake
+   * down to dust). Observed 2026-06-13: a 9.08-share weather winner was healed
+   * to 0.0089 sh and its genuine +$4 resolution win was recorded as +$0.00.
+   * Partial down-heals to a still-meaningful size and upward (size-up) heals are
+   * unaffected; the guard only blocks a wipe-to-dust and alerts for manual review.
+   */
+  RECONCILE_MIN_HEAL_SHARES: z.coerce.number().min(0).optional().default(1),
   /** Post-exit sweep: after a partial fill, resell the residual up to N times. */
   RESIDUAL_SWEEP_ENABLED: boolFromEnv.optional().default(true),
   RESIDUAL_SWEEP_MAX_ATTEMPTS: z.coerce.number().int().min(0).max(5).optional().default(2),
@@ -1824,6 +1835,13 @@ export const envSchema = z.object({
   // fills, entry prices, realized PnL, wins/losses, best/worst). Fires from the
   // weather cron entrypoint; gated by a Redis NX key so it sends at most once/day.
   WEATHER_DAILY_SUMMARY_ENABLED: boolFromEnv.optional().default(true),
+  // Defer the daily weather digest until at least this UTC hour so the PREVIOUS
+  // weather-day's Western-hemisphere markets — which resolve at city-local
+  // midnight ≈ early-UTC the next day — have all settled before we report.
+  // Sent at 00:00–08:00 UTC, a "yesterday" report would miss those wins (e.g.
+  // Panama City resolved 05:24 UTC) and skew the day negative. 12 clears even
+  // UTC-10 cities. The digest groups resolutions by city-local resolution day.
+  WEATHER_DAILY_SUMMARY_MIN_UTC_HOUR: z.coerce.number().int().min(0).max(23).optional().default(12),
   // Restricts which bracket sides the scanner will treat as tradable. Default 'BOTH'
   // preserves legacy behavior. 'NO' is the 2026-04-19 post-analysis config: 186-outcome
   // reconciliation showed NO side at 73.7% vs YES at 11.5% — gate out YES until the
