@@ -98,6 +98,35 @@ describe('computeCityBias', () => {
     expect(redis.set).not.toHaveBeenCalled();
   });
 
+  // Concatenate every tagged-template call's static text (main query + fragments).
+  function emittedSql(sql: ReturnType<typeof makeSql>): string {
+    return (sql.mock.calls as unknown[][])
+      .map((c) => (Array.isArray(c[0]) ? (c[0] as string[]).join(' ') : ''))
+      .join(' ');
+  }
+
+  it("metric='low' joins resolution_low, guards against NULL ground truth, and reads only low shadow rows", async () => {
+    const sql = makeSql([]);
+    const redis = makeRedis();
+    await computeCityBias(sql as never, redis as never, 14, '', 'low');
+    const text = emittedSql(sql);
+    expect(text).toContain('resolution_low');
+    expect(text).toContain('observed_low');
+    expect(text).toContain('IS NOT NULL');            // non-null ground-truth guard (review fix)
+    expect(text).toContain("payload->>'metric' = 'low'");
+    expect(text).not.toContain('resolution_high');
+  });
+
+  it("metric='high' joins resolution_high and excludes low shadow rows (no contamination)", async () => {
+    const sql = makeSql([]);
+    const redis = makeRedis();
+    await computeCityBias(sql as never, redis as never, 14, '', 'high');
+    const text = emittedSql(sql);
+    expect(text).toContain('resolution_high');
+    expect(text).not.toContain('resolution_low');
+    expect(text).toContain("payload->>'metric' IS DISTINCT FROM 'low'");
+  });
+
   it('clamps the sample window to WEATHER_BIAS_SAMPLES_SINCE when later than the EWMA lookback', async () => {
     // After a station/coords change, pre-cutover samples were measured against
     // a different thermometer — they must not enter the EWMA.

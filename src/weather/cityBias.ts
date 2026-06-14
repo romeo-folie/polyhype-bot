@@ -152,6 +152,11 @@ export async function computeCityBias(
         WHERE so.kind = 'weather_event'
           AND so.observed_at >= ${windowStart}
           AND (so.payload->>'forecastHigh') IS NOT NULL
+          -- The metric ground-truth extreme must exist, else the error term is
+          -- NULL. For 'high' this is a no-op (observed_high is required); for
+          -- 'low' it drops shadow rows whose low columns the reconciler has not
+          -- filled yet, which would otherwise inflate COUNT(*)/HAVING and damp the EWMA.
+          AND ${groundTruth} IS NOT NULL
           ${metricFilter}
       ),
       stats AS (
