@@ -1108,6 +1108,26 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     expect(mockNotifyWeatherDrift).not.toHaveBeenCalled();
   });
 
+  it('notifies an EXIT even when the per-state dedup was already consumed (silent-exit fix)', async () => {
+    // Panama 5259: a streak-1 modal deferral already notified this window (dedup→false),
+    // then the streak-2 exit fired but its notification was suppressed. An EXIT must
+    // always notify, otherwise the sale is silent and the user only sees "streak 1".
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockDedup.mockResolvedValue(false); // same-state dedup already consumed by the earlier alert
+    const redis = makeRedis();
+    setupModalAgainstPosition(redis); // held ~0.30 < ceiling → modal exit fires
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+    }));
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).toHaveBeenCalled();
+    expect(mockNotifyWeatherDrift).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'exit' }),
+    );
+  });
+
   it('notifyWeatherDrift action reflects actual live action taken', async () => {
     mockLoadConfig.mockReturnValue(makeConfig({
       WEATHER_DRIFT_ENABLED: true,

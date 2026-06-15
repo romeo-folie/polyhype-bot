@@ -1238,6 +1238,12 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       // 5. Notify fallback + notification fire (actionable positions only).
       // Runs after block_size_up and flip so the notification shows the final action.
       if (isActionable && cfg.WEATHER_DRIFT_ENABLED && action === 'none') action = 'notify';
+      // An actual EXIT is a terminal, high-value event — always notify, even if an
+      // earlier same-state alert (e.g. a streak-1 modal deferral) already consumed the
+      // per-state dedup key this window. Otherwise the sale is silent (Panama 5259:
+      // streak-1 deferral notified, streak-2 exit was deduped → user only saw "streak 1").
+      // The position exits once (exitedKey idempotency), so this can't spam.
+      if (action === 'exit') shouldNotify = true;
       if (shouldNotify) {
         await notifyWeatherDrift({
           positionId: pos.id,
