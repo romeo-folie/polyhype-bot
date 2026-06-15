@@ -2439,6 +2439,17 @@ export const envSchema = z.object({
   // Catches rapid single-scan collapses that reach Tier thresholds too late.
   WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED: boolFromEnv.optional().default(false),
   WEATHER_DRIFT_BID_VELOCITY_THRESHOLD: z.coerce.number().min(0).max(1).optional().default(0.40),
+  // Accuracy gate for market-PRICE exits (market_against / bid_velocity): the
+  // auto-exit only fires once the held-side best bid has collapsed to/below this
+  // near-dead floor. In the moderate whipsaw zone (bid ~0.2–0.4) the CLOB bid is
+  // efficiently priced — realized win-rate ≈ bid — so exiting captures ~fair value
+  // in EV but repeatedly sold positions that bounced back to win. 10-day backtest
+  // (2026-06-15): bid ≤0.15 was 100% losers (salvage real), while bid 0.20–0.36
+  // held all 4 false-positive winners (Paris/Houston etc.). Model/oracle conviction
+  // is NOT used as the gate — both proved miscalibrated. Notifications still fire on
+  // moderate moves; ONLY the auto-exit is gated. Does not affect modal_against,
+  // thesis_weakened, oracle_impossible, or oracle_likely_against exits.
+  WEATHER_DRIFT_MARKET_EXIT_MAX_BID: z.coerce.number().min(0).max(1).optional().default(0.15),
 
   // ── Weather drift Phase 5: live observation + contradiction audit ───────────
   // Master gate for fetching live intraday observations for open weather

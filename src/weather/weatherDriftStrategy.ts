@@ -934,8 +934,17 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           // market_against Tier 1: both market and model moved — exit on resolution day.
           // market_against Tier 2: market moved but model can't update intraday.
           //   When TIER2_EXIT_ON_RES_DAY, exit anyway on resolution day (market IS the oracle).
+          // Accuracy gate (2026-06-15): market-PRICE exits (market_against, bid_velocity)
+          // fire only once the held-side bid has collapsed to near-dead. In the moderate
+          // whipsaw zone the CLOB bid is efficiently priced (win-rate ≈ bid), so exiting
+          // is ~EV-neutral but repeatedly sold positions that bounced back to win
+          // (Paris/Houston, 2026-06-14). 10-day backtest: bid ≤0.15 = 100% losers;
+          // bid 0.20–0.36 held all 4 false-positive winners. Notifications unaffected.
+          const marketBidDead =
+            currentHeldBid != null && currentHeldBid <= cfg.WEATHER_DRIFT_MARKET_EXIT_MAX_BID;
           const marketAgainstCanExit =
             state === 'market_against' &&
+            marketBidDead &&
             (marketAgainstTier === 1 ||
               (marketAgainstTier === 2 && isResolutionDay && cfg.WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY));
           // Conviction gate for modal_against exits: a single-streak exit fires only
@@ -958,7 +967,15 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           // oracle_confirmed means our held side is the winner — never exit via drift.
           // Hold guard may veto thesis_weakened/modal_against on res-day when fresh
           // settlement-aligned oracle says P is still favorable (oracle_impossible is exempt).
+          //
+          // Restrict the forecast exit to genuine FORECAST-exit states. Previously this
+          // was true for any non-market/non-oracle state (incl. stable/watch), so a
+          // bid_velocity-actionable stable position exited HERE — bypassing the market
+          // dead-bid gate below (Houston 2026-06-14: stable + 48% bid crash, model 0.815,
+          // sold, then won). Market-price actionability (bid_velocity / market_against)
+          // must route through the gated paths, not this one.
           const forecastCanExit =
+            (forecastState === 'thesis_weakened' || forecastState === 'modal_against') &&
             state !== 'market_against' &&
             state !== 'oracle_confirmed' &&
             state !== 'oracle_likely_against' && // conditional oracle has its own gate below
@@ -968,7 +985,8 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           const oracleImpossibleCanExit = state === 'oracle_impossible';
           // Bid velocity: rapid single-scan collapse on resolution day bypasses Tier logic.
           // Hold guard may veto when fresh conditional oracle says hold.
-          const bidVelocityCanExit = bidVelocityTrigger && isResolutionDay && !holdGuardVetoed;
+          const bidVelocityCanExit =
+            bidVelocityTrigger && isResolutionDay && !holdGuardVetoed && marketBidDead;
           // Conditional oracle soft exit (Phase B): bid > conditionalP + buffer on res-day.
           const conditionalOracleCanExit =
             cfg.WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED &&
@@ -1003,6 +1021,36 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
               currentHeldProb: +result.currentHeldProb.toFixed(3),
               steepDrop: cfg.WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP,
               heldProbCeiling: cfg.WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING,
+            });
+          }
+
+          // Surface market-price exits held back by the dead-bid accuracy gate: the
+          // market_against tiers (or a bid-velocity collapse) fired, but the bid is
+          // still above the near-dead floor, so we hold through the whipsaw instead
+          // of selling a possibly-winning position.
+          const marketExitWouldFire =
+            (state === 'market_against' &&
+              (marketAgainstTier === 1 ||
+                (marketAgainstTier === 2 && cfg.WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY))) ||
+            (bidVelocityTrigger && !holdGuardVetoed);
+          if (
+            isResolutionDay &&
+            !shouldExit &&
+            !marketBidDead &&
+            currentHeldBid != null &&
+            heldTokenId != null &&
+            marketExitWouldFire
+          ) {
+            logger.info('[weather-drift] market exit held — bid above dead-bid floor', {
+              positionId: pos.id,
+              city,
+              state,
+              currentHeldBid: +currentHeldBid.toFixed(4),
+              deadBidFloor: cfg.WEATHER_DRIFT_MARKET_EXIT_MAX_BID,
+              marketAgainstTier,
+              bidVelocityTrigger,
+              marketDrop: +marketDrop.toFixed(3),
+              currentHeldProb: +result.currentHeldProb.toFixed(3),
             });
           }
 
