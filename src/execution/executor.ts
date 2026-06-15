@@ -496,6 +496,10 @@ async function tryExecuteViaClobMaker(
   prefetchedBook?: OrderBookSummary | null,
   emptyBookMode?: boolean,
   redis?: Redis,
+  /** Conviction TAKER entry: cross to the ask (capped) instead of resting a maker.
+   * Decided upstream in executeSignal (incl. the daily circuit breaker + spread
+   * bypass). When false, every weather branch below behaves exactly as before. */
+  wantTaker?: boolean,
 ): Promise<{
   ok: boolean;
   tradeResult?: TradeResult;
@@ -552,9 +556,13 @@ async function tryExecuteViaClobMaker(
     signal.source === 'weather' && cfg.WEATHER_REST_ABOVE_CAP_ENABLED;
 
   // --- Pending order handling (empty-book + weather patient real-book +
-  // weather rest-above-cap lifecycle) ---
+  // weather rest-above-cap lifecycle + conviction taker) ---
   // On each cron cycle, resume polling an existing open order rather than re-posting.
-  if ((emptyBookMode || isWeatherPatient || isWeatherRestAboveCapLifecycle) && redis) {
+  // wantTaker is included so a taker's partial-fill residual (persisted below) is
+  // always found and resumed — independent of WEATHER_REAL_BOOK_DISCOUNT_BPS (which
+  // sets isWeatherPatient); otherwise zeroing that knob would let the taker re-fire a
+  // duplicate on the residual. Matches the persist + deletePendingOrder conditions.
+  if ((emptyBookMode || isWeatherPatient || isWeatherRestAboveCapLifecycle || (wantTaker && signal.source === 'weather')) && redis) {
     const pending = await getPendingOrder(redis, signal.marketId, signal.direction);
     if (pending) {
       // Normalize both sides before comparing: oracle-lag stores 'UP'/'DOWN' in the
@@ -671,6 +679,76 @@ async function tryExecuteViaClobMaker(
             });
             await deletePendingOrder(redis, signal.marketId, pending.direction);
             // do NOT return — fall through past the pending block to re-post below.
+          } else if (wantTaker && pending.isBracketOpposite !== true) {
+            // Conviction-taker pre-emption: this scan the market is taker-eligible
+            // (wantTaker is res-day-only), but a stranded resting maker bid — typically
+            // a ghost-era conviction bid clamped at the cap — would block the taker
+            // forever: it won't fill (the winner's ask drifted above it) and the FV
+            // revalidation KEEPS it (cheap = value-positive). Cancel it and fall through
+            // to take. Bracket legs are never pre-empted (intentional liquidity).
+            const cancelled = await confirmMakerCancel(pending.orderId);
+            if (!cancelled) {
+              // Couldn't confirm the cancel — do NOT take (double-exposure risk). Hold
+              // this cycle; the resting order is retried/resumed next scan.
+              return {
+                ok: false,
+                error: 'maker_cancel_unconfirmed',
+                waitMs: Date.now() - startedAt,
+                makerOrderId: pending.orderId,
+                makerPostedPrice: pending.price,
+                makerPostedSize: pending.size,
+                makerFillStatus: 'cancel_unconfirmed',
+              };
+            }
+            // confirmMakerCancel returns true for 'filled' too, so a fill can have
+            // landed in the cancel window. Re-read before taking. Two non-clean cases
+            // must NOT take (double-exposure): (a) the order is gone/unreadable (null) —
+            // unknown fill state, possibly fully consumed; (b) size_matched > 0 — it
+            // filled. In both, leave the key + report not-filled so the next scan's
+            // resume path records any fill. Only a confirmed clean zero-fill takes.
+            const racedOrder = await getClobOrder(pending.orderId).catch(() => null);
+            if (racedOrder === null) {
+              logger.info('[weather-taker] resting order unreadable after pre-empt cancel — holding, not taking', {
+                marketId: signal.marketId,
+                restingOrderId: pending.orderId,
+              });
+              return {
+                ok: false,
+                error: 'maker_not_filled',
+                waitMs: Date.now() - startedAt,
+                makerOrderId: pending.orderId,
+                makerPostedPrice: pending.price,
+                makerPostedSize: pending.size,
+                makerFillStatus: 'pending',
+              };
+            }
+            // Take ONLY on a confirmed finite zero fill. A fill (>0) OR an
+            // unparseable matched size (NaN) both leave the key + hold — never take on
+            // an uncertain matched size (double-exposure is the only unrecoverable error).
+            const racedMatched = parseFloat(racedOrder.size_matched ?? '0');
+            if (!Number.isFinite(racedMatched) || racedMatched > 0) {
+              logger.info('[weather-taker] resting bid filled or matched-size uncertain after pre-empt cancel — holding, not taking', {
+                marketId: signal.marketId,
+                restingOrderId: pending.orderId,
+                matched: racedOrder.size_matched ?? null,
+              });
+              return {
+                ok: false,
+                error: 'maker_not_filled',
+                waitMs: Date.now() - startedAt,
+                makerOrderId: pending.orderId,
+                makerPostedPrice: pending.price,
+                makerPostedSize: pending.size,
+                makerFillStatus: 'pending',
+              };
+            }
+            await deletePendingOrder(redis, signal.marketId, pending.direction);
+            logger.info('[weather-taker] pre-empted stranded resting maker — crossing to take', {
+              marketId: signal.marketId,
+              cancelledOrderId: pending.orderId,
+              restingPrice: pending.price,
+            });
+            // do NOT return — fall through past the pending block to the taker gate.
           } else {
             // Genuinely resting and unfilled this cycle — hold for queue priority.
             return {
@@ -737,6 +815,43 @@ async function tryExecuteViaClobMaker(
   let { bestBid, bestAsk } = getBookTouch(book);
   let mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : null;
   let spreadBps = bestBid > 0 && bestAsk > 0 && mid ? ((bestAsk - bestBid) / mid) * 10000 : null;
+
+  // Conviction TAKER entry: the decision (and daily circuit breaker) was made in
+  // executeSignal; here we re-validate against the freshly-touched book. On a real
+  // book bestAsk IS our-side ask for both YES and NO (see the patient real-book note
+  // below). The prefetched book is normally the same one the decision used, so this
+  // re-validates true; the guard only bites if the book moved adversely between the
+  // benchmark and now — in which case we SKIP rather than silently resting a maker on
+  // a wide-spread book (which would otherwise have been spread_too_wide-skipped).
+  let weatherTakerGate = false;
+  let weatherTakerModelWin = 0;
+  if (wantTaker && !emptyBookMode && signal.source === 'weather' && signal.consensusProbability != null && bestAsk > 0) {
+    const isYesDir = signal.direction === 'YES' || signal.direction === 'UP';
+    weatherTakerModelWin = isYesDir ? signal.consensusProbability : 1 - signal.consensusProbability;
+    const freshEdge = weatherTakerModelWin - bestAsk;
+    if (bestAsk <= cfg.WEATHER_TAKER_ENTRY_MAX_PRICE && freshEdge >= cfg.WEATHER_TAKER_ENTRY_MIN_EDGE) {
+      weatherTakerGate = true;
+    } else {
+      logger.info('[weather-taker] book moved since decision — skipping (no maker fallback on wide book)', {
+        marketId: signal.marketId,
+        bestAsk,
+        modelWin: weatherTakerModelWin,
+        freshEdge,
+        maxPrice: cfg.WEATHER_TAKER_ENTRY_MAX_PRICE,
+        minEdge: cfg.WEATHER_TAKER_ENTRY_MIN_EDGE,
+      });
+      return {
+        ok: false,
+        error: 'weather_taker_book_moved',
+        waitMs: Date.now() - startedAt,
+        makerBestBid: bestBid,
+        makerBestAsk: bestAsk,
+        ...(mid ? { makerMidPrice: mid } : {}),
+        ...(spreadBps ? { makerSpreadBps: spreadBps } : {}),
+        makerFillStatus: 'rejected',
+      };
+    }
+  }
 
   // Oracle-lag needs a narrower empty-book edge than the shared default. See
   // ORACLE_LAG_MAKER_EDGE_BPS comment in config.ts for the fill-rate math.
@@ -891,6 +1006,28 @@ async function tryExecuteViaClobMaker(
   } else {
     price = resolveMakerPrice(book, edgeBps, fairValue);
   }
+  // Conviction taker: override the resting-maker price with a crossing limit. A
+  // non-postOnly GTC BUY at price ≥ bestAsk fills at bestAsk (taker) and rests any
+  // residual. max(roundDown(limit), bestAsk) guarantees we cross; the min() floors
+  // the limit at modelWin − MIN_EDGE and the hard ceiling, so a fill always keeps at
+  // least MIN_EDGE of model edge and never pays above WEATHER_TAKER_ENTRY_MAX_PRICE.
+  // Set unconditionally here (bestAsk > 0 from the gate) so a null maker price from
+  // resolveMakerPrice can't drop us into maker_bad_price.
+  if (weatherTakerGate) {
+    const takerTick = parseFloat(book.tick_size ?? '0.01');
+    const takerLimit = Math.min(
+      cfg.WEATHER_TAKER_ENTRY_MAX_PRICE,
+      weatherTakerModelWin - cfg.WEATHER_TAKER_ENTRY_MIN_EDGE,
+    );
+    price = Math.max(roundDownToTick(takerLimit, takerTick), bestAsk);
+    logger.info('[weather-taker] crossing to take at ask', {
+      marketId: signal.marketId,
+      bestAsk,
+      limitPrice: price,
+      modelWin: weatherTakerModelWin,
+      edge: Math.round((weatherTakerModelWin - bestAsk) * 1000) / 1000,
+    });
+  }
   if (price === null) {
     return {
       ok: false,
@@ -916,7 +1053,8 @@ async function tryExecuteViaClobMaker(
   // defense-in-depth guards below still fire when the knob is off or clamping is
   // impossible (cap below one tick).
   if (
-    (emptyBookMode || isWeatherPatient || signal._restAboveCap === true)
+    !weatherTakerGate
+    && (emptyBookMode || isWeatherPatient || signal._restAboveCap === true)
     && signal.source === 'weather'
     && cfg.WEATHER_REST_ABOVE_CAP_ENABLED
   ) {
@@ -956,7 +1094,8 @@ async function tryExecuteViaClobMaker(
   // For non-fairValue paths the price is book-derived, so we guard the final
   // price directly.
   if (
-    (emptyBookMode || isWeatherPatient || signal._restAboveCap === true)
+    !weatherTakerGate
+    && (emptyBookMode || isWeatherPatient || signal._restAboveCap === true)
     && signal.source === 'weather'
     && cfg.WEATHER_MAX_ENTRY_PRICE > 0
     && price > cfg.WEATHER_MAX_ENTRY_PRICE + 1e-9
@@ -976,7 +1115,8 @@ async function tryExecuteViaClobMaker(
   // exempt — same reasoning as the fairValue clamp above. _restAboveCap covered
   // on every path, same as the WEATHER_MAX_ENTRY_PRICE guard.
   if (
-    (emptyBookMode || isWeatherPatient || signal._restAboveCap === true)
+    !weatherTakerGate
+    && (emptyBookMode || isWeatherPatient || signal._restAboveCap === true)
     && signal.source === 'weather'
     && !signal._isResolutionDay
     && !signal._isBracketOpposite
@@ -1209,9 +1349,25 @@ async function tryExecuteViaClobMaker(
   const weatherPostOnly = Boolean(
     emptyBookMode && signal.source === 'weather' && cfg.WEATHER_MAKER_POST_ONLY,
   );
-  const postOnly = emptyBookMode
+  // Conviction taker MUST cross the spread → postOnly:false. (Real-book weather is
+  // otherwise strict-maker postOnly:true, which is exactly why it never takes today.)
+  const postOnly = weatherTakerGate
+    ? false
+    : emptyBookMode
     ? (signal.source === 'oracle-lag' || weatherPostOnly)
     : true;
+  // Reserve the daily taker notional at the actual submit. This is reached only after
+  // the pending-order check at the top returned early for any held resting maker, so an
+  // existing resting order never consumes the breaker without taking. The CHECK ran in
+  // executeSignal; the sub-millisecond midnight-UTC window where check and reserve land
+  // on different day keys is benign (≤ one stake, trips the breaker early = safe).
+  // Reserve the full stake up-front (a crossing limit may only partially fill) — the
+  // residual is tracked via the pending key, not re-reserved. Sequential per-signal.
+  if (weatherTakerGate && redis && cfg.WEATHER_TAKER_ENTRY_MAX_DAILY_USD > 0) {
+    const dayKey = `weather:taker_daily:${new Date().toISOString().slice(0, 10)}`;
+    await redis.incrbyfloat(dayKey, signal.stakeUsd).catch(() => {});
+    await redis.expire(dayKey, 129600).catch(() => {}); // 36h TTL — outlives the UTC day
+  }
   let result = await submitClobLimitBuy({
     tokenId,
     price,
@@ -1312,14 +1468,18 @@ async function tryExecuteViaClobMaker(
   // exists in the matching engine. Only take the fast-path on confirmed full fills
   // (shares_bought ≥ size - ε); partial fills fall through to persist-and-poll so
   // the residual open portion is correctly tracked and cancelled on the next cycle.
+  // weatherTakerGate is a non-postOnly crossing limit on a REAL book, so it fills
+  // as a taker at submit exactly like the empty-book crossing case — record inline
+  // here rather than persisting it as a pending maker (which would leave the spent
+  // USDC unrecorded and the position unmonitored until the next cron resume).
   const isImmediateFullFill =
-    emptyBookMode &&
+    (emptyBookMode || weatherTakerGate) &&
     !postOnly &&
     result.success &&
     result.order_id != null &&
     (result.shares_bought ?? 0) >= size - 1e-9;
   if (isImmediateFullFill) {
-    logger.info('[executor] empty-book GTC filled immediately (taker)', {
+    logger.info('[executor] crossing GTC filled immediately (taker)', {
       marketId: signal.marketId,
       tokenId,
       orderId: result.order_id,
@@ -1381,7 +1541,10 @@ async function tryExecuteViaClobMaker(
   // arm, a plain-path rest-above-cap post would be cancelled by the generic
   // wait loop instead of resting, and would never count toward the
   // sumRestAboveCapNotional pool.
-  if ((emptyBookMode || isWeatherPatient || signal._restAboveCap === true) && redis) {
+  // weatherTakerGate is included so a PARTIAL taker fill (full fills already returned
+  // inline above) persists its resting residual + is resumed next cycle — consistent
+  // regardless of WEATHER_REAL_BOOK_DISCOUNT_BPS (which otherwise sets isWeatherPatient).
+  if ((emptyBookMode || isWeatherPatient || signal._restAboveCap === true || weatherTakerGate) && redis) {
     const expiresAt = startedAt + cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS;
     // The posted order is GTC — it rests on-chain until filled or explicitly
     // cancelled, which only happens via the resume path on a later scanner
@@ -1435,7 +1598,13 @@ async function tryExecuteViaClobMaker(
     logger.info('[executor] maker order posted — returning pending', {
       marketId: signal.marketId,
       source: signal.source,
-      mode: emptyBookMode ? 'empty_book' : isWeatherPatient ? 'weather_patient' : 'rest_above_cap',
+      mode: emptyBookMode
+        ? 'empty_book'
+        : weatherTakerGate
+        ? 'weather_taker_partial'
+        : isWeatherPatient
+        ? 'weather_patient'
+        : 'rest_above_cap',
       orderId: result.order_id,
       price,
       expiresAt: new Date(expiresAt).toISOString(),
@@ -1524,7 +1693,7 @@ async function tryExecuteViaClobMaker(
         }
       }
 
-      if ((emptyBookMode || isWeatherPatient || signal._restAboveCap === true) && redis) await deletePendingOrder(redis, signal.marketId, signal.direction);
+      if ((emptyBookMode || isWeatherPatient || signal._restAboveCap === true || weatherTakerGate) && redis) await deletePendingOrder(redis, signal.marketId, signal.direction);
       // Same VWAP repricing as the pending-order resume path: a GTC that
       // crossed at post time filled below the posted limit, and the posted
       // price would overstate cost basis. Falls back to the posted price when
@@ -1563,7 +1732,7 @@ async function tryExecuteViaClobMaker(
     await sleep(pollIntervalMs);
   }
 
-  if ((emptyBookMode || isWeatherPatient || signal._restAboveCap === true) && redis) await deletePendingOrder(redis, signal.marketId, signal.direction);
+  if ((emptyBookMode || isWeatherPatient || signal._restAboveCap === true || weatherTakerGate) && redis) await deletePendingOrder(redis, signal.marketId, signal.direction);
   const cancelled = await confirmMakerCancel(result.order_id);
   if (!cancelled) {
     return {
@@ -2924,6 +3093,9 @@ export async function executeSignal(
   // active, then handed to the maker path so we don't double-fetch the book.
   let prefetchedClobBook: OrderBookSummary | null = null;
   let emptyBookMakerRoute = false;
+  // Hoisted: set inside the spread-guardrail block below, read in the maker-attempt
+  // block (which is a separate scope). False unless the conviction-taker gate passes.
+  let weatherTakerEligible = false;
 
   // Entry spread guardrail. Catches degenerate books where "edge" is an artifact
   // of thin liquidity rather than a real mispricing — both wide two-sided books
@@ -2939,8 +3111,14 @@ export async function executeSignal(
   // Sports ghost-book check requires a live book read even when spread gating is
   // off (effectiveSpreadCeiling === 0). Include sports in the book-fetch condition
   // so SPORTS_REQUIRE_REAL_BOOK cannot be bypassed by setting MAX_ENTRY_SPREAD_BPS=0.
+  // Likewise the weather conviction taker needs the live book to compute its gate
+  // (ask + edge), so it must fetch independently of the spread guard — otherwise
+  // WEATHER_TAKER_ENTRY_ENABLED would be silently inert whenever MAX_ENTRY_SPREAD_BPS=0.
   const needsBookCheck =
-    effectiveSpreadCeiling > 0 || (signal.source === 'sports' && cfg.SPORTS_REQUIRE_REAL_BOOK);
+    effectiveSpreadCeiling > 0
+    || (signal.source === 'sports' && cfg.SPORTS_REQUIRE_REAL_BOOK)
+    || (cfg.WEATHER_TAKER_ENTRY_ENABLED && signal.source === 'weather'
+        && signal._isResolutionDay === true && signal._isBracketOpposite !== true);
   if (needsBookCheck && signal.source !== 'copytrade') {
     const { book, benchmark } = await fetchBookAndBenchmark(signal);
     prefetchedClobBook = book;
@@ -2954,7 +3132,10 @@ export async function executeSignal(
     // signals block on undefined too — handled below in the sports-specific check.
     const oneSidedBook =
       benchmark.decisionBestBid === null || benchmark.decisionBestAsk === null;
-    const spreadTooWide = spreadBps != null && spreadBps > effectiveSpreadCeiling;
+    // effectiveSpreadCeiling === 0 means the spread guard is OFF (the documented
+    // convention). Guard on > 0 so that fetching the book for another reason (sports
+    // real-book check, weather taker gate) never silently re-enables spread skipping.
+    const spreadTooWide = effectiveSpreadCeiling > 0 && spreadBps != null && spreadBps > effectiveSpreadCeiling;
     const guardrailDiagnostic = {
       spreadBps: spreadBps != null ? Math.round(spreadBps) : null,
       threshold: effectiveSpreadCeiling,
@@ -2978,6 +3159,71 @@ export async function executeSignal(
       !oneSidedBook &&
       (benchmark.decisionBestBid ?? 1) < cfg.EMPTY_BOOK_BID_THRESHOLD &&
       (benchmark.decisionBestAsk ?? 0) > cfg.EMPTY_BOOK_ASK_THRESHOLD;
+
+    // Conviction TAKER entry (weather). The resting-maker path adverse-selects:
+    // it fills only when a seller hits our discounted bid (price falling = losers),
+    // and the high-conviction winners drift away from the bid before it fills. Worse,
+    // ~every real weather book is wider than MAX_ENTRY_SPREAD_BPS, so today these
+    // opportunities are ALL discarded with spread_too_wide (verified: 968/968 over
+    // 10 days, 815 of them at a takeable ask ≤ ceiling). A taker CROSSES to the ask,
+    // so spread_too_wide — which protects resting MAKER posts from an ambiguous mid —
+    // does not apply: we pay the ask, hard-capped at WEATHER_TAKER_ENTRY_MAX_PRICE and
+    // at modelWin − WEATHER_TAKER_ENTRY_MIN_EDGE (edge always preserved). Decided once
+    // here (incl. the daily circuit breaker) and threaded into the maker fn so the
+    // spread bypass and the actual take stay consistent. Empty/ghost books (nothing
+    // real to take) and bracket-opposite legs (maker liquidity) are excluded → the
+    // maker path is byte-for-byte unchanged when this is OFF or unmet. decisionBestAsk
+    // is our-side ask for both YES and NO (clobTokenForSignal is direction-aware).
+    const takerSideAsk = benchmark.decisionBestAsk; // our-side ask (direction-aware token)
+    if (
+      cfg.WEATHER_TAKER_ENTRY_ENABLED &&
+      signal.source === 'weather' &&
+      signal._isBracketOpposite !== true &&
+      // Size-ups stay on the maker path: their "never pay above the side mid to add"
+      // discipline (the sizeMid clamp in tryExecuteViaClobMaker) would be silently
+      // undone by the taker price override. This feature is for FRESH high-conviction
+      // entries, not averaging up.
+      signal.sizeUpSanctioned !== true &&
+      signal._isSizeUp !== true &&
+      // Resolution-day only: pre-res-day forecasts can still drift, which is exactly
+      // why the maker early-entry cap (WEATHER_EARLY_ENTRY_MAX_PRICE) is stricter.
+      // We only pay up to take once the forecast is locked in on res day. Pre-res-day
+      // brackets still rest cheap maker bids; the res-day taker pre-empts a stranded
+      // one (see the pending-order pre-emption in tryExecuteViaClobMaker).
+      signal._isResolutionDay === true &&
+      !emptyBook &&
+      signal.consensusProbability != null &&
+      typeof takerSideAsk === 'number' &&
+      takerSideAsk > 0 &&
+      takerSideAsk <= cfg.WEATHER_TAKER_ENTRY_MAX_PRICE
+    ) {
+      const isYesDir = signal.direction === 'YES' || signal.direction === 'UP';
+      const modelWin = isYesDir
+        ? signal.consensusProbability
+        : 1 - signal.consensusProbability;
+      const takerEdge = modelWin - takerSideAsk;
+      if (takerEdge >= cfg.WEATHER_TAKER_ENTRY_MIN_EDGE) {
+        let dailyOk = true;
+        if (redis && cfg.WEATHER_TAKER_ENTRY_MAX_DAILY_USD > 0) {
+          // CHECK only here. The RESERVE happens at the actual submit inside
+          // tryExecuteViaClobMaker — AFTER its pending-order check returns early for a
+          // held resting maker — so an existing resting order can never consume the
+          // breaker scan after scan without ever taking.
+          const dayKey = `weather:taker_daily:${new Date().toISOString().slice(0, 10)}`;
+          const spent = parseFloat((await redis.get(dayKey).catch(() => null)) ?? '0') || 0;
+          if (spent + signal.stakeUsd > cfg.WEATHER_TAKER_ENTRY_MAX_DAILY_USD + 1e-9) {
+            dailyOk = false;
+            logger.info('[weather-taker] daily circuit breaker hit — maker fallback', {
+              marketId: signal.marketId,
+              spentUsd: Math.round(spent * 100) / 100,
+              stakeUsd: signal.stakeUsd,
+              capUsd: cfg.WEATHER_TAKER_ENTRY_MAX_DAILY_USD,
+            });
+          }
+        }
+        weatherTakerEligible = dailyOk;
+      }
+    }
 
     // canEmptyBookMaker uses a two-step source check for empty books: a signal is a
     // candidate if it is generally maker-eligible OR explicitly listed in the
@@ -3030,7 +3276,7 @@ export async function executeSignal(
       });
       return recordSkip('no_clob_book', 'skipped', guardrailDiagnostic);
     }
-    if (!emptyBook && spreadTooWide) {
+    if (!emptyBook && spreadTooWide && !weatherTakerEligible) {
       logger.info('[executor] skipping — entry spread too wide', {
         marketId: signal.marketId,
         ...guardrailDiagnostic,
@@ -3146,6 +3392,7 @@ export async function executeSignal(
       prefetchedClobBook,
       emptyBookMakerRoute,
       redis,
+      weatherTakerEligible,
     );
     if (makerAttempt.governorStamped === true) governorStampedThisCall = true;
     safeRecordExecutionTiming('maker_wait_ms', makerAttempt.waitMs);
