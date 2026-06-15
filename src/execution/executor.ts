@@ -556,9 +556,13 @@ async function tryExecuteViaClobMaker(
     signal.source === 'weather' && cfg.WEATHER_REST_ABOVE_CAP_ENABLED;
 
   // --- Pending order handling (empty-book + weather patient real-book +
-  // weather rest-above-cap lifecycle) ---
+  // weather rest-above-cap lifecycle + conviction taker) ---
   // On each cron cycle, resume polling an existing open order rather than re-posting.
-  if ((emptyBookMode || isWeatherPatient || isWeatherRestAboveCapLifecycle) && redis) {
+  // wantTaker is included so a taker's partial-fill residual (persisted below) is
+  // always found and resumed — independent of WEATHER_REAL_BOOK_DISCOUNT_BPS (which
+  // sets isWeatherPatient); otherwise zeroing that knob would let the taker re-fire a
+  // duplicate on the residual. Matches the persist + deletePendingOrder conditions.
+  if ((emptyBookMode || isWeatherPatient || isWeatherRestAboveCapLifecycle || (wantTaker && signal.source === 'weather')) && redis) {
     const pending = await getPendingOrder(redis, signal.marketId, signal.direction);
     if (pending) {
       // Normalize both sides before comparing: oracle-lag stores 'UP'/'DOWN' in the
@@ -1282,6 +1286,18 @@ async function tryExecuteViaClobMaker(
     : emptyBookMode
     ? (signal.source === 'oracle-lag' || weatherPostOnly)
     : true;
+  // Reserve the daily taker notional at the actual submit. This is reached only after
+  // the pending-order check at the top returned early for any held resting maker, so an
+  // existing resting order never consumes the breaker without taking. The CHECK ran in
+  // executeSignal; the sub-millisecond midnight-UTC window where check and reserve land
+  // on different day keys is benign (≤ one stake, trips the breaker early = safe).
+  // Reserve the full stake up-front (a crossing limit may only partially fill) — the
+  // residual is tracked via the pending key, not re-reserved. Sequential per-signal.
+  if (weatherTakerGate && redis && cfg.WEATHER_TAKER_ENTRY_MAX_DAILY_USD > 0) {
+    const dayKey = `weather:taker_daily:${new Date().toISOString().slice(0, 10)}`;
+    await redis.incrbyfloat(dayKey, signal.stakeUsd).catch(() => {});
+    await redis.expire(dayKey, 129600).catch(() => {}); // 36h TTL — outlives the UTC day
+  }
   let result = await submitClobLimitBuy({
     tokenId,
     price,
@@ -3104,7 +3120,10 @@ export async function executeSignal(
       if (takerEdge >= cfg.WEATHER_TAKER_ENTRY_MIN_EDGE) {
         let dailyOk = true;
         if (redis && cfg.WEATHER_TAKER_ENTRY_MAX_DAILY_USD > 0) {
-          // One day key for BOTH the check and the reserve (no midnight-UTC race).
+          // CHECK only here. The RESERVE happens at the actual submit inside
+          // tryExecuteViaClobMaker — AFTER its pending-order check returns early for a
+          // held resting maker — so an existing resting order can never consume the
+          // breaker scan after scan without ever taking.
           const dayKey = `weather:taker_daily:${new Date().toISOString().slice(0, 10)}`;
           const spent = parseFloat((await redis.get(dayKey).catch(() => null)) ?? '0') || 0;
           if (spent + signal.stakeUsd > cfg.WEATHER_TAKER_ENTRY_MAX_DAILY_USD + 1e-9) {
@@ -3115,13 +3134,6 @@ export async function executeSignal(
               stakeUsd: signal.stakeUsd,
               capUsd: cfg.WEATHER_TAKER_ENTRY_MAX_DAILY_USD,
             });
-          } else {
-            // Reserve the full stake up-front. A circuit breaker errs toward stopping:
-            // a crossing limit may only partially fill, or rarely skip downstream (book
-            // moved / below min size) — over-reserving just trips the breaker slightly
-            // early, the safe direction. Sequential per-signal so no double-spend.
-            await redis.incrbyfloat(dayKey, signal.stakeUsd).catch(() => {});
-            await redis.expire(dayKey, 129600).catch(() => {}); // 36h TTL — outlives the UTC day
           }
         }
         weatherTakerEligible = dailyOk;

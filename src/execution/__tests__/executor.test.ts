@@ -3672,6 +3672,90 @@ describe('weather conviction taker entry', () => {
     );
   });
 
+  it('holds an existing resting maker order — taker does NOT fire and does NOT consume the breaker', async () => {
+    // A resting order exists for this market+direction. The pending-order check at the
+    // top of tryExecuteViaClobMaker runs BEFORE the taker gate and returns the held
+    // order, so: no new (duplicate) order, no daily-breaker reservation.
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'resting-1',
+      tokenId: 'tok-yes',
+      price: 0.55,
+      size: 9,
+      direction: 'YES',
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 600_000,
+      consensusP: 0.85,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    mockGetOrder.mockResolvedValue({
+      id: 'resting-1',
+      status: 'live',
+      owner: '0x1',
+      maker_address: '0x1',
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      side: 'BUY',
+      original_size: '9',
+      size_matched: '0', // genuinely resting, unfilled
+      price: '0.55',
+      associate_trades: [],
+      outcome: 'YES',
+      created_at: Date.now(),
+      expiration: '',
+      order_type: 'GTC',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const redis = makeTakerRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(weatherSignal(), redis as any);
+
+    expect(result.entryExecutionPath).toBe('maker_pending'); // resting order held
+    expect(mockSubmitLimit).not.toHaveBeenCalled(); // no duplicate / no taker order
+    expect(redis.incrbyfloat).not.toHaveBeenCalled(); // breaker untouched
+  });
+
+  it('holds a resting order even when WEATHER_REAL_BOOK_DISCOUNT_BPS=0 (pending-check is taker-aware, not discount-gated)', async () => {
+    // With the discount knob zeroed, isWeatherPatient is false; the pending-check must
+    // still fire via the taker arm so a partial residual is never duplicated.
+    mockConfig.WEATHER_REAL_BOOK_DISCOUNT_BPS = 0;
+    mockGetPendingOrder.mockResolvedValue({
+      orderId: 'resting-0bps',
+      tokenId: 'tok-yes',
+      price: 0.62,
+      size: 8,
+      direction: 'YES',
+      postedAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 600_000,
+      consensusP: 0.85,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    mockGetOrder.mockResolvedValue({
+      id: 'resting-0bps',
+      status: 'live',
+      owner: '0x1',
+      maker_address: '0x1',
+      market: 'mkt-test',
+      asset_id: 'tok-yes',
+      side: 'BUY',
+      original_size: '8',
+      size_matched: '0',
+      price: '0.62',
+      associate_trades: [],
+      outcome: 'YES',
+      created_at: Date.now(),
+      expiration: '',
+      order_type: 'GTC',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const redis = makeTakerRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(weatherSignal(), redis as any);
+
+    expect(result.entryExecutionPath).toBe('maker_pending');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+    expect(redis.incrbyfloat).not.toHaveBeenCalled();
+  });
+
   it('does NOT take a sanctioned size-up — it stays on the maker path (mid-cap discipline preserved)', async () => {
     const redis = makeTakerRedis();
     const result = await executeSignal(
