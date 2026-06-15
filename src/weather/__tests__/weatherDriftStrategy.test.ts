@@ -187,14 +187,15 @@ vi.mock('../noaaClient.js', () => ({
 
 // ── Dynamic imports ───────────────────────────────────────────────────────────
 
-const {
-  evaluateWeatherPositionThesis,
-  fetchOpenWeatherPositions,
-  parseWeatherPositionMeta,
-} = await import('../weatherThesis.js');
+const { evaluateWeatherPositionThesis } = await import('../weatherThesis.js');
 
-const { classifyDriftState, runWeatherDriftStrategy, runWeatherNowcastScan, sliceToRemainingHours } =
-  await import('../weatherDriftStrategy.js');
+const {
+  classifyDriftState,
+  modalExitStreakSatisfied,
+  runWeatherDriftStrategy,
+  runWeatherNowcastScan,
+  sliceToRemainingHours,
+} = await import('../weatherDriftStrategy.js');
 
 const { enqueueWrite } = await import('../../db/writeQueue.js');
 
@@ -260,6 +261,8 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     WEATHER_DRIFT_FLIP_MAX_SCAN_NOTIONAL: 50,
     WEATHER_DRIFT_EXACT_MODAL_MIN_RUNS: 1,
     WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS: 2,
+    WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP: 0.15,
+    WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING: 0.75,
     // Conditional oracle knobs — all dark by default
     WEATHER_COND_ORACLE_ENABLED: false,
     WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED: false,
@@ -541,6 +544,53 @@ describe('evaluateWeatherPositionThesis', () => {
     expect(result.modalInversionRaw).toBe(true);
     expect(result.currentHeldProb).toBeCloseTo(0.70, 3);
     expect(result.modalInvalidated).toBe(false); // 0.70 > 0.55 ceiling
+  });
+});
+
+// ── modalExitStreakSatisfied tests ────────────────────────────────────────────
+
+describe('modalExitStreakSatisfied (modal_against exit conviction gate)', () => {
+  // Production defaults: fast-track at 1 streak, slow-track at 2, steep drop 0.15,
+  // held-prob ceiling 0.75.
+  const base = {
+    fastTrackRuns: 1,
+    slowTrackRuns: 2,
+    steepDrop: 0.15,
+    heldProbCeiling: 0.75,
+  };
+
+  it('defers a 1-streak exit on a shallow drop at high held-prob (London 5084)', () => {
+    // 8.6% drop at 76.9% held — neither fast-track condition met → needs 2 streaks.
+    expect(
+      modalExitStreakSatisfied({ ...base, modalStreak: 1, drop: 0.086, currentHeldProb: 0.769 }),
+    ).toBe(false);
+  });
+
+  it('exits once a second consecutive streak accrues at the same shallow drift', () => {
+    expect(
+      modalExitStreakSatisfied({ ...base, modalStreak: 2, drop: 0.086, currentHeldProb: 0.769 }),
+    ).toBe(true);
+  });
+
+  it('fast-tracks a 1-streak exit on a steep held-prob drop (>= 15%)', () => {
+    expect(
+      modalExitStreakSatisfied({ ...base, modalStreak: 1, drop: 0.15, currentHeldProb: 0.80 }),
+    ).toBe(true);
+  });
+
+  it('fast-tracks a 1-streak exit when held-prob is below the ceiling (< 75%)', () => {
+    expect(
+      modalExitStreakSatisfied({ ...base, modalStreak: 1, drop: 0.05, currentHeldProb: 0.74 }),
+    ).toBe(true);
+  });
+
+  it('held-prob exactly at the ceiling is NOT below it → still needs 2 streaks', () => {
+    expect(
+      modalExitStreakSatisfied({ ...base, modalStreak: 1, drop: 0.05, currentHeldProb: 0.75 }),
+    ).toBe(false);
+    expect(
+      modalExitStreakSatisfied({ ...base, modalStreak: 2, drop: 0.05, currentHeldProb: 0.75 }),
+    ).toBe(true);
   });
 });
 
@@ -1041,7 +1091,7 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     await runWeatherDriftStrategy(redis as any);
 
     expect(mockNotifyWeatherDrift).toHaveBeenCalledOnce();
-    const notifyArgs = mockNotifyWeatherDrift.mock.calls[0]![0] as any;
+    const notifyArgs = mockNotifyWeatherDrift.mock.calls[0]![0];
     expect(notifyArgs.positionId).toBe('pos-1');
     expect(notifyArgs.state).toBe('thesis_weakened');
     expect(notifyArgs.direction).toBe('NO');
@@ -1065,7 +1115,7 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     const redis = makeRedis();
     await runWeatherDriftStrategy(redis as any);
 
-    const notifyArgs = mockNotifyWeatherDrift.mock.calls[0]![0] as any;
+    const notifyArgs = mockNotifyWeatherDrift.mock.calls[0]![0];
     expect(notifyArgs.action).toBe('block_size_up');
   });
 
@@ -1075,7 +1125,7 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     const redis = makeRedis();
     await runWeatherDriftStrategy(redis as any);
 
-    const notifyArgs = mockNotifyWeatherDrift.mock.calls[0]![0] as any;
+    const notifyArgs = mockNotifyWeatherDrift.mock.calls[0]![0];
     expect(notifyArgs.action).toBe('notify');
   });
 
@@ -1103,7 +1153,7 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     const blockCall = setCalls.find((c) => c[0] === 'weather:forecast_invalidated:mkt-1:NO');
     expect(blockCall).toBeTruthy();
     // Payload should include driftState
-    const stored = JSON.parse(blockCall![1] as string);
+    const stored = JSON.parse(blockCall![1]);
     expect(stored.driftState).toBe('thesis_weakened');
   });
 
@@ -1290,7 +1340,7 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     await runWeatherDriftStrategy(redis as any);
 
     expect(mockTryWeatherExit).toHaveBeenCalledOnce();
-    const exitArgs = mockTryWeatherExit.mock.calls[0]![0] as any;
+    const exitArgs = mockTryWeatherExit.mock.calls[0]![0];
     expect(exitArgs.pos.id).toBe('pos-1');
     expect(exitArgs.isResolutionDay).toBe(true);
     expect(exitArgs.useMarketFloor).toBe(true);
@@ -1331,7 +1381,7 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     // Both enabled; exit fires first and sets action='exit' — cancel should not run.
     mockTryWeatherExit.mockResolvedValue(true);
     const redis = makeRedis();
-    setupModalAgainstPosition(redis);
+    setupModalAgainstPosition(redis); // held-prob ~0.30 → fast-tracks the exit at streak 1
     mockGetPendingOrder.mockResolvedValue({ orderId: 'ord-1', price: 0.30 });
     mockLoadConfig.mockReturnValue(makeConfig({
       WEATHER_DRIFT_ENABLED: true,
@@ -1345,6 +1395,68 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     expect(call.payload.action).toBe('exit');
     // cancel_resting is skipped because action was already set to 'exit'
     expect(mockCancelRestingWeatherOrder).not.toHaveBeenCalled();
+  });
+
+  it('does NOT exit a first-streak modal_against when neither fast-track condition is met (London 5084 regression)', async () => {
+    // The streak-1 fixture would normally fast-track (large drop / low held-prob). Push
+    // both fast-track thresholds out of reach so neither condition fires — emulating the
+    // London 5084 case (shallow drop, still-high held-prob): the exit must wait for the
+    // 2nd consecutive modal-against streak instead of dumping on this scan.
+    mockTryWeatherExit.mockResolvedValue(true);
+    const redis = makeRedis();
+    setupModalAgainstPosition(redis); // streak=1
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP: 0.60, // > fixture drop → no steep-drop fast-track
+      WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING: 0.20, // < fixture held-prob → no low-conviction fast-track
+    }));
+
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.state).toBe('modal_against');
+    expect(call.payload.action).not.toBe('exit');
+  });
+
+  it('exits a first-streak modal_against once the same streak hits the required runs', async () => {
+    // Same deferral config, but a confirmed 2nd streak now satisfies slowTrackRuns (2).
+    mockTryWeatherExit.mockResolvedValue(true);
+    const redis = makeRedis();
+    setupModalAgainstPosition(redis);
+    redis._store.set('weather:forecast_modal_streak:pos-1', '2'); // 2nd consecutive inversion
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP: 0.60,
+      WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING: 0.20,
+    }));
+
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.action).toBe('exit');
+  });
+
+  it('fast-tracks a first-streak modal_against exit on severe drift (default thresholds)', async () => {
+    // With default thresholds (steep 0.15 / ceiling 0.75), the fixture's severe drift
+    // (large drop, held-prob well below 0.75) fast-tracks the exit on a single streak —
+    // proves a genuinely collapsed position still exits immediately.
+    mockTryWeatherExit.mockResolvedValue(true);
+    const redis = makeRedis();
+    setupModalAgainstPosition(redis); // streak=1, held-prob ~0.30, drop ~0.50
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+    }));
+
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.action).toBe('exit');
   });
 
   it('does not write forecast_invalidated key when exit already succeeded', async () => {
@@ -2268,7 +2380,7 @@ describe('runWeatherNowcastScan', () => {
 
   function findNowcastRow() {
     return vi.mocked(enqueueWrite).mock.calls.find(
-      (c) => (c[0] as string) === 'shadow_observations' &&
+      (c) => (c[0]) === 'shadow_observations' &&
              (c[1] as any).kind === 'weather_nowcast_entry',
     );
   }
@@ -2332,7 +2444,7 @@ describe('runWeatherNowcastScan', () => {
       2100,
     );
     // Blob includes computedAt for the read-side blob-age check.
-    const setArg = vi.mocked(redis.set).mock.calls[0]?.[1] as string;
+    const setArg = vi.mocked(redis.set).mock.calls[0]![1];
     expect(setArg).toMatch(/"computedAt":\d+/);
   });
 

@@ -42,7 +42,7 @@ import {
   daysUntil,
   cancelRestingWeatherOrder,
 } from './weatherScanner.js';
-import type { ParsedWeatherEvent, ParsedBracket, WeatherBracketOpportunity } from './weatherScanner.js';
+import type { WeatherBracketOpportunity } from './weatherScanner.js';
 import {
   fetchOpenWeatherPositions,
   parseWeatherPositionMeta,
@@ -63,7 +63,7 @@ import {
 } from './conditionalOracle.js';
 import type { ConditionalOracleResult } from './conditionalOracle.js';
 import { fetchEnsembleHourly } from './openMeteoClient.js';
-import type { EnsembleHourlyForecast } from './openMeteoClient.js';
+import type { EnsembleHourlyForecast, FetchFn as OpenMeteoFetchFn } from './openMeteoClient.js';
 import { classifyFlipCandidate, tryWeatherFlip } from './weatherFlip.js';
 import type { FlipCandidateClass } from './weatherFlip.js';
 
@@ -229,12 +229,38 @@ export function classifyDriftState(
   return { state: 'stable', reason: 'ok' };
 }
 
+/**
+ * Whether a modal_against drift EXIT may fire given the current streak.
+ *
+ * A single-streak exit is only allowed when the drift is severe: either the
+ * held-prob has dropped steeply from entry (`drop >= steepDrop`) OR the current
+ * held-prob is already below the conviction ceiling (`currentHeldProb <
+ * heldProbCeiling`). In those cases the required streak is `fastTrackRuns`
+ * (the actionable/notification minimum). Otherwise the exit waits for the
+ * stricter `slowTrackRuns` consecutive modal-against scans, so a high-conviction
+ * position straddling a rounding boundary isn't dumped on one wobbly scan.
+ *
+ * Pure function — no I/O — so the gate is unit-testable in isolation.
+ */
+export function modalExitStreakSatisfied(opts: {
+  modalStreak: number;
+  drop: number;
+  currentHeldProb: number;
+  fastTrackRuns: number;
+  slowTrackRuns: number;
+  steepDrop: number;
+  heldProbCeiling: number;
+}): boolean {
+  const fastTrack =
+    opts.drop >= opts.steepDrop || opts.currentHeldProb < opts.heldProbCeiling;
+  const requiredRuns = fastTrack ? opts.fastTrackRuns : opts.slowTrackRuns;
+  return opts.modalStreak >= requiredRuns;
+}
+
 // ── Redis key constants ───────────────────────────────────────────────────────
 
 const MODAL_STREAK_KEY_PREFIX = 'weather:forecast_modal_streak:';
-const MODAL_STREAK_TTL_S = 2 * 3600;
 const MODAL_SUPPORTED_KEY_PREFIX = 'weather:forecast_modal_supported:';
-const MODAL_SUPPORTED_TTL_S = 14 * 24 * 3600;
 
 // Shared with the invalidation scanner — drift writes this same key so the
 // existing size-up gate checks a single namespace regardless of which scanner set it.
@@ -310,7 +336,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
 
   // Per-scan ensemble hourly memo: one GFS fetch per (city, targetDate) regardless of how
   // many brackets for that city-date are held. Avoids N×11 identical API calls per scan.
-  const ensembleHourlyMemo = new Map<string, import('./openMeteoClient.js').EnsembleHourlyForecast | null>();
+  const ensembleHourlyMemo = new Map<string, EnsembleHourlyForecast | null>();
 
   for (const pos of positions) {
     try {
@@ -438,7 +464,6 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       let heldTokenId: string | null = null;
       let oppositeTokenId: string | null = null;
       let gammaBidFallback: number | null = null;
-      let gammaOppositeAsk: number | null = null;
       try {
         const market = await getMarket(pos.marketId);
         const tokenIds = parseClobTokenIds(market.clobTokenIds);
@@ -447,14 +472,11 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         // Parse Gamma's market-implied price for the held side. Index 0 = YES, 1 = NO.
         const prices = parseOutcomePrices(market.outcomePrices);
         const rawPrice = pos.direction === 'YES' ? prices[0] : prices[1];
-        const rawOppositePrice = pos.direction === 'YES' ? prices[1] : prices[0];
         const parsed = rawPrice != null ? parseFloat(rawPrice) : NaN;
-        const parsedOpp = rawOppositePrice != null ? parseFloat(rawOppositePrice) : NaN;
         // `parsed > 0` intentionally skips resolved markets: Gamma returns "0"
         // for the losing side once the market settles. Those are handled by the
         // reconciler, not the drift scanner.
         if (isFinite(parsed) && parsed > 0) gammaBidFallback = parsed;
-        if (isFinite(parsedOpp) && parsedOpp > 0) gammaOppositeAsk = parsedOpp;
       } catch (err) {
         logger.warn('[weather-drift] market fetch failed — market-adverse check and exit skipped', {
           positionId: pos.id,
@@ -678,7 +700,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         if (isResolutionDay || daysOut <= 1) {
           try {
             const memoKey = `${city}:${targetDate}`;
-            let hourlyData: import('./openMeteoClient.js').EnsembleHourlyForecast | null;
+            let hourlyData: EnsembleHourlyForecast | null;
             if (ensembleHourlyMemo.has(memoKey)) {
               hourlyData = ensembleHourlyMemo.get(memoKey) ?? null;
             } else {
@@ -687,7 +709,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
                 event.coords.lon,
                 targetDate,
                 event.coords.unit,
-                fetchFn as import('./openMeteoClient.js').FetchFn | undefined,
+                fetchFn as OpenMeteoFetchFn | undefined,
                 cfg.WEATHER_MODEL_ECMWF_ENABLED,
                 cfg.WEATHER_FORECAST_RETRY_COUNT,
               ).catch(() => null);
@@ -916,6 +938,23 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             state === 'market_against' &&
             (marketAgainstTier === 1 ||
               (marketAgainstTier === 2 && isResolutionDay && cfg.WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY));
+          // Conviction gate for modal_against exits: a single-streak exit fires only
+          // on a steep held-prob drop OR a held-prob already below the ceiling;
+          // otherwise wait for the stricter consecutive-run count. Prevents dumping a
+          // still-high-conviction position on a one-scan rounding wobble (London 5084).
+          // Only gates modal_against — thesis_weakened already requires SEVERE_DROP,
+          // and other states are unaffected.
+          const modalExitOk =
+            forecastState !== 'modal_against' ||
+            modalExitStreakSatisfied({
+              modalStreak: result.modalStreak,
+              drop: result.drop,
+              currentHeldProb: result.currentHeldProb,
+              fastTrackRuns: cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS,
+              slowTrackRuns: cfg.WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS,
+              steepDrop: cfg.WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP,
+              heldProbCeiling: cfg.WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING,
+            });
           // oracle_confirmed means our held side is the winner — never exit via drift.
           // Hold guard may veto thesis_weakened/modal_against on res-day when fresh
           // settlement-aligned oracle says P is still favorable (oracle_impossible is exempt).
@@ -923,7 +962,8 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             state !== 'market_against' &&
             state !== 'oracle_confirmed' &&
             state !== 'oracle_likely_against' && // conditional oracle has its own gate below
-            !(holdGuardVetoed && state !== 'oracle_impossible');
+            !(holdGuardVetoed && state !== 'oracle_impossible') &&
+            modalExitOk;
           // oracle_impossible is permanent (daily max only rises) — exit any day, not just res-day.
           const oracleImpossibleCanExit = state === 'oracle_impossible';
           // Bid velocity: rapid single-scan collapse on resolution day bypasses Tier logic.
@@ -940,6 +980,31 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             bidVelocityCanExit ||
             conditionalOracleCanExit ||
             (isResolutionDay && (forecastCanExit || marketAgainstCanExit));
+
+          // Surface the conviction-gate deferral: modal_against would otherwise exit
+          // on this scan but is held back pending another consecutive streak. Guard
+          // on heldTokenId/holdGuard so we only attribute the hold to the streak gate
+          // when the streak truly is the blocker (not a market-fetch failure or the
+          // separate conditional-oracle hold guard).
+          if (
+            isResolutionDay &&
+            forecastState === 'modal_against' &&
+            !modalExitOk &&
+            !shouldExit &&
+            heldTokenId != null &&
+            !holdGuardVetoed
+          ) {
+            logger.info('[weather-drift] modal exit deferred — awaiting streak', {
+              positionId: pos.id,
+              city,
+              modalStreak: result.modalStreak,
+              requiredRuns: cfg.WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS,
+              drop: +result.drop.toFixed(3),
+              currentHeldProb: +result.currentHeldProb.toFixed(3),
+              steepDrop: cfg.WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP,
+              heldProbCeiling: cfg.WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING,
+            });
+          }
 
           if (cfg.WEATHER_DRIFT_EXIT_ENABLED && shouldExit && heldTokenId) {
             // tryWeatherExit fetches the book again for an accurate exit price.
@@ -1343,7 +1408,7 @@ export async function runWeatherNowcastScan(
 
   // Memo-ised ensemble hourly per (city, targetDate) — multiple brackets for the same
   // event would otherwise each trigger an identical GFS fetch.
-  const ensembleHourlyMemo = new Map<string, import('./openMeteoClient.js').EnsembleHourlyForecast | null>();
+  const ensembleHourlyMemo = new Map<string, EnsembleHourlyForecast | null>();
 
   for (const opp of resDayOpps) {
     try {
@@ -1362,10 +1427,10 @@ export async function runWeatherNowcastScan(
         ...(fetchFn != null && { fetchFn: fetchFn as typeof fetch }),
       }).catch((): null => null);
 
-      if (!liveObs || liveObs.observedMax == null || liveObs.observedAt == null || liveObs.confidence === 'none') continue;
+      if (liveObs?.observedMax == null || liveObs.observedAt == null || liveObs.confidence === 'none') continue;
 
       const nowcastMemoKey = `${opp.city}:${opp.targetDate}`;
-      let ensembleHourly: import('./openMeteoClient.js').EnsembleHourlyForecast | null;
+      let ensembleHourly: EnsembleHourlyForecast | null;
       if (ensembleHourlyMemo.has(nowcastMemoKey)) {
         ensembleHourly = ensembleHourlyMemo.get(nowcastMemoKey) ?? null;
       } else {
