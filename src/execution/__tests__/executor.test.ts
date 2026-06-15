@@ -3774,6 +3774,22 @@ describe('weather conviction taker entry', () => {
     }
   });
 
+  it('fires even when MAX_ENTRY_SPREAD_BPS=0 (taker flag is independent of the spread guard)', async () => {
+    // Regression for the P2 review finding: the taker gate needs the live book, so it
+    // must fetch even when the generic spread guard is disabled (0 = off). Without the
+    // needsBookCheck fix the book is never read → weatherTakerEligible stays false →
+    // silent maker fallback.
+    mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
+    const redis = makeTakerRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(weatherSignal(), redis as any);
+
+    expect(mockSubmitLimit).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-yes', price: 0.70, postOnly: false }),
+    );
+    expect(result.entryExecutionPath).toBe('maker_fill');
+  });
+
   it('uses the NO-side ask and NO token when direction is NO', async () => {
     const redis = makeTakerRedis();
     // NO win prob = 1 − 0.10 = 0.90; vs NO-side ask 0.62 → edge 0.28.

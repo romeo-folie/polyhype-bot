@@ -3041,8 +3041,13 @@ export async function executeSignal(
   // Sports ghost-book check requires a live book read even when spread gating is
   // off (effectiveSpreadCeiling === 0). Include sports in the book-fetch condition
   // so SPORTS_REQUIRE_REAL_BOOK cannot be bypassed by setting MAX_ENTRY_SPREAD_BPS=0.
+  // Likewise the weather conviction taker needs the live book to compute its gate
+  // (ask + edge), so it must fetch independently of the spread guard — otherwise
+  // WEATHER_TAKER_ENTRY_ENABLED would be silently inert whenever MAX_ENTRY_SPREAD_BPS=0.
   const needsBookCheck =
-    effectiveSpreadCeiling > 0 || (signal.source === 'sports' && cfg.SPORTS_REQUIRE_REAL_BOOK);
+    effectiveSpreadCeiling > 0
+    || (signal.source === 'sports' && cfg.SPORTS_REQUIRE_REAL_BOOK)
+    || (cfg.WEATHER_TAKER_ENTRY_ENABLED && signal.source === 'weather' && signal._isBracketOpposite !== true);
   if (needsBookCheck && signal.source !== 'copytrade') {
     const { book, benchmark } = await fetchBookAndBenchmark(signal);
     prefetchedClobBook = book;
@@ -3056,7 +3061,10 @@ export async function executeSignal(
     // signals block on undefined too — handled below in the sports-specific check.
     const oneSidedBook =
       benchmark.decisionBestBid === null || benchmark.decisionBestAsk === null;
-    const spreadTooWide = spreadBps != null && spreadBps > effectiveSpreadCeiling;
+    // effectiveSpreadCeiling === 0 means the spread guard is OFF (the documented
+    // convention). Guard on > 0 so that fetching the book for another reason (sports
+    // real-book check, weather taker gate) never silently re-enables spread skipping.
+    const spreadTooWide = effectiveSpreadCeiling > 0 && spreadBps != null && spreadBps > effectiveSpreadCeiling;
     const guardrailDiagnostic = {
       spreadBps: spreadBps != null ? Math.round(spreadBps) : null,
       threshold: effectiveSpreadCeiling,
