@@ -169,6 +169,66 @@ export async function notifyTradeExecuted(
 }
 
 /**
+ * Notify when a rebate maker leg fills, surfacing its pairing status so the
+ * operator can tell a hedged pair from an accidental directional bet:
+ *   - paired:       opposite leg is held → the pair is complete (riskless-ish).
+ *   - pair_pending: opposite leg is still resting → single leg, pair may complete.
+ *   - naked:        no opposite order at all → directional exposure.
+ */
+export async function notifyRebateFill(opts: {
+  question: string;
+  direction: 'YES' | 'NO';
+  price: number;
+  shares: number;
+  usd: number;
+  estRebateUsd: number;
+  isPartial: boolean;
+  pairing: 'paired' | 'partial' | 'pair_pending' | 'naked';
+  combinedCost: number | null;
+  hedgedShares?: number;
+  unhedgedShares?: number;
+  oppositeRestingPrice?: number | null;
+}): Promise<void> {
+  const header = opts.isPartial
+    ? '🟡 <b>Rebate Leg Partially Filled</b>'
+    : '🟡 <b>Rebate Leg Filled</b>';
+
+  let pairingLine: string;
+  switch (opts.pairing) {
+    case 'paired':
+      pairingLine =
+        '✅ <b>PAIRED</b> — opposite leg held' +
+        (opts.combinedCost != null ? ` (combined cost ${opts.combinedCost.toFixed(2)}, hedged)` : '');
+      break;
+    case 'partial':
+      // Held opposite only covers part of this fill — the rest is directional.
+      pairingLine =
+        '🟠 <b>PARTIALLY PAIRED</b> — ' +
+        `${(opts.hedgedShares ?? 0).toFixed(2)}/${opts.shares.toFixed(2)} sh hedged` +
+        (opts.combinedCost != null ? ` (combined ${opts.combinedCost.toFixed(2)})` : '') +
+        `; ${(opts.unhedgedShares ?? 0).toFixed(2)} sh still directional ⚠️`;
+      break;
+    case 'pair_pending':
+      pairingLine =
+        '⏳ <b>SINGLE LEG</b> — opposite still resting' +
+        (opts.oppositeRestingPrice != null ? ` @ ${fmtProb(opts.oppositeRestingPrice)}` : '') +
+        (opts.combinedCost != null ? ` (pair pending, combined ${opts.combinedCost.toFixed(2)})` : '');
+      break;
+    default:
+      pairingLine = '⚠️ <b>NAKED SINGLE LEG</b> — no opposite order (directional exposure)';
+  }
+
+  const text =
+    `${header}\n\n` +
+    `<b>Market:</b> ${escapeHtml(opts.question)}\n` +
+    `<b>Side:</b> ${opts.direction} @ ${fmtProb(opts.price)}  |  ${opts.shares.toFixed(2)} sh ($${opts.usd.toFixed(2)})\n` +
+    `<b>Est. rebate:</b> $${opts.estRebateUsd.toFixed(4)}\n` +
+    `<b>Pairing:</b> ${pairingLine}`;
+
+  await notify(text);
+}
+
+/**
  * Notify on a failed trade execution.
  */
 export async function notifyTradeError(

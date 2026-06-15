@@ -15,6 +15,10 @@ vi.mock('../../execution/positionLedger.js', () => ({
   getPosition: (...args: unknown[]) => mockGetPosition(...args),
 }));
 
+vi.mock('../../execution/telegram.js', () => ({
+  notifyRebateFill: vi.fn().mockResolvedValue(undefined),
+}));
+
 // Foundation from the REAL Zod schema defaults so the mock can't drift from
 // config.ts (see feedback: hand-written literals crash on new cfg.X reads).
 const { envSchema } = await vi.importActual<{ envSchema: z.AnyZodObject }>(
@@ -61,9 +65,11 @@ import {
   resolvePairTarget,
   cancelRestingOrder,
   isRestingOrderStranded,
+  classifyRebatePairing,
 } from '../orderManager.js';
 import { getClobOrder, cancelClobOrder, submitClobLimitBuy } from '../../shared/clob.js';
 import { recordPosition } from '../../execution/positionLedger.js';
+import { notifyRebateFill } from '../../execution/telegram.js';
 import type { RestingOrder, RebateMarketCandidate, RebateQuote } from '../types.js';
 import type { MarketFlowStats } from '../flowAnalyzer.js';
 
@@ -71,6 +77,7 @@ const mockGetOrder = vi.mocked(getClobOrder);
 const mockCancelOrder = vi.mocked(cancelClobOrder);
 const mockSubmitLimit = vi.mocked(submitClobLimitBuy);
 const mockRecordPosition = vi.mocked(recordPosition);
+const mockNotifyRebateFill = vi.mocked(notifyRebateFill);
 
 interface PipelineMock {
   hincrby: ReturnType<typeof vi.fn>;
@@ -211,6 +218,8 @@ describe('orderManager', () => {
       // 10 × 0.10 × 0.51 × 0.49 × 0.25 = 0.062475
       const order = makeOrder({ price: 0.51, size: 10 });
       redis.hgetall.mockResolvedValue({ 'order-1': JSON.stringify(order) });
+      // Opposite leg held with enough shares to fully cover the 10-sh fill → paired.
+      mockGetPosition.mockResolvedValue({ sharesHeld: 20, entryPrice: 0.5 });
 
       mockGetOrder.mockResolvedValue({
         id: 'order-1',
@@ -239,6 +248,14 @@ describe('orderManager', () => {
       expect(mockRecordPosition).toHaveBeenCalledOnce();
       expect(redis.hdel).toHaveBeenCalledWith('rebate:orders', 'order-1');
 
+      // Fires a per-fill notification. mockGetPosition (beforeEach) reports a held
+      // opposite leg → PAIRED, combined = this 0.51 + opposite entry 0.5.
+      expect(mockNotifyRebateFill).toHaveBeenCalledTimes(1);
+      expect(mockNotifyRebateFill).toHaveBeenCalledWith(
+        expect.objectContaining({ direction: 'YES', pairing: 'paired', isPartial: false }),
+      );
+      expect(mockNotifyRebateFill.mock.calls[0]![0].combinedCost).toBeCloseTo(1.01, 5);
+
       const stats = statCalls(redis);
       const todayKey = `rebate:stats:date:${new Date().toISOString().slice(0, 10)}`;
       // Cumulative + per-market + per-day fill counters (the date bucket feeds
@@ -253,6 +270,80 @@ describe('orderManager', () => {
       expect(rebateBumps.map((b) => b.key)).toContain(todayKey);
       // Lifetime recorded on terminal event, including the date bucket.
       expect(stats.some((s) => s.field === 'lifetime_ms_total' && s.key === todayKey)).toBe(true);
+    });
+
+    it('notifies a NAKED single leg on fill when no opposite position or order exists', async () => {
+      const redis = makeRedis();
+      const order = makeOrder({ price: 0.51, size: 10 });
+      redis.hgetall.mockResolvedValue({ 'order-1': JSON.stringify(order) });
+      mockGetPosition.mockResolvedValue(null); // no opposite leg held
+      mockGetOrder.mockResolvedValue({
+        id: 'order-1', status: 'MATCHED', owner: '0x1', maker_address: '0x1', market: 'mkt-1',
+        asset_id: 'tok-yes', side: 'BUY', original_size: '10', size_matched: '10', price: '0.51',
+        associate_trades: [], outcome: 'YES', created_at: Date.now(), expiration: '', order_type: 'GTC',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await reconcileOrders(redis as any);
+
+      // No opposite position AND loadRestingOrders has no opposite leg → naked.
+      expect(mockNotifyRebateFill).toHaveBeenCalledWith(
+        expect.objectContaining({ pairing: 'naked', combinedCost: null }),
+      );
+    });
+
+    it('notifies a SINGLE LEG with the opposite still resting (pair pending) on fill', async () => {
+      const redis = makeRedis();
+      const yes = makeOrder({ orderId: 'order-1', price: 0.51, size: 10 });
+      const no = makeOrder({ orderId: 'order-2', direction: 'NO', tokenId: 'tok-no', price: 0.40 });
+      redis.hgetall.mockResolvedValue({
+        'order-1': JSON.stringify(yes),
+        'order-2': JSON.stringify(no),
+      });
+      mockGetPosition.mockResolvedValue(null); // no opposite leg HELD…
+      // …but order-2 (the NO leg) is still resting. Only order-1 is MATCHED.
+      mockGetOrder.mockImplementation(async (id: string) =>
+        id === 'order-1'
+          ? {
+              id: 'order-1', status: 'MATCHED', owner: '0x1', maker_address: '0x1', market: 'mkt-1',
+              asset_id: 'tok-yes', side: 'BUY', original_size: '10', size_matched: '10', price: '0.51',
+              associate_trades: [], outcome: 'YES', created_at: Date.now(), expiration: '', order_type: 'GTC',
+            }
+          : null,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ) as any;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await reconcileOrders(redis as any);
+
+      expect(mockNotifyRebateFill).toHaveBeenCalledWith(
+        expect.objectContaining({ pairing: 'pair_pending', oppositeRestingPrice: 0.40 }),
+      );
+      const call = mockNotifyRebateFill.mock.calls.find((c) => c[0].direction === 'YES')!;
+      expect(call[0].combinedCost).toBeCloseTo(0.91, 5); // 0.51 + 0.40
+    });
+
+    it('notifies PARTIALLY PAIRED when the held opposite is smaller than the fill', async () => {
+      // Reviewer scenario: a 4-sh opposite held vs a 10-sh fill → only 4 hedged,
+      // 6 still directional. Must NOT report fully paired.
+      const redis = makeRedis();
+      const order = makeOrder({ price: 0.51, size: 10 });
+      redis.hgetall.mockResolvedValue({ 'order-1': JSON.stringify(order) });
+      mockGetPosition.mockResolvedValue({ sharesHeld: 4, entryPrice: 0.5 });
+      mockGetOrder.mockResolvedValue({
+        id: 'order-1', status: 'MATCHED', owner: '0x1', maker_address: '0x1', market: 'mkt-1',
+        asset_id: 'tok-yes', side: 'BUY', original_size: '10', size_matched: '10', price: '0.51',
+        associate_trades: [], outcome: 'YES', created_at: Date.now(), expiration: '', order_type: 'GTC',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await reconcileOrders(redis as any);
+
+      expect(mockNotifyRebateFill).toHaveBeenCalledWith(
+        expect.objectContaining({ pairing: 'partial', hedgedShares: 4, unhedgedShares: 6 }),
+      );
     });
 
     it('persists the order rebateShare on the recorded position (crypto 0.20 not the 0.25 default)', async () => {
@@ -1099,6 +1190,59 @@ describe('orderManager', () => {
     it('Phase-2 revalidation knobs default to disabled / 0.05 band', () => {
       expect(schemaDefaults(envSchema).REBATE_REVALIDATE_RESTING_ENABLED).toBe(false);
       expect(schemaDefaults(envSchema).REBATE_STALE_DRIFT_THRESHOLD).toBe(0.05);
+    });
+  });
+
+  describe('classifyRebatePairing', () => {
+    const base = {
+      thisShares: 10,
+      thisPrice: 0.55,
+      oppositeHeldShares: null as number | null,
+      oppositeHeldPrice: null as number | null,
+      oppositeRestingShares: null as number | null,
+      oppositeRestingPrice: null as number | null,
+    };
+
+    it('paired when the held opposite covers the whole fill — combined = both prices', () => {
+      const r = classifyRebatePairing({ ...base, oppositeHeldShares: 12, oppositeHeldPrice: 0.41 });
+      expect(r.status).toBe('paired');
+      expect(r.combinedCost).toBeCloseTo(0.96, 5);
+      expect(r.hedgedShares).toBe(10);
+      expect(r.unhedgedShares).toBe(0);
+    });
+
+    it('partial when the held opposite is smaller than the fill — residual is directional', () => {
+      const r = classifyRebatePairing({ ...base, oppositeHeldShares: 4, oppositeHeldPrice: 0.41 });
+      expect(r.status).toBe('partial');
+      expect(r.hedgedShares).toBe(4);
+      expect(r.unhedgedShares).toBe(6);
+      expect(r.combinedCost).toBeCloseTo(0.96, 5);
+    });
+
+    it('pair_pending when only an opposite order is still resting', () => {
+      const r = classifyRebatePairing({ ...base, oppositeRestingShares: 10, oppositeRestingPrice: 0.40 });
+      expect(r.status).toBe('pair_pending');
+      expect(r.combinedCost).toBeCloseTo(0.95, 5);
+      expect(r.unhedgedShares).toBe(10);
+    });
+
+    it('naked when there is no opposite leg or order — no combined cost', () => {
+      const r = classifyRebatePairing({ ...base });
+      expect(r.status).toBe('naked');
+      expect(r.combinedCost).toBeNull();
+      expect(r.unhedgedShares).toBe(10);
+    });
+
+    it('a held opposite leg takes precedence over a resting opposite (already hedged)', () => {
+      const r = classifyRebatePairing({
+        ...base,
+        oppositeHeldShares: 12,
+        oppositeHeldPrice: 0.42,
+        oppositeRestingShares: 10,
+        oppositeRestingPrice: 0.40,
+      });
+      expect(r.status).toBe('paired');
+      expect(r.combinedCost).toBeCloseTo(0.97, 5);
     });
   });
 });
