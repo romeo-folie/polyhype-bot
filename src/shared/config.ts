@@ -2362,6 +2362,17 @@ export const envSchema = z.object({
   // Number of consecutive modal-against scans required before considering exit
   // or flip for exact-bracket positions (stricter than notification gate).
   WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS: z.coerce.number().int().min(1).optional().default(2),
+  // Conviction gate for SINGLE-streak modal_against exits. A modal_against exit
+  // fires on the first scan ONLY when the drift is severe — either the held-prob
+  // has dropped from entry by ≥ WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP, OR the current
+  // held-prob is below WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING. Otherwise the
+  // exit waits for WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS consecutive scans before
+  // selling. A still-high-conviction position straddling a rounding boundary
+  // (forecast a 0.1° wobble from flipping back) must not be dumped on one scan —
+  // 2026-06-13 London 5084 sold at modal streak 1 on an 8.6% drop at 76.9% held.
+  // Notifications/cancels still fire at streak 1; only the position EXIT is gated.
+  WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP: z.coerce.number().min(0).max(1).optional().default(0.15),
+  WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING: z.coerce.number().min(0).max(1).optional().default(0.75),
 
   // ── Weather drift live actions (Phase 3+4) ──────────────────────────────
   // Master live gate. Shadow logging (WEATHER_DRIFT_SHADOW_ENABLED) is
