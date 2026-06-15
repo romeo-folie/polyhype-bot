@@ -183,8 +183,10 @@ export async function notifyRebateFill(opts: {
   usd: number;
   estRebateUsd: number;
   isPartial: boolean;
-  pairing: 'paired' | 'pair_pending' | 'naked';
+  pairing: 'paired' | 'partial' | 'pair_pending' | 'naked';
   combinedCost: number | null;
+  hedgedShares?: number;
+  unhedgedShares?: number;
   oppositeRestingPrice?: number | null;
 }): Promise<void> {
   const header = opts.isPartial
@@ -197,6 +199,14 @@ export async function notifyRebateFill(opts: {
       pairingLine =
         '✅ <b>PAIRED</b> — opposite leg held' +
         (opts.combinedCost != null ? ` (combined cost ${opts.combinedCost.toFixed(2)}, hedged)` : '');
+      break;
+    case 'partial':
+      // Held opposite only covers part of this fill — the rest is directional.
+      pairingLine =
+        '🟠 <b>PARTIALLY PAIRED</b> — ' +
+        `${(opts.hedgedShares ?? 0).toFixed(2)}/${opts.shares.toFixed(2)} sh hedged` +
+        (opts.combinedCost != null ? ` (combined ${opts.combinedCost.toFixed(2)})` : '') +
+        `; ${(opts.unhedgedShares ?? 0).toFixed(2)} sh still directional ⚠️`;
       break;
     case 'pair_pending':
       pairingLine =
