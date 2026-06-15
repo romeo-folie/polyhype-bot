@@ -23,6 +23,7 @@ import {
   CLOB_MIN_ORDER_USD,
 } from '../shared/clob.js';
 import { recordPosition, getPosition } from '../execution/positionLedger.js';
+import { notifyRebateFill } from '../execution/telegram.js';
 import { estimateFillRebateUsd } from './flowAnalyzer.js';
 import { utcDateString } from './rebateChecker.js';
 import type { RestingOrder, RebateMarketCandidate, RebateQuote } from './types.js';
@@ -532,6 +533,26 @@ export async function reconcileOrders(redis: Redis): Promise<ReconcileResult> {
   return result;
 }
 
+/**
+ * Classify a just-filled rebate leg's pairing status for the fill notification.
+ * Pure — no I/O. `oppositeHeldPrice` is the entry price of an opposite leg
+ * already held (→ paired/hedged); `oppositeRestingPrice` is the price of an
+ * opposite order still resting (→ pair pending). Neither → naked directional leg.
+ */
+export function classifyRebatePairing(
+  thisPrice: number,
+  oppositeHeldPrice: number | null,
+  oppositeRestingPrice: number | null,
+): { status: 'paired' | 'pair_pending' | 'naked'; combinedCost: number | null } {
+  if (oppositeHeldPrice != null) {
+    return { status: 'paired', combinedCost: thisPrice + oppositeHeldPrice };
+  }
+  if (oppositeRestingPrice != null) {
+    return { status: 'pair_pending', combinedCost: thisPrice + oppositeRestingPrice };
+  }
+  return { status: 'naked', combinedCost: null };
+}
+
 async function recordFilledOrder(
   redis: Redis,
   order: RestingOrder,
@@ -579,6 +600,43 @@ async function recordFilledOrder(
     // 0.25 rest) instead of defaulting to 0.25 and overstating est_rebate_usd.
     ...(order.rebateShare !== undefined && { rebateShare: order.rebateShare }),
   });
+
+  // Per-fill notification with pairing status: opposite leg held → PAIRED
+  // (hedged); opposite still resting → pair pending; neither → naked directional
+  // leg. Fire-and-forget so a Telegram hiccup never breaks reconciliation.
+  if (cfg.REBATE_FILL_NOTIFY_ENABLED) {
+    const oppositeDir = order.direction === 'YES' ? 'NO' : 'YES';
+    const oppositePos = await getPosition(redis, order.marketId, oppositeDir).catch(() => null);
+    let oppositeRestingPrice: number | null = null;
+    if (!oppositePos) {
+      const restingOrders = await loadRestingOrders(redis).catch(
+        () => new Map<string, RestingOrder>(),
+      );
+      oppositeRestingPrice = findRestingOrder(restingOrders, order.marketId, oppositeDir)?.price ?? null;
+    }
+    const { status, combinedCost } = classifyRebatePairing(
+      order.price,
+      oppositePos?.entryPrice ?? null,
+      oppositeRestingPrice,
+    );
+    void notifyRebateFill({
+      question: order.question,
+      direction: order.direction,
+      price: order.price,
+      shares: sharesFilled,
+      usd: filledUsd,
+      estRebateUsd,
+      isPartial: sharesFilled < order.size - 1e-9,
+      pairing: status,
+      combinedCost,
+      oppositeRestingPrice,
+    }).catch((err: unknown) => {
+      logger.warn('[rebate] fill notification failed', {
+        marketId: order.marketId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
 }
 
 // ─── Order placement ─────────────────────────────────────────────────────────

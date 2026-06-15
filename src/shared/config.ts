@@ -1323,6 +1323,12 @@ export const envSchema = z.object({
   REBATE_MAKER_ADDRESS: z.string().optional(),
   // Telegram + log daily summary comparing estimated vs API-reported rebates.
   REBATE_DAILY_SUMMARY_ENABLED: boolFromEnv.optional().default(true),
+  // Per-fill Telegram notification when a rebate maker leg fills, including its
+  // pairing status — PAIRED (opposite leg held = hedged), pair-pending (opposite
+  // still resting), or naked single leg (directional exposure). Lets the operator
+  // see when a "pair" is actually a one-sided directional bet (e.g. the opposite
+  // leg never filled / went INVALID).
+  REBATE_FILL_NOTIFY_ENABLED: boolFromEnv.optional().default(true),
 
   // --- CRYPTO FUTURES (Phase: futures) ---
   FUTURES_ENABLED: boolFromEnv.optional().default(false),
