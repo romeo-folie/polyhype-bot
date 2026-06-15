@@ -2059,6 +2059,29 @@ export const envSchema = z.object({
   // significantly (flip risk). Applies at the pre-execution skip gate (outcomePrice >
   // cap → entry_price_above_cap) and to the maker fairValue clamp. 0 disables.
   WEATHER_EARLY_ENTRY_MAX_PRICE: z.coerce.number().min(0).max(1).optional().default(0.50),
+  // Conviction TAKER entry for weather (additive; OFF by default). The maker path
+  // rests a discounted bid that adverse-selects: it fills only when sellers hit it
+  // (price falling = losers), and high-conviction winners drift away from the bid
+  // before it fills. When this gate is ON and a REAL-book weather bracket shows
+  // (modelWin − ourSideAsk) ≥ WEATHER_TAKER_ENTRY_MIN_EDGE with ourSideAsk ≤
+  // WEATHER_TAKER_ENTRY_MAX_PRICE, the executor CROSSES the spread (postOnly:false,
+  // limit = min(MAX_PRICE, modelWin − MIN_EDGE)) to TAKE at the ask instead of
+  // resting. Empty/ghost books (nothing to take) and bracket-opposite legs (maker
+  // liquidity) are excluded → the maker path is byte-for-byte unchanged when the
+  // gate is off or unmet. Backtest (779 brackets, 06-06→06-13): edge≥0.15 take →
+  // 77% win, +11% net ROI; 0 divergence vs PM settlement on 24 held-to-resolution.
+  WEATHER_TAKER_ENTRY_ENABLED: boolFromEnv.optional().default(false),
+  // Minimum model edge (modelWin − ourSideAsk) required to take. The limit price is
+  // floored at modelWin − this, so a fill always keeps at least this much edge.
+  WEATHER_TAKER_ENTRY_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.15),
+  // Hard price ceiling for taker entries — never pay above this for a share, even
+  // with huge edge (no buying near-certainties for crumbs; bounds per-share loss).
+  WEATHER_TAKER_ENTRY_MAX_PRICE: z.coerce.number().min(0).max(1).optional().default(0.80),
+  // Daily circuit breaker (USD): total taker-entry stake reserved per UTC day. Once
+  // hit, the gate falls back to the maker path. Bounds the blast radius of an
+  // execution bug while the strategy is monitored live. 0 disables the breaker
+  // (taker entries unbounded — NOT recommended).
+  WEATHER_TAKER_ENTRY_MAX_DAILY_USD: z.coerce.number().min(0).optional().default(25),
   // LEGACY relative-to-quote ceiling for weather maker entries. Active ONLY when
   // WEATHER_EMPTY_BOOK_DISCOUNT_BPS=0 (conviction pricing disabled). It bounds the
   // post to within this much of the scanner's observed side quote (e.g. quote=0.44,
