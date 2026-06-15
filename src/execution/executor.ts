@@ -679,6 +679,76 @@ async function tryExecuteViaClobMaker(
             });
             await deletePendingOrder(redis, signal.marketId, pending.direction);
             // do NOT return — fall through past the pending block to re-post below.
+          } else if (wantTaker && pending.isBracketOpposite !== true) {
+            // Conviction-taker pre-emption: this scan the market is taker-eligible
+            // (wantTaker is res-day-only), but a stranded resting maker bid — typically
+            // a ghost-era conviction bid clamped at the cap — would block the taker
+            // forever: it won't fill (the winner's ask drifted above it) and the FV
+            // revalidation KEEPS it (cheap = value-positive). Cancel it and fall through
+            // to take. Bracket legs are never pre-empted (intentional liquidity).
+            const cancelled = await confirmMakerCancel(pending.orderId);
+            if (!cancelled) {
+              // Couldn't confirm the cancel — do NOT take (double-exposure risk). Hold
+              // this cycle; the resting order is retried/resumed next scan.
+              return {
+                ok: false,
+                error: 'maker_cancel_unconfirmed',
+                waitMs: Date.now() - startedAt,
+                makerOrderId: pending.orderId,
+                makerPostedPrice: pending.price,
+                makerPostedSize: pending.size,
+                makerFillStatus: 'cancel_unconfirmed',
+              };
+            }
+            // confirmMakerCancel returns true for 'filled' too, so a fill can have
+            // landed in the cancel window. Re-read before taking. Two non-clean cases
+            // must NOT take (double-exposure): (a) the order is gone/unreadable (null) —
+            // unknown fill state, possibly fully consumed; (b) size_matched > 0 — it
+            // filled. In both, leave the key + report not-filled so the next scan's
+            // resume path records any fill. Only a confirmed clean zero-fill takes.
+            const racedOrder = await getClobOrder(pending.orderId).catch(() => null);
+            if (racedOrder === null) {
+              logger.info('[weather-taker] resting order unreadable after pre-empt cancel — holding, not taking', {
+                marketId: signal.marketId,
+                restingOrderId: pending.orderId,
+              });
+              return {
+                ok: false,
+                error: 'maker_not_filled',
+                waitMs: Date.now() - startedAt,
+                makerOrderId: pending.orderId,
+                makerPostedPrice: pending.price,
+                makerPostedSize: pending.size,
+                makerFillStatus: 'pending',
+              };
+            }
+            // Take ONLY on a confirmed finite zero fill. A fill (>0) OR an
+            // unparseable matched size (NaN) both leave the key + hold — never take on
+            // an uncertain matched size (double-exposure is the only unrecoverable error).
+            const racedMatched = parseFloat(racedOrder.size_matched ?? '0');
+            if (!Number.isFinite(racedMatched) || racedMatched > 0) {
+              logger.info('[weather-taker] resting bid filled or matched-size uncertain after pre-empt cancel — holding, not taking', {
+                marketId: signal.marketId,
+                restingOrderId: pending.orderId,
+                matched: racedOrder.size_matched ?? null,
+              });
+              return {
+                ok: false,
+                error: 'maker_not_filled',
+                waitMs: Date.now() - startedAt,
+                makerOrderId: pending.orderId,
+                makerPostedPrice: pending.price,
+                makerPostedSize: pending.size,
+                makerFillStatus: 'pending',
+              };
+            }
+            await deletePendingOrder(redis, signal.marketId, pending.direction);
+            logger.info('[weather-taker] pre-empted stranded resting maker — crossing to take', {
+              marketId: signal.marketId,
+              cancelledOrderId: pending.orderId,
+              restingPrice: pending.price,
+            });
+            // do NOT return — fall through past the pending block to the taker gate.
           } else {
             // Genuinely resting and unfilled this cycle — hold for queue priority.
             return {
@@ -3047,7 +3117,8 @@ export async function executeSignal(
   const needsBookCheck =
     effectiveSpreadCeiling > 0
     || (signal.source === 'sports' && cfg.SPORTS_REQUIRE_REAL_BOOK)
-    || (cfg.WEATHER_TAKER_ENTRY_ENABLED && signal.source === 'weather' && signal._isBracketOpposite !== true);
+    || (cfg.WEATHER_TAKER_ENTRY_ENABLED && signal.source === 'weather'
+        && signal._isResolutionDay === true && signal._isBracketOpposite !== true);
   if (needsBookCheck && signal.source !== 'copytrade') {
     const { book, benchmark } = await fetchBookAndBenchmark(signal);
     prefetchedClobBook = book;
@@ -3114,6 +3185,12 @@ export async function executeSignal(
       // entries, not averaging up.
       signal.sizeUpSanctioned !== true &&
       signal._isSizeUp !== true &&
+      // Resolution-day only: pre-res-day forecasts can still drift, which is exactly
+      // why the maker early-entry cap (WEATHER_EARLY_ENTRY_MAX_PRICE) is stricter.
+      // We only pay up to take once the forecast is locked in on res day. Pre-res-day
+      // brackets still rest cheap maker bids; the res-day taker pre-empts a stranded
+      // one (see the pending-order pre-emption in tryExecuteViaClobMaker).
+      signal._isResolutionDay === true &&
       !emptyBook &&
       signal.consensusProbability != null &&
       typeof takerSideAsk === 'number' &&

@@ -3544,6 +3544,7 @@ describe('weather conviction taker entry', () => {
       direction: 'YES',
       consensusProbability: 0.85, // YES win prob; edge vs ask 0.62 = 0.23 ≥ 0.15
       stakeUsd: 5,
+      _isResolutionDay: true, // taker is res-day-only; override to false for pre-res-day cases
       ...overrides,
     });
   }
@@ -3672,14 +3673,11 @@ describe('weather conviction taker entry', () => {
     );
   });
 
-  it('holds an existing resting maker order — taker does NOT fire and does NOT consume the breaker', async () => {
-    // A resting order exists for this market+direction. The pending-order check at the
-    // top of tryExecuteViaClobMaker runs BEFORE the taker gate and returns the held
-    // order, so: no new (duplicate) order, no daily-breaker reservation.
+  function restingPendingOrder(orderId = 'resting-1', price = 0.55) {
     mockGetPendingOrder.mockResolvedValue({
-      orderId: 'resting-1',
+      orderId,
       tokenId: 'tok-yes',
-      price: 0.55,
+      price,
       size: 9,
       direction: 'YES',
       postedAt: Date.now() - 60_000,
@@ -3688,7 +3686,7 @@ describe('weather conviction taker entry', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
     mockGetOrder.mockResolvedValue({
-      id: 'resting-1',
+      id: orderId,
       status: 'live',
       owner: '0x1',
       maker_address: '0x1',
@@ -3697,7 +3695,7 @@ describe('weather conviction taker entry', () => {
       side: 'BUY',
       original_size: '9',
       size_matched: '0', // genuinely resting, unfilled
-      price: '0.55',
+      price: String(price),
       associate_trades: [],
       outcome: 'YES',
       created_at: Date.now(),
@@ -3705,53 +3703,145 @@ describe('weather conviction taker entry', () => {
       order_type: 'GTC',
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
+  }
+
+  it('pre-empts a stranded resting maker on res-day — cancels it and crosses to take', async () => {
+    // The ghost-era 0.55 bid won't fill (winner drifted up) and the FV rule keeps it
+    // (cheap = value-positive). On res-day with the taker eligible we cancel it and take.
+    restingPendingOrder('resting-1', 0.55);
     const redis = makeTakerRedis();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeSignal(weatherSignal(), redis as any);
 
-    expect(result.entryExecutionPath).toBe('maker_pending'); // resting order held
-    expect(mockSubmitLimit).not.toHaveBeenCalled(); // no duplicate / no taker order
-    expect(redis.incrbyfloat).not.toHaveBeenCalled(); // breaker untouched
+    expect(mockCancelOrder).toHaveBeenCalledWith('resting-1'); // stranded bid cancelled
+    expect(mockDeletePendingOrder).toHaveBeenCalled(); // key freed
+    expect(mockSubmitLimit).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: 'tok-yes', price: 0.70, postOnly: false }),
+    );
+    expect(result.entryExecutionPath).toBe('maker_fill'); // taker took
   });
 
-  it('holds a resting order even when WEATHER_REAL_BOOK_DISCOUNT_BPS=0 (pending-check is taker-aware, not discount-gated)', async () => {
-    // With the discount knob zeroed, isWeatherPatient is false; the pending-check must
-    // still fire via the taker arm so a partial residual is never duplicated.
-    mockConfig.WEATHER_REAL_BOOK_DISCOUNT_BPS = 0;
+  it('pre-empts at WEATHER_REAL_BOOK_DISCOUNT_BPS=0 too (pending-check is taker-aware, not discount-gated)', async () => {
+    mockConfig.WEATHER_REAL_BOOK_DISCOUNT_BPS = 0; // isWeatherPatient false → only the wantTaker arm fires the pending-check
+    restingPendingOrder('resting-0bps', 0.55);
+    const redis = makeTakerRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(weatherSignal(), redis as any);
+
+    expect(mockCancelOrder).toHaveBeenCalledWith('resting-0bps');
+    expect(mockSubmitLimit).toHaveBeenCalledWith(
+      expect.objectContaining({ price: 0.70, postOnly: false }),
+    );
+    expect(result.entryExecutionPath).toBe('maker_fill');
+  });
+
+  it('does NOT pre-empt when the cancel is unconfirmed (no double exposure)', async () => {
+    restingPendingOrder('resting-stuck', 0.55);
+    mockCancelOrder.mockResolvedValue(false); // cancel never confirms (order stays live)
+    const redis = makeTakerRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(weatherSignal(), redis as any);
+
+    expect(mockCancelOrder).toHaveBeenCalledWith('resting-stuck'); // attempted
+    expect(mockSubmitLimit).not.toHaveBeenCalled(); // but did NOT take — no duplicate
+    expect(redis.incrbyfloat).not.toHaveBeenCalled();
+    expect(result.entryExecutionPath).not.toBe('maker_fill'); // no fill recorded
+  });
+
+  // A resting CLOB order at a given matched size. mockGetOrder is called twice on the
+  // pre-empt path: the pending-check poll, then the post-cancel race re-read.
+  function clobOrder(sizeMatched: string, status = 'live') {
+    return {
+      id: 'resting-raced', status, owner: '0x1', maker_address: '0x1',
+      market: 'mkt-test', asset_id: 'tok-yes', side: 'BUY',
+      original_size: '9', size_matched: sizeMatched, price: '0.55',
+      associate_trades: [], outcome: 'YES', created_at: Date.now(),
+      expiration: '', order_type: 'GTC',
+    };
+  }
+  function racedPending() {
     mockGetPendingOrder.mockResolvedValue({
-      orderId: 'resting-0bps',
-      tokenId: 'tok-yes',
-      price: 0.62,
-      size: 8,
-      direction: 'YES',
-      postedAt: Date.now() - 60_000,
-      expiresAt: Date.now() + 600_000,
+      orderId: 'resting-raced', tokenId: 'tok-yes', price: 0.55, size: 9,
+      direction: 'YES', postedAt: Date.now() - 60_000, expiresAt: Date.now() + 600_000,
       consensusP: 0.85,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
-    mockGetOrder.mockResolvedValue({
-      id: 'resting-0bps',
-      status: 'live',
-      owner: '0x1',
-      maker_address: '0x1',
-      market: 'mkt-test',
-      asset_id: 'tok-yes',
-      side: 'BUY',
-      original_size: '8',
-      size_matched: '0',
-      price: '0.62',
-      associate_trades: [],
-      outcome: 'YES',
-      created_at: Date.now(),
-      expiration: '',
-      order_type: 'GTC',
+  }
+
+  it('does NOT take if a fill raced the pre-empt cancel (re-read shows matched > 0)', async () => {
+    racedPending();
+    mockGetOrder
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
+      .mockResolvedValueOnce(clobOrder('0') as any) // pending-check poll → resting
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .mockResolvedValueOnce(clobOrder('9') as any); // race re-read → it filled
     const redis = makeTakerRedis();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = await executeSignal(weatherSignal(), redis as any);
 
-    expect(result.entryExecutionPath).toBe('maker_pending');
+    expect(mockCancelOrder).toHaveBeenCalledWith('resting-raced');
+    expect(mockSubmitLimit).not.toHaveBeenCalled(); // no duplicate take
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled(); // key left → next scan records the fill
+    expect(redis.incrbyfloat).not.toHaveBeenCalled();
+    expect(result.entryExecutionPath).not.toBe('maker_fill');
+  });
+
+  it('does NOT take if the resting order is unreadable after the pre-empt cancel (null)', async () => {
+    racedPending();
+    mockGetOrder
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .mockResolvedValueOnce(clobOrder('0') as any) // poll → resting
+      .mockResolvedValueOnce(null); // race re-read → gone/unreadable (possibly fully filled)
+    const redis = makeTakerRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(weatherSignal(), redis as any);
+
+    expect(mockCancelOrder).toHaveBeenCalledWith('resting-raced');
+    expect(mockSubmitLimit).not.toHaveBeenCalled(); // conservative: do not take on unknown state
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    expect(result.entryExecutionPath).not.toBe('maker_fill');
+  });
+
+  it('does NOT take if the post-cancel matched size is unparseable (NaN → hold, not take)', async () => {
+    racedPending();
+    mockGetOrder
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .mockResolvedValueOnce(clobOrder('0') as any) // poll → resting
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .mockResolvedValueOnce(clobOrder('') as any); // race re-read → garbage matched size
+    const redis = makeTakerRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(weatherSignal(), redis as any);
+
+    expect(mockCancelOrder).toHaveBeenCalledWith('resting-raced');
+    expect(mockSubmitLimit).not.toHaveBeenCalled(); // uncertain state → never take
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+    expect(result.entryExecutionPath).not.toBe('maker_fill');
+  });
+
+  it('holds (does NOT pre-empt) a resting order when NOT taker-eligible (ghost book)', async () => {
+    mockGetOrderBook.mockResolvedValue(wideRealBook('0.99', '0.01')); // ghost → wantTaker false
+    restingPendingOrder('resting-ghost', 0.43);
+    const redis = makeTakerRedis();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await executeSignal(weatherSignal(), redis as any);
+
+    expect(result.entryExecutionPath).toBe('maker_pending'); // held for queue priority
+    expect(mockCancelOrder).not.toHaveBeenCalled(); // not pre-empted
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+    expect(redis.incrbyfloat).not.toHaveBeenCalled();
+  });
+
+  it('is res-day-only: does NOT take a pre-resolution-day bracket', async () => {
+    const redis = makeTakerRedis();
+    const result = await executeSignal(
+      weatherSignal({ _isResolutionDay: false }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    // Not taker-eligible pre-res-day → wide book hits the normal spread_too_wide skip.
+    expect(result.skipReason).toBe('spread_too_wide');
     expect(mockSubmitLimit).not.toHaveBeenCalled();
     expect(redis.incrbyfloat).not.toHaveBeenCalled();
   });
