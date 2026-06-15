@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
-import { getOpenPositions, closePosition, recordPosition, updatePositionShares, sizeUpPosition, type Position } from '../execution/positionLedger.js';
+import { getOpenPositions, closePosition, recordPosition, updatePositionShares, sizeUpPosition, hasOpenPosition, type Position } from '../execution/positionLedger.js';
 import { getHyperliquid } from '../shared/hyperliquid.js';
 import { fetchClobTokenBalance, cancelClobOrder, resolveOrderFillPrice } from '../shared/clob.js';
 import { loadConfig } from '../shared/config.js';
@@ -454,6 +454,22 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
     }
 
     const direction: 'YES' | 'NO' = pos.asset === market.clobTokenIds[0] ? 'YES' : 'NO';
+
+    // Double-import guard: only import an orphan that is genuinely absent from the
+    // ledger. The orphan scan matches CLOB positions to ledger rows by tokenId; a
+    // position already tracked under (marketId, direction) — e.g. a rebate-farming
+    // leg whose tokenId/asset didn't line up in that scan — would otherwise be
+    // re-imported as a phantom `reconciled:clob` row, double-counting it in P&L and
+    // inflating open exposure (the wipe-to-dust double-count incident). A real
+    // orphan has no such row, so this is a no-op for the legitimate restore path.
+    if (await hasOpenPosition(redis, market.id, direction)) {
+      logger.debug('[reconcile] skipping CLOB orphan — position already tracked for market+direction', {
+        marketId: market.id,
+        direction,
+        conditionId: pos.conditionId,
+      });
+      return false;
+    }
 
     // Check whether this fill came from a bot-posted GTC maker order.
     // Validate tokenId and direction before enriching to avoid false attribution

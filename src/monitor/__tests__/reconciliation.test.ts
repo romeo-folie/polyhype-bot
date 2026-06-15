@@ -14,6 +14,7 @@ vi.mock('../../execution/positionLedger.js', () => ({
   closePosition: vi.fn(),
   recordPosition: vi.fn(),
   sizeUpPosition: vi.fn(),
+  hasOpenPosition: vi.fn().mockResolvedValue(false),
 }));
 
 vi.mock('../../shared/clob.js', () => ({
@@ -94,6 +95,9 @@ describe('Position Reconciliation Healer', () => {
     // in a prior test — restore the inconclusive default so each test's explicit
     // override is isolated.
     (clob.fetchClobTokenBalance as any).mockResolvedValue({ ok: false, error: 'not found' });
+    // Default: no existing ledger row → orphan imports proceed. The double-import
+    // guard test overrides this to true; reset here so it doesn't leak (see above).
+    (positionLedger.hasOpenPosition as any).mockResolvedValue(false);
   });
 
   it('detects and heals a share mismatch for CLOB position', async () => {
@@ -188,7 +192,7 @@ describe('Position Reconciliation Healer', () => {
     ];
     (positionLedger.getOpenPositions as any).mockResolvedValue([livePosition]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
-    (mockRedis.incr as any).mockResolvedValue(3); // streak hit the threshold
+    (mockRedis.incr).mockResolvedValue(3); // streak hit the threshold
 
     await runReconciliation(mockRedis, { forceFix: true });
 
@@ -218,7 +222,7 @@ describe('Position Reconciliation Healer', () => {
     ];
     (positionLedger.getOpenPositions as any).mockResolvedValue([livePosition]);
     (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(clobPositions);
-    (mockRedis.incr as any).mockResolvedValue(4); // already past the threshold
+    (mockRedis.incr).mockResolvedValue(4); // already past the threshold
 
     await runReconciliation(mockRedis, { forceFix: true });
 
@@ -406,6 +410,36 @@ describe('Position Reconciliation Healer', () => {
 
     await runReconciliation(mockRedis, { forceFix: true });
 
+    expect(positionLedger.recordPosition).not.toHaveBeenCalled();
+  });
+
+  it('does NOT re-import a CLOB orphan already tracked under (market, direction) — double-import guard', async () => {
+    // The orphan scan matches CLOB↔ledger by tokenId, so a position already tracked
+    // (e.g. a rebate-farming leg whose token/asset didn't line up) is flagged as an
+    // orphan. Re-importing it would create a phantom duplicate `reconciled:clob` row
+    // that double-counts the position (wipe-to-dust incident). hasOpenPosition guards it.
+    const trackedOrphan = {
+      conditionId: 'cond-dup',
+      asset: 'tok-yes',
+      avgPrice: 0.40,
+      size: 500,
+    };
+    const dupGammaMarket = {
+      id: 'numeric-dup',
+      question: 'Will the underdog win?',
+      conditionId: 'cond-dup',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+    };
+
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]); // tokenId scan finds no match → flagged orphan
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([trackedOrphan]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue(dupGammaMarket);
+    // …but a ledger row already exists for this market+direction.
+    (positionLedger.hasOpenPosition as any).mockResolvedValue(true);
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(positionLedger.hasOpenPosition).toHaveBeenCalledWith(mockRedis, 'numeric-dup', 'YES');
     expect(positionLedger.recordPosition).not.toHaveBeenCalled();
   });
 
