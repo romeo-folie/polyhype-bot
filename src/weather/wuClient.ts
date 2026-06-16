@@ -116,9 +116,9 @@ export interface WuHistoricalExtreme {
 
 /**
  * Fetch the daily extreme temperature (max or min) from WU for a specific ICAO
- * station and date, including the timestamp of the observation that contributed
- * the extreme. Returns null if the station is unavailable or data is missing for
- * that date.
+ * station and date, including the timestamp of the latest observation included
+ * in the running extreme. Returns null if the station is unavailable or data is
+ * missing for that date.
  *
  * The WU historical endpoint returns the same array of hourly observations
  * regardless of metric — `max(temps)` is the daily high, `min(temps)` the daily
@@ -153,11 +153,8 @@ export async function fetchWuHistoricalExtremeWithTimestamp(
     ? Math.min(...hourly.map((o) => o.temp))
     : Math.max(...hourly.map((o) => o.temp));
   const roundedExtreme = Math.round(extreme * 10) / 10;
-  const extremeObs = hourly
-    .filter((o) => o.temp === extreme)
-    .sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt))
-    .at(-1);
-  if (!extremeObs) return null;
+  const latestObs = hourly.at(-1);
+  if (!latestObs) return null;
 
   logger.debug('[weather-wu] daily extreme fetched', {
     icao,
@@ -168,7 +165,7 @@ export async function fetchWuHistoricalExtremeWithTimestamp(
   });
   return {
     observedMax: roundedExtreme,
-    observedAt: extremeObs.observedAt,
+    observedAt: latestObs.observedAt,
   };
 }
 

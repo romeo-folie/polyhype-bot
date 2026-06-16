@@ -596,7 +596,7 @@ describe('fetchLiveObservation routing', () => {
     expect(outage.observedAt).not.toBeNull();
   });
 
-  it('WU result preserves the extreme observation timestamp instead of fetch time', async () => {
+  it('WU result preserves the latest observation timestamp instead of fetch time', async () => {
     mockFetchWuHistoricalExtremeWithTimestamp.mockResolvedValue({
       observedMax: 26.0,
       observedAt: '2026-06-09T13:50:00.000Z',

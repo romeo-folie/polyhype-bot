@@ -107,7 +107,7 @@ describe('fetchWuHistoricalHigh', () => {
     vi.unstubAllEnvs();
   });
 
-  it('returns the timestamp of the latest observation that set the daily high', async () => {
+  it('returns the timestamp of the latest observation while preserving the daily high', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -116,7 +116,7 @@ describe('fetchWuHistoricalHigh', () => {
           { valid_time_gmt: 1_780_000_000, temp: 18 },
           { valid_time_gmt: 1_780_003_600, temp: 22 },
           { valid_time_gmt: 1_780_007_200, temp: 21 },
-          { valid_time_gmt: 1_780_010_800, temp: 22 },
+          { valid_time_gmt: 1_780_010_800, temp: 20 },
         ],
       }),
     });
@@ -137,7 +137,7 @@ describe('fetchWuHistoricalHigh', () => {
     });
   });
 
-  it('returns the timestamp of the latest observation that set the daily low', async () => {
+  it('returns the timestamp of the latest observation while preserving the daily low', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -146,7 +146,7 @@ describe('fetchWuHistoricalHigh', () => {
           { valid_time_gmt: 1_780_000_000, temp: 12 },
           { valid_time_gmt: 1_780_003_600, temp: 9 },
           { valid_time_gmt: 1_780_007_200, temp: 11 },
-          { valid_time_gmt: 1_780_010_800, temp: 9 },
+          { valid_time_gmt: 1_780_010_800, temp: 13 },
         ],
       }),
     });

@@ -338,6 +338,25 @@ describe('conditionalHeldProbability', () => {
       }));
       expect(result!.isStale).toBe(true);
     });
+
+    it('uses latest/as-of observedAt for low-metric staleness, not the dawn minimum time', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-06-09T18:30:00.000Z'));
+      try {
+        const result = conditionalHeldProbability(baseInput({
+          metric: 'low',
+          direction: 'YES',
+          bracket: { low: null, high: 49 },
+          observedMax: 52,
+          observedAt: '2026-06-09T18:00:00.000Z',
+          maxObsAgeMin: 90,
+          remainingHourlyMembers: flatMembers(55, 20),
+        }));
+        expect(result!.isStale).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('climo fallback interpolation', () => {

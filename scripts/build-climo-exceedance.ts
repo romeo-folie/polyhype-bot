@@ -50,8 +50,12 @@
 
 import { writeFileSync, existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
+import { pathToFileURL } from 'url';
 import { CITY_COORDINATES, canonicalCityKey } from '../src/weather/noaaClient.js';
-import { fetchWuHistoricalHourlyObservations } from '../src/weather/wuClient.js';
+import {
+  fetchWuHistoricalHourlyObservations,
+  type WuHistoricalHourlyObservation,
+} from '../src/weather/wuClient.js';
 
 const ARCHIVE_BASE = 'https://archive-api.open-meteo.com/v1/archive';
 const RISE_OUT = resolve('src/weather/data/climoExceedance.json');
@@ -200,8 +204,8 @@ async function fetchWuHourlyForYear(
   year: number,
   delayMs: number,
   redis: ReturnType<typeof makeMemoryRedis>,
-): Promise<Record<string, number[]> | null> {
-  const result: Record<string, number[]> = {};
+): Promise<Record<string, WuHistoricalHourlyObservation[]> | null> {
+  const result: Record<string, WuHistoricalHourlyObservation[]> = {};
   let fetched = 0;
   let missing = 0;
 
@@ -214,7 +218,7 @@ async function fetchWuHourlyForYear(
       redis as never,
     );
     if (obs?.length) {
-      result[day] = obs.map((o) => o.temp);
+      result[day] = obs;
       fetched++;
     } else {
       missing++;
@@ -224,6 +228,34 @@ async function fetchWuHourlyForYear(
 
   console.log(`    WU ${city} ${year}: ${fetched} days fetched, ${missing} missing`);
   return Object.keys(result).length ? result : null;
+}
+
+export function localDateHourFromUtc(
+  utcIso: string,
+  tz: string,
+): { date: string; month: number; hour: number } | null {
+  const date = new Date(utcIso);
+  if (!Number.isFinite(date.getTime())) return null;
+
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value;
+  const year = get('year');
+  const month = get('month');
+  const day = get('day');
+  const hour = get('hour');
+  if (!year || !month || !day || !hour) return null;
+  return {
+    date: `${year}-${month}-${day}`,
+    month: parseInt(month, 10),
+    hour: parseInt(hour, 10) % 24,
+  };
 }
 
 function buildMonthHourMap(
@@ -254,6 +286,49 @@ function buildMonthHourMap(
       if (!map[month]) map[month] = {};
       if (!map[month]![h]) map[month]![h] = [];
       map[month]![h]!.push(delta);
+    }
+  }
+  return map;
+}
+
+export function buildMonthHourMapFromWuObservations(
+  dailyObservations: Record<string, WuHistoricalHourlyObservation[]>,
+  tz: string,
+  metric: 'high' | 'low' = 'high',
+): MonthHourMap {
+  const byLocalDay: Record<string, { month: number; byHour: Record<number, number[]> }> = {};
+
+  for (const obs of Object.values(dailyObservations).flat()) {
+    const local = localDateHourFromUtc(obs.observedAt, tz);
+    if (!local || !Number.isFinite(obs.temp)) continue;
+    byLocalDay[local.date] ??= { month: local.month, byHour: {} };
+    byLocalDay[local.date]!.byHour[local.hour] ??= [];
+    byLocalDay[local.date]!.byHour[local.hour]!.push(obs.temp);
+  }
+
+  const map: MonthHourMap = {};
+  for (const { month, byHour } of Object.values(byLocalDay)) {
+    const hourlyTemps = Object.entries(byHour)
+      .map(([hour, temps]) => ({
+        hour: parseInt(hour, 10),
+        temp: metric === 'low' ? Math.min(...temps) : Math.max(...temps),
+      }))
+      .filter((entry) => Number.isFinite(entry.hour) && Number.isFinite(entry.temp))
+      .sort((a, b) => a.hour - b.hour);
+    if (hourlyTemps.length < 20) continue;
+
+    const finalExtreme = metric === 'low'
+      ? Math.min(...hourlyTemps.map((entry) => entry.temp))
+      : Math.max(...hourlyTemps.map((entry) => entry.temp));
+
+    for (const { hour } of hourlyTemps) {
+      const elapsed = hourlyTemps.filter((entry) => entry.hour <= hour).map((entry) => entry.temp);
+      const running = metric === 'low' ? Math.min(...elapsed) : Math.max(...elapsed);
+      if (!Number.isFinite(running)) continue;
+      const delta = metric === 'low' ? running - finalExtreme : finalExtreme - running;
+      if (!map[month]) map[month] = {};
+      if (!map[month]![hour]) map[month]![hour] = [];
+      map[month]![hour]!.push(delta);
     }
   }
   return map;
@@ -333,7 +408,13 @@ async function main() {
         )
         : await fetchHourlyForYear(coords.lat, coords.lon, coords.unit, year);
       if (!dailyHourly) continue;
-      const yearMap = buildMonthHourMap(dailyHourly, coords.tz, args.metric);
+      const yearMap = sourceForCity === 'wu'
+        ? buildMonthHourMapFromWuObservations(
+          dailyHourly as Record<string, WuHistoricalHourlyObservation[]>,
+          coords.tz,
+          args.metric,
+        )
+        : buildMonthHourMap(dailyHourly as Record<string, number[]>, coords.tz, args.metric);
       for (const [mStr, hours] of Object.entries(yearMap)) {
         const m = parseInt(mStr, 10);
         if (!combined[m]) combined[m] = {};
@@ -392,4 +473,6 @@ async function main() {
   console.log(`Written to ${args.outPath}`);
 }
 
-main().catch((err) => { console.error(err); process.exit(1); });
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => { console.error(err); process.exit(1); });
+}
