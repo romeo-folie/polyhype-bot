@@ -104,6 +104,11 @@ interface WuObservation {
   temp: number | null;
 }
 
+export interface WuHistoricalHourlyObservation {
+  observedAt: string;
+  temp: number;
+}
+
 export interface WuHistoricalExtreme {
   observedMax: number;
   observedAt: string;
@@ -134,6 +139,52 @@ export async function fetchWuHistoricalExtremeWithTimestamp(
   metric: 'high' | 'low' = 'high',
   fetchFn: FetchFn = fetch,
 ): Promise<WuHistoricalExtreme | null> {
+  const hourly = await fetchWuHistoricalHourlyObservations(
+    icao,
+    isoCountry,
+    date,
+    unit,
+    redis,
+    fetchFn,
+  );
+  if (!hourly?.length) return null;
+
+  const extreme = metric === 'low'
+    ? Math.min(...hourly.map((o) => o.temp))
+    : Math.max(...hourly.map((o) => o.temp));
+  const roundedExtreme = Math.round(extreme * 10) / 10;
+  const extremeObs = hourly
+    .filter((o) => o.temp === extreme)
+    .sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt))
+    .at(-1);
+  if (!extremeObs) return null;
+
+  logger.debug('[weather-wu] daily extreme fetched', {
+    icao,
+    date,
+    metric,
+    extreme: roundedExtreme,
+    obsCount: hourly.length,
+  });
+  return {
+    observedMax: roundedExtreme,
+    observedAt: extremeObs.observedAt,
+  };
+}
+
+/**
+ * Fetch the hourly observations WU exposes for one station/day. The returned
+ * temperature unit follows the `unit` argument. Invalid/missing readings are
+ * filtered out and observations are sorted by their WU timestamp.
+ */
+export async function fetchWuHistoricalHourlyObservations(
+  icao: string,
+  isoCountry: string,
+  date: string,
+  unit: 'fahrenheit' | 'celsius',
+  redis: Redis,
+  fetchFn: FetchFn = fetch,
+): Promise<WuHistoricalHourlyObservation[] | null> {
   const dateStr = date.replace(/-/g, '');
   const units = unit === 'fahrenheit' ? 'e' : 'm';
 
@@ -187,21 +238,12 @@ export async function fetchWuHistoricalExtremeWithTimestamp(
     );
     if (!validObs.length) return null;
 
-    const extreme = metric === 'low'
-      ? Math.min(...validObs.map((o) => o.temp))
-      : Math.max(...validObs.map((o) => o.temp));
-    const roundedExtreme = Math.round(extreme * 10) / 10;
-    const extremeObs = validObs
-      .filter((o) => o.temp === extreme)
+    return [...validObs]
       .sort((a, b) => a.valid_time_gmt - b.valid_time_gmt)
-      .at(-1);
-    if (!extremeObs) return null;
-
-    logger.debug('[weather-wu] daily extreme fetched', { icao, date, metric, extreme: roundedExtreme, obsCount: obs.length });
-    return {
-      observedMax: roundedExtreme,
-      observedAt: new Date(extremeObs.valid_time_gmt * 1000).toISOString(),
-    };
+      .map((o) => ({
+        observedAt: new Date(o.valid_time_gmt * 1000).toISOString(),
+        temp: o.temp,
+      }));
   }
 
   return null;

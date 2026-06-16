@@ -8,6 +8,7 @@ const redisMock = { get: vi.fn(), set: vi.fn() };
 
 const {
   fetchWuHistoricalHigh,
+  fetchWuHistoricalHourlyObservations,
   fetchWuHistoricalExtremeWithTimestamp,
 } = await import('../wuClient.js');
 
@@ -164,5 +165,34 @@ describe('fetchWuHistoricalHigh', () => {
       observedMax: 9,
       observedAt: new Date(1_780_010_800 * 1000).toISOString(),
     });
+  });
+
+  it('returns sorted hourly observations with timestamps and filters invalid rows', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        observations: [
+          { valid_time_gmt: 1_780_007_200, temp: 21 },
+          { valid_time_gmt: 1_780_000_000, temp: 18 },
+          { valid_time_gmt: 1_780_003_600, temp: null },
+          { valid_time_gmt: Number.NaN, temp: 20 },
+        ],
+      }),
+    });
+
+    const result = await fetchWuHistoricalHourlyObservations(
+      'EGLC',
+      'GB',
+      '2026-04-20',
+      'celsius',
+      redisMock as any,
+      fetchFn as any,
+    );
+
+    expect(result).toEqual([
+      { observedAt: new Date(1_780_000_000 * 1000).toISOString(), temp: 18 },
+      { observedAt: new Date(1_780_007_200 * 1000).toISOString(), temp: 21 },
+    ]);
   });
 });
