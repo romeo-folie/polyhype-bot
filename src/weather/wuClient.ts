@@ -104,10 +104,16 @@ interface WuObservation {
   temp: number | null;
 }
 
+export interface WuHistoricalExtreme {
+  observedMax: number;
+  observedAt: string;
+}
+
 /**
  * Fetch the daily extreme temperature (max or min) from WU for a specific ICAO
- * station and date. Returns null if the station is unavailable or data is missing
- * for that date.
+ * station and date, including the timestamp of the observation that contributed
+ * the extreme. Returns null if the station is unavailable or data is missing for
+ * that date.
  *
  * The WU historical endpoint returns the same array of hourly observations
  * regardless of metric — `max(temps)` is the daily high, `min(temps)` the daily
@@ -119,7 +125,7 @@ interface WuObservation {
  * @param unit       Temperature unit: 'fahrenheit' | 'celsius'
  * @param metric     'high' (daily max, default) | 'low' (daily min)
  */
-export async function fetchWuHistoricalExtreme(
+export async function fetchWuHistoricalExtremeWithTimestamp(
   icao: string,
   isoCountry: string,
   date: string,
@@ -127,7 +133,7 @@ export async function fetchWuHistoricalExtreme(
   redis: Redis,
   metric: 'high' | 'low' = 'high',
   fetchFn: FetchFn = fetch,
-): Promise<number | null> {
+): Promise<WuHistoricalExtreme | null> {
   const dateStr = date.replace(/-/g, '');
   const units = unit === 'fahrenheit' ? 'e' : 'm';
 
@@ -175,15 +181,56 @@ export async function fetchWuHistoricalExtreme(
       return null;
     }
 
-    const temps = obs.map((o) => o.temp).filter((t): t is number => typeof t === 'number');
-    if (!temps.length) return null;
+    const validObs = obs.filter(
+      (o): o is WuObservation & { temp: number } =>
+        typeof o.temp === 'number' && Number.isFinite(o.temp) && Number.isFinite(o.valid_time_gmt),
+    );
+    if (!validObs.length) return null;
 
-    const extreme = metric === 'low' ? Math.min(...temps) : Math.max(...temps);
-    logger.debug('[weather-wu] daily extreme fetched', { icao, date, metric, extreme, obsCount: obs.length });
-    return Math.round(extreme * 10) / 10;
+    const extreme = metric === 'low'
+      ? Math.min(...validObs.map((o) => o.temp))
+      : Math.max(...validObs.map((o) => o.temp));
+    const roundedExtreme = Math.round(extreme * 10) / 10;
+    const extremeObs = validObs
+      .filter((o) => o.temp === extreme)
+      .sort((a, b) => a.valid_time_gmt - b.valid_time_gmt)
+      .at(-1);
+    if (!extremeObs) return null;
+
+    logger.debug('[weather-wu] daily extreme fetched', { icao, date, metric, extreme: roundedExtreme, obsCount: obs.length });
+    return {
+      observedMax: roundedExtreme,
+      observedAt: new Date(extremeObs.valid_time_gmt * 1000).toISOString(),
+    };
   }
 
   return null;
+}
+
+/**
+ * Fetch the daily extreme temperature (max or min) from WU for a specific ICAO
+ * station and date. Returns only the extreme value for existing reconciler
+ * callers that do not need the intraday observation timestamp.
+ */
+export async function fetchWuHistoricalExtreme(
+  icao: string,
+  isoCountry: string,
+  date: string,
+  unit: 'fahrenheit' | 'celsius',
+  redis: Redis,
+  metric: 'high' | 'low' = 'high',
+  fetchFn: FetchFn = fetch,
+): Promise<number | null> {
+  const result = await fetchWuHistoricalExtremeWithTimestamp(
+    icao,
+    isoCountry,
+    date,
+    unit,
+    redis,
+    metric,
+    fetchFn,
+  );
+  return result?.observedMax ?? null;
 }
 
 /**

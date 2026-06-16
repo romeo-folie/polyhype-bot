@@ -44,6 +44,54 @@ The oracle conditions a forecast distribution on the observed running-max temper
 - **Method:** build a proper reliability diagram — bucket `cond_p` in deciles, compute realized win rate per bucket, over a 2–4 week window (n was only ~20 here). Then slice by `clampedByClimo`, `isStale`, `confidence` (`settlement_aligned` vs not), `observedAtLocalHour`, `estimatorGap`, and `daysOut` to isolate which conditions the oracle is calibrated under (if any).
 - **Goal:** find the subset where `cond_p` IS reliable (e.g. settlement_aligned + late-day + non-clamped), or conclude it needs a recalibration / shrink toward climo, before any exit gating relies on it.
 
+## 2026-06-16 follow-up findings
+
+Operational note: the weather scanner runs from host cron. Its scanner logs are not in the app repo; on the host they were found at `/home/romeo/logs/pga/weather.log` and `/home/romeo/logs/pga/weather.log.1`.
+
+The follow-up calibration check used the currently settled DB rows. At the time of the check, settled weather ground truth was only complete through `2026-06-14`, so any later rows were excluded from realized win/loss counts.
+
+### Shadow calibration still fails
+
+Two cuts both showed that high `cond_p` is not action-grade:
+
+| View | Filter | Result |
+|---|---:|---:|
+| Scan-point rows | `cond_p >= 0.95` | realized ~53%, not ~98% |
+| Latest row per market | `cond_p >= 0.95` | 10 wins / 7 losses (~59%) |
+| Drift-exit hold shadow | `condOracleAudit.wouldVeto=true` | 9 wins / 14 losses |
+
+This means the dark hold guard would still have held more losers than winners in the sample. The issue is not limited to duplicate scan rows; it persists when each market is counted once.
+
+### Climo fallback is the biggest identifiable culprit
+
+In the latest-row-per-market sample, Brier scores were:
+
+| Model/input | Brier |
+|---|---:|
+| Ensemble conditional probability | 0.214 |
+| Static model | 0.334 |
+| Climo fallback | 0.425 |
+
+The worst high-confidence misses were concentrated in climo-fallback rows, including Seattle, London, Mexico City, Amsterdam, and Paris. A simple cap of `cond_p` at `0.65` improved latest-row-per-market Brier from `0.305` to `0.242` in the checked sample, which is a strong signal that the current live action value should be shrunk or capped unless the row is in a proven calibrated subset.
+
+Interpretation: the climo fallback appears to be built from a source that understates real intraday extremes for the settlement-style station feed. The oracle can therefore become confidently wrong after seeing a partial-day observation that looks safely below/above a bracket in our climo distribution, while the actual WU/settlement station still has enough intraday movement to settle the other way.
+
+### Timestamp bug found
+
+The WU live observation path calls the WU historical endpoint but stamped `observedAt` as fetch time in `src/weather/liveObservation.ts`. That means the conditional oracle could treat a daily extreme as if it was observed at the scanner time rather than at the observation time that actually set the extreme.
+
+This especially matters after the target local day has rolled over: the scanner may fetch a final historical extreme on the next UTC/local day, but the conditioning logic sees a late `observedAt` and can overstate how much of the day is already known. In the checked sample, the "observed after target local day" rows were small but all bad: 3 latest markets, all losses, with 2 high-confidence misses.
+
+This timestamp bug is not the whole calibration problem. The larger issue remains climo fallback quality. But fixing it removes a concrete source of misleading conditioning and makes the shadow data easier to trust.
+
+### Recommended state before enabling action
+
+- Keep these live action flags disabled until calibration is re-proven: `WEATHER_COND_ORACLE_HOLD_GUARD_ENABLED=false`, `WEATHER_COND_ORACLE_RESTING_CANCEL_ENABLED=false`, and `WEATHER_COND_ORACLE_NOWCAST_ENTRY_ENABLED=false`.
+- Fix WU live observations to preserve the timestamp of the observation that set the daily extreme.
+- Rebuild or replace climo from settlement-aligned station history, preferably WU/official station history rather than ERA5/open-meteo historical data.
+- Add an action-layer probability cap or shrink for climo-fallback rows. The first tested blunt cap, `cond_p <= 0.65`, improved Brier in the latest-row sample.
+- If experimenting before a full rebuild, restrict use to ensemble-only, non-clamped rows with settlement-aligned observations and continue shadowing before trading on it.
+
 ## Consequence for exit logic (handled separately)
 Because the probabilistic oracle is unreliable, the market-exit accuracy work (2026-06-15, separate change) does **not** use `cond_p`. It relies on the deterministic binary observed-temperature signal where available, not the probabilistic estimate. See that change for details.
 

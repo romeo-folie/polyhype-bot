@@ -20,7 +20,7 @@
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 import { lookupCity } from './noaaClient.js';
-import { fetchWuHistoricalExtreme } from './wuClient.js';
+import { fetchWuHistoricalExtremeWithTimestamp } from './wuClient.js';
 
 const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -112,7 +112,7 @@ async function fetchWuIntradayExtreme(
   metric: 'high' | 'low',
   fetchFn?: typeof fetch,
 ): Promise<{ observedMax: number | null; observedAt: string | null }> {
-  const extreme = await fetchWuHistoricalExtreme(
+  const extreme = await fetchWuHistoricalExtremeWithTimestamp(
     icao,
     isoCountry,
     targetDate,
@@ -121,9 +121,10 @@ async function fetchWuIntradayExtreme(
     metric,
     fetchFn,
   );
-  // WU historical endpoint does not return per-observation timestamps in the
-  // extreme computation path, so observedAt is approximated as the fetch time.
-  return { observedMax: extreme, observedAt: extreme != null ? new Date().toISOString() : null };
+  return {
+    observedMax: extreme?.observedMax ?? null,
+    observedAt: extreme?.observedAt ?? null,
+  };
 }
 
 // ── METAR live ────────────────────────────────────────────────────────────────

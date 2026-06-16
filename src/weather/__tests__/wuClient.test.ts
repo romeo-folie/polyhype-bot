@@ -6,10 +6,13 @@ vi.mock('../../shared/logger.js', () => ({
 
 const redisMock = { get: vi.fn(), set: vi.fn() };
 
-const { fetchWuHistoricalHigh } = await import('../wuClient.js');
+const {
+  fetchWuHistoricalHigh,
+  fetchWuHistoricalExtremeWithTimestamp,
+} = await import('../wuClient.js');
 
 const makeObs = (temps: number[]) =>
-  JSON.stringify({ observations: temps.map((t) => ({ valid_time_gmt: 0, temp: t })) });
+  temps.map((t, i) => ({ valid_time_gmt: 1_780_000_000 + i * 3600, temp: t }));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -21,7 +24,7 @@ describe('fetchWuHistoricalHigh', () => {
   it('returns the max temp across observations', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: async () => ({ observations: [{ temp: 18 }, { temp: 22 }, { temp: 15 }] }),
+      json: async () => ({ observations: makeObs([18, 22, 15]) }),
     });
 
     const result = await fetchWuHistoricalHigh('EGLC', 'GB', '2026-04-20', 'celsius', redisMock as any, fetchFn as any);
@@ -35,7 +38,7 @@ describe('fetchWuHistoricalHigh', () => {
     const fetchFn = vi.fn()
       .mockResolvedValueOnce({ ok: false, status: 401, text: async () => '' })
       .mockResolvedValueOnce({ ok: true, status: 200, text: async () => refreshHtml }) // key refresh
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ observations: [{ temp: 19 }] }) });
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ observations: makeObs([19]) }) });
 
     const result = await fetchWuHistoricalHigh('KLGA', 'US', '2026-04-20', 'fahrenheit', redisMock as any, fetchFn as any);
     expect(result).toBe(19);
@@ -64,7 +67,7 @@ describe('fetchWuHistoricalHigh', () => {
 
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: async () => ({ observations: [{ temp: 20 }] }),
+      json: async () => ({ observations: makeObs([20]) }),
     });
 
     const result = await fetchWuHistoricalHigh('EGLC', 'GB', '2026-04-20', 'celsius', redisMock as any, fetchFn as any);
@@ -94,12 +97,72 @@ describe('fetchWuHistoricalHigh', () => {
     fetchFn
       .mockResolvedValueOnce({ ok: false, status: 401, text: async () => '' }) // data fetch → 401
       .mockResolvedValueOnce({ ok: true, status: 200, text: async () => refreshHtml }) // page refresh
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ observations: [{ temp: 25 }] }) }); // retry with fresh key
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ observations: makeObs([25]) }) }); // retry with fresh key
 
     const result = await fetchWuHistoricalHigh('EGLC', 'GB', '2026-04-20', 'celsius', redisMock as any, fetchFn as any);
     expect(result).toBe(25);
     // Fresh key from page must be stored, not the env var.
     expect(redisMock.set).toHaveBeenCalledWith('weather:wu_api_key', freshKey, 'EX', expect.any(Number));
     vi.unstubAllEnvs();
+  });
+
+  it('returns the timestamp of the latest observation that set the daily high', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        observations: [
+          { valid_time_gmt: 1_780_000_000, temp: 18 },
+          { valid_time_gmt: 1_780_003_600, temp: 22 },
+          { valid_time_gmt: 1_780_007_200, temp: 21 },
+          { valid_time_gmt: 1_780_010_800, temp: 22 },
+        ],
+      }),
+    });
+
+    const result = await fetchWuHistoricalExtremeWithTimestamp(
+      'EGLC',
+      'GB',
+      '2026-04-20',
+      'celsius',
+      redisMock as any,
+      'high',
+      fetchFn as any,
+    );
+
+    expect(result).toEqual({
+      observedMax: 22,
+      observedAt: new Date(1_780_010_800 * 1000).toISOString(),
+    });
+  });
+
+  it('returns the timestamp of the latest observation that set the daily low', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        observations: [
+          { valid_time_gmt: 1_780_000_000, temp: 12 },
+          { valid_time_gmt: 1_780_003_600, temp: 9 },
+          { valid_time_gmt: 1_780_007_200, temp: 11 },
+          { valid_time_gmt: 1_780_010_800, temp: 9 },
+        ],
+      }),
+    });
+
+    const result = await fetchWuHistoricalExtremeWithTimestamp(
+      'EGLC',
+      'GB',
+      '2026-04-20',
+      'celsius',
+      redisMock as any,
+      'low',
+      fetchFn as any,
+    );
+
+    expect(result).toEqual({
+      observedMax: 9,
+      observedAt: new Date(1_780_010_800 * 1000).toISOString(),
+    });
   });
 });
