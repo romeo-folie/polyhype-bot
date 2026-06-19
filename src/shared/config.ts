@@ -2221,6 +2221,12 @@ export const envSchema = z.object({
   // NO candidate. Set _ENABLED=false to skip the fetch entirely.
   WEATHER_MODAL_MASS_VETO_ENABLED: boolFromEnv.optional().default(true),
   WEATHER_INTERIOR_NO_MODAL_MASS_VETO: z.coerce.number().min(0).max(1).optional().default(0.50),
+  // Restrict the modal-mass veto to resolution-day events only. Open-Meteo
+  // heavily rate-limits the ensemble-hourly endpoint (429s), and live NO entries
+  // concentrate on resolution day (taker path); res-day is also where member data
+  // is most informative. Default true keeps the extra fetches few and the veto
+  // functional where it matters. Set false to evaluate it on every horizon.
+  WEATHER_MODAL_MASS_VETO_RES_DAY_ONLY: boolFromEnv.optional().default(true),
   // Calibration SHADOW pass (PR2a). When true, the scanner maps the raw model
   // P(YES) through the fitted reliability map (src/weather/data/calibrationParams.json)
   // and logs modelProbCalibrated/edgeCalibrated/tradeSideCalibrated alongside the
