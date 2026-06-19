@@ -66,6 +66,9 @@ const baseConfig = {
   WEATHER_INTERIOR_NO_FORECAST_MARGIN: 0,
   WEATHER_MODAL_MASS_VETO_ENABLED: false,
   WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.50,
+  // Evaluate the modal-mass veto on every horizon in tests (events target ~2
+  // days out, not res-day). Production defaults this true (res-day only).
+  WEATHER_MODAL_MASS_VETO_RES_DAY_ONLY: false,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
 vi.mock('../../shared/config.js', () => ({
@@ -5254,6 +5257,27 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
     const no = results.find((o) => o.bracketLabel === '50-51°F' && o.tradeSide === 'NO');
     expect(no).toBeDefined();
     expect(no!.blockedByModalMass).toBe(false);
+    expect(mockFetchEnsembleHourly).not.toHaveBeenCalled();
+  });
+
+  it('skips the modal-mass veto on a non-resolution-day event when RES_DAY_ONLY=true', async () => {
+    // The event targets ~2 days out (not res-day), so res-day-only gating must
+    // skip the veto entirely: no ensemble-hourly fetch, NO not blocked by modal mass.
+    mockFetchEnsembleHourly.mockResolvedValue(hourlyClusteredAt(50.5));
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_MIN_MODEL_COVERAGE: 0,
+      WEATHER_MIN_EDGE: 0.02,
+      WEATHER_MODAL_MASS_VETO_ENABLED: true,
+      WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.5,
+      WEATHER_INTERIOR_NO_FORECAST_MARGIN: 1,
+      WEATHER_MODAL_MASS_VETO_RES_DAY_ONLY: true,
+    });
+    const results = await scanWeatherMarkets(redisMock as never);
+    const no = results.find((o) => o.bracketLabel === '50-51°F' && o.tradeSide === 'NO');
+    expect(no).toBeDefined();
+    expect(no!.blockedByModalMass).toBe(false);
+    expect(no!.ensembleYesMass ?? null).toBeNull();
     expect(mockFetchEnsembleHourly).not.toHaveBeenCalled();
   });
 });

@@ -586,6 +586,21 @@ interface EnsembleHourlyResponse {
   hourly?: Record<string, unknown>;
 }
 
+// In-process memo for ensemble-hourly fetches. The weather scanner is a
+// short-lived host-cron process; within one run BOTH the modal-mass entry veto
+// (scanWeatherMarkets) and the resolution-day nowcast (weatherDriftStrategy)
+// request the same (city, day, model) hourly data. Memoizing dedupes those and
+// curbs Open-Meteo 429s. Only successful (non-null) results are cached so a
+// transient failure can be retried; the TTL guards any long-lived importer.
+interface EnsembleHourlyCacheEntry { ts: number; promise: Promise<EnsembleHourlyForecast | null> }
+const ensembleHourlyCache = new Map<string, EnsembleHourlyCacheEntry>();
+const ENSEMBLE_HOURLY_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/** Clear the ensemble-hourly memo. Test-only — keeps cases independent. */
+export function _resetEnsembleHourlyCache(): void {
+  ensembleHourlyCache.clear();
+}
+
 /**
  * Fetch per-member hourly temperature_2m trajectories for a target local day.
  * Used only for resolution-day (or daysOut ≤ 1) positions where live obs are
@@ -593,8 +608,38 @@ interface EnsembleHourlyResponse {
  *
  * Response format matches the ensemble daily format: member data in flat keys
  * `temperature_2m_member00`, `temperature_2m_member01`, etc.
+ *
+ * Results are memoized per (lat, lon, day, unit, model) for a short TTL so the
+ * modal-mass veto and the res-day nowcast share a single network call. Failures
+ * (null) are evicted so they don't poison subsequent retries.
  */
-export async function fetchEnsembleHourly(
+export function fetchEnsembleHourly(
+  lat: number,
+  lon: number,
+  targetDate: string,
+  unit: 'fahrenheit' | 'celsius' = 'fahrenheit',
+  fetchFn?: FetchFn,
+  useEcmwf = false,
+  retryCount = 0,
+): Promise<EnsembleHourlyForecast | null> {
+  const targetStr = targetDate.slice(0, 10);
+  const key = `${lat.toFixed(4)},${lon.toFixed(4)},${targetStr},${unit},${useEcmwf ? 'ecmwf' : 'gfs'}`;
+  const now = Date.now();
+  const hit = ensembleHourlyCache.get(key);
+  if (hit && now - hit.ts < ENSEMBLE_HOURLY_CACHE_TTL_MS) {
+    return hit.promise;
+  }
+  const promise = fetchEnsembleHourlyUncached(lat, lon, targetDate, unit, fetchFn, useEcmwf, retryCount);
+  ensembleHourlyCache.set(key, { ts: now, promise });
+  // Don't retain failures — a null/throw should not block a later retry.
+  void promise.then(
+    (v) => { if (v === null) ensembleHourlyCache.delete(key); },
+    () => ensembleHourlyCache.delete(key),
+  );
+  return promise;
+}
+
+async function fetchEnsembleHourlyUncached(
   lat: number,
   lon: number,
   targetDate: string,
