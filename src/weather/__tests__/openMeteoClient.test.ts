@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../shared/logger.js', () => ({
   logger: {
@@ -9,9 +9,15 @@ vi.mock('../../shared/logger.js', () => ({
   },
 }));
 
-const { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHistoricalHigh, fetchHrrrForecast, fetchEnsembleHourly } = await import(
+const { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHistoricalHigh, fetchHrrrForecast, fetchEnsembleHourly, _resetEnsembleHourlyCache } = await import(
   '../openMeteoClient.js'
 );
+
+// The ensemble-hourly memo persists across calls; clear it before each test so
+// cases stay independent (the cache key is args-only, not the injected fetchFn).
+beforeEach(() => {
+  _resetEnsembleHourlyCache();
+});
 
 // Helper to create a mock fetch function
 function mockFetch(body: unknown, status = 200) {
@@ -505,5 +511,54 @@ describe('fetchEnsembleHourly', () => {
     expect(result!.ensembleModel).toBe('ecmwf');
     const url = (fetchFn.mock.calls[0] as string[])[0];
     expect(url).toContain('ecmwf_ifs025');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchEnsembleHourly — in-process memo (modal-mass veto ↔ res-day nowcast share)
+// ---------------------------------------------------------------------------
+
+describe('fetchEnsembleHourly cache', () => {
+  const okBody = {
+    hourly: {
+      time: [0, 3600],
+      temperature_2m_member00: [50, 51],
+      temperature_2m_member01: [49, 52],
+    },
+  };
+
+  it('memoizes a successful result so repeat (lat,lon,day,unit,model) calls share one fetch', async () => {
+    const fetchFn = mockFetch(okBody);
+    const a = await fetchEnsembleHourly(40.0, -80.0, '2026-06-20', 'fahrenheit', fetchFn);
+    const b = await fetchEnsembleHourly(40.0, -80.0, '2026-06-20', 'fahrenheit', fetchFn);
+    expect(a).not.toBeNull();
+    expect(b).toEqual(a);
+    expect(fetchFn).toHaveBeenCalledTimes(1); // second call served from the memo
+  });
+
+  it('keys the memo by args — different day/model/unit miss the cache', async () => {
+    const fetchFn = mockFetch(okBody);
+    await fetchEnsembleHourly(40.0, -80.0, '2026-06-20', 'fahrenheit', fetchFn);
+    await fetchEnsembleHourly(40.0, -80.0, '2026-06-21', 'fahrenheit', fetchFn); // diff day
+    await fetchEnsembleHourly(40.0, -80.0, '2026-06-20', 'fahrenheit', fetchFn, true); // ecmwf
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  });
+
+  it('refetches after the cache is reset', async () => {
+    const fetchFn = mockFetch(okBody);
+    await fetchEnsembleHourly(41.0, -81.0, '2026-06-20', 'fahrenheit', fetchFn);
+    _resetEnsembleHourlyCache();
+    await fetchEnsembleHourly(41.0, -81.0, '2026-06-20', 'fahrenheit', fetchFn);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not memoize a null result (so a transient failure can be retried)', async () => {
+    // ok response but no member keys → returns null; must not be cached.
+    const fetchFn = mockFetch({ hourly: { time: [0, 3600] } });
+    const a = await fetchEnsembleHourly(42.0, -82.0, '2026-06-20', 'fahrenheit', fetchFn);
+    const b = await fetchEnsembleHourly(42.0, -82.0, '2026-06-20', 'fahrenheit', fetchFn);
+    expect(a).toBeNull();
+    expect(b).toBeNull();
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 });

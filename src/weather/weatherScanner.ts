@@ -1830,7 +1830,12 @@ export async function scanWeatherMarkets(
     // bracket (widened by WEATHER_INTERIOR_NO_FORECAST_MARGIN). Evaluated here
     // rather than in findMispricedBrackets because it needs an async fetch; the
     // extra ensemble-hourly call only fires when a bounded NO candidate survives.
-    if (cfg.WEATHER_MODAL_MASS_VETO_ENABLED) {
+    // Gated to resolution day by default — Open-Meteo 429-rate-limits the hourly
+    // endpoint, live NO entries concentrate on res-day, and the shared
+    // fetchEnsembleHourly memo lets the res-day nowcast reuse this fetch.
+    const modalVetoActive = cfg.WEATHER_MODAL_MASS_VETO_ENABLED
+      && (!cfg.WEATHER_MODAL_MASS_VETO_RES_DAY_ONLY || isResolutionDay);
+    if (modalVetoActive) {
       const boundedNoOpps = gatedOpportunities.filter((o) => {
         if (o.tradeSide !== 'NO' || o.blockedByNoFallback) return false;
         const p = parseBracketLabel(o.bracketLabel);
