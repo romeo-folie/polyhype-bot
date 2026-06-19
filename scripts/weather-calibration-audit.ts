@@ -59,6 +59,7 @@ interface Pair {
   daysOut: number;
   shape: BracketShape;
   source: string;
+  metric: 'high' | 'low';
   pRaw: number;
   yes: boolean;
   observedAt: string;
@@ -140,26 +141,35 @@ function groupBy<T>(items: T[], key: (t: T) => string): Map<string, T[]> {
   return m;
 }
 
-/** Build the full lookup table (all tiers) from a set of pairs. */
+/** Build the full lookup table (all tiers) from a set of pairs. Every key is
+ *  prefixed by metric so high/low never blend; the per-metric cell is the root
+ *  (parent of that metric's shape tier), and metrics shrink toward each metric's
+ *  own root, never across metrics. */
 function buildTable(pairs: Pair[]): CalibrationTable {
-  const global = fitCell(pairs, null);
+  const byMetric: Record<string, CalibrationCell> = {};
+  for (const [metric, ps] of groupBy(pairs, (p) => p.metric)) {
+    byMetric[metric] = fitCell(ps, null); // root shrinks to identity
+  }
 
   const byShape: Record<string, CalibrationCell> = {};
-  for (const [shape, ps] of groupBy(pairs, (p) => p.shape)) {
-    byShape[shape] = fitCell(ps, global.bins);
+  for (const [key, ps] of groupBy(pairs, (p) => `${p.metric}|${p.shape}`)) {
+    const metric = key.split('|')[0]!;
+    byShape[key] = fitCell(ps, byMetric[metric]!.bins);
   }
 
   const byShapeSource: Record<string, CalibrationCell> = {};
-  for (const [key, ps] of groupBy(pairs, (p) => `${p.shape}|${p.source}`)) {
-    const shape = key.split('|')[0]!;
-    byShapeSource[key] = fitCell(ps, (byShape[shape] ?? global).bins);
+  for (const [key, ps] of groupBy(pairs, (p) => `${p.metric}|${p.shape}|${p.source}`)) {
+    const parts = key.split('|');
+    const shape = `${parts[0]}|${parts[1]}`;
+    byShapeSource[key] = fitCell(ps, (byShape[shape] ?? byMetric[parts[0]!]!).bins);
   }
 
   const byShapeSourceHorizon: Record<string, CalibrationCell> = {};
-  for (const [key, ps] of groupBy(pairs, (p) => `${p.shape}|${p.source}|${horizonBucket(p.daysOut)}`)) {
+  for (const [key, ps] of groupBy(pairs, (p) => `${p.metric}|${p.shape}|${p.source}|${horizonBucket(p.daysOut)}`)) {
     const parts = key.split('|');
-    const ss = `${parts[0]}|${parts[1]}`;
-    byShapeSourceHorizon[key] = fitCell(ps, (byShapeSource[ss] ?? byShape[parts[0]!] ?? global).bins);
+    const ss = `${parts[0]}|${parts[1]}|${parts[2]}`;
+    const shape = `${parts[0]}|${parts[1]}`;
+    byShapeSourceHorizon[key] = fitCell(ps, (byShapeSource[ss] ?? byShape[shape] ?? byMetric[parts[0]!]!).bins);
   }
 
   return {
@@ -174,7 +184,7 @@ function buildTable(pairs: Pair[]): CalibrationTable {
     byShapeSourceHorizon,
     byShapeSource,
     byShape,
-    global,
+    byMetric,
   };
 }
 
@@ -207,8 +217,9 @@ async function loadPairs(): Promise<Pair[]> {
     if (low != null) gtLow.set(k, low);
   }
 
-  // Dedup to one pair per (city, date, bracket, daysOut) — collapses intra-day
-  // rescans (same outcome) while preserving the per-horizon prediction. Last write wins.
+  // Dedup to one pair per (metric, city, date, bracket, daysOut) — collapses
+  // intra-day rescans (same outcome) while preserving the per-horizon prediction.
+  // ORDER BY observed_at (above) makes "last write wins" = most-recent prediction.
   const dedup = new Map<string, Pair>();
   for (const row of rows) {
     const p = row.payload;
@@ -219,17 +230,28 @@ async function loadPairs(): Promise<Pair[]> {
     if (!targetDate || !label) continue;
     const parsed = parseBracketLabel(label);
     if (!parsed) continue;
-    const pRaw = Number(p.modelProb);
+    // CALIBRATION INPUT = the bias-corrected, pre-PR1-σ-inflation Gaussian, the
+    // scale runtime calibrates (modelProbCalInput). Legacy rows predate that
+    // field but predate σ inflation too, so their modelProb IS that same scale.
+    // Drop the transitional rows that were σ-inflated yet lack the clean input
+    // (sourceStddevMultiplier ≠ 1 and no modelProbCalInput) — they're on the
+    // post-inflation scale and would contaminate training.
+    const sourceMult = Number(p.sourceStddevMultiplier);
+    const inflated = Number.isFinite(sourceMult) && sourceMult !== 1;
+    const hasCalInput = p.modelProbCalInput != null && Number.isFinite(Number(p.modelProbCalInput));
+    if (inflated && !hasCalInput) continue;
+    const pRaw = hasCalInput ? Number(p.modelProbCalInput) : Number(p.modelProb);
     if (!Number.isFinite(pRaw)) continue;
-    const metric = p.metric === 'low' ? 'low' : 'high';
+    // Rows predating the lowest-temp feature have no `metric` and are all highs.
+    const metric: 'high' | 'low' = p.metric === 'low' ? 'low' : 'high';
     const actual = (metric === 'low' ? gtLow : gtHigh).get(`${city}|${targetDate}`);
     if (actual === undefined) continue;
     const daysOut = Number.isFinite(Number(p.daysOut)) ? Number(p.daysOut) : 2;
     const shape = classifyBracketShape(parsed.low, parsed.high);
     const source = normalizeSource(typeof p.forecastSource === 'string' ? p.forecastSource : undefined);
     const yes = isYes(actual, parsed.low, parsed.high);
-    const key = `${city}|${targetDate}|${label}|${daysOut}`;
-    dedup.set(key, { city, targetDate, daysOut, shape, source, pRaw, yes, observedAt: row.observed_at });
+    const key = `${metric}|${city}|${targetDate}|${label}|${daysOut}`;
+    dedup.set(key, { city, targetDate, daysOut, shape, source, metric, pRaw, yes, observedAt: row.observed_at });
   }
   return Array.from(dedup.values());
 }
@@ -299,7 +321,7 @@ async function main(): Promise<void> {
   const test = sorted.slice(cut);
   const holdoutTable = buildTable(train);
   const calOf = (table: CalibrationTable) => (p: Pair): number =>
-    calibrateWeatherBracketProbability(p.pRaw, { shape: p.shape, source: p.source, daysOut: p.daysOut }, table);
+    calibrateWeatherBracketProbability(p.pRaw, { shape: p.shape, source: p.source, daysOut: p.daysOut, metric: p.metric }, table);
   const rawOf = (p: Pair): number => p.pRaw;
 
   log(`\nChronological hold-out: train=${train.length} (≤ ${train[train.length - 1]?.observedAt.slice(0, 10)}), test=${test.length}`);
@@ -332,6 +354,7 @@ async function main(): Promise<void> {
 
   // ── Per-shape / source / horizon (hold-out gap, raw vs cal) ───────────────
   const segs: { title: string; key: (p: Pair) => string }[] = [
+    { title: 'METRIC', key: (p) => p.metric },
     { title: 'SHAPE', key: (p) => p.shape },
     { title: 'SOURCE', key: (p) => p.source },
     { title: 'HORIZON', key: (p) => horizonBucket(p.daysOut) },

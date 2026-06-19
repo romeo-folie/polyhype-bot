@@ -888,6 +888,10 @@ export interface WeatherBracketOpportunity {
    *  correction and NO source-σ inflation. Lets shadow analysis measure the σ
    *  inflation's effect before the learned calibrator (PR2) lands. */
   modelProbRaw?: number;
+  /** The probability the calibrator was applied to: the bias-corrected,
+   *  pre-source-inflation Gaussian (the scale the reliability map is trained on).
+   *  Logged so train==serve consistency stays auditable. */
+  modelProbCalInput?: number | null;
   /** Calibrated P(YES) from the reliability map (PR2a). Null when the calibration
    *  shadow pass is disabled. SHADOW-ONLY: the live tradeSide/edge still use the
    *  raw modelProbability; this is logged for analysis before acting on it (PR2b). */
@@ -1251,21 +1255,26 @@ export function findMispricedBrackets(
   // source multiplier compound — both scale the forecast σ that feeds the model.
   const sourceStddevMultiplier = resolveSourceStddevMultiplier(forecast.source, openMeteoStddevMultiplier);
 
-  // Effective stddev:
+  // Effective stddev, given a raw (pre-bias-mode) σ:
   //   - full: max of ensemble spread and empirical σ (prevents overconfidence
   //     in stable regimes where ensemble spread is tight but realized error is larger)
   //   - weak: inflate by weakBiasStddevMultiplier (de-confidence; ignore empiricalStddev
   //     directly since the sample is too thin to trust its magnitude)
-  //   - none: raw stddev × stddevMultiplier
-  const rawEffectiveStdDev = forecast.stdDev * stddevMultiplier * sourceStddevMultiplier;
-  let effectiveStdDev: number;
-  if (biasMode === 'full') {
-    effectiveStdDev = Math.max(rawEffectiveStdDev, cityBias!.empiricalStddev * stddevMultiplier);
-  } else if (biasMode === 'weak') {
-    effectiveStdDev = rawEffectiveStdDev * weakBiasStddevMultiplier;
-  } else {
-    effectiveStdDev = rawEffectiveStdDev;
-  }
+  //   - none: the raw σ as given
+  const applyBiasModeSigma = (rawSigma: number): number =>
+    biasMode === 'full'
+      ? Math.max(rawSigma, cityBias!.empiricalStddev * stddevMultiplier)
+      : biasMode === 'weak'
+        ? rawSigma * weakBiasStddevMultiplier
+        : rawSigma;
+
+  // Live σ includes the source-specific inflation (PR1). This is what the live
+  // tradeSide/edge use.
+  const effectiveStdDev = applyBiasModeSigma(forecast.stdDev * stddevMultiplier * sourceStddevMultiplier);
+  // Calibrator-input σ: the SAME bias-corrected σ WITHOUT PR1's source inflation.
+  // The reliability map is fitted on this pre-inflation scale (the long-stable
+  // definition), so calibrating this quantity keeps train==serve consistent.
+  const effectiveStdDevNoSourceInflation = applyBiasModeSigma(forecast.stdDev * stddevMultiplier);
 
   // Pre-2026-06-19 baseline σ: no bias correction, no source-σ inflation. Used
   // only to log modelProbRaw so shadow analysis can isolate the σ-inflation effect.
@@ -1487,12 +1496,19 @@ export function findMispricedBrackets(
     // tradeSide/edge above — purely additive shadow fields, gated separately
     // from execution (PR2b acts on it).
     let modelProbCalibrated: number | null = null;
+    let modelProbCalInput: number | null = null;
     let edgeCalibrated: number | null = null;
     let tradeSideCalibrated: 'YES' | 'NO' | null = null;
     if (calibrationShadowEnabled) {
       const shape = classifyBracketShape(bracket.low, bracket.high);
-      modelProbCalibrated = calibrateWeatherBracketProbability(modelProb, {
-        shape, source: forecast.source, daysOut,
+      // Calibrate the bias-corrected, PRE-source-inflation Gaussian — the scale the
+      // reliability map is trained on (logged as modelProbCalInput so train==serve
+      // stays auditable). NOT the σ-inflated modelProb the live path uses.
+      modelProbCalInput = estimateBracketProbability(
+        forecastHighForCalc, bracket.low, bracket.high, daysOut, effectiveStdDevNoSourceInflation,
+      );
+      modelProbCalibrated = calibrateWeatherBracketProbability(modelProbCalInput, {
+        shape, source: forecast.source, daysOut, metric: event.metric,
       });
       const edgeYesCal = modelProbCalibrated - bracket.yesPrice;
       const edgeNoCal = (1 - modelProbCalibrated) - bracket.noPrice;
@@ -1561,6 +1577,7 @@ export function findMispricedBrackets(
       ensembleYesMass: null,
       sourceStddevMultiplier,
       modelProbRaw,
+      modelProbCalInput,
       modelProbCalibrated,
       edgeCalibrated,
       tradeSideCalibrated,
@@ -2129,6 +2146,8 @@ export async function scanWeatherMarkets(
           sourceStddevMultiplier: opp.sourceStddevMultiplier ?? 1.0,
           modelProbRaw: opp.modelProbRaw ?? null,
           // Calibration shadow (PR2a) — raw vs calibrated for reliability tracking.
+          // modelProbCalInput is the (pre-σ-inflation) scale the map is trained on.
+          modelProbCalInput: opp.modelProbCalInput ?? null,
           modelProbCalibrated: opp.modelProbCalibrated ?? null,
           edgeCalibrated: opp.edgeCalibrated ?? null,
           tradeSideCalibrated: opp.tradeSideCalibrated ?? null,

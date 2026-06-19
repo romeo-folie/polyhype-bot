@@ -44,11 +44,13 @@ export interface CalibrationTable {
     minCellSamples: number;
     version: number;
   };
-  /** Most-specific → least-specific lookup tiers. Keys: see cellKey(). */
+  /** Most-specific → least-specific lookup tiers. Keys: see cellKey(). Every key
+   *  is prefixed by metric so high- and low-temperature markets never share a
+   *  curve — the root tier is per-metric (byMetric['high'|'low']). */
   byShapeSourceHorizon: Record<string, CalibrationCell>;
   byShapeSource: Record<string, CalibrationCell>;
   byShape: Record<string, CalibrationCell>;
-  global: CalibrationCell | null;
+  byMetric: Record<string, CalibrationCell>;
 }
 
 export interface CalibrationFeatures {
@@ -56,6 +58,8 @@ export interface CalibrationFeatures {
   /** Forecast source as stored on the opportunity (`open-meteo`, `hrrr-combined`, …). */
   source: string;
   daysOut: number;
+  /** Which daily extreme the market resolves on. High and low calibrate separately. */
+  metric: 'high' | 'low';
 }
 
 /**
@@ -87,12 +91,15 @@ export function cellKey(features: CalibrationFeatures): {
   shapeSourceHorizon: string;
   shapeSource: string;
   shape: string;
+  metric: string;
 } {
   const source = normalizeSource(features.source);
+  const m = features.metric;
   return {
-    shapeSourceHorizon: `${features.shape}|${source}|${horizonBucket(features.daysOut)}`,
-    shapeSource: `${features.shape}|${source}`,
-    shape: features.shape,
+    shapeSourceHorizon: `${m}|${features.shape}|${source}|${horizonBucket(features.daysOut)}`,
+    shapeSource: `${m}|${features.shape}|${source}`,
+    shape: `${m}|${features.shape}`,
+    metric: m,
   };
 }
 
@@ -157,7 +164,7 @@ export function calibrateWeatherBracketProbability(
     pickCell(table.byShapeSourceHorizon[keys.shapeSourceHorizon], minN) ??
     pickCell(table.byShapeSource[keys.shapeSource], minN) ??
     pickCell(table.byShape[keys.shape], minN) ??
-    pickCell(table.global, minN);
+    pickCell(table.byMetric[keys.metric], minN);
   if (!cell) return clamp01(pRaw);
   return interpolateCell(cell.bins, pRaw);
 }

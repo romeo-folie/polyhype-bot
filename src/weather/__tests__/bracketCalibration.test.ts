@@ -20,7 +20,7 @@ function synthTable(over: Partial<CalibrationTable> = {}): CalibrationTable {
     byShapeSourceHorizon: {},
     byShapeSource: {},
     byShape: {},
-    global: { n: 9000, bins: rise(0.2, 0.8) },
+    byMetric: { high: { n: 9000, bins: rise(0.2, 0.8) } },
     ...over,
   };
 }
@@ -55,11 +55,17 @@ describe('normalizeSource', () => {
 });
 
 describe('cellKey', () => {
-  it('builds the three lookup keys', () => {
-    const k = cellKey({ shape: 'exact', source: 'Open-Meteo', daysOut: 1 });
-    expect(k.shapeSourceHorizon).toBe('exact|open-meteo|0-1');
-    expect(k.shapeSource).toBe('exact|open-meteo');
-    expect(k.shape).toBe('exact');
+  it('builds the metric-prefixed lookup keys', () => {
+    const k = cellKey({ shape: 'exact', source: 'Open-Meteo', daysOut: 1, metric: 'high' });
+    expect(k.shapeSourceHorizon).toBe('high|exact|open-meteo|0-1');
+    expect(k.shapeSource).toBe('high|exact|open-meteo');
+    expect(k.shape).toBe('high|exact');
+    expect(k.metric).toBe('high');
+  });
+  it('separates high and low into different keys', () => {
+    const lo = cellKey({ shape: 'exact', source: 'open-meteo', daysOut: 1, metric: 'low' });
+    expect(lo.shapeSourceHorizon).toBe('low|exact|open-meteo|0-1');
+    expect(lo.metric).toBe('low');
   });
 });
 
@@ -89,7 +95,7 @@ describe('interpolateCell', () => {
 });
 
 describe('calibrateWeatherBracketProbability', () => {
-  const feat = { shape: 'exact' as const, source: 'open-meteo', daysOut: 1 };
+  const feat = { shape: 'exact' as const, source: 'open-meteo', daysOut: 1, metric: 'high' as const };
 
   it('is the identity when no table is available', () => {
     expect(calibrateWeatherBracketProbability(0.3, feat, null)).toBeCloseTo(0.3, 6);
@@ -99,9 +105,9 @@ describe('calibrateWeatherBracketProbability', () => {
 
   it('prefers the most specific cell that meets minCellSamples', () => {
     const table = synthTable({
-      byShapeSourceHorizon: { 'exact|open-meteo|0-1': { n: 100, bins: rise(0.4, 0.4) } }, // flat 0.4
-      byShapeSource: { 'exact|open-meteo': { n: 500, bins: rise(0.6, 0.6) } },
-      byShape: { exact: { n: 5000, bins: rise(0.7, 0.7) } },
+      byShapeSourceHorizon: { 'high|exact|open-meteo|0-1': { n: 100, bins: rise(0.4, 0.4) } }, // flat 0.4
+      byShapeSource: { 'high|exact|open-meteo': { n: 500, bins: rise(0.6, 0.6) } },
+      byShape: { 'high|exact': { n: 5000, bins: rise(0.7, 0.7) } },
     });
     // SSH cell present & n≥80 → 0.4 regardless of pRaw
     expect(calibrateWeatherBracketProbability(0.05, feat, table)).toBeCloseTo(0.4, 6);
@@ -109,17 +115,26 @@ describe('calibrateWeatherBracketProbability', () => {
 
   it('falls back to a coarser cell when the specific one is too sparse', () => {
     const table = synthTable({
-      byShapeSourceHorizon: { 'exact|open-meteo|0-1': { n: 10, bins: rise(0.4, 0.4) } }, // n<80 → skip
-      byShapeSource: { 'exact|open-meteo': { n: 500, bins: rise(0.6, 0.6) } },
+      byShapeSourceHorizon: { 'high|exact|open-meteo|0-1': { n: 10, bins: rise(0.4, 0.4) } }, // n<80 → skip
+      byShapeSource: { 'high|exact|open-meteo': { n: 500, bins: rise(0.6, 0.6) } },
     });
     expect(calibrateWeatherBracketProbability(0.05, feat, table)).toBeCloseTo(0.6, 6);
   });
 
-  it('falls back to global, then identity', () => {
-    const onlyGlobal = synthTable(); // global bins rise(0.2,0.8)
-    expect(calibrateWeatherBracketProbability(0.05, feat, onlyGlobal)).toBeCloseTo(0.2, 6);
-    const noUsableCell = synthTable({ global: { n: 10, bins: rise(0.2, 0.8) } }); // global n<80
+  it('falls back to the per-metric root, then identity', () => {
+    const onlyMetric = synthTable(); // byMetric.high bins rise(0.2,0.8)
+    expect(calibrateWeatherBracketProbability(0.05, feat, onlyMetric)).toBeCloseTo(0.2, 6);
+    const noUsableCell = synthTable({ byMetric: { high: { n: 10, bins: rise(0.2, 0.8) } } }); // n<80
     expect(calibrateWeatherBracketProbability(0.05, feat, noUsableCell)).toBeCloseTo(0.05, 6); // identity
+  });
+
+  it('never blends across metrics — a low bracket misses the high curves', () => {
+    const table = synthTable({
+      byShape: { 'high|exact': { n: 5000, bins: rise(0.7, 0.7) } }, // high-only curve
+      byMetric: { high: { n: 9000, bins: rise(0.7, 0.7) } },        // no low root
+    });
+    // low has no cell anywhere → identity, not the high 0.7 curve
+    expect(calibrateWeatherBracketProbability(0.05, { ...feat, metric: 'low' }, table)).toBeCloseTo(0.05, 6);
   });
 
   it('output is bounded [0,1] and non-decreasing in pRaw (monotone map)', () => {
@@ -144,13 +159,14 @@ describe('calibrationParams.json integrity', () => {
     expect(table!._meta.binCount).toBeGreaterThan(0);
     expect(table!._meta.scoredPairs).toBeGreaterThan(0);
     expect(table!._meta.minCellSamples).toBeGreaterThan(0);
-    expect(table!.global).not.toBeNull();
+    expect(Object.keys(table!.byMetric).length).toBeGreaterThan(0);
+    expect(table!.byMetric.high).toBeDefined(); // highs always present
   });
 
   it('every cell has binCount bins, each in [0,1] and non-decreasing', () => {
     const binCount = table!._meta.binCount;
     const cells = [
-      ...(table!.global ? [['global', table!.global] as const] : []),
+      ...Object.entries(table!.byMetric),
       ...Object.entries(table!.byShape),
       ...Object.entries(table!.byShapeSource),
       ...Object.entries(table!.byShapeSourceHorizon),
