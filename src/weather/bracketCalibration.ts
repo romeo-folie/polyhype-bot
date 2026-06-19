@@ -1,0 +1,174 @@
+/**
+ * Weather bracket-probability calibration (reliability map).
+ *
+ * The Gaussian bracket model (`estimateBracketProbability`) is systematically
+ * mis-calibrated: across the full shadow history every predicted-probability
+ * bucket realizes a lower win rate than predicted (overconfident). See
+ * docs/issues/weather-bracket-model-overconfidence-2026-06-19.md.
+ *
+ * This module applies a fitted, monotone reliability map that converts the raw
+ * model YES probability `p_raw = P(YES bracket)` into a calibrated `p_cal`
+ * grounded in realized outcomes, keyed by (shape, source, horizon). The map is
+ * fitted offline by `scripts/weather-calibration-audit.ts --fit`, committed as
+ * `data/calibrationParams.json`, and loaded here at module init (same pattern as
+ * the climatology table). When the artifact is missing/empty, calibration is the
+ * identity — safe no-op.
+ *
+ * RUNTIME IS PURE + SHADOW-FIRST: the scanner logs p_cal alongside the live
+ * (raw) decision; acting on p_cal is gated separately (PR2b).
+ */
+import { createRequire } from 'node:module';
+
+const _require = createRequire(import.meta.url);
+
+/** Coarse bracket shape — the dominant driver of calibration error. */
+export type BracketShape = 'exact' | 'range' | 'high_tail' | 'low_tail';
+
+/** Per-cell reliability curve: `bins[i]` = calibrated P(YES) for a raw prob in
+ *  the i-th equal-width bin of [0,1]. Monotone non-decreasing. */
+export interface CalibrationCell {
+  /** Scored sample count behind this cell (post-shrinkage cells still report raw n). */
+  n: number;
+  /** Calibrated value per raw-probability bin (length = _meta.binCount). */
+  bins: number[];
+}
+
+export interface CalibrationTable {
+  _meta: {
+    generatedAt: string;
+    scoredPairs: number;
+    binCount: number;
+    /** Bayesian pseudo-count strength used when shrinking a cell toward its parent. */
+    priorStrength: number;
+    /** Minimum scored n for a specific cell to be trusted at runtime. */
+    minCellSamples: number;
+    version: number;
+  };
+  /** Most-specific → least-specific lookup tiers. Keys: see cellKey(). Every key
+   *  is prefixed by metric so high- and low-temperature markets never share a
+   *  curve — the root tier is per-metric (byMetric['high'|'low']). */
+  byShapeSourceHorizon: Record<string, CalibrationCell>;
+  byShapeSource: Record<string, CalibrationCell>;
+  byShape: Record<string, CalibrationCell>;
+  byMetric: Record<string, CalibrationCell>;
+}
+
+export interface CalibrationFeatures {
+  shape: BracketShape;
+  /** Forecast source as stored on the opportunity (`open-meteo`, `hrrr-combined`, …). */
+  source: string;
+  daysOut: number;
+  /** Which daily extreme the market resolves on. High and low calibrate separately. */
+  metric: 'high' | 'low';
+}
+
+/**
+ * Classify a bracket into a calibration shape from its parsed bounds.
+ *   - low tail  ("X or below"): low === null
+ *   - high tail ("X or higher"): high === null
+ *   - exact (single degree, e.g. "27°C"): low === high
+ *   - range (multi-degree, e.g. "70-71°F"): low < high
+ */
+export function classifyBracketShape(low: number | null, high: number | null): BracketShape {
+  if (low === null) return 'low_tail';
+  if (high === null) return 'high_tail';
+  return low === high ? 'exact' : 'range';
+}
+
+/** Horizon bucket — forecast skill (and thus calibration) degrades with lead time. */
+export function horizonBucket(daysOut: number): string {
+  if (daysOut <= 1) return '0-1';
+  if (daysOut <= 3) return '2-3';
+  return '4+';
+}
+
+/** Normalize a forecast-source string to a stable, lowercased key. */
+export function normalizeSource(source: string | null | undefined): string {
+  return (source ?? 'unknown').trim().toLowerCase() || 'unknown';
+}
+
+export function cellKey(features: CalibrationFeatures): {
+  shapeSourceHorizon: string;
+  shapeSource: string;
+  shape: string;
+  metric: string;
+} {
+  const source = normalizeSource(features.source);
+  const m = features.metric;
+  return {
+    shapeSourceHorizon: `${m}|${features.shape}|${source}|${horizonBucket(features.daysOut)}`,
+    shapeSource: `${m}|${features.shape}|${source}`,
+    shape: `${m}|${features.shape}`,
+    metric: m,
+  };
+}
+
+/**
+ * Interpolate a calibrated probability from a cell's per-bin curve at `pRaw`.
+ * Bins are equal-width over [0,1]; we linearly interpolate between adjacent bin
+ * CENTERS so the mapping is continuous (avoids step discontinuities at edges).
+ */
+export function interpolateCell(bins: number[], pRaw: number): number {
+  const k = bins.length;
+  if (k === 0) return pRaw;
+  if (k === 1) return clamp01(bins[0]!);
+  const x = clamp01(pRaw);
+  const pos = x * k - 0.5; // position in "bin center" coordinates (center of bin i is at i)
+  if (pos <= 0) return clamp01(bins[0]!);
+  if (pos >= k - 1) return clamp01(bins[k - 1]!);
+  const lo = Math.floor(pos);
+  const frac = pos - lo;
+  return clamp01(bins[lo]! + (bins[lo + 1]! - bins[lo]!) * frac);
+}
+
+function clamp01(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+let _cachedTable: CalibrationTable | null | undefined;
+
+/** Load the committed calibration artifact (cached). Returns null if absent. */
+export function loadCalibrationTable(): CalibrationTable | null {
+  if (_cachedTable !== undefined) return _cachedTable;
+  try {
+    _cachedTable = _require('./data/calibrationParams.json') as CalibrationTable;
+  } catch {
+    _cachedTable = null;
+  }
+  return _cachedTable;
+}
+
+/** Test-only: clear the cached artifact so a test can inject its own table. */
+export function _setCalibrationTableForTest(table: CalibrationTable | null): void {
+  _cachedTable = table;
+}
+
+/**
+ * Calibrate a raw model YES probability. Picks the most-specific cell with
+ * enough samples (shape+source+horizon → shape+source → shape → global), then
+ * interpolates its reliability curve. Identity when no table/cell is available.
+ *
+ * `p_raw` is P(YES for the bracket), side-agnostic — callers convert to the
+ * traded side afterward exactly as they do with the raw probability.
+ */
+export function calibrateWeatherBracketProbability(
+  pRaw: number,
+  features: CalibrationFeatures,
+  table: CalibrationTable | null = loadCalibrationTable(),
+): number {
+  if (!table) return clamp01(pRaw);
+  const minN = table._meta.minCellSamples;
+  const keys = cellKey(features);
+  const cell =
+    pickCell(table.byShapeSourceHorizon[keys.shapeSourceHorizon], minN) ??
+    pickCell(table.byShapeSource[keys.shapeSource], minN) ??
+    pickCell(table.byShape[keys.shape], minN) ??
+    pickCell(table.byMetric[keys.metric], minN);
+  if (!cell) return clamp01(pRaw);
+  return interpolateCell(cell.bins, pRaw);
+}
+
+function pickCell(cell: CalibrationCell | null | undefined, minN: number): CalibrationCell | null {
+  return cell && cell.n >= minN && cell.bins.length > 0 ? cell : null;
+}

@@ -2227,6 +2227,13 @@ export const envSchema = z.object({
   // is most informative. Default true keeps the extra fetches few and the veto
   // functional where it matters. Set false to evaluate it on every horizon.
   WEATHER_MODAL_MASS_VETO_RES_DAY_ONLY: boolFromEnv.optional().default(true),
+  // Calibration SHADOW pass (PR2a). When true, the scanner maps the raw model
+  // P(YES) through the fitted reliability map (src/weather/data/calibrationParams.json)
+  // and logs modelProbCalibrated/edgeCalibrated/tradeSideCalibrated alongside the
+  // live raw decision. SHADOW-ONLY — it never changes the traded side/edge; acting
+  // on the calibrated probability is a separate gate (PR2b). See
+  // docs/issues/weather-bracket-model-overconfidence-2026-06-19.md.
+  WEATHER_CALIBRATION_SHADOW_ENABLED: boolFromEnv.optional().default(true),
   // --- WEATHER EXIT RULES (monitor) ---
   // Weather brackets resolve at end-of-day of their target date; realized hold
   // times run ~17–26h when entering 0–1 day out. Stale-exit (STALE_MIN_AGE_H_WEATHER=6h)
