@@ -57,6 +57,15 @@ const baseConfig = {
   // dedicated lowest-temp tests override these explicitly.
   WEATHER_LOWEST_TEMP_ENABLED: false,
   WEATHER_LOWEST_TEMP_SHADOW_ENABLED: false,
+  // NO-bias model-safety gates (2026-06-19). Test-safe values preserve legacy
+  // scan behaviour (fallback on, no σ inflation, strict interior gate, modal
+  // veto off); production config.ts defaults differ (false/1.25/1/true). The
+  // dedicated NO-bias tests override these explicitly.
+  WEATHER_YES_GATE_NO_FALLBACK_ENABLED: true,
+  WEATHER_OPEN_METEO_STDDEV_MULTIPLIER: 1.0,
+  WEATHER_INTERIOR_NO_FORECAST_MARGIN: 0,
+  WEATHER_MODAL_MASS_VETO_ENABLED: false,
+  WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.50,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
 vi.mock('../../shared/config.js', () => ({
@@ -151,10 +160,13 @@ vi.mock('../noaaClient.js', async () => {
 const mockFetchOpenMeteo = vi.fn<() => Promise<unknown>>();
 const mockFetchEnsemble = vi.fn<() => Promise<unknown>>();
 const mockFetchHrrr = vi.fn<() => Promise<unknown>>();
+// Defaults to null so the modal-mass veto is a no-op unless a test configures it.
+const mockFetchEnsembleHourly = vi.fn<() => Promise<unknown>>(() => Promise.resolve(null));
 vi.mock('../openMeteoClient.js', () => ({
   fetchOpenMeteoForecast: mockFetchOpenMeteo,
   fetchEnsembleForecast: mockFetchEnsemble,
   fetchHrrrForecast: mockFetchHrrr,
+  fetchEnsembleHourly: mockFetchEnsembleHourly,
 }));
 
 // Dynamic imports — after mocks
@@ -1264,6 +1276,144 @@ describe('findMispricedBrackets - YES quality gates', () => {
     });
     expect(opportunities.filter((o) => o.tradeSide === 'YES')).toHaveLength(1);
   });
+});
+
+// ---------------------------------------------------------------------------
+// findMispricedBrackets — NO-bias model-safety guards (2026-06-19)
+// ---------------------------------------------------------------------------
+
+describe('findMispricedBrackets - NO-bias model-safety guards (2026-06-19)', () => {
+  const baseEvent = {
+    eventId: 'e1', slug: 's1', city: 'paris',
+    coords: lookupCity('paris') ?? { lat: 48.85, lon: 2.35, unit: 'celsius' as const, tz: 'Europe/Paris', noaaCoverage: false },
+    targetDate: '2026-06-30', unit: 'celsius' as const, metric: 'high' as const,
+    endDate: '2026-06-30T12:00:00Z', allMarketIds: ['m1'],
+  };
+  const GATES_ON = { yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50 };
+
+  // Interior "25°C", forecast 24.4°C → modelProb ≈ 0.261; edgeYes (0.161) ≥ edgeNo
+  // (0.089). YES is gated (interior) → the model preferred YES but it was blocked.
+  function fallbackBrackets() {
+    return [{
+      marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
+      threshold: 0, low: 25, high: 25, label: '25°C', yesPrice: 0.10, noPrice: 0.65,
+    }];
+  }
+  const fallbackForecast = { forecastHigh: 24.4, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
+
+  it('shadow-logs (does not trade) a YES-gate fallback NO when the fallback is disabled', () => {
+    const event = { ...baseEvent, brackets: fallbackBrackets() };
+    const { opportunities } = findMispricedBrackets(event, fallbackForecast, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON, yesGateNoFallbackEnabled: false,
+    });
+    expect(opportunities).toHaveLength(1);
+    const o = opportunities[0]!;
+    expect(o.tradeSide).toBe('NO');
+    expect(o.blockedByNoFallback).toBe(true);      // recorded for shadow…
+    expect(o.wouldHaveFallenBackToNo).toBe(true);
+    expect(o.yesFellBackToNo).toBe(false);         // …but did NOT trade as a fallback
+    expect(o.yesGateReason).toBe('interior_bracket');
+  });
+
+  it('still trades the YES-gate fallback NO when the fallback is enabled', () => {
+    const event = { ...baseEvent, brackets: fallbackBrackets() };
+    const { opportunities } = findMispricedBrackets(event, fallbackForecast, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON, yesGateNoFallbackEnabled: true,
+    });
+    expect(opportunities).toHaveLength(1);
+    const o = opportunities[0]!;
+    expect(o.tradeSide).toBe('NO');
+    expect(o.blockedByNoFallback).toBe(false);
+    expect(o.yesFellBackToNo).toBe(true);
+  });
+
+  it('does not block a native NO when the fallback is disabled', () => {
+    // "28°C" far from forecast 24.1°C → edgeYes < 0 → native NO, not a fallback.
+    const event = { ...baseEvent, brackets: [{
+      marketId: 'm2', conditionId: 'c2', clobTokenIds: ['ty2', 'tn2'],
+      threshold: 0, low: 28, high: 28, label: '28°C', yesPrice: 0.90, noPrice: 0.08,
+    }] };
+    const forecast = { forecastHigh: 24.1, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON, yesGateNoFallbackEnabled: false,
+    });
+    expect(opportunities).toHaveLength(1);
+    const o = opportunities[0]!;
+    expect(o.tradeSide).toBe('NO');
+    expect(o.blockedByNoFallback).toBe(false);
+    expect(o.wouldHaveFallenBackToNo).toBe(false);
+  });
+
+  it('inflates Open-Meteo σ only (source-aware multiplier)', () => {
+    const event = { ...baseEvent, brackets: [{
+      marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
+      threshold: 0, low: 24, high: null, label: '24°C or higher', yesPrice: 0.40, noPrice: 0.60,
+    }] };
+    const om = { forecastHigh: 26, stdDev: 1.5, source: 'open-meteo' as const, ensembleMembers: 30 };
+    const noaa = { forecastHigh: 26, stdDev: 1.5, source: 'noaa' as const, ensembleMembers: 0 };
+    const rOm = findMispricedBrackets(event, om, 1, 0.0, { minModelCoverage: 0, openMeteoStddevMultiplier: 1.5 });
+    const rNoaa = findMispricedBrackets(event, noaa, 1, 0.0, { minModelCoverage: 0, openMeteoStddevMultiplier: 1.5 });
+    expect(rOm.effectiveStdDev).toBeCloseTo(1.5 * 1.5, 6);   // 1.5°C × 1.5 source mult
+    expect(rNoaa.effectiveStdDev).toBeCloseTo(1.5, 6);       // NOAA untouched
+    expect(rOm.opportunities[0]!.sourceStddevMultiplier).toBe(1.5);
+    expect(rNoaa.opportunities[0]!.sourceStddevMultiplier).toBe(1.0);
+  });
+
+  it('blocks an interior NO when the forecast rounds adjacent to the bracket (margin 1)', () => {
+    // "24°C" bracket, forecast 25.4°C → rounds to 25 → within [24-1, 24+1] = [23,25] at margin 1.
+    const brackets = [{
+      marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
+      threshold: 0, low: 24, high: 24, label: '24°C', yesPrice: 0.90, noPrice: 0.05,
+    }];
+    const forecast = { forecastHigh: 25.4, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
+    const event = { ...baseEvent, brackets };
+
+    const blocked = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, interiorNoForecastMargin: 1,
+    }).opportunities;
+    expect(blocked.filter((o) => o.tradeSide === 'NO')).toHaveLength(0);
+
+    // Legacy margin 0: rounded 25 ∉ [24,24] → NO allowed.
+    const allowed = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, interiorNoForecastMargin: 0,
+    }).opportunities;
+    expect(allowed.filter((o) => o.tradeSide === 'NO')).toHaveLength(1);
+  });
+
+  // June 2026 failure cohort: exact-degree NO bets whose actual high resolved AT
+  // the degree. PR1 cannot fully fix the deep-confidence misses (that needs the
+  // learned calibrator in PR2), but its Open-Meteo σ inflation must REDUCE the NO
+  // edge on every one of these shapes — moving them toward un-tradable.
+  const JUNE_NO_CASES = [
+    { city: 'toronto',  label: '24°C', low: 24, high: 24, forecastHigh: 25.8 },
+    { city: 'istanbul', label: '23°C', low: 23, high: 23, forecastHigh: 27.0 },
+    { city: 'taipei',   label: '37°C', low: 37, high: 37, forecastHigh: 38.6 },
+    { city: 'madrid',   label: '29°C', low: 29, high: 29, forecastHigh: 30.6 },
+    { city: 'shenzhen', label: '27°C', low: 27, high: 27, forecastHigh: 29.4 },
+  ];
+  for (const c of JUNE_NO_CASES) {
+    it(`reduces NO edge on the June ${c.city} ${c.label} exact-degree case`, () => {
+      const event = {
+        ...baseEvent, city: c.city, coords: lookupCity(c.city) ?? baseEvent.coords,
+        brackets: [{
+          marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
+          threshold: 0, low: c.low, high: c.high, label: c.label, yesPrice: 0.10, noPrice: 0.49,
+        }],
+      };
+      const forecast = { forecastHigh: c.forecastHigh, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
+      // Legacy: no σ inflation, strict interior gate.
+      const legacy = findMispricedBrackets(event, forecast, 1, 0.0, {
+        minModelCoverage: 0, openMeteoStddevMultiplier: 1.0, interiorNoForecastMargin: 0,
+      }).opportunities.find((o) => o.tradeSide === 'NO');
+      // PR1: Open-Meteo σ × 1.25, adjacency margin 1.
+      const pr1 = findMispricedBrackets(event, forecast, 1, 0.0, {
+        minModelCoverage: 0, openMeteoStddevMultiplier: 1.25, interiorNoForecastMargin: 1,
+      }).opportunities.find((o) => o.tradeSide === 'NO');
+      expect(legacy).toBeDefined();
+      // PR1 either blocks the NO entirely or strictly reduces its edge.
+      if (pr1) expect(pr1.edge).toBeLessThan(legacy!.edge);
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -4985,5 +5135,125 @@ describe('revalidateRestingWeatherOrders', () => {
       expect(mockCancelClobOrder).toHaveBeenCalledWith('order-1');
       expect(mockDeletePendingOrder).toHaveBeenCalledWith(expect.anything(), 'mkt-1', 'NO');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scanWeatherMarkets — modal-mass NO veto (2026-06-19)
+// ---------------------------------------------------------------------------
+
+describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
+  let redisMock: ReturnType<typeof createRedisMock>;
+  let originalFetch: typeof globalThis.fetch;
+
+  const td = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+  const iso = `${td.getUTCFullYear().toString()}-${(td.getUTCMonth() + 1).toString().padStart(2, '0')}-${td.getUTCDate().toString().padStart(2, '0')}`;
+  const MN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const titleDate = `${MN[td.getUTCMonth()] ?? 'June'} ${td.getUTCDate().toString()}`;
+  const slugDate = `${(MN[td.getUTCMonth()] ?? 'June').toLowerCase()}-${td.getUTCDate().toString()}-${td.getUTCFullYear().toString()}`;
+  const endIso = `${iso}T12:00:00Z`;
+
+  // One interior bracket ("50-51°F") priced as a NO bet far below the point
+  // forecast (56°F) — the Gaussian gives it low YES so NO has edge, and the
+  // forecast does not round near it (round(56)=56 ∉ [49,52]). Only the ensemble
+  // modal-mass veto can block it.
+  function makeEvent() {
+    const mk = (id: string, label: string, yes: string, no: string, thr: string) => ({
+      id,
+      question: `Will the highest temperature in Chicago be ${label} on ${titleDate}?`,
+      conditionId: `cond-${id}`,
+      clobTokenIds: `["${id}y","${id}n"]`,
+      outcomePrices: `["${yes}","${no}"]`,
+      outcomes: '["Yes","No"]',
+      active: true,
+      closed: false,
+      volume: '10000',
+      liquidity: '5000',
+      endDate: endIso,
+      description: null,
+      groupItemTitle: label,
+      groupItemThreshold: thr,
+    });
+    return {
+      id: 'event-mm',
+      title: `Highest temperature in Chicago on ${titleDate}?`,
+      slug: `highest-temperature-in-chicago-on-${slugDate}`,
+      active: true,
+      closed: false,
+      negRisk: true,
+      endDate: endIso,
+      markets: [
+        mk('m0', '49°F or below', '0.02', '0.99', '0'),
+        mk('m1', '50-51°F', '0.05', '0.60', '1'), // bounded NO target
+        mk('m2', '52°F or higher', '0.10', '0.85', '2'),
+      ],
+    };
+  }
+
+  function hourlyClusteredAt(tempF: number) {
+    // 20 members, each a flat 24-hour trajectory at tempF → daily max = tempF.
+    return {
+      hours: Array.from({ length: 24 }, (_, h) => h * 3600),
+      memberTemps: Array.from({ length: 20 }, () => Array.from({ length: 24 }, () => tempF)),
+      memberCount: 20,
+      forecastDate: iso,
+      ensembleModel: 'gfs' as const,
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    redisMock = createRedisMock();
+    originalFetch = globalThis.fetch;
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_MIN_MODEL_COVERAGE: 0,
+      WEATHER_MIN_EDGE: 0.02,
+      WEATHER_MODAL_MASS_VETO_ENABLED: true,
+      WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.5,
+      WEATHER_INTERIOR_NO_FORECAST_MARGIN: 1,
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: () => Promise.resolve([makeEvent()]),
+    }) as unknown as typeof fetch;
+    mockFetchNwsForecast.mockResolvedValue({ highF: 56, lowF: 40, precipProbability: 0, forecastDate: iso, shortForecast: 'Clear' });
+    mockFetchOpenMeteo.mockResolvedValue({ highTemp: 56, lowTemp: 40, precipProbability: 0, forecastDate: iso });
+    mockFetchEnsemble.mockResolvedValue({ meanHigh: 56, stddevHigh: 3.2, meanLow: 40, stddevLow: 2.8, memberCount: 31, forecastDate: iso });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    // Restore the default fresh-spread implementation so later files/tests are unaffected.
+    mockLoadConfig.mockImplementation(() => ({ ...baseConfig }));
+  });
+
+  it('blocks the interior NO when ensemble members cluster in the bracket', async () => {
+    mockFetchEnsembleHourly.mockResolvedValue(hourlyClusteredAt(50.5));
+    const results = await scanWeatherMarkets(redisMock as never);
+    const no = results.find((o) => o.bracketLabel === '50-51°F' && o.tradeSide === 'NO');
+    expect(no).toBeDefined();
+    expect(no!.blockedByModalMass).toBe(true);
+    expect(no!.ensembleYesMass ?? 0).toBeGreaterThanOrEqual(0.5);
+    expect(mockFetchEnsembleHourly).toHaveBeenCalled();
+  });
+
+  it('does not block the interior NO when ensemble members are far from the bracket', async () => {
+    mockFetchEnsembleHourly.mockResolvedValue(hourlyClusteredAt(60));
+    const results = await scanWeatherMarkets(redisMock as never);
+    const no = results.find((o) => o.bracketLabel === '50-51°F' && o.tradeSide === 'NO');
+    expect(no).toBeDefined();
+    expect(no!.blockedByModalMass).toBe(false);
+    expect(no!.ensembleYesMass ?? 1).toBeLessThan(0.5);
+  });
+
+  it('skips the ensemble-hourly fetch when the veto is disabled', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig, WEATHER_MIN_MODEL_COVERAGE: 0, WEATHER_MIN_EDGE: 0.02, WEATHER_MODAL_MASS_VETO_ENABLED: false,
+    });
+    const results = await scanWeatherMarkets(redisMock as never);
+    const no = results.find((o) => o.bracketLabel === '50-51°F' && o.tradeSide === 'NO');
+    expect(no).toBeDefined();
+    expect(no!.blockedByModalMass).toBe(false);
+    expect(mockFetchEnsembleHourly).not.toHaveBeenCalled();
   });
 });
