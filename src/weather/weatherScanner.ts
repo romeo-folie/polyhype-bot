@@ -55,6 +55,7 @@ import type { CityCoordinates, FetchFn } from './noaaClient.js';
 import { cityLocalDate, cityLocalHour, cityDayEndUtcMs } from './resolutionTime.js';
 import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast, fetchEnsembleHourly } from './openMeteoClient.js';
 import { ensembleFinalMaxDistribution, bracketWinProbFromFinalMaxes } from './conditionalOracle.js';
+import { calibrateWeatherBracketProbability, classifyBracketShape } from './bracketCalibration.js';
 import { getCityBias, getCityActuals } from './cityBias.js';
 import type { CityBias, CityActuals } from './cityBias.js';
 import { cacheForecast } from './forecastCache.js';
@@ -887,6 +888,14 @@ export interface WeatherBracketOpportunity {
    *  correction and NO source-σ inflation. Lets shadow analysis measure the σ
    *  inflation's effect before the learned calibrator (PR2) lands. */
   modelProbRaw?: number;
+  /** Calibrated P(YES) from the reliability map (PR2a). Null when the calibration
+   *  shadow pass is disabled. SHADOW-ONLY: the live tradeSide/edge still use the
+   *  raw modelProbability; this is logged for analysis before acting on it (PR2b). */
+  modelProbCalibrated?: number | null;
+  /** Calibrated edge on the live-chosen tradeSide (modelProbCalibrated vs price). */
+  edgeCalibrated?: number | null;
+  /** Side the calibrated probability would naturally pick (pre-gate), for comparison. */
+  tradeSideCalibrated?: 'YES' | 'NO' | null;
 }
 
 interface WeatherMarketState {
@@ -1102,6 +1111,10 @@ export interface FindMispricedOptions {
   /** Block interior/range NO when the rounded forecast is within this many
    *  market-unit degrees of the bracket (default 0 = into-bracket only). */
   interiorNoForecastMargin?: number;
+  /** Compute the calibrated P(YES) (reliability map) and attach the shadow
+   *  comparison fields. SHADOW-ONLY — never changes the live side/edge. Default
+   *  false at the function level; scanWeatherMarkets passes the config value. */
+  calibrationShadowEnabled?: boolean;
 }
 
 export interface BiasedProbResult {
@@ -1199,6 +1212,7 @@ export function findMispricedBrackets(
     yesGateNoFallbackEnabled = true,
     openMeteoStddevMultiplier = 1.0,
     interiorNoForecastMargin = 0,
+    calibrationShadowEnabled = false,
   } = options;
   // Defense-in-depth clamp: loadConfig() cross-validates trusted ≥ min, but this
   // helper is also called directly from tests and could accept arbitrary values.
@@ -1468,6 +1482,26 @@ export function findMispricedBrackets(
     // segment fallback-NO out of the native-NO cohort; a native NO stays untagged.
     const yesFellBackToNo = wouldHaveFallenBackToNo && !blockedByNoFallback;
 
+    // Calibration SHADOW pass (PR2a): map the raw model P(YES) through the fitted
+    // reliability map and record what it would imply. Never changes the live
+    // tradeSide/edge above — purely additive shadow fields, gated separately
+    // from execution (PR2b acts on it).
+    let modelProbCalibrated: number | null = null;
+    let edgeCalibrated: number | null = null;
+    let tradeSideCalibrated: 'YES' | 'NO' | null = null;
+    if (calibrationShadowEnabled) {
+      const shape = classifyBracketShape(bracket.low, bracket.high);
+      modelProbCalibrated = calibrateWeatherBracketProbability(modelProb, {
+        shape, source: forecast.source, daysOut,
+      });
+      const edgeYesCal = modelProbCalibrated - bracket.yesPrice;
+      const edgeNoCal = (1 - modelProbCalibrated) - bracket.noPrice;
+      tradeSideCalibrated = edgeYesCal >= edgeNoCal && edgeYesCal > 0
+        ? 'YES'
+        : edgeNoCal > 0 ? 'NO' : null;
+      edgeCalibrated = tradeSide === 'YES' ? edgeYesCal : edgeNoCal;
+    }
+
     opportunities.push({
       marketId: bracket.marketId,
       conditionId: bracket.conditionId,
@@ -1527,6 +1561,9 @@ export function findMispricedBrackets(
       ensembleYesMass: null,
       sourceStddevMultiplier,
       modelProbRaw,
+      modelProbCalibrated,
+      edgeCalibrated,
+      tradeSideCalibrated,
     });
   }
 
@@ -1811,6 +1848,7 @@ export async function scanWeatherMarkets(
         yesGateNoFallbackEnabled: cfg.WEATHER_YES_GATE_NO_FALLBACK_ENABLED,
         openMeteoStddevMultiplier: cfg.WEATHER_OPEN_METEO_STDDEV_MULTIPLIER,
         interiorNoForecastMargin: cfg.WEATHER_INTERIOR_NO_FORECAST_MARGIN,
+        calibrationShadowEnabled: cfg.WEATHER_CALIBRATION_SHADOW_ENABLED,
       },
     );
     const afterMarketGate = await applyMarketDisagreementGate(redis, opportunities, cfg);
@@ -2090,6 +2128,10 @@ export async function scanWeatherMarkets(
           ensembleYesMass: opp.ensembleYesMass ?? null,
           sourceStddevMultiplier: opp.sourceStddevMultiplier ?? 1.0,
           modelProbRaw: opp.modelProbRaw ?? null,
+          // Calibration shadow (PR2a) — raw vs calibrated for reliability tracking.
+          modelProbCalibrated: opp.modelProbCalibrated ?? null,
+          edgeCalibrated: opp.edgeCalibrated ?? null,
+          tradeSideCalibrated: opp.tradeSideCalibrated ?? null,
         },
       });
     }

@@ -66,6 +66,9 @@ const baseConfig = {
   WEATHER_INTERIOR_NO_FORECAST_MARGIN: 0,
   WEATHER_MODAL_MASS_VETO_ENABLED: false,
   WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.50,
+  // Calibration shadow off in the base config so legacy scan assertions are
+  // unaffected; the dedicated calibration tests enable it explicitly.
+  WEATHER_CALIBRATION_SHADOW_ENABLED: false,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
 vi.mock('../../shared/config.js', () => ({
@@ -1414,6 +1417,44 @@ describe('findMispricedBrackets - NO-bias model-safety guards (2026-06-19)', () 
       if (pr1) expect(pr1.edge).toBeLessThan(legacy!.edge);
     });
   }
+
+  // ── Calibration shadow pass (PR2a) ──────────────────────────────────────────
+  it('attaches calibrated shadow fields when calibrationShadowEnabled, without changing the live decision', () => {
+    const brackets = [{
+      marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
+      threshold: 0, low: 28, high: 28, label: '28°C', yesPrice: 0.90, noPrice: 0.08,
+    }];
+    const forecast = { forecastHigh: 24.1, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
+    const event = { ...baseEvent, brackets };
+    const opp = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON, calibrationShadowEnabled: true,
+    }).opportunities[0]!;
+    // Live decision is unchanged (still a native NO on the raw probability).
+    expect(opp.tradeSide).toBe('NO');
+    // Calibrated fields are populated and well-formed (uses the committed artifact).
+    expect(opp.modelProbCalibrated).not.toBeNull();
+    expect(opp.modelProbCalibrated!).toBeGreaterThanOrEqual(0);
+    expect(opp.modelProbCalibrated!).toBeLessThanOrEqual(1);
+    expect(opp.edgeCalibrated).not.toBeNull();
+    expect(['YES', 'NO', null]).toContain(opp.tradeSideCalibrated);
+    // modelProbability (the live raw prob) is untouched by calibration.
+    expect(opp.modelProbability).toBeCloseTo(opp.modelProbRaw!, 6);
+  });
+
+  it('leaves calibrated shadow fields null when calibrationShadowEnabled is off (default)', () => {
+    const brackets = [{
+      marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
+      threshold: 0, low: 28, high: 28, label: '28°C', yesPrice: 0.90, noPrice: 0.08,
+    }];
+    const forecast = { forecastHigh: 24.1, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
+    const event = { ...baseEvent, brackets };
+    const opp = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, ...GATES_ON,
+    }).opportunities[0]!;
+    expect(opp.modelProbCalibrated ?? null).toBeNull();
+    expect(opp.edgeCalibrated ?? null).toBeNull();
+    expect(opp.tradeSideCalibrated ?? null).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
