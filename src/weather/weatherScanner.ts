@@ -53,7 +53,8 @@ import {
 } from './noaaClient.js';
 import type { CityCoordinates, FetchFn } from './noaaClient.js';
 import { cityLocalDate, cityLocalHour, cityDayEndUtcMs } from './resolutionTime.js';
-import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast } from './openMeteoClient.js';
+import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast, fetchEnsembleHourly } from './openMeteoClient.js';
+import { ensembleFinalMaxDistribution, bracketWinProbFromFinalMaxes } from './conditionalOracle.js';
 import { getCityBias, getCityActuals } from './cityBias.js';
 import type { CityBias, CityActuals } from './cityBias.js';
 import { cacheForecast } from './forecastCache.js';
@@ -862,8 +863,30 @@ export interface WeatherBracketOpportunity {
   yesGateReason?: string | null;
   /** True when this NO opportunity is a fallback from a gated YES (the model's
    *  preferred side was YES but it was gated off). Lets shadow analysis exclude
-   *  these from the "native NO" cohort so YES-gate win-rate study stays clean. */
+   *  these from the "native NO" cohort so YES-gate win-rate study stays clean.
+   *  Only set when the fallback actually traded (WEATHER_YES_GATE_NO_FALLBACK_ENABLED=true). */
   yesFellBackToNo?: boolean;
+  /** True whenever the model preferred YES (edgeYes ≥ edgeNo > 0) but a YES gate
+   *  blocked it — independent of whether the NO fallback was allowed to trade.
+   *  This is the analysis cohort for the YES→NO fallback decision. */
+  wouldHaveFallenBackToNo?: boolean;
+  /** True when this NO opportunity exists only because the model's preferred YES
+   *  was gated AND WEATHER_YES_GATE_NO_FALLBACK_ENABLED=false. Shadow-logged but
+   *  never traded (betting NO here is betting against the model's own side). */
+  blockedByNoFallback?: boolean;
+  /** True when the ensemble member distribution puts too much YES mass on this
+   *  bracket (widened by WEATHER_INTERIOR_NO_FORECAST_MARGIN) for a NO bet to be
+   *  safe. Evaluated in scanWeatherMarkets (needs an async ensemble-hourly fetch). */
+  blockedByModalMass?: boolean;
+  /** Ensemble YES mass over the margin-widened bracket used by the modal-mass
+   *  veto. Null when not evaluated (not a bounded NO, or the fetch was skipped/failed). */
+  ensembleYesMass?: number | null;
+  /** Source-specific σ multiplier applied at entry (e.g. 1.25 for Open-Meteo, 1.0 otherwise). */
+  sourceStddevMultiplier?: number;
+  /** Pre-2026-06-19 baseline bracket probability: the Gaussian with NO bias
+   *  correction and NO source-σ inflation. Lets shadow analysis measure the σ
+   *  inflation's effect before the learned calibrator (PR2) lands. */
+  modelProbRaw?: number;
 }
 
 interface WeatherMarketState {
@@ -979,14 +1002,36 @@ export { shrinkTowardMarket };
  * bounded brackets carry the signal — a tail (null bound) has an open side the
  * forecast cannot round out of, so it returns false.
  */
+/**
+ * True when the rounded corrected forecast lands inside a bounded bracket
+ * widened by `margin` market-unit degrees on each side. With `margin=0` this is
+ * the strict "forecast rounds into the bracket" check (the model's central
+ * estimate resolves YES); with `margin=1` it also covers the immediately
+ * adjacent degree, where the model still has substantial mass on the bracket.
+ * Always false for tail brackets (one null bound) — those use the base-rate gate.
+ */
 export function forecastRoundsIntoBracket(
   correctedForecastHigh: number,
   low: number | null,
   high: number | null,
+  margin = 0,
 ): boolean {
   if (low === null || high === null) return false;
   const rounded = Math.round(correctedForecastHigh);
-  return rounded >= low && rounded <= high;
+  return rounded >= low - margin && rounded <= high + margin;
+}
+
+/**
+ * Source-specific σ inflation multiplier (entry only). Open-Meteo highs are
+ * underdispersed (realized MAE/σ ≈ 1.0 vs ≈ 0.80 for a calibrated normal), so
+ * their bracket probabilities are over-confident; widen σ to de-confidence NO
+ * edge. HRRR-combined / NOAA / combined are left at 1.0.
+ */
+export function resolveSourceStddevMultiplier(
+  source: string,
+  openMeteoMultiplier: number,
+): number {
+  return source === 'open-meteo' ? openMeteoMultiplier : 1.0;
 }
 
 /**
@@ -1045,6 +1090,18 @@ export interface FindMispricedOptions {
   yesMinMarketPrice?: number;
   /** Minimum model probability for YES entries. Default 0.50. */
   yesMinModelProb?: number;
+  // ── NO-bet model-safety gates (2026-06-19 NO-bias calibration) ─────────────
+  /** When false, a YES candidate blocked by a YES gate is NOT bet as NO — the
+   *  opportunity is shadow-logged (blockedByNoFallback) but not traded. Function
+   *  default true preserves legacy behaviour; scanWeatherMarkets passes the
+   *  config value (production default false). */
+  yesGateNoFallbackEnabled?: boolean;
+  /** Source-specific σ inflation for Open-Meteo highs at entry (default 1.0 = off
+   *  at the function level; scanWeatherMarkets passes WEATHER_OPEN_METEO_STDDEV_MULTIPLIER). */
+  openMeteoStddevMultiplier?: number;
+  /** Block interior/range NO when the rounded forecast is within this many
+   *  market-unit degrees of the bracket (default 0 = into-bracket only). */
+  interiorNoForecastMargin?: number;
 }
 
 export interface BiasedProbResult {
@@ -1137,6 +1194,11 @@ export function findMispricedBrackets(
     yesAllowInteriorBrackets = true,
     yesMinMarketPrice = 0,
     yesMinModelProb = 0,
+    // NO-bet safety defaults are "off" at the function level so existing tests
+    // are unaffected; scanWeatherMarkets passes the live config values.
+    yesGateNoFallbackEnabled = true,
+    openMeteoStddevMultiplier = 1.0,
+    interiorNoForecastMargin = 0,
   } = options;
   // Defense-in-depth clamp: loadConfig() cross-validates trusted ≥ min, but this
   // helper is also called directly from tests and could accept arbitrary values.
@@ -1170,13 +1232,18 @@ export function findMispricedBrackets(
   const correctedForecastHigh = meanShiftApplied ? rawForecastHigh - cityBias.meanBias : rawForecastHigh;
   const forecastHighForCalc = correctedForecastHigh;
 
+  // Source-specific σ inflation (entry only): Open-Meteo highs are underdispersed,
+  // so widen σ before the bias-mode logic. The static stddevMultiplier and this
+  // source multiplier compound — both scale the forecast σ that feeds the model.
+  const sourceStddevMultiplier = resolveSourceStddevMultiplier(forecast.source, openMeteoStddevMultiplier);
+
   // Effective stddev:
   //   - full: max of ensemble spread and empirical σ (prevents overconfidence
   //     in stable regimes where ensemble spread is tight but realized error is larger)
   //   - weak: inflate by weakBiasStddevMultiplier (de-confidence; ignore empiricalStddev
   //     directly since the sample is too thin to trust its magnitude)
   //   - none: raw stddev × stddevMultiplier
-  const rawEffectiveStdDev = forecast.stdDev * stddevMultiplier;
+  const rawEffectiveStdDev = forecast.stdDev * stddevMultiplier * sourceStddevMultiplier;
   let effectiveStdDev: number;
   if (biasMode === 'full') {
     effectiveStdDev = Math.max(rawEffectiveStdDev, cityBias!.empiricalStddev * stddevMultiplier);
@@ -1186,8 +1253,13 @@ export function findMispricedBrackets(
     effectiveStdDev = rawEffectiveStdDev;
   }
 
+  // Pre-2026-06-19 baseline σ: no bias correction, no source-σ inflation. Used
+  // only to log modelProbRaw so shadow analysis can isolate the σ-inflation effect.
+  const baselineStdDev = forecast.stdDev * stddevMultiplier;
+
   // Compute model probability for each bracket
   const modelProbs: number[] = [];
+  const rawModelProbs: number[] = [];
   const shadowModelProbs: (number | null)[] = [];
   for (const bracket of event.brackets) {
     const prob = estimateBracketProbability(
@@ -1198,6 +1270,10 @@ export function findMispricedBrackets(
       effectiveStdDev,
     );
     modelProbs.push(prob);
+    // Pre-fix baseline (uncorrected centre + uninflated σ) for shadow comparison.
+    rawModelProbs.push(
+      estimateBracketProbability(rawForecastHigh, bracket.low, bracket.high, daysOut, baselineStdDev),
+    );
     if (forecast.shadowEnsemble) {
       shadowModelProbs.push(
         estimateBracketProbability(
@@ -1240,6 +1316,7 @@ export function findMispricedBrackets(
   for (let i = 0; i < event.brackets.length; i++) {
     const bracket = event.brackets[i]!;
     const modelProb = modelProbs[i]!;
+    const modelProbRaw = rawModelProbs[i]!;
     const adjustedMarketProb = adjustedMarketProbs[i]!;
 
     // Edge per side using actual bid prices (not vig-adjusted event-level probs).
@@ -1264,19 +1341,34 @@ export function findMispricedBrackets(
 
     let tradeSide: 'YES' | 'NO';
     let edge: number;
+    // The model preferred YES (edgeYes ≥ edgeNo > 0) but a YES quality gate
+    // blocked it. This is the fallback cohort the NO-bias issue targets: with YES
+    // systematically underpredicted, "we won't buy YES" must NOT become "buy NO".
+    const wouldHaveFallenBackToNo = yesGateBlocked && edgeYes > 0 && edgeYes >= edgeNo && edgeNo > 0;
+    // True when this NO exists only as a (disabled) YES-gate fallback: recorded
+    // for shadow analysis but never traded.
+    let blockedByNoFallback = false;
 
     if (!yesGateBlocked && edgeYes >= edgeNo && edgeYes > 0) {
       tradeSide = 'YES';
       edge = edgeYes;
     } else if (edgeNo > 0) {
-      if (yesGateBlocked && edgeYes > 0) {
-        logger.debug('[weather] YES gated — falling back to NO', {
-          city: event.city, bracket: bracket.label, reason: yesGateReason,
-          edgeYes: edgeYes.toFixed(3), edgeNo: edgeNo.toFixed(3),
-        });
-      }
       tradeSide = 'NO';
       edge = edgeNo;
+      if (wouldHaveFallenBackToNo) {
+        if (yesGateNoFallbackEnabled) {
+          logger.debug('[weather] YES gated — falling back to NO', {
+            city: event.city, bracket: bracket.label, reason: yesGateReason,
+            edgeYes: edgeYes.toFixed(3), edgeNo: edgeNo.toFixed(3),
+          });
+        } else {
+          blockedByNoFallback = true;
+          logger.debug('[weather] YES gated — NO fallback disabled, shadow-only', {
+            city: event.city, bracket: bracket.label, reason: yesGateReason,
+            edgeYes: edgeYes.toFixed(3), edgeNo: edgeNo.toFixed(3),
+          });
+        }
+      }
     } else {
       if (yesGateBlocked && edgeYes > 0) {
         logger.debug('[weather] YES gated — no NO fallback, skipping', {
@@ -1292,7 +1384,7 @@ export function findMispricedBrackets(
     // NO edge when the model's P(YES) is high — edgeNo = (1-modelProb) - noPrice can
     // be positive at modelProb=0.82 if noPrice=0.08. Betting NO there means betting
     // against our own forecast direction; skip unless model genuinely leans NO.
-    if (tradeSide === 'NO' && (bracket.low === null || bracket.high === null) && modelProb > maxTailNoBetModelProb) {
+    if (!blockedByNoFallback && tradeSide === 'NO' && (bracket.low === null || bracket.high === null) && modelProb > maxTailNoBetModelProb) {
       logger.debug('[weather] skipping tail NO — model favours YES', {
         city: event.city,
         bracket: bracket.label,
@@ -1311,7 +1403,7 @@ export function findMispricedBrackets(
     // the cache will populate within hours.
     // Thin sample → fail open: some data exists, just not enough to be confident
     // either way, so let the model probability decide.
-    if (tradeSide === 'NO' && (bracket.low === null || bracket.high === null)) {
+    if (!blockedByNoFallback && tradeSide === 'NO' && (bracket.low === null || bracket.high === null)) {
       // For lowest-temperature markets the base rate must come from the daily MIN
       // series, not the daily MAX — a min ≥ 20°C is far rarer than a max ≥ 20°C.
       const actualsSeries = event.metric === 'low' ? cityActuals?.lows : cityActuals?.highs;
@@ -1347,15 +1439,18 @@ export function findMispricedBrackets(
       }
     }
 
-    // Gate: interior NO bets where the corrected forecast itself rounds into this
-    // bracket. The model's central estimate resolves YES, so we'd be betting against
-    // our own best guess — skip regardless of apparent edge.
-    if (tradeSide === 'NO' && forecastRoundsIntoBracket(correctedForecastHigh, bracket.low, bracket.high)) {
-      logger.debug('[weather] skipping interior NO — forecast rounds into bracket', {
+    // Gate: interior NO bets where the corrected forecast rounds into the bracket
+    // (margin 0) or within interiorNoForecastMargin degrees of it. The model's
+    // central estimate is in/near the bracket, so we'd be betting against our own
+    // best guess — skip regardless of apparent edge.
+    if (!blockedByNoFallback && tradeSide === 'NO'
+        && forecastRoundsIntoBracket(correctedForecastHigh, bracket.low, bracket.high, interiorNoForecastMargin)) {
+      logger.debug('[weather] skipping interior NO — forecast rounds into/near bracket', {
         city: event.city,
         bracket: bracket.label,
         correctedForecastHigh,
         roundedForecast: Math.round(correctedForecastHigh),
+        margin: interiorNoForecastMargin,
       });
       continue;
     }
@@ -1366,13 +1461,12 @@ export function findMispricedBrackets(
     if (bracket.yesPrice < 0.005 && tradeSide === 'YES') continue;
     if (bracket.noPrice < 0.005 && tradeSide === 'NO') continue;
 
-    // A YES-gate fallback: the model's preferred side was YES (edgeYes >= edgeNo,
-    // edgeYes > 0) but the YES gate blocked it, so this NO exists only because YES
-    // was gated. yesGateReason is persisted ONLY in this case — a native NO (YES
-    // never had edge, or NO was genuinely better) must stay untagged so shadow
-    // analysis can segment fallback-NO out of the native-NO cohort.
-    const yesFellBackToNo =
-      yesGateBlocked && tradeSide === 'NO' && edgeYes >= edgeNo && edgeYes > 0;
+    // A YES-gate fallback that ACTUALLY TRADED: the model preferred YES but the
+    // YES gate blocked it and WEATHER_YES_GATE_NO_FALLBACK_ENABLED=true, so this
+    // NO traded only because YES was gated. yesGateReason is persisted whenever
+    // the YES gate drove the NO (traded OR shadow-blocked) so shadow analysis can
+    // segment fallback-NO out of the native-NO cohort; a native NO stays untagged.
+    const yesFellBackToNo = wouldHaveFallenBackToNo && !blockedByNoFallback;
 
     opportunities.push({
       marketId: bracket.marketId,
@@ -1420,11 +1514,19 @@ export function findMispricedBrackets(
       shadowEnsembleMembers: forecast.shadowEnsemble?.ensembleMembers ?? null,
       // Veto is evaluated later in scanWeatherMarkets once cfg is available.
       blockedByEnsembleVeto: false,
-      // Only tag the reason when YES actually got gated into this NO fallback —
-      // a native NO must keep yesGateReason=null even if e.g. the interior gate
-      // would have tripped, so the native-NO cohort stays clean.
-      yesGateReason: yesFellBackToNo ? yesGateReason : null,
+      // Tag the reason whenever the YES gate drove this NO (traded fallback OR
+      // shadow-blocked) — a native NO must keep yesGateReason=null even if e.g.
+      // the interior gate would have tripped, so the native-NO cohort stays clean.
+      yesGateReason: wouldHaveFallenBackToNo ? yesGateReason : null,
       yesFellBackToNo,
+      wouldHaveFallenBackToNo,
+      blockedByNoFallback,
+      // Modal-mass veto is evaluated later in scanWeatherMarkets (needs an async
+      // ensemble-hourly fetch); default unblocked / unevaluated here.
+      blockedByModalMass: false,
+      ensembleYesMass: null,
+      sourceStddevMultiplier,
+      modelProbRaw,
     });
   }
 
@@ -1706,6 +1808,9 @@ export async function scanWeatherMarkets(
         yesAllowInteriorBrackets: cfg.WEATHER_YES_ALLOW_INTERIOR_BRACKETS,
         yesMinMarketPrice: cfg.WEATHER_YES_MIN_MARKET_PRICE,
         yesMinModelProb: cfg.WEATHER_YES_MIN_MODEL_PROB,
+        yesGateNoFallbackEnabled: cfg.WEATHER_YES_GATE_NO_FALLBACK_ENABLED,
+        openMeteoStddevMultiplier: cfg.WEATHER_OPEN_METEO_STDDEV_MULTIPLIER,
+        interiorNoForecastMargin: cfg.WEATHER_INTERIOR_NO_FORECAST_MARGIN,
       },
     );
     const afterMarketGate = await applyMarketDisagreementGate(redis, opportunities, cfg);
@@ -1719,6 +1824,59 @@ export async function scanWeatherMarkets(
            opp.shadowEdge != null &&
            opp.shadowEdge <= 0),
     }));
+
+    // Modal-mass NO veto: for bounded-bracket NO candidates, fetch the ensemble
+    // member distribution and block NO when too much member mass rounds into the
+    // bracket (widened by WEATHER_INTERIOR_NO_FORECAST_MARGIN). Evaluated here
+    // rather than in findMispricedBrackets because it needs an async fetch; the
+    // extra ensemble-hourly call only fires when a bounded NO candidate survives.
+    if (cfg.WEATHER_MODAL_MASS_VETO_ENABLED) {
+      const boundedNoOpps = gatedOpportunities.filter((o) => {
+        if (o.tradeSide !== 'NO' || o.blockedByNoFallback) return false;
+        const p = parseBracketLabel(o.bracketLabel);
+        return p?.low != null && p?.high != null;
+      });
+      if (boundedNoOpps.length > 0) {
+        const coords = lookupCity(event.city);
+        const hourly = coords
+          ? await fetchEnsembleHourly(
+              coords.lat, coords.lon, event.targetDate, event.unit, fetchFn, cfg.WEATHER_MODEL_ECMWF_ENABLED,
+            ).catch(() => null)
+          : null;
+        if (hourly && hourly.memberTemps.length > 0) {
+          // No observed running extreme at entry (future day): each member's final
+          // extreme is just its forecast daily max/min — no bias/spread adjustment.
+          const finalExtremes = ensembleFinalMaxDistribution(
+            event.metric === 'low' ? Infinity : -Infinity,
+            hourly.memberTemps,
+            0,
+            1.0,
+            event.metric,
+          );
+          const margin = cfg.WEATHER_INTERIOR_NO_FORECAST_MARGIN;
+          for (const o of boundedNoOpps) {
+            const parsed = parseBracketLabel(o.bracketLabel);
+            if (parsed?.low == null || parsed?.high == null) continue;
+            const yesMass = bracketWinProbFromFinalMaxes(finalExtremes, 'YES', {
+              low: parsed.low - margin,
+              high: parsed.high + margin,
+            });
+            o.ensembleYesMass = yesMass;
+            if (yesMass >= cfg.WEATHER_INTERIOR_NO_MODAL_MASS_VETO) {
+              o.blockedByModalMass = true;
+              logger.info('[weather] modal-mass veto — too much ensemble YES mass for NO', {
+                city: event.city,
+                bracket: o.bracketLabel,
+                yesMass: Math.round(yesMass * 1000) / 1000,
+                threshold: cfg.WEATHER_INTERIOR_NO_MODAL_MASS_VETO,
+                members: hourly.memberCount,
+                margin,
+              });
+            }
+          }
+        }
+      }
+    }
     // `effectiveStdDev` above is the post-bias σ actually used by
     // estimateBracketProbability (weak-band inflator or full-tier empirical-σ
     // overlay already applied). Surfaced up from findMispricedBrackets so the
@@ -1731,7 +1889,8 @@ export async function scanWeatherMarkets(
       ? Math.max(...gatedOpportunities.map((o) => o.edge))
       : 0;
     const allowedInEvent = gatedOpportunities.filter(
-      (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto,
+      (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto
+        && !o.blockedByNoFallback && !o.blockedByModalMass,
     ).length;
     const disagreementBlocked = gatedOpportunities.filter((o) => o.blockedByMarketDisagreement).length;
     const ensembleVetoBlocked = gatedOpportunities.filter((o) => o.blockedByEnsembleVeto).length;
@@ -1833,7 +1992,9 @@ export async function scanWeatherMarkets(
         featureLive &&
         opp.allowedByConfig &&
         !opp.blockedByMarketDisagreement &&
-        !opp.blockedByEnsembleVeto;
+        !opp.blockedByEnsembleVeto &&
+        !opp.blockedByNoFallback &&
+        !opp.blockedByModalMass;
       logger.info('[weather] bracket opportunity', {
         marketId: opp.marketId,
         eventSlug: opp.eventSlug,
@@ -1858,6 +2019,9 @@ export async function scanWeatherMarkets(
         allowedByConfig: opp.allowedByConfig,
         blockedByMarketDisagreement: opp.blockedByMarketDisagreement ?? false,
         blockedByEnsembleVeto: opp.blockedByEnsembleVeto ?? false,
+        blockedByNoFallback: opp.blockedByNoFallback ?? false,
+        blockedByModalMass: opp.blockedByModalMass ?? false,
+        ensembleYesMass: opp.ensembleYesMass ?? null,
         previousOutcomePrice: opp.previousOutcomePrice ?? null,
         previousWinProbability: opp.previousWinProbability ?? null,
         wouldTrade,
@@ -1919,6 +2083,13 @@ export async function scanWeatherMarkets(
           // out of the native-NO cohort when studying YES-gate win rates.
           yesGateReason: opp.yesGateReason ?? null,
           yesFellBackToNo: opp.yesFellBackToNo ?? false,
+          // NO-bias calibration provenance (2026-06-19):
+          wouldHaveFallenBackToNo: opp.wouldHaveFallenBackToNo ?? false,
+          blockedByNoFallback: opp.blockedByNoFallback ?? false,
+          blockedByModalMass: opp.blockedByModalMass ?? false,
+          ensembleYesMass: opp.ensembleYesMass ?? null,
+          sourceStddevMultiplier: opp.sourceStddevMultiplier ?? 1.0,
+          modelProbRaw: opp.modelProbRaw ?? null,
         },
       });
     }
@@ -1945,7 +2116,8 @@ export async function scanWeatherMarkets(
 
   const totalEnsembleVetoBlocked = allOpportunities.filter((o) => o.blockedByEnsembleVeto).length;
   const allowedOpportunities = allOpportunities.filter(
-    (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto,
+    (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto
+      && !o.blockedByNoFallback && !o.blockedByModalMass,
   );
   logger.info('[weather] scan summary', {
     totalEvents: rawEvents.length,
@@ -2695,6 +2867,8 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       o.allowedByConfig &&
       !o.blockedByMarketDisagreement &&
       !o.blockedByEnsembleVeto &&
+      !o.blockedByNoFallback &&
+      !o.blockedByModalMass &&
       !excludedCities.has(o.city.toLowerCase()),
   );
 

@@ -2191,6 +2191,36 @@ export const envSchema = z.object({
   WEATHER_YES_MIN_MARKET_PRICE: z.coerce.number().min(0).max(0.99).optional().default(0.30),
   // Minimum model probability for YES entries. Ensures directional confidence.
   WEATHER_YES_MIN_MODEL_PROB: z.coerce.number().min(0).max(1).optional().default(0.50),
+  // ── NO-bet model-safety gates (2026-06-19: weather NO-bias calibration) ──────
+  // The Gaussian bracket model systematically underpredicts YES for narrow
+  // brackets, which inflates NO edge (see
+  // docs/issues/weather-bracket-model-overconfidence-2026-06-19.md). These gates
+  // curb the worst NO failure modes while the learned calibrator (PR2, shadow)
+  // is built.
+  //
+  // YES→NO fallback: when a YES candidate is blocked by a YES quality gate but
+  // the model preferred YES (edgeYes ≥ edgeNo > 0), the old code fell back to
+  // betting NO — i.e. against the model's own preferred side. Default OFF: a
+  // gated YES no longer becomes a NO bet; it is shadow-logged, not traded.
+  WEATHER_YES_GATE_NO_FALLBACK_ENABLED: boolFromEnv.optional().default(false),
+  // Source-specific σ inflation. Open-Meteo (international highs) is materially
+  // underdispersed (realized MAE/σ ≈ 1.0 vs ≈ 0.80 for a calibrated normal), so
+  // its bracket probabilities are over-confident. Multiply the Open-Meteo
+  // forecast σ by this factor at ENTRY only (exit/invalidation σ unchanged).
+  // 1.0 disables; HRRR-combined/NOAA are always left at 1.0.
+  WEATHER_OPEN_METEO_STDDEV_MULTIPLIER: z.coerce.number().min(0.5).max(3).optional().default(1.25),
+  // Interior-NO forecast margin (market-unit degrees). Block an interior/range
+  // NO bet when the rounded corrected forecast lands within this many degrees of
+  // the bracket (0 = only when it rounds into the bracket; 1 = also the
+  // immediately-adjacent degree). Tail brackets keep using the base-rate gate.
+  WEATHER_INTERIOR_NO_FORECAST_MARGIN: z.coerce.number().int().min(0).max(5).optional().default(1),
+  // Ensemble modal-mass NO veto. For bounded-bracket NO candidates, fetch the
+  // ensemble member distribution and block NO when the YES mass over the bracket
+  // (widened by WEATHER_INTERIOR_NO_FORECAST_MARGIN) is at least this fraction.
+  // Costs one extra ensemble-hourly fetch per event that has a surviving bounded
+  // NO candidate. Set _ENABLED=false to skip the fetch entirely.
+  WEATHER_MODAL_MASS_VETO_ENABLED: boolFromEnv.optional().default(true),
+  WEATHER_INTERIOR_NO_MODAL_MASS_VETO: z.coerce.number().min(0).max(1).optional().default(0.50),
   // --- WEATHER EXIT RULES (monitor) ---
   // Weather brackets resolve at end-of-day of their target date; realized hold
   // times run ~17–26h when entering 0–1 day out. Stale-exit (STALE_MIN_AGE_H_WEATHER=6h)
