@@ -2431,20 +2431,30 @@ export const envSchema = z.object({
   // Number of consecutive modal-against scans required before classifying a
   // position as actionable for cancellation/notification (modal_against gate).
   WEATHER_DRIFT_EXACT_MODAL_MIN_RUNS: z.coerce.number().int().min(1).optional().default(1),
-  // Number of consecutive modal-against scans required before considering exit
-  // or flip for exact-bracket positions (stricter than notification gate).
+  // Number of consecutive modal-against scans required before a modal_against
+  // EXIT (or flip) fires. This is the SOLE modal-exit gate: a modal_against exit
+  // fires only when the corrected forecast has rounded against the held thesis on
+  // this many consecutive scans — there is NO held-prob / steep-drop fast-track.
+  // A still-high-conviction position straddling a rounding boundary (a 0.1° wobble
+  // from flipping back) is therefore never dumped on a single scan (2026-06-13
+  // London 5084: sold at modal streak 1 on an 8.6% drop at 76.9% held).
+  // Notifications/cancels still fire at streak 1 (the notification gate is
+  // WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS); only the EXIT waits for N runs.
   WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS: z.coerce.number().int().min(1).optional().default(2),
-  // Conviction gate for SINGLE-streak modal_against exits. A modal_against exit
-  // fires on the first scan ONLY when the drift is severe — either the held-prob
-  // has dropped from entry by ≥ WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP, OR the current
-  // held-prob is below WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING. Otherwise the
-  // exit waits for WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS consecutive scans before
-  // selling. A still-high-conviction position straddling a rounding boundary
-  // (forecast a 0.1° wobble from flipping back) must not be dumped on one scan —
-  // 2026-06-13 London 5084 sold at modal streak 1 on an 8.6% drop at 76.9% held.
-  // Notifications/cancels still fire at streak 1; only the position EXIT is gated.
-  WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP: z.coerce.number().min(0).max(1).optional().default(0.15),
-  WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING: z.coerce.number().min(0).max(1).optional().default(0.75),
+
+  // ── Held-prob "fresh decline below floor" exit ──────────────────────────────
+  // Resolution-day exit for a position whose model held-prob — having once been at
+  // or above WEATHER_DRIFT_HELD_PROB_EXIT_FLOOR ("peaked") — makes a genuine
+  // scan-over-scan decline (≥ WEATHER_DRIFT_FRESH_DECLINE_MIN_DELTA vs the prior
+  // scan) that takes it BELOW the floor. Replaces the old single-scan severe-drop
+  // exit: a still-confident (≥ floor) position is never sold on a drop alone, and
+  // a static/stale drop never re-fires (only an actively-falling position exits).
+  // A position ENTERED below the floor never qualifies (never peaked), so
+  // low-conviction entries aren't dumped on the first downtick. Gated to
+  // resolution day, like the other forecast exits.
+  WEATHER_DRIFT_HELD_PROB_EXIT_ENABLED: boolFromEnv.optional().default(true),
+  WEATHER_DRIFT_HELD_PROB_EXIT_FLOOR: z.coerce.number().min(0).max(1).optional().default(0.75),
+  WEATHER_DRIFT_FRESH_DECLINE_MIN_DELTA: z.coerce.number().min(0).max(1).optional().default(0.02),
 
   // ── Weather drift live actions (Phase 3+4) ──────────────────────────────
   // Master live gate. Shadow logging (WEATHER_DRIFT_SHADOW_ENABLED) is

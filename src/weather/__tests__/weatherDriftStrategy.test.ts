@@ -191,7 +191,7 @@ const { evaluateWeatherPositionThesis } = await import('../weatherThesis.js');
 
 const {
   classifyDriftState,
-  modalExitStreakSatisfied,
+  shouldExitOnHeldProbDecline,
   runWeatherDriftStrategy,
   runWeatherNowcastScan,
   sliceToRemainingHours,
@@ -262,8 +262,9 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     WEATHER_DRIFT_FLIP_MAX_SCAN_NOTIONAL: 50,
     WEATHER_DRIFT_EXACT_MODAL_MIN_RUNS: 1,
     WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS: 2,
-    WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP: 0.15,
-    WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING: 0.75,
+    WEATHER_DRIFT_HELD_PROB_EXIT_ENABLED: true,
+    WEATHER_DRIFT_HELD_PROB_EXIT_FLOOR: 0.75,
+    WEATHER_DRIFT_FRESH_DECLINE_MIN_DELTA: 0.02,
     // Conditional oracle knobs — all dark by default
     WEATHER_COND_ORACLE_ENABLED: false,
     WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED: false,
@@ -548,50 +549,57 @@ describe('evaluateWeatherPositionThesis', () => {
   });
 });
 
-// ── modalExitStreakSatisfied tests ────────────────────────────────────────────
+// ── shouldExitOnHeldProbDecline tests ─────────────────────────────────────────
 
-describe('modalExitStreakSatisfied (modal_against exit conviction gate)', () => {
-  // Production defaults: fast-track at 1 streak, slow-track at 2, steep drop 0.15,
-  // held-prob ceiling 0.75.
-  const base = {
-    fastTrackRuns: 1,
-    slowTrackRuns: 2,
-    steepDrop: 0.15,
-    heldProbCeiling: 0.75,
-  };
+describe('shouldExitOnHeldProbDecline (held-prob fresh-decline exit gate)', () => {
+  // Production defaults: floor 0.75, min scan-over-scan delta 0.02.
+  const base = { enabled: true, floor: 0.75, minDelta: 0.02 };
 
-  it('defers a 1-streak exit on a shallow drop at high held-prob (London 5084)', () => {
-    // 8.6% drop at 76.9% held — neither fast-track condition met → needs 2 streaks.
+  it('exits when a peaked position actively declines below the floor', () => {
+    // User scenario step 2: 0.78 → 0.72 (fresh decline of 0.06, now below 0.75).
     expect(
-      modalExitStreakSatisfied({ ...base, modalStreak: 1, drop: 0.086, currentHeldProb: 0.769 }),
+      shouldExitOnHeldProbDecline({ ...base, peakedAboveFloor: true, prevHeldProb: 0.78, currentHeldProb: 0.72 }),
+    ).toBe(true);
+  });
+
+  it('does NOT exit while still at or above the floor, even after a drop', () => {
+    // User scenario step 1: dropped from 0.92 → 0.78 but still ≥ 0.75 → hold.
+    expect(
+      shouldExitOnHeldProbDecline({ ...base, peakedAboveFloor: true, prevHeldProb: 0.92, currentHeldProb: 0.78 }),
     ).toBe(false);
   });
 
-  it('exits once a second consecutive streak accrues at the same shallow drift', () => {
+  it('does NOT exit a position that was never above the floor (low-conviction entry)', () => {
+    // Entered below 0.75, ticking down — must not be dumped on a downtick.
     expect(
-      modalExitStreakSatisfied({ ...base, modalStreak: 2, drop: 0.086, currentHeldProb: 0.769 }),
-    ).toBe(true);
-  });
-
-  it('fast-tracks a 1-streak exit on a steep held-prob drop (>= 15%)', () => {
-    expect(
-      modalExitStreakSatisfied({ ...base, modalStreak: 1, drop: 0.15, currentHeldProb: 0.80 }),
-    ).toBe(true);
-  });
-
-  it('fast-tracks a 1-streak exit when held-prob is below the ceiling (< 75%)', () => {
-    expect(
-      modalExitStreakSatisfied({ ...base, modalStreak: 1, drop: 0.05, currentHeldProb: 0.74 }),
-    ).toBe(true);
-  });
-
-  it('held-prob exactly at the ceiling is NOT below it → still needs 2 streaks', () => {
-    expect(
-      modalExitStreakSatisfied({ ...base, modalStreak: 1, drop: 0.05, currentHeldProb: 0.75 }),
+      shouldExitOnHeldProbDecline({ ...base, peakedAboveFloor: false, prevHeldProb: 0.55, currentHeldProb: 0.52 }),
     ).toBe(false);
+  });
+
+  it('does NOT exit on the first scan (no prior held-prob on record)', () => {
     expect(
-      modalExitStreakSatisfied({ ...base, modalStreak: 2, drop: 0.05, currentHeldProb: 0.75 }),
+      shouldExitOnHeldProbDecline({ ...base, peakedAboveFloor: true, prevHeldProb: null, currentHeldProb: 0.30 }),
+    ).toBe(false);
+  });
+
+  it('does NOT exit on a static/stale drop below the floor (decline < minDelta)', () => {
+    // Below the floor but essentially flat (0.001 wiggle) — the re-detection case
+    // we are explicitly avoiding: only an actively-FALLING position exits.
+    expect(
+      shouldExitOnHeldProbDecline({ ...base, peakedAboveFloor: true, prevHeldProb: 0.701, currentHeldProb: 0.700 }),
+    ).toBe(false);
+  });
+
+  it('exits on a slow grind once a single step clears minDelta below the floor', () => {
+    expect(
+      shouldExitOnHeldProbDecline({ ...base, peakedAboveFloor: true, prevHeldProb: 0.74, currentHeldProb: 0.71 }),
     ).toBe(true);
+  });
+
+  it('is inert when disabled', () => {
+    expect(
+      shouldExitOnHeldProbDecline({ ...base, enabled: false, peakedAboveFloor: true, prevHeldProb: 0.78, currentHeldProb: 0.30 }),
+    ).toBe(false);
   });
 });
 
@@ -1000,6 +1008,26 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     redis._store.set('weather:forecast_modal_supported:pos-1', '1');
   }
 
+  // Tail bracket + NO position ENTERED above the floor (entryHeldProb 0.90) whose
+  // model held-prob has since fallen to ~0.30, with a prior-scan held-prob seeded so
+  // the fresh-decline-below-floor exit fires (0.40 → 0.30 = 0.10 decline ≥ 0.02).
+  function setupHeldProbDeclinePosition(redis: ReturnType<typeof makeRedis>) {
+    mockFetchWeatherEvents.mockResolvedValue([{}]);
+    mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
+      city: 'chicago',
+      targetDate: '2026-06-01',
+      coords: { tz: 'America/Chicago' },
+      brackets: [{ label: '39°F or below', low: null, high: 39, marketId: 'mkt-1' }],
+    });
+    mockSql.mockResolvedValue([makePos({ consensusProbability: 0.10 })]); // entryHeldProb(NO)=0.90
+    mockFetchForecast.mockResolvedValue(makeForecast());
+    redis._store.set(
+      'weather:drift_held_prob_state:pos-1',
+      JSON.stringify({ prev: 0.40, peaked: true }),
+    );
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockDedup.mockResolvedValue(true); // first occurrence
@@ -1115,7 +1143,8 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     mockTryWeatherExit.mockResolvedValue(true);
     mockDedup.mockResolvedValue(false); // same-state dedup already consumed by the earlier alert
     const redis = makeRedis();
-    setupModalAgainstPosition(redis); // held ~0.30 < ceiling → modal exit fires
+    setupModalAgainstPosition(redis);
+    redis._store.set('weather:forecast_modal_streak:pos-1', '2'); // 2nd consecutive inversion → modal exit fires
     mockLoadConfig.mockReturnValue(makeConfig({
       WEATHER_DRIFT_ENABLED: true,
       WEATHER_DRIFT_EXIT_ENABLED: true,
@@ -1353,11 +1382,13 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
   it('calls tryWeatherExit on resolution day when WEATHER_DRIFT_EXIT_ENABLED=true', async () => {
     // isResolutionDay = (event.targetDate === cityLocalDate(tz))
     // mockCityLocalDate returns '2026-06-01' and targetDate is '2026-06-01' → true
+    // Held-prob fresh-decline fixture: peaked@0.90 entry, now 0.30 with prev 0.40 → exits.
     mockLoadConfig.mockReturnValue(makeConfig({
       WEATHER_DRIFT_ENABLED: true,
       WEATHER_DRIFT_EXIT_ENABLED: true,
     }));
     const redis = makeRedis();
+    setupHeldProbDeclinePosition(redis);
     await runWeatherDriftStrategy(redis as any);
 
     expect(mockTryWeatherExit).toHaveBeenCalledOnce();
@@ -1392,17 +1423,20 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
       WEATHER_DRIFT_EXIT_ENABLED: true,
     }));
     const redis = makeRedis();
+    setupHeldProbDeclinePosition(redis);
     await runWeatherDriftStrategy(redis as any);
 
     const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
     expect(call.payload.action).toBe('exit');
+    expect(call.payload.state).toBe('held_prob_decline');
   });
 
   it('exit takes priority over cancel_resting in action field', async () => {
     // Both enabled; exit fires first and sets action='exit' — cancel should not run.
     mockTryWeatherExit.mockResolvedValue(true);
     const redis = makeRedis();
-    setupModalAgainstPosition(redis); // held-prob ~0.30 → fast-tracks the exit at streak 1
+    setupModalAgainstPosition(redis);
+    redis._store.set('weather:forecast_modal_streak:pos-1', '2'); // 2nd consecutive inversion → modal exit fires
     mockGetPendingOrder.mockResolvedValue({ orderId: 'ord-1', price: 0.30 });
     mockLoadConfig.mockReturnValue(makeConfig({
       WEATHER_DRIFT_ENABLED: true,
@@ -1418,19 +1452,18 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     expect(mockCancelRestingWeatherOrder).not.toHaveBeenCalled();
   });
 
-  it('does NOT exit a first-streak modal_against when neither fast-track condition is met (London 5084 regression)', async () => {
-    // The streak-1 fixture would normally fast-track (large drop / low held-prob). Push
-    // both fast-track thresholds out of reach so neither condition fires — emulating the
-    // London 5084 case (shallow drop, still-high held-prob): the exit must wait for the
-    // 2nd consecutive modal-against streak instead of dumping on this scan.
+  it('does NOT exit a first-streak modal_against — no held-prob/steep-drop fast-track (London 5084 regression)', async () => {
+    // The fixture is a streak-1 modal_against with a collapsed held-prob (~0.30) and a
+    // large drop from entry — exactly what the OLD fast-track would have dumped on a
+    // single scan. With the fast-track removed, a modal_against exit must wait for the
+    // 2nd consecutive modal-against streak. (The held-prob fresh-decline exit can't fire
+    // here either: no prior-scan held-prob is on record for this fixture.)
     mockTryWeatherExit.mockResolvedValue(true);
     const redis = makeRedis();
-    setupModalAgainstPosition(redis); // streak=1
+    setupModalAgainstPosition(redis); // streak=1, held-prob ~0.30
     mockLoadConfig.mockReturnValue(makeConfig({
       WEATHER_DRIFT_ENABLED: true,
       WEATHER_DRIFT_EXIT_ENABLED: true,
-      WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP: 0.60, // > fixture drop → no steep-drop fast-track
-      WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING: 0.20, // < fixture held-prob → no low-conviction fast-track
     }));
 
     await runWeatherDriftStrategy(redis as any);
@@ -1441,33 +1474,11 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     expect(call.payload.action).not.toBe('exit');
   });
 
-  it('exits a first-streak modal_against once the same streak hits the required runs', async () => {
-    // Same deferral config, but a confirmed 2nd streak now satisfies slowTrackRuns (2).
+  it('exits a modal_against once two consecutive modal-against scans accrue', async () => {
     mockTryWeatherExit.mockResolvedValue(true);
     const redis = makeRedis();
     setupModalAgainstPosition(redis);
     redis._store.set('weather:forecast_modal_streak:pos-1', '2'); // 2nd consecutive inversion
-    mockLoadConfig.mockReturnValue(makeConfig({
-      WEATHER_DRIFT_ENABLED: true,
-      WEATHER_DRIFT_EXIT_ENABLED: true,
-      WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP: 0.60,
-      WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING: 0.20,
-    }));
-
-    await runWeatherDriftStrategy(redis as any);
-
-    expect(mockTryWeatherExit).toHaveBeenCalledTimes(1);
-    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
-    expect(call.payload.action).toBe('exit');
-  });
-
-  it('fast-tracks a first-streak modal_against exit on severe drift (default thresholds)', async () => {
-    // With default thresholds (steep 0.15 / ceiling 0.75), the fixture's severe drift
-    // (large drop, held-prob well below 0.75) fast-tracks the exit on a single streak —
-    // proves a genuinely collapsed position still exits immediately.
-    mockTryWeatherExit.mockResolvedValue(true);
-    const redis = makeRedis();
-    setupModalAgainstPosition(redis); // streak=1, held-prob ~0.30, drop ~0.50
     mockLoadConfig.mockReturnValue(makeConfig({
       WEATHER_DRIFT_ENABLED: true,
       WEATHER_DRIFT_EXIT_ENABLED: true,
@@ -1489,10 +1500,110 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
       WEATHER_DRIFT_BLOCK_SIZE_UP_ENABLED: true,
     }));
     const redis = makeRedis();
+    setupHeldProbDeclinePosition(redis);
     await runWeatherDriftStrategy(redis as any);
 
     const setCalls = vi.mocked(redis.set).mock.calls;
     expect(setCalls.find((c) => c[0].startsWith('weather:forecast_invalidated:'))).toBeUndefined();
+  });
+
+  // ── held_prob_decline exit ───────────────────────────────────────────────────
+  // The default thesis_weakened fixture is ENTERED below the floor (entryHeldProb
+  // 0.70), so it can never trigger the held-prob fresh-decline exit.
+  // setupHeldProbDeclinePosition enters above the floor (0.90) and seeds a
+  // prior-scan held-prob so the fresh decline below the floor is detectable.
+
+  it('no longer EXITS a thesis_weakened position on a severe cumulative drop alone (severe-drop exit replaced)', async () => {
+    // Default fixture: entryHeldProb=0.70 (never peaked ≥0.75), held now 0.30,
+    // drop 0.40 ≥ SEVERE_DROP. Under the OLD logic this exited on one scan; now it
+    // must NOT sell — it only notifies.
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.state).toBe('thesis_weakened');
+    expect(call.payload.action).toBe('notify'); // still actionable → notifies, never sells
+  });
+
+  it('exits a peaked position that has actively declined below the floor', async () => {
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    setupHeldProbDeclinePosition(redis); // peaked@0.90, prev 0.40 → now 0.30
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).toHaveBeenCalledOnce();
+    const exitArgs = mockTryWeatherExit.mock.calls[0]![0];
+    expect(exitArgs.exitReason).toBe('weather_drift');
+    expect(exitArgs.extraContext.heldProbDeclineExit).toBe(true);
+    const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
+    expect(call.payload.state).toBe('held_prob_decline');
+  });
+
+  it('does NOT exit a once-peaked position when no prior scan is on record (first scan)', async () => {
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    setupHeldProbDeclinePosition(redis);
+    redis._store.delete('weather:drift_held_prob_state:pos-1'); // no prior-scan held-prob
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+  });
+
+  it('does NOT exit a peaked position below the floor on a static drop (decline < minDelta)', async () => {
+    // prev 0.305 → cur 0.30 (decline 0.005 < 0.02): the re-detection case we avoid.
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    setupHeldProbDeclinePosition(redis);
+    redis._store.set(
+      'weather:drift_held_prob_state:pos-1',
+      JSON.stringify({ prev: 0.305, peaked: true }),
+    );
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+  });
+
+  it('does NOT exit on resolution day before resolution day (held-prob exit is res-day gated)', async () => {
+    mockCityLocalDate.mockReturnValue('2026-06-02'); // targetDate 2026-06-01 → not resolution day
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    setupHeldProbDeclinePosition(redis);
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+  });
+
+  it('persists the current held-prob and latched peak for the next scan', async () => {
+    mockLoadConfig.mockReturnValue(makeConfig({ WEATHER_DRIFT_ENABLED: true }));
+    const redis = makeRedis();
+    setupHeldProbDeclinePosition(redis);
+    await runWeatherDriftStrategy(redis as any);
+
+    const stored = JSON.parse(redis._store.get('weather:drift_held_prob_state:pos-1')!);
+    expect(stored.prev).toBeCloseTo(0.30, 5); // current held-prob, ready for next scan
+    expect(stored.peaked).toBe(true);
   });
 
   // ── market_against ────────────────────────────────────────────────────────
@@ -2778,6 +2889,39 @@ describe('runWeatherDriftStrategy — M3: hold guard vetoes forecast-state exits
     expect((driftCall![1] as any).payload.holdGuardVetoed).toBe(true);
     expect((driftCall![1] as any).payload.holdGuardVetoReason).toBe('forecast_state');
     // Exit should NOT have been called (hold guard blocked it)
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+  });
+
+  it('hold guard veto reason names held_prob_decline when that trigger fired', async () => {
+    // Position entered above the floor (0.90) and now declined to 0.30 with a prior
+    // scan on record → heldProbDeclineExit fires alongside thesis_weakened. The veto
+    // reason must NAME held_prob_decline (Phase A audit accuracy) rather than collapse
+    // to a bare 'forecast_state' as the pre-fix ternary did.
+    mockSql.mockResolvedValue([makePos({ consensusProbability: 0.10 })]); // entryHeldProb=0.90 → peaked
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_COND_ORACLE_ENABLED: true,
+      WEATHER_COND_ORACLE_HOLD_GUARD_ENABLED: true,
+      WEATHER_COND_ORACLE_HOLD_GUARD_GAP: 0.30,
+      WEATHER_DRIFT_SEVERE_DROP: 0.10,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.80,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.80,
+      WEATHER_DRIFT_WU_LIVE_ENABLED: true,
+    }));
+    const redis = makeRedis();
+    redis._store.set(
+      'weather:drift_held_prob_state:pos-1',
+      JSON.stringify({ prev: 0.40, peaked: true }),
+    );
+    await runWeatherDriftStrategy(redis as any);
+
+    const driftCall = vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    );
+    expect((driftCall![1] as any).payload.holdGuardVetoed).toBe(true);
+    expect((driftCall![1] as any).payload.holdGuardVetoReason).toBe('held_prob_decline+forecast_state');
     expect(mockTryWeatherExit).not.toHaveBeenCalled();
   });
 

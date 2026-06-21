@@ -635,6 +635,7 @@ export async function notifyWeatherDrift(opts: {
     state === 'oracle_confirmed'   ? '✅ <b>Weather Oracle Confirmed</b>' :
     state === 'oracle_impossible'  ? '🚫 <b>Weather Oracle Impossible</b>' :
     state === 'oracle_likely_against' ? '⚠️ <b>Weather Drift — Oracle Against</b>' :
+    state === 'held_prob_decline'  ? '📉 <b>Weather Drift — Held-Prob Decline</b>' :
                                      '🌧️ <b>Weather Drift Invalidation</b>';
 
   const text =

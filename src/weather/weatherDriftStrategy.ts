@@ -96,6 +96,7 @@ export type WeatherDriftState =
   | 'stable'
   | 'watch'
   | 'thesis_weakened'
+  | 'held_prob_decline'         // Held-prob made a fresh scan-over-scan decline below the conviction floor
   | 'modal_against'
   | 'market_against'            // Market price has moved strongly against us (independent of forecast)
   | 'oracle_impossible'         // Phase 5+: binary certainty — held side mathematically cannot win
@@ -152,6 +153,10 @@ export interface WeatherDriftDecision {
   // Bid velocity exit
   bidVelocityTrigger: boolean;
   bidVelocityDrop: number | null;
+  // Held-prob fresh-decline exit
+  heldProbDeclineExit: boolean;
+  prevHeldProb: number | null;
+  peakedAboveFloor: boolean;
   // Conditional oracle (Phases A-C)
   conditionalHeldProb: number | null;
   conditionalEstimator: string | null;
@@ -230,31 +235,36 @@ export function classifyDriftState(
 }
 
 /**
- * Whether a modal_against drift EXIT may fire given the current streak.
+ * Whether a held-prob "fresh decline below floor" EXIT may fire this scan.
  *
- * A single-streak exit is only allowed when the drift is severe: either the
- * held-prob has dropped steeply from entry (`drop >= steepDrop`) OR the current
- * held-prob is already below the conviction ceiling (`currentHeldProb <
- * heldProbCeiling`). In those cases the required streak is `fastTrackRuns`
- * (the actionable/notification minimum). Otherwise the exit waits for the
- * stricter `slowTrackRuns` consecutive modal-against scans, so a high-conviction
- * position straddling a rounding boundary isn't dumped on one wobbly scan.
+ * Fires only when ALL hold:
+ *  - the position has been at or above the conviction `floor` at some point
+ *    (`peakedAboveFloor`) — so a position ENTERED below the floor is never sold
+ *    on a downtick;
+ *  - the current held-prob is now BELOW the floor;
+ *  - there is a prior-scan held-prob (`prevHeldProb != null`) and the position
+ *    is ACTIVELY declining — `prevHeldProb - currentHeldProb >= minDelta`.
+ *
+ * The active-decline requirement is what distinguishes this from the removed
+ * single-scan severe-drop exit: a static/stale drop never re-fires (only a
+ * genuinely falling position exits), and a position needs at least one prior
+ * scan on record before it can trigger (no exit on the very first observation).
  *
  * Pure function — no I/O — so the gate is unit-testable in isolation.
  */
-export function modalExitStreakSatisfied(opts: {
-  modalStreak: number;
-  drop: number;
+export function shouldExitOnHeldProbDecline(opts: {
+  enabled: boolean;
   currentHeldProb: number;
-  fastTrackRuns: number;
-  slowTrackRuns: number;
-  steepDrop: number;
-  heldProbCeiling: number;
+  prevHeldProb: number | null;
+  peakedAboveFloor: boolean;
+  floor: number;
+  minDelta: number;
 }): boolean {
-  const fastTrack =
-    opts.drop >= opts.steepDrop || opts.currentHeldProb < opts.heldProbCeiling;
-  const requiredRuns = fastTrack ? opts.fastTrackRuns : opts.slowTrackRuns;
-  return opts.modalStreak >= requiredRuns;
+  if (!opts.enabled) return false;
+  if (!opts.peakedAboveFloor) return false;
+  if (opts.currentHeldProb >= opts.floor) return false;
+  if (opts.prevHeldProb == null) return false;
+  return opts.prevHeldProb - opts.currentHeldProb >= opts.minDelta;
 }
 
 // ── Redis key constants ───────────────────────────────────────────────────────
@@ -277,6 +287,12 @@ const DRIFT_NOTIFY_KEY_PREFIX = 'weather:drift_notify:';
 // Bid velocity: stores the previous scan's bid for rate-of-change comparison.
 const PREV_BID_KEY_PREFIX = 'weather:drift_prev_bid:';
 const PREV_BID_TTL_S = 3600; // covers 2 scan cycles; auto-expires when position closes
+// Held-prob fresh-decline exit: stores {prev, peaked} per position. `prev` is the
+// last scan's held-prob (for the scan-over-scan decline check); `peaked` latches
+// true once the position has been at/above the conviction floor. Refreshed every
+// scan, so it stays alive while the position is scanned and expires once it stops.
+const HELD_PROB_STATE_KEY_PREFIX = 'weather:drift_held_prob_state:';
+const HELD_PROB_STATE_TTL_S = 7 * 24 * 3600;
 // Conditional oracle result cache: written by drift strategy, read by revalidation pass.
 export const COND_ORACLE_RESULT_KEY_PREFIX = 'weather:cond_oracle:';
 // 35 min: shorter than one scan cycle (30 min) + execution window, so the read
@@ -560,6 +576,47 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         await redis.set(prevBidKey, String(currentHeldBid), 'EX', PREV_BID_TTL_S).catch(() => {});
       }
 
+      // ── Held-prob fresh-decline tracking ─────────────────────────────────────
+      // Read the prior-scan held-prob and the latched "peaked above floor" flag,
+      // decide whether an active scan-over-scan decline has taken a once-confident
+      // position below the conviction floor, then persist the updated state for the
+      // next scan. A position entered at/above the floor is "peaked" from scan 1;
+      // a position entered below it only peaks if a later scan observes recovery.
+      const heldFloor = cfg.WEATHER_DRIFT_HELD_PROB_EXIT_FLOOR;
+      let prevHeldProb: number | null = null;
+      let peakedAboveFloor = result.entryHeldProb >= heldFloor;
+      const heldStateKey = `${HELD_PROB_STATE_KEY_PREFIX}${pos.id}`;
+      const heldStateRaw = await redis.get(heldStateKey).catch(() => null);
+      if (heldStateRaw) {
+        try {
+          const parsed = JSON.parse(heldStateRaw) as { prev?: unknown; peaked?: unknown };
+          if (typeof parsed.prev === 'number' && isFinite(parsed.prev)) prevHeldProb = parsed.prev;
+          if (parsed.peaked === true) peakedAboveFloor = true;
+        } catch {
+          // Malformed blob — treat as no prior state.
+        }
+      }
+      const heldProbDeclineExit = shouldExitOnHeldProbDecline({
+        enabled: cfg.WEATHER_DRIFT_HELD_PROB_EXIT_ENABLED,
+        currentHeldProb: result.currentHeldProb,
+        prevHeldProb,
+        peakedAboveFloor,
+        floor: heldFloor,
+        minDelta: cfg.WEATHER_DRIFT_FRESH_DECLINE_MIN_DELTA,
+      });
+      // Persist for the next scan. `peaked` latches once the held-prob has been at
+      // or above the floor (entry or any prior scan); `prev` is always the current
+      // value so the next scan's decline check is genuinely scan-over-scan.
+      const newPeaked = peakedAboveFloor || result.currentHeldProb >= heldFloor;
+      await redis
+        .set(
+          heldStateKey,
+          JSON.stringify({ prev: result.currentHeldProb, peaked: newPeaked }),
+          'EX',
+          HELD_PROB_STATE_TTL_S,
+        )
+        .catch(() => {});
+
       // ── Phase 5: live observation + oracle state ─────────────────────────────
       // Fetch intraday observed max for the city. Written as a shadow row even
       // when WEATHER_DRIFT_LIVE_OBS_ENABLED=false so data accumulates from day one.
@@ -819,7 +876,9 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           ? 'oracle_likely_against'
           : marketAgainstTier != null
             ? 'market_against'
-            : forecastState);
+            : heldProbDeclineExit && forecastState !== 'modal_against'
+              ? 'held_prob_decline'
+              : forecastState);
 
       // ── Phase B: hold guard ──────────────────────────────────────────────────
       // When conditionalP - bid ≥ HOLD_GUARD_GAP with fresh settlement-aligned obs,
@@ -830,7 +889,8 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       if (
         cfg.WEATHER_COND_ORACLE_HOLD_GUARD_ENABLED &&
         isResolutionDay &&
-        (bidVelocityTrigger || forecastState === 'thesis_weakened' || forecastState === 'modal_against') &&
+        (bidVelocityTrigger || heldProbDeclineExit ||
+          forecastState === 'thesis_weakened' || forecastState === 'modal_against') &&
         condOracleResult != null &&
         !condOracleResult.isStale &&
         liveObs?.confidence === 'settlement_aligned' &&
@@ -839,12 +899,17 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         const pMinusBid = condOracleResult.heldProb - currentHeldBid;
         if (pMinusBid >= cfg.WEATHER_COND_ORACLE_HOLD_GUARD_GAP) {
           holdGuardVetoed = true;
-          holdGuardVetoReason =
-            bidVelocityTrigger && (forecastState === 'thesis_weakened' || forecastState === 'modal_against')
-              ? 'bid_velocity+forecast_state'
-              : bidVelocityTrigger
-                ? 'bid_velocity'
-                : 'forecast_state';
+          // Build the reason from the triggers that actually fired, so a pure
+          // held-prob-decline veto isn't mislabelled as 'forecast_state' (would
+          // corrupt the Phase A audit). Order: bid_velocity, held_prob_decline,
+          // forecast_state.
+          const vetoTriggers: string[] = [];
+          if (bidVelocityTrigger) vetoTriggers.push('bid_velocity');
+          if (heldProbDeclineExit) vetoTriggers.push('held_prob_decline');
+          if (forecastState === 'thesis_weakened' || forecastState === 'modal_against') {
+            vetoTriggers.push('forecast_state');
+          }
+          holdGuardVetoReason = vetoTriggers.join('+') || 'forecast_state';
           logger.info('[weather-drift] hold guard vetoing exit', {
             positionId: pos.id,
             vetoReason: holdGuardVetoReason,
@@ -862,7 +927,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       if (
         cfg.WEATHER_COND_ORACLE_ENABLED &&
         condOracleResult != null &&
-        (bidVelocityTrigger || marketAgainstTier === 2 ||
+        (bidVelocityTrigger || marketAgainstTier === 2 || heldProbDeclineExit ||
           forecastState === 'thesis_weakened' || forecastState === 'modal_against')
       ) {
         const wouldConfirm = condOracleResult.isStale
@@ -874,7 +939,8 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         // Covers both bid-velocity and forecast-state exits (not oracle_impossible).
         const wouldVeto = condOracleResult.isStale
           ? null
-          : (bidVelocityTrigger || forecastState === 'thesis_weakened' || forecastState === 'modal_against') &&
+          : (bidVelocityTrigger || heldProbDeclineExit ||
+              forecastState === 'thesis_weakened' || forecastState === 'modal_against') &&
             isResolutionDay &&
             state !== 'oracle_impossible' &&
             liveObs?.confidence === 'settlement_aligned' &&
@@ -901,7 +967,10 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
       const isActionable =
         (forecastState === 'modal_against' &&
           result.modalStreak >= cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS) ||
+        // thesis_weakened still NOTIFIES on a severe cumulative drop, but no longer
+        // EXITS on it alone — the held-prob fresh-decline exit owns the sell.
         (forecastState === 'thesis_weakened' && result.drop >= cfg.WEATHER_DRIFT_SEVERE_DROP) ||
+        heldProbDeclineExit ||
         state === 'market_against' ||
         // Oracle states always alert — the settlement outcome may be decided even on
         // non-resolution days (max only increases). Notification fires regardless of
@@ -947,40 +1016,40 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             marketBidDead &&
             (marketAgainstTier === 1 ||
               (marketAgainstTier === 2 && isResolutionDay && cfg.WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY));
-          // Conviction gate for modal_against exits: a single-streak exit fires only
-          // on a steep held-prob drop OR a held-prob already below the ceiling;
-          // otherwise wait for the stricter consecutive-run count. Prevents dumping a
-          // still-high-conviction position on a one-scan rounding wobble (London 5084).
-          // Only gates modal_against — thesis_weakened already requires SEVERE_DROP,
-          // and other states are unaffected.
+          // Modal-against exit gate: fires only once the forecast has rounded
+          // against the held thesis on WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS
+          // consecutive scans. No held-prob / steep-drop fast-track — a still-
+          // high-conviction position straddling a rounding boundary is never dumped
+          // on a single scan (London 5084). The held-prob fresh-decline exit owns
+          // the "conviction collapsed below the floor" case independently.
           const modalExitOk =
             forecastState !== 'modal_against' ||
-            modalExitStreakSatisfied({
-              modalStreak: result.modalStreak,
-              drop: result.drop,
-              currentHeldProb: result.currentHeldProb,
-              fastTrackRuns: cfg.WEATHER_FORECAST_INVALIDATION_MODAL_MIN_RUNS,
-              slowTrackRuns: cfg.WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS,
-              steepDrop: cfg.WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP,
-              heldProbCeiling: cfg.WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING,
-            });
+            result.modalStreak >= cfg.WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS;
           // oracle_confirmed means our held side is the winner — never exit via drift.
-          // Hold guard may veto thesis_weakened/modal_against on res-day when fresh
-          // settlement-aligned oracle says P is still favorable (oracle_impossible is exempt).
+          // Hold guard may veto modal_against on res-day when fresh settlement-aligned
+          // oracle says P is still favorable (oracle_impossible is exempt).
           //
-          // Restrict the forecast exit to genuine FORECAST-exit states. Previously this
-          // was true for any non-market/non-oracle state (incl. stable/watch), so a
-          // bid_velocity-actionable stable position exited HERE — bypassing the market
-          // dead-bid gate below (Houston 2026-06-14: stable + 48% bid crash, model 0.815,
-          // sold, then won). Market-price actionability (bid_velocity / market_against)
-          // must route through the gated paths, not this one.
+          // Restrict the forecast exit to modal_against only. thesis_weakened no
+          // longer exits on a cumulative drop alone — the held-prob fresh-decline
+          // exit (below) replaces that. Market-price actionability (bid_velocity /
+          // market_against) routes through the gated paths, not this one.
           const forecastCanExit =
-            (forecastState === 'thesis_weakened' || forecastState === 'modal_against') &&
+            forecastState === 'modal_against' &&
             state !== 'market_against' &&
             state !== 'oracle_confirmed' &&
             state !== 'oracle_likely_against' && // conditional oracle has its own gate below
             !(holdGuardVetoed && state !== 'oracle_impossible') &&
             modalExitOk;
+          // Held-prob fresh-decline exit: a once-confident position (peaked ≥ floor)
+          // that has actively declined below the floor this scan. Resolution-day
+          // only, vetoable by the conditional-oracle hold guard.
+          const heldProbCanExit =
+            heldProbDeclineExit &&
+            isResolutionDay &&
+            !holdGuardVetoed &&
+            state !== 'market_against' &&
+            state !== 'oracle_confirmed' &&
+            state !== 'oracle_likely_against';
           // oracle_impossible is permanent (daily max only rises) — exit any day, not just res-day.
           const oracleImpossibleCanExit = state === 'oracle_impossible';
           // Bid velocity: rapid single-scan collapse on resolution day bypasses Tier logic.
@@ -997,6 +1066,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             oracleImpossibleCanExit ||
             bidVelocityCanExit ||
             conditionalOracleCanExit ||
+            heldProbCanExit ||
             (isResolutionDay && (forecastCanExit || marketAgainstCanExit));
 
           // Surface the conviction-gate deferral: modal_against would otherwise exit
@@ -1019,8 +1089,6 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
               requiredRuns: cfg.WEATHER_DRIFT_EXACT_EXIT_MODAL_MIN_RUNS,
               drop: +result.drop.toFixed(3),
               currentHeldProb: +result.currentHeldProb.toFixed(3),
-              steepDrop: cfg.WEATHER_DRIFT_MODAL_EXIT_STEEP_DROP,
-              heldProbCeiling: cfg.WEATHER_DRIFT_MODAL_EXIT_HELD_PROB_CEILING,
             });
           }
 
@@ -1083,6 +1151,10 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
               extraContext: {
                 driftState: state, marketAgainstTier, bidSource,
                 ...(bidVelocityTrigger && { bidVelocityTrigger, bidVelocityDrop: +bidVelocityDrop.toFixed(3) }),
+                ...(heldProbDeclineExit && {
+                  heldProbDeclineExit: true,
+                  prevHeldProb: prevHeldProb != null ? +prevHeldProb.toFixed(3) : null,
+                }),
               },
             }).catch(() => false);
             if (exited) action = 'exit';
@@ -1306,6 +1378,9 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         flipCandidateClass,
         bidVelocityTrigger,
         bidVelocityDrop: cfg.WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED ? bidVelocityDrop : null,
+        heldProbDeclineExit,
+        prevHeldProb,
+        peakedAboveFloor,
         conditionalHeldProb: condOracleResult?.heldProb ?? null,
         conditionalEstimator: condOracleResult?.estimator ?? null,
         conditionalMembers: condOracleResult?.members ?? null,
@@ -1402,6 +1477,11 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           bidVelocityDrop: cfg.WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED && currentHeldBid != null
             ? bidVelocityDrop
             : null,
+          heldProbDeclineExit,
+          prevHeldProb,
+          peakedAboveFloor,
+          heldProbExitFloor: cfg.WEATHER_DRIFT_HELD_PROB_EXIT_FLOOR,
+          freshDeclineMinDelta: cfg.WEATHER_DRIFT_FRESH_DECLINE_MIN_DELTA,
           conditionalHeldProb: condOracleResult?.heldProb ?? null,
           conditionalEstimator: condOracleResult?.estimator ?? null,
           conditionalMembers: condOracleResult?.members ?? null,
