@@ -1031,7 +1031,11 @@ describe('findMispricedBrackets - interior NO rounding gate', () => {
     const forecast = { forecastHigh: 31.59, stdDev: 2, source: 'combined' as const, ensembleMembers: 31 };
 
     const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0 });
-    expect(opportunities.filter((o) => o.tradeSide === 'NO')).toHaveLength(0);
+    // Now SHADOW-LOGGED (not silently dropped) but flagged blocked + excluded from execution,
+    // so the calibrator keeps learning from this coin-flip cohort with resolved outcomes.
+    const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps).toHaveLength(1);
+    expect(noOpps[0]!.blockedByInteriorMargin).toBe(true);
   });
 
   it('allows interior NO when rounded forecast is clearly outside bracket', () => {
@@ -1054,6 +1058,8 @@ describe('findMispricedBrackets - interior NO rounding gate', () => {
     const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0 });
     const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
     expect(noOpps.length).toBeGreaterThan(0);
+    // Clearly outside the bracket → a genuine (tradable) NO, not interior-margin-blocked.
+    expect(noOpps[0]!.blockedByInteriorMargin ?? false).toBe(false);
   });
 
   it('blocks interior NO with bias-corrected forecast that rounds into bracket', () => {
@@ -1076,7 +1082,9 @@ describe('findMispricedBrackets - interior NO rounding gate', () => {
       event, forecast, 1, 0.0,
       { minModelCoverage: 0, cityBias, biasCorrectionEnabled: true },
     );
-    expect(opportunities.filter((o) => o.tradeSide === 'NO')).toHaveLength(0);
+    const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
+    expect(noOpps).toHaveLength(1);
+    expect(noOpps[0]!.blockedByInteriorMargin).toBe(true);
   });
 
   it('does not block tail brackets via rounding gate', () => {
@@ -1365,7 +1373,7 @@ describe('findMispricedBrackets - NO-bias model-safety guards (2026-06-19)', () 
     expect(rNoaa.opportunities[0]!.sourceStddevMultiplier).toBe(1.0);
   });
 
-  it('blocks an interior NO when the forecast rounds adjacent to the bracket (margin 1)', () => {
+  it('shadow-logs (blocks) an interior NO when the forecast rounds adjacent to the bracket (margin 1)', () => {
     // "24°C" bracket, forecast 25.4°C → rounds to 25 → within [24-1, 24+1] = [23,25] at margin 1.
     const brackets = [{
       marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
@@ -1374,16 +1382,19 @@ describe('findMispricedBrackets - NO-bias model-safety guards (2026-06-19)', () 
     const forecast = { forecastHigh: 25.4, stdDev: 1.36, source: 'open-meteo' as const, ensembleMembers: 30 };
     const event = { ...baseEvent, brackets };
 
+    // margin 1: logged-as-blocked (shadow), excluded from execution.
     const blocked = findMispricedBrackets(event, forecast, 1, 0.0, {
       minModelCoverage: 0, interiorNoForecastMargin: 1,
-    }).opportunities;
-    expect(blocked.filter((o) => o.tradeSide === 'NO')).toHaveLength(0);
+    }).opportunities.filter((o) => o.tradeSide === 'NO');
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]!.blockedByInteriorMargin).toBe(true);
 
-    // Legacy margin 0: rounded 25 ∉ [24,24] → NO allowed.
+    // Legacy margin 0: rounded 25 ∉ [24,24] → genuine (tradable) NO, not blocked.
     const allowed = findMispricedBrackets(event, forecast, 1, 0.0, {
       minModelCoverage: 0, interiorNoForecastMargin: 0,
-    }).opportunities;
-    expect(allowed.filter((o) => o.tradeSide === 'NO')).toHaveLength(1);
+    }).opportunities.filter((o) => o.tradeSide === 'NO');
+    expect(allowed).toHaveLength(1);
+    expect(allowed[0]!.blockedByInteriorMargin ?? false).toBe(false);
   });
 
   // June 2026 failure cohort: exact-degree NO bets whose actual high resolved AT
@@ -2838,6 +2849,35 @@ describe('scanWeatherMarkets', () => {
       expect(signal.question).toMatch(/Chicago/);
       expect(signal.clobTokenIds).toHaveLength(2);
       expect(signal.stakeUsd).toBeGreaterThan(0);
+    });
+
+    it('shadow-logs but does NOT execute an interior NO blocked by the coin-flip margin veto', async () => {
+      // Same config as the passing "executes correctly" test — only the prices change.
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+      });
+      // Forecast 52°F. Make "52-53°F" (idx 7) a NO bet (high yesPrice) — round(52)=52
+      // ∈ [52,53] → interior-margin veto → biggest raw edge (~0.66) but shadow-only.
+      // "54-55°F" (idx 8) stays a genuine YES. With WEATHER_MAX_PER_CITY=1, WITHOUT
+      // the veto the 52-53 NO would be the #1 execution; the veto must drop it so the
+      // single Chicago trade is 54-55 instead — proving the block excludes execution.
+      const yesPrices = [0.01, 0.03, 0.05, 0.10, 0.15, 0.20, 0.18, 0.90, 0.08, 0.05, 0.03];
+      wireMockGammaAndForecast(yesPrices);
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true, entryPrice: 0.9, sharesFilled: 10,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      const executedQuestions = mockExecuteAndRecordSignal.mock.calls.map(
+        (c) => (c[0] as { question: string }).question,
+      );
+      expect(executedQuestions.length).toBeGreaterThan(0);                  // the scan does execute a trade…
+      expect(executedQuestions.some((q) => /52-53°F/.test(q))).toBe(false); // …but never the vetoed coin-flip
+      expect(executedQuestions.some((q) => /54-55°F/.test(q))).toBe(true);  // it's the next, un-vetoed bracket
     });
 
     it('respects WEATHER_MAX_POSITIONS_PER_SCAN cap', async () => {
