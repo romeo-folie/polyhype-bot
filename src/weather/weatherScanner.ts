@@ -875,6 +875,10 @@ export interface WeatherBracketOpportunity {
    *  was gated AND WEATHER_YES_GATE_NO_FALLBACK_ENABLED=false. Shadow-logged but
    *  never traded (betting NO here is betting against the model's own side). */
   blockedByNoFallback?: boolean;
+  /** True when this interior/range NO was declined because the rounded forecast
+   *  lands in/near the bracket (the "1° coin-flip" cohort). Shadow-logged (so the
+   *  calibrator keeps learning from these with resolved outcomes) but NOT traded. */
+  blockedByInteriorMargin?: boolean;
   /** True when the ensemble member distribution puts too much YES mass on this
    *  bracket (widened by WEATHER_INTERIOR_NO_FORECAST_MARGIN) for a NO bet to be
    *  safe. Evaluated in scanWeatherMarkets (needs an async ensemble-hourly fetch). */
@@ -1463,19 +1467,23 @@ export function findMispricedBrackets(
     }
 
     // Gate: interior NO bets where the corrected forecast rounds into the bracket
-    // (margin 0) or within interiorNoForecastMargin degrees of it. The model's
+    // (margin 0) or within interiorNoForecastMargin degrees of it — the model's
     // central estimate is in/near the bracket, so we'd be betting against our own
-    // best guess — skip regardless of apparent edge.
-    if (!blockedByNoFallback && tradeSide === 'NO'
-        && forecastRoundsIntoBracket(correctedForecastHigh, bracket.low, bracket.high, interiorNoForecastMargin)) {
-      logger.debug('[weather] skipping interior NO — forecast rounds into/near bracket', {
+    // best guess. These are the "1° coin-flip" NO bets we decline to TRADE.
+    // We no longer drop them silently: they are SHADOW-LOGGED (blockedByInteriorMargin)
+    // and excluded from execution, so the calibrator keeps learning from this exact
+    // cohort (with resolved outcomes) even though we won't bet them today.
+    const blockedByInteriorMargin =
+      !blockedByNoFallback && tradeSide === 'NO'
+      && forecastRoundsIntoBracket(correctedForecastHigh, bracket.low, bracket.high, interiorNoForecastMargin);
+    if (blockedByInteriorMargin) {
+      logger.debug('[weather] interior NO declined (forecast rounds into/near) — shadow-only', {
         city: event.city,
         bracket: bracket.label,
         correctedForecastHigh,
         roundedForecast: Math.round(correctedForecastHigh),
         margin: interiorNoForecastMargin,
       });
-      continue;
     }
 
     // Skip near-zero markets where liquidity is negligible. Hard floor on both
@@ -1571,6 +1579,7 @@ export function findMispricedBrackets(
       yesFellBackToNo,
       wouldHaveFallenBackToNo,
       blockedByNoFallback,
+      blockedByInteriorMargin,
       // Modal-mass veto is evaluated later in scanWeatherMarkets (needs an async
       // ensemble-hourly fetch); default unblocked / unevaluated here.
       blockedByModalMass: false,
@@ -1892,7 +1901,7 @@ export async function scanWeatherMarkets(
       && (!cfg.WEATHER_MODAL_MASS_VETO_RES_DAY_ONLY || isResolutionDay);
     if (modalVetoActive) {
       const boundedNoOpps = gatedOpportunities.filter((o) => {
-        if (o.tradeSide !== 'NO' || o.blockedByNoFallback) return false;
+        if (o.tradeSide !== 'NO' || o.blockedByNoFallback || o.blockedByInteriorMargin) return false;
         const p = parseBracketLabel(o.bracketLabel);
         return p?.low != null && p?.high != null;
       });
@@ -1950,7 +1959,7 @@ export async function scanWeatherMarkets(
       : 0;
     const allowedInEvent = gatedOpportunities.filter(
       (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto
-        && !o.blockedByNoFallback && !o.blockedByModalMass,
+        && !o.blockedByNoFallback && !o.blockedByModalMass && !o.blockedByInteriorMargin,
     ).length;
     const disagreementBlocked = gatedOpportunities.filter((o) => o.blockedByMarketDisagreement).length;
     const ensembleVetoBlocked = gatedOpportunities.filter((o) => o.blockedByEnsembleVeto).length;
@@ -2054,7 +2063,8 @@ export async function scanWeatherMarkets(
         !opp.blockedByMarketDisagreement &&
         !opp.blockedByEnsembleVeto &&
         !opp.blockedByNoFallback &&
-        !opp.blockedByModalMass;
+        !opp.blockedByModalMass &&
+        !opp.blockedByInteriorMargin;
       logger.info('[weather] bracket opportunity', {
         marketId: opp.marketId,
         eventSlug: opp.eventSlug,
@@ -2080,6 +2090,7 @@ export async function scanWeatherMarkets(
         blockedByMarketDisagreement: opp.blockedByMarketDisagreement ?? false,
         blockedByEnsembleVeto: opp.blockedByEnsembleVeto ?? false,
         blockedByNoFallback: opp.blockedByNoFallback ?? false,
+        blockedByInteriorMargin: opp.blockedByInteriorMargin ?? false,
         blockedByModalMass: opp.blockedByModalMass ?? false,
         ensembleYesMass: opp.ensembleYesMass ?? null,
         previousOutcomePrice: opp.previousOutcomePrice ?? null,
@@ -2146,6 +2157,7 @@ export async function scanWeatherMarkets(
           // NO-bias calibration provenance (2026-06-19):
           wouldHaveFallenBackToNo: opp.wouldHaveFallenBackToNo ?? false,
           blockedByNoFallback: opp.blockedByNoFallback ?? false,
+          blockedByInteriorMargin: opp.blockedByInteriorMargin ?? false,
           blockedByModalMass: opp.blockedByModalMass ?? false,
           ensembleYesMass: opp.ensembleYesMass ?? null,
           sourceStddevMultiplier: opp.sourceStddevMultiplier ?? 1.0,
@@ -2183,7 +2195,7 @@ export async function scanWeatherMarkets(
   const totalEnsembleVetoBlocked = allOpportunities.filter((o) => o.blockedByEnsembleVeto).length;
   const allowedOpportunities = allOpportunities.filter(
     (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto
-      && !o.blockedByNoFallback && !o.blockedByModalMass,
+      && !o.blockedByNoFallback && !o.blockedByModalMass && !o.blockedByInteriorMargin,
   );
   logger.info('[weather] scan summary', {
     totalEvents: rawEvents.length,
@@ -2935,6 +2947,7 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       !o.blockedByEnsembleVeto &&
       !o.blockedByNoFallback &&
       !o.blockedByModalMass &&
+      !o.blockedByInteriorMargin &&
       !excludedCities.has(o.city.toLowerCase()),
   );
 
