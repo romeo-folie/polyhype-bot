@@ -48,6 +48,11 @@ import {
 const BIN_COUNT = 10;
 const PRIOR_STRENGTH = 20; // pseudo-counts shrinking each cell toward its parent
 const MIN_CELL_SAMPLES = 80; // runtime trust threshold for a specific cell
+// A cell's learned curve must beat raw (identity) by at least this much Brier on
+// the recent hold-out to be kept; otherwise the cell ships as identity (raw
+// passthrough). Guards against over-fit/drifting corrections on already-well-
+// calibrated cohorts (e.g. the US `combined` source).
+const GUARDRAIL_MIN_BRIER_GAIN = 0.003;
 const VERSION = 1;
 
 // eslint-disable-next-line no-console
@@ -130,6 +135,42 @@ function fitCell(pairs: Pair[], parentBins: number[] | null): CalibrationCell {
   return { n: pairs.length, bins: pav(cal, weights) };
 }
 
+/** Identity reliability curve (bin centers) — interpolates back to ~pRaw, i.e. a no-op. */
+const IDENTITY_BINS = Array.from({ length: BIN_COUNT }, (_, i) => (i + 0.5) / BIN_COUNT);
+
+function brierOf(pairs: Pair[], pred: (p: Pair) => number): number {
+  if (pairs.length === 0) return Infinity;
+  let s = 0;
+  for (const p of pairs) s += (clamp01(pred(p)) - (p.yes ? 1 : 0)) ** 2;
+  return s / pairs.length;
+}
+
+/**
+ * Fit a cell, but GUARD against a learned curve that doesn't actually help.
+ * For cells large enough to be used at runtime (n ≥ MIN_CELL_SAMPLES), validate the
+ * fitted curve against identity (raw) on a held-out time-slice (last 25%). Keep the
+ * learned curve only if it beats identity out-of-sample; otherwise store identity bins
+ * so the cell is a no-op and raw passes through. This stops already-well-calibrated
+ * cohorts (e.g. the US `combined` source, and currently `low`) from being made WORSE
+ * by an over-fit correction — a calibration cell can now only help or do nothing.
+ */
+function fitCellGuarded(pairs: Pair[], parentBins: number[] | null): CalibrationCell {
+  const n = pairs.length;
+  if (n < MIN_CELL_SAMPLES) return fitCell(pairs, parentBins); // not used at runtime; harmless
+  const cut = Math.floor(n * 0.75);
+  const val = pairs.slice(cut);
+  if (val.length < 15) return fitCell(pairs, parentBins); // too few to validate → trust the fit
+  const trial = fitCell(pairs.slice(0, cut), parentBins).bins;
+  const bFitted = brierOf(val, (p) => interpolateCell(trial, p.pRaw));
+  const bIdentity = brierOf(val, (p) => p.pRaw);
+  // Require a MEANINGFUL Brier improvement on the recent hold-out, not just any
+  // edge — a marginal win is usually noise/drift (e.g. the US `combined` source,
+  // whose raw is already well-calibrated). Borderline cells default to raw, so
+  // calibration only fires where it clearly helps.
+  if (bFitted <= bIdentity - GUARDRAIL_MIN_BRIER_GAIN) return fitCell(pairs, parentBins);
+  return { n, bins: [...IDENTITY_BINS] }; // not a clear win → identity (raw passes through)
+}
+
 function groupBy<T>(items: T[], key: (t: T) => string): Map<string, T[]> {
   const m = new Map<string, T[]>();
   for (const it of items) {
@@ -148,20 +189,20 @@ function groupBy<T>(items: T[], key: (t: T) => string): Map<string, T[]> {
 function buildTable(pairs: Pair[]): CalibrationTable {
   const byMetric: Record<string, CalibrationCell> = {};
   for (const [metric, ps] of groupBy(pairs, (p) => p.metric)) {
-    byMetric[metric] = fitCell(ps, null); // root shrinks to identity
+    byMetric[metric] = fitCellGuarded(ps, null); // root shrinks to identity
   }
 
   const byShape: Record<string, CalibrationCell> = {};
   for (const [key, ps] of groupBy(pairs, (p) => `${p.metric}|${p.shape}`)) {
     const metric = key.split('|')[0]!;
-    byShape[key] = fitCell(ps, byMetric[metric]!.bins);
+    byShape[key] = fitCellGuarded(ps, byMetric[metric]!.bins);
   }
 
   const byShapeSource: Record<string, CalibrationCell> = {};
   for (const [key, ps] of groupBy(pairs, (p) => `${p.metric}|${p.shape}|${p.source}`)) {
     const parts = key.split('|');
     const shape = `${parts[0]}|${parts[1]}`;
-    byShapeSource[key] = fitCell(ps, (byShape[shape] ?? byMetric[parts[0]!]!).bins);
+    byShapeSource[key] = fitCellGuarded(ps, (byShape[shape] ?? byMetric[parts[0]!]!).bins);
   }
 
   const byShapeSourceHorizon: Record<string, CalibrationCell> = {};
@@ -169,7 +210,7 @@ function buildTable(pairs: Pair[]): CalibrationTable {
     const parts = key.split('|');
     const ss = `${parts[0]}|${parts[1]}|${parts[2]}`;
     const shape = `${parts[0]}|${parts[1]}`;
-    byShapeSourceHorizon[key] = fitCell(ps, (byShapeSource[ss] ?? byShape[shape] ?? byMetric[parts[0]!]!).bins);
+    byShapeSourceHorizon[key] = fitCellGuarded(ps, (byShapeSource[ss] ?? byShape[shape] ?? byMetric[parts[0]!]!).bins);
   }
 
   return {
