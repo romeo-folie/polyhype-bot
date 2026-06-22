@@ -31,6 +31,11 @@ export interface CalibrationCell {
   n: number;
   /** Calibrated value per raw-probability bin (length = _meta.binCount). */
   bins: number[];
+  /** True when this cell's learned curve did NOT beat raw on the guardrail hold-out,
+   *  so it ships as a no-op: calibration returns the raw probability EXACTLY (incl.
+   *  the outer 5% tails, which the bin-center interpolation would otherwise clamp).
+   *  bins are still populated (identity centers) for the integrity test. */
+  identity?: boolean;
 }
 
 export interface CalibrationTable {
@@ -87,6 +92,27 @@ export function normalizeSource(source: string | null | undefined): string {
   return (source ?? 'unknown').trim().toLowerCase() || 'unknown';
 }
 
+/**
+ * Is this bracket's (shape, source) in the comma-separated `shape|source` allowlist
+ * (WEATHER_CALIBRATION_LIVE_COHORTS)? Used to scope acting-on-calibration to the
+ * cohorts validated +EV out-of-sample (e.g. `range|hrrr-combined`). Source is
+ * normalized both sides so casing/whitespace don't matter. Empty list → no cohort.
+ */
+export function isCalibrationLiveCohort(
+  shape: BracketShape,
+  source: string,
+  cohortsCsv: string,
+): boolean {
+  const want = `${shape}|${normalizeSource(source)}`;
+  return cohortsCsv
+    .split(',')
+    .map((c) => {
+      const [s, src] = c.split('|');
+      return `${(s ?? '').trim()}|${normalizeSource(src)}`;
+    })
+    .includes(want);
+}
+
 export function cellKey(features: CalibrationFeatures): {
   shapeSourceHorizon: string;
   shapeSource: string;
@@ -139,8 +165,8 @@ export function loadCalibrationTable(): CalibrationTable | null {
   return _cachedTable;
 }
 
-/** Test-only: clear the cached artifact so a test can inject its own table. */
-export function _setCalibrationTableForTest(table: CalibrationTable | null): void {
+/** Test-only: inject a table, or pass undefined to reset (reload from disk next call). */
+export function _setCalibrationTableForTest(table: CalibrationTable | null | undefined): void {
   _cachedTable = table;
 }
 
@@ -166,6 +192,9 @@ export function calibrateWeatherBracketProbability(
     pickCell(table.byShape[keys.shape], minN) ??
     pickCell(table.byMetric[keys.metric], minN);
   if (!cell) return clamp01(pRaw);
+  // Identity cells are an exact no-op — return raw without interpolation so the
+  // outer 5% tails aren't clamped (matters for high-tail YES where pRaw > 0.95).
+  if (cell.identity) return clamp01(pRaw);
   return interpolateCell(cell.bins, pRaw);
 }
 

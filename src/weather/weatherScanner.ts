@@ -55,7 +55,7 @@ import type { CityCoordinates, FetchFn } from './noaaClient.js';
 import { cityLocalDate, cityLocalHour, cityDayEndUtcMs } from './resolutionTime.js';
 import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast, fetchEnsembleHourly } from './openMeteoClient.js';
 import { ensembleFinalMaxDistribution, bracketWinProbFromFinalMaxes } from './conditionalOracle.js';
-import { calibrateWeatherBracketProbability, classifyBracketShape } from './bracketCalibration.js';
+import { calibrateWeatherBracketProbability, classifyBracketShape, isCalibrationLiveCohort } from './bracketCalibration.js';
 import { getCityBias, getCityActuals } from './cityBias.js';
 import type { CityBias, CityActuals } from './cityBias.js';
 import { cacheForecast } from './forecastCache.js';
@@ -897,9 +897,12 @@ export interface WeatherBracketOpportunity {
    *  Logged so train==serve consistency stays auditable. */
   modelProbCalInput?: number | null;
   /** Calibrated P(YES) from the reliability map (PR2a). Null when the calibration
-   *  shadow pass is disabled. SHADOW-ONLY: the live tradeSide/edge still use the
-   *  raw modelProbability; this is logged for analysis before acting on it (PR2b). */
+   *  shadow pass is disabled. For live-calibration cohorts (PR2b) this also drove
+   *  the side/edge/sizing; otherwise it is shadow-only. */
   modelProbCalibrated?: number | null;
+  /** PR2b: true when this bracket's cohort acted on the calibrated probability for
+   *  the LIVE decision (modelProbability == calibrated). False for the raw path. */
+  calibrationLive?: boolean;
   /** Calibrated edge on the live-chosen tradeSide (modelProbCalibrated vs price). */
   edgeCalibrated?: number | null;
   /** Side the calibrated probability would naturally pick (pre-gate), for comparison. */
@@ -1123,6 +1126,15 @@ export interface FindMispricedOptions {
    *  comparison fields. SHADOW-ONLY — never changes the live side/edge. Default
    *  false at the function level; scanWeatherMarkets passes the config value. */
   calibrationShadowEnabled?: boolean;
+  /** PR2b: when true, brackets whose (shape|source) cohort is in
+   *  calibrationLiveCohorts use the CALIBRATED probability for live side/edge/Kelly
+   *  and may take interior YES. Default false → raw decisions unchanged. */
+  calibrationLiveEnabled?: boolean;
+  /** Comma-separated `shape|source` allow-list for calibrationLiveEnabled. */
+  calibrationLiveCohorts?: string;
+  /** Market-price floor for calibrated YES on live cohorts (replaces the raw 0.30
+   *  floor; live cohorts rely on calibrated edge + this lower floor). Default 0.15. */
+  calibrationYesMinPrice?: number;
 }
 
 export interface BiasedProbResult {
@@ -1221,6 +1233,9 @@ export function findMispricedBrackets(
     openMeteoStddevMultiplier = 1.0,
     interiorNoForecastMargin = 0,
     calibrationShadowEnabled = false,
+    calibrationLiveEnabled = false,
+    calibrationLiveCohorts = '',
+    calibrationYesMinPrice = 0.15,
   } = options;
   // Defense-in-depth clamp: loadConfig() cross-validates trusted ≥ min, but this
   // helper is also called directly from tests and could accept arbitrary values.
@@ -1345,23 +1360,55 @@ export function findMispricedBrackets(
     const modelProb = modelProbs[i]!;
     const modelProbRaw = rawModelProbs[i]!;
     const adjustedMarketProb = adjustedMarketProbs[i]!;
+    const shadowModelProb = shadowModelProbs[i] ?? null;
+
+    // ── Calibration (PR2a shadow / PR2b live) ────────────────────────────────
+    // Compute the calibrated P(YES) up-front. It is LOGGED in shadow always; and
+    // for cohorts allow-listed in WEATHER_CALIBRATION_LIVE_COHORTS (when live is on)
+    // it DRIVES the live side/edge/Kelly — those cohorts validated +EV OOS. All
+    // other cohorts keep the raw model + existing YES gates, unchanged.
+    const shape = classifyBracketShape(bracket.low, bracket.high);
+    const cohortLive = calibrationLiveEnabled
+      && isCalibrationLiveCohort(shape, forecast.source, calibrationLiveCohorts);
+    let modelProbCalibrated: number | null = null;
+    let modelProbCalInput: number | null = null;
+    if (calibrationShadowEnabled || cohortLive) {
+      // Calibrate the bias-corrected, PRE-source-inflation Gaussian — the scale the
+      // map is trained on (logged as modelProbCalInput so train==serve stays auditable).
+      modelProbCalInput = estimateBracketProbability(
+        forecastHighForCalc, bracket.low, bracket.high, daysOut, effectiveStdDevNoSourceInflation,
+      );
+      modelProbCalibrated = calibrateWeatherBracketProbability(modelProbCalInput, {
+        shape, source: forecast.source, daysOut, metric: event.metric,
+      });
+    }
+    // Probability that drives the LIVE decision: calibrated for allow-listed cohorts,
+    // raw otherwise (default — zero behavioural change when calibrationLiveEnabled=false).
+    const decisionProb = cohortLive && modelProbCalibrated !== null ? modelProbCalibrated : modelProb;
 
     // Edge per side using actual bid prices (not vig-adjusted event-level probs).
     // YES edge: model says bracket is more likely than yesPrice implies
     // NO edge: model says bracket is less likely than (1 - noPrice) implies
-    const edgeYes = modelProb - bracket.yesPrice;
-    const edgeNo = (1 - modelProb) - bracket.noPrice;
-    const shadowModelProb = shadowModelProbs[i] ?? null;
+    const edgeYes = decisionProb - bracket.yesPrice;
+    const edgeNo = (1 - decisionProb) - bracket.noPrice;
 
     // YES quality gate: evaluate BEFORE side selection so that a gated YES
     // falls back to the NO candidate rather than suppressing the bracket entirely.
-    // "NO bets are unaffected" holds only when the gate runs pre-selection.
+    // For live-calibration cohorts, interior YES is ALLOWED (the point — surfacing
+    // under-predicted YES) and the model-prob floor applies to the calibrated prob;
+    // the market-price floor still holds. Other cohorts keep the gates verbatim.
+    // Live cohorts gate YES on calibrated edge + a lower price floor; the raw 0.30
+    // market-price / 0.50 model-prob floors would block the (cheap) +EV calibrated
+    // YES, and the cohort allow-list already guards against bad longshots.
+    const interiorYesAllowed = cohortLive || yesAllowInteriorBrackets;
+    const yesMinPriceEff = cohortLive ? calibrationYesMinPrice : yesMinMarketPrice;
+    const yesMinModelProbEff = cohortLive ? 0 : yesMinModelProb;
     let yesGateReason: string | null = null;
-    if (bracket.low !== null && bracket.high !== null && !yesAllowInteriorBrackets) {
+    if (bracket.low !== null && bracket.high !== null && !interiorYesAllowed) {
       yesGateReason = 'interior_bracket';
-    } else if (bracket.yesPrice < yesMinMarketPrice) {
+    } else if (bracket.yesPrice < yesMinPriceEff) {
       yesGateReason = 'market_price_below_min';
-    } else if (modelProb < yesMinModelProb) {
+    } else if (decisionProb < yesMinModelProbEff) {
       yesGateReason = 'model_prob_below_min';
     }
     const yesGateBlocked = yesGateReason !== null;
@@ -1408,14 +1455,15 @@ export function findMispricedBrackets(
     if (edge < minEdge) continue;
 
     // Gate: tail brackets ("X or higher" / "X or below") produce spuriously positive
-    // NO edge when the model's P(YES) is high — edgeNo = (1-modelProb) - noPrice can
-    // be positive at modelProb=0.82 if noPrice=0.08. Betting NO there means betting
-    // against our own forecast direction; skip unless model genuinely leans NO.
-    if (!blockedByNoFallback && tradeSide === 'NO' && (bracket.low === null || bracket.high === null) && modelProb > maxTailNoBetModelProb) {
+    // NO edge when the model's P(YES) is high — edgeNo = (1-decisionProb) - noPrice can
+    // be positive at decisionProb=0.82 if noPrice=0.08. Betting NO there means betting
+    // against our own forecast direction; skip unless the model genuinely leans NO.
+    // decisionProb is the calibrated prob for live cohorts, raw otherwise.
+    if (!blockedByNoFallback && tradeSide === 'NO' && (bracket.low === null || bracket.high === null) && decisionProb > maxTailNoBetModelProb) {
       logger.debug('[weather] skipping tail NO — model favours YES', {
         city: event.city,
         bracket: bracket.label,
-        modelProb: modelProb.toFixed(3),
+        decisionProb: decisionProb.toFixed(3),
         maxTailNoBetModelProb,
       });
       continue;
@@ -1499,25 +1547,13 @@ export function findMispricedBrackets(
     // segment fallback-NO out of the native-NO cohort; a native NO stays untagged.
     const yesFellBackToNo = wouldHaveFallenBackToNo && !blockedByNoFallback;
 
-    // Calibration SHADOW pass (PR2a): map the raw model P(YES) through the fitted
-    // reliability map and record what it would imply. Never changes the live
-    // tradeSide/edge above — purely additive shadow fields, gated separately
-    // from execution (PR2b acts on it).
-    let modelProbCalibrated: number | null = null;
-    let modelProbCalInput: number | null = null;
+    // Calibrated shadow comparison fields. modelProbCalibrated/modelProbCalInput
+    // were computed at the top of the loop (and, for live cohorts, already drove
+    // the side/edge above). edgeCalibrated is on the LIVE-chosen side for analysis;
+    // tradeSideCalibrated is the side the calibrated probs would pick.
     let edgeCalibrated: number | null = null;
     let tradeSideCalibrated: 'YES' | 'NO' | null = null;
-    if (calibrationShadowEnabled) {
-      const shape = classifyBracketShape(bracket.low, bracket.high);
-      // Calibrate the bias-corrected, PRE-source-inflation Gaussian — the scale the
-      // reliability map is trained on (logged as modelProbCalInput so train==serve
-      // stays auditable). NOT the σ-inflated modelProb the live path uses.
-      modelProbCalInput = estimateBracketProbability(
-        forecastHighForCalc, bracket.low, bracket.high, daysOut, effectiveStdDevNoSourceInflation,
-      );
-      modelProbCalibrated = calibrateWeatherBracketProbability(modelProbCalInput, {
-        shape, source: forecast.source, daysOut, metric: event.metric,
-      });
+    if (modelProbCalibrated !== null) {
       const edgeYesCal = modelProbCalibrated - bracket.yesPrice;
       const edgeNoCal = (1 - modelProbCalibrated) - bracket.noPrice;
       tradeSideCalibrated = edgeYesCal >= edgeNoCal && edgeYesCal > 0
@@ -1539,7 +1575,11 @@ export function findMispricedBrackets(
       clobTokenIds: bracket.clobTokenIds,
       yesPrice: bracket.yesPrice,
       noPrice: bracket.noPrice,
-      modelProbability: modelProb,
+      // For live-calibration cohorts this is the CALIBRATED prob (so edge, side, and
+      // downstream Kelly sizing are all consistent on the prob we acted on); for all
+      // other cohorts it is the raw model prob exactly as before. modelProbRaw and
+      // modelProbCalibrated are logged separately for transparency.
+      modelProbability: decisionProb,
       adjustedMarketProb,
       edge,
       tradeSide,
@@ -1590,6 +1630,7 @@ export function findMispricedBrackets(
       modelProbCalibrated,
       edgeCalibrated,
       tradeSideCalibrated,
+      calibrationLive: cohortLive,
     });
   }
 
@@ -1875,6 +1916,9 @@ export async function scanWeatherMarkets(
         openMeteoStddevMultiplier: cfg.WEATHER_OPEN_METEO_STDDEV_MULTIPLIER,
         interiorNoForecastMargin: cfg.WEATHER_INTERIOR_NO_FORECAST_MARGIN,
         calibrationShadowEnabled: cfg.WEATHER_CALIBRATION_SHADOW_ENABLED,
+        calibrationLiveEnabled: cfg.WEATHER_CALIBRATION_LIVE_ENABLED,
+        calibrationLiveCohorts: cfg.WEATHER_CALIBRATION_LIVE_COHORTS,
+        calibrationYesMinPrice: cfg.WEATHER_CALIBRATION_YES_MIN_PRICE,
       },
     );
     const afterMarketGate = await applyMarketDisagreementGate(redis, opportunities, cfg);
@@ -2168,6 +2212,7 @@ export async function scanWeatherMarkets(
           modelProbCalibrated: opp.modelProbCalibrated ?? null,
           edgeCalibrated: opp.edgeCalibrated ?? null,
           tradeSideCalibrated: opp.tradeSideCalibrated ?? null,
+          calibrationLive: opp.calibrationLive ?? false,
         },
       });
     }
