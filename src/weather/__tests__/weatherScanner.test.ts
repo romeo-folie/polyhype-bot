@@ -74,7 +74,7 @@ const baseConfig = {
   WEATHER_CALIBRATION_SHADOW_ENABLED: false,
   // Calibration-live (PR2b) off in base config; dedicated tests enable + inject a table.
   WEATHER_CALIBRATION_LIVE_ENABLED: false,
-  WEATHER_CALIBRATION_LIVE_COHORTS: 'range|hrrr-combined',
+  WEATHER_CALIBRATION_LIVE_COHORTS: 'high|range|hrrr-combined',
   WEATHER_CALIBRATION_YES_MIN_PRICE: 0.15,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
@@ -1537,7 +1537,7 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     const opp = findMispricedBrackets(rangeEvent, forecastHrrr, 1, 0.0, {
       minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
       calibrationShadowEnabled: true, calibrationLiveEnabled: true,
-      calibrationLiveCohorts: 'range|hrrr-combined', calibrationYesMinPrice: 0.15,
+      calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
     }).opportunities[0]!;
     expect(opp.tradeSide).toBe('YES');               // calibrated 0.60 > yesPrice 0.25 → YES
     expect(opp.calibrationLive).toBe(true);
@@ -1549,7 +1549,7 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     const opp = findMispricedBrackets(rangeEvent, { ...forecastHrrr, source: 'open-meteo' as const }, 1, 0.0, {
       minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
       calibrationShadowEnabled: true, calibrationLiveEnabled: true,
-      calibrationLiveCohorts: 'range|hrrr-combined', calibrationYesMinPrice: 0.15,
+      calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
     }).opportunities[0]!;
     // open-meteo not in allow-list → raw decision: low modelProb → NO (or fallback-blocked), never the calibrated YES.
     expect(opp.tradeSide).toBe('NO');
@@ -1561,11 +1561,26 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     const opp = findMispricedBrackets(rangeEvent, forecastHrrr, 1, 0.0, {
       minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
       calibrationShadowEnabled: true, // shadow on, but live OFF
-      calibrationLiveCohorts: 'range|hrrr-combined',
+      calibrationLiveCohorts: 'high|range|hrrr-combined',
     }).opportunities[0]!;
     expect(opp.calibrationLive).toBe(false);
     expect(opp.tradeSide).toBe('NO');                 // raw decision unchanged
     expect(opp.modelProbCalibrated).toBeCloseTo(0.60, 6); // still LOGGED in shadow
+    expect(opp.modelProbability).toBeCloseTo(opp.modelProbRaw!, 6);
+  });
+
+  it('does NOT act on calibration for a low-metric market sharing the same shape|source', () => {
+    // Regression guard (review finding): the live cohort key is metric-aware, so a
+    // lowest-temperature range/HRRR market stays on the RAW model even with the
+    // high-temp cohort allow-listed — the low cells are not OOS-validated.
+    const lowEvent = { ...rangeEvent, metric: 'low' as const };
+    const opp = findMispricedBrackets(lowEvent, forecastHrrr, 1, 0.0, {
+      minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
+      calibrationShadowEnabled: true, calibrationLiveEnabled: true,
+      calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+    }).opportunities[0]!;
+    expect(opp.calibrationLive).toBe(false);          // low metric excluded from the high cohort
+    expect(opp.tradeSide).toBe('NO');                 // raw decision unchanged
     expect(opp.modelProbability).toBeCloseTo(opp.modelProbRaw!, 6);
   });
 });

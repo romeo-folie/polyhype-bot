@@ -1369,7 +1369,7 @@ export function findMispricedBrackets(
     // other cohorts keep the raw model + existing YES gates, unchanged.
     const shape = classifyBracketShape(bracket.low, bracket.high);
     const cohortLive = calibrationLiveEnabled
-      && isCalibrationLiveCohort(shape, forecast.source, calibrationLiveCohorts);
+      && isCalibrationLiveCohort(event.metric, shape, forecast.source, calibrationLiveCohorts);
     let modelProbCalibrated: number | null = null;
     let modelProbCalInput: number | null = null;
     if (calibrationShadowEnabled || cohortLive) {

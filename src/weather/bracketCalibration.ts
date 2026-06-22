@@ -93,22 +93,27 @@ export function normalizeSource(source: string | null | undefined): string {
 }
 
 /**
- * Is this bracket's (shape, source) in the comma-separated `shape|source` allowlist
- * (WEATHER_CALIBRATION_LIVE_COHORTS)? Used to scope acting-on-calibration to the
- * cohorts validated +EV out-of-sample (e.g. `range|hrrr-combined`). Source is
- * normalized both sides so casing/whitespace don't matter. Empty list → no cohort.
+ * Is this bracket's (metric, shape, source) in the comma-separated `metric|shape|source`
+ * allowlist (WEATHER_CALIBRATION_LIVE_COHORTS)? Used to scope acting-on-calibration to
+ * the cohorts validated +EV out-of-sample (e.g. `high|range|hrrr-combined`). The metric
+ * (`high`/`low`) is part of the key because the calibration table is metric-keyed and the
+ * `high` and `low` cohorts validate independently — without it, enabling lowest-temp
+ * markets would silently pull the unvalidated `low` cells into calibration-live mode.
+ * Metric and source are normalized both sides so casing/whitespace don't matter. Empty
+ * list → no cohort.
  */
 export function isCalibrationLiveCohort(
+  metric: string,
   shape: BracketShape,
   source: string,
   cohortsCsv: string,
 ): boolean {
-  const want = `${shape}|${normalizeSource(source)}`;
+  const want = `${normalizeSource(metric)}|${shape}|${normalizeSource(source)}`;
   return cohortsCsv
     .split(',')
     .map((c) => {
-      const [s, src] = c.split('|');
-      return `${(s ?? '').trim()}|${normalizeSource(src)}`;
+      const [m, s, src] = c.split('|');
+      return `${normalizeSource(m)}|${(s ?? '').trim()}|${normalizeSource(src)}`;
     })
     .includes(want);
 }

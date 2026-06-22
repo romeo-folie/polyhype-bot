@@ -420,9 +420,11 @@ async function main(): Promise<void> {
   log(`  Calib gap improves:    ${gapCal < gapRaw ? 'PASS' : 'FAIL'} (${gapCal.toFixed(4)} < ${gapRaw.toFixed(4)})`);
 
   // ── PR2b readiness: calibrated-YES / -NO cohort performance (hold-out) ────────
-  // Per (shape|source) cohort, the realized win rate of the bets the CALIBRATED
+  // Per (metric|shape|source) cohort, the realized win rate of the bets the CALIBRATED
   // logic would take, vs breakeven (avg price). This is the gate for enabling YES
   // (and act-on-calibration NO) live per cohort: WR must clear breakeven with N.
+  // Metric is part of the cohort key because the live allow-list (WEATHER_CALIBRATION_
+  // LIVE_COHORTS) is metric-aware — high/low must never blend in the go/no-go read.
   const calFn = calOf(holdoutTable);
   const cohortReport = (side: 'YES' | 'NO'): void => {
     log(`\nCALIBRATED-${side} by cohort (hold-out): cohort  n  WR  breakeven  ROI`);
@@ -431,7 +433,7 @@ async function main(): Promise<void> {
       return side === 'YES' ? c > p.yesPrice && Number.isFinite(p.yesPrice)
                             : c < p.yesPrice && Number.isFinite(p.yesPrice);
     });
-    for (const [cohort, ps] of Array.from(groupBy(picks, (p) => `${p.shape}|${p.source}`)).sort((a, b) => b[1].length - a[1].length)) {
+    for (const [cohort, ps] of Array.from(groupBy(picks, (p) => `${p.metric}|${p.shape}|${p.source}`)).sort((a, b) => b[1].length - a[1].length)) {
       if (ps.length < 5) continue;
       const price = (p: Pair): number => (side === 'YES' ? p.yesPrice : 1 - p.yesPrice);
       const wonF = (p: Pair): boolean => (side === 'YES' ? p.yes : !p.yes);
@@ -440,7 +442,7 @@ async function main(): Promise<void> {
       const be = ps.reduce((s, p) => s + price(p), 0) / n;
       const roi = ps.reduce((s, p) => s + (wonF(p) ? 1 / Math.max(0.01, price(p)) - 1 : -1), 0) / n;
       const gate = wr > be ? 'PASS' : 'fail';
-      log(`  ${cohort.padEnd(22)} ${String(n).padStart(3)}  ${(100 * wr).toFixed(0)}%  ${(100 * be).toFixed(0)}%  ${(100 * roi).toFixed(0)}%  ${gate}`);
+      log(`  ${cohort.padEnd(28)} ${String(n).padStart(3)}  ${(100 * wr).toFixed(0)}%  ${(100 * be).toFixed(0)}%  ${(100 * roi).toFixed(0)}%  ${gate}`);
     }
   };
   cohortReport('YES');

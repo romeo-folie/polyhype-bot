@@ -166,14 +166,22 @@ describe('calibrateWeatherBracketProbability', () => {
 });
 
 describe('isCalibrationLiveCohort', () => {
-  it('matches shape|source against the allow-list (source normalized)', () => {
-    const list = 'range|hrrr-combined, exact|combined';
-    expect(isCalibrationLiveCohort('range', 'hrrr-combined', list)).toBe(true);
-    expect(isCalibrationLiveCohort('range', 'HRRR-Combined', list)).toBe(true); // case-insensitive
-    expect(isCalibrationLiveCohort('exact', 'combined', list)).toBe(true);
-    expect(isCalibrationLiveCohort('exact', 'open-meteo', list)).toBe(false); // not listed
-    expect(isCalibrationLiveCohort('range', 'open-meteo', list)).toBe(false);
-    expect(isCalibrationLiveCohort('range', 'hrrr-combined', '')).toBe(false); // empty list
+  it('matches metric|shape|source against the allow-list (metric + source normalized)', () => {
+    const list = 'high|range|hrrr-combined, high|exact|combined';
+    expect(isCalibrationLiveCohort('high', 'range', 'hrrr-combined', list)).toBe(true);
+    expect(isCalibrationLiveCohort('HIGH', 'range', 'HRRR-Combined', list)).toBe(true); // case-insensitive
+    expect(isCalibrationLiveCohort('high', 'exact', 'combined', list)).toBe(true);
+    expect(isCalibrationLiveCohort('high', 'exact', 'open-meteo', list)).toBe(false); // not listed
+    expect(isCalibrationLiveCohort('high', 'range', 'open-meteo', list)).toBe(false);
+    expect(isCalibrationLiveCohort('high', 'range', 'hrrr-combined', '')).toBe(false); // empty list
+  });
+
+  it('excludes a different metric on the same shape|source (low-temp not validated)', () => {
+    // Regression guard: the cohort key is metric-aware so enabling lowest-temp markets
+    // does NOT pull the unvalidated `low` cells into calibration-live mode.
+    const list = 'high|range|hrrr-combined';
+    expect(isCalibrationLiveCohort('high', 'range', 'hrrr-combined', list)).toBe(true);
+    expect(isCalibrationLiveCohort('low', 'range', 'hrrr-combined', list)).toBe(false);
   });
 });
 

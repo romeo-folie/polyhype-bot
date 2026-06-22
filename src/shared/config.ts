@@ -2234,21 +2234,23 @@ export const envSchema = z.object({
   // on the calibrated probability is a separate gate (PR2b). See
   // docs/issues/weather-bracket-model-overconfidence-2026-06-19.md.
   WEATHER_CALIBRATION_SHADOW_ENABLED: boolFromEnv.optional().default(true),
-  // Calibration LIVE (PR2b). When true, brackets whose (shape|source) cohort is in
-  // WEATHER_CALIBRATION_LIVE_COHORTS use the CALIBRATED probability for live side
+  // Calibration LIVE (PR2b). When true, brackets whose (metric|shape|source) cohort is
+  // in WEATHER_CALIBRATION_LIVE_COHORTS use the CALIBRATED probability for live side
   // selection + edge, and may take interior YES (subject to
   // WEATHER_CALIBRATION_YES_MIN_PRICE, default 0.15 — replaces the raw 0.30/0.50
   // gates; the cohort allow-list is the real guard). All other cohorts keep the
   // raw model + existing YES gates UNCHANGED.
-  // Scoped per-cohort on purpose: backtests show calibration helps range/hrrr but
-  // HURTS exact/open-meteo (over-lifts deep-confidence NO into losing YES), so it
+  // Scoped per-cohort on purpose: backtests show calibration helps high-temp range/hrrr
+  // but HURTS exact/open-meteo (over-lifts deep-confidence NO into losing YES), so it
   // must never drive decisions globally. Default false = no behavioural change.
   WEATHER_CALIBRATION_LIVE_ENABLED: boolFromEnv.optional().default(false),
-  // Comma-separated `shape|source` cohorts allowed to act on calibration (and take
-  // YES) when WEATHER_CALIBRATION_LIVE_ENABLED=true. shape ∈ exact|range|high_tail|
-  // low_tail; source as logged (open-meteo|hrrr-combined|combined|noaa). Only the
-  // cohorts validated +EV out-of-sample belong here.
-  WEATHER_CALIBRATION_LIVE_COHORTS: z.string().optional().default('range|hrrr-combined'),
+  // Comma-separated `metric|shape|source` cohorts allowed to act on calibration (and
+  // take YES) when WEATHER_CALIBRATION_LIVE_ENABLED=true. metric ∈ high|low; shape ∈
+  // exact|range|high_tail|low_tail; source as logged (open-meteo|hrrr-combined|
+  // combined|noaa). Metric is part of the key because the calibration table is
+  // metric-keyed and high/low validate independently — only the cohorts validated +EV
+  // out-of-sample belong here (currently high-temp range/HRRR; low-temp not yet).
+  WEATHER_CALIBRATION_LIVE_COHORTS: z.string().optional().default('high|range|hrrr-combined'),
   // Market-price floor for calibrated YES on live cohorts. The raw YES gate's 0.30
   // floor would block the +EV calibrated YES (which sit ~0.15–0.30); the cohort
   // allow-list is the real protection against cheap-longshot YES, so live cohorts
