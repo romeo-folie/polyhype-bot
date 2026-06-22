@@ -72,6 +72,10 @@ const baseConfig = {
   // Calibration shadow off in the base config so legacy scan assertions are
   // unaffected; the dedicated calibration tests enable it explicitly.
   WEATHER_CALIBRATION_SHADOW_ENABLED: false,
+  // Calibration-live (PR2b) off in base config; dedicated tests enable + inject a table.
+  WEATHER_CALIBRATION_LIVE_ENABLED: false,
+  WEATHER_CALIBRATION_LIVE_COHORTS: 'high|range|hrrr-combined',
+  WEATHER_CALIBRATION_YES_MIN_PRICE: 0.15,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
 vi.mock('../../shared/config.js', () => ({
@@ -203,6 +207,8 @@ const {
   getDefaultStdDev,
   lookupCity,
 } = await import('../noaaClient.js');
+
+const { _setCalibrationTableForTest } = await import('../bracketCalibration.js');
 
 const { logger } = await import('../../shared/logger.js');
 
@@ -1495,6 +1501,87 @@ describe('findMispricedBrackets - NO-bias model-safety guards (2026-06-19)', () 
     expect(opp.modelProbCalibrated ?? null).toBeNull();
     expect(opp.edgeCalibrated ?? null).toBeNull();
     expect(opp.tradeSideCalibrated ?? null).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findMispricedBrackets — calibrated LIVE decisions, per-cohort (PR2b)
+// ---------------------------------------------------------------------------
+
+describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
+  // Synthetic table: range|hrrr-combined maps everything to 0.60 (so a cheap-YES
+  // range bracket flips to a calibrated YES); a high|metric root for fallback.
+  const rise60 = Array.from({ length: 10 }, () => 0.60);
+  const synthTable = {
+    _meta: { generatedAt: '', scoredPairs: 9000, binCount: 10, priorStrength: 20, minCellSamples: 80, version: 1 },
+    byShapeSourceHorizon: {},
+    byShapeSource: { 'high|range|hrrr-combined': { n: 500, bins: rise60 } },
+    byShape: {},
+    byMetric: { high: { n: 9000, bins: Array.from({ length: 10 }, (_, i) => (i + 0.5) / 10) } },
+  };
+  // A US Fahrenheit range bracket priced as a NO under the raw model (forecast far
+  // below), so without calibration it's a NO; calibration (0.60) flips it to YES.
+  const rangeEvent = {
+    eventId: 'e1', slug: 's1', city: 'chicago', coords: lookupCity('chicago')!,
+    targetDate: '2026-06-30', unit: 'fahrenheit' as const, metric: 'high' as const,
+    endDate: '2026-06-30T12:00:00Z', allMarketIds: ['m1'],
+    brackets: [{ marketId: 'm1', conditionId: 'c1', clobTokenIds: ['ty', 'tn'],
+      threshold: 0, low: 70, high: 71, label: '70-71°F', yesPrice: 0.25, noPrice: 0.72 }],
+  };
+  const forecastHrrr = { forecastHigh: 64, stdDev: 4, source: 'hrrr-combined' as const, ensembleMembers: 31 };
+
+  beforeEach(() => { _setCalibrationTableForTest(synthTable as never); });
+  afterEach(() => { _setCalibrationTableForTest(undefined); });
+
+  it('acts on calibration for an allow-listed cohort and surfaces interior YES', () => {
+    const opp = findMispricedBrackets(rangeEvent, forecastHrrr, 1, 0.0, {
+      minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
+      calibrationShadowEnabled: true, calibrationLiveEnabled: true,
+      calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+    }).opportunities[0]!;
+    expect(opp.tradeSide).toBe('YES');               // calibrated 0.60 > yesPrice 0.25 → YES
+    expect(opp.calibrationLive).toBe(true);
+    expect(opp.modelProbability).toBeCloseTo(0.60, 6); // decision prob = calibrated (drives Kelly)
+    expect(opp.modelProbCalibrated).toBeCloseTo(0.60, 6);
+  });
+
+  it('leaves a non-allow-listed cohort (open-meteo) on the raw model — no YES surfaced', () => {
+    const opp = findMispricedBrackets(rangeEvent, { ...forecastHrrr, source: 'open-meteo' as const }, 1, 0.0, {
+      minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
+      calibrationShadowEnabled: true, calibrationLiveEnabled: true,
+      calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+    }).opportunities[0]!;
+    // open-meteo not in allow-list → raw decision: low modelProb → NO (or fallback-blocked), never the calibrated YES.
+    expect(opp.tradeSide).toBe('NO');
+    expect(opp.calibrationLive).toBe(false);
+    expect(opp.modelProbability).toBeCloseTo(opp.modelProbRaw!, 6); // raw, not 0.60
+  });
+
+  it('does not act on calibration when calibrationLiveEnabled is off (default)', () => {
+    const opp = findMispricedBrackets(rangeEvent, forecastHrrr, 1, 0.0, {
+      minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
+      calibrationShadowEnabled: true, // shadow on, but live OFF
+      calibrationLiveCohorts: 'high|range|hrrr-combined',
+    }).opportunities[0]!;
+    expect(opp.calibrationLive).toBe(false);
+    expect(opp.tradeSide).toBe('NO');                 // raw decision unchanged
+    expect(opp.modelProbCalibrated).toBeCloseTo(0.60, 6); // still LOGGED in shadow
+    expect(opp.modelProbability).toBeCloseTo(opp.modelProbRaw!, 6);
+  });
+
+  it('does NOT act on calibration for a low-metric market sharing the same shape|source', () => {
+    // Regression guard (review finding): the live cohort key is metric-aware, so a
+    // lowest-temperature range/HRRR market stays on the RAW model even with the
+    // high-temp cohort allow-listed — the low cells are not OOS-validated.
+    const lowEvent = { ...rangeEvent, metric: 'low' as const };
+    const opp = findMispricedBrackets(lowEvent, forecastHrrr, 1, 0.0, {
+      minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
+      calibrationShadowEnabled: true, calibrationLiveEnabled: true,
+      calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+    }).opportunities[0]!;
+    expect(opp.calibrationLive).toBe(false);          // low metric excluded from the high cohort
+    expect(opp.tradeSide).toBe('NO');                 // raw decision unchanged
+    expect(opp.modelProbability).toBeCloseTo(opp.modelProbRaw!, 6);
   });
 });
 

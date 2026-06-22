@@ -6,6 +6,7 @@ import {
   cellKey,
   interpolateCell,
   calibrateWeatherBracketProbability,
+  isCalibrationLiveCohort,
   loadCalibrationTable,
   type CalibrationTable,
 } from '../bracketCalibration.js';
@@ -147,6 +148,40 @@ describe('calibrateWeatherBracketProbability', () => {
       expect(c).toBeGreaterThanOrEqual(prev - 1e-9);
       prev = c;
     }
+  });
+
+  it('identity cells return raw EXACTLY — including the outer 5% tails (no bin-center clamp)', () => {
+    // A non-identity cell with the SAME identity-center bins would clamp pRaw>0.95
+    // down to 0.95 via interpolation; the identity flag must passthrough exactly.
+    const idCell = { n: 5000, bins: rise(0.05, 0.95), identity: true as const };
+    const table = synthTable({ byShape: { 'high|exact': idCell } });
+    for (const p of [0.0, 0.02, 0.5, 0.97, 0.99, 1.0]) {
+      expect(calibrateWeatherBracketProbability(p, feat, table)).toBeCloseTo(p, 9);
+    }
+    // Sanity: the SAME bins WITHOUT the identity flag DO clamp the tail.
+    const clampCell = { n: 5000, bins: rise(0.05, 0.95) };
+    const clamped = synthTable({ byShape: { 'high|exact': clampCell } });
+    expect(calibrateWeatherBracketProbability(0.99, feat, clamped)).toBeCloseTo(0.95, 6);
+  });
+});
+
+describe('isCalibrationLiveCohort', () => {
+  it('matches metric|shape|source against the allow-list (metric + source normalized)', () => {
+    const list = 'high|range|hrrr-combined, high|exact|combined';
+    expect(isCalibrationLiveCohort('high', 'range', 'hrrr-combined', list)).toBe(true);
+    expect(isCalibrationLiveCohort('HIGH', 'range', 'HRRR-Combined', list)).toBe(true); // case-insensitive
+    expect(isCalibrationLiveCohort('high', 'exact', 'combined', list)).toBe(true);
+    expect(isCalibrationLiveCohort('high', 'exact', 'open-meteo', list)).toBe(false); // not listed
+    expect(isCalibrationLiveCohort('high', 'range', 'open-meteo', list)).toBe(false);
+    expect(isCalibrationLiveCohort('high', 'range', 'hrrr-combined', '')).toBe(false); // empty list
+  });
+
+  it('excludes a different metric on the same shape|source (low-temp not validated)', () => {
+    // Regression guard: the cohort key is metric-aware so enabling lowest-temp markets
+    // does NOT pull the unvalidated `low` cells into calibration-live mode.
+    const list = 'high|range|hrrr-combined';
+    expect(isCalibrationLiveCohort('high', 'range', 'hrrr-combined', list)).toBe(true);
+    expect(isCalibrationLiveCohort('low', 'range', 'hrrr-combined', list)).toBe(false);
   });
 });
 
