@@ -41,7 +41,14 @@ vi.mock('../positionLedger.js', () => ({
   recordPosition: vi.fn(),
 }));
 
-vi.mock('../../db/writeQueue.js', () => ({ enqueueWrite: vi.fn().mockResolvedValue(undefined) }));
+const mockEnqueueWrite = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../db/writeQueue.js', () => ({ enqueueWrite: mockEnqueueWrite }));
+
+/** finalOrderType recorded on the execution_events row for the most recent attempt. */
+function recordedFinalOrderType(): unknown {
+  const call = mockEnqueueWrite.mock.calls.filter((c) => c[0] === 'execution_events').at(-1);
+  return call ? (call[1] as { finalOrderType?: unknown }).finalOrderType : undefined;
+}
 
 vi.mock('../telegram.js', () => ({
   notifyTradeExecuted: vi.fn().mockResolvedValue(undefined),
@@ -222,6 +229,143 @@ describe('hl-momentum post-only maker entries', () => {
     expect(mockPlaceRestingOrder).not.toHaveBeenCalled();
     expect(mockPlaceMarketOrder).toHaveBeenCalled();
     expect(result.entryOrderType).toBe('taker');
+  });
+});
+
+describe('hl-momentum taker fallback (HL_MOMENTUM_TAKER_FALLBACK_ENABLED)', () => {
+  const fallbackConfig = {
+    ...mockConfig,
+    HL_MOMENTUM_TAKER_FALLBACK_ENABLED: true,
+    HL_MOMENTUM_TAKER_FALLBACK_MAX_DRIFT_PCT: 0.005,
+  };
+
+  // A would-cross ALO rejection is the fastest no-fill path (no rest/poll wait).
+  // referenceMid = mid of the FIRST book read (in placeHlMakerEntry); the fallback
+  // re-reads the book (SECOND read) and compares mids to decide whether to cross.
+  function armWouldCross() {
+    mockPlaceRestingOrder.mockResolvedValue({
+      success: false,
+      error: 'Post only order would have immediately matched, bbo was 50000',
+    });
+  }
+
+  it('crosses to taker when the maker does not fill and price is within drift', async () => {
+    mockLoadConfig.mockReturnValue({ ...fallbackConfig });
+    armWouldCross();
+    mockGetBestBidAsk.mockReset();
+    mockGetBestBidAsk
+      .mockResolvedValueOnce({ bestBid: 50_000, bestAsk: 50_020 }) // reference mid = 50_010
+      .mockResolvedValueOnce({ bestBid: 50_010, bestAsk: 50_030 }); // mid 50_020, drift ~0.02%
+    mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '0xtk', price: 50_030 });
+
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(mockPlaceMarketOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ symbol: 'BTC', isBuy: true, sizeUsd: 30, leverage: 10 }),
+    );
+    expect(result.skipped).toBe(false);
+    expect(result.error).toBeUndefined();
+    expect(result.entryOrderType).toBe('taker');
+  });
+
+  it('crosses to taker on a wait_timeout no-fill when within drift', async () => {
+    // Distinct from the would-cross path: full poll → cancel → re-check cycle, then
+    // the fallback re-reads the book after the wait. referenceMid is captured pre-wait.
+    mockLoadConfig.mockReturnValue({ ...fallbackConfig });
+    mockGetOrderStatus.mockResolvedValue({ status: 'open', origSz: 1, remainingSz: 1, filledSz: 0 });
+    mockGetBestBidAsk.mockReset();
+    mockGetBestBidAsk
+      .mockResolvedValueOnce({ bestBid: 50_000, bestAsk: 50_020 }) // reference mid = 50_010
+      .mockResolvedValueOnce({ bestBid: 50_030, bestAsk: 50_050 }); // mid 50_040, drift ~0.06%
+    mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '0xtk', price: 50_050 });
+
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(mockCancelOrder).toHaveBeenCalledWith('BTC', 777);
+    expect(mockPlaceMarketOrder).toHaveBeenCalled();
+    expect(result.skipped).toBe(false);
+    expect(result.entryOrderType).toBe('taker');
+  });
+
+  it('declines the cross when price has drifted past the entry', async () => {
+    mockLoadConfig.mockReturnValue({ ...fallbackConfig });
+    armWouldCross();
+    mockGetBestBidAsk.mockReset();
+    mockGetBestBidAsk
+      .mockResolvedValueOnce({ bestBid: 50_000, bestAsk: 50_020 }) // reference mid = 50_010
+      .mockResolvedValueOnce({ bestBid: 50_400, bestAsk: 50_420 }); // mid 50_410, drift 0.8% > 0.5%
+
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(mockPlaceMarketOrder).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toContain('fallback_drift_exceeded');
+  });
+
+  it('declines the cross when the book is unavailable for re-validation', async () => {
+    mockLoadConfig.mockReturnValue({ ...fallbackConfig });
+    armWouldCross();
+    mockGetBestBidAsk.mockReset();
+    mockGetBestBidAsk
+      .mockResolvedValueOnce({ bestBid: 50_000, bestAsk: 50_020 }) // reference
+      .mockResolvedValueOnce(null); // fallback book unavailable
+
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(mockPlaceMarketOrder).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toContain('fallback_no_book');
+  });
+
+  it('drops the entry (no cross) when the fallback knob is off', async () => {
+    armWouldCross(); // within-drift book, but knob off → existing behaviour preserved
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(mockPlaceMarketOrder).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toContain('maker_not_filled');
+  });
+});
+
+describe('execution_events final_order_type label', () => {
+  it('records maker for a maker fill (not taker)', async () => {
+    mockGetOrderStatus.mockResolvedValue({ status: 'filled', origSz: 1, remainingSz: 0, filledSz: 1 });
+
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(result.entryOrderType).toBe('maker');
+    expect(recordedFinalOrderType()).toBe('maker');
+  });
+
+  it('records taker for a taker fallback fill', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...mockConfig,
+      HL_MOMENTUM_TAKER_FALLBACK_ENABLED: true,
+      HL_MOMENTUM_TAKER_FALLBACK_MAX_DRIFT_PCT: 0.005,
+    });
+    mockPlaceRestingOrder.mockResolvedValue({
+      success: false,
+      error: 'Post only order would have immediately matched, bbo was 50000',
+    });
+    mockGetBestBidAsk.mockReset();
+    mockGetBestBidAsk
+      .mockResolvedValueOnce({ bestBid: 50_000, bestAsk: 50_020 })
+      .mockResolvedValueOnce({ bestBid: 50_010, bestAsk: 50_030 });
+    mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '0xtk', price: 50_030 });
+
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(result.entryOrderType).toBe('taker');
+    expect(recordedFinalOrderType()).toBe('taker');
+  });
+
+  it('records taker for the non-maker (placeMarketOrder) path', async () => {
+    mockLoadConfig.mockReturnValue({ ...mockConfig, HL_MAKER_ENTRIES_ENABLED: false });
+    mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '0xtx', price: 50_000 });
+
+    await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(recordedFinalOrderType()).toBe('taker');
   });
 });
 

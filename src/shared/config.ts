@@ -1513,6 +1513,18 @@ export const envSchema = z.object({
   HL_MAKER_WAIT_SEC: z.coerce.number().int().min(5).optional().default(90),
   // Poll cadence for the resting order's fill status.
   HL_MAKER_POLL_INTERVAL_SEC: z.coerce.number().int().min(1).optional().default(5),
+  // Taker fallback for an hl-momentum maker entry that didn't fill: cross and take
+  // instead of dropping the entry. A resting maker order at the touch only fills when
+  // the market trades back to it, so it structurally misses the fast momentum moves
+  // (its winners) and keeps the stalls. The fallback recovers those at the cost of the
+  // 0.045% taker fee. Only applies when HL_MAKER_ENTRIES_ENABLED is on. Default off.
+  HL_MOMENTUM_TAKER_FALLBACK_ENABLED: boolFromEnv.optional().default(false),
+  // Re-validation guard for the taker fallback: skip the cross if the live mid price has
+  // drifted (either direction) more than this fraction from the mid at post time. Measured
+  // mid-to-mid so a wide spread isn't mistaken for a move. A larger drift means the market
+  // has run past where the signal's edge was computed (chasing), so we decline. 0.005 =
+  // 0.5% (~⅓ of the 1.5% min ATR stop).
+  HL_MOMENTUM_TAKER_FALLBACK_MAX_DRIFT_PCT: z.coerce.number().min(0).max(0.1).optional().default(0.005),
   // ATR-scaled SL/TP for NON-meme hl-momentum positions (2026-06-12 review): frozen
   // at entry like the meme path and stored in the same ledger fields
   // (memeAtrSlPct/memeAtrTpPct = "frozen ATR SL/TP", meme or not). Replaces the fixed
