@@ -1815,13 +1815,17 @@ async function placeHlMakerEntry(
   cfg: ReturnType<typeof loadConfig>,
 ): Promise<
   | { outcome: 'filled'; txHash: string; price: number; fillFraction: number }
-  | { outcome: 'not_filled'; detail: string }
+  | { outcome: 'not_filled'; detail: string; referenceMid: number }
   | { outcome: 'error'; error: string }
 > {
   const isBuy = signal.direction === 'LONG';
   const book = await hl.getBestBidAsk(signal.marketId).catch(() => null);
   if (!book) return { outcome: 'error', error: 'l2 book unavailable for maker entry' };
   const limitPrice = isBuy ? book.bestBid : book.bestAsk;
+  // Mid at post time — the reference for the taker fallback's anti-chase drift check.
+  // Using mid (not the touch) keeps the drift measure independent of the spread, so a
+  // wide book doesn't look like a price move.
+  const referenceMid = (book.bestBid + book.bestAsk) / 2;
 
   const placed = await hl.placeRestingOrder({
     symbol: signal.marketId,
@@ -1833,7 +1837,7 @@ async function placeHlMakerEntry(
   if (!placed.success || placed.oid === undefined) {
     const err = placed.error ?? 'resting order failed';
     if (/immediately match/i.test(err)) {
-      return { outcome: 'not_filled', detail: 'alo_would_cross' };
+      return { outcome: 'not_filled', detail: 'alo_would_cross', referenceMid };
     }
     return { outcome: 'error', error: err };
   }
@@ -1869,7 +1873,7 @@ async function placeHlMakerEntry(
           fillFraction: status.filledSz / status.origSz,
         };
       }
-      return { outcome: 'not_filled', detail: `order_${status.status}` };
+      return { outcome: 'not_filled', detail: `order_${status.status}`, referenceMid };
     }
   }
 
@@ -1892,7 +1896,67 @@ async function placeHlMakerEntry(
     // error so it is visible; the reconciler picks up any orphaned fill from venue state.
     return { outcome: 'error', error: `cancel failed with unknown order state: ${cancel.error ?? ''}` };
   }
-  return { outcome: 'not_filled', detail: 'wait_timeout' };
+  return { outcome: 'not_filled', detail: 'wait_timeout', referenceMid };
+}
+
+/**
+ * Taker fallback for an hl-momentum maker entry that didn't fill
+ * (HL_MOMENTUM_TAKER_FALLBACK_ENABLED). A resting maker order at the touch only fills
+ * when the market trades back to it, so it structurally misses the fast momentum moves
+ * (its winners). Rather than drop the entry, cross and take — but first re-validate that
+ * the market is still trading near where we posted: if the live mid has drifted (either
+ * direction) beyond HL_MOMENTUM_TAKER_FALLBACK_MAX_DRIFT_PCT from the mid at post time,
+ * the move has run past the signal's entry and crossing would be chasing, so we decline.
+ * Drift is measured mid-to-mid (not vs the touch) so a wide spread isn't read as a move.
+ */
+async function placeHlTakerFallbackEntry(
+  hl: ReturnType<typeof getHyperliquid>,
+  signal: TradeSignal,
+  leverage: number,
+  cfg: ReturnType<typeof loadConfig>,
+  referenceMid: number,
+): Promise<
+  | { outcome: 'crossed'; tradeResult: { success: boolean; txHash?: string; price?: number; error?: string } }
+  | { outcome: 'skip'; detail: string }
+> {
+  const isBuy = signal.direction === 'LONG';
+  const book = await hl.getBestBidAsk(signal.marketId).catch(() => null);
+  if (!book) return { outcome: 'skip', detail: 'fallback_no_book' };
+  const currentMid = (book.bestBid + book.bestAsk) / 2;
+  if (
+    !isFinite(currentMid) ||
+    currentMid <= 0 ||
+    !isFinite(referenceMid) ||
+    referenceMid <= 0
+  ) {
+    return { outcome: 'skip', detail: 'fallback_no_book' };
+  }
+  const driftPct = Math.abs(currentMid - referenceMid) / referenceMid;
+  if (driftPct > cfg.HL_MOMENTUM_TAKER_FALLBACK_MAX_DRIFT_PCT) {
+    logger.info('[executor] taker fallback declined — price drifted past entry', {
+      symbol: signal.marketId,
+      direction: signal.direction,
+      referenceMid,
+      currentMid,
+      driftPct: driftPct.toFixed(4),
+      maxDrift: cfg.HL_MOMENTUM_TAKER_FALLBACK_MAX_DRIFT_PCT,
+    });
+    return { outcome: 'skip', detail: 'fallback_drift_exceeded' };
+  }
+  logger.info('[executor] maker entry not filled — crossing to taker (fallback)', {
+    symbol: signal.marketId,
+    direction: signal.direction,
+    referenceMid,
+    currentMid,
+    driftPct: driftPct.toFixed(4),
+  });
+  const tradeResult = await hl.placeMarketOrder({
+    symbol: signal.marketId,
+    isBuy,
+    sizeUsd: signal.stakeUsd,
+    leverage,
+  });
+  return { outcome: 'crossed', tradeResult };
 }
 
 async function executeHyperliquidSignal(
@@ -2025,23 +2089,16 @@ async function executeHyperliquidSignal(
     });
 
     // Post-only maker entry for hl-momentum (2026-06-12 review): post at the touch,
-    // wait, cancel on timeout — never fall back to taker. With gross PF ≈ 0.94 a
-    // missed entry costs ~nothing in expectation; a taker fill costs 3× the fee.
+    // wait, cancel on timeout. Cuts the entry fee from 0.045% to 0.015% (fees were 2/3
+    // of the all-time HL loss). On a no-fill, HL_MOMENTUM_TAKER_FALLBACK_ENABLED can
+    // cross to taker rather than dropping the entry — a resting maker order structurally
+    // misses the fast momentum moves (its winners), so the fallback recovers those when
+    // the price hasn't already run past the entry (see placeHlTakerFallbackEntry).
     let tradeResult: { success: boolean; txHash?: string; price?: number; error?: string };
     let entryOrderType: 'maker' | 'taker' = 'taker';
     if (cfg.HL_MAKER_ENTRIES_ENABLED && signal.sourcedFrom === 'hl-momentum') {
       const makerRes = await placeHlMakerEntry(hl, signal, leverage, cfg);
-      if (makerRes.outcome === 'not_filled') {
-        logger.info('[executor] maker entry not filled — skipping', {
-          symbol: signal.marketId,
-          direction: signal.direction,
-          detail: makerRes.detail,
-        });
-        return { signal, skipped: true, skipReason: `maker_not_filled:${makerRes.detail}` };
-      }
-      if (makerRes.outcome === 'error') {
-        tradeResult = { success: false, error: makerRes.error };
-      } else {
+      if (makerRes.outcome === 'filled') {
         entryOrderType = 'maker';
         if (makerRes.fillFraction < 1) {
           // Partial fill at timeout: the position exists for the filled part only.
@@ -2056,6 +2113,27 @@ async function executeHyperliquidSignal(
           signal.stakeUsd = scaledStake;
         }
         tradeResult = { success: true, txHash: makerRes.txHash, price: makerRes.price };
+      } else if (makerRes.outcome === 'error') {
+        tradeResult = { success: false, error: makerRes.error };
+      } else {
+        // not_filled — optionally cross to taker instead of dropping the entry.
+        const fallback = cfg.HL_MOMENTUM_TAKER_FALLBACK_ENABLED
+          ? await placeHlTakerFallbackEntry(hl, signal, leverage, cfg, makerRes.referenceMid)
+          : null;
+        if (fallback?.outcome === 'crossed') {
+          entryOrderType = 'taker';
+          tradeResult = fallback.tradeResult;
+        } else {
+          const detail =
+            fallback?.outcome === 'skip' ? `${makerRes.detail},${fallback.detail}` : makerRes.detail;
+          logger.info('[executor] maker entry not filled — skipping', {
+            symbol: signal.marketId,
+            direction: signal.direction,
+            detail,
+            takerFallbackEnabled: cfg.HL_MOMENTUM_TAKER_FALLBACK_ENABLED,
+          });
+          return { signal, skipped: true, skipReason: `maker_not_filled:${detail}` };
+        }
       }
     } else {
       tradeResult = await hl.placeMarketOrder({
@@ -2854,7 +2932,10 @@ export async function executeSignal(
       finalizeAttempt({
         finalExecutionPath: 'hyperliquid_fill',
         finalVenue: 'hyperliquid',
-        finalOrderType: 'taker',
+        // Reflect the actual entry path: hl-momentum maker entries (and their taker
+        // fallback) report their real type via result.entryOrderType. Other HL paths
+        // (placeMarketOrder) are taker and leave entryOrderType undefined → 'taker'.
+        finalOrderType: result.entryOrderType === 'maker' ? 'maker' : 'taker',
         executionSucceeded: true,
         finalSharesFilled: result.sharesFilled ?? null,
         finalStakeUsdExecuted: signal.stakeUsd,
