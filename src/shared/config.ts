@@ -2243,6 +2243,22 @@ export const envSchema = z.object({
   // NO candidate. Set _ENABLED=false to skip the fetch entirely.
   WEATHER_MODAL_MASS_VETO_ENABLED: boolFromEnv.optional().default(true),
   WEATHER_INTERIOR_NO_MODAL_MASS_VETO: z.coerce.number().min(0).max(1).optional().default(0.50),
+  // --- CONFLUENCE GATES (multi-signal cross-check) ---
+  // MAE-aware coin-flip veto: widen the interior-NO margin by the city's MEASURED
+  // forecast error (cityBias.correctedMae, ~1.3-1.5°F) × this multiplier, so we don't
+  // bet NO on a bracket our forecast literally can't resolve. effectiveMargin =
+  // max(WEATHER_INTERIOR_NO_FORECAST_MARGIN, correctedMae × mult). 0 = disabled (flat
+  // margin only, no behaviour change) — ships inert; raise after reviewing shadow impact.
+  WEATHER_INTERIOR_NO_MARGIN_MAE_MULT: z.coerce.number().min(0).max(3).optional().default(0),
+  // Market-favorite NO veto: never bet NO on a bracket the market itself prices as
+  // ≥ this likely (bracket yesPrice ≥ threshold). Stops "NO against a 90% market"
+  // longshots where our diverging forecast overrides a confident book. Live + killable.
+  WEATHER_MARKET_FAVORITE_NO_VETO_ENABLED: boolFromEnv.optional().default(true),
+  WEATHER_MARKET_FAVORITE_NO_MAX_YESPRICE: z.coerce.number().min(0.5).max(1).optional().default(0.85),
+  // Confluence YES (SHADOW ONLY): log when the model-modal bracket == the market-favorite
+  // bracket (forecast and crowd agree on the same winner) — a high-confidence YES
+  // candidate. Does NOT trade; validate the cohort pays before wiring a live YES path.
+  WEATHER_CONFLUENCE_YES_SHADOW_ENABLED: boolFromEnv.optional().default(true),
   // Restrict the modal-mass veto to resolution-day events only. Open-Meteo
   // heavily rate-limits the ensemble-hourly endpoint (429s), and live NO entries
   // concentrate on resolution day (taker path); res-day is also where member data
