@@ -29,16 +29,32 @@ set -euo pipefail
 # Ensure persistent log directory exists
 mkdir -p "$HOME/logs/pga"
 
-ENV_FILE="$(dirname "$0")/.env"
+# ENV_FILE is overridable via PGA_ENV_FILE (used by tests); defaults to the .env beside this script.
+ENV_FILE="${PGA_ENV_FILE:-$(dirname "$0")/.env}"
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "ERROR: $ENV_FILE not found. Aborting." >&2
   exit 1
 fi
 
+# Load .env TOLERANTLY. A single malformed line — e.g. an unquoted shell-special char
+# like '|' or a stray space in a key — must NEVER abort the pipeline. Under `set -e`,
+# `source` turns one bad line into exit 127 ("command not found"), which silently killed
+# the ENTIRE host-cron fleet (weather, execution, spot, rebate, settlement…) for ~2.5
+# days on 2026-06-22→25: no scans, no trades, no shadow, no error surfaced. We disable
+# errexit only around the source and capture its stderr. The tsx entrypoints also load
+# .env via dotenv, which parses it correctly regardless of shell syntax, so a line the
+# shell mangles still reaches the app with the right value.
+ENV_ERR_LOG="$HOME/logs/pga/env-source.log"
 set -a
+set +e
 # shellcheck source=.env
-source "$ENV_FILE"
+source "$ENV_FILE" 2>"$ENV_ERR_LOG"
+set -e
 set +a
+if [[ -s "$ENV_ERR_LOG" ]]; then
+  echo "WARN: $ENV_FILE produced shell-source errors (continuing; dotenv loads it in-process). Fix these lines:" >&2
+  sed 's/^/  /' "$ENV_ERR_LOG" >&2
+fi
 
 # Derive a lock-file name from the last path component of the script being run.
 # e.g. "npx tsx src/monitor/index.ts" -> lock file "/tmp/pga-monitor.lock"

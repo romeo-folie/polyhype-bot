@@ -28,6 +28,7 @@ import { evaluateWeatherNearResEntry } from './nearResEntry.js';
 import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import { runWeatherLockInScan } from './weatherLockIn.js';
+import { WEATHER_SCANNER_HEARTBEAT_KEY } from '../cron/heartbeatWatchdog.js';
 import { runWeatherInvalidationScan, FORECAST_INVALIDATED_KEY_PREFIX } from './weatherInvalidation.js';
 import {
   runWeatherDriftStrategy,
@@ -3470,6 +3471,19 @@ async function main() {
   const redis = getRedis();
   try {
     await runWeatherScan(redis);
+    // Liveness heartbeat: record that a scan COMPLETED so the heartbeat watchdog
+    // (src/cron/heartbeatWatchdog.ts, run from the always-on pga-cron container) can
+    // alert if this host-cron scanner silently dies — as it did 2026-06-22→25 when a
+    // malformed .env aborted run.sh before tsx ever launched (held weather positions
+    // then rode to resolution unmonitored). 7-day TTL keeps the age computable while stale.
+    // Best-effort: a heartbeat write failure must never fail the scan.
+    try {
+      await redis.setex(WEATHER_SCANNER_HEARTBEAT_KEY, 7 * 24 * 60 * 60, String(Math.floor(Date.now() / 1000)));
+    } catch (err) {
+      logger.warn('[weather] heartbeat write failed (non-fatal)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     // Once-per-UTC-day performance digest. Best-effort: a digest failure (DB or
     // Telegram) must never fail the scan. The Redis NX gate inside makes this
     // send at most once per day even though main() runs every */30 cron tick.
