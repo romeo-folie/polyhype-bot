@@ -887,6 +887,20 @@ export interface WeatherBracketOpportunity {
   /** Ensemble YES mass over the margin-widened bracket used by the modal-mass
    *  veto. Null when not evaluated (not a bounded NO, or the fetch was skipped/failed). */
   ensembleYesMass?: number | null;
+  /** True when this NO bet is on a bracket the MARKET itself prices ≥ the favorite
+   *  threshold (yesPrice ≥ WEATHER_MARKET_FAVORITE_NO_MAX_YESPRICE) — we don't fade a
+   *  confident book. Excluded from execution. */
+  blockedByMarketFavorite?: boolean;
+  /** Effective interior-NO margin actually used (max of the flat margin and the
+   *  MAE-scaled margin). Logged for shadow visibility into the MAE-aware veto. */
+  interiorNoMarginEff?: number;
+  /** SHADOW: true when this bracket is BOTH the model-modal and the market-favorite
+   *  bracket — forecast and crowd agree it's the likely winner (a YES candidate). */
+  confluenceYesAgree?: boolean;
+  /** Label of the market-favorite bracket (max yesPrice) for this event. */
+  marketFavoriteBracket?: string | null;
+  /** Label of the model-modal bracket (max modelProb) for this event. */
+  modelModalBracket?: string | null;
   /** Source-specific σ multiplier applied at entry (e.g. 1.25 for Open-Meteo, 1.0 otherwise). */
   sourceStddevMultiplier?: number;
   /** Pre-2026-06-19 baseline bracket probability: the Gaussian with NO bias
@@ -1136,6 +1150,14 @@ export interface FindMispricedOptions {
   /** Market-price floor for calibrated YES on live cohorts (replaces the raw 0.30
    *  floor; live cohorts rely on calibrated edge + this lower floor). Default 0.15. */
   calibrationYesMinPrice?: number;
+  /** Widen the interior-NO margin by cityBias.correctedMae × this multiplier
+   *  (MAE-aware coin-flip veto). 0 = disabled (flat interiorNoForecastMargin only). */
+  interiorNoMarginMaeMult?: number;
+  /** Veto a NO bet when the bracket's market yesPrice ≥ marketFavoriteNoMaxYesPrice. */
+  marketFavoriteNoVetoEnabled?: boolean;
+  marketFavoriteNoMaxYesPrice?: number;
+  /** SHADOW: flag brackets where model-modal == market-favorite (confluence YES). */
+  confluenceYesShadowEnabled?: boolean;
 }
 
 export interface BiasedProbResult {
@@ -1237,6 +1259,10 @@ export function findMispricedBrackets(
     calibrationLiveEnabled = false,
     calibrationLiveCohorts = '',
     calibrationYesMinPrice = 0.15,
+    interiorNoMarginMaeMult = 0,
+    marketFavoriteNoVetoEnabled = false,
+    marketFavoriteNoMaxYesPrice = 0.85,
+    confluenceYesShadowEnabled = false,
   } = options;
   // Defense-in-depth clamp: loadConfig() cross-validates trusted ≥ min, but this
   // helper is also called directly from tests and could accept arbitrary values.
@@ -1355,6 +1381,26 @@ export function findMispricedBrackets(
   const adjustedMarketProbs = event.brackets.map((b) =>
     overround > 0 ? b.yesPrice / overround : 0,
   );
+
+  // Confluence (shadow): the bracket the MARKET most favors (max yesPrice) and the one
+  // the MODEL most favors (max modelProb). When they're the same bracket, forecast and
+  // crowd agree on the likely winner → a high-confidence YES candidate (logged, not traded).
+  let marketFavoriteIdx = -1;
+  let modelModalIdx = -1;
+  let bestYesPrice = -Infinity;
+  let bestModelProb = -Infinity;
+  for (let j = 0; j < event.brackets.length; j++) {
+    if (event.brackets[j]!.yesPrice > bestYesPrice) {
+      bestYesPrice = event.brackets[j]!.yesPrice;
+      marketFavoriteIdx = j;
+    }
+    if (modelProbs[j]! > bestModelProb) {
+      bestModelProb = modelProbs[j]!;
+      modelModalIdx = j;
+    }
+  }
+  const marketFavoriteBracket = marketFavoriteIdx >= 0 ? event.brackets[marketFavoriteIdx]!.label : null;
+  const modelModalBracket = modelModalIdx >= 0 ? event.brackets[modelModalIdx]!.label : null;
 
   for (let i = 0; i < event.brackets.length; i++) {
     const bracket = event.brackets[i]!;
@@ -1522,18 +1568,45 @@ export function findMispricedBrackets(
     // We no longer drop them silently: they are SHADOW-LOGGED (blockedByInteriorMargin)
     // and excluded from execution, so the calibrator keeps learning from this exact
     // cohort (with resolved outcomes) even though we won't bet them today.
+    // MAE-aware margin: widen the flat margin by the city's measured forecast error
+    // so we don't bet NO on a bracket our forecast can't resolve. mult=0 → flat margin.
+    const effectiveInteriorMargin = Math.max(
+      interiorNoForecastMargin,
+      interiorNoMarginMaeMult > 0 ? (cityBias?.correctedMae ?? 0) * interiorNoMarginMaeMult : 0,
+    );
     const blockedByInteriorMargin =
       !blockedByNoFallback && tradeSide === 'NO'
-      && forecastRoundsIntoBracket(correctedForecastHigh, bracket.low, bracket.high, interiorNoForecastMargin);
+      && forecastRoundsIntoBracket(correctedForecastHigh, bracket.low, bracket.high, effectiveInteriorMargin);
     if (blockedByInteriorMargin) {
       logger.debug('[weather] interior NO declined (forecast rounds into/near) — shadow-only', {
         city: event.city,
         bracket: bracket.label,
         correctedForecastHigh,
         roundedForecast: Math.round(correctedForecastHigh),
-        margin: interiorNoForecastMargin,
+        margin: effectiveInteriorMargin,
       });
     }
+
+    // Market-favorite NO veto: don't fade a bracket the market itself prices as the
+    // likely winner (yesPrice ≥ threshold). Stops "NO against a confident book" bets
+    // where our diverging forecast overrides the crowd. Excluded from execution.
+    const blockedByMarketFavorite =
+      marketFavoriteNoVetoEnabled && tradeSide === 'NO'
+      && bracket.yesPrice >= marketFavoriteNoMaxYesPrice;
+    if (blockedByMarketFavorite) {
+      logger.info('[weather] NO vetoed — market favors this bracket', {
+        city: event.city,
+        bracket: bracket.label,
+        yesPrice: bracket.yesPrice,
+        threshold: marketFavoriteNoMaxYesPrice,
+        decisionProb,
+      });
+    }
+
+    // Confluence (SHADOW): model-modal bracket == market-favorite bracket → both agree
+    // this bracket is the likely winner. Logged as a YES candidate; never traded here.
+    const confluenceYesAgree =
+      confluenceYesShadowEnabled && i === marketFavoriteIdx && i === modelModalIdx;
 
     // Skip near-zero markets where liquidity is negligible. Hard floor on both
     // sides, independent of the configurable yesMinMarketPrice gate — otherwise
@@ -1621,6 +1694,11 @@ export function findMispricedBrackets(
       wouldHaveFallenBackToNo,
       blockedByNoFallback,
       blockedByInteriorMargin,
+      blockedByMarketFavorite,
+      interiorNoMarginEff: effectiveInteriorMargin,
+      confluenceYesAgree,
+      marketFavoriteBracket,
+      modelModalBracket,
       // Modal-mass veto is evaluated later in scanWeatherMarkets (needs an async
       // ensemble-hourly fetch); default unblocked / unevaluated here.
       blockedByModalMass: false,
@@ -1920,6 +1998,10 @@ export async function scanWeatherMarkets(
         calibrationLiveEnabled: cfg.WEATHER_CALIBRATION_LIVE_ENABLED,
         calibrationLiveCohorts: cfg.WEATHER_CALIBRATION_LIVE_COHORTS,
         calibrationYesMinPrice: cfg.WEATHER_CALIBRATION_YES_MIN_PRICE,
+        interiorNoMarginMaeMult: cfg.WEATHER_INTERIOR_NO_MARGIN_MAE_MULT,
+        marketFavoriteNoVetoEnabled: cfg.WEATHER_MARKET_FAVORITE_NO_VETO_ENABLED,
+        marketFavoriteNoMaxYesPrice: cfg.WEATHER_MARKET_FAVORITE_NO_MAX_YESPRICE,
+        confluenceYesShadowEnabled: cfg.WEATHER_CONFLUENCE_YES_SHADOW_ENABLED,
       },
     );
     const afterMarketGate = await applyMarketDisagreementGate(redis, opportunities, cfg);
@@ -1946,7 +2028,7 @@ export async function scanWeatherMarkets(
       && (!cfg.WEATHER_MODAL_MASS_VETO_RES_DAY_ONLY || isResolutionDay);
     if (modalVetoActive) {
       const boundedNoOpps = gatedOpportunities.filter((o) => {
-        if (o.tradeSide !== 'NO' || o.blockedByNoFallback || o.blockedByInteriorMargin) return false;
+        if (o.tradeSide !== 'NO' || o.blockedByNoFallback || o.blockedByInteriorMargin || o.blockedByMarketFavorite) return false;
         const p = parseBracketLabel(o.bracketLabel);
         return p?.low != null && p?.high != null;
       });
@@ -2004,7 +2086,8 @@ export async function scanWeatherMarkets(
       : 0;
     const allowedInEvent = gatedOpportunities.filter(
       (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto
-        && !o.blockedByNoFallback && !o.blockedByModalMass && !o.blockedByInteriorMargin,
+        && !o.blockedByNoFallback && !o.blockedByModalMass && !o.blockedByInteriorMargin
+        && !o.blockedByMarketFavorite,
     ).length;
     const disagreementBlocked = gatedOpportunities.filter((o) => o.blockedByMarketDisagreement).length;
     const ensembleVetoBlocked = gatedOpportunities.filter((o) => o.blockedByEnsembleVeto).length;
@@ -2109,7 +2192,8 @@ export async function scanWeatherMarkets(
         !opp.blockedByEnsembleVeto &&
         !opp.blockedByNoFallback &&
         !opp.blockedByModalMass &&
-        !opp.blockedByInteriorMargin;
+        !opp.blockedByInteriorMargin &&
+        !opp.blockedByMarketFavorite;
       logger.info('[weather] bracket opportunity', {
         marketId: opp.marketId,
         eventSlug: opp.eventSlug,
@@ -2136,6 +2220,11 @@ export async function scanWeatherMarkets(
         blockedByEnsembleVeto: opp.blockedByEnsembleVeto ?? false,
         blockedByNoFallback: opp.blockedByNoFallback ?? false,
         blockedByInteriorMargin: opp.blockedByInteriorMargin ?? false,
+        blockedByMarketFavorite: opp.blockedByMarketFavorite ?? false,
+        interiorNoMarginEff: opp.interiorNoMarginEff ?? null,
+        confluenceYesAgree: opp.confluenceYesAgree ?? false,
+        marketFavoriteBracket: opp.marketFavoriteBracket ?? null,
+        modelModalBracket: opp.modelModalBracket ?? null,
         blockedByModalMass: opp.blockedByModalMass ?? false,
         ensembleYesMass: opp.ensembleYesMass ?? null,
         previousOutcomePrice: opp.previousOutcomePrice ?? null,
@@ -2203,6 +2292,11 @@ export async function scanWeatherMarkets(
           wouldHaveFallenBackToNo: opp.wouldHaveFallenBackToNo ?? false,
           blockedByNoFallback: opp.blockedByNoFallback ?? false,
           blockedByInteriorMargin: opp.blockedByInteriorMargin ?? false,
+          blockedByMarketFavorite: opp.blockedByMarketFavorite ?? false,
+          interiorNoMarginEff: opp.interiorNoMarginEff ?? null,
+          confluenceYesAgree: opp.confluenceYesAgree ?? false,
+          marketFavoriteBracket: opp.marketFavoriteBracket ?? null,
+          modelModalBracket: opp.modelModalBracket ?? null,
           blockedByModalMass: opp.blockedByModalMass ?? false,
           ensembleYesMass: opp.ensembleYesMass ?? null,
           sourceStddevMultiplier: opp.sourceStddevMultiplier ?? 1.0,
@@ -2241,7 +2335,8 @@ export async function scanWeatherMarkets(
   const totalEnsembleVetoBlocked = allOpportunities.filter((o) => o.blockedByEnsembleVeto).length;
   const allowedOpportunities = allOpportunities.filter(
     (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto
-      && !o.blockedByNoFallback && !o.blockedByModalMass && !o.blockedByInteriorMargin,
+      && !o.blockedByNoFallback && !o.blockedByModalMass && !o.blockedByInteriorMargin
+      && !o.blockedByMarketFavorite,
   );
   logger.info('[weather] scan summary', {
     totalEvents: rawEvents.length,
@@ -2994,6 +3089,7 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       !o.blockedByNoFallback &&
       !o.blockedByModalMass &&
       !o.blockedByInteriorMargin &&
+      !o.blockedByMarketFavorite &&
       !excludedCities.has(o.city.toLowerCase()),
   );
 

@@ -64,6 +64,12 @@ const baseConfig = {
   WEATHER_YES_GATE_NO_FALLBACK_ENABLED: true,
   WEATHER_OPEN_METEO_STDDEV_MULTIPLIER: 1.0,
   WEATHER_INTERIOR_NO_FORECAST_MARGIN: 0,
+  // Confluence gates default "off" in baseConfig so existing tests are unaffected;
+  // dedicated tests enable them. (Production defaults: veto on, confluence-shadow on.)
+  WEATHER_INTERIOR_NO_MARGIN_MAE_MULT: 0,
+  WEATHER_MARKET_FAVORITE_NO_VETO_ENABLED: false,
+  WEATHER_MARKET_FAVORITE_NO_MAX_YESPRICE: 0.85,
+  WEATHER_CONFLUENCE_YES_SHADOW_ENABLED: false,
   WEATHER_MODAL_MASS_VETO_ENABLED: false,
   WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.50,
   // Evaluate the modal-mass veto on every horizon in tests (events target ~2
@@ -1115,6 +1121,117 @@ describe('findMispricedBrackets - interior NO rounding gate', () => {
     const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, { minModelCoverage: 0, cityActuals: coolActuals });
     const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
     expect(noOpps.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findMispricedBrackets — confluence gates (market-favorite veto, MAE margin, confluence YES)
+// ---------------------------------------------------------------------------
+
+describe('findMispricedBrackets - market-favorite NO veto', () => {
+  // NO on a bracket the model dislikes (forecast 79, bracket 76-77) but the MARKET
+  // prices as the heavy favorite (yesPrice 0.90). The Miami pattern.
+  const event = {
+    eventId: 'e-mfav', slug: 'miami-mfav', city: 'miami',
+    coords: lookupCity('miami') ?? { lat: 25.79, lon: -80.29 },
+    targetDate: '2026-06-25', unit: 'fahrenheit' as const,
+    endDate: '2026-06-25T12:00:00Z',
+    brackets: [
+      { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+        threshold: 0, low: 76, high: 77, label: '76-77°F', yesPrice: 0.90, noPrice: 0.08 },
+    ],
+  };
+  const forecast = { forecastHigh: 79, stdDev: 2, source: 'combined' as const, ensembleMembers: 31 };
+
+  it('blocks a NO on a bracket priced ≥ threshold when enabled', () => {
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, marketFavoriteNoVetoEnabled: true, marketFavoriteNoMaxYesPrice: 0.85,
+    });
+    const no = opportunities.find((o) => o.tradeSide === 'NO')!;
+    expect(no).toBeDefined();
+    expect(no.blockedByMarketFavorite).toBe(true);
+  });
+
+  it('does not block when disabled, or when yesPrice is below the threshold', () => {
+    const disabled = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, marketFavoriteNoVetoEnabled: false, marketFavoriteNoMaxYesPrice: 0.85,
+    }).opportunities.find((o) => o.tradeSide === 'NO')!;
+    expect(disabled.blockedByMarketFavorite ?? false).toBe(false);
+
+    const cheaper = { ...event, brackets: [{ ...event.brackets[0]!, yesPrice: 0.80, noPrice: 0.18 }] };
+    const below = findMispricedBrackets(cheaper, forecast, 1, 0.0, {
+      minModelCoverage: 0, marketFavoriteNoVetoEnabled: true, marketFavoriteNoMaxYesPrice: 0.85,
+    }).opportunities.find((o) => o.tradeSide === 'NO')!;
+    expect(below.blockedByMarketFavorite ?? false).toBe(false);
+  });
+});
+
+describe('findMispricedBrackets - MAE-aware interior margin', () => {
+  // Forecast 79.4 → rounds to 79. Bracket 76-77. Flat margin 1 → [75,78] excludes 79 (no block).
+  // correctedMae 2.5 × mult 1.0 → margin 2.5 → [73.5,79.5] includes 79 → blocked.
+  const event = {
+    eventId: 'e-mae', slug: 'mae', city: 'miami',
+    coords: lookupCity('miami') ?? { lat: 25.79, lon: -80.29 },
+    targetDate: '2026-06-25', unit: 'fahrenheit' as const,
+    endDate: '2026-06-25T12:00:00Z',
+    brackets: [
+      { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+        threshold: 0, low: 76, high: 77, label: '76-77°F', yesPrice: 0.15, noPrice: 0.70 },
+    ],
+  };
+  const forecast = { forecastHigh: 79.4, stdDev: 2, source: 'combined' as const, ensembleMembers: 31 };
+  const cityBias = { meanBias: 0, empiricalStddev: 2, correctedMae: 2.5, sampleSize: 20, updatedAt: '' };
+
+  it('flat margin (mult=0) does NOT block a forecast just outside the bracket', () => {
+    const no = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, interiorNoForecastMargin: 1, interiorNoMarginMaeMult: 0, cityBias,
+    }).opportunities.find((o) => o.tradeSide === 'NO')!;
+    expect(no.blockedByInteriorMargin ?? false).toBe(false);
+    expect(no.interiorNoMarginEff).toBe(1);
+  });
+
+  it('MAE-widened margin (mult=1.0) blocks the same NO', () => {
+    const no = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, interiorNoForecastMargin: 1, interiorNoMarginMaeMult: 1.0, cityBias,
+    }).opportunities.find((o) => o.tradeSide === 'NO')!;
+    expect(no.interiorNoMarginEff).toBeCloseTo(2.5, 6);
+    expect(no.blockedByInteriorMargin).toBe(true);
+  });
+});
+
+describe('findMispricedBrackets - confluence YES (shadow)', () => {
+  // Forecast 78.5 → model-modal bracket is 78-79. Market favorite is also 78-79 (yes 0.55).
+  const event = {
+    eventId: 'e-conf', slug: 'conf', city: 'miami',
+    coords: lookupCity('miami') ?? { lat: 25.79, lon: -80.29 },
+    targetDate: '2026-06-25', unit: 'fahrenheit' as const,
+    endDate: '2026-06-25T12:00:00Z',
+    brackets: [
+      { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['ay','an'], threshold: 0, low: 76, high: 77, label: '76-77°F', yesPrice: 0.10, noPrice: 0.88 },
+      { marketId: 'm1', conditionId: 'c1', clobTokenIds: ['by','bn'], threshold: 0, low: 78, high: 79, label: '78-79°F', yesPrice: 0.55, noPrice: 0.43 },
+      { marketId: 'm2', conditionId: 'c2', clobTokenIds: ['cy','cn'], threshold: 0, low: 80, high: 81, label: '80-81°F', yesPrice: 0.05, noPrice: 0.93 },
+    ],
+  };
+  const forecast = { forecastHigh: 78.5, stdDev: 1.5, source: 'combined' as const, ensembleMembers: 31 };
+
+  it('flags the bracket that is BOTH model-modal and market-favorite', () => {
+    const opps = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, confluenceYesShadowEnabled: true, marketFavoriteNoVetoEnabled: false,
+    }).opportunities;
+    const fav = opps.find((o) => o.bracketLabel === '78-79°F')!;
+    expect(fav.confluenceYesAgree).toBe(true);
+    expect(fav.marketFavoriteBracket).toBe('78-79°F');
+    expect(fav.modelModalBracket).toBe('78-79°F');
+    // A non-confluence bracket is not flagged.
+    const other = opps.find((o) => o.bracketLabel === '76-77°F')!;
+    expect(other.confluenceYesAgree ?? false).toBe(false);
+  });
+
+  it('does not flag confluence when the shadow switch is off', () => {
+    const opps = findMispricedBrackets(event, forecast, 1, 0.0, {
+      minModelCoverage: 0, confluenceYesShadowEnabled: false, marketFavoriteNoVetoEnabled: false,
+    }).opportunities;
+    expect(opps.every((o) => !(o.confluenceYesAgree ?? false))).toBe(true);
   });
 });
 
@@ -2965,6 +3082,34 @@ describe('scanWeatherMarkets', () => {
       expect(executedQuestions.length).toBeGreaterThan(0);                  // the scan does execute a trade…
       expect(executedQuestions.some((q) => /52-53°F/.test(q))).toBe(false); // …but never the vetoed coin-flip
       expect(executedQuestions.some((q) => /54-55°F/.test(q))).toBe(true);  // it's the next, un-vetoed bracket
+    });
+
+    it('does NOT execute a NO on a bracket the market prices as the favorite (market-favorite veto)', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MARKET_FAVORITE_NO_VETO_ENABLED: true,
+        WEATHER_MARKET_FAVORITE_NO_MAX_YESPRICE: 0.85,
+      });
+      // Forecast 52°F. "40-41°F" (idx 1) is far below → model ~0 → a NO with a huge raw
+      // edge (~0.90) at yesPrice 0.90. With WEATHER_MAX_PER_CITY=1 that NO would be the
+      // #1 execution — but the market prices the bracket at 0.90 (≥0.85), so the
+      // market-favorite veto must drop it and a different bracket trades instead.
+      const yesPrices = [0.05, 0.90, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05];
+      wireMockGammaAndForecast(yesPrices);
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true, entryPrice: 0.9, sharesFilled: 10,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      const executedQuestions = mockExecuteAndRecordSignal.mock.calls.map(
+        (c) => (c[0] as { question: string }).question,
+      );
+      expect(executedQuestions.length).toBeGreaterThan(0);                  // the scan still trades…
+      expect(executedQuestions.some((q) => /40-41°F/.test(q))).toBe(false); // …but never the market-favorite NO
     });
 
     it('respects WEATHER_MAX_POSITIONS_PER_SCAN cap', async () => {
