@@ -1862,6 +1862,16 @@ export const envSchema = z.object({
   // events with ~11 brackets each (e.g. "40-41°F", "42-43°F", ...).
   // Ships dark (WEATHER_SCANNER_ENABLED=false). Shadow-log first, review, then enable.
   WEATHER_SCANNER_ENABLED: boolFromEnv.optional().default(false),
+  // --- HEARTBEAT WATCHDOG (src/cron/heartbeatWatchdog.ts) ---
+  // The weather scanner stamps heartbeat:weather-scanner on each completed scan; the
+  // watchdog (run from the always-on pga-cron container) alerts via Telegram if that
+  // heartbeat goes stale. Catches a silently-dead host-cron scanner — which on
+  // 2026-06-22→25 left held weather positions unmonitored for ~2.5 days.
+  HEARTBEAT_WATCHDOG_ENABLED: boolFromEnv.optional().default(true),
+  // Alert if no completed weather scan within this many minutes (scanner runs every 30m).
+  WEATHER_SCANNER_HEARTBEAT_MAX_AGE_MIN: z.coerce.number().int().min(1).optional().default(60),
+  // While still stale, re-alert at most once per this many minutes (avoid page-storm).
+  WEATHER_SCANNER_HEARTBEAT_REALERT_MIN: z.coerce.number().int().min(1).optional().default(180),
   // Lowest-temperature markets ("Lowest temperature in [city] on [date]?",
   // Gamma tag_slug=lowest-temperature). Same bracket structure as the highest
   // markets but resolves against the day's MINIMUM temperature, so it uses the
