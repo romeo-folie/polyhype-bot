@@ -135,6 +135,13 @@ vi.mock('../../shared/bankroll.js', () => ({
   getBankroll: mockGetBankroll,
 }));
 
+// Capture shadow_observations writes so tests can assert the shadow stream's
+// wouldTrade/wouldBlock/blockedBy* reflect the active config (not just the model).
+const mockEnqueueWrite = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../db/writeQueue.js', () => ({
+  enqueueWrite: mockEnqueueWrite,
+}));
+
 // Outage alert + invalidation notify both route through telegram. The mock
 // must export every symbol any module loaded in this suite imports:
 // weatherScanner (notify) and weatherInvalidation (notifyWeatherInvalidationNoHedge).
@@ -3494,6 +3501,38 @@ describe('scanWeatherMarkets', () => {
       await runWeatherScan(redisMock as never);
 
       expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+    });
+
+    it('res-day-only gate marks off-day shadow rows blockedByResDayOnly + wouldTrade=false', async () => {
+      // The shadow stream must reflect the active config: with the gate ON, an off-day
+      // bracket that the model would otherwise trade must record wouldTrade=false,
+      // wouldBlock=true and blockedByResDayOnly=true — not overstate tradability.
+      // featureLive is true (scanner+execution enabled) so wouldTrade would be true here
+      // if the gate did not flip it.
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_LOOKAHEAD_HOURS: 72,
+        WEATHER_RES_DAY_ENTRY_ONLY: true,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true, entryPrice: 0.9, sharesFilled: 10,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      const bracketWrites = mockEnqueueWrite.mock.calls
+        .filter((c) => c[0] === 'shadow_observations' && (c[1] as { kind?: string }).kind === 'weather_bracket')
+        .map((c) => c[1] as { wouldBlock: boolean; payload: { wouldTrade: boolean; blockedByResDayOnly: boolean } });
+      expect(bracketWrites.length).toBeGreaterThan(0);
+      for (const w of bracketWrites) {
+        expect(w.payload.blockedByResDayOnly).toBe(true);
+        expect(w.payload.wouldTrade).toBe(false);
+        expect(w.wouldBlock).toBe(true);
+      }
     });
 
     it('res-day-only gate OFF leaves the same off-day opportunity tradable', async () => {

@@ -888,6 +888,11 @@ export interface WeatherBracketOpportunity {
   /** Ensemble YES mass over the margin-widened bracket used by the modal-mass
    *  veto. Null when not evaluated (not a bounded NO, or the fetch was skipped/failed). */
   ensembleYesMass?: number | null;
+  /** True when WEATHER_RES_DAY_ENTRY_ONLY is on and this is NOT a resolution-day entry
+   *  (and not a size-up). Computed before shadow emission so wouldTrade/wouldBlock and the
+   *  shadow stream reflect the active config; the tradable filter drops these. Event-level
+   *  (same for every bracket in the event). */
+  blockedByResDayOnly?: boolean;
   /** True when this NO bet is on a bracket the MARKET itself prices ≥ the favorite
    *  threshold (yesPrice ≥ WEATHER_MARKET_FAVORITE_NO_MAX_YESPRICE) — we don't fade a
    *  confident book. Excluded from execution. */
@@ -2197,6 +2202,16 @@ export async function scanWeatherMarkets(
       },
     });
 
+    // Resolution-day-only entry gate, computed BEFORE shadow emission so wouldTrade/
+    // wouldBlock and the shadow stream reflect the active config — not just the model.
+    // (opp.isResolutionDay / opp.sizeUpScanOnly are assigned below, so use the loop-local
+    // isResolutionDay / isSizeUpScan here.) Event-level: same for every bracket. The
+    // tradable filter drops these; recording it keeps the off-day rows in the calibration
+    // stream while marking exactly why they will not trade under the gate.
+    const blockedByResDayOnly =
+      cfg.WEATHER_RES_DAY_ENTRY_ONLY && !isResolutionDay && !isSizeUpScan;
+    for (const opp of gatedOpportunities) opp.blockedByResDayOnly = blockedByResDayOnly;
+
     // Log each opportunity individually for shadow analysis.
     // Shadow still records disallowed-side opps so calibration analysis keeps
     // accruing validation data for the gated side — only wouldTrade flips.
@@ -2209,7 +2224,8 @@ export async function scanWeatherMarkets(
         !opp.blockedByNoFallback &&
         !opp.blockedByModalMass &&
         !opp.blockedByInteriorMargin &&
-        !opp.blockedByMarketFavorite;
+        !opp.blockedByMarketFavorite &&
+        !opp.blockedByResDayOnly;
       logger.info('[weather] bracket opportunity', {
         marketId: opp.marketId,
         eventSlug: opp.eventSlug,
@@ -2243,6 +2259,7 @@ export async function scanWeatherMarkets(
         modelModalBracket: opp.modelModalBracket ?? null,
         blockedByModalMass: opp.blockedByModalMass ?? false,
         ensembleYesMass: opp.ensembleYesMass ?? null,
+        blockedByResDayOnly: opp.blockedByResDayOnly ?? false,
         previousOutcomePrice: opp.previousOutcomePrice ?? null,
         previousWinProbability: opp.previousWinProbability ?? null,
         wouldTrade,
@@ -2315,6 +2332,7 @@ export async function scanWeatherMarkets(
           modelModalBracket: opp.modelModalBracket ?? null,
           blockedByModalMass: opp.blockedByModalMass ?? false,
           ensembleYesMass: opp.ensembleYesMass ?? null,
+          blockedByResDayOnly: opp.blockedByResDayOnly ?? false,
           sourceStddevMultiplier: opp.sourceStddevMultiplier ?? 1.0,
           modelProbRaw: opp.modelProbRaw ?? null,
           // Calibration shadow (PR2a) — raw vs calibrated for reliability tracking.
@@ -3229,18 +3247,19 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
   }
 
   // Resolution-day-only entry gate: when WEATHER_RES_DAY_ENTRY_ONLY is on, drop every
-  // opportunity that is NOT on its city-local resolution day. Day-ahead forecasting has
+  // opportunity flagged blockedByResDayOnly (computed at shadow-emission time as
+  // WEATHER_RES_DAY_ENTRY_ONLY && !isResolutionDay && !sizeUpScanOnly — so the shadow
+  // stream's wouldTrade/wouldBlock already reflect this gate). Day-ahead forecasting has
   // no edge over the market (same public models it already prices); the edge is res-day
   // nowcasting (live obs / conviction taker / lock-in). Off-day opps were already
   // shadow-logged above — this only blocks the live entry, so calibration keeps learning.
   // Unlike the max-lookahead gate this keys off the tz-correct isResolutionDay flag (set
   // per-opportunity from cityLocalDate at scan time), so it excludes day-ahead cleanly for
-  // every timezone. Size-ups bypass it — a res-day top-up is inherently on resolution day.
+  // every timezone. Size-ups are never flagged — a res-day top-up is inherently on res day.
   if (cfg.WEATHER_RES_DAY_ENTRY_ONLY) {
     const before = tradable.length;
     tradable = tradable.filter((opp) => {
-      if (opp.sizeUpScanOnly) return true;
-      if (opp.isResolutionDay === true) return true;
+      if (!opp.blockedByResDayOnly) return true;
       logger.info('[weather] skipping — res-day-only gate (not resolution day)', {
         marketId: opp.marketId,
         city: opp.city,
