@@ -29,6 +29,7 @@ import type { GammaMarket } from '../mapping/gamma.js';
 import { parseOutcomePrices, parseClobTokenIds } from '../mapping/gamma.js';
 import { runWeatherLockInScan } from './weatherLockIn.js';
 import { WEATHER_SCANNER_HEARTBEAT_KEY } from '../cron/heartbeatWatchdog.js';
+import { fetchLiveObservation } from './liveObservation.js';
 import { runWeatherInvalidationScan, FORECAST_INVALIDATED_KEY_PREFIX } from './weatherInvalidation.js';
 import {
   runWeatherDriftStrategy,
@@ -1054,6 +1055,21 @@ export function forecastRoundsIntoBracket(
   if (low === null || high === null) return false;
   const rounded = Math.round(correctedForecastHigh);
   return rounded >= low - margin && rounded <= high + margin;
+}
+
+/**
+ * Res-day "lock-in": a NO on a HIGH bracket is physically certain once the running
+ * observed max has exceeded the bracket's upper bound by `marginC` native degrees — the
+ * daily high cannot fall below its own running max. The margin covers the ~0.5° rounding
+ * boundary plus a buffer against our-obs-vs-resolution-station drift. Pure for testing.
+ */
+export function isWeatherHighLockedIn(
+  observedMax: number | null,
+  bracketHigh: number | null,
+  marginC: number,
+): boolean {
+  if (observedMax == null || bracketHigh == null || !Number.isFinite(observedMax)) return false;
+  return observedMax >= bracketHigh + marginC;
 }
 
 /**
@@ -2428,6 +2444,75 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
 }
 
 /**
+ * RES-DAY LOCK-IN execution. For each res-day NO opportunity on a bounded HIGH bracket,
+ * fetch the live running observed max; if it has ALREADY exceeded the bracket (by the
+ * safety margin) the NO is physically certain — the daily high can't fall below its
+ * running max — so we take it. We stamp a near-certain win-prob and hand the signal to
+ * the executor's res-day TAKER path, which enforces liquidity (a real ask), the ask cap,
+ * the edge floor, the daily circuit breaker, AND position dedup. This is betting on what
+ * already happened, not a forecast. Gated by WEATHER_LOCKIN_ENABLED; a no-op when off or
+ * when nothing is observationally locked. `deps` is injectable for tests.
+ */
+export async function executeWeatherLockIns(
+  redis: Redis,
+  opportunities: WeatherBracketOpportunity[],
+  fetchFn?: FetchFn,
+  deps?: { fetchObs?: typeof fetchLiveObservation; execute?: typeof executeAndRecordSignal },
+): Promise<void> {
+  const cfg = loadConfig();
+  // WEATHER_TAKER_ENTRY_ENABLED is a hard prerequisite: the lock-in relies on the
+  // executor's res-day taker to CROSS to the ask. Without it the signal would fall
+  // through to the maker path and post a resting NO bid below the ask — wrong-direction
+  // liquidity on a near-certain outcome. Require it so lock-in is never silently a maker.
+  if (!cfg.WEATHER_LOCKIN_ENABLED || !cfg.WEATHER_EXECUTION_ENABLED || !cfg.WEATHER_TAKER_ENTRY_ENABLED) return;
+  const fetchObs = deps?.fetchObs ?? fetchLiveObservation;
+  const execute = deps?.execute ?? executeAndRecordSignal;
+  // Candidates: res-day NO on a HIGH bracket (the backtest-validated cohort), not size-ups.
+  const candidates = opportunities.filter(
+    (o) => o.isResolutionDay === true && o.tradeSide === 'NO' && o.metric !== 'low' && !o.sizeUpScanOnly,
+  );
+  for (const opp of candidates) {
+    try {
+      const bracket = parseBracketLabel(opp.bracketLabel);
+      // Only bounded brackets lock in this way; tails ("X or higher") can't be "exceeded".
+      if (bracket?.high == null) continue;
+      const liveObs = await fetchObs(opp.city, opp.targetDate, redis, {
+        wuEnabled: cfg.WEATHER_DRIFT_WU_LIVE_ENABLED,
+        metarEnabled: cfg.WEATHER_DRIFT_METAR_LIVE_ENABLED,
+        hkoEnabled: cfg.WEATHER_DRIFT_HKO_LIVE_ENABLED,
+        maxAgeMin: cfg.WEATHER_COND_ORACLE_MAX_OBS_AGE_MIN,
+        metric: 'high',
+        ...(fetchFn != null && { fetchFn: fetchFn as typeof fetch }),
+      }).catch((): null => null);
+      if (liveObs?.observedMax == null || liveObs.observedAt == null || liveObs.confidence === 'none') continue;
+      if (!isWeatherHighLockedIn(liveObs.observedMax, bracket.high, cfg.WEATHER_LOCKIN_MARGIN)) continue;
+      // OBSERVED certainty (not forecast): stamp a near-certain win-prob so the executor's
+      // res-day taker edge (modelWin − ask) clears. consensusProbability = P(in-bracket)
+      // = 1 − modelWin. The executor handles liquidity, ask cap, edge, daily cap, dedup.
+      const signal = buildWeatherSignal(
+        { ...opp, modelProbability: 1 - cfg.WEATHER_LOCKIN_MODEL_WIN, edge: cfg.WEATHER_LOCKIN_MODEL_WIN - opp.outcomePrice },
+        cfg.WEATHER_LOCKIN_STAKE_USD,
+      );
+      logger.info('[weather-lockin] observed max exceeded bracket — taking NO', {
+        city: opp.city, targetDate: opp.targetDate, bracket: opp.bracketLabel,
+        observedMax: liveObs.observedMax, bracketHigh: bracket.high, margin: cfg.WEATHER_LOCKIN_MARGIN,
+        source: liveObs.source, outcomePrice: opp.outcomePrice, stakeUsd: cfg.WEATHER_LOCKIN_STAKE_USD,
+      });
+      const result = await execute(signal, redis);
+      if (result?.skipped) {
+        logger.info('[weather-lockin] executor skipped', {
+          city: opp.city, bracket: opp.bracketLabel, reason: result.skipReason ?? 'unknown',
+        });
+      }
+    } catch (err) {
+      logger.warn('[weather-lockin] error (non-fatal)', {
+        city: opp.city, bracket: opp.bracketLabel, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
+/**
  * Build the bracket-strategy opposite-side TradeSignal for a weather opportunity.
  * The primary signal bets on the model-favoured side; this leg rests on the other
  * side as a GTC maker at a wider discount. If both legs fill the position is a
@@ -3027,6 +3112,17 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     await runWeatherNowcastScan(redis, opportunities, fetchFn);
   } catch (err) {
     logger.warn('[weather-nowcast] scan threw (non-fatal)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Res-day lock-in: take NO on any bracket the running observed max has already exceeded
+  // (physics: the daily high can't fall below its running max). Reuses the executor's
+  // res-day taker (liquidity/ask-cap/edge/daily-breaker/dedup). No-op unless enabled.
+  try {
+    await executeWeatherLockIns(redis, opportunities, fetchFn);
+  } catch (err) {
+    logger.warn('[weather-lockin] scan threw (non-fatal)', {
       error: err instanceof Error ? err.message : String(err),
     });
   }

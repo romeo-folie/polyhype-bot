@@ -70,6 +70,11 @@ const baseConfig = {
   WEATHER_MARKET_FAVORITE_NO_VETO_ENABLED: false,
   WEATHER_MARKET_FAVORITE_NO_MAX_YESPRICE: 0.85,
   WEATHER_CONFLUENCE_YES_SHADOW_ENABLED: false,
+  // Res-day lock-in (off in baseConfig; dedicated tests enable).
+  WEATHER_LOCKIN_ENABLED: false,
+  WEATHER_LOCKIN_MARGIN: 1.0,
+  WEATHER_LOCKIN_STAKE_USD: 10,
+  WEATHER_LOCKIN_MODEL_WIN: 0.97,
   WEATHER_MODAL_MASS_VETO_ENABLED: false,
   WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.50,
   // Evaluate the modal-mass veto on every horizon in tests (events target ~2
@@ -201,6 +206,8 @@ const {
   shrinkTowardMarket,
   partitionTradableByEntryCap,
   revalidateRestingWeatherOrders,
+  isWeatherHighLockedIn,
+  executeWeatherLockIns,
 } = await import('../weatherScanner.js');
 
 const { computeHalfKelly } = await import('../../mapping/divergenceCalculator.js');
@@ -1232,6 +1239,93 @@ describe('findMispricedBrackets - confluence YES (shadow)', () => {
       minModelCoverage: 0, confluenceYesShadowEnabled: false, marketFavoriteNoVetoEnabled: false,
     }).opportunities;
     expect(opps.every((o) => !(o.confluenceYesAgree ?? false))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Res-day lock-in (observed-max nowcast)
+// ---------------------------------------------------------------------------
+
+describe('isWeatherHighLockedIn', () => {
+  it('locks when observed max ≥ bracketHigh + margin (high can only stay/rise)', () => {
+    expect(isWeatherHighLockedIn(30, 28, 1.0)).toBe(true);   // 30 ≥ 29
+    expect(isWeatherHighLockedIn(29, 28, 1.0)).toBe(true);   // 29 ≥ 29 (boundary)
+    expect(isWeatherHighLockedIn(28.9, 28, 1.0)).toBe(false); // 28.9 < 29
+    expect(isWeatherHighLockedIn(28, 28, 1.0)).toBe(false);
+    expect(isWeatherHighLockedIn(null, 28, 1.0)).toBe(false);
+    expect(isWeatherHighLockedIn(35, null, 1.0)).toBe(false);
+  });
+});
+
+describe('executeWeatherLockIns', () => {
+  const baseOpp = {
+    marketId: 'm1', conditionId: 'c1', eventId: 'e1', eventSlug: 's1', clobTokenIds: ['ty', 'tn'],
+    city: 'taipei', targetDate: '2026-06-26', metric: 'high' as const, bracketLabel: '28°C',
+    question: 'Will the highest temperature in Taipei be 28°C on June 26?',
+    yesPrice: 0.30, noPrice: 0.70, outcomePrice: 0.70, tradeSide: 'NO' as const,
+    modelProbability: 0.06, edge: 0.23, forecastHigh: 31, daysOut: 0, isResolutionDay: true,
+    allowedByConfig: true,
+  } as never;
+  const lockCfg = (over: Record<string, unknown> = {}) => ({
+    ...baseConfig, WEATHER_EXECUTION_ENABLED: true, WEATHER_LOCKIN_ENABLED: true,
+    WEATHER_TAKER_ENTRY_ENABLED: true,
+    WEATHER_LOCKIN_MARGIN: 1.0, WEATHER_LOCKIN_STAKE_USD: 10, WEATHER_LOCKIN_MODEL_WIN: 0.97, ...over,
+  });
+  const obs = (observedMax: number, confidence = 'high') => (async () => ({
+    city: 'taipei', targetDate: '2026-06-26', observedMax, metric: 'high', source: 'metar',
+    observedAt: '2026-06-26T07:00:00Z', confidence,
+  })) as never;
+
+  it('takes NO when the observed max has already exceeded the bracket', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+    await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(30), execute: execute as never });
+    expect(execute).toHaveBeenCalledTimes(1);
+    const sig = execute.mock.calls[0]![0] as { direction: string; consensusProbability: number; stakeUsd: number; _isResolutionDay: boolean };
+    expect(sig.direction).toBe('NO');
+    expect(sig.consensusProbability).toBeCloseTo(0.03, 6); // 1 − WEATHER_LOCKIN_MODEL_WIN → near-certain NO
+    expect(sig.stakeUsd).toBe(10);
+    expect(sig._isResolutionDay).toBe(true);
+  });
+
+  it('does NOT take when the observed max is below bracketHigh + margin', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn();
+    await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(28), execute: execute as never });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when disabled, even if the bracket is exceeded', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_LOCKIN_ENABLED: false }));
+    const execute = vi.fn();
+    await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(40), execute: execute as never });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when the res-day taker path is off (lock-in must not become a maker)', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_TAKER_ENTRY_ENABLED: false }));
+    const execute = vi.fn();
+    await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(40), execute: execute as never });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('skips YES opps, low-metric, and tail brackets', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn();
+    const opps = [
+      { ...baseOpp, tradeSide: 'YES' },
+      { ...baseOpp, metric: 'low' },
+      { ...baseOpp, bracketLabel: '32°C or higher' }, // tail → bracket.high null
+    ] as never;
+    await executeWeatherLockIns({} as never, opps, undefined, { fetchObs: obs(40), execute: execute as never });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('skips when the live observation is stale / confidence none', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn();
+    await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(40, 'none'), execute: execute as never });
+    expect(execute).not.toHaveBeenCalled();
   });
 });
 
