@@ -70,6 +70,9 @@ const baseConfig = {
   WEATHER_MARKET_FAVORITE_NO_VETO_ENABLED: false,
   WEATHER_MARKET_FAVORITE_NO_MAX_YESPRICE: 0.85,
   WEATHER_CONFLUENCE_YES_SHADOW_ENABLED: false,
+  // Res-day-only entry gate off in baseConfig (mirrors schema default) so legacy scan
+  // tests — which use ~2-day-out fixtures — still execute; dedicated tests enable it.
+  WEATHER_RES_DAY_ENTRY_ONLY: false,
   // Res-day lock-in (off in baseConfig; dedicated tests enable).
   WEATHER_LOCKIN_ENABLED: false,
   WEATHER_LOCKIN_MARGIN: 1.0,
@@ -130,6 +133,13 @@ vi.mock('../resolutionTime.js', async () => {
 const mockGetBankroll = vi.fn();
 vi.mock('../../shared/bankroll.js', () => ({
   getBankroll: mockGetBankroll,
+}));
+
+// Capture shadow_observations writes so tests can assert the shadow stream's
+// wouldTrade/wouldBlock/blockedBy* reflect the active config (not just the model).
+const mockEnqueueWrite = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../db/writeQueue.js', () => ({
+  enqueueWrite: mockEnqueueWrite,
 }));
 
 // Outage alert + invalidation notify both route through telegram. The mock
@@ -3470,6 +3480,81 @@ describe('scanWeatherMarkets', () => {
 
       expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
     });
+
+    it('res-day-only gate blocks off-day (non-resolution-day) opportunities', async () => {
+      // Default fixture targets ~2 days out → isResolutionDay=false. With the gate ON
+      // and the lookahead gate wide open (72h), the ONLY thing that can suppress
+      // execution is the res-day-only gate.
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_LOOKAHEAD_HOURS: 72,
+        WEATHER_RES_DAY_ENTRY_ONLY: true,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true, entryPrice: 0.9, sharesFilled: 10,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+    });
+
+    it('res-day-only gate marks off-day shadow rows blockedByResDayOnly + wouldTrade=false', async () => {
+      // The shadow stream must reflect the active config: with the gate ON, an off-day
+      // bracket that the model would otherwise trade must record wouldTrade=false,
+      // wouldBlock=true and blockedByResDayOnly=true — not overstate tradability.
+      // featureLive is true (scanner+execution enabled) so wouldTrade would be true here
+      // if the gate did not flip it.
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_LOOKAHEAD_HOURS: 72,
+        WEATHER_RES_DAY_ENTRY_ONLY: true,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true, entryPrice: 0.9, sharesFilled: 10,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      const bracketWrites = mockEnqueueWrite.mock.calls
+        .filter((c) => c[0] === 'shadow_observations' && (c[1] as { kind?: string }).kind === 'weather_bracket')
+        .map((c) => c[1] as { wouldBlock: boolean; payload: { wouldTrade: boolean; blockedByResDayOnly: boolean } });
+      expect(bracketWrites.length).toBeGreaterThan(0);
+      for (const w of bracketWrites) {
+        expect(w.payload.blockedByResDayOnly).toBe(true);
+        expect(w.payload.wouldTrade).toBe(false);
+        expect(w.wouldBlock).toBe(true);
+      }
+    });
+
+    it('res-day-only gate OFF leaves the same off-day opportunity tradable', async () => {
+      // Identical ~2-day-out fixture with the gate explicitly OFF: the off-day opp still
+      // executes, proving the block above is the gate itself, not the fixture.
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_LOOKAHEAD_HOURS: 72,
+        WEATHER_RES_DAY_ENTRY_ONLY: false,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true, entryPrice: 0.9, sharesFilled: 10,
+      });
+
+      await runWeatherScan(redisMock as never);
+
+      expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+    });
   });
 
   // ── lowest-temperature discovery + shadow/live gating ────────────────────
@@ -4195,6 +4280,47 @@ describe('resolution-day size-up and near-res gate bypass', () => {
       (c) => (c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite === true,
     );
     expect(bracketCall).toBeUndefined();
+  });
+
+  it('res-day-only gate ALLOWS resolution-day entries (isResolutionDay=true)', async () => {
+    // Same res-day fresh-entry path as the test below, but with WEATHER_RES_DAY_ENTRY_ONLY
+    // ON. The gate must NOT block res-day opportunities — it only suppresses off-day ones.
+    // The executed signal must carry _isResolutionDay=true (the flag the gate keys off).
+    (redisMock as any).del = vi.fn().mockResolvedValue(1);
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_RES_DAY_ENTRY_ONLY: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      WEATHER_RES_DAY_EARLY_ENTRY_ENABLED: true,
+      WEATHER_RES_DAY_MIN_HOURS_REMAINING: -100, // always pass regardless of clock
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
+      WEATHER_MARKET_DISAGREEMENT_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayMocks();
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8,
+      memberCount: 31, forecastDate: todayIso, ensembleModel: 'gfs',
+    });
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+      entryPrice: 0.43, sharesFilled: null, governorStamped: true, wasEmptyBook: true,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    expect(mockGetBankroll).toHaveBeenCalled();
+    const primaryCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => !(c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite,
+    );
+    expect(primaryCall).toBeDefined();
+    expect((primaryCall![0] as { _isResolutionDay?: boolean })._isResolutionDay).toBe(true);
   });
 
   it('bracket does NOT fire on resolution-day entries (isResolutionDay=true)', async () => {
