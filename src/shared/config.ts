@@ -2661,6 +2661,21 @@ export const envSchema = z.object({
   // only marks which would qualify as entries. Edge is measured vs the executable
   // CLOB ask when a resting ask exists (edgeBasis='ask'), else vs Gamma outcomePrice.
   WEATHER_COND_ORACLE_NOWCAST_MIN_EDGE: z.coerce.number().min(0).max(1).optional().default(0.08),
+  // --- RES-DAY LOCK-IN (observed-max nowcast) ---
+  // Bet NO on a res-day HIGH bracket the running observed max has ALREADY exceeded —
+  // the daily high can only stay or rise, so the bracket is physically impossible. Not a
+  // forecast: betting on what already happened. Backtest (since June 1): 100% WR / +110%
+  // ROI on the observed-determined subset, all priced <0.90 (thin books slow to reprice).
+  // Reuses the executor's res-day taker path (liquidity/ask-cap/edge/daily-breaker/dedup).
+  WEATHER_LOCKIN_ENABLED: boolFromEnv.optional().default(false),
+  // Locked when observedMax ≥ bracketHigh + this many native degrees. Covers the ~0.5°
+  // rounding boundary plus a safety buffer against obs-vs-resolution station drift.
+  WEATHER_LOCKIN_MARGIN: z.coerce.number().min(0.5).max(5).optional().default(1.0),
+  // Stake per lock-in (near-certain → can size above the normal weather bet; still capped).
+  WEATHER_LOCKIN_STAKE_USD: z.coerce.number().min(1).optional().default(10),
+  // Stamped win-prob for the locked NO (P(in-bracket) = 1 − this). Drives the taker edge
+  // (modelWin − ask ≥ WEATHER_TAKER_ENTRY_MIN_EDGE). <1.0 leaves margin for divergence.
+  WEATHER_LOCKIN_MODEL_WIN: z.coerce.number().min(0.5).max(1).optional().default(0.97),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
