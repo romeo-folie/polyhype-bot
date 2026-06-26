@@ -1953,6 +1953,16 @@ export const envSchema = z.object({
   // Hours until local city midnight that must remain for a resolution-day fresh entry
   // to be considered. 15h ≈ before 09:00 local — no temperature readings exist yet.
   WEATHER_RES_DAY_MIN_HOURS_REMAINING: z.coerce.number().min(0).max(24).optional().default(15),
+  // Resolution-day-only entry gate. When true, the scanner does NOT take fresh live
+  // entries on any market that is not on its city-local resolution day — off-day
+  // (day-ahead and further) opportunities are still shadow-logged for calibration but
+  // never traded. Rationale: day-ahead forecasting carries no edge over the market (it
+  // prices the same public models); the edge is res-day nowcasting (live observations,
+  // the conviction taker, and the lock-in). Unlike WEATHER_MAX_LOOKAHEAD_HOURS this is
+  // tz-correct (keys off isResolutionDay, not Gamma's noon-UTC endDate), so it cleanly
+  // excludes day-ahead for every city. Size-ups bypass it (a res-day top-up is inherently
+  // on resolution day). Ships dark.
+  WEATHER_RES_DAY_ENTRY_ONLY: boolFromEnv.optional().default(false),
   // Use HRRR (3km, hourly-updating, radar-assimilated) as 3rd voter for US cities at daysOut≤1.
   // HRRR is the highest-accuracy US model at 0–18h lead. Ships dark.
   WEATHER_HRRR_ENABLED: boolFromEnv.optional().default(false),

@@ -3228,6 +3228,40 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     return;
   }
 
+  // Resolution-day-only entry gate: when WEATHER_RES_DAY_ENTRY_ONLY is on, drop every
+  // opportunity that is NOT on its city-local resolution day. Day-ahead forecasting has
+  // no edge over the market (same public models it already prices); the edge is res-day
+  // nowcasting (live obs / conviction taker / lock-in). Off-day opps were already
+  // shadow-logged above — this only blocks the live entry, so calibration keeps learning.
+  // Unlike the max-lookahead gate this keys off the tz-correct isResolutionDay flag (set
+  // per-opportunity from cityLocalDate at scan time), so it excludes day-ahead cleanly for
+  // every timezone. Size-ups bypass it — a res-day top-up is inherently on resolution day.
+  if (cfg.WEATHER_RES_DAY_ENTRY_ONLY) {
+    const before = tradable.length;
+    tradable = tradable.filter((opp) => {
+      if (opp.sizeUpScanOnly) return true;
+      if (opp.isResolutionDay === true) return true;
+      logger.info('[weather] skipping — res-day-only gate (not resolution day)', {
+        marketId: opp.marketId,
+        city: opp.city,
+        bracket: opp.bracketLabel,
+        daysOut: opp.daysOut,
+      });
+      return false;
+    });
+    if (tradable.length < before) {
+      logger.info('[weather] res-day-only gate filtered opportunities', {
+        before,
+        after: tradable.length,
+        blocked: before - tradable.length,
+      });
+    }
+    if (tradable.length === 0) {
+      logger.info('[weather] no tradable opportunities after res-day-only gate', {});
+      return;
+    }
+  }
+
   // Max-lookahead gate: only enter markets resolving within WEATHER_MAX_LOOKAHEAD_HOURS.
   // Forecasts beyond 28h are too uncertain to trade — 1-day-out only.
   if (cfg.WEATHER_MAX_LOOKAHEAD_HOURS > 0) {
