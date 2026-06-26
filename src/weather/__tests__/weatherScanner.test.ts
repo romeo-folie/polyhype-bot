@@ -1267,12 +1267,12 @@ describe('executeWeatherLockIns', () => {
     allowedByConfig: true,
   } as never;
   const lockCfg = (over: Record<string, unknown> = {}) => ({
-    ...baseConfig, WEATHER_EXECUTION_ENABLED: true, WEATHER_LOCKIN_ENABLED: true,
-    WEATHER_TAKER_ENTRY_ENABLED: true,
+    ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_EXECUTION_ENABLED: true,
+    WEATHER_LOCKIN_ENABLED: true, WEATHER_TAKER_ENTRY_ENABLED: true,
     WEATHER_LOCKIN_MARGIN: 1.0, WEATHER_LOCKIN_STAKE_USD: 10, WEATHER_LOCKIN_MODEL_WIN: 0.97, ...over,
   });
-  const obs = (observedMax: number, confidence = 'high') => (async () => ({
-    city: 'taipei', targetDate: '2026-06-26', observedMax, metric: 'high', source: 'metar',
+  const obs = (observedMax: number, confidence = 'settlement_aligned') => (async () => ({
+    city: 'taipei', targetDate: '2026-06-26', observedMax, metric: 'high', source: 'wu-live',
     observedAt: '2026-06-26T07:00:00Z', confidence,
   })) as never;
 
@@ -1306,6 +1306,20 @@ describe('executeWeatherLockIns', () => {
     mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_TAKER_ENTRY_ENABLED: false }));
     const execute = vi.fn();
     await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(40), execute: execute as never });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when WEATHER_SCANNER_ENABLED is off (master live-trade kill switch / shadow mode)', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_SCANNER_ENABLED: false }));
+    const execute = vi.fn();
+    await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(40), execute: execute as never });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('skips PROXY observations — only settlement-aligned obs can trigger an irreversible lock-in', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn();
+    await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(40, 'proxy'), execute: execute as never });
     expect(execute).not.toHaveBeenCalled();
   });
 

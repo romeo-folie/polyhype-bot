@@ -2460,11 +2460,18 @@ export async function executeWeatherLockIns(
   deps?: { fetchObs?: typeof fetchLiveObservation; execute?: typeof executeAndRecordSignal },
 ): Promise<void> {
   const cfg = loadConfig();
-  // WEATHER_TAKER_ENTRY_ENABLED is a hard prerequisite: the lock-in relies on the
-  // executor's res-day taker to CROSS to the ask. Without it the signal would fall
-  // through to the maker path and post a resting NO bid below the ask — wrong-direction
-  // liquidity on a near-certain outcome. Require it so lock-in is never silently a maker.
-  if (!cfg.WEATHER_LOCKIN_ENABLED || !cfg.WEATHER_EXECUTION_ENABLED || !cfg.WEATHER_TAKER_ENTRY_ENABLED) return;
+  // Live-trade kill switch: WEATHER_SCANNER_ENABLED is the master gate for placing real
+  // weather orders (shadow logging runs without it). The lock-in executes BEFORE the
+  // main tradable loop's own WEATHER_SCANNER_ENABLED check, so it must re-assert it here
+  // or it could trade live while the rest of weather is still in shadow mode.
+  // WEATHER_TAKER_ENTRY_ENABLED is a hard prerequisite too: the lock-in relies on the
+  // executor's res-day taker to CROSS to the ask. Without it the signal would fall through
+  // to the maker path and post a resting NO bid below the ask — wrong-direction liquidity
+  // on a near-certain outcome. Require it so lock-in is never silently a maker.
+  if (
+    !cfg.WEATHER_SCANNER_ENABLED || !cfg.WEATHER_LOCKIN_ENABLED
+    || !cfg.WEATHER_EXECUTION_ENABLED || !cfg.WEATHER_TAKER_ENTRY_ENABLED
+  ) return;
   const fetchObs = deps?.fetchObs ?? fetchLiveObservation;
   const execute = deps?.execute ?? executeAndRecordSignal;
   // Candidates: res-day NO on a HIGH bracket (the backtest-validated cohort), not size-ups.
@@ -2484,7 +2491,11 @@ export async function executeWeatherLockIns(
         metric: 'high',
         ...(fetchFn != null && { fetchFn: fetchFn as typeof fetch }),
       }).catch((): null => null);
-      if (liveObs?.observedMax == null || liveObs.observedAt == null || liveObs.confidence === 'none') continue;
+      // Require SETTLEMENT-ALIGNED obs (same source as the final reconciler). A 'proxy'
+      // station exceeding the bracket does NOT prove the resolution source did — acting on
+      // it risks the station-divergence trap on an irreversible bet. (Backtest: all 23
+      // validated lock-in wins were settlement_aligned, so this costs zero edge.)
+      if (liveObs?.observedMax == null || liveObs.observedAt == null || liveObs.confidence !== 'settlement_aligned') continue;
       if (!isWeatherHighLockedIn(liveObs.observedMax, bracket.high, cfg.WEATHER_LOCKIN_MARGIN)) continue;
       // OBSERVED certainty (not forecast): stamp a near-certain win-prob so the executor's
       // res-day taker edge (modelWin − ask) clears. consensusProbability = P(in-bracket)
