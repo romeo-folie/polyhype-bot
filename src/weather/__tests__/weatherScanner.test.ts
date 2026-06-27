@@ -73,6 +73,9 @@ const baseConfig = {
   // Res-day-only entry gate off in baseConfig (mirrors schema default) so legacy scan
   // tests — which use ~2-day-out fixtures — still execute; dedicated tests enable it.
   WEATHER_RES_DAY_ENTRY_ONLY: false,
+  // Shadow-ensemble cache TTL + fail-open on null shadow (mirror schema defaults).
+  WEATHER_SHADOW_ENSEMBLE_CACHE_TTL_S: 86_400,
+  WEATHER_RES_DAY_ENTRY_FAIL_OPEN_ON_NULL_SHADOW: false,
   // Res-day lock-in (off in baseConfig; dedicated tests enable).
   WEATHER_LOCKIN_ENABLED: false,
   WEATHER_LOCKIN_MARGIN: 1.0,
@@ -4321,6 +4324,116 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     );
     expect(primaryCall).toBeDefined();
     expect((primaryCall![0] as { _isResolutionDay?: boolean })._isResolutionDay).toBe(true);
+  });
+
+  // Shadow-ensemble last-good cache: a res-day fresh entry fail-closes when the
+  // shadow (ECMWF) fetch returns null (429), UNLESS a last-good shadow is cached.
+  const shadowEntryConfig = {
+    WEATHER_SCANNER_ENABLED: true,
+    WEATHER_EXECUTION_ENABLED: true,
+    SIZE_UP_ENABLED: true,
+    WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+    WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+    WEATHER_RES_DAY_EARLY_ENTRY_ENABLED: true,
+    WEATHER_RES_DAY_MIN_HOURS_REMAINING: -100,
+    WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+    WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
+    WEATHER_MARKET_DISAGREEMENT_ENABLED: false,
+    ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+  };
+  // Primary (GFS, useEcmwf=false) succeeds; shadow (ECMWF, useEcmwf=true) 429s → null.
+  function wirePrimaryOkShadowNull() {
+    wireTodayMocks();
+    mockFetchEnsemble.mockImplementation((..._args: unknown[]) =>
+      Promise.resolve(_args[5] // useEcmwf
+        ? null
+        : { meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: todayIso, ensembleModel: 'gfs' }));
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+      entryPrice: 0.43, sharesFilled: null, governorStamped: true, wasEmptyBook: true,
+    });
+  }
+
+  it('res-day entry fail-closes when the fresh shadow ensemble is null and no cache exists', async () => {
+    (redisMock as any).del = vi.fn().mockResolvedValue(1);
+    mockLoadConfig.mockReturnValue({ ...baseConfig, ...shadowEntryConfig });
+    wirePrimaryOkShadowNull(); // no shadow cache seeded
+
+    await runWeatherScan(redisMock as never);
+
+    // Null shadowEdge → early-entry veto fails closed → nothing executes.
+    expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+  });
+
+  it('res-day entry recovers via the last-good shadow cache when the fresh shadow fetch is null', async () => {
+    (redisMock as any).del = vi.fn().mockResolvedValue(1);
+    // Seed what a prior successful scan would have cached for this city/date/metric.
+    // Key format mirrors forecastCache.shadowEnsembleCacheKey (kept in sync by the
+    // dedicated forecastCache unit tests; a format drift fails this test loudly).
+    redisMock._store.set(
+      `weather:shadow_ensemble_cache:high:chicago:${todayIso}`,
+      JSON.stringify({ stdDev: 3.2, ensembleMembers: 51, ensembleModel: 'ecmwf', fetchedAt: '2026-06-27T10:00:00.000Z' }),
+    );
+    mockLoadConfig.mockReturnValue({ ...baseConfig, ...shadowEntryConfig });
+    wirePrimaryOkShadowNull(); // identical to the test above, except the cache is seeded
+
+    await runWeatherScan(redisMock as never);
+
+    // The cached shadow restores shadowEdge → the entry is no longer fail-closed.
+    expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+    const primaryCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => !(c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite,
+    );
+    expect(primaryCall).toBeDefined();
+  });
+
+  it('res-day entry FAILS OPEN when shadow null + no cache + WEATHER_RES_DAY_ENTRY_FAIL_OPEN_ON_NULL_SHADOW', async () => {
+    // Same as the "fail-closes" test (null fresh shadow, no cache seeded) but with the
+    // fail-open flag on: the residual-null case must ALLOW the entry on the primary alone
+    // (sustained ensemble-endpoint outage no longer blocks every res-day entry).
+    (redisMock as any).del = vi.fn().mockResolvedValue(1);
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig, ...shadowEntryConfig,
+      WEATHER_RES_DAY_ENTRY_FAIL_OPEN_ON_NULL_SHADOW: true,
+    });
+    wirePrimaryOkShadowNull(); // shadow fetch null, no cache seeded
+
+    await runWeatherScan(redisMock as never);
+
+    expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+    const primaryCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => !(c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite,
+    );
+    expect(primaryCall).toBeDefined();
+  });
+
+  it('res-day entry is STILL vetoed with fail-open ON when the shadow genuinely disagrees (shadowEdge ≤ 0)', async () => {
+    // Safety invariant: fail-open must rescue ONLY the null case, never a real disagreement.
+    // YES-only so the single tradable opp is YES 52-53°F. Primary (GFS, σ=3.2) gives it
+    // positive edge (model ~0.24 vs price 0.12); the shadow (ECMWF, σ=8) collapses the
+    // center-bracket prob to ~0.10 < 0.12 → shadowEdge ≤ 0. With fail-open ON it must
+    // still veto (shadowEdge is a real value, not null) → nothing executes.
+    (redisMock as any).del = vi.fn().mockResolvedValue(1);
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig, ...shadowEntryConfig,
+      WEATHER_TRADE_SIDES: 'YES',
+      WEATHER_RES_DAY_ENTRY_FAIL_OPEN_ON_NULL_SHADOW: true,
+    });
+    wireTodayMocks();
+    mockFetchEnsemble.mockImplementation((..._args: unknown[]) =>
+      Promise.resolve(_args[5] // useEcmwf → shadow: very wide σ → collapses every tradable YES bracket below its price → shadowEdge ≤ 0
+        ? { meanHigh: 52, stddevHigh: 20.0, meanLow: 38, stddevLow: 12.0, memberCount: 51, forecastDate: todayIso, ensembleModel: 'ecmwf' }
+        : { meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: todayIso, ensembleModel: 'gfs' }));
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+      entryPrice: 0.12, sharesFilled: null, governorStamped: true, wasEmptyBook: true,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
   });
 
   it('bracket does NOT fire on resolution-day entries (isResolutionDay=true)', async () => {
