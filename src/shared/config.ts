@@ -2474,6 +2474,20 @@ export const envSchema = z.object({
   // the morning's last-good value safely covers the afternoon. 24h bridges a full daily
   // outage (and per-targetDate keys mean no cross-day contamination).
   WEATHER_SHADOW_ENSEMBLE_CACHE_TTL_S: z.coerce.number().int().min(60).optional().default(86_400),
+  // Redis read-through cache for Open-Meteo ENSEMBLE fetches (fetchEnsembleForecast +
+  // fetchEnsembleHourly), shared across all paths AND host-cron processes. The ensemble
+  // models only re-run ~every 6h, but the scanner re-fetched them every scan with no
+  // cross-process cache (each scan is a fresh tsx process, so in-memory memos die) →
+  // thousands of ensemble requests/day → daily-quota 429s. Caching at the source fixes it.
+  // The intraday signal (live obs) is fetched separately and uncached, so this never
+  // stales nowcasts/lock-ins — only the model's slowly-changing spread is reused.
+  WEATHER_ENSEMBLE_CACHE_ENABLED: boolFromEnv.optional().default(true),
+  // TTL tiered by lead time. NEAR = events ≤1 day out (the traded res-day cohort) — kept
+  // short so a new model run is picked up quickly. FAR = ≥2 days out (shadow-logged only,
+  // never traded) — cached hard since staleness is irrelevant for calibration rows. Both
+  // stay ≤ the ~6h model cadence so we're never more than one run behind on what we trade.
+  WEATHER_ENSEMBLE_CACHE_NEAR_TTL_S: z.coerce.number().int().min(60).optional().default(7_200),
+  WEATHER_ENSEMBLE_CACHE_FAR_TTL_S: z.coerce.number().int().min(60).optional().default(21_600),
   // One loud Telegram alert when a scan's forecast failure rate is high, instead
   // of silent noForecast inflation in the scan summary.
   WEATHER_OUTAGE_ALERT_ENABLED: boolFromEnv.optional().default(true),

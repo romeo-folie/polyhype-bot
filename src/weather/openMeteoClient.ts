@@ -16,6 +16,8 @@
  */
 
 import { logger } from '../shared/logger.js';
+import { loadConfig } from '../shared/config.js';
+import { getRedis } from '../shared/redis.js';
 
 const FORECAST_BASE = 'https://api.open-meteo.com/v1/forecast';
 const ENSEMBLE_BASE = 'https://ensemble-api.open-meteo.com/v1/ensemble';
@@ -337,7 +339,81 @@ export async function fetchHrrrForecast(
  * @param unit - 'fahrenheit' or 'celsius'
  * @param useEcmwf - use ECMWF IFS instead of GFS (default false)
  */
+// ── Redis read-through cache for ensemble fetches ───────────────────────────
+//
+// The ensemble models only re-run ~every 6h, but every weather scan is a fresh
+// host-cron process so in-memory memos die between scans — the scanner re-fetched
+// each ensemble on every scan, exhausting Open-Meteo's daily quota (429s). This
+// cache is keyed model:lat:lon:date(:metric) and shared across paths AND processes.
+// TTL is tiered by lead time (near ≤1d vs far ≥2d). Fail-safe: any Redis miss/error
+// falls through to a live fetch, and only successful (non-null) results are stored,
+// so Redis can never block a forecast or pin a transient failure. Skipped when a
+// fetchFn is injected (tests) or the cache is disabled.
+const ENSEMBLE_CACHE_PREFIX = 'weather:om_ens:';
+
+function ensembleCacheTtlS(targetDate: string): number {
+  const cfg = loadConfig();
+  const targetMs = Date.parse(`${targetDate.slice(0, 10)}T00:00:00Z`);
+  const todayMs = Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`);
+  const daysOut = Number.isFinite(targetMs) ? Math.round((targetMs - todayMs) / 86_400_000) : 0;
+  return daysOut <= 1
+    ? cfg.WEATHER_ENSEMBLE_CACHE_NEAR_TTL_S
+    : cfg.WEATHER_ENSEMBLE_CACHE_FAR_TTL_S;
+}
+
+async function cachedEnsembleFetch<T>(
+  key: string,
+  targetDate: string,
+  isInjected: boolean,
+  fetcher: () => Promise<T | null>,
+): Promise<T | null> {
+  if (isInjected || !loadConfig().WEATHER_ENSEMBLE_CACHE_ENABLED) return fetcher();
+  let redis: ReturnType<typeof getRedis>;
+  try {
+    redis = getRedis();
+  } catch {
+    return fetcher();
+  }
+  try {
+    const raw = await redis.get(key);
+    if (raw !== null && raw !== undefined) return JSON.parse(raw) as T;
+  } catch {
+    // Redis read failed — fall through to a live fetch.
+  }
+  const val = await fetcher();
+  if (val !== null) {
+    try {
+      await redis.set(key, JSON.stringify(val), 'EX', ensembleCacheTtlS(targetDate));
+    } catch {
+      // Best-effort write; a cache-write failure must never break a forecast.
+    }
+  }
+  return val;
+}
+
+/**
+ * Ensemble forecast stats for (lat, lon, targetDate, model). Redis-cached
+ * read-through (see cachedEnsembleFetch); the network implementation is
+ * fetchEnsembleForecastUncached.
+ */
 export async function fetchEnsembleForecast(
+  lat: number,
+  lon: number,
+  targetDate: string,
+  unit: 'fahrenheit' | 'celsius' = 'fahrenheit',
+  fetchFn?: FetchFn,
+  useEcmwf = false,
+  retryCount = 0,
+  metric: 'high' | 'low' = 'high',
+): Promise<EnsembleForecast | null> {
+  // unit is part of the key (like fetchEnsembleHourly): the API applies temperature_unit
+  // to all returned values, so a fahrenheit and a celsius response must not collide.
+  const key = `${ENSEMBLE_CACHE_PREFIX}fc:${useEcmwf ? 'ecmwf' : 'gfs'}:${lat.toFixed(4)}:${lon.toFixed(4)}:${targetDate.slice(0, 10)}:${unit}:${metric}`;
+  return cachedEnsembleFetch(key, targetDate, fetchFn !== undefined, () =>
+    fetchEnsembleForecastUncached(lat, lon, targetDate, unit, fetchFn, useEcmwf, retryCount, metric));
+}
+
+async function fetchEnsembleForecastUncached(
   lat: number,
   lon: number,
   targetDate: string,
@@ -629,7 +705,12 @@ export function fetchEnsembleHourly(
   if (hit && now - hit.ts < ENSEMBLE_HOURLY_CACHE_TTL_MS) {
     return hit.promise;
   }
-  const promise = fetchEnsembleHourlyUncached(lat, lon, targetDate, unit, fetchFn, useEcmwf, retryCount);
+  // L1 = the in-process memo above (dedupes within one scan). L2 = the Redis
+  // read-through below, which survives across host-cron scans (fresh process each
+  // run) and is shared with every other ensemble caller.
+  const redisKey = `${ENSEMBLE_CACHE_PREFIX}hr:${useEcmwf ? 'ecmwf' : 'gfs'}:${lat.toFixed(4)}:${lon.toFixed(4)}:${targetStr}:${unit}`;
+  const promise = cachedEnsembleFetch(redisKey, targetDate, fetchFn !== undefined, () =>
+    fetchEnsembleHourlyUncached(lat, lon, targetDate, unit, fetchFn, useEcmwf, retryCount));
   ensembleHourlyCache.set(key, { ts: now, promise });
   // Don't retain failures — a null/throw should not block a later retry.
   void promise.then(

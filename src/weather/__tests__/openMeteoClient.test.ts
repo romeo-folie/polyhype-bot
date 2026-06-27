@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../shared/logger.js', () => ({
   logger: {
@@ -7,6 +7,23 @@ vi.mock('../../shared/logger.js', () => ({
     error: vi.fn(),
     debug: vi.fn(),
   },
+}));
+
+// Config + Redis are only touched by the new ensemble cache (cachedEnsembleFetch).
+// Existing tests inject a fetchFn, which short-circuits before these are read, so
+// these mocks are inert for them; the cache tests below exercise them.
+const mockLoadConfig = vi.fn(() => ({
+  WEATHER_ENSEMBLE_CACHE_ENABLED: true,
+  WEATHER_ENSEMBLE_CACHE_NEAR_TTL_S: 7200,
+  WEATHER_ENSEMBLE_CACHE_FAR_TTL_S: 21600,
+}));
+vi.mock('../../shared/config.js', () => ({ loadConfig: mockLoadConfig }));
+
+const ensRedisStore = new Map<string, string>();
+const mockRedisGet = vi.fn((k: string): Promise<string | null> => Promise.resolve(ensRedisStore.get(k) ?? null));
+const mockRedisSet = vi.fn((k: string, v: string): Promise<string> => { ensRedisStore.set(k, v); return Promise.resolve('OK'); });
+vi.mock('../../shared/redis.js', () => ({
+  getRedis: () => ({ get: mockRedisGet, set: mockRedisSet }),
 }));
 
 const { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHistoricalHigh, fetchHrrrForecast, fetchEnsembleHourly, _resetEnsembleHourlyCache } = await import(
@@ -560,5 +577,129 @@ describe('fetchEnsembleHourly cache', () => {
     expect(a).toBeNull();
     expect(b).toBeNull();
     expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Redis read-through cache (shared across paths + host-cron processes)
+// ---------------------------------------------------------------------------
+
+describe('ensemble Redis read-through cache', () => {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const farStr = new Date(Date.now() + 5 * 86_400_000).toISOString().slice(0, 10);
+  const realFetch = globalThis.fetch;
+
+  function ensBody(date: string, val = 51, n = 31) {
+    const md: Record<string, number[]> = {};
+    for (let i = 0; i < n; i++) md[`temperature_2m_max_member${i.toString().padStart(2, '0')}`] = [val + (i % 3)];
+    return { daily: { time: [date], temperature_2m_max: [val], ...md } };
+  }
+  function setGlobalFetch(body: unknown, status = 200) {
+    const fn = vi.fn().mockResolvedValue({
+      ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body),
+    });
+    globalThis.fetch = fn as unknown as typeof fetch;
+    return fn;
+  }
+
+  beforeEach(() => {
+    ensRedisStore.clear();
+    mockRedisGet.mockClear();
+    mockRedisSet.mockClear();
+    mockLoadConfig.mockReturnValue({
+      WEATHER_ENSEMBLE_CACHE_ENABLED: true,
+      WEATHER_ENSEMBLE_CACHE_NEAR_TTL_S: 7200,
+      WEATHER_ENSEMBLE_CACHE_FAR_TTL_S: 21600,
+    });
+    _resetEnsembleHourlyCache();
+  });
+  afterEach(() => { globalThis.fetch = realFetch; });
+
+  it('fetches once, then serves the second call from Redis (no 2nd network call)', async () => {
+    const fetchFn = setGlobalFetch(ensBody(todayStr));
+    const r1 = await fetchEnsembleForecast(10, 20, todayStr, 'fahrenheit'); // no fetchFn → cache active
+    const r2 = await fetchEnsembleForecast(10, 20, todayStr, 'fahrenheit');
+    expect(r1).not.toBeNull();
+    expect(r2).toEqual(r1);
+    expect(fetchFn).toHaveBeenCalledTimes(1); // 2nd call was a Redis hit
+    expect(mockRedisSet).toHaveBeenCalledTimes(1);
+  });
+
+  it('keys the forecast cache by unit (a celsius caller is not served a fahrenheit entry)', async () => {
+    setGlobalFetch(ensBody(todayStr, 85)); // fahrenheit values → mean ~86
+    const rF = await fetchEnsembleForecast(10, 20, todayStr, 'fahrenheit');
+    expect(rF!.meanHigh).toBeCloseTo(86, 0);
+    // Same lat/lon/date/metric, different unit, WITHOUT clearing the store: a unit-keyed
+    // cache must MISS and re-fetch celsius values, not return the cached fahrenheit ~86.
+    const fC = setGlobalFetch(ensBody(todayStr, 29)); // celsius values → mean ~30
+    const rC = await fetchEnsembleForecast(10, 20, todayStr, 'celsius');
+    expect(rC!.meanHigh).toBeCloseTo(30, 0);
+    expect(fC).toHaveBeenCalledTimes(1); // celsius missed (distinct key) → fetched
+  });
+
+  it('uses the NEAR ttl for ≤1-day-out and the FAR ttl for ≥2-days-out', async () => {
+    setGlobalFetch(ensBody(todayStr));
+    await fetchEnsembleForecast(10, 20, todayStr, 'fahrenheit');
+    expect(mockRedisSet).toHaveBeenLastCalledWith(
+      expect.stringContaining(':fc:'), expect.any(String), 'EX', 7200,
+    );
+
+    ensRedisStore.clear(); mockRedisSet.mockClear();
+    setGlobalFetch(ensBody(farStr));
+    await fetchEnsembleForecast(10, 20, farStr, 'fahrenheit');
+    expect(mockRedisSet).toHaveBeenLastCalledWith(
+      expect.any(String), expect.any(String), 'EX', 21600,
+    );
+  });
+
+  it('does NOT cache a null result (a failed fetch is retried, not pinned)', async () => {
+    const fetchFn = setGlobalFetch({}, 500);
+    const r1 = await fetchEnsembleForecast(10, 20, todayStr, 'fahrenheit');
+    expect(r1).toBeNull();
+    expect(mockRedisSet).not.toHaveBeenCalled();
+    await fetchEnsembleForecast(10, 20, todayStr, 'fahrenheit');
+    expect(fetchFn).toHaveBeenCalledTimes(2); // re-fetched, not served from cache
+  });
+
+  it('bypasses the cache entirely when WEATHER_ENSEMBLE_CACHE_ENABLED=false', async () => {
+    mockLoadConfig.mockReturnValue({
+      WEATHER_ENSEMBLE_CACHE_ENABLED: false,
+      WEATHER_ENSEMBLE_CACHE_NEAR_TTL_S: 7200,
+      WEATHER_ENSEMBLE_CACHE_FAR_TTL_S: 21600,
+    });
+    const fetchFn = setGlobalFetch(ensBody(todayStr));
+    await fetchEnsembleForecast(10, 20, todayStr, 'fahrenheit');
+    await fetchEnsembleForecast(10, 20, todayStr, 'fahrenheit');
+    expect(fetchFn).toHaveBeenCalledTimes(2); // no caching
+    expect(mockRedisGet).not.toHaveBeenCalled();
+    expect(mockRedisSet).not.toHaveBeenCalled();
+  });
+
+  it('skips the cache when a fetchFn is injected (test / DI path)', async () => {
+    const injected = mockFetch(ensBody(todayStr));
+    const r = await fetchEnsembleForecast(10, 20, todayStr, 'fahrenheit', injected);
+    expect(r).not.toBeNull();
+    expect(mockRedisGet).not.toHaveBeenCalled();
+    expect(mockRedisSet).not.toHaveBeenCalled();
+  });
+
+  it('is fail-safe: a Redis read error falls through to a live fetch', async () => {
+    mockRedisGet.mockRejectedValueOnce(new Error('redis down'));
+    const fetchFn = setGlobalFetch(ensBody(todayStr));
+    const r = await fetchEnsembleForecast(10, 20, todayStr, 'fahrenheit');
+    expect(r).not.toBeNull();
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('caches fetchEnsembleHourly across processes (in-memo cleared → Redis hit, no 2nd fetch)', async () => {
+    const okBody = {
+      hourly: { time: [0, 3600], temperature_2m_member00: [50, 51], temperature_2m_member01: [49, 52] },
+    };
+    const fetchFn = setGlobalFetch(okBody);
+    const r1 = await fetchEnsembleHourly(10, 20, todayStr, 'fahrenheit'); // fetch + Redis cache
+    expect(r1).not.toBeNull();
+    _resetEnsembleHourlyCache(); // simulate a fresh host-cron process (in-memory memo gone)
+    await fetchEnsembleHourly(10, 20, todayStr, 'fahrenheit'); // served from Redis
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 });
