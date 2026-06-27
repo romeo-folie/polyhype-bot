@@ -12,7 +12,10 @@ vi.mock('../../shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-const mockLoadConfig = vi.fn(() => ({ WEATHER_FORECAST_CACHE_TTL_S: 10_800 }));
+const mockLoadConfig = vi.fn(() => ({
+  WEATHER_FORECAST_CACHE_TTL_S: 10_800,
+  WEATHER_SHADOW_ENSEMBLE_CACHE_TTL_S: 86_400,
+}));
 vi.mock('../../shared/config.js', () => ({ loadConfig: mockLoadConfig }));
 
 const {
@@ -127,7 +130,7 @@ describe('forecastCache — shadow ensemble', () => {
     vi.clearAllMocks();
   });
 
-  it('writes the shadow under weather:shadow_ensemble_cache:<metric>:<city>:<date> with the config TTL', async () => {
+  it('writes the shadow under weather:shadow_ensemble_cache:<metric>:<city>:<date> with the LONGER shadow TTL', async () => {
     const redis = makeRedis();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await cacheShadowEnsemble(redis as any, 'tokyo', '2026-06-27', 'high', shadow);
@@ -136,7 +139,7 @@ describe('forecastCache — shadow ensemble', () => {
       'weather:shadow_ensemble_cache:high:tokyo:2026-06-27',
       expect.any(String),
       'EX',
-      10_800,
+      86_400, // WEATHER_SHADOW_ENSEMBLE_CACHE_TTL_S, NOT the 10_800 forecast TTL
     );
   });
 

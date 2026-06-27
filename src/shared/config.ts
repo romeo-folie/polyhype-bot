@@ -1963,6 +1963,14 @@ export const envSchema = z.object({
   // excludes day-ahead for every city. Size-ups bypass it (a res-day top-up is inherently
   // on resolution day). Ships dark.
   WEATHER_RES_DAY_ENTRY_ONLY: boolFromEnv.optional().default(false),
+  // Fail OPEN on a null shadow ensemble for resolution-day fresh entries. By default the
+  // early-entry ensemble veto fails CLOSED when shadowEdge is null (no corroboration →
+  // block), but the shadow's Open-Meteo ensemble endpoint suffers sustained daily outages,
+  // which then blocks ALL res-day entries. With the last-good shadow cache, shadowEdge is
+  // null only when BOTH the fresh fetch AND the cache are unavailable; this flag makes that
+  // residual null case ALLOW the entry (on the primary forecast alone) instead of blocking.
+  // A genuine shadow DISAGREEMENT (shadowEdge ≤ 0, shadow present) still vetoes regardless.
+  WEATHER_RES_DAY_ENTRY_FAIL_OPEN_ON_NULL_SHADOW: boolFromEnv.optional().default(false),
   // Use HRRR (3km, hourly-updating, radar-assimilated) as 3rd voter for US cities at daysOut≤1.
   // HRRR is the highest-accuracy US model at 0–18h lead. Ships dark.
   WEATHER_HRRR_ENABLED: boolFromEnv.optional().default(false),
@@ -2458,6 +2466,14 @@ export const envSchema = z.object({
   // fail — on a 30-min cadence a ≤3h-stale forecast beats a blind skip
   // (2026-06-04 Open-Meteo outage blinded the entire invalidation sweep).
   WEATHER_FORECAST_CACHE_TTL_S: z.coerce.number().int().min(60).optional().default(10_800),
+  // Separate, LONGER TTL for the dual-ensemble SHADOW last-good cache. The shadow
+  // (alternate model) is a 2nd Open-Meteo ensemble call per event, so it is the first
+  // dropped when the daily quota is exhausted — observed as a sustained ~09:00→00:00 UTC
+  // outage while the primary forecast still succeeds. The shadow's stdDev (spread) is
+  // stable intraday, and a staler/wider spread only makes the veto MORE conservative, so
+  // the morning's last-good value safely covers the afternoon. 24h bridges a full daily
+  // outage (and per-targetDate keys mean no cross-day contamination).
+  WEATHER_SHADOW_ENSEMBLE_CACHE_TTL_S: z.coerce.number().int().min(60).optional().default(86_400),
   // One loud Telegram alert when a scan's forecast failure rate is high, instead
   // of silent noForecast inflation in the scan summary.
   WEATHER_OUTAGE_ALERT_ENABLED: boolFromEnv.optional().default(true),

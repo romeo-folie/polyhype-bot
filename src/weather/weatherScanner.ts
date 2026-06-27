@@ -2060,9 +2060,16 @@ export async function scanWeatherMarkets(
     const gatedOpportunities = afterMarketGate.map((opp) => ({
       ...opp,
       blockedByEnsembleVeto: isEarlyResolutionDayEntry
-        // Early resolution-day entries require positive ensemble agreement.
-        // Null shadowEdge (no ECMWF data) also blocks — fail closed.
-        ? (opp.shadowEdge == null || opp.shadowEdge <= 0)
+        // Early resolution-day entries require positive ensemble agreement. shadowEdge is
+        // null only when BOTH the fresh shadow fetch AND the last-good cache are absent.
+        // Default: fail CLOSED on null (block — no corroboration). With
+        // WEATHER_RES_DAY_ENTRY_FAIL_OPEN_ON_NULL_SHADOW the residual null case fails OPEN
+        // (allow on the primary alone) so a sustained ensemble-endpoint outage no longer
+        // blocks every res-day entry. Either way a real disagreement (shadowEdge ≤ 0,
+        // shadow present) still vetoes.
+        ? (cfg.WEATHER_RES_DAY_ENTRY_FAIL_OPEN_ON_NULL_SHADOW
+            ? (opp.shadowEdge != null && opp.shadowEdge <= 0)
+            : (opp.shadowEdge == null || opp.shadowEdge <= 0))
         : (cfg.WEATHER_DUAL_ENSEMBLE_VETO_ENABLED &&
            opp.shadowEdge != null &&
            opp.shadowEdge <= 0),

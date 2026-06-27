@@ -150,7 +150,9 @@ export async function cacheShadowEnsemble(
     shadowEnsembleCacheKey(city, targetDate, metric),
     JSON.stringify(payload),
     'EX',
-    cfg.WEATHER_FORECAST_CACHE_TTL_S,
+    // Longer than the primary forecast cache: the shadow spread is stable intraday and
+    // must survive the sustained daily ensemble-endpoint outage.
+    cfg.WEATHER_SHADOW_ENSEMBLE_CACHE_TTL_S,
   );
 }
 
