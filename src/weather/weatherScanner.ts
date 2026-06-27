@@ -60,7 +60,7 @@ import { ensembleFinalMaxDistribution, bracketWinProbFromFinalMaxes } from './co
 import { calibrateWeatherBracketProbability, classifyBracketShape, isCalibrationLiveCohort } from './bracketCalibration.js';
 import { getCityBias, getCityActuals } from './cityBias.js';
 import type { CityBias, CityActuals } from './cityBias.js';
-import { cacheForecast } from './forecastCache.js';
+import { cacheForecast, cacheShadowEnsemble, readCachedShadowEnsemble } from './forecastCache.js';
 import { notify } from '../execution/telegram.js';
 
 const GAMMA_BASE = 'https://gamma-api.polymarket.com';
@@ -1964,6 +1964,37 @@ export async function scanWeatherMarkets(
     // Cache the successful forecast so the invalidation evaluator can fall back
     // to it when live fetches fail (best-effort, never blocks the scan).
     void cacheForecast(redis, event.city, event.targetDate, forecast).catch(() => {});
+
+    // Shadow-ensemble last-good cache. The shadow (alternate model) is fetched on
+    // a second Open-Meteo ensemble call, so it 429s far more than the primary even
+    // when the primary forecast succeeds — and a null shadow fail-closes every
+    // resolution-day fresh entry (early-entry veto, weatherScanner.ts ~2034). Cache
+    // a fresh shadow; fall back to the last-good one when a fresh fetch returns null
+    // so a transient 429 no longer hard-blocks res-day entries. Corroboration intent
+    // is preserved (≤TTL-stale spread on the fresh forecast centre); a real shadow
+    // disagreement (shadowEdge ≤ 0) still vetoes.
+    if (cfg.WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED) {
+      const shadowMetric = event.metric ?? 'high';
+      if (forecast.shadowEnsemble) {
+        void cacheShadowEnsemble(
+          redis, event.city, event.targetDate, shadowMetric, forecast.shadowEnsemble,
+        ).catch(() => {});
+      } else {
+        const cachedShadow = await readCachedShadowEnsemble(
+          redis, event.city, event.targetDate, shadowMetric,
+        ).catch(() => null);
+        if (cachedShadow) {
+          forecast.shadowEnsemble = cachedShadow;
+          logger.info('[weather] shadow ensemble fetch failed — using last-good cache', {
+            city: event.city,
+            targetDate: event.targetDate,
+            metric: shadowMetric,
+            shadowStdDev: +cachedShadow.stdDev.toFixed(2),
+            shadowModel: cachedShadow.ensembleModel,
+          });
+        }
+      }
+    }
 
     // Whether the feature governing this event is live (trades) vs shadow-only.
     // Highest-temp is gated by WEATHER_SCANNER_ENABLED; lowest-temp by its own flag.

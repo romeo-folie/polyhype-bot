@@ -94,10 +94,100 @@ export async function readCachedForecast(
       // Fall back to the requested metric when older cache entries predate the field.
       metric: parsed.metric ?? metric,
       stdDev: parsed.stdDev,
-      source: parsed.source as ForecastResult['source'],
+      source: parsed.source,
       ensembleMembers: typeof parsed.ensembleMembers === 'number' ? parsed.ensembleMembers : 0,
-      ensembleModel: (parsed.ensembleModel as ForecastResult['ensembleModel']) ?? 'none',
+      ensembleModel: parsed.ensembleModel ?? 'none',
       shadowEnsemble: null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ── Shadow-ensemble last-good cache ─────────────────────────────────────────
+//
+// The dual-ensemble shadow (the alternate model — ECMWF when GFS is primary)
+// is fetched on a SECOND Open-Meteo ensemble call per event, so it is the first
+// to be 429-rate-limited even when the primary forecast succeeds. A null shadow
+// hard-blocks every resolution-day fresh entry (the early-entry veto fails closed
+// on null shadowEdge), so we cache the last-good shadow spread separately and let
+// the scanner fall back to it when a fresh shadow fetch returns null. Only the
+// stdDev/members/model are needed: shadowEdge reuses the PRIMARY (fresh) forecast
+// centre and only swaps in the shadow's spread.
+
+const SHADOW_ENSEMBLE_CACHE_PREFIX = 'weather:shadow_ensemble_cache:';
+
+/** The non-null shape of ForecastResult.shadowEnsemble. */
+export type ShadowEnsemble = NonNullable<ForecastResult['shadowEnsemble']>;
+
+export function shadowEnsembleCacheKey(
+  city: string,
+  targetDate: string,
+  metric: 'high' | 'low' = 'high',
+): string {
+  return `${SHADOW_ENSEMBLE_CACHE_PREFIX}${metric}:${city}:${targetDate}`;
+}
+
+interface CachedShadowEnsemble extends ShadowEnsemble {
+  fetchedAt: string;
+}
+
+/**
+ * Persist a freshly-fetched shadow ensemble (best-effort, fire-and-forget).
+ * Callers must only pass a shadow obtained from a live fetch — never a
+ * cache-sourced one — so the TTL reflects true data age.
+ */
+export async function cacheShadowEnsemble(
+  redis: Redis,
+  city: string,
+  targetDate: string,
+  metric: 'high' | 'low',
+  shadow: ShadowEnsemble,
+): Promise<void> {
+  const cfg = loadConfig();
+  const payload: CachedShadowEnsemble = { ...shadow, fetchedAt: new Date().toISOString() };
+  await redis.set(
+    shadowEnsembleCacheKey(city, targetDate, metric),
+    JSON.stringify(payload),
+    'EX',
+    cfg.WEATHER_FORECAST_CACHE_TTL_S,
+  );
+}
+
+/**
+ * Read the last-good shadow ensemble for (city, targetDate, metric), or null
+ * when absent, corrupt, or missing required fields. stdDev must be finite and
+ * positive (it enters a normal CDF) and the model must be a known ensemble.
+ */
+export async function readCachedShadowEnsemble(
+  redis: Redis,
+  city: string,
+  targetDate: string,
+  metric: 'high' | 'low' = 'high',
+): Promise<ShadowEnsemble | null> {
+  const raw = await redis.get(shadowEnsembleCacheKey(city, targetDate, metric));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<CachedShadowEnsemble>;
+    if (
+      typeof parsed.stdDev !== 'number' ||
+      !Number.isFinite(parsed.stdDev) ||
+      parsed.stdDev <= 0 ||
+      (parsed.ensembleModel !== 'gfs' && parsed.ensembleModel !== 'ecmwf')
+    ) {
+      return null;
+    }
+    logger.debug('[weather] shadow ensemble cache hit', {
+      city,
+      targetDate,
+      metric,
+      ensembleModel: parsed.ensembleModel,
+      fetchedAt: parsed.fetchedAt,
+    });
+    return {
+      stdDev: parsed.stdDev,
+      ensembleMembers: typeof parsed.ensembleMembers === 'number' ? parsed.ensembleMembers : 0,
+      ensembleModel: parsed.ensembleModel,
     };
   } catch {
     return null;
