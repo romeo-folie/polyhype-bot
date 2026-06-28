@@ -5,11 +5,14 @@ vi.mock('../../shared/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-vi.mock('../../shared/config.js', () => ({
-  loadConfig: vi.fn(() => ({
-    CLOB_ORDER_TYPE: 'FAK',
-  })),
-}));
+const mockLoadConfig = vi.fn(() => ({
+  CLOB_ORDER_TYPE: 'FAK',
+  WEATHER_EXIT_BLOCKED_ENABLED: false,
+  RECONCILE_MIN_HEAL_SHARES: 1,
+} as Record<string, unknown>));
+vi.mock('../../shared/config.js', () => ({ loadConfig: mockLoadConfig }));
+
+vi.mock('../../db/writeQueue.js', () => ({ enqueueWrite: vi.fn() }));
 
 vi.mock('../../shared/clob.js', () => ({
   submitClobSell: vi.fn(),
@@ -29,6 +32,10 @@ vi.mock('../../execution/positionLedger.js', () => ({
   updatePositionShares: vi.fn(),
   markPositionSynthHedged: vi.fn(),
   markPositionPendingSettlement: vi.fn(),
+  markPositionExitBlocked: vi.fn(),
+  // Real-ish implementation so the executor's weather discriminator works.
+  isWeatherSourced: (s?: string | null) =>
+    (s?.startsWith('weather:') || s?.startsWith('weather-oracle:') || s?.startsWith('reconciled:weather')) ?? false,
 }));
 
 vi.mock('../../execution/telegram.js', () => ({
@@ -61,7 +68,8 @@ vi.mock('../../shared/hyperliquid.js', () => ({
 }));
 
 const { submitClobSell, fetchClobTokenBalance } = await import('../../shared/clob.js');
-const { closePosition, updatePositionShares, markPositionPendingSettlement } = await import('../../execution/positionLedger.js');
+const { closePosition, updatePositionShares, markPositionPendingSettlement, markPositionExitBlocked } = await import('../../execution/positionLedger.js');
+const { enqueueWrite } = await import('../../db/writeQueue.js');
 const { notifyTakeProfitExecuted } = await import('../../execution/telegram.js');
 const { recordPositionOutcome } = await import('../../shared/positionOutcomeRecorder.js');
 const { executeTakeProfit, resolveMakerExitPrice } = await import('../takeProfitExecutor.js');
@@ -71,6 +79,7 @@ const mockFetchClobTokenBalance = vi.mocked(fetchClobTokenBalance);
 const mockClose = vi.mocked(closePosition);
 const mockUpdateShares = vi.mocked(updatePositionShares);
 const mockMarkPending = vi.mocked(markPositionPendingSettlement);
+const mockMarkExitBlocked = vi.mocked(markPositionExitBlocked);
 const mockNotify = vi.mocked(notifyTakeProfitExecuted);
 const mockRecordOutcome = vi.mocked(recordPositionOutcome);
 
@@ -107,13 +116,20 @@ describe('executeTakeProfit', () => {
     mockClose.mockReset();
     mockUpdateShares.mockReset();
     mockMarkPending.mockReset();
+    mockMarkExitBlocked.mockReset();
     mockNotify.mockReset();
     mockRecordOutcome.mockReset();
     mockClose.mockResolvedValue(undefined);
     mockUpdateShares.mockResolvedValue(undefined);
     mockMarkPending.mockResolvedValue(undefined);
+    mockMarkExitBlocked.mockResolvedValue(undefined);
     mockNotify.mockResolvedValue(undefined);
     mockRecordOutcome.mockResolvedValue(undefined);
+    mockLoadConfig.mockReturnValue({
+      CLOB_ORDER_TYPE: 'FAK',
+      WEATHER_EXIT_BLOCKED_ENABLED: false,
+      RECONCILE_MIN_HEAL_SHARES: 1,
+    });
     // Default CLOB setup
     mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 12.5 });
     mockClobSell.mockResolvedValue({ success: true, tx_hash: '0xexit' });
@@ -579,6 +595,115 @@ describe('executeTakeProfit', () => {
     const outcomeArgs = mockRecordOutcome.mock.calls[0]?.[2] as { result: string; returnPct: number };
     expect(outcomeArgs.result).toBe('won');
     expect(outcomeArgs.returnPct).toBeCloseTo(((9.99 * 0.8) - 5.0) / 5.0 * 100, 2);
+  });
+
+  // ── Weather exit-blocked (sub-min-notional) ──────────────────────────────────
+
+  const weatherPos = (overrides: Partial<Position> = {}) =>
+    makePosition({
+      direction: 'NO',
+      sourcedFrom: 'weather:miami:2026-06-27:90-91°F',
+      ...overrides,
+    });
+
+  it('weather full position below min notional → exit-blocked, NOT pendingSettlement (flag on)', async () => {
+    mockLoadConfig.mockReturnValue({
+      CLOB_ORDER_TYPE: 'FAK',
+      WEATHER_EXIT_BLOCKED_ENABLED: true,
+      RECONCILE_MIN_HEAL_SHARES: 1,
+    });
+    // 5.882351 sh × 0.13 = $0.7647 < $1 → pre-sync min-notional, shares ≥ 1 → exit-blocked.
+    const result = await executeTakeProfit({
+      position: weatherPos({ sharesHeld: 5.882351, entryPrice: 0.65 }),
+      currentPrice: 0.13,
+      returnPct: -80,
+      reason: 'weather_drift',
+      redis: makeRedis(),
+    });
+
+    expect(mockMarkExitBlocked).toHaveBeenCalledWith(expect.any(Object), 'mkt-1', 'NO', 'min_notional');
+    expect(mockMarkPending).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('exit_blocked_min_notional');
+    // Shadow row records the blocked exit (wouldBlock=true per repo convention).
+    expect(vi.mocked(enqueueWrite)).toHaveBeenCalledWith(
+      'shadow_observations',
+      expect.objectContaining({ kind: 'weather_exit_blocked', wouldBlock: true }),
+    );
+  });
+
+  it('weather full position below min notional → pendingSettlement when flag OFF (default)', async () => {
+    // Flag defaults false → legacy behaviour preserved.
+    const result = await executeTakeProfit({
+      position: weatherPos({ sharesHeld: 5.882351, entryPrice: 0.65 }),
+      currentPrice: 0.13,
+      returnPct: -80,
+      reason: 'weather_drift',
+      redis: makeRedis(),
+    });
+
+    expect(mockMarkPending).toHaveBeenCalledWith(expect.any(Object), 'mkt-1', 'NO');
+    expect(mockMarkExitBlocked).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+  });
+
+  it('weather DUST below min notional → still pendingSettlement, not exit-blocked (flag on)', async () => {
+    mockLoadConfig.mockReturnValue({
+      CLOB_ORDER_TYPE: 'FAK',
+      WEATHER_EXIT_BLOCKED_ENABLED: true,
+      RECONCILE_MIN_HEAL_SHARES: 1,
+    });
+    // 0.008707 sh < RECONCILE_MIN_HEAL_SHARES → genuine dust → pendingSettlement.
+    await executeTakeProfit({
+      position: weatherPos({ sharesHeld: 0.008707, entryPrice: 0.55 }),
+      currentPrice: 0.5,
+      returnPct: -10,
+      reason: 'weather_drift',
+      redis: makeRedis(),
+    });
+
+    expect(mockMarkPending).toHaveBeenCalledWith(expect.any(Object), 'mkt-1', 'NO');
+    expect(mockMarkExitBlocked).not.toHaveBeenCalled();
+  });
+
+  it('NON-weather full position below min notional → pendingSettlement even with flag on', async () => {
+    mockLoadConfig.mockReturnValue({
+      CLOB_ORDER_TYPE: 'FAK',
+      WEATHER_EXIT_BLOCKED_ENABLED: true,
+      RECONCILE_MIN_HEAL_SHARES: 1,
+    });
+    await executeTakeProfit({
+      position: makePosition({ sourcedFrom: 'headline', sharesHeld: 5, entryPrice: 0.5 }),
+      currentPrice: 0.13,
+      returnPct: -70,
+      reason: 'take_profit',
+      redis: makeRedis(),
+    });
+
+    expect(mockMarkPending).toHaveBeenCalledWith(expect.any(Object), 'mkt-1', 'YES');
+    expect(mockMarkExitBlocked).not.toHaveBeenCalled();
+  });
+
+  it('weather post-sync notional below min (on-chain balance shrank) → exit-blocked (flag on)', async () => {
+    mockLoadConfig.mockReturnValue({
+      CLOB_ORDER_TYPE: 'FAK',
+      WEATHER_EXIT_BLOCKED_ENABLED: true,
+      RECONCILE_MIN_HEAL_SHARES: 1,
+    });
+    // pre-sync 5.882351 × 0.30 = $1.76 ≥ $1 (passes), but on-chain balance is 2 sh →
+    // safeShares 2 × 0.30 = $0.60 < $1 → post-sync min-notional, 2 sh ≥ 1 → exit-blocked.
+    mockFetchClobTokenBalance.mockResolvedValue({ ok: true, balance: 2 });
+    const result = await executeTakeProfit({
+      position: weatherPos({ sharesHeld: 5.882351, entryPrice: 0.65 }),
+      currentPrice: 0.3,
+      returnPct: -54,
+      reason: 'weather_drift',
+      redis: makeRedis(),
+    });
+
+    expect(mockMarkExitBlocked).toHaveBeenCalledWith(expect.any(Object), 'mkt-1', 'NO', 'min_notional');
+    expect(mockMarkPending).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
   });
 });
 

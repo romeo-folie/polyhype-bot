@@ -3,6 +3,8 @@ import { runReconciliation } from '../reconciliation.js';
 import * as positionLedger from '../../execution/positionLedger.js';
 import * as polymarketData from '../../shared/polymarketData.js';
 import * as polymarketGamma from '../../shared/polymarketGamma.js';
+import * as gamma from '../../mapping/gamma.js';
+import * as config from '../../shared/config.js';
 import * as pendingMakerOrders from '../../execution/pendingMakerOrders.js';
 import * as telegram from '../../execution/telegram.js';
 import * as clob from '../../shared/clob.js';
@@ -15,6 +17,16 @@ vi.mock('../../execution/positionLedger.js', () => ({
   recordPosition: vi.fn(),
   sizeUpPosition: vi.fn(),
   hasOpenPosition: vi.fn().mockResolvedValue(false),
+  clearPositionPendingSettlement: vi.fn(),
+  // Real-ish implementation so the reconciler's weather discriminator works.
+  isWeatherSourced: (s?: string | null) =>
+    (s?.startsWith('weather:') || s?.startsWith('weather-oracle:') || s?.startsWith('reconciled:weather')) ?? false,
+}));
+
+vi.mock('../../mapping/gamma.js', () => ({
+  getMarket: vi.fn(),
+  // Real-ish parse so heldPrice extraction matches production.
+  parseOutcomePrices: (op: string | string[]) => (Array.isArray(op) ? op : JSON.parse(op)),
 }));
 
 vi.mock('../../shared/clob.js', () => ({
@@ -49,6 +61,8 @@ vi.mock('../../shared/config.js', () => ({
     RECONCILE_MIN_HEAL_SHARES: 1,
     RECONCILE_WIPE_SUPPRESS_ALERT_RUNS: 3,
     RECONCILE_WIPE_SUPPRESS_TTL_S: 21_600,
+    WEATHER_EXIT_BLOCKED_ENABLED: true,
+    MONITOR_NEAR_RES_PRICE_THRESHOLD: 0.95,
   })),
 }));
 
@@ -1184,5 +1198,109 @@ describe('Position Reconciliation Healer', () => {
     expect(positionLedger.recordPosition).toHaveBeenCalledWith(mockRedis, expect.objectContaining({
       marketId: 'numeric-normal',
     }));
+  });
+
+  // ── Change 6: heal stuck pendingSettlement on live weather positions ─────────
+
+  function stuckWeatherPending(overrides: Record<string, unknown> = {}) {
+    return {
+      marketId: 'mkt-1',
+      conditionId: 'cond-1',
+      direction: 'NO',
+      executionVenue: 'clob',
+      stakeUsd: 3,
+      entryPrice: 0.62,
+      sharesHeld: 4.8387,
+      pendingSettlement: true,
+      sourcedFrom: 'weather:paris:2026-06-27:31C',
+      clobTokenIds: ['tok-yes', 'tok-no'],
+      ...overrides,
+    };
+  }
+
+  // The on-venue snapshot for the held NO token (tok-no). A non-empty snapshot is
+  // also required to pass the reconciler's "CLOB empty → abort" outage guard.
+  const venueSnapshot = (size: number) => [
+    { conditionId: 'cond-1', asset: 'tok-no', size, avgPrice: 0.62 },
+  ];
+
+  it('clears stuck pendingSettlement on a live, unresolved weather position (collapsed bid)', async () => {
+    (positionLedger.getOpenPositions as any).mockResolvedValue([stuckWeatherPending()]);
+    // Venue still holds the full balance (Paris pattern: healed back to full shares).
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(venueSnapshot(4.8387));
+    // Unresolved market; held side (NO = index 1) is cheap (collapsed), not a winner.
+    (gamma.getMarket as any).mockResolvedValue({ closed: false, outcomePrices: '["0.79","0.21"]' });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(positionLedger.clearPositionPendingSettlement).toHaveBeenCalledWith(
+      mockRedis, 'mkt-1', 'NO', 'min_notional',
+    );
+  });
+
+  it('does NOT clear pending for a near-resolution winner (held side ≥ threshold)', async () => {
+    (positionLedger.getOpenPositions as any).mockResolvedValue([stuckWeatherPending()]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(venueSnapshot(4.8387));
+    // Held side (NO) is winning at 0.98 ≥ near-res threshold → leave it for the redeemer.
+    (gamma.getMarket as any).mockResolvedValue({ closed: false, outcomePrices: '["0.02","0.98"]' });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(positionLedger.clearPositionPendingSettlement).not.toHaveBeenCalled();
+  });
+
+  it('does NOT clear pending on a resolved (closed) market', async () => {
+    (positionLedger.getOpenPositions as any).mockResolvedValue([stuckWeatherPending()]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(venueSnapshot(4.8387));
+    (gamma.getMarket as any).mockResolvedValue({ closed: true, outcomePrices: '["0.79","0.21"]' });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(positionLedger.clearPositionPendingSettlement).not.toHaveBeenCalled();
+  });
+
+  it('does NOT clear pending for a genuine dust residual (venue balance < min heal shares)', async () => {
+    (positionLedger.getOpenPositions as any).mockResolvedValue([
+      stuckWeatherPending({ sharesHeld: 0.0089 }),
+    ]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(venueSnapshot(0.0089));
+    (gamma.getMarket as any).mockResolvedValue({ closed: false, outcomePrices: '["0.79","0.21"]' });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(positionLedger.clearPositionPendingSettlement).not.toHaveBeenCalled();
+    expect(gamma.getMarket).not.toHaveBeenCalled(); // short-circuits before the market fetch
+  });
+
+  it('does NOT clear pending for a NON-weather pending position', async () => {
+    (positionLedger.getOpenPositions as any).mockResolvedValue([
+      stuckWeatherPending({ sourcedFrom: 'headline' }),
+    ]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(venueSnapshot(4.8387));
+    (gamma.getMarket as any).mockResolvedValue({ closed: false, outcomePrices: '["0.79","0.21"]' });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(positionLedger.clearPositionPendingSettlement).not.toHaveBeenCalled();
+  });
+
+  it('does NOT clear pending when WEATHER_EXIT_BLOCKED_ENABLED is off', async () => {
+    (config.loadConfig as any).mockReturnValueOnce({
+      SIZE_UP_ENABLED: true,
+      SIZE_UP_ELIGIBLE_SOURCES: 'weather',
+      RECONCILE_GHOST_ALERT_THRESHOLD: 5,
+      RECONCILE_MIN_HEAL_SHARES: 1,
+      RECONCILE_WIPE_SUPPRESS_ALERT_RUNS: 3,
+      RECONCILE_WIPE_SUPPRESS_TTL_S: 21_600,
+      WEATHER_EXIT_BLOCKED_ENABLED: false,
+      MONITOR_NEAR_RES_PRICE_THRESHOLD: 0.95,
+    });
+    (positionLedger.getOpenPositions as any).mockResolvedValue([stuckWeatherPending()]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue(venueSnapshot(4.8387));
+    (gamma.getMarket as any).mockResolvedValue({ closed: false, outcomePrices: '["0.79","0.21"]' });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    expect(positionLedger.clearPositionPendingSettlement).not.toHaveBeenCalled();
   });
 });

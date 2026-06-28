@@ -2,7 +2,8 @@ import { randomUUID } from 'crypto';
 import type { Redis } from 'ioredis';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
-import { getOpenPositions, closePosition, recordPosition, updatePositionShares, sizeUpPosition, hasOpenPosition, type Position } from '../execution/positionLedger.js';
+import { getOpenPositions, closePosition, recordPosition, updatePositionShares, sizeUpPosition, hasOpenPosition, clearPositionPendingSettlement, isWeatherSourced, type Position } from '../execution/positionLedger.js';
+import { getMarket, parseOutcomePrices } from '../mapping/gamma.js';
 import { getHyperliquid } from '../shared/hyperliquid.js';
 import { fetchClobTokenBalance, cancelClobOrder, resolveOrderFillPrice } from '../shared/clob.js';
 import { loadConfig } from '../shared/config.js';
@@ -196,6 +197,67 @@ export async function runReconciliation(
           reason: 'closed stale ledger entry (ghost)',
         });
         continue;
+      }
+
+      // -- HEAL STUCK pendingSettlement (weather exit-blocked) --
+      // A weather position parked at pendingSettlement (a sub-$1 sell or a dust
+      // heal) is hidden from the weather scanners (their SQL filters
+      // pending_settlement=false), so it can ride to settlement even after the
+      // bid recovers (Paris 2026-06-27). If the venue still holds a meaningful
+      // balance on an UNRESOLVED market and the held side is NOT near-resolution
+      // (a genuine winner the monitor parks for the redeemer), clear pending and
+      // record a non-terminal exit-blocked reason so the scanners re-evaluate it.
+      if (
+        cfg.WEATHER_EXIT_BLOCKED_ENABLED &&
+        forceFix &&
+        ledgerPos.pendingSettlement === true &&
+        isWeatherSourced(ledgerPos.sourcedFrom) &&
+        venueCheckConclusive &&
+        venueShares >= cfg.RECONCILE_MIN_HEAL_SHARES
+      ) {
+        const market = await getMarket(ledgerPos.marketId).catch(() => null);
+        if (market && !market.closed) {
+          let heldPrice = NaN;
+          try {
+            const prices = parseOutcomePrices(market.outcomePrices);
+            const rawHeld =
+              ledgerPos.direction === 'YES' || ledgerPos.direction === 'UP'
+                ? prices[0]
+                : prices[1];
+            heldPrice = rawHeld != null ? parseFloat(rawHeld) : NaN;
+          } catch {
+            heldPrice = NaN;
+          }
+          // Don't reactivate a genuine near-resolution winner — the monitor parks
+          // those pending on purpose so the redeemer collects full settlement.
+          const nearRes =
+            Number.isFinite(heldPrice) && heldPrice >= cfg.MONITOR_NEAR_RES_PRICE_THRESHOLD;
+          if (!nearRes) {
+            await clearPositionPendingSettlement(
+              redis,
+              ledgerPos.marketId,
+              ledgerPos.direction,
+              'min_notional',
+            );
+            healedCount++;
+            logger.info('[reconcile] cleared stuck pendingSettlement on live weather position', {
+              marketId: ledgerPos.marketId,
+              direction: ledgerPos.direction,
+              venueShares: venueShares.toFixed(4),
+              heldPrice: Number.isFinite(heldPrice) ? heldPrice.toFixed(3) : 'n/a',
+            });
+            details.push({
+              type: 'healed',
+              marketId: ledgerPos.marketId,
+              direction: ledgerPos.direction,
+              venue: venueName,
+              ledgerShares,
+              venueShares,
+              reason: `cleared stuck pendingSettlement (weather, venue ${venueShares.toFixed(2)} sh, unresolved)`,
+            });
+            continue;
+          }
+        }
       }
 
       // -- CHECK FOR SHARE/PRICE MISMATCHES --

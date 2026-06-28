@@ -135,10 +135,15 @@ export async function runMonitorInner(redis: ReturnType<typeof getRedis>): Promi
   for (const position of positions) {
     // Positions flagged as pendingSettlement are below the CLOB $1 minimum —
     // skip them silently; the resolution redeemer handles settlement.
-    if (position.pendingSettlement === true) {
-      logger.debug('[monitor] skipping pendingSettlement position', {
+    // Exit-blocked weather positions are also below the $1 minimum: the generic
+    // monitor can't sell them either, so skip here too — weather drift owns the
+    // retry (the position stays pending_settlement=false so the scanners see it).
+    if (position.pendingSettlement === true || position.exitBlockedReason) {
+      logger.debug('[monitor] skipping pendingSettlement/exit-blocked position', {
         marketId: position.marketId,
         direction: position.direction,
+        pendingSettlement: position.pendingSettlement === true,
+        exitBlockedReason: position.exitBlockedReason ?? null,
       });
       held++;
       continue;

@@ -12,6 +12,7 @@
  */
 
 import { logger } from '../shared/logger.js';
+import { enqueueWrite } from '../db/writeQueue.js';
 import { extractTheme, removeNearZeroPosition } from '../shared/themeExtractor.js';
 import {
   submitClobSell,
@@ -33,6 +34,8 @@ import {
   recordPosition,
   markPositionSynthHedged,
   markPositionPendingSettlement,
+  markPositionExitBlocked,
+  isWeatherSourced,
   updatePositionShares,
 } from '../execution/positionLedger.js';
 import { notifyTakeProfitExecuted, notify } from '../execution/telegram.js';
@@ -735,6 +738,90 @@ async function tryExecuteViaClobMakerExit(opts: {
   return { ok: true, result };
 }
 
+/**
+ * Route a CLOB sell whose notional is below the $1 CLOB minimum.
+ *
+ * A FULL live weather position (shares ≥ RECONCILE_MIN_HEAL_SHARES) is recorded
+ * as exit-blocked (non-terminal) so the weather scanners keep evaluating it and
+ * can retry once the bid recovers, instead of being hidden as pendingSettlement.
+ * Genuine dust and non-weather positions keep the existing pendingSettlement
+ * behaviour. Gated on WEATHER_EXIT_BLOCKED_ENABLED. Always returns a failure result.
+ */
+async function handleSubMinNotional(
+  redis: Redis,
+  position: Position,
+  shares: number,
+  currentPrice: number,
+  notionalUsd: number,
+  returnPct: number,
+  reason: ExitReason,
+  stage: 'pre_sync' | 'post_sync',
+): Promise<TakeProfitResult> {
+  const cfg = loadConfig();
+  const weatherFullPosition =
+    cfg.WEATHER_EXIT_BLOCKED_ENABLED &&
+    isWeatherSourced(position.sourcedFrom) &&
+    shares >= cfg.RECONCILE_MIN_HEAL_SHARES;
+
+  if (weatherFullPosition) {
+    logger.warn('[take-profit-executor] weather sell below min notional — exit-blocked (kept live)', {
+      marketId: position.marketId,
+      direction: position.direction,
+      stage,
+      shares,
+      currentPrice,
+      notionalUsd: notionalUsd.toFixed(4),
+      minUsd: CLOB_MIN_ORDER_USD,
+    });
+    await markPositionExitBlocked(redis, position.marketId, position.direction, 'min_notional');
+    void enqueueWrite('shadow_observations', {
+      kind: 'weather_exit_blocked',
+      source: 'monitor',
+      marketId: position.marketId,
+      direction: position.direction,
+      // The CLOB sell is NOT submitted (sub-$1) — the exit IS blocked. Matches the
+      // repo convention where wouldBlock=true means "this path blocked the action".
+      wouldBlock: true,
+      metricValue: notionalUsd,
+      threshold: CLOB_MIN_ORDER_USD,
+      payload: {
+        stage,
+        sharesHeld: shares,
+        currentPrice,
+        notionalAtBid: notionalUsd,
+        reason: 'min_notional',
+        sourcedFrom: position.sourcedFrom,
+        exitReason: reason,
+      },
+    });
+    return {
+      marketId: position.marketId,
+      success: false,
+      error: `exit_blocked_min_notional: $${notionalUsd.toFixed(4)} < $${CLOB_MIN_ORDER_USD.toString()}`,
+      returnPct,
+      reason,
+    };
+  }
+
+  logger.warn('[take-profit-executor] CLOB sell below minimum notional — marking pendingSettlement', {
+    marketId: position.marketId,
+    direction: position.direction,
+    stage,
+    shares,
+    currentPrice,
+    notionalUsd: notionalUsd.toFixed(4),
+    minUsd: CLOB_MIN_ORDER_USD,
+  });
+  await markPositionPendingSettlement(redis, position.marketId, position.direction);
+  return {
+    marketId: position.marketId,
+    success: false,
+    error: `CLOB sell below minimum: $${notionalUsd.toFixed(4)} < $${CLOB_MIN_ORDER_USD.toString()}`,
+    returnPct,
+    reason,
+  };
+}
+
 async function executeClobExit(opts: {
   position: Position;
   currentPrice: number;
@@ -770,25 +857,9 @@ async function executeClobExit(opts: {
   // Positions this small are better left for the resolution redeemer (which pays $1/share at settlement).
   const notionalUsd = sharesToSell * currentPrice;
   if (notionalUsd < CLOB_MIN_ORDER_USD) {
-    logger.warn(
-      '[take-profit-executor] CLOB sell below minimum notional — marking pendingSettlement',
-      {
-        marketId: position.marketId,
-        shares: sharesToSell,
-        currentPrice,
-        notionalUsd: notionalUsd.toFixed(4),
-        minUsd: CLOB_MIN_ORDER_USD,
-      },
+    return handleSubMinNotional(
+      redis, position, sharesToSell, currentPrice, notionalUsd, returnPct, reason, 'pre_sync',
     );
-    await markPositionPendingSettlement(redis, position.marketId, position.direction);
-
-    return {
-      marketId: position.marketId,
-      success: false,
-      error: `CLOB sell below minimum: $${notionalUsd.toFixed(4)} < $${CLOB_MIN_ORDER_USD.toString()}`,
-      returnPct,
-      reason,
-    };
   }
 
   // Fetch actual on-chain balance with one retry to handle transient RPC failures.
@@ -848,24 +919,9 @@ async function executeClobExit(opts: {
   // Re-check notional after balance sync — actual balance may be too small to sell
   const postSyncNotional = safeShares * currentPrice;
   if (postSyncNotional < CLOB_MIN_ORDER_USD) {
-    logger.warn(
-      '[take-profit-executor] post-sync notional below minimum — marking pendingSettlement',
-      {
-        marketId: position.marketId,
-        safeShares,
-        currentPrice,
-        postSyncNotional: postSyncNotional.toFixed(4),
-        minUsd: CLOB_MIN_ORDER_USD,
-      },
+    return handleSubMinNotional(
+      redis, position, safeShares, currentPrice, postSyncNotional, returnPct, reason, 'post_sync',
     );
-    await markPositionPendingSettlement(redis, position.marketId, position.direction);
-    return {
-      marketId: position.marketId,
-      success: false,
-      error: `post-sync below minimum: $${postSyncNotional.toFixed(4)} < $${CLOB_MIN_ORDER_USD.toString()}`,
-      returnPct,
-      reason,
-    };
   }
 
   // Log drift when actual balance is less than Redis-tracked shares.
