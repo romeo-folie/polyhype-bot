@@ -2629,6 +2629,33 @@ export const envSchema = z.object({
   // thesis_weakened, oracle_impossible, or oracle_likely_against exits.
   WEATHER_DRIFT_MARKET_EXIT_MAX_BID: z.coerce.number().min(0).max(1).optional().default(0.15),
 
+  // ── Dynamic executable dead-bid (last-chance exit threshold) ────────────────
+  // The fixed MARKET_EXIT_MAX_BID (0.15) can sit BELOW the lowest bid at which a
+  // small position still clears the $1 CLOB minimum notional. For a position of N
+  // shares that floor is CLOB_MIN_ORDER_USD / N (the "minimum executable bid"), so
+  // a 5.6-share bag is unsellable below ~0.18 — waiting for bid ≤ 0.15 means
+  // waiting until after it can no longer be sold (Shenzhen/Shanghai/Miami,
+  // 2026-06-27). When enabled, the dead-bid gate is raised to
+  //   effectiveDeadBid = min(MAX_BID, max(MARKET_EXIT_MAX_BID, (1/shares) * buffer))
+  // so the exit still fires inside the executable window for small positions, while
+  // larger positions (minExecutableBid ≤ 0.15) keep the existing 0.15 floor.
+  // Both ENABLED flags default OFF: while off, the dynamic values are shadow-logged
+  // (`wouldExitUnderExecutableGate`) but the live gate uses the fixed 0.15 floor
+  // (rollout step 1). Flip the velocity flag first (step 2), then the market flag
+  // (step 3). See docs/plans/weather-exit-logic-refinement-2026-06-28.md.
+  WEATHER_DRIFT_DYNAMIC_DEAD_BID_MARKET_ENABLED: boolFromEnv.optional().default(false),
+  WEATHER_DRIFT_DYNAMIC_DEAD_BID_VELOCITY_ENABLED: boolFromEnv.optional().default(false),
+  // Multiplier on the minimum-executable bid for market-against (Tier 1/2) exits.
+  WEATHER_DRIFT_LAST_CHANCE_BUFFER: z.coerce.number().min(1).max(3).optional().default(1.10),
+  // Multiplier on the minimum-executable bid for bid-velocity collapse exits
+  // (slightly higher — a fast collapse warrants a wider executable margin).
+  WEATHER_DRIFT_LAST_CHANCE_VELOCITY_BUFFER: z.coerce.number().min(1).max(3).optional().default(1.20),
+  // Hard ceiling on the dynamic dead-bid so a pathologically tiny position cannot
+  // push the exit threshold to an aggressive level. 0.30 keeps the last-chance band
+  // executable (≥ ~3.4 shares clears $1 at 0.30) without dumping positions that are
+  // merely small but still richly bid.
+  WEATHER_DRIFT_LAST_CHANCE_MAX_BID: z.coerce.number().min(0).max(1).optional().default(0.30),
+
   // ── Weather drift Phase 5: live observation + contradiction audit ───────────
   // Master gate for fetching live intraday observations for open weather
   // positions. Shadow rows are always written when a fetch succeeds; live oracle

@@ -30,7 +30,7 @@ import { getCityBias } from './cityBias.js';
 import { cacheForecast, readCachedForecast } from './forecastCache.js';
 import { cityLocalDate } from './resolutionTime.js';
 import { getMarket, parseClobTokenIds, parseOutcomePrices } from '../mapping/gamma.js';
-import { getClobOrderBook } from '../shared/clob.js';
+import { getClobOrderBook, CLOB_MIN_ORDER_USD } from '../shared/clob.js';
 import { getBookTouchLevels } from '../shared/bookTouch.js';
 import { getPendingOrder } from '../execution/pendingMakerOrders.js';
 import { notifyWeatherDrift } from '../execution/telegram.js';
@@ -265,6 +265,45 @@ export function shouldExitOnHeldProbDecline(opts: {
   if (opts.currentHeldProb >= opts.floor) return false;
   if (opts.prevHeldProb == null) return false;
   return opts.prevHeldProb - opts.currentHeldProb >= opts.minDelta;
+}
+
+/**
+ * Compute the executable "last-chance" dead-bid for a position.
+ *
+ * The fixed dead-bid floor (`WEATHER_DRIFT_MARKET_EXIT_MAX_BID`, 0.15) can sit
+ * BELOW the lowest bid at which the full position still clears the $1 CLOB
+ * minimum notional. For a position of `sharesHeld` shares that floor is
+ * `minOrderUsd / sharesHeld` (`minExecutableBid`) — the order is rejected below
+ * it — so a 5.6-share bag is unsellable under ~0.18 and waiting for bid ≤ 0.15
+ * means waiting until after the position is mechanically unsellable.
+ *
+ * `dynamicDeadBid` raises the dead-bid toward a small buffer above
+ * `minExecutableBid` (clamped to `[baseDeadBid, maxBid]`) so a market-adverse /
+ * bid-velocity exit still fires while the position is sellable. For large
+ * positions `minExecutableBid` is ≤ `baseDeadBid`, so `dynamicDeadBid` collapses
+ * back to `baseDeadBid` and the existing 0.15 behaviour is preserved.
+ *
+ * Pure — no I/O — so the threshold math is unit-testable in isolation. Callers
+ * decide whether the LIVE gate uses `dynamicDeadBid` (flag on) or `baseDeadBid`
+ * (flag off, shadow only); `minExecutableBid` / `lastChanceBid` are always logged.
+ */
+export function computeExecutableDeadBid(opts: {
+  sharesHeld: number;
+  baseDeadBid: number;
+  buffer: number;
+  maxBid: number;
+  minOrderUsd?: number;
+}): { minExecutableBid: number | null; lastChanceBid: number | null; dynamicDeadBid: number } {
+  const minOrderUsd = opts.minOrderUsd ?? CLOB_MIN_ORDER_USD;
+  // A non-positive / non-finite share count can't yield a meaningful executable
+  // floor — fall back to the fixed dead-bid and emit null shadow values.
+  if (!(opts.sharesHeld > 0) || !isFinite(opts.sharesHeld)) {
+    return { minExecutableBid: null, lastChanceBid: null, dynamicDeadBid: opts.baseDeadBid };
+  }
+  const minExecutableBid = minOrderUsd / opts.sharesHeld;
+  const lastChanceBid = minExecutableBid * opts.buffer;
+  const dynamicDeadBid = Math.min(opts.maxBid, Math.max(opts.baseDeadBid, lastChanceBid));
+  return { minExecutableBid, lastChanceBid, dynamicDeadBid };
 }
 
 // ── Redis key constants ───────────────────────────────────────────────────────
@@ -548,6 +587,34 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           else if (tier2) marketAgainstTier = 2;
         }
       }
+
+      // ── Executable last-chance dead-bid ──────────────────────────────────────
+      // Raise the fixed dead-bid floor toward the bid at which the full position
+      // still clears the $1 CLOB minimum, so small positions exit inside their
+      // executable window instead of after they become unsellable. Flag-gated:
+      // when disabled the LIVE gate keeps the fixed floor and the dynamic values
+      // are shadow-logged only (rollout step 1). The two paths use different
+      // buffers — market-against (Tier 1/2) uses the normal buffer; a bid-velocity
+      // collapse uses the wider velocity buffer.
+      const marketDeadBid = computeExecutableDeadBid({
+        sharesHeld: pos.sharesHeld,
+        baseDeadBid: cfg.WEATHER_DRIFT_MARKET_EXIT_MAX_BID,
+        buffer: cfg.WEATHER_DRIFT_LAST_CHANCE_BUFFER,
+        maxBid: cfg.WEATHER_DRIFT_LAST_CHANCE_MAX_BID,
+      });
+      const velocityDeadBid = computeExecutableDeadBid({
+        sharesHeld: pos.sharesHeld,
+        baseDeadBid: cfg.WEATHER_DRIFT_MARKET_EXIT_MAX_BID,
+        buffer: cfg.WEATHER_DRIFT_LAST_CHANCE_VELOCITY_BUFFER,
+        maxBid: cfg.WEATHER_DRIFT_LAST_CHANCE_MAX_BID,
+      });
+      const marketEffectiveDeadBid = cfg.WEATHER_DRIFT_DYNAMIC_DEAD_BID_MARKET_ENABLED
+        ? marketDeadBid.dynamicDeadBid
+        : cfg.WEATHER_DRIFT_MARKET_EXIT_MAX_BID;
+      const velocityEffectiveDeadBid = cfg.WEATHER_DRIFT_DYNAMIC_DEAD_BID_VELOCITY_ENABLED
+        ? velocityDeadBid.dynamicDeadBid
+        : cfg.WEATHER_DRIFT_MARKET_EXIT_MAX_BID;
+      const notionalAtBid = currentHeldBid != null ? pos.sharesHeld * currentHeldBid : null;
 
       // ── Bid velocity detection ───────────────────────────────────────────────
       // Compare the current bid to the previous scan's bid. A rapid collapse
@@ -1009,8 +1076,14 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           // is ~EV-neutral but repeatedly sold positions that bounced back to win
           // (Paris/Houston, 2026-06-14). 10-day backtest: bid ≤0.15 = 100% losers;
           // bid 0.20–0.36 held all 4 false-positive winners. Notifications unaffected.
+          // Dead-bid gate: market-against and bid-velocity exits use their own
+          // effective dead-bid (dynamic when enabled, fixed 0.15 otherwise). The
+          // dynamic floor lifts the threshold just into the executable window for
+          // small positions so the sell is not deferred past min-notional.
           const marketBidDead =
-            currentHeldBid != null && currentHeldBid <= cfg.WEATHER_DRIFT_MARKET_EXIT_MAX_BID;
+            currentHeldBid != null && currentHeldBid <= marketEffectiveDeadBid;
+          const velocityBidDead =
+            currentHeldBid != null && currentHeldBid <= velocityEffectiveDeadBid;
           const marketAgainstCanExit =
             state === 'market_against' &&
             marketBidDead &&
@@ -1053,9 +1126,10 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           // oracle_impossible is permanent (daily max only rises) — exit any day, not just res-day.
           const oracleImpossibleCanExit = state === 'oracle_impossible';
           // Bid velocity: rapid single-scan collapse on resolution day bypasses Tier logic.
-          // Hold guard may veto when fresh conditional oracle says hold.
+          // Hold guard may veto when fresh conditional oracle says hold. Uses the
+          // velocity effective dead-bid (wider buffer than the market path).
           const bidVelocityCanExit =
-            bidVelocityTrigger && isResolutionDay && !holdGuardVetoed && marketBidDead;
+            bidVelocityTrigger && isResolutionDay && !holdGuardVetoed && velocityBidDead;
           // Conditional oracle soft exit (Phase B): bid > conditionalP + buffer on res-day.
           const conditionalOracleCanExit =
             cfg.WEATHER_COND_ORACLE_SOFT_EXIT_ENABLED &&
@@ -1096,25 +1170,36 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           // market_against tiers (or a bid-velocity collapse) fired, but the bid is
           // still above the near-dead floor, so we hold through the whipsaw instead
           // of selling a possibly-winning position.
-          const marketExitWouldFire =
-            (state === 'market_against' &&
-              (marketAgainstTier === 1 ||
-                (marketAgainstTier === 2 && cfg.WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY))) ||
-            (bidVelocityTrigger && !holdGuardVetoed);
+          const wouldExitMarketPath =
+            state === 'market_against' &&
+            (marketAgainstTier === 1 ||
+              (marketAgainstTier === 2 && cfg.WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY));
+          const wouldExitVelocityPath = bidVelocityTrigger && !holdGuardVetoed;
+          // Held back specifically by the dead-bid floor when the firing path's bid
+          // is above its effective floor and nothing else already exited.
+          const heldByDeadBidFloor =
+            currentHeldBid != null &&
+            ((wouldExitMarketPath && !marketBidDead) ||
+              (wouldExitVelocityPath && !velocityBidDead));
           if (
             isResolutionDay &&
             !shouldExit &&
-            !marketBidDead &&
+            heldByDeadBidFloor &&
             currentHeldBid != null &&
-            heldTokenId != null &&
-            marketExitWouldFire
+            heldTokenId != null
           ) {
             logger.info('[weather-drift] market exit held — bid above dead-bid floor', {
               positionId: pos.id,
               city,
               state,
               currentHeldBid: +currentHeldBid.toFixed(4),
-              deadBidFloor: cfg.WEATHER_DRIFT_MARKET_EXIT_MAX_BID,
+              baseDeadBid: cfg.WEATHER_DRIFT_MARKET_EXIT_MAX_BID,
+              marketEffectiveDeadBid: +marketEffectiveDeadBid.toFixed(4),
+              velocityEffectiveDeadBid: +velocityEffectiveDeadBid.toFixed(4),
+              minExecutableBid:
+                marketDeadBid.minExecutableBid != null
+                  ? +marketDeadBid.minExecutableBid.toFixed(4)
+                  : null,
               marketAgainstTier,
               bidVelocityTrigger,
               marketDrop: +marketDrop.toFixed(3),
@@ -1421,6 +1506,37 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         }),
       });
 
+      // Shadow instrumentation for the dynamic dead-bid rollout (step 1): would a
+      // market-adverse / bid-velocity exit have fired under the dynamic executable
+      // gate where the fixed 0.15 floor held it? Computed regardless of the enable
+      // flags so several days of comparison data accrue before going live.
+      // Mirror the live gate: market-against exits (both tiers) only fire on
+      // resolution day (shouldExit wraps them in `isResolutionDay && ...`), so the
+      // shadow comparison must require it too or it over-reports on other days.
+      const marketTierExitEligible =
+        isResolutionDay &&
+        state === 'market_against' &&
+        (marketAgainstTier === 1 ||
+          (marketAgainstTier === 2 && cfg.WEATHER_DRIFT_TIER2_EXIT_ON_RES_DAY));
+      const velocityExitEligible = bidVelocityTrigger && isResolutionDay && !holdGuardVetoed;
+      const wouldExitMarketUnderDynamic =
+        marketTierExitEligible && currentHeldBid != null && currentHeldBid <= marketDeadBid.dynamicDeadBid;
+      const wouldExitMarketUnderFixed =
+        marketTierExitEligible &&
+        currentHeldBid != null &&
+        currentHeldBid <= cfg.WEATHER_DRIFT_MARKET_EXIT_MAX_BID;
+      const wouldExitVelocityUnderDynamic =
+        velocityExitEligible && currentHeldBid != null && currentHeldBid <= velocityDeadBid.dynamicDeadBid;
+      const wouldExitVelocityUnderFixed =
+        velocityExitEligible &&
+        currentHeldBid != null &&
+        currentHeldBid <= cfg.WEATHER_DRIFT_MARKET_EXIT_MAX_BID;
+      // True only when the dynamic gate flips a held position to an exit (i.e. the
+      // fixed floor would NOT have exited it this scan) — the core step-1 signal.
+      const wouldExitUnderExecutableGate =
+        (wouldExitMarketUnderDynamic && !wouldExitMarketUnderFixed) ||
+        (wouldExitVelocityUnderDynamic && !wouldExitVelocityUnderFixed);
+
       void enqueueWrite('shadow_observations', {
         kind: 'weather_drift_decision',
         source: 'arb',
@@ -1467,6 +1583,18 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
           marketDrop: currentHeldBid != null ? marketDrop : null,
           modelMarketGap: currentHeldBid != null ? modelMarketGap : null,
           marketAgainstTier,
+          // Dynamic executable dead-bid instrumentation (rollout step 1).
+          sharesHeld: pos.sharesHeld,
+          baseDeadBid: cfg.WEATHER_DRIFT_MARKET_EXIT_MAX_BID,
+          minExecutableBid: marketDeadBid.minExecutableBid,
+          marketDynamicDeadBid: marketDeadBid.dynamicDeadBid,
+          velocityDynamicDeadBid: velocityDeadBid.dynamicDeadBid,
+          marketEffectiveDeadBid,
+          velocityEffectiveDeadBid,
+          notionalAtBid,
+          dynamicDeadBidMarketEnabled: cfg.WEATHER_DRIFT_DYNAMIC_DEAD_BID_MARKET_ENABLED,
+          dynamicDeadBidVelocityEnabled: cfg.WEATHER_DRIFT_DYNAMIC_DEAD_BID_VELOCITY_ENABLED,
+          wouldExitUnderExecutableGate,
           observedMax: liveObs?.observedMax ?? null,
           observedSource: liveObs?.source ?? null,
           liveObsConfidence: liveObs?.confidence ?? null,
