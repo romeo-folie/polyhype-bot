@@ -2656,6 +2656,20 @@ export const envSchema = z.object({
   // merely small but still richly bid.
   WEATHER_DRIFT_LAST_CHANCE_MAX_BID: z.coerce.number().min(0).max(1).optional().default(0.30),
 
+  // ── Exit-blocked state for sub-min-notional weather positions ───────────────
+  // When a weather sell can't be submitted because the order would be below the $1
+  // CLOB minimum notional, marking a FULL live position pendingSettlement HIDES it
+  // from the weather scanners (their SQL filters pending_settlement=false), so it
+  // rides to settlement even if the bid later recovers (Paris 2026-06-27). When
+  // enabled, a weather position with meaningful shares (>= RECONCILE_MIN_HEAL_SHARES)
+  // records a non-terminal exitBlockedReason='min_notional' instead: the generic
+  // monitor skips it (it can't sell sub-$1 either), but weather drift keeps
+  // re-evaluating it and the reconciler can heal it back when shares/market change.
+  // Genuine dust (< RECONCILE_MIN_HEAL_SHARES) and non-weather positions keep the
+  // existing pendingSettlement behaviour. Default OFF (exit-refinement rollout
+  // step 4). See docs/plans/weather-exit-logic-refinement-2026-06-28.md.
+  WEATHER_EXIT_BLOCKED_ENABLED: boolFromEnv.optional().default(false),
+
   // ── Weather drift Phase 5: live observation + contradiction audit ───────────
   // Master gate for fetching live intraday observations for open weather
   // positions. Shadow rows are always written when a fetch succeeds; live oracle

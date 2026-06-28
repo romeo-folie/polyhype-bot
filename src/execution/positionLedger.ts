@@ -75,6 +75,13 @@ export interface Position {
   /** True when the position's notional is below the CLOB $1 minimum.
    * The monitor skips these — they resolve at market settlement via the redeemer. */
   pendingSettlement?: boolean | undefined;
+  /** Non-terminal block reason set when a weather sell can't meet the $1 CLOB
+   * minimum notional (e.g. 'min_notional'). Unlike pendingSettlement the position
+   * stays visible to the weather scanners (pending_settlement=false), so the exit
+   * can retry once the bid recovers; the generic monitor skips it meanwhile. */
+  exitBlockedReason?: string | undefined;
+  /** ISO timestamp the position was last marked exit-blocked. */
+  exitBlockedAt?: string | undefined;
   /** Futures-specific metadata */
   isFutures?: boolean | undefined;
   leverage?: number | undefined;
@@ -226,6 +233,8 @@ export async function recordPosition(redis: Redis, positionIn: Position): Promis
     fallbackReason: position.fallbackReason ?? '',
     synthHedged: position.synthHedged ? 'true' : 'false',
     pendingSettlement: position.pendingSettlement ? 'true' : 'false',
+    exitBlockedReason: position.exitBlockedReason ?? '',
+    exitBlockedAt: position.exitBlockedAt ?? '',
     isFutures: position.isFutures ? 'true' : 'false',
     leverage: position.leverage !== undefined ? String(position.leverage) : '',
     symbol: position.symbol ?? '',
@@ -357,6 +366,67 @@ export async function markPositionPendingSettlement(
   if (pos) void enqueueWrite('positions', pos as unknown as Record<string, unknown>);
   const stack = new Error().stack?.split('\n').slice(1, 4).join(' ← ').replace(/\s+/g, ' ') ?? 'unknown';
   logger.info('[ledger] position marked pendingSettlement', { marketId, direction, caller: stack });
+}
+
+/** True when a position originated from any weather source. */
+export function isWeatherSourced(sourcedFrom?: string | null): boolean {
+  return (
+    sourcedFrom?.startsWith('weather:') ||
+    sourcedFrom?.startsWith('weather-oracle:') ||
+    sourcedFrom?.startsWith('reconciled:weather')
+  ) ?? false;
+}
+
+/**
+ * Mark a position as exit-blocked (a sell that can't meet the $1 CLOB minimum
+ * notional). NON-TERMINAL: pendingSettlement is forced false so the weather
+ * scanners keep evaluating the position and can retry the exit once the bid
+ * recovers. The generic monitor skips exit-blocked positions (it can't sell
+ * sub-$1 either) — see src/monitor/index.ts.
+ */
+export async function markPositionExitBlocked(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+  reason = 'min_notional',
+): Promise<void> {
+  const key = positionKey(marketId, direction);
+  await redis.hset(key, {
+    exitBlockedReason: reason,
+    exitBlockedAt: new Date().toISOString(),
+    pendingSettlement: 'false',
+  });
+  const pos = await getPosition(redis, marketId, direction);
+  if (pos) void enqueueWrite('positions', pos as unknown as Record<string, unknown>);
+  logger.info('[ledger] position marked exitBlocked', { marketId, direction, reason });
+}
+
+/**
+ * Clear a position's pendingSettlement flag, optionally recording a non-terminal
+ * exitBlockedReason in its place. Used by the reconciler to heal a weather
+ * position that was parked pending but still holds meaningful shares on an
+ * unresolved market, so the scanners pick it up again.
+ */
+export async function clearPositionPendingSettlement(
+  redis: Redis,
+  marketId: string,
+  direction: Position['direction'],
+  exitBlockedReason?: string,
+): Promise<void> {
+  const key = positionKey(marketId, direction);
+  await redis.hset(key, {
+    pendingSettlement: 'false',
+    ...(exitBlockedReason
+      ? { exitBlockedReason, exitBlockedAt: new Date().toISOString() }
+      : {}),
+  });
+  const pos = await getPosition(redis, marketId, direction);
+  if (pos) void enqueueWrite('positions', pos as unknown as Record<string, unknown>);
+  logger.info('[ledger] cleared pendingSettlement', {
+    marketId,
+    direction,
+    exitBlockedReason: exitBlockedReason ?? null,
+  });
 }
 
 export async function updateHighWaterMark(
@@ -530,6 +600,8 @@ function deserialisePosition(raw: Record<string, string>): Position {
 
   if (raw.synthHedged === 'true') pos.synthHedged = true;
   if (raw.pendingSettlement === 'true') pos.pendingSettlement = true;
+  if (raw.exitBlockedReason) pos.exitBlockedReason = raw.exitBlockedReason;
+  if (raw.exitBlockedAt) pos.exitBlockedAt = raw.exitBlockedAt;
   if (raw.isFutures === 'true') {
     pos.isFutures = true;
     if (raw.leverage !== undefined && raw.leverage !== '') pos.leverage = parseFloat(raw.leverage);
