@@ -91,8 +91,11 @@ const baseConfig = {
   WEATHER_CALIBRATION_SHADOW_ENABLED: false,
   // Calibration-live (PR2b) off in base config; dedicated tests enable + inject a table.
   WEATHER_CALIBRATION_LIVE_ENABLED: false,
+  WEATHER_REQUIRE_CALIBRATION_COHORT_FOR_ENTRY: false,
   WEATHER_CALIBRATION_LIVE_COHORTS: 'high|range|hrrr-combined',
   WEATHER_CALIBRATION_YES_MIN_PRICE: 0.15,
+  WEATHER_BLOCK_EXACT_OPEN_METEO_NO_WITHOUT_LIVE_CONFIRMATION: false,
+  WEATHER_RES_DAY_LIVE_CONFIRMATION_REQUIRED: false,
 };
 const mockLoadConfig = vi.fn(() => ({ ...baseConfig }));
 vi.mock('../../shared/config.js', () => ({
@@ -203,6 +206,11 @@ vi.mock('../openMeteoClient.js', () => ({
   fetchEnsembleHourly: mockFetchEnsembleHourly,
 }));
 
+const mockFetchLiveObservation = vi.fn<() => Promise<unknown>>();
+vi.mock('../liveObservation.js', () => ({
+  fetchLiveObservation: mockFetchLiveObservation,
+}));
+
 // Dynamic imports — after mocks
 const {
   extractCityFromTitle,
@@ -220,6 +228,7 @@ const {
   partitionTradableByEntryCap,
   revalidateRestingWeatherOrders,
   isWeatherHighLockedIn,
+  isWeatherLowLockedIn,
   executeWeatherLockIns,
 } = await import('../weatherScanner.js');
 
@@ -1270,6 +1279,18 @@ describe('isWeatherHighLockedIn', () => {
   });
 });
 
+describe('isWeatherLowLockedIn', () => {
+  it('locks low NO after the running minimum falls below the bracket floor', () => {
+    expect(isWeatherLowLockedIn(28, 30, 31, 'NO', 1.0)).toBe(true);
+    expect(isWeatherLowLockedIn(29.1, 30, 31, 'NO', 1.0)).toBe(false);
+  });
+
+  it('locks low-tail YES but not bounded low YES intraday', () => {
+    expect(isWeatherLowLockedIn(28, null, 29, 'YES', 1.0)).toBe(true);
+    expect(isWeatherLowLockedIn(30, 30, 31, 'YES', 1.0)).toBe(false);
+  });
+});
+
 describe('executeWeatherLockIns', () => {
   const baseOpp = {
     marketId: 'm1', conditionId: 'c1', eventId: 'e1', eventSlug: 's1', clobTokenIds: ['ty', 'tn'],
@@ -1299,6 +1320,18 @@ describe('executeWeatherLockIns', () => {
     expect(sig.consensusProbability).toBeCloseTo(0.03, 6); // 1 − WEATHER_LOCKIN_MODEL_WIN → near-certain NO
     expect(sig.stakeUsd).toBe(10);
     expect(sig._isResolutionDay).toBe(true);
+  });
+
+  it('still takes lock-in NO when calibration cohort gating blocked the scanner entry path', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+    await executeWeatherLockIns(
+      {} as never,
+      [{ ...baseOpp, allowedByConfig: false, blockedByCalibrationCohort: true }] as never,
+      undefined,
+      { fetchObs: obs(30), execute: execute as never },
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
   it('does NOT take when the observed max is below bracketHigh + margin', async () => {
@@ -1783,16 +1816,18 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     expect(opp.modelProbCalibrated).toBeCloseTo(0.60, 6);
   });
 
-  it('leaves a non-allow-listed cohort (open-meteo) on the raw model — no YES surfaced', () => {
+  it('uses calibrated probability for a non-admitted cohort but marks it shadow-only', () => {
     const opp = findMispricedBrackets(rangeEvent, { ...forecastHrrr, source: 'open-meteo' as const }, 1, 0.0, {
       minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
       calibrationShadowEnabled: true, calibrationLiveEnabled: true,
       calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
     }).opportunities[0]!;
-    // open-meteo not in allow-list → raw decision: low modelProb → NO (or fallback-blocked), never the calibrated YES.
-    expect(opp.tradeSide).toBe('NO');
+    // Calibration-live no longer falls back to raw for non-admitted cohorts; it
+    // computes on calibrated probability but keeps the cohort shadow-only.
     expect(opp.calibrationLive).toBe(false);
-    expect(opp.modelProbability).toBeCloseTo(opp.modelProbRaw!, 6); // raw, not 0.60
+    expect(opp.blockedByCalibrationCohort).toBe(true);
+    expect(opp.allowedByConfig).toBe(false);
+    expect(opp.modelProbability).toBe(opp.modelProbCalibrated);
   });
 
   it('does not act on calibration when calibrationLiveEnabled is off (default)', () => {
@@ -1807,7 +1842,7 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     expect(opp.modelProbability).toBeCloseTo(opp.modelProbRaw!, 6);
   });
 
-  it('does NOT act on calibration for a low-metric market sharing the same shape|source', () => {
+  it('blocks a low-metric market sharing the same shape|source unless the metric-specific cohort is admitted', () => {
     // Regression guard (review finding): the live cohort key is metric-aware, so a
     // lowest-temperature range/HRRR market stays on the RAW model even with the
     // high-temp cohort allow-listed — the low cells are not OOS-validated.
@@ -1818,8 +1853,9 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
       calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
     }).opportunities[0]!;
     expect(opp.calibrationLive).toBe(false);          // low metric excluded from the high cohort
-    expect(opp.tradeSide).toBe('NO');                 // raw decision unchanged
-    expect(opp.modelProbability).toBeCloseTo(opp.modelProbRaw!, 6);
+    expect(opp.blockedByCalibrationCohort).toBe(true);
+    expect(opp.allowedByConfig).toBe(false);
+    expect(opp.modelProbability).toBe(opp.modelProbCalibrated);
   });
 });
 
@@ -3696,6 +3732,30 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     };
   }
 
+  function makeTodayLowGammaEvent() {
+    const highEvent = makeTodayGammaEvent();
+    return {
+      ...highEvent,
+      id: 'event-low-today',
+      title: `Lowest temperature in Chicago on ${titleDate2}?`,
+      slug: `lowest-temperature-in-chicago-on-${slugDate2}`,
+      markets: highEvent.markets.map((m, i) => {
+        const labels = [
+          '29°F or below', '30-31°F', '32-33°F', '34-35°F', '36-37°F',
+          '38-39°F', '40-41°F', '42-43°F', '44-45°F', '46-47°F', '48°F or higher',
+        ];
+        return {
+          ...m,
+          id: `mlt${i}`,
+          question: `Will the lowest temperature in Chicago be ${labels[i]} on ${titleDate2}?`,
+          conditionId: `cond-lt${i}`,
+          clobTokenIds: `["tlt${i}y","tlt${i}n"]`,
+          groupItemTitle: labels[i],
+        };
+      }),
+    };
+  }
+
   function wireTodayMocks() {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true, status: 200,
@@ -3710,6 +3770,47 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     mockFetchNwsForecast.mockResolvedValue({
       highF: 52, lowF: 38, precipProbability: 10, forecastDate: todayIso, shortForecast: 'Cloudy',
     });
+  }
+
+  function wireTodayHighAndLowMocks() {
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(url.includes('tag_slug=lowest-temperature')
+          ? [makeTodayLowGammaEvent()]
+          : [makeTodayGammaEvent()]),
+      });
+    }) as unknown as typeof fetch;
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: todayIso,
+    });
+    mockFetchOpenMeteo.mockResolvedValue({
+      highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: todayIso,
+    });
+    mockFetchNwsForecast.mockResolvedValue({
+      highF: 52, lowF: 38, precipProbability: 10, forecastDate: todayIso, shortForecast: 'Cloudy',
+    });
+  }
+
+  function liveObs(overrides: Record<string, unknown> = {}) {
+    return {
+      city: 'chicago',
+      targetDate: todayIso,
+      observedMax: 52,
+      metric: 'high',
+      source: 'wu-live',
+      observedAt: `${todayIso}T16:00:00Z`,
+      confidence: 'settlement_aligned',
+      ...overrides,
+    };
+  }
+
+  function signalDecisionWrites() {
+    return mockEnqueueWrite.mock.calls
+      .filter((c) => c[0] === 'signal_decisions')
+      .map((c) => c[1] as Record<string, any>);
   }
 
   beforeEach(() => {
@@ -4324,6 +4425,296 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     );
     expect(primaryCall).toBeDefined();
     expect((primaryCall![0] as { _isResolutionDay?: boolean })._isResolutionDay).toBe(true);
+  });
+
+  it('res-day live-confirmation gate blocks unconfirmed fresh entries and records decision context', async () => {
+    (redisMock as any).del = vi.fn().mockResolvedValue(1);
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_RES_DAY_ENTRY_ONLY: true,
+      WEATHER_RES_DAY_LIVE_CONFIRMATION_REQUIRED: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      WEATHER_RES_DAY_EARLY_ENTRY_ENABLED: true,
+      WEATHER_RES_DAY_MIN_HOURS_REMAINING: -100,
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
+      WEATHER_MARKET_DISAGREEMENT_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayMocks();
+    mockFetchLiveObservation.mockResolvedValue(liveObs({ observedMax: 52 }));
+    mockGetBankroll.mockResolvedValue(1000);
+
+    await runWeatherScan(redisMock as never);
+
+    expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+    const blocked = signalDecisionWrites().find((w) =>
+      String(w.skipDetail ?? '').includes('live_confirmation_missing'));
+    expect(blocked).toBeDefined();
+    expect(blocked!.hasTrade).toBe(false);
+    expect(blocked!.decisionId).toMatch(/[0-9a-f-]{36}/);
+    expect((blocked!.raw as Record<string, unknown>).isResolutionDay).toBe(true);
+    expect((blocked!.raw as Record<string, unknown>).sizeUpScanOnly).toBe(false);
+    expect((blocked!.raw as Record<string, unknown>).blockedByLiveConfirmation).toBe(true);
+  });
+
+  it('res-day live-confirmation gate allows a settlement-aligned lock-confirmed entry and links decisionId', async () => {
+    (redisMock as any).del = vi.fn().mockResolvedValue(1);
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_RES_DAY_ENTRY_ONLY: true,
+      WEATHER_RES_DAY_LIVE_CONFIRMATION_REQUIRED: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      WEATHER_RES_DAY_EARLY_ENTRY_ENABLED: true,
+      WEATHER_RES_DAY_MIN_HOURS_REMAINING: -100,
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
+      WEATHER_MARKET_DISAGREEMENT_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayMocks();
+    mockFetchEnsemble
+      .mockResolvedValueOnce({
+        meanHigh: 65, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8,
+        memberCount: 31, forecastDate: todayIso, ensembleModel: 'gfs',
+      })
+      .mockResolvedValueOnce({
+        meanHigh: 65, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8,
+        memberCount: 51, forecastDate: todayIso, ensembleModel: 'ecmwf',
+      });
+    mockFetchOpenMeteo.mockResolvedValue({
+      highTemp: 65, lowTemp: 38, precipProbability: 10, forecastDate: todayIso,
+    });
+    mockFetchNwsForecast.mockResolvedValue({
+      highF: 65, lowF: 38, precipProbability: 10, forecastDate: todayIso, shortForecast: 'Cloudy',
+    });
+    mockFetchLiveObservation.mockResolvedValue(liveObs({ observedMax: 70 }));
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+      entryPrice: 0.43, sharesFilled: null, governorStamped: true, wasEmptyBook: true,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    const primaryCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => !(c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite,
+    );
+    expect(primaryCall).toBeDefined();
+    const signal = primaryCall![0] as { decisionId?: string };
+    expect(signal.decisionId).toMatch(/[0-9a-f-]{36}/);
+    const traded = signalDecisionWrites().find((w) => w.decisionId === signal.decisionId);
+    expect(traded).toBeDefined();
+    expect(traded!.hasTrade).toBe(true);
+    expect((traded!.raw as Record<string, unknown>).isResolutionDay).toBe(true);
+    expect((traded!.raw as Record<string, unknown>).liveObservationConfirmed).toBe(true);
+  });
+
+  it('res-day live-confirmation gate blocks unconfirmed low-metric bounded entries', async () => {
+    (redisMock as any).del = vi.fn().mockResolvedValue(1);
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_LOWEST_TEMP_ENABLED: true,
+      WEATHER_RES_DAY_ENTRY_ONLY: true,
+      WEATHER_RES_DAY_LIVE_CONFIRMATION_REQUIRED: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      WEATHER_RES_DAY_EARLY_ENTRY_ENABLED: true,
+      WEATHER_RES_DAY_MIN_HOURS_REMAINING: -100,
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
+      WEATHER_MARKET_DISAGREEMENT_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayHighAndLowMocks();
+    mockFetchLiveObservation.mockResolvedValue(liveObs({ metric: 'low', observedMax: 38 }));
+    mockGetBankroll.mockResolvedValue(1000);
+
+    await runWeatherScan(redisMock as never);
+
+    const lowBlocked = signalDecisionWrites().find((w) =>
+      String((w.raw as Record<string, unknown>).metric) === 'low' &&
+      String(w.skipDetail ?? '').includes('live_confirmation_missing'));
+    expect(lowBlocked).toBeDefined();
+    expect(lowBlocked!.hasTrade).toBe(false);
+    expect((lowBlocked!.raw as Record<string, unknown>).blockedByLiveConfirmation).toBe(true);
+    expect((lowBlocked!.raw as Record<string, unknown>).liveObservationConfirmed).toBe(false);
+  });
+
+  it('res-day live-confirmation gate allows low NO when the running minimum locks it in', async () => {
+    (redisMock as any).del = vi.fn().mockResolvedValue(1);
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_LOWEST_TEMP_ENABLED: true,
+      WEATHER_RES_DAY_ENTRY_ONLY: true,
+      WEATHER_RES_DAY_LIVE_CONFIRMATION_REQUIRED: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      WEATHER_RES_DAY_EARLY_ENTRY_ENABLED: true,
+      WEATHER_RES_DAY_MIN_HOURS_REMAINING: -100,
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
+      WEATHER_MARKET_DISAGREEMENT_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      const lowEvent = makeTodayLowGammaEvent();
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(url.includes('tag_slug=lowest-temperature')
+          ? [{
+              ...lowEvent,
+              markets: lowEvent.markets.map((m) => ({ ...m, outcomePrices: '["0.85","0.15"]' })),
+            }]
+          : [makeTodayGammaEvent()]),
+      });
+    }) as unknown as typeof fetch;
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8,
+      memberCount: 31, forecastDate: todayIso, ensembleModel: 'gfs',
+    });
+    mockFetchOpenMeteo.mockResolvedValue({
+      highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: todayIso,
+    });
+    mockFetchNwsForecast.mockResolvedValue({
+      highF: 52, lowF: 38, precipProbability: 10, forecastDate: todayIso, shortForecast: 'Cloudy',
+    });
+    mockFetchLiveObservation.mockResolvedValue(liveObs({ metric: 'low', observedMax: 28 }));
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+      entryPrice: 0.43, sharesFilled: null, governorStamped: true, wasEmptyBook: true,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    const lowTraded = signalDecisionWrites().find((w) =>
+      w.hasTrade === true &&
+      String((w.raw as Record<string, unknown>).metric) === 'low' &&
+      (w.raw as Record<string, unknown>).liveObservationConfirmed === true);
+    expect(lowTraded).toBeDefined();
+    expect((lowTraded!.raw as Record<string, unknown>).blockedByLiveConfirmation).toBe(false);
+    const lowCall = mockExecuteAndRecordSignal.mock.calls.find((c) =>
+      String((c[0] as { sourcedFrom?: string }).sourcedFrom ?? '').startsWith('weather:low:'));
+    expect(lowCall).toBeDefined();
+  });
+
+  it('exact Open-Meteo NO gate blocks unconfirmed exact high brackets and records decision context', async () => {
+    const target = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+    const targetIso = target.toISOString().slice(0, 10);
+    const [py, pm, pd] = targetIso.split('-') as [string, string, string];
+    const parisMonth = MONTH_NAMES2[parseInt(pm, 10) - 1] ?? 'May';
+    const parisDay = parseInt(pd, 10).toString();
+    const parisSlugDate = `${parisMonth.toLowerCase()}-${parisDay}-${py}`;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      const events = url.includes('tag_slug=lowest-temperature')
+        ? []
+        : [{
+            id: 'event-paris-exact',
+            title: `Highest temperature in Paris on ${parisMonth} ${parisDay}?`,
+            slug: `highest-temperature-in-paris-on-${parisSlugDate}`,
+            active: true,
+            closed: false,
+            negRisk: true,
+            endDate: `${targetIso}T12:00:00Z`,
+            markets: [
+              {
+                id: 'm-paris-low-tail',
+                question: `Will the highest temperature in Paris be 19°C or below on ${parisMonth} ${parisDay}?`,
+                conditionId: 'cond-paris-low-tail',
+                clobTokenIds: '["tply","tpln"]',
+                outcomePrices: '["0.36","0.63"]',
+                outcomes: '["Yes","No"]',
+                active: true,
+                closed: false,
+                volume: '10000',
+                liquidity: '5000',
+                endDate: `${targetIso}T12:00:00Z`,
+                description: null,
+                groupItemTitle: '19°C or below',
+                groupItemThreshold: '0',
+              },
+              {
+                id: 'm-paris-exact',
+                question: `Will the highest temperature in Paris be 24°C on ${parisMonth} ${parisDay}?`,
+                conditionId: 'cond-paris-exact',
+                clobTokenIds: '["tpey","tpen"]',
+                outcomePrices: '["0.90","0.10"]',
+                outcomes: '["Yes","No"]',
+                active: true,
+                closed: false,
+                volume: '10000',
+                liquidity: '5000',
+                endDate: `${targetIso}T12:00:00Z`,
+                description: null,
+                groupItemTitle: '24°C',
+                groupItemThreshold: '1',
+              },
+              {
+                id: 'm-paris-high-tail',
+                question: `Will the highest temperature in Paris be 25°C or higher on ${parisMonth} ${parisDay}?`,
+                conditionId: 'cond-paris-high-tail',
+                clobTokenIds: '["tphy","tphn"]',
+                outcomePrices: '["0.01","0.99"]',
+                outcomes: '["Yes","No"]',
+                active: true,
+                closed: false,
+                volume: '10000',
+                liquidity: '5000',
+                endDate: `${targetIso}T12:00:00Z`,
+                description: null,
+                groupItemTitle: '25°C or higher',
+                groupItemThreshold: '2',
+              },
+            ],
+          }];
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(events) });
+    }) as unknown as typeof fetch;
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 20, stddevHigh: 1, meanLow: 12, stddevLow: 1, memberCount: 31, forecastDate: targetIso,
+    });
+    mockFetchOpenMeteo.mockResolvedValue({
+      highTemp: 20, lowTemp: 12, precipProbability: 10, forecastDate: targetIso,
+    });
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_BLOCK_EXACT_OPEN_METEO_NO_WITHOUT_LIVE_CONFIRMATION: true,
+      WEATHER_MIN_MODEL_COVERAGE: 0,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: false,
+      WEATHER_MARKET_DISAGREEMENT_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    mockGetBankroll.mockResolvedValue(1000);
+
+    await runWeatherScan(redisMock as never);
+
+    expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+    const exactBlocked = signalDecisionWrites().find((w) =>
+      String(w.skipDetail ?? '').includes('exact_open_meteo_no_unconfirmed'));
+    expect(exactBlocked).toBeDefined();
+    expect(exactBlocked!.hasTrade).toBe(false);
+    expect((exactBlocked!.raw as Record<string, unknown>).blockedByExactOpenMeteoNo).toBe(true);
+    expect((exactBlocked!.raw as Record<string, unknown>).forecastSource).toBe('open-meteo');
   });
 
   // Shadow-ensemble last-good cache: a res-day fresh entry fail-closes when the

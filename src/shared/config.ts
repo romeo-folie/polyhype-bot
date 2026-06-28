@@ -2296,17 +2296,23 @@ export const envSchema = z.object({
   // WEATHER_CALIBRATION_YES_MIN_PRICE, default 0.15 — replaces the raw 0.30/0.50
   // gates; the cohort allow-list is the real guard). All other cohorts keep the
   // raw model + existing YES gates UNCHANGED.
-  // Scoped per-cohort on purpose: backtests show calibration helps high-temp range/hrrr
-  // but HURTS exact/open-meteo (over-lifts deep-confidence NO into losing YES), so it
-  // must never drive decisions globally. Default false = no behavioural change.
+  // Scoped per-cohort on purpose: backtests show calibration can help range cohorts
+  // but HURTS exact/open-meteo and can drift by source, so only cohorts admitted by
+  // the chronological hold-out audit may execute. Default false = no behavioural change.
   WEATHER_CALIBRATION_LIVE_ENABLED: boolFromEnv.optional().default(false),
-  // Comma-separated `metric|shape|source` cohorts allowed to act on calibration (and
-  // take YES) when WEATHER_CALIBRATION_LIVE_ENABLED=true. metric ∈ high|low; shape ∈
+  // When calibration-live is enabled, require the bracket's metric|shape|source
+  // cohort to be admitted by WEATHER_CALIBRATION_LIVE_COHORTS before it can execute.
+  // Non-admitted cohorts are still shadow-logged using calibrated probability but
+  // no longer fall back to raw-probability entries.
+  WEATHER_REQUIRE_CALIBRATION_COHORT_FOR_ENTRY: boolFromEnv.optional().default(false),
+  // Comma-separated `metric|shape|source` cohorts admitted for live calibrated entries
+  // when WEATHER_CALIBRATION_LIVE_ENABLED=true. metric ∈ high|low; shape ∈
   // exact|range|high_tail|low_tail; source as logged (open-meteo|hrrr-combined|
   // combined|noaa). Metric is part of the key because the calibration table is
-  // metric-keyed and high/low validate independently — only the cohorts validated +EV
-  // out-of-sample belong here (currently high-temp range/HRRR; low-temp not yet).
-  WEATHER_CALIBRATION_LIVE_COHORTS: z.string().optional().default('high|range|hrrr-combined'),
+  // metric-keyed and high/low validate independently — only cohorts validated +EV
+  // out-of-sample belong here. Refresh with:
+  //   npx tsx scripts/weather-calibration-audit.ts --write-live-cohorts
+  WEATHER_CALIBRATION_LIVE_COHORTS: z.string().optional().default('low|range|combined'),
   // Market-price floor for calibrated YES on live cohorts. The raw YES gate's 0.30
   // floor would block the +EV calibrated YES (which sit ~0.15–0.30); the cohort
   // allow-list is the real protection against cheap-longshot YES, so live cohorts
@@ -2314,6 +2320,12 @@ export const envSchema = z.object({
   // the raw 0.30 / 0.50-model-prob gates. Below this, books are too thin / the
   // market's intraday info dominates.
   WEATHER_CALIBRATION_YES_MIN_PRICE: z.coerce.number().min(0).max(0.99).optional().default(0.15),
+  // Weather overconfidence guardrails: exact high/Open-Meteo NO and resolution-day
+  // fresh entries need settlement-aligned live observation confirmation. Lock-in
+  // NO remains available through executeWeatherLockIns; these gates block pure
+  // forecast entries from the normal scanner path.
+  WEATHER_BLOCK_EXACT_OPEN_METEO_NO_WITHOUT_LIVE_CONFIRMATION: boolFromEnv.optional().default(false),
+  WEATHER_RES_DAY_LIVE_CONFIRMATION_REQUIRED: boolFromEnv.optional().default(false),
   // --- WEATHER EXIT RULES (monitor) ---
   // Weather brackets resolve at end-of-day of their target date; realized hold
   // times run ~17–26h when entering 0–1 day out. Stale-exit (STALE_MIN_AGE_H_WEATHER=6h)
