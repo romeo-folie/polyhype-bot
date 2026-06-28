@@ -124,7 +124,7 @@ vi.mock('../../mapping/gamma.js', () => ({
 
 // Default: no resting bid (market price unavailable) — tests that need a bid override this.
 const mockGetClobOrderBook = vi.fn().mockResolvedValue(null);
-vi.mock('../../shared/clob.js', () => ({ getClobOrderBook: mockGetClobOrderBook }));
+vi.mock('../../shared/clob.js', () => ({ getClobOrderBook: mockGetClobOrderBook, CLOB_MIN_ORDER_USD: 1.0 }));
 
 const mockGetBookTouchLevels = vi.fn().mockReturnValue({ bestBid: null, bestAsk: null });
 vi.mock('../../shared/bookTouch.js', () => ({ getBookTouchLevels: mockGetBookTouchLevels }));
@@ -192,6 +192,7 @@ const { evaluateWeatherPositionThesis } = await import('../weatherThesis.js');
 const {
   classifyDriftState,
   shouldExitOnHeldProbDecline,
+  computeExecutableDeadBid,
   runWeatherDriftStrategy,
   runWeatherNowcastScan,
   sliceToRemainingHours,
@@ -254,6 +255,13 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     WEATHER_DRIFT_CONTRADICTION_MIN_MODEL_MARKET_GAP: 0.55,
     WEATHER_DRIFT_MARKET_DEAD_BID: 0.05,
     WEATHER_DRIFT_MARKET_EXIT_MAX_BID: 0.15,
+    // Dynamic executable dead-bid — production defaults (both flags off → the live
+    // gate keeps the fixed 0.15 floor; dynamic values shadow-logged only).
+    WEATHER_DRIFT_DYNAMIC_DEAD_BID_MARKET_ENABLED: false,
+    WEATHER_DRIFT_DYNAMIC_DEAD_BID_VELOCITY_ENABLED: false,
+    WEATHER_DRIFT_LAST_CHANCE_BUFFER: 1.10,
+    WEATHER_DRIFT_LAST_CHANCE_VELOCITY_BUFFER: 1.20,
+    WEATHER_DRIFT_LAST_CHANCE_MAX_BID: 0.30,
     WEATHER_DRIFT_FLIP_ENABLED: false,
     WEATHER_DRIFT_FLIP_CONFIRMED_ONLY: true,
     WEATHER_DRIFT_FLIP_MIN_EDGE_BPS: 500,
@@ -600,6 +608,53 @@ describe('shouldExitOnHeldProbDecline (held-prob fresh-decline exit gate)', () =
     expect(
       shouldExitOnHeldProbDecline({ ...base, enabled: false, peakedAboveFloor: true, prevHeldProb: 0.78, currentHeldProb: 0.30 }),
     ).toBe(false);
+  });
+});
+
+// ── computeExecutableDeadBid tests ────────────────────────────────────────────
+describe('computeExecutableDeadBid (dynamic last-chance dead-bid)', () => {
+  // baseDeadBid 0.15, maxBid 0.30, minOrderUsd 1.0 model the production defaults.
+  const base = { baseDeadBid: 0.15, maxBid: 0.30, minOrderUsd: 1.0 };
+
+  it('raises the dead-bid for a small position (5 shares, buffer 1.20 → 0.24)', () => {
+    const r = computeExecutableDeadBid({ ...base, sharesHeld: 5, buffer: 1.2 });
+    expect(r.minExecutableBid).toBeCloseTo(0.2, 6);
+    expect(r.lastChanceBid).toBeCloseTo(0.24, 6);
+    expect(r.dynamicDeadBid).toBeCloseTo(0.24, 6);
+  });
+
+  it('preserves the fixed 0.15 floor for a large position (20 shares → 0.05 minExec)', () => {
+    const r = computeExecutableDeadBid({ ...base, sharesHeld: 20, buffer: 1.2 });
+    expect(r.minExecutableBid).toBeCloseTo(0.05, 6);
+    // lastChanceBid 0.06 < baseDeadBid 0.15 → dynamic collapses back to the floor.
+    expect(r.dynamicDeadBid).toBeCloseTo(0.15, 6);
+  });
+
+  it('Shanghai-like position (7.042252 shares, velocity buffer 1.20 → ~0.170)', () => {
+    const r = computeExecutableDeadBid({ ...base, sharesHeld: 7.042252, buffer: 1.2 });
+    expect(r.minExecutableBid).toBeCloseTo(0.142, 3);
+    expect(r.dynamicDeadBid).toBeCloseTo(0.17, 3);
+  });
+
+  it('clamps the dynamic dead-bid to maxBid for a tiny position', () => {
+    // 2 shares → minExec 0.50, ×1.20 = 0.60, clamped to maxBid 0.30.
+    const r = computeExecutableDeadBid({ ...base, sharesHeld: 2, buffer: 1.2 });
+    expect(r.minExecutableBid).toBeCloseTo(0.5, 6);
+    expect(r.lastChanceBid).toBeCloseTo(0.6, 6);
+    expect(r.dynamicDeadBid).toBeCloseTo(0.3, 6);
+  });
+
+  it('falls back to baseDeadBid and null shadow values for non-positive shares', () => {
+    expect(computeExecutableDeadBid({ ...base, sharesHeld: 0, buffer: 1.2 })).toEqual({
+      minExecutableBid: null,
+      lastChanceBid: null,
+      dynamicDeadBid: 0.15,
+    });
+  });
+
+  it('defaults minOrderUsd to the CLOB minimum ($1) when omitted', () => {
+    const r = computeExecutableDeadBid({ sharesHeld: 5, baseDeadBid: 0.15, maxBid: 0.3, buffer: 1.2 });
+    expect(r.minExecutableBid).toBeCloseTo(0.2, 6);
   });
 });
 
@@ -2296,6 +2351,167 @@ describe('runWeatherDriftStrategy — Phase 3+4 live actions', () => {
     const call = vi.mocked(enqueueWrite).mock.calls[0]![1] as any;
     expect(call.payload.state).toBe('market_against');
     expect(call.payload.action).toBe('cancel_resting');
+  });
+});
+
+// ── Dynamic executable dead-bid integration ──────────────────────────────────
+
+describe('runWeatherDriftStrategy — dynamic executable dead-bid', () => {
+  // Small NO position on a tail bracket: entryPrice 0.65, drop=0.40 (≥ severeDrop)
+  // so a low bid yields market_against Tier 1. sharesHeld is overridable so we can
+  // model the Shenzhen-like bag whose min-executable bid sits above the fixed 0.15.
+  function setupSmallMarketAgainst(sharesHeld: number) {
+    mockFetchWeatherEvents.mockResolvedValue([{}]);
+    mockParseWeatherEvent.mockReturnValue({
+      metric: 'high',
+      city: 'shenzhen',
+      targetDate: '2026-06-01',
+      coords: { tz: 'Asia/Shanghai' },
+      brackets: [{ label: '39°F or below', low: null, high: 39, marketId: 'mkt-1' }],
+    });
+    mockSql.mockResolvedValue([
+      makePos({ sourcedFrom: 'weather:shenzhen:2026-06-01:39°F or below', sharesHeld }),
+    ]);
+    mockFetchForecast.mockResolvedValue(makeForecast());
+  }
+
+  function driftDecision() {
+    return vi.mocked(enqueueWrite).mock.calls.find(
+      (c) => (c[1] as any).kind === 'weather_drift_decision',
+    )![1] as any;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockDedup.mockResolvedValue(true);
+    mockCityLocalDate.mockReturnValue('2026-06-01'); // resolution day
+    mockTryWeatherExit.mockResolvedValue(true);
+    mockGetClobOrderBook.mockResolvedValue({ bids: [], asks: [] });
+  });
+
+  it('market_against exits at a bid above the fixed floor when the dynamic flag is on', async () => {
+    // sharesHeld=5.576207 → minExec≈0.179, ×1.10≈0.197. bid 0.18 ≤ 0.197 (dynamic)
+    // but 0.18 > 0.15 (fixed) → dynamic gate lets the exit fire.
+    setupSmallMarketAgainst(5.576207);
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.18 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_DYNAMIC_DEAD_BID_MARKET_ENABLED: true,
+    }));
+    await runWeatherDriftStrategy(makeRedis() as any);
+
+    expect(mockTryWeatherExit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extraContext: expect.objectContaining({ driftState: 'market_against', marketAgainstTier: 1 }),
+      }),
+    );
+    const p = driftDecision().payload;
+    expect(p.action).toBe('exit');
+    // Notional at the exit bid clears the $1 CLOB minimum (the whole point).
+    expect(p.notionalAtBid).toBeGreaterThan(1);
+  });
+
+  it('market_against HOLDS at the same bid under the fixed floor (flag off) and shadow-flags it', async () => {
+    setupSmallMarketAgainst(5.576207);
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.18 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      // market flag OFF — default fixed-floor behaviour.
+    }));
+    await runWeatherDriftStrategy(makeRedis() as any);
+
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+    const p = driftDecision().payload;
+    expect(p.state).toBe('market_against');
+    expect(p.action).not.toBe('exit');
+    // Step-1 shadow signal: the dynamic gate WOULD have exited where the fixed held.
+    expect(p.wouldExitUnderExecutableGate).toBe(true);
+    expect(p.marketEffectiveDeadBid).toBeCloseTo(0.15, 6); // fixed (flag off)
+    expect(p.marketDynamicDeadBid).toBeCloseTo(0.197, 3);
+    expect(p.minExecutableBid).toBeCloseTo(0.179, 3);
+    expect(p.dynamicDeadBidMarketEnabled).toBe(false);
+  });
+
+  it('large positions keep the fixed 0.15 floor even with the dynamic flag on', async () => {
+    // sharesHeld=20 → minExec=0.05, dynamic collapses to 0.15. bid 0.18 > 0.15 → hold.
+    setupSmallMarketAgainst(20);
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.18 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_DYNAMIC_DEAD_BID_MARKET_ENABLED: true,
+    }));
+    await runWeatherDriftStrategy(makeRedis() as any);
+
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+    const p = driftDecision().payload;
+    expect(p.marketEffectiveDeadBid).toBeCloseTo(0.15, 6);
+    expect(p.wouldExitUnderExecutableGate).toBe(false);
+  });
+
+  it('bid-velocity exit fires once the bid crosses the dynamic velocity threshold', async () => {
+    // Shanghai-like: sharesHeld=7.042252 → minExec≈0.142, ×1.20≈0.170. prev bid 0.40
+    // → current 0.165 (58.75% drop ≥ threshold) and 0.165 ≤ 0.170 → velocity exit.
+    setupSmallMarketAgainst(7.042252);
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.165 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_THRESHOLD: 0.40,
+      WEATHER_DRIFT_DYNAMIC_DEAD_BID_VELOCITY_ENABLED: true,
+      // Suppress market_against so velocity is the sole exit path.
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.99,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.99,
+      WEATHER_DRIFT_SEVERE_DROP: 0.99,
+    }));
+    const redis = makeRedis(new Map([['weather:drift_prev_bid:pos-1', '0.40']]));
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).toHaveBeenCalled();
+    const p = driftDecision().payload;
+    expect(p.action).toBe('exit');
+    expect(p.bidVelocityTrigger).toBe(true);
+  });
+
+  it('bid-velocity HOLDS at 0.200 (above the dynamic velocity threshold)', async () => {
+    setupSmallMarketAgainst(7.042252);
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.20 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig({
+      WEATHER_DRIFT_ENABLED: true,
+      WEATHER_DRIFT_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_EXIT_ENABLED: true,
+      WEATHER_DRIFT_BID_VELOCITY_THRESHOLD: 0.40,
+      WEATHER_DRIFT_DYNAMIC_DEAD_BID_VELOCITY_ENABLED: true,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_EXIT: 0.99,
+      WEATHER_DRIFT_MARKET_ADVERSE_DROP_NOTIFY: 0.99,
+      WEATHER_DRIFT_SEVERE_DROP: 0.99,
+    }));
+    const redis = makeRedis(new Map([['weather:drift_prev_bid:pos-1', '0.40']]));
+    await runWeatherDriftStrategy(redis as any);
+
+    expect(mockTryWeatherExit).not.toHaveBeenCalled();
+    const p = driftDecision().payload;
+    expect(p.bidVelocityTrigger).toBe(true);
+    expect(p.action).not.toBe('exit');
+    // bid 0.20 is above BOTH the fixed and dynamic thresholds → not a step-1 flip.
+    expect(p.wouldExitUnderExecutableGate).toBe(false);
+  });
+
+  it('shadow row always carries the dead-bid instrumentation', async () => {
+    setupSmallMarketAgainst(5.576207);
+    mockGetBookTouchLevels.mockReturnValue({ bestBid: { price: 0.18 }, bestAsk: null });
+    mockLoadConfig.mockReturnValue(makeConfig()); // shadow only — no live actions
+    await runWeatherDriftStrategy(makeRedis() as any);
+
+    const p = driftDecision().payload;
+    expect(p.sharesHeld).toBeCloseTo(5.576207, 6);
+    expect(p.baseDeadBid).toBeCloseTo(0.15, 6);
+    expect(p.minExecutableBid).toBeCloseTo(0.179, 3);
+    expect(p.velocityDynamicDeadBid).toBeCloseTo(0.215, 3); // ×1.20, capped at 0.30
+    expect(p.notionalAtBid).toBeCloseTo(5.576207 * 0.18, 4);
   });
 });
 
