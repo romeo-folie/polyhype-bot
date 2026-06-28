@@ -21,6 +21,7 @@
  */
 
 import type { Redis } from 'ioredis';
+import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../shared/config.js';
 import { logger } from '../shared/logger.js';
 import { enqueueWrite } from '../db/writeQueue.js';
@@ -928,6 +929,20 @@ export interface WeatherBracketOpportunity {
   edgeCalibrated?: number | null;
   /** Side the calibrated probability would naturally pick (pre-gate), for comparison. */
   tradeSideCalibrated?: 'YES' | 'NO' | null;
+  /** UUID emitted to signal_decisions and carried into execution/outcome rows. */
+  decisionId?: string;
+  /** True when the bracket/side is confirmed by settlement-aligned live observations. */
+  liveObservationConfirmed?: boolean;
+  /** Live observed running extreme used for confirmation, when fetched. */
+  liveObservedMax?: number | null;
+  /** Confidence class from the live observation source, when fetched. */
+  liveObservationConfidence?: string | null;
+  /** True when a resolution-day fresh entry was blocked because live observation did not confirm it. */
+  blockedByLiveConfirmation?: boolean;
+  /** True when a high/exact/open-meteo NO was blocked unless observation lock-in confirmed it. */
+  blockedByExactOpenMeteoNo?: boolean;
+  /** True when calibration-live is on but this metric|shape|source cohort is not admitted. */
+  blockedByCalibrationCohort?: boolean;
 }
 
 interface WeatherMarketState {
@@ -943,6 +958,79 @@ function weatherMarketStateKey(marketId: string, side: 'YES' | 'NO'): string {
 
 function weatherWinProbability(opp: WeatherBracketOpportunity): number {
   return opp.tradeSide === 'YES' ? opp.modelProbability : 1 - opp.modelProbability;
+}
+
+function weatherCohortKey(opp: WeatherBracketOpportunity): string {
+  const parsed = parseBracketLabel(opp.bracketLabel);
+  const shape = parsed ? classifyBracketShape(parsed.low, parsed.high) : 'exact';
+  return `${opp.metric}|${shape}|${opp.forecastSource}`;
+}
+
+function weatherDecisionSkipDetail(opp: WeatherBracketOpportunity): string {
+  const reasons: string[] = [];
+  if (!opp.allowedByConfig) reasons.push('side_disabled');
+  if (opp.blockedByCalibrationCohort) reasons.push('calibration_cohort_not_admitted');
+  if (opp.blockedByMarketDisagreement) reasons.push('market_disagreement');
+  if (opp.blockedByEnsembleVeto) reasons.push('ensemble_veto');
+  if (opp.blockedByNoFallback) reasons.push('yes_gate_no_fallback');
+  if (opp.blockedByModalMass) reasons.push('modal_mass');
+  if (opp.blockedByInteriorMargin) reasons.push('interior_margin');
+  if (opp.blockedByMarketFavorite) reasons.push('market_favorite');
+  if (opp.blockedByResDayOnly) reasons.push('res_day_only');
+  if (opp.blockedByLiveConfirmation) reasons.push('live_confirmation_missing');
+  if (opp.blockedByExactOpenMeteoNo) reasons.push('exact_open_meteo_no_unconfirmed');
+  return reasons.join(',') || 'filtered';
+}
+
+function emitWeatherSignalDecision(opp: WeatherBracketOpportunity, hasTrade: boolean): void {
+  const decisionId = opp.decisionId ?? randomUUID();
+  opp.decisionId = decisionId;
+  void enqueueWrite('signal_decisions', {
+    decisionId,
+    source: 'weather',
+    marketId: opp.marketId,
+    conditionId: opp.conditionId,
+    question: opp.question,
+    category: 'weather',
+    direction: opp.tradeSide,
+    hasTrade,
+    skipReason: hasTrade ? undefined : 'other',
+    skipDetail: hasTrade ? undefined : weatherDecisionSkipDetail(opp),
+    consensusProbability: opp.modelProbability,
+    consensusStddev: opp.effectiveStdDev,
+    currentYesPrice: opp.yesPrice,
+    divergence: opp.edge,
+    stakeAttemptedUsd: undefined,
+    raw: {
+      eventSlug: opp.eventSlug,
+      city: opp.city,
+      targetDate: opp.targetDate,
+      metric: opp.metric,
+      bracket: opp.bracketLabel,
+      cohort: weatherCohortKey(opp),
+      tradeSide: opp.tradeSide,
+      sidePrice: opp.outcomePrice,
+      modelProbCalibrated: opp.modelProbCalibrated ?? null,
+      calibrationLive: opp.calibrationLive ?? false,
+      forecastSource: opp.forecastSource,
+      daysOut: opp.daysOut,
+      isResolutionDay: opp.isResolutionDay ?? false,
+      sizeUpScanOnly: opp.sizeUpScanOnly ?? false,
+      liveObservationConfirmed: opp.liveObservationConfirmed ?? false,
+      liveObservedMax: opp.liveObservedMax ?? null,
+      liveObservationConfidence: opp.liveObservationConfidence ?? null,
+      blockedByLiveConfirmation: opp.blockedByLiveConfirmation ?? false,
+      blockedByExactOpenMeteoNo: opp.blockedByExactOpenMeteoNo ?? false,
+      blockedByCalibrationCohort: opp.blockedByCalibrationCohort ?? false,
+      blockedByResDayOnly: opp.blockedByResDayOnly ?? false,
+      blockedByNoFallback: opp.blockedByNoFallback ?? false,
+      blockedByInteriorMargin: opp.blockedByInteriorMargin ?? false,
+      blockedByMarketFavorite: opp.blockedByMarketFavorite ?? false,
+      blockedByModalMass: opp.blockedByModalMass ?? false,
+      blockedByEnsembleVeto: opp.blockedByEnsembleVeto ?? false,
+      blockedByMarketDisagreement: opp.blockedByMarketDisagreement ?? false,
+    },
+  });
 }
 
 async function applyMarketDisagreementGate(
@@ -1078,6 +1166,28 @@ export function isWeatherHighLockedIn(
 }
 
 /**
+ * Res-day "lock-in" for LOW markets. `observedMin` is carried in observedMax by
+ * the live-observation contract for metric='low'. The daily low can only fall,
+ * so NO is locked once the running min is below a bounded/high-tail bracket's
+ * lower boundary, and low-tail YES is locked once the running min is below the
+ * tail ceiling. Bounded LOW YES remains unconfirmable intraday because the
+ * running min can still fall out the bottom of the range.
+ */
+export function isWeatherLowLockedIn(
+  observedMin: number | null,
+  bracketLow: number | null,
+  bracketHigh: number | null,
+  tradeSide: 'YES' | 'NO',
+  marginC: number,
+): boolean {
+  if (observedMin == null || !Number.isFinite(observedMin)) return false;
+  if (tradeSide === 'YES') {
+    return bracketLow == null && bracketHigh != null && observedMin <= bracketHigh - marginC;
+  }
+  return bracketLow != null && observedMin <= bracketLow - marginC;
+}
+
+/**
  * Source-specific σ inflation multiplier (entry only). Open-Meteo highs are
  * underdispersed (realized MAE/σ ≈ 1.0 vs ≈ 0.80 for a calibrated normal), so
  * their bracket probabilities are over-confident; widen σ to de-confidence NO
@@ -1171,6 +1281,10 @@ export interface FindMispricedOptions {
   /** Market-price floor for calibrated YES on live cohorts (replaces the raw 0.30
    *  floor; live cohorts rely on calibrated edge + this lower floor). Default 0.15. */
   calibrationYesMinPrice?: number;
+  /** When calibration-live is enabled, only allow-listed cohorts may execute.
+   *  Other cohorts still use calibrated probability for shadow comparison but
+   *  remain shadow-only instead of falling back to raw-probability entries. */
+  requireCalibrationCohortForEntry?: boolean;
   /** Widen the interior-NO margin by cityBias.correctedMae × this multiplier
    *  (MAE-aware coin-flip veto). 0 = disabled (flat interiorNoForecastMargin only). */
   interiorNoMarginMaeMult?: number;
@@ -1280,6 +1394,7 @@ export function findMispricedBrackets(
     calibrationLiveEnabled = false,
     calibrationLiveCohorts = '',
     calibrationYesMinPrice = 0.15,
+    requireCalibrationCohortForEntry = true,
     interiorNoMarginMaeMult = 0,
     marketFavoriteNoVetoEnabled = false,
     marketFavoriteNoMaxYesPrice = 0.85,
@@ -1450,9 +1565,15 @@ export function findMispricedBrackets(
         shape, source: forecast.source, daysOut, metric: event.metric,
       });
     }
-    // Probability that drives the LIVE decision: calibrated for allow-listed cohorts,
-    // raw otherwise (default — zero behavioural change when calibrationLiveEnabled=false).
-    const decisionProb = cohortLive && modelProbCalibrated !== null ? modelProbCalibrated : modelProb;
+    // Probability that drives the LIVE decision. When calibration-live is on, never
+    // fall back to raw probabilities for entry EV: all cohorts use the calibrated
+    // value if available, and non-admitted cohorts are marked shadow-only below.
+    // This prevents raw overconfidence from leaking through outside the live cohort
+    // allow-list. With calibration-live off, legacy raw decisions are unchanged.
+    const decisionProb =
+      calibrationLiveEnabled && modelProbCalibrated !== null
+        ? modelProbCalibrated
+        : modelProb;
 
     // Edge per side using actual bid prices (not vig-adjusted event-level probs).
     // YES edge: model says bracket is more likely than yesPrice implies
@@ -1670,10 +1791,9 @@ export function findMispricedBrackets(
       clobTokenIds: bracket.clobTokenIds,
       yesPrice: bracket.yesPrice,
       noPrice: bracket.noPrice,
-      // For live-calibration cohorts this is the CALIBRATED prob (so edge, side, and
-      // downstream Kelly sizing are all consistent on the prob we acted on); for all
-      // other cohorts it is the raw model prob exactly as before. modelProbRaw and
-      // modelProbCalibrated are logged separately for transparency.
+      // When calibration-live is enabled this is calibrated for every cohort;
+      // non-admitted cohorts are shadow-only via allowedByConfig below. With
+      // calibration-live off this remains the raw model probability.
       modelProbability: decisionProb,
       adjustedMarketProb,
       edge,
@@ -1687,7 +1807,8 @@ export function findMispricedBrackets(
       daysOut,
       unit: event.unit,
       overround,
-      allowedByConfig: allowedSides.has(tradeSide),
+      allowedByConfig: allowedSides.has(tradeSide)
+        && !(calibrationLiveEnabled && requireCalibrationCohortForEntry && !cohortLive),
       rawForecastHigh,
       correctedForecastHigh,
       cityMeanBias: cityBias?.meanBias ?? null,
@@ -1731,6 +1852,9 @@ export function findMispricedBrackets(
       edgeCalibrated,
       tradeSideCalibrated,
       calibrationLive: cohortLive,
+      blockedByLiveConfirmation: false,
+      blockedByExactOpenMeteoNo: false,
+      blockedByCalibrationCohort: calibrationLiveEnabled && requireCalibrationCohortForEntry && !cohortLive,
     });
   }
 
@@ -2050,6 +2174,7 @@ export async function scanWeatherMarkets(
         calibrationLiveEnabled: cfg.WEATHER_CALIBRATION_LIVE_ENABLED,
         calibrationLiveCohorts: cfg.WEATHER_CALIBRATION_LIVE_COHORTS,
         calibrationYesMinPrice: cfg.WEATHER_CALIBRATION_YES_MIN_PRICE,
+        requireCalibrationCohortForEntry: cfg.WEATHER_REQUIRE_CALIBRATION_COHORT_FOR_ENTRY,
         interiorNoMarginMaeMult: cfg.WEATHER_INTERIOR_NO_MARGIN_MAE_MULT,
         marketFavoriteNoVetoEnabled: cfg.WEATHER_MARKET_FAVORITE_NO_VETO_ENABLED,
         marketFavoriteNoMaxYesPrice: cfg.WEATHER_MARKET_FAVORITE_NO_MAX_YESPRICE,
@@ -2132,6 +2257,91 @@ export async function scanWeatherMarkets(
         }
       }
     }
+
+    const needsLiveConfirmation =
+      cfg.WEATHER_RES_DAY_LIVE_CONFIRMATION_REQUIRED ||
+      cfg.WEATHER_BLOCK_EXACT_OPEN_METEO_NO_WITHOUT_LIVE_CONFIRMATION;
+    if (needsLiveConfirmation && gatedOpportunities.length > 0) {
+      const liveObs = isResolutionDay
+        ? await fetchLiveObservation(event.city, event.targetDate, redis, {
+            wuEnabled: cfg.WEATHER_DRIFT_WU_LIVE_ENABLED,
+            metarEnabled: cfg.WEATHER_DRIFT_METAR_LIVE_ENABLED,
+            hkoEnabled: cfg.WEATHER_DRIFT_HKO_LIVE_ENABLED,
+            maxAgeMin: cfg.WEATHER_COND_ORACLE_MAX_OBS_AGE_MIN,
+            metric: event.metric,
+            ...(fetchFn != null && { fetchFn: fetchFn as typeof fetch }),
+          }).catch(() => null)
+        : null;
+      for (const o of gatedOpportunities) {
+        const parsed = parseBracketLabel(o.bracketLabel);
+        const observedMax = liveObs?.observedMax ?? null;
+        const settlementAligned =
+          liveObs != null &&
+          observedMax != null &&
+          liveObs.observedAt != null &&
+          liveObs.confidence === 'settlement_aligned';
+        const liveConfirmed =
+          settlementAligned &&
+          parsed != null &&
+          (event.metric === 'high'
+            ? (
+                // NO is locked once the running high has exceeded the bracket's
+                // upper boundary; the daily high cannot fall back into the bracket.
+                (o.tradeSide === 'NO' && parsed.high != null &&
+                  isWeatherHighLockedIn(observedMax, parsed.high, cfg.WEATHER_LOCKIN_MARGIN)) ||
+                // High-tail YES is locked once the running high has cleared the
+                // lower threshold. Bounded YES still cannot be confirmed intraday.
+                (o.tradeSide === 'YES' && parsed.high == null && parsed.low != null &&
+                  observedMax >= parsed.low + cfg.WEATHER_LOCKIN_MARGIN)
+              )
+            : isWeatherLowLockedIn(
+                observedMax,
+                parsed.low,
+                parsed.high,
+                o.tradeSide,
+                cfg.WEATHER_LOCKIN_MARGIN,
+              ));
+        o.liveObservationConfirmed = liveConfirmed;
+        o.liveObservedMax = observedMax;
+        o.liveObservationConfidence = liveObs?.confidence ?? null;
+
+        const exactOpenMeteoNo =
+          cfg.WEATHER_BLOCK_EXACT_OPEN_METEO_NO_WITHOUT_LIVE_CONFIRMATION &&
+          o.tradeSide === 'NO' &&
+          event.metric === 'high' &&
+          o.forecastSource === 'open-meteo' &&
+          parsed?.low != null &&
+          parsed.high != null &&
+          parsed.low === parsed.high;
+        if (exactOpenMeteoNo && !liveConfirmed) {
+          o.blockedByExactOpenMeteoNo = true;
+          logger.info('[weather] exact Open-Meteo NO blocked — no settlement-aligned lock-in', {
+            marketId: o.marketId,
+            city: o.city,
+            bracket: o.bracketLabel,
+            observedMax: liveObs?.observedMax ?? null,
+            confidence: liveObs?.confidence ?? null,
+          });
+        }
+
+        if (
+          cfg.WEATHER_RES_DAY_LIVE_CONFIRMATION_REQUIRED &&
+          isResolutionDay &&
+          !o.sizeUpScanOnly &&
+          !liveConfirmed
+        ) {
+          o.blockedByLiveConfirmation = true;
+          logger.info('[weather] res-day entry blocked — no settlement-aligned live confirmation', {
+            marketId: o.marketId,
+            city: o.city,
+            bracket: o.bracketLabel,
+            tradeSide: o.tradeSide,
+            observedMax: liveObs?.observedMax ?? null,
+            confidence: liveObs?.confidence ?? null,
+          });
+        }
+      }
+    }
     // `effectiveStdDev` above is the post-bias σ actually used by
     // estimateBracketProbability (weak-band inflator or full-tier empirical-σ
     // overlay already applied). Surfaced up from findMispricedBrackets so the
@@ -2146,7 +2356,8 @@ export async function scanWeatherMarkets(
     const allowedInEvent = gatedOpportunities.filter(
       (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto
         && !o.blockedByNoFallback && !o.blockedByModalMass && !o.blockedByInteriorMargin
-        && !o.blockedByMarketFavorite,
+        && !o.blockedByMarketFavorite && !o.blockedByLiveConfirmation
+        && !o.blockedByExactOpenMeteoNo,
     ).length;
     const disagreementBlocked = gatedOpportunities.filter((o) => o.blockedByMarketDisagreement).length;
     const ensembleVetoBlocked = gatedOpportunities.filter((o) => o.blockedByEnsembleVeto).length;
@@ -2248,7 +2459,12 @@ export async function scanWeatherMarkets(
     // stream while marking exactly why they will not trade under the gate.
     const blockedByResDayOnly =
       cfg.WEATHER_RES_DAY_ENTRY_ONLY && !isResolutionDay && !isSizeUpScan;
-    for (const opp of gatedOpportunities) opp.blockedByResDayOnly = blockedByResDayOnly;
+    for (const opp of gatedOpportunities) {
+      opp.blockedByResDayOnly = blockedByResDayOnly;
+      if (isSizeUpScan) opp.sizeUpScanOnly = true;
+      if (isEarlyResolutionDayEntry) opp.earlyResolutionDayEntry = true;
+      opp.isResolutionDay = isResolutionDay;
+    }
 
     // Log each opportunity individually for shadow analysis.
     // Shadow still records disallowed-side opps so calibration analysis keeps
@@ -2263,6 +2479,8 @@ export async function scanWeatherMarkets(
         !opp.blockedByModalMass &&
         !opp.blockedByInteriorMargin &&
         !opp.blockedByMarketFavorite &&
+        !opp.blockedByLiveConfirmation &&
+        !opp.blockedByExactOpenMeteoNo &&
         !opp.blockedByResDayOnly;
       logger.info('[weather] bracket opportunity', {
         marketId: opp.marketId,
@@ -2291,6 +2509,12 @@ export async function scanWeatherMarkets(
         blockedByNoFallback: opp.blockedByNoFallback ?? false,
         blockedByInteriorMargin: opp.blockedByInteriorMargin ?? false,
         blockedByMarketFavorite: opp.blockedByMarketFavorite ?? false,
+        blockedByLiveConfirmation: opp.blockedByLiveConfirmation ?? false,
+        blockedByExactOpenMeteoNo: opp.blockedByExactOpenMeteoNo ?? false,
+        blockedByCalibrationCohort: opp.blockedByCalibrationCohort ?? false,
+        liveObservationConfirmed: opp.liveObservationConfirmed ?? false,
+        liveObservedMax: opp.liveObservedMax ?? null,
+        liveObservationConfidence: opp.liveObservationConfidence ?? null,
         interiorNoMarginEff: opp.interiorNoMarginEff ?? null,
         confluenceYesAgree: opp.confluenceYesAgree ?? false,
         marketFavoriteBracket: opp.marketFavoriteBracket ?? null,
@@ -2364,6 +2588,12 @@ export async function scanWeatherMarkets(
           blockedByNoFallback: opp.blockedByNoFallback ?? false,
           blockedByInteriorMargin: opp.blockedByInteriorMargin ?? false,
           blockedByMarketFavorite: opp.blockedByMarketFavorite ?? false,
+          blockedByLiveConfirmation: opp.blockedByLiveConfirmation ?? false,
+          blockedByExactOpenMeteoNo: opp.blockedByExactOpenMeteoNo ?? false,
+          blockedByCalibrationCohort: opp.blockedByCalibrationCohort ?? false,
+          liveObservationConfirmed: opp.liveObservationConfirmed ?? false,
+          liveObservedMax: opp.liveObservedMax ?? null,
+          liveObservationConfidence: opp.liveObservationConfidence ?? null,
           interiorNoMarginEff: opp.interiorNoMarginEff ?? null,
           confluenceYesAgree: opp.confluenceYesAgree ?? false,
           marketFavoriteBracket: opp.marketFavoriteBracket ?? null,
@@ -2382,17 +2612,11 @@ export async function scanWeatherMarkets(
           calibrationLive: opp.calibrationLive ?? false,
         },
       });
+      emitWeatherSignalDecision(opp, wouldTrade);
     }
 
     if (gatedOpportunities.length > 0) {
       eventsWithOpportunities++;
-      if (isSizeUpScan) {
-        for (const opp of gatedOpportunities) opp.sizeUpScanOnly = true;
-      }
-      if (isEarlyResolutionDayEntry) {
-        for (const opp of gatedOpportunities) opp.earlyResolutionDayEntry = true;
-      }
-      for (const opp of gatedOpportunities) opp.isResolutionDay = isResolutionDay;
       // Lowest-temp opportunities are shadow-logged above but only enter the
       // returned (execution) set once the feature is live. In shadow mode they
       // are recorded and counted, never traded.
@@ -2408,7 +2632,8 @@ export async function scanWeatherMarkets(
   const allowedOpportunities = allOpportunities.filter(
     (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto
       && !o.blockedByNoFallback && !o.blockedByModalMass && !o.blockedByInteriorMargin
-      && !o.blockedByMarketFavorite,
+      && !o.blockedByMarketFavorite && !o.blockedByLiveConfirmation
+      && !o.blockedByExactOpenMeteoNo,
   );
   logger.info('[weather] scan summary', {
     totalEvents: rawEvents.length,
@@ -2481,6 +2706,7 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
     marketId: opp.marketId,
     conditionId: opp.conditionId,
     clobTokenIds: opp.clobTokenIds,
+    decisionId: opp.decisionId ?? randomUUID(),
     direction: opp.tradeSide,
     stakeUsd,
     edgeMagnitude: opp.edge,
@@ -3253,6 +3479,8 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       !o.blockedByModalMass &&
       !o.blockedByInteriorMargin &&
       !o.blockedByMarketFavorite &&
+      !o.blockedByLiveConfirmation &&
+      !o.blockedByExactOpenMeteoNo &&
       !excludedCities.has(o.city.toLowerCase()),
   );
 

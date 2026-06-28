@@ -26,7 +26,7 @@
  *   npx tsx scripts/weather-calibration-audit.ts --fit      # audit + write artifact
  */
 import 'dotenv/config';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getSql, closeSql } from '../src/db/client.js';
@@ -53,6 +53,8 @@ const MIN_CELL_SAMPLES = 80; // runtime trust threshold for a specific cell
 // passthrough). Guards against over-fit/drifting corrections on already-well-
 // calibrated cohorts (e.g. the US `combined` source).
 const GUARDRAIL_MIN_BRIER_GAIN = 0.003;
+const LIVE_COHORT_MIN_SAMPLES = 15;
+const LIVE_COHORT_MIN_ROI = 0.05;
 const VERSION = 1;
 
 // eslint-disable-next-line no-console
@@ -351,6 +353,7 @@ function meanAbsGap(bins: Bin[], minN = 5): number {
 
 async function main(): Promise<void> {
   const doFit = process.argv.includes('--fit');
+  const writeLiveCohorts = process.argv.includes('--write-live-cohorts');
   const pairs = await loadPairs();
   log(`Loaded ${pairs.length} scored (city,date,bracket,daysOut) pairs from shadow_observations ⋈ ground truth`);
   if (pairs.length < 200) {
@@ -426,6 +429,7 @@ async function main(): Promise<void> {
   // Metric is part of the cohort key because the live allow-list (WEATHER_CALIBRATION_
   // LIVE_COHORTS) is metric-aware — high/low must never blend in the go/no-go read.
   const calFn = calOf(holdoutTable);
+  const admittedYesCohorts = new Set<string>();
   const cohortReport = (side: 'YES' | 'NO'): void => {
     log(`\nCALIBRATED-${side} by cohort (hold-out): cohort  n  WR  breakeven  ROI`);
     const picks = test.filter((p) => {
@@ -442,11 +446,29 @@ async function main(): Promise<void> {
       const be = ps.reduce((s, p) => s + price(p), 0) / n;
       const roi = ps.reduce((s, p) => s + (wonF(p) ? 1 / Math.max(0.01, price(p)) - 1 : -1), 0) / n;
       const gate = wr > be ? 'PASS' : 'fail';
+      if (side === 'YES' && n >= LIVE_COHORT_MIN_SAMPLES && roi >= LIVE_COHORT_MIN_ROI && wr > be) {
+        admittedYesCohorts.add(cohort);
+      }
       log(`  ${cohort.padEnd(28)} ${String(n).padStart(3)}  ${(100 * wr).toFixed(0)}%  ${(100 * be).toFixed(0)}%  ${(100 * roi).toFixed(0)}%  ${gate}`);
     }
   };
   cohortReport('YES');
   cohortReport('NO');
+
+  const liveCohorts = [...admittedYesCohorts].sort();
+  log(`\nLIVE COHORT ADMISSION (calibrated-YES, hold-out): minN=${LIVE_COHORT_MIN_SAMPLES}, minROI=${(LIVE_COHORT_MIN_ROI * 100).toFixed(0)}%`);
+  log(`  ${liveCohorts.length > 0 ? liveCohorts.join(',') : '(none)'}`);
+  if (writeLiveCohorts) {
+    const envPath = join(process.cwd(), '.env');
+    const env = readFileSync(envPath, 'utf-8');
+    const nextValue = `"${liveCohorts.join(',')}"`;
+    const line = `WEATHER_CALIBRATION_LIVE_COHORTS=${nextValue}  # auto-updated by weather-calibration-audit --write-live-cohorts; holdout minN=${LIVE_COHORT_MIN_SAMPLES}, minROI=${(LIVE_COHORT_MIN_ROI * 100).toFixed(0)}%\n`;
+    const next = /^WEATHER_CALIBRATION_LIVE_COHORTS=.*$/m.test(env)
+      ? env.replace(/^WEATHER_CALIBRATION_LIVE_COHORTS=.*$/m, () => line.trimEnd())
+      : `${env.replace(/\s*$/, '\n')}${line}`;
+    writeFileSync(envPath, next);
+    log(`\n--write-live-cohorts: wrote ${envPath}`);
+  }
 
   if (doFit) {
     // Commit a table fit on ALL data (max signal); reported metrics above are the
