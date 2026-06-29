@@ -61,6 +61,10 @@ export interface PendingMakerOrder {
   // Legacy blobs written before this field exist without it — consumers must
   // treat absence as "unknown, do not cancel" (edgeMagnitude===0 heuristic).
   isBracketOpposite?: boolean;
+  // True for weather far-NO ladder bids. These are intentionally patient,
+  // below-ask orders priced by the scanner's ladder ceiling rather than the
+  // global weather entry caps.
+  isWeatherFarNoLadder?: boolean;
 }
 
 /** A pending maker order paired with the market/direction parsed from its key. */

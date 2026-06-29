@@ -301,7 +301,7 @@ function sleep(ms: number): Promise<void> {
 
 function roundDownToTick(value: number, tick: number): number {
   if (!isFinite(value) || !isFinite(tick) || tick <= 0) return value;
-  const rounded = Math.floor(value / tick) * tick;
+  const rounded = Math.floor(value / tick + 1e-9) * tick;
   return parseFloat(rounded.toFixed(6));
 }
 
@@ -554,6 +554,8 @@ async function tryExecuteViaClobMaker(
   // bug the pending-key lifecycle exists to prevent.
   const isWeatherRestAboveCapLifecycle =
     signal.source === 'weather' && cfg.WEATHER_REST_ABOVE_CAP_ENABLED;
+  const isWeatherFarNoLadderLifecycle =
+    signal.source === 'weather' && signal._isWeatherFarNoLadder === true;
 
   // --- Pending order handling (empty-book + weather patient real-book +
   // weather rest-above-cap lifecycle + conviction taker) ---
@@ -562,7 +564,7 @@ async function tryExecuteViaClobMaker(
   // always found and resumed — independent of WEATHER_REAL_BOOK_DISCOUNT_BPS (which
   // sets isWeatherPatient); otherwise zeroing that knob would let the taker re-fire a
   // duplicate on the residual. Matches the persist + deletePendingOrder conditions.
-  if ((emptyBookMode || isWeatherPatient || isWeatherRestAboveCapLifecycle || (wantTaker && signal.source === 'weather')) && redis) {
+  if ((emptyBookMode || isWeatherPatient || isWeatherRestAboveCapLifecycle || isWeatherFarNoLadderLifecycle || (wantTaker && signal.source === 'weather')) && redis) {
     const pending = await getPendingOrder(redis, signal.marketId, signal.direction);
     if (pending) {
       // Normalize both sides before comparing: oracle-lag stores 'UP'/'DOWN' in the
@@ -679,7 +681,7 @@ async function tryExecuteViaClobMaker(
             });
             await deletePendingOrder(redis, signal.marketId, pending.direction);
             // do NOT return — fall through past the pending block to re-post below.
-          } else if (wantTaker && pending.isBracketOpposite !== true) {
+          } else if (wantTaker && pending.isBracketOpposite !== true && pending.isWeatherFarNoLadder !== true) {
             // Conviction-taker pre-emption: this scan the market is taker-eligible
             // (wantTaker is res-day-only), but a stranded resting maker bid — typically
             // a ghost-era conviction bid clamped at the cap — would block the taker
@@ -931,6 +933,7 @@ async function tryExecuteViaClobMaker(
   if (
     emptyBookMode
     && signal.source === 'weather'
+    && signal._isWeatherFarNoLadder !== true
     && cfg.WEATHER_MAX_ENTRY_PRICE > 0
     && fairValue != null
   ) {
@@ -944,6 +947,7 @@ async function tryExecuteViaClobMaker(
     && signal.source === 'weather'
     && !signal._isResolutionDay
     && !signal._isBracketOpposite
+    && signal._isWeatherFarNoLadder !== true
     && cfg.WEATHER_EARLY_ENTRY_MAX_PRICE > 0
     && fairValue != null
   ) {
@@ -957,6 +961,7 @@ async function tryExecuteViaClobMaker(
   if (
     emptyBookMode
     && signal.source === 'weather'
+    && signal._isWeatherFarNoLadder !== true
     && cfg.WEATHER_EMPTY_BOOK_DISCOUNT_BPS <= 0
     && cfg.WEATHER_EMPTY_BOOK_MAX_ENTRY_PRICE > 0
     && fairValue != null
@@ -971,6 +976,7 @@ async function tryExecuteViaClobMaker(
   if (
     emptyBookMode
     && signal.source === 'weather'
+    && signal._isWeatherFarNoLadder !== true
     && cfg.WEATHER_EMPTY_BOOK_DISCOUNT_BPS <= 0
     && cfg.WEATHER_MAX_SIGNAL_PRICE_DRIFT > 0
     && signal.outcomePrice > 0
@@ -1056,6 +1062,7 @@ async function tryExecuteViaClobMaker(
     !weatherTakerGate
     && (emptyBookMode || isWeatherPatient || signal._restAboveCap === true)
     && signal.source === 'weather'
+    && signal._isWeatherFarNoLadder !== true
     && cfg.WEATHER_REST_ABOVE_CAP_ENABLED
   ) {
     let cappedPrice = price;
@@ -1113,6 +1120,7 @@ async function tryExecuteViaClobMaker(
     !weatherTakerGate
     && (emptyBookMode || isWeatherPatient || signal._restAboveCap === true)
     && signal.source === 'weather'
+    && signal._isWeatherFarNoLadder !== true
     && cfg.WEATHER_MAX_ENTRY_PRICE > 0
     && price > cfg.WEATHER_MAX_ENTRY_PRICE + 1e-9
   ) {
@@ -1136,6 +1144,7 @@ async function tryExecuteViaClobMaker(
     && signal.source === 'weather'
     && !signal._isResolutionDay
     && !signal._isBracketOpposite
+    && signal._isWeatherFarNoLadder !== true
     && cfg.WEATHER_EARLY_ENTRY_MAX_PRICE > 0
     && price > cfg.WEATHER_EARLY_ENTRY_MAX_PRICE + 1e-9
   ) {
@@ -1155,6 +1164,7 @@ async function tryExecuteViaClobMaker(
   if (
     emptyBookMode
     && signal.source === 'weather'
+    && signal._isWeatherFarNoLadder !== true
     && cfg.WEATHER_EMPTY_BOOK_DISCOUNT_BPS <= 0
     && cfg.WEATHER_MAX_SIGNAL_PRICE_DRIFT > 0
     && signal.outcomePrice > 0
@@ -1560,7 +1570,7 @@ async function tryExecuteViaClobMaker(
   // weatherTakerGate is included so a PARTIAL taker fill (full fills already returned
   // inline above) persists its resting residual + is resumed next cycle — consistent
   // regardless of WEATHER_REAL_BOOK_DISCOUNT_BPS (which otherwise sets isWeatherPatient).
-  if ((emptyBookMode || isWeatherPatient || signal._restAboveCap === true || weatherTakerGate) && redis) {
+  if ((emptyBookMode || isWeatherPatient || signal._restAboveCap === true || signal._isWeatherFarNoLadder === true || weatherTakerGate) && redis) {
     const expiresAt = startedAt + cfg.MAKER_EMPTY_BOOK_MAX_WAIT_MS;
     // The posted order is GTC — it rests on-chain until filled or explicitly
     // cancelled, which only happens via the resume path on a later scanner
@@ -2596,7 +2606,13 @@ export async function executeSignal(
       default:           return cfg.MAX_ENTRY_PRICE;
     }
   })();
-  if (!signal.isFutures && !signal._isBracketOpposite && effectivePriceCap > 0 && (signal.outcomePrice ?? 0) > effectivePriceCap) {
+  if (
+    !signal.isFutures
+    && !signal._isBracketOpposite
+    && signal._isWeatherFarNoLadder !== true
+    && effectivePriceCap > 0
+    && (signal.outcomePrice ?? 0) > effectivePriceCap
+  ) {
     // Rest-above-cap: for FRESH weather entries the cap is a price clamp, not a
     // participation filter — proceed to the maker path, which posts a resting
     // GTC clamped to the cap. Never falls through to a taker buy: an explicit

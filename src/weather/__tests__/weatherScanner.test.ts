@@ -5743,6 +5743,28 @@ describe('revalidateRestingWeatherOrders', () => {
     expect(mockDeletePendingOrder).not.toHaveBeenCalled();
   });
 
+  it('keeps far-NO ladder bids through primary FV revalidation for queue priority', async () => {
+    // A ladder NO can intentionally rest at 0.94 below a 0.99 ask even when the
+    // current fresh FV no longer supports that price. The ladder marker gives it
+    // a dedicated lifecycle: hold until fill, explicit external cancel, or the
+    // post-resolution sweep.
+    mockListPendingOrders.mockResolvedValue([
+      pendingEntry({
+        order: {
+          isWeatherFarNoLadder: true,
+          price: 0.94,
+          edgeMagnitude: 0.04,
+        },
+      }),
+    ]);
+
+    await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.20)]);
+
+    expect(mockGetClobOrder).not.toHaveBeenCalled();
+    expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+  });
+
   it('never cancels bracket-opposite legs, flagged or legacy (edge=0)', async () => {
     mockListPendingOrders.mockResolvedValue([
       pendingEntry({ marketId: 'mkt-1', order: { isBracketOpposite: true } }),

@@ -3640,7 +3640,9 @@ describe('weather conviction taker entry', () => {
 
   it('keeps far-NO ladder signals maker-only and capped to the scanner bid', async () => {
     mockConfig.MAX_ENTRY_SPREAD_BPS = 0;
-    mockGetOrderBook.mockResolvedValue(wideRealBook('0.72', '0.68'));
+    mockConfig.WEATHER_MAX_ENTRY_PRICE = 0.75;
+    mockConfig.WEATHER_EARLY_ENTRY_MAX_PRICE = 0.70;
+    mockGetOrderBook.mockResolvedValue(wideRealBook('0.99', '0.68'));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     mockSubmitLimit.mockResolvedValue({ success: true, order_id: 'far-no-1' } as any);
     const redis = makeTakerRedis();
@@ -3649,21 +3651,21 @@ describe('weather conviction taker entry', () => {
     const result = await executeSignal(weatherSignal({
       direction: 'NO',
       consensusProbability: 0.01,
-      outcomePrice: 0.55,
-      edgeMagnitude: 0.44,
+      outcomePrice: 0.94,
+      edgeMagnitude: 0.04,
       _isWeatherFarNoLadder: true,
     }), redis as any);
 
     expect(result.entryExecutionPath).toBe('maker_pending');
     expect(mockSubmitLimit).toHaveBeenCalledWith(
-      expect.objectContaining({ tokenId: 'tok-no', price: 0.55, postOnly: true }),
+      expect.objectContaining({ tokenId: 'tok-no', price: 0.94, postOnly: true }),
     );
     expect(redis.incrbyfloat).not.toHaveBeenCalled();
     expect(mockSetPendingOrder).toHaveBeenCalledWith(
       expect.anything(),
       'mkt-test',
       'NO',
-      expect.objectContaining({ isWeatherFarNoLadder: true, price: 0.55 }),
+      expect.objectContaining({ isWeatherFarNoLadder: true, price: 0.94 }),
       expect.any(Number),
     );
   });

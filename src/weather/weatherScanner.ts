@@ -3321,6 +3321,7 @@ export async function revalidateRestingWeatherOrders(
   let cancelledCondOracle = 0;
   for (const { marketId, direction, order } of weatherEntries) {
     const isBracket = order.isBracketOpposite === true;
+    const isFarNoLadder = order.isWeatherFarNoLadder === true;
     // Legacy blobs predate the explicit bracket flag — treat edge ≤ 0 as
     // "possibly a bracket leg" and never cancel those under any rule.
     const isAmbiguousLegacy =
@@ -3429,7 +3430,7 @@ export async function revalidateRestingWeatherOrders(
           }
         }
 
-        if (!primaryRuleOn) continue;
+        if (!primaryRuleOn || isFarNoLadder) continue;
         const sideFV = direction === 'YES' ? opp.modelProbability : 1 - opp.modelProbability;
         if (!Number.isFinite(sideFV)) continue;
         if (sideFV + 1e-9 >= order.price) continue; // still value-positive at our bid
