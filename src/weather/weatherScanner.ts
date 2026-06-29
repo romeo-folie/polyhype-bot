@@ -1612,6 +1612,11 @@ export function findMispricedBrackets(
       yesGateReason = 'calibration_cohort_not_admitted';
     }
     const yesGateBlocked = yesGateReason !== null;
+    const noBlockedByCalibrationCohort =
+      calibrationLiveEnabled
+      && requireCalibrationCohortForEntry
+      && !noCohortLive
+      && yesCohortLive;
 
     let tradeSide: 'YES' | 'NO';
     let edge: number;
@@ -1628,7 +1633,7 @@ export function findMispricedBrackets(
     // for shadow analysis but never traded.
     let blockedByNoFallback = false;
 
-    if (!yesGateBlocked && edgeYes >= edgeNo && edgeYes > 0) {
+    if (!yesGateBlocked && edgeYes > 0 && (edgeYes >= edgeNo || noBlockedByCalibrationCohort)) {
       tradeSide = 'YES';
       edge = edgeYes;
     } else if (edgeNo > 0) {

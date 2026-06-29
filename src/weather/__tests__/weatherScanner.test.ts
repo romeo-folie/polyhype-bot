@@ -1916,6 +1916,40 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     expect(opp.blockedByCalibrationCohort).toBe(false);
     expect(opp.allowedByConfig).toBe(true);
   });
+
+  it('falls through to an admitted YES when an unadmitted NO has the larger edge', () => {
+    _setCalibrationTableForTest({
+      _meta: { generatedAt: '', scoredPairs: 9000, binCount: 10, priorStrength: 20, minCellSamples: 80, version: 1 },
+      byShapeSourceHorizon: {},
+      byShapeSource: { 'high|range|hrrr-combined': { n: 500, bins: Array(10).fill(0.35) } },
+      byShape: {},
+      byMetric: { high: { n: 9000, bins: Array.from({ length: 10 }, (_, i) => (i + 0.5) / 10) } },
+    } as never);
+    const yesOnlyEvent = {
+      ...rangeEvent,
+      brackets: [{
+        ...rangeEvent.brackets[0]!,
+        yesPrice: 0.20,
+        noPrice: 0.40,
+      }],
+    };
+    const opp = findMispricedBrackets(yesOnlyEvent, forecastHrrr, 1, 0.0, {
+      minModelCoverage: 0,
+      yesAllowInteriorBrackets: false,
+      yesMinMarketPrice: 0.30,
+      yesMinModelProb: 0.50,
+      calibrationShadowEnabled: true,
+      calibrationLiveEnabled: true,
+      calibrationLiveCohorts: 'YES|high|range|hrrr-combined',
+      calibrationYesMinPrice: 0.15,
+    }).opportunities[0]!;
+
+    expect(opp.tradeSide).toBe('YES');
+    expect(opp.edge).toBeCloseTo(0.15, 6);
+    expect(opp.calibrationLive).toBe(true);
+    expect(opp.blockedByCalibrationCohort).toBe(false);
+    expect(opp.allowedByConfig).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
