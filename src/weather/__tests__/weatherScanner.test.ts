@@ -1808,7 +1808,7 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     const opp = findMispricedBrackets(rangeEvent, forecastHrrr, 1, 0.0, {
       minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
       calibrationShadowEnabled: true, calibrationLiveEnabled: true,
-      calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+      calibrationLiveCohorts: 'YES|high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
     }).opportunities[0]!;
     expect(opp.tradeSide).toBe('YES');               // calibrated 0.60 > yesPrice 0.25 → YES
     expect(opp.calibrationLive).toBe(true);
@@ -1820,7 +1820,7 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     const opp = findMispricedBrackets(rangeEvent, { ...forecastHrrr, source: 'open-meteo' as const }, 1, 0.0, {
       minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
       calibrationShadowEnabled: true, calibrationLiveEnabled: true,
-      calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+      calibrationLiveCohorts: 'YES|high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
     }).opportunities[0]!;
     // Calibration-live no longer falls back to raw for non-admitted cohorts; it
     // computes on calibrated probability but keeps the cohort shadow-only.
@@ -1834,7 +1834,7 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     const opp = findMispricedBrackets(rangeEvent, forecastHrrr, 1, 0.0, {
       minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
       calibrationShadowEnabled: true, // shadow on, but live OFF
-      calibrationLiveCohorts: 'high|range|hrrr-combined',
+      calibrationLiveCohorts: 'YES|high|range|hrrr-combined',
     }).opportunities[0]!;
     expect(opp.calibrationLive).toBe(false);
     expect(opp.tradeSide).toBe('NO');                 // raw decision unchanged
@@ -1850,12 +1850,41 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     const opp = findMispricedBrackets(lowEvent, forecastHrrr, 1, 0.0, {
       minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
       calibrationShadowEnabled: true, calibrationLiveEnabled: true,
-      calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+      calibrationLiveCohorts: 'YES|high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
     }).opportunities[0]!;
     expect(opp.calibrationLive).toBe(false);          // low metric excluded from the high cohort
     expect(opp.blockedByCalibrationCohort).toBe(true);
     expect(opp.allowedByConfig).toBe(false);
     expect(opp.modelProbability).toBe(opp.modelProbCalibrated);
+  });
+
+  it('requires the selected calibrated side to be admitted', () => {
+    const yesOpp = findMispricedBrackets(rangeEvent, forecastHrrr, 1, 0.0, {
+      minModelCoverage: 0, yesAllowInteriorBrackets: true, yesMinMarketPrice: 0.10, yesMinModelProb: 0.50,
+      calibrationShadowEnabled: true, calibrationLiveEnabled: true,
+      calibrationLiveCohorts: 'NO|high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+    }).opportunities[0]!;
+    expect(yesOpp.tradeSide).toBe('YES');
+    expect(yesOpp.calibrationLive).toBe(false);
+    expect(yesOpp.blockedByCalibrationCohort).toBe(true);
+    expect(yesOpp.allowedByConfig).toBe(false);
+
+    _setCalibrationTableForTest({
+      _meta: { generatedAt: '', scoredPairs: 9000, binCount: 10, priorStrength: 20, minCellSamples: 80, version: 1 },
+      byShapeSourceHorizon: {},
+      byShapeSource: { 'high|range|hrrr-combined': { n: 500, bins: Array(10).fill(0.20) } },
+      byShape: {},
+      byMetric: { high: { n: 9000, bins: Array.from({ length: 10 }, (_, i) => (i + 0.5) / 10) } },
+    } as never);
+    const noOpp = findMispricedBrackets(rangeEvent, forecastHrrr, 1, 0.0, {
+      minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
+      calibrationShadowEnabled: true, calibrationLiveEnabled: true,
+      calibrationLiveCohorts: 'NO|high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+    }).opportunities[0]!;
+    expect(noOpp.tradeSide).toBe('NO');
+    expect(noOpp.calibrationLive).toBe(true);
+    expect(noOpp.blockedByCalibrationCohort).toBe(false);
+    expect(noOpp.allowedByConfig).toBe(true);
   });
 });
 

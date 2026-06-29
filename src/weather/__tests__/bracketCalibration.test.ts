@@ -7,6 +7,7 @@ import {
   interpolateCell,
   calibrateWeatherBracketProbability,
   isCalibrationLiveCohort,
+  isCalibrationLiveCohortForSide,
   loadCalibrationTable,
   type CalibrationTable,
 } from '../bracketCalibration.js';
@@ -182,6 +183,17 @@ describe('isCalibrationLiveCohort', () => {
     const list = 'high|range|hrrr-combined';
     expect(isCalibrationLiveCohort('high', 'range', 'hrrr-combined', list)).toBe(true);
     expect(isCalibrationLiveCohort('low', 'range', 'hrrr-combined', list)).toBe(false);
+  });
+
+  it('matches side-aware live cohorts and treats legacy entries as both-side', () => {
+    const list = 'YES|low|range|combined, NO|high|exact|open-meteo, high|range|hrrr-combined';
+    expect(isCalibrationLiveCohortForSide('YES', 'low', 'range', 'combined', list)).toBe(true);
+    expect(isCalibrationLiveCohortForSide('NO', 'low', 'range', 'combined', list)).toBe(false);
+    expect(isCalibrationLiveCohortForSide('NO', 'high', 'exact', 'OPEN-METEO', list)).toBe(true);
+    expect(isCalibrationLiveCohortForSide('YES', 'high', 'exact', 'open-meteo', list)).toBe(false);
+    expect(isCalibrationLiveCohortForSide('YES', 'high', 'range', 'hrrr-combined', list)).toBe(true);
+    expect(isCalibrationLiveCohortForSide('NO', 'high', 'range', 'hrrr-combined', list)).toBe(true);
+    expect(isCalibrationLiveCohort('high', 'exact', 'open-meteo', list)).toBe(true);
   });
 });
 

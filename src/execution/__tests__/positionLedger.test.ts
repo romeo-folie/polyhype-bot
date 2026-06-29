@@ -14,6 +14,7 @@ function makePosition(overrides: Partial<Position> = {}): Position {
   return {
     marketId: 'mkt-1',
     conditionId: 'cond-1',
+    decisionId: '11111111-1111-4111-8111-111111111111',
     clobTokenIds: ['tok-yes', 'tok-no'],
     question: 'Will X happen?',
     direction: 'YES',
@@ -110,6 +111,7 @@ describe('getOpenPositions', () => {
     expect(positions).toHaveLength(1);
     expect(positions[0]!.marketId).toBe('mkt-1');
     expect(positions[0]!.entryPrice).toBeCloseTo(0.4);
+    expect(positions[0]!.decisionId).toBe('11111111-1111-4111-8111-111111111111');
     expect(positions[0]!.clobTokenIds).toEqual(['tok-yes', 'tok-no']);
     expect(positions[0]!.txHash).toBe('0xabc');
   });

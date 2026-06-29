@@ -25,6 +25,8 @@ export interface Position {
   conditionId?: string | undefined;
   /** Execution attempt correlation ID */
   executionId?: string | undefined;
+  /** Signal decision UUID linking signal_decisions → execution_events → positions/outcomes */
+  decisionId?: string | undefined;
   clobTokenIds?: string[] | undefined;
   /** Question or trade reasoning */
   question: string;
@@ -187,6 +189,7 @@ export async function recordPosition(redis: Redis, positionIn: Position): Promis
     marketId: position.marketId,
     conditionId: position.conditionId ?? '',
     executionId: position.executionId ?? '',
+    decisionId: position.decisionId ?? '',
     clobTokenIds: JSON.stringify(position.clobTokenIds ?? []),
     question: position.question,
     direction: position.direction,
@@ -547,6 +550,7 @@ function deserialisePosition(raw: Record<string, string>): Position {
     marketId: raw.marketId ?? '',
     conditionId: raw.conditionId,
     executionId: raw.executionId !== '' ? raw.executionId : undefined,
+    decisionId: raw.decisionId !== '' ? raw.decisionId : undefined,
     clobTokenIds: raw.clobTokenIds ? (JSON.parse(raw.clobTokenIds) as string[]) : [],
     question: raw.question ?? '',
     direction: (raw.direction ?? 'YES') as Position['direction'],

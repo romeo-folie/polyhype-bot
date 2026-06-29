@@ -4319,6 +4319,7 @@ async function finalizeSuccessfulExecution(
     await recordPosition(redis, {
       marketId: result.signal.marketId,
       executionId: result.signal.executionId,
+      decisionId: result.signal.decisionId,
       conditionId: result.signal.conditionId,
       clobTokenIds: result.signal.clobTokenIds,
       question: result.signal.question,

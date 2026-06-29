@@ -18,6 +18,7 @@ export async function recordPositionOutcome(
     Pick<
       Position,
       | 'executionId'
+      | 'decisionId'
       | 'sourcedFrom'
       | 'question'
       | 'direction'
@@ -101,6 +102,7 @@ export async function recordPositionOutcome(
   await recordOutcome(redis, {
     ...outcome,
     ...(position.executionId ? { executionId: position.executionId } : {}),
+    ...(position.decisionId ? { decisionId: position.decisionId } : {}),
     ...(position.modeConfigured ? { modeConfigured: position.modeConfigured } : {}),
     ...(position.entryExecutionPath ? { entryExecutionPath: position.entryExecutionPath } : {}),
     ...(position.entryOrderType ? { entryOrderType: position.entryOrderType } : {}),
@@ -129,6 +131,7 @@ export async function recordPositionOutcome(
     closedAt: new Date(closedAtMs).toISOString(),
     openedAt: position.openedAt,
     executionId: position.executionId,
+    decisionId: position.decisionId,
     source: inferSource(position.sourcedFrom),
     category: inferCategory(position.question),
     marketId: position.marketId,
@@ -225,6 +228,8 @@ export async function recordRedemptionOutcome(
   const rawStakeUsd = rawGet('stakeUsd', isNumber) ?? rawDerivedStakeUsd;
   const rawConditionId =
     rawGet('conditionId', isString) ?? rawGet('condition_id', isString);
+  const rawDecisionId =
+    rawGet('decisionId', isString) ?? rawGet('decision_id', isString);
 
   const sourcedFrom =
     overrides.sourcedFromOverride ??
@@ -244,6 +249,7 @@ export async function recordRedemptionOutcome(
     question: overrides.question,
     sourcedFrom,
     executionId: ledgerPos?.executionId,
+    decisionId: ledgerPos?.decisionId ?? rawDecisionId,
     consensusProbability:
       ledgerPos?.consensusProbability ?? rawConsensusProbability ?? 0.5,
     edgeMagnitude: ledgerPos?.edgeMagnitude ?? rawEdgeMagnitude ?? 0,
