@@ -58,6 +58,13 @@ const baseConfig = {
   WEATHER_FAR_NO_MAX_BID: 0.95,
   WEATHER_FAR_NO_MIN_BID: 0.50,
   WEATHER_FAR_NO_MIN_DISTANCE_DEGREES: 2,
+  WEATHER_ADJACENT_NO_LADDER_ENABLED: false,
+  WEATHER_ADJACENT_NO_MIN_WIN_PROB: 0.88,
+  WEATHER_ADJACENT_NO_MIN_EDGE: 0.06,
+  WEATHER_ADJACENT_NO_MAX_BID: 0.80,
+  WEATHER_ADJACENT_NO_MIN_BID: 0.50,
+  WEATHER_ADJACENT_NO_MIN_DISTANCE_DEGREES: 0.5,
+  WEATHER_ADJACENT_NO_MAX_DISTANCE_DEGREES: 2,
   // Lowest-temperature feature off by default in the base config so legacy scan
   // tests never trigger the second (lowest-temperature) Gamma fetch; the
   // dedicated lowest-temp tests override these explicitly.
@@ -1646,6 +1653,54 @@ describe('findMispricedBrackets - far NO ladder', () => {
 
     const nearby = opportunities.find((o) => o.bracketLabel === '31°C');
     expect(nearby?.isFarNoLadder ?? false).toBe(false);
+  });
+
+  it('emits adjacent NO ladder candidates with a lower bid cap and separate tag', () => {
+    const adjacentEvent = {
+      ...event,
+      brackets: [
+        ...event.brackets,
+        { marketId: 'm32', conditionId: 'c32', clobTokenIds: ['y32', 'n32'], threshold: 5, low: 32, high: 32, label: '32°C', yesPrice: 0.12, noPrice: 0.88 },
+      ],
+    };
+    const { opportunities } = findMispricedBrackets(adjacentEvent, forecast, 1, 0.08, {
+      minModelCoverage: 0,
+      farNoLadderEnabled: false,
+      adjacentNoLadderEnabled: true,
+      adjacentNoMinWinProb: 0.88,
+      adjacentNoMinEdge: 0.06,
+      adjacentNoMaxBid: 0.80,
+      adjacentNoMinBid: 0.50,
+      adjacentNoMinDistanceDegrees: 0.5,
+      adjacentNoMaxDistanceDegrees: 2,
+    });
+
+    const adjacent = opportunities.find((o) => o.bracketLabel === '32°C');
+    expect(adjacent).toBeDefined();
+    expect(adjacent!.tradeSide).toBe('NO');
+    expect(adjacent!.isFarNoLadder).toBe(false);
+    expect(adjacent!.isAdjacentNoLadder).toBe(true);
+    expect(adjacent!.noLadderKind).toBe('adjacent');
+    expect(adjacent!.farNoDistance).toBeCloseTo(1.5, 6);
+    expect(adjacent!.farNoMarketPrice).toBe(0.88);
+    expect(adjacent!.outcomePrice).toBeCloseTo(0.80, 6);
+    expect(adjacent!.edge).toBeGreaterThanOrEqual(0.06);
+  });
+
+  it('does not turn the exact forecast bracket into an adjacent NO ladder candidate', () => {
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.08, {
+      minModelCoverage: 0,
+      adjacentNoLadderEnabled: true,
+      adjacentNoMinWinProb: 0.50,
+      adjacentNoMinEdge: 0.03,
+      adjacentNoMaxBid: 0.80,
+      adjacentNoMinBid: 0.50,
+      adjacentNoMinDistanceDegrees: 0.5,
+      adjacentNoMaxDistanceDegrees: 2,
+    });
+
+    const exact = opportunities.find((o) => o.bracketLabel === '30°C');
+    expect(exact?.isAdjacentNoLadder ?? false).toBe(false);
   });
 });
 

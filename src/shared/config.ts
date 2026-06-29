@@ -2203,6 +2203,17 @@ export const envSchema = z.object({
   // the bracket's rounded-resolution interval. This keeps the ladder from
   // re-admitting the coin-flip exact brackets the interior-NO guard blocks.
   WEATHER_FAR_NO_MIN_DISTANCE_DEGREES: z.coerce.number().min(0).max(20).optional().default(2),
+  // Adjacent/mid-NO ladder strategy: a separate, lower-bid maker-only NO path for
+  // brackets closer to the forecast than the far-NO ladder allows. It remains
+  // default-off and keeps its own lower bid cap because these brackets have a
+  // materially worse tail-loss profile than far-away obvious NOs.
+  WEATHER_ADJACENT_NO_LADDER_ENABLED: boolFromEnv.optional().default(false),
+  WEATHER_ADJACENT_NO_MIN_WIN_PROB: z.coerce.number().min(0.5).max(1).optional().default(0.88),
+  WEATHER_ADJACENT_NO_MIN_EDGE: z.coerce.number().min(0).max(0.5).optional().default(0.06),
+  WEATHER_ADJACENT_NO_MAX_BID: z.coerce.number().min(0).max(1).optional().default(0.80),
+  WEATHER_ADJACENT_NO_MIN_BID: z.coerce.number().min(0).max(1).optional().default(0.50),
+  WEATHER_ADJACENT_NO_MIN_DISTANCE_DEGREES: z.coerce.number().min(0).max(20).optional().default(0.5),
+  WEATHER_ADJACENT_NO_MAX_DISTANCE_DEGREES: z.coerce.number().min(0).max(20).optional().default(2),
   // Cancel unfilled bracket-opposite legs once their reversal path is gone.
   // A resting leg bid only fills when its side trades DOWN through it, and the
   // fill only loses when no reversal follows. While the day's temperature is
