@@ -1087,6 +1087,22 @@ async function tryExecuteViaClobMaker(
       // reject the post rather than silently overpaying.
     }
   }
+  // Far-NO ladder entries are intentionally priced by the scanner as a patient
+  // bid ceiling (P(NO) minus a safety edge), not by the live side-ask anchor.
+  // Enforce that ceiling after all maker-price derivation so the order can only
+  // rest at or below the ladder bid.
+  if (
+    !weatherTakerGate &&
+    signal.source === 'weather' &&
+    signal._isWeatherFarNoLadder === true &&
+    signal.outcomePrice > 0
+  ) {
+    const tick = parseFloat(book.tick_size ?? '0.01');
+    const capped = roundDownToTick(Math.min(price, signal.outcomePrice), tick);
+    if (isFinite(capped) && capped >= tick) {
+      price = capped;
+    }
+  }
 
   // Defense-in-depth for WEATHER_MAX_ENTRY_PRICE: applies to the empty-book and
   // patient real-book paths, and to ANY path carrying _restAboveCap (the plain
@@ -1354,7 +1370,7 @@ async function tryExecuteViaClobMaker(
   const postOnly = weatherTakerGate
     ? false
     : emptyBookMode
-    ? (signal.source === 'oracle-lag' || weatherPostOnly)
+    ? (signal.source === 'oracle-lag' || weatherPostOnly || signal._isWeatherFarNoLadder === true)
     : true;
   // Reserve the daily taker notional at the actual submit. This is reached only after
   // the pending-order check at the top returned early for any held resting maker, so an
@@ -1592,6 +1608,7 @@ async function tryExecuteViaClobMaker(
         // cancel bracket legs (they intentionally rest value-negative).
         ...(signal._restAboveCap === true && { restAboveCap: true }),
         ...(signal._isBracketOpposite === true && { isBracketOpposite: true }),
+        ...(signal._isWeatherFarNoLadder === true && { isWeatherFarNoLadder: true }),
       },
       pendingTtlS,
     );
@@ -3199,7 +3216,8 @@ export async function executeSignal(
     effectiveSpreadCeiling > 0
     || (signal.source === 'sports' && cfg.SPORTS_REQUIRE_REAL_BOOK)
     || (cfg.WEATHER_TAKER_ENTRY_ENABLED && signal.source === 'weather'
-        && signal._isResolutionDay === true && signal._isBracketOpposite !== true);
+        && signal._isResolutionDay === true && signal._isBracketOpposite !== true
+        && signal._isWeatherFarNoLadder !== true);
   if (needsBookCheck && signal.source !== 'copytrade') {
     const { book, benchmark } = await fetchBookAndBenchmark(signal);
     prefetchedClobBook = book;
@@ -3260,6 +3278,7 @@ export async function executeSignal(
       cfg.WEATHER_TAKER_ENTRY_ENABLED &&
       signal.source === 'weather' &&
       signal._isBracketOpposite !== true &&
+      signal._isWeatherFarNoLadder !== true &&
       // Size-ups stay on the maker path: their "never pay above the side mid to add"
       // discipline (the sizeMid clamp in tryExecuteViaClobMaker) would be silently
       // undone by the taker price override. This feature is for FRESH high-conviction

@@ -52,6 +52,12 @@ const baseConfig = {
   WEATHER_BRACKET_CANCEL_ENABLED: false,
   WEATHER_BRACKET_CANCEL_LOCAL_HOUR: 18,
   WEATHER_BRACKET_CANCEL_PRIMARY_PRICE: 0.95,
+  WEATHER_FAR_NO_LADDER_ENABLED: false,
+  WEATHER_FAR_NO_MIN_WIN_PROB: 0.975,
+  WEATHER_FAR_NO_MIN_EDGE: 0.03,
+  WEATHER_FAR_NO_MAX_BID: 0.95,
+  WEATHER_FAR_NO_MIN_BID: 0.50,
+  WEATHER_FAR_NO_MIN_DISTANCE_DEGREES: 2,
   // Lowest-temperature feature off by default in the base config so legacy scan
   // tests never trigger the second (lowest-temperature) Gamma fetch; the
   // dedicated lowest-temp tests override these explicitly.
@@ -1579,6 +1585,67 @@ describe('findMispricedBrackets - YES quality gates', () => {
       minModelCoverage: 0, ...GATES_ON,
     });
     expect(opportunities.filter((o) => o.tradeSide === 'YES')).toHaveLength(1);
+  });
+});
+
+describe('findMispricedBrackets - far NO ladder', () => {
+  const event = {
+    eventId: 'e-far-no',
+    slug: 'highest-temperature-in-paris-on-june-28-2026',
+    city: 'paris',
+    coords: lookupCity('paris')!,
+    targetDate: '2026-06-28',
+    unit: 'celsius' as const,
+    metric: 'high' as const,
+    endDate: '2026-06-28T22:00:00Z',
+    brackets: [
+      { marketId: 'm29', conditionId: 'c29', clobTokenIds: ['y29', 'n29'], threshold: 0, low: 29, high: 29, label: '29°C', yesPrice: 0.05, noPrice: 0.95 },
+      { marketId: 'm30', conditionId: 'c30', clobTokenIds: ['y30', 'n30'], threshold: 1, low: 30, high: 30, label: '30°C', yesPrice: 0.25, noPrice: 0.75 },
+      { marketId: 'm31', conditionId: 'c31', clobTokenIds: ['y31', 'n31'], threshold: 2, low: 31, high: 31, label: '31°C', yesPrice: 0.20, noPrice: 0.80 },
+      { marketId: 'm34', conditionId: 'c34', clobTokenIds: ['y34', 'n34'], threshold: 3, low: 34, high: 34, label: '34°C', yesPrice: 0.01, noPrice: 0.99 },
+      { marketId: 'm35', conditionId: 'c35', clobTokenIds: ['y35', 'n35'], threshold: 4, low: 35, high: 35, label: '35°C', yesPrice: 0.01, noPrice: 0.99 },
+    ],
+  };
+  const forecast = {
+    forecastHigh: 30,
+    stdDev: 1,
+    source: 'open-meteo' as const,
+    ensembleMembers: 30,
+  };
+
+  it('emits far NO candidates at the configured maker bid instead of the expensive market quote', () => {
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.08, {
+      minModelCoverage: 0,
+      farNoLadderEnabled: true,
+      farNoMinWinProb: 0.975,
+      farNoMinEdge: 0.03,
+      farNoMaxBid: 0.94,
+      farNoMinBid: 0.50,
+      farNoMinDistanceDegrees: 2,
+    });
+
+    const far = opportunities.find((o) => o.bracketLabel === '34°C');
+    expect(far).toBeDefined();
+    expect(far!.tradeSide).toBe('NO');
+    expect(far!.isFarNoLadder).toBe(true);
+    expect(far!.farNoMarketPrice).toBe(0.99);
+    expect(far!.outcomePrice).toBeCloseTo(0.94, 6);
+    expect(far!.edge).toBeGreaterThanOrEqual(0.03);
+  });
+
+  it('does not turn nearby exact brackets into ladder NO candidates', () => {
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.08, {
+      minModelCoverage: 0,
+      farNoLadderEnabled: true,
+      farNoMinWinProb: 0.50,
+      farNoMinEdge: 0.03,
+      farNoMaxBid: 0.94,
+      farNoMinBid: 0.50,
+      farNoMinDistanceDegrees: 2,
+    });
+
+    const nearby = opportunities.find((o) => o.bracketLabel === '31°C');
+    expect(nearby?.isFarNoLadder ?? false).toBe(false);
   });
 });
 

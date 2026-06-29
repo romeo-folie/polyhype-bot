@@ -118,6 +118,10 @@ export interface TradeSignal {
    *  WEATHER_BRACKET_OPPOSITE_DISCOUNT_BPS for real-book pricing instead of the
    *  normal WEATHER_REAL_BOOK_DISCOUNT_BPS. */
   _isBracketOpposite?: boolean;
+  /** True when this is a far-from-forecast weather NO ladder bid. These are
+   *  patient maker-only orders at the scanner's own bid ceiling, not taker
+   *  entries and not paired bracket legs. */
+  _isWeatherFarNoLadder?: boolean;
   /** Target maker order size in SHARES, set only for bracket-opposite legs. The
    *  bracket's purpose is to hold the same share count as the primary so YES+NO
    *  form 1:1 pairs. When set, the executor sizes the maker order at exactly this

@@ -2181,6 +2181,28 @@ export const envSchema = z.object({
   // Wider than WEATHER_REAL_BOOK_DISCOUNT_BPS since the bracket leg has no model
   // edge — we demand a bigger cushion to compensate.
   WEATHER_BRACKET_OPPOSITE_DISCOUNT_BPS: z.coerce.number().min(0).max(5000).optional().default(800),
+  // Far-NO ladder strategy: emit additional maker-only NO opportunities for
+  // brackets safely away from the corrected forecast even when the current NO
+  // quote is too expensive. The scanner prices these at its own bid ceiling
+  // (model NO probability minus a safety edge, capped below), and the executor
+  // enforces post-only + that ceiling so the order can only rest as optionality.
+  // Default off; enable only after reviewing shadow rows.
+  WEATHER_FAR_NO_LADDER_ENABLED: boolFromEnv.optional().default(false),
+  // Minimum model-side win probability for a ladder NO. High by design because
+  // buying 94-96c NO earns thin profit and rare losses are brutal.
+  WEATHER_FAR_NO_MIN_WIN_PROB: z.coerce.number().min(0.5).max(1).optional().default(0.975),
+  // Minimum model edge retained at the posted bid: bid ≤ P(NO) − this value.
+  WEATHER_FAR_NO_MIN_EDGE: z.coerce.number().min(0).max(0.5).optional().default(0.03),
+  // Absolute posted bid ceiling for ladder NOs. Prevents paying near-par for
+  // pennies even when the model claims 99%+.
+  WEATHER_FAR_NO_MAX_BID: z.coerce.number().min(0).max(1).optional().default(0.95),
+  // Minimum posted bid. Below this the order is too small/illiquid to be useful
+  // and often fails CLOB min-notional economics after sizing.
+  WEATHER_FAR_NO_MIN_BID: z.coerce.number().min(0).max(1).optional().default(0.50),
+  // Required distance, in market-unit degrees, from the corrected forecast to
+  // the bracket's rounded-resolution interval. This keeps the ladder from
+  // re-admitting the coin-flip exact brackets the interior-NO guard blocks.
+  WEATHER_FAR_NO_MIN_DISTANCE_DEGREES: z.coerce.number().min(0).max(20).optional().default(2),
   // Cancel unfilled bracket-opposite legs once their reversal path is gone.
   // A resting leg bid only fills when its side trades DOWN through it, and the
   // fill only loses when no reversal follows. While the day's temperature is
