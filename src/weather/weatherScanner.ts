@@ -943,6 +943,17 @@ export interface WeatherBracketOpportunity {
   blockedByExactOpenMeteoNo?: boolean;
   /** True when calibration-live is on but this metric|shape|source cohort is not admitted. */
   blockedByCalibrationCohort?: boolean;
+  /** True when this is a far-from-forecast maker-only NO ladder bid priced at
+   *  our own bid ceiling rather than the current market quote. */
+  isFarNoLadder?: boolean;
+  /** True when this is a closer, lower-capped maker-only NO ladder bid. */
+  isAdjacentNoLadder?: boolean;
+  /** Which NO ladder family produced this opportunity. */
+  noLadderKind?: 'far' | 'adjacent' | null;
+  /** Distance from corrected forecast to the bracket interval, for ladder NOs. */
+  farNoDistance?: number;
+  /** Live market NO quote before the ladder bid ceiling was applied. */
+  farNoMarketPrice?: number;
 }
 
 interface WeatherMarketState {
@@ -1151,6 +1162,19 @@ export function forecastRoundsIntoBracket(
   return rounded >= low - margin && rounded <= high + margin;
 }
 
+function forecastDistanceToBracket(
+  forecastValue: number,
+  low: number | null,
+  high: number | null,
+): number {
+  if (!Number.isFinite(forecastValue)) return Infinity;
+  const lowBoundary = low == null ? -Infinity : low - 0.5;
+  const highBoundary = high == null ? Infinity : high + 0.5;
+  if (forecastValue >= lowBoundary && forecastValue < highBoundary) return 0;
+  if (forecastValue < lowBoundary) return lowBoundary - forecastValue;
+  return forecastValue - highBoundary;
+}
+
 /**
  * Res-day "lock-in": a NO on a HIGH bracket is physically certain once the running
  * observed max has exceeded the bracket's upper bound by `marginC` native degrees — the
@@ -1294,6 +1318,25 @@ export interface FindMispricedOptions {
   marketFavoriteNoMaxYesPrice?: number;
   /** SHADOW: flag brackets where model-modal == market-favorite (confluence YES). */
   confluenceYesShadowEnabled?: boolean;
+  /** Enable maker-only far-NO ladder candidates priced at our own bid ceiling. */
+  farNoLadderEnabled?: boolean;
+  /** Minimum model P(NO) for far-NO ladder. */
+  farNoMinWinProb?: number;
+  /** Minimum retained edge at the ladder bid. */
+  farNoMinEdge?: number;
+  /** Absolute max ladder bid. */
+  farNoMaxBid?: number;
+  /** Absolute min ladder bid. */
+  farNoMinBid?: number;
+  /** Minimum forecast-to-bracket distance for ladder candidates. */
+  farNoMinDistanceDegrees?: number;
+  adjacentNoLadderEnabled?: boolean;
+  adjacentNoMinWinProb?: number;
+  adjacentNoMinEdge?: number;
+  adjacentNoMaxBid?: number;
+  adjacentNoMinBid?: number;
+  adjacentNoMinDistanceDegrees?: number;
+  adjacentNoMaxDistanceDegrees?: number;
 }
 
 export interface BiasedProbResult {
@@ -1400,6 +1443,19 @@ export function findMispricedBrackets(
     marketFavoriteNoVetoEnabled = false,
     marketFavoriteNoMaxYesPrice = 0.85,
     confluenceYesShadowEnabled = false,
+    farNoLadderEnabled = false,
+    farNoMinWinProb = 0.975,
+    farNoMinEdge = minEdge,
+    farNoMaxBid = 0.95,
+    farNoMinBid = 0.50,
+    farNoMinDistanceDegrees = 2,
+    adjacentNoLadderEnabled = false,
+    adjacentNoMinWinProb = 0.88,
+    adjacentNoMinEdge = 0.06,
+    adjacentNoMaxBid = 0.80,
+    adjacentNoMinBid = 0.50,
+    adjacentNoMinDistanceDegrees = 0.5,
+    adjacentNoMaxDistanceDegrees = 2,
   } = options;
   // Defense-in-depth clamp: loadConfig() cross-validates trusted ≥ min, but this
   // helper is also called directly from tests and could accept arbitrary values.
@@ -1582,7 +1638,37 @@ export function findMispricedBrackets(
     // YES edge: model says bracket is more likely than yesPrice implies
     // NO edge: model says bracket is less likely than (1 - noPrice) implies
     const edgeYes = decisionProb - bracket.yesPrice;
-    const edgeNo = (1 - decisionProb) - bracket.noPrice;
+    const modelNoProb = 1 - decisionProb;
+    const farNoDistance = forecastDistanceToBracket(forecastHighForCalc, bracket.low, bracket.high);
+    const farNoBid = Math.min(farNoMaxBid, modelNoProb - farNoMinEdge);
+    const farNoLadderCandidate =
+      farNoLadderEnabled &&
+      modelNoProb >= farNoMinWinProb &&
+      farNoDistance >= farNoMinDistanceDegrees &&
+      farNoBid >= farNoMinBid &&
+      bracket.noPrice > farNoBid + 1e-9;
+    const adjacentNoBid = Math.min(adjacentNoMaxBid, modelNoProb - adjacentNoMinEdge);
+    const adjacentNoLadderCandidate =
+      !farNoLadderCandidate &&
+      adjacentNoLadderEnabled &&
+      modelNoProb >= adjacentNoMinWinProb &&
+      farNoDistance >= adjacentNoMinDistanceDegrees &&
+      farNoDistance < adjacentNoMaxDistanceDegrees &&
+      adjacentNoBid >= adjacentNoMinBid &&
+      bracket.noPrice > adjacentNoBid + 1e-9;
+    const noLadderKind: 'far' | 'adjacent' | null = farNoLadderCandidate
+      ? 'far'
+      : adjacentNoLadderCandidate
+        ? 'adjacent'
+        : null;
+    const noLadderCandidate = noLadderKind !== null;
+    const noLadderMinEdge = noLadderKind === 'far' ? farNoMinEdge : adjacentNoMinEdge;
+    const noDecisionPrice = farNoLadderCandidate
+      ? farNoBid
+      : adjacentNoLadderCandidate
+        ? adjacentNoBid
+        : bracket.noPrice;
+    const edgeNo = modelNoProb - noDecisionPrice;
 
     // YES quality gate: evaluate BEFORE side selection so that a gated YES
     // falls back to the NO candidate rather than suppressing the bracket entirely.
@@ -1662,7 +1748,7 @@ export function findMispricedBrackets(
       continue; // No eligible positive edge on either side
     }
 
-    if (edge < minEdge) continue;
+    if (edge < (noLadderCandidate ? noLadderMinEdge : minEdge)) continue;
 
     const cohortLive = tradeSide === 'YES' ? yesCohortLive : noCohortLive;
 
@@ -1777,7 +1863,7 @@ export function findMispricedBrackets(
     // sides, independent of the configurable yesMinMarketPrice gate — otherwise
     // WEATHER_YES_MIN_MARKET_PRICE=0 would re-expose thin near-zero YES books.
     if (bracket.yesPrice < 0.005 && tradeSide === 'YES') continue;
-    if (bracket.noPrice < 0.005 && tradeSide === 'NO') continue;
+    if (noDecisionPrice < 0.005 && tradeSide === 'NO') continue;
 
     // A YES-gate fallback that ACTUALLY TRADED: the model preferred YES but the
     // YES gate blocked it and WEATHER_YES_GATE_NO_FALLBACK_ENABLED=true, so this
@@ -1821,7 +1907,7 @@ export function findMispricedBrackets(
       adjustedMarketProb,
       edge,
       tradeSide,
-      outcomePrice: tradeSide === 'YES' ? bracket.yesPrice : bracket.noPrice,
+      outcomePrice: tradeSide === 'YES' ? bracket.yesPrice : noDecisionPrice,
       forecastHigh: correctedForecastHigh,
       forecastStdDev: forecast.stdDev,
       effectiveStdDev,
@@ -1878,6 +1964,12 @@ export function findMispricedBrackets(
       blockedByLiveConfirmation: false,
       blockedByExactOpenMeteoNo: false,
       blockedByCalibrationCohort: calibrationLiveEnabled && requireCalibrationCohortForEntry && !cohortLive,
+      isFarNoLadder: tradeSide === 'NO' && farNoLadderCandidate,
+      isAdjacentNoLadder: tradeSide === 'NO' && adjacentNoLadderCandidate,
+      noLadderKind: tradeSide === 'NO' ? noLadderKind : null,
+      ...(tradeSide === 'NO' && noLadderCandidate
+        ? { farNoDistance, farNoMarketPrice: bracket.noPrice }
+        : {}),
     });
   }
 
@@ -2202,6 +2294,19 @@ export async function scanWeatherMarkets(
         marketFavoriteNoVetoEnabled: cfg.WEATHER_MARKET_FAVORITE_NO_VETO_ENABLED,
         marketFavoriteNoMaxYesPrice: cfg.WEATHER_MARKET_FAVORITE_NO_MAX_YESPRICE,
         confluenceYesShadowEnabled: cfg.WEATHER_CONFLUENCE_YES_SHADOW_ENABLED,
+        farNoLadderEnabled: cfg.WEATHER_FAR_NO_LADDER_ENABLED,
+        farNoMinWinProb: cfg.WEATHER_FAR_NO_MIN_WIN_PROB,
+        farNoMinEdge: cfg.WEATHER_FAR_NO_MIN_EDGE,
+        farNoMaxBid: cfg.WEATHER_FAR_NO_MAX_BID,
+        farNoMinBid: cfg.WEATHER_FAR_NO_MIN_BID,
+        farNoMinDistanceDegrees: cfg.WEATHER_FAR_NO_MIN_DISTANCE_DEGREES,
+        adjacentNoLadderEnabled: cfg.WEATHER_ADJACENT_NO_LADDER_ENABLED,
+        adjacentNoMinWinProb: cfg.WEATHER_ADJACENT_NO_MIN_WIN_PROB,
+        adjacentNoMinEdge: cfg.WEATHER_ADJACENT_NO_MIN_EDGE,
+        adjacentNoMaxBid: cfg.WEATHER_ADJACENT_NO_MAX_BID,
+        adjacentNoMinBid: cfg.WEATHER_ADJACENT_NO_MIN_BID,
+        adjacentNoMinDistanceDegrees: cfg.WEATHER_ADJACENT_NO_MIN_DISTANCE_DEGREES,
+        adjacentNoMaxDistanceDegrees: cfg.WEATHER_ADJACENT_NO_MAX_DISTANCE_DEGREES,
       },
     );
     const afterMarketGate = await applyMarketDisagreementGate(redis, opportunities, cfg);
@@ -2547,6 +2652,11 @@ export async function scanWeatherMarkets(
         blockedByResDayOnly: opp.blockedByResDayOnly ?? false,
         previousOutcomePrice: opp.previousOutcomePrice ?? null,
         previousWinProbability: opp.previousWinProbability ?? null,
+        isFarNoLadder: opp.isFarNoLadder ?? false,
+        isAdjacentNoLadder: opp.isAdjacentNoLadder ?? false,
+        noLadderKind: opp.noLadderKind ?? null,
+        farNoDistance: opp.farNoDistance ?? null,
+        farNoMarketPrice: opp.farNoMarketPrice ?? null,
         wouldTrade,
       });
       void enqueueWrite('shadow_observations', {
@@ -2625,6 +2735,11 @@ export async function scanWeatherMarkets(
           ensembleYesMass: opp.ensembleYesMass ?? null,
           blockedByResDayOnly: opp.blockedByResDayOnly ?? false,
           sourceStddevMultiplier: opp.sourceStddevMultiplier ?? 1.0,
+          isFarNoLadder: opp.isFarNoLadder ?? false,
+          isAdjacentNoLadder: opp.isAdjacentNoLadder ?? false,
+          noLadderKind: opp.noLadderKind ?? null,
+          farNoDistance: opp.farNoDistance ?? null,
+          farNoMarketPrice: opp.farNoMarketPrice ?? null,
           modelProbRaw: opp.modelProbRaw ?? null,
           // Calibration shadow (PR2a) — raw vs calibrated for reliability tracking.
           // modelProbCalInput is the (pre-σ-inflation) scale the map is trained on.
@@ -2744,6 +2859,9 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
     // other (off-day) scan the executor must not top up a held bracket.
     ...(opp.sizeUpScanOnly === true ? { sizeUpSanctioned: true } : {}),
     _isResolutionDay: opp.isResolutionDay ?? false,
+    ...(opp.isFarNoLadder === true || opp.isAdjacentNoLadder === true
+      ? { _isWeatherFarNoLadder: true }
+      : {}),
     ...(correctEndDate ? { endDate: correctEndDate } : {}),
   };
 }
@@ -3256,6 +3374,7 @@ export async function revalidateRestingWeatherOrders(
   let cancelledCondOracle = 0;
   for (const { marketId, direction, order } of weatherEntries) {
     const isBracket = order.isBracketOpposite === true;
+    const isFarNoLadder = order.isWeatherFarNoLadder === true;
     // Legacy blobs predate the explicit bracket flag — treat edge ≤ 0 as
     // "possibly a bracket leg" and never cancel those under any rule.
     const isAmbiguousLegacy =
@@ -3364,7 +3483,7 @@ export async function revalidateRestingWeatherOrders(
           }
         }
 
-        if (!primaryRuleOn) continue;
+        if (!primaryRuleOn || isFarNoLadder) continue;
         const sideFV = direction === 'YES' ? opp.modelProbability : 1 - opp.modelProbability;
         if (!Number.isFinite(sideFV)) continue;
         if (sideFV + 1e-9 >= order.price) continue; // still value-positive at our bid
@@ -3959,6 +4078,8 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       if (
         cfg.WEATHER_BRACKET_ENABLED
         && !opp.sizeUpScanOnly
+        && !opp.isFarNoLadder
+        && !opp.isAdjacentNoLadder
         && orderCommitted
         && result.wasEmptyBook === true
         && !opp.isResolutionDay

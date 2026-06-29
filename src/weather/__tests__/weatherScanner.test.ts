@@ -52,6 +52,19 @@ const baseConfig = {
   WEATHER_BRACKET_CANCEL_ENABLED: false,
   WEATHER_BRACKET_CANCEL_LOCAL_HOUR: 18,
   WEATHER_BRACKET_CANCEL_PRIMARY_PRICE: 0.95,
+  WEATHER_FAR_NO_LADDER_ENABLED: false,
+  WEATHER_FAR_NO_MIN_WIN_PROB: 0.975,
+  WEATHER_FAR_NO_MIN_EDGE: 0.03,
+  WEATHER_FAR_NO_MAX_BID: 0.95,
+  WEATHER_FAR_NO_MIN_BID: 0.50,
+  WEATHER_FAR_NO_MIN_DISTANCE_DEGREES: 2,
+  WEATHER_ADJACENT_NO_LADDER_ENABLED: false,
+  WEATHER_ADJACENT_NO_MIN_WIN_PROB: 0.88,
+  WEATHER_ADJACENT_NO_MIN_EDGE: 0.06,
+  WEATHER_ADJACENT_NO_MAX_BID: 0.80,
+  WEATHER_ADJACENT_NO_MIN_BID: 0.50,
+  WEATHER_ADJACENT_NO_MIN_DISTANCE_DEGREES: 0.5,
+  WEATHER_ADJACENT_NO_MAX_DISTANCE_DEGREES: 2,
   // Lowest-temperature feature off by default in the base config so legacy scan
   // tests never trigger the second (lowest-temperature) Gamma fetch; the
   // dedicated lowest-temp tests override these explicitly.
@@ -82,7 +95,7 @@ const baseConfig = {
   WEATHER_LOCKIN_STAKE_USD: 10,
   WEATHER_LOCKIN_MODEL_WIN: 0.97,
   WEATHER_MODAL_MASS_VETO_ENABLED: false,
-  WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.50,
+  WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.65,
   // Evaluate the modal-mass veto on every horizon in tests (events target ~2
   // days out, not res-day). Production defaults this true (res-day only).
   WEATHER_MODAL_MASS_VETO_RES_DAY_ONLY: false,
@@ -1579,6 +1592,115 @@ describe('findMispricedBrackets - YES quality gates', () => {
       minModelCoverage: 0, ...GATES_ON,
     });
     expect(opportunities.filter((o) => o.tradeSide === 'YES')).toHaveLength(1);
+  });
+});
+
+describe('findMispricedBrackets - far NO ladder', () => {
+  const event = {
+    eventId: 'e-far-no',
+    slug: 'highest-temperature-in-paris-on-june-28-2026',
+    city: 'paris',
+    coords: lookupCity('paris')!,
+    targetDate: '2026-06-28',
+    unit: 'celsius' as const,
+    metric: 'high' as const,
+    endDate: '2026-06-28T22:00:00Z',
+    brackets: [
+      { marketId: 'm29', conditionId: 'c29', clobTokenIds: ['y29', 'n29'], threshold: 0, low: 29, high: 29, label: '29°C', yesPrice: 0.05, noPrice: 0.95 },
+      { marketId: 'm30', conditionId: 'c30', clobTokenIds: ['y30', 'n30'], threshold: 1, low: 30, high: 30, label: '30°C', yesPrice: 0.25, noPrice: 0.75 },
+      { marketId: 'm31', conditionId: 'c31', clobTokenIds: ['y31', 'n31'], threshold: 2, low: 31, high: 31, label: '31°C', yesPrice: 0.20, noPrice: 0.80 },
+      { marketId: 'm34', conditionId: 'c34', clobTokenIds: ['y34', 'n34'], threshold: 3, low: 34, high: 34, label: '34°C', yesPrice: 0.01, noPrice: 0.99 },
+      { marketId: 'm35', conditionId: 'c35', clobTokenIds: ['y35', 'n35'], threshold: 4, low: 35, high: 35, label: '35°C', yesPrice: 0.01, noPrice: 0.99 },
+    ],
+  };
+  const forecast = {
+    forecastHigh: 30,
+    stdDev: 1,
+    source: 'open-meteo' as const,
+    ensembleMembers: 30,
+  };
+
+  it('emits far NO candidates at the configured maker bid instead of the expensive market quote', () => {
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.08, {
+      minModelCoverage: 0,
+      farNoLadderEnabled: true,
+      farNoMinWinProb: 0.975,
+      farNoMinEdge: 0.03,
+      farNoMaxBid: 0.94,
+      farNoMinBid: 0.50,
+      farNoMinDistanceDegrees: 2,
+    });
+
+    const far = opportunities.find((o) => o.bracketLabel === '34°C');
+    expect(far).toBeDefined();
+    expect(far!.tradeSide).toBe('NO');
+    expect(far!.isFarNoLadder).toBe(true);
+    expect(far!.farNoMarketPrice).toBe(0.99);
+    expect(far!.outcomePrice).toBeCloseTo(0.94, 6);
+    expect(far!.edge).toBeGreaterThanOrEqual(0.03);
+  });
+
+  it('does not turn nearby exact brackets into ladder NO candidates', () => {
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.08, {
+      minModelCoverage: 0,
+      farNoLadderEnabled: true,
+      farNoMinWinProb: 0.50,
+      farNoMinEdge: 0.03,
+      farNoMaxBid: 0.94,
+      farNoMinBid: 0.50,
+      farNoMinDistanceDegrees: 2,
+    });
+
+    const nearby = opportunities.find((o) => o.bracketLabel === '31°C');
+    expect(nearby?.isFarNoLadder ?? false).toBe(false);
+  });
+
+  it('emits adjacent NO ladder candidates with a lower bid cap and separate tag', () => {
+    const adjacentEvent = {
+      ...event,
+      brackets: [
+        ...event.brackets,
+        { marketId: 'm32', conditionId: 'c32', clobTokenIds: ['y32', 'n32'], threshold: 5, low: 32, high: 32, label: '32°C', yesPrice: 0.12, noPrice: 0.88 },
+      ],
+    };
+    const { opportunities } = findMispricedBrackets(adjacentEvent, forecast, 1, 0.08, {
+      minModelCoverage: 0,
+      farNoLadderEnabled: false,
+      adjacentNoLadderEnabled: true,
+      adjacentNoMinWinProb: 0.88,
+      adjacentNoMinEdge: 0.06,
+      adjacentNoMaxBid: 0.80,
+      adjacentNoMinBid: 0.50,
+      adjacentNoMinDistanceDegrees: 0.5,
+      adjacentNoMaxDistanceDegrees: 2,
+    });
+
+    const adjacent = opportunities.find((o) => o.bracketLabel === '32°C');
+    expect(adjacent).toBeDefined();
+    expect(adjacent!.tradeSide).toBe('NO');
+    expect(adjacent!.isFarNoLadder).toBe(false);
+    expect(adjacent!.isAdjacentNoLadder).toBe(true);
+    expect(adjacent!.noLadderKind).toBe('adjacent');
+    expect(adjacent!.farNoDistance).toBeCloseTo(1.5, 6);
+    expect(adjacent!.farNoMarketPrice).toBe(0.88);
+    expect(adjacent!.outcomePrice).toBeCloseTo(0.80, 6);
+    expect(adjacent!.edge).toBeGreaterThanOrEqual(0.06);
+  });
+
+  it('does not turn the exact forecast bracket into an adjacent NO ladder candidate', () => {
+    const { opportunities } = findMispricedBrackets(event, forecast, 1, 0.08, {
+      minModelCoverage: 0,
+      adjacentNoLadderEnabled: true,
+      adjacentNoMinWinProb: 0.50,
+      adjacentNoMinEdge: 0.03,
+      adjacentNoMaxBid: 0.80,
+      adjacentNoMinBid: 0.50,
+      adjacentNoMinDistanceDegrees: 0.5,
+      adjacentNoMaxDistanceDegrees: 2,
+    });
+
+    const exact = opportunities.find((o) => o.bracketLabel === '30°C');
+    expect(exact?.isAdjacentNoLadder ?? false).toBe(false);
   });
 });
 
@@ -5676,6 +5798,28 @@ describe('revalidateRestingWeatherOrders', () => {
     expect(mockDeletePendingOrder).not.toHaveBeenCalled();
   });
 
+  it('keeps far-NO ladder bids through primary FV revalidation for queue priority', async () => {
+    // A ladder NO can intentionally rest at 0.94 below a 0.99 ask even when the
+    // current fresh FV no longer supports that price. The ladder marker gives it
+    // a dedicated lifecycle: hold until fill, explicit external cancel, or the
+    // post-resolution sweep.
+    mockListPendingOrders.mockResolvedValue([
+      pendingEntry({
+        order: {
+          isWeatherFarNoLadder: true,
+          price: 0.94,
+          edgeMagnitude: 0.04,
+        },
+      }),
+    ]);
+
+    await revalidateRestingWeatherOrders({} as never, [opp('mkt-1', 0.20)]);
+
+    expect(mockGetClobOrder).not.toHaveBeenCalled();
+    expect(mockCancelClobOrder).not.toHaveBeenCalled();
+    expect(mockDeletePendingOrder).not.toHaveBeenCalled();
+  });
+
   it('never cancels bracket-opposite legs, flagged or legacy (edge=0)', async () => {
     mockListPendingOrders.mockResolvedValue([
       pendingEntry({ marketId: 'mkt-1', order: { isBracketOpposite: true } }),
@@ -6384,8 +6528,25 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
     };
   }
 
+  function hourlyWithModalMass(mass: number) {
+    // 20 members, each a flat 24-hour trajectory. `mass` controls the share
+    // inside 50-51°F widened by margin=1, i.e. [49,52].
+    const members = 20;
+    const inside = Math.round(members * mass);
+    return {
+      hours: Array.from({ length: 24 }, (_, h) => h * 3600),
+      memberTemps: Array.from({ length: members }, (_, i) => {
+        const tempF = i < inside ? 50.5 : 60;
+        return Array.from({ length: 24 }, () => tempF);
+      }),
+      memberCount: members,
+      forecastDate: iso,
+      ensembleModel: 'gfs' as const,
+    };
+  }
+
   function hourlyClusteredAt(tempF: number) {
-    // 20 members, each a flat 24-hour trajectory at tempF → daily max = tempF.
+    // 20 members, each a flat 24-hour trajectory at tempF -> daily max = tempF.
     return {
       hours: Array.from({ length: 24 }, (_, h) => h * 3600),
       memberTemps: Array.from({ length: 20 }, () => Array.from({ length: 24 }, () => tempF)),
@@ -6404,7 +6565,7 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
       WEATHER_MIN_MODEL_COVERAGE: 0,
       WEATHER_MIN_EDGE: 0.02,
       WEATHER_MODAL_MASS_VETO_ENABLED: true,
-      WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.5,
+      WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.65,
       WEATHER_INTERIOR_NO_FORECAST_MARGIN: 1,
     });
     globalThis.fetch = vi.fn().mockResolvedValue({
@@ -6421,14 +6582,23 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
     mockLoadConfig.mockImplementation(() => ({ ...baseConfig }));
   });
 
-  it('blocks the interior NO when ensemble members cluster in the bracket', async () => {
-    mockFetchEnsembleHourly.mockResolvedValue(hourlyClusteredAt(50.5));
+  it('blocks the interior NO when ensemble YES mass reaches the higher threshold', async () => {
+    mockFetchEnsembleHourly.mockResolvedValue(hourlyWithModalMass(0.65));
     const results = await scanWeatherMarkets(redisMock as never);
     const no = results.find((o) => o.bracketLabel === '50-51°F' && o.tradeSide === 'NO');
     expect(no).toBeDefined();
     expect(no!.blockedByModalMass).toBe(true);
-    expect(no!.ensembleYesMass ?? 0).toBeGreaterThanOrEqual(0.5);
+    expect(no!.ensembleYesMass ?? 0).toBeGreaterThanOrEqual(0.65);
     expect(mockFetchEnsembleHourly).toHaveBeenCalled();
+  });
+
+  it('does not block the interior NO at 50% ensemble YES mass', async () => {
+    mockFetchEnsembleHourly.mockResolvedValue(hourlyWithModalMass(0.50));
+    const results = await scanWeatherMarkets(redisMock as never);
+    const no = results.find((o) => o.bracketLabel === '50-51°F' && o.tradeSide === 'NO');
+    expect(no).toBeDefined();
+    expect(no!.blockedByModalMass).toBe(false);
+    expect(no!.ensembleYesMass).toBeCloseTo(0.50, 6);
   });
 
   it('does not block the interior NO when ensemble members are far from the bracket', async () => {
@@ -6437,7 +6607,7 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
     const no = results.find((o) => o.bracketLabel === '50-51°F' && o.tradeSide === 'NO');
     expect(no).toBeDefined();
     expect(no!.blockedByModalMass).toBe(false);
-    expect(no!.ensembleYesMass ?? 1).toBeLessThan(0.5);
+    expect(no!.ensembleYesMass ?? 1).toBeLessThan(0.65);
   });
 
   it('skips the ensemble-hourly fetch when the veto is disabled', async () => {
@@ -6460,7 +6630,7 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
       WEATHER_MIN_MODEL_COVERAGE: 0,
       WEATHER_MIN_EDGE: 0.02,
       WEATHER_MODAL_MASS_VETO_ENABLED: true,
-      WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.5,
+      WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.65,
       WEATHER_INTERIOR_NO_FORECAST_MARGIN: 1,
       WEATHER_MODAL_MASS_VETO_RES_DAY_ONLY: true,
     });
