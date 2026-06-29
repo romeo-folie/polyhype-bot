@@ -93,29 +93,80 @@ export function normalizeSource(source: string | null | undefined): string {
 }
 
 /**
- * Is this bracket's (metric, shape, source) in the comma-separated `metric|shape|source`
- * allowlist (WEATHER_CALIBRATION_LIVE_COHORTS)? Used to scope acting-on-calibration to
- * the cohorts validated +EV out-of-sample (e.g. `high|range|hrrr-combined`). The metric
- * (`high`/`low`) is part of the key because the calibration table is metric-keyed and the
- * `high` and `low` cohorts validate independently — without it, enabling lowest-temp
- * markets would silently pull the unvalidated `low` cells into calibration-live mode.
- * Metric and source are normalized both sides so casing/whitespace don't matter. Empty
- * list → no cohort.
+ * Is this bracket's side-specific (side, metric, shape, source) in the comma-separated
+ * live calibration allow-list? New entries use `SIDE|metric|shape|source`, e.g.
+ * `NO|high|exact|open-meteo`. Legacy `metric|shape|source` entries are still accepted
+ * as both-side cohorts for backward compatibility.
+ *
+ * Side matters because the hold-out audit can validate calibrated NO while calibrated
+ * YES in the same metric/shape/source bucket is a loser, or vice versa. Metric also
+ * stays in the key because high/low markets validate independently.
  */
+export type CalibrationTradeSide = 'YES' | 'NO';
+
+function parseLiveCohortEntry(entry: string): {
+  side: CalibrationTradeSide | null;
+  metric: string;
+  shape: string;
+  source: string;
+} | null {
+  const parts = entry.split('|').map((p) => p.trim());
+  if (parts.length === 3) {
+    const [metric, shape, source] = parts;
+    return {
+      side: null,
+      metric: normalizeSource(metric),
+      shape: shape ?? '',
+      source: normalizeSource(source),
+    };
+  }
+  if (parts.length === 4) {
+    const [sideRaw, metric, shape, source] = parts;
+    const side = sideRaw?.toUpperCase();
+    if (side !== 'YES' && side !== 'NO') return null;
+    return {
+      side,
+      metric: normalizeSource(metric),
+      shape: shape ?? '',
+      source: normalizeSource(source),
+    };
+  }
+  return null;
+}
+
+export function isCalibrationLiveCohortForSide(
+  side: CalibrationTradeSide,
+  metric: string,
+  shape: BracketShape,
+  source: string,
+  cohortsCsv: string,
+): boolean {
+  const wantMetric = normalizeSource(metric);
+  const wantSource = normalizeSource(source);
+  return cohortsCsv
+    .split(',')
+    .map(parseLiveCohortEntry)
+    .some((c) => c !== null
+      && (c.side === null || c.side === side)
+      && c.metric === wantMetric
+      && c.shape === shape
+      && c.source === wantSource);
+}
+
+/** @deprecated Runtime callers should use side-aware isCalibrationLiveCohortForSide. */
 export function isCalibrationLiveCohort(
   metric: string,
   shape: BracketShape,
   source: string,
   cohortsCsv: string,
 ): boolean {
-  const want = `${normalizeSource(metric)}|${shape}|${normalizeSource(source)}`;
   return cohortsCsv
     .split(',')
-    .map((c) => {
-      const [m, s, src] = c.split('|');
-      return `${normalizeSource(m)}|${(s ?? '').trim()}|${normalizeSource(src)}`;
-    })
-    .includes(want);
+    .map(parseLiveCohortEntry)
+    .some((c) => c !== null
+      && c.metric === normalizeSource(metric)
+      && c.shape === shape
+      && c.source === normalizeSource(source));
 }
 
 export function cellKey(features: CalibrationFeatures): {

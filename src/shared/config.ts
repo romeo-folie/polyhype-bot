@@ -2290,7 +2290,7 @@ export const envSchema = z.object({
   // on the calibrated probability is a separate gate (PR2b). See
   // docs/issues/weather-bracket-model-overconfidence-2026-06-19.md.
   WEATHER_CALIBRATION_SHADOW_ENABLED: boolFromEnv.optional().default(true),
-  // Calibration LIVE (PR2b). When true, brackets whose (metric|shape|source) cohort is
+  // Calibration LIVE (PR2b). When true, brackets whose side|metric|shape|source cohort is
   // in WEATHER_CALIBRATION_LIVE_COHORTS use the CALIBRATED probability for live side
   // selection + edge, and may take interior YES (subject to
   // WEATHER_CALIBRATION_YES_MIN_PRICE, default 0.15 — replaces the raw 0.30/0.50
@@ -2300,19 +2300,19 @@ export const envSchema = z.object({
   // but HURTS exact/open-meteo and can drift by source, so only cohorts admitted by
   // the chronological hold-out audit may execute. Default false = no behavioural change.
   WEATHER_CALIBRATION_LIVE_ENABLED: boolFromEnv.optional().default(false),
-  // When calibration-live is enabled, require the bracket's metric|shape|source
+  // When calibration-live is enabled, require the selected side's metric|shape|source
   // cohort to be admitted by WEATHER_CALIBRATION_LIVE_COHORTS before it can execute.
   // Non-admitted cohorts are still shadow-logged using calibrated probability but
   // no longer fall back to raw-probability entries.
   WEATHER_REQUIRE_CALIBRATION_COHORT_FOR_ENTRY: boolFromEnv.optional().default(false),
-  // Comma-separated `metric|shape|source` cohorts admitted for live calibrated entries
-  // when WEATHER_CALIBRATION_LIVE_ENABLED=true. metric ∈ high|low; shape ∈
+  // Comma-separated `SIDE|metric|shape|source` cohorts admitted for live calibrated
+  // entries when WEATHER_CALIBRATION_LIVE_ENABLED=true. SIDE ∈ YES|NO; metric ∈ high|low; shape ∈
   // exact|range|high_tail|low_tail; source as logged (open-meteo|hrrr-combined|
-  // combined|noaa). Metric is part of the key because the calibration table is
-  // metric-keyed and high/low validate independently — only cohorts validated +EV
-  // out-of-sample belong here. Refresh with:
+  // combined|noaa). Legacy `metric|shape|source` entries still parse as both-side
+  // cohorts, but the audit writer emits side-aware keys because YES/NO validate
+  // independently. Refresh with:
   //   npx tsx scripts/weather-calibration-audit.ts --write-live-cohorts
-  WEATHER_CALIBRATION_LIVE_COHORTS: z.string().optional().default('low|range|combined'),
+  WEATHER_CALIBRATION_LIVE_COHORTS: z.string().optional().default('YES|low|range|combined'),
   // Market-price floor for calibrated YES on live cohorts. The raw YES gate's 0.30
   // floor would block the +EV calibrated YES (which sit ~0.15–0.30); the cohort
   // allow-list is the real protection against cheap-longshot YES, so live cohorts

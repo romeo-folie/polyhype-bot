@@ -24,6 +24,7 @@ describe('recordPositionOutcome', () => {
       redis,
       {
         executionId: 'exec-123',
+        decisionId: '11111111-1111-4111-8111-111111111111',
         sourcedFrom: 'headline',
         question: 'Will X happen?',
         direction: 'YES',
@@ -49,6 +50,7 @@ describe('recordPositionOutcome', () => {
       redis,
       expect.objectContaining({
         executionId: 'exec-123',
+        decisionId: '11111111-1111-4111-8111-111111111111',
         executionVenue: 'clob',
         modeConfigured: 'hybrid',
         entryExecutionPath: 'maker_fill',
@@ -61,6 +63,13 @@ describe('recordPositionOutcome', () => {
         returnPct: 15,
       }),
       { sourcedFrom: 'headline' },
+    );
+    expect(enqueueWrite).toHaveBeenLastCalledWith(
+      'outcomes',
+      expect.objectContaining({
+        executionId: 'exec-123',
+        decisionId: '11111111-1111-4111-8111-111111111111',
+      }),
     );
   });
 
@@ -170,6 +179,7 @@ describe('recordRedemptionOutcome', () => {
       redis,
       {
         executionId: 'exec-redeem-1',
+        decisionId: '22222222-2222-4222-8222-222222222222',
         sourcedFrom: 'Breaking headline',
         question: 'ledger-original-question',
         direction: 'YES',
@@ -200,6 +210,7 @@ describe('recordRedemptionOutcome', () => {
       redis,
       expect.objectContaining({
         executionId: 'exec-redeem-1',
+        decisionId: '22222222-2222-4222-8222-222222222222',
         exitReason: 'clob_on_chain_redeemed',
         result: 'won',
         returnPct: 80,

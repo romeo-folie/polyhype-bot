@@ -17,6 +17,8 @@ export interface PositionOutcome {
   id: string;
   closedAt: string;
   executionId?: string;
+  /** Signal decision UUID linking signal_decisions -> execution_events -> outcomes. */
+  decisionId?: string;
   source:
     | 'osint'
     | 'copytrade'
@@ -306,6 +308,7 @@ export async function getRecentOutcomes(
         executionVenue: data.executionVenue ?? '',
       };
       if (data.executionId) parsed.executionId = data.executionId;
+      if (data.decisionId) parsed.decisionId = data.decisionId;
       if (data.urgencyScore !== undefined && data.urgencyScore !== null && data.urgencyScore !== '')
         parsed.urgencyScore = Number(data.urgencyScore);
       if (data.modeConfigured)

@@ -1821,7 +1821,7 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     const opp = findMispricedBrackets(rangeEvent, forecastHrrr, 1, 0.0, {
       minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
       calibrationShadowEnabled: true, calibrationLiveEnabled: true,
-      calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+      calibrationLiveCohorts: 'YES|high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
     }).opportunities[0]!;
     expect(opp.tradeSide).toBe('YES');               // calibrated 0.60 > yesPrice 0.25 → YES
     expect(opp.calibrationLive).toBe(true);
@@ -1833,7 +1833,7 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     const opp = findMispricedBrackets(rangeEvent, { ...forecastHrrr, source: 'open-meteo' as const }, 1, 0.0, {
       minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
       calibrationShadowEnabled: true, calibrationLiveEnabled: true,
-      calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+      calibrationLiveCohorts: 'YES|high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
     }).opportunities[0]!;
     // Calibration-live no longer falls back to raw for non-admitted cohorts; it
     // computes on calibrated probability but keeps the cohort shadow-only.
@@ -1847,7 +1847,7 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     const opp = findMispricedBrackets(rangeEvent, forecastHrrr, 1, 0.0, {
       minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
       calibrationShadowEnabled: true, // shadow on, but live OFF
-      calibrationLiveCohorts: 'high|range|hrrr-combined',
+      calibrationLiveCohorts: 'YES|high|range|hrrr-combined',
     }).opportunities[0]!;
     expect(opp.calibrationLive).toBe(false);
     expect(opp.tradeSide).toBe('NO');                 // raw decision unchanged
@@ -1863,12 +1863,105 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     const opp = findMispricedBrackets(lowEvent, forecastHrrr, 1, 0.0, {
       minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
       calibrationShadowEnabled: true, calibrationLiveEnabled: true,
-      calibrationLiveCohorts: 'high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+      calibrationLiveCohorts: 'YES|high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
     }).opportunities[0]!;
     expect(opp.calibrationLive).toBe(false);          // low metric excluded from the high cohort
     expect(opp.blockedByCalibrationCohort).toBe(true);
     expect(opp.allowedByConfig).toBe(false);
     expect(opp.modelProbability).toBe(opp.modelProbCalibrated);
+  });
+
+  it('requires the selected calibrated side to be admitted', () => {
+    _setCalibrationTableForTest({
+      _meta: { generatedAt: '', scoredPairs: 9000, binCount: 10, priorStrength: 20, minCellSamples: 80, version: 1 },
+      byShapeSourceHorizon: {},
+      byShapeSource: { 'high|range|hrrr-combined': { n: 500, bins: Array(10).fill(0.20) } },
+      byShape: {},
+      byMetric: { high: { n: 9000, bins: Array.from({ length: 10 }, (_, i) => (i + 0.5) / 10) } },
+    } as never);
+    const noOpp = findMispricedBrackets(rangeEvent, forecastHrrr, 1, 0.0, {
+      minModelCoverage: 0, yesAllowInteriorBrackets: false, yesMinMarketPrice: 0.30, yesMinModelProb: 0.50,
+      calibrationShadowEnabled: true, calibrationLiveEnabled: true,
+      calibrationLiveCohorts: 'NO|high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
+    }).opportunities[0]!;
+    expect(noOpp.tradeSide).toBe('NO');
+    expect(noOpp.calibrationLive).toBe(true);
+    expect(noOpp.blockedByCalibrationCohort).toBe(false);
+    expect(noOpp.allowedByConfig).toBe(true);
+  });
+
+  it('falls through to an admitted NO when an unadmitted tail YES has the larger edge', () => {
+    _setCalibrationTableForTest({
+      _meta: { generatedAt: '', scoredPairs: 9000, binCount: 10, priorStrength: 20, minCellSamples: 80, version: 1 },
+      byShapeSourceHorizon: {},
+      byShapeSource: { 'high|high_tail|hrrr-combined': { n: 500, bins: Array(10).fill(0.60) } },
+      byShape: {},
+      byMetric: { high: { n: 9000, bins: Array.from({ length: 10 }, (_, i) => (i + 0.5) / 10) } },
+    } as never);
+    const tailEvent = {
+      ...rangeEvent,
+      brackets: [{
+        marketId: 'm-tail', conditionId: 'c-tail', clobTokenIds: ['ty-tail', 'tn-tail'],
+        threshold: 0, low: 70, high: null, label: '70°F or higher',
+        yesPrice: 0.20, noPrice: 0.15,
+      }],
+    };
+    const opp = findMispricedBrackets(tailEvent, forecastHrrr, 1, 0.0, {
+      minModelCoverage: 0,
+      yesAllowInteriorBrackets: false,
+      yesMinMarketPrice: 0.10,
+      yesMinModelProb: 0.50,
+      maxTailNoBetModelProb: 1,
+      cityActuals: {
+        highs: [60, 61, 62, 63, 64, 65, 66],
+        unit: 'fahrenheit',
+        sampleSize: 7,
+        updatedAt: '2026-06-30T00:00:00Z',
+      },
+      calibrationShadowEnabled: true,
+      calibrationLiveEnabled: true,
+      calibrationLiveCohorts: 'NO|high|high_tail|hrrr-combined',
+      calibrationYesMinPrice: 0.15,
+    }).opportunities[0]!;
+
+    expect(opp.tradeSide).toBe('NO');
+    expect(opp.calibrationLive).toBe(true);
+    expect(opp.blockedByCalibrationCohort).toBe(false);
+    expect(opp.allowedByConfig).toBe(true);
+  });
+
+  it('falls through to an admitted YES when an unadmitted NO has the larger edge', () => {
+    _setCalibrationTableForTest({
+      _meta: { generatedAt: '', scoredPairs: 9000, binCount: 10, priorStrength: 20, minCellSamples: 80, version: 1 },
+      byShapeSourceHorizon: {},
+      byShapeSource: { 'high|range|hrrr-combined': { n: 500, bins: Array(10).fill(0.35) } },
+      byShape: {},
+      byMetric: { high: { n: 9000, bins: Array.from({ length: 10 }, (_, i) => (i + 0.5) / 10) } },
+    } as never);
+    const yesOnlyEvent = {
+      ...rangeEvent,
+      brackets: [{
+        ...rangeEvent.brackets[0]!,
+        yesPrice: 0.20,
+        noPrice: 0.40,
+      }],
+    };
+    const opp = findMispricedBrackets(yesOnlyEvent, forecastHrrr, 1, 0.0, {
+      minModelCoverage: 0,
+      yesAllowInteriorBrackets: false,
+      yesMinMarketPrice: 0.30,
+      yesMinModelProb: 0.50,
+      calibrationShadowEnabled: true,
+      calibrationLiveEnabled: true,
+      calibrationLiveCohorts: 'YES|high|range|hrrr-combined',
+      calibrationYesMinPrice: 0.15,
+    }).opportunities[0]!;
+
+    expect(opp.tradeSide).toBe('YES');
+    expect(opp.edge).toBeCloseTo(0.15, 6);
+    expect(opp.calibrationLive).toBe(true);
+    expect(opp.blockedByCalibrationCohort).toBe(false);
+    expect(opp.allowedByConfig).toBe(true);
   });
 });
 
@@ -4322,6 +4415,13 @@ describe('resolution-day size-up and near-res gate bypass', () => {
       (c) => (c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite === true,
     );
     expect(bracketCall).toBeDefined();
+    const primaryCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => !(c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite,
+    );
+    expect(primaryCall).toBeDefined();
+    expect((bracketCall![0] as { decisionId?: string }).decisionId).toBe(
+      (primaryCall![0] as { decisionId?: string }).decisionId,
+    );
   });
 
   it('bracket leg carries _bracketTargetShares equal to the primary filled share count', async () => {

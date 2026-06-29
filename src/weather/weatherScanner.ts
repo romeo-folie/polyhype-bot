@@ -58,7 +58,7 @@ import type { CityCoordinates, FetchFn } from './noaaClient.js';
 import { cityLocalDate, cityLocalHour, cityDayEndUtcMs } from './resolutionTime.js';
 import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast, fetchEnsembleHourly } from './openMeteoClient.js';
 import { ensembleFinalMaxDistribution, bracketWinProbFromFinalMaxes } from './conditionalOracle.js';
-import { calibrateWeatherBracketProbability, classifyBracketShape, isCalibrationLiveCohort } from './bracketCalibration.js';
+import { calibrateWeatherBracketProbability, classifyBracketShape, isCalibrationLiveCohortForSide } from './bracketCalibration.js';
 import { getCityBias, getCityActuals } from './cityBias.js';
 import type { CityBias, CityActuals } from './cityBias.js';
 import { cacheForecast, cacheShadowEnsemble, readCachedShadowEnsemble } from './forecastCache.js';
@@ -1008,6 +1008,7 @@ function emitWeatherSignalDecision(opp: WeatherBracketOpportunity, hasTrade: boo
       metric: opp.metric,
       bracket: opp.bracketLabel,
       cohort: weatherCohortKey(opp),
+      sideCohort: `${opp.tradeSide}|${weatherCohortKey(opp)}`,
       tradeSide: opp.tradeSide,
       sidePrice: opp.outcomePrice,
       modelProbCalibrated: opp.modelProbCalibrated ?? null,
@@ -1272,11 +1273,11 @@ export interface FindMispricedOptions {
    *  comparison fields. SHADOW-ONLY — never changes the live side/edge. Default
    *  false at the function level; scanWeatherMarkets passes the config value. */
   calibrationShadowEnabled?: boolean;
-  /** PR2b: when true, brackets whose (shape|source) cohort is in
+  /** PR2b: when true, brackets whose side|metric|shape|source cohort is in
    *  calibrationLiveCohorts use the CALIBRATED probability for live side/edge/Kelly
    *  and may take interior YES. Default false → raw decisions unchanged. */
   calibrationLiveEnabled?: boolean;
-  /** Comma-separated `shape|source` allow-list for calibrationLiveEnabled. */
+  /** Comma-separated side-aware allow-list for calibrationLiveEnabled. */
   calibrationLiveCohorts?: string;
   /** Market-price floor for calibrated YES on live cohorts (replaces the raw 0.30
    *  floor; live cohorts rely on calibrated edge + this lower floor). Default 0.15. */
@@ -1547,15 +1548,17 @@ export function findMispricedBrackets(
 
     // ── Calibration (PR2a shadow / PR2b live) ────────────────────────────────
     // Compute the calibrated P(YES) up-front. It is LOGGED in shadow always; and
-    // for cohorts allow-listed in WEATHER_CALIBRATION_LIVE_COHORTS (when live is on)
-    // it DRIVES the live side/edge/Kelly — those cohorts validated +EV OOS. All
-    // other cohorts keep the raw model + existing YES gates, unchanged.
+    // for side-specific cohorts allow-listed in WEATHER_CALIBRATION_LIVE_COHORTS
+    // (when live is on) it DRIVES the live side/edge/Kelly. Non-admitted selected
+    // sides are shadow-only when requireCalibrationCohortForEntry is enabled.
     const shape = classifyBracketShape(bracket.low, bracket.high);
-    const cohortLive = calibrationLiveEnabled
-      && isCalibrationLiveCohort(event.metric, shape, forecast.source, calibrationLiveCohorts);
+    const yesCohortLive = calibrationLiveEnabled
+      && isCalibrationLiveCohortForSide('YES', event.metric, shape, forecast.source, calibrationLiveCohorts);
+    const noCohortLive = calibrationLiveEnabled
+      && isCalibrationLiveCohortForSide('NO', event.metric, shape, forecast.source, calibrationLiveCohorts);
     let modelProbCalibrated: number | null = null;
     let modelProbCalInput: number | null = null;
-    if (calibrationShadowEnabled || cohortLive) {
+    if (calibrationShadowEnabled || calibrationLiveEnabled) {
       // Calibrate the bias-corrected, PRE-source-inflation Gaussian — the scale the
       // map is trained on (logged as modelProbCalInput so train==serve stays auditable).
       modelProbCalInput = estimateBracketProbability(
@@ -1589,9 +1592,9 @@ export function findMispricedBrackets(
     // Live cohorts gate YES on calibrated edge + a lower price floor; the raw 0.30
     // market-price / 0.50 model-prob floors would block the (cheap) +EV calibrated
     // YES, and the cohort allow-list already guards against bad longshots.
-    const interiorYesAllowed = cohortLive || yesAllowInteriorBrackets;
-    const yesMinPriceEff = cohortLive ? calibrationYesMinPrice : yesMinMarketPrice;
-    const yesMinModelProbEff = cohortLive ? 0 : yesMinModelProb;
+    const interiorYesAllowed = yesCohortLive || yesAllowInteriorBrackets;
+    const yesMinPriceEff = yesCohortLive ? calibrationYesMinPrice : yesMinMarketPrice;
+    const yesMinModelProbEff = yesCohortLive ? 0 : yesMinModelProb;
     let yesGateReason: string | null = null;
     if (bracket.low !== null && bracket.high !== null && !interiorYesAllowed) {
       yesGateReason = 'interior_bracket';
@@ -1600,19 +1603,37 @@ export function findMispricedBrackets(
     } else if (decisionProb < yesMinModelProbEff) {
       yesGateReason = 'model_prob_below_min';
     }
+    const yesBlockedByCalibrationCohort =
+      calibrationLiveEnabled
+      && requireCalibrationCohortForEntry
+      && !yesCohortLive
+      && noCohortLive;
+    if (yesGateReason === null && yesBlockedByCalibrationCohort) {
+      yesGateReason = 'calibration_cohort_not_admitted';
+    }
     const yesGateBlocked = yesGateReason !== null;
+    const noBlockedByCalibrationCohort =
+      calibrationLiveEnabled
+      && requireCalibrationCohortForEntry
+      && !noCohortLive
+      && yesCohortLive;
 
     let tradeSide: 'YES' | 'NO';
     let edge: number;
     // The model preferred YES (edgeYes ≥ edgeNo > 0) but a YES quality gate
     // blocked it. This is the fallback cohort the NO-bias issue targets: with YES
     // systematically underpredicted, "we won't buy YES" must NOT become "buy NO".
-    const wouldHaveFallenBackToNo = yesGateBlocked && edgeYes > 0 && edgeYes >= edgeNo && edgeNo > 0;
+    const wouldHaveFallenBackToNo =
+      !yesBlockedByCalibrationCohort
+      && yesGateBlocked
+      && edgeYes > 0
+      && edgeYes >= edgeNo
+      && edgeNo > 0;
     // True when this NO exists only as a (disabled) YES-gate fallback: recorded
     // for shadow analysis but never traded.
     let blockedByNoFallback = false;
 
-    if (!yesGateBlocked && edgeYes >= edgeNo && edgeYes > 0) {
+    if (!yesGateBlocked && edgeYes > 0 && (edgeYes >= edgeNo || noBlockedByCalibrationCohort)) {
       tradeSide = 'YES';
       edge = edgeYes;
     } else if (edgeNo > 0) {
@@ -1642,6 +1663,8 @@ export function findMispricedBrackets(
     }
 
     if (edge < minEdge) continue;
+
+    const cohortLive = tradeSide === 'YES' ? yesCohortLive : noCohortLive;
 
     // Gate: tail brackets ("X or higher" / "X or below") produce spuriously positive
     // NO edge when the model's P(YES) is high — edgeNo = (1-decisionProb) - noPrice can
@@ -2855,6 +2878,7 @@ function buildBracketOppositeSignal(
     reasoning: `Bracket opposite of ${opp.tradeSide}; primary edge=${opp.edge.toFixed(3)} daysOut=${opp.daysOut}`,
     _isBracketOpposite: true,
     _isResolutionDay: opp.isResolutionDay ?? false,
+    ...(opp.decisionId ? { decisionId: opp.decisionId } : {}),
     // Size the leg by the primary's share count (1:1 pairing), not by stakeUsd
     // divided by the discounted post price — see executor sizing for the rationale.
     ...(targetShares > 0 ? { _bracketTargetShares: targetShares } : {}),
