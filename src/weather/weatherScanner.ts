@@ -2778,6 +2778,19 @@ export async function executeWeatherLockIns(
       // it risks the station-divergence trap on an irreversible bet. (Backtest: all 23
       // validated lock-in wins were settlement_aligned, so this costs zero edge.)
       if (liveObs?.observedMax == null || liveObs.observedAt == null || liveObs.confidence !== 'settlement_aligned') continue;
+      // WU's same-day historical endpoint is not safe as a monotonic intraday
+      // source: it has produced a lock-in max that later revised downward. Keep
+      // it for shadow/drift diagnostics, but do not use it for irreversible entries.
+      if (liveObs.source === 'wu-live') {
+        logger.info('[weather-lockin] skipping WU live observation — same-day max is revision-prone', {
+          city: opp.city,
+          targetDate: opp.targetDate,
+          bracket: opp.bracketLabel,
+          observedMax: liveObs.observedMax,
+          observedAt: liveObs.observedAt,
+        });
+        continue;
+      }
       if (!isWeatherHighLockedIn(liveObs.observedMax, bracket.high, cfg.WEATHER_LOCKIN_MARGIN)) continue;
       // OBSERVED certainty (not forecast): stamp a near-certain win-prob so the executor's
       // res-day taker edge (modelWin − ask) clears. consensusProbability = P(in-bracket)
@@ -2786,6 +2799,7 @@ export async function executeWeatherLockIns(
         { ...opp, modelProbability: 1 - cfg.WEATHER_LOCKIN_MODEL_WIN, edge: cfg.WEATHER_LOCKIN_MODEL_WIN - opp.outcomePrice },
         cfg.WEATHER_LOCKIN_STAKE_USD,
       );
+      signal._forceTakerEntry = true;
       logger.info('[weather-lockin] observed max exceeded bracket — taking NO', {
         city: opp.city, targetDate: opp.targetDate, bracket: opp.bracketLabel,
         observedMax: liveObs.observedMax, bracketHigh: bracket.high, margin: cfg.WEATHER_LOCKIN_MARGIN,

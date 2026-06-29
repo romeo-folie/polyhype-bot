@@ -3650,7 +3650,8 @@ describe('weather conviction taker entry', () => {
     expect(result.skipped).toBe(false);
     expect(result.executionVenue).toBe('clob');
     expect(result.error).toBeFalsy();
-    expect(result.entryExecutionPath).toBe('maker_fill');
+    expect(result.entryExecutionPath).toBe('clob_direct');
+    expect(result.entryOrderType).toBe('taker');
   });
 
   it('persists a PARTIAL taker fill as pending — residual tracked for next-cycle resume', async () => {
@@ -3718,7 +3719,8 @@ describe('weather conviction taker entry', () => {
     expect(mockSubmitLimit).toHaveBeenCalledWith(
       expect.objectContaining({ tokenId: 'tok-yes', price: 0.70, postOnly: false }),
     );
-    expect(result.entryExecutionPath).toBe('maker_fill'); // taker took
+    expect(result.entryExecutionPath).toBe('clob_direct'); // taker took
+    expect(result.entryOrderType).toBe('taker');
   });
 
   it('pre-empts at WEATHER_REAL_BOOK_DISCOUNT_BPS=0 too (pending-check is taker-aware, not discount-gated)', async () => {
@@ -3732,7 +3734,8 @@ describe('weather conviction taker entry', () => {
     expect(mockSubmitLimit).toHaveBeenCalledWith(
       expect.objectContaining({ price: 0.70, postOnly: false }),
     );
-    expect(result.entryExecutionPath).toBe('maker_fill');
+    expect(result.entryExecutionPath).toBe('clob_direct');
+    expect(result.entryOrderType).toBe('taker');
   });
 
   it('does NOT pre-empt when the cancel is unconfirmed (no double exposure)', async () => {
@@ -3832,6 +3835,22 @@ describe('weather conviction taker entry', () => {
     expect(redis.incrbyfloat).not.toHaveBeenCalled();
   });
 
+  it('forced taker weather signal skips on a ghost book instead of falling back to maker', async () => {
+    mockGetOrderBook.mockResolvedValue(wideRealBook('0.99', '0.01')); // ghost → no real ask to take
+    const redis = makeTakerRedis();
+    const result = await executeSignal(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      weatherSignal({ _forceTakerEntry: true } as any),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      redis as any,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('no_clob_book');
+    expect(mockSubmitLimit).not.toHaveBeenCalled();
+    expect(redis.incrbyfloat).not.toHaveBeenCalled();
+  });
+
   it('is res-day-only: does NOT take a pre-resolution-day bracket', async () => {
     const redis = makeTakerRedis();
     const result = await executeSignal(
@@ -3877,7 +3896,8 @@ describe('weather conviction taker entry', () => {
     expect(mockSubmitLimit).toHaveBeenCalledWith(
       expect.objectContaining({ tokenId: 'tok-yes', price: 0.70, postOnly: false }),
     );
-    expect(result.entryExecutionPath).toBe('maker_fill');
+    expect(result.entryExecutionPath).toBe('clob_direct');
+    expect(result.entryOrderType).toBe('taker');
   });
 
   it('uses the NO-side ask and NO token when direction is NO', async () => {

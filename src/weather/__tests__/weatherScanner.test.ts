@@ -1305,8 +1305,8 @@ describe('executeWeatherLockIns', () => {
     WEATHER_LOCKIN_ENABLED: true, WEATHER_TAKER_ENTRY_ENABLED: true,
     WEATHER_LOCKIN_MARGIN: 1.0, WEATHER_LOCKIN_STAKE_USD: 10, WEATHER_LOCKIN_MODEL_WIN: 0.97, ...over,
   });
-  const obs = (observedMax: number, confidence = 'settlement_aligned') => (async () => ({
-    city: 'taipei', targetDate: '2026-06-26', observedMax, metric: 'high', source: 'wu-live',
+  const obs = (observedMax: number, confidence = 'settlement_aligned', source = 'hko-live') => (async () => ({
+    city: 'taipei', targetDate: '2026-06-26', observedMax, metric: 'high', source,
     observedAt: '2026-06-26T07:00:00Z', confidence,
   })) as never;
 
@@ -1315,11 +1315,12 @@ describe('executeWeatherLockIns', () => {
     const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
     await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(30), execute: execute as never });
     expect(execute).toHaveBeenCalledTimes(1);
-    const sig = execute.mock.calls[0]![0] as { direction: string; consensusProbability: number; stakeUsd: number; _isResolutionDay: boolean };
+    const sig = execute.mock.calls[0]![0] as { direction: string; consensusProbability: number; stakeUsd: number; _isResolutionDay: boolean; _forceTakerEntry?: boolean };
     expect(sig.direction).toBe('NO');
     expect(sig.consensusProbability).toBeCloseTo(0.03, 6); // 1 − WEATHER_LOCKIN_MODEL_WIN → near-certain NO
     expect(sig.stakeUsd).toBe(10);
     expect(sig._isResolutionDay).toBe(true);
+    expect(sig._forceTakerEntry).toBe(true);
   });
 
   it('still takes lock-in NO when calibration cohort gating blocked the scanner entry path', async () => {
@@ -1366,6 +1367,18 @@ describe('executeWeatherLockIns', () => {
     mockLoadConfig.mockReturnValue(lockCfg());
     const execute = vi.fn();
     await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(40, 'proxy'), execute: execute as never });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('skips WU live observations because same-day WU historical highs can revise downward', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn();
+    await executeWeatherLockIns(
+      {} as never,
+      [baseOpp],
+      undefined,
+      { fetchObs: obs(40, 'settlement_aligned', 'wu-live'), execute: execute as never },
+    );
     expect(execute).not.toHaveBeenCalled();
   });
 
