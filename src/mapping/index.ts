@@ -109,6 +109,10 @@ export interface TradeSignal {
    *  (city-local timezone). False for pre-resolution-day entries. Used by the executor
    *  to apply WEATHER_EARLY_ENTRY_MAX_PRICE on off-day weather entries only. */
   _isResolutionDay?: boolean;
+  /** True when the producer requires an immediate taker entry and forbids maker
+   *  fallback. Used by weather lock-in entries, where a resting bid is not the
+   *  intended risk profile. */
+  _forceTakerEntry?: boolean;
   /** True when this is the bracket-strategy opposite-side leg of a primary weather
    *  signal. The executor bypasses the opposite-side entry gate and applies
    *  WEATHER_BRACKET_OPPOSITE_DISCOUNT_BPS for real-book pricing instead of the

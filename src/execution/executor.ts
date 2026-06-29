@@ -3306,6 +3306,19 @@ export async function executeSignal(
       }
     }
 
+    if (signal.source === 'weather' && signal._forceTakerEntry === true && !weatherTakerEligible) {
+      const reason = emptyBook ? 'no_clob_book' : 'liquidity_gate';
+      logger.info('[weather-taker] forced taker entry blocked — no maker fallback', {
+        marketId: signal.marketId,
+        reason,
+        takerSideAsk,
+        maxPrice: cfg.WEATHER_TAKER_ENTRY_MAX_PRICE,
+        minEdge: cfg.WEATHER_TAKER_ENTRY_MIN_EDGE,
+        dailyCapUsd: cfg.WEATHER_TAKER_ENTRY_MAX_DAILY_USD,
+      });
+      return recordSkip(reason, 'skipped', guardrailDiagnostic);
+    }
+
     // canEmptyBookMaker uses a two-step source check for empty books: a signal is a
     // candidate if it is generally maker-eligible OR explicitly listed in the
     // empty-book-specific whitelist. The whitelist lets sources like oracle-lag
@@ -3539,6 +3552,7 @@ export async function executeSignal(
     }
 
     if (makerAttempt.ok && makerAttempt.tradeResult?.success) {
+      const isWeatherTakerFill = weatherTakerEligible && signal.source === 'weather';
       if (
         makerAttempt.filledStakeUsd &&
         makerAttempt.filledStakeUsd > 0 &&
@@ -3566,21 +3580,23 @@ export async function executeSignal(
       }
 
       makerFilled = true;
-      Object.assign(
-        makerTelemetry,
-        calculateMakerPriceImprovement(
-          makerBenchmark.counterfactualImmediateTakerPrice,
-          // Prefer the actual fill VWAP so price improvement reflects what we
-          // really paid, not the posted limit.
-          makerAttempt.makerAvgFillPrice ?? makerAttempt.makerPostedPrice,
-          makerAttempt.tradeResult.shares_bought ?? makerAttempt.makerSharesFilled ?? null,
-        ),
-      );
-      safeRecordExecutionMetric('maker_filled');
+      if (!isWeatherTakerFill) {
+        Object.assign(
+          makerTelemetry,
+          calculateMakerPriceImprovement(
+            makerBenchmark.counterfactualImmediateTakerPrice,
+            // Prefer the actual fill VWAP so price improvement reflects what we
+            // really paid, not the posted limit.
+            makerAttempt.makerAvgFillPrice ?? makerAttempt.makerPostedPrice,
+            makerAttempt.tradeResult.shares_bought ?? makerAttempt.makerSharesFilled ?? null,
+          ),
+        );
+      }
+      safeRecordExecutionMetric(isWeatherTakerFill ? 'clob_success' : 'maker_filled', isWeatherTakerFill ? 'weather_taker' : 'count');
       await redis.set(key, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
-      if (makerTelemetry.makerFillStatus === 'partial') {
+      if (!isWeatherTakerFill && makerTelemetry.makerFillStatus === 'partial') {
         safeRecordExecutionMetric('maker_partial_fill');
-      } else {
+      } else if (!isWeatherTakerFill) {
         safeRecordExecutionMetric('maker_full_fill');
       }
       const isFeeMarket = feeMarketBpsObserved != null || signal.feesEnabled === true;
@@ -3648,11 +3664,13 @@ export async function executeSignal(
       });
 
       finalizeAttempt({
-        executionPath: 'maker_fill',
+        executionPath: isWeatherTakerFill ? 'clob_direct' : 'maker_fill',
         finalExecutionPath:
-          makerTelemetry.makerFillStatus === 'partial' ? 'maker_partial_fill' : 'maker_fill',
+          isWeatherTakerFill
+            ? 'clob_direct'
+            : makerTelemetry.makerFillStatus === 'partial' ? 'maker_partial_fill' : 'maker_fill',
         finalVenue: 'clob',
-        finalOrderType: 'maker',
+        finalOrderType: isWeatherTakerFill ? 'taker' : 'maker',
         finalSharesFilled: makerAttempt.tradeResult.shares_bought ?? null,
         finalStakeUsdExecuted: signal.stakeUsd,
         executionSucceeded: true,
@@ -3664,8 +3682,10 @@ export async function executeSignal(
         executionVenue: 'clob',
         modeConfigured: cfg.EXECUTION_MODE,
         entryExecutionPath:
-          makerTelemetry.makerFillStatus === 'partial' ? 'maker_partial_fill' : 'maker_fill',
-        entryOrderType: 'maker',
+          isWeatherTakerFill
+            ? 'clob_direct'
+            : makerTelemetry.makerFillStatus === 'partial' ? 'maker_partial_fill' : 'maker_fill',
+        entryOrderType: isWeatherTakerFill ? 'taker' : 'maker',
         // Actual fill VWAP when attributable — keeps the recorded entryPrice
         // consistent with the (actual-cost) stake instead of the posted limit.
         entryPrice: makerAttempt.makerAvgFillPrice ?? makerAttempt.makerPostedPrice ?? null,
