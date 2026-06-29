@@ -95,7 +95,7 @@ const baseConfig = {
   WEATHER_LOCKIN_STAKE_USD: 10,
   WEATHER_LOCKIN_MODEL_WIN: 0.97,
   WEATHER_MODAL_MASS_VETO_ENABLED: false,
-  WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.50,
+  WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.65,
   // Evaluate the modal-mass veto on every horizon in tests (events target ~2
   // days out, not res-day). Production defaults this true (res-day only).
   WEATHER_MODAL_MASS_VETO_RES_DAY_ONLY: false,
@@ -6528,8 +6528,25 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
     };
   }
 
+  function hourlyWithModalMass(mass: number) {
+    // 20 members, each a flat 24-hour trajectory. `mass` controls the share
+    // inside 50-51°F widened by margin=1, i.e. [49,52].
+    const members = 20;
+    const inside = Math.round(members * mass);
+    return {
+      hours: Array.from({ length: 24 }, (_, h) => h * 3600),
+      memberTemps: Array.from({ length: members }, (_, i) => {
+        const tempF = i < inside ? 50.5 : 60;
+        return Array.from({ length: 24 }, () => tempF);
+      }),
+      memberCount: members,
+      forecastDate: iso,
+      ensembleModel: 'gfs' as const,
+    };
+  }
+
   function hourlyClusteredAt(tempF: number) {
-    // 20 members, each a flat 24-hour trajectory at tempF → daily max = tempF.
+    // 20 members, each a flat 24-hour trajectory at tempF -> daily max = tempF.
     return {
       hours: Array.from({ length: 24 }, (_, h) => h * 3600),
       memberTemps: Array.from({ length: 20 }, () => Array.from({ length: 24 }, () => tempF)),
@@ -6548,7 +6565,7 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
       WEATHER_MIN_MODEL_COVERAGE: 0,
       WEATHER_MIN_EDGE: 0.02,
       WEATHER_MODAL_MASS_VETO_ENABLED: true,
-      WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.5,
+      WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.65,
       WEATHER_INTERIOR_NO_FORECAST_MARGIN: 1,
     });
     globalThis.fetch = vi.fn().mockResolvedValue({
@@ -6565,14 +6582,23 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
     mockLoadConfig.mockImplementation(() => ({ ...baseConfig }));
   });
 
-  it('blocks the interior NO when ensemble members cluster in the bracket', async () => {
-    mockFetchEnsembleHourly.mockResolvedValue(hourlyClusteredAt(50.5));
+  it('blocks the interior NO when ensemble YES mass reaches the higher threshold', async () => {
+    mockFetchEnsembleHourly.mockResolvedValue(hourlyWithModalMass(0.65));
     const results = await scanWeatherMarkets(redisMock as never);
     const no = results.find((o) => o.bracketLabel === '50-51°F' && o.tradeSide === 'NO');
     expect(no).toBeDefined();
     expect(no!.blockedByModalMass).toBe(true);
-    expect(no!.ensembleYesMass ?? 0).toBeGreaterThanOrEqual(0.5);
+    expect(no!.ensembleYesMass ?? 0).toBeGreaterThanOrEqual(0.65);
     expect(mockFetchEnsembleHourly).toHaveBeenCalled();
+  });
+
+  it('does not block the interior NO at 50% ensemble YES mass', async () => {
+    mockFetchEnsembleHourly.mockResolvedValue(hourlyWithModalMass(0.50));
+    const results = await scanWeatherMarkets(redisMock as never);
+    const no = results.find((o) => o.bracketLabel === '50-51°F' && o.tradeSide === 'NO');
+    expect(no).toBeDefined();
+    expect(no!.blockedByModalMass).toBe(false);
+    expect(no!.ensembleYesMass).toBeCloseTo(0.50, 6);
   });
 
   it('does not block the interior NO when ensemble members are far from the bracket', async () => {
@@ -6581,7 +6607,7 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
     const no = results.find((o) => o.bracketLabel === '50-51°F' && o.tradeSide === 'NO');
     expect(no).toBeDefined();
     expect(no!.blockedByModalMass).toBe(false);
-    expect(no!.ensembleYesMass ?? 1).toBeLessThan(0.5);
+    expect(no!.ensembleYesMass ?? 1).toBeLessThan(0.65);
   });
 
   it('skips the ensemble-hourly fetch when the veto is disabled', async () => {
@@ -6604,7 +6630,7 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
       WEATHER_MIN_MODEL_COVERAGE: 0,
       WEATHER_MIN_EDGE: 0.02,
       WEATHER_MODAL_MASS_VETO_ENABLED: true,
-      WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.5,
+      WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.65,
       WEATHER_INTERIOR_NO_FORECAST_MARGIN: 1,
       WEATHER_MODAL_MASS_VETO_RES_DAY_ONLY: true,
     });

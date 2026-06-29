@@ -2293,7 +2293,7 @@ export const envSchema = z.object({
   // Costs one extra ensemble-hourly fetch per event that has a surviving bounded
   // NO candidate. Set _ENABLED=false to skip the fetch entirely.
   WEATHER_MODAL_MASS_VETO_ENABLED: boolFromEnv.optional().default(true),
-  WEATHER_INTERIOR_NO_MODAL_MASS_VETO: z.coerce.number().min(0).max(1).optional().default(0.50),
+  WEATHER_INTERIOR_NO_MODAL_MASS_VETO: z.coerce.number().min(0).max(1).optional().default(0.65),
   // --- CONFLUENCE GATES (multi-signal cross-check) ---
   // MAE-aware coin-flip veto: widen the interior-NO margin by the city's MEASURED
   // forecast error (cityBias.correctedMae, ~1.3-1.5°F) × this multiplier, so we don't
