@@ -153,6 +153,7 @@ export function isCalibrationLiveCohortForSide(
       && c.source === wantSource);
 }
 
+/** @deprecated Runtime callers should use side-aware isCalibrationLiveCohortForSide. */
 export function isCalibrationLiveCohort(
   metric: string,
   shape: BracketShape,

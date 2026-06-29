@@ -1603,6 +1603,14 @@ export function findMispricedBrackets(
     } else if (decisionProb < yesMinModelProbEff) {
       yesGateReason = 'model_prob_below_min';
     }
+    const yesBlockedByCalibrationCohort =
+      calibrationLiveEnabled
+      && requireCalibrationCohortForEntry
+      && !yesCohortLive
+      && noCohortLive;
+    if (yesGateReason === null && yesBlockedByCalibrationCohort) {
+      yesGateReason = 'calibration_cohort_not_admitted';
+    }
     const yesGateBlocked = yesGateReason !== null;
 
     let tradeSide: 'YES' | 'NO';
@@ -1610,7 +1618,12 @@ export function findMispricedBrackets(
     // The model preferred YES (edgeYes ≥ edgeNo > 0) but a YES quality gate
     // blocked it. This is the fallback cohort the NO-bias issue targets: with YES
     // systematically underpredicted, "we won't buy YES" must NOT become "buy NO".
-    const wouldHaveFallenBackToNo = yesGateBlocked && edgeYes > 0 && edgeYes >= edgeNo && edgeNo > 0;
+    const wouldHaveFallenBackToNo =
+      !yesBlockedByCalibrationCohort
+      && yesGateBlocked
+      && edgeYes > 0
+      && edgeYes >= edgeNo
+      && edgeNo > 0;
     // True when this NO exists only as a (disabled) YES-gate fallback: recorded
     // for shadow analysis but never traded.
     let blockedByNoFallback = false;
@@ -2846,6 +2859,7 @@ function buildBracketOppositeSignal(
     reasoning: `Bracket opposite of ${opp.tradeSide}; primary edge=${opp.edge.toFixed(3)} daysOut=${opp.daysOut}`,
     _isBracketOpposite: true,
     _isResolutionDay: opp.isResolutionDay ?? false,
+    ...(opp.decisionId ? { decisionId: opp.decisionId } : {}),
     // Size the leg by the primary's share count (1:1 pairing), not by stakeUsd
     // divided by the discounted post price — see executor sizing for the rationale.
     ...(targetShares > 0 ? { _bracketTargetShares: targetShares } : {}),

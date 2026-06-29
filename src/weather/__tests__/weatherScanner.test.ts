@@ -1859,16 +1859,6 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
   });
 
   it('requires the selected calibrated side to be admitted', () => {
-    const yesOpp = findMispricedBrackets(rangeEvent, forecastHrrr, 1, 0.0, {
-      minModelCoverage: 0, yesAllowInteriorBrackets: true, yesMinMarketPrice: 0.10, yesMinModelProb: 0.50,
-      calibrationShadowEnabled: true, calibrationLiveEnabled: true,
-      calibrationLiveCohorts: 'NO|high|range|hrrr-combined', calibrationYesMinPrice: 0.15,
-    }).opportunities[0]!;
-    expect(yesOpp.tradeSide).toBe('YES');
-    expect(yesOpp.calibrationLive).toBe(false);
-    expect(yesOpp.blockedByCalibrationCohort).toBe(true);
-    expect(yesOpp.allowedByConfig).toBe(false);
-
     _setCalibrationTableForTest({
       _meta: { generatedAt: '', scoredPairs: 9000, binCount: 10, priorStrength: 20, minCellSamples: 80, version: 1 },
       byShapeSourceHorizon: {},
@@ -1885,6 +1875,46 @@ describe('findMispricedBrackets - calibrated live decisions (PR2b)', () => {
     expect(noOpp.calibrationLive).toBe(true);
     expect(noOpp.blockedByCalibrationCohort).toBe(false);
     expect(noOpp.allowedByConfig).toBe(true);
+  });
+
+  it('falls through to an admitted NO when an unadmitted tail YES has the larger edge', () => {
+    _setCalibrationTableForTest({
+      _meta: { generatedAt: '', scoredPairs: 9000, binCount: 10, priorStrength: 20, minCellSamples: 80, version: 1 },
+      byShapeSourceHorizon: {},
+      byShapeSource: { 'high|high_tail|hrrr-combined': { n: 500, bins: Array(10).fill(0.60) } },
+      byShape: {},
+      byMetric: { high: { n: 9000, bins: Array.from({ length: 10 }, (_, i) => (i + 0.5) / 10) } },
+    } as never);
+    const tailEvent = {
+      ...rangeEvent,
+      brackets: [{
+        marketId: 'm-tail', conditionId: 'c-tail', clobTokenIds: ['ty-tail', 'tn-tail'],
+        threshold: 0, low: 70, high: null, label: '70°F or higher',
+        yesPrice: 0.20, noPrice: 0.15,
+      }],
+    };
+    const opp = findMispricedBrackets(tailEvent, forecastHrrr, 1, 0.0, {
+      minModelCoverage: 0,
+      yesAllowInteriorBrackets: false,
+      yesMinMarketPrice: 0.10,
+      yesMinModelProb: 0.50,
+      maxTailNoBetModelProb: 1,
+      cityActuals: {
+        highs: [60, 61, 62, 63, 64, 65, 66],
+        unit: 'fahrenheit',
+        sampleSize: 7,
+        updatedAt: '2026-06-30T00:00:00Z',
+      },
+      calibrationShadowEnabled: true,
+      calibrationLiveEnabled: true,
+      calibrationLiveCohorts: 'NO|high|high_tail|hrrr-combined',
+      calibrationYesMinPrice: 0.15,
+    }).opportunities[0]!;
+
+    expect(opp.tradeSide).toBe('NO');
+    expect(opp.calibrationLive).toBe(true);
+    expect(opp.blockedByCalibrationCohort).toBe(false);
+    expect(opp.allowedByConfig).toBe(true);
   });
 });
 
@@ -4338,6 +4368,13 @@ describe('resolution-day size-up and near-res gate bypass', () => {
       (c) => (c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite === true,
     );
     expect(bracketCall).toBeDefined();
+    const primaryCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => !(c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite,
+    );
+    expect(primaryCall).toBeDefined();
+    expect((bracketCall![0] as { decisionId?: string }).decisionId).toBe(
+      (primaryCall![0] as { decisionId?: string }).decisionId,
+    );
   });
 
   it('bracket leg carries _bracketTargetShares equal to the primary filled share count', async () => {
