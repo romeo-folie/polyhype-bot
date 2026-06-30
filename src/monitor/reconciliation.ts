@@ -693,7 +693,14 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
       // most adversely-selected weather fills land (the scanner blocked re-emission
       // after an adverse reprice, so the executor-resume path never ran). Cohort
       // context joins from the 'posted' row by marketId+direction. Gated, default off.
-      if (pendingOrder.source === 'weather' || isWeatherSourced(pendingOrder.sourcedFrom ?? '')) {
+      // Scoped to the PRIMARY ENTRY leg only (the toxicity question is about entries):
+      // bracket-opposite hedge legs are excluded here, matching the scanner — which
+      // logs only the primary post — so the dataset never has an orphan 'filled' row
+      // with no matching 'posted' row. (Bracket legs have no directional edge/cohort.)
+      if (
+        !pendingOrder.isBracketOpposite
+        && (pendingOrder.source === 'weather' || isWeatherSourced(pendingOrder.sourcedFrom ?? ''))
+      ) {
         if (loadConfig().WEATHER_MAKER_LIFECYCLE_LOG_ENABLED) {
           enqueueWeatherMakerLifecycle({
             eventType: 'filled',

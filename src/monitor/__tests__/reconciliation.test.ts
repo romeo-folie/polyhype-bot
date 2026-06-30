@@ -556,6 +556,36 @@ describe('Position Reconciliation Healer', () => {
     expect(lifecycle[1].payload.clobMid).toBeNull(); // unrecoverable in the async path
   });
 
+  it('does NOT log a maker-lifecycle row for a bracket-OPPOSITE leg fill (primary-entry scope)', async () => {
+    (config.loadConfig as any).mockReturnValue({
+      SIZE_UP_ENABLED: true, SIZE_UP_ELIGIBLE_SOURCES: 'weather', RECONCILE_GHOST_ALERT_THRESHOLD: 5,
+      RECONCILE_MIN_HEAL_SHARES: 1, RECONCILE_WIPE_SUPPRESS_ALERT_RUNS: 3, RECONCILE_WIPE_SUPPRESS_TTL_S: 21_600,
+      WEATHER_EXIT_BLOCKED_ENABLED: true, MONITOR_NEAR_RES_PRICE_THRESHOLD: 0.95,
+      WEATHER_MAKER_LIFECYCLE_LOG_ENABLED: true,
+    });
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([
+      { conditionId: 'cond-wx', asset: 'tok-no', avgPrice: 0.62, size: 12 },
+    ]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue({
+      id: 'wx-mkt', question: 'Will the highest temperature in Seoul be 30°C on June 30?',
+      conditionId: 'cond-wx', clobTokenIds: ['tok-yes', 'tok-no'],
+    });
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-wx-br', tokenId: 'tok-no', price: 0.60, size: 12,
+      postedAt: Date.now() - 60_000, expiresAt: Date.now() + 60_000,
+      direction: 'NO', source: 'weather', sourcedFrom: 'weather:seoul:2026-06-30:30°C',
+      isBracketOpposite: true, // hedge leg — excluded from the lifecycle dataset
+    });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    const lifecycle = (writeQueue.enqueueWrite as any).mock.calls.find(
+      (c: any[]) => c[0] === 'shadow_observations' && c[1]?.kind === 'weather_maker_lifecycle',
+    );
+    expect(lifecycle).toBeUndefined();
+  });
+
   it('does NOT log a maker-lifecycle row for a weather orphan fill when the flag is off', async () => {
     // Set the config explicitly (flag off) — a prior test may have left loadConfig
     // returning a flag-on override (mockReturnValue survives clearAllMocks).

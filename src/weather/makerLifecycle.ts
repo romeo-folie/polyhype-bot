@@ -18,6 +18,12 @@
  * reprice, so the executor-resume path never runs and fill-time market state is
  * unrecoverable). So 'reconciler' fills are a robust toxicity proxy even when
  * the precise fill-time mid is null.
+ *
+ * SCOPE — primary ENTRY maker legs only. Bracket-opposite hedge legs (free-arb
+ * opposite side, no directional edge/cohort) are excluded at BOTH emission sites
+ * (the scanner logs only the primary leg; the reconciler skips isBracketOpposite
+ * pending orders) so the dataset is never partially joined — every 'filled' row
+ * has a matching 'posted' row.
  */
 import { enqueueWrite } from '../db/writeQueue.js';
 
