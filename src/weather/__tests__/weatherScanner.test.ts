@@ -4124,6 +4124,63 @@ describe('scanWeatherMarkets', () => {
     });
   });
 
+  // ── maker-lifecycle toxicity logging ────────────────────────────────────
+  describe('maker-lifecycle logging (WEATHER_MAKER_LIFECYCLE_LOG_ENABLED)', () => {
+    function wire(): void {
+      const evt = makeMockGammaEvent();
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve([evt]) }) as unknown as typeof fetch;
+      mockFetchNwsForecast.mockResolvedValue({ highF: 52, lowF: 38, precipProbability: 10, forecastDate: targetIso, shortForecast: 'Cloudy' });
+      mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: targetIso });
+      mockFetchEnsemble.mockResolvedValue({ meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: targetIso });
+      mockGetBankroll.mockResolvedValue(1000);
+    }
+    function lifecycleRows(): { payload: Record<string, unknown> }[] {
+      return mockEnqueueWrite.mock.calls
+        .filter((c) => c[0] === 'shadow_observations' && (c[1] as { kind?: string }).kind === 'weather_maker_lifecycle')
+        .map((c) => c[1] as { payload: Record<string, unknown> });
+    }
+    const makerPending = { signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true, entryPrice: 0.55, sharesFilled: null, entryExecutionPath: 'maker_pending', decisionBenchmark: { makerPostedPrice: 0.55, decisionMidPrice: 0.58 } };
+    const makerFill = { signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: false, entryPrice: 0.54, sharesFilled: 18, entryExecutionPath: 'maker_fill', decisionBenchmark: { makerPostedPrice: 0.55, decisionMidPrice: 0.50 } };
+
+    it('writes nothing when the flag is off', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_EXECUTION_ENABLED: true, WEATHER_MAKER_LIFECYCLE_LOG_ENABLED: false });
+      wire();
+      mockExecuteAndRecordSignal.mockResolvedValue(makerPending as never);
+      await runWeatherScan(redisMock as never);
+      expect(lifecycleRows()).toHaveLength(0);
+    });
+
+    it('logs a POSTED row on a fresh maker_pending order', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_EXECUTION_ENABLED: true, WEATHER_MAKER_LIFECYCLE_LOG_ENABLED: true });
+      wire();
+      mockExecuteAndRecordSignal.mockResolvedValue(makerPending as never);
+      await runWeatherScan(redisMock as never);
+      const rows = lifecycleRows();
+      expect(rows.length).toBeGreaterThan(0);
+      for (const r of rows) {
+        expect(r.payload.eventType).toBe('posted');
+        expect(r.payload.fillDetectionPath).toBeNull();
+        expect(typeof r.payload.strategyFamily).toBe('string');
+        expect(r.payload.postedPrice).toBe(0.55);
+      }
+    });
+
+    it('logs a FILLED row (executor_resume) on a maker_fill detection', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_EXECUTION_ENABLED: true, WEATHER_MAKER_LIFECYCLE_LOG_ENABLED: true });
+      wire();
+      mockExecuteAndRecordSignal.mockResolvedValue(makerFill as never);
+      await runWeatherScan(redisMock as never);
+      const rows = lifecycleRows();
+      expect(rows.length).toBeGreaterThan(0);
+      for (const r of rows) {
+        expect(r.payload.eventType).toBe('filled');
+        expect(r.payload.fillDetectionPath).toBe('executor_resume');
+        expect(r.payload.fillPrice).toBe(0.54);
+        expect(r.payload.fillShares).toBe(18);
+      }
+    });
+  });
+
   // ── lowest-temperature discovery + shadow/live gating ────────────────────
   describe('lowest-temperature events', () => {
     function makeMockLowGammaEvent() {

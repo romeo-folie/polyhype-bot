@@ -8,6 +8,7 @@ import * as config from '../../shared/config.js';
 import * as pendingMakerOrders from '../../execution/pendingMakerOrders.js';
 import * as telegram from '../../execution/telegram.js';
 import * as clob from '../../shared/clob.js';
+import * as writeQueue from '../../db/writeQueue.js';
 import type { Redis } from 'ioredis';
 
 vi.mock('../../execution/positionLedger.js', () => ({
@@ -63,8 +64,11 @@ vi.mock('../../shared/config.js', () => ({
     RECONCILE_WIPE_SUPPRESS_TTL_S: 21_600,
     WEATHER_EXIT_BLOCKED_ENABLED: true,
     MONITOR_NEAR_RES_PRICE_THRESHOLD: 0.95,
+    WEATHER_MAKER_LIFECYCLE_LOG_ENABLED: false,
   })),
 }));
+
+vi.mock('../../db/writeQueue.js', () => ({ enqueueWrite: vi.fn() }));
 
 vi.mock('../../execution/telegram.js', () => ({
   notifyTradeExecuted: vi.fn().mockResolvedValue(undefined),
@@ -515,6 +519,72 @@ describe('Position Reconciliation Healer', () => {
       undefined,
       expect.objectContaining({ venue: 'clob' }),
     );
+  });
+
+  it('logs a maker-lifecycle FILLED row (reconciler path) for a weather orphan with a linked pending order when the flag is on', async () => {
+    (config.loadConfig as any).mockReturnValue({
+      SIZE_UP_ENABLED: true, SIZE_UP_ELIGIBLE_SOURCES: 'weather', RECONCILE_GHOST_ALERT_THRESHOLD: 5,
+      RECONCILE_MIN_HEAL_SHARES: 1, RECONCILE_WIPE_SUPPRESS_ALERT_RUNS: 3, RECONCILE_WIPE_SUPPRESS_TTL_S: 21_600,
+      WEATHER_EXIT_BLOCKED_ENABLED: true, MONITOR_NEAR_RES_PRICE_THRESHOLD: 0.95,
+      WEATHER_MAKER_LIFECYCLE_LOG_ENABLED: true,
+    });
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([
+      { conditionId: 'cond-wx', asset: 'tok-no', avgPrice: 0.62, size: 12 },
+    ]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue({
+      id: 'wx-mkt', question: 'Will the highest temperature in Seoul be 30°C on June 30?',
+      conditionId: 'cond-wx', clobTokenIds: ['tok-yes', 'tok-no'],
+    });
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-wx-1', tokenId: 'tok-no', price: 0.60, size: 12,
+      postedAt: Date.now() - 60_000, expiresAt: Date.now() + 60_000,
+      consensusP: 0.55, direction: 'NO', edgeMagnitude: 0.10, bestAskAtPosting: 0.65,
+      intendedStakeUsd: 7, sourcedFrom: 'weather:seoul:2026-06-30:30°C', source: 'weather',
+    });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    const lifecycle = (writeQueue.enqueueWrite as any).mock.calls.find(
+      (c: any[]) => c[0] === 'shadow_observations' && c[1]?.kind === 'weather_maker_lifecycle',
+    );
+    expect(lifecycle).toBeDefined();
+    expect(lifecycle[1].payload.eventType).toBe('filled');
+    expect(lifecycle[1].payload.fillDetectionPath).toBe('reconciler');
+    expect(lifecycle[1].payload.fillPrice).toBe(0.62); // basisPrice = orphan avgPrice
+    expect(lifecycle[1].payload.postedPrice).toBe(0.60);
+    expect(lifecycle[1].payload.clobMid).toBeNull(); // unrecoverable in the async path
+  });
+
+  it('does NOT log a maker-lifecycle row for a weather orphan fill when the flag is off', async () => {
+    // Set the config explicitly (flag off) — a prior test may have left loadConfig
+    // returning a flag-on override (mockReturnValue survives clearAllMocks).
+    (config.loadConfig as any).mockReturnValue({
+      SIZE_UP_ENABLED: true, SIZE_UP_ELIGIBLE_SOURCES: 'weather', RECONCILE_GHOST_ALERT_THRESHOLD: 5,
+      RECONCILE_MIN_HEAL_SHARES: 1, RECONCILE_WIPE_SUPPRESS_ALERT_RUNS: 3, RECONCILE_WIPE_SUPPRESS_TTL_S: 21_600,
+      WEATHER_EXIT_BLOCKED_ENABLED: true, MONITOR_NEAR_RES_PRICE_THRESHOLD: 0.95,
+      WEATHER_MAKER_LIFECYCLE_LOG_ENABLED: false,
+    });
+    (positionLedger.getOpenPositions as any).mockResolvedValue([]);
+    (polymarketData.fetchPolymarketPositions as any).mockResolvedValue([
+      { conditionId: 'cond-wx', asset: 'tok-no', avgPrice: 0.62, size: 12 },
+    ]);
+    (polymarketGamma.fetchMarketByConditionId as any).mockResolvedValue({
+      id: 'wx-mkt', question: 'Will the highest temperature in Seoul be 30°C on June 30?',
+      conditionId: 'cond-wx', clobTokenIds: ['tok-yes', 'tok-no'],
+    });
+    (pendingMakerOrders.getPendingOrder as any).mockResolvedValue({
+      orderId: 'order-wx-1', tokenId: 'tok-no', price: 0.60, size: 12,
+      postedAt: Date.now() - 60_000, expiresAt: Date.now() + 60_000,
+      direction: 'NO', source: 'weather', sourcedFrom: 'weather:seoul:2026-06-30:30°C',
+    });
+
+    await runReconciliation(mockRedis, { forceFix: true });
+
+    const lifecycle = (writeQueue.enqueueWrite as any).mock.calls.find(
+      (c: any[]) => c[0] === 'shadow_observations' && c[1]?.kind === 'weather_maker_lifecycle',
+    );
+    expect(lifecycle).toBeUndefined();
   });
 
   it('forwards pendingOrder.reasoning to the async maker-fill Telegram notification', async () => {

@@ -11,6 +11,7 @@ import { fetchPolymarketPositions, type PolymarketPosition } from '../shared/pol
 import { fetchMarketByConditionId } from '../shared/polymarketGamma.js';
 import { isRecentlyClosed, isRecentlyResolved } from '../shared/closedGuard.js';
 import { getPendingOrder, deletePendingOrder } from '../execution/pendingMakerOrders.js';
+import { enqueueWeatherMakerLifecycle } from '../weather/makerLifecycle.js';
 import { notifyTradeExecuted, notify } from '../execution/telegram.js';
 import type { TradeSignal } from '../mapping/index.js';
 import { weatherEndDateFromQuestion } from '../weather/resolutionTime.js';
@@ -688,6 +689,28 @@ async function importClobOrphan(redis: Redis, pos: PolymarketPosition): Promise<
           }),
         });
       }
+      // Maker-lifecycle toxicity logging: this is the ASYNC fill path, where the
+      // most adversely-selected weather fills land (the scanner blocked re-emission
+      // after an adverse reprice, so the executor-resume path never ran). Cohort
+      // context joins from the 'posted' row by marketId+direction. Gated, default off.
+      if (pendingOrder.source === 'weather' || isWeatherSourced(pendingOrder.sourcedFrom ?? '')) {
+        if (loadConfig().WEATHER_MAKER_LIFECYCLE_LOG_ENABLED) {
+          enqueueWeatherMakerLifecycle({
+            eventType: 'filled',
+            fillDetectionPath: 'reconciler',
+            marketId: market.id,
+            direction,
+            postedPrice: pendingOrder.price ?? null,
+            modelProb: pendingOrder.consensusP ?? null,
+            edge: pendingOrder.edgeMagnitude ?? null,
+            fillPrice: basisPrice,
+            fillShares: shares,
+            clobMid: null,      // unrecoverable in the async reconciler path
+            toxicityBps: null,
+          });
+        }
+      }
+
       // Bot-originated maker fill (async path). Emit the one-and-only Telegram
       // notification for this trade — we intentionally don't notify at post time
       // so the user only sees confirmed entries.

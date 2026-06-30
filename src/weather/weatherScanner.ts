@@ -66,6 +66,7 @@ import {
   type WeatherStrategyFamily,
   type WeatherSelectedBy,
 } from './strategyFamily.js';
+import { enqueueWeatherMakerLifecycle, makerToxicityBps } from './makerLifecycle.js';
 import { getCityBias, getCityActuals } from './cityBias.js';
 import type { CityBias, CityActuals } from './cityBias.js';
 import { cacheForecast, cacheShadowEnsemble, readCachedShadowEnsemble } from './forecastCache.js';
@@ -4302,16 +4303,45 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         sharesFilled: result.sharesFilled,
       });
       // Shadow-only: posted price vs the side's market for the primary leg.
-      logger.info('[weather-fill-shadow]', {
-        ...buildWeatherFillShadow({
-          leg: 'primary',
-          side: opp.tradeSide,
-          gammaSideMid: opp.outcomePrice,
-          edge: opp.edge,
-          opp,
-          result,
-        }),
+      const fillShadow = buildWeatherFillShadow({
+        leg: 'primary',
+        side: opp.tradeSide,
+        gammaSideMid: opp.outcomePrice,
+        edge: opp.edge,
+        opp,
+        result,
       });
+      logger.info('[weather-fill-shadow]', { ...fillShadow });
+      // Maker-lifecycle toxicity logging (forward filled-data). Capture a fresh
+      // maker POST and an executor-resume FILL; reconciler fills are captured in
+      // the reconciler. Gated, default off → zero behaviour change.
+      if (cfg.WEATHER_MAKER_LIFECYCLE_LOG_ENABLED) {
+        const isFreshPost = result.entryExecutionPath === 'maker_pending' && result.governorStamped === true;
+        const isMakerFill = result.entryExecutionPath === 'maker_fill';
+        if (isFreshPost || isMakerFill) {
+          enqueueWeatherMakerLifecycle({
+            eventType: isMakerFill ? 'filled' : 'posted',
+            fillDetectionPath: isMakerFill ? 'executor_resume' : null,
+            marketId: opp.marketId,
+            direction: opp.tradeSide,
+            strategyFamily: opp.strategyFamily ?? null,
+            city: opp.city,
+            bracket: opp.bracketLabel,
+            targetDate: opp.targetDate,
+            metric: opp.metric,
+            daysOut: opp.daysOut,
+            isResolutionDay: opp.isResolutionDay ?? null,
+            forecastSource: opp.forecastSource,
+            postedPrice: fillShadow.postedPrice,
+            clobMid: fillShadow.clobSideMid,
+            modelProb: opp.modelProbability,
+            edge: opp.edge,
+            fillPrice: isMakerFill ? (result.entryPrice ?? null) : null,
+            fillShares: isMakerFill ? (result.sharesFilled ?? null) : null,
+            toxicityBps: makerToxicityBps(fillShadow.clobSideMid, fillShadow.postedPrice),
+          });
+        }
+      }
       // `governorStamped` is true iff THIS call accepted a new Polymarket order
       // and stamped the shared global governor — including a fresh maker_pending
       // GTC (the executor stamps on order *acceptance*, not only on fill). It is
