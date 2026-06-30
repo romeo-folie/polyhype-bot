@@ -59,6 +59,13 @@ import { cityLocalDate, cityLocalHour, cityDayEndUtcMs } from './resolutionTime.
 import { fetchOpenMeteoForecast, fetchEnsembleForecast, fetchHrrrForecast, fetchEnsembleHourly } from './openMeteoClient.js';
 import { ensembleFinalMaxDistribution, bracketWinProbFromFinalMaxes } from './conditionalOracle.js';
 import { calibrateWeatherBracketProbability, classifyBracketShape, isCalibrationLiveCohortForSide } from './bracketCalibration.js';
+import {
+  classifyWeatherStrategyFamily,
+  weatherSelectedBy,
+  isWeatherModalDisagreement,
+  type WeatherStrategyFamily,
+  type WeatherSelectedBy,
+} from './strategyFamily.js';
 import { getCityBias, getCityActuals } from './cityBias.js';
 import type { CityBias, CityActuals } from './cityBias.js';
 import { cacheForecast, cacheShadowEnsemble, readCachedShadowEnsemble } from './forecastCache.js';
@@ -954,6 +961,17 @@ export interface WeatherBracketOpportunity {
   farNoDistance?: number;
   /** Live market NO quote before the ladder bid ceiling was applied. */
   farNoMarketPrice?: number;
+  /** True for an unbounded bracket ("X or higher" / "X or below"), i.e. bracket
+   *  low === null || high === null. Drives tail_yes vs interior_yes classification. */
+  isTailBracket?: boolean;
+  /** Mutually-exclusive strategy family this candidate belongs to. Stamped after
+   *  all gates (incl. async ones) are evaluated, so resday_lockin_no reflects
+   *  live-observation confirmation. See src/weather/strategyFamily.ts. */
+  strategyFamily?: WeatherStrategyFamily;
+  /** How the decision price/side was chosen (raw_edge / calibrated_edge / ladder_bid / lockin). */
+  selectedBy?: WeatherSelectedBy;
+  /** Orthogonal tag: the model-modal and market-favorite brackets disagree. */
+  modalDisagreement?: boolean;
 }
 
 interface WeatherMarketState {
@@ -1964,6 +1982,7 @@ export function findMispricedBrackets(
       blockedByLiveConfirmation: false,
       blockedByExactOpenMeteoNo: false,
       blockedByCalibrationCohort: calibrationLiveEnabled && requireCalibrationCohortForEntry && !cohortLive,
+      isTailBracket: bracket.low === null || bracket.high === null,
       isFarNoLadder: tradeSide === 'NO' && farNoLadderCandidate,
       isAdjacentNoLadder: tradeSide === 'NO' && adjacentNoLadderCandidate,
       noLadderKind: tradeSide === 'NO' ? noLadderKind : null,
@@ -2592,6 +2611,15 @@ export async function scanWeatherMarkets(
       if (isSizeUpScan) opp.sizeUpScanOnly = true;
       if (isEarlyResolutionDayEntry) opp.earlyResolutionDayEntry = true;
       opp.isResolutionDay = isResolutionDay;
+      // Classify into a strategy family AFTER all gates (including the async
+      // modal-mass / live-confirmation gates above) and isResolutionDay are set,
+      // so resday_lockin_no reflects live-observation confirmation. isTailBracket
+      // is set on every opp at construction; narrow the optional to a definite
+      // boolean for the classifier input.
+      const familyInput = { ...opp, isTailBracket: opp.isTailBracket === true };
+      opp.strategyFamily = classifyWeatherStrategyFamily(familyInput);
+      opp.selectedBy = weatherSelectedBy(familyInput);
+      opp.modalDisagreement = isWeatherModalDisagreement(familyInput);
     }
 
     // Log each opportunity individually for shadow analysis.
@@ -2657,6 +2685,9 @@ export async function scanWeatherMarkets(
         noLadderKind: opp.noLadderKind ?? null,
         farNoDistance: opp.farNoDistance ?? null,
         farNoMarketPrice: opp.farNoMarketPrice ?? null,
+        strategyFamily: opp.strategyFamily ?? null,
+        selectedBy: opp.selectedBy ?? null,
+        modalDisagreement: opp.modalDisagreement ?? false,
         wouldTrade,
       });
       void enqueueWrite('shadow_observations', {
@@ -2740,6 +2771,13 @@ export async function scanWeatherMarkets(
           noLadderKind: opp.noLadderKind ?? null,
           farNoDistance: opp.farNoDistance ?? null,
           farNoMarketPrice: opp.farNoMarketPrice ?? null,
+          // Strategy-family classification (PR1) — one mutually-exclusive family
+          // per candidate, plus the price-selection mechanism and the orthogonal
+          // model-modal-vs-market-favorite disagreement tag.
+          isTailBracket: opp.isTailBracket ?? null,
+          strategyFamily: opp.strategyFamily ?? null,
+          selectedBy: opp.selectedBy ?? null,
+          modalDisagreement: opp.modalDisagreement ?? false,
           modelProbRaw: opp.modelProbRaw ?? null,
           // Calibration shadow (PR2a) — raw vs calibrated for reliability tracking.
           // modelProbCalInput is the (pre-σ-inflation) scale the map is trained on.
