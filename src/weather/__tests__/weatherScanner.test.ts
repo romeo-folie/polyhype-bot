@@ -3161,6 +3161,49 @@ describe('scanWeatherMarkets', () => {
     );
   });
 
+  it('stamps every weather_bracket shadow row with a side-consistent strategy family (PR1)', async () => {
+    const gammaEvent = makeMockGammaEvent();
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve([gammaEvent]),
+    }) as unknown as typeof fetch;
+    mockFetchNwsForecast.mockResolvedValue({
+      highF: 52, lowF: 38, precipProbability: 10, forecastDate: targetIso, shortForecast: 'Mostly Cloudy',
+    });
+    mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: targetIso });
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: targetIso,
+    });
+
+    await scanWeatherMarkets(redisMock as never);
+
+    const YES_FAMILIES = ['tail_yes', 'interior_yes'];
+    const NO_FAMILIES = [
+      'native_no', 'yes_gated_fallback_no', 'far_no_ladder',
+      'adjacent_no_ladder', 'resday_lockin_no', 'market_favorite_fade',
+    ];
+    const bracketWrites = mockEnqueueWrite.mock.calls
+      .filter((c) => c[0] === 'shadow_observations' && (c[1] as { kind?: string }).kind === 'weather_bracket')
+      .map((c) => (c[1] as { payload: {
+        tradeSide: 'YES' | 'NO'; strategyFamily: string | null; selectedBy: string | null; modalDisagreement: boolean;
+      } }).payload);
+
+    expect(bracketWrites.length).toBeGreaterThan(0);
+    for (const p of bracketWrites) {
+      // Exactly one family, consistent with the traded side.
+      expect(p.strategyFamily).not.toBeNull();
+      if (p.tradeSide === 'YES') {
+        expect(YES_FAMILIES).toContain(p.strategyFamily);
+      } else {
+        expect(NO_FAMILIES).toContain(p.strategyFamily);
+      }
+      // selectedBy and the disagreement tag are always populated.
+      expect(['raw_edge', 'calibrated_edge', 'ladder_bid', 'lockin']).toContain(p.selectedBy);
+      expect(typeof p.modalDisagreement).toBe('boolean');
+    }
+  });
+
   it('skips deduped events', async () => {
     const gammaEvent = makeMockGammaEvent();
 
