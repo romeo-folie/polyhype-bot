@@ -92,6 +92,7 @@ const baseConfig = {
   // Res-day lock-in (off in baseConfig; dedicated tests enable).
   WEATHER_LOCKIN_ENABLED: false,
   WEATHER_LOCKIN_MARGIN: 1.0,
+  WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: true,
   WEATHER_LOCKIN_STAKE_USD: 10,
   WEATHER_LOCKIN_MODEL_WIN: 0.97,
   WEATHER_MODAL_MASS_VETO_ENABLED: false,
@@ -1324,9 +1325,9 @@ describe('executeWeatherLockIns', () => {
     WEATHER_LOCKIN_ENABLED: true, WEATHER_TAKER_ENTRY_ENABLED: true,
     WEATHER_LOCKIN_MARGIN: 1.0, WEATHER_LOCKIN_STAKE_USD: 10, WEATHER_LOCKIN_MODEL_WIN: 0.97, ...over,
   });
-  const obs = (observedMax: number, confidence = 'settlement_aligned', source = 'hko-live') => (async () => ({
+  const obs = (observedMax: number, confidence = 'settlement_aligned', source = 'hko-live', monotonic = true) => (async () => ({
     city: 'taipei', targetDate: '2026-06-26', observedMax, metric: 'high', source,
-    observedAt: '2026-06-26T07:00:00Z', confidence,
+    observedAt: '2026-06-26T07:00:00Z', confidence, monotonic,
   })) as never;
 
   it('takes NO when the observed max has already exceeded the bracket', async () => {
@@ -1415,6 +1416,43 @@ describe('executeWeatherLockIns', () => {
       { fetchObs: obs(40, 'settlement_aligned', 'wu-live'), execute: execute as never },
     );
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('skips a NON-MONOTONIC source even when settlement-aligned (revisable max unsafe for an irreversible bet)', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn();
+    // settlement_aligned + not wu-live, but monotonic=false → blocked by the new gate.
+    await executeWeatherLockIns(
+      {} as never,
+      [baseOpp],
+      undefined,
+      { fetchObs: obs(40, 'settlement_aligned', 'metar-live', false), execute: execute as never },
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('allows a non-monotonic source only when WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY is off (escape hatch)', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: false }));
+    const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+    await executeWeatherLockIns(
+      {} as never,
+      [baseOpp],
+      undefined,
+      { fetchObs: obs(40, 'settlement_aligned', 'metar-live', false), execute: execute as never },
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes a monotonic METAR lock-in (settlement-aligned + monotonic)', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+    await executeWeatherLockIns(
+      {} as never,
+      [baseOpp],
+      undefined,
+      { fetchObs: obs(40, 'settlement_aligned', 'metar-live', true), execute: execute as never },
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
   it('skips YES opps, low-metric, and tail brackets', async () => {
@@ -4290,9 +4328,13 @@ describe('resolution-day size-up and near-res gate bypass', () => {
       targetDate: todayIso,
       observedMax: 52,
       metric: 'high',
+      // Default represents a valid MONOTONIC confirming source (e.g. HKO/METAR
+      // running extreme). source stays 'wu-live' for back-compat with tests that
+      // don't read it; the confirmation gate keys off confidence + monotonic.
       source: 'wu-live',
       observedAt: `${todayIso}T16:00:00Z`,
       confidence: 'settlement_aligned',
+      monotonic: true,
       ...overrides,
     };
   }
@@ -5013,6 +5055,59 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     expect(traded!.hasTrade).toBe(true);
     expect((traded!.raw as Record<string, unknown>).isResolutionDay).toBe(true);
     expect((traded!.raw as Record<string, unknown>).liveObservationConfirmed).toBe(true);
+  });
+
+  it('does NOT live-confirm a NON-MONOTONIC (revisable WU) max even though it clears the bracket — same gate that guards exact Open-Meteo NO', async () => {
+    // Identical to the confirmed case above, but the observation is monotonic=false
+    // (a revisable WU running extreme). Even though observedMax=70 clears the bracket,
+    // it must NOT set liveObservationConfirmed — that revisability is the 2026-06-29
+    // Seoul failure, and this same liveConfirmed predicate also unblocks exact
+    // Open-Meteo NOs, so a WU max must not confirm an irreversible entry on any path.
+    (redisMock as any).del = vi.fn().mockResolvedValue(1);
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig,
+      WEATHER_SCANNER_ENABLED: true,
+      WEATHER_EXECUTION_ENABLED: true,
+      WEATHER_RES_DAY_ENTRY_ONLY: true,
+      WEATHER_RES_DAY_LIVE_CONFIRMATION_REQUIRED: true,
+      WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: true,
+      SIZE_UP_ENABLED: true,
+      WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+      WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+      WEATHER_RES_DAY_EARLY_ENTRY_ENABLED: true,
+      WEATHER_RES_DAY_MIN_HOURS_REMAINING: -100,
+      WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+      WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
+      WEATHER_MARKET_DISAGREEMENT_ENABLED: false,
+      ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+    });
+    wireTodayMocks();
+    mockFetchEnsemble
+      .mockResolvedValueOnce({ meanHigh: 65, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: todayIso, ensembleModel: 'gfs' })
+      .mockResolvedValueOnce({ meanHigh: 65, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 51, forecastDate: todayIso, ensembleModel: 'ecmwf' });
+    mockFetchOpenMeteo.mockResolvedValue({ highTemp: 65, lowTemp: 38, precipProbability: 10, forecastDate: todayIso });
+    mockFetchNwsForecast.mockResolvedValue({ highF: 65, lowF: 38, precipProbability: 10, forecastDate: todayIso, shortForecast: 'Cloudy' });
+    // observedMax=70 clears the bracket, but monotonic=false → must not confirm.
+    mockFetchLiveObservation.mockResolvedValue(liveObs({ observedMax: 70, source: 'wu-live', monotonic: false }));
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+      entryPrice: 0.43, sharesFilled: null, governorStamped: true, wasEmptyBook: true,
+    });
+
+    await runWeatherScan(redisMock as never);
+
+    // No primary res-day entry executes: the revisable max didn't confirm, so the
+    // res-day live-confirmation gate blocks it.
+    const primaryCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => !(c[0] as { _isBracketOpposite?: boolean })._isBracketOpposite,
+    );
+    expect(primaryCall).toBeUndefined();
+    const blocked = signalDecisionWrites().find(
+      (w) => (w.raw as Record<string, unknown>).blockedByLiveConfirmation === true,
+    );
+    expect(blocked).toBeDefined();
+    expect((blocked!.raw as Record<string, unknown>).liveObservationConfirmed).toBe(false);
   });
 
   it('res-day live-confirmation gate blocks unconfirmed low-metric bounded entries', async () => {

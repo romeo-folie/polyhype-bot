@@ -2825,6 +2825,12 @@ export const envSchema = z.object({
   // Stamped win-prob for the locked NO (P(in-bracket) = 1 − this). Drives the taker edge
   // (modelWin − ask ≥ WEATHER_TAKER_ENTRY_MIN_EDGE). <1.0 leaves margin for divergence.
   WEATHER_LOCKIN_MODEL_WIN: z.coerce.number().min(0.5).max(1).optional().default(0.97),
+  // Only confirm a lock-in from a MONOTONIC observation source — one whose intraday
+  // running extreme can't revise the wrong way (HKO rhrread + METAR, both Redis-
+  // accumulated). Default true: blocks WU (its endpoint re-fetches an array WU can
+  // QC-correct downward — the 2026-06-29 Seoul failure). Set false only to accept a
+  // revisable max for an irreversible bet (not recommended).
+  WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: boolFromEnv.optional().default(true),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
