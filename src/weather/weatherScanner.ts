@@ -950,6 +950,12 @@ export interface WeatherBracketOpportunity {
   blockedByExactOpenMeteoNo?: boolean;
   /** True when calibration-live is on but this metric|shape|source cohort is not admitted. */
   blockedByCalibrationCohort?: boolean;
+  /** True when this opportunity's strategy family is in WEATHER_BLOCKED_STRATEGY_FAMILIES
+   *  (a proven-loser cohort paused from live trading). Shadow-logged, never traded. */
+  blockedByFamilyBlock?: boolean;
+  /** True when this is a NO entry whose model edge exceeds WEATHER_NO_MAX_EDGE — the
+   *  "edge inversion" cohort (highest apparent edge underperforms). Shadow-logged. */
+  blockedByHighNoEdge?: boolean;
   /** True when this is a far-from-forecast maker-only NO ladder bid priced at
    *  our own bid ceiling rather than the current market quote. */
   isFarNoLadder?: boolean;
@@ -1106,6 +1112,8 @@ function emitWeatherSignalDecision(opp: WeatherBracketOpportunity, hasTrade: boo
       liveObservationConfidence: opp.liveObservationConfidence ?? null,
       blockedByLiveConfirmation: opp.blockedByLiveConfirmation ?? false,
       blockedByExactOpenMeteoNo: opp.blockedByExactOpenMeteoNo ?? false,
+      blockedByFamilyBlock: opp.blockedByFamilyBlock ?? false,
+      blockedByHighNoEdge: opp.blockedByHighNoEdge ?? false,
       blockedByCalibrationCohort: opp.blockedByCalibrationCohort ?? false,
       blockedByResDayOnly: opp.blockedByResDayOnly ?? false,
       blockedByNoFallback: opp.blockedByNoFallback ?? false,
@@ -2148,7 +2156,9 @@ function computeWeatherWouldTrade(opp: WeatherBracketOpportunity, featureLive: b
     && !opp.blockedByMarketFavorite
     && !opp.blockedByLiveConfirmation
     && !opp.blockedByExactOpenMeteoNo
-    && !opp.blockedByResDayOnly;
+    && !opp.blockedByResDayOnly
+    && !opp.blockedByFamilyBlock
+    && !opp.blockedByHighNoEdge;
 }
 
 /**
@@ -2168,6 +2178,14 @@ export async function scanWeatherMarkets(
 ): Promise<WeatherBracketOpportunity[]> {
   const cfg = loadConfig();
   const allOpportunities: WeatherBracketOpportunity[] = [];
+  // Proven-loser cohort blocks (parsed once). Families in this set are shadow-logged
+  // but never traded; NO entries with edge > noMaxEdge are likewise blocked. Both
+  // default to no-op (empty set / 1.0 ceiling), so this is zero behaviour change
+  // until WEATHER_BLOCKED_STRATEGY_FAMILIES / WEATHER_NO_MAX_EDGE are configured.
+  const blockedFamilies = new Set(
+    (cfg.WEATHER_BLOCKED_STRATEGY_FAMILIES ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+  );
+  const noMaxEdge = cfg.WEATHER_NO_MAX_EDGE ?? 1.0;
 
   // Step 1: Discover weather events. Highest-temperature always; lowest-temperature
   // when its feature is on in EITHER mode (shadow logs, live trades). Both tags
@@ -2761,6 +2779,10 @@ export async function scanWeatherMarkets(
       opp.strategyFamily = classifyWeatherStrategyFamily(familyInput);
       opp.selectedBy = weatherSelectedBy(familyInput);
       opp.modalDisagreement = isWeatherModalDisagreement(familyInput);
+      // Proven-loser cohort blocks (shadow-logged, never traded).
+      opp.blockedByFamilyBlock =
+        blockedFamilies.size > 0 && opp.strategyFamily != null && blockedFamilies.has(opp.strategyFamily);
+      opp.blockedByHighNoEdge = opp.tradeSide === 'NO' && opp.edge > noMaxEdge;
     }
 
     // Log each opportunity individually for shadow analysis.
@@ -2797,6 +2819,8 @@ export async function scanWeatherMarkets(
         blockedByMarketFavorite: opp.blockedByMarketFavorite ?? false,
         blockedByLiveConfirmation: opp.blockedByLiveConfirmation ?? false,
         blockedByExactOpenMeteoNo: opp.blockedByExactOpenMeteoNo ?? false,
+        blockedByFamilyBlock: opp.blockedByFamilyBlock ?? false,
+        blockedByHighNoEdge: opp.blockedByHighNoEdge ?? false,
         blockedByCalibrationCohort: opp.blockedByCalibrationCohort ?? false,
         liveObservationConfirmed: opp.liveObservationConfirmed ?? false,
         liveObservedMax: opp.liveObservedMax ?? null,
@@ -2884,6 +2908,8 @@ export async function scanWeatherMarkets(
           blockedByMarketFavorite: opp.blockedByMarketFavorite ?? false,
           blockedByLiveConfirmation: opp.blockedByLiveConfirmation ?? false,
           blockedByExactOpenMeteoNo: opp.blockedByExactOpenMeteoNo ?? false,
+          blockedByFamilyBlock: opp.blockedByFamilyBlock ?? false,
+          blockedByHighNoEdge: opp.blockedByHighNoEdge ?? false,
           blockedByCalibrationCohort: opp.blockedByCalibrationCohort ?? false,
           liveObservationConfirmed: opp.liveObservationConfirmed ?? false,
           liveObservedMax: opp.liveObservedMax ?? null,
@@ -2970,6 +2996,8 @@ export async function scanWeatherMarkets(
             blockedByModalMass: opp.blockedByModalMass ?? false,
             blockedByLiveConfirmation: opp.blockedByLiveConfirmation ?? false,
             blockedByExactOpenMeteoNo: opp.blockedByExactOpenMeteoNo ?? false,
+            blockedByFamilyBlock: opp.blockedByFamilyBlock ?? false,
+            blockedByHighNoEdge: opp.blockedByHighNoEdge ?? false,
             blockedByResDayOnly: opp.blockedByResDayOnly ?? false,
             wouldTrade,
             daysOut: opp.daysOut,
@@ -3025,6 +3053,8 @@ export async function scanWeatherMarkets(
             blockedByModalMass: false,
             blockedByLiveConfirmation: false,
             blockedByExactOpenMeteoNo: false,
+            blockedByFamilyBlock: false,
+            blockedByHighNoEdge: false,
             blockedByResDayOnly: false,
             wouldTrade: false,
             daysOut,
@@ -3052,7 +3082,7 @@ export async function scanWeatherMarkets(
     (o) => o.allowedByConfig && !o.blockedByMarketDisagreement && !o.blockedByEnsembleVeto
       && !o.blockedByNoFallback && !o.blockedByModalMass && !o.blockedByInteriorMargin
       && !o.blockedByMarketFavorite && !o.blockedByLiveConfirmation
-      && !o.blockedByExactOpenMeteoNo,
+      && !o.blockedByExactOpenMeteoNo && !o.blockedByFamilyBlock && !o.blockedByHighNoEdge,
   );
   logger.info('[weather] scan summary', {
     totalEvents: rawEvents.length,
@@ -3179,6 +3209,12 @@ export async function executeWeatherLockIns(
   const fetchObs = deps?.fetchObs ?? fetchLiveObservation;
   const execute = deps?.execute ?? executeAndRecordSignal;
   // Candidates: res-day NO on a HIGH bracket (the backtest-validated cohort), not size-ups.
+  // INTENTIONALLY NOT filtered by the MODEL-based scanner blocks (allowedByConfig,
+  // blockedByCalibrationCohort, blockedByFamilyBlock, blockedByHighNoEdge): a lock-in
+  // is physics — the observed max already cleared the bracket — and it overrides the
+  // model edge below with WEATHER_LOCKIN_MODEL_WIN. WEATHER_NO_MAX_EDGE / the family
+  // block target model overconfidence, which does not apply once the outcome is
+  // observed. The dedicated control for this path is WEATHER_LOCKIN_ENABLED.
   const candidates = opportunities.filter(
     (o) => o.isResolutionDay === true && o.tradeSide === 'NO' && o.metric !== 'low' && !o.sizeUpScanOnly,
   );
@@ -3919,6 +3955,8 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       !o.blockedByMarketFavorite &&
       !o.blockedByLiveConfirmation &&
       !o.blockedByExactOpenMeteoNo &&
+      !o.blockedByFamilyBlock &&
+      !o.blockedByHighNoEdge &&
       !excludedCities.has(o.city.toLowerCase()),
   );
 

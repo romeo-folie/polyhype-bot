@@ -2331,6 +2331,21 @@ export const envSchema = z.object({
   // live entries to audit what is being skipped. Existing 'weather_bracket' rows
   // (consumed by the backtest + calibration audit) are unchanged either way.
   WEATHER_FULL_BRACKET_SHADOW_ENABLED: boolFromEnv.optional().default(false),
+  // Proven-loser cohort blocks (entry-backtest driven). Comma-separated strategy
+  // family names (see src/weather/strategyFamily.ts: native_no, market_favorite_fade,
+  // adjacent_no_ladder, far_no_ladder, yes_gated_fallback_no, tail_yes, interior_yes,
+  // resday_lockin_no) that are SHADOW-LOGGED but never traded. Default '' = block
+  // nothing. The June entry backtest showed native_no (−5.8%) and market_favorite_fade
+  // (−30/−52%) lose across all configs tried; this pauses them pending fresh filled data.
+  // NOTE: gates the model-edge SCANNER path only. Listing 'resday_lockin_no' here does
+  // NOT stop the physics-confirmed lock-in executor (executeWeatherLockIns) — that path
+  // is intentionally exempt; use WEATHER_LOCKIN_ENABLED to control lock-ins.
+  WEATHER_BLOCKED_STRATEGY_FAMILIES: z.string().optional().default(''),
+  // Block NO entries whose model edge exceeds this. The backtest's "edge inversion":
+  // the highest-edge NOs (edge ≥0.20) win only ~53% vs ~83% for modest edge — high
+  // apparent edge is a model blind spot, not mispricing. Default 1.0 = no-op (no NO
+  // edge can exceed 1.0); set e.g. 0.20 to block the high-edge-NO cohort.
+  WEATHER_NO_MAX_EDGE: z.coerce.number().min(0).optional().default(1.0),
   // Calibration LIVE (PR2b). When true, brackets whose side|metric|shape|source cohort is
   // in WEATHER_CALIBRATION_LIVE_COHORTS use the CALIBRATED probability for live side
   // selection + edge, and may take interior YES (subject to

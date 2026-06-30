@@ -104,6 +104,10 @@ const baseConfig = {
   WEATHER_CALIBRATION_SHADOW_ENABLED: false,
   // Full-bracket shadow census off in base config; the dedicated PR2 tests enable it.
   WEATHER_FULL_BRACKET_SHADOW_ENABLED: false,
+  // Proven-loser cohort blocks default to no-op (block nothing / edge ceiling above any
+  // achievable edge); the dedicated block tests set them explicitly.
+  WEATHER_BLOCKED_STRATEGY_FAMILIES: '',
+  WEATHER_NO_MAX_EDGE: 1.0,
   // Calibration-live (PR2b) off in base config; dedicated tests enable + inject a table.
   WEATHER_CALIBRATION_LIVE_ENABLED: false,
   WEATHER_REQUIRE_CALIBRATION_COHORT_FOR_ENTRY: false,
@@ -1344,6 +1348,22 @@ describe('executeWeatherLockIns', () => {
     await executeWeatherLockIns(
       {} as never,
       [{ ...baseOpp, allowedByConfig: false, blockedByCalibrationCohort: true }] as never,
+      undefined,
+      { fetchObs: obs(30), execute: execute as never },
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('still takes lock-in NO when the proven-loser cohort blocks flagged the scanner entry', async () => {
+    // WEATHER_BLOCKED_STRATEGY_FAMILIES / WEATHER_NO_MAX_EDGE target MODEL overconfidence;
+    // a physics-confirmed lock-in overrides the model edge and is intentionally exempt
+    // (same exemption as the calibration-cohort case above). The control for lock-ins is
+    // WEATHER_LOCKIN_ENABLED — not the family list.
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+    await executeWeatherLockIns(
+      {} as never,
+      [{ ...baseOpp, blockedByFamilyBlock: true, blockedByHighNoEdge: true }] as never,
       undefined,
       { fetchObs: obs(30), execute: execute as never },
     );
@@ -3976,6 +3996,93 @@ describe('scanWeatherMarkets', () => {
 
       expect(countOn).toBe(countOff);
       expect(countOff).toBeGreaterThan(0);
+    });
+  });
+
+  // ── proven-loser cohort blocks (entry-backtest driven) ───────────────────
+  describe('proven-loser cohort blocks (WEATHER_BLOCKED_STRATEGY_FAMILIES / WEATHER_NO_MAX_EDGE)', () => {
+    function wire(): void {
+      const evt = makeMockGammaEvent();
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve([evt]) }) as unknown as typeof fetch;
+      mockFetchNwsForecast.mockResolvedValue({ highF: 52, lowF: 38, precipProbability: 10, forecastDate: targetIso, shortForecast: 'Cloudy' });
+      mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: targetIso });
+      mockFetchEnsemble.mockResolvedValue({ meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: targetIso });
+    }
+    function bracketRows(): { direction: string; wouldBlock: boolean; metricValue: number; payload: Record<string, unknown> }[] {
+      return mockEnqueueWrite.mock.calls
+        .filter((c) => c[0] === 'shadow_observations' && (c[1] as { kind?: string }).kind === 'weather_bracket')
+        .map((c) => c[1] as { direction: string; wouldBlock: boolean; metricValue: number; payload: Record<string, unknown> });
+    }
+
+    it('default config blocks nothing (regression: flags false on every row)', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true });
+      wire();
+      await scanWeatherMarkets(redisMock as never);
+      const rows = bracketRows();
+      expect(rows.length).toBeGreaterThan(0);
+      for (const r of rows) {
+        expect(r.payload.blockedByFamilyBlock).toBe(false);
+        expect(r.payload.blockedByHighNoEdge).toBe(false);
+      }
+    });
+
+    it('a listed family is shadow-flagged + not traded; blocking every family stops execution', async () => {
+      // native_no listed → those rows are flagged blocked and would not trade.
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_BLOCKED_STRATEGY_FAMILIES: 'native_no' });
+      wire();
+      await scanWeatherMarkets(redisMock as never);
+      const nativeNo = bracketRows().filter((r) => r.payload.strategyFamily === 'native_no');
+      expect(nativeNo.length).toBeGreaterThan(0);
+      for (const r of nativeNo) {
+        expect(r.payload.blockedByFamilyBlock).toBe(true);
+        expect(r.payload.wouldTrade).toBe(false);
+        expect(r.wouldBlock).toBe(true);
+      }
+
+      // Block every family → no opportunity survives the tradable filter → no execution.
+      vi.clearAllMocks();
+      redisMock = createRedisMock();
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_BLOCKED_STRATEGY_FAMILIES:
+          'native_no,interior_yes,tail_yes,market_favorite_fade,far_no_ladder,adjacent_no_ladder,yes_gated_fallback_no,resday_lockin_no',
+      });
+      wire();
+      mockGetBankroll.mockResolvedValue(1000);
+      mockExecuteAndRecordSignal.mockResolvedValue({
+        signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true, entryPrice: 0.9, sharesFilled: 10,
+      });
+      await runWeatherScan(redisMock as never);
+      expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+    });
+
+    it('does NOT block an unlisted family (only the listed one is paused)', async () => {
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_BLOCKED_STRATEGY_FAMILIES: 'tail_yes',  // not native_no
+      });
+      wire();
+      await scanWeatherMarkets(redisMock as never);
+      const nativeNo = bracketRows().filter((r) => r.payload.strategyFamily === 'native_no');
+      expect(nativeNo.length).toBeGreaterThan(0);
+      for (const r of nativeNo) expect(r.payload.blockedByFamilyBlock).toBe(false);
+    });
+
+    it('blocks NO entries whose edge exceeds WEATHER_NO_MAX_EDGE', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_NO_MAX_EDGE: 0.05 });
+      wire();
+      await scanWeatherMarkets(redisMock as never);
+      const rows = bracketRows();
+      const highEdgeNo = rows.filter((r) => r.direction === 'NO' && r.metricValue > 0.05);
+      expect(highEdgeNo.length).toBeGreaterThan(0);
+      for (const r of highEdgeNo) expect(r.payload.blockedByHighNoEdge).toBe(true);
+      // NO entries at/below the ceiling are untouched by this gate.
+      for (const r of rows.filter((r) => r.direction === 'NO' && r.metricValue <= 0.05)) {
+        expect(r.payload.blockedByHighNoEdge).toBe(false);
+      }
     });
   });
 
