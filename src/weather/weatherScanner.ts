@@ -2585,7 +2585,12 @@ export async function scanWeatherMarkets(
           liveObs != null &&
           observedMax != null &&
           liveObs.observedAt != null &&
-          liveObs.confidence === 'settlement_aligned';
+          liveObs.confidence === 'settlement_aligned' &&
+          // The same monotonicity requirement as executeWeatherLockIns applies here:
+          // liveConfirmed unblocks irreversible entries (exact Open-Meteo NO,
+          // res-day live-confirmation), so a revisable WU max (monotonic=false) must
+          // NOT confirm them — that's the Seoul failure via the normal entry path.
+          (!cfg.WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY || liveObs.monotonic);
         const liveConfirmed =
           settlementAligned &&
           parsed != null &&
