@@ -972,6 +972,57 @@ export interface WeatherBracketOpportunity {
   selectedBy?: WeatherSelectedBy;
   /** Orthogonal tag: the model-modal and market-favorite brackets disagree. */
   modalDisagreement?: boolean;
+  /** Raw YES edge (decisionProb − yesPrice) at scan time. Both side edges are
+   *  carried for the full-bracket shadow census; only the selected side's `edge`
+   *  drove the decision. */
+  edgeYes?: number;
+  /** Raw NO edge ((1 − decisionProb) − noDecisionPrice) at scan time. */
+  edgeNo?: number;
+}
+
+/** Terminal reason a bracket never became a tradeable opportunity. One per skip
+ *  site in findMispricedBrackets. */
+export type WeatherBracketSkipReason =
+  | 'no_positive_edge'
+  | 'below_min_edge'
+  | 'tail_no_model_favors_yes'
+  | 'tail_no_actuals_absent'
+  | 'tail_no_base_rate_blocked'
+  | 'near_zero_price';
+
+/** A bracket the scanner considered but skipped before it became an opportunity.
+ *  Captured ONLY when WEATHER_FULL_BRACKET_SHADOW_ENABLED so the full-bracket
+ *  census records every bracket — not just the ones that became opportunities.
+ *  Carries both-side edges (the unselected side is otherwise discarded at the
+ *  skip) plus whichever gate flags were computed before the terminal skip. */
+export interface WeatherBracketSkipped {
+  marketId: string;
+  conditionId: string;
+  bracketLabel: string;
+  question: string;
+  metric: 'high' | 'low';
+  isTailBracket: boolean;
+  yesPrice: number;
+  noPrice: number;
+  edgeYes: number;
+  edgeNo: number;
+  /** The side the model leaned to, or null when neither side had positive edge. */
+  tradeSide: 'YES' | 'NO' | null;
+  /** Probability that drove the decision (calibrated for live cohorts, else raw). */
+  modelProbability: number;
+  modelProbCalibrated: number | null;
+  correctedForecastHigh: number;
+  /** Distance (°) from corrected forecast to the bracket interval. */
+  forecastDistance: number;
+  noLadderKind: 'far' | 'adjacent' | null;
+  /** The maker bid we WOULD post for a ladder NO, else null. */
+  proposedMakerBid: number | null;
+  marketFavoriteBracket: string | null;
+  modelModalBracket: string | null;
+  yesGateReason: string | null;
+  blockedByInteriorMargin: boolean;
+  blockedByMarketFavorite: boolean;
+  terminalSkipReason: WeatherBracketSkipReason;
 }
 
 interface WeatherMarketState {
@@ -1254,6 +1305,9 @@ export function resolveSourceStddevMultiplier(
  */
 export interface FindMispricedResult {
   opportunities: WeatherBracketOpportunity[];
+  /** Brackets considered but skipped before becoming opportunities. Populated only
+   *  when options.fullBracketShadowEnabled is set; empty otherwise. */
+  skippedBrackets: WeatherBracketSkipped[];
   /** Sum of all bracket model probabilities — used for coverage check and shadow logging. */
   modelSum: number;
   /** True when the mean-bias shift was applied to the forecast centre (biasMode=full AND meanShiftHelpful). */
@@ -1355,6 +1409,10 @@ export interface FindMispricedOptions {
   adjacentNoMinBid?: number;
   adjacentNoMinDistanceDegrees?: number;
   adjacentNoMaxDistanceDegrees?: number;
+  /** When true, capture a snapshot of every SKIPPED bracket into the returned
+   *  skippedBrackets array (for the full-bracket shadow census). Default false →
+   *  no snapshots built, zero hot-path overhead. */
+  fullBracketShadowEnabled?: boolean;
 }
 
 export interface BiasedProbResult {
@@ -1474,6 +1532,7 @@ export function findMispricedBrackets(
     adjacentNoMinBid = 0.50,
     adjacentNoMinDistanceDegrees = 0.5,
     adjacentNoMaxDistanceDegrees = 2,
+    fullBracketShadowEnabled = false,
   } = options;
   // Defense-in-depth clamp: loadConfig() cross-validates trusted ≥ min, but this
   // helper is also called directly from tests and could accept arbitrary values.
@@ -1481,6 +1540,7 @@ export function findMispricedBrackets(
   // fire on thinner samples than the weak band requires.
   const biasTrustedSamples = Math.max(biasTrustedSamplesRaw, biasMinSamples);
   const opportunities: WeatherBracketOpportunity[] = [];
+  const skippedBrackets: WeatherBracketSkipped[] = [];
 
   // Three-tier trust model for per-city bias metadata:
   //   - n < biasMinSamples           → 'none': ignore bias entirely
@@ -1581,7 +1641,7 @@ export function findMispricedBrackets(
       bracketCount: event.brackets.length,
       threshold: minModelCoverage,
     });
-    return { opportunities: [], modelSum, meanShiftApplied, biasMode, effectiveStdDev };
+    return { opportunities: [], skippedBrackets, modelSum, meanShiftApplied, biasMode, effectiveStdDev };
   }
 
   // Compute overround (diagnostic): sum of all market YES prices.
@@ -1737,6 +1797,46 @@ export function findMispricedBrackets(
     // for shadow analysis but never traded.
     let blockedByNoFallback = false;
 
+    // Full-bracket census: capture a snapshot of a bracket that is about to be
+    // SKIPPED (one of the `continue`s below), so the shadow stream records every
+    // considered bracket — not just opportunities. Reads the both-side edges,
+    // prices, probs, ladder bid and modal/favorite labels in scope here; the
+    // site-varying values (the leaning side, and the interior/market-favorite
+    // gate flags which are computed later) are passed explicitly. No-op unless
+    // fullBracketShadowEnabled so the off path allocates nothing.
+    const isTailBracket = bracket.low === null || bracket.high === null;
+    const captureSkipped = (
+      terminalSkipReason: WeatherBracketSkipReason,
+      site: { tradeSide: 'YES' | 'NO' | null; blockedByInteriorMargin?: boolean; blockedByMarketFavorite?: boolean },
+    ): void => {
+      if (!fullBracketShadowEnabled) return;
+      skippedBrackets.push({
+        marketId: bracket.marketId,
+        conditionId: bracket.conditionId,
+        bracketLabel: bracket.label,
+        question: bracket.question,
+        metric: event.metric,
+        isTailBracket,
+        yesPrice: bracket.yesPrice,
+        noPrice: bracket.noPrice,
+        edgeYes,
+        edgeNo,
+        tradeSide: site.tradeSide,
+        modelProbability: decisionProb,
+        modelProbCalibrated,
+        correctedForecastHigh,
+        forecastDistance: farNoDistance,
+        noLadderKind,
+        proposedMakerBid: noLadderKind !== null ? noDecisionPrice : null,
+        marketFavoriteBracket,
+        modelModalBracket,
+        yesGateReason,
+        blockedByInteriorMargin: site.blockedByInteriorMargin ?? false,
+        blockedByMarketFavorite: site.blockedByMarketFavorite ?? false,
+        terminalSkipReason,
+      });
+    };
+
     if (!yesGateBlocked && edgeYes > 0 && (edgeYes >= edgeNo || noBlockedByCalibrationCohort)) {
       tradeSide = 'YES';
       edge = edgeYes;
@@ -1763,10 +1863,14 @@ export function findMispricedBrackets(
           city: event.city, bracket: bracket.label, reason: yesGateReason,
         });
       }
+      captureSkipped('no_positive_edge', { tradeSide: null });
       continue; // No eligible positive edge on either side
     }
 
-    if (edge < (noLadderCandidate ? noLadderMinEdge : minEdge)) continue;
+    if (edge < (noLadderCandidate ? noLadderMinEdge : minEdge)) {
+      captureSkipped('below_min_edge', { tradeSide });
+      continue;
+    }
 
     const cohortLive = tradeSide === 'YES' ? yesCohortLive : noCohortLive;
 
@@ -1782,6 +1886,7 @@ export function findMispricedBrackets(
         decisionProb: decisionProb.toFixed(3),
         maxTailNoBetModelProb,
       });
+      captureSkipped('tail_no_model_favors_yes', { tradeSide });
       continue;
     }
 
@@ -1804,6 +1909,7 @@ export function findMispricedBrackets(
           bracket: bracket.label,
           metric: event.metric,
         });
+        captureSkipped('tail_no_actuals_absent', { tradeSide });
         continue;
       }
       if (
@@ -1825,6 +1931,7 @@ export function findMispricedBrackets(
             sampleSize: actualsSeries.length,
             baseRateNoBlockThreshold,
           });
+          captureSkipped('tail_no_base_rate_blocked', { tradeSide });
           continue;
         }
       }
@@ -1880,8 +1987,14 @@ export function findMispricedBrackets(
     // Skip near-zero markets where liquidity is negligible. Hard floor on both
     // sides, independent of the configurable yesMinMarketPrice gate — otherwise
     // WEATHER_YES_MIN_MARKET_PRICE=0 would re-expose thin near-zero YES books.
-    if (bracket.yesPrice < 0.005 && tradeSide === 'YES') continue;
-    if (noDecisionPrice < 0.005 && tradeSide === 'NO') continue;
+    if (bracket.yesPrice < 0.005 && tradeSide === 'YES') {
+      captureSkipped('near_zero_price', { tradeSide, blockedByInteriorMargin, blockedByMarketFavorite });
+      continue;
+    }
+    if (noDecisionPrice < 0.005 && tradeSide === 'NO') {
+      captureSkipped('near_zero_price', { tradeSide, blockedByInteriorMargin, blockedByMarketFavorite });
+      continue;
+    }
 
     // A YES-gate fallback that ACTUALLY TRADED: the model preferred YES but the
     // YES gate blocked it and WEATHER_YES_GATE_NO_FALLBACK_ENABLED=true, so this
@@ -1983,6 +2096,8 @@ export function findMispricedBrackets(
       blockedByExactOpenMeteoNo: false,
       blockedByCalibrationCohort: calibrationLiveEnabled && requireCalibrationCohortForEntry && !cohortLive,
       isTailBracket: bracket.low === null || bracket.high === null,
+      edgeYes,
+      edgeNo,
       isFarNoLadder: tradeSide === 'NO' && farNoLadderCandidate,
       isAdjacentNoLadder: tradeSide === 'NO' && adjacentNoLadderCandidate,
       noLadderKind: tradeSide === 'NO' ? noLadderKind : null,
@@ -1992,7 +2107,7 @@ export function findMispricedBrackets(
     });
   }
 
-  return { opportunities, modelSum, meanShiftApplied, biasMode, effectiveStdDev };
+  return { opportunities, skippedBrackets, modelSum, meanShiftApplied, biasMode, effectiveStdDev };
 }
 
 // ── Main scanner ─────────────────────────────────────────────────────────
@@ -2010,6 +2125,25 @@ async function hasAnyOpenWeatherPosition(redis: Redis, marketIds: string[]): Pro
   ]);
   const results = await Promise.all(checks);
   return results.some(Boolean);
+}
+
+/**
+ * Whether an opportunity would be traded live: the feature is live, the side is
+ * allowed by config, and no blocking gate fired. Extracted so the shadow write
+ * loop and the full-bracket census compute it identically.
+ */
+function computeWeatherWouldTrade(opp: WeatherBracketOpportunity, featureLive: boolean): boolean {
+  return featureLive
+    && opp.allowedByConfig
+    && !opp.blockedByMarketDisagreement
+    && !opp.blockedByEnsembleVeto
+    && !opp.blockedByNoFallback
+    && !opp.blockedByModalMass
+    && !opp.blockedByInteriorMargin
+    && !opp.blockedByMarketFavorite
+    && !opp.blockedByLiveConfirmation
+    && !opp.blockedByExactOpenMeteoNo
+    && !opp.blockedByResDayOnly;
 }
 
 /**
@@ -2276,6 +2410,7 @@ export async function scanWeatherMarkets(
     // values used for gating rather than recomputing them.
     const {
       opportunities,
+      skippedBrackets,
       modelSum,
       meanShiftApplied: meanShiftApplied,
       biasMode: eventBiasMode,
@@ -2326,6 +2461,7 @@ export async function scanWeatherMarkets(
         adjacentNoMinBid: cfg.WEATHER_ADJACENT_NO_MIN_BID,
         adjacentNoMinDistanceDegrees: cfg.WEATHER_ADJACENT_NO_MIN_DISTANCE_DEGREES,
         adjacentNoMaxDistanceDegrees: cfg.WEATHER_ADJACENT_NO_MAX_DISTANCE_DEGREES,
+        fullBracketShadowEnabled: cfg.WEATHER_FULL_BRACKET_SHADOW_ENABLED,
       },
     );
     const afterMarketGate = await applyMarketDisagreementGate(redis, opportunities, cfg);
@@ -2626,18 +2762,7 @@ export async function scanWeatherMarkets(
     // Shadow still records disallowed-side opps so calibration analysis keeps
     // accruing validation data for the gated side — only wouldTrade flips.
     for (const opp of gatedOpportunities) {
-      const wouldTrade =
-        featureLive &&
-        opp.allowedByConfig &&
-        !opp.blockedByMarketDisagreement &&
-        !opp.blockedByEnsembleVeto &&
-        !opp.blockedByNoFallback &&
-        !opp.blockedByModalMass &&
-        !opp.blockedByInteriorMargin &&
-        !opp.blockedByMarketFavorite &&
-        !opp.blockedByLiveConfirmation &&
-        !opp.blockedByExactOpenMeteoNo &&
-        !opp.blockedByResDayOnly;
+      const wouldTrade = computeWeatherWouldTrade(opp, featureLive);
       logger.info('[weather] bracket opportunity', {
         marketId: opp.marketId,
         eventSlug: opp.eventSlug,
@@ -2789,6 +2914,119 @@ export async function scanWeatherMarkets(
         },
       });
       emitWeatherSignalDecision(opp, wouldTrade);
+    }
+
+    // Full-bracket shadow census (kind='weather_bracket_full'): one row per
+    // bracket per scan, INCLUDING skipped non-opportunity brackets, so the shadow
+    // stream is a complete record of every bracket considered. A SEPARATE kind so
+    // the legacy 'weather_bracket' population (backtest + calibration audit) is
+    // untouched. Default-off (WEATHER_FULL_BRACKET_SHADOW_ENABLED) — it ~5x's
+    // weather shadow write volume.
+    if (cfg.WEATHER_FULL_BRACKET_SHADOW_ENABLED) {
+      for (const opp of gatedOpportunities) {
+        const wouldTrade = computeWeatherWouldTrade(opp, featureLive);
+        void enqueueWrite('shadow_observations', {
+          kind: 'weather_bracket_full',
+          source: 'arb',
+          marketId: opp.marketId,
+          direction: opp.tradeSide,
+          wouldBlock: !wouldTrade,
+          metricValue: opp.edge,
+          threshold: cfg.WEATHER_MIN_EDGE,
+          payload: {
+            wasSkipped: false,
+            terminalSkipReason: null,
+            eventSlug: opp.eventSlug,
+            city: opp.city,
+            targetDate: opp.targetDate,
+            metric: opp.metric,
+            bracket: opp.bracketLabel,
+            isTailBracket: opp.isTailBracket ?? null,
+            tradeSide: opp.tradeSide,
+            yesPrice: opp.yesPrice,
+            noPrice: opp.noPrice,
+            edgeYes: opp.edgeYes ?? null,
+            edgeNo: opp.edgeNo ?? null,
+            modelProb: opp.modelProbability,
+            modelProbCalibrated: opp.modelProbCalibrated ?? null,
+            correctedForecastHigh: opp.correctedForecastHigh,
+            forecastDistance: opp.farNoDistance ?? null,
+            noLadderKind: opp.noLadderKind ?? null,
+            farNoLadderQualifies: opp.noLadderKind === 'far',
+            proposedEntryPrice: opp.outcomePrice,
+            proposedMakerBid: opp.noLadderKind != null ? opp.outcomePrice : null,
+            marketFavoriteBracket: opp.marketFavoriteBracket ?? null,
+            modelModalBracket: opp.modelModalBracket ?? null,
+            strategyFamily: opp.strategyFamily ?? null,
+            selectedBy: opp.selectedBy ?? null,
+            yesGateReason: opp.yesGateReason ?? null,
+            blockedByInteriorMargin: opp.blockedByInteriorMargin ?? false,
+            blockedByMarketFavorite: opp.blockedByMarketFavorite ?? false,
+            blockedByModalMass: opp.blockedByModalMass ?? false,
+            blockedByLiveConfirmation: opp.blockedByLiveConfirmation ?? false,
+            blockedByExactOpenMeteoNo: opp.blockedByExactOpenMeteoNo ?? false,
+            blockedByResDayOnly: opp.blockedByResDayOnly ?? false,
+            wouldTrade,
+            daysOut: opp.daysOut,
+            forecastSource: opp.forecastSource,
+          },
+        });
+      }
+      for (const s of skippedBrackets) {
+        const proposedEntryPrice = s.tradeSide === 'YES'
+          ? s.yesPrice
+          : s.tradeSide === 'NO'
+            ? (s.proposedMakerBid ?? s.noPrice)
+            : null;
+        void enqueueWrite('shadow_observations', {
+          kind: 'weather_bracket_full',
+          source: 'arb',
+          marketId: s.marketId,
+          // A no_positive_edge bracket has no leaning side; omit direction rather
+          // than forcing one (the envelope enum rejects null).
+          ...(s.tradeSide != null ? { direction: s.tradeSide } : {}),
+          wouldBlock: true,
+          metricValue: s.tradeSide === 'YES' ? s.edgeYes : s.edgeNo,
+          threshold: cfg.WEATHER_MIN_EDGE,
+          payload: {
+            wasSkipped: true,
+            terminalSkipReason: s.terminalSkipReason,
+            eventSlug: event.slug,
+            city: event.city,
+            targetDate: event.targetDate,
+            metric: s.metric,
+            bracket: s.bracketLabel,
+            isTailBracket: s.isTailBracket,
+            tradeSide: s.tradeSide,
+            yesPrice: s.yesPrice,
+            noPrice: s.noPrice,
+            edgeYes: s.edgeYes,
+            edgeNo: s.edgeNo,
+            modelProb: s.modelProbability,
+            modelProbCalibrated: s.modelProbCalibrated,
+            correctedForecastHigh: s.correctedForecastHigh,
+            forecastDistance: s.forecastDistance,
+            noLadderKind: s.noLadderKind,
+            farNoLadderQualifies: s.noLadderKind === 'far',
+            proposedEntryPrice,
+            proposedMakerBid: s.proposedMakerBid,
+            marketFavoriteBracket: s.marketFavoriteBracket,
+            modelModalBracket: s.modelModalBracket,
+            strategyFamily: null,
+            selectedBy: null,
+            yesGateReason: s.yesGateReason,
+            blockedByInteriorMargin: s.blockedByInteriorMargin,
+            blockedByMarketFavorite: s.blockedByMarketFavorite,
+            blockedByModalMass: false,
+            blockedByLiveConfirmation: false,
+            blockedByExactOpenMeteoNo: false,
+            blockedByResDayOnly: false,
+            wouldTrade: false,
+            daysOut,
+            forecastSource: forecast.source,
+          },
+        });
+      }
     }
 
     if (gatedOpportunities.length > 0) {

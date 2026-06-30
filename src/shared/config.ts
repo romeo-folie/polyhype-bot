@@ -2323,6 +2323,14 @@ export const envSchema = z.object({
   // on the calibrated probability is a separate gate (PR2b). See
   // docs/issues/weather-bracket-model-overconfidence-2026-06-19.md.
   WEATHER_CALIBRATION_SHADOW_ENABLED: boolFromEnv.optional().default(true),
+  // Full-bracket shadow census. When true, the scanner writes one
+  // shadow_observations row (kind='weather_bracket_full') per bracket per scan —
+  // INCLUDING skipped non-opportunity brackets that the legacy 'weather_bracket'
+  // rows never captured — so every considered bracket is auditable. Default OFF:
+  // it ~5x's weather shadow write volume, so enable only while actively pausing
+  // live entries to audit what is being skipped. Existing 'weather_bracket' rows
+  // (consumed by the backtest + calibration audit) are unchanged either way.
+  WEATHER_FULL_BRACKET_SHADOW_ENABLED: boolFromEnv.optional().default(false),
   // Calibration LIVE (PR2b). When true, brackets whose side|metric|shape|source cohort is
   // in WEATHER_CALIBRATION_LIVE_COHORTS use the CALIBRATED probability for live side
   // selection + edge, and may take interior YES (subject to
