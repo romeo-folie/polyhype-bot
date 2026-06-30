@@ -10,10 +10,14 @@
  * fresh forward-shadow window.
  *
  * Data sources (read-only):
- *   - shadow_observations (kind='weather_bracket') — every bracket the scanner
- *     considered, traded or not. Re-classified into a strategy family via the
- *     PR1 classifier so HISTORICAL rows (which predate the stored strategyFamily
- *     field) are labelled with one consistent definition.
+ *   - shadow_observations (kind='weather_bracket') — the weather bracket rows the
+ *     scanner SURFACED as shadow/opportunity rows. Re-classified into a strategy
+ *     family via the PR1 classifier so HISTORICAL rows (which predate the stored
+ *     strategyFamily field) are labelled with one consistent definition.
+ *     CAVEAT: historical rows are OPPORTUNITY-BIASED — until the full-bracket
+ *     snapshot work (PR2) lands, skipped non-opportunity brackets are not all
+ *     persisted, so this is NOT a complete census of every bracket considered.
+ *     Read the cohort tables as "rows the scanner surfaced", not "all brackets".
  *   - weather_ground_truth — resolved actual highs/lows, used to recompute
  *     win/loss with the resolver's half-open ±0.5° boundary and
  *     COALESCE(resolution, observed) rule.
@@ -92,12 +96,19 @@ async function loadGroundTruth(): Promise<GroundTruth> {
 }
 
 /**
- * Load every scored weather bracket candidate, deduped to the most-recent
- * prediction per (metric, city, date, bracket, daysOut) — collapsing intra-day
- * rescans while preserving each forecast horizon. ORDER BY observed_at ASC makes
- * "last write wins" the most-recent prediction at that horizon.
+ * Load scored weather bracket candidates in two forms:
+ *   - `scored`: deduped to the most-recent prediction per (metric, city, date,
+ *     bracket, daysOut) — collapses intra-day rescans while preserving each
+ *     forecast horizon. Use for cohort win-rate tables (avoids double-counting
+ *     correlated intra-day rescans of the same outcome).
+ *   - `history`: EVERY scorable row, undeduped, ordered ASC by observed_at. Use
+ *     for executed→family attribution, which must see the family AS IT WAS at
+ *     each scan (the dedup would collapse an early native_no res-day row onto a
+ *     later resday_lockin_no row sharing the same key and mis-attribute a trade
+ *     that executed before live confirmation).
+ * ORDER BY observed_at ASC makes "last write wins" the most-recent prediction.
  */
-async function loadCandidates(gt: GroundTruth): Promise<Candidate[]> {
+async function loadCandidates(gt: GroundTruth): Promise<{ scored: Candidate[]; history: Candidate[] }> {
   const sql = getSql();
   const rows = SINCE
     ? await sql<{ market_id: string | null; payload: Record<string, unknown>; observed_at: string; metric_value: number | null }[]>`
@@ -111,11 +122,14 @@ async function loadCandidates(gt: GroundTruth): Promise<Candidate[]> {
         WHERE kind = 'weather_bracket'
         ORDER BY observed_at ASC`;
   const dedup = new Map<string, Candidate>();
+  const history: Candidate[] = [];
   for (const row of rows) {
     const c = candidateFromShadowPayload(row.market_id ?? '', row.payload, row.metric_value, row.observed_at, gt);
-    if (c) dedup.set(candidateKey(c), c);
+    if (!c) continue;
+    history.push(c);
+    dedup.set(candidateKey(c), c);
   }
-  return Array.from(dedup.values());
+  return { scored: Array.from(dedup.values()), history };
 }
 
 async function loadExecuted(): Promise<ExecutedRow[]> {
@@ -160,13 +174,16 @@ function printTable(title: string, m: Map<string, Stat>, opts: { minN?: number; 
 
 async function main(): Promise<void> {
   const gt = await loadGroundTruth();
-  const all = await loadCandidates(gt);
-  const cands = TRADABLE_ONLY ? all.filter((c) => c.wouldTrade) : all;
+  const { scored, history } = await loadCandidates(gt);
+  const cands = TRADABLE_ONLY ? scored.filter((c) => c.wouldTrade) : scored;
 
   log('# Weather entry backtest');
-  log(`scored candidates: ${all.length}${SINCE ? ` (since ${SINCE})` : ''}` +
-      `  |  wouldTrade: ${all.filter((c) => c.wouldTrade).length}` +
-      `  |  reporting on: ${TRADABLE_ONLY ? 'wouldTrade only' : 'all candidates'}`);
+  log(`deduped candidates: ${scored.length} (from ${history.length} shadow rows)${SINCE ? ` (since ${SINCE})` : ''}` +
+      `  |  wouldTrade: ${scored.filter((c) => c.wouldTrade).length}` +
+      `  |  reporting on: ${TRADABLE_ONLY ? 'wouldTrade only' : 'all surfaced shadow/opportunity rows'}`);
+  log('CAVEAT: historical weather_bracket rows are opportunity-biased (skipped non-opportunity');
+  log('  brackets are not all persisted until PR2). These cohorts cover surfaced rows, not every');
+  log('  bracket considered. Executed-by-family below is the ground-truth realized $ check.');
 
   // 1. Family × side — the headline cohort table.
   printTable('Family × side performance', groupBy(cands, (c) => `${c.family}|${c.side}`), { sortByEdge: true });
@@ -210,7 +227,7 @@ async function main(): Promise<void> {
   // that lose REAL money to block first.
   log('\n## Executed trades by family (realized $)');
   log('family'.padEnd(24) + 'n'.padStart(6) + 'win%'.padStart(8) + 'pnl$'.padStart(10) + 'stake$'.padStart(10) + 'roi'.padStart(9));
-  const byFam = Array.from(attributeExecutedByFamily(executed, all).entries()).sort((a, b) => a[1].pnl - b[1].pnl);
+  const byFam = Array.from(attributeExecutedByFamily(executed, history).entries()).sort((a, b) => a[1].pnl - b[1].pnl);
   for (const [fam, s] of byFam) {
     log(
       fam.slice(0, 24).padEnd(24) +
@@ -224,10 +241,10 @@ async function main(): Promise<void> {
 
   if (JSON_OUT) {
     const dump = {
-      since: SINCE, tradableOnly: TRADABLE_ONLY, scored: all.length,
+      since: SINCE, tradableOnly: TRADABLE_ONLY, scored: scored.length, shadowRows: history.length,
       candidates: cands,
       executed: { trades: executed.length, won: exWins, lost: exLost, pushed: exPush, pnlUsd: exPnl, stakeUsd: exStake },
-      executedByFamily: Object.fromEntries(attributeExecutedByFamily(executed, all)),
+      executedByFamily: Object.fromEntries(attributeExecutedByFamily(executed, history)),
     };
     writeFileSync(JSON_OUT, JSON.stringify(dump, null, 2) + '\n');
     log(`\nwrote ${JSON_OUT}`);

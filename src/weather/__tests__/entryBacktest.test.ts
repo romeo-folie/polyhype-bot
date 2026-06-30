@@ -232,6 +232,21 @@ describe('attributeExecutedByFamily', () => {
     expect(m.get('resday_lockin_no')!.pnl).toBeCloseTo(2.5, 10); // 5 * 50/100
   });
 
+  it('attributes a trade BETWEEN two scans to the family AS IT WAS at entry (not a future scan)', () => {
+    // mkt1 was native_no on 06-14, then became resday_lockin_no on 06-15T12 once
+    // live obs confirmed. A trade that executed on 06-15T06 — BEFORE confirmation —
+    // entered as native_no and must attribute there, not to the later lockin row.
+    // This is the case the deduped candidate set would mis-attribute (the two rows
+    // share a dedup key on res-day), so attribution must run on the full history.
+    const executed: ExecutedRow[] = [
+      { market_id: 'mkt1', question: 'q', opened_at: '2026-06-15T06:00:00Z', result: 'lost', return_pct: -100, stake_usd: 4, direction: 'NO' },
+    ];
+    const m = attributeExecutedByFamily(executed, cands);
+    expect(m.get('native_no')!.n).toBe(1);
+    expect(m.get('native_no')!.pnl).toBeCloseTo(-4, 10);
+    expect(m.has('resday_lockin_no')).toBe(false);
+  });
+
   it('falls back to the earliest candidate when entry precedes all shadow rows', () => {
     const executed: ExecutedRow[] = [
       { market_id: 'mkt1', question: 'q', opened_at: '2026-06-13T00:00:00Z', result: 'lost', return_pct: -100, stake_usd: 5, direction: 'NO' },
