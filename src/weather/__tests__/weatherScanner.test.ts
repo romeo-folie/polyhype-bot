@@ -242,6 +242,7 @@ const {
   scanWeatherMarkets,
   daysUntil,
   parseAllowedSides,
+  parseWeatherCorrelationKey,
   runWeatherScan,
   buildWeatherFillShadow,
   shrinkTowardMarket,
@@ -292,6 +293,9 @@ function createRedisMock() {
     exists: vi.fn((...keys: string[]) =>
       Promise.resolve(keys.filter((k) => store.has(k)).length),
     ),
+    // Empty positions index → getOpenPositions returns [] (correlated-cap tests
+    // exercise the within-scan accumulation, not pre-existing held exposure).
+    zrange: vi.fn(() => Promise.resolve([] as string[])),
     pipeline: vi.fn(() => pipelineMock),
     _store: store,
   };
@@ -3661,6 +3665,40 @@ describe('scanWeatherMarkets', () => {
       expect(mockExecuteAndRecordSignal.mock.calls.length).toBeLessThanOrEqual(1);
     });
 
+    it('respects WEATHER_CORRELATED_MAX_EXPOSURE_USD (caps stacked entries on one city+date+metric)', async () => {
+      const corrCfg = (corrCap: number) => ({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_POSITIONS_PER_SCAN: 10,
+        WEATHER_MAX_PER_CITY: 10,
+        WEATHER_MAX_SCAN_EXPOSURE_USD: 1000, // relaxed so only the correlated cap can bind
+        WEATHER_CORRELATED_MAX_EXPOSURE_USD: corrCap,
+      });
+      const execResult = { signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob' as const, governorStamped: true };
+
+      // Disabled (0): the fixture's NO entries (all chicago / same date / high) fire freely.
+      mockLoadConfig.mockReturnValue(corrCfg(0));
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(10000);
+      mockExecuteAndRecordSignal.mockResolvedValue(execResult);
+      await runWeatherScan(redisMock as never);
+      const uncapped = mockExecuteAndRecordSignal.mock.calls.length;
+      expect(uncapped).toBeGreaterThan(1);
+
+      // Enabled tight ($5): every opp shares the same city+date+metric key, so the
+      // accumulated stake exhausts the cap after the first — the rest are skipped.
+      vi.clearAllMocks();
+      redisMock = createRedisMock();
+      mockLoadConfig.mockReturnValue(corrCfg(5));
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(10000);
+      mockExecuteAndRecordSignal.mockResolvedValue(execResult);
+      await runWeatherScan(redisMock as never);
+      expect(mockExecuteAndRecordSignal.mock.calls.length).toBeLessThanOrEqual(1);
+      expect(mockExecuteAndRecordSignal.mock.calls.length).toBeLessThan(uncapped);
+    });
+
     it('skips when bankroll is zero', async () => {
       mockLoadConfig.mockReturnValue({
         ...baseConfig,
@@ -5560,6 +5598,38 @@ describe('weather category wiring', () => {
 // ---------------------------------------------------------------------------
 // buildWeatherFillShadow — posted-price-vs-side-market shadow payload
 // ---------------------------------------------------------------------------
+
+describe('parseWeatherCorrelationKey (correlated-cap seed, prefix-tolerant)', () => {
+  it('parses the regular weather: high + low forms', () => {
+    expect(parseWeatherCorrelationKey('weather:chicago:2026-06-30:52-53°F')).toEqual({
+      metric: 'high', city: 'chicago', targetDate: '2026-06-30',
+    });
+    expect(parseWeatherCorrelationKey('weather:low:chicago:2026-06-30:38°F')).toEqual({
+      metric: 'low', city: 'chicago', targetDate: '2026-06-30',
+    });
+  });
+  it('counts oracle-scanner positions (weather-oracle: prefix)', () => {
+    expect(parseWeatherCorrelationKey('weather-oracle:seoul:2026-06-30:30°C')).toEqual({
+      metric: 'high', city: 'seoul', targetDate: '2026-06-30',
+    });
+    expect(parseWeatherCorrelationKey('weather-oracle:low:seoul:2026-06-30:18°C')).toEqual({
+      metric: 'low', city: 'seoul', targetDate: '2026-06-30',
+    });
+  });
+  it('counts reconciler-healed positions (reconciled:weather… prefix)', () => {
+    expect(parseWeatherCorrelationKey('reconciled:weather:paris:2026-06-30:24°C')).toEqual({
+      metric: 'high', city: 'paris', targetDate: '2026-06-30',
+    });
+    expect(parseWeatherCorrelationKey('reconciled:weather-oracle:paris:2026-06-30:24°C')).toEqual({
+      metric: 'high', city: 'paris', targetDate: '2026-06-30',
+    });
+  });
+  it('returns null for non-weather or unstructured sourcedFrom', () => {
+    expect(parseWeatherCorrelationKey('oracle-lag:btc-15m')).toBeNull();
+    expect(parseWeatherCorrelationKey('reconciled:clob')).toBeNull();
+    expect(parseWeatherCorrelationKey('weather')).toBeNull();
+  });
+});
 
 describe('buildWeatherFillShadow', () => {
   const baseOpp = {
