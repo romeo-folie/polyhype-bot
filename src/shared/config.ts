@@ -2831,6 +2831,14 @@ export const envSchema = z.object({
   // QC-correct downward — the 2026-06-29 Seoul failure). Set false only to accept a
   // revisable max for an irreversible bet (not recommended).
   WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: boolFromEnv.optional().default(true),
+  // Forward maker-fill TOXICITY data collection. When true, write a
+  // shadow_observations row (kind='weather_maker_lifecycle') for each weather
+  // maker order at post and at fill — including the fill DETECTION PATH
+  // (executor_resume vs reconciler), since the most adversely-selected fills are
+  // detected async by the reconciler. Logging-only; default off (zero behaviour
+  // change). The forward filled-data the entry backtest can't see (shadow EV is
+  // priced at the quote, not the real fill).
+  WEATHER_MAKER_LIFECYCLE_LOG_ENABLED: boolFromEnv.optional().default(false),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
