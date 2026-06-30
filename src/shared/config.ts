@@ -2034,6 +2034,12 @@ export const envSchema = z.object({
   // sizing + count cap ever misbehave. Opp iteration stops once cumulative stake
   // would exceed this.
   WEATHER_MAX_SCAN_EXPOSURE_USD: z.coerce.number().min(0).optional().default(30),
+  // Max aggregate stake across CORRELATED weather entries — the OPEN positions plus
+  // this scan's fills sharing one city+target_date+metric. Weather brackets on the
+  // same city-day are highly correlated (one forecast miss loses several "safe" NOs
+  // at once); this caps that stacked risk on top of the per-scan/per-city caps.
+  // 0 = disabled (no-op, no extra position read); set e.g. 10 to bound it.
+  WEATHER_CORRELATED_MAX_EXPOSURE_USD: z.coerce.number().min(0).optional().default(0),
   // Half-Kelly fraction for weather stake sizing. Kept independent of the OSINT
   // default because bracket model uncertainty is structurally larger and the side
   // bias (YES 11.5% vs NO 73.7%) argues for lighter sizing.

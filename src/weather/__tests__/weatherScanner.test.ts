@@ -242,6 +242,7 @@ const {
   scanWeatherMarkets,
   daysUntil,
   parseAllowedSides,
+  parseWeatherCorrelationKey,
   runWeatherScan,
   buildWeatherFillShadow,
   shrinkTowardMarket,
@@ -292,6 +293,9 @@ function createRedisMock() {
     exists: vi.fn((...keys: string[]) =>
       Promise.resolve(keys.filter((k) => store.has(k)).length),
     ),
+    // Empty positions index → getOpenPositions (real, against this mock) returns [].
+    // The correlated-cap seed reads listPendingOrders, which is MOCKED separately.
+    zrange: vi.fn(() => Promise.resolve([] as string[])),
     pipeline: vi.fn(() => pipelineMock),
     _store: store,
   };
@@ -3661,6 +3665,74 @@ describe('scanWeatherMarkets', () => {
       expect(mockExecuteAndRecordSignal.mock.calls.length).toBeLessThanOrEqual(1);
     });
 
+    it('respects WEATHER_CORRELATED_MAX_EXPOSURE_USD (caps stacked entries on one city+date+metric)', async () => {
+      const corrCfg = (corrCap: number) => ({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_POSITIONS_PER_SCAN: 10,
+        WEATHER_MAX_PER_CITY: 10,
+        WEATHER_MAX_SCAN_EXPOSURE_USD: 1000, // relaxed so only the correlated cap can bind
+        WEATHER_CORRELATED_MAX_EXPOSURE_USD: corrCap,
+      });
+      const execResult = { signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob' as const, governorStamped: true };
+
+      mockListPendingOrders.mockResolvedValue([]); // no resting orders → within-scan only
+      // Disabled (0): the fixture's NO entries (all chicago / same date / high) fire freely.
+      mockLoadConfig.mockReturnValue(corrCfg(0));
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(10000);
+      mockExecuteAndRecordSignal.mockResolvedValue(execResult);
+      await runWeatherScan(redisMock as never);
+      const uncapped = mockExecuteAndRecordSignal.mock.calls.length;
+      expect(uncapped).toBeGreaterThan(1);
+
+      // Enabled tight ($5): every opp shares the same city+date+metric key, so the
+      // accumulated stake exhausts the cap after the first — the rest are skipped.
+      vi.clearAllMocks();
+      redisMock = createRedisMock();
+      mockLoadConfig.mockReturnValue(corrCfg(5));
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(10000);
+      mockExecuteAndRecordSignal.mockResolvedValue(execResult);
+      await runWeatherScan(redisMock as never);
+      expect(mockExecuteAndRecordSignal.mock.calls.length).toBeLessThanOrEqual(1);
+      expect(mockExecuteAndRecordSignal.mock.calls.length).toBeLessThan(uncapped);
+    });
+
+    it('seeds the correlated cap from RESTING pending maker orders (a prior-scan GTC blocks a fresh same-key entry)', async () => {
+      // A weather maker order resting from a PRIOR scan on chicago / targetIso / high,
+      // posted notional 0.5×12 = 6 (> cap 5). No ledger position exists yet, but it is
+      // committed correlated exposure, so a fresh same-key entry this scan must be blocked.
+      mockListPendingOrders.mockResolvedValue([
+        { marketId: 'premkt', direction: 'NO', order: {
+          orderId: 'pre-1', price: 0.5, size: 12, direction: 'NO', source: 'weather',
+          sourcedFrom: `weather:chicago:${targetIso}:52-53°F`,
+        } },
+      ]);
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_POSITIONS_PER_SCAN: 10,
+        WEATHER_MAX_PER_CITY: 10,
+        WEATHER_MAX_SCAN_EXPOSURE_USD: 1000,
+        WEATHER_CORRELATED_MAX_EXPOSURE_USD: 5,
+        // Keep the revalidation pass from cancelling the seeded resting order.
+        WEATHER_RESTING_REVALIDATION_ENABLED: false,
+        WEATHER_BRACKET_CANCEL_ENABLED: false,
+        WEATHER_COND_ORACLE_RESTING_CANCEL_ENABLED: false,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(10000);
+      mockExecuteAndRecordSignal.mockResolvedValue({ signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true });
+
+      await runWeatherScan(redisMock as never);
+
+      // The resting order alone meets the cap → no fresh chicago/high entry executes.
+      expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
+    });
+
     it('skips when bankroll is zero', async () => {
       mockLoadConfig.mockReturnValue({
         ...baseConfig,
@@ -5560,6 +5632,38 @@ describe('weather category wiring', () => {
 // ---------------------------------------------------------------------------
 // buildWeatherFillShadow — posted-price-vs-side-market shadow payload
 // ---------------------------------------------------------------------------
+
+describe('parseWeatherCorrelationKey (correlated-cap seed, prefix-tolerant)', () => {
+  it('parses the regular weather: high + low forms', () => {
+    expect(parseWeatherCorrelationKey('weather:chicago:2026-06-30:52-53°F')).toEqual({
+      metric: 'high', city: 'chicago', targetDate: '2026-06-30',
+    });
+    expect(parseWeatherCorrelationKey('weather:low:chicago:2026-06-30:38°F')).toEqual({
+      metric: 'low', city: 'chicago', targetDate: '2026-06-30',
+    });
+  });
+  it('counts oracle-scanner positions (weather-oracle: prefix)', () => {
+    expect(parseWeatherCorrelationKey('weather-oracle:seoul:2026-06-30:30°C')).toEqual({
+      metric: 'high', city: 'seoul', targetDate: '2026-06-30',
+    });
+    expect(parseWeatherCorrelationKey('weather-oracle:low:seoul:2026-06-30:18°C')).toEqual({
+      metric: 'low', city: 'seoul', targetDate: '2026-06-30',
+    });
+  });
+  it('counts reconciler-healed positions (reconciled:weather… prefix)', () => {
+    expect(parseWeatherCorrelationKey('reconciled:weather:paris:2026-06-30:24°C')).toEqual({
+      metric: 'high', city: 'paris', targetDate: '2026-06-30',
+    });
+    expect(parseWeatherCorrelationKey('reconciled:weather-oracle:paris:2026-06-30:24°C')).toEqual({
+      metric: 'high', city: 'paris', targetDate: '2026-06-30',
+    });
+  });
+  it('returns null for non-weather or unstructured sourcedFrom', () => {
+    expect(parseWeatherCorrelationKey('oracle-lag:btc-15m')).toBeNull();
+    expect(parseWeatherCorrelationKey('reconciled:clob')).toBeNull();
+    expect(parseWeatherCorrelationKey('weather')).toBeNull();
+  });
+});
 
 describe('buildWeatherFillShadow', () => {
   const baseOpp = {

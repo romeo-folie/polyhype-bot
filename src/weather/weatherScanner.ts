@@ -41,7 +41,7 @@ import { computeHalfKelly } from '../mapping/divergenceCalculator.js';
 import { shrinkTowardMarket } from '../shared/probability.js';
 import { executeAndRecordSignal } from '../execution/executor.js';
 import type { ExecutionResult } from '../execution/executor.js';
-import { hasOpenPosition } from '../execution/positionLedger.js';
+import { hasOpenPosition, getOpenPositions } from '../execution/positionLedger.js';
 import { listPendingOrders, deletePendingOrder } from '../execution/pendingMakerOrders.js';
 import type { PendingMakerOrder } from '../execution/pendingMakerOrders.js';
 import { getClobOrder, cancelClobOrder } from '../shared/clob.js';
@@ -226,6 +226,25 @@ export function parseWeatherSourcedFrom(
   // High form: weather:{city}:{date}:{bracket}
   if (parts.length < 4) return null;
   return { metric: 'high', city: parts[1]!, targetDate: parts[2]!, bracketLabel: parts.slice(3).join(':') };
+}
+
+/**
+ * Correlation-key fields (metric/city/targetDate) for ANY weather-sourced
+ * position, tolerant of the wrapper prefixes other producers use:
+ *   - weather-oracle:  (the oracle scanner — same structure, different prefix)
+ *   - reconciled:      (reconciler-healed positions)
+ * so the correlated-exposure cap counts oracle + reconciled holdings too, not
+ * just the regular scanner's. Returns null when the sourcedFrom carries no
+ * structured city/date/metric (e.g. an unstructured reconciled:clob import).
+ */
+export function parseWeatherCorrelationKey(
+  sourcedFrom: string,
+): { metric: 'high' | 'low'; city: string; targetDate: string } | null {
+  let s = sourcedFrom;
+  if (s.startsWith('reconciled:')) s = s.slice('reconciled:'.length);
+  if (s.startsWith('weather-oracle:')) s = `weather:${s.slice('weather-oracle:'.length)}`;
+  const meta = parseWeatherSourcedFrom(s);
+  return meta ? { metric: meta.metric, city: meta.city, targetDate: meta.targetDate } : null;
 }
 
 /**
@@ -4168,12 +4187,43 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
   const perCityCount = new Map<string, number>();
   let executed = 0;
   let cumulativeStakeUsd = 0;
+  // Correlated-event exposure: stake already committed on OPEN positions per
+  // city+date+metric, accumulated with this scan's fills below. Seeded only when
+  // the cap is enabled (>0) so the disabled default does no extra position read.
+  const correlatedExposure = new Map<string, number>();
+  if (cfg.WEATHER_CORRELATED_MAX_EXPOSURE_USD > 0) {
+    const open = await getOpenPositions(redis);
+    for (const pos of open) {
+      // Counts regular (weather:), oracle (weather-oracle:) and reconciled
+      // (reconciled:weather…) holdings — all real correlated exposure.
+      const meta = parseWeatherCorrelationKey(pos.sourcedFrom);
+      if (!meta) continue;
+      const key = `${meta.metric}:${meta.city}:${meta.targetDate}`;
+      correlatedExposure.set(key, (correlatedExposure.get(key) ?? 0) + pos.stakeUsd);
+    }
+    // ...AND weather maker orders still RESTING from a prior scan (maker:open:*).
+    // They aren't ledger positions until they fill, but they ARE committed
+    // correlated exposure — without them a later same-key entry could pass the cap
+    // while an earlier resting GTC sits there, and both fill above it (the ladder
+    // NO path rests bids patiently). Posted notional = price*size (fallback stake).
+    const pending = await listPendingOrders(redis);
+    for (const { order } of pending) {
+      const meta = parseWeatherCorrelationKey(order.sourcedFrom ?? '');
+      if (!meta) continue;
+      const notional = order.price > 0 && order.size > 0 && Number.isFinite(order.price * order.size)
+        ? order.price * order.size
+        : (order.intendedStakeUsd ?? 0);
+      const key = `${meta.metric}:${meta.city}:${meta.targetDate}`;
+      correlatedExposure.set(key, (correlatedExposure.get(key) ?? 0) + notional);
+    }
+  }
   // Set to true after any non-skipped execution (including size-ups) so the
   // next attempt can pause long enough for the global governor to reset.
   let needsGovernorPause = false;
 
   for (let i = 0; i < tradable.length; i++) {
     const opp = tradable[i]!;
+    const corrKey = `${opp.metric}:${opp.city}:${opp.targetDate}`;
 
     if (executed >= cfg.WEATHER_MAX_POSITIONS_PER_SCAN) {
       logger.info('[weather] per-scan count cap reached', {
@@ -4273,6 +4323,23 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         cap: cfg.WEATHER_MAX_SCAN_EXPOSURE_USD,
       });
       break;
+    }
+
+    // Correlated-event cap: bound aggregate stake on one city+date+metric (open
+    // positions + this scan's fills). Skip (not break) — a different city/date may
+    // still fit. Size-ups top up an existing correlated position, so they're exempt.
+    if (cfg.WEATHER_CORRELATED_MAX_EXPOSURE_USD > 0 && !opp.sizeUpScanOnly) {
+      const correlatedSoFar = correlatedExposure.get(corrKey) ?? 0;
+      if (correlatedSoFar + worstCaseStakeUsd > cfg.WEATHER_CORRELATED_MAX_EXPOSURE_USD) {
+        logger.info('[weather] correlated-event exposure cap — skipping opp', {
+          city: opp.city, targetDate: opp.targetDate, metric: opp.metric,
+          correlatedSoFar: correlatedSoFar.toFixed(2),
+          proposedStakeUsd: worstCaseStakeUsd.toFixed(2),
+          cap: cfg.WEATHER_CORRELATED_MAX_EXPOSURE_USD,
+          marketId: opp.marketId,
+        });
+        continue;
+      }
     }
 
     // Pause here — after all caps are checked so we only wait when an execution
@@ -4381,6 +4448,9 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
         // All committed orders — fills and resting maker GTCs, fresh entries and
         // size-ups — commit capital, so they all count toward per-scan exposure.
         cumulativeStakeUsd += filledStakeUsd;
+        // ...and toward this city+date+metric's correlated exposure, so several
+        // entries on the same city-day can't stack past the cap within one scan.
+        correlatedExposure.set(corrKey, (correlatedExposure.get(corrKey) ?? 0) + filledStakeUsd);
       }
 
       // The cross-scan active-event marker tracks whether a position now exists
@@ -4486,6 +4556,10 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
           if (bracketResult.governorStamped === true) needsGovernorPause = true;
           if (bracketResult.governorStamped === true && !bracketResult.error) {
             cumulativeStakeUsd += bracketWorstCase;
+            // The opposite leg is on the same city+date+metric, so it counts toward
+            // correlated exposure too (mirrors cumulativeStakeUsd) — otherwise a
+            // later same-key opp could stack past the cap.
+            correlatedExposure.set(corrKey, (correlatedExposure.get(corrKey) ?? 0) + bracketWorstCase);
           }
         } catch (err) {
           logger.warn('[weather] bracket opposite execution threw', {
