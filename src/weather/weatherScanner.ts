@@ -4201,6 +4201,21 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
       const key = `${meta.metric}:${meta.city}:${meta.targetDate}`;
       correlatedExposure.set(key, (correlatedExposure.get(key) ?? 0) + pos.stakeUsd);
     }
+    // ...AND weather maker orders still RESTING from a prior scan (maker:open:*).
+    // They aren't ledger positions until they fill, but they ARE committed
+    // correlated exposure — without them a later same-key entry could pass the cap
+    // while an earlier resting GTC sits there, and both fill above it (the ladder
+    // NO path rests bids patiently). Posted notional = price*size (fallback stake).
+    const pending = await listPendingOrders(redis);
+    for (const { order } of pending) {
+      const meta = parseWeatherCorrelationKey(order.sourcedFrom ?? '');
+      if (!meta) continue;
+      const notional = order.price > 0 && order.size > 0 && Number.isFinite(order.price * order.size)
+        ? order.price * order.size
+        : (order.intendedStakeUsd ?? 0);
+      const key = `${meta.metric}:${meta.city}:${meta.targetDate}`;
+      correlatedExposure.set(key, (correlatedExposure.get(key) ?? 0) + notional);
+    }
   }
   // Set to true after any non-skipped execution (including size-ups) so the
   // next attempt can pause long enough for the global governor to reset.

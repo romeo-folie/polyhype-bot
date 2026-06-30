@@ -293,8 +293,8 @@ function createRedisMock() {
     exists: vi.fn((...keys: string[]) =>
       Promise.resolve(keys.filter((k) => store.has(k)).length),
     ),
-    // Empty positions index → getOpenPositions returns [] (correlated-cap tests
-    // exercise the within-scan accumulation, not pre-existing held exposure).
+    // Empty positions index → getOpenPositions (real, against this mock) returns [].
+    // The correlated-cap seed reads listPendingOrders, which is MOCKED separately.
     zrange: vi.fn(() => Promise.resolve([] as string[])),
     pipeline: vi.fn(() => pipelineMock),
     _store: store,
@@ -3677,6 +3677,7 @@ describe('scanWeatherMarkets', () => {
       });
       const execResult = { signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob' as const, governorStamped: true };
 
+      mockListPendingOrders.mockResolvedValue([]); // no resting orders → within-scan only
       // Disabled (0): the fixture's NO entries (all chicago / same date / high) fire freely.
       mockLoadConfig.mockReturnValue(corrCfg(0));
       wireMockGammaAndForecast();
@@ -3697,6 +3698,39 @@ describe('scanWeatherMarkets', () => {
       await runWeatherScan(redisMock as never);
       expect(mockExecuteAndRecordSignal.mock.calls.length).toBeLessThanOrEqual(1);
       expect(mockExecuteAndRecordSignal.mock.calls.length).toBeLessThan(uncapped);
+    });
+
+    it('seeds the correlated cap from RESTING pending maker orders (a prior-scan GTC blocks a fresh same-key entry)', async () => {
+      // A weather maker order resting from a PRIOR scan on chicago / targetIso / high,
+      // posted notional 0.5×12 = 6 (> cap 5). No ledger position exists yet, but it is
+      // committed correlated exposure, so a fresh same-key entry this scan must be blocked.
+      mockListPendingOrders.mockResolvedValue([
+        { marketId: 'premkt', direction: 'NO', order: {
+          orderId: 'pre-1', price: 0.5, size: 12, direction: 'NO', source: 'weather',
+          sourcedFrom: `weather:chicago:${targetIso}:52-53°F`,
+        } },
+      ]);
+      mockLoadConfig.mockReturnValue({
+        ...baseConfig,
+        WEATHER_SCANNER_ENABLED: true,
+        WEATHER_EXECUTION_ENABLED: true,
+        WEATHER_MAX_POSITIONS_PER_SCAN: 10,
+        WEATHER_MAX_PER_CITY: 10,
+        WEATHER_MAX_SCAN_EXPOSURE_USD: 1000,
+        WEATHER_CORRELATED_MAX_EXPOSURE_USD: 5,
+        // Keep the revalidation pass from cancelling the seeded resting order.
+        WEATHER_RESTING_REVALIDATION_ENABLED: false,
+        WEATHER_BRACKET_CANCEL_ENABLED: false,
+        WEATHER_COND_ORACLE_RESTING_CANCEL_ENABLED: false,
+      });
+      wireMockGammaAndForecast();
+      mockGetBankroll.mockResolvedValue(10000);
+      mockExecuteAndRecordSignal.mockResolvedValue({ signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob', governorStamped: true });
+
+      await runWeatherScan(redisMock as never);
+
+      // The resting order alone meets the cap → no fresh chicago/high entry executes.
+      expect(mockExecuteAndRecordSignal).not.toHaveBeenCalled();
     });
 
     it('skips when bankroll is zero', async () => {
