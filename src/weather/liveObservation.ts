@@ -41,6 +41,14 @@ export interface WeatherLiveObservation {
   source: LiveObsSource;
   /** Settlement-aligned: same source as the final reconciler; proxy: different source or intraday proxy. */
   confidence: LiveObsConfidence;
+  /** True when observedMax comes from a Redis-accumulated running extreme that can
+   *  only move in the extreme direction within the day (max only up / min only down)
+   *  AND whose underlying readings are final (never retroactively revised). Only such
+   *  a source is safe for an IRREVERSIBLE lock-in: WU re-fetches an array that can be
+   *  QC-corrected downward (the 2026-06-29 Seoul failure), so it is NOT monotonic;
+   *  HKO (rhrread current-reading) and METAR (final published reports), both
+   *  Redis-accumulated, ARE. See WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY. */
+  monotonic: boolean;
   /** ISO8601 UTC timestamp of the most recent observation that contributed to observedMax. */
   observedAt: string | null;
 }
@@ -222,6 +230,53 @@ export function fetchMetarIntradayHigh(
 const HKO_INTRADAY_MAX_PREFIX = 'weather:hko_intraday_max:';
 const HKO_INTRADAY_MIN_PREFIX = 'weather:hko_intraday_min:';
 const HKO_INTRADAY_MAX_TTL_S = 36 * 3600;
+
+/**
+ * Accumulate a Redis-backed intraday running extreme: store currentReading only
+ * when it is MORE extreme than the stored value (higher for 'high', lower for
+ * 'low'), then return the running extreme. This makes the result MONOTONIC within
+ * the day — a later, lower reading never lowers the stored max — which is the
+ * property an irreversible lock-in requires. Shared by HKO (rhrread) and METAR
+ * (final published reports); both have non-revising underlying readings.
+ * Best-effort: a Redis error falls back to currentReading.
+ */
+async function accumulateRunningExtreme(
+  redis: Redis,
+  accKey: string,
+  currentReading: number | null,
+  metric: 'high' | 'low',
+  ttlS: number,
+): Promise<number | null> {
+  if (currentReading != null) {
+    try {
+      const storedRaw = await redis.get(accKey);
+      const seed = metric === 'low' ? Infinity : -Infinity;
+      const stored = storedRaw != null ? parseFloat(storedRaw) : seed;
+      const isMoreExtreme = metric === 'low' ? currentReading < stored : currentReading > stored;
+      if (!isFinite(stored) || isMoreExtreme) {
+        await redis.set(accKey, String(currentReading), 'EX', ttlS);
+      }
+    } catch {
+      // Redis write is best-effort.
+    }
+  }
+  try {
+    const storedRaw = await redis.get(accKey);
+    if (storedRaw != null) {
+      const running = parseFloat(storedRaw);
+      if (isFinite(running)) return running;
+    }
+  } catch {
+    // Fall through to currentReading.
+  }
+  return currentReading;
+}
+
+// METAR intraday running-extreme accumulator keys (mirrors HKO). Keyed by
+// ICAO+date so each station/day resets; 36h TTL for overlap safety.
+const METAR_INTRADAY_MAX_PREFIX = 'weather:metar_intraday_max:';
+const METAR_INTRADAY_MIN_PREFIX = 'weather:metar_intraday_min:';
+const METAR_INTRADAY_TTL_S = 36 * 3600;
 const HKO_RHRREAD_URL =
   'https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en';
 const HKO_STATION_NAME = 'Hong Kong Observatory';
@@ -312,43 +367,13 @@ export async function fetchHkoIntradayExtreme(
     });
   }
 
-  // Update the Redis running extreme if the new reading is more extreme.
-  // For 'high' a higher reading wins; for 'low' a lower reading wins.
-  if (currentReading != null) {
-    try {
-      const storedRaw = await redis.get(accKey);
-      const seed = metric === 'low' ? Infinity : -Infinity;
-      const stored = storedRaw != null ? parseFloat(storedRaw) : seed;
-      const isMoreExtreme = metric === 'low'
-        ? currentReading < stored
-        : currentReading > stored;
-      if (!isFinite(stored) || isMoreExtreme) {
-        await redis.set(accKey, String(currentReading), 'EX', HKO_INTRADAY_MAX_TTL_S);
-        logger.debug('[weather-live-obs] HKO intraday extreme updated', {
-          targetDate,
-          metric,
-          previous: isFinite(stored) ? stored : null,
-          current: currentReading,
-        });
-      }
-    } catch {
-      // Redis write is best-effort.
-    }
+  // Accumulate the Redis running extreme (max only up / min only down). Returns the
+  // running value from an earlier observation today when the current reading is less
+  // extreme (or this call had no reading but an earlier one is stored).
+  const running = await accumulateRunningExtreme(redis, accKey, currentReading, metric, HKO_INTRADAY_MAX_TTL_S);
+  if (running != null) {
+    return { observedMax: running, observedAt: observedAt ?? new Date().toISOString() };
   }
-
-  // Return the running extreme from Redis (may be from an earlier observation today).
-  try {
-    const storedRaw = await redis.get(accKey);
-    if (storedRaw != null) {
-      const running = parseFloat(storedRaw);
-      if (isFinite(running)) {
-        return { observedMax: running, observedAt: observedAt ?? new Date().toISOString() };
-      }
-    }
-  } catch {
-    // Fall through to null.
-  }
-
   return { observedMax: currentReading, observedAt };
 }
 
@@ -485,6 +510,7 @@ export async function fetchLiveObservation(
     metric,
     source: 'none',
     confidence: 'none',
+    monotonic: false,
     observedAt: null,
   };
 
@@ -512,6 +538,8 @@ export async function fetchLiveObservation(
       // final dailyExtract settlement source, so intraday readings are settlement_aligned
       // when they support an irreversible oracle conclusion (max only up / min only down).
       confidence: observedMax != null ? 'settlement_aligned' : 'none',
+      // Redis-accumulated running extreme over a non-revising current-reading feed.
+      monotonic: true,
       observedAt,
     };
   } else if (resolutionSource === 'wu' && opts.wuEnabled) {
@@ -530,29 +558,36 @@ export async function fetchLiveObservation(
       observedMax,
       metric,
       source: 'wu-live',
-      // WU intraday returns the same hourly observations the final daily extract
-      // is derived from, so intraday extreme is settlement_aligned for irreversible
-      // oracle conclusions (running max only increases / running min only decreases).
+      // NOTE: confidence stays 'settlement_aligned' (same station as the final
+      // extract) for the drift/oracle consumers, but WU is NOT monotonic — its
+      // historical endpoint re-fetches an array WU can QC-correct downward, which
+      // is the 2026-06-29 Seoul lock-in failure. The lock-in path gates on
+      // `monotonic`, so it never trusts a revisable WU max for an irreversible bet.
       confidence: observedMax != null ? 'settlement_aligned' : 'none',
+      monotonic: false,
       observedAt,
     };
   } else if (resolutionSource === 'metar' && opts.metarEnabled) {
-    const { observedMax, observedAt } = await fetchMetarIntradayExtreme(
-      wuStation,
-      targetDate,
-      fetchFn,
-      metric,
-    );
+    const raw = await fetchMetarIntradayExtreme(wuStation, targetDate, fetchFn, metric);
+    // METAR published reports are FINAL (never retroactively corrected); accumulating
+    // them in Redis yields a guaranteed-monotonic running extreme, and it also rides
+    // out a transient under-fetch (a partial response can't lower the stored max).
+    const accKey = `${metric === 'low' ? METAR_INTRADAY_MIN_PREFIX : METAR_INTRADAY_MAX_PREFIX}${wuStation}:${targetDate}`;
+    const observedMax = await accumulateRunningExtreme(redis, accKey, raw.observedMax, metric, METAR_INTRADAY_TTL_S);
     result = {
       city,
       targetDate,
       observedMax,
       metric,
       source: 'metar-live',
-      // METAR hourly observations are a proxy — no city currently uses METAR as
-      // its primary resolution source, so this is always 'proxy' until verified.
-      confidence: observedMax != null ? 'proxy' : 'none',
-      observedAt,
+      // This branch runs ONLY when resolutionSource==='metar' (e.g. Istanbul), so
+      // METAR IS that city's settlement source — settlement_aligned, not a proxy.
+      confidence: observedMax != null ? 'settlement_aligned' : 'none',
+      monotonic: true,
+      // When this scan's fetch returned nothing but the accumulator still holds a
+      // prior max, stamp the current time (as HKO does) so a transient METAR outage
+      // doesn't suppress a valid lock-in on the already-confirmed running max.
+      observedAt: raw.observedAt ?? (observedMax != null ? new Date().toISOString() : null),
     };
   } else {
     return none;

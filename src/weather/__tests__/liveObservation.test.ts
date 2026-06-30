@@ -511,4 +511,76 @@ describe('fetchLiveObservation routing', () => {
     expect(obs.confidence).toBe('settlement_aligned');
     expect(obs.observedMax).toBe(26.0);
   });
+
+  // ── monotonic flag per source (lock-in safety) ──────────────────────────────
+  const metarFetch = (temp: number, reportTime = '2026-06-09 14:00:00') => vi.fn().mockResolvedValue({
+    ok: true, status: 200, json: () => Promise.resolve([{ reportTime, temp }]),
+  });
+  const hkoFetch = (value: number) => vi.fn().mockResolvedValue({
+    ok: true, status: 200,
+    json: () => Promise.resolve({ temperature: { recordTime: '2026-06-09T14:00:00+08:00', data: [{ place: 'Hong Kong Observatory', value, unit: 'C' }] } }),
+  });
+
+  it('WU is NOT monotonic (revisable historical endpoint)', async () => {
+    mockFetchWuHistoricalExtreme.mockResolvedValue(26.0);
+    const redis = makeRedis();
+    const obs = await fetchLiveObservation('chicago', '2026-06-09', redis as any, {
+      wuEnabled: true, metarEnabled: false, hkoEnabled: false, maxAgeMin: 30,
+    });
+    expect(obs.source).toBe('wu-live');
+    expect(obs.monotonic).toBe(false);
+  });
+
+  it('HKO IS monotonic (Redis-accumulated running extreme)', async () => {
+    const redis = makeRedis();
+    const obs = await fetchLiveObservation('hong kong', '2026-06-09', redis as any, {
+      wuEnabled: false, metarEnabled: false, hkoEnabled: true, maxAgeMin: 30, fetchFn: hkoFetch(31.5) as any,
+    });
+    expect(obs.source).toBe('hko-live');
+    expect(obs.confidence).toBe('settlement_aligned');
+    expect(obs.monotonic).toBe(true);
+  });
+
+  it('METAR is monotonic + settlement_aligned (METAR IS the resolution source for metar cities)', async () => {
+    const redis = makeRedis();
+    const obs = await fetchLiveObservation('teltest', '2026-06-09', redis as any, {
+      wuEnabled: false, metarEnabled: true, hkoEnabled: false, maxAgeMin: 30, fetchFn: metarFetch(30.0) as any,
+    });
+    expect(obs.source).toBe('metar-live');
+    expect(obs.confidence).toBe('settlement_aligned'); // was 'proxy' before the accumulator
+    expect(obs.monotonic).toBe(true);
+    expect(obs.observedMax).toBe(30.0);
+  });
+
+  it('METAR running max does not revise down — a later lower reading keeps the accumulated max', async () => {
+    const redis = makeRedis();
+    // maxAgeMin: 0 disables the live_obs cache so each call re-runs the METAR branch;
+    // the separate metar_intraday_max accumulator key persists in the mock store.
+    const first = await fetchLiveObservation('teltest', '2026-06-09', redis as any, {
+      wuEnabled: false, metarEnabled: true, hkoEnabled: false, maxAgeMin: 0, fetchFn: metarFetch(30.0, '2026-06-09 12:00:00') as any,
+    });
+    expect(first.observedMax).toBe(30.0);
+    const second = await fetchLiveObservation('teltest', '2026-06-09', redis as any, {
+      wuEnabled: false, metarEnabled: true, hkoEnabled: false, maxAgeMin: 0, fetchFn: metarFetch(28.0, '2026-06-09 14:00:00') as any,
+    });
+    expect(second.observedMax).toBe(30.0); // not 28.0 — the running max is preserved
+  });
+
+  it('METAR transient outage keeps the accumulated max with a non-null observedAt (lock-in not suppressed)', async () => {
+    const redis = makeRedis();
+    const emptyFetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve([]) });
+    // Seed the accumulator with a confirmed prior max.
+    const first = await fetchLiveObservation('teltest', '2026-06-09', redis as any, {
+      wuEnabled: false, metarEnabled: true, hkoEnabled: false, maxAgeMin: 0, fetchFn: metarFetch(30.0, '2026-06-09 12:00:00') as any,
+    });
+    expect(first.observedMax).toBe(30.0);
+    // Next scan: METAR returns no data. The accumulator still holds 30, and observedAt
+    // must be non-null so the executeWeatherLockIns `observedAt == null` gate doesn't
+    // suppress a lock-in on the already-confirmed running max.
+    const outage = await fetchLiveObservation('teltest', '2026-06-09', redis as any, {
+      wuEnabled: false, metarEnabled: true, hkoEnabled: false, maxAgeMin: 0, fetchFn: emptyFetch as any,
+    });
+    expect(outage.observedMax).toBe(30.0);
+    expect(outage.observedAt).not.toBeNull();
+  });
 });

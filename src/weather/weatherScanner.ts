@@ -3249,6 +3249,17 @@ export async function executeWeatherLockIns(
         });
         continue;
       }
+      // Monotonic-source gate (defense-in-depth, supersedes the source-specific WU
+      // skip above): a lock-in is irreversible, so only trust a running extreme that
+      // cannot revise the wrong way (HKO + METAR, both Redis-accumulated). WU is
+      // monotonic=false; this blocks it (and any future revisable source) explicitly.
+      if (cfg.WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY && !liveObs.monotonic) {
+        logger.info('[weather-lockin] skipping non-monotonic source — revisable max unsafe for irreversible entry', {
+          city: opp.city, targetDate: opp.targetDate, bracket: opp.bracketLabel,
+          source: liveObs.source, observedMax: liveObs.observedMax,
+        });
+        continue;
+      }
       if (!isWeatherHighLockedIn(liveObs.observedMax, bracket.high, cfg.WEATHER_LOCKIN_MARGIN)) continue;
       // OBSERVED certainty (not forecast): stamp a near-certain win-prob so the executor's
       // res-day taker edge (modelWin − ask) clears. consensusProbability = P(in-bracket)

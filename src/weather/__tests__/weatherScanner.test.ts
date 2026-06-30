@@ -92,6 +92,7 @@ const baseConfig = {
   // Res-day lock-in (off in baseConfig; dedicated tests enable).
   WEATHER_LOCKIN_ENABLED: false,
   WEATHER_LOCKIN_MARGIN: 1.0,
+  WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: true,
   WEATHER_LOCKIN_STAKE_USD: 10,
   WEATHER_LOCKIN_MODEL_WIN: 0.97,
   WEATHER_MODAL_MASS_VETO_ENABLED: false,
@@ -1324,9 +1325,9 @@ describe('executeWeatherLockIns', () => {
     WEATHER_LOCKIN_ENABLED: true, WEATHER_TAKER_ENTRY_ENABLED: true,
     WEATHER_LOCKIN_MARGIN: 1.0, WEATHER_LOCKIN_STAKE_USD: 10, WEATHER_LOCKIN_MODEL_WIN: 0.97, ...over,
   });
-  const obs = (observedMax: number, confidence = 'settlement_aligned', source = 'hko-live') => (async () => ({
+  const obs = (observedMax: number, confidence = 'settlement_aligned', source = 'hko-live', monotonic = true) => (async () => ({
     city: 'taipei', targetDate: '2026-06-26', observedMax, metric: 'high', source,
-    observedAt: '2026-06-26T07:00:00Z', confidence,
+    observedAt: '2026-06-26T07:00:00Z', confidence, monotonic,
   })) as never;
 
   it('takes NO when the observed max has already exceeded the bracket', async () => {
@@ -1415,6 +1416,43 @@ describe('executeWeatherLockIns', () => {
       { fetchObs: obs(40, 'settlement_aligned', 'wu-live'), execute: execute as never },
     );
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('skips a NON-MONOTONIC source even when settlement-aligned (revisable max unsafe for an irreversible bet)', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn();
+    // settlement_aligned + not wu-live, but monotonic=false → blocked by the new gate.
+    await executeWeatherLockIns(
+      {} as never,
+      [baseOpp],
+      undefined,
+      { fetchObs: obs(40, 'settlement_aligned', 'metar-live', false), execute: execute as never },
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('allows a non-monotonic source only when WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY is off (escape hatch)', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: false }));
+    const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+    await executeWeatherLockIns(
+      {} as never,
+      [baseOpp],
+      undefined,
+      { fetchObs: obs(40, 'settlement_aligned', 'metar-live', false), execute: execute as never },
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes a monotonic METAR lock-in (settlement-aligned + monotonic)', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+    await executeWeatherLockIns(
+      {} as never,
+      [baseOpp],
+      undefined,
+      { fetchObs: obs(40, 'settlement_aligned', 'metar-live', true), execute: execute as never },
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
   it('skips YES opps, low-metric, and tail brackets', async () => {
