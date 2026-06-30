@@ -102,6 +102,8 @@ const baseConfig = {
   // Calibration shadow off in the base config so legacy scan assertions are
   // unaffected; the dedicated calibration tests enable it explicitly.
   WEATHER_CALIBRATION_SHADOW_ENABLED: false,
+  // Full-bracket shadow census off in base config; the dedicated PR2 tests enable it.
+  WEATHER_FULL_BRACKET_SHADOW_ENABLED: false,
   // Calibration-live (PR2b) off in base config; dedicated tests enable + inject a table.
   WEATHER_CALIBRATION_LIVE_ENABLED: false,
   WEATHER_REQUIRE_CALIBRATION_COHORT_FOR_ENTRY: false,
@@ -3864,6 +3866,116 @@ describe('scanWeatherMarkets', () => {
       await runWeatherScan(redisMock as never);
 
       expect(mockExecuteAndRecordSignal).toHaveBeenCalled();
+    });
+  });
+
+  // ── full-bracket shadow census (PR2) ─────────────────────────────────────
+  describe('full-bracket shadow snapshots (WEATHER_FULL_BRACKET_SHADOW_ENABLED)', () => {
+    function wireFull(): void {
+      const evt = makeMockGammaEvent();
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true, status: 200, json: () => Promise.resolve([evt]),
+      }) as unknown as typeof fetch;
+      // Tight forecast around 52F: the modal bracket becomes an opportunity while
+      // far tail brackets skip (cityActuals is null in tests → tail_no_actuals_absent),
+      // so both wasSkipped populations are exercised.
+      mockFetchNwsForecast.mockResolvedValue({ highF: 52, lowF: 38, precipProbability: 10, forecastDate: targetIso, shortForecast: 'Cloudy' });
+      mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: targetIso });
+      mockFetchEnsemble.mockResolvedValue({ meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: targetIso });
+    }
+    function fullRows(): { payload: Record<string, unknown> }[] {
+      return mockEnqueueWrite.mock.calls
+        .filter((c) => c[0] === 'shadow_observations' && (c[1] as { kind?: string }).kind === 'weather_bracket_full')
+        .map((c) => c[1] as { payload: Record<string, unknown> });
+    }
+    function bracketRowCount(): number {
+      return mockEnqueueWrite.mock.calls
+        .filter((c) => c[0] === 'shadow_observations' && (c[1] as { kind?: string }).kind === 'weather_bracket').length;
+    }
+
+    it('writes NO weather_bracket_full rows when the flag is off', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_FULL_BRACKET_SHADOW_ENABLED: false });
+      wireFull();
+      await scanWeatherMarkets(redisMock as never);
+      expect(fullRows()).toHaveLength(0);
+    });
+
+    it('writes exactly one full row per bracket (opportunities + skipped) when on', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_FULL_BRACKET_SHADOW_ENABLED: true });
+      wireFull();
+      await scanWeatherMarkets(redisMock as never);
+      const rows = fullRows();
+      // fixture has 11 brackets; every bracket is either an opportunity or skipped.
+      expect(rows).toHaveLength(11);
+      const opps = rows.filter((r) => r.payload.wasSkipped === false);
+      const skipped = rows.filter((r) => r.payload.wasSkipped === true);
+      expect(opps.length).toBeGreaterThan(0);
+      expect(skipped.length).toBeGreaterThan(0);
+      expect(opps.length + skipped.length).toBe(11);
+    });
+
+    it('carries numeric both-side edges on every full row', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_FULL_BRACKET_SHADOW_ENABLED: true });
+      wireFull();
+      await scanWeatherMarkets(redisMock as never);
+      const rows = fullRows();
+      expect(rows.length).toBeGreaterThan(0);
+      for (const { payload: p } of rows) {
+        expect(Number.isFinite(p.edgeYes as number)).toBe(true);
+        expect(Number.isFinite(p.edgeNo as number)).toBe(true);
+      }
+    });
+
+    it('carries a numeric forecastDistance on every full row, including non-ladder opportunities', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_FULL_BRACKET_SHADOW_ENABLED: true });
+      wireFull();
+      await scanWeatherMarkets(redisMock as never);
+      const rows = fullRows();
+      expect(rows.length).toBeGreaterThan(0);
+      for (const { payload: p } of rows) {
+        expect(Number.isFinite(p.forecastDistance as number)).toBe(true);
+      }
+      // The regressed case: non-ladder opportunity rows (farNoLadderQualifies=false,
+      // wasSkipped=false) previously read opp.farNoDistance (ladder-only) → null.
+      const nonLadderOpps = rows.filter((r) => r.payload.wasSkipped === false && r.payload.farNoLadderQualifies === false);
+      expect(nonLadderOpps.length).toBeGreaterThan(0);
+      for (const { payload: p } of nonLadderOpps) {
+        expect(typeof p.forecastDistance).toBe('number');
+      }
+    });
+
+    it('skipped rows set wasSkipped=true + a terminalSkipReason; opportunity rows set neither', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_FULL_BRACKET_SHADOW_ENABLED: true });
+      wireFull();
+      await scanWeatherMarkets(redisMock as never);
+      const rows = fullRows();
+      for (const { payload: p } of rows) {
+        if (p.wasSkipped === true) {
+          expect(typeof p.terminalSkipReason).toBe('string');
+          expect(p.terminalSkipReason).toBeTruthy();
+        } else {
+          expect(p.terminalSkipReason).toBeNull();
+          expect(typeof p.wouldTrade).toBe('boolean');
+          expect(typeof p.proposedEntryPrice).toBe('number');
+        }
+      }
+    });
+
+    it('leaves the legacy weather_bracket population unchanged whether the flag is on or off', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_FULL_BRACKET_SHADOW_ENABLED: false });
+      wireFull();
+      await scanWeatherMarkets(redisMock as never);
+      const countOff = bracketRowCount();
+
+      vi.clearAllMocks();
+      redisMock = createRedisMock();
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_FULL_BRACKET_SHADOW_ENABLED: true });
+      wireFull();
+      await scanWeatherMarkets(redisMock as never);
+      const countOn = bracketRowCount();
+
+      expect(countOn).toBe(countOff);
+      expect(countOff).toBeGreaterThan(0);
     });
   });
 
