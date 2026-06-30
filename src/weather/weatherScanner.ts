@@ -978,6 +978,10 @@ export interface WeatherBracketOpportunity {
   edgeYes?: number;
   /** Raw NO edge ((1 − decisionProb) − noDecisionPrice) at scan time. */
   edgeNo?: number;
+  /** Distance (°) from the corrected forecast to this bracket interval, computed
+   *  for EVERY bracket (not just ladder NOs, unlike farNoDistance). Drives the
+   *  distance-from-forecast cohorts in the full-bracket census. */
+  forecastDistance?: number;
 }
 
 /** Terminal reason a bracket never became a tradeable opportunity. One per skip
@@ -2098,6 +2102,7 @@ export function findMispricedBrackets(
       isTailBracket: bracket.low === null || bracket.high === null,
       edgeYes,
       edgeNo,
+      forecastDistance: farNoDistance,
       isFarNoLadder: tradeSide === 'NO' && farNoLadderCandidate,
       isAdjacentNoLadder: tradeSide === 'NO' && adjacentNoLadderCandidate,
       noLadderKind: tradeSide === 'NO' ? noLadderKind : null,
@@ -2950,7 +2955,7 @@ export async function scanWeatherMarkets(
             modelProb: opp.modelProbability,
             modelProbCalibrated: opp.modelProbCalibrated ?? null,
             correctedForecastHigh: opp.correctedForecastHigh,
-            forecastDistance: opp.farNoDistance ?? null,
+            forecastDistance: opp.forecastDistance ?? null,
             noLadderKind: opp.noLadderKind ?? null,
             farNoLadderQualifies: opp.noLadderKind === 'far',
             proposedEntryPrice: opp.outcomePrice,

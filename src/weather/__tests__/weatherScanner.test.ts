@@ -3926,6 +3926,24 @@ describe('scanWeatherMarkets', () => {
       }
     });
 
+    it('carries a numeric forecastDistance on every full row, including non-ladder opportunities', async () => {
+      mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_FULL_BRACKET_SHADOW_ENABLED: true });
+      wireFull();
+      await scanWeatherMarkets(redisMock as never);
+      const rows = fullRows();
+      expect(rows.length).toBeGreaterThan(0);
+      for (const { payload: p } of rows) {
+        expect(Number.isFinite(p.forecastDistance as number)).toBe(true);
+      }
+      // The regressed case: non-ladder opportunity rows (farNoLadderQualifies=false,
+      // wasSkipped=false) previously read opp.farNoDistance (ladder-only) → null.
+      const nonLadderOpps = rows.filter((r) => r.payload.wasSkipped === false && r.payload.farNoLadderQualifies === false);
+      expect(nonLadderOpps.length).toBeGreaterThan(0);
+      for (const { payload: p } of nonLadderOpps) {
+        expect(typeof p.forecastDistance).toBe('number');
+      }
+    });
+
     it('skipped rows set wasSkipped=true + a terminalSkipReason; opportunity rows set neither', async () => {
       mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_SCANNER_ENABLED: true, WEATHER_FULL_BRACKET_SHADOW_ENABLED: true });
       wireFull();
