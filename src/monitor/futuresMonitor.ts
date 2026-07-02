@@ -173,6 +173,78 @@ async function pruneOrphanedHedge(
   });
 }
 
+/**
+ * Outcome recording for futures positions closed exchange-side while carrying a
+ * native stop trigger (HL_NATIVE_STOP_ENABLED). Before this, the prune path
+ * silently dropped the ledger row and the trade vanished from analytics.
+ *
+ * Distinguishes "native stop fired" (trigger order filled) from other external
+ * closes (manual close, liquidation) via the trigger's order status, cancels a
+ * still-resting trigger, and recovers the actual close price from user fills.
+ * Best-effort — any failure degrades to the previous silent-prune behaviour.
+ */
+export async function handleExternallyClosedPosition(
+  redis: ReturnType<typeof getRedis>,
+  hl: ReturnType<typeof getHyperliquid>,
+  lp: Position,
+): Promise<void> {
+  if (!lp.isFutures || lp.nativeStopOid === undefined) return;
+  const symbol = lp.symbol ?? lp.marketId;
+  try {
+    const status = await hl.getOrderStatus(lp.nativeStopOid);
+    const nativeStopFired = status.status === 'filled';
+    if (status.status === 'open') {
+      await hl.cancelOrder(symbol, lp.nativeStopOid).catch(() => {});
+    }
+
+    // Recover the close price from fills since entry (most recent closing-side
+    // fill for this coin). LONG closes sell (side 'A'); SHORT closes buy ('B').
+    const openedAtMs = Date.parse(lp.openedAt);
+    const sinceMs = Number.isFinite(openedAtMs) ? openedAtMs : Date.now() - 48 * 3600_000;
+    const closeSide = lp.direction === 'LONG' ? 'A' : 'B';
+    let closePx: number | undefined;
+    try {
+      const fills = await hl.getUserFillsByTime(sinceMs);
+      const closes = fills.filter((f) => f.coin === symbol && f.side === closeSide && f.px > 0);
+      closePx = closes.length > 0 ? closes[closes.length - 1]?.px : undefined;
+    } catch {
+      // fall through to trigger-price estimate
+    }
+    if (closePx === undefined && nativeStopFired) closePx = lp.nativeStopPx;
+    if (closePx === undefined || !Number.isFinite(lp.entryPrice) || lp.entryPrice <= 0) {
+      logger.warn('[futures-monitor] external close — no close price recoverable, outcome skipped', {
+        symbol,
+        nativeStopOid: lp.nativeStopOid,
+        nativeStopFired,
+      });
+      return;
+    }
+
+    const rawMove = ((closePx - lp.entryPrice) / lp.entryPrice) * 100;
+    const returnPct = lp.direction === 'LONG' ? rawMove : -rawMove;
+    const exitReason = nativeStopFired
+      ? `Stop-Loss triggered (native_trigger_stop px=${closePx.toString()})`
+      : `External close (px=${closePx.toString()})`;
+    await recordPositionOutcome(redis, lp, {
+      result: returnPct > 0 ? 'won' : returnPct < 0 ? 'lost' : 'pushed',
+      returnPct,
+      executionVenueOverride: 'hyperliquid',
+      exitReason,
+    });
+    logger.info('[futures-monitor] external close outcome recorded', {
+      symbol,
+      direction: lp.direction,
+      returnPct: returnPct.toFixed(2),
+      nativeStopFired,
+    });
+  } catch (e: unknown) {
+    logger.warn('[futures-monitor] external close handling failed (non-fatal)', {
+      symbol,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
 export async function runFuturesMonitorWorker(): Promise<void> {
   const cfg = loadConfig();
   const redis = getRedis();
@@ -313,6 +385,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             direction: lp.direction,
           });
           await pruneOrphanedHedge(redis, lp);
+          await handleExternallyClosedPosition(redis, hl, lp);
           await closeLedgerPosition(redis, lp.marketId, lp.direction);
         }
         await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
@@ -381,6 +454,7 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             direction: lp.direction,
           });
           await pruneOrphanedHedge(redis, lp);
+          await handleExternallyClosedPosition(redis, hl, lp);
           await closeLedgerPosition(redis, lp.marketId, lp.direction);
         }
       }
@@ -953,6 +1027,22 @@ export async function runFuturesMonitorWorker(): Promise<void> {
 
             // Record futures outcome for analytics
             const ledgerPos = futuresLedger.find((p) => p.marketId === symbol);
+
+            // Cancel the resting native stop trigger so it can't linger after a
+            // software exit. Best-effort — a reduce-only trigger with no position
+            // behind it is harmless if the cancel races the close.
+            if (ledgerPos?.nativeStopOid !== undefined) {
+              await hl
+                .cancelOrder(symbol, ledgerPos.nativeStopOid)
+                .then((r) => {
+                  if (!r.success) {
+                    logger.debug('[futures-monitor] native stop cancel failed (non-fatal)', {
+                      symbol, oid: ledgerPos.nativeStopOid, error: r.error,
+                    });
+                  }
+                })
+                .catch(() => {});
+            }
             const exitPrice = entryPx + pnlUsd / sziRaw;
             const tpReason = reason.startsWith('Stop-Loss')
               ? 'futures_sl'

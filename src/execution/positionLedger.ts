@@ -106,6 +106,11 @@ export interface Position {
    */
   memeAtrSlPct?: number | undefined;
   memeAtrTpPct?: number | undefined;
+  /** Exchange-side reduce-only stop trigger resting on HL (HL_NATIVE_STOP_ENABLED).
+   *  The monitor cancels it on software exits; the prune path uses it to record an
+   *  outcome when the position was closed exchange-side. */
+  nativeStopOid?: number | undefined;
+  nativeStopPx?: number | undefined;
   /** Price-zone classification (Change 3 telemetry) */
   priceZone?: 1 | 2 | 3 | 4 | 5 | undefined;
   /** Entry-time funding APR (%) for hl-funding positions — used for sign-flip exit */
@@ -248,6 +253,8 @@ export async function recordPosition(redis: Redis, positionIn: Position): Promis
     entryAtrPct: position.entryAtrPct !== undefined ? String(position.entryAtrPct) : '',
     memeAtrSlPct: position.memeAtrSlPct !== undefined ? String(position.memeAtrSlPct) : '',
     memeAtrTpPct: position.memeAtrTpPct !== undefined ? String(position.memeAtrTpPct) : '',
+    nativeStopOid: position.nativeStopOid !== undefined ? String(position.nativeStopOid) : '',
+    nativeStopPx: position.nativeStopPx !== undefined ? String(position.nativeStopPx) : '',
     priceZone: position.priceZone !== undefined ? String(position.priceZone) : '',
     entryFundingApr: position.entryFundingApr !== undefined ? String(position.entryFundingApr) : '',
     isContrarian: position.isContrarian ? 'true' : '',
@@ -622,6 +629,10 @@ function deserialisePosition(raw: Record<string, string>): Position {
     pos.memeAtrSlPct = parseFloat(raw.memeAtrSlPct);
   if (raw.memeAtrTpPct !== undefined && raw.memeAtrTpPct !== '')
     pos.memeAtrTpPct = parseFloat(raw.memeAtrTpPct);
+  if (raw.nativeStopOid !== undefined && raw.nativeStopOid !== '')
+    pos.nativeStopOid = parseInt(raw.nativeStopOid, 10);
+  if (raw.nativeStopPx !== undefined && raw.nativeStopPx !== '')
+    pos.nativeStopPx = parseFloat(raw.nativeStopPx);
   if (raw.highWaterMarkPct !== undefined && raw.highWaterMarkPct !== '')
     pos.highWaterMarkPct = parseFloat(raw.highWaterMarkPct);
   if (raw.priceZone !== undefined && raw.priceZone !== '') {

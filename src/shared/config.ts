@@ -1541,6 +1541,17 @@ export const envSchema = z.object({
   // Trailing giveback = entry 15m ATR% × mult, price terms. Replaces the fixed ROE
   // giveback (0.5% price at 10x) that scratched winners on the first wiggle.
   HL_MOMENTUM_TRAIL_ATR_MULT: z.coerce.number().min(0.1).optional().default(1.0),
+  // Native exchange-side stop (2026-07-02 review): after each hl-momentum entry,
+  // rest a reduce-only stop-market trigger on Hyperliquid at the effective
+  // software-stop distance (min of the frozen ATR design stop and the
+  // FUTURES_MAX_LOSS_ROE_PCT backstop, in price terms) × buffer. The futures
+  // monitor still exits first in normal operation; the native trigger is a hard
+  // floor for gaps, monitor downtime, and dumps that outrun the 5s poll (8 of 21
+  // losing trades 06-12→07-02 died at the ROE backstop, −$7.99 — largest bucket).
+  HL_NATIVE_STOP_ENABLED: boolFromEnv.optional().default(false),
+  // Trigger distance = effective software stop × this multiplier (≥1 so the
+  // software monitor keeps exit priority and its outcome telemetry).
+  HL_NATIVE_STOP_BUFFER_MULT: z.coerce.number().min(1).max(3).optional().default(1.15),
   // Pure-time-exit shadow experiment: for every hl-momentum entry, record what a
   // no-SL/no-trail exit after HL_TIME_EXIT_SHADOW_HOURS would have returned
   // (shadow_observations kind=hl_time_exit_shadow). Separates "signal is dead" from

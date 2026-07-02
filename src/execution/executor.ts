@@ -31,6 +31,7 @@ import { isStaleCooldownActive } from '../monitor/staleExit.js';
 import { getHyperliquid, resolveHlSymbol, type HlPosition } from '../shared/hyperliquid.js';
 import { computeATR } from '../arb/indicators.js';
 import { isMemeSymbol } from '../futures/hlMomentumScanner.js';
+import { computeNativeStop } from './nativeStop.js';
 import { loadConfig } from '../shared/config.js';
 import { getCalibrationStats, getBucketCorrection } from '../shared/calibration.js';
 import { inferCategory } from '../shared/outcomeRecorder.js';
@@ -210,6 +211,9 @@ export interface ExecutionResult {
   /** Frozen meme ATR-derived SL/TP magnitudes (issue #264). */
   memeAtrSlPct?: number;
   memeAtrTpPct?: number;
+  /** Exchange-side reduce-only stop trigger resting on HL (HL_NATIVE_STOP_ENABLED). */
+  nativeStopOid?: number;
+  nativeStopPx?: number;
   /** True if this execution was a size-up (pyramid top-up) into an existing position. */
   isSizeUp?: boolean;
   /** True when the entry routed through the empty-book maker path (ghost/no-liquidity book).
@@ -2344,6 +2348,111 @@ async function executeHyperliquidSignal(
         }
       }
 
+      // Native exchange-side stop (2026-07-02 review): rest a reduce-only
+      // stop-market trigger at the effective software-stop distance × buffer.
+      // The monitor still exits first in normal operation (buffer ≥ 1); the
+      // trigger is a hard floor for gaps, monitor downtime, and dumps that
+      // outrun the 5s poll. Best-effort: a failed trigger placement never
+      // fails the entry.
+      let nativeStopOid: number | undefined;
+      let nativeStopPx: number | undefined;
+      if (
+        cfg.HL_NATIVE_STOP_ENABLED &&
+        signal.sourcedFrom === 'hl-momentum' &&
+        tradeResult.price !== undefined
+      ) {
+        try {
+          const isMeme = isMemeSymbol(signal.marketId, cfg.HL_MOMENTUM_MEME_SYMBOLS);
+          // Mirror the monitor's SL precedence: frozen ATR SL (meme or non-meme,
+          // each behind its own enable knob) beats the fixed ROE stop; the
+          // contrarian fixed stop only applies when no ATR snapshot governs.
+          const atrSlActive =
+            (isMeme && cfg.HL_MOMENTUM_MEME_ATR_SLTP_ENABLED) ||
+            (!isMeme && cfg.HL_MOMENTUM_ATR_SLTP_ENABLED);
+          const stop = computeNativeStop({
+            entryPrice: tradeResult.price,
+            direction: signal.direction === 'LONG' ? 'LONG' : 'SHORT',
+            leverage,
+            designSlPricePct: atrSlActive ? memeAtrSlPct : undefined,
+            fixedSlRoePct:
+              signal.isContrarian && !isMeme
+                ? cfg.HL_MOMENTUM_CONTRARIAN_STOP_LOSS_PCT
+                : cfg.HL_MOMENTUM_STOP_LOSS_PCT,
+            maxLossRoePct: cfg.FUTURES_MAX_LOSS_ROE_PCT,
+            bufferMult: cfg.HL_NATIVE_STOP_BUFFER_MULT,
+          });
+          if (stop) {
+            // Sweep stale triggers from prior trades on this symbol first: the
+            // monitor's cancel-on-exit is best-effort, and a leftover trigger
+            // priced for an old position would race this one (grouping 'na'
+            // never cancel-replaces).
+            try {
+              const stale = await hl.getOpenTriggerOrders(signal.marketId);
+              for (const o of stale.filter((s) => s.reduceOnly)) {
+                const c = await hl.cancelOrder(signal.marketId, o.oid);
+                logger.info('[executor] cancelled stale native stop trigger before entry', {
+                  symbol: signal.marketId,
+                  oid: o.oid,
+                  success: c.success,
+                  error: c.error,
+                });
+              }
+            } catch (e: unknown) {
+              logger.warn('[executor] stale trigger sweep failed (non-fatal)', {
+                symbol: signal.marketId,
+                error: e instanceof Error ? e.message : String(e),
+              });
+            }
+
+            // Use the actual on-exchange position size so partial maker fills
+            // and size rounding are covered exactly.
+            const positions = await hl.getOpenPositions();
+            const hlPos = positions.find((p) => p.symbol === signal.marketId);
+            const sizeBase = hlPos ? Math.abs(parseFloat(hlPos.position.szi)) : 0;
+            if (sizeBase > 0) {
+              const trig = await hl.placeStopTrigger({
+                symbol: signal.marketId,
+                isBuy: signal.direction !== 'LONG',
+                sizeBase,
+                triggerPx: stop.triggerPx,
+              });
+              if (trig.success && trig.oid !== undefined) {
+                nativeStopOid = trig.oid;
+                nativeStopPx = trig.triggerPx ?? stop.triggerPx;
+                logger.info('[executor] native stop trigger resting', {
+                  symbol: signal.marketId,
+                  direction: signal.direction,
+                  oid: nativeStopOid,
+                  triggerPx: nativeStopPx,
+                  effectiveSlPricePct: stop.effectiveSlPricePct.toFixed(3),
+                  triggerDistancePct: stop.triggerDistancePct.toFixed(3),
+                });
+              } else {
+                logger.warn('[executor] native stop trigger placement failed (non-fatal)', {
+                  symbol: signal.marketId,
+                  error: trig.error,
+                });
+              }
+            } else {
+              logger.warn('[executor] native stop skipped — position not visible yet', {
+                symbol: signal.marketId,
+              });
+            }
+          } else {
+            logger.warn('[executor] native stop skipped — no sane trigger computable', {
+              symbol: signal.marketId,
+              leverage,
+              memeAtrSlPct,
+            });
+          }
+        } catch (e: unknown) {
+          logger.warn('[executor] native stop placement errored (non-fatal)', {
+            symbol: signal.marketId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+
       const result: ExecutionResult = {
         signal,
         skipped: false,
@@ -2359,6 +2468,8 @@ async function executeHyperliquidSignal(
       if (memeAtrTpPct !== undefined) result.memeAtrTpPct = memeAtrTpPct;
       if (hlMakerFillStatus !== undefined) result.makerFillStatus = hlMakerFillStatus;
       if (hlFallbackReason !== undefined) result.fallbackReason = hlFallbackReason;
+      if (nativeStopOid !== undefined) result.nativeStopOid = nativeStopOid;
+      if (nativeStopPx !== undefined) result.nativeStopPx = nativeStopPx;
 
       void notifyTradeExecuted(signal, tradeResult.txHash, {
         venue: 'hyperliquid',
@@ -4448,6 +4559,8 @@ async function finalizeSuccessfulExecution(
       entryAtrPct: result.entryAtrPct,
       memeAtrSlPct: result.memeAtrSlPct,
       memeAtrTpPct: result.memeAtrTpPct,
+      nativeStopOid: result.nativeStopOid,
+      nativeStopPx: result.nativeStopPx,
       priceZone: result.signal.priceZone,
       entryFundingApr: result.signal.entryFundingApr,
       isContrarian: result.signal.isContrarian,
