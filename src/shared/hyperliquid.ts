@@ -737,6 +737,122 @@ class HyperliquidClient {
     }
   }
 
+  /**
+   * Rest a reduce-only stop-market trigger order (exchange-side stop-loss).
+   *
+   * `isBuy` is the direction of the CLOSING order (sell to close a LONG, buy to
+   * close a SHORT). `triggerPx` is where the stop arms; once triggered HL
+   * executes a market order bounded by `p`, which we set 10% through the
+   * trigger so the stop still fills across fast dumps (the whole point of an
+   * exchange-side stop). No updateLeverage call — reduce-only orders act on the
+   * existing position. Trigger orders always rest, so success returns the oid.
+   */
+  async placeStopTrigger(opts: {
+    symbol: string;
+    isBuy: boolean;
+    sizeBase: number;
+    triggerPx: number;
+  }): Promise<{ success: boolean; oid?: number; triggerPx?: number; error?: string }> {
+    if (loadConfig().HL_DRY_RUN) {
+      logger.info('[hyperliquid] DRY RUN — stop trigger not submitted', {
+        symbol: opts.symbol,
+        isBuy: opts.isBuy,
+        sizeBase: opts.sizeBase,
+        triggerPx: opts.triggerPx,
+      });
+      return { success: true, oid: 0, triggerPx: opts.triggerPx };
+    }
+    try {
+      if (!isFinite(opts.triggerPx) || opts.triggerPx <= 0) {
+        return { success: false, error: `invalid trigger price ${String(opts.triggerPx)}` };
+      }
+      if (!isFinite(opts.sizeBase) || opts.sizeBase <= 0) {
+        return { success: false, error: `invalid size ${String(opts.sizeBase)}` };
+      }
+      const { index, szDecimals } = await this.getAssetMeta(opts.symbol);
+      if (index === -1) throw new Error(`Symbol ${opts.symbol} not found on Hyperliquid`);
+
+      const triggerPx = this.roundPrice(opts.triggerPx, szDecimals);
+      // Slippage-bounded execution price after trigger: 10% through the trigger.
+      const limitPx = this.roundPrice(
+        opts.isBuy ? triggerPx * 1.10 : triggerPx * 0.90,
+        szDecimals,
+      );
+      const sizeBase = this.roundSize(opts.sizeBase, szDecimals);
+      if (sizeBase <= 0) {
+        return { success: false, error: `size rounds to zero for ${opts.symbol}` };
+      }
+
+      const action = {
+        type: 'order',
+        orders: [
+          {
+            a: index,
+            b: opts.isBuy,
+            p: String(limitPx),
+            s: String(sizeBase),
+            r: true,
+            t: { trigger: { isMarket: true, triggerPx: String(triggerPx), tpsl: 'sl' } },
+          },
+        ],
+        grouping: 'na',
+      };
+
+      const nonce = nextHlNonce();
+      const signature = await this.signAction(action, nonce);
+      const response = await axios.post<HlExchangeResponse>(
+        `${this.baseUrl}/exchange`,
+        { action, nonce, signature, vaultAddress: this.vaultAddress },
+        { timeout: HL_REQUEST_TIMEOUT_MS },
+      );
+
+      if (response.data.status === 'ok') {
+        const responseObj = typeof response.data.response === 'object' ? response.data.response : undefined;
+        const result = responseObj?.data?.statuses?.[0] as Record<string, unknown> | undefined;
+        const resting = result?.resting as { oid?: unknown } | undefined;
+        if (resting?.oid != null) {
+          return { success: true, oid: Number(resting.oid), triggerPx };
+        }
+        const errorMsg = result?.error as string | undefined;
+        if (errorMsg) return { success: false, error: errorMsg };
+      }
+      return { success: false, error: JSON.stringify(response.data) };
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
+      const responseBody = axiosErr.response?.data
+        ? JSON.stringify(axiosErr.response.data).slice(0, 500)
+        : undefined;
+      const msg = axiosErr.message ?? String(err);
+      return { success: false, error: responseBody ? `${msg}: ${responseBody}` : msg };
+    }
+  }
+
+  /**
+   * Fills for the main wallet since `startTimeMs` (HL `userFillsByTime`).
+   * Used to recover the actual close price when a position was closed
+   * exchange-side (native stop trigger, liquidation, manual close).
+   */
+  async getUserFillsByTime(startTimeMs: number): Promise<
+    { coin: string; px: number; sz: number; side: string; time: number; closedPnl: number }[]
+  > {
+    const response = await axios.post<
+      { coin: string; px: string; sz: string; side: string; time: number; closedPnl?: string }[]
+    >(
+      `${this.baseUrl}/info`,
+      { type: 'userFillsByTime', user: this.mainWalletAddress, startTime: startTimeMs },
+      { timeout: HL_REQUEST_TIMEOUT_MS },
+    );
+    const fills = Array.isArray(response.data) ? response.data : [];
+    return fills.map((f) => ({
+      coin: f.coin,
+      px: parseFloat(f.px) || 0,
+      sz: parseFloat(f.sz) || 0,
+      side: f.side,
+      time: f.time,
+      closedPnl: parseFloat(f.closedPnl ?? '0') || 0,
+    }));
+  }
+
   // --- Private Helpers ---
 
   /**
