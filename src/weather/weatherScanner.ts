@@ -3202,6 +3202,67 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
   };
 }
 
+/** Terminal classification of one lock-in candidate evaluation, in live-gate order. */
+export type WeatherLockinOutcome =
+  | 'no_live_obs'            // fetch failed / no usable running max for the city+date
+  | 'not_settlement_aligned' // obs source ≠ the market's resolution source (proxy/none)
+  | 'wu_source_skipped'      // WU same-day max is revision-prone (2026-06-29 Seoul)
+  | 'non_monotonic_source'   // WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY blocked a revisable source
+  | 'not_locked_in'          // observedMax below bracketHigh + margin
+  | 'fired';                 // physically locked via a trusted source — signal built
+
+/** One kind='weather_lockin' shadow row per candidate evaluation. `lockedIn` is recorded
+ *  independently of `outcome` so source-blocked-but-physically-locked cohorts (e.g. WU)
+ *  are directly queryable as counterfactuals. */
+function emitWeatherLockinShadow(
+  opp: WeatherBracketOpportunity,
+  input: {
+    bracketHigh: number;
+    marginC: number;
+    liveObs: Awaited<ReturnType<typeof fetchLiveObservation>> | null;
+    lockedIn: boolean;
+    outcome: WeatherLockinOutcome;
+    /** Whether the live execution path was armed (all four live flags on). */
+    live: boolean;
+    executorSkipped?: boolean;
+    executorSkipReason?: string | null;
+  },
+): void {
+  void enqueueWrite('shadow_observations', {
+    kind: 'weather_lockin',
+    source: 'arb',
+    marketId: opp.marketId,
+    direction: 'NO',
+    wouldBlock: input.outcome !== 'fired',
+    // Lock surplus: how far the running max cleared (+) or fell short of (−) the
+    // bracketHigh + margin threshold, in the market's native degrees.
+    ...(input.liveObs?.observedMax != null
+      ? { metricValue: input.liveObs.observedMax - (input.bracketHigh + input.marginC) }
+      : {}),
+    threshold: 0,
+    payload: {
+      eventSlug: opp.eventSlug,
+      city: opp.city,
+      targetDate: opp.targetDate,
+      metric: opp.metric,
+      bracket: opp.bracketLabel,
+      bracketHigh: input.bracketHigh,
+      marginC: input.marginC,
+      outcomePrice: opp.outcomePrice,
+      obsSource: input.liveObs?.source ?? null,
+      observedMax: input.liveObs?.observedMax ?? null,
+      observedAt: input.liveObs?.observedAt ?? null,
+      confidence: input.liveObs?.confidence ?? null,
+      monotonic: input.liveObs?.monotonic ?? null,
+      lockedIn: input.lockedIn,
+      outcome: input.outcome,
+      live: input.live,
+      executorSkipped: input.executorSkipped ?? null,
+      executorSkipReason: input.executorSkipReason ?? null,
+    },
+  });
+}
+
 /**
  * RES-DAY LOCK-IN execution. For each res-day NO opportunity on a bounded HIGH bracket,
  * fetch the live running observed max; if it has ALREADY exceeded the bracket (by the
@@ -3211,6 +3272,12 @@ function buildWeatherSignal(opp: WeatherBracketOpportunity, stakeUsd: number): T
  * the edge floor, the daily circuit breaker, AND position dedup. This is betting on what
  * already happened, not a forecast. Gated by WEATHER_LOCKIN_ENABLED; a no-op when off or
  * when nothing is observationally locked. `deps` is injectable for tests.
+ *
+ * SHADOW RECORD: every candidate evaluation writes a kind='weather_lockin'
+ * shadow_observations row (outcome + lockedIn + obs source), and — when
+ * WEATHER_LOCKIN_SHADOW_ENABLED is on — the evaluation loop runs even while the
+ * live path is disabled, so a killed lock-in keeps accruing counterfactual data
+ * (e.g. the WU-blocked cohort). Shadow-only runs never call the executor.
  */
 export async function executeWeatherLockIns(
   redis: Redis,
@@ -3227,10 +3294,10 @@ export async function executeWeatherLockIns(
   // executor's res-day taker to CROSS to the ask. Without it the signal would fall through
   // to the maker path and post a resting NO bid below the ask — wrong-direction liquidity
   // on a near-certain outcome. Require it so lock-in is never silently a maker.
-  if (
-    !cfg.WEATHER_SCANNER_ENABLED || !cfg.WEATHER_LOCKIN_ENABLED
-    || !cfg.WEATHER_EXECUTION_ENABLED || !cfg.WEATHER_TAKER_ENTRY_ENABLED
-  ) return;
+  const live =
+    cfg.WEATHER_SCANNER_ENABLED && cfg.WEATHER_LOCKIN_ENABLED
+    && cfg.WEATHER_EXECUTION_ENABLED && cfg.WEATHER_TAKER_ENTRY_ENABLED;
+  if (!live && !cfg.WEATHER_LOCKIN_SHADOW_ENABLED) return;
   const fetchObs = deps?.fetchObs ?? fetchLiveObservation;
   const execute = deps?.execute ?? executeAndRecordSignal;
   // Candidates: res-day NO on a HIGH bracket (the backtest-validated cohort), not size-ups.
@@ -3256,36 +3323,60 @@ export async function executeWeatherLockIns(
         metric: 'high',
         ...(fetchFn != null && { fetchFn: fetchFn as typeof fetch }),
       }).catch((): null => null);
+      // Classify the candidate in live-gate order. `lockedIn` is computed for every
+      // outcome (not just 'fired') so source-blocked cohorts stay queryable.
+      const lockedIn =
+        liveObs?.observedMax != null
+        && isWeatherHighLockedIn(liveObs.observedMax, bracket.high, cfg.WEATHER_LOCKIN_MARGIN);
       // Require SETTLEMENT-ALIGNED obs (same source as the final reconciler). A 'proxy'
       // station exceeding the bracket does NOT prove the resolution source did — acting on
       // it risks the station-divergence trap on an irreversible bet. (Backtest: all 23
       // validated lock-in wins were settlement_aligned, so this costs zero edge.)
-      if (liveObs?.observedMax == null || liveObs.observedAt == null || liveObs.confidence !== 'settlement_aligned') continue;
-      // WU's same-day historical endpoint is not safe as a monotonic intraday
-      // source: it has produced a lock-in max that later revised downward. Keep
-      // it for shadow/drift diagnostics, but do not use it for irreversible entries.
-      if (liveObs.source === 'wu-live') {
+      // WU's same-day historical endpoint is not safe as a monotonic intraday source: it
+      // has produced a lock-in max that later revised downward — skip it for irreversible
+      // entries. The monotonic gate (defense-in-depth, supersedes the WU skip) then blocks
+      // any remaining revisable source (HKO + METAR, both Redis-accumulated, pass).
+      const outcome: WeatherLockinOutcome =
+        liveObs?.observedMax == null || liveObs.observedAt == null
+          ? 'no_live_obs'
+          : liveObs.confidence !== 'settlement_aligned'
+            ? 'not_settlement_aligned'
+            : liveObs.source === 'wu-live'
+              ? 'wu_source_skipped'
+              : cfg.WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY && !liveObs.monotonic
+                ? 'non_monotonic_source'
+                : !lockedIn
+                  ? 'not_locked_in'
+                  : 'fired';
+      if (outcome === 'wu_source_skipped') {
         logger.info('[weather-lockin] skipping WU live observation — same-day max is revision-prone', {
           city: opp.city,
           targetDate: opp.targetDate,
           bracket: opp.bracketLabel,
-          observedMax: liveObs.observedMax,
-          observedAt: liveObs.observedAt,
+          observedMax: liveObs?.observedMax,
+          observedAt: liveObs?.observedAt,
         });
-        continue;
-      }
-      // Monotonic-source gate (defense-in-depth, supersedes the source-specific WU
-      // skip above): a lock-in is irreversible, so only trust a running extreme that
-      // cannot revise the wrong way (HKO + METAR, both Redis-accumulated). WU is
-      // monotonic=false; this blocks it (and any future revisable source) explicitly.
-      if (cfg.WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY && !liveObs.monotonic) {
+      } else if (outcome === 'non_monotonic_source') {
         logger.info('[weather-lockin] skipping non-monotonic source — revisable max unsafe for irreversible entry', {
           city: opp.city, targetDate: opp.targetDate, bracket: opp.bracketLabel,
-          source: liveObs.source, observedMax: liveObs.observedMax,
+          source: liveObs?.source, observedMax: liveObs?.observedMax,
+        });
+      }
+      if (outcome !== 'fired') {
+        emitWeatherLockinShadow(opp, {
+          bracketHigh: bracket.high, marginC: cfg.WEATHER_LOCKIN_MARGIN,
+          liveObs, lockedIn, outcome, live,
         });
         continue;
       }
-      if (!isWeatherHighLockedIn(liveObs.observedMax, bracket.high, cfg.WEATHER_LOCKIN_MARGIN)) continue;
+      if (!live) {
+        // Shadow-only run: record the would-fire, never touch the executor.
+        emitWeatherLockinShadow(opp, {
+          bracketHigh: bracket.high, marginC: cfg.WEATHER_LOCKIN_MARGIN,
+          liveObs, lockedIn, outcome, live,
+        });
+        continue;
+      }
       // OBSERVED certainty (not forecast): stamp a near-certain win-prob so the executor's
       // res-day taker edge (modelWin − ask) clears. consensusProbability = P(in-bracket)
       // = 1 − modelWin. The executor handles liquidity, ask cap, edge, daily cap, dedup.
@@ -3296,8 +3387,8 @@ export async function executeWeatherLockIns(
       signal._forceTakerEntry = true;
       logger.info('[weather-lockin] observed max exceeded bracket — taking NO', {
         city: opp.city, targetDate: opp.targetDate, bracket: opp.bracketLabel,
-        observedMax: liveObs.observedMax, bracketHigh: bracket.high, margin: cfg.WEATHER_LOCKIN_MARGIN,
-        source: liveObs.source, outcomePrice: opp.outcomePrice, stakeUsd: cfg.WEATHER_LOCKIN_STAKE_USD,
+        observedMax: liveObs?.observedMax, bracketHigh: bracket.high, margin: cfg.WEATHER_LOCKIN_MARGIN,
+        source: liveObs?.source, outcomePrice: opp.outcomePrice, stakeUsd: cfg.WEATHER_LOCKIN_STAKE_USD,
       });
       const result = await execute(signal, redis);
       if (result?.skipped) {
@@ -3305,6 +3396,12 @@ export async function executeWeatherLockIns(
           city: opp.city, bracket: opp.bracketLabel, reason: result.skipReason ?? 'unknown',
         });
       }
+      emitWeatherLockinShadow(opp, {
+        bracketHigh: bracket.high, marginC: cfg.WEATHER_LOCKIN_MARGIN,
+        liveObs, lockedIn, outcome, live,
+        executorSkipped: result?.skipped ?? false,
+        executorSkipReason: result?.skipped ? (result.skipReason ?? 'unknown') : null,
+      });
     } catch (err) {
       logger.warn('[weather-lockin] error (non-fatal)', {
         city: opp.city, bracket: opp.bracketLabel, error: err instanceof Error ? err.message : String(err),

@@ -2837,6 +2837,14 @@ export const envSchema = z.object({
   // QC-correct downward — the 2026-06-29 Seoul failure). Set false only to accept a
   // revisable max for an irreversible bet (not recommended).
   WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: boolFromEnv.optional().default(true),
+  // Structured record of every lock-in candidate evaluation: one shadow_observations
+  // row (kind='weather_lockin') per res-day bounded-bracket NO candidate per scan,
+  // carrying the live obs, whether the bracket was physically locked (lockedIn) and
+  // which gate blocked entry (outcome). When true the evaluation loop also runs while
+  // WEATHER_LOCKIN_ENABLED is false — a killed lock-in keeps accruing counterfactual
+  // data (e.g. the WU-blocked cohort) without ever calling the executor. Costs
+  // live-observation fetches on res-day scans while the feature is otherwise off.
+  WEATHER_LOCKIN_SHADOW_ENABLED: boolFromEnv.optional().default(true),
   // Forward maker-fill TOXICITY data collection. When true, write a
   // shadow_observations row (kind='weather_maker_lifecycle') for each weather
   // maker order at post and at fill — including the fill DETECTION PATH

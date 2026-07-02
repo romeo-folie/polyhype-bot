@@ -95,6 +95,9 @@ const baseConfig = {
   WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: true,
   WEATHER_LOCKIN_STAKE_USD: 10,
   WEATHER_LOCKIN_MODEL_WIN: 0.97,
+  // Off in baseConfig (schema default is true) so legacy lock-in gate tests keep
+  // asserting the full no-op; dedicated shadow tests enable it explicitly.
+  WEATHER_LOCKIN_SHADOW_ENABLED: false,
   WEATHER_MODAL_MASS_VETO_ENABLED: false,
   WEATHER_INTERIOR_NO_MODAL_MASS_VETO: 0.65,
   // Evaluate the modal-mass veto on every horizon in tests (events target ~2
@@ -1476,6 +1479,115 @@ describe('executeWeatherLockIns', () => {
     const execute = vi.fn();
     await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(40, 'none'), execute: execute as never });
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  describe('weather_lockin shadow kind', () => {
+    beforeEach(() => {
+      mockEnqueueWrite.mockClear();
+    });
+    const lockinRows = () =>
+      mockEnqueueWrite.mock.calls
+        .filter(([table, row]) => table === 'shadow_observations' && (row as { kind: string }).kind === 'weather_lockin')
+        .map(([, row]) => row as { kind: string; marketId: string; direction: string; wouldBlock: boolean; metricValue?: number; payload: Record<string, unknown> });
+
+    it('emits a fired row with executor result when the lock-in trades live', async () => {
+      mockLoadConfig.mockReturnValue(lockCfg());
+      const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+      await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(30), execute: execute as never });
+      expect(execute).toHaveBeenCalledTimes(1);
+      const rows = lockinRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.marketId).toBe('m1');
+      expect(rows[0]!.direction).toBe('NO');
+      expect(rows[0]!.wouldBlock).toBe(false);
+      // Lock surplus: observedMax 30 − (bracketHigh 28 + margin 1.0) = +1.
+      expect(rows[0]!.metricValue).toBeCloseTo(1.0, 6);
+      expect(rows[0]!.payload).toMatchObject({
+        outcome: 'fired', lockedIn: true, live: true,
+        obsSource: 'hko-live', observedMax: 30, confidence: 'settlement_aligned',
+        bracketHigh: 28, marginC: 1.0, city: 'taipei',
+        executorSkipped: false, executorSkipReason: null,
+      });
+    });
+
+    it('records the executor skip reason on a fired-but-skipped lock-in', async () => {
+      mockLoadConfig.mockReturnValue(lockCfg());
+      const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: true, skipReason: 'insufficient_liquidity' });
+      await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(30), execute: execute as never });
+      const rows = lockinRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.payload).toMatchObject({
+        outcome: 'fired', executorSkipped: true, executorSkipReason: 'insufficient_liquidity',
+      });
+    });
+
+    it('records the WU-blocked cohort as wu_source_skipped with lockedIn=true (the counterfactual)', async () => {
+      mockLoadConfig.mockReturnValue(lockCfg());
+      const execute = vi.fn();
+      await executeWeatherLockIns(
+        {} as never, [baseOpp], undefined,
+        { fetchObs: obs(40, 'settlement_aligned', 'wu-live', false), execute: execute as never },
+      );
+      expect(execute).not.toHaveBeenCalled();
+      const rows = lockinRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.wouldBlock).toBe(true);
+      expect(rows[0]!.payload).toMatchObject({
+        outcome: 'wu_source_skipped', lockedIn: true, obsSource: 'wu-live', live: true,
+      });
+    });
+
+    it('classifies non-monotonic, not-settlement-aligned, below-margin, and fetch-failure outcomes', async () => {
+      mockLoadConfig.mockReturnValue(lockCfg());
+      const execute = vi.fn();
+      const run = (fetchObs: unknown) =>
+        executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: fetchObs as never, execute: execute as never });
+      await run(obs(40, 'settlement_aligned', 'metar-live', false));
+      await run(obs(40, 'proxy'));
+      await run(obs(28)); // below 28 + 1.0 margin
+      await run(async () => { throw new Error('obs outage'); });
+      expect(execute).not.toHaveBeenCalled();
+      const outcomes = lockinRows().map((r) => r.payload.outcome);
+      expect(outcomes).toEqual(['non_monotonic_source', 'not_settlement_aligned', 'not_locked_in', 'no_live_obs']);
+      // The below-margin row still carries the (negative) lock surplus for cohort analysis.
+      expect(lockinRows()[2]!.metricValue).toBeCloseTo(-1.0, 6);
+      expect(lockinRows()[2]!.payload.lockedIn).toBe(false);
+      // Fetch failure has no observation → no metricValue on the envelope.
+      expect(lockinRows()[3]!.metricValue).toBeUndefined();
+    });
+
+    it('keeps evaluating and logging in shadow when WEATHER_LOCKIN_ENABLED is false, without executing', async () => {
+      mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_LOCKIN_ENABLED: false, WEATHER_LOCKIN_SHADOW_ENABLED: true }));
+      const execute = vi.fn();
+      await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: obs(30), execute: execute as never });
+      expect(execute).not.toHaveBeenCalled();
+      const rows = lockinRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.wouldBlock).toBe(false); // it WOULD have fired
+      expect(rows[0]!.payload).toMatchObject({ outcome: 'fired', lockedIn: true, live: false });
+    });
+
+    it('stays a full no-op (no fetch, no rows) when both live and shadow are off', async () => {
+      mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_LOCKIN_ENABLED: false, WEATHER_LOCKIN_SHADOW_ENABLED: false }));
+      const fetchObs = vi.fn();
+      const execute = vi.fn();
+      await executeWeatherLockIns({} as never, [baseOpp], undefined, { fetchObs: fetchObs as never, execute: execute as never });
+      expect(fetchObs).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(lockinRows()).toHaveLength(0);
+    });
+
+    it('does not emit rows for non-candidates (YES, low metric, tail brackets)', async () => {
+      mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_LOCKIN_SHADOW_ENABLED: true }));
+      const execute = vi.fn();
+      const opps = [
+        { ...baseOpp, tradeSide: 'YES' },
+        { ...baseOpp, metric: 'low' },
+        { ...baseOpp, bracketLabel: '32°C or higher' },
+      ] as never;
+      await executeWeatherLockIns({} as never, opps, undefined, { fetchObs: obs(40), execute: execute as never });
+      expect(lockinRows()).toHaveLength(0);
+    });
   });
 });
 
