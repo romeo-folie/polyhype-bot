@@ -327,6 +327,72 @@ describe('hl-momentum taker fallback (HL_MOMENTUM_TAKER_FALLBACK_ENABLED)', () =
   });
 });
 
+describe('hl entry telemetry (maker fill status + fallback reason)', () => {
+  /** Latest execution_events row enqueued for the attempt. */
+  function recordedEventRow(): Record<string, unknown> | undefined {
+    const call = mockEnqueueWrite.mock.calls.filter((c) => c[0] === 'execution_events').at(-1);
+    return call?.[1] as Record<string, unknown> | undefined;
+  }
+
+  it('records makerFillStatus=full on a clean maker fill', async () => {
+    mockGetOrderStatus.mockResolvedValue({ status: 'filled', origSz: 1, remainingSz: 0, filledSz: 1 });
+
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(result.makerFillStatus).toBe('full');
+    expect(result.fallbackReason).toBeUndefined();
+    expect(recordedEventRow()?.makerFillStatus).toBe('full');
+  });
+
+  it('records makerFillStatus=timeout and the fallback reason on a taker-fallback cross', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...mockConfig,
+      HL_MOMENTUM_TAKER_FALLBACK_ENABLED: true,
+      HL_MOMENTUM_TAKER_FALLBACK_MAX_DRIFT_PCT: 0.005,
+    });
+    mockPlaceRestingOrder.mockResolvedValue({
+      success: false,
+      error: 'Post only order would have immediately matched, bbo was 50000',
+    });
+    mockGetBestBidAsk.mockReset();
+    mockGetBestBidAsk
+      .mockResolvedValueOnce({ bestBid: 50_000, bestAsk: 50_020 })
+      .mockResolvedValueOnce({ bestBid: 50_010, bestAsk: 50_030 });
+    mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '0xtk', price: 50_030 });
+
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(result.makerFillStatus).toBe('timeout');
+    expect(result.fallbackReason).toBe('hl_maker_no_fill_taker_fallback');
+    const row = recordedEventRow();
+    expect(row?.makerFillStatus).toBe('timeout');
+    expect(row?.fallbackReason).toBe('hl_maker_no_fill_taker_fallback');
+  });
+
+  it('records makerFillStatus=timeout with no fallback reason on a maker_not_filled skip', async () => {
+    mockPlaceRestingOrder.mockResolvedValue({
+      success: false,
+      error: 'Post only order would have immediately matched, bbo was 50000',
+    });
+
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(result.skipped).toBe(true);
+    expect(result.makerFillStatus).toBe('timeout');
+    expect(result.fallbackReason).toBeUndefined();
+    expect(recordedEventRow()?.makerFillStatus).toBe('timeout');
+  });
+
+  it('records makerFillStatus=partial on a partial maker fill', async () => {
+    mockGetOrderStatus.mockResolvedValue({ status: 'open', origSz: 1, remainingSz: 0.4, filledSz: 0.6 });
+
+    const result = await executeSignal(makeHlSignal() as never, mockRedis);
+
+    expect(result.skipped).toBe(false);
+    expect(result.makerFillStatus).toBe('partial');
+  });
+});
+
 describe('execution_events final_order_type label', () => {
   it('records maker for a maker fill (not taker)', async () => {
     mockGetOrderStatus.mockResolvedValue({ status: 'filled', origSz: 1, remainingSz: 0, filledSz: 1 });
