@@ -828,6 +828,25 @@ class HyperliquidClient {
   }
 
   /**
+   * Open orders for the main wallet (HL `frontendOpenOrders` — includes
+   * trigger metadata the plain `openOrders` endpoint omits). Used to sweep
+   * stale native-stop triggers before resting a new one on the same symbol.
+   */
+  async getOpenTriggerOrders(symbol: string): Promise<{ oid: number; reduceOnly: boolean }[]> {
+    const response = await axios.post<
+      { coin: string; oid: number; isTrigger?: boolean; reduceOnly?: boolean }[]
+    >(
+      `${this.baseUrl}/info`,
+      { type: 'frontendOpenOrders', user: this.mainWalletAddress },
+      { timeout: HL_REQUEST_TIMEOUT_MS },
+    );
+    const orders = Array.isArray(response.data) ? response.data : [];
+    return orders
+      .filter((o) => o.coin === symbol && o.isTrigger === true)
+      .map((o) => ({ oid: o.oid, reduceOnly: o.reduceOnly === true }));
+  }
+
+  /**
    * Fills for the main wallet since `startTimeMs` (HL `userFillsByTime`).
    * Used to recover the actual close price when a position was closed
    * exchange-side (native stop trigger, liquidation, manual close).

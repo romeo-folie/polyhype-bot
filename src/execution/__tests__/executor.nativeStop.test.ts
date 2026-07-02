@@ -67,6 +67,8 @@ vi.mock('../../arb/indicators.js', () => ({
 const mockPlaceMarketOrder = vi.fn();
 const mockPlaceStopTrigger = vi.fn();
 const mockGetOpenPositions = vi.fn();
+const mockGetOpenTriggerOrders = vi.fn();
+const mockCancelOrder = vi.fn();
 vi.mock('../../shared/hyperliquid.js', () => ({
   getHyperliquid: vi.fn().mockReturnValue({
     getClearinghouseState: vi.fn().mockResolvedValue({
@@ -77,6 +79,8 @@ vi.mock('../../shared/hyperliquid.js', () => ({
     getAssetContext: vi.fn().mockRejectedValue(new Error('ctx unavailable in test')),
     placeMarketOrder: mockPlaceMarketOrder,
     placeStopTrigger: (...args: unknown[]) => mockPlaceStopTrigger(...args),
+    getOpenTriggerOrders: (...args: unknown[]) => mockGetOpenTriggerOrders(...args),
+    cancelOrder: (...args: unknown[]) => mockCancelOrder(...args),
   }),
   resolveHlSymbol: vi.fn().mockReturnValue(undefined),
 }));
@@ -114,6 +118,8 @@ beforeEach(() => {
   mockComputeATR.mockResolvedValue(null);
   mockPlaceMarketOrder.mockResolvedValue({ success: true, txHash: '123', price: 100 });
   mockPlaceStopTrigger.mockResolvedValue({ success: true, oid: 4242, triggerPx: 97.12 });
+  mockGetOpenTriggerOrders.mockResolvedValue([]);
+  mockCancelOrder.mockResolvedValue({ success: true });
   // Margin pre-check call returns empty; post-entry size lookup returns the position.
   mockGetOpenPositions
     .mockResolvedValueOnce([])
@@ -186,6 +192,26 @@ describe('executor native stop trigger placement', () => {
     expect(result.skipped).toBe(false);
     expect(result.error).toBeUndefined();
     expect(result.nativeStopOid).toBeUndefined();
+  });
+
+  it('sweeps stale reduce-only triggers on the symbol before resting a new one', async () => {
+    mockGetOpenTriggerOrders.mockResolvedValue([
+      { oid: 111, reduceOnly: true },
+      { oid: 222, reduceOnly: false }, // not ours — leave alone
+    ]);
+    const result = await executeSignal(makeHlSignal(), mockRedis);
+    expect(result.skipped).toBe(false);
+    expect(mockCancelOrder).toHaveBeenCalledTimes(1);
+    expect(mockCancelOrder).toHaveBeenCalledWith('BTC', 111);
+    expect(mockPlaceStopTrigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('still places the trigger when the stale sweep fails', async () => {
+    mockGetOpenTriggerOrders.mockRejectedValue(new Error('api down'));
+    const result = await executeSignal(makeHlSignal(), mockRedis);
+    expect(result.skipped).toBe(false);
+    expect(mockPlaceStopTrigger).toHaveBeenCalledTimes(1);
+    expect(result.nativeStopOid).toBe(4242);
   });
 
   it('skips the trigger when the position is not visible yet', async () => {

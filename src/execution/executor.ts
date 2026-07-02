@@ -2365,6 +2365,28 @@ async function executeHyperliquidSignal(
             bufferMult: cfg.HL_NATIVE_STOP_BUFFER_MULT,
           });
           if (stop) {
+            // Sweep stale triggers from prior trades on this symbol first: the
+            // monitor's cancel-on-exit is best-effort, and a leftover trigger
+            // priced for an old position would race this one (grouping 'na'
+            // never cancel-replaces).
+            try {
+              const stale = await hl.getOpenTriggerOrders(signal.marketId);
+              for (const o of stale.filter((s) => s.reduceOnly)) {
+                const c = await hl.cancelOrder(signal.marketId, o.oid);
+                logger.info('[executor] cancelled stale native stop trigger before entry', {
+                  symbol: signal.marketId,
+                  oid: o.oid,
+                  success: c.success,
+                  error: c.error,
+                });
+              }
+            } catch (e: unknown) {
+              logger.warn('[executor] stale trigger sweep failed (non-fatal)', {
+                symbol: signal.marketId,
+                error: e instanceof Error ? e.message : String(e),
+              });
+            }
+
             // Use the actual on-exchange position size so partial maker fills
             // and size rounding are covered exactly.
             const positions = await hl.getOpenPositions();
