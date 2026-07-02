@@ -43,6 +43,10 @@ export async function recordPositionOutcome(
       | 'priceZone'
       | 'synthHedged'
       | 'pendingSettlement'
+      | 'isContrarian'
+      | 'leverage'
+      | 'memeAtrSlPct'
+      | 'entryFundingApr'
     >,
     'openedAt'
   > & {
@@ -160,6 +164,19 @@ export async function recordPositionOutcome(
     priceZone: position.priceZone,
     synthHedged: position.synthHedged ?? false,
     pendingSettlement: position.pendingSettlement ?? false,
+    // Cohort telemetry (2026-07-02 HL review): signal mode, leverage, and the
+    // frozen SL that actually governed the position were previously not
+    // recorded anywhere on the outcome row — cohort splits (contrarian vs
+    // momentum, per-leverage stop geometry) required joining shadow
+    // observations by symbol+timestamp. Only defined keys are written.
+    raw: {
+      ...(position.isContrarian !== undefined ? { isContrarian: position.isContrarian } : {}),
+      ...(position.leverage !== undefined ? { leverage: position.leverage } : {}),
+      ...(position.memeAtrSlPct !== undefined ? { activeAtrSlPct: position.memeAtrSlPct } : {}),
+      ...(position.entryFundingApr !== undefined
+        ? { entryFundingApr: position.entryFundingApr }
+        : {}),
+    },
   });
 }
 

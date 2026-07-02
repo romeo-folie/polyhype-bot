@@ -73,6 +73,69 @@ describe('recordPositionOutcome', () => {
     );
   });
 
+  it('records cohort telemetry (signal mode, leverage, active SL) in the outcomes raw payload', async () => {
+    const redis = {} as any;
+
+    await recordPositionOutcome(
+      redis,
+      {
+        executionId: 'exec-hl-1',
+        sourcedFrom: 'hl-momentum',
+        question: 'kBONK perpetual',
+        direction: 'SHORT',
+        consensusProbability: 0.5,
+        edgeMagnitude: 0,
+        openedAt: '2026-07-02T00:45:00Z',
+        executionVenue: 'hyperliquid',
+        entryOrderType: 'taker',
+        fallbackReason: 'hl_maker_no_fill_taker_fallback',
+        isContrarian: true,
+        leverage: 10,
+        memeAtrSlPct: 1.04,
+        entryFundingApr: 10.95,
+      },
+      { result: 'lost', returnPct: -2.65 },
+    );
+
+    expect(enqueueWrite).toHaveBeenLastCalledWith(
+      'outcomes',
+      expect.objectContaining({
+        fallbackReason: 'hl_maker_no_fill_taker_fallback',
+        entryOrderType: 'taker',
+        raw: {
+          isContrarian: true,
+          leverage: 10,
+          activeAtrSlPct: 1.04,
+          entryFundingApr: 10.95,
+        },
+      }),
+    );
+  });
+
+  it('writes an empty raw payload when no cohort telemetry fields are present', async () => {
+    const redis = {} as any;
+
+    await recordPositionOutcome(
+      redis,
+      {
+        executionId: 'exec-pm-1',
+        sourcedFrom: 'headline',
+        question: 'Will X happen?',
+        direction: 'YES',
+        consensusProbability: 0.7,
+        edgeMagnitude: 0.12,
+        openedAt: '2026-04-02T12:00:00Z',
+        executionVenue: 'clob',
+      },
+      { result: 'won', returnPct: 15 },
+    );
+
+    expect(enqueueWrite).toHaveBeenLastCalledWith(
+      'outcomes',
+      expect.objectContaining({ raw: {} }),
+    );
+  });
+
   it('forwards copytrade sourcedFrom to the outcome recorder', async () => {
     const redis = {} as any;
 

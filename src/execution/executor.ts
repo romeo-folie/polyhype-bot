@@ -201,6 +201,8 @@ export interface ExecutionResult {
   sharesFilled?: number | null;
   decisionBenchmark?: DecisionBenchmark;
   fallbackReason?: string;
+  /** Entry maker fill status for HL momentum entries ('full' | 'partial' | 'timeout' | 'error'). */
+  makerFillStatus?: string;
   /** True if a delta hedge was placed on HL for this trade. */
   hedgeDispatched?: boolean;
   /** ATR snapshot at futures entry — persisted to ledger for ATR-based SL/TP. */
@@ -2127,10 +2129,17 @@ async function executeHyperliquidSignal(
     // the price hasn't already run past the entry (see placeHlTakerFallbackEntry).
     let tradeResult: { success: boolean; txHash?: string; price?: number; error?: string };
     let entryOrderType: 'maker' | 'taker' = 'taker';
+    // Telemetry (2026-07-02 review): the maker fill status and taker-fallback
+    // marker were never recorded, which made the maker-vs-fallback cohort split
+    // reconstructable only by joining shadow observations. Threaded through
+    // ExecutionResult → execution_events + ledger → outcomes.
+    let hlMakerFillStatus: string | undefined;
+    let hlFallbackReason: string | undefined;
     if (cfg.HL_MAKER_ENTRIES_ENABLED && signal.sourcedFrom === 'hl-momentum') {
       const makerRes = await placeHlMakerEntry(hl, signal, leverage, cfg);
       if (makerRes.outcome === 'filled') {
         entryOrderType = 'maker';
+        hlMakerFillStatus = makerRes.fillFraction < 1 ? 'partial' : 'full';
         if (makerRes.fillFraction < 1) {
           // Partial fill at timeout: the position exists for the filled part only.
           // Scale the recorded stake so ledger exposure matches reality.
@@ -2145,14 +2154,17 @@ async function executeHyperliquidSignal(
         }
         tradeResult = { success: true, txHash: makerRes.txHash, price: makerRes.price };
       } else if (makerRes.outcome === 'error') {
+        hlMakerFillStatus = 'error';
         tradeResult = { success: false, error: makerRes.error };
       } else {
         // not_filled — optionally cross to taker instead of dropping the entry.
+        hlMakerFillStatus = 'timeout';
         const fallback = cfg.HL_MOMENTUM_TAKER_FALLBACK_ENABLED
           ? await placeHlTakerFallbackEntry(hl, signal, leverage, cfg, makerRes.referenceMid)
           : null;
         if (fallback?.outcome === 'crossed') {
           entryOrderType = 'taker';
+          hlFallbackReason = 'hl_maker_no_fill_taker_fallback';
           tradeResult = fallback.tradeResult;
         } else {
           const detail =
@@ -2163,7 +2175,12 @@ async function executeHyperliquidSignal(
             detail,
             takerFallbackEnabled: cfg.HL_MOMENTUM_TAKER_FALLBACK_ENABLED,
           });
-          return { signal, skipped: true, skipReason: `maker_not_filled:${detail}` };
+          return {
+            signal,
+            skipped: true,
+            skipReason: `maker_not_filled:${detail}`,
+            makerFillStatus: hlMakerFillStatus,
+          };
         }
       }
     } else {
@@ -2449,6 +2466,8 @@ async function executeHyperliquidSignal(
       if (entryAtrPct !== undefined) result.entryAtrPct = entryAtrPct;
       if (memeAtrSlPct !== undefined) result.memeAtrSlPct = memeAtrSlPct;
       if (memeAtrTpPct !== undefined) result.memeAtrTpPct = memeAtrTpPct;
+      if (hlMakerFillStatus !== undefined) result.makerFillStatus = hlMakerFillStatus;
+      if (hlFallbackReason !== undefined) result.fallbackReason = hlFallbackReason;
       if (nativeStopOid !== undefined) result.nativeStopOid = nativeStopOid;
       if (nativeStopPx !== undefined) result.nativeStopPx = nativeStopPx;
 
@@ -3071,6 +3090,18 @@ export async function executeSignal(
       return recordSkip('position_already_open');
     }
     const result = await executeHyperliquidSignal(signal, redis, knownSessionExposureUsd);
+    // Surface HL maker-entry telemetry on the execution_events row (spread via
+    // makerTelemetry into both the emit payload and the DB write). Previously
+    // maker_fill_status/fallback_reason were always NULL for HL entries, so the
+    // maker-vs-taker-fallback cohort split wasn't queryable.
+    if (result.makerFillStatus !== undefined || result.fallbackReason !== undefined) {
+      makerTelemetry = {
+        ...makerTelemetry,
+        makerAttempted: true,
+        ...(result.makerFillStatus !== undefined ? { makerFillStatus: result.makerFillStatus } : {}),
+        ...(result.fallbackReason !== undefined ? { fallbackReason: result.fallbackReason } : {}),
+      };
+    }
     if (!result.skipped && !result.error) {
       await redis.set(futuresDedup, '1', 'EX', IDEMPOTENCY_TTL_SECONDS);
       finalizeAttempt({
