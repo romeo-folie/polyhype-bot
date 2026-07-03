@@ -50,7 +50,7 @@ export interface ConditionalOracleInput {
   /** Which daily extreme the market resolves on. Defaults to 'high'. Drives the
    *  oracle direction (max increases vs min decreases) and the climo table type. */
   metric?: 'high' | 'low';
-  /** ISO8601 UTC timestamp of the observation that set observedMax. */
+  /** ISO8601 UTC timestamp of the latest observation included in observedMax. */
   observedAt: string;
   /** IANA timezone for the city (to derive local hour from observedAt). */
   tz: string;

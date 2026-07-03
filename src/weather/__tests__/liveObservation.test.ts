@@ -16,9 +16,9 @@ vi.mock('../../shared/logger.js', () => ({
 }));
 
 // Mock wuClient to avoid network calls in routing tests.
-const mockFetchWuHistoricalExtreme = vi.fn().mockResolvedValue(null);
+const mockFetchWuHistoricalExtremeWithTimestamp = vi.fn().mockResolvedValue(null);
 vi.mock('../wuClient.js', () => ({
-  fetchWuHistoricalExtreme: mockFetchWuHistoricalExtreme,
+  fetchWuHistoricalExtremeWithTimestamp: mockFetchWuHistoricalExtremeWithTimestamp,
 }));
 
 // Mock noaaClient to provide CITY_COORDINATES without network dependency.
@@ -432,16 +432,19 @@ describe('fetchHkoIntradayHigh', () => {
 describe('fetchLiveObservation routing', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockFetchWuHistoricalExtreme.mockResolvedValue(null);
+    mockFetchWuHistoricalExtremeWithTimestamp.mockResolvedValue(null);
   });
 
   it('calls WU for a wu resolutionSource city when wuEnabled=true', async () => {
     const redis = makeRedis();
-    mockFetchWuHistoricalExtreme.mockResolvedValue(22.0);
+    mockFetchWuHistoricalExtremeWithTimestamp.mockResolvedValue({
+      observedMax: 22.0,
+      observedAt: '2026-06-09T20:00:00.000Z',
+    });
     await fetchLiveObservation('chicago', '2026-06-09', redis as any, {
       wuEnabled: true, metarEnabled: false, hkoEnabled: false, maxAgeMin: 30,
     });
-    expect(mockFetchWuHistoricalExtreme).toHaveBeenCalledWith(
+    expect(mockFetchWuHistoricalExtremeWithTimestamp).toHaveBeenCalledWith(
       'KORD', 'US', '2026-06-09', 'fahrenheit', expect.anything(), 'high', expect.anything(),
     );
   });
@@ -479,7 +482,7 @@ describe('fetchLiveObservation routing', () => {
     });
     expect(obs.observedMax).toBe(25.0);
     // Should not have called WU since cache was fresh.
-    expect(mockFetchWuHistoricalExtreme).not.toHaveBeenCalled();
+    expect(mockFetchWuHistoricalExtremeWithTimestamp).not.toHaveBeenCalled();
   });
 
   it('re-fetches when cache has expired', async () => {
@@ -492,17 +495,23 @@ describe('fetchLiveObservation routing', () => {
       cachedAt: new Date(Date.now() - 2 * 3600_000).toISOString(),
     };
     redis._store.set('weather:live_obs:chicago:2026-06-09', JSON.stringify(stale));
-    mockFetchWuHistoricalExtreme.mockResolvedValue(27.5);
+    mockFetchWuHistoricalExtremeWithTimestamp.mockResolvedValue({
+      observedMax: 27.5,
+      observedAt: '2026-06-09T21:00:00.000Z',
+    });
 
     const obs = await fetchLiveObservation('chicago', '2026-06-09', redis as any, {
       wuEnabled: true, metarEnabled: false, hkoEnabled: false, maxAgeMin: 30,
     });
     expect(obs.observedMax).toBe(27.5);
-    expect(mockFetchWuHistoricalExtreme).toHaveBeenCalled();
+    expect(mockFetchWuHistoricalExtremeWithTimestamp).toHaveBeenCalled();
   });
 
   it('WU result has settlement_aligned confidence', async () => {
-    mockFetchWuHistoricalExtreme.mockResolvedValue(26.0);
+    mockFetchWuHistoricalExtremeWithTimestamp.mockResolvedValue({
+      observedMax: 26.0,
+      observedAt: '2026-06-09T14:00:00.000Z',
+    });
     const redis = makeRedis();
     const obs = await fetchLiveObservation('london', '2026-06-09', redis as any, {
       wuEnabled: true, metarEnabled: false, hkoEnabled: false, maxAgeMin: 30,
@@ -522,7 +531,10 @@ describe('fetchLiveObservation routing', () => {
   });
 
   it('WU is NOT monotonic (revisable historical endpoint)', async () => {
-    mockFetchWuHistoricalExtreme.mockResolvedValue(26.0);
+    mockFetchWuHistoricalExtremeWithTimestamp.mockResolvedValue({
+      observedMax: 26.0,
+      observedAt: '2026-06-09T14:00:00.000Z',
+    });
     const redis = makeRedis();
     const obs = await fetchLiveObservation('chicago', '2026-06-09', redis as any, {
       wuEnabled: true, metarEnabled: false, hkoEnabled: false, maxAgeMin: 30,
@@ -582,5 +594,17 @@ describe('fetchLiveObservation routing', () => {
     });
     expect(outage.observedMax).toBe(30.0);
     expect(outage.observedAt).not.toBeNull();
+  });
+
+  it('WU result preserves the latest observation timestamp instead of fetch time', async () => {
+    mockFetchWuHistoricalExtremeWithTimestamp.mockResolvedValue({
+      observedMax: 26.0,
+      observedAt: '2026-06-09T13:50:00.000Z',
+    });
+    const redis = makeRedis();
+    const obs = await fetchLiveObservation('london', '2026-06-09', redis as any, {
+      wuEnabled: true, metarEnabled: false, hkoEnabled: false, maxAgeMin: 30,
+    });
+    expect(obs.observedAt).toBe('2026-06-09T13:50:00.000Z');
   });
 });

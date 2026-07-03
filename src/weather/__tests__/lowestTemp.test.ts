@@ -324,7 +324,15 @@ describe('WU / METAR daily-low fetchers reduce by min', () => {
     const fetchFn = (async () => ({
       ok: true,
       status: 200,
-      json: async () => ({ observations: [{ temp: 50 }, { temp: 31 }, { temp: 44 }] }),
+      // valid_time_gmt is present on every real WU observation; the hourly parser
+      // now requires it (it drives observedAt), so the mock must carry it too.
+      json: async () => ({
+        observations: [
+          { temp: 50, valid_time_gmt: 1_760_000_000 },
+          { temp: 31, valid_time_gmt: 1_760_003_600 },
+          { temp: 44, valid_time_gmt: 1_760_007_200 },
+        ],
+      }),
     })) as unknown as typeof fetch;
     const low = await fetchWuHistoricalLow('KLGA', 'US', '2026-06-14', 'fahrenheit', redis as never, fetchFn);
     expect(low).toBe(31);

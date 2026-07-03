@@ -5,6 +5,8 @@
  * Usage:
  *   npx tsx scripts/build-climo-exceedance.ts --all --years 2010-2024            # rise table (highest-temp)
  *   npx tsx scripts/build-climo-exceedance.ts --all --metric low --years 2010-2024  # fall table (lowest-temp)
+ *   npx tsx scripts/build-climo-exceedance.ts --all --source wu --years 2010-2024   # WU station-history table
+ *   npx tsx scripts/build-climo-exceedance.ts --all --source auto                  # WU for WU cities, ERA5 fallback otherwise
  *   npx tsx scripts/build-climo-exceedance.ts --city chicago --city "hong kong"  # incremental merge
  *
  * --metric high (default) builds the RISE table P(finalMax > runningMax + delta)
@@ -19,12 +21,14 @@
  * commit the regenerated JSON; the climoTable integrity test fails until the
  * table matches the runtime city list again.
  *
- * Data source: Open-Meteo Historical API (ERA5 reanalysis) at the city's
- * runtime coordinates. NOTE: ERA5 grid data has compressed extremes vs
- * station observations (verified 2026-06-11: Milan June 15:00 max 15-year
- * rise reads 1.7°C) — the table understates tail rises. Acceptable for the
- * fallback/clamp role; a station-history build (WU/ISD) is the planned
- * replacement for cities where the fallback binds.
+ * Data sources:
+ *   --source wu          Weather Underground historical hourly observations for
+ *                        WU-resolution cities. This is the settlement-aligned
+ *                        source for most Polymarket weather markets.
+ *   --source open-meteo  Open-Meteo Historical API (ERA5 reanalysis) at runtime
+ *                        coordinates. ERA5 grid data has compressed extremes vs
+ *                        station observations; use as a proxy/fallback only.
+ *   --source auto        WU for WU-resolution cities, Open-Meteo otherwise.
  *
  * Table schema:
  *   city → month (1-12) → localHour (0-23) →
@@ -46,7 +50,12 @@
 
 import { writeFileSync, existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
+import { pathToFileURL } from 'url';
 import { CITY_COORDINATES, canonicalCityKey } from '../src/weather/noaaClient.js';
+import {
+  fetchWuHistoricalHourlyObservations,
+  type WuHistoricalHourlyObservation,
+} from '../src/weather/wuClient.js';
 
 const ARCHIVE_BASE = 'https://archive-api.open-meteo.com/v1/archive';
 const RISE_OUT = resolve('src/weather/data/climoExceedance.json');
@@ -60,6 +69,10 @@ interface Args {
   outPath: string;
   /** 'high' → rise table (daily max); 'low' → fall table (daily min). */
   metric: 'high' | 'low';
+  /** Historical source used to build hourly local-day paths. */
+  source: 'open-meteo' | 'wu' | 'auto';
+  /** Delay between WU daily calls. WU source makes one request per city/day. */
+  wuDelayMs: number;
 }
 
 function parseArgs(): Args {
@@ -70,6 +83,8 @@ function parseArgs(): Args {
   let yearEnd = 2024;
   let outPath: string | null = null;
   let metric: 'high' | 'low' = 'high';
+  let source: Args['source'] = 'open-meteo';
+  let wuDelayMs = 250;
 
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--city' && argv[i + 1]) {
@@ -95,13 +110,26 @@ function parseArgs(): Args {
       yearEnd = end;
     } else if (argv[i] === '--out' && argv[i + 1]) {
       outPath = resolve(argv[++i]!);
+    } else if (argv[i] === '--source' && argv[i + 1]) {
+      const s = argv[++i]!;
+      if (s !== 'open-meteo' && s !== 'wu' && s !== 'auto') {
+        console.error(`Invalid --source '${s}': expected open-meteo, wu, or auto`);
+        process.exit(1);
+      }
+      source = s;
+    } else if (argv[i] === '--wu-delay-ms' && argv[i + 1]) {
+      wuDelayMs = parseInt(argv[++i]!, 10);
+      if (!Number.isFinite(wuDelayMs) || wuDelayMs < 0) {
+        console.error(`Invalid --wu-delay-ms '${argv[i]}': expected non-negative integer`);
+        process.exit(1);
+      }
     }
   }
 
   // Default output path follows the metric so the two tables never overwrite.
   if (outPath === null) outPath = metric === 'low' ? FALL_OUT : RISE_OUT;
 
-  return { cities, all, yearRange: [yearStart, yearEnd], outPath, metric };
+  return { cities, all, yearRange: [yearStart, yearEnd], outPath, metric, source, wuDelayMs };
 }
 
 // City list and coordinates come from the runtime table (src/weather/noaaClient.ts)
@@ -143,6 +171,93 @@ async function fetchHourlyForYear(
   return result;
 }
 
+function formatDateUtc(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function* datesInYear(year: number): Generator<string> {
+  const cursor = new Date(Date.UTC(year, 0, 1));
+  while (cursor.getUTCFullYear() === year) {
+    yield formatDateUtc(cursor);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+}
+
+function makeMemoryRedis() {
+  const cache = new Map<string, string>();
+  return {
+    async get(key: string) {
+      return cache.get(key) ?? null;
+    },
+    async set(key: string, value: string) {
+      cache.set(key, value);
+      return 'OK';
+    },
+  };
+}
+
+async function fetchWuHourlyForYear(
+  city: string,
+  icao: string,
+  isoCountry: string,
+  unit: 'fahrenheit' | 'celsius',
+  year: number,
+  delayMs: number,
+  redis: ReturnType<typeof makeMemoryRedis>,
+): Promise<Record<string, WuHistoricalHourlyObservation[]> | null> {
+  const result: Record<string, WuHistoricalHourlyObservation[]> = {};
+  let fetched = 0;
+  let missing = 0;
+
+  for (const day of datesInYear(year)) {
+    const obs = await fetchWuHistoricalHourlyObservations(
+      icao,
+      isoCountry,
+      day,
+      unit,
+      redis as never,
+    );
+    if (obs?.length) {
+      result[day] = obs;
+      fetched++;
+    } else {
+      missing++;
+    }
+    if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+  }
+
+  console.log(`    WU ${city} ${year}: ${fetched} days fetched, ${missing} missing`);
+  return Object.keys(result).length ? result : null;
+}
+
+export function localDateHourFromUtc(
+  utcIso: string,
+  tz: string,
+): { date: string; month: number; hour: number } | null {
+  const date = new Date(utcIso);
+  if (!Number.isFinite(date.getTime())) return null;
+
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value;
+  const year = get('year');
+  const month = get('month');
+  const day = get('day');
+  const hour = get('hour');
+  if (!year || !month || !day || !hour) return null;
+  return {
+    date: `${year}-${month}-${day}`,
+    month: parseInt(month, 10),
+    hour: parseInt(hour, 10) % 24,
+  };
+}
+
 function buildMonthHourMap(
   dailyHourly: Record<string, number[]>,
   tz: string,
@@ -169,17 +284,60 @@ function buildMonthHourMap(
       if (!isFinite(running)) continue;
       const delta = metric === 'low' ? running - finalExtreme : finalExtreme - running;
       if (!map[month]) map[month] = {};
-      if (!map[month]![h]) map[month]![h] = [];
-      map[month]![h]!.push(delta);
+      if (!map[month][h]) map[month][h] = [];
+      map[month][h]!.push(delta);
     }
   }
   return map;
 }
 
-function computeExceedanceTable(rises: number[], nQuantiles = 20): Array<{ delta: number; exceedance: number }> {
+export function buildMonthHourMapFromWuObservations(
+  dailyObservations: Record<string, WuHistoricalHourlyObservation[]>,
+  tz: string,
+  metric: 'high' | 'low' = 'high',
+): MonthHourMap {
+  const byLocalDay: Record<string, { month: number; byHour: Record<number, number[]> }> = {};
+
+  for (const obs of Object.values(dailyObservations).flat()) {
+    const local = localDateHourFromUtc(obs.observedAt, tz);
+    if (!local || !Number.isFinite(obs.temp)) continue;
+    byLocalDay[local.date] ??= { month: local.month, byHour: {} };
+    byLocalDay[local.date]!.byHour[local.hour] ??= [];
+    byLocalDay[local.date]!.byHour[local.hour]!.push(obs.temp);
+  }
+
+  const map: MonthHourMap = {};
+  for (const { month, byHour } of Object.values(byLocalDay)) {
+    const hourlyTemps = Object.entries(byHour)
+      .map(([hour, temps]) => ({
+        hour: parseInt(hour, 10),
+        temp: metric === 'low' ? Math.min(...temps) : Math.max(...temps),
+      }))
+      .filter((entry) => Number.isFinite(entry.hour) && Number.isFinite(entry.temp))
+      .sort((a, b) => a.hour - b.hour);
+    if (hourlyTemps.length < 20) continue;
+
+    const finalExtreme = metric === 'low'
+      ? Math.min(...hourlyTemps.map((entry) => entry.temp))
+      : Math.max(...hourlyTemps.map((entry) => entry.temp));
+
+    for (const { hour } of hourlyTemps) {
+      const elapsed = hourlyTemps.filter((entry) => entry.hour <= hour).map((entry) => entry.temp);
+      const running = metric === 'low' ? Math.min(...elapsed) : Math.max(...elapsed);
+      if (!Number.isFinite(running)) continue;
+      const delta = metric === 'low' ? running - finalExtreme : finalExtreme - running;
+      if (!map[month]) map[month] = {};
+      if (!map[month][hour]) map[month][hour] = [];
+      map[month][hour].push(delta);
+    }
+  }
+  return map;
+}
+
+function computeExceedanceTable(rises: number[], nQuantiles = 20): { delta: number; exceedance: number }[] {
   if (rises.length === 0) return [];
   const sorted = [...rises].sort((a, b) => a - b);
-  const result: Array<{ delta: number; exceedance: number }> = [];
+  const result: { delta: number; exceedance: number }[] = [];
   const step = (sorted[sorted.length - 1]! - sorted[0]!) / nQuantiles;
   for (let i = 0; i <= nQuantiles; i++) {
     const delta = sorted[0]! + step * i;
@@ -192,7 +350,10 @@ function computeExceedanceTable(rises: number[], nQuantiles = 20): Array<{ delta
 async function main() {
   const args = parseArgs();
   if (!args.all && args.cities.length === 0) {
-    console.log('Usage: tsx scripts/build-climo-exceedance.ts (--all | --city chicago --city "hong kong" ...) [--years 2010-2024]');
+    console.log(
+      'Usage: tsx scripts/build-climo-exceedance.ts (--all | --city chicago --city "hong kong" ...) ' +
+      '[--years 2010-2024] [--metric high|low] [--source open-meteo|wu|auto] [--wu-delay-ms 250]',
+    );
     process.exit(0);
   }
 
@@ -208,6 +369,7 @@ async function main() {
   const cityProvenance = ((existing._meta as Record<string, unknown> | undefined)?.cityProvenance ?? {}) as Record<string, unknown>;
 
   const targetCities = args.all ? Object.keys(CITY_COORDINATES) : args.cities;
+  const wuRedis = makeMemoryRedis();
 
   for (const cityArg of targetCities) {
     const city = canonicalCityKey(cityArg) ?? cityArg.toLowerCase();
@@ -216,33 +378,62 @@ async function main() {
       console.warn(`Unknown city: ${cityArg}. Must exist in CITY_COORDINATES (src/weather/noaaClient.ts).`);
       continue;
     }
-    console.log(`Building climo table for ${city} (${args.yearRange[0]}–${args.yearRange[1]}, ${coords.lat},${coords.lon})...`);
+    const sourceForCity = args.source === 'auto'
+      ? (coords.resolutionSource === 'wu' ? 'wu' : 'open-meteo')
+      : args.source;
+    if (sourceForCity === 'wu' && (coords.resolutionSource !== 'wu' || !coords.isoCountry)) {
+      console.warn(
+        `Skipping ${city}: --source wu requires a WU-resolution city with isoCountry ` +
+        `(resolutionSource=${coords.resolutionSource}, isoCountry=${coords.isoCountry ?? 'missing'}).`,
+      );
+      continue;
+    }
+    console.log(
+      `Building climo table for ${city} (${args.yearRange[0]}–${args.yearRange[1]}, ` +
+      `${sourceForCity}, ${coords.lat},${coords.lon})...`,
+    );
 
     const combined: MonthHourMap = {};
     for (let year = args.yearRange[0]; year <= args.yearRange[1]; year++) {
       console.log(`  Fetching ${year}...`);
-      const dailyHourly = await fetchHourlyForYear(coords.lat, coords.lon, coords.unit, year);
+      const dailyHourly = sourceForCity === 'wu'
+        ? await fetchWuHourlyForYear(
+          city,
+          coords.wuStation,
+          coords.isoCountry!,
+          coords.unit,
+          year,
+          args.wuDelayMs,
+          wuRedis,
+        )
+        : await fetchHourlyForYear(coords.lat, coords.lon, coords.unit, year);
       if (!dailyHourly) continue;
-      const yearMap = buildMonthHourMap(dailyHourly, coords.tz, args.metric);
+      const yearMap = sourceForCity === 'wu'
+        ? buildMonthHourMapFromWuObservations(
+          dailyHourly as Record<string, WuHistoricalHourlyObservation[]>,
+          coords.tz,
+          args.metric,
+        )
+        : buildMonthHourMap(dailyHourly as Record<string, number[]>, coords.tz, args.metric);
       for (const [mStr, hours] of Object.entries(yearMap)) {
         const m = parseInt(mStr, 10);
         if (!combined[m]) combined[m] = {};
         for (const [hStr, rises] of Object.entries(hours)) {
           const h = parseInt(hStr, 10);
-          if (!combined[m]![h]) combined[m]![h] = [];
-          combined[m]![h]!.push(...rises);
+          if (!combined[m][h]) combined[m][h] = [];
+          combined[m][h].push(...rises);
         }
       }
       await new Promise((r) => setTimeout(r, 500)); // rate limit
     }
 
-    const cityTable: Record<number, Record<number, Array<{ delta: number; exceedance: number }>>> = {};
+    const cityTable: Record<number, Record<number, { delta: number; exceedance: number }[]>> = {};
     for (const [mStr, hours] of Object.entries(combined)) {
       const m = parseInt(mStr, 10);
       cityTable[m] = {};
       for (const [hStr, rises] of Object.entries(hours)) {
         const h = parseInt(hStr, 10);
-        cityTable[m]![h] = computeExceedanceTable(rises);
+        cityTable[m][h] = computeExceedanceTable(rises);
       }
     }
     cities[city] = cityTable;
@@ -252,7 +443,9 @@ async function main() {
       lat: coords.lat,
       lon: coords.lon,
       unit: coords.unit,
-      source: 'open-meteo-archive-era5',
+      resolutionSource: coords.resolutionSource,
+      wuStation: coords.wuStation,
+      source: sourceForCity === 'wu' ? 'weather-underground-historical' : 'open-meteo-archive-era5',
       years: `${args.yearRange[0]}-${args.yearRange[1]}`,
       generatedAt: new Date().toISOString(),
     };
@@ -270,6 +463,7 @@ async function main() {
         : 'city → month (1-12) → localHour (0-23) → sorted array of { delta, exceedance } where exceedance = P(finalMax > runningMax + delta)',
       generatedAt: new Date().toISOString(),
       sourceRange: `${args.yearRange[0]}-${args.yearRange[1]}`,
+      source: args.source,
       cityProvenance,
     },
     cities,
@@ -279,4 +473,6 @@ async function main() {
   console.log(`Written to ${args.outPath}`);
 }
 
-main().catch((err) => { console.error(err); process.exit(1); });
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => { console.error(err); process.exit(1); });
+}
