@@ -284,8 +284,8 @@ function buildMonthHourMap(
       if (!isFinite(running)) continue;
       const delta = metric === 'low' ? running - finalExtreme : finalExtreme - running;
       if (!map[month]) map[month] = {};
-      if (!map[month]![h]) map[month]![h] = [];
-      map[month]![h]!.push(delta);
+      if (!map[month][h]) map[month][h] = [];
+      map[month][h]!.push(delta);
     }
   }
   return map;
@@ -327,17 +327,17 @@ export function buildMonthHourMapFromWuObservations(
       if (!Number.isFinite(running)) continue;
       const delta = metric === 'low' ? running - finalExtreme : finalExtreme - running;
       if (!map[month]) map[month] = {};
-      if (!map[month]![hour]) map[month]![hour] = [];
-      map[month]![hour]!.push(delta);
+      if (!map[month][hour]) map[month][hour] = [];
+      map[month][hour].push(delta);
     }
   }
   return map;
 }
 
-function computeExceedanceTable(rises: number[], nQuantiles = 20): Array<{ delta: number; exceedance: number }> {
+function computeExceedanceTable(rises: number[], nQuantiles = 20): { delta: number; exceedance: number }[] {
   if (rises.length === 0) return [];
   const sorted = [...rises].sort((a, b) => a - b);
-  const result: Array<{ delta: number; exceedance: number }> = [];
+  const result: { delta: number; exceedance: number }[] = [];
   const step = (sorted[sorted.length - 1]! - sorted[0]!) / nQuantiles;
   for (let i = 0; i <= nQuantiles; i++) {
     const delta = sorted[0]! + step * i;
@@ -420,20 +420,20 @@ async function main() {
         if (!combined[m]) combined[m] = {};
         for (const [hStr, rises] of Object.entries(hours)) {
           const h = parseInt(hStr, 10);
-          if (!combined[m]![h]) combined[m]![h] = [];
-          combined[m]![h]!.push(...rises);
+          if (!combined[m][h]) combined[m][h] = [];
+          combined[m][h].push(...rises);
         }
       }
       await new Promise((r) => setTimeout(r, 500)); // rate limit
     }
 
-    const cityTable: Record<number, Record<number, Array<{ delta: number; exceedance: number }>>> = {};
+    const cityTable: Record<number, Record<number, { delta: number; exceedance: number }[]>> = {};
     for (const [mStr, hours] of Object.entries(combined)) {
       const m = parseInt(mStr, 10);
       cityTable[m] = {};
       for (const [hStr, rises] of Object.entries(hours)) {
         const h = parseInt(hStr, 10);
-        cityTable[m]![h] = computeExceedanceTable(rises);
+        cityTable[m][h] = computeExceedanceTable(rises);
       }
     }
     cities[city] = cityTable;
