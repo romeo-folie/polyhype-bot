@@ -1,5 +1,20 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { Redis } from 'ioredis';
+
+// Mock only loadConfig (keep all other real exports) so runHeartbeatWatchdog's config
+// read is hermetic — without this the tests rely on a host .env and fail in clean/CI envs.
+vi.mock('../../shared/config.js', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    loadConfig: () => ({
+      HEARTBEAT_WATCHDOG_ENABLED: true,
+      WEATHER_SCANNER_HEARTBEAT_MAX_AGE_MIN: 60,
+      WEATHER_SCANNER_HEARTBEAT_REALERT_MIN: 180,
+    }),
+  };
+});
+
 import {
   evaluateHeartbeat,
   runHeartbeatWatchdog,
