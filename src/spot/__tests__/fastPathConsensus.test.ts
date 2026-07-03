@@ -34,6 +34,14 @@ const { extractPriceTarget, formulaProbability, estimateFastConsensus } =
 
 const mockEstimate = vi.mocked(estimateConsensusProbability);
 
+// A resolution date ~1 year out, in the "Month D, YYYY" style Polymarket questions use.
+// Hardcoded dates rot: the suite broke on 2026-07-01 when "June 30, 2026" fell into the
+// past — the deadline assertion and the formula path both require a FUTURE deadline.
+const FUTURE_DATE = new Date(Date.now() + 365 * 24 * 3600 * 1000).toLocaleDateString(
+  'en-US',
+  { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' },
+);
+
 function makeMove(overrides: Partial<SpotMove> = {}): SpotMove {
   return {
     assetId: 'bitcoin',
@@ -51,8 +59,8 @@ function makeMarket(overrides: Partial<CorrelatedMarket> = {}): CorrelatedMarket
     marketId: 'mkt-1',
     conditionId: 'cond-1',
     clobTokenIds: ['tok-yes', 'tok-no'],
-    question: 'Will Bitcoin be above $100,000 on June 30, 2026?',
-    description: 'Resolves YES if BTC spot price exceeds $100,000 on June 30, 2026.',
+    question: `Will Bitcoin be above $100,000 on ${FUTURE_DATE}?`,
+    description: `Resolves YES if BTC spot price exceeds $100,000 on ${FUTURE_DATE}.`,
     currentYesPrice: 0.6,
     correlationDirection: 'positive',
     feesEnabled: false,
@@ -62,7 +70,7 @@ function makeMarket(overrides: Partial<CorrelatedMarket> = {}): CorrelatedMarket
 
 describe('extractPriceTarget', () => {
   it('extracts price target with date from standard format', () => {
-    const result = extractPriceTarget('Will Bitcoin be above $100,000 on June 30, 2026?');
+    const result = extractPriceTarget(`Will Bitcoin be above $100,000 on ${FUTURE_DATE}?`);
 
     expect(result).not.toBeNull();
     expect(result!.targetPrice).toBe(100000);
