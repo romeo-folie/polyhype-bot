@@ -89,6 +89,11 @@ const baseConfig = {
   // Shadow-ensemble cache TTL + fail-open on null shadow (mirror schema defaults).
   WEATHER_SHADOW_ENSEMBLE_CACHE_TTL_S: 86_400,
   WEATHER_RES_DAY_ENTRY_FAIL_OPEN_ON_NULL_SHADOW: false,
+  // Entry-timing gate: enforcement off (mirrors schema default — decisions are still
+  // computed and shadow-logged); dedicated tests enable enforcement explicitly.
+  WEATHER_TIMING_GATE_ENABLED: false,
+  WEATHER_TIMING_GATE_CONTESTED_SIGMA: 1.0,
+  WEATHER_TIMING_GATE_FAR_SIGMA: 2.0,
   // Res-day lock-in (off in baseConfig; dedicated tests enable).
   WEATHER_LOCKIN_ENABLED: false,
   WEATHER_LOCKIN_MARGIN: 1.0,
@@ -254,6 +259,8 @@ const {
   isWeatherHighLockedIn,
   isWeatherLowLockedIn,
   executeWeatherLockIns,
+  bracketDistanceSigma,
+  weatherTimingGateDecision,
 } = await import('../weatherScanner.js');
 
 const { computeHalfKelly } = await import('../../mapping/divergenceCalculator.js');
@@ -398,6 +405,70 @@ describe('parseBracketLabel', () => {
 
   it('returns null for unparseable labels', () => {
     expect(parseBracketLabel('something random')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Entry-timing gate — pure helpers
+// ---------------------------------------------------------------------------
+
+describe('bracketDistanceSigma', () => {
+  it('returns 0 when the forecast rounds into the bracket (half-degree widened)', () => {
+    // Bracket 90-91 spans [89.5, 91.5): forecast 91.4 is inside.
+    expect(bracketDistanceSigma(91.4, 2, 90, 91)).toBe(0);
+    expect(bracketDistanceSigma(89.5, 2, 90, 91)).toBe(0);
+  });
+
+  it('measures distance to the NEAREST widened boundary in σ units', () => {
+    // Forecast 93.5, bracket 90-91 → upper boundary 91.5 → 2° away; σ=2 → 1σ.
+    expect(bracketDistanceSigma(93.5, 2, 90, 91)).toBeCloseTo(1.0, 6);
+    // Below the bracket: forecast 85.5, lower boundary 89.5 → 4° / σ=2 → 2σ.
+    expect(bracketDistanceSigma(85.5, 2, 90, 91)).toBeCloseTo(2.0, 6);
+  });
+
+  it('handles tail brackets (single boundary)', () => {
+    // "58 or higher" → low=58, high=null → boundary 57.5. Forecast 53.5, σ=2 → 2σ.
+    expect(bracketDistanceSigma(53.5, 2, 58, null)).toBeCloseTo(2.0, 6);
+    // "39 or below" → high=39 → boundary 39.5. Forecast 45.5, σ=3 → 2σ.
+    expect(bracketDistanceSigma(45.5, 3, null, 39)).toBeCloseTo(2.0, 6);
+  });
+
+  it('returns null on unusable σ or missing bounds', () => {
+    expect(bracketDistanceSigma(90, 0, 90, 91)).toBeNull();
+    expect(bracketDistanceSigma(90, NaN, 90, 91)).toBeNull();
+    expect(bracketDistanceSigma(NaN, 2, 90, 91)).toBeNull();
+    expect(bracketDistanceSigma(90, 2, null, null)).toBeNull();
+  });
+});
+
+describe('weatherTimingGateDecision', () => {
+  const cfg = { contestedSigma: 1.0, farSigma: 2.0 };
+
+  it('NO contested (<1σ): allowed on res-day, blocked day-ahead (wait for the nowcast)', () => {
+    expect(weatherTimingGateDecision({ side: 'NO', distSigma: 0.4, isResolutionDay: true, ...cfg })).toBe('allow');
+    expect(weatherTimingGateDecision({ side: 'NO', distSigma: 0.4, isResolutionDay: false, ...cfg })).toBe('block_contested_no_day_ahead');
+  });
+
+  it('NO mid-band (1–2σ): allowed day-ahead, blocked on res-day (day-ahead price was the edge)', () => {
+    expect(weatherTimingGateDecision({ side: 'NO', distSigma: 1.5, isResolutionDay: false, ...cfg })).toBe('allow');
+    expect(weatherTimingGateDecision({ side: 'NO', distSigma: 1.5, isResolutionDay: true, ...cfg })).toBe('block_mid_no_res_day');
+  });
+
+  it('NO far (≥2σ "obvious"): blocked in BOTH windows — negative EV everywhere', () => {
+    expect(weatherTimingGateDecision({ side: 'NO', distSigma: 2.0, isResolutionDay: false, ...cfg })).toBe('block_far_no');
+    expect(weatherTimingGateDecision({ side: 'NO', distSigma: 3.7, isResolutionDay: true, ...cfg })).toBe('block_far_no');
+  });
+
+  it('YES: allowed day-ahead, blocked on res-day (winner already repriced)', () => {
+    expect(weatherTimingGateDecision({ side: 'YES', distSigma: 0.2, isResolutionDay: false, ...cfg })).toBe('allow');
+    expect(weatherTimingGateDecision({ side: 'YES', distSigma: 0.2, isResolutionDay: true, ...cfg })).toBe('block_yes_res_day');
+  });
+
+  it('band boundaries are configurable (contested/far sigma thresholds)', () => {
+    // Same 1.5σ NO day-ahead: with contestedSigma raised to 1.8 it becomes "contested" → blocked.
+    expect(weatherTimingGateDecision({ side: 'NO', distSigma: 1.5, isResolutionDay: false, contestedSigma: 1.8, farSigma: 3 })).toBe('block_contested_no_day_ahead');
+    // With farSigma lowered to 1.2 it becomes "far" → blocked everywhere.
+    expect(weatherTimingGateDecision({ side: 'NO', distSigma: 1.5, isResolutionDay: true, contestedSigma: 1.0, farSigma: 1.2 })).toBe('block_far_no');
   });
 });
 
@@ -5205,6 +5276,83 @@ describe('resolution-day size-up and near-res gate bypass', () => {
     );
     expect(primaryCall).toBeDefined();
     expect((primaryCall![0] as { _isResolutionDay?: boolean })._isResolutionDay).toBe(true);
+  });
+
+  // Shared config for the entry-timing gate tests: the res-day fresh-entry path where
+  // the executed primary is the contested YES (52-53°F @ 0.12, forecast 52) — the exact
+  // cohort the gate blocks on res-day ('block_yes_res_day').
+  const timingGateConfig = {
+    WEATHER_SCANNER_ENABLED: true,
+    WEATHER_EXECUTION_ENABLED: true,
+    SIZE_UP_ENABLED: true,
+    WEATHER_MAX_LOOKAHEAD_HOURS: 0,
+    WEATHER_NEAR_RES_ENTRY_ENABLED: false,
+    WEATHER_RES_DAY_EARLY_ENTRY_ENABLED: true,
+    WEATHER_RES_DAY_MIN_HOURS_REMAINING: -100,
+    WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED: true,
+    WEATHER_DUAL_ENSEMBLE_VETO_ENABLED: false,
+    WEATHER_MARKET_DISAGREEMENT_ENABLED: false,
+    ARB_GLOBAL_MAX_TRADES_PER_MIN: 60,
+  };
+  function wireTimingGateMocks(): void {
+    (redisMock as any).del = vi.fn().mockResolvedValue(1);
+    wireTodayMocks();
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8,
+      memberCount: 31, forecastDate: todayIso, ensembleModel: 'gfs',
+    });
+    mockGetBankroll.mockResolvedValue(1000);
+    mockExecuteAndRecordSignal.mockResolvedValue({
+      signal: { stakeUsd: 5 } as never, skipped: false, executionVenue: 'clob',
+      entryPrice: 0.12, sharesFilled: null, governorStamped: true, wasEmptyBook: true,
+    });
+  }
+
+  it('entry-timing gate OFF: decisions are shadow-logged on every bracket row, behavior unchanged', async () => {
+    mockLoadConfig.mockReturnValue({ ...baseConfig, ...timingGateConfig }); // gate off (baseConfig)
+    wireTimingGateMocks();
+
+    await runWeatherScan(redisMock as never);
+
+    // Behavior unchanged: the res-day YES primary still executes.
+    const yesCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => (c[0] as { direction?: string }).direction === 'YES',
+    );
+    expect(yesCall).toBeDefined();
+    // Shadow rows carry the timing fields regardless of enforcement.
+    const bracketWrites = mockEnqueueWrite.mock.calls
+      .filter((c) => c[0] === 'shadow_observations' && (c[1] as { kind?: string }).kind === 'weather_bracket')
+      .map((c) => (c[1] as { payload: { timingGateDecision?: string | null; blockedByTimingGate?: boolean; timingDistSigma?: number | null } }).payload);
+    expect(bracketWrites.length).toBeGreaterThan(0);
+    for (const p of bracketWrites) {
+      expect(p.blockedByTimingGate).toBe(false); // enforcement off → never blocked
+      expect(p.timingGateDecision === null || typeof p.timingGateDecision === 'string').toBe(true);
+    }
+    // The res-day YES bracket must carry the block verdict in shadow (data keeps accruing).
+    expect(bracketWrites.some((p) => p.timingGateDecision === 'block_yes_res_day')).toBe(true);
+  });
+
+  it('entry-timing gate ON: res-day YES is blocked (block_yes_res_day), executor never sees it', async () => {
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig, ...timingGateConfig, WEATHER_TIMING_GATE_ENABLED: true,
+    });
+    wireTimingGateMocks();
+
+    await runWeatherScan(redisMock as never);
+
+    // The contested-YES res-day pick (the executed primary when the gate is off)
+    // must NOT reach the executor under enforcement.
+    const yesCall = mockExecuteAndRecordSignal.mock.calls.find(
+      (c) => (c[0] as { direction?: string }).direction === 'YES',
+    );
+    expect(yesCall).toBeUndefined();
+    // And the shadow row records the block with enforcement on.
+    const blocked = mockEnqueueWrite.mock.calls
+      .filter((c) => c[0] === 'shadow_observations' && (c[1] as { kind?: string }).kind === 'weather_bracket')
+      .map((c) => (c[1] as { payload: { timingGateDecision?: string | null; blockedByTimingGate?: boolean } }).payload)
+      .filter((p) => p.timingGateDecision === 'block_yes_res_day');
+    expect(blocked.length).toBeGreaterThan(0);
+    for (const p of blocked) expect(p.blockedByTimingGate).toBe(true);
   });
 
   it('res-day live-confirmation gate blocks unconfirmed fresh entries and records decision context', async () => {
