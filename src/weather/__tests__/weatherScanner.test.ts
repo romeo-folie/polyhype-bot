@@ -246,6 +246,8 @@ const {
   parseBracketLabel,
   parseWeatherEvent,
   findMispricedBrackets,
+  forecastRoundsIntoBracket,
+  computeBiasedProb,
   fetchForecast,
   scanWeatherMarkets,
   daysUntil,
@@ -1153,12 +1155,15 @@ describe('findMispricedBrackets', () => {
 // ---------------------------------------------------------------------------
 
 describe('findMispricedBrackets - interior NO rounding gate', () => {
-  it('blocks interior NO when Math.round(correctedForecastHigh) falls inside bracket', () => {
-    // "32°C" bracket (low=32, high=32). Forecast 31.59°C → rounds to 32 → inside bracket → blocked.
-    // This is the Hong Kong failure case: model says 31.59°C but WU rounds to 32 → YES.
+  it('blocks interior NO when the source-binned forecast falls inside bracket (round city)', () => {
+    // "32°C" bracket (low=32, high=32) for a WHOLE-DEGREE (round) city: forecast
+    // 31.59°C → the source rounds it to 32 → inside bracket → NO blocked.
+    // (Seoul resolves on WU whole degrees; the original version of this test used
+    // Hong Kong, but the 2026-07-08 census showed HK resolves one-decimal with
+    // FLOOR semantics — 31.59 officially lands in "31", not "32" — see below.)
     const event = {
-      eventId: 'e-hk-32', slug: 'hk-32', city: 'hong kong',
-      coords: lookupCity('hong kong') ?? { lat: 22.39, lon: 114.11 },
+      eventId: 'e-seoul-32', slug: 'seoul-32', city: 'seoul',
+      coords: lookupCity('seoul')!,
       targetDate: '2026-05-22', unit: 'celsius' as const,
       brackets: [
         { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
@@ -1175,6 +1180,29 @@ describe('findMispricedBrackets - interior NO rounding gate', () => {
     const noOpps = opportunities.filter((o) => o.tradeSide === 'NO');
     expect(noOpps).toHaveLength(1);
     expect(noOpps[0]!.blockedByInteriorMargin).toBe(true);
+  });
+
+  it('bins by FLOOR for Hong Kong: 31.59 lands in "31" so NO on "32" is NOT interior-blocked — but 32.4 is', () => {
+    const run = (fc: number) => findMispricedBrackets(
+      {
+        eventId: 'e-hk-32', slug: 'hk-32', city: 'hong kong',
+        coords: lookupCity('hong kong')!,
+        targetDate: '2026-05-22', unit: 'celsius' as const,
+        brackets: [
+          { marketId: 'm0', conditionId: 'c0', clobTokenIds: ['t0y', 't0n'],
+            threshold: 0, low: 32, high: 32, label: '32°C',
+            yesPrice: 0.25, noPrice: 0.72 },
+        ],
+        endDate: '2026-05-22T12:00:00Z',
+      },
+      { forecastHigh: fc, stdDev: 2, source: 'combined' as const, ensembleMembers: 31 }, 1, 0.0,
+      { minModelCoverage: 0 },
+    ).opportunities.filter((o) => o.tradeSide === 'NO')[0];
+
+    // 31.59 floors to 31 → outside "32" → the coin-flip gate must NOT block.
+    expect(run(31.59)?.blockedByInteriorMargin).toBe(false);
+    // 32.4 floors to 32 → inside "32" → blocked (the true HK coin-flip shape).
+    expect(run(32.4)?.blockedByInteriorMargin).toBe(true);
   });
 
   it('allows interior NO when rounded forecast is clearly outside bracket', () => {
@@ -7456,5 +7484,113 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
     expect(no!.blockedByModalMass).toBe(false);
     expect(no!.ensembleYesMass ?? null).toBeNull();
     expect(mockFetchEnsembleHourly).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Floor bracket semantics in model PRICING (HK one-decimal resolution)
+// ---------------------------------------------------------------------------
+
+
+
+// ---------------------------------------------------------------------------
+// Floor bracket semantics in PRICING (PR: fix/weather-floor-semantics-pricing)
+// ---------------------------------------------------------------------------
+
+describe('forecastRoundsIntoBracket — floor semantics', () => {
+  it('bins by floor for one-decimal sources: 31.6 lands in the "31" bracket', () => {
+    // Round convention (default): 31.6 rounds to 32 → NOT in [31,31].
+    expect(forecastRoundsIntoBracket(31.6, 31, 31)).toBe(false);
+    // Floor semantics (HK): the containing bracket of 31.6 is "31".
+    expect(forecastRoundsIntoBracket(31.6, 31, 31, 0, 'floor')).toBe(true);
+    expect(forecastRoundsIntoBracket(31.99, 31, 31, 0, 'floor')).toBe(true);
+    expect(forecastRoundsIntoBracket(30.99, 31, 31, 0, 'floor')).toBe(false);
+    expect(forecastRoundsIntoBracket(32.0, 31, 31, 0, 'floor')).toBe(false);
+  });
+
+  it('margin widening still applies under floor semantics', () => {
+    expect(forecastRoundsIntoBracket(32.4, 31, 31, 1, 'floor')).toBe(true); // floor 32 within ±1
+    expect(forecastRoundsIntoBracket(33.0, 31, 31, 1, 'floor')).toBe(false);
+  });
+});
+
+describe('computeBiasedProb — bracketSemantics threading', () => {
+  const forecast = { forecastHigh: 31.6, metric: 'high' as const, stdDev: 1.2, source: 'combined' as const, ensembleMembers: 31, ensembleModel: 'gfs' as const, shadowEnsemble: null };
+
+  it('floor option prices the bracket on [31.0, 32.0) instead of [30.5, 31.5)', () => {
+    const floor = computeBiasedProb(31, 31, 1, forecast, { bracketSemantics: 'floor' });
+    const round = computeBiasedProb(31, 31, 1, forecast, {});
+    expect(floor.modelProbability).toBeCloseTo(
+      estimateBracketProbability(31.6, 31, 31, 1, floor.effectiveStdDev, 'floor'), 10);
+    expect(round.modelProbability).toBeCloseTo(
+      estimateBracketProbability(31.6, 31, 31, 1, round.effectiveStdDev), 10);
+    // At a 31.6 forecast the two conventions must differ materially: the floor
+    // bracket CONTAINS the forecast center; the round bracket does not.
+    expect(floor.modelProbability).toBeGreaterThan(round.modelProbability + 0.02);
+  });
+});
+
+describe('findMispricedBrackets — Hong Kong floor pricing', () => {
+  it('prices HK brackets with floor boundaries (city config drives semantics)', () => {
+    const hk = lookupCity('hong kong')!;
+    expect(hk.bracketSemantics).toBe('floor'); // config precondition
+    const event = {
+      eventId: 'hk1', slug: 'hk-test', city: 'hong kong', coords: hk,
+      targetDate: '2026-07-08', unit: 'celsius' as const,
+      brackets: [
+        { marketId: 'h0', conditionId: 'hc0', clobTokenIds: ['h0y', 'h0n'], threshold: 0, low: null, high: 29, label: '29°C or below', yesPrice: 0.05, noPrice: 0.95 },
+        { marketId: 'h1', conditionId: 'hc1', clobTokenIds: ['h1y', 'h1n'], threshold: 1, low: 30, high: 30, label: '30°C', yesPrice: 0.15, noPrice: 0.85 },
+        { marketId: 'h2', conditionId: 'hc2', clobTokenIds: ['h2y', 'h2n'], threshold: 2, low: 31, high: 31, label: '31°C', yesPrice: 0.40, noPrice: 0.60 },
+        { marketId: 'h3', conditionId: 'hc3', clobTokenIds: ['h3y', 'h3n'], threshold: 3, low: 32, high: 32, label: '32°C', yesPrice: 0.30, noPrice: 0.70 },
+        { marketId: 'h4', conditionId: 'hc4', clobTokenIds: ['h4y', 'h4n'], threshold: 4, low: 33, high: null, label: '33°C or higher', yesPrice: 0.10, noPrice: 0.90 },
+      ],
+      endDate: '2026-07-08T12:00:00Z',
+    };
+    const forecast = { forecastHigh: 31.6, stdDev: 1.2, source: 'combined' as const, ensembleMembers: 31 };
+
+    const { opportunities } = findMispricedBrackets(event as never, forecast as never, 1, 0.01);
+    expect(opportunities.length).toBeGreaterThan(0);
+    const any = opportunities[0]!;
+    // The 31°C bracket must be priced on floor boundaries [31.0, 32.0).
+    const b31 = opportunities.find((o) => o.bracketLabel === '31°C');
+    const probe = b31 ?? any;
+    const parsed = { '29°C or below': [null, 29], '30°C': [30, 30], '31°C': [31, 31], '32°C': [32, 32], '33°C or higher': [33, null] }[probe.bracketLabel] as [number | null, number | null];
+    const expectedFloor = estimateBracketProbability(31.6, parsed[0], parsed[1], 1, probe.effectiveStdDev, 'floor');
+    const expectedRound = estimateBracketProbability(31.6, parsed[0], parsed[1], 1, probe.effectiveStdDev);
+    expect(probe.modelProbability).toBeCloseTo(expectedFloor, 10);
+    expect(Math.abs(probe.modelProbability - expectedRound)).toBeGreaterThan(1e-4); // NOT the round value
+  });
+});
+
+describe('evaluateWeatherPositionThesis — bracketSemantics threading', () => {
+  it('modal check + held-prob use floor semantics when the input carries it', async () => {
+    const { evaluateWeatherPositionThesis } = await import('../weatherThesis.js');
+    const base = {
+      pos: { direction: 'NO', consensusProbability: 0.2, entryPrice: 0.6 } as never,
+      bracket: { low: 31, high: 31 },
+      daysOut: 0,
+      forecast: { forecastHigh: 31.6, metric: 'high', stdDev: 1.2, source: 'combined', ensembleMembers: 31, ensembleModel: 'gfs', shadowEnsemble: null } as never,
+      cityBias: null,
+      redisValues: { modalStreakRaw: null, modalSupportedMarkerRaw: null },
+      stddevMultiplier: 1.0,
+      biasCorrectionEnabled: false,
+      biasMinSamples: 14,
+      biasTrustedSamples: 14,
+      weakBiasStddevMultiplier: 1.2,
+      modalEnabled: true,
+      modalMinRuns: 2,
+      modalMaxHeldProb: 0.9,
+      invalidationMinDrop: 0.3,
+      invalidationMinCurrentHeldProb: 0.35,
+      skipModalStreakAdvance: true,
+    };
+    const floor = evaluateWeatherPositionThesis({ ...base, bracketSemantics: 'floor' } as never);
+    const round = evaluateWeatherPositionThesis(base as never);
+    // Floor: 31.6 is CONTAINED in "31" → the forecast supports YES → a NO position
+    // is modal-inverted. Round: 31.6 rounds to 32 → NO is modal-supported.
+    expect(floor.modalInversionRaw).toBe(true);
+    expect(round.modalInversionRaw).toBe(false);
+    // Held-prob for NO must be LOWER under floor (the bracket holds more mass).
+    expect(floor.currentHeldProb).toBeLessThan(round.currentHeldProb - 0.02);
   });
 });

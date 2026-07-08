@@ -188,10 +188,15 @@ function ensembleFinalExtremeDistribution(
  * into the bracket, so the same math serves both metrics — only how each
  * member's final value was reduced (max vs min) differs upstream.
  *
- * The rounding boundary semantics match classifyOracleState:
- *   Interior YES: final value must round into [low, high] → low-0.5 ≤ v < high + 0.5
- *   High-tail YES: rounds ≥ low → v ≥ low - 0.5
- *   Low-tail YES:  rounds ≤ high → v < high + 0.5
+ * Boundary semantics: the formulas below hardcode the ROUND convention
+ * (bracket "N" = [N-0.5, N+0.5)). For FLOOR-semantics cities (one-decimal
+ * sources, e.g. HKO — see CityCoordinates.bracketSemantics) callers must
+ * pass a bracket PRE-SHIFTED by +0.5 (conditionalHeldProbability does this
+ * via estimatorBracketForSemantics), which lands every boundary on the
+ * floor values [low, high+1) exactly.
+ *   Interior YES: low-0.5 ≤ v < high + 0.5
+ *   High-tail YES: v ≥ low - 0.5
+ *   Low-tail YES:  v < high + 0.5
  *   (NO is the complement of YES in each case.)
  */
 export function bracketWinProbFromFinalMaxes(
@@ -463,6 +468,18 @@ export function conditionalHeldProbability(
 
   // Degenerate case: binary oracle boundary already crossed → agree with classifyOracleState.
   const binaryState = classifyOracleState(observedMax, direction, bracket, metric, input.classifyOpts);
+
+  // Probabilistic estimators below hardcode ROUND (±0.5) boundaries. For floor-
+  // semantics cities, shifting the bracket by +0.5 makes those formulas land on
+  // the floor boundaries exactly: (low+0.5)-0.5 = low and (high+0.5)+0.5 = high+1
+  // — i.e. containment on [low, high+1), matching estimateBracketProbability and
+  // the (already semantics-aware) classifyOracleState degenerate shortcut above.
+  const estBracket = input.classifyOpts?.semantics === 'floor'
+    ? {
+        low: bracket.low == null ? null : bracket.low + 0.5,
+        high: bracket.high == null ? null : bracket.high + 0.5,
+      }
+    : bracket;
   if (binaryState === 'oracle_impossible' || binaryState === 'oracle_confirmed') {
     const obsAgeMinDegen = (Date.now() - new Date(observedAt).getTime()) / 60_000;
     return {
@@ -504,7 +521,7 @@ export function conditionalHeldProbability(
         metric,
       );
       if (finalValues.length >= minMembers) {
-        ensembleHeldProb = bracketWinProbFromFinalMaxes(finalValues, direction, bracket);
+        ensembleHeldProb = bracketWinProbFromFinalMaxes(finalValues, direction, estBracket);
         membersUsed = finalValues.length;
       }
     } catch (err) {
@@ -526,7 +543,7 @@ export function conditionalHeldProbability(
         observedAtLocalHour,
         month,
         direction,
-        bracket,
+        estBracket,
         metric,
       );
     } catch (err) {

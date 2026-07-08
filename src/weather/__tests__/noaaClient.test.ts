@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { CITY_COORDINATES, canonicalCityKey, lookupCity } from '../noaaClient.js';
+import { CITY_COORDINATES, canonicalCityKey, lookupCity, estimateBracketProbability } from '../noaaClient.js';
 
 describe('CITY_COORDINATES', () => {
   it('every WU-sourced city has an isoCountry code', () => {
@@ -156,5 +156,41 @@ describe('canonicalCityKey / lookupCity', () => {
   it('returns null for unknown city', () => {
     expect(canonicalCityKey('atlantis')).toBe(null);
     expect(lookupCity('atlantis')).toBe(null);
+  });
+});
+
+describe('estimateBracketProbability — floor semantics (one-decimal sources)', () => {
+  // Floor boundaries sit exactly +0.5° above round boundaries, so
+  // P_floor(forecast) must equal P_round(forecast − 0.5) for every shape.
+  const σ = 2.0;
+
+  it('interior bracket: floor equals round shifted by half a degree', () => {
+    expect(estimateBracketProbability(31.0, 31, 31, 0, σ, 'floor'))
+      .toBeCloseTo(estimateBracketProbability(30.5, 31, 31, 0, σ), 10);
+    expect(estimateBracketProbability(33.2, 31, 31, 0, σ, 'floor'))
+      .toBeCloseTo(estimateBracketProbability(32.7, 31, 31, 0, σ), 10);
+  });
+
+  it('tails: floor equals round shifted by half a degree', () => {
+    expect(estimateBracketProbability(31.8, null, 31, 0, σ, 'floor'))
+      .toBeCloseTo(estimateBracketProbability(31.3, null, 31, 0, σ), 10); // "31 or below"
+    expect(estimateBracketProbability(31.8, 32, null, 0, σ, 'floor'))
+      .toBeCloseTo(estimateBracketProbability(31.3, 32, null, 0, σ), 10); // "32 or higher"
+  });
+
+  it('floor probabilities are a full ladder (sum to 1 over a partition)', () => {
+    // ≤30, 31, 32, ≥33 partitions the line under floor semantics too.
+    const fc = 31.5;
+    const total =
+      estimateBracketProbability(fc, null, 30, 0, σ, 'floor') +
+      estimateBracketProbability(fc, 31, 31, 0, σ, 'floor') +
+      estimateBracketProbability(fc, 32, 32, 0, σ, 'floor') +
+      estimateBracketProbability(fc, 33, null, 0, σ, 'floor');
+    expect(total).toBeCloseTo(1.0, 6);
+  });
+
+  it('default (no semantics arg) is round — unchanged behavior', () => {
+    expect(estimateBracketProbability(52, 52, 53, 1, 3))
+      .toBeCloseTo(estimateBracketProbability(52, 52, 53, 1, 3, 'round'), 12);
   });
 });

@@ -59,17 +59,24 @@ export function winningDirection(
   actual: number,
   low: number | null,
   high: number | null,
+  semantics: 'round' | 'floor' = 'round',
 ): 'YES' | 'NO' {
+  // Bin the (possibly fractional) actual per the resolution source's semantics:
+  // whole-degree sources report integers (binning is a no-op there, and rounding
+  // covers any fractional ground-truth value); one-decimal FLOOR cities (HKO)
+  // contain 31.6 in the "31" bracket — an exact-value comparison against
+  // low===high would otherwise return NO for every fractional actual.
+  const binned = semantics === 'floor' ? Math.floor(actual) : Math.round(actual);
   if (high === null) {
-    // High-tail: "X° or higher" — YES wins when actual >= low
-    return actual >= low! ? 'YES' : 'NO';
+    // High-tail: "X° or higher" — YES wins when the binned actual >= low
+    return binned >= low! ? 'YES' : 'NO';
   }
   if (low === null) {
-    // Low-tail: "X° or below" — YES wins when actual <= high
-    return actual <= high ? 'YES' : 'NO';
+    // Low-tail: "X° or below" — YES wins when the binned actual <= high
+    return binned <= high ? 'YES' : 'NO';
   }
-  // Interior bracket: YES wins when low <= actual <= high
-  return actual >= low && actual <= high ? 'YES' : 'NO';
+  // Interior bracket: YES wins when low <= binned <= high
+  return binned >= low && binned <= high ? 'YES' : 'NO';
 }
 
 /** Run one oracle scan cycle. */
@@ -149,7 +156,10 @@ export async function runWeatherOracleScan(redis: Redis): Promise<void> {
 
     for (const bracket of event.brackets) {
       try {
-        const direction = winningDirection(actual, bracket.low, bracket.high);
+        const direction = winningDirection(
+          actual, bracket.low, bracket.high,
+          event.coords?.bracketSemantics === 'floor' ? 'floor' : 'round',
+        );
         // winning token: YES = index 0, NO = index 1
         const winningTokenId = direction === 'YES'
           ? bracket.clobTokenIds[0]

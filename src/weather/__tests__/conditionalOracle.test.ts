@@ -459,3 +459,101 @@ describe('loadClimoTable', () => {
     expect(typeof table).toBe('object');
   });
 });
+
+// ── Floor semantics (one-decimal cities, e.g. HKO) ────────────────────────────
+
+describe('floor semantics — probabilistic estimators respect classifyOpts', () => {
+  it('bracketWinProbFromFinalMaxes with a +0.5-pre-shifted bracket lands on floor boundaries', () => {
+    // Floor "31°C" = [31.0, 32.0). Pre-shifted bracket {31.5, 31.5} makes the
+    // round formulas produce exactly those boundaries: 31.6/31.8 are YES, 32.2 is NO.
+    const p = bracketWinProbFromFinalMaxes([31.6, 31.8, 32.2], 'NO', { low: 31.5, high: 31.5 });
+    expect(p).toBeCloseTo(1 / 3, 10);
+    // Un-shifted (round) bracket wrongly calls all three NO wins (none in [30.5, 31.5)).
+    expect(bracketWinProbFromFinalMaxes([31.6, 31.8, 32.2], 'NO', { low: 31, high: 31 })).toBe(1);
+  });
+
+  it('conditionalHeldProbability threads floor semantics into the ENSEMBLE estimator', () => {
+    // 20 members flat at 31.6 → every final max = 31.6. Floor "31°C" contains
+    // 31.6 → NO loses in every member → heldProb(NO) = 0. Under round semantics
+    // 31.6 rounds to 32 → NO wins every member → heldProb(NO) = 1. The exact
+    // half-degree flip that mispriced HK exits/hold-guards.
+    const mk = (classifyOpts?: { semantics: 'round' | 'floor' }) => conditionalHeldProbability({
+      city: 'hong kong',
+      direction: 'NO',
+      bracket: { low: 31, high: 31 },
+      observedMax: 31,
+      metric: 'high',
+      ...(classifyOpts ? { classifyOpts } : {}),
+      observedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+      tz: 'Asia/Hong_Kong',
+      remainingHourlyMembers: flatMembers(31.6, 20),
+      climoTable: null,
+      biasCorrection: 0,
+      spreadInflation: 1.0,
+      minMembers: 10,
+      maxObsAgeMin: 90,
+      estimatorMaxGap: 0.25,
+    });
+    const floor = mk({ semantics: 'floor' });
+    const round = mk();
+    expect(floor!.estimator).toBe('ensemble');
+    expect(floor!.heldProb).toBeCloseTo(0, 6); // bracket contains 31.6 → NO dead
+    expect(round!.heldProb).toBeCloseTo(1, 6); // old behavior: 31.6 "rounds out"
+  });
+});
+
+describe('floor semantics — CLIMO estimator paths', () => {
+  function tableFor(entries: { delta: number; exceedance: number }[]) {
+    const allHours: Record<number, typeof entries> = {};
+    for (let h = 0; h < 24; h++) allHours[h] = entries;
+    const allMonths: Record<number, typeof allHours> = {};
+    for (let m = 1; m <= 12; m++) allMonths[m] = allHours;
+    return { chicago: allMonths };
+  }
+
+  it('HIGH-metric climo path uses floor boundaries (delta shifts by +0.5)', () => {
+    // bracket "31", observedMax 31, NO. In-bracket branch → NO = exc(boundary − obs).
+    // Round: boundary 31.5 → delta 0.5 → exc 0.6. Floor: boundary 32.0 → delta 1.0 → exc 0.3.
+    const climoTable = tableFor([
+      { delta: 0, exceedance: 0.8 }, { delta: 0.5, exceedance: 0.6 },
+      { delta: 1.0, exceedance: 0.3 }, { delta: 2.0, exceedance: 0.1 },
+    ]);
+    const mk = (classifyOpts?: { semantics: 'round' | 'floor' }) => conditionalHeldProbability({
+      city: 'chicago', direction: 'NO', bracket: { low: 31, high: 31 },
+      observedMax: 31, metric: 'high',
+      ...(classifyOpts ? { classifyOpts } : {}),
+      observedAt: new Date(Date.now() - 5 * 60_000).toISOString(), tz: 'America/Chicago',
+      remainingHourlyMembers: null, climoTable: climoTable as never,
+      biasCorrection: 0, spreadInflation: 1.0, minMembers: 10, maxObsAgeMin: 90, estimatorMaxGap: 0.25,
+    });
+    const round = mk();
+    const floor = mk({ semantics: 'floor' });
+    expect(round!.estimator).toBe('climo');
+    expect(round!.heldProb).toBeCloseTo(0.6, 6);
+    expect(floor!.heldProb).toBeCloseTo(0.3, 6);
+  });
+
+  it('LOW-metric climo path uses floor boundaries too', () => {
+    // Lowest-temp bracket "25", running min 25.4, YES. Inside-from-above branch →
+    // P(YES) = 1 − exc(observedMin − lower boundary).
+    // Round: boundary 24.5 → delta 0.9 → exc 0.2 → YES 0.8.
+    // Floor: boundary 25.0 → delta 0.4 → exc 0.5 → YES 0.5.
+    const climoTable = tableFor([
+      { delta: 0, exceedance: 0.7 }, { delta: 0.4, exceedance: 0.5 },
+      { delta: 0.9, exceedance: 0.2 }, { delta: 2.0, exceedance: 0.05 },
+    ]);
+    const mk = (classifyOpts?: { semantics: 'round' | 'floor' }) => conditionalHeldProbability({
+      city: 'chicago', direction: 'YES', bracket: { low: 25, high: 25 },
+      observedMax: 25.4, metric: 'low',
+      ...(classifyOpts ? { classifyOpts } : {}),
+      observedAt: new Date(Date.now() - 5 * 60_000).toISOString(), tz: 'America/Chicago',
+      remainingHourlyMembers: null, climoTable: climoTable as never,
+      biasCorrection: 0, spreadInflation: 1.0, minMembers: 10, maxObsAgeMin: 90, estimatorMaxGap: 0.25,
+    });
+    const round = mk();
+    const floor = mk({ semantics: 'floor' });
+    expect(round!.estimator).toBe('climo');
+    expect(round!.heldProb).toBeCloseTo(0.8, 6);
+    expect(floor!.heldProb).toBeCloseTo(0.5, 6);
+  });
+});

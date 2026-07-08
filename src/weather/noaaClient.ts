@@ -502,30 +502,37 @@ export function estimateBracketProbability(
   bracketHigh: number | null,
   daysOut: number,
   stdDevOverride?: number,
+  semantics: 'round' | 'floor' = 'round',
 ): number {
   const stdDev = stdDevOverride ?? getDefaultStdDev(daysOut);
 
-  // Use half-integer boundaries to handle whole-degree rounding.
-  // "39°F or below" means T <= 39, so effective upper boundary is 39.5
-  // "40-41°F" means 40 <= T <= 41, so boundaries are [39.5, 41.5)
-  // "58°F or higher" means T >= 58, so effective lower boundary is 57.5
+  // Bracket boundaries depend on the resolution source's precision (see
+  // CityCoordinates.bracketSemantics — all markets resolve by CONTAINMENT):
+  //   'round' (whole-degree sources, the default): the source rounds its
+  //     measurement to an integer, so "40-41°F" ≈ [39.5, 41.5) in true °.
+  //   'floor' (one-decimal sources, e.g. HKO): the containing bracket is the
+  //     integer floor of a one-decimal value, so "31°C" = [31.0, 32.0) —
+  //     boundaries sit half a degree HIGHER than the round convention. Pricing
+  //     HK on 'round' shifted every bracket probability by that half degree.
+  const hiEdge = semantics === 'floor' ? 1.0 : 0.5;
+  const loEdge = semantics === 'floor' ? 0.0 : 0.5;
 
   if (bracketLow === null && bracketHigh !== null) {
-    // Low-tail bracket: P(T <= bracketHigh) = CDF at bracketHigh + 0.5
-    const z = (bracketHigh + 0.5 - forecastTemp) / stdDev;
+    // Low-tail bracket: P(T <= bracketHigh per source precision)
+    const z = (bracketHigh + hiEdge - forecastTemp) / stdDev;
     return normalCdf(z);
   }
 
   if (bracketHigh === null && bracketLow !== null) {
-    // High-tail bracket: P(T >= bracketLow) = 1 - CDF at bracketLow - 0.5
-    const z = (bracketLow - 0.5 - forecastTemp) / stdDev;
+    // High-tail bracket: P(T >= bracketLow per source precision)
+    const z = (bracketLow - loEdge - forecastTemp) / stdDev;
     return 1 - normalCdf(z);
   }
 
   if (bracketLow !== null && bracketHigh !== null) {
     // Interior bracket: P(bracketLow <= T <= bracketHigh)
-    const zHigh = (bracketHigh + 0.5 - forecastTemp) / stdDev;
-    const zLow = (bracketLow - 0.5 - forecastTemp) / stdDev;
+    const zHigh = (bracketHigh + hiEdge - forecastTemp) / stdDev;
+    const zLow = (bracketLow - loEdge - forecastTemp) / stdDev;
     return normalCdf(zHigh) - normalCdf(zLow);
   }
 
