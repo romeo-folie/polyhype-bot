@@ -51,6 +51,11 @@ export interface WeatherLiveObservation {
   monotonic: boolean;
   /** ISO8601 UTC timestamp of the most recent observation that contributed to observedMax. */
   observedAt: string | null;
+  /** True when observedMax is built from a feed that ROUNDS to whole degrees (e.g. the
+   *  HKO rhrread fallback: a displayed 32 can be a true 31.5–32.4 — the 2026-07-08 false
+   *  lock-in fired on a rounded 31.8). Certainty consumers must add 0.5° slack. Absent/
+   *  false for one-decimal or exact feeds. */
+  integerRounded?: boolean;
 }
 
 // ── Redis cache ───────────────────────────────────────────────────────────────
@@ -76,6 +81,13 @@ async function readCachedObs(
     const parsed = JSON.parse(raw) as WeatherLiveObservation & { cachedAt: string };
     const ageMs = Date.now() - new Date(parsed.cachedAt).getTime();
     if (ageMs > maxAgeMin * 60_000) return null;
+    // Migration shim: HKO rows cached by pre-integerRounded builds are rhrread
+    // integers without the flag. Default them to ROUNDED (conservative — adds the
+    // 0.5° certainty slack) so a stale cached "32" for a true 31.8 cannot re-fire
+    // the 2026-07-08 false lock-in during the cache-TTL window after deploy.
+    if (parsed.source === 'hko-live' && parsed.integerRounded === undefined) {
+      parsed.integerRounded = true;
+    }
     return parsed;
   } catch {
     return null;
@@ -190,7 +202,7 @@ export async function fetchMetarIntradayExtreme(
 
   if (dayObs.length === 0) return { observedMax: null, observedAt: null };
 
-  const temps = dayObs.map((o) => o.temp as number);
+  const temps = dayObs.map((o) => o.temp!);
   const extreme = metric === 'low' ? Math.min(...temps) : Math.max(...temps);
   // Use the latest reportTime from today's observations as the observedAt stamp.
   const latestReport = dayObs
@@ -281,6 +293,81 @@ const METAR_INTRADAY_TTL_S = 36 * 3600;
 const HKO_RHRREAD_URL =
   'https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en';
 const HKO_STATION_NAME = 'Hong Kong Observatory';
+// HKO's text-readings page publishes the station's running daily extremes
+// ("Max / Min Air Temperature Since Midnight") at ONE DECIMAL — the same precision
+// as the "Absolute Daily Max" the markets settle on. rhrread ROUNDS to integers
+// (displayed 32 = true 31.5–32.4), which produced the 2026-07-08 false lock-in
+// at a true 31.8. Prefer this page; fall back to rhrread when it fails.
+const HKO_TEXT_READINGS_URL =
+  'https://www.hko.gov.hk/textonly/v2/forecast/text_readings_e.htm';
+// One-decimal accumulators are kept in SEPARATE keys: the legacy keys already hold
+// ROUNDED integers (e.g. 32 for a true 31.8) which a max() would never let a correct
+// one-decimal reading displace.
+const HKO_INTRADAY_1DP_MAX_PREFIX = 'weather:hko_intraday_1dp_max:';
+const HKO_INTRADAY_1DP_MIN_PREFIX = 'weather:hko_intraday_1dp_min:';
+
+const HKO_TEXT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * Parse the "HK Observatory" row of HKO's text-readings page into the one-decimal
+ * running daily extremes since midnight. Returns null unless BOTH the page's
+ * "Since Midnight (D Mon YYYY)" header matches targetDate (guards the HKT-midnight
+ * rollover, same hazard as the rhrread recordTime check) AND the row parses to
+ * plausible finite values. Exported for tests.
+ *
+ * Row shape (tags stripped):
+ *   HK Observatory   30.4   77   31.8 / 25.3   +2.0 ...
+ *   (current °C)  (humidity)  (max / min since midnight °C)
+ */
+export function parseHkoTextExtremes(
+  pageHtml: string,
+  targetDate: string,
+): { max: number; min: number } | null {
+  const txt = pageHtml.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&');
+
+  const [y, m, d] = targetDate.split('-').map((v) => parseInt(v, 10));
+  const mon = HKO_TEXT_MONTHS[(m ?? 0) - 1];
+  if (!y || !mon || !d) return null;
+  if (!txt.includes(`(${d} ${mon} ${y})`)) return null;
+
+  const row = txt.match(
+    /HK Observatory\s+(-?\d+(?:\.\d+)?)\s+\d+\s+(-?\d+(?:\.\d+)?)\s*\/\s*(-?\d+(?:\.\d+)?)/,
+  );
+  if (!row) return null;
+  const max = parseFloat(row[2]!);
+  const min = parseFloat(row[3]!);
+  if (!Number.isFinite(max) || !Number.isFinite(min)) return null;
+  // Plausibility: HK extremes live well inside [-5, 45]°C and max ≥ min.
+  if (max < min || max < -5 || max > 45 || min < -5 || min > 45) return null;
+  return { max, min };
+}
+
+/** Fetch + parse the HKO one-decimal running extremes. Null on any failure. */
+async function fetchHkoOneDecimalExtremes(
+  targetDate: string,
+  fetchFn: typeof fetch,
+): Promise<{ max: number; min: number } | null> {
+  try {
+    const res = await fetchWithTimeout(HKO_TEXT_READINGS_URL, fetchFn);
+    if (!res.ok) {
+      logger.warn('[weather-live-obs] HKO text readings unexpected status', {
+        targetDate, status: res.status,
+      });
+      return null;
+    }
+    const body = await res.text();
+    const parsed = parseHkoTextExtremes(body, targetDate);
+    if (!parsed) {
+      logger.debug('[weather-live-obs] HKO text readings unparseable or wrong date', { targetDate });
+    }
+    return parsed;
+  } catch (err) {
+    logger.warn('[weather-live-obs] HKO text readings fetch error', {
+      targetDate, error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
 
 interface HkoRhrreadStation {
   place: string;
@@ -310,7 +397,20 @@ export async function fetchHkoIntradayExtreme(
   redis: Redis,
   metric: 'high' | 'low' = 'high',
   fetchFn: typeof fetch = fetch,
-): Promise<{ observedMax: number | null; observedAt: string | null }> {
+): Promise<{ observedMax: number | null; observedAt: string | null; integerRounded: boolean }> {
+  // Preferred source: the text-readings page's one-decimal running extremes —
+  // settlement precision, no rounding gap. Accumulated in DEDICATED 1dp keys so
+  // legacy rounded integers (e.g. a stored 32 for a true 31.8) can't mask them.
+  const oneDp = await fetchHkoOneDecimalExtremes(targetDate, fetchFn);
+  if (oneDp != null) {
+    const reading = metric === 'low' ? oneDp.min : oneDp.max;
+    const key1dp =
+      `${metric === 'low' ? HKO_INTRADAY_1DP_MIN_PREFIX : HKO_INTRADAY_1DP_MAX_PREFIX}${targetDate}`;
+    const now = new Date().toISOString();
+    const running1dp = await accumulateRunningExtreme(redis, key1dp, reading, metric, HKO_INTRADAY_MAX_TTL_S);
+    return { observedMax: running1dp ?? reading, observedAt: now, integerRounded: false };
+  }
+
   const accKey =
     `${metric === 'low' ? HKO_INTRADAY_MIN_PREFIX : HKO_INTRADAY_MAX_PREFIX}${targetDate}`;
 
@@ -327,7 +427,7 @@ export async function fetchHkoIntradayExtreme(
     });
   }
 
-  if (res != null && res.ok) {
+  if (res?.ok) {
     let payload: HkoRhrreadPayload;
     try {
       payload = (await res.json()) as HkoRhrreadPayload;
@@ -371,11 +471,13 @@ export async function fetchHkoIntradayExtreme(
   // Accumulate the Redis running extreme (max only up / min only down). Returns the
   // running value from an earlier observation today when the current reading is less
   // extreme (or this call had no reading but an earlier one is stored).
+  // rhrread fallback values are ROUNDED integers → integerRounded: true so certainty
+  // consumers (lock-in, oracle) apply the 0.5° slack.
   const running = await accumulateRunningExtreme(redis, accKey, currentReading, metric, HKO_INTRADAY_MAX_TTL_S);
   if (running != null) {
-    return { observedMax: running, observedAt: observedAt ?? new Date().toISOString() };
+    return { observedMax: running, observedAt: observedAt ?? new Date().toISOString(), integerRounded: true };
   }
-  return { observedMax: currentReading, observedAt };
+  return { observedMax: currentReading, observedAt, integerRounded: true };
 }
 
 /**
@@ -414,35 +516,79 @@ export function fetchHkoIntradayHigh(
  * Returns null when the observation is inconclusive — the running extreme is
  * still in a region the day could resolve either way from.
  */
+export interface OracleClassifyOpts {
+  /** Bracket containment semantics of the resolution source (see
+   *  CityCoordinates.bracketSemantics). 'round' (default): "N°" = [N−0.5, N+0.5).
+   *  'floor': one-decimal resolution, "N°" = [N.0, N.9] — exceeding the bracket
+   *  needs observed ≥ high+1, not > high+0.5. */
+  semantics?: 'round' | 'floor';
+  /** Extra margin (native °) an observation must clear a boundary by before a
+   *  CERTAINTY verdict is issued. Use 0.5 when the feed rounds to whole degrees
+   *  (a displayed 32 only guarantees a true ≥31.5 — the 2026-07-08 HK false
+   *  lock-in). Makes verdicts strictly harder; never flips a direction. */
+  certaintySlack?: number;
+}
+
+/** Derive OracleClassifyOpts from the city's configured bracket semantics and
+ *  whether the observation came from an integer-rounded feed. */
+export function oracleClassifyOptsForCity(
+  city: string,
+  integerRounded?: boolean,
+): OracleClassifyOpts {
+  const coords = lookupCity(city);
+  return {
+    semantics: coords?.bracketSemantics === 'floor' ? 'floor' : 'round',
+    certaintySlack: integerRounded ? 0.5 : 0,
+  };
+}
+
 export function classifyOracleState(
   observed: number,
   direction: 'YES' | 'NO',
   bracket: { low: number | null; high: number | null },
   metric: 'high' | 'low' = 'high',
+  opts?: OracleClassifyOpts,
 ): 'oracle_impossible' | 'oracle_confirmed' | null {
   const { low, high } = bracket;
   const isTail = low === null || high === null;
+  const floor = opts?.semantics === 'floor';
+  const slack = opts?.certaintySlack ?? 0;
+
+  // Boundary predicates under both semantics. `slack` always makes a certainty
+  // verdict HARDER to reach (the observation must clear the boundary by more).
+  //   round: "N°" = [N−0.5, N+0.5)  → exceeded above when obs >  high+0.5; escaped
+  //          below when obs < low−0.5; a tail is reached at its rounding boundary.
+  //   floor: "N°" = [N.0, N.9]      → exceeded above when obs ≥ high+1; escaped
+  //          below when obs < low;   a tail is reached at its integer boundary.
+  const exceedsAbove = (v: number, h: number): boolean =>
+    floor ? v >= h + 1 + slack : v > h + 0.5 + slack;
+  const escapesBelow = (v: number, l: number): boolean =>
+    floor ? v < l - slack : v < l - 0.5 - slack;
+  const reachesHighTail = (v: number, l: number): boolean =>
+    floor ? v >= l + slack : v >= l - 0.5 + slack;
+  const reachesLowTail = (v: number, h: number): boolean =>
+    floor ? v < h + 1 - slack : v < h + 0.5 - slack;
 
   if (metric === 'low') {
     // Daily minimum can only fall further intraday.
     if (!isTail) {
-      // Interior: YES impossible once the running min drops below the bracket floor.
-      if (observed < low! - 0.5) {
+      // Interior: YES impossible once the running min has escaped below the bracket floor.
+      if (escapesBelow(observed, low)) {
         return direction === 'YES' ? 'oracle_impossible' : 'oracle_confirmed';
       }
       return null;
     }
     if (low === null) {
-      // Low-tail "high or below": YES means final min ≤ high (rounds < high+0.5).
+      // Low-tail "high or below": YES means the final min lands at/below the ceiling.
       // Once the running min is already there, it can only go lower → YES confirmed.
-      if (observed < high! + 0.5) {
+      if (reachesLowTail(observed, high!)) {
         return direction === 'YES' ? 'oracle_confirmed' : 'oracle_impossible';
       }
       return null;
     }
-    // High-tail "low or higher": YES means final min ≥ low (rounds ≥ low-0.5).
-    // Once the running min has dropped below low-0.5 it can never recover → YES impossible.
-    if (observed < low - 0.5) {
+    // High-tail "low or higher": YES means the final min stays at/above the floor.
+    // Once the running min has escaped below it, it can never recover → YES impossible.
+    if (escapesBelow(observed, low)) {
       return direction === 'YES' ? 'oracle_impossible' : 'oracle_confirmed';
     }
     return null;
@@ -451,8 +597,8 @@ export function classifyOracleState(
   // metric === 'high': daily maximum can only rise further intraday.
   if (!isTail) {
     // Interior bracket: YES is impossible once the running max has exceeded the
-    // bracket's upper rounding boundary (the day can only get hotter).
-    if (observed > high! + 0.5) {
+    // bracket's upper boundary (the day can only get hotter).
+    if (exceedsAbove(observed, high)) {
       return direction === 'YES' ? 'oracle_impossible' : 'oracle_confirmed';
     }
     // If observed is still within or below the bracket, we can't conclude
@@ -461,17 +607,17 @@ export function classifyOracleState(
   }
 
   if (low === null) {
-    // Low-tail: "high or below" — YES means final max ≤ high; rounds < high + 0.5.
-    // If observed already > high + 0.5, the final max will round ≥ high+1, so YES is impossible.
-    if (observed > high! + 0.5) {
+    // Low-tail: "high or below" — YES means the final max stays at/below the ceiling.
+    // If observed has already exceeded it, YES is impossible.
+    if (exceedsAbove(observed, high!)) {
       return direction === 'YES' ? 'oracle_impossible' : 'oracle_confirmed';
     }
     return null;
   }
 
-  // High-tail: "low or higher" — YES means final max ≥ low; rounds ≥ low - 0.5.
-  // If observed already ≥ low - 0.5, the running max has reached the tail, so YES is confirmed.
-  if (observed >= low - 0.5) {
+  // High-tail: "low or higher" — YES means the final max reaches the tail floor.
+  // If observed is already there, the running max can only rise → YES confirmed.
+  if (reachesHighTail(observed, low)) {
     return direction === 'YES' ? 'oracle_confirmed' : 'oracle_impossible';
   }
   return null;
@@ -528,20 +674,25 @@ export async function fetchLiveObservation(
   let result: WeatherLiveObservation;
 
   if (resolutionSource === 'hko' && opts.hkoEnabled) {
-    const { observedMax, observedAt } = await fetchHkoIntradayExtreme(targetDate, redis, metric, fetchFn);
+    const { observedMax, observedAt, integerRounded } =
+      await fetchHkoIntradayExtreme(targetDate, redis, metric, fetchFn);
     result = {
       city,
       targetDate,
       observedMax,
       metric,
       source: 'hko-live',
-      // HKO rhrread is the official observatory reading — same station as the
-      // final dailyExtract settlement source, so intraday readings are settlement_aligned
-      // when they support an irreversible oracle conclusion (max only up / min only down).
+      // HKO readings come from the official observatory station — same station as
+      // the final dailyExtract settlement source, so intraday readings are
+      // settlement_aligned when they support an irreversible oracle conclusion
+      // (max only up / min only down).
       confidence: observedMax != null ? 'settlement_aligned' : 'none',
-      // Redis-accumulated running extreme over a non-revising current-reading feed.
+      // Redis-accumulated running extreme over a non-revising feed (one-decimal
+      // text-readings page preferred; rhrread integer fallback).
       monotonic: true,
       observedAt,
+      // rhrread fallback rounds to whole degrees — certainty consumers add 0.5° slack.
+      integerRounded,
     };
   } else if (resolutionSource === 'wu' && opts.wuEnabled) {
     const { observedMax, observedAt } = await fetchWuIntradayExtreme(

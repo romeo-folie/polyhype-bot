@@ -27,7 +27,7 @@ vi.mock('../noaaClient.js', () => ({
     const cities: Record<string, object> = {
       chicago: { resolutionSource: 'wu', wuStation: 'KORD', isoCountry: 'US', unit: 'fahrenheit', tz: 'America/Chicago' },
       london: { resolutionSource: 'wu', wuStation: 'EGLC', isoCountry: 'GB', unit: 'celsius', tz: 'Europe/London' },
-      'hong kong': { resolutionSource: 'hko', wuStation: 'HKO', unit: 'celsius', tz: 'Asia/Hong_Kong' },
+      'hong kong': { resolutionSource: 'hko', wuStation: 'HKO', unit: 'celsius', tz: 'Asia/Hong_Kong', bracketSemantics: 'floor' },
       teltest: { resolutionSource: 'metar', wuStation: 'LLBG', isoCountry: 'IL', unit: 'celsius', tz: 'Asia/Jerusalem' },
     };
     return cities[city.toLowerCase()] ?? null;
@@ -39,7 +39,10 @@ const {
   classifyContradiction,
   fetchMetarIntradayHigh,
   fetchHkoIntradayHigh,
+  fetchHkoIntradayExtreme,
   fetchLiveObservation,
+  parseHkoTextExtremes,
+  oracleClassifyOptsForCity,
 } = await import('../liveObservation.js');
 
 // ── Helper ────────────────────────────────────────────────────────────────────
@@ -606,5 +609,140 @@ describe('fetchLiveObservation routing', () => {
       wuEnabled: true, metarEnabled: false, hkoEnabled: false, maxAgeMin: 30,
     });
     expect(obs.observedAt).toBe('2026-06-09T13:50:00.000Z');
+  });
+});
+
+// ── HKO one-decimal source + floor semantics (2026-07-08 false-lock-in fix) ──
+
+const HKO_TEXT_PAGE = `
+                         Temperature   Humidity   Air Temperature   Temperature
+                                                  Since Midnight    Difference
+                                                  (9 Jun 2026)
+                     (degree Celsius) (percent)   (degree Celsius)
+Chek Lap Kok                   30.8       71        32.0 / 26.6       +0.9
+HK Observatory                 30.4       77        31.8 / 25.3       +2.0
+King's Park                    29.6       80        31.2 / 24.6       +1.3
+`;
+
+describe('parseHkoTextExtremes', () => {
+  it('parses the HK Observatory one-decimal since-midnight extremes', () => {
+    expect(parseHkoTextExtremes(HKO_TEXT_PAGE, '2026-06-09')).toEqual({ max: 31.8, min: 25.3 });
+  });
+
+  it('returns null when the page header date does not match targetDate (HKT rollover guard)', () => {
+    expect(parseHkoTextExtremes(HKO_TEXT_PAGE, '2026-06-10')).toBeNull();
+  });
+
+  it('returns null when the HK Observatory row is missing', () => {
+    const page = HKO_TEXT_PAGE.replace(/HK Observatory.*\n/, '');
+    expect(parseHkoTextExtremes(page, '2026-06-09')).toBeNull();
+  });
+
+  it('returns null on implausible values', () => {
+    const page = HKO_TEXT_PAGE.replace('31.8 / 25.3', '99.9 / 25.3');
+    expect(parseHkoTextExtremes(page, '2026-06-09')).toBeNull();
+  });
+});
+
+describe('fetchHkoIntradayExtreme — one-decimal path', () => {
+  const TARGET_DATE = '2026-06-09';
+  const RHRREAD = {
+    temperature: {
+      recordTime: '2026-06-09T14:00:00+08:00',
+      data: [{ place: 'Hong Kong Observatory', value: 32, unit: 'C' }],
+    },
+  };
+
+  /** Routes the text-readings URL to the fixture page, everything else to rhrread JSON. */
+  function makeRoutingFetch(pageBody: string | null) {
+    return vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('text_readings')) {
+        if (pageBody == null) return Promise.resolve({ ok: false, status: 503 } as Response);
+        return Promise.resolve({
+          ok: true, status: 200, text: () => Promise.resolve(pageBody),
+        } as unknown as Response);
+      }
+      return Promise.resolve({
+        ok: true, status: 200, json: () => Promise.resolve(RHRREAD),
+      } as unknown as Response);
+    });
+  }
+
+  it('prefers the one-decimal page: returns 31.8 with integerRounded=false (NOT the rounded 32)', async () => {
+    const redis = makeRedis();
+    const result = await fetchHkoIntradayExtreme(TARGET_DATE, redis as any, 'high', makeRoutingFetch(HKO_TEXT_PAGE));
+    expect(result.observedMax).toBe(31.8);
+    expect(result.integerRounded).toBe(false);
+  });
+
+  it('accumulates one-decimal values in a DEDICATED key so legacy rounded integers cannot mask them', async () => {
+    // Legacy key already poisoned with a rounded 32 for a true 31.8.
+    const store = new Map([['weather:hko_intraday_max:2026-06-09', '32']]);
+    const redis = makeRedis(store);
+    const result = await fetchHkoIntradayExtreme(TARGET_DATE, redis as any, 'high', makeRoutingFetch(HKO_TEXT_PAGE));
+    expect(result.observedMax).toBe(31.8); // one-decimal wins; 32 in the legacy key is ignored
+    expect(store.get('weather:hko_intraday_1dp_max:2026-06-09')).toBe('31.8');
+  });
+
+  it('metric=low uses the since-midnight minimum', async () => {
+    const redis = makeRedis();
+    const result = await fetchHkoIntradayExtreme(TARGET_DATE, redis as any, 'low', makeRoutingFetch(HKO_TEXT_PAGE));
+    expect(result.observedMax).toBe(25.3);
+    expect(result.integerRounded).toBe(false);
+  });
+
+  it('falls back to rhrread (integerRounded=true) when the text page is unavailable', async () => {
+    const redis = makeRedis();
+    const result = await fetchHkoIntradayExtreme(TARGET_DATE, redis as any, 'high', makeRoutingFetch(null));
+    expect(result.observedMax).toBe(32);
+    expect(result.integerRounded).toBe(true);
+  });
+});
+
+describe('classifyOracleState — floor semantics + certainty slack', () => {
+  const bracket31 = { low: 31, high: 31 };
+
+  it('REGRESSION (the HK false lock-in): 31.8 on a floor "31°C" bracket is NOT a verdict', () => {
+    // Round semantics (the old default) wrongly calls 31.8 > 31.5 an exceedance…
+    expect(classifyOracleState(31.8, 'NO', bracket31, 'high')).toBe('oracle_confirmed');
+    // …floor semantics knows the bracket spans [31.0, 31.9]: no verdict until 32.0.
+    expect(classifyOracleState(31.8, 'NO', bracket31, 'high', { semantics: 'floor' })).toBeNull();
+    expect(classifyOracleState(32.0, 'NO', bracket31, 'high', { semantics: 'floor' })).toBe('oracle_confirmed');
+    expect(classifyOracleState(32.0, 'YES', bracket31, 'high', { semantics: 'floor' })).toBe('oracle_impossible');
+  });
+
+  it('certaintySlack makes an integer-rounded 32 inconclusive under floor semantics', () => {
+    const opts = { semantics: 'floor' as const, certaintySlack: 0.5 };
+    expect(classifyOracleState(32, 'NO', bracket31, 'high', opts)).toBeNull();     // displayed 32 = true ≥31.5 only
+    expect(classifyOracleState(32.5, 'NO', bracket31, 'high', opts)).toBe('oracle_confirmed');
+  });
+
+  it('floor high-tail: "32°C or higher" confirms YES at exactly 32.0, not 31.5', () => {
+    const tail = { low: 32, high: null };
+    expect(classifyOracleState(31.6, 'YES', tail, 'high', { semantics: 'floor' })).toBeNull();
+    expect(classifyOracleState(31.6, 'YES', tail, 'high')).toBe('oracle_confirmed'); // round: 31.6 ≥ 31.5
+    expect(classifyOracleState(32.0, 'YES', tail, 'high', { semantics: 'floor' })).toBe('oracle_confirmed');
+  });
+
+  it('floor low-metric interior: running min escapes below the bracket at low, not low−0.5', () => {
+    const bracket25 = { low: 25, high: 25 };
+    expect(classifyOracleState(24.9, 'YES', bracket25, 'low', { semantics: 'floor' })).toBe('oracle_impossible');
+    expect(classifyOracleState(24.9, 'YES', bracket25, 'low')).toBeNull(); // round needs < 24.5
+  });
+
+  it('defaults (no opts) preserve the original round behavior exactly', () => {
+    expect(classifyOracleState(31.6, 'YES', bracket31, 'high')).toBe('oracle_impossible');
+    expect(classifyOracleState(31.4, 'YES', bracket31, 'high')).toBeNull();
+  });
+});
+
+describe('oracleClassifyOptsForCity', () => {
+  it('derives floor semantics for Hong Kong and round for others', () => {
+    expect(oracleClassifyOptsForCity('hong kong')).toEqual({ semantics: 'floor', certaintySlack: 0 });
+    expect(oracleClassifyOptsForCity('chicago')).toEqual({ semantics: 'round', certaintySlack: 0 });
+  });
+
+  it('adds 0.5° certainty slack for integer-rounded observations', () => {
+    expect(oracleClassifyOptsForCity('hong kong', true)).toEqual({ semantics: 'floor', certaintySlack: 0.5 });
   });
 });

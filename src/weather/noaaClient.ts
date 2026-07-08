@@ -42,6 +42,15 @@ export interface CityCoordinates {
   wuStation: string;
   /** Which ground-truth fetcher to use for this city's resolution source. */
   resolutionSource: 'wu' | 'metar' | 'hko';
+  /** Bracket containment semantics of the resolution source. Absent (default) =
+   *  'round': integer resolution, bracket "N°" spans [N−0.5, N+0.5). 'floor':
+   *  ONE-DECIMAL resolution where the containing bracket is the integer floor —
+   *  "N°" = [N.0, N.9]. Verified for Hong Kong 2026-07-08: HKO "Absolute Daily
+   *  Max" resolves to one decimal and the official 31.6 on 07-06 resolved the
+   *  "31°C" bracket YES. Certainty logic (lock-in, classifyOracleState) must
+   *  require observed ≥ high+1 (not > high+0.5) to call a floor bracket exceeded —
+   *  the 2026-07-08 false lock-in (pos 5628) fired through this half-degree gap. */
+  bracketSemantics?: 'floor';
   /** ISO 3166-1 alpha-2 country code — required for WU cities (constructs ICAO:9:ISO2 location key). */
   isoCountry?: string;
   /** IANA timezone identifier — used to determine the city's local calendar date. */
@@ -95,7 +104,7 @@ export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   // the 30 days the code assumed). WU has 35+ days of LLBG history.
   'tel aviv':      { lat: 31.9965, lon: 34.8906,    noaaCoverage: false, unit: 'celsius', wuStation: 'LLBG', resolutionSource: 'wu', isoCountry: 'IL', tz: 'Asia/Jerusalem'            },
   // Resolves via Hong Kong Observatory. HKO reports to 1 dp; bracket labels are integer °C.
-  'hong kong':     { lat: 22.3020, lon: 114.1740,   noaaCoverage: false, unit: 'celsius', wuStation: 'HKO',  resolutionSource: 'hko',                    tz: 'Asia/Hong_Kong'          },
+  'hong kong':     { lat: 22.3020, lon: 114.1740,   noaaCoverage: false, unit: 'celsius', wuStation: 'HKO',  resolutionSource: 'hko', bracketSemantics: 'floor', tz: 'Asia/Hong_Kong'          },
   // Malpensa (LIMC), not Linate (LIML) — Polymarket resolves against LIMC
   milan:           { lat: 45.6306, lon: 8.7281,     noaaCoverage: false, unit: 'celsius', wuStation: 'LIMC', resolutionSource: 'wu', isoCountry: 'IT', tz: 'Europe/Rome'               },
   madrid:          { lat: 40.4719, lon: -3.5626,    noaaCoverage: false, unit: 'celsius', wuStation: 'LEMD', resolutionSource: 'wu', isoCountry: 'ES', tz: 'Europe/Madrid'             },

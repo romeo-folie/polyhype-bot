@@ -1403,10 +1403,48 @@ describe('executeWeatherLockIns', () => {
     WEATHER_LOCKIN_ENABLED: true, WEATHER_TAKER_ENTRY_ENABLED: true,
     WEATHER_LOCKIN_MARGIN: 1.0, WEATHER_LOCKIN_STAKE_USD: 10, WEATHER_LOCKIN_MODEL_WIN: 0.97, ...over,
   });
-  const obs = (observedMax: number, confidence = 'settlement_aligned', source = 'hko-live', monotonic = true) => (async () => ({
+  const obs = (observedMax: number, confidence = 'settlement_aligned', source = 'hko-live', monotonic = true, integerRounded?: boolean) => (async () => ({
     city: 'taipei', targetDate: '2026-06-26', observedMax, metric: 'high', source,
     observedAt: '2026-06-26T07:00:00Z', confidence, monotonic,
+    ...(integerRounded !== undefined ? { integerRounded } : {}),
   })) as never;
+
+  it('REGRESSION (pos 5628): an integer-ROUNDED reading at exactly bracketHigh+margin does NOT fire', async () => {
+    // Displayed 29 on the 28°C bracket = the HK incident shape (displayed 32 on 31°C):
+    // a rounded 29 only guarantees a true ≥28.5, so the +0.5 slack widens the
+    // effective margin to 1.5 and 29 < 29.5 must not lock in.
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+    await executeWeatherLockIns({} as never, [baseOpp], undefined, {
+      fetchObs: obs(29, 'settlement_aligned', 'hko-live', true, true), execute: execute as never,
+    });
+    expect(execute).not.toHaveBeenCalled();
+    // The shadow row must record the EFFECTIVE margin (1.5), not the base config value —
+    // otherwise margin-sensitivity backtests on shadow data silently use the wrong gate.
+    const lockinWrite = mockEnqueueWrite.mock.calls
+      .map((c) => c[1] as { kind?: string; payload?: { marginC?: number; outcome?: string } })
+      .find((w) => w.kind === 'weather_lockin');
+    expect(lockinWrite?.payload?.marginC).toBe(1.5);
+    expect(lockinWrite?.payload?.outcome).toBe('not_locked_in');
+  });
+
+  it('a rounded reading that clears the widened margin still fires (30 ≥ 28+1.5)', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+    await executeWeatherLockIns({} as never, [baseOpp], undefined, {
+      fetchObs: obs(30, 'settlement_aligned', 'hko-live', true, true), execute: execute as never,
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('a ONE-DECIMAL (integerRounded=false) reading fires at the base margin unchanged', async () => {
+    mockLoadConfig.mockReturnValue(lockCfg());
+    const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+    await executeWeatherLockIns({} as never, [baseOpp], undefined, {
+      fetchObs: obs(29, 'settlement_aligned', 'hko-live', true, false), execute: execute as never,
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
 
   it('takes NO when the observed max has already exceeded the bracket', async () => {
     mockLoadConfig.mockReturnValue(lockCfg());
