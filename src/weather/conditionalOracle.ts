@@ -23,6 +23,7 @@
 import { createRequire } from 'module';
 import { logger } from '../shared/logger.js';
 import { classifyOracleState } from './liveObservation.js';
+import type { OracleClassifyOpts } from './liveObservation.js';
 
 // JSON asset loader — ESM-compatible via createRequire.
 const _require = createRequire(import.meta.url);
@@ -50,6 +51,11 @@ export interface ConditionalOracleInput {
   /** Which daily extreme the market resolves on. Defaults to 'high'. Drives the
    *  oracle direction (max increases vs min decreases) and the climo table type. */
   metric?: 'high' | 'low';
+  /** Bracket semantics + integer-rounding slack for the DEGENERATE (binary-certainty)
+   *  shortcut — see classifyOracleState. Without it a rounded HKO 32 (true 31.5–32.4)
+   *  degenerates to heldProb 1 on a floor-semantics "31°C" bracket (the 2026-07-08
+   *  false nowcast/lock-in). Callers should pass oracleClassifyOptsForCity(...). */
+  classifyOpts?: OracleClassifyOpts;
   /** ISO8601 UTC timestamp of the latest observation included in observedMax. */
   observedAt: string;
   /** IANA timezone for the city (to derive local hour from observedAt). */
@@ -456,7 +462,7 @@ export function conditionalHeldProbability(
   const metric = input.metric ?? 'high';
 
   // Degenerate case: binary oracle boundary already crossed → agree with classifyOracleState.
-  const binaryState = classifyOracleState(observedMax, direction, bracket, metric);
+  const binaryState = classifyOracleState(observedMax, direction, bracket, metric, input.classifyOpts);
   if (binaryState === 'oracle_impossible' || binaryState === 'oracle_confirmed') {
     const obsAgeMinDegen = (Date.now() - new Date(observedAt).getTime()) / 60_000;
     return {

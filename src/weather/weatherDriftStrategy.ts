@@ -54,6 +54,7 @@ import {
   fetchLiveObservation,
   classifyOracleState,
   classifyContradiction,
+  oracleClassifyOptsForCity,
 } from './liveObservation.js';
 import type { ContradictionClass } from './liveObservation.js';
 import {
@@ -715,11 +716,14 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
         });
 
         if (liveObs?.observedMax != null) {
+          // City semantics (floor vs round) + 0.5° slack for integer-rounded feeds —
+          // without these a rounded HKO 32 (true 31.8) false-confirms a "31°C" NO.
           oracleState = classifyOracleState(
             liveObs.observedMax,
             pos.direction,
             { low: bracket.low, high: bracket.high },
             metric,
+            oracleClassifyOptsForCity(city, liveObs.integerRounded),
           );
 
           // Shadow-log the live observation for every position with a viable source.
@@ -853,6 +857,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
             bracket: { low: bracket.low, high: bracket.high },
             observedMax: liveObs.observedMax,
             metric,
+            classifyOpts: oracleClassifyOptsForCity(city, liveObs.integerRounded),
             observedAt: liveObs.observedAt,
             tz: event.coords.tz,
             remainingHourlyMembers,
@@ -1715,6 +1720,7 @@ export async function runWeatherNowcastScan(
         bracket: { low: bracket.low, high: bracket.high },
         observedMax: liveObs.observedMax,
         metric: opp.metric,
+        classifyOpts: oracleClassifyOptsForCity(opp.city, liveObs.integerRounded),
         observedAt: liveObs.observedAt,
         tz: cityCoords.tz,
         remainingHourlyMembers: remainingMembers,

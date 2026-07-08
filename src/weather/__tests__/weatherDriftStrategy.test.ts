@@ -153,6 +153,9 @@ vi.mock('../liveObservation.js', () => ({
   fetchLiveObservation: mockFetchLiveObservation,
   classifyOracleState: mockClassifyOracleState,
   classifyContradiction: mockClassifyContradiction,
+  // Pure per-city lookup whose result feeds the (mocked) classifiers — a stable
+  // stub keeps these tests hermetic and independent of city config.
+  oracleClassifyOptsForCity: vi.fn().mockReturnValue({ semantics: 'round', certaintySlack: 0 }),
 }));
 
 const mockClassifyFlipCandidate = vi.fn().mockReturnValue(null);

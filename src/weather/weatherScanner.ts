@@ -2680,6 +2680,12 @@ export async function scanWeatherMarkets(
           // res-day live-confirmation), so a revisable WU max (monotonic=false) must
           // NOT confirm them — that's the Seoul failure via the normal entry path.
           (!cfg.WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY || liveObs.monotonic);
+        // Integer-rounded feeds (HKO rhrread fallback) only pin the true value to
+        // ±0.5° — a displayed 32 can be a true 31.5. Widen the confirmation margin so
+        // a rounded reading cannot confirm an irreversible entry it hasn't earned
+        // (the 2026-07-08 false lock-in fired exactly through this gap).
+        const confirmMargin =
+          cfg.WEATHER_LOCKIN_MARGIN + (liveObs?.integerRounded ? 0.5 : 0);
         const liveConfirmed =
           settlementAligned &&
           parsed != null &&
@@ -2688,18 +2694,18 @@ export async function scanWeatherMarkets(
                 // NO is locked once the running high has exceeded the bracket's
                 // upper boundary; the daily high cannot fall back into the bracket.
                 (o.tradeSide === 'NO' && parsed.high != null &&
-                  isWeatherHighLockedIn(observedMax, parsed.high, cfg.WEATHER_LOCKIN_MARGIN)) ||
+                  isWeatherHighLockedIn(observedMax, parsed.high, confirmMargin)) ||
                 // High-tail YES is locked once the running high has cleared the
                 // lower threshold. Bounded YES still cannot be confirmed intraday.
                 (o.tradeSide === 'YES' && parsed.high == null && parsed.low != null &&
-                  observedMax >= parsed.low + cfg.WEATHER_LOCKIN_MARGIN)
+                  observedMax >= parsed.low + confirmMargin)
               )
             : isWeatherLowLockedIn(
                 observedMax,
                 parsed.low,
                 parsed.high,
                 o.tradeSide,
-                cfg.WEATHER_LOCKIN_MARGIN,
+                confirmMargin,
               ));
         o.liveObservationConfirmed = liveConfirmed;
         o.liveObservedMax = observedMax;
@@ -3426,9 +3432,15 @@ export async function executeWeatherLockIns(
       }).catch((): null => null);
       // Classify the candidate in live-gate order. `lockedIn` is computed for every
       // outcome (not just 'fired') so source-blocked cohorts stay queryable.
+      // Integer-rounded feeds (HKO rhrread fallback) get 0.5° extra margin: a displayed
+      // 32 only pins the true value to ≥31.5, and HK's floor-semantics "31°C" bracket
+      // needs a true ≥32.0 — the 2026-07-08 false lock-in (pos 5628) fired through
+      // exactly this gap on a rounded 31.8.
+      const lockinMargin =
+        cfg.WEATHER_LOCKIN_MARGIN + (liveObs?.integerRounded ? 0.5 : 0);
       const lockedIn =
         liveObs?.observedMax != null
-        && isWeatherHighLockedIn(liveObs.observedMax, bracket.high, cfg.WEATHER_LOCKIN_MARGIN);
+        && isWeatherHighLockedIn(liveObs.observedMax, bracket.high, lockinMargin);
       // Require SETTLEMENT-ALIGNED obs (same source as the final reconciler). A 'proxy'
       // station exceeding the bracket does NOT prove the resolution source did — acting on
       // it risks the station-divergence trap on an irreversible bet. (Backtest: all 23
@@ -3465,7 +3477,7 @@ export async function executeWeatherLockIns(
       }
       if (outcome !== 'fired') {
         emitWeatherLockinShadow(opp, {
-          bracketHigh: bracket.high, marginC: cfg.WEATHER_LOCKIN_MARGIN,
+          bracketHigh: bracket.high, marginC: lockinMargin,
           liveObs, lockedIn, outcome, live,
         });
         continue;
@@ -3473,7 +3485,7 @@ export async function executeWeatherLockIns(
       if (!live) {
         // Shadow-only run: record the would-fire, never touch the executor.
         emitWeatherLockinShadow(opp, {
-          bracketHigh: bracket.high, marginC: cfg.WEATHER_LOCKIN_MARGIN,
+          bracketHigh: bracket.high, marginC: lockinMargin,
           liveObs, lockedIn, outcome, live,
         });
         continue;
@@ -3488,7 +3500,8 @@ export async function executeWeatherLockIns(
       signal._forceTakerEntry = true;
       logger.info('[weather-lockin] observed max exceeded bracket — taking NO', {
         city: opp.city, targetDate: opp.targetDate, bracket: opp.bracketLabel,
-        observedMax: liveObs?.observedMax, bracketHigh: bracket.high, margin: cfg.WEATHER_LOCKIN_MARGIN,
+        observedMax: liveObs?.observedMax, bracketHigh: bracket.high, margin: lockinMargin,
+        integerRounded: liveObs?.integerRounded ?? false,
         source: liveObs?.source, outcomePrice: opp.outcomePrice, stakeUsd: cfg.WEATHER_LOCKIN_STAKE_USD,
       });
       const result = await execute(signal, redis);
@@ -3498,7 +3511,7 @@ export async function executeWeatherLockIns(
         });
       }
       emitWeatherLockinShadow(opp, {
-        bracketHigh: bracket.high, marginC: cfg.WEATHER_LOCKIN_MARGIN,
+        bracketHigh: bracket.high, marginC: lockinMargin,
         liveObs, lockedIn, outcome, live,
         executorSkipped: result?.skipped ?? false,
         executorSkipReason: result?.skipped ? (result.skipReason ?? 'unknown') : null,
