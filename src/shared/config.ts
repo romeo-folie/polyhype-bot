@@ -1974,6 +1974,23 @@ export const envSchema = z.object({
   // excludes day-ahead for every city. Size-ups bypass it (a res-day top-up is inherently
   // on resolution day). Ships dark.
   WEATHER_RES_DAY_ENTRY_ONLY: boolFromEnv.optional().default(false),
+  // Distance-conditional entry-TIMING gate (2026-07-07 backtest, scripts/
+  // horizon-by-distance.ts, picks since 06-14 scored vs ground truth):
+  //   NO <1σ from forecast (contested): res-day +6.6%/$1 vs day-ahead +3.7% → wait for res-day
+  //   NO 1–2σ (sweet spot):             day-ahead +5.1% vs res-day +3.9%   → take day-ahead
+  //   NO ≥2σ ("obvious"):               NEGATIVE both windows (−2%/−8%; px 0.83, WR ~80% vs
+  //                                     83% breakeven — the model's tail confidence loses to
+  //                                     the market's) → never take
+  //   YES:                              day-ahead +1.9% vs res-day −15.2% (winner reprices
+  //                                     0.34→0.45 by res-day) → day-ahead only
+  // Decisions are ALWAYS computed and shadow-logged (timingGateDecision/timingDistSigma on
+  // every bracket row) so the bands keep accruing validation; enforcement is gated on this
+  // flag. Size-ups bypass (top-ups are position management, not entry timing). Ships dark.
+  WEATHER_TIMING_GATE_ENABLED: boolFromEnv.optional().default(false),
+  // Band boundaries in effectiveStdDev units (distance = forecast → nearest bracket
+  // boundary, half-degree-widened; 0 when the forecast rounds into the bracket).
+  WEATHER_TIMING_GATE_CONTESTED_SIGMA: z.coerce.number().min(0.1).max(5).optional().default(1.0),
+  WEATHER_TIMING_GATE_FAR_SIGMA: z.coerce.number().min(0.5).max(10).optional().default(2.0),
   // Fail OPEN on a null shadow ensemble for resolution-day fresh entries. By default the
   // early-entry ensemble veto fails CLOSED when shadowEdge is null (no corroboration →
   // block), but the shadow's Open-Meteo ensemble endpoint suffers sustained daily outages,

@@ -921,6 +921,17 @@ export interface WeatherBracketOpportunity {
    *  shadow stream reflect the active config; the tradable filter drops these. Event-level
    *  (same for every bracket in the event). */
   blockedByResDayOnly?: boolean;
+  /** Distance from the (bias-corrected) forecast to this bracket's nearest half-degree-
+   *  widened boundary, in effectiveStdDev units. 0 when the forecast rounds into the
+   *  bracket. Null when σ is unusable or the label is unparseable. Shadow-logged always. */
+  timingDistSigma?: number | null;
+  /** The distance-conditional entry-timing verdict for this (side, band, window) —
+   *  computed and shadow-logged on EVERY bracket regardless of enforcement so the
+   *  timing bands keep accruing validation data. */
+  timingGateDecision?: WeatherTimingGateDecision | null;
+  /** True when WEATHER_TIMING_GATE_ENABLED is on and timingGateDecision !== 'allow'
+   *  (size-ups bypass). Folded into wouldTrade and dropped by the tradable filter. */
+  blockedByTimingGate?: boolean;
   /** True when this NO bet is on a bracket the MARKET itself prices ≥ the favorite
    *  threshold (yesPrice ≥ WEATHER_MARKET_FAVORITE_NO_MAX_YESPRICE) — we don't fade a
    *  confident book. Excluded from execution. */
@@ -1136,6 +1147,9 @@ function emitWeatherSignalDecision(opp: WeatherBracketOpportunity, hasTrade: boo
       blockedByHighNoEdge: opp.blockedByHighNoEdge ?? false,
       blockedByCalibrationCohort: opp.blockedByCalibrationCohort ?? false,
       blockedByResDayOnly: opp.blockedByResDayOnly ?? false,
+      blockedByTimingGate: opp.blockedByTimingGate ?? false,
+      timingDistSigma: opp.timingDistSigma != null ? +opp.timingDistSigma.toFixed(3) : null,
+      timingGateDecision: opp.timingGateDecision ?? null,
       blockedByNoFallback: opp.blockedByNoFallback ?? false,
       blockedByInteriorMargin: opp.blockedByInteriorMargin ?? false,
       blockedByMarketFavorite: opp.blockedByMarketFavorite ?? false,
@@ -1289,6 +1303,60 @@ export function isWeatherHighLockedIn(
 ): boolean {
   if (observedMax == null || bracketHigh == null || !Number.isFinite(observedMax)) return false;
   return observedMax >= bracketHigh + marginC;
+}
+
+// ── Distance-conditional entry-timing gate (pure helpers) ────────────────────
+//
+// Backtest (scripts/horizon-by-distance.ts, picks since 2026-06-14 scored vs
+// weather_ground_truth): entry timing should depend on how far the bracket sits
+// from the forecast. Contested NOs (<1σ) do better on res-day (+6.6% vs +3.7%/$1
+// — the nowcast resolves the coin-flip); mid-band NOs (1–2σ) do better day-ahead
+// (+5.1% vs +3.9%); far "obvious" NOs (≥2σ) are NEGATIVE in BOTH windows (avg px
+// 0.83 needs 83% WR, realized ~80% — the market prices tails better than the
+// model); YES only has value day-ahead (+1.9% vs −15.2% — the eventual winner
+// reprices 0.34→0.45 by res-day).
+
+export type WeatherTimingGateDecision =
+  | 'allow'
+  | 'block_contested_no_day_ahead' // NO <1σ off-day: wait for the res-day nowcast
+  | 'block_mid_no_res_day'         // NO 1–2σ on res-day: the day-ahead price was the edge
+  | 'block_far_no'                 // NO ≥2σ: negative both windows — never take
+  | 'block_yes_res_day';           // YES on res-day: winner already repriced
+
+/**
+ * Distance from the forecast to the bracket's nearest boundary in σ units, using
+ * the same half-degree-widened bounds as estimateBracketProbability (a whole-degree
+ * bracket "N" spans [N−0.5, N+0.5)). Returns 0 when the forecast lands inside the
+ * widened bracket, null when σ is unusable.
+ */
+export function bracketDistanceSigma(
+  forecast: number,
+  stdDev: number,
+  low: number | null,
+  high: number | null,
+): number | null {
+  if (!Number.isFinite(forecast) || !Number.isFinite(stdDev) || stdDev <= 0) return null;
+  if (low == null && high == null) return null;
+  const inside = (low == null || forecast >= low - 0.5) && (high == null || forecast <= high + 0.5);
+  if (inside) return 0;
+  const dLow = low != null ? Math.abs(forecast - (low - 0.5)) : Infinity;
+  const dHigh = high != null ? Math.abs(forecast - (high + 0.5)) : Infinity;
+  return Math.min(dLow, dHigh) / stdDev;
+}
+
+/** The timing-gate verdict for one (side, distance-band, entry-window) combination. */
+export function weatherTimingGateDecision(opts: {
+  side: 'YES' | 'NO';
+  distSigma: number;
+  isResolutionDay: boolean;
+  contestedSigma: number;
+  farSigma: number;
+}): WeatherTimingGateDecision {
+  const { side, distSigma, isResolutionDay, contestedSigma, farSigma } = opts;
+  if (side === 'YES') return isResolutionDay ? 'block_yes_res_day' : 'allow';
+  if (distSigma >= farSigma) return 'block_far_no';
+  if (distSigma < contestedSigma) return isResolutionDay ? 'allow' : 'block_contested_no_day_ahead';
+  return isResolutionDay ? 'block_mid_no_res_day' : 'allow';
 }
 
 /**
@@ -2178,7 +2246,8 @@ function computeWeatherWouldTrade(opp: WeatherBracketOpportunity, featureLive: b
     && !opp.blockedByExactOpenMeteoNo
     && !opp.blockedByResDayOnly
     && !opp.blockedByFamilyBlock
-    && !opp.blockedByHighNoEdge;
+    && !opp.blockedByHighNoEdge
+    && !opp.blockedByTimingGate;
 }
 
 /**
@@ -2808,6 +2877,29 @@ export async function scanWeatherMarkets(
       opp.blockedByFamilyBlock =
         blockedFamilies.size > 0 && opp.strategyFamily != null && blockedFamilies.has(opp.strategyFamily);
       opp.blockedByHighNoEdge = opp.tradeSide === 'NO' && opp.edge > noMaxEdge;
+      // Distance-conditional entry-timing gate. Decision ALWAYS computed and
+      // shadow-logged (band validation keeps accruing); enforcement only when
+      // WEATHER_TIMING_GATE_ENABLED. Size-ups bypass — a top-up is position
+      // management, not entry timing.
+      const timingBracket = parseBracketLabel(opp.bracketLabel);
+      opp.timingDistSigma = timingBracket
+        ? bracketDistanceSigma(
+            opp.correctedForecastHigh, opp.effectiveStdDev, timingBracket.low, timingBracket.high)
+        : null;
+      opp.timingGateDecision = opp.timingDistSigma == null
+        ? null
+        : weatherTimingGateDecision({
+            side: opp.tradeSide,
+            distSigma: opp.timingDistSigma,
+            isResolutionDay,
+            contestedSigma: cfg.WEATHER_TIMING_GATE_CONTESTED_SIGMA,
+            farSigma: cfg.WEATHER_TIMING_GATE_FAR_SIGMA,
+          });
+      opp.blockedByTimingGate =
+        cfg.WEATHER_TIMING_GATE_ENABLED
+        && !opp.sizeUpScanOnly
+        && opp.timingGateDecision != null
+        && opp.timingGateDecision !== 'allow';
     }
 
     // Log each opportunity individually for shadow analysis.
@@ -2857,6 +2949,9 @@ export async function scanWeatherMarkets(
         blockedByModalMass: opp.blockedByModalMass ?? false,
         ensembleYesMass: opp.ensembleYesMass ?? null,
         blockedByResDayOnly: opp.blockedByResDayOnly ?? false,
+        blockedByTimingGate: opp.blockedByTimingGate ?? false,
+        timingDistSigma: opp.timingDistSigma != null ? +opp.timingDistSigma.toFixed(3) : null,
+        timingGateDecision: opp.timingGateDecision ?? null,
         previousOutcomePrice: opp.previousOutcomePrice ?? null,
         previousWinProbability: opp.previousWinProbability ?? null,
         isFarNoLadder: opp.isFarNoLadder ?? false,
@@ -2946,6 +3041,9 @@ export async function scanWeatherMarkets(
           blockedByModalMass: opp.blockedByModalMass ?? false,
           ensembleYesMass: opp.ensembleYesMass ?? null,
           blockedByResDayOnly: opp.blockedByResDayOnly ?? false,
+          blockedByTimingGate: opp.blockedByTimingGate ?? false,
+          timingDistSigma: opp.timingDistSigma != null ? +opp.timingDistSigma.toFixed(3) : null,
+          timingGateDecision: opp.timingGateDecision ?? null,
           sourceStddevMultiplier: opp.sourceStddevMultiplier ?? 1.0,
           isFarNoLadder: opp.isFarNoLadder ?? false,
           isAdjacentNoLadder: opp.isAdjacentNoLadder ?? false,
@@ -3024,6 +3122,9 @@ export async function scanWeatherMarkets(
             blockedByFamilyBlock: opp.blockedByFamilyBlock ?? false,
             blockedByHighNoEdge: opp.blockedByHighNoEdge ?? false,
             blockedByResDayOnly: opp.blockedByResDayOnly ?? false,
+            blockedByTimingGate: opp.blockedByTimingGate ?? false,
+            timingDistSigma: opp.timingDistSigma != null ? +opp.timingDistSigma.toFixed(3) : null,
+            timingGateDecision: opp.timingGateDecision ?? null,
             wouldTrade,
             daysOut: opp.daysOut,
             forecastSource: opp.forecastSource,
@@ -4152,6 +4253,38 @@ export async function runWeatherScan(redis: Redis, fetchFn?: FetchFn): Promise<v
     }
     if (tradable.length === 0) {
       logger.info('[weather] no tradable opportunities after res-day-only gate', {});
+      return;
+    }
+  }
+
+  // Distance-conditional entry-timing gate: drop opportunities whose (side, forecast-
+  // distance band, entry window) combination is a backtested loser (blockedByTimingGate,
+  // computed at shadow-emission time so the shadow stream already reflects it). Decisions
+  // are logged on every bracket regardless; this block only runs under enforcement.
+  if (cfg.WEATHER_TIMING_GATE_ENABLED) {
+    const before = tradable.length;
+    tradable = tradable.filter((opp) => {
+      if (!opp.blockedByTimingGate) return true;
+      logger.info('[weather] skipping — entry-timing gate', {
+        marketId: opp.marketId,
+        city: opp.city,
+        bracket: opp.bracketLabel,
+        tradeSide: opp.tradeSide,
+        decision: opp.timingGateDecision,
+        distSigma: opp.timingDistSigma != null ? +opp.timingDistSigma.toFixed(2) : null,
+        isResolutionDay: opp.isResolutionDay ?? false,
+      });
+      return false;
+    });
+    if (tradable.length < before) {
+      logger.info('[weather] entry-timing gate filtered opportunities', {
+        before,
+        after: tradable.length,
+        blocked: before - tradable.length,
+      });
+    }
+    if (tradable.length === 0) {
+      logger.info('[weather] no tradable opportunities after entry-timing gate', {});
       return;
     }
   }
