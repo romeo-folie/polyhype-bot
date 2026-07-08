@@ -1316,6 +1316,72 @@ export function isWeatherHighLockedIn(
 // model); YES only has value day-ahead (+1.9% vs −15.2% — the eventual winner
 // reprices 0.34→0.45 by res-day).
 
+// ── Resolution-semantics drift guard (pure classifier + audit) ───────────────
+//
+// 2026-07-08 census of all 51 live market descriptions: every market resolves by
+// CONTAINMENT ("the temperature range that contains ..."); the only per-city
+// variable is the SOURCE and its PRECISION (47 × Wunderground whole-degree,
+// 3 × NOAA timeseries whole-degree, 1 × HKO one-decimal). Our config encodes that
+// census (resolutionSource + bracketSemantics); this guard detects when a live
+// description stops matching it — before a mismatch produces another pos-5628.
+
+export interface ResolutionDescriptionClass {
+  /** Which source family the description names, or null when unrecognised. */
+  source: 'wu' | 'metar' | 'hko' | null;
+  /** True when the description declares one-decimal precision (→ floor semantics). */
+  oneDecimal: boolean;
+}
+
+/** Classify a market description's resolution source + precision. Pure. */
+export function classifyResolutionDescription(description: string): ResolutionDescriptionClass {
+  const source =
+    /weather\.gov\.hk|hong kong observatory/i.test(description) ? 'hko'
+    : /weather\.gov\/wrh\/timeseries/i.test(description) ? 'metar'
+    : /wunderground\.com/i.test(description) ? 'wu'
+    : null;
+  return { source, oneDecimal: /one decimal/i.test(description) };
+}
+
+const SEMANTICS_DRIFT_ALERT_PREFIX = 'weather:semantics_drift:';
+const SEMANTICS_DRIFT_ALERT_TTL_S = 24 * 3600;
+
+/**
+ * Compare a city's live market description against its configured resolution
+ * source/semantics; warn + Telegram-alert (deduped 24h per city) on drift.
+ * Best-effort — never throws into the scan.
+ */
+export async function auditResolutionSemantics(
+  redis: Redis,
+  city: string,
+  coords: CityCoordinates,
+  description: string,
+): Promise<void> {
+  const cls = classifyResolutionDescription(description);
+  const expectedOneDecimal = coords.bracketSemantics === 'floor';
+  const sourceDrift = cls.source != null && cls.source !== coords.resolutionSource;
+  const precisionDrift = cls.oneDecimal !== expectedOneDecimal;
+  if (!sourceDrift && !precisionDrift) return;
+
+  logger.warn('[weather] resolution semantics drift — description disagrees with config', {
+    city,
+    descriptionSource: cls.source,
+    configSource: coords.resolutionSource,
+    descriptionOneDecimal: cls.oneDecimal,
+    configOneDecimal: expectedOneDecimal,
+  });
+  const claimed = await redis
+    .set(`${SEMANTICS_DRIFT_ALERT_PREFIX}${city}`, '1', 'EX', SEMANTICS_DRIFT_ALERT_TTL_S, 'NX')
+    .catch(() => null);
+  if (claimed === 'OK') {
+    void notify(
+      `⚠️ <b>Weather resolution semantics drift — ${city}</b>\n` +
+        `Market description says source=${cls.source ?? '?'} oneDecimal=${String(cls.oneDecimal)}; ` +
+        `config says source=${coords.resolutionSource} oneDecimal=${String(expectedOneDecimal)}.\n` +
+        `Certainty logic (lock-in/oracle) may be mis-calibrated for this city until the config is updated.`,
+    ).catch(() => {});
+  }
+}
+
 export type WeatherTimingGateDecision =
   | 'allow'
   | 'block_contested_no_day_ahead' // NO <1σ off-day: wait for the res-day nowcast
@@ -2308,11 +2374,28 @@ export async function scanWeatherMarkets(
   // is shadow-only (still shadow-logged). Surfaced in the scan summary.
   let lowShadowSuppressed = 0;
 
+  // Resolution-semantics drift guard: one audit per city per scan. The 2026-07-08
+  // census is a snapshot — Polymarket's per-city resolution source/precision can
+  // change (istanbul/moscow/tel-aviv resolve via NOAA, not WU; HK is one-decimal).
+  // A silent change re-creates the pos-5628 class of bug, so compare each city's
+  // live market description against our config and alert on mismatch.
+  const semanticsAudited = new Set<string>();
+
   for (const rawEvent of rawEvents) {
     // Step 2: Parse the event
     const event = parseWeatherEvent(rawEvent);
     if (!event) continue;
     parsedCount++;
+
+    if (!semanticsAudited.has(event.city)) {
+      const desc = rawEvent.markets.find((m) => m.description)?.description;
+      // Only mark the city audited once a description was actually found, so a
+      // description-less first event doesn't suppress the audit for the scan.
+      if (desc) {
+        semanticsAudited.add(event.city);
+        void auditResolutionSemantics(redis, event.city, event.coords, desc).catch(() => {});
+      }
+    }
 
     // Check horizon
     const daysOut = daysUntil(event.targetDate);
@@ -3436,8 +3519,15 @@ export async function executeWeatherLockIns(
       // 32 only pins the true value to ≥31.5, and HK's floor-semantics "31°C" bracket
       // needs a true ≥32.0 — the 2026-07-08 false lock-in (pos 5628) fired through
       // exactly this gap on a rounded 31.8.
+      // Per-source margin: WU is revision-prone (its history array can be QC-corrected
+      // downward — Seoul 2026-06-29), so when WU lock-ins are enabled they must clear a
+      // FAT margin (WEATHER_LOCKIN_WU_MARGIN, default 2.0: the 392-city-day backtest's
+      // single feed-above-final event was Seoul at d=1.0; 2.0 absorbs d<1.5 with zero
+      // occurrences). Integer-rounded feeds add the usual 0.5 slack on top.
+      const isWuObs = liveObs?.source === 'wu-live';
       const lockinMargin =
-        cfg.WEATHER_LOCKIN_MARGIN + (liveObs?.integerRounded ? 0.5 : 0);
+        (isWuObs ? cfg.WEATHER_LOCKIN_WU_MARGIN : cfg.WEATHER_LOCKIN_MARGIN)
+        + (liveObs?.integerRounded ? 0.5 : 0);
       const lockedIn =
         liveObs?.observedMax != null
         && isWeatherHighLockedIn(liveObs.observedMax, bracket.high, lockinMargin);
@@ -3445,18 +3535,19 @@ export async function executeWeatherLockIns(
       // station exceeding the bracket does NOT prove the resolution source did — acting on
       // it risks the station-divergence trap on an irreversible bet. (Backtest: all 23
       // validated lock-in wins were settlement_aligned, so this costs zero edge.)
-      // WU's same-day historical endpoint is not safe as a monotonic intraday source: it
-      // has produced a lock-in max that later revised downward — skip it for irreversible
-      // entries. The monotonic gate (defense-in-depth, supersedes the WU skip) then blocks
-      // any remaining revisable source (HKO + METAR, both Redis-accumulated, pass).
+      // WU handling: hard-skipped unless WEATHER_LOCKIN_WU_ENABLED — when enabled, WU
+      // candidates bypass the monotonic-only gate (WU is non-monotonic by nature; the
+      // fat WU margin above is the revision protection) and proceed to the margin check.
+      // The monotonic gate still blocks any OTHER revisable source (HKO + METAR, both
+      // Redis-accumulated, pass).
       const outcome: WeatherLockinOutcome =
         liveObs?.observedMax == null || liveObs.observedAt == null
           ? 'no_live_obs'
           : liveObs.confidence !== 'settlement_aligned'
             ? 'not_settlement_aligned'
-            : liveObs.source === 'wu-live'
+            : isWuObs && !cfg.WEATHER_LOCKIN_WU_ENABLED
               ? 'wu_source_skipped'
-              : cfg.WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY && !liveObs.monotonic
+              : !isWuObs && cfg.WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY && !liveObs.monotonic
                 ? 'non_monotonic_source'
                 : !lockedIn
                   ? 'not_locked_in'

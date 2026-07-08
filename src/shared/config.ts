@@ -2865,6 +2865,15 @@ export const envSchema = z.object({
   // QC-correct downward — the 2026-06-29 Seoul failure). Set false only to accept a
   // revisable max for an irreversible bet (not recommended).
   WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: boolFromEnv.optional().default(true),
+  // Re-admit WU-observed cities to the lock-in with a WU-specific FAT margin instead
+  // of the blanket source ban. Backtest 2026-07-08 (392 WU city-days, 06-28→07-08):
+  // the feed's intraday max ended above the final settlement exactly ONCE — the Seoul
+  // 06-29 incident itself (d=1.0°) — and a 2.0° margin absorbs d<1.5 (zero events).
+  // When enabled, WU candidates bypass the monotonic-only gate (the margin IS the
+  // revision protection) and use WEATHER_LOCKIN_WU_MARGIN in place of
+  // WEATHER_LOCKIN_MARGIN. Ships dark: default false keeps today's hard skip.
+  WEATHER_LOCKIN_WU_ENABLED: boolFromEnv.optional().default(false),
+  WEATHER_LOCKIN_WU_MARGIN: z.coerce.number().min(1).max(5).optional().default(2.0),
   // Structured record of every lock-in candidate evaluation: one shadow_observations
   // row (kind='weather_lockin') per res-day bounded-bracket NO candidate per scan,
   // carrying the live obs, whether the bracket was physically locked (lockedIn) and
