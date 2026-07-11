@@ -293,3 +293,19 @@ describe('runWeatherOracleScan', () => {
     expect(mockExecuteAndRecordSignal).toHaveBeenCalledOnce();
   });
 });
+
+describe('winningDirection — floor semantics (one-decimal cities)', () => {
+  it('bins fractional actuals by floor for HK: 31.6 resolves the "31" bracket YES', () => {
+    // Round (default): 31.6 rounds to 32 → NO on the "31" bracket.
+    expect(winningDirection(31.6, 31, 31)).toBe('NO');
+    // Floor (HKO one-decimal): official 31.6 is CONTAINED in "31" (07-06 settlement).
+    expect(winningDirection(31.6, 31, 31, 'floor')).toBe('YES');
+    expect(winningDirection(32.0, 31, 31, 'floor')).toBe('NO');
+  });
+
+  it('floor tails: "32 or higher" needs a binned 32 (i.e. actual ≥ 32.0)', () => {
+    expect(winningDirection(31.9, 32, null, 'floor')).toBe('NO');
+    expect(winningDirection(32.0, 32, null, 'floor')).toBe('YES');
+    expect(winningDirection(31.9, null, 31, 'floor')).toBe('YES'); // "31 or below" contains 31.9
+  });
+});

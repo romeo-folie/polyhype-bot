@@ -152,6 +152,10 @@ export interface WeatherThesisRedisValues {
 }
 
 export interface WeatherThesisInput {
+  /** Bracket-boundary semantics of the city's resolution source (HK = 'floor'
+   *  on one-decimal; default 'round'). Drives both the held-prob CDF boundaries
+   *  and the modal rounds-into-bracket check. */
+  bracketSemantics?: 'round' | 'floor';
   pos: OpenWeatherPosition;
   bracket: { low: number | null; high: number | null };
   daysOut: number;
@@ -247,6 +251,7 @@ export function evaluateWeatherPositionThesis(input: WeatherThesisInput): Weathe
       biasMinSamples,
       biasTrustedSamples,
       weakBiasStddevMultiplier,
+      bracketSemantics: input.bracketSemantics ?? 'round',
     });
 
   // Entry held probability: P(our side) at entry. Reconciler-imported rows have
@@ -274,6 +279,8 @@ export function evaluateWeatherPositionThesis(input: WeatherThesisInput): Weathe
       correctedForecastHigh,
       bracket.low,
       bracket.high,
+      0,
+      input.bracketSemantics ?? 'round',
     );
     modalInversionRaw = pos.direction === 'NO' ? forecastInBracket : !forecastInBracket;
     modalSupportsThesis = !modalInversionRaw;

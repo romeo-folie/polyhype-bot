@@ -1280,10 +1280,16 @@ export function forecastRoundsIntoBracket(
   low: number | null,
   high: number | null,
   margin = 0,
+  semantics: 'round' | 'floor' = 'round',
 ): boolean {
   if (low === null || high === null) return false;
-  const rounded = Math.round(correctedForecastHigh);
-  return rounded >= low - margin && rounded <= high + margin;
+  // How the resolution source bins a continuous value into an integer bracket:
+  // whole-degree sources round (31.6 -> "32"); one-decimal floor-semantics
+  // sources contain (31.6 -> "31" -- see CityCoordinates.bracketSemantics).
+  const binned = semantics === 'floor'
+    ? Math.floor(correctedForecastHigh)
+    : Math.round(correctedForecastHigh);
+  return binned >= low - margin && binned <= high + margin;
 }
 
 function forecastDistanceToBracket(
@@ -1501,6 +1507,10 @@ export interface FindMispricedResult {
 
 export interface FindMispricedOptions {
   stddevMultiplier?: number;
+  /** Bracket-boundary semantics of the city's resolution source (see
+   *  CityCoordinates.bracketSemantics). Consumed by computeBiasedProb; the
+   *  scanner path derives it from event.coords directly. Default 'round'. */
+  bracketSemantics?: 'round' | 'floor';
   minModelCoverage?: number;
   allowedSides?: ReadonlySet<'YES' | 'NO'>;
   cityBias?: CityBias | null;
@@ -1608,7 +1618,8 @@ export function computeBiasedProb(
   forecast: ForecastResult,
   options: Pick<FindMispricedOptions,
     'stddevMultiplier' | 'cityBias' | 'biasCorrectionEnabled' |
-    'biasMinSamples' | 'biasTrustedSamples' | 'weakBiasStddevMultiplier'
+    'biasMinSamples' | 'biasTrustedSamples' | 'weakBiasStddevMultiplier' |
+    'bracketSemantics'
   > = {},
 ): BiasedProbResult {
   const {
@@ -1650,6 +1661,7 @@ export function computeBiasedProb(
     bracketHigh,
     daysOut,
     effectiveStdDev,
+    options.bracketSemantics ?? 'round',
   );
   return { modelProbability, effectiveStdDev, correctedForecastHigh, biasMode };
 }
@@ -1772,6 +1784,12 @@ export function findMispricedBrackets(
   // only to log modelProbRaw so shadow analysis can isolate the σ-inflation effect.
   const baselineStdDev = forecast.stdDev * stddevMultiplier;
 
+  // Bracket-boundary semantics from the city's resolution source (HK = floor
+  // on one-decimal; everyone else = round on whole degrees). Threading this in
+  // removes the half-degree shift HK probabilities carried under 'round'.
+  const bracketSemantics: 'round' | 'floor' =
+    event.coords.bracketSemantics === 'floor' ? 'floor' : 'round';
+
   // Compute model probability for each bracket
   const modelProbs: number[] = [];
   const rawModelProbs: number[] = [];
@@ -1783,11 +1801,12 @@ export function findMispricedBrackets(
       bracket.high,
       daysOut,
       effectiveStdDev,
+      bracketSemantics,
     );
     modelProbs.push(prob);
     // Pre-fix baseline (uncorrected centre + uninflated σ) for shadow comparison.
     rawModelProbs.push(
-      estimateBracketProbability(rawForecastHigh, bracket.low, bracket.high, daysOut, baselineStdDev),
+      estimateBracketProbability(rawForecastHigh, bracket.low, bracket.high, daysOut, baselineStdDev, bracketSemantics),
     );
     if (forecast.shadowEnsemble) {
       shadowModelProbs.push(
@@ -1797,6 +1816,7 @@ export function findMispricedBrackets(
           bracket.high,
           daysOut,
           forecast.shadowEnsemble.stdDev,
+          bracketSemantics,
         ),
       );
     } else {
@@ -1871,7 +1891,7 @@ export function findMispricedBrackets(
       // Calibrate the bias-corrected, PRE-source-inflation Gaussian — the scale the
       // map is trained on (logged as modelProbCalInput so train==serve stays auditable).
       modelProbCalInput = estimateBracketProbability(
-        forecastHighForCalc, bracket.low, bracket.high, daysOut, effectiveStdDevNoSourceInflation,
+        forecastHighForCalc, bracket.low, bracket.high, daysOut, effectiveStdDevNoSourceInflation, bracketSemantics,
       );
       modelProbCalibrated = calibrateWeatherBracketProbability(modelProbCalInput, {
         shape, source: forecast.source, daysOut, metric: event.metric,
@@ -2127,7 +2147,7 @@ export function findMispricedBrackets(
     );
     const blockedByInteriorMargin =
       !blockedByNoFallback && tradeSide === 'NO'
-      && forecastRoundsIntoBracket(correctedForecastHigh, bracket.low, bracket.high, effectiveInteriorMargin);
+      && forecastRoundsIntoBracket(correctedForecastHigh, bracket.low, bracket.high, effectiveInteriorMargin, bracketSemantics);
     if (blockedByInteriorMargin) {
       logger.debug('[weather] interior NO declined (forecast rounds into/near) — shadow-only', {
         city: event.city,

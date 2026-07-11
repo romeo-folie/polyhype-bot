@@ -473,6 +473,7 @@ export async function runWeatherDriftStrategy(redis: Redis, fetchFn?: FetchFn): 
 
       const result = evaluateWeatherPositionThesis({
         pos,
+        bracketSemantics: event.coords.bracketSemantics === 'floor' ? 'floor' : 'round',
         bracket: { low: bracket.low, high: bracket.high },
         daysOut,
         forecast,

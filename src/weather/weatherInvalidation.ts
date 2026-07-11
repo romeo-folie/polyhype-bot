@@ -368,6 +368,7 @@ export async function runWeatherInvalidationScan(redis: Redis, fetchFn?: FetchFn
 
       const thesisResult = evaluateWeatherPositionThesis({
         pos,
+        bracketSemantics: event.coords.bracketSemantics === 'floor' ? 'floor' : 'round',
         bracket: { low: bracket.low, high: bracket.high },
         daysOut,
         forecast,
