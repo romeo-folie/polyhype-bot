@@ -98,11 +98,15 @@ export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   // Esenboğa (LTAC) sits 25km north of Ankara and ~200m higher — forecast it directly.
   ankara:          { lat: 40.1281, lon: 32.9951,    noaaCoverage: false, unit: 'celsius', wuStation: 'LTAC', resolutionSource: 'wu', isoCountry: 'TR', tz: 'Europe/Istanbul'           },
   lucknow:         { lat: 26.7606, lon: 80.8893,    noaaCoverage: false, unit: 'celsius', wuStation: 'VILK', resolutionSource: 'wu', isoCountry: 'IN', tz: 'Asia/Kolkata'              },
-  // Ben Gurion (LLBG). Originally routed through METAR; switched to WU
-  // 2026-04-24 after the aviationweather.gov endpoint was found to cap at
-  // ~400 obs regardless of the `hours` param (effective ~9-day window, not
-  // the 30 days the code assumed). WU has 35+ days of LLBG history.
-  'tel aviv':      { lat: 31.9965, lon: 34.8906,    noaaCoverage: false, unit: 'celsius', wuStation: 'LLBG', resolutionSource: 'wu', isoCountry: 'IL', tz: 'Asia/Jerusalem'            },
+  // Ben Gurion (LLBG). History: METAR → WU 2026-04-24 (aviationweather.gov caps
+  // at ~400 obs ≈ 9 days, breaking 30-day bias backfills; WU has 35+ days) →
+  // BACK to METAR 2026-07-08: the 51-city description census showed this market
+  // resolves on NOAA's timeseries (weather.gov/wrh/timeseries?site=LLBG), i.e.
+  // the METAR feed — WU is a QC-revising proxy of the same station, so labeling
+  // it 'wu' mis-granted settlement_aligned to revisable data. The reconciler's
+  // daily lag-1 fetch is well inside the ~9-day METAR window (Istanbul precedent);
+  // only deep re-backfills would need a manual WU pull.
+  'tel aviv':      { lat: 31.9965, lon: 34.8906,    noaaCoverage: false, unit: 'celsius', wuStation: 'LLBG', resolutionSource: 'metar', isoCountry: 'IL', tz: 'Asia/Jerusalem'         },
   // Resolves via Hong Kong Observatory. HKO reports to 1 dp; bracket labels are integer °C.
   'hong kong':     { lat: 22.3020, lon: 114.1740,   noaaCoverage: false, unit: 'celsius', wuStation: 'HKO',  resolutionSource: 'hko', bracketSemantics: 'floor', tz: 'Asia/Hong_Kong'          },
   // Malpensa (LIMC), not Linate (LIML) — Polymarket resolves against LIMC
@@ -129,9 +133,11 @@ export const CITY_COORDINATES: Record<string, CityCoordinates> = {
   jakarta:         { lat: -6.2661, lon: 106.8908,   noaaCoverage: false, unit: 'celsius', wuStation: 'WIHH', resolutionSource: 'wu', isoCountry: 'ID', tz: 'Asia/Jakarta'              },
   jeddah:          { lat: 21.6796, lon: 39.1565,    noaaCoverage: false, unit: 'celsius', wuStation: 'OEJN', resolutionSource: 'wu', isoCountry: 'SA', tz: 'Asia/Riyadh'              },
   // Vnukovo (UUWW). Switched METAR → WU 2026-04-24 (same reason as tel aviv).
-  // Market resolves via NOAA's timeseries page for the same ICAO — both
-  // render the UUWW METAR feed, so WU remains equivalent here.
-  moscow:          { lat: 55.5915, lon: 37.2615,    noaaCoverage: false, unit: 'celsius', wuStation: 'UUWW', resolutionSource: 'wu', isoCountry: 'RU', tz: 'Europe/Moscow'             },
+  // Market resolves on NOAA's timeseries (weather.gov/wrh/timeseries?site=UUWW)
+  // = the METAR feed. Relabeled wu → metar 2026-07-08 (census): WU renders the
+  // same station but applies its own QC revisions, so 'wu' mis-granted
+  // settlement_aligned to revisable data for certainty (lock-in/oracle) logic.
+  moscow:          { lat: 55.5915, lon: 37.2615,    noaaCoverage: false, unit: 'celsius', wuStation: 'UUWW', resolutionSource: 'metar', isoCountry: 'RU', tz: 'Europe/Moscow'          },
   // Songshan (RCSS), downtown Taipei — the station Polymarket's description
   // names. We previously used Taoyuan (RCTP), 30km west on the coast and
   // systematically cooler; that gap is likely why taipei's bias never

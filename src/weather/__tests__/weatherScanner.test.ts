@@ -101,6 +101,8 @@ const baseConfig = {
   WEATHER_LOCKIN_ENABLED: false,
   WEATHER_LOCKIN_MARGIN: 1.0,
   WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: true,
+  WEATHER_LOCKIN_WU_ENABLED: false,
+  WEATHER_LOCKIN_WU_MARGIN: 2.0,
   WEATHER_LOCKIN_STAKE_USD: 10,
   WEATHER_LOCKIN_MODEL_WIN: 0.97,
   // Off in baseConfig (schema default is true) so legacy lock-in gate tests keep
@@ -264,6 +266,8 @@ const {
   executeWeatherLockIns,
   bracketDistanceSigma,
   weatherTimingGateDecision,
+  classifyResolutionDescription,
+  auditResolutionSemantics,
 } = await import('../weatherScanner.js');
 
 const { computeHalfKelly } = await import('../../mapping/divergenceCalculator.js');
@@ -1647,6 +1651,33 @@ describe('executeWeatherLockIns', () => {
       expect(rows[0]!.payload).toMatchObject({
         outcome: 'wu_source_skipped', lockedIn: true, obsSource: 'wu-live', live: true,
       });
+    });
+
+    it('WEATHER_LOCKIN_WU_ENABLED: WU fires past the monotonic gate when it clears the FAT WU margin', async () => {
+      // baseOpp bracket = 28°C → WU margin 2.0 needs obs ≥ 30. monotonic=false must
+      // NOT block (the fat margin is the revision protection when WU is enabled).
+      mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_LOCKIN_WU_ENABLED: true }));
+      const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+      await executeWeatherLockIns(
+        {} as never, [baseOpp], undefined,
+        { fetchObs: obs(30, 'settlement_aligned', 'wu-live', false), execute: execute as never },
+      );
+      expect(execute).toHaveBeenCalledTimes(1);
+      const rows = lockinRows();
+      expect(rows[0]!.payload).toMatchObject({ outcome: 'fired', marginC: 2.0, obsSource: 'wu-live' });
+    });
+
+    it('WEATHER_LOCKIN_WU_ENABLED: WU below the WU margin is not_locked_in (base margin does NOT apply)', async () => {
+      // obs 29 clears the base margin (28+1) but NOT the WU margin (28+2) —
+      // exactly the borderline that produced the Seoul loss.
+      mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_LOCKIN_WU_ENABLED: true }));
+      const execute = vi.fn();
+      await executeWeatherLockIns(
+        {} as never, [baseOpp], undefined,
+        { fetchObs: obs(29, 'settlement_aligned', 'wu-live', false), execute: execute as never },
+      );
+      expect(execute).not.toHaveBeenCalled();
+      expect(lockinRows()[0]!.payload).toMatchObject({ outcome: 'not_locked_in', marginC: 2.0 });
     });
 
     it('classifies non-monotonic, not-settlement-aligned, below-margin, and fetch-failure outcomes', async () => {
@@ -5568,6 +5599,8 @@ describe('resolution-day size-up and near-res gate bypass', () => {
       WEATHER_RES_DAY_ENTRY_ONLY: true,
       WEATHER_RES_DAY_LIVE_CONFIRMATION_REQUIRED: true,
       WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: true,
+  WEATHER_LOCKIN_WU_ENABLED: false,
+  WEATHER_LOCKIN_WU_MARGIN: 2.0,
       SIZE_UP_ENABLED: true,
       WEATHER_MAX_LOOKAHEAD_HOURS: 0,
       WEATHER_NEAR_RES_ENTRY_ENABLED: false,
@@ -7551,5 +7584,63 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
     expect(no!.blockedByModalMass).toBe(false);
     expect(no!.ensembleYesMass ?? null).toBeNull();
     expect(mockFetchEnsembleHourly).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resolution-semantics drift guard (2026-07-08 census)
+// ---------------------------------------------------------------------------
+
+describe('classifyResolutionDescription', () => {
+  it('classifies the three source families from real description fragments', () => {
+    expect(classifyResolutionDescription(
+      'available here: https://www.wunderground.com/history/daily/us/fl/miami/KMIA. ' +
+      'The resolution source for this market measures temperatures to whole degrees Fahrenheit',
+    )).toEqual({ source: 'wu', oneDecimal: false });
+    expect(classifyResolutionDescription(
+      'information from NOAA, specifically the highest reading under the "Temp" column, ' +
+      'available here: https://www.weather.gov/wrh/timeseries?site=LLBG ... whole degrees Celsius',
+    )).toEqual({ source: 'metar', oneDecimal: false });
+    expect(classifyResolutionDescription(
+      'information from the Hong Kong Observatory, specifically the "Absolute Daily Max" ... ' +
+      'available here: https://www.weather.gov.hk/en/cis/climat.htm ... measures temperatures in Celsius to one decimal',
+    )).toEqual({ source: 'hko', oneDecimal: true });
+  });
+
+  it('returns null source for unrecognised descriptions (no false alerts)', () => {
+    expect(classifyResolutionDescription('resolves per the official city weather bureau')).toEqual({ source: null, oneDecimal: false });
+  });
+});
+
+describe('auditResolutionSemantics', () => {
+  const wuCoords = { resolutionSource: 'wu' } as never;
+  const WU_DESC = 'available here: https://www.wunderground.com/history/daily/kr/incheon/RKSI. whole degrees Celsius';
+  const METAR_DESC = 'available here: https://www.weather.gov/wrh/timeseries?site=RKSI. whole degrees Celsius';
+
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('is silent when the description matches the config', async () => {
+    const redisMock = createRedisMock();
+    await auditResolutionSemantics(redisMock as never, 'seoul', wuCoords, WU_DESC);
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  it('alerts (deduped 24h) when the description source disagrees with the config', async () => {
+    const redisMock = createRedisMock();
+    await auditResolutionSemantics(redisMock as never, 'seoul', wuCoords, METAR_DESC);
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    expect(String(mockNotify.mock.calls[0]![0])).toContain('semantics drift');
+    // Dedup: second detection within the window must not re-notify.
+    await auditResolutionSemantics(redisMock as never, 'seoul', wuCoords, METAR_DESC);
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+  });
+
+  it('alerts when precision drifts (description says one decimal, config says integer)', async () => {
+    const redisMock = createRedisMock();
+    await auditResolutionSemantics(
+      redisMock as never, 'seoul', wuCoords,
+      WU_DESC.replace('whole degrees Celsius', 'Celsius to one decimal'),
+    );
+    expect(mockNotify).toHaveBeenCalledTimes(1);
   });
 });
