@@ -45,6 +45,9 @@ const baseConfig = {
   WEATHER_FORECAST_CACHE_TTL_S: 10_800,
   WEATHER_OUTAGE_ALERT_ENABLED: false,
   WEATHER_OUTAGE_FAIL_RATE: 0.5,
+  // Mirrors the schema default (30). Outage tests that exercise the rate/dedup logic
+  // with small synthetic universes override this to 5 explicitly.
+  WEATHER_OUTAGE_MIN_ATTEMPTED: 30,
   WEATHER_OUTAGE_ALERT_DEDUP_TTL_S: 14_400,
   // Resting-order revalidation + bracket cancel — mirror the config.ts schema
   // defaults so tests never rely on `undefined` happening to be falsy.
@@ -3084,6 +3087,73 @@ describe('fetchForecast - ECMWF flag wiring', () => {
       0, // retryCount default when no opts passed
       'high', // metric — high-temperature event
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchForecast — quality-reject vs provider-failure classification
+// ---------------------------------------------------------------------------
+
+describe('fetchForecast - onQualityReject classification', () => {
+  function makeUsEvent(city: string, targetDate: string) {
+    const coords = lookupCity(city);
+    expect(coords).not.toBeNull();
+    return {
+      eventId: `${city}-qr-test`, slug: `${city}-qr-test`, city,
+      coords: coords!, targetDate, unit: 'fahrenheit' as const,
+      brackets: [], endDate: `${targetDate}T12:00:00Z`,
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetchEnsemble.mockResolvedValue(null);
+  });
+
+  it('cross-source spread rejection → null + onQualityReject invoked', async () => {
+    const onQualityReject = vi.fn();
+    mockFetchNwsForecast.mockResolvedValueOnce({ highF: 70, lowF: 55, forecastDate: '2026-04-20' });
+    mockFetchOpenMeteo.mockResolvedValueOnce(null);
+    mockFetchHrrr.mockResolvedValueOnce({ highTemp: 90, lowTemp: 60, precipProbability: 0, forecastDate: '2026-04-20' });
+
+    // NWS 70 vs HRRR 90 → spread 20 > maxCrossSourceSpread 15 → OUR guard rejects.
+    const result = await fetchForecast(
+      makeUsEvent('chicago', '2026-04-20'), 1, undefined, 0.7, false, true, false, 15,
+      { onQualityReject },
+    );
+
+    expect(result).toBeNull();
+    expect(onQualityReject).toHaveBeenCalledTimes(1);
+  });
+
+  it('HRRR-sole-source rejection → null + onQualityReject invoked', async () => {
+    const onQualityReject = vi.fn();
+    mockFetchNwsForecast.mockResolvedValueOnce(null);
+    mockFetchOpenMeteo.mockResolvedValueOnce(null);
+    mockFetchHrrr.mockResolvedValueOnce({ highTemp: 90, lowTemp: 60, precipProbability: 0, forecastDate: '2026-04-20' });
+
+    const result = await fetchForecast(
+      makeUsEvent('chicago', '2026-04-20'), 1, undefined, 0.7, false, true, false, 15,
+      { onQualityReject },
+    );
+
+    expect(result).toBeNull();
+    expect(onQualityReject).toHaveBeenCalledTimes(1);
+  });
+
+  it('genuine provider failure (all sources null) → null WITHOUT onQualityReject', async () => {
+    const onQualityReject = vi.fn();
+    mockFetchNwsForecast.mockResolvedValueOnce(null);
+    mockFetchOpenMeteo.mockResolvedValueOnce(null);
+    mockFetchHrrr.mockResolvedValueOnce(null);
+
+    const result = await fetchForecast(
+      makeUsEvent('chicago', '2026-04-20'), 1, undefined, 0.7, false, true, false, 15,
+      { onQualityReject },
+    );
+
+    expect(result).toBeNull();
+    expect(onQualityReject).not.toHaveBeenCalled();
   });
 });
 
@@ -6407,7 +6477,9 @@ describe('scanWeatherMarkets - outage alert and forecast cache', () => {
 
   it('sends ONE deduped Telegram alert when the forecast failure rate exceeds the threshold', async () => {
     const redisMock = createRedisMock();
-    mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true });
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true, WEATHER_OUTAGE_MIN_ATTEMPTED: 5,
+    });
     wireEvents(SIX_CITIES);
     allForecastsFail();
 
@@ -6418,12 +6490,17 @@ describe('scanWeatherMarkets - outage alert and forecast cache', () => {
     expect(redisMock.set).toHaveBeenCalledWith(
       'weather:outage_alert', '1', 'EX', 14_400, 'NX',
     );
+    // The send must be auditable from the logs (it previously fired with no trace).
+    const warnCalls = (logger.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(warnCalls.some((c) => String(c[0]).includes('outage alert sent'))).toBe(true);
   });
 
   it('suppresses the alert while the dedup key is live', async () => {
     const redisMock = createRedisMock();
     redisMock._store.set('weather:outage_alert', '1'); // prior alert within the window
-    mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true });
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true, WEATHER_OUTAGE_MIN_ATTEMPTED: 5,
+    });
     wireEvents(SIX_CITIES);
     allForecastsFail();
 
@@ -6434,8 +6511,26 @@ describe('scanWeatherMarkets - outage alert and forecast cache', () => {
 
   it('does not alert below the minimum attempted-fetch sample size', async () => {
     const redisMock = createRedisMock();
-    mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true });
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true, WEATHER_OUTAGE_MIN_ATTEMPTED: 5,
+    });
     wireEvents(SIX_CITIES.slice(0, 3)); // 3 attempted < 5 — even at 100% failure
+    allForecastsFail();
+
+    await scanWeatherMarkets(redisMock as never);
+
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  it('REGRESSION: a small dedup-skewed scan cannot fire the alert at the default MIN_ATTEMPTED', async () => {
+    // The production false positive: on dedup-heavy :30 scans only the ~5 failing
+    // events retry (a null forecast releases its dedup slot) while healthy events stay
+    // deduped, so attempted collapses to single digits and 100% of it fails. With the
+    // schema-default WEATHER_OUTAGE_MIN_ATTEMPTED=30 (baseConfig), 6 attempted at 100%
+    // failure must NOT alert.
+    const redisMock = createRedisMock();
+    mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true });
+    wireEvents(SIX_CITIES); // attempted = 6 < 30
     allForecastsFail();
 
     await scanWeatherMarkets(redisMock as never);

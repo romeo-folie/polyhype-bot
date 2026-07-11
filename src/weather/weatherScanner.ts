@@ -544,6 +544,13 @@ export interface FetchForecastOptions {
   /** Retries on transient Open-Meteo failures, threaded to each fetcher
    *  (WEATHER_FORECAST_RETRY_COUNT in production). */
   retryCount?: number;
+  /**
+   * Invoked when the forecast is rejected by OUR OWN quality guards (cross-source
+   * spread too large, HRRR sole source) rather than by a provider failure. Lets the
+   * caller separate "we deliberately skipped data the provider returned" from "the
+   * provider is down" — the outage alert must only count the latter.
+   */
+  onQualityReject?: () => void;
 }
 
 /**
@@ -674,6 +681,7 @@ export async function fetchForecast(
           targetDate,
           hrrrHigh,
         });
+        opts?.onQualityReject?.();
         return null;
       }
       const rawSpread = Math.max(...availableHighs) - Math.min(...availableHighs);
@@ -687,6 +695,7 @@ export async function fetchForecast(
           omHigh,
           hrrrHigh,
         });
+        opts?.onQualityReject?.();
         return null;
       }
     }
@@ -2301,6 +2310,10 @@ export async function scanWeatherMarkets(
   let sizeUpRescanned = 0;
   let earlyResolutionDayEntries = 0;
   let noForecast = 0;
+  // Subset of noForecast rejected by OUR quality guards (cross-source spread,
+  // HRRR-sole-source) — deliberate skips, not provider failures. The outage
+  // alert subtracts these so a nightly spread-guard cluster can't read as an outage.
+  let noForecastQualityReject = 0;
   let horizonSkipped = 0;
   let eventsWithOpportunities = 0;
   let totalDisagreementBlocked = 0;
@@ -2454,7 +2467,10 @@ export async function scanWeatherMarkets(
       cfg.WEATHER_HRRR_ENABLED,
       cfg.WEATHER_DUAL_ENSEMBLE_SHADOW_ENABLED,
       cfg.WEATHER_HRRR_MAX_CROSS_SOURCE_SPREAD,
-      { retryCount: cfg.WEATHER_FORECAST_RETRY_COUNT },
+      {
+        retryCount: cfg.WEATHER_FORECAST_RETRY_COUNT,
+        onQualityReject: () => { noForecastQualityReject++; },
+      },
     );
     if (!forecast) {
       noForecast++;
@@ -3224,6 +3240,7 @@ export async function scanWeatherMarkets(
     earlyResolutionDayEntries,
     horizonSkipped,
     noForecast,
+    noForecastQualityReject,
     eventsWithOpportunities,
     totalOpportunities: allOpportunities.length,
     allowedOpportunities: allowedOpportunities.length,
@@ -3242,17 +3259,37 @@ export async function scanWeatherMarkets(
   // loud Telegram alert per dedup window beats silent noForecast inflation
   // (2026-06-04: noForecast 0→24 across three scans with zero operator signal).
   if (cfg.WEATHER_OUTAGE_ALERT_ENABLED) {
-    // Only events that actually attempted a fetch belong in the denominator.
+    // Only events that actually attempted a fetch belong in the denominator, and only
+    // genuine PROVIDER failures in the numerator — quality-guard rejections (spread,
+    // HRRR-sole-source) are deliberate skips of data the provider DID return.
+    // WEATHER_OUTAGE_MIN_ATTEMPTED keeps dedup-heavy :30 scans from firing: failing
+    // events retry every scan (a null forecast releases the dedup slot) while healthy
+    // events stay deduped, so a small denominator is dominated by the failing handful
+    // and reads as a fake 56–100% outage (observed daily 00:30–04:30 UTC).
     const attempted = parsedCount - dedupSkipped - horizonSkipped;
-    if (attempted >= 5 && noForecast / attempted > cfg.WEATHER_OUTAGE_FAIL_RATE) {
+    const providerFailures = noForecast - noForecastQualityReject;
+    if (
+      attempted >= cfg.WEATHER_OUTAGE_MIN_ATTEMPTED &&
+      providerFailures / attempted > cfg.WEATHER_OUTAGE_FAIL_RATE
+    ) {
       const claimed = await redis
         .set('weather:outage_alert', '1', 'EX', cfg.WEATHER_OUTAGE_ALERT_DEDUP_TTL_S, 'NX')
         .catch(() => null);
       if (claimed === 'OK') {
-        const pct = Math.round((noForecast / attempted) * 100);
+        const pct = Math.round((providerFailures / attempted) * 100);
+        // Log the send — the Telegram message alone is unauditable from the logs
+        // (this alert previously fired with no trace, masquerading as a real outage).
+        logger.warn('[weather] forecast provider degraded — outage alert sent', {
+          providerFailures,
+          noForecast,
+          noForecastQualityReject,
+          attempted,
+          pct,
+        });
         void notify(
           `⚠️ <b>Weather forecast provider degraded</b>\n` +
-            `${noForecast}/${attempted} attempted events returned no forecast (${pct}%).\n` +
+            `${providerFailures}/${attempted} attempted events returned no forecast (${pct}%` +
+            `${noForecastQualityReject > 0 ? `; +${noForecastQualityReject} quality-guard skips excluded` : ''}).\n` +
             `Invalidation coverage is limited until the provider recovers — ` +
             `cached/ensemble fallbacks are in use where available.`,
         ).catch(() => {});

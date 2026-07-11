@@ -2593,8 +2593,18 @@ export const envSchema = z.object({
   // One loud Telegram alert when a scan's forecast failure rate is high, instead
   // of silent noForecast inflation in the scan summary.
   WEATHER_OUTAGE_ALERT_ENABLED: boolFromEnv.optional().default(true),
-  // Alert when noForecast / attempted exceeds this fraction (attempted ≥ 5).
+  // Alert when PROVIDER failures / attempted exceeds this fraction. Provider failures
+  // exclude our own quality-guard rejections (cross-source spread, HRRR-sole-source) —
+  // those are deliberate skips of data the provider DID return, not provider outage.
   WEATHER_OUTAGE_FAIL_RATE: z.coerce.number().min(0).max(1).optional().default(0.5),
+  // Minimum attempted fetches in a scan before the outage alert may fire. Dedup-heavy
+  // :30 scans skip all healthy events (their dedup keys are live) while failing events
+  // RETRY every scan (a null forecast releases its dedup slot) — so the denominator
+  // collapses to almost only the failing handful and a few stuck events read as a
+  // "provider outage" (observed daily 00:30–04:30 UTC: attempted=5–9, noForecast=5 →
+  // 56–100% "failure"). 30 restricts the alert to full-evaluation scans where the
+  // rate is meaningful (~115 attempted; a real outage still trips within the hour).
+  WEATHER_OUTAGE_MIN_ATTEMPTED: z.coerce.number().int().min(1).optional().default(30),
   // Suppress repeat outage alerts within this window (SET NX EX dedupe).
   WEATHER_OUTAGE_ALERT_DEDUP_TTL_S: z.coerce.number().int().min(60).optional().default(14_400),
 
