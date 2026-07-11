@@ -2593,8 +2593,18 @@ export const envSchema = z.object({
   // One loud Telegram alert when a scan's forecast failure rate is high, instead
   // of silent noForecast inflation in the scan summary.
   WEATHER_OUTAGE_ALERT_ENABLED: boolFromEnv.optional().default(true),
-  // Alert when noForecast / attempted exceeds this fraction (attempted ≥ 5).
+  // Alert when PROVIDER failures / attempted exceeds this fraction. Provider failures
+  // exclude our own quality-guard rejections (cross-source spread, HRRR-sole-source) —
+  // those are deliberate skips of data the provider DID return, not provider outage.
   WEATHER_OUTAGE_FAIL_RATE: z.coerce.number().min(0).max(1).optional().default(0.5),
+  // Minimum attempted fetches in a scan before the outage alert may fire. Dedup-heavy
+  // :30 scans skip all healthy events (their dedup keys are live) while failing events
+  // RETRY every scan (a null forecast releases its dedup slot) — so the denominator
+  // collapses to almost only the failing handful and a few stuck events read as a
+  // "provider outage" (observed daily 00:30–04:30 UTC: attempted=5–9, noForecast=5 →
+  // 56–100% "failure"). 30 restricts the alert to full-evaluation scans where the
+  // rate is meaningful (~115 attempted; a real outage still trips within the hour).
+  WEATHER_OUTAGE_MIN_ATTEMPTED: z.coerce.number().int().min(1).optional().default(30),
   // Suppress repeat outage alerts within this window (SET NX EX dedupe).
   WEATHER_OUTAGE_ALERT_DEDUP_TTL_S: z.coerce.number().int().min(60).optional().default(14_400),
 
@@ -2865,6 +2875,15 @@ export const envSchema = z.object({
   // QC-correct downward — the 2026-06-29 Seoul failure). Set false only to accept a
   // revisable max for an irreversible bet (not recommended).
   WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: boolFromEnv.optional().default(true),
+  // Re-admit WU-observed cities to the lock-in with a WU-specific FAT margin instead
+  // of the blanket source ban. Backtest 2026-07-08 (392 WU city-days, 06-28→07-08):
+  // the feed's intraday max ended above the final settlement exactly ONCE — the Seoul
+  // 06-29 incident itself (d=1.0°) — and a 2.0° margin absorbs d<1.5 (zero events).
+  // When enabled, WU candidates bypass the monotonic-only gate (the margin IS the
+  // revision protection) and use WEATHER_LOCKIN_WU_MARGIN in place of
+  // WEATHER_LOCKIN_MARGIN. Ships dark: default false keeps today's hard skip.
+  WEATHER_LOCKIN_WU_ENABLED: boolFromEnv.optional().default(false),
+  WEATHER_LOCKIN_WU_MARGIN: z.coerce.number().min(1).max(5).optional().default(2.0),
   // Structured record of every lock-in candidate evaluation: one shadow_observations
   // row (kind='weather_lockin') per res-day bounded-bracket NO candidate per scan,
   // carrying the live obs, whether the bracket was physically locked (lockedIn) and

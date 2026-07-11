@@ -34,19 +34,22 @@ describe('CITY_COORDINATES', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('tel aviv and moscow stay WU-sourced with isoCountry (2026-04-24 METAR cap)', () => {
-    // aviationweather.gov caps obs at ~400 (~9d window) so long-history
-    // backfills must go through WU. Their markets resolve via NOAA's
-    // timeseries page for the SAME ICAO — WU renders the same METAR feed,
-    // so WU stays correct as long as the station matches.
-    const wuCities: { city: string; station: string; iso: string }[] = [
+  it('tel aviv and moscow are METAR-sourced with isoCountry (2026-07-08 census relabel)', () => {
+    // Their markets resolve on NOAA's timeseries (weather.gov/wrh/timeseries),
+    // i.e. the METAR feed. The 2026-04-24 switch to WU worked around
+    // aviationweather.gov's ~400-obs (~9d) history cap for backfills, but WU is
+    // a QC-REVISING proxy of the same station — labeling it 'wu' mis-granted
+    // settlement_aligned to revisable data for certainty logic (lock-in/oracle).
+    // The reconciler's daily lag-1 fetch is well inside the METAR window; only
+    // deep re-backfills would need a manual WU pull.
+    const metarCities: { city: string; station: string; iso: string }[] = [
       { city: 'tel aviv', station: 'LLBG', iso: 'IL' },
       { city: 'moscow',   station: 'UUWW', iso: 'RU' },
     ];
-    for (const { city, station, iso } of wuCities) {
+    for (const { city, station, iso } of metarCities) {
       const entry = CITY_COORDINATES[city];
       expect(entry, `${city} missing from CITY_COORDINATES`).toBeDefined();
-      expect(entry!.resolutionSource).toBe('wu');
+      expect(entry!.resolutionSource).toBe('metar');
       expect(entry!.wuStation).toBe(station);
       expect(entry!.isoCountry).toBe(iso);
     }
@@ -192,5 +195,25 @@ describe('estimateBracketProbability — floor semantics (one-decimal sources)',
   it('default (no semantics arg) is round — unchanged behavior', () => {
     expect(estimateBracketProbability(52, 52, 53, 1, 3))
       .toBeCloseTo(estimateBracketProbability(52, 52, 53, 1, 3, 'round'), 12);
+  });
+});
+
+describe('resolution source + bracket semantics (2026-07-08 description census)', () => {
+  it('istanbul, moscow, tel aviv resolve via NOAA timeseries → metar', () => {
+    // Market descriptions: "resolution source ... NOAA, specifically the highest
+    // reading under the Temp column ... weather.gov/wrh/timeseries?site=<ICAO>".
+    // WU renders the same stations but applies its own QC revisions — labeling
+    // these 'wu' mis-granted settlement_aligned to revisable data.
+    expect(lookupCity('istanbul')!.resolutionSource).toBe('metar');
+    expect(lookupCity('moscow')!.resolutionSource).toBe('metar');
+    expect(lookupCity('tel aviv')!.resolutionSource).toBe('metar');
+  });
+
+  it('hong kong is the ONLY city with floor (one-decimal) bracket semantics', () => {
+    expect(lookupCity('hong kong')!.bracketSemantics).toBe('floor');
+    const floorCities = Object.entries(CITY_COORDINATES)
+      .filter(([, c]) => c.bracketSemantics === 'floor')
+      .map(([k]) => k);
+    expect(floorCities).toEqual(['hong kong']);
   });
 });

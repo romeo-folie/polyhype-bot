@@ -45,6 +45,9 @@ const baseConfig = {
   WEATHER_FORECAST_CACHE_TTL_S: 10_800,
   WEATHER_OUTAGE_ALERT_ENABLED: false,
   WEATHER_OUTAGE_FAIL_RATE: 0.5,
+  // Mirrors the schema default (30). Outage tests that exercise the rate/dedup logic
+  // with small synthetic universes override this to 5 explicitly.
+  WEATHER_OUTAGE_MIN_ATTEMPTED: 30,
   WEATHER_OUTAGE_ALERT_DEDUP_TTL_S: 14_400,
   // Resting-order revalidation + bracket cancel — mirror the config.ts schema
   // defaults so tests never rely on `undefined` happening to be falsy.
@@ -98,6 +101,8 @@ const baseConfig = {
   WEATHER_LOCKIN_ENABLED: false,
   WEATHER_LOCKIN_MARGIN: 1.0,
   WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: true,
+  WEATHER_LOCKIN_WU_ENABLED: false,
+  WEATHER_LOCKIN_WU_MARGIN: 2.0,
   WEATHER_LOCKIN_STAKE_USD: 10,
   WEATHER_LOCKIN_MODEL_WIN: 0.97,
   // Off in baseConfig (schema default is true) so legacy lock-in gate tests keep
@@ -263,6 +268,8 @@ const {
   executeWeatherLockIns,
   bracketDistanceSigma,
   weatherTimingGateDecision,
+  classifyResolutionDescription,
+  auditResolutionSemantics,
 } = await import('../weatherScanner.js');
 
 const { computeHalfKelly } = await import('../../mapping/divergenceCalculator.js');
@@ -1672,6 +1679,33 @@ describe('executeWeatherLockIns', () => {
       expect(rows[0]!.payload).toMatchObject({
         outcome: 'wu_source_skipped', lockedIn: true, obsSource: 'wu-live', live: true,
       });
+    });
+
+    it('WEATHER_LOCKIN_WU_ENABLED: WU fires past the monotonic gate when it clears the FAT WU margin', async () => {
+      // baseOpp bracket = 28°C → WU margin 2.0 needs obs ≥ 30. monotonic=false must
+      // NOT block (the fat margin is the revision protection when WU is enabled).
+      mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_LOCKIN_WU_ENABLED: true }));
+      const execute = vi.fn().mockResolvedValue({ signal: {}, skipped: false });
+      await executeWeatherLockIns(
+        {} as never, [baseOpp], undefined,
+        { fetchObs: obs(30, 'settlement_aligned', 'wu-live', false), execute: execute as never },
+      );
+      expect(execute).toHaveBeenCalledTimes(1);
+      const rows = lockinRows();
+      expect(rows[0]!.payload).toMatchObject({ outcome: 'fired', marginC: 2.0, obsSource: 'wu-live' });
+    });
+
+    it('WEATHER_LOCKIN_WU_ENABLED: WU below the WU margin is not_locked_in (base margin does NOT apply)', async () => {
+      // obs 29 clears the base margin (28+1) but NOT the WU margin (28+2) —
+      // exactly the borderline that produced the Seoul loss.
+      mockLoadConfig.mockReturnValue(lockCfg({ WEATHER_LOCKIN_WU_ENABLED: true }));
+      const execute = vi.fn();
+      await executeWeatherLockIns(
+        {} as never, [baseOpp], undefined,
+        { fetchObs: obs(29, 'settlement_aligned', 'wu-live', false), execute: execute as never },
+      );
+      expect(execute).not.toHaveBeenCalled();
+      expect(lockinRows()[0]!.payload).toMatchObject({ outcome: 'not_locked_in', marginC: 2.0 });
     });
 
     it('classifies non-monotonic, not-settlement-aligned, below-margin, and fetch-failure outcomes', async () => {
@@ -3112,6 +3146,73 @@ describe('fetchForecast - ECMWF flag wiring', () => {
       0, // retryCount default when no opts passed
       'high', // metric — high-temperature event
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchForecast — quality-reject vs provider-failure classification
+// ---------------------------------------------------------------------------
+
+describe('fetchForecast - onQualityReject classification', () => {
+  function makeUsEvent(city: string, targetDate: string) {
+    const coords = lookupCity(city);
+    expect(coords).not.toBeNull();
+    return {
+      eventId: `${city}-qr-test`, slug: `${city}-qr-test`, city,
+      coords: coords!, targetDate, unit: 'fahrenheit' as const,
+      brackets: [], endDate: `${targetDate}T12:00:00Z`,
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetchEnsemble.mockResolvedValue(null);
+  });
+
+  it('cross-source spread rejection → null + onQualityReject invoked', async () => {
+    const onQualityReject = vi.fn();
+    mockFetchNwsForecast.mockResolvedValueOnce({ highF: 70, lowF: 55, forecastDate: '2026-04-20' });
+    mockFetchOpenMeteo.mockResolvedValueOnce(null);
+    mockFetchHrrr.mockResolvedValueOnce({ highTemp: 90, lowTemp: 60, precipProbability: 0, forecastDate: '2026-04-20' });
+
+    // NWS 70 vs HRRR 90 → spread 20 > maxCrossSourceSpread 15 → OUR guard rejects.
+    const result = await fetchForecast(
+      makeUsEvent('chicago', '2026-04-20'), 1, undefined, 0.7, false, true, false, 15,
+      { onQualityReject },
+    );
+
+    expect(result).toBeNull();
+    expect(onQualityReject).toHaveBeenCalledTimes(1);
+  });
+
+  it('HRRR-sole-source rejection → null + onQualityReject invoked', async () => {
+    const onQualityReject = vi.fn();
+    mockFetchNwsForecast.mockResolvedValueOnce(null);
+    mockFetchOpenMeteo.mockResolvedValueOnce(null);
+    mockFetchHrrr.mockResolvedValueOnce({ highTemp: 90, lowTemp: 60, precipProbability: 0, forecastDate: '2026-04-20' });
+
+    const result = await fetchForecast(
+      makeUsEvent('chicago', '2026-04-20'), 1, undefined, 0.7, false, true, false, 15,
+      { onQualityReject },
+    );
+
+    expect(result).toBeNull();
+    expect(onQualityReject).toHaveBeenCalledTimes(1);
+  });
+
+  it('genuine provider failure (all sources null) → null WITHOUT onQualityReject', async () => {
+    const onQualityReject = vi.fn();
+    mockFetchNwsForecast.mockResolvedValueOnce(null);
+    mockFetchOpenMeteo.mockResolvedValueOnce(null);
+    mockFetchHrrr.mockResolvedValueOnce(null);
+
+    const result = await fetchForecast(
+      makeUsEvent('chicago', '2026-04-20'), 1, undefined, 0.7, false, true, false, 15,
+      { onQualityReject },
+    );
+
+    expect(result).toBeNull();
+    expect(onQualityReject).not.toHaveBeenCalled();
   });
 });
 
@@ -5526,6 +5627,8 @@ describe('resolution-day size-up and near-res gate bypass', () => {
       WEATHER_RES_DAY_ENTRY_ONLY: true,
       WEATHER_RES_DAY_LIVE_CONFIRMATION_REQUIRED: true,
       WEATHER_LOCKIN_MONOTONIC_SOURCES_ONLY: true,
+  WEATHER_LOCKIN_WU_ENABLED: false,
+  WEATHER_LOCKIN_WU_MARGIN: 2.0,
       SIZE_UP_ENABLED: true,
       WEATHER_MAX_LOOKAHEAD_HOURS: 0,
       WEATHER_NEAR_RES_ENTRY_ENABLED: false,
@@ -6435,7 +6538,9 @@ describe('scanWeatherMarkets - outage alert and forecast cache', () => {
 
   it('sends ONE deduped Telegram alert when the forecast failure rate exceeds the threshold', async () => {
     const redisMock = createRedisMock();
-    mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true });
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true, WEATHER_OUTAGE_MIN_ATTEMPTED: 5,
+    });
     wireEvents(SIX_CITIES);
     allForecastsFail();
 
@@ -6446,12 +6551,17 @@ describe('scanWeatherMarkets - outage alert and forecast cache', () => {
     expect(redisMock.set).toHaveBeenCalledWith(
       'weather:outage_alert', '1', 'EX', 14_400, 'NX',
     );
+    // The send must be auditable from the logs (it previously fired with no trace).
+    const warnCalls = (logger.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(warnCalls.some((c) => String(c[0]).includes('outage alert sent'))).toBe(true);
   });
 
   it('suppresses the alert while the dedup key is live', async () => {
     const redisMock = createRedisMock();
     redisMock._store.set('weather:outage_alert', '1'); // prior alert within the window
-    mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true });
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true, WEATHER_OUTAGE_MIN_ATTEMPTED: 5,
+    });
     wireEvents(SIX_CITIES);
     allForecastsFail();
 
@@ -6462,8 +6572,26 @@ describe('scanWeatherMarkets - outage alert and forecast cache', () => {
 
   it('does not alert below the minimum attempted-fetch sample size', async () => {
     const redisMock = createRedisMock();
-    mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true });
+    mockLoadConfig.mockReturnValue({
+      ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true, WEATHER_OUTAGE_MIN_ATTEMPTED: 5,
+    });
     wireEvents(SIX_CITIES.slice(0, 3)); // 3 attempted < 5 — even at 100% failure
+    allForecastsFail();
+
+    await scanWeatherMarkets(redisMock as never);
+
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  it('REGRESSION: a small dedup-skewed scan cannot fire the alert at the default MIN_ATTEMPTED', async () => {
+    // The production false positive: on dedup-heavy :30 scans only the ~5 failing
+    // events retry (a null forecast releases its dedup slot) while healthy events stay
+    // deduped, so attempted collapses to single digits and 100% of it fails. With the
+    // schema-default WEATHER_OUTAGE_MIN_ATTEMPTED=30 (baseConfig), 6 attempted at 100%
+    // failure must NOT alert.
+    const redisMock = createRedisMock();
+    mockLoadConfig.mockReturnValue({ ...baseConfig, WEATHER_OUTAGE_ALERT_ENABLED: true });
+    wireEvents(SIX_CITIES); // attempted = 6 < 30
     allForecastsFail();
 
     await scanWeatherMarkets(redisMock as never);
@@ -7488,12 +7616,6 @@ describe('scanWeatherMarkets - modal-mass NO veto (2026-06-19)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Floor bracket semantics in model PRICING (HK one-decimal resolution)
-// ---------------------------------------------------------------------------
-
-
-
-// ---------------------------------------------------------------------------
 // Floor bracket semantics in PRICING (PR: fix/weather-floor-semantics-pricing)
 // ---------------------------------------------------------------------------
 
@@ -7592,5 +7714,63 @@ describe('evaluateWeatherPositionThesis — bracketSemantics threading', () => {
     expect(round.modalInversionRaw).toBe(false);
     // Held-prob for NO must be LOWER under floor (the bracket holds more mass).
     expect(floor.currentHeldProb).toBeLessThan(round.currentHeldProb - 0.02);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resolution-semantics drift guard (2026-07-08 census)
+// ---------------------------------------------------------------------------
+
+describe('classifyResolutionDescription', () => {
+  it('classifies the three source families from real description fragments', () => {
+    expect(classifyResolutionDescription(
+      'available here: https://www.wunderground.com/history/daily/us/fl/miami/KMIA. ' +
+      'The resolution source for this market measures temperatures to whole degrees Fahrenheit',
+    )).toEqual({ source: 'wu', oneDecimal: false });
+    expect(classifyResolutionDescription(
+      'information from NOAA, specifically the highest reading under the "Temp" column, ' +
+      'available here: https://www.weather.gov/wrh/timeseries?site=LLBG ... whole degrees Celsius',
+    )).toEqual({ source: 'metar', oneDecimal: false });
+    expect(classifyResolutionDescription(
+      'information from the Hong Kong Observatory, specifically the "Absolute Daily Max" ... ' +
+      'available here: https://www.weather.gov.hk/en/cis/climat.htm ... measures temperatures in Celsius to one decimal',
+    )).toEqual({ source: 'hko', oneDecimal: true });
+  });
+
+  it('returns null source for unrecognised descriptions (no false alerts)', () => {
+    expect(classifyResolutionDescription('resolves per the official city weather bureau')).toEqual({ source: null, oneDecimal: false });
+  });
+});
+
+describe('auditResolutionSemantics', () => {
+  const wuCoords = { resolutionSource: 'wu' } as never;
+  const WU_DESC = 'available here: https://www.wunderground.com/history/daily/kr/incheon/RKSI. whole degrees Celsius';
+  const METAR_DESC = 'available here: https://www.weather.gov/wrh/timeseries?site=RKSI. whole degrees Celsius';
+
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('is silent when the description matches the config', async () => {
+    const redisMock = createRedisMock();
+    await auditResolutionSemantics(redisMock as never, 'seoul', wuCoords, WU_DESC);
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  it('alerts (deduped 24h) when the description source disagrees with the config', async () => {
+    const redisMock = createRedisMock();
+    await auditResolutionSemantics(redisMock as never, 'seoul', wuCoords, METAR_DESC);
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    expect(String(mockNotify.mock.calls[0]![0])).toContain('semantics drift');
+    // Dedup: second detection within the window must not re-notify.
+    await auditResolutionSemantics(redisMock as never, 'seoul', wuCoords, METAR_DESC);
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+  });
+
+  it('alerts when precision drifts (description says one decimal, config says integer)', async () => {
+    const redisMock = createRedisMock();
+    await auditResolutionSemantics(
+      redisMock as never, 'seoul', wuCoords,
+      WU_DESC.replace('whole degrees Celsius', 'Celsius to one decimal'),
+    );
+    expect(mockNotify).toHaveBeenCalledTimes(1);
   });
 });
