@@ -1586,6 +1586,11 @@ export const envSchema = z.object({
   // Per-side cooldown after a TP/non-SL exit from an hl-momentum position. Prevents
   // re-entering the same thesis immediately after a profitable close.
   HL_MOMENTUM_POST_TP_COOLDOWN_SEC: z.coerce.number().int().min(60).optional().default(1800),
+  // Symbol-wide cooldown after ANY losing futures close (set by futuresMonitor;
+  // read by every futures entry path — momentum, funding, spot-move, news/mapping).
+  // Blocks both directions so a losing trade can't immediately cascade into re-entries.
+  // Was a hardcoded 1800s; now configurable. Default preserves the prior 30-min behaviour.
+  HL_FUTURES_LOSS_COOLDOWN_SEC: z.coerce.number().int().min(60).optional().default(1800),
   // Lookback windows for each scoring timeframe.
   // 15m primary: 54h (194,400,000ms) → ~216 bars (covers MACD 35-bar warmup with room to spare).
   HL_MOMENTUM_PRIMARY_LOOKBACK_MS: z.coerce.number().int().min(60_000).optional().default(194_400_000),

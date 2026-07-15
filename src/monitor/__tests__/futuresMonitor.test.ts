@@ -19,6 +19,7 @@ const baseCfg = {
   HL_MOMENTUM_TAKE_PROFIT_PCT: 12,
   HL_MOMENTUM_MEME_ATR_SLTP_ENABLED: false,
   HL_MOMENTUM_MEME_SYMBOLS: 'pepeusdt,wifusdt,bonkusdt,penguusdt',
+  HL_FUTURES_LOSS_COOLDOWN_SEC: 1800,
 };
 const loadConfigMock = vi.fn().mockReturnValue(baseCfg);
 vi.mock('../../shared/config.js', () => ({
@@ -1513,6 +1514,7 @@ describe('futuresMonitor', () => {
     const cooldownCfg = {
       ...baseCfg,
       HL_MOMENTUM_POST_TP_COOLDOWN_SEC: 1800,
+      HL_FUTURES_LOSS_COOLDOWN_SEC: 900,
     };
 
     const makeLedgerPos = (symbol: string, sourcedFrom = 'hl-momentum') => ({
@@ -1568,6 +1570,33 @@ describe('futuresMonitor', () => {
         '1',
         'EX',
         expect.any(Number),
+      );
+    });
+
+    it('sets loss cooldown with HL_FUTURES_LOSS_COOLDOWN_SEC TTL on a losing close', async () => {
+      loadConfigMock.mockReturnValue(cooldownCfg);
+      mockGetOpenPositions.mockResolvedValue([makeSlPos('TAO')]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerPos('TAO')]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('TAO');
+      // TTL is driven by config (900 here), not the former hardcoded 1800.
+      expect(mockRedis.setex).toHaveBeenCalledWith('futures:loss-cooldown:TAO', 900, '1');
+    });
+
+    it('does NOT set loss cooldown on a profitable close', async () => {
+      loadConfigMock.mockReturnValue(cooldownCfg);
+      mockGetOpenPositions.mockResolvedValue([makeTpPos('TAO')]);
+      mockGetLedgerPositions.mockResolvedValue([makeLedgerPos('TAO')]);
+
+      await runTick();
+
+      expect(mockClosePosition).toHaveBeenCalledWith('TAO');
+      expect(mockRedis.setex).not.toHaveBeenCalledWith(
+        'futures:loss-cooldown:TAO',
+        expect.any(Number),
+        '1',
       );
     });
 

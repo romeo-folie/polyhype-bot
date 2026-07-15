@@ -1114,8 +1114,9 @@ export async function runFuturesMonitorWorker(): Promise<void> {
             // re-enter the same symbol and create a cascade of small losing trades.
             if (pnlUsd < 0) {
               const cooldownKey = `futures:loss-cooldown:${symbol}`;
-              await redis.setex(cooldownKey, 1800, '1');
-              logger.info('[futures-monitor] loss cooldown set', { symbol, ttlSec: 1800 });
+              const lossCooldownSec = cfg.HL_FUTURES_LOSS_COOLDOWN_SEC;
+              await redis.setex(cooldownKey, lossCooldownSec, '1');
+              logger.info('[futures-monitor] loss cooldown set', { symbol, ttlSec: lossCooldownSec });
             }
 
             // Set a per-side momentum cooldown after a profitable TP/non-SL exit from
