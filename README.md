@@ -220,7 +220,8 @@ Shortlist auto-refresh queries the leaderboard by PnL/volume thresholds and opti
 ### 3. Spot → Arb Path (`worker:spot-feed` + `worker:arb`)
 
 ```
-BinanceFeed (WebSocket) — BTC, ETH, SOL, XRP, BNB, TAO, DOGE, ADA, AVAX, LINK, SUI
+BinanceFeed (WebSocket) — BTC, ETH, SOL, XRP, BNB, TAO, DOGE, ADA, AVAX, LINK, SUI, DOT
+                          (default set; extend via BINANCE_SYMBOLS)
 HeliusFeed (Helius/Pyth) — SOL, BTC, ETH
 ChainlinkFeed (Polymarket RTDS WS) — the oracle Polymarket's Up/Down markets resolve against
   → Redis hot-price cache (per-symbol)
@@ -318,7 +319,7 @@ Exploits the favorite-longshot bias from Whelan's study of 300K contracts: cheap
 
 ### 9. Weather Scanner (`src/weather/weatherScanner.ts`)
 
-Daily highest-temperature (and optionally lowest-temperature) bracket markets across ~15 cities worldwide.
+Daily highest-temperature (and optionally lowest-temperature) bracket markets across ~50 configured cities worldwide (all shadow-tracked; a subset is excluded from live execution via `WEATHER_EXCLUDED_CITIES` while bias windows accumulate).
 
 ```
 Gamma API search for weather bracket markets
