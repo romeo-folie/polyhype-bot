@@ -126,17 +126,19 @@ Periodic pipelines run via host crontab (not Docker). See [Crontab](#crontab-hos
 | **pga-bootstrap** | Stale-lock cleanup | Init (run-once) | Clears stale `lock:*` keys before workers start |
 | **pga-spot-feed** | `src/spot/feeds/manager.ts` | Persistent worker | Binance WS + Helius/Pyth + Chainlink RTDS feeds → Redis hot-price cache → publish `spot:price_moved` |
 | **pga-arb** | `src/arb/worker.ts` | Persistent worker | YES+NO arb sweep (10s baseline), crypto latency arb, Up/Down FV scanner, HL momentum + funding scanners |
-| **pga-copytrade** | `src/copytrade/worker.ts` | Persistent worker | Mirror expert whale wallets with category/liquidity/slippage guardrails (2s poll loop) |
+| **pga-copytrade** | `src/copytrade/worker.ts` | Persistent worker † | Mirror expert whale wallets with category/liquidity/slippage guardrails (2s poll loop) |
 | **pga-monitor** | `src/monitor/worker.ts` | Persistent worker | PM position monitoring: SL/TP, trailing stop, stale exit, trend exit, divergence close, weather near-res exit, on-chain resolution redemption |
 | **pga-futures** | `src/monitor/futuresMonitor.ts` | Persistent worker | HL perp monitoring: SL/TP, trailing stop, max-hold, TA re-eval, funding exits (5s poll) |
-| **pga-telegram** | `src/ingestion/telegramMonitor.ts` | Persistent worker | MTProto listener for OSINT channels → immediate scoring → execution |
-| **pga-clob-flow** | `src/clob/flowMonitor.ts` | Persistent worker | Streams Polymarket book/trade tape into Redis |
-| **pga-sports** | `src/sports/poller.ts` | Persistent worker | NBA/NHL/MLB in-play win-probability edge vs Polymarket |
+| **pga-telegram** | `src/ingestion/telegramMonitor.ts` | Persistent worker † | MTProto listener for OSINT channels → immediate scoring → execution |
+| **pga-clob-flow** | `src/clob/flowMonitor.ts` | Persistent worker † | Streams Polymarket book/trade tape into Redis |
+| **pga-sports** | `src/sports/poller.ts` | Persistent worker † | NBA/NHL/MLB in-play win-probability edge vs Polymarket |
 | **pga-db** | TimescaleDB (pg16) | Infrastructure | Durable analytics database (TimescaleDB + pgvector) |
 | **pga-db-migrate** | `node-pg-migrate up` | Init (run-once) | Applies schema migrations on deploy |
 | **pga-db-writer** | `src/db/writer/index.ts` | Persistent worker | XREADGROUP consumer draining `db:writeq` Redis stream into Postgres |
 | **pga-cron** | `embedTradeMemory` + `snapshotTelemetry` + `weatherReconciler` | Persistent (24h loop) | Nightly analytics: trade memory embeddings, telemetry snapshots, weather outcome reconciliation |
 | **pga-db-backup** | `pg_dump` | Persistent (24h loop) | Nightly compressed Postgres backup with 7-day retention |
+
+† Gated behind the `off-scope` Compose profile (current focus: weather + Hyperliquid). A plain `docker compose up -d` starts 11 of the 15 services; add `--profile off-scope` to also start `pga-telegram`, `pga-copytrade`, `pga-clob-flow`, and `pga-sports`.
 
 ## Crontab (host-level)
 
@@ -237,7 +239,7 @@ ArbitrageWorker — independent scan paths (ACTIVE_ARB_SCANNERS selects the set)
     → Compute fair value: Black-Scholes binary formula (<1ms, no LLM)
     → edge = |fairValue - pmPrice| - fees
     → If edge > CRYPTO_ARB_MIN_EDGE: execute directional trade
-    → 5-min dedup per (marketId, direction)
+    → 3-min dedup per (marketId, direction) (CRYPTO_ARB_DEDUP_TTL_S, default 180s)
 
   Path C — 15-minute BTC/ETH Up/Down markets:
     fv-scanner (preferred): BS p_model (src/pricing) vs market mid → maker-post entries
@@ -270,7 +272,7 @@ Spot Poller (CoinGecko REST, configurable assets + lookback window)
 
 ```
 ESPN live scoreboard feed (NBA / NHL / MLB — SPORTS_LEAGUES, default nba)
-  → Win-probability models (closed-form; NBA + MLB implemented, MLB min-inning gate)
+  → Win-probability models (closed-form; NBA + NHL + MLB, MLB min-inning gate)
   → Compare vs Polymarket odds
   → Edge detection → Execution Router
 ```
@@ -323,8 +325,9 @@ Gamma API search for weather bracket markets
   → Parse city, date, bracket from question text
   → Forecasts: NOAA/NWS (US cities) + Open-Meteo (international; GFS 31-member
     ensemble drives dynamic σ; optional HRRR/ECMWF, shadow-only)
-  → Resolution oracles routed per city: Weather Underground (US),
-    METAR/aviationweather (international ICAO), HKO (Hong Kong)
+  → Resolution oracles routed per city: Weather Underground for nearly all
+    cities, with per-city exceptions — METAR/aviationweather (Tel Aviv,
+    Istanbul, Moscow) and HKO (Hong Kong)
   → Gaussian bracket pricing (forecast mean + σ) + climatology tables
   → Calibration: offline-fit reliability map (bracketCalibration.ts) layered
     over a per-category bias theta (CALIBRATION_BIAS_THETA_WEATHER=0.69)
@@ -570,9 +573,11 @@ echo 'your-pg-password' > secrets/pg_password
 
 # 3. Deploy
 docker compose up -d --build
+# add --profile off-scope to also start pga-telegram, pga-copytrade,
+# pga-clob-flow, and pga-sports (disabled by default — see Services table)
 
 # 4. Verify
-docker compose ps             # all services Up/Healthy
+docker compose ps             # all started services Up/Healthy
 redis-cli KEYS '*lock*'       # no stale locks
 
 # 5. Set up host crontab (see Crontab section above)
