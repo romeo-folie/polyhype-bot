@@ -220,8 +220,8 @@ Shortlist auto-refresh queries the leaderboard by PnL/volume thresholds and opti
 ### 3. Spot → Arb Path (`worker:spot-feed` + `worker:arb`)
 
 ```
-BinanceFeed (WebSocket) — BTC, ETH, SOL, XRP, BNB, TAO, DOGE, ADA, AVAX, LINK, SUI, DOT
-                          (default set; extend via BINANCE_SYMBOLS)
+BinanceFeed (WebSocket) — live symbol set configured via BINANCE_SYMBOLS
+                          (config default: BTC, ETH, SOL)
 HeliusFeed (Helius/Pyth) — SOL, BTC, ETH
 ChainlinkFeed (Polymarket RTDS WS) — the oracle Polymarket's Up/Down markets resolve against
   → Redis hot-price cache (per-symbol)
