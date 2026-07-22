@@ -1888,6 +1888,17 @@ export const envSchema = z.object({
   WEATHER_SCANNER_HEARTBEAT_MAX_AGE_MIN: z.coerce.number().int().min(1).optional().default(60),
   // While still stale, re-alert at most once per this many minutes (avoid page-storm).
   WEATHER_SCANNER_HEARTBEAT_REALERT_MIN: z.coerce.number().int().min(1).optional().default(180),
+  // Cohort health monitor (src/cron/weatherCohortHealth.ts, runs from pga-cron). Replays
+  // each LIVE calibration cohort's calibrated decisions on the recent resolved window and
+  // Telegram-alerts when a cohort's WR no longer clears breakeven — catches post-admission
+  // edge decay (e.g. the July YES|low over-promotion) in days instead of weeks.
+  WEATHER_COHORT_HEALTH_ENABLED: boolFromEnv.optional().default(true),
+  // Look-back window (days of resolved shadow) used to score each live cohort's health.
+  WEATHER_COHORT_HEALTH_WINDOW_DAYS: z.coerce.number().int().min(1).optional().default(14),
+  // Min picks a cohort needs in the window before its WR-vs-breakeven read is trusted.
+  WEATHER_COHORT_HEALTH_MIN_SAMPLES: z.coerce.number().int().min(1).optional().default(20),
+  // While a cohort stays degraded, re-alert at most once per this many minutes.
+  WEATHER_COHORT_HEALTH_REALERT_MIN: z.coerce.number().int().min(1).optional().default(1440),
   // Lowest-temperature markets ("Lowest temperature in [city] on [date]?",
   // Gamma tag_slug=lowest-temperature). Same bracket structure as the highest
   // markets but resolves against the day's MINIMUM temperature, so it uses the
