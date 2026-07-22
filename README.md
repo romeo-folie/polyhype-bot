@@ -159,6 +159,7 @@ Periodic pipelines run via host crontab (not Docker). See [Crontab](#crontab-hos
 | `*/15 * * * *` | Correlation violation scanner (`src/cron/correlationScanner.ts`) | `~/logs/pga/correlation.log` |
 | `*/15 * * * *` | PM-activity reconciler (`src/cron/polymarketActivityReconciler.ts`, exec'd inside `pga-cron`) | `~/logs/pga/pm-reconciler.log` |
 | `*/15 * * * *` | Heartbeat watchdog (`src/cron/heartbeatWatchdog.ts`, exec'd inside `pga-cron`) | `~/logs/pga/heartbeat.log` |
+| `0 5 * * *` | Weather cohort health monitor (`src/cron/weatherCohortHealth.ts`, exec'd inside `pga-cron`; needs PG) | `~/logs/pga/cohort-health.log` |
 | `45 * * * *` | Shadow digest (`scripts/shadow-digest.sh`) | `/tmp/shadow-digest.log` |
 | `0 3 * * MON` | Calibration stats (`src/cron/calibrate.ts`) | `~/logs/pga/calibrate.log` |
 | `0 4 * * *` | Log rotation (`scripts/rotate-logs.sh`) | — |
