@@ -169,6 +169,69 @@ export function isCalibrationLiveCohort(
       && c.source === normalizeSource(source));
 }
 
+/** Tunable thresholds for promoting a calibrated (side|metric|shape|source) cohort to live. */
+export interface LiveCohortAdmissionOpts {
+  /** Min hold-out picks the cohort must have. */
+  minSamples: number;
+  /** Min hold-out ROI (fraction, e.g. 0.05 = 5%). */
+  minRoi: number;
+  /** Min picks in the most-recent slice for the forward guardrail to be evaluable. */
+  recentMinSamples: number;
+}
+
+/** Realized cohort performance on the hold-out and its most-recent forward slice. */
+export interface LiveCohortStats {
+  /** Hold-out picks. */
+  n: number;
+  /** Hold-out win rate (0–1). */
+  wr: number;
+  /** Hold-out breakeven = avg entry price of the side (0–1). */
+  be: number;
+  /** Hold-out ROI (fraction). */
+  roi: number;
+  /** Picks in the most-recent slice. */
+  recentN: number;
+  /** Win rate on the most-recent slice. */
+  recentWr: number;
+  /** Breakeven on the most-recent slice. */
+  recentBe: number;
+}
+
+/**
+ * Decide whether a (side, metric) cohort earns LIVE act-on-calibration. Hardened after
+ * the July 2026 over-promotion of `YES|low|exact|open-meteo`, which cleared the old thin
+ * gate (n≥15, roi≥5%, wr>be on a single hold-out) and then ran 22–25% WR / −35% ROI
+ * forward. The failures it now guards against:
+ *  - **low-YES is excluded outright.** The low-metric YES calibration was never validated
+ *    (its reliability never improved) and calibration corrects the *average*, not the
+ *    per-bracket discrimination a YES bet needs — so calibrated YES on the contested
+ *    cohort has no real edge. Re-enabling YES must come from a discriminating signal
+ *    (res-day intraday nowcast), not the reliability map.
+ *  - **thin samples.** `minSamples` is raised well above 15 so a lucky small hold-out
+ *    cannot promote a cohort (SE on WR at n=15 is ~±13%, wider than a 5% ROI edge).
+ *  - **recent degradation.** A cohort must ALSO clear breakeven on its most-recent slice
+ *    (with `recentN ≥ recentMinSamples`); one that was +EV early but has decayed, or that
+ *    has too little recent data to confirm, is not admitted.
+ */
+export function shouldAdmitLiveCohort(
+  side: CalibrationTradeSide,
+  metric: string,
+  s: LiveCohortStats,
+  opts: LiveCohortAdmissionOpts,
+): { admit: boolean; reason: string } {
+  if (side === 'YES' && normalizeSource(metric) === 'low') {
+    return { admit: false, reason: 'low-YES excluded (unvalidated; needs a discriminating signal)' };
+  }
+  if (s.n < opts.minSamples) return { admit: false, reason: `n<${String(opts.minSamples)}` };
+  if (s.roi < opts.minRoi) return { admit: false, reason: `roi<${(opts.minRoi * 100).toFixed(0)}%` };
+  if (!(s.wr > s.be)) return { admit: false, reason: 'wr<=be' };
+  if (s.recentN < opts.recentMinSamples) {
+    return { admit: false, reason: `recentN<${String(opts.recentMinSamples)} (forward-unconfirmed)` };
+  }
+  if (!(s.recentWr > s.recentBe)) return { admit: false, reason: 'recent wr<=be (degrading)' };
+  return { admit: true, reason: 'ok' };
+}
+
 export function cellKey(features: CalibrationFeatures): {
   shapeSourceHorizon: string;
   shapeSource: string;
