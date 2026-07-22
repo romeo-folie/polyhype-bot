@@ -8,6 +8,7 @@ import {
   calibrateWeatherBracketProbability,
   isCalibrationLiveCohort,
   isCalibrationLiveCohortForSide,
+  shouldAdmitLiveCohort,
   loadCalibrationTable,
   type CalibrationTable,
 } from '../bracketCalibration.js';
@@ -194,6 +195,55 @@ describe('isCalibrationLiveCohort', () => {
     expect(isCalibrationLiveCohortForSide('YES', 'high', 'range', 'hrrr-combined', list)).toBe(true);
     expect(isCalibrationLiveCohortForSide('NO', 'high', 'range', 'hrrr-combined', list)).toBe(true);
     expect(isCalibrationLiveCohort('high', 'exact', 'open-meteo', list)).toBe(true);
+  });
+});
+
+// ── Live-cohort admission gate (hardened after the July YES|low over-promotion) ──
+describe('shouldAdmitLiveCohort', () => {
+  const OPTS = { minSamples: 50, minRoi: 0.05, recentMinSamples: 12 };
+  // A cohort that passes every numeric bar (strong hold-out AND strong recent slice).
+  const healthy = { n: 200, wr: 0.72, be: 0.62, roi: 0.16, recentN: 60, recentWr: 0.70, recentBe: 0.61 };
+
+  it('admits a robust NO cohort that clears both hold-out and recent guardrails', () => {
+    const r = shouldAdmitLiveCohort('NO', 'high', healthy, OPTS);
+    expect(r.admit).toBe(true);
+    expect(r.reason).toBe('ok');
+  });
+
+  it('admits a robust non-low YES cohort (only low-YES is blanket-excluded)', () => {
+    expect(shouldAdmitLiveCohort('YES', 'high', healthy, OPTS).admit).toBe(true);
+  });
+
+  it('excludes low-YES outright regardless of stellar stats', () => {
+    const r = shouldAdmitLiveCohort('YES', 'low', { ...healthy, roi: 1.5, wr: 0.99 }, OPTS);
+    expect(r.admit).toBe(false);
+    expect(r.reason).toMatch(/low-YES excluded/);
+  });
+
+  it('rejects a thin cohort (this is what let YES|low through at n=15)', () => {
+    const r = shouldAdmitLiveCohort('NO', 'high', { ...healthy, n: 20 }, OPTS);
+    expect(r.admit).toBe(false);
+    expect(r.reason).toBe('n<50');
+  });
+
+  it('rejects below the ROI floor', () => {
+    expect(shouldAdmitLiveCohort('NO', 'high', { ...healthy, roi: 0.02 }, OPTS).admit).toBe(false);
+  });
+
+  it('rejects when the hold-out win rate does not clear breakeven', () => {
+    expect(shouldAdmitLiveCohort('NO', 'high', { ...healthy, wr: 0.60, be: 0.62 }, OPTS).admit).toBe(false);
+  });
+
+  it('rejects a cohort that was +EV overall but has DEGRADED on the recent slice', () => {
+    const r = shouldAdmitLiveCohort('NO', 'high', { ...healthy, recentWr: 0.55, recentBe: 0.62 }, OPTS);
+    expect(r.admit).toBe(false);
+    expect(r.reason).toMatch(/degrading/);
+  });
+
+  it('rejects a cohort with too little recent data to confirm (forward-unconfirmed)', () => {
+    const r = shouldAdmitLiveCohort('NO', 'high', { ...healthy, recentN: 5 }, OPTS);
+    expect(r.admit).toBe(false);
+    expect(r.reason).toMatch(/forward-unconfirmed/);
   });
 });
 

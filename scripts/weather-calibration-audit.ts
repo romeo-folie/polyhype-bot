@@ -40,6 +40,7 @@ import {
   cellKey,
   interpolateCell,
   calibrateWeatherBracketProbability,
+  shouldAdmitLiveCohort,
   type BracketShape,
   type CalibrationCell,
   type CalibrationTable,
@@ -53,8 +54,15 @@ const MIN_CELL_SAMPLES = 80; // runtime trust threshold for a specific cell
 // passthrough). Guards against over-fit/drifting corrections on already-well-
 // calibrated cohorts (e.g. the US `combined` source).
 const GUARDRAIL_MIN_BRIER_GAIN = 0.003;
-const LIVE_COHORT_MIN_SAMPLES = 15;
+// Live-cohort admission thresholds. Hardened 2026-07 after `YES|low|exact|open-meteo`
+// cleared the old n=15 gate and ran 22–25% WR forward. minN raised to 50 (a 15-sample
+// hold-out cannot distinguish a real edge from noise); a most-recent-slice forward
+// guardrail requires the cohort to still clear breakeven recently. See
+// `shouldAdmitLiveCohort` in src/weather/bracketCalibration.ts.
+const LIVE_COHORT_MIN_SAMPLES = 50;
 const LIVE_COHORT_MIN_ROI = 0.05;
+const LIVE_COHORT_RECENT_FRACTION = 0.30;
+const LIVE_COHORT_RECENT_MIN_SAMPLES = 12;
 const VERSION = 1;
 
 // eslint-disable-next-line no-console
@@ -446,24 +454,34 @@ async function main(): Promise<void> {
       const wr = ps.filter(wonF).length / n;
       const be = ps.reduce((s, p) => s + price(p), 0) / n;
       const roi = ps.reduce((s, p) => s + (wonF(p) ? 1 / Math.max(0.01, price(p)) - 1 : -1), 0) / n;
-      const gate = wr > be ? 'PASS' : 'fail';
-      if (n >= LIVE_COHORT_MIN_SAMPLES && roi >= LIVE_COHORT_MIN_ROI && wr > be) {
-        admittedLiveCohorts.add(`${side}|${cohort}`);
-      }
-      log(`  ${cohort.padEnd(28)} ${String(n).padStart(3)}  ${(100 * wr).toFixed(0)}%  ${(100 * be).toFixed(0)}%  ${(100 * roi).toFixed(0)}%  ${gate}`);
+      // Most-recent slice (by observed_at) — the forward guardrail. A cohort must still
+      // clear breakeven recently, not merely on the full hold-out.
+      const byTime = ps.slice().sort((a, b) => a.observedAt.localeCompare(b.observedAt));
+      const recent = byTime.slice(Math.floor(byTime.length * (1 - LIVE_COHORT_RECENT_FRACTION)));
+      const rN = recent.length;
+      const rWr = rN > 0 ? recent.filter(wonF).length / rN : 0;
+      const rBe = rN > 0 ? recent.reduce((s, p) => s + price(p), 0) / rN : 0;
+      const metric = cohort.split('|')[0] ?? '';
+      const { admit, reason } = shouldAdmitLiveCohort(side, metric, { n, wr, be, roi, recentN: rN, recentWr: rWr, recentBe: rBe }, {
+        minSamples: LIVE_COHORT_MIN_SAMPLES,
+        minRoi: LIVE_COHORT_MIN_ROI,
+        recentMinSamples: LIVE_COHORT_RECENT_MIN_SAMPLES,
+      });
+      if (admit) admittedLiveCohorts.add(`${side}|${cohort}`);
+      log(`  ${cohort.padEnd(28)} ${String(n).padStart(3)}  ${(100 * wr).toFixed(0)}%  ${(100 * be).toFixed(0)}%  ${(100 * roi).toFixed(0)}%  recent[${String(rN)}] ${(100 * rWr).toFixed(0)}%/${(100 * rBe).toFixed(0)}%  ${admit ? 'ADMIT' : `— ${reason}`}`);
     }
   };
   cohortReport('YES');
   cohortReport('NO');
 
   const liveCohorts = [...admittedLiveCohorts].sort();
-  log(`\nLIVE COHORT ADMISSION (side-aware calibrated entries, hold-out): minN=${LIVE_COHORT_MIN_SAMPLES}, minROI=${(LIVE_COHORT_MIN_ROI * 100).toFixed(0)}%`);
+  log(`\nLIVE COHORT ADMISSION (side-aware calibrated entries, hold-out): minN=${LIVE_COHORT_MIN_SAMPLES}, minROI=${(LIVE_COHORT_MIN_ROI * 100).toFixed(0)}%, recent-slice guardrail (last ${(LIVE_COHORT_RECENT_FRACTION * 100).toFixed(0)}%, min ${LIVE_COHORT_RECENT_MIN_SAMPLES}), low-YES excluded`);
   log(`  ${liveCohorts.length > 0 ? liveCohorts.join(',') : '(none)'}`);
   if (writeLiveCohorts) {
     const envPath = join(process.cwd(), '.env');
     const env = readFileSync(envPath, 'utf-8');
     const nextValue = `"${liveCohorts.join(',')}"`;
-    const line = `WEATHER_CALIBRATION_LIVE_COHORTS=${nextValue}  # auto-updated by weather-calibration-audit --write-live-cohorts; holdout minN=${LIVE_COHORT_MIN_SAMPLES}, minROI=${(LIVE_COHORT_MIN_ROI * 100).toFixed(0)}%\n`;
+    const line = `WEATHER_CALIBRATION_LIVE_COHORTS=${nextValue}  # auto-updated by weather-calibration-audit --write-live-cohorts; holdout minN=${LIVE_COHORT_MIN_SAMPLES}, minROI=${(LIVE_COHORT_MIN_ROI * 100).toFixed(0)}%, recent-slice guardrail, low-YES excluded\n`;
     const next = /^WEATHER_CALIBRATION_LIVE_COHORTS=.*$/m.test(env)
       ? env.replace(/^WEATHER_CALIBRATION_LIVE_COHORTS=.*$/m, () => line.trimEnd())
       : `${env.replace(/\s*$/, '\n')}${line}`;
