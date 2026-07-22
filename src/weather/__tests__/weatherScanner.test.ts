@@ -265,6 +265,7 @@ const {
   revalidateRestingWeatherOrders,
   isWeatherHighLockedIn,
   isWeatherLowLockedIn,
+  computeLiveObsTimeContext,
   executeWeatherLockIns,
   bracketDistanceSigma,
   weatherTimingGateDecision,
@@ -374,6 +375,48 @@ describe('extractDateFromEvent', () => {
 
   it('returns null when no date can be extracted', () => {
     expect(extractDateFromEvent('No date', 'no-date')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeLiveObsTimeContext (PR C1 — intraday-nowcast shadow features)
+// ---------------------------------------------------------------------------
+
+describe('computeLiveObsTimeContext', () => {
+  it('returns nulls for a missing observation', () => {
+    expect(computeLiveObsTimeContext(null, '2026-07-22T12:00:00Z', 0))
+      .toEqual({ hoursToResolution: null, localSolarHour: null });
+  });
+
+  it('returns nulls for an unparseable observation timestamp', () => {
+    expect(computeLiveObsTimeContext('not-a-date', '2026-07-22T12:00:00Z', 0))
+      .toEqual({ hoursToResolution: null, localSolarHour: null });
+  });
+
+  it('computes hoursToResolution as endDate − observedAt', () => {
+    const r = computeLiveObsTimeContext('2026-07-22T10:00:00Z', '2026-07-22T22:00:00Z', 0);
+    expect(r.hoursToResolution).toBeCloseTo(12, 6);
+  });
+
+  it('derives local solar hour from UTC hour + lon/15 (east = later)', () => {
+    // 14:30 UTC, Tokyo lon≈139.7 → +9.31h → ~23.81 local
+    const tokyo = computeLiveObsTimeContext('2026-07-22T14:30:00Z', null, 139.69);
+    expect(tokyo.localSolarHour).toBeCloseTo((14.5 + 139.69 / 15) % 24, 4);
+    expect(tokyo.hoursToResolution).toBeNull(); // null endDate → no horizon
+  });
+
+  it('wraps local solar hour into [0,24) for western longitudes', () => {
+    // 02:00 UTC, Mexico City lon≈-99.1 → 2 − 6.61 = −4.61 → wraps to ~19.39
+    const mx = computeLiveObsTimeContext('2026-07-22T02:00:00Z', '2026-07-22T12:00:00Z', -99.13);
+    expect(mx.localSolarHour).toBeGreaterThanOrEqual(0);
+    expect(mx.localSolarHour).toBeLessThan(24);
+    expect(mx.localSolarHour).toBeCloseTo(((2 - 99.13 / 15) % 24 + 24) % 24, 4);
+  });
+
+  it('handles a null endDate but still returns the solar hour', () => {
+    const r = computeLiveObsTimeContext('2026-07-22T15:00:00Z', null, 0);
+    expect(r.hoursToResolution).toBeNull();
+    expect(r.localSolarHour).toBeCloseTo(15, 6);
   });
 });
 
@@ -3615,6 +3658,37 @@ describe('scanWeatherMarkets', () => {
       // selectedBy and the disagreement tag are always populated.
       expect(['raw_edge', 'calibrated_edge', 'ladder_bid', 'lockin']).toContain(p.selectedBy);
       expect(typeof p.modalDisagreement).toBe('boolean');
+    }
+  });
+
+  it('writes the intraday-nowcast time-context fields into the weather_bracket shadow payload (PR C1)', async () => {
+    const gammaEvent = makeMockGammaEvent();
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: () => Promise.resolve([gammaEvent]),
+    }) as unknown as typeof fetch;
+    mockFetchNwsForecast.mockResolvedValue({
+      highF: 52, lowF: 38, precipProbability: 10, forecastDate: targetIso, shortForecast: 'Mostly Cloudy',
+    });
+    mockFetchOpenMeteo.mockResolvedValue({ highTemp: 52, lowTemp: 38, precipProbability: 10, forecastDate: targetIso });
+    mockFetchEnsemble.mockResolvedValue({
+      meanHigh: 52, stddevHigh: 3.2, meanLow: 38, stddevLow: 2.8, memberCount: 31, forecastDate: targetIso,
+    });
+
+    await scanWeatherMarkets(redisMock as never);
+
+    // The five nowcast features must land in the weather_bracket SSOT payload (the
+    // table the offline discrimination analysis queries) — not just signal_decisions.
+    // They are always present (null off res-day); this guards the wiring itself.
+    const bracketPayloads = mockEnqueueWrite.mock.calls
+      .filter((c) => c[0] === 'shadow_observations' && (c[1] as { kind?: string }).kind === 'weather_bracket')
+      .map((c) => (c[1] as { payload: Record<string, unknown> }).payload);
+    expect(bracketPayloads.length).toBeGreaterThan(0);
+    for (const p of bracketPayloads) {
+      expect(p).toHaveProperty('liveObservedAt');
+      expect(p).toHaveProperty('liveObsHoursToResolution');
+      expect(p).toHaveProperty('liveObsLocalSolarHour');
+      expect(p).toHaveProperty('liveObsMonotonic');
+      expect(p).toHaveProperty('liveObsIntegerRounded');
     }
   });
 

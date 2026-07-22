@@ -984,6 +984,21 @@ export interface WeatherBracketOpportunity {
   liveObservedMax?: number | null;
   /** Confidence class from the live observation source, when fetched. */
   liveObservationConfidence?: string | null;
+  // ── Intraday-nowcast shadow features (res-day only) ─────────────────────────
+  // Time context of the running-extreme observation, logged so we can later test
+  // whether "observedMax at hour-of-day H" discriminates the final bracket — the
+  // signal the forecast model provably lacks on the contested cohort. Shadow-only.
+  /** ISO8601 UTC timestamp of the running-extreme observation. */
+  liveObservedAt?: string | null;
+  /** Hours from the observation to market resolution (endDate − observedAt). */
+  liveObsHoursToResolution?: number | null;
+  /** Local solar hour of the observation (UTC hour shifted by lon/15), 0–24 — where
+   *  in the diurnal cycle the reading sits (daily max typically ~15–16h local). */
+  liveObsLocalSolarHour?: number | null;
+  /** True when observedMax is a Redis-accumulated running extreme (cannot fall back). */
+  liveObsMonotonic?: boolean | null;
+  /** True when the observation feed rounds to whole degrees (±0.5° true value). */
+  liveObsIntegerRounded?: boolean | null;
   /** True when a resolution-day fresh entry was blocked because live observation did not confirm it. */
   blockedByLiveConfirmation?: boolean;
   /** True when a high/exact/open-meteo NO was blocked unless observation lock-in confirmed it. */
@@ -1150,6 +1165,11 @@ function emitWeatherSignalDecision(opp: WeatherBracketOpportunity, hasTrade: boo
       liveObservationConfirmed: opp.liveObservationConfirmed ?? false,
       liveObservedMax: opp.liveObservedMax ?? null,
       liveObservationConfidence: opp.liveObservationConfidence ?? null,
+      liveObservedAt: opp.liveObservedAt ?? null,
+      liveObsHoursToResolution: opp.liveObsHoursToResolution ?? null,
+      liveObsLocalSolarHour: opp.liveObsLocalSolarHour ?? null,
+      liveObsMonotonic: opp.liveObsMonotonic ?? null,
+      liveObsIntegerRounded: opp.liveObsIntegerRounded ?? null,
       blockedByLiveConfirmation: opp.blockedByLiveConfirmation ?? false,
       blockedByExactOpenMeteoNo: opp.blockedByExactOpenMeteoNo ?? false,
       blockedByFamilyBlock: opp.blockedByFamilyBlock ?? false,
@@ -1303,6 +1323,30 @@ function forecastDistanceToBracket(
   if (forecastValue >= lowBoundary && forecastValue < highBoundary) return 0;
   if (forecastValue < lowBoundary) return lowBoundary - forecastValue;
   return forecastValue - highBoundary;
+}
+
+/**
+ * Time context of an intraday running-extreme observation, for the nowcast shadow
+ * features (PR C1). Returns:
+ *  - `hoursToResolution`: hours from the observation to market resolution (endDate).
+ *  - `localSolarHour`: 0–24 solar hour at the station (UTC hour shifted by lon/15) —
+ *    locates the reading in the diurnal cycle (daily max typically ~15–16h local).
+ * Null observation (or unparseable timestamps) → nulls. Pure for testing.
+ */
+export function computeLiveObsTimeContext(
+  observedAtIso: string | null,
+  endDateIso: string | null,
+  lon: number,
+): { hoursToResolution: number | null; localSolarHour: number | null } {
+  if (observedAtIso == null) return { hoursToResolution: null, localSolarHour: null };
+  const obsMs = Date.parse(observedAtIso);
+  if (!Number.isFinite(obsMs)) return { hoursToResolution: null, localSolarHour: null };
+  const endMs = endDateIso != null ? Date.parse(endDateIso) : NaN;
+  const hoursToResolution = Number.isFinite(endMs) ? (endMs - obsMs) / 3_600_000 : null;
+  const d = new Date(obsMs);
+  const utcHour = d.getUTCHours() + d.getUTCMinutes() / 60;
+  const localSolarHour = (((utcHour + lon / 15) % 24) + 24) % 24;
+  return { hoursToResolution, localSolarHour };
 }
 
 /**
@@ -2829,6 +2873,16 @@ export async function scanWeatherMarkets(
         o.liveObservationConfirmed = liveConfirmed;
         o.liveObservedMax = observedMax;
         o.liveObservationConfidence = liveObs?.confidence ?? null;
+        // Intraday-nowcast shadow features: pin the observation's time context so
+        // an offline analysis can test whether observedMax@hour-of-day discriminates
+        // the final bracket. Shadow-only — no effect on the live decision.
+        const liveObsAtIso = liveObs?.observedAt ?? null;
+        o.liveObservedAt = liveObsAtIso;
+        o.liveObsMonotonic = liveObs?.monotonic ?? null;
+        o.liveObsIntegerRounded = liveObs?.integerRounded ?? null;
+        const tctx = computeLiveObsTimeContext(liveObsAtIso, event.endDate, event.coords.lon);
+        o.liveObsHoursToResolution = tctx.hoursToResolution;
+        o.liveObsLocalSolarHour = tctx.localSolarHour;
 
         const exactOpenMeteoNo =
           cfg.WEATHER_BLOCK_EXACT_OPEN_METEO_NO_WITHOUT_LIVE_CONFIRMATION &&
@@ -3159,6 +3213,11 @@ export async function scanWeatherMarkets(
           liveObservationConfirmed: opp.liveObservationConfirmed ?? false,
           liveObservedMax: opp.liveObservedMax ?? null,
           liveObservationConfidence: opp.liveObservationConfidence ?? null,
+          liveObservedAt: opp.liveObservedAt ?? null,
+          liveObsHoursToResolution: opp.liveObsHoursToResolution ?? null,
+          liveObsLocalSolarHour: opp.liveObsLocalSolarHour ?? null,
+          liveObsMonotonic: opp.liveObsMonotonic ?? null,
+          liveObsIntegerRounded: opp.liveObsIntegerRounded ?? null,
           interiorNoMarginEff: opp.interiorNoMarginEff ?? null,
           confluenceYesAgree: opp.confluenceYesAgree ?? false,
           marketFavoriteBracket: opp.marketFavoriteBracket ?? null,
